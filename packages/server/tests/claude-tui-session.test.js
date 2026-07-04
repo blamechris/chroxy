@@ -1677,6 +1677,19 @@ describe('ClaudeTuiSession', () => {
       return path
     }
 
+    // #6578: write a session file carrying an explicit `sessionId` and,
+    // when `status` is undefined, OMIT the `status` field entirely (current
+    // claude 2.1.186+ session files carry no `status` at all). The resolver
+    // keys on `sessionId`, not the pid, so the FILE name pid may differ from
+    // the pty pid (wrapper-shim MODE A).
+    function writeSessionFileV2(pid, sessionId, status) {
+      const path = join(fakeHome, '.claude', 'sessions', `${pid}.json`)
+      const body = { pid, sessionId, cwd: '/tmp', startedAt: Date.now() }
+      if (status !== undefined) body.status = status
+      writeFileSync(path, JSON.stringify(body))
+      return path
+    }
+
     it('_waitForPrompt resolves true when session file reports status=idle', async () => {
       session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
       session._term = { write: () => {}, kill: () => {}, pid: fakePid }
@@ -1802,6 +1815,87 @@ describe('ClaudeTuiSession', () => {
       assert.equal(ready, true, 'probe survives JSON.parse errors and resolves once the file is sane')
     })
 
+    // #6578 — the readiness signal is now resolved by matching `sessionId`,
+    // not by the pty pid alone, and file-existence-with-matching-sessionId is
+    // itself a startup readiness signal (claude writes the file at startup and
+    // current versions carry NO `status` field). These lock in the four
+    // resolution/gating cases plus the multi-session false-positive guard.
+
+    it('_waitForPrompt resolves a session file under a DIFFERENT pid via matching sessionId (#6578 MODE A)', async () => {
+      // Wrapper-shim install: real claude pid != pty pid, so the fast-path
+      // ~/.claude/sessions/<pty-pid>.json never appears — but the real file
+      // (named by claude's own pid) carries a matching sessionId. The dir-scan
+      // must find it and treat file-existence as ready.
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._term = { write: () => {}, kill: () => {}, pid: fakePid }
+      session._sessionId = 'uuid-mode-a'
+      // No file at fakePid; a file under a DIFFERENT pid with the matching id.
+      writeSessionFileV2(fakePid + 7, 'uuid-mode-a', undefined)
+      const ready = await session._waitForPrompt(200)
+      assert.equal(ready, true, 'resolved by sessionId under a different pid → ready')
+      assert.equal(session._lastProbeSawStatus, true,
+        'resolving a matching session file counts as "saw status" (not degraded)')
+    })
+
+    it('_waitForPrompt treats a matching statusless session file as ready (#6578 MODE B)', async () => {
+      // Current claude session files carry NO `status` field. File at the pty
+      // pid, matching sessionId, no status → ready (not degraded).
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._term = { write: () => {}, kill: () => {}, pid: fakePid }
+      session._sessionId = 'uuid-mode-b'
+      writeSessionFileV2(fakePid, 'uuid-mode-b', undefined)
+      const ready = await session._waitForPrompt(200)
+      assert.equal(ready, true, 'statusless-but-present matching file → ready')
+      assert.equal(session._lastProbeSawStatus, true,
+        'a resolved matching file is not a degraded probe')
+    })
+
+    it('_waitForPrompt still gates on status=busy when the file carries a status (#6578 back-compat)', async () => {
+      // Claude versions that still write `status` must keep between-turn
+      // gating: a matching file with status:busy is NOT ready.
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._term = { write: () => {}, kill: () => {}, pid: fakePid }
+      session._sessionId = 'uuid-busy'
+      writeSessionFileV2(fakePid, 'uuid-busy', 'busy')
+      const ready = await session._waitForPrompt(50)
+      assert.equal(ready, false, 'status=busy on a matching file must still gate')
+    })
+
+    it('_waitForPrompt ignores a session file whose sessionId does not match (#6578 multi-session guard)', async () => {
+      // A sibling session's file (different sessionId) must not be read as
+      // THIS session's readiness — otherwise two concurrent TUIs false-positive
+      // off each other.
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._term = { write: () => {}, kill: () => {}, pid: fakePid }
+      session._sessionId = 'uuid-mine'
+      // Only a foreign file exists (statusless, would otherwise read as ready).
+      writeSessionFileV2(fakePid + 3, 'uuid-someone-else', undefined)
+      const ready = await session._waitForPrompt(60)
+      assert.equal(ready, false, 'non-matching sessionId must not be treated as ready')
+      assert.equal(session._lastProbeSawStatus, false,
+        'no matching file resolved → degraded/no-file signal')
+    })
+
+    it('resolveSessionFile returns the pid path on the fast path and null on no match (#6578)', () => {
+      // Fast path: file at the pty pid with a matching sessionId → returned.
+      const p = writeSessionFileV2(fakePid, 'uuid-fast', undefined)
+      assert.equal(
+        ClaudeTuiSession.resolveSessionFile('uuid-fast', fakePid), p,
+        'fast path returns the pty-pid file when its sessionId matches',
+      )
+      // No file anywhere with the id → null (swallowed I/O, never throws).
+      assert.equal(
+        ClaudeTuiSession.resolveSessionFile('uuid-absent', fakePid), null,
+        'no matching file anywhere → null',
+      )
+      // Dir-scan fallback: fast path misses, another file matches.
+      const q = writeSessionFileV2(fakePid + 11, 'uuid-scan', undefined)
+      assert.equal(
+        ClaudeTuiSession.resolveSessionFile('uuid-scan', fakePid), q,
+        'dir-scan finds the matching file under a different pid',
+      )
+    })
+
     it('readSessionStatus returns null for missing/invalid files', () => {
       // Static helper isolation: covers the file-absent, JSON-invalid,
       // and missing-field branches without going through the polling
@@ -1882,60 +1976,58 @@ describe('ClaudeTuiSession', () => {
       })
     })
 
-    describe('_degradedProbeSuffix (#5328, WP-5.6)', () => {
-      // Surfaces WHY the readiness probe degraded: a missing session file for
-      // the pty pid points at claude running under a different pid (wrapper
-      // shim); a statusless-but-present file points at a wrong entrypoint.
-      //
-      // #5366 review: stub the static sessionFilePath onto a temp dir so the
-      // file-existence branches are HERMETIC (no reliance on the real ~/.claude)
-      // and BOTH branches (missing vs present) are exercised deterministically.
-      let probeTmp
-      let origSessionFilePath
+    describe('_degradedProbeSuffix (#5328, WP-5.6; #6578)', () => {
+      // #6578: readiness is now resolved by matching `sessionId` (via
+      // resolveSessionFile), and `_lastProbeSawStatus` means "resolved a
+      // matching session file". So the suffix collapses to a single degraded
+      // case: NO session file for this sessionId was found anywhere (wrapper
+      // shim under a fully different install, or claude never wrote it). The
+      // found-but-busy case is healthy (`_lastProbeSawStatus === true` →
+      // empty). The stub is on resolveSessionFile now, not sessionFilePath.
+      let origResolve
       beforeEach(() => {
-        probeTmp = mkdtempSync(join(tmpdir(), 'chroxy-tui-probe-'))
-        origSessionFilePath = ClaudeTuiSession.sessionFilePath
-        ClaudeTuiSession.sessionFilePath = (pid) => join(probeTmp, `${pid}.json`)
+        origResolve = ClaudeTuiSession.resolveSessionFile
       })
       afterEach(() => {
-        ClaudeTuiSession.sessionFilePath = origSessionFilePath
-        if (probeTmp) rmSync(probeTmp, { recursive: true, force: true })
-        probeTmp = null
+        ClaudeTuiSession.resolveSessionFile = origResolve
       })
 
-      it('returns empty when the probe saw a status (healthy / real busy)', () => {
+      it('returns empty when the probe resolved a matching file (healthy / real busy)', () => {
         session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
         session._lastProbeSawStatus = true
         assert.equal(session._degradedProbeSuffix(), '')
       })
 
-      it('names the wrong-pid cause when the per-pid session file is MISSING', () => {
-        session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
-        session._lastProbeSawStatus = false
-        session._term = { pid: 4242 } // no file written for it → missing
-        const suffix = session._degradedProbeSuffix()
-        assert.match(suffix, /no session file at .*4242\.json/, `got: ${suffix}`)
-        assert.match(suffix, /different pid/)
-        assert.match(suffix, /readiness gating is effectively disabled/)
-      })
-
-      it('names the statusless-file cause when the session file is PRESENT (#5366 review)', () => {
+      it('names the no-matching-file cause when no session file for this sessionId resolved (#6578)', () => {
         session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
         session._lastProbeSawStatus = false
         session._term = { pid: 4242 }
-        // File exists but carries no `status` field → wrong-entrypoint cause.
-        writeFileSync(join(probeTmp, '4242.json'), '{}')
+        session._sessionId = 'uuid-gone'
+        ClaudeTuiSession.resolveSessionFile = () => null // nothing resolved
         const suffix = session._degradedProbeSuffix()
-        assert.match(suffix, /session file never appeared with a `status` field/, `got: ${suffix}`)
-        assert.doesNotMatch(suffix, /different pid/)
+        assert.match(suffix, /no session file/, `got: ${suffix}`)
+        assert.match(suffix, /uuid-gone/, `should name the sessionId, got: ${suffix}`)
+        assert.match(suffix, /readiness gating is effectively disabled/)
       })
 
-      it('falls back to the statusless-file message when there is no usable pid', () => {
+      it('does not claim a missing pid-file when the dir-scan DID resolve one (no misleading wrapper-shim wording) (#6578)', () => {
+        // If a matching file was found (even under a different pid), the probe
+        // is NOT degraded — the suffix must be empty, not the wrapper-shim note.
+        session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+        session._lastProbeSawStatus = true // resolved a matching file
+        session._term = { pid: 4242 }
+        session._sessionId = 'uuid-found'
+        assert.equal(session._degradedProbeSuffix(), '',
+          'a resolved matching file is not a degraded probe')
+      })
+
+      it('still degrades gracefully when there is no usable pid or sessionId (#6578)', () => {
         session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
         session._lastProbeSawStatus = false
         session._term = null
+        session._sessionId = null
         const suffix = session._degradedProbeSuffix()
-        assert.match(suffix, /session file never appeared with a `status` field/, `got: ${suffix}`)
+        assert.match(suffix, /no session file/, `got: ${suffix}`)
       })
     })
 

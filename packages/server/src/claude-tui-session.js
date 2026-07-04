@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID } from 'crypto'
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'fs'
+import { mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'fs'
 // #6132 (HOL fix from #5337): the per-turn hook-drain hot path uses async fs so a
 // slow/stuck sink (FUSE/NFS, full disk, tmpwatch race) can't block the shared
 // event loop — which would freeze EVERY claude-tui session (the default provider).
@@ -550,6 +550,12 @@ export class ClaudeTuiSession extends BaseSession {
     // recur on the fresh PTY. Reset to false in _spawnPty (every successful
     // (re)spawn), flipped true the first time sendMessage arms the nudge.
     this._firstTurnNudgedForSpawn = false
+    // #6578: cache the session-file path resolved by resolveSessionFile so the
+    // per-turn readiness probe doesn't re-scan ~/.claude/sessions every turn.
+    // Invalidated on every (re)spawn (reset in _spawnPty alongside the nudge
+    // latch) because a respawn under a wrapper shim can land on a new pid, and a
+    // retry-FRESH fallback mints a new sessionId → the old path no longer maps.
+    this._resolvedSessionFile = null
     // #5431: incremental transcript scanner for outstanding background work
     // (run_in_background Bash/Agent, Monitor, ScheduleWakeup). Created
     // lazily by getBackgroundTaskSnapshot() once the per-PID session file
@@ -956,6 +962,76 @@ export class ClaudeTuiSession extends BaseSession {
       return typeof data.status === 'string' ? data.status : null
     } catch {
       return null
+    }
+  }
+
+  /**
+   * #6578: resolve the on-disk session file for THIS session, keyed on the
+   * deterministic `sessionId` (passed to claude as `--session-id`/`--resume`)
+   * rather than only the pty pid. Two breakages on current claude (2.1.186+)
+   * made the pid-only path unreliable:
+   *   - MODE A: under a wrapper-shim install the real claude pid != pty pid,
+   *     so `~/.claude/sessions/<pty-pid>.json` never appears.
+   *   - MODE B: the session file carries NO `status` field at all, so the old
+   *     status-only signal returned null even when the file WAS found.
+   * Since claude writes this file at startup with a matching `sessionId`, the
+   * file is resolvable by directory scan regardless of pid, and its mere
+   * existence (with a matching sessionId) is itself a startup-readiness signal.
+   *
+   * Resolution order:
+   *   1. Fast path — `sessionFilePath(ptyPid)`; verify its parsed `sessionId`
+   *      matches (or accept it verbatim when `sessionId` is falsy, preserving
+   *      the legacy pid-keyed behaviour for callers without a known id).
+   *   2. Dir-scan — read `~/.claude/sessions` and return the first `*.json`
+   *      whose parsed `sessionId === sessionId`.
+   *
+   * Swallows ALL I/O/parse errors (returns null) — this feeds the readiness
+   * path and must NEVER throw. Returns the absolute path or null.
+   *
+   * @param {string|null} sessionId  the upstream claude conversation uuid
+   * @param {number} ptyPid          the pty child pid (fast-path filename)
+   * @returns {string|null}
+   */
+  static resolveSessionFile(sessionId, ptyPid) {
+    // Fast path: the pty-pid-named file. When we have no sessionId to match on
+    // (older callers), accept it verbatim if it exists — matches the legacy
+    // pid-keyed behaviour. With a sessionId, only accept it on a match.
+    if (Number.isInteger(ptyPid) && ptyPid > 0) {
+      const fast = this.sessionFilePath(ptyPid)
+      try {
+        const data = JSON.parse(readFileSync(fast, 'utf8'))
+        if (!sessionId || data.sessionId === sessionId) return fast
+      } catch { /* not written yet / mid-write race / wrong pid — fall through */ }
+    }
+    // Dir-scan fallback keyed on sessionId. Nothing to scan for without an id.
+    if (!sessionId) return null
+    try {
+      const dir = join(homedir(), '.claude', 'sessions')
+      for (const name of readdirSync(dir)) {
+        if (!name.endsWith('.json')) continue
+        const full = join(dir, name)
+        try {
+          const data = JSON.parse(readFileSync(full, 'utf8'))
+          if (data.sessionId === sessionId) return full
+        } catch { /* skip unreadable/half-written sibling files */ }
+      }
+    } catch { /* sessions dir missing / unreadable — degrade to null */ }
+    return null
+  }
+
+  /**
+   * #6578: does `filePath` still map to `sessionId`? Used to validate a cached
+   * `_resolvedSessionFile` before reusing it — the file could be deleted or
+   * (after a retry-FRESH fallback) now carry a different id. When `sessionId`
+   * is falsy the check reduces to "the file still exists" (legacy pid-keyed
+   * callers). Swallows errors → false, so a stale cache forces a re-resolve.
+   */
+  static _sessionFileMatches(filePath, sessionId) {
+    try {
+      const data = JSON.parse(readFileSync(filePath, 'utf8'))
+      return sessionId ? data.sessionId === sessionId : true
+    } catch {
+      return false
     }
   }
 
@@ -1801,6 +1877,10 @@ export class ClaudeTuiSession extends BaseSession {
     // first-turn submit nudge for the first message on THIS spawn. Reset after
     // the destroy-race guard above so an aborted (re)spawn doesn't clear it.
     this._firstTurnNudgedForSpawn = false
+    // #6578: a (re)spawn can land on a new pid (wrapper shim) or a new sessionId
+    // (retry-FRESH fallback), so the cached session-file path is stale — force
+    // the next readiness probe to re-resolve.
+    this._resolvedSessionFile = null
 
     this._term.onData((data) => {
       this._appendToOutputTail(data)
@@ -1858,27 +1938,24 @@ export class ClaudeTuiSession extends BaseSession {
   }
 
   /**
-   * #5328 (WP-5.6): build the diagnostic suffix for a readiness-probe timeout.
-   * When the probe degraded (never saw a `status` field — `_lastProbeSawStatus`
-   * is false), distinguish the two root causes by checking whether the per-pid
-   * session file exists on disk, so the swallowed degradation names its likely
-   * cause instead of just "not ready":
-   *   - file MISSING → claude is likely running under a DIFFERENT pid than the
-   *     PTY child (a wrapper shim that forks node without `exec`); the probe
-   *     reads ~/.claude/sessions/<pty-pid>.json, which the real claude never
-   *     writes, so readiness gating is effectively disabled for this session.
-   *   - file PRESENT but statusless → a non-cli entrypoint or an upstream
-   *     file-format change; the file exists but carries no `status` field.
-   * Returns '' when the probe was healthy (saw status but never idle = real busy).
+   * #5328 (WP-5.6) / #6578: build the diagnostic suffix for a readiness-probe
+   * timeout. Since #6578 the probe resolves the session file by matching
+   * `sessionId` (resolveSessionFile) and treats existence-with-matching-id as
+   * ready even when the file carries no `status`, so `_lastProbeSawStatus` now
+   * means "resolved a matching session file". That collapses the degraded case
+   * to ONE: no session file carrying this session's `sessionId` was found
+   * anywhere under ~/.claude/sessions — neither at the pty pid nor via the
+   * dir-scan. Likely causes: a wrapper shim whose real claude writes to a
+   * DIFFERENT ~/.claude (so no matching file is reachable), or claude never
+   * wrote the file. Returns '' when the probe resolved a matching file (found
+   * but busy = healthy, real busy).
    */
   _degradedProbeSuffix() {
     if (this._lastProbeSawStatus !== false) return ''
     const pid = this._term && this._term.pid
-    const sessFile = Number.isInteger(pid) && pid > 0 ? ClaudeTuiSession.sessionFilePath(pid) : null
-    if (sessFile && !existsSync(sessFile)) {
-      return ` — no session file at ${sessFile} (pty pid ${pid}); claude may be running under a different pid (a wrapper shim that forks node without exec), so the readiness probe can never see its status and readiness gating is effectively disabled for this session`
-    }
-    return ' — session file never appeared with a `status` field; if claude was spawned via a non-cli entrypoint or upstream changed the file format, the probe has degraded and will never see ready'
+    const pidNote = Number.isInteger(pid) && pid > 0 ? ` (pty pid ${pid})` : ''
+    const idNote = this._sessionId ? ` sessionId ${this._sessionId}` : ' (no sessionId)'
+    return ` — no session file for${idNote} found under ~/.claude/sessions${pidNote}; claude may be running under a different pid or a different ~/.claude (a wrapper shim that forks node without exec, or a redirected HOME), so the readiness probe can't resolve its state and readiness gating is effectively disabled for this session`
   }
 
   /**
@@ -1949,17 +2026,31 @@ export class ClaudeTuiSession extends BaseSession {
       this._lastProbeSawStatus = false
       return finish(false)
     }
-    const sessFile = ClaudeTuiSession.sessionFilePath(pid)
-    // Track whether we ever read a non-null status. Distinguishes
-    // "claude wrote status but never reached idle" (real busy/stuck)
-    // from "status field never appeared" (probe degraded — see the
-    // entrypoint:cli note on sessionFilePath). The warn sites read
-    // `_lastProbeSawStatus` to surface the difference in logs.
+    // #6578: resolve the session file by matching `sessionId` (not just the pty
+    // pid) so a wrapper-shim install (real claude pid != pty pid, MODE A) still
+    // finds the file, and treat the file's EXISTENCE-with-matching-sessionId as
+    // a readiness signal because current claude session files carry no `status`
+    // field at all (MODE B). `_lastProbeSawStatus` now means "resolved a
+    // matching session file this poll" (not "read a non-null status string").
     let sawStatus = false
     const checkReady = () => {
+      // Reuse the cached path when it still resolves to this session's file;
+      // re-resolve (dir-scan) when the cache is cold or has gone stale (file
+      // deleted / sessionId changed). Caching keeps the per-turn probe from
+      // scanning ~/.claude/sessions every poll.
+      let sessFile = this._resolvedSessionFile
+      if (!sessFile || !ClaudeTuiSession._sessionFileMatches(sessFile, this._sessionId)) {
+        sessFile = ClaudeTuiSession.resolveSessionFile(this._sessionId, pid)
+        this._resolvedSessionFile = sessFile
+      }
+      if (!sessFile) return false
+      // A matching file was resolved → we have this session's readiness signal.
+      sawStatus = true
       const status = ClaudeTuiSession.readSessionStatus(sessFile)
-      if (status !== null) sawStatus = true
-      return status !== null && status !== 'busy'
+      // Ready = a status is present and it's not 'busy' (versions that still
+      // write status keep between-turn gating), OR the file exists with no
+      // status field at all (current claude — existence IS the ready signal).
+      return status === null ? true : status !== 'busy'
     }
     while (this._nowMonotonic() - startMs < timeoutMs) {
       if (this._ptyExited) {
