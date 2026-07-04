@@ -1,6 +1,10 @@
-# Skills
+# Runtime skills (session-injected)
 
-Skills are reusable instruction snippets that Chroxy injects into every session you start. They let you encode personal conventions, project standards, or any recurring guidance once and have every provider (Claude SDK, Claude CLI, Codex, Gemini) automatically apply it.
+> **Heads up — "skills" means two unrelated things in Chroxy.** This page is about **runtime skills**: Markdown files in `~/.chroxy/skills/` that Chroxy injects into the model's prompt at session start, so any provider applies your conventions. They're a runtime, provider-agnostic feature and need a running Chroxy session (they have nothing to do with Claude Code's own `.claude/skills/`).
+>
+> The *other* "skills" are the **dev-workflow `/skill` registry** — authoring/reviewing commands like `/full-review` that are compiled into each coding agent's native format for people *building* Chroxy. Those are a contributor tool with no runtime role. See **[dev-workflow skills](dev-workflow-skills.md)** and the side-by-side **[comparison table](dev-workflow-skills.md#two-things-called-skills)**.
+
+Runtime skills are reusable instruction snippets that Chroxy injects into every session you start. They let you encode personal conventions, project standards, or any recurring guidance once and have every provider (Claude SDK, Claude CLI, Codex, Gemini) automatically apply it.
 
 ## Where skill files live
 
@@ -32,7 +36,9 @@ When a global file and a repo file share the same filename, the **repo file wins
 
 ## Writing a skill
 
-A skill file is just Markdown — no frontmatter, no special syntax required. The filename (without `.md`) becomes the skill name. The first non-empty line is used as a short description in the `list_skills` response.
+A skill file is Markdown. The filename (without `.md`) becomes the skill name, and the first non-empty line is used as a short description in the `list_skills` response.
+
+**Frontmatter is optional.** A bare Markdown file (no frontmatter) works as-is — but you can add a YAML frontmatter block to scope or tune the skill (see [Frontmatter & provider scoping](#frontmatter--provider-scoping) below).
 
 Example — `~/.chroxy/skills/coding-style.md`:
 
@@ -42,6 +48,30 @@ Prefer explicit error handling over silent failures.
 - Always propagate errors to the caller; do not swallow exceptions.
 - Use descriptive variable names — prefer `userRecord` over `u`.
 - Keep functions focused: one responsibility per function.
+```
+
+## Frontmatter & provider scoping
+
+An optional YAML frontmatter block (a `---`-fenced header at the very top of the file) tunes how and when a skill is injected. Only these keys are recognized — any other key inside a **valid** block is ignored. If the frontmatter is **malformed** (or there's no closing `---` fence), the file is loaded as a plain skill with its **entire contents** — the frontmatter text is *not* stripped, so it gets injected along with the body. Keep the block well-formed, or omit it.
+
+| Key | Purpose |
+|-----|---------|
+| `providers` | **Scope the skill to specific providers.** A list of provider ids — e.g. `providers: [claude-sdk, codex]` — includes the skill only for sessions on one of those providers. Omit it to apply to all. Matching is exact against the session's provider id (the registry key from `providers.js`, e.g. `claude-sdk`), except the alias `claude` matches any `claude-*` provider. |
+| `activation` | `auto` (default) or `manual`. A `manual` skill is only injected when a client explicitly activates it by name. |
+| `injection` | `prepend` (before the first user message — the Codex/Gemini default), `append` (added to the system prompt — the Claude SDK default), or `system` (synonym for `append`). |
+| `priority` | A number used by the size-budget pruner to decide which skills to keep when the combined skill text would exceed the budget. |
+| `name` / `description` | Override the derived name / first-line description. |
+| `allowed-tools` | Reserved metadata (declares the tools a skill expects). |
+| `version` | Reserved metadata (an author-supplied version string). |
+
+Example — a skill that only applies to Codex sessions and is injected before the first message:
+
+```markdown
+---
+providers: [codex]
+injection: prepend
+---
+When using the shell tool, prefer `rg` over `grep` for searches.
 ```
 
 ## Disabling a skill

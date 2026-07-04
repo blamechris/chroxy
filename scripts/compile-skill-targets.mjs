@@ -11,7 +11,8 @@
 //   codex  -> ~/.codex/prompts/<name>.md            (md; $ARGUMENTS; user-global, /prompts:<name>)
 //
 // Targets come from `.claude/skill-profile.md` (a `targets:` line) unless
-// overridden with --targets. Codex is opt-in (user-global + deprecated upstream).
+// overridden with --targets. Codex is opt-in (user-global; still supported by
+// codex-cli via ~/.codex/prompts/).
 //
 // Usage:
 //   node scripts/compile-skill-targets.mjs [--name <name>] [--targets claude,gemini]
@@ -24,6 +25,27 @@ import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 
 const ALL_TARGETS = ['claude', 'gemini', 'codex']
+
+// #6571 — home-dir marker(s) for coding agents whose skills are USER-GLOBAL and
+// OPT-IN. Only `codex` qualifies: its skills land in `~/.codex/prompts/` (a home
+// dir, not the repo) and it is deliberately off the committed default target list,
+// so a Codex contributor can silently miss the dev-workflow skills. `gemini` is
+// NOT here — it's in the default `targets:` and compiles into the repo's
+// `.gemini/commands/` (version-controlled), so a missing Gemini skill is visible
+// in the repo and its home dir (`~/.gemini`) says nothing about compile coverage.
+const AGENT_HOME_MARKERS = { codex: '.codex' }
+
+/**
+ * #6571 — detect coding agents that are installed on this machine (their home dir
+ * exists) but are NOT in the selected compile targets. Detection only — never adds
+ * the target (that would write to a home dir the user didn't ask about); the caller
+ * just prints the flag to pass. Returns the unselected-but-present target ids.
+ */
+export function detectUncompiledAgents(targets, home = homedir()) {
+  return Object.entries(AGENT_HOME_MARKERS)
+    .filter(([target, dir]) => !targets.includes(target) && existsSync(join(home, dir)))
+    .map(([target]) => target)
+}
 
 function parseArgs(argv) {
   const out = { repo: process.cwd(), dryRun: false }
@@ -177,7 +199,7 @@ function emitCodex(name, body, description) {
   return {
     path: join(homedir(), '.codex/prompts', `${name}.md`),
     content: `---\ndescription: ${yamlDq(description)}\n---\n\n${body}`,
-    note: `codex: invoke as /prompts:${name} (user-global; OpenAI marks custom prompts deprecated)`,
+    note: `codex: invoke as /prompts:${name} (user-global; codex-cli still supports ~/.codex/prompts/)`,
   }
 }
 
@@ -228,6 +250,15 @@ function main() {
   if (bad.length) {
     console.error(`Unknown target(s): ${bad.join(', ')}. Known: ${ALL_TARGETS.join(', ')}`)
     process.exit(1)
+  }
+
+  // #6571 — nudge if a coding agent is installed but its target isn't selected.
+  const uncompiled = detectUncompiledAgents(targets)
+  if (uncompiled.length) {
+    const dirs = uncompiled.map((t) => `~/${AGENT_HOME_MARKERS[t]}`).join(', ')
+    // Codex prompts write to ~/.codex/prompts/ (user-global); name that so the hint
+    // can't be misread as compiling into the home dir for a repo-local target.
+    console.log(`Hint: ${dirs} present but ${uncompiled.join(', ')} not a selected target — pass --targets ${[...targets, ...uncompiled].join(',')} to also compile into ~/.codex/prompts/ (see docs/dev-workflow-skills.md).`)
   }
 
   const names = args.name ? [args.name] : readdirSync(cmdDir).filter((f) => f.endsWith('.md')).map((f) => f.replace(/\.md$/, ''))

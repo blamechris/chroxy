@@ -20,7 +20,7 @@ const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 const helperPath = resolve(__dirname, '..', 'compile-skill-targets.mjs')
 
-const { deriveDescription } = await import(helperPath)
+const { deriveDescription, detectUncompiledAgents } = await import(helperPath)
 
 let pass = 0
 let fail = 0
@@ -148,6 +148,45 @@ await test('hard-cuts a space-less emoji run on a cluster boundary, never a lone
   assert(!/[\uD800-\uDFFF]/.test(stripped), 'a lone surrogate leaked — the cut sliced mid-cluster')
   assert([...visible].every((ch) => ch === emoji), 'every visible glyph must be a whole emoji')
   assert(countGraphemes(visible) <= 160, `visible text must respect the 160-grapheme cap, got ${countGraphemes(visible)}`)
+})
+
+// --- detectUncompiledAgents (#6571) ---------------------------------------
+import { mkdtempSync, mkdirSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join as pjoin } from 'node:path'
+
+await test('detectUncompiledAgents flags ONLY codex (gemini is repo-local, never flagged even with ~/.gemini present)', () => {
+  const home = mkdtempSync(pjoin(tmpdir(), 'skill-home-'))
+  try {
+    mkdirSync(pjoin(home, '.codex'))
+    mkdirSync(pjoin(home, '.gemini')) // present but IRRELEVANT — gemini compiles into the repo, not ~/.gemini
+    const out = detectUncompiledAgents(['claude'], home)
+    assert(out.includes('codex'), `expected codex flagged, got ${JSON.stringify(out)}`)
+    assert(!out.includes('gemini'), 'gemini is repo-local + in the default target list — a ~/.gemini dir must NOT be a hint')
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+await test('detectUncompiledAgents does NOT flag a target that IS selected', () => {
+  const home = mkdtempSync(pjoin(tmpdir(), 'skill-home-'))
+  try {
+    mkdirSync(pjoin(home, '.codex'))
+    const out = detectUncompiledAgents(['claude', 'gemini', 'codex'], home)
+    assert(out.length === 0, `codex is selected, expected [], got ${JSON.stringify(out)}`)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+await test('detectUncompiledAgents returns nothing when no agent home dirs exist', () => {
+  const home = mkdtempSync(pjoin(tmpdir(), 'skill-home-'))
+  try {
+    const out = detectUncompiledAgents(['claude'], home)
+    assert(out.length === 0, `no agent dirs present, expected [], got ${JSON.stringify(out)}`)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
 })
 
 // --- summary --------------------------------------------------------------

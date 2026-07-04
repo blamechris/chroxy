@@ -74,6 +74,14 @@ npx chroxy tunnel setup
 
 ### Skills (pull-based registry)
 
+> **"Skills" is overloaded in Chroxy — this section is the DEV-WORKFLOW `/skill` system**
+> (authoring/reviewing commands like `/full-review`, compiled into each coding agent's native
+> format for people *building* Chroxy). It is unrelated to **runtime skills**
+> (`~/.chroxy/skills/*.md`, injected into a live session's prompt). User-facing docs:
+> [docs/dev-workflow-skills.md](docs/dev-workflow-skills.md) (this system) and
+> [docs/skills.md](docs/skills.md) (runtime). This section stays the operational source of truth
+> for the dev-workflow system; both docs link back here (and `AGENTS.md` is generated from here).
+
 Skills live in the `blamechris/skill-templates` **registry** and install **on demand** via the
 `/skill` client — think `npm`/`brew` for `.claude/commands/*.md`. There is no push-deploy and no
 `sync.sh`; the old push/`customizations/` workflow is retired.
@@ -97,7 +105,9 @@ custom-command format, so the same skill is first-party under whichever model yo
   Claude loads from `.claude/skills/`). *Version-controlled.*
 - **gemini** → `.gemini/commands/<name>.toml` (TOML; `$ARGUMENTS`→`{{args}}`). *Version-controlled.*
 - **codex** *(opt-in)* → `~/.codex/prompts/<name>.md` (invoked `/prompts:<name>`; user-global,
-  not version-controlled, deprecated upstream).
+  not version-controlled). Codex CLI still supports `~/.codex/prompts/` (recent versions also ship
+  a `~/.codex/skills/` dir); the emitter targets the stable prompts path. Off by default — the
+  compiler prints a hint if `~/.codex` exists but `codex` isn't a selected target.
 
 The active target list is the `targets:` line in `.claude/skill-profile.md` (this repo:
 `claude, gemini` — both in-repo/version-controlled; codex is per-machine opt-in via
