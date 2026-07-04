@@ -100,6 +100,14 @@
         {
           "faceIDPermission": "Allow Chroxy to use Face ID to unlock the app."
         }
+      ],
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true
+          }
+        }
       ]
     ],
     "extra": {
