@@ -329,6 +329,24 @@ export function ConnectScreen() {
     }
 
     try {
+      // Best-effort transport check: a cellular-only phone can still return a
+      // *scannable* IP (e.g. CGNAT 100.64.x), so IP shape alone can't tell Wi-Fi
+      // from cellular. getNetworkStateAsync makes the "not on Wi-Fi" state
+      // authoritative for cellular; if it throws/undefined we fall back to the IP
+      // heuristic below. We only treat an *explicit* CELLULAR type as no-LAN —
+      // WIFI/ETHERNET/UNKNOWN still proceed to the IP-based subnet check.
+      let onCellular = false;
+      try {
+        const netState = await Network.getNetworkStateAsync();
+        onCellular = netState?.type === Network.NetworkStateType.CELLULAR;
+      } catch {
+        // Older/unsupported platform — rely on the IP check below.
+      }
+      if (abort.signal.aborted) {
+        setScanning(false);
+        return;
+      }
+
       const deviceIp = await Network.getIpAddressAsync();
       if (abort.signal.aborted) {
         setScanning(false);
@@ -336,9 +354,10 @@ export function ConnectScreen() {
       }
 
       const subnet = deriveSubnet24(deviceIp);
-      if (!subnet) {
-        // No usable private IPv4 (0.0.0.0 / loopback / link-local / cellular-only)
-        // → the phone has no LAN to sweep. Almost always "not connected to Wi-Fi".
+      if (!subnet || onCellular) {
+        // No usable LAN IP (0.0.0.0 / loopback / link-local) or an explicitly
+        // cellular transport → the phone has no LAN to sweep. Almost always
+        // "not connected to Wi-Fi".
         finalizeScan({ noWifi: true });
         return;
       }
@@ -614,6 +633,7 @@ export function ConnectScreen() {
 
           <View style={styles.scanEmptyActions}>
             <TouchableOpacity
+              style={styles.scanEmptyLinkButton}
               onPress={jumpToManualEntry}
               accessibilityRole="button"
               accessibilityLabel="Enter server address manually"
@@ -623,8 +643,9 @@ export function ConnectScreen() {
             </TouchableOpacity>
             {!scanNoWifi && (
               <TouchableOpacity
+                style={styles.scanEmptyLinkButton}
                 onPress={openTroubleshooting}
-                accessibilityRole="button"
+                accessibilityRole="link"
                 accessibilityLabel="Open LAN discovery troubleshooting guide"
                 testID="lan-scan-troubleshooting-link"
               >
@@ -943,9 +964,15 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   scanEmptyActions: {
-    marginTop: 14,
+    marginTop: 8,
     alignItems: 'center',
-    gap: 10,
+  },
+  // Wrapper gives each link a >=44pt tap target (Apple HIG); the visible Text
+  // stays 13pt. Matches the `manualToggle` pattern used elsewhere on this screen.
+  scanEmptyLinkButton: {
+    minHeight: 44,
+    justifyContent: 'center',
+    paddingHorizontal: 8,
   },
   scanEmptyLink: {
     color: COLORS.accentBlue,
