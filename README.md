@@ -1,11 +1,13 @@
 # Chroxy
 
-> Remote terminal for Claude Code, Gemini, and Codex — from your phone or desktop.
+> Remote terminal for Claude Code, Gemini, Codex, DeepSeek, Ollama, and any OpenAI/Anthropic-compatible model — from your phone or desktop.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](http://makeapullrequest.com)
 
-Run a lightweight daemon on your dev machine, connect from your phone or desktop via a secure tunnel. Get both a full terminal view and a clean chat-like UI that parses the AI CLI's output into readable messages. Pluggable session providers let you swap between Claude Code (Agent SDK or legacy CLI), Google Gemini, and OpenAI Codex.
+Run a lightweight daemon on your dev machine, connect from your phone or desktop via a secure tunnel. Get both a full terminal view and a clean chat-like UI that parses the AI CLI's output into readable messages. Pluggable session providers let you swap between Claude Code (Agent SDK, legacy CLI, or the interactive TUI), Google Gemini, OpenAI Codex, DeepSeek, local models via Ollama, your own Anthropic API key (BYOK), and any config-driven OpenAI- or Anthropic-compatible endpoint (LM Studio, OpenRouter, vLLM, …). See [docs/providers.md](docs/providers.md).
+
+> **Claude is the default, not a requirement.** The daemon defaults to the `claude-tui` provider out of the box, but a Codex-, Gemini-, Ollama-, or BYOK-only setup needs no `claude` binary at all — `chroxy doctor` only preflights the provider you actually select.
 
 ```
 ┌─────────────┐                        ┌──────────────────────┐
@@ -24,7 +26,7 @@ Run a lightweight daemon on your dev machine, connect from your phone or desktop
 
 ## Why Chroxy?
 
-- **Works with Claude Code, Gemini, and Codex** — Pluggable providers let you pick `claude-tui` (default), `claude-sdk`, `claude-cli`, `gemini`, or `codex` per session. See [docs/providers.md](docs/providers.md).
+- **Multi-provider, not Claude-only** — Pluggable providers let you pick `claude-tui` (default), `claude-sdk`, `claude-cli`, `claude-byok`, `gemini`, `codex`, `deepseek`, `ollama` (local models), or any config-driven OpenAI/Anthropic-compatible endpoint per session. Claude is the default, not a dependency — run a Codex- or Gemini-only setup with no `claude` binary installed. See [docs/providers.md](docs/providers.md).
 - **Provider flexibility** — If you're hitting your Claude programmatic credit cap, swap providers per session with `--provider codex` or `CHROXY_PROVIDER=gemini`. Codex and Gemini bill separately from Anthropic. See [Billing & API usage](#billing--api-usage) below.
 - **No tmux required** — CLI headless mode wraps your AI CLI directly (via the Agent SDK for Claude, or `gemini -p` / `codex exec` for the others). Just start and connect.
 - **Two views, one session** — Switch between a clean chat UI (markdown-rendered) and a full xterm.js terminal emulator.
@@ -135,6 +137,15 @@ Or pass them inline when starting the server:
 ```bash
 OPENAI_API_KEY=sk-... PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy start
 ```
+
+**Running without Claude installed?** The daemon defaults to the `claude-tui` provider, so a bare `chroxy start` expects a `claude` binary. To run a Codex- or Gemini-only machine (no `claude` at all), make a non-Claude provider the default with `CHROXY_PROVIDER`:
+
+```bash
+# Codex-only — no `claude` binary required
+CHROXY_PROVIDER=codex OPENAI_API_KEY=sk-... npx chroxy start
+```
+
+`chroxy doctor` preflights only the provider you actually select, so it won't complain about a missing `claude` when your default is Codex, Gemini, Ollama, or BYOK. You can still switch providers per session at any time (`--provider gemini`, `CHROXY_PROVIDER=…`).
 
 If you create a session for a provider whose key isn't set, the server returns a clear error (e.g. *"Codex: required credential not set — OPENAI_API_KEY"*). See [docs/providers.md](docs/providers.md) for per-provider capabilities and full env var reference.
 
