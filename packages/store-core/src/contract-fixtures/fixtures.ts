@@ -2444,7 +2444,7 @@ export const SWITCH_FIXTURES: ContractFixture[] = [
   // pull reply. Became a both-clients switch type when the mobile app gained a
   // `case 'permission_input':` (dashboard handles it via its HANDLERS map). Both
   // reducers are byte-identical: a single flat write
-  // `set({ permissionInputs: { ...permissionInputs, [requestId]: data } })`,
+  // `set({ permissionInputs: { ...get().permissionInputs, [requestId]: data } })`,
   // Zod-validated (drop-on-malformed). A flat-assert fixture drives BOTH clients'
   // real handleMessage, so any future drift in either reducer fails here. Replaces
   // the PENDING_CONTRACT_TYPES allowlist entry.
