@@ -209,7 +209,17 @@ describe('WsServer permission_response rate limiting (#2324)', () => {
     for (let i = 0; i < 5; i++) {
       send(ws, { type: 'get_permission_input', requestId: `req-${i}` })
     }
-    await new Promise(resolve => setTimeout(resolve, 150))
+    // Deterministic (not a fixed sleep): wait for the LAST pull's reply. Messages
+    // are processed in order, so req-4's permission_input arriving proves all 5
+    // were handled. If get_permission_input shared the general limiter (2), req-4
+    // would be rate-limited instead and this wait would TIME OUT — so the wait
+    // itself asserts the separation; the check below is belt-and-suspenders.
+    await waitForMessage(
+      messages,
+      m => m.type === 'permission_input' && m.requestId === 'req-4',
+      2000,
+      'permission_input reply for the last pull'
+    )
 
     const rateLimited = messages.find(m => m.type === 'rate_limited')
     assert.equal(rateLimited, undefined, 'get_permission_input uses its own limiter, not the general one')
