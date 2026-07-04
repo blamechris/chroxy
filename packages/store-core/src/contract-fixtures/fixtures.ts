@@ -2467,8 +2467,13 @@ export const SWITCH_FIXTURES: ContractFixture[] = [
     },
   },
   {
-    // The found:false security shape carries an `error` and NEVER input/tool, so
-    // the "unavailable" reply can't leak any tool input. Locks that branch too.
+    // The found:false security shape carries only an `error`. The "can't leak any
+    // tool input" invariant is enforced by ServerPermissionInputSchema (its
+    // found:false branch is a plain z.object, so Zod STRIPS any stray input/tool at
+    // parse); the reducer stores the parsed data, so a leak is structurally
+    // impossible. This fixture drives that shape through both reducers and asserts
+    // the stored error (a toMatchObject partial — it documents the branch, the
+    // schema does the enforcing).
     name: 'permission_input (not found) stores the security error shape without any input (both clients)',
     type: 'permission_input',
     message: {
