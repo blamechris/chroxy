@@ -26,10 +26,14 @@ import { fileURLToPath } from 'node:url'
 
 const ALL_TARGETS = ['claude', 'gemini', 'codex']
 
-// #6571 — home-dir markers for coding agents whose skills are opt-in. Used only
-// to NUDGE a contributor whose agent is installed but whose compile target isn't
-// selected (so a Codex/Gemini user doesn't silently miss the dev-workflow skills).
-const AGENT_HOME_MARKERS = { codex: '.codex', gemini: '.gemini' }
+// #6571 — home-dir marker(s) for coding agents whose skills are USER-GLOBAL and
+// OPT-IN. Only `codex` qualifies: its skills land in `~/.codex/prompts/` (a home
+// dir, not the repo) and it is deliberately off the committed default target list,
+// so a Codex contributor can silently miss the dev-workflow skills. `gemini` is
+// NOT here — it's in the default `targets:` and compiles into the repo's
+// `.gemini/commands/` (version-controlled), so a missing Gemini skill is visible
+// in the repo and its home dir (`~/.gemini`) says nothing about compile coverage.
+const AGENT_HOME_MARKERS = { codex: '.codex' }
 
 /**
  * #6571 — detect coding agents that are installed on this machine (their home dir
@@ -252,7 +256,9 @@ function main() {
   const uncompiled = detectUncompiledAgents(targets)
   if (uncompiled.length) {
     const dirs = uncompiled.map((t) => `~/${AGENT_HOME_MARKERS[t]}`).join(', ')
-    console.log(`Hint: ${dirs} present but not a selected target — pass --targets ${[...targets, ...uncompiled].join(',')} to compile for ${uncompiled.join(', ')} too (see docs/dev-workflow-skills.md).\n`)
+    // Codex prompts write to ~/.codex/prompts/ (user-global); name that so the hint
+    // can't be misread as compiling into the home dir for a repo-local target.
+    console.log(`Hint: ${dirs} present but ${uncompiled.join(', ')} not a selected target — pass --targets ${[...targets, ...uncompiled].join(',')} to also compile into ~/.codex/prompts/ (see docs/dev-workflow-skills.md).`)
   }
 
   const names = args.name ? [args.name] : readdirSync(cmdDir).filter((f) => f.endsWith('.md')).map((f) => f.replace(/\.md$/, ''))

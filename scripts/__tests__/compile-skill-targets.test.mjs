@@ -155,13 +155,14 @@ import { mkdtempSync, mkdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join as pjoin } from 'node:path'
 
-await test('detectUncompiledAgents flags codex when ~/.codex exists but codex is not selected', () => {
+await test('detectUncompiledAgents flags ONLY codex (gemini is repo-local, never flagged even with ~/.gemini present)', () => {
   const home = mkdtempSync(pjoin(tmpdir(), 'skill-home-'))
   try {
     mkdirSync(pjoin(home, '.codex'))
-    const out = detectUncompiledAgents(['claude', 'gemini'], home)
-    assert(out.includes('codex'), `expected ['codex'], got ${JSON.stringify(out)}`)
-    assert(!out.includes('gemini'), 'gemini has no home dir here, must not be flagged')
+    mkdirSync(pjoin(home, '.gemini')) // present but IRRELEVANT — gemini compiles into the repo, not ~/.gemini
+    const out = detectUncompiledAgents(['claude'], home)
+    assert(out.includes('codex'), `expected codex flagged, got ${JSON.stringify(out)}`)
+    assert(!out.includes('gemini'), 'gemini is repo-local + in the default target list — a ~/.gemini dir must NOT be a hint')
   } finally {
     rmSync(home, { recursive: true, force: true })
   }

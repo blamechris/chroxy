@@ -52,7 +52,7 @@ Prefer explicit error handling over silent failures.
 
 ## Frontmatter & provider scoping
 
-An optional YAML frontmatter block (a `---`-fenced header at the very top of the file) tunes how and when a skill is injected. Only these keys are recognized — anything else is dropped, and malformed frontmatter falls back to loading the body as a plain skill:
+An optional YAML frontmatter block (a `---`-fenced header at the very top of the file) tunes how and when a skill is injected. Only these keys are recognized — any other key inside a **valid** block is ignored. If the frontmatter is **malformed** (or there's no closing `---` fence), the file is loaded as a plain skill with its **entire contents** — the frontmatter text is *not* stripped, so it gets injected along with the body. Keep the block well-formed, or omit it.
 
 | Key | Purpose |
 |-----|---------|
@@ -62,6 +62,7 @@ An optional YAML frontmatter block (a `---`-fenced header at the very top of the
 | `priority` | A number used by the size-budget pruner to decide which skills to keep when the combined skill text would exceed the budget. |
 | `name` / `description` | Override the derived name / first-line description. |
 | `allowed-tools` | Reserved metadata (declares the tools a skill expects). |
+| `version` | Reserved metadata (an author-supplied version string). |
 
 Example — a skill that only applies to Codex sessions and is injected before the first message:
 
