@@ -30,7 +30,15 @@ function createMockSocket(): WebSocket {
   return { send: vi.fn(), close: vi.fn(), readyState: WebSocket.OPEN, addEventListener: vi.fn(), removeEventListener: vi.fn() } as unknown as WebSocket
 }
 function baseState(): Partial<ConnectionState> {
-  return { connectionPhase: 'connected', socket: null, sessions: [], activeSessionId: null, sessionStates: {}, permissionInputs: {}, messages: [] }
+  // Mirror the real store's init for the fields the permission_resolved / _expired
+  // / _timeout handlers touch (sessionNotifications banner-drain + the error/info
+  // notification actions), so dispatching those events doesn't crash the mock.
+  return {
+    connectionPhase: 'connected', socket: null, sessions: [], activeSessionId: null,
+    sessionStates: {}, permissionInputs: {}, messages: [],
+    sessionNotifications: [], resolvedPermissions: {},
+    addServerError: vi.fn(), addInfoNotification: vi.fn(),
+  } as Partial<ConnectionState>
 }
 
 describe('permission_input dispatch (#6543)', () => {
@@ -66,5 +74,27 @@ describe('permission_input dispatch (#6543)', () => {
   it('drops a malformed permission_input (missing found)', () => {
     handleMessage({ type: 'permission_input', requestId: 'r3' }, ctx() as never)
     expect(store.getState().permissionInputs['r3']).toBeUndefined()
+  })
+
+  it('#6559 — prunes the pulled input when the prompt resolves (unrelated keys survive)', () => {
+    handleMessage({ type: 'permission_input', requestId: 'r1', found: true, tool: 'Write', input: { file_path: '/x', content: 'a' } }, ctx() as never)
+    handleMessage({ type: 'permission_input', requestId: 'keep', found: true, tool: 'Edit', input: { file_path: '/y', content: 'b' } }, ctx() as never)
+    expect(store.getState().permissionInputs['r1']).toBeDefined()
+
+    handleMessage({ type: 'permission_resolved', requestId: 'r1', decision: 'allow' }, ctx() as never)
+
+    expect(store.getState().permissionInputs['r1']).toBeUndefined()
+    expect(store.getState().permissionInputs['keep']).toBeDefined()
+  })
+
+  it('#6559 — prunes on permission_expired and permission_timeout too', () => {
+    handleMessage({ type: 'permission_input', requestId: 're', found: true, tool: 'Write', input: { file_path: '/e' } }, ctx() as never)
+    handleMessage({ type: 'permission_input', requestId: 'rt', found: true, tool: 'Write', input: { file_path: '/t' } }, ctx() as never)
+
+    handleMessage({ type: 'permission_expired', requestId: 're', message: 'expired' }, ctx() as never)
+    handleMessage({ type: 'permission_timeout', requestId: 'rt', message: 'timed out' }, ctx() as never)
+
+    expect(store.getState().permissionInputs['re']).toBeUndefined()
+    expect(store.getState().permissionInputs['rt']).toBeUndefined()
   })
 })

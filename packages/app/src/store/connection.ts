@@ -1557,6 +1557,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       restartEtaMs: null,
       restartingSince: null,
       pendingPermissionConfirm: null,
+      // #6559 — drop any pulled pre-write-diff inputs on disconnect (they're
+      // per-connection; a resolved prompt already self-prunes, this clears the
+      // tail if we disconnect mid-prompt).
+      permissionInputs: {},
       timeoutWarning: null,
       // #4542: clear the cached prefs snapshot on disconnect so the next
       // connect refetches from the actual server (snapshots are host-specific).

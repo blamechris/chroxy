@@ -3047,6 +3047,16 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
             (n) => n.requestId !== resolvedRequestId
           ),
         }));
+        // #6559 — prune the pulled pre-write-diff input for this now-resolved
+        // prompt. permissionInputs is append-only otherwise and grows unbounded
+        // over a long session. Guard the copy-delete so a prompt that never
+        // pulled input (the common case) doesn't churn a new object.
+        set((s) => {
+          if (!s.permissionInputs || !(resolvedRequestId in s.permissionInputs)) return {};
+          const next = { ...s.permissionInputs };
+          delete next[resolvedRequestId];
+          return { permissionInputs: next };
+        });
       }
       break;
     }
@@ -3072,6 +3082,13 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
             (n) => n.requestId !== expiredRequestId
           ),
         }));
+        // #6559 — prune the pulled input for an expired prompt too.
+        set((s) => {
+          if (!s.permissionInputs || !(expiredRequestId in s.permissionInputs)) return {};
+          const next = { ...s.permissionInputs };
+          delete next[expiredRequestId];
+          return { permissionInputs: next };
+        });
       }
       break;
     }
@@ -3106,6 +3123,13 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         notifState.sessionNotifications
           .filter((n) => n.requestId === timeoutRequestId)
           .forEach((n) => notifState.dismissSessionNotification(n.id));
+        // #6559 — prune the pulled input for a timed-out prompt too.
+        set((s) => {
+          if (!s.permissionInputs || !(timeoutRequestId in s.permissionInputs)) return {};
+          const next = { ...s.permissionInputs };
+          delete next[timeoutRequestId];
+          return { permissionInputs: next };
+        });
       }
       // Show a dismissible server error banner so users know the permission was auto-denied
       // (system message text comes from the shared handler so wording stays in sync)
