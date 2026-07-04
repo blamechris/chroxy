@@ -927,10 +927,12 @@ export class WsServer {
       // #5536 — identity keypair for signing the eager exchange public key.
       get serverIdentity() { return self._serverIdentity },
       get localhostBypass() { return self._localhostBypass },
-      // #6564 — a POSITIVE tunnel-active signal. When a tunnel is running an
-      // unknown reverse proxy could sit in front of the loopback listener, so the
-      // localhost plaintext bypass is gated off while this is true (see ws-history).
-      get tunnelActive() { return self._quickTunnelActive || self._tunnelUrl != null },
+      // #6564 — a POSITIVE "an edge could be in front" signal. Any of: a running
+      // Quick/named tunnel (_quickTunnelActive / _tunnelUrl), OR an operator-supplied
+      // external URL (config.externalUrl — SKIP_TUNNEL mode, where the operator runs
+      // their own reverse proxy in front, exactly the unknown-edge case). When true,
+      // the localhost plaintext bypass is gated off (see ws-history).
+      get tunnelActive() { return self._quickTunnelActive || self._tunnelUrl != null || Boolean(self.config?.externalUrl) },
       get keyExchangeTimeoutMs() { return self._keyExchangeTimeoutMs },
       protocolVersion: SERVER_PROTOCOL_VERSION,
       minProtocolVersion: MIN_PROTOCOL_VERSION,
