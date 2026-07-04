@@ -87,6 +87,10 @@ const CONFIG_SCHEMA = {
   maxPayload: 'number',
   maxToolInput: 'number',
   noEncrypt: 'boolean',
+  // #6564 — force E2E encryption on loopback connections too (disable the
+  // localhost plaintext bypass unconditionally). Default off: the bypass is
+  // already auto-disabled while a tunnel is active (see ws-history.js).
+  encryptLocalhost: 'boolean',
   transforms: 'array',
   tokenExpiry: 'string',
   sessionTimeout: 'string',
@@ -1301,6 +1305,7 @@ function envKeyForConfig(key) {
     maxPayload: 'CHROXY_MAX_PAYLOAD',
     maxToolInput: 'CHROXY_MAX_TOOL_INPUT',
     noEncrypt: 'CHROXY_NO_ENCRYPT',
+    encryptLocalhost: 'CHROXY_ENCRYPT_LOCALHOST',
     transforms: 'CHROXY_TRANSFORMS',
     tokenExpiry: 'CHROXY_TOKEN_EXPIRY',
     sessionTimeout: 'CHROXY_SESSION_TIMEOUT',

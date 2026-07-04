@@ -927,6 +927,10 @@ export class WsServer {
       // #5536 — identity keypair for signing the eager exchange public key.
       get serverIdentity() { return self._serverIdentity },
       get localhostBypass() { return self._localhostBypass },
+      // #6564 — a POSITIVE tunnel-active signal. When a tunnel is running an
+      // unknown reverse proxy could sit in front of the loopback listener, so the
+      // localhost plaintext bypass is gated off while this is true (see ws-history).
+      get tunnelActive() { return self._quickTunnelActive || self._tunnelUrl != null },
       get keyExchangeTimeoutMs() { return self._keyExchangeTimeoutMs },
       protocolVersion: SERVER_PROTOCOL_VERSION,
       minProtocolVersion: MIN_PROTOCOL_VERSION,

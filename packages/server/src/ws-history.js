@@ -168,7 +168,7 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
   const {
     clients, sessionManager, cliSession, defaultSessionId,
     serverMode, serverVersion, latestVersion, gitInfo,
-    encryptionEnabled, localhostBypass, keyExchangeTimeoutMs,
+    encryptionEnabled, localhostBypass, tunnelActive, keyExchangeTimeoutMs,
     protocolVersion, minProtocolVersion, webTaskManager,
     // #5721: `send` MUST be `WsServer._send` (which returns the delivery
     // boolean from the client-sender), NOT a wrapper that drops the return —
@@ -256,8 +256,20 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
   // headers would classify local — see #6564), but an attacker cannot STRIP
   // cloudflared's edge-stamped cf-connecting-ip to GAIN the bypass, so the
   // security-relevant direction is safe.
+  //
+  // #6564: harden the residual operator-misconfiguration hole. When a tunnel is
+  // running (`tunnelActive`), an UNKNOWN reverse proxy could be forwarding remote
+  // traffic to the loopback listener without setting cf-connecting-ip /
+  // x-forwarded-for — which would classify as localPeer and get the plaintext
+  // bypass. So the bypass is DEFAULT-OFF while a tunnel is active: a genuine
+  // same-host dashboard simply does the (cheap, already-supported) key exchange in
+  // that window. With no tunnel there is no unknown edge, so the fast loopback
+  // bypass still applies. Operators can force encryption on loopback unconditionally
+  // with `encryptLocalhost: true` (CHROXY_ENCRYPT_LOCALHOST=1), which sets
+  // `localhostBypass=false`. Trust assumption documented in
+  // docs/security/encryption-threat-model.md.
   const isLoopbackSocket = client.socketIp === '127.0.0.1' || client.socketIp === '::1' || client.socketIp === '::ffff:127.0.0.1'
-  const isLocalhost = localhostBypass && isLoopbackSocket && client.localPeer === true
+  const isLocalhost = localhostBypass && isLoopbackSocket && client.localPeer === true && !tunnelActive
   const requireEncryption = encryptionEnabled && !isLocalhost
 
   // #5555 (eager key exchange) — if the client supplied its ephemeral public

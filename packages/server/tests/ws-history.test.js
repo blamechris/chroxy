@@ -909,6 +909,42 @@ describe('sendPostAuthInfo — encryption', () => {
     if (client._keyExchangeTimeout) clearTimeout(client._keyExchangeTimeout)
   })
 
+  it('#6564: a genuine local dashboard is still bypassed when NO tunnel is active', () => {
+    const ws = makeFakeWs()
+    const ctx = makeCtx({ encryptionEnabled: true, localhostBypass: true, tunnelActive: false })
+    registerClient(ctx, ws, { socketIp: '127.0.0.1', localPeer: true })
+
+    sendPostAuthInfo(ctx, ws)
+    const authOk = ctx._sends.find(m => m.type === 'auth_ok')
+    assert.equal(authOk.encryption, 'disabled', 'no tunnel → no unknown edge → fast loopback bypass still applies')
+  })
+
+  it('#6564: the loopback bypass is DEFAULT-OFF while a tunnel is active (unknown proxy could be in front)', () => {
+    const ws = makeFakeWs()
+    const ctx = makeCtx({ encryptionEnabled: true, localhostBypass: true, tunnelActive: true, keyExchangeTimeoutMs: 60000 })
+    // Same genuine-local-dashboard classification (loopback socket + localPeer:true),
+    // but a tunnel is running — a non-CF loopback-forwarding proxy that omits proxy
+    // headers would otherwise classify local and get plaintext. Require encryption.
+    const client = registerClient(ctx, ws, { socketIp: '127.0.0.1', localPeer: true })
+
+    sendPostAuthInfo(ctx, ws)
+    const authOk = ctx._sends.find(m => m.type === 'auth_ok')
+    assert.equal(authOk.encryption, 'required', 'tunnel active → loopback bypass is disabled, encryption required')
+    if (client._keyExchangeTimeout) clearTimeout(client._keyExchangeTimeout)
+  })
+
+  it('#6564: encryptLocalhost (localhostBypass:false) forces encryption on loopback even with NO tunnel', () => {
+    const ws = makeFakeWs()
+    // The operator override: encryptLocalhost:true wires localhostBypass:false.
+    const ctx = makeCtx({ encryptionEnabled: true, localhostBypass: false, tunnelActive: false, keyExchangeTimeoutMs: 60000 })
+    const client = registerClient(ctx, ws, { socketIp: '127.0.0.1', localPeer: true })
+
+    sendPostAuthInfo(ctx, ws)
+    const authOk = ctx._sends.find(m => m.type === 'auth_ok')
+    assert.equal(authOk.encryption, 'required', 'localhostBypass:false → no loopback bypass at all')
+    if (client._keyExchangeTimeout) clearTimeout(client._keyExchangeTimeout)
+  })
+
   it('does NOT bypass encryption for localhost IP when localhostBypass is false', () => {
     const ws = makeFakeWs()
     const ctx = makeCtx({ encryptionEnabled: true, localhostBypass: false })

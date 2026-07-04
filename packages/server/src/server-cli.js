@@ -919,6 +919,10 @@ export async function startCliServer(config) {
     pushManager,
     maxPayload: config.maxPayload,
     noEncrypt: config.noEncrypt,
+    // #6564 — `encryptLocalhost` (CHROXY_ENCRYPT_LOCALHOST) forces E2E encryption
+    // on loopback too by disabling the plaintext bypass unconditionally. Default
+    // off; the bypass is separately auto-disabled while a tunnel is active.
+    localhostBypass: !config.encryptLocalhost,
     tokenManager,
     pairingManager,
     // #5536 — the identity keypair the WsServer uses to sign each connection's
