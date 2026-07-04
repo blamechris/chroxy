@@ -22,7 +22,18 @@ export interface ScanResult {
 }
 
 const BATCH_SIZE = 30;
-const PROBE_TIMEOUT_MS = 1500;
+// Per-probe timeout. On a LAN, a live daemon answers `/health` in a few ms, so a
+// short timeout would be plenty for the *found* case. The timeout only bites on
+// dead IPs — and only on networks that silently DROP packets to unused addresses
+// (many consumer routers) rather than sending a fast RST. On such a network every
+// probe waits the full timeout, so if the live daemon's probe happens to be
+// queued behind a batch of dropped-packet connections (iOS caps concurrent
+// sockets), too-short a timeout can miss a reachable daemon. 2s gives the live
+// probe headroom to answer on a DROP network while keeping the whole sweep
+// (~ceil(254/BATCH_SIZE) batches) inside the E2E flow's 30s budget. On a network
+// that RSTs dead IPs fast (the common case) this value is irrelevant — dead
+// probes reject immediately regardless — so the found-case latency is unchanged.
+const PROBE_TIMEOUT_MS = 2000;
 
 /**
  * Validate a port string and return the numeric port, or null if invalid.
@@ -32,6 +43,46 @@ export function validatePort(portStr: string): number | null {
   const parsed = Number(portStr);
   if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) return null;
   return parsed;
+}
+
+/**
+ * True when `ip` is a dotted-quad IPv4 we can actually derive a scannable /24
+ * from — i.e. a real host address on some network, not a placeholder or an
+ * address whose peers we could never reach.
+ *
+ * Rejects: non-IPv4 (empty, IPv6, junk), the unspecified `0.0.0.0`, loopback
+ * `127/8`, and link-local `169.254/16` (APIPA — the phone has no real DHCP lease,
+ * so there is no LAN to sweep). Everything else, including any RFC1918 private
+ * range, is accepted; we intentionally do NOT hard-code "must be 10/192.168/172"
+ * because some networks hand out other ranges.
+ */
+export function isScannableIpv4(ip: string | null | undefined): boolean {
+  if (!ip || typeof ip !== 'string') return false;
+  const m = ip.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (!m) return false;
+  const octets = m.slice(1, 5).map(Number);
+  if (octets.some((o) => o > 255)) return false;
+  const [a, b] = octets;
+  if (a === 0) return false; // 0.0.0.0 / 0/8 — unspecified
+  if (a === 127) return false; // loopback
+  if (a === 169 && b === 254) return false; // link-local (no DHCP lease)
+  return true;
+}
+
+/**
+ * Derive the /24 subnet prefix (e.g. `"10.0.0"`) we sweep for a given device IP,
+ * or `null` when the IP isn't scannable (see {@link isScannableIpv4}).
+ *
+ * We assume a /24 because that is what the vast majority of home/office Wi-Fi
+ * networks use and expo-network does not expose the interface netmask. If the
+ * daemon lives on a wider network (e.g. a /16) or a different subnet than the
+ * phone, this sweep will not reach it — hence the UI surfaces the exact subnet
+ * scanned so a subnet mismatch is visible, and always offers manual entry / QR
+ * as the reliable, discovery-independent fallback.
+ */
+export function deriveSubnet24(ip: string | null | undefined): string | null {
+  if (!isScannableIpv4(ip)) return null;
+  return (ip as string).split('.').slice(0, 3).join('.');
 }
 
 /**
