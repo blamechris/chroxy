@@ -187,6 +187,22 @@ The `--no-encrypt` flag disables E2E encryption entirely (intended for local dev
 
 **Mitigation**: The `auth_ok` message includes `encryption: 'disabled'` so the app knows the connection is unencrypted. The flag is documented as intended for local development and testing only. This flag should never be used over a public tunnel.
 
+### Localhost Plaintext Bypass (#6562, #6564)
+
+When encryption is enabled, a **genuine same-host connection** (the web dashboard talking to the daemon over loopback) skips the key exchange and runs plaintext — the traffic never leaves the machine, so there is no wire to sniff. A connection qualifies for the bypass only when **all** of these hold:
+
+1. the **socket peer** is loopback (`127.0.0.1` / `::1` / `::ffff:127.0.0.1`) — unspoofable, it is the kernel-reported peer address; **and**
+2. the upgrade-time locality classification `localPeer` is true — i.e. the socket peer is loopback/RFC1918 **and** no `cf-connecting-ip` / `x-forwarded-for` proxy headers were present.
+
+Condition (2) is what stops a **tunneled** client from getting the bypass: cloudflared forwards tunnel traffic to `127.0.0.1` (so the socket peer is loopback) but stamps `cf-connecting-ip`, which flips `localPeer` to false — so a remote client over a Quick Tunnel does the full encrypted handshake, and a pinned mobile client correctly refuses any attempt to downgrade it. An attacker **cannot strip** cloudflared's edge-stamped header to *gain* the bypass, so the security-critical direction is safe.
+
+**Trust assumption + #6564 hardening.** Header *absence* is a **weak positive** "local" signal: a non-Cloudflare reverse proxy that forwards remote traffic to the loopback listener **without** setting those headers would classify as `localPeer` and receive the plaintext bypass. This is an operator-misconfiguration hole (a benign but unknown proxy in front of loopback), not an attacker capability. #6564 closes it defensively:
+
+- **Default-off while an edge could be in front.** Whenever a tunnel is running OR an operator-supplied external URL is configured (`tunnelActive` — a Quick/named tunnel, a set tunnel URL, or `config.externalUrl` for a self-hosted reverse proxy), an unknown edge *could* be forwarding to the loopback listener, so the bypass is disabled and even a same-host dashboard does the (cheap, already-supported) key exchange. With **no** tunnel and **no** external URL there is no unknown edge, so the fast loopback bypass still applies.
+- **Operator override.** `encryptLocalhost: true` in `~/.chroxy/config.json` (or `CHROXY_ENCRYPT_LOCALHOST=1`) forces encryption on loopback **unconditionally** (it sets `localhostBypass=false`), for deployments that want no plaintext on the box at all.
+
+The bypass therefore assumes either (a) no tunnel/edge in front (the plain local-dev case), or (b) that any proxy in front is cloudflared or a known header-setting reverse proxy. If neither holds for your deployment, set `encryptLocalhost: true`.
+
 ## 9. Attack Vectors and Mitigations
 
 | Attack Vector | Risk | Mitigation |
