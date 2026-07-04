@@ -91,7 +91,7 @@ describe('GeminiSession', () => {
       let session = null
       try {
         assert.equal(GeminiSession.hasAlternativeCredentials(), true)
-        assert.equal(GeminiSession.preflight.credentials.optional, true, 'doctor agrees Gemini is authenticated via OAuth')
+        assert.equal(GeminiSession.preflight.credentials.optional, true, 'preflight marks the key optional so doctor downgrades a missing key fail→warn, not a hard failure')
         session = new GeminiSession({ cwd: '/tmp' })
         // The base JsonlSubprocessSession.start() throws the API-key error ONLY when
         // no env var AND no alt creds; with OAuth present that throw must be skipped.

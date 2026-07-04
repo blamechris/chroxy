@@ -895,8 +895,9 @@ describe('CodexSession', () => {
 
     // #6563: a `codex login`-only user (OAuth tokens in ~/.codex/auth.json, no
     // OPENAI_API_KEY) must be runtime-ready — start() must NOT throw (matching
-    // resolveAuth()'s ready:true), and preflight must mark the env var optional so
-    // `chroxy doctor` agrees. All three layers share the hasCodexOAuthCreds probe.
+    // resolveAuth()'s ready:true), and preflight marks the env var optional so
+    // `chroxy doctor` downgrades the missing key from fail→warn (not a hard
+    // failure). All three layers share the hasCodexOAuthCreds probe.
     it('#6563: OAuth-only (auth.json present, no env var) — start() does not throw + preflight optional', () => {
       const oauthDir = mkdtempSync(join(tmpdir(), 'chroxy-codex-oauth-'))
       writeFileSync(join(oauthDir, 'auth.json'), JSON.stringify({ tokens: { access_token: 'tok-abc' } }))
@@ -905,7 +906,7 @@ describe('CodexSession', () => {
       delete process.env.OPENAI_API_KEY
       try {
         assert.equal(CodexSession.hasAlternativeCredentials(), true)
-        assert.equal(CodexSession.preflight.credentials.optional, true, 'doctor agrees Codex is authenticated via OAuth')
+        assert.equal(CodexSession.preflight.credentials.optional, true, 'preflight marks the key optional so doctor downgrades a missing key fail→warn, not a hard failure')
         const session = new CodexSession({ cwd: '/tmp' })
         assert.doesNotThrow(() => session.start(), 'OAuth-only user is not rejected at runtime')
         assert.equal(session._processReady, true)

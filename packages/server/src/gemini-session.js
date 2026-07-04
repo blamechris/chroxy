@@ -241,9 +241,11 @@ export class GeminiSession extends JsonlSubprocessSession {
         envVars: ['GEMINI_API_KEY', 'GOOGLE_API_KEY'],
         hint: 'set GEMINI_API_KEY or GOOGLE_API_KEY',
         // #6563: the env var is OPTIONAL when OAuth creds exist (`gemini login`),
-        // so `chroxy doctor` agrees with resolveAuth() (ready on OAuth) instead
-        // of reporting a false credentials failure. Same probe as resolveAuth()
-        // + hasAlternativeCredentials() → one definition of "authenticated".
+        // so `chroxy doctor` downgrades the missing env var from fail→warn instead
+        // of a hard credentials failure — doctor can't read the OAuth token, but it
+        // must not report a false failure when resolveAuth() is ready on OAuth. Same
+        // probe as resolveAuth() + hasAlternativeCredentials() → one definition of
+        // "has a usable credential".
         optional: hasGeminiOAuthCreds(),
       },
     }
