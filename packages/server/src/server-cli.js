@@ -47,6 +47,8 @@ import { getRegistryForProvider, watchModelsOverlay } from './models.js'
 // (`if (config?.environments?.enabled)`).
 import { UNREACHABLE_STATUSES } from './environment-statuses.js'
 import { resolveSkipPermissions, buildEnvironmentBackend, isUserShellEnabled, getAllowAnyModelProviders } from './config.js'
+import { parseDuration } from './duration.js'
+import { createSessionTokenStore } from './session-token-store.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -904,10 +906,25 @@ export async function startCliServer(config) {
   }
 
   // Create pairing manager for ephemeral QR-based pairing (replaces permanent token in QR)
+  // #6598 — how long a paired device's token survives without reconnecting
+  // (sliding). Operator-configurable via `sessionTokenTtl` / CHROXY_SESSION_TOKEN_TTL;
+  // default 30d, floored at 5min so a typo can't cause re-pair spam.
+  const SESSION_TOKEN_TTL_DEFAULT_MS = 30 * 24 * 60 * 60_000
+  const SESSION_TOKEN_TTL_FLOOR_MS = 5 * 60_000
+  const parsedSessionTtl = config.sessionTokenTtl ? parseDuration(config.sessionTokenTtl) : null
+  const sessionTokenTtlMs = Math.max(
+    parsedSessionTtl && parsedSessionTtl > 0 ? parsedSessionTtl : SESSION_TOKEN_TTL_DEFAULT_MS,
+    SESSION_TOKEN_TTL_FLOOR_MS,
+  )
+  // #6598 — persist paired tokens across restarts (encrypted at rest). Honour a
+  // CHROXY_CONFIG_DIR override so it sits next to config.json / credentials.json.
+  const chroxyDir = process.env.CHROXY_CONFIG_DIR || join(homedir(), '.chroxy')
   const pairingManager = NO_AUTH ? null : new PairingManager({
     ttlMs: 60_000,
     autoRefresh: true,
     identityPublicKey: serverIdentity?.publicKey || null,
+    sessionTokenTtlMs,
+    sessionTokenStore: createSessionTokenStore({ dir: chroxyDir }),
   })
 
   wsServer = new WsServer({

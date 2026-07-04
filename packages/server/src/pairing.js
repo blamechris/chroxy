@@ -9,6 +9,9 @@
  */
 import { EventEmitter } from 'events'
 import { randomBytes, timingSafeEqual } from 'crypto'
+import { createLogger } from './logger.js'
+
+const log = createLogger('pairing')
 
 // -- Typeable short pairing code (#5512, epic #5509) --
 //
@@ -66,9 +69,13 @@ const MAX_SESSION_TOKENS = 100
 // _pendingRequests sweep so expired tokens are reaped even when no lookup or
 // new issuance touches them — without this they linger to the cap and trigger
 // eviction of a still-valid (longest-paired) token, silently logging out a
-// device. Hourly is ample against a 24h TTL; unref'd so it never holds the
-// process open.
+// device. Hourly is ample against a multi-day TTL (default 30d, #6598); unref'd
+// so it never holds the process open.
 const SESSION_TOKEN_SWEEP_INTERVAL_MS = 60 * 60_000 // 1 hour
+// #6598: a sliding-expiry refresh moves a token's clock on every reconnect, but
+// with a multi-day TTL there's no need to hit disk each time — persist a slide at
+// most this often. Structural changes (mint / sweep) persist immediately.
+const SLIDE_PERSIST_THROTTLE_MS = 60 * 60_000 // 1 hour
 const MAX_ACTIVE_PAIRINGS = 10
 
 // -- Pairing-approval primitive (#5510, epic #5509) --
@@ -103,7 +110,7 @@ function appendIdentityKey(url, identityPublicKey) {
 }
 
 export class PairingManager extends EventEmitter {
-  constructor({ wsUrl = null, ttlMs = DEFAULT_TTL_MS, sessionTokenTtlMs = DEFAULT_SESSION_TOKEN_TTL_MS, autoRefresh = false, pendingTtlMs = DEFAULT_PENDING_TTL_MS, identityPublicKey = null } = {}) {
+  constructor({ wsUrl = null, ttlMs = DEFAULT_TTL_MS, sessionTokenTtlMs = DEFAULT_SESSION_TOKEN_TTL_MS, autoRefresh = false, pendingTtlMs = DEFAULT_PENDING_TTL_MS, identityPublicKey = null, sessionTokenStore = null } = {}) {
     super()
     this._wsUrl = wsUrl
     // #5536 — the daemon's long-lived E2E identity public key (base64 Ed25519),
@@ -114,12 +121,41 @@ export class PairingManager extends EventEmitter {
     this._autoRefresh = autoRefresh
     this._current = null
     this._activePairings = new Map() // id → { expiresAt, used }
-    this._sessionTokens = new Map() // sessionToken → { createdAt }
+    this._sessionTokens = new Map() // sessionToken → { createdAt, sessionId }
     this._refreshTimer = null
     // #5555: background TTL sweep for _sessionTokens (started lazily on first
     // token issuance, cleared on destroy — no leaked timer).
     this._sessionTokenSweepTimer = null
     this._destroyed = false
+    // #6598: optional { load, save } adapter so paired tokens survive a daemon
+    // restart. When absent, behaviour is exactly as before (in-memory only).
+    this._sessionTokenStore = sessionTokenStore
+    // Throttle slide-refresh persistence: a sliding-expiry refresh moves createdAt
+    // on every reconnect, but with a multi-day TTL we don't need to hit disk each
+    // time. Structural changes (mint / sweep / revoke) always persist immediately;
+    // a slide persists at most once per SLIDE_PERSIST_THROTTLE_MS.
+    this._lastSlidePersistMs = 0
+    // Restore persisted tokens (expired ones are dropped lazily on first lookup,
+    // and by the background sweep once it's armed below).
+    if (this._sessionTokenStore) {
+      try {
+        for (const [token, meta] of this._sessionTokenStore.load()) {
+          if (typeof token === 'string' && meta && typeof meta.createdAt === 'number') {
+            // Coerce sessionId to string|null — a hand-edited / corrupt store must
+            // not inject a non-string binding that downstream handlers assume.
+            const sessionId = typeof meta.sessionId === 'string' ? meta.sessionId : null
+            this._sessionTokens.set(token, { createdAt: meta.createdAt, sessionId })
+          }
+        }
+        // Arm the background TTL sweep so restored-but-expired tokens are reaped
+        // even if nothing looks them up after a restart.
+        if (this._sessionTokens.size > 0) this._ensureSessionTokenSweepTimer()
+      } catch (err) {
+        // Never let a restore failure break construction — start empty so devices
+        // re-pair. Logged (not silent) so a genuine programming error surfaces.
+        log.warn(`could not restore persisted session tokens (${err.message}) — devices will re-pair`)
+      }
+    }
 
     // -- Pairing-approval primitive (#5510) --
     this._pendingTtlMs = pendingTtlMs
@@ -353,7 +389,15 @@ export class PairingManager extends EventEmitter {
    * Uses constant-time comparison to prevent timing attacks.
    */
   isSessionTokenValid(token) {
-    return this._lookupToken(token) !== null
+    const meta = this._lookupToken(token)
+    if (meta === null) return false
+    // #6598 sliding expiry: a successful auth (this is called on the auth path,
+    // NOT on every per-message getSessionIdForToken lookup) refreshes the token's
+    // clock, so only a device that hasn't connected within the TTL window expires.
+    // `meta` is the live map value, so mutating it slides the stored entry.
+    meta.createdAt = Date.now()
+    this._maybePersistSlide()
+    return true
   }
 
   /**
@@ -412,6 +456,9 @@ export class PairingManager extends EventEmitter {
       clearInterval(this._sessionTokenSweepTimer)
       this._sessionTokenSweepTimer = null
     }
+    // #6598: a sweep that dropped an expired token is a structural change —
+    // persist so the reaped token doesn't reappear on the next restart.
+    if (removed > 0) this._persistSessionTokens()
     return removed
   }
 
@@ -419,6 +466,32 @@ export class PairingManager extends EventEmitter {
     if (this._destroyed || this._sessionTokenSweepTimer) return
     this._sessionTokenSweepTimer = setInterval(() => this._sweepSessionTokens(), SESSION_TOKEN_SWEEP_INTERVAL_MS)
     this._sessionTokenSweepTimer.unref?.()
+  }
+
+  /**
+   * #6598: persist the current session-token map through the injected store, if
+   * any. Best-effort — the store swallows + logs I/O errors, never throwing into
+   * token issuance or the auth path. Used for STRUCTURAL changes (mint / sweep).
+   */
+  _persistSessionTokens() {
+    if (!this._sessionTokenStore) return
+    try {
+      this._sessionTokenStore.save([...this._sessionTokens.entries()])
+    } catch { /* store logs; a failed persist just means a restart may re-pair */ }
+  }
+
+  /**
+   * #6598: persist a sliding-expiry refresh, throttled to at most once per
+   * SLIDE_PERSIST_THROTTLE_MS so a reconnect-happy client doesn't churn the disk.
+   * A slide missed by the throttle is at most SLIDE_PERSIST_THROTTLE_MS stale on
+   * disk, negligible against the multi-day TTL.
+   */
+  _maybePersistSlide() {
+    if (!this._sessionTokenStore) return
+    const now = Date.now()
+    if (now - this._lastSlidePersistMs < SLIDE_PERSIST_THROTTLE_MS) return
+    this._lastSlidePersistMs = now
+    this._persistSessionTokens()
   }
 
   /**
@@ -441,6 +514,9 @@ export class PairingManager extends EventEmitter {
     }
     this._sessionTokens.set(token, meta)
     this._ensureSessionTokenSweepTimer()
+    // #6598: a freshly minted token is a structural change — persist immediately
+    // so a device paired right before a restart stays paired after it.
+    this._persistSessionTokens()
   }
 
   /**

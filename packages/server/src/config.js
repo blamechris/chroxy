@@ -93,6 +93,12 @@ const CONFIG_SCHEMA = {
   encryptLocalhost: 'boolean',
   transforms: 'array',
   tokenExpiry: 'string',
+  // #6598 — how long a paired device's session token stays valid without
+  // reconnecting (sliding: each connect refreshes it). Duration string like
+  // '30d' / '15d' / '12h'. Persisted across restarts. Default 30d + the 5min
+  // floor are applied in server-cli when computing sessionTokenTtlMs; a malformed
+  // or sub-floor value is warned about by validateConfig.
+  sessionTokenTtl: 'string',
   sessionTimeout: 'string',
   costBudget: 'number',
   // #5665: monthly programmatic-credit budget meter config. Nested object:
@@ -939,6 +945,17 @@ export function validateConfig(config, verbose = false) {
     }
   }
 
+  // #6598: paired-session-token lifetime. Warn on a typo (which would silently
+  // fall back to the 30d default) or a sub-floor value (floored to 5min at wiring).
+  if (typeof config.sessionTokenTtl === 'string' && config.sessionTokenTtl.length > 0) {
+    const ms = parseDuration(config.sessionTokenTtl)
+    if (ms == null) {
+      warnings.push(`Invalid duration format for 'sessionTokenTtl': '${config.sessionTokenTtl}'`)
+    } else if (ms < 5 * 60_000) {
+      warnings.push(`Value for 'sessionTokenTtl' is too low: '${config.sessionTokenTtl}' (minimum 5m)`)
+    }
+  }
+
   // #3899: hard-cap range. Same 30s / 24h bounds as resultTimeoutMs.
   // Additionally: warn if hardTimeoutMs < resultTimeoutMs — the soft
   // warning is supposed to fire first; an inverted config would fire
@@ -1308,6 +1325,7 @@ function envKeyForConfig(key) {
     encryptLocalhost: 'CHROXY_ENCRYPT_LOCALHOST',
     transforms: 'CHROXY_TRANSFORMS',
     tokenExpiry: 'CHROXY_TOKEN_EXPIRY',
+    sessionTokenTtl: 'CHROXY_SESSION_TOKEN_TTL',
     sessionTimeout: 'CHROXY_SESSION_TIMEOUT',
     costBudget: 'CHROXY_COST_BUDGET',
     externalUrl: 'CHROXY_EXTERNAL_URL',
