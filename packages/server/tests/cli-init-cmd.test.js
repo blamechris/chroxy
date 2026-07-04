@@ -111,6 +111,37 @@ describe('chroxy init provider picker', () => {
     assert.deepEqual(parsed.providers, ['gemini'])
   })
 
+  // #6565: the daemon's provider SELECTOR reads the singular `provider` key
+  // (server-cli.js `config.provider || DEFAULT_PROVIDER`), NOT `providers[]`.
+  // init must write `provider = providers[0]` so a picked provider actually runs.
+  it('#6565: writes the singular `provider` key = primary choice (default → claude-tui)', async () => {
+    const mock = makePrompt(['', ''])
+    const env = makeEnv()
+    await runInitCmd({
+      force: true, promptFn: mock.fn, logFn: env.log, writeFileFn: env.writeFile,
+      ensureDirFn: () => {}, configFilePath: '/tmp/fake-config.json', configDirPath: '/tmp/fake-dir',
+      existsFn: () => false, isKeychainAvailableFn: () => false, setTokenFn: () => {},
+    })
+    const parsed = JSON.parse(env.getWritten().contents)
+    assert.equal(parsed.provider, 'claude-tui', 'singular `provider` written for the selector')
+    assert.deepEqual(parsed.providers, ['claude-tui'])
+  })
+
+  it('#6565: a non-default pick (codex) writes provider=codex → start resolves codex', async () => {
+    const mock = makePrompt(['', '3']) // 3 = codex
+    const env = makeEnv()
+    await runInitCmd({
+      force: true, promptFn: mock.fn, logFn: env.log, writeFileFn: env.writeFile,
+      ensureDirFn: () => {}, configFilePath: '/tmp/fake-config.json', configDirPath: '/tmp/fake-dir',
+      existsFn: () => false, isKeychainAvailableFn: () => false, setTokenFn: () => {},
+    })
+    const parsed = JSON.parse(env.getWritten().contents)
+    assert.equal(parsed.provider, 'codex')
+    assert.deepEqual(parsed.providers, ['codex'])
+    // Mirrors the selector in server-cli.js — the daemon would now run codex.
+    assert.equal(parsed.provider || 'claude-tui', 'codex')
+  })
+
   it('shows next-step hint for codex (OPENAI_API_KEY)', async () => {
     const mock = makePrompt(['', '3'])
     const env = makeEnv()
