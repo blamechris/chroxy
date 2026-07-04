@@ -2440,4 +2440,49 @@ export const SWITCH_FIXTURES: ContractFixture[] = [
       dashboard: { sessions: { s1: { messages: [{ type: 'system', content: 'This action is bound to another session' }] } } },
     },
   },
+  // permission_input (#6558, follow-up to #6543 PR-4) — the get_permission_input
+  // pull reply. Became a both-clients switch type when the mobile app gained a
+  // `case 'permission_input':` (dashboard handles it via its HANDLERS map). Both
+  // reducers are byte-identical: a single flat write
+  // `set({ permissionInputs: { ...permissionInputs, [requestId]: data } })`,
+  // Zod-validated (drop-on-malformed). A flat-assert fixture drives BOTH clients'
+  // real handleMessage, so any future drift in either reducer fails here. Replaces
+  // the PENDING_CONTRACT_TYPES allowlist entry.
+  {
+    name: 'permission_input (found) stores the full redacted tool input by requestId (both clients)',
+    type: 'permission_input',
+    message: {
+      type: 'permission_input',
+      requestId: 'r1',
+      found: true,
+      tool: 'Write',
+      input: { file_path: '/x', content: 'a\nb' },
+    },
+    expect: {
+      flat: {
+        permissionInputs: {
+          r1: { type: 'permission_input', requestId: 'r1', found: true, tool: 'Write', input: { file_path: '/x', content: 'a\nb' } },
+        },
+      },
+    },
+  },
+  {
+    // The found:false security shape carries an `error` and NEVER input/tool, so
+    // the "unavailable" reply can't leak any tool input. Locks that branch too.
+    name: 'permission_input (not found) stores the security error shape without any input (both clients)',
+    type: 'permission_input',
+    message: {
+      type: 'permission_input',
+      requestId: 'r2',
+      found: false,
+      error: { code: 'NOT_PENDING', message: 'gone' },
+    },
+    expect: {
+      flat: {
+        permissionInputs: {
+          r2: { type: 'permission_input', requestId: 'r2', found: false, error: { code: 'NOT_PENDING', message: 'gone' } },
+        },
+      },
+    },
+  },
 ]

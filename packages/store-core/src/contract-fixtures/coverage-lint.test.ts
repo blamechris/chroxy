@@ -91,16 +91,10 @@ const dashHandlerPath = resolve(here, '../../../dashboard/src/store/message-hand
 // close comment for the full rationale.
 // ---------------------------------------------------------------------------
 const PENDING_CONTRACT_TYPES = new Set<string>([
-  // permission_input (#6543 PR-4) — the pre-write-diff pull reply became
-  // both-clients when the mobile app gained a `case 'permission_input':` (dashboard
-  // handles it via its HANDLERS map). Its reducer is a one-line flat-state write
-  // (`set({ permissionInputs: { ...get().permissionInputs, [requestId]: data } })`)
-  // that is byte-identical on both clients, and each side is behaviour-verified by
-  // a dedicated dispatch test (dashboard: dispatch-permission-input.test.ts; app:
-  // message-handler-permission-input.test.ts). A shared SWITCH_FIXTURES entry is a
-  // tracked follow-up (the flat `permissionInputs` map is trivially assertable once
-  // the per-client SWITCH runner seeds it); listed here until then.
-  'permission_input',
+  // permission_input (#6543 PR-4) — now covered by a both-clients SWITCH_FIXTURES
+  // flat-assert entry (#6558): the found + not-found shapes drive both clients'
+  // real handleMessage and assert the identical `permissionInputs[requestId]`
+  // write. Removed from this allowlist.
   // ------------------------------------------------------------------
   // Below WAS empty — the both-clients SWITCH_FIXTURES backlog is otherwise fully
   // drained. Every other both-clients switch type has a behaviour-verified fixture
