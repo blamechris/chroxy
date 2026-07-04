@@ -152,6 +152,71 @@ describe('WsServer permission_response rate limiting (#2324)', () => {
     ws.close()
   })
 
+  it('#6551 — rate-limits get_permission_input with its own tight limiter', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: false,
+    })
+
+    // Tight dedicated limiter so we don't need to send 30 pulls.
+    server._permissionInputRateLimiter = new RateLimiter({ windowMs: 60_000, maxMessages: 3, burst: 0 })
+
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port)
+
+    // 3 pulls are allowed (they resolve to found:false — no pending — but are NOT rate-limited).
+    for (let i = 0; i < 3; i++) {
+      send(ws, { type: 'get_permission_input', requestId: `req-${i}` })
+    }
+    // The 4th pull trips the dedicated limiter.
+    send(ws, { type: 'get_permission_input', requestId: 'req-overflow' })
+
+    const rateLimited = await waitForMessage(
+      messages,
+      m => m.type === 'rate_limited',
+      2000,
+      'rate_limited for get_permission_input'
+    )
+
+    assert.ok(rateLimited, 'Should receive rate_limited message')
+    assert.ok(rateLimited.retryAfterMs > 0, 'retryAfterMs should be positive')
+    assert.match(rateLimited.message, /permission-input pulls/i, 'Message should mention permission-input pulls')
+
+    ws.close()
+  })
+
+  it('#6551 — get_permission_input does not consume the general rate limiter bucket', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: false,
+    })
+
+    // General limiter is tighter than the number of pulls; dedicated limiter is generous.
+    server._rateLimiter = new RateLimiter({ windowMs: 60_000, maxMessages: 2, burst: 0 })
+    server._permissionInputRateLimiter = new RateLimiter({ windowMs: 60_000, maxMessages: 100, burst: 0 })
+
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port)
+
+    // 5 pulls — would trip the general limiter (2) if they shared it; the dedicated
+    // limiter (100) leaves them all under budget.
+    for (let i = 0; i < 5; i++) {
+      send(ws, { type: 'get_permission_input', requestId: `req-${i}` })
+    }
+    await new Promise(resolve => setTimeout(resolve, 150))
+
+    const rateLimited = messages.find(m => m.type === 'rate_limited')
+    assert.equal(rateLimited, undefined, 'get_permission_input uses its own limiter, not the general one')
+
+    ws.close()
+  })
+
   it('rate-limits user_question_response after the relaxed threshold is exceeded', async () => {
     const mockSession = createMockSession()
     server = new WsServer({
