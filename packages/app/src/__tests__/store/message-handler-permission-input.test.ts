@@ -34,9 +34,18 @@ jest.mock('../../store/persistence', () => ({
   _resetForTesting: jest.fn(),
 }));
 
-/** Minimal mock Zustand store seeding `permissionInputs` with an empty map. */
+/** Minimal mock Zustand store seeding `permissionInputs` with an empty map.
+ *  Also seeds the flat fields the permission_resolved / _expired / _timeout
+ *  handlers read (sessionStates for the all-sessions prompt search, plus the
+ *  notification/error lists) so dispatching those events doesn't crash. */
 function createMockStore(initialInputs: Record<string, unknown> = {}) {
-  let state = { permissionInputs: initialInputs } as unknown as ConnectionState;
+  let state = {
+    permissionInputs: initialInputs,
+    sessionStates: {},
+    sessionNotifications: [],
+    serverErrors: [],
+    activeSessionId: null,
+  } as unknown as ConnectionState;
   return {
     store: {
       getState: () => state,
@@ -158,5 +167,47 @@ describe('permission_input feeder (#6543 PR-4)', () => {
     // No-op: the seeded map reference is untouched (parse failed before any set).
     expect(current().permissionInputs).toBe(seeded);
     expect(current().permissionInputs.r3).toBeUndefined();
+  });
+
+  it('#6559 — prunes the pulled input when the prompt resolves (unrelated keys survive)', () => {
+    const { store, current } = createMockStore({
+      r1: { type: 'permission_input', requestId: 'r1', found: true, tool: 'Write', input: { file_path: '/x' } },
+      keep: { type: 'permission_input', requestId: 'keep', found: true, tool: 'Edit', input: { file_path: '/y' } },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({ type: 'permission_resolved', requestId: 'r1', decision: 'allow' });
+
+    expect(current().permissionInputs.r1).toBeUndefined();
+    expect(current().permissionInputs.keep).toBeDefined();
+  });
+
+  it('#6559 — prunes on permission_expired and permission_timeout too', () => {
+    const { store, current } = createMockStore({
+      re: { type: 'permission_input', requestId: 're', found: true, tool: 'Write', input: {} },
+      rt: { type: 'permission_input', requestId: 'rt', found: true, tool: 'Write', input: {} },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({ type: 'permission_expired', requestId: 're', message: 'expired' });
+    _testMessageHandler.handle({ type: 'permission_timeout', requestId: 'rt', message: 'timed out' });
+
+    expect(current().permissionInputs.re).toBeUndefined();
+    expect(current().permissionInputs.rt).toBeUndefined();
+  });
+
+  it('#6559 — leaves a live (unresolved) prompt input in place (AC #3)', () => {
+    const { store, current } = createMockStore({
+      live: { type: 'permission_input', requestId: 'live', found: true, tool: 'Write', input: {} },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    // Resolving a DIFFERENT request must not touch the still-live prompt's input.
+    _testMessageHandler.handle({ type: 'permission_resolved', requestId: 'other', decision: 'allow' });
+
+    expect(current().permissionInputs.live).toBeDefined();
   });
 });

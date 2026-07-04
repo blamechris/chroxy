@@ -2334,6 +2334,16 @@ function handlePermissionResolved(msg: Record<string, unknown>, get: MsgGet, set
           : n
       ),
     }));
+    // #6559 — prune the pulled pre-write-diff input for this now-resolved prompt.
+    // permissionInputs is append-only otherwise and grows unbounded over a long
+    // session. Guard the copy-delete so a prompt that never pulled input (the
+    // common case) doesn't churn a new object. Mirrors the app handler.
+    set((s) => {
+      if (!s.permissionInputs || !Object.prototype.hasOwnProperty.call(s.permissionInputs, resolvedRequestId)) return {};
+      const next = { ...s.permissionInputs };
+      delete next[resolvedRequestId];
+      return { permissionInputs: next };
+    });
   }
 }
 
@@ -4452,6 +4462,14 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       const { requestId: expiredRequestId, systemMessage: expiredSystemMsg } =
         sharedPermissionExpired(msg);
       if (expiredRequestId) {
+        // #6559 — prune the pulled input for an expired prompt. Hoisted above the
+        // alreadyResolved early-return so both branches drop it (guarded copy-delete).
+        set((s) => {
+          if (!s.permissionInputs || !Object.prototype.hasOwnProperty.call(s.permissionInputs, expiredRequestId)) return {};
+          const next = { ...s.permissionInputs };
+          delete next[expiredRequestId];
+          return { permissionInputs: next };
+        });
         // If the user already resolved this request (via Allow/Deny/AllowSession),
         // this is the race condition from #2833 — the server expired the prompt
         // after we answered. Suppress the "Expired — already handled" message
@@ -4549,6 +4567,13 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
               : n
           ),
         }));
+        // #6559 — prune the pulled input for a timed-out prompt too.
+        set((s) => {
+          if (!s.permissionInputs || !Object.prototype.hasOwnProperty.call(s.permissionInputs, timeoutRequestId)) return {};
+          const next = { ...s.permissionInputs };
+          delete next[timeoutRequestId];
+          return { permissionInputs: next };
+        });
       }
       // Surface a dismissible error toast so the operator knows the
       // permission was auto-denied (wording comes from the shared handler so

@@ -2515,6 +2515,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       serverErrors: [],
       sessionNotifications: [],
       resolvedPermissions: {},
+      // #6559 — drop any pulled pre-write-diff inputs on disconnect (per-connection
+      // state; mirrors the app disconnect reset so both clients clear the tail if
+      // we disconnect mid-prompt). A resolved/expired/timed-out prompt already
+      // self-prunes above.
+      permissionInputs: {},
       serverPhase: null,
       tunnelProgress: null,
       // #5356: clear exposure on disconnect so a reconnect against a
