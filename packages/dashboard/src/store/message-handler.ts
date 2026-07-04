@@ -2339,7 +2339,7 @@ function handlePermissionResolved(msg: Record<string, unknown>, get: MsgGet, set
     // session. Guard the copy-delete so a prompt that never pulled input (the
     // common case) doesn't churn a new object. Mirrors the app handler.
     set((s) => {
-      if (!s.permissionInputs || !(resolvedRequestId in s.permissionInputs)) return {};
+      if (!s.permissionInputs || !Object.prototype.hasOwnProperty.call(s.permissionInputs, resolvedRequestId)) return {};
       const next = { ...s.permissionInputs };
       delete next[resolvedRequestId];
       return { permissionInputs: next };
@@ -4465,7 +4465,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         // #6559 — prune the pulled input for an expired prompt. Hoisted above the
         // alreadyResolved early-return so both branches drop it (guarded copy-delete).
         set((s) => {
-          if (!s.permissionInputs || !(expiredRequestId in s.permissionInputs)) return {};
+          if (!s.permissionInputs || !Object.prototype.hasOwnProperty.call(s.permissionInputs, expiredRequestId)) return {};
           const next = { ...s.permissionInputs };
           delete next[expiredRequestId];
           return { permissionInputs: next };
@@ -4569,7 +4569,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         }));
         // #6559 — prune the pulled input for a timed-out prompt too.
         set((s) => {
-          if (!s.permissionInputs || !(timeoutRequestId in s.permissionInputs)) return {};
+          if (!s.permissionInputs || !Object.prototype.hasOwnProperty.call(s.permissionInputs, timeoutRequestId)) return {};
           const next = { ...s.permissionInputs };
           delete next[timeoutRequestId];
           return { permissionInputs: next };
