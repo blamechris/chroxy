@@ -7,7 +7,7 @@
 
 Run a lightweight daemon on your dev machine, connect from your phone or desktop via a secure tunnel. Get both a full terminal view and a clean chat-like UI that parses the AI CLI's output into readable messages. Pluggable session providers let you swap between Claude Code (Agent SDK, legacy CLI, or the interactive TUI), Google Gemini, OpenAI Codex, DeepSeek, local models via Ollama, your own Anthropic API key (BYOK), and any config-driven OpenAI- or Anthropic-compatible endpoint (LM Studio, OpenRouter, vLLM, …). See [docs/providers.md](docs/providers.md).
 
-> **Claude is the default, not a requirement.** The daemon defaults to the `claude-tui` provider out of the box, but a Codex-, Gemini-, Ollama-, or BYOK-only setup needs no `claude` binary at all — `chroxy doctor` only preflights the provider you actually select.
+> **Claude is the default, not a requirement.** The daemon defaults to the `claude-tui` provider out of the box, but a Codex-, Gemini-, Ollama-, or BYOK-only setup needs no `claude` binary at all — set `"provider"` in `~/.chroxy/config.json` (both the daemon **and** `chroxy doctor` honor it, so neither demands `claude`).
 
 ```
 ┌─────────────┐                        ┌──────────────────────┐
@@ -138,14 +138,20 @@ Or pass them inline when starting the server:
 OPENAI_API_KEY=sk-... PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy start
 ```
 
-**Running without Claude installed?** The daemon defaults to the `claude-tui` provider, so a bare `chroxy start` expects a `claude` binary. To run a Codex- or Gemini-only machine (no `claude` at all), make a non-Claude provider the default with `CHROXY_PROVIDER`:
+**Running without Claude installed?** The daemon defaults to the `claude-tui` provider, so a bare `chroxy start` expects a `claude` binary. To run a Codex- or Gemini-only machine (no `claude` at all), make a non-Claude provider the default. The cleanest way is to set it in `~/.chroxy/config.json`, because both the daemon **and** `chroxy doctor` read `config.provider`:
 
-```bash
-# Codex-only — no `claude` binary required
-CHROXY_PROVIDER=codex OPENAI_API_KEY=sk-... npx chroxy start
+```jsonc
+// ~/.chroxy/config.json
+{ "provider": "codex" }
 ```
 
-`chroxy doctor` preflights only the provider you actually select, so it won't complain about a missing `claude` when your default is Codex, Gemini, Ollama, or BYOK. You can still switch providers per session at any time (`--provider gemini`, `CHROXY_PROVIDER=…`).
+```bash
+# Codex-only — no `claude` binary required. doctor honors config.provider too,
+# so it preflights Codex (not claude) and won't complain about a missing binary.
+OPENAI_API_KEY=sk-... npx chroxy start
+```
+
+`CHROXY_PROVIDER=codex npx chroxy start` also works to set the daemon's start-time default, but `chroxy doctor` reads `config.provider` from `~/.chroxy/config.json` rather than the env var — so setting it in the config file is what keeps *both* commands claude-free. Any client can still switch providers per session on session create (`--provider gemini`, or the provider picker in the app/dashboard).
 
 If you create a session for a provider whose key isn't set, the server returns a clear error (e.g. *"Codex: required credential not set — OPENAI_API_KEY"*). See [docs/providers.md](docs/providers.md) for per-provider capabilities and full env var reference.
 
