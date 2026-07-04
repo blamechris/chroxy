@@ -10,6 +10,7 @@ import {
   maybeRatchetContextWindow,
 } from './utils/context-window-learn.js'
 import { BILLING_CLASSES } from './billing-class.js'
+import { hasCodexOAuthCreds } from './auth-probes.js'
 
 /**
  * Manages a Codex CLI session using `codex exec --json`.
@@ -308,6 +309,17 @@ export class CodexSession extends JsonlSubprocessSession {
     return 'OPENAI_API_KEY'
   }
 
+  /**
+   * #6563 — Codex authenticates via OPENAI_API_KEY OR OAuth tokens cached in
+   * ~/.codex/auth.json by `codex login`. Reuse the SAME probe resolveAuth() and
+   * the preflight use so all three layers (display, runtime, preflight) agree
+   * that a `codex login`-only user is authenticated — start() must not throw for
+   * them just because the env key is unset.
+   */
+  static hasAlternativeCredentials() {
+    return hasCodexOAuthCreds()
+  }
+
   static get providerName() {
     return 'codex'
   }
@@ -408,7 +420,11 @@ export class CodexSession extends JsonlSubprocessSession {
       credentials: {
         envVars: ['OPENAI_API_KEY'],
         hint: 'set OPENAI_API_KEY',
-        optional: false,
+        // #6563: the env var is OPTIONAL when OAuth creds exist (`codex login`),
+        // so `chroxy doctor` agrees with resolveAuth() (ready on OAuth) instead of
+        // reporting a false credentials failure. Same probe as resolveAuth() +
+        // hasAlternativeCredentials() → one definition of "authenticated".
+        optional: hasCodexOAuthCreds(),
       },
     }
   }
