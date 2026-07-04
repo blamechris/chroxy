@@ -25,6 +25,23 @@ import { fileURLToPath } from 'node:url'
 
 const ALL_TARGETS = ['claude', 'gemini', 'codex']
 
+// #6571 — home-dir markers for coding agents whose skills are opt-in. Used only
+// to NUDGE a contributor whose agent is installed but whose compile target isn't
+// selected (so a Codex/Gemini user doesn't silently miss the dev-workflow skills).
+const AGENT_HOME_MARKERS = { codex: '.codex', gemini: '.gemini' }
+
+/**
+ * #6571 — detect coding agents that are installed on this machine (their home dir
+ * exists) but are NOT in the selected compile targets. Detection only — never adds
+ * the target (that would write to a home dir the user didn't ask about); the caller
+ * just prints the flag to pass. Returns the unselected-but-present target ids.
+ */
+export function detectUncompiledAgents(targets, home = homedir()) {
+  return Object.entries(AGENT_HOME_MARKERS)
+    .filter(([target, dir]) => !targets.includes(target) && existsSync(join(home, dir)))
+    .map(([target]) => target)
+}
+
 function parseArgs(argv) {
   const out = { repo: process.cwd(), dryRun: false }
   // Require a value after a value-taking flag, with a clear error instead of an
@@ -228,6 +245,13 @@ function main() {
   if (bad.length) {
     console.error(`Unknown target(s): ${bad.join(', ')}. Known: ${ALL_TARGETS.join(', ')}`)
     process.exit(1)
+  }
+
+  // #6571 — nudge if a coding agent is installed but its target isn't selected.
+  const uncompiled = detectUncompiledAgents(targets)
+  if (uncompiled.length) {
+    const dirs = uncompiled.map((t) => `~/${AGENT_HOME_MARKERS[t]}`).join(', ')
+    console.log(`Hint: ${dirs} present but not a selected target — pass --targets ${[...targets, ...uncompiled].join(',')} to compile for ${uncompiled.join(', ')} too (see docs/dev-workflow-skills.md).\n`)
   }
 
   const names = args.name ? [args.name] : readdirSync(cmdDir).filter((f) => f.endsWith('.md')).map((f) => f.replace(/\.md$/, ''))
