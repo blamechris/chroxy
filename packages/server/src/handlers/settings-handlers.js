@@ -783,8 +783,15 @@ function handleGetPermissionInput(ws, client, msg, ctx) {
   if (!pending) return notFound('NOT_PENDING', 'That permission is no longer pending (resolved or expired).')
 
   const tool = sess?._lastPermissionData?.get(requestId)?.tool
-  const input = sanitizeToolInput(pending.input, { maxChars: PULL_MAX_INPUT_CHARS })
-  return send({ found: true, tool, input })
+  // #6551 — memoize the redacted pull on the pending entry so repeated pulls for
+  // the same requestId don't re-run the full redactDeep tree-walk + JSON.stringify
+  // per call. The pending entry is deleted at every resolve/timeout/abort site, so
+  // the memo auto-invalidates with it (no separate cache-invalidation wiring). The
+  // input is treated as immutable once pending, so the cached value stays correct.
+  if (pending._redactedPull === undefined) {
+    pending._redactedPull = sanitizeToolInput(pending.input, { maxChars: PULL_MAX_INPUT_CHARS })
+  }
+  return send({ found: true, tool, input: pending._redactedPull })
 }
 
 export const settingsHandlers = {

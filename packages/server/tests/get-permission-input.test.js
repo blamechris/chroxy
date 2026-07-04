@@ -107,4 +107,59 @@ describe('get_permission_input handler (#6543)', () => {
     assert.equal(msg.found, false)
     assert.equal(msg.error.code, 'NOT_PENDING')
   })
+
+  it('#6551 — memoizes the redacted pull on the pending entry (no re-serialization per repeat pull)', () => {
+    // A STABLE session (getSession returns the SAME object) so the memo stored on
+    // the pending entry survives across calls — makeCtx() rebuilds the session per
+    // call, which would defeat the memo.
+    const { session } = makeSession()
+    const send = createSpy()
+    const ctx = nsCtx({
+      send,
+      permissionSessionMap: new Map([['req-1', 'sess-1']]),
+      sessionManager: { getSession: (sid) => (sid === 'sess-1' ? { session } : undefined) },
+      _send: send,
+    })
+    const pull = () => {
+      settingsHandlers.get_permission_input({}, { id: 'c1', activeSessionId: 'sess-1' }, { type: 'get_permission_input', requestId: 'req-1' }, ctx)
+      return ctx.transport.send.lastCall[1].input
+    }
+
+    const first = pull()
+    const second = pull()
+
+    // Reference-identical → the second pull reused the memoized redaction instead
+    // of a fresh redactDeep tree-walk + JSON.stringify. (Without the memo,
+    // sanitizeToolInput returns a NEW object each call.)
+    assert.strictEqual(first, second, 'repeated pulls return the SAME redacted object (memoized)')
+    // The memo lives on the pending entry, so it auto-invalidates when the entry
+    // is deleted on resolve/timeout/abort.
+    assert.ok(session._pendingPermissions.get('req-1')._redactedPull !== undefined, 'redacted pull cached on the pending entry')
+    // Security is unaffected — the cached value is still fully redacted.
+    assert.ok(!JSON.stringify(first).includes(SECRET), 'the memoized pull is still redacted')
+  })
+
+  it('#6551 — a WARM memo is still authorization-gated (the cache never bypasses the viewer/owner check)', () => {
+    const { session } = makeSession()
+    const send = createSpy()
+    const ctx = nsCtx({
+      send,
+      permissionSessionMap: new Map([['req-1', 'sess-1']]),
+      sessionManager: { getSession: (sid) => (sid === 'sess-1' ? { session } : undefined) },
+      _send: send,
+    })
+
+    // An authorized viewer pulls first → the memo is populated.
+    settingsHandlers.get_permission_input({}, { id: 'c1', activeSessionId: 'sess-1' }, { type: 'get_permission_input', requestId: 'req-1' }, ctx)
+    assert.equal(ctx.transport.send.lastCall[1].found, true)
+    assert.ok(session._pendingPermissions.get('req-1')._redactedPull !== undefined, 'memo is warm')
+
+    // A DIFFERENT client bound to another session pulls the SAME requestId. The
+    // authority gate must reject it BEFORE the memo is served — the warm cache
+    // must not leak the input to an unauthorized client.
+    settingsHandlers.get_permission_input({}, { id: 'c2', boundSessionId: 'other-session' }, { type: 'get_permission_input', requestId: 'req-1' }, ctx)
+    const msg = ctx.transport.send.lastCall[1]
+    assert.equal(msg.found, false, 'unauthorized client gets found:false even with a warm memo')
+    assert.equal(msg.input, undefined, 'no cached input leaks to the unauthorized client')
+  })
 })

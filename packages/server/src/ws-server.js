@@ -583,6 +583,13 @@ export class WsServer {
     this._rateLimiter = new RateLimiter({ name: 'ws' })
     // Separate, relaxed limiter for permission/question responses (60 per minute, no burst)
     this._permissionRateLimiter = new RateLimiter({ name: 'permission', windowMs: 60_000, maxMessages: 60, burst: 0 })
+    // #6551: dedicated limiter for get_permission_input (the pre-write-diff pull).
+    // Each pull can return up to 512K, so it's TIGHTER than the general limiter
+    // (30/min + 10 burst vs 100 + 20) to bound cost/egress amplification — a
+    // legit diff-review UI pulls at most once per permission prompt, so 40
+    // effective/min is generous while capping a self-DoS from one client hammering
+    // one requestId.
+    this._permissionInputRateLimiter = new RateLimiter({ name: 'permission-input', windowMs: 60_000, maxMessages: 30, burst: 10 })
     // #3737: per-IP limiter for GET /diagnostics. Default 12 req/min + 4 burst
     // — half of /permission since the cost (FS read + session iteration) is
     // comparable but legitimate use is diagnostic, not interactive. Override
@@ -2157,6 +2164,14 @@ export class WsServer {
       if (!allowed) {
         const label = msg.type === 'user_question_response' ? 'question responses' : 'permission responses'
         this._send(ws, { type: 'rate_limited', retryAfterMs, message: `Too many ${label}. Please slow down.` })
+        return
+      }
+    } else if (msg.type === 'get_permission_input') {
+      // #6551: the pre-write-diff pull has its own tight limiter (each call can
+      // return up to 512K), so it can't burn the general budget or self-DoS.
+      const { allowed, retryAfterMs } = this._permissionInputRateLimiter.check(client.rateLimitKey)
+      if (!allowed) {
+        this._send(ws, { type: 'rate_limited', retryAfterMs, message: 'Too many permission-input pulls. Please slow down.' })
         return
       }
     } else {
