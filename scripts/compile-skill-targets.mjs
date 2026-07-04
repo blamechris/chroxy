@@ -11,7 +11,8 @@
 //   codex  -> ~/.codex/prompts/<name>.md            (md; $ARGUMENTS; user-global, /prompts:<name>)
 //
 // Targets come from `.claude/skill-profile.md` (a `targets:` line) unless
-// overridden with --targets. Codex is opt-in (user-global + deprecated upstream).
+// overridden with --targets. Codex is opt-in (user-global; still supported by
+// codex-cli via ~/.codex/prompts/).
 //
 // Usage:
 //   node scripts/compile-skill-targets.mjs [--name <name>] [--targets claude,gemini]
@@ -194,7 +195,7 @@ function emitCodex(name, body, description) {
   return {
     path: join(homedir(), '.codex/prompts', `${name}.md`),
     content: `---\ndescription: ${yamlDq(description)}\n---\n\n${body}`,
-    note: `codex: invoke as /prompts:${name} (user-global; OpenAI marks custom prompts deprecated)`,
+    note: `codex: invoke as /prompts:${name} (user-global; codex-cli still supports ~/.codex/prompts/)`,
   }
 }
 
