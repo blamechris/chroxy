@@ -88,11 +88,32 @@ describe('ConnectScreen component structure', () => {
 
   test('shows actionable empty-state guidance after scan finds nothing', () => {
     expect(src).toMatch(/No servers found on port/)
-    expect(src).toMatch(/loopback by default/)
-    expect(src).toMatch(/Expose on local network/)
+    // Honest root-cause guidance for a unicast sweep (client/AP isolation),
+    // replacing the old false "binds to loopback" claim (#6561).
+    expect(src).toMatch(/client\/AP isolation/)
     expect(src).toMatch(/testID="lan-scan-empty-state"/)
     expect(src).toMatch(/testID="lan-scan-empty-title"/)
     expect(src).toMatch(/testID="lan-scan-empty-hint"/)
+  })
+
+  test('empty state offers discovery-independent fallbacks (manual entry + troubleshooting)', () => {
+    expect(src).toMatch(/testID="lan-scan-manual-cta"/)
+    expect(src).toMatch(/testID="lan-scan-troubleshooting-link"/)
+    expect(src).toMatch(/lan-discovery\.md/)
+  })
+
+  test('does not claim the daemon binds to loopback (false when bound to 0.0.0.0)', () => {
+    // Regression guard for #6561: the old copy misdirected users to enable an
+    // already-on setting. These strings must stay out of the empty state.
+    expect(src).not.toMatch(/loopback by default/)
+    expect(src).not.toMatch(/Expose on local network/)
+  })
+
+  test('shows a distinct "no local network" empty state (cellular / no usable IPv4)', () => {
+    expect(src).toMatch(/scanNoWifi/)
+    expect(src).toMatch(/testID="lan-scan-nowifi-title"/)
+    expect(src).toMatch(/testID="lan-scan-nowifi-hint"/)
+    expect(src).toMatch(/No local network to scan/)
   })
 
   test('shows error guidance when scan throws', () => {

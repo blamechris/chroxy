@@ -79,6 +79,7 @@ npx chroxy tunnel setup
 ### Triage Runbooks
 
 - [`docs/troubleshooting/session-token-mismatch.md`](docs/troubleshooting/session-token-mismatch.md) — how to enable the `[session-binding-*]` debug logs and correlate a `SESSION_TOKEN_MISMATCH` failure by `requestId` (runbook from the resolved #2832 investigation).
+- [`docs/troubleshooting/lan-discovery.md`](docs/troubleshooting/lan-discovery.md) — why the mobile app's "Scan Local Network" finds nothing on the same Wi-Fi (it's a **unicast /24 sweep**, not mDNS — router client/AP isolation blocks it) and the router-side fixes + manual/QR fallbacks (#6561).
 
 ## Session Start Protocol
 
