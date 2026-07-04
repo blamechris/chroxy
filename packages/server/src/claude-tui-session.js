@@ -556,6 +556,10 @@ export class ClaudeTuiSession extends BaseSession {
     // latch) because a respawn under a wrapper shim can land on a new pid, and a
     // retry-FRESH fallback mints a new sessionId → the old path no longer maps.
     this._resolvedSessionFile = null
+    // #6578: last time the readiness probe ran the (readdir-heavy) session-file
+    // dir-scan, so it can be throttled to ~2/sec during warmup. -Infinity so the
+    // first cold-resolve scans immediately; reset on each (re)spawn.
+    this._lastSessionDirScanMs = -Infinity
     // #5431: incremental transcript scanner for outstanding background work
     // (run_in_background Bash/Agent, Monitor, ScheduleWakeup). Created
     // lazily by getBackgroundTaskSnapshot() once the per-PID session file
@@ -992,10 +996,12 @@ export class ClaudeTuiSession extends BaseSession {
    * @param {number} ptyPid          the pty child pid (fast-path filename)
    * @returns {string|null}
    */
-  static resolveSessionFile(sessionId, ptyPid) {
+  static resolveSessionFile(sessionId, ptyPid, { allowDirScan = true } = {}) {
     // Fast path: the pty-pid-named file. When we have no sessionId to match on
     // (older callers), accept it verbatim if it exists — matches the legacy
-    // pid-keyed behaviour. With a sessionId, only accept it on a match.
+    // pid-keyed behaviour. With a sessionId, only accept it on a match. This is a
+    // single stat+read and runs on every poll; the dir-scan below is the costly
+    // part and the caller throttles it via `allowDirScan`.
     if (Number.isInteger(ptyPid) && ptyPid > 0) {
       const fast = this.sessionFilePath(ptyPid)
       try {
@@ -1003,8 +1009,10 @@ export class ClaudeTuiSession extends BaseSession {
         if (!sessionId || data.sessionId === sessionId) return fast
       } catch { /* not written yet / mid-write race / wrong pid — fall through */ }
     }
-    // Dir-scan fallback keyed on sessionId. Nothing to scan for without an id.
-    if (!sessionId) return null
+    // Dir-scan fallback keyed on sessionId. Nothing to scan for without an id, and
+    // callers can suppress the scan (allowDirScan=false) to throttle its per-poll
+    // cost during the warmup window — the cheap fast-path above still runs.
+    if (!sessionId || !allowDirScan) return null
     try {
       const dir = join(homedir(), '.claude', 'sessions')
       for (const name of readdirSync(dir)) {
@@ -1023,8 +1031,9 @@ export class ClaudeTuiSession extends BaseSession {
    * #6578: does `filePath` still map to `sessionId`? Used to validate a cached
    * `_resolvedSessionFile` before reusing it — the file could be deleted or
    * (after a retry-FRESH fallback) now carry a different id. When `sessionId`
-   * is falsy the check reduces to "the file still exists" (legacy pid-keyed
-   * callers). Swallows errors → false, so a stale cache forces a re-resolve.
+   * is falsy the check reduces to "the file still exists AND parses as JSON"
+   * (legacy pid-keyed callers). Swallows errors → false (a missing OR
+   * unreadable/corrupt file), so a stale cache forces a re-resolve.
    */
   static _sessionFileMatches(filePath, sessionId) {
     try {
@@ -1879,8 +1888,9 @@ export class ClaudeTuiSession extends BaseSession {
     this._firstTurnNudgedForSpawn = false
     // #6578: a (re)spawn can land on a new pid (wrapper shim) or a new sessionId
     // (retry-FRESH fallback), so the cached session-file path is stale — force
-    // the next readiness probe to re-resolve.
+    // the next readiness probe to re-resolve (and scan immediately).
     this._resolvedSessionFile = null
+    this._lastSessionDirScanMs = -Infinity
 
     this._term.onData((data) => {
       this._appendToOutputTail(data)
@@ -2040,7 +2050,15 @@ export class ClaudeTuiSession extends BaseSession {
       // scanning ~/.claude/sessions every poll.
       let sessFile = this._resolvedSessionFile
       if (!sessFile || !ClaudeTuiSession._sessionFileMatches(sessFile, this._sessionId)) {
-        sessFile = ClaudeTuiSession.resolveSessionFile(this._sessionId, pid)
+        // Throttle the readdir-heavy dir-scan to ~2/sec during the cold-resolve
+        // warmup window. The cheap fast-path (pty-pid file read) still runs every
+        // 100ms poll; only the fallback scan is rate-limited — so a MODE-A file
+        // (real pid != pty pid) is still detected within ~500ms of appearing,
+        // negligible against the multi-second warmup.
+        const now = this._nowMonotonic()
+        const allowDirScan = (now - this._lastSessionDirScanMs) >= 500
+        if (allowDirScan) this._lastSessionDirScanMs = now
+        sessFile = ClaudeTuiSession.resolveSessionFile(this._sessionId, pid, { allowDirScan })
         this._resolvedSessionFile = sessFile
       }
       if (!sessFile) return false

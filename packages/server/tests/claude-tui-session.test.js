@@ -1894,6 +1894,12 @@ describe('ClaudeTuiSession', () => {
         ClaudeTuiSession.resolveSessionFile('uuid-scan', fakePid), q,
         'dir-scan finds the matching file under a different pid',
       )
+      // #6578 throttle: allowDirScan:false suppresses the (readdir-heavy) fallback,
+      // so the same under-a-different-pid file is NOT found — only the fast path runs.
+      assert.equal(
+        ClaudeTuiSession.resolveSessionFile('uuid-scan', fakePid, { allowDirScan: false }), null,
+        'allowDirScan:false skips the dir-scan (fast-path miss → null)',
+      )
     })
 
     it('readSessionStatus returns null for missing/invalid files', () => {
