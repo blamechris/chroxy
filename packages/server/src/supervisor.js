@@ -20,6 +20,16 @@ function maskToken(token) {
   return `${token.slice(0, 4)}...${token.slice(-4)}`
 }
 
+// #6566: the StartupDisplay connect-block lines that carry the API token —
+// `   Token: <token>` and `   Dashboard: …?token=<token>`. Under --show-token the
+// supervisor prints these RAW to the operator's terminal instead of letting the
+// redacting logger scrub them back to [REDACTED] (the child's stdout is re-logged
+// through that logger). Deliberately narrow — only the startup banner, never an
+// arbitrary log line that happens to mention a token. Exported for the test.
+export function isConnectBlockTokenLine(line) {
+  return /^\s*Token:\s/.test(line) || /Dashboard:\s.*\?token=/.test(line)
+}
+
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 const packageJson = JSON.parse(readFileSync(join(__dirname, '../package.json'), 'utf-8'))
@@ -432,6 +442,17 @@ export class Supervisor extends EventEmitter {
     if (this._child.stdout) {
       stdoutRl = createInterface({ input: this._child.stdout })
       stdoutRl.on('line', (line) => {
+        // #6566: honour --show-token through the supervisor pipe. The child prints
+        // the real token in the connect-block when --show-token is set, but the
+        // logger's secret-redaction scrubs it on the way to the terminal. When the
+        // operator explicitly asked to see it, print those lines RAW to the
+        // terminal and log a REDACTED copy to the FILE only (toConsole:false), so
+        // the token reaches the operator's terminal but never lands on disk.
+        if (this.config.showToken && isConnectBlockTokenLine(line)) {
+          process.stdout.write(`${line}\n`)
+          this._log.info(`[child:out] ${line}`, { toConsole: false })
+          return
+        }
         this._log.info(`[child:out] ${line}`)
       })
     }

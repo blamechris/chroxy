@@ -6,7 +6,7 @@ import { join } from 'path'
 import { tmpdir } from 'os'
 import { Readable } from 'stream'
 import { createServer as createNetServer } from 'net'
-import { Supervisor } from '../src/supervisor.js'
+import { Supervisor, isConnectBlockTokenLine } from '../src/supervisor.js'
 
 // Bind without a host arg so these probes match how the supervisor's standby
 // server binds (`listen(port)` → the unspecified address), otherwise an
@@ -247,6 +247,53 @@ describe('Supervisor', () => {
 
       supervisor._shuttingDown = true
       clearInterval(supervisor._heartbeatInterval)
+    })
+
+    // #6566: under supervision the child prints the real token in its connect-block
+    // when --show-token is set, but that stdout line is re-logged through the
+    // redacting logger — scrubbing it back to [REDACTED] on the way to the
+    // operator's terminal. Push a connect-block line through the child's stdout
+    // (a distinct token so the supervisor's own masked banner can't interfere) and
+    // inspect what reaches process.stdout.
+    async function driveChildLine(showToken, line) {
+      const { supervisor } = setup(showToken ? { showToken: true } : {})
+      const chunks = []
+      mock.method(process.stdout, 'write', (chunk) => { chunks.push(String(chunk)); return true })
+      try {
+        await supervisor.start()
+        supervisor.lastChild.stdout.push(line + '\n')
+        await new Promise((r) => setImmediate(r))
+        await new Promise((r) => setImmediate(r))
+      } finally {
+        mock.restoreAll()
+        supervisor._shuttingDown = true
+        if (supervisor._heartbeatInterval) clearInterval(supervisor._heartbeatInterval)
+      }
+      return chunks.join('')
+    }
+
+    it('#6566: --show-token reveals the real token in the terminal under supervision', async () => {
+      const out = await driveChildLine(true, '   Token: SHOWTOKEN-SECRET-123')
+      assert.match(out, /SHOWTOKEN-SECRET-123/, 'the real token reaches the terminal under --show-token')
+      assert.doesNotMatch(out, /Token: \[REDACTED\]/, 'the connect-block Token line is not scrubbed')
+    })
+
+    it('#6566: --show-token reveals the full ?token= dashboard URL under supervision', async () => {
+      const out = await driveChildLine(true, '   Dashboard: http://host:8765/dashboard?token=SHOWTOKEN-SECRET-123')
+      assert.match(out, /\?token=SHOWTOKEN-SECRET-123/, 'the full ?token= URL reaches the terminal')
+    })
+
+    it('#6566: still redacts the token WITHOUT --show-token (default supervised path)', async () => {
+      const out = await driveChildLine(false, '   Token: SHOWTOKEN-SECRET-123')
+      assert.doesNotMatch(out, /SHOWTOKEN-SECRET-123/, 'the token is redacted when the flag is off')
+      assert.match(out, /\[REDACTED\]/, 'the redacting logger still scrubs the token to disk + terminal')
+    })
+
+    it('#6566: isConnectBlockTokenLine matches only the connect-block token lines', () => {
+      assert.equal(isConnectBlockTokenLine('   Token: abc123'), true)
+      assert.equal(isConnectBlockTokenLine('   Dashboard: http://h/dashboard?token=abc123'), true)
+      assert.equal(isConnectBlockTokenLine('some log line mentioning a token in prose'), false)
+      assert.equal(isConnectBlockTokenLine('   URL:   ws://host:8765'), false)
     })
 
     it('exits when no API token configured', async () => {
