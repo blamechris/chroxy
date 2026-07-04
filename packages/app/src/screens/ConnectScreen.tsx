@@ -10,6 +10,7 @@ import {
   Keyboard,
   ActivityIndicator,
   Platform,
+  Linking,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { CameraView, useCameraPermissions, BarcodeScanningResult } from 'expo-camera';
@@ -21,10 +22,15 @@ import { setPendingPairingId, setPendingPairingIdentityKey } from '../store/mess
 import { Icon } from '../components/Icon';
 import { ICON_TRIANGLE_DOWN, ICON_TRIANGLE_RIGHT, ICON_BULLET } from '../constants/icons';
 import { COLORS } from '../constants/colors';
-import { validatePort, scanSubnet } from '../utils/lan-scanner';
+import { validatePort, scanSubnet, deriveSubnet24 } from '../utils/lan-scanner';
 import type { DiscoveredServer } from '../utils/lan-scanner';
 
 const DEFAULT_PORT = 8765;
+
+// Troubleshooting guide linked from the LAN-scan empty state (#6561). Points at
+// the docs on `main` so it stays valid without an app release.
+const LAN_TROUBLESHOOTING_URL =
+  'https://github.com/blamechris/chroxy/blob/main/docs/troubleshooting/lan-discovery.md';
 
 
 type ParseResult =
@@ -107,6 +113,13 @@ export function ConnectScreen() {
   const [scanning, setScanning] = useState(false);
   const [scanCompleted, setScanCompleted] = useState(false);
   const [scanError, setScanError] = useState(false);
+  // Set when the scan couldn't start because the phone isn't on Wi-Fi (or has no
+  // usable LAN IP) — distinct from a completed scan that simply found nothing, so
+  // the empty state can give the right advice.
+  const [scanNoWifi, setScanNoWifi] = useState(false);
+  // The /24 prefix we actually swept (e.g. "10.0.0"), surfaced in the UI so a
+  // subnet mismatch between phone and daemon is visible (#6561).
+  const [scannedSubnet, setScannedSubnet] = useState<string | null>(null);
   const [discoveredServers, setDiscoveredServers] = useState<DiscoveredServer[]>([]);
   const [scanProgress, setScanProgress] = useState(0);
   const [scanPort, setScanPort] = useState(String(DEFAULT_PORT));
@@ -288,27 +301,67 @@ export function ConnectScreen() {
     setScanning(true);
     setScanCompleted(false);
     setScanError(false);
+    setScanNoWifi(false);
+    setScannedSubnet(null);
     setDiscoveredServers([]);
     setScanProgress(0);
 
     const abort = new AbortController();
     scanAbortRef.current = abort;
 
+    // Drive every terminal outcome through one helper so `scanCompleted` (the E2E
+    // anchor) and the spinner state stay in sync regardless of which branch we hit.
+    const finalizeScan = (patch?: { error?: boolean; noWifi?: boolean }) => {
+      if (abort.signal.aborted) return;
+      if (patch?.error) setScanError(true);
+      if (patch?.noWifi) setScanNoWifi(true);
+      setScanProgress(1);
+      setScanning(false);
+      setScanCompleted(true);
+    };
+
+    const port = validatePort(scanPort);
+    if (port === null) {
+      Alert.alert('Invalid Port', `Port must be between 1 and 65535. Using default (${DEFAULT_PORT}).`);
+      setScanPort(String(DEFAULT_PORT));
+      setScanning(false);
+      return;
+    }
+
     try {
-      const deviceIp = await Network.getIpAddressAsync();
-      if (!deviceIp || abort.signal.aborted) {
+      // Best-effort transport check: a cellular-only phone can still return a
+      // *scannable* IP (e.g. CGNAT 100.64.x), so IP shape alone can't tell Wi-Fi
+      // from cellular. getNetworkStateAsync makes the "not on Wi-Fi" state
+      // authoritative for cellular; if it throws/undefined we fall back to the IP
+      // heuristic below. We only treat an *explicit* CELLULAR type as no-LAN —
+      // WIFI/ETHERNET/UNKNOWN still proceed to the IP-based subnet check.
+      let onCellular = false;
+      try {
+        const netState = await Network.getNetworkStateAsync();
+        onCellular = netState?.type === Network.NetworkStateType.CELLULAR;
+      } catch {
+        // Older/unsupported platform — rely on the IP check below.
+      }
+      if (abort.signal.aborted) {
         setScanning(false);
         return;
       }
 
-      const subnet = deviceIp.split('.').slice(0, 3).join('.');
-      const port = validatePort(scanPort);
-      if (port === null) {
-        Alert.alert('Invalid Port', `Port must be between 1 and 65535. Using default (${DEFAULT_PORT}).`);
-        setScanPort(String(DEFAULT_PORT));
+      const deviceIp = await Network.getIpAddressAsync();
+      if (abort.signal.aborted) {
         setScanning(false);
         return;
       }
+
+      const subnet = deriveSubnet24(deviceIp);
+      if (!subnet || onCellular) {
+        // No usable LAN IP (0.0.0.0 / loopback / link-local) or an explicitly
+        // cellular transport → the phone has no LAN to sweep. Almost always
+        // "not connected to Wi-Fi".
+        finalizeScan({ noWifi: true });
+        return;
+      }
+      setScannedSubnet(subnet);
 
       await scanSubnet(subnet, port, abort.signal, {
         onProgress: (p) => setScanProgress(p),
@@ -316,14 +369,11 @@ export function ConnectScreen() {
       });
     } catch (err) {
       console.warn('[LAN scan] scan threw unexpectedly:', err);
-      setScanError(true);
+      finalizeScan({ error: true });
+      return;
     }
 
-    if (!abort.signal.aborted) {
-      setScanProgress(1);
-      setScanning(false);
-      setScanCompleted(true);
-    }
+    finalizeScan();
   }, [scanning, scanPort]);
 
   const handleSelectDiscovered = (server: DiscoveredServer) => {
@@ -334,6 +384,20 @@ export function ConnectScreen() {
     // require auth, and connecting with an empty token causes auth failures + rate limiting.
     setShowManual(true);
     scrollToInput();
+  };
+
+  // Reliable, discovery-independent fallback: reveal + scroll to the manual
+  // host+port form. Surfaced from the empty state so a blocked scan has an
+  // obvious next step (#6561).
+  const jumpToManualEntry = () => {
+    setShowManual(true);
+    scrollToInput();
+  };
+
+  const openTroubleshooting = () => {
+    Linking.openURL(LAN_TROUBLESHOOTING_URL).catch(() => {
+      Alert.alert('Could not open link', LAN_TROUBLESHOOTING_URL);
+    });
   };
 
   if (autoConnecting) {
@@ -518,17 +582,33 @@ export function ConnectScreen() {
         <View
           style={styles.discoveredSection}
           testID="lan-scan-empty-state"
-          accessibilityLabel={scanError ? 'LAN scan result: scan failed' : 'LAN scan result: no servers found'}
+          accessibilityLabel={
+            scanNoWifi
+              ? 'LAN scan result: no local network to scan'
+              : scanError
+                ? 'LAN scan result: scan failed'
+                : 'LAN scan result: no servers found'
+          }
         >
-          {scanError ? (
+          {scanNoWifi ? (
+            <>
+              <Text style={styles.scanEmptyTitle} testID="lan-scan-nowifi-title">
+                No local network to scan
+              </Text>
+              <Text style={styles.scanEmptyHint} testID="lan-scan-nowifi-hint">
+                Your phone isn't on a Wi-Fi network with a usable local address — it may be
+                on cellular, or on Wi-Fi that hasn't assigned an IPv4 address. Connect to the
+                same Wi-Fi as your computer and scan again — or enter the address manually below.
+              </Text>
+            </>
+          ) : scanError ? (
             <>
               <Text style={styles.scanEmptyTitle} testID="lan-scan-error-title">
                 Scan failed (port {scanPort})
               </Text>
               <Text style={styles.scanEmptyHint} testID="lan-scan-error-hint">
-                Could not scan the network. Make sure WiFi is on and your phone and computer are on the same network.{'\n'}
-                If Chroxy is running but not visible, open Chroxy on your computer, go to Settings, and enable{' '}
-                <Text style={styles.scanEmptyHighlight}>"Expose on local network"</Text>, then scan again.
+                Couldn't scan the network. Make sure Wi-Fi is on and your phone is on the
+                same network as your computer, then try again.
               </Text>
             </>
           ) : (
@@ -537,12 +617,45 @@ export function ConnectScreen() {
                 No servers found on port {scanPort}
               </Text>
               <Text style={styles.scanEmptyHint} testID="lan-scan-empty-hint">
-                Chroxy binds to loopback by default and won't appear in a LAN scan.{'\n'}
-                On your computer, open Chroxy {'→'} Settings and enable{' '}
-                <Text style={styles.scanEmptyHighlight}>"Expose on local network"</Text>, then scan again.
+                Scanned{' '}
+                <Text style={styles.scanEmptyHighlight}>
+                  {scannedSubnet ? `${scannedSubnet}.1-254` : 'your Wi-Fi'}
+                </Text>{' '}
+                and found no Chroxy daemon.{'\n\n'}
+                If Chroxy is running and reachable at your computer's LAN IP, your Wi-Fi
+                router may be blocking device-to-device connections (client/AP isolation) —
+                common on mesh and guest networks.{'\n\n'}
+                The reliable way in: <Text style={styles.scanEmptyHighlight}>Enter manually</Text>{' '}
+                with your computer's IP and port, or{' '}
+                <Text style={styles.scanEmptyHighlight}>Scan QR Code</Text>.
               </Text>
             </>
           )}
+
+          <View style={styles.scanEmptyActions}>
+            <TouchableOpacity
+              style={styles.scanEmptyLinkButton}
+              activeOpacity={0.7}
+              onPress={jumpToManualEntry}
+              accessibilityRole="button"
+              accessibilityLabel="Enter server address manually"
+              testID="lan-scan-manual-cta"
+            >
+              <Text style={styles.scanEmptyLink}>{ICON_TRIANGLE_RIGHT} Enter address manually</Text>
+            </TouchableOpacity>
+            {!scanNoWifi && (
+              <TouchableOpacity
+                style={styles.scanEmptyLinkButton}
+                activeOpacity={0.7}
+                onPress={openTroubleshooting}
+                accessibilityRole="link"
+                accessibilityLabel="Open LAN discovery troubleshooting guide"
+                testID="lan-scan-troubleshooting-link"
+              >
+                <Text style={styles.scanEmptyLink}>{ICON_TRIANGLE_RIGHT} Troubleshooting: LAN discovery</Text>
+              </TouchableOpacity>
+            )}
+          </View>
         </View>
       )}
 
@@ -852,6 +965,23 @@ const styles = StyleSheet.create({
   scanEmptyHighlight: {
     color: COLORS.textMuted,
     fontWeight: '600',
+  },
+  scanEmptyActions: {
+    marginTop: 8,
+    alignItems: 'center',
+  },
+  // Wrapper gives each link a >=44pt tap target (Apple HIG); the visible Text
+  // stays 13pt. Matches the `manualToggle` pattern used elsewhere on this screen.
+  scanEmptyLinkButton: {
+    minHeight: 44,
+    justifyContent: 'center',
+    paddingHorizontal: 8,
+  },
+  scanEmptyLink: {
+    color: COLORS.accentBlue,
+    fontSize: 13,
+    fontWeight: '600',
+    textAlign: 'center',
   },
   discoveredItem: {
     flexDirection: 'row',
