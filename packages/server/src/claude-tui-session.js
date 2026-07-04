@@ -1384,7 +1384,18 @@ export class ClaudeTuiSession extends BaseSession {
     }
 
     this._respawnCount++
-    if (this._respawnCount > 5) {
+    // #6576 — fire the retry-FRESH as soon as the dying tail CONFIRMS the resume id
+    // is unknown (the `_scanOutputForUnknownResume()` disjunct), not only at the
+    // 5-respawn cap. Retrying a `--resume` claude has ALREADY rejected is pointless,
+    // and the cap-gated ~30s of backoff exceeds a client's readiness timeout — a
+    // ghost resume otherwise broadcast `session_restore_failed` and wedged every
+    // real client into a reconnect loop (daemon restarts also reset `_respawnCount`,
+    // so the cap was never reached). The one-shot `_didFallbackFromUnknownResume`
+    // latch (the `|| this._didFallbackFromUnknownResume` disjunct) keeps a fresh
+    // attempt that ALSO dies routing to exhaustion instead of looping; the
+    // `_respawnCount > 5` disjunct still governs UNCONFIRMED crash loops (#5417) so a
+    // real conversation is never abandoned without claude's own rejection.
+    if (this._scanOutputForUnknownResume() || this._didFallbackFromUnknownResume || this._respawnCount > 5) {
       // #5348 — drop-and-retry-FRESH fallback. A FRESH session (spawned with
       // `--session-id`) that died before claude persisted its conversation
       // makes every `--resume` respawn doomed: claude can't find the

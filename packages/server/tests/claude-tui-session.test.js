@@ -1124,7 +1124,7 @@ describe('ClaudeTuiSession', () => {
     // CONFIRM the resume id is unknown (claude's own "No conversation found"
     // rejection), so the doomed resumes here die with that diagnostic in the
     // tail, exactly as the real claude TUI renders it before exiting.
-    it('an originally-fresh session gets ONE retry-FRESH attempt at the cap when the tail confirms resume_unknown (#5348/#5417)', async () => {
+    it('an originally-fresh session retries FRESH on the FIRST confirmed unknown-resume death, then exhausts if the fresh attempt also dies (#6576/#5348/#5417)', async () => {
       const spawns = []
       session = makeSession((self) => {
         spawns.push({ resumed: self._resumedFromPersisted, id: self._sessionId })
@@ -1138,18 +1138,19 @@ describe('ClaudeTuiSession', () => {
       session.on('respawn_exhausted', (d) => exhausted.push(d))
 
       session._onPtyGone({ exitCode: 1, signal: null }, 'exit')
-      // 5 doomed --resume attempts, then the fresh fallback (also 15s backoff).
-      for (const d of [1000, 2000, 4000, 8000, 15000, 15000]) {
+      // #6576: the FIRST respawn dies with claude's "No conversation found" tail →
+      // retry FRESH immediately (no 5-respawn cap wait). The fresh attempt here also
+      // dies (null tail) → one-shot latch → exhaust. Two spawns total, not six.
+      for (const d of [1000, 2000, 4000]) {
         mock.timers.tick(d)
         await new Promise((r) => setImmediate(r))
       }
-      mock.timers.tick(15000)
-      await new Promise((r) => setImmediate(r))
 
-      assert.equal(spawns.length, 6, '5 resume attempts + exactly one fresh fallback attempt')
-      assert.ok(spawns.slice(0, 5).every((s) => s.resumed && s.id === 'conv-uuid-1234'), 'first 5 attempts --resume the original conversation')
-      assert.equal(spawns[5].resumed, false, 'the fallback attempt spawns FRESH (--session-id, not --resume)')
-      assert.notEqual(spawns[5].id, 'conv-uuid-1234', 'the fallback attempt mints a brand-new conversation uuid')
+      assert.equal(spawns.length, 2, 'one doomed --resume attempt + exactly one fresh fallback attempt (no 5-respawn cap wait)')
+      assert.equal(spawns[0].resumed, true, 'first respawn --resumes the original conversation')
+      assert.equal(spawns[0].id, 'conv-uuid-1234')
+      assert.equal(spawns[1].resumed, false, 'the fallback attempt spawns FRESH (--session-id, not --resume)')
+      assert.notEqual(spawns[1].id, 'conv-uuid-1234', 'the fallback attempt mints a brand-new conversation uuid')
       const resumeUnknown = errors.filter((e) => e.code === 'resume_unknown')
       assert.equal(resumeUnknown.length, 1, 'one loud resume_unknown error so the dashboard can render "starting fresh"')
       assert.equal(resumeUnknown[0].attemptedResumeId, 'conv-uuid-1234', 'the error carries the abandoned conversation id')
@@ -1163,25 +1164,25 @@ describe('ClaudeTuiSession', () => {
       assert.equal(session._respawnScheduled, false, 'no further respawn after exhaustion')
     })
 
-    it('a retry-FRESH attempt that survives warmup re-emits ready with the new uuid and re-arms the latch (#5348)', async () => {
+    it('a retry-FRESH attempt that survives warmup re-emits ready with the new uuid and re-arms the latch (#6576/#5348)', async () => {
       let spawnCalls = 0
-      // First 5 spawns die during warmup (doomed resumes, each leaving claude's
-      // resume rejection in the tail, #5417); the 6th — the fresh fallback —
-      // survives.
+      // #6576: the FIRST respawn dies during warmup with claude's resume rejection
+      // in the tail (#5417) → retry FRESH immediately; the fresh fallback (spawn #2)
+      // survives. No 5-respawn cap wait.
       session = makeSession((self) => {
         spawnCalls++
-        if (spawnCalls <= 5) dieWithTail(self, `No conversation found with session ID: ${self._sessionId}`)
+        if (spawnCalls === 1) dieWithTail(self, `No conversation found with session ID: ${self._sessionId}`)
       })
       const readies = []
       session.on('ready', (d) => readies.push(d))
 
       session._onPtyGone({ exitCode: 1, signal: null }, 'exit')
-      for (const d of [1000, 2000, 4000, 8000, 15000, 15000]) {
+      for (const d of [1000, 2000, 4000]) {
         mock.timers.tick(d)
         await new Promise((r) => setImmediate(r))
       }
 
-      assert.equal(spawnCalls, 6)
+      assert.equal(spawnCalls, 2, 'one doomed --resume respawn + one fresh fallback that survives (no 5-respawn cap wait)')
       assert.equal(readies.length, 1, 'ready re-emitted once the fresh attempt survives warmup')
       assert.notEqual(readies[0].sessionId, 'conv-uuid-1234', 'ready carries the NEW conversation uuid (persistence picks it up via the resumeSessionId getter)')
       assert.equal(readies[0].sessionId, session._sessionId, 'emitted id matches the live session id')
@@ -1245,18 +1246,18 @@ describe('ClaudeTuiSession', () => {
       session.on('respawn_exhausted', (d) => exhausted.push(d))
 
       session._onPtyGone({ exitCode: 1, signal: null }, 'exit')
-      // 5 doomed --resume attempts, then the fresh fallback (also 15s backoff).
-      for (const d of [1000, 2000, 4000, 8000, 15000, 15000]) {
+      // #6576: the FIRST respawn dies with claude's "No conversation found" tail →
+      // retry FRESH immediately; the fresh attempt also dies (null tail) → exhaust.
+      for (const d of [1000, 2000, 4000]) {
         mock.timers.tick(d)
         await new Promise((r) => setImmediate(r))
       }
-      mock.timers.tick(15000)
-      await new Promise((r) => setImmediate(r))
 
-      assert.equal(spawns.length, 6, '5 resume attempts + exactly one fresh fallback attempt')
-      assert.ok(spawns.slice(0, 5).every((s) => s.resumed && s.id === 'restored-uuid-9999'), 'first 5 attempts --resume the restored conversation')
-      assert.equal(spawns[5].resumed, false, 'the fallback attempt spawns FRESH (--session-id, not --resume)')
-      assert.notEqual(spawns[5].id, 'restored-uuid-9999', 'the fallback attempt mints a brand-new conversation uuid')
+      assert.equal(spawns.length, 2, 'one doomed --resume attempt + exactly one fresh fallback attempt (no 5-respawn cap wait)')
+      assert.equal(spawns[0].resumed, true, 'first respawn --resumes the restored conversation')
+      assert.equal(spawns[0].id, 'restored-uuid-9999')
+      assert.equal(spawns[1].resumed, false, 'the fallback attempt spawns FRESH (--session-id, not --resume)')
+      assert.notEqual(spawns[1].id, 'restored-uuid-9999', 'the fallback attempt mints a brand-new conversation uuid')
       const resumeUnknown = errors.filter((e) => e.code === 'resume_unknown')
       assert.equal(resumeUnknown.length, 1, 'one loud resume_unknown error so the dashboard can render "starting fresh"')
       assert.equal(resumeUnknown[0].attemptedResumeId, 'restored-uuid-9999', 'the error carries the abandoned conversation id')
