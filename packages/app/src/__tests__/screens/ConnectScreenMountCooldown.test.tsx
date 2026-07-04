@@ -41,9 +41,27 @@ const SAVED = { url: 'wss://tunnel.example.com', token: 'tok' };
 let connectAuto: jest.Mock;
 let loadSavedConnection: jest.Mock;
 
+// These Zustand stores are singletons shared across every test file in the same
+// Jest worker. We override two store actions + two lifecycle fields below, so we
+// capture their originals and RESTORE them in afterEach — otherwise the mocks
+// leak into later suites and cause order-dependent flakiness (#6588 review).
+type ConnStore = ReturnType<typeof useConnectionStore.getState>;
+type LifecycleStore = ReturnType<typeof useConnectionLifecycleStore.getState>;
+let origConnectAuto: ConnStore['connectAuto'];
+let origLoadSavedConnection: ConnStore['loadSavedConnection'];
+let origSavedConnection: LifecycleStore['savedConnection'];
+let origUserDisconnected: LifecycleStore['userDisconnected'];
+
 beforeEach(() => {
   jest.useFakeTimers();
   __resetMountAutoConnectForTests();
+  const cs = useConnectionStore.getState();
+  origConnectAuto = cs.connectAuto;
+  origLoadSavedConnection = cs.loadSavedConnection;
+  const ls = useConnectionLifecycleStore.getState();
+  origSavedConnection = ls.savedConnection;
+  origUserDisconnected = ls.userDisconnected;
+
   connectAuto = jest.fn().mockResolvedValue(undefined);
   loadSavedConnection = jest.fn().mockResolvedValue(undefined);
   // Override the two store actions the mount effect calls; seed a saved record.
@@ -52,9 +70,15 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  act(() => {
-    useConnectionLifecycleStore.setState({ savedConnection: null } as never);
-  });
+  // Restore the singleton store actions + lifecycle fields we overrode.
+  useConnectionStore.setState({
+    connectAuto: origConnectAuto,
+    loadSavedConnection: origLoadSavedConnection,
+  } as never);
+  useConnectionLifecycleStore.setState({
+    savedConnection: origSavedConnection,
+    userDisconnected: origUserDisconnected,
+  } as never);
   jest.useRealTimers();
   jest.clearAllMocks();
 });
