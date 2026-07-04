@@ -1274,6 +1274,56 @@ describe('ClaudeTuiSession', () => {
     // plus adjacent-line pairs (the TUI line-wraps and box-pads its output,
     // so a pattern can straddle ONE rendered line break — but the `.*` in the
     // #4950 co-occurrence patterns must never span unrelated lines).
+    // #6576 (Option A) — the ACTUAL restore-on-restart fix. start() must NOT reject
+    // when the dying warmup armed a retry-FRESH, because SessionManager tears down
+    // the provider on a restore start() rejection (`_handleAsyncStartFailure`),
+    // which cancels the scheduled respawn — the wedge #6576 is about. This exercises
+    // the FULL start() path (not `_onPtyGone` directly), covering the teardown race
+    // the `_scheduleRespawn`-only tests could not see.
+    it('start() does NOT reject a restore whose --resume ghost dies during warmup — recovers via the scheduled retry-FRESH and emits ready (#6576)', async () => {
+      let spawnCalls = 0
+      const prevHome = process.env.HOME
+      const fakeHome = mkdtempSync(join(tmpdir(), 'chroxy-tui-6576a-'))
+      writeFileSync(join(fakeHome, '.claude.json'), JSON.stringify({ projects: {} }))
+      process.env.HOME = fakeHome
+      try {
+        session = new ClaudeTuiSession({ cwd: '/tmp', port: 12345, skillsDir: emptySkillsDir, repoSkillsDir: null, resumeSessionId: 'ghost-uuid-0001' })
+        session._spawnPty = async function () {
+          spawnCalls++
+          this._term = { write: () => {}, kill: () => {}, onData: () => {}, onExit: () => {}, on: () => {} }
+          if (spawnCalls === 1) {
+            // The doomed --resume dies during warmup with claude's own rejection in
+            // the tail — this arms the retry-FRESH (and pre-fix made start() throw →
+            // SessionManager teardown → the restore-on-restart wedge).
+            this._outputTail = ''
+            this._outputTailRaw = Buffer.alloc(0)
+            this._appendToOutputTail(`No conversation found with session ID: ${this._sessionId}`)
+            this._onPtyGone({ exitCode: 1, signal: null }, 'exit')
+          }
+          // spawnCalls === 2 (the scheduled fresh retry) leaves a live _term → survives.
+        }
+        const readies = []
+        session.on('error', () => {})
+        session.on('resume_unknown', () => {})
+        session.on('ready', (d) => readies.push(d))
+
+        // The fix: start() RESOLVES (pre-fix it threw → session_restore_failed + teardown).
+        await session.start()
+        assert.equal(session._freshRetryPending, true, 'the first death armed a retry-FRESH that start() deferred to instead of rejecting')
+        assert.equal(readies.length, 0, 'ready not emitted yet — the fresh conversation is still scheduled to spawn')
+
+        for (const d of [1000, 2000]) { mock.timers.tick(d); await new Promise((r) => setImmediate(r)) }
+
+        assert.equal(spawnCalls, 2, 'one doomed --resume + one fresh retry spawn')
+        assert.equal(readies.length, 1, 'the fresh retry survived warmup and emitted ready — session recovered IN PLACE (no restore_failed / no teardown)')
+        assert.notEqual(readies[0].sessionId, 'ghost-uuid-0001', 'ready carries the new fresh conversation uuid')
+        assert.equal(session._processReady, true, 'session ready after inline recovery')
+      } finally {
+        if (prevHome === undefined) delete process.env.HOME; else process.env.HOME = prevHome
+        try { rmSync(fakeHome, { recursive: true, force: true }) } catch { /* best effort */ }
+      }
+    })
+
     describe('_scanOutputForUnknownResume (#5417)', () => {
       it('matches claude\'s resume rejection through ANSI codes and line wrapping', () => {
         session = makeSession()

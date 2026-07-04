@@ -1254,6 +1254,20 @@ export class ClaudeTuiSession extends BaseSession {
       throw err
     }
     if (this._ptyExited) {
+      // #6576 (Option A) — the dying warmup already went through _onPtyGone →
+      // _scheduleRespawn. If claude's own tail CONFIRMED the resume id is unknown,
+      // that path armed a retry-FRESH (`_freshRetryPending`) + scheduled a respawn
+      // on a brand-new conversation. Do NOT reject start() in that case: a restore
+      // start() rejection makes SessionManager (`_handleAsyncStartFailure`) tear
+      // down the provider, which cancels the scheduled respawn — the exact
+      // restore-on-restart wedge #6576 is about (the background retry never runs).
+      // Return quietly instead; the scheduled respawn spawns the fresh conversation
+      // and emits `ready` when it warms up, so the session recovers in place with no
+      // `session_restore_failed` and no teardown. A genuinely unrecoverable death
+      // (no retry armed) still rejects below.
+      if (this._freshRetryPending) {
+        return
+      }
       const message = `claude PTY exited during warmup (code=${this._ptyExitInfo?.exitCode ?? 'unknown'})`
       this.emit('error', { message })
       throw new Error(message)
