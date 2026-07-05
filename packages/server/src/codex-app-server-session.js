@@ -99,7 +99,11 @@ export class CodexAppServerSession extends BaseSession {
       ...(this.model ? { model: this.model } : {}),
     })
     this._threadId = started?.thread?.id || null
-    this.resumeSessionId = this._threadId
+    // #6608 — do NOT set this.resumeSessionId in Phase 1: capabilities.resume is
+    // false, and SessionManager persists resumeSessionId as the conversationId to
+    // resume on restart. Leaving it null keeps the two consistent. The live thread
+    // id is tracked on this._threadId (used for turn/start + interrupt). Wiring
+    // real app-server resume (thread/resume) is a follow-up.
     this._log = loggerForSession('codex-app-server', this._threadId || 'no-thread')
     this._processReady = true
     ;(this._log || log).info(`codex app-server ready (thread=${this._threadId} sandbox=${sandbox})`)
@@ -127,6 +131,10 @@ export class CodexAppServerSession extends BaseSession {
         threadId: this._threadId,
         approvalPolicy: 'never',
         input: [{ type: 'text', text: prompt || '' }],
+        // #6608 — pass the CURRENT model per turn (turn/start accepts it) so a
+        // mid-session set_model actually takes effect, matching the exec path's
+        // per-turn model. thread/start seeds the initial model; this tracks changes.
+        ...(this.model ? { model: this.model } : {}),
       })
       if (this._activeTurn && !this._activeTurn.turnId) this._activeTurn.turnId = res?.turn?.id || null
     } catch (err) {
@@ -245,6 +253,11 @@ export class CodexAppServerSession extends BaseSession {
       'turn_ended_with_orphan_tool_start',
     )
     this._activeTurn = null
+    // #6606 review — disarm the intentional-stop flag on a NORMAL completion too
+    // (mirrors sdk-session.js). interrupt() arms it; if the turn then completes
+    // cleanly, only _failTurn would otherwise consume it, so a leftover flag
+    // would mis-report a LATER genuine error as a clean `stopped` (#4881 race).
+    this._clearIntentionalStop()
     this._clearMessageState()
     this._maybeDequeue()
   }

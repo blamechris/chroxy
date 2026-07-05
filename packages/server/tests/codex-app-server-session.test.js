@@ -180,3 +180,68 @@ describe('CodexAppServerSession — lifecycle guards', () => {
     assert.ok(Array.isArray(CodexAppServerSession.getAllowedModels()))
   })
 })
+
+describe('CodexAppServerSession — crash / stop paths (#6607)', () => {
+  it('a NORMAL completion disarms intentional-stop so a LATER failure reports as error (#6606 C1)', () => {
+    const { s, cleanup } = mkSession()
+    // interrupt() armed the intentional-stop flag, but the turn then finished cleanly.
+    s._isBusy = true
+    s._activeTurn = { messageId: 'm1', turnId: 't1', didStreamStart: false }
+    s.markIntentionalStop()
+    s._onNotification({ method: 'turn/completed', params: { turn: {} } })
+    // A subsequent GENUINE failure must surface as `error`, not a stale `stopped`.
+    const ev = capture(s, ['error', 'stopped'])
+    s._isBusy = true
+    s._activeTurn = { messageId: 'm2', turnId: 't2', didStreamStart: false }
+    s._failTurn('genuine failure')
+    assert.deepEqual(ev.map(([e]) => e), ['error'], 'later failure is error, not a stale stopped')
+    cleanup()
+  })
+
+  it('client exit during a turn fails the turn and clears busy', () => {
+    const { s, cleanup } = mkSession()
+    const ev = capture(s, ['error'])
+    s._isBusy = true
+    s._activeTurn = { messageId: 'm1', turnId: 't1', didStreamStart: false }
+    s._onClientExit({ code: 1, signal: null })
+    assert.equal(ev[0][0], 'error')
+    assert.match(ev[0][1].message, /exited/)
+    assert.equal(s._isBusy, false, 'busy cleared after client exit mid-turn')
+    assert.equal(s._processReady, false, 'session marked not-ready')
+    cleanup()
+  })
+
+  it('an error notification during a turn fails the turn', () => {
+    const { s, cleanup } = mkSession()
+    const ev = capture(s, ['error'])
+    s._isBusy = true
+    s._activeTurn = { messageId: 'm1', turnId: 't1', didStreamStart: false }
+    s._onNotification({ method: 'error', params: { message: 'boom' } })
+    assert.equal(ev[0][0], 'error')
+    assert.equal(s._isBusy, false, 'busy cleared on error')
+    cleanup()
+  })
+
+  it('an intentional interrupt that then fails reports stopped (not error)', () => {
+    const { s, cleanup } = mkSession()
+    const ev = capture(s, ['error', 'stopped'])
+    s._isBusy = true
+    s._activeTurn = { messageId: 'm1', turnId: 't1', didStreamStart: false }
+    s.markIntentionalStop()
+    s._failTurn('interrupted')
+    assert.deepEqual(ev.map(([e]) => e), ['stopped'], 'intentional stop surfaces as stopped')
+    cleanup()
+  })
+
+  it('orphan tool_start is swept with a synthetic tool_result at turn end', () => {
+    const { s, cleanup } = mkSession()
+    const ev = capture(s, ['tool_result'])
+    s._isBusy = true
+    s._activeTurn = { messageId: 'm1', turnId: 't1', didStreamStart: false }
+    // a tool starts but never completes before the turn ends
+    s._onNotification({ method: 'item/started', params: { item: { type: 'commandExecution', id: 'orphan', command: 'sleep 999', cwd: '/tmp' } } })
+    s._onNotification({ method: 'turn/completed', params: { turn: {} } })
+    assert.ok(ev.some(([, p]) => p.toolUseId === 'orphan'), 'orphan tool_start got a synthetic tool_result')
+    cleanup()
+  })
+})
