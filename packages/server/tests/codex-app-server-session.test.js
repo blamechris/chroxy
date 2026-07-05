@@ -365,6 +365,26 @@ describe('CodexAppServerSession — approval surfacing (#6605 Phase 2)', () => {
     cleanup()
   })
 
+  it('interrupt() aborts a pending approval → Stop unblocks the turn (decline)', async () => {
+    const { s, cleanup, responded } = mkApprovalSession()
+    capture(s, ['permission_request'])
+    s._onServerRequest({ id: 20, method: 'item/commandExecution/requestApproval', params: { command: 'x' } })
+    await s.interrupt()
+    await tick()
+    assert.deepEqual(responded, [[20, { decision: 'decline' }]], 'Stop declined the pending approval')
+    cleanup()
+  })
+
+  it('switching to auto drains a pending approval (autoAllowPending → accept)', async () => {
+    const { s, cleanup, responded } = mkApprovalSession('approve')
+    capture(s, ['permission_request'])
+    s._onServerRequest({ id: 21, method: 'item/commandExecution/requestApproval', params: { command: 'x' } })
+    s.setPermissionMode('auto') // panic button — must drain the pending prompt
+    await tick()
+    assert.deepEqual(responded, [[21, { decision: 'accept' }]], 'auto drained the pending prompt as accept')
+    cleanup()
+  })
+
   it('destroy() clears a pending approval without hanging (no leak)', async () => {
     const { s, cleanup } = mkApprovalSession()
     capture(s, ['permission_request'])

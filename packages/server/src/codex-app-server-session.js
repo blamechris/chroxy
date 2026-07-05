@@ -468,10 +468,22 @@ export class CodexAppServerSession extends BaseSession {
   async interrupt() {
     this.clearOutgoingQueue()
     this.markIntentionalStop()
+    // Stop must not wait on a prompt: abort this turn's approval scope so a
+    // pending permission_request resolves (deny → decline) immediately, instead
+    // of leaving the turn wedged until the 5-min timeout (#6611 review).
+    this._endTurnAbort()
     if (this._client && this._activeTurn?.turnId) {
       try { await this._client.request('turn/interrupt', { threadId: this._threadId, turnId: this._activeTurn.turnId }) }
       catch (err) { (this._log || log).debug(`turn/interrupt failed: ${err.message}`) }
     }
+  }
+
+  // Panic-button parity with SdkSession (#3729): switching TO auto drains any
+  // already-emitted approval prompts (they resolve as allow → we answer codex
+  // accept), so the user isn't left staring at a prompt after choosing "approve
+  // everything". approvalPolicy for the NEXT turn is derived from the new mode.
+  _onPermissionModeChanged(mode) {
+    if (mode === 'auto') this._permissions.autoAllowPending()
   }
 
   async destroy() {
