@@ -363,8 +363,14 @@ export class CodexAppServerSession extends BaseSession {
       // response is a permission-grant object, not a simple decision — safe-deny
       // (grant nothing) so the turn proceeds without escalating. Full surfacing
       // is tracked in #6610.
+      //
+      // Send ONLY an empty `permissions` object and OMIT `scope`: per the
+      // app-server schema PermissionGrantScope accepts only 'turn'/'session', so
+      // an explicit 'none' is an invalid enum value that errors on deserialize
+      // (the field's serde default only applies when it's ABSENT) — which would
+      // wedge the turn, the opposite of a safe-deny (#6612).
       ;(this._log || log).info('codex app-server: declining permissions-escalation request (grant nothing) — #6610')
-      this._client?.respond(id, { permissions: {}, scope: 'none' })
+      this._client?.respond(id, { permissions: {} })
       return
     }
     ;(this._log || log).warn(`codex app-server: unsupported serverRequest ${method} — declining`)
@@ -406,7 +412,9 @@ export class CodexAppServerSession extends BaseSession {
     // item/commandExecution/requestApproval
     return {
       tool: 'shell',
-      input: { command: params?.command, cwd: params?.cwd, description: params?.reason },
+      // Always give the prompt a non-empty description so a null/blank command
+      // can't render an empty approval prompt (#6611 review nitpick).
+      input: { command: params?.command, cwd: params?.cwd, description: params?.reason || params?.command || 'Run a shell command' },
     }
   }
 

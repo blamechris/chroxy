@@ -354,12 +354,24 @@ describe('CodexAppServerSession — approval surfacing (#6605 Phase 2)', () => {
     cleanup()
   })
 
-  it('permissions-escalation request is safe-denied (grant nothing) without a prompt', () => {
+  it('permissions-escalation request is safe-denied (grant nothing, no scope) without a prompt', () => {
     const { s, cleanup, responded } = mkApprovalSession()
     const reqs = capture(s, ['permission_request'])
     s._onServerRequest({ id: 11, method: 'item/permissions/requestApproval', params: { scope: 'disk-full-access' } })
     assert.equal(reqs.length, 0, 'escalation is not surfaced as a normal prompt in Phase 2')
-    assert.deepEqual(responded, [[11, { permissions: {}, scope: 'none' }]])
+    // grant nothing: empty permissions, scope OMITTED (an explicit 'none' is an
+    // invalid PermissionGrantScope enum value and would wedge the turn — #6612).
+    assert.deepEqual(responded, [[11, { permissions: {} }]])
+    cleanup()
+  })
+
+  it('destroy() clears a pending approval without hanging (no leak)', async () => {
+    const { s, cleanup } = mkApprovalSession()
+    capture(s, ['permission_request'])
+    s._onServerRequest({ id: 14, method: 'item/commandExecution/requestApproval', params: { command: 'x' } })
+    assert.equal(s._permissions._pendingPermissions.size, 1, 'one pending approval before destroy')
+    await s.destroy()
+    assert.equal(s._permissions._pendingPermissions.size, 0, 'destroy cleared the pending approval (no hang/leak)')
     cleanup()
   })
 
