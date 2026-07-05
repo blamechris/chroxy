@@ -7,6 +7,7 @@ import { registerProvider, getProvider, listProviders, registerDockerProvider, _
 import { CliSession } from '../src/cli-session.js'
 import { SdkSession } from '../src/sdk-session.js'
 import { CodexSession } from '../src/codex-session.js'
+import { CodexAppServerSession } from '../src/codex-app-server-session.js'
 import { GeminiSession } from '../src/gemini-session.js'
 
 describe('Provider Registry', () => {
@@ -1544,5 +1545,37 @@ describe('validateProviderClass — inProcessPermissions guard (#5379)', () => {
       assert.deepEqual([...DOCKER_PROVIDER_IDS].sort(), ['docker', 'docker-byok', 'docker-cli', 'docker-sdk'],
         'a docker provider changed — keep DOCKER_PROVIDER_IDS in sync with store-core CLAUDE_BACKED_DOCKER_IDS; a NON-Claude docker-* must NOT be added to the store-core allowlist (it would get a fabricated 200k context-window meter)')
     })
+  })
+})
+
+describe('codex provider default — app-server (#6616)', () => {
+  const KEY = 'CHROXY_CODEX_APPSERVER'
+  const orig = process.env[KEY]
+  const restore = () => { if (orig === undefined) delete process.env[KEY]; else process.env[KEY] = orig }
+
+  it('defaults to the app-server driver when the env is unset', () => {
+    delete process.env[KEY]
+    assert.equal(getProvider('codex'), CodexAppServerSession)
+    restore()
+  })
+
+  it('any non-opt-out value keeps the app-server driver (e.g. "1")', () => {
+    process.env[KEY] = '1'
+    assert.equal(getProvider('codex'), CodexAppServerSession)
+    restore()
+  })
+
+  it('opts out to the exec CodexSession for 0/false/no/off (case-insensitive)', () => {
+    for (const v of ['0', 'false', 'no', 'off', 'OFF', ' false ']) {
+      process.env[KEY] = v
+      assert.equal(getProvider('codex'), CodexSession, `opt-out value: "${v}"`)
+    }
+    restore()
+  })
+
+  it('the opt-out never affects non-codex providers', () => {
+    process.env[KEY] = '0'
+    assert.equal(getProvider('claude-cli'), CliSession)
+    restore()
   })
 })
