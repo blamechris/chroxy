@@ -320,7 +320,10 @@ describe('settings-handlers', () => {
         assert.match(err.message, /gemini/i)
       })
 
-      it('rejects set_permission_mode on a Codex session with CAPABILITY_NOT_SUPPORTED', () => {
+      it('accepts set_permission_mode on a Codex session (app-server is the default, #6616)', () => {
+        // Since #6616 the codex provider drives the app-server path by default,
+        // which advertises permissionModeSwitch:true — so the capability gate now
+        // ALLOWS set_permission_mode for codex (it used to reject under exec).
         const sessions = new Map()
         const session = createMockSession()
         sessions.set('s1', { session, name: 'Cx', cwd: '/tmp', provider: 'codex' })
@@ -330,12 +333,8 @@ describe('settings-handlers', () => {
 
         settingsHandlers.set_permission_mode(ws, client, { mode: 'approve', requestId: 'r2' }, ctx)
 
-        assert.equal(session.setPermissionMode.callCount, 0)
-        assert.equal(ws._messages.length, 1)
-        const err = ws._messages[0]
-        assert.equal(err.type, 'error')
-        assert.equal(err.code, 'CAPABILITY_NOT_SUPPORTED')
-        assert.match(err.message, /codex/i)
+        assert.equal(session.setPermissionMode.callCount, 1)
+        assert.equal(ws._messages.length, 0, 'no CAPABILITY_NOT_SUPPORTED error for codex now')
       })
 
       it('accepts set_permission_mode on a claude-sdk session', () => {

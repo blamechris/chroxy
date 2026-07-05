@@ -35,6 +35,10 @@ import {
   resetCachesForTest,
 } from './auth-probes.js'
 
+// #6616 — values of CHROXY_CODEX_APPSERVER that opt the codex provider OUT of the
+// (now-default) app-server path and back to the legacy `codex exec` path.
+const CODEX_EXEC_OPT_OUT = new Set(['0', 'false', 'no', 'off'])
+
 const PROVIDERS = {
   'claude-cli': CliSession,
   'claude-sdk': SdkSession,
@@ -53,11 +57,11 @@ const PROVIDERS = {
   'ollama': OllamaSession,
   'gemini': GeminiSession,
   'codex': CodexSession,
-  // #6605 — codex via the app-server JSON-RPC protocol (persistent) instead of
-  // one-shot `codex exec`. Hidden (not a user-selectable provider): it's the
-  // opt-in swap target for the 'codex' key, selected in getProvider() when
-  // CHROXY_CODEX_APPSERVER=1. Registered here so validateProviderClass runs its
-  // contract check at module load.
+  // #6605/#6616 — codex via the app-server JSON-RPC protocol (persistent) instead
+  // of one-shot `codex exec`. Hidden (not a user-selectable provider): it's the
+  // swap target for the 'codex' key and is now the DEFAULT, selected in
+  // getProvider() unless CHROXY_CODEX_APPSERVER opts out (=0). Registered here so
+  // validateProviderClass runs its contract check at module load.
   'codex-appserver': CodexAppServerSession,
   // #5983 (epic #5982) — general-purpose user shell ($SHELL via node-pty).
   // Gated OFF by default (userShell.enabled, #5985a) and primary-token-only
@@ -170,13 +174,16 @@ export function getRegisteredProviderNames() {
  * @throws {Error} If provider is not registered
  */
 export function getProvider(name) {
-  // #6605 — opt-in: drive codex through the app-server JSON-RPC protocol
-  // (persistent, approval-capable) instead of one-shot `codex exec`. Env-gated
-  // at resolve time (not in the PROVIDERS literal, which is validated at load)
-  // so it's a safe no-op until explicitly enabled. getProvider is the single
-  // chokepoint SessionManager uses to both construct and preflight, so this one
-  // branch covers every path.
-  if (name === 'codex' && process.env.CHROXY_CODEX_APPSERVER === '1') {
+  // #6616 — codex is driven through the app-server JSON-RPC protocol (persistent,
+  // approval-capable) BY DEFAULT. It's a strict superset of one-shot `codex exec`:
+  // approvals surfaced in Chroxy (#6611), permission-mode mapping (#6613),
+  // intra-session conversation memory, and attachments incl. image vision (#6609)
+  // — where exec rejects attachments and has no approval surface. Opt OUT to the
+  // legacy exec path with CHROXY_CODEX_APPSERVER=0 (or false/no/off). Resolved
+  // here (not in the load-validated PROVIDERS literal) because getProvider is the
+  // single chokepoint SessionManager uses to both construct and preflight, so
+  // this one branch covers every path.
+  if (name === 'codex' && !CODEX_EXEC_OPT_OUT.has((process.env.CHROXY_CODEX_APPSERVER || '').trim().toLowerCase())) {
     return CodexAppServerSession
   }
   const ProviderClass = PROVIDERS[name]

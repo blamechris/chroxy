@@ -35,8 +35,9 @@ const log = createLogger('codex-app-server')
  * therefore advertises `permissions` / `inProcessPermissions` /
  * `permissionModeSwitch`.
  *
- * Selected only when `CHROXY_CODEX_APPSERVER=1` (see providers.js `getProvider`);
- * otherwise the exec-based CodexSession is used, so this is a no-op by default.
+ * This is the DEFAULT driver for the `codex` provider (#6616, see providers.js
+ * `getProvider`); set `CHROXY_CODEX_APPSERVER=0` to fall back to the legacy
+ * exec-based CodexSession.
  *
  * Architecturally this mirrors SdkSession (persistent backend + streaming),
  * NOT the JsonlSubprocessSession middle layer (subprocess-per-turn). Codex
