@@ -71,6 +71,7 @@ export class CodexAppServerSession extends BaseSession {
     this._threadId = null
     this._activeTurn = null // { messageId, turnId, didStreamStart }
     this._lastUsage = null
+    this._skillsPrepended = false // #6606 — inject the skills prefix once, on turn 1
   }
 
   _buildChildEnv() { return buildSpawnEnv('codex') }
@@ -125,17 +126,33 @@ export class CodexAppServerSession extends BaseSession {
     this._currentMessageId = messageId
     this._activeTurn = { messageId, turnId: null, didStreamStart: false }
     this._armResultTimeout()
+
+    // #6606 review — mirror the exec path: prepend the combined skills prefix on
+    // the FIRST turn so runtime skills reach codex. The flag flips only AFTER
+    // turn/start succeeds, so a failed first turn still retries with the skills.
+    let text = prompt || ''
+    if (!this._skillsPrepended) {
+      const combined = typeof this._buildCombinedSkillsPrefix === 'function' ? this._buildCombinedSkillsPrefix() : ''
+      if (combined) text = `${combined}\n\n---\n\n${text}`
+    }
+    // #6609 — attachments aren't materialized on the app-server path yet (the
+    // exec path does via JsonlSubprocessSession). Warn rather than silently drop.
+    if (attachments?.length) {
+      ;(this._log || log).warn(`codex app-server: ${attachments.length} attachment(s) ignored — not yet supported (#6609)`)
+    }
+
     ;(this._log || log).info(`codex app-server turn start (msg=${messageId} thread=${this._threadId})`)
     try {
       const res = await this._client.request('turn/start', {
         threadId: this._threadId,
         approvalPolicy: 'never',
-        input: [{ type: 'text', text: prompt || '' }],
+        input: [{ type: 'text', text }],
         // #6608 — pass the CURRENT model per turn (turn/start accepts it) so a
         // mid-session set_model actually takes effect, matching the exec path's
         // per-turn model. thread/start seeds the initial model; this tracks changes.
         ...(this.model ? { model: this.model } : {}),
       })
+      this._skillsPrepended = true
       if (this._activeTurn && !this._activeTurn.turnId) this._activeTurn.turnId = res?.turn?.id || null
     } catch (err) {
       // turn/start itself failed (dead server, bad thread) — fail this turn.

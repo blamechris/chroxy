@@ -65,6 +65,14 @@ describe('CodexAppServerClient (JSON-RPC transport)', () => {
     assert.deepEqual(notes, ['a', 'b'])
   })
 
+  it('parses CRLF-framed lines (a trailing \\r does not break JSON.parse) (#6606)', () => {
+    const c = new CodexAppServerClient({})
+    const notes = []
+    c.on('notification', (n) => notes.push(n.method))
+    c._onData('{"jsonrpc":"2.0","method":"crlf"}\r\n')
+    assert.deepEqual(notes, ['crlf'])
+  })
+
   it('rejects all in-flight requests on kill()', async () => {
     const c = new CodexAppServerClient({})
     c._child = { stdin: { write: () => {} } }
@@ -162,6 +170,24 @@ describe('CodexAppServerSession — lifecycle guards', () => {
     s._onServerRequest({ id: 3, method: 'item/commandExecution/requestApproval', params: {} })
     assert.equal(responded.id, 3)
     assert.match(responded.msg, /Phase 1/)
+    cleanup()
+  })
+
+  it('prepends the skills prefix on the FIRST turn only, and the current model (#6606)', async () => {
+    const { s, cleanup } = mkSession()
+    s._processReady = true
+    s._threadId = 't'
+    s.model = 'gpt-5-codex'
+    const captured = []
+    s._client = { request: async (_m, p) => { captured.push(p); return { turn: { id: 'tt' } } } }
+    s._buildCombinedSkillsPrefix = () => 'SKILLZ'
+    await s.sendMessage('hello')
+    s._isBusy = false // simulate turn completion so the next send isn't queued
+    s._activeTurn = null
+    await s.sendMessage('again')
+    assert.match(captured[0].input[0].text, /SKILLZ[\s\S]*hello/, 'first turn carries the skills prefix')
+    assert.equal(captured[0].model, 'gpt-5-codex', 'turn/start carries the current model')
+    assert.equal(captured[1].input[0].text, 'again', 'second turn has no skills prefix')
     cleanup()
   })
 

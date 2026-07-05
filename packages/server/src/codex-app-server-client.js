@@ -44,6 +44,12 @@ export class CodexAppServerClient extends EventEmitter {
     this._child.stderr.on('data', (d) => this._onStderr(d))
     this._child.on('exit', (code, signal) => this._onExit(code, signal))
     this._child.on('error', (err) => this._onError(err))
+    // #6606 review — a write to a dead child (EPIPE) or an stdout/stderr stream
+    // error would otherwise surface as an UNHANDLED 'error' and crash the daemon.
+    // Route them through the same teardown as a process error (idempotent).
+    for (const s of [this._child.stdin, this._child.stdout, this._child.stderr]) {
+      s?.on('error', (err) => this._onError(err))
+    }
     const res = await this.request('initialize', { clientInfo })
     this.notify('initialized')
     return res
@@ -85,9 +91,11 @@ export class CodexAppServerClient extends EventEmitter {
     this._buf += String(d)
     let nl
     while ((nl = this._buf.indexOf('\n')) >= 0) {
-      const line = this._buf.slice(0, nl)
+      // trim() strips a trailing '\r' too, so CRLF-framed lines parse cleanly
+      // instead of throwing on the stray carriage return (#6606 review).
+      const line = this._buf.slice(0, nl).trim()
       this._buf = this._buf.slice(nl + 1)
-      if (!line.trim()) continue
+      if (!line) continue
       let m
       try { m = JSON.parse(line) } catch { continue } // ignore non-JSON lines (banners)
       this._dispatch(m)
