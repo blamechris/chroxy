@@ -1,9 +1,16 @@
+import { mkdtempSync, rmSync } from 'fs'
+import { tmpdir } from 'os'
+import { join, basename, extname } from 'path'
 import { BaseSession, buildBaseSessionOpts } from './base-session.js'
 import { CodexSession, resolveCodexSandbox } from './codex-session.js'
 import { CodexAppServerClient } from './codex-app-server-client.js'
 import { PermissionManager, wirePermissionManager } from './permission-manager.js'
+import { materializeAttachments, buildAttachmentsPromptSuffix } from './claude-tui-attachments.js'
 import { buildSpawnEnv } from './utils/spawn-env.js'
 import { createLogger, loggerForSession } from './logger.js'
+
+// Image extensions codex can attach for VISION via a `localImage` input item.
+const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg'])
 
 const log = createLogger('codex-app-server')
 
@@ -80,6 +87,7 @@ export class CodexAppServerSession extends BaseSession {
     this._lastUsage = null
     this._skillsPrepended = false // #6606 — inject the skills prefix once, on turn 1
     this._turnAbort = null // per-turn AbortController — cancels pending approvals
+    this._attachDir = null // #6609 — lazily-created temp dir for materialized attachments
 
     // #6605 Phase 2 — surface codex approvals through the same PermissionManager
     // bridge SdkSession uses. wirePermissionManager re-emits permission_request /
@@ -156,18 +164,18 @@ export class CodexAppServerSession extends BaseSession {
       const combined = typeof this._buildCombinedSkillsPrefix === 'function' ? this._buildCombinedSkillsPrefix() : ''
       if (combined) text = `${combined}\n\n---\n\n${text}`
     }
-    // #6609 — attachments aren't materialized on the app-server path yet (the
-    // exec path does via JsonlSubprocessSession). Warn rather than silently drop.
-    if (attachments?.length) {
-      ;(this._log || log).warn(`codex app-server: ${attachments.length} attachment(s) ignored — not yet supported (#6609)`)
-    }
+    // #6609 — materialize attachments into codex UserInput items. Images become
+    // `localImage` items (codex vision); documents / non-image file_refs are named
+    // in a text suffix codex can read. Failure is non-fatal — send the prompt
+    // without attachments rather than lose the turn.
+    const input = this._buildTurnInput(text, attachments, messageId)
 
-    ;(this._log || log).info(`codex app-server turn start (msg=${messageId} thread=${this._threadId})`)
+    ;(this._log || log).info(`codex app-server turn start (msg=${messageId} thread=${this._threadId} inputItems=${input.length})`)
     try {
       const res = await this._client.request('turn/start', {
         threadId: this._threadId,
         approvalPolicy: this._approvalPolicy(), // #6605 P2 — per-turn, tracks mode changes
-        input: [{ type: 'text', text }],
+        input,
         // #6608 — pass the CURRENT model per turn (turn/start accepts it) so a
         // mid-session set_model actually takes effect, matching the exec path's
         // per-turn model. thread/start seeds the initial model; this tracks changes.
@@ -179,6 +187,63 @@ export class CodexAppServerSession extends BaseSession {
       // turn/start itself failed (dead server, bad thread) — fail this turn.
       this._failTurn(`Codex turn failed to start: ${err.message}`)
     }
+  }
+
+  // #6609 — build the codex `turn/start` input array from the prompt + Chroxy
+  // attachments. codex's UserInput union natively takes file paths, so:
+  //   - binary image/document → materialized to a temp file (reused helper)
+  //   - file_ref → its path used directly (no copy)
+  //   - images → a `localImage` input item (codex vision)
+  //   - documents / non-image file_refs → named in a text suffix codex can read
+  // Always returns at least the text item; attachment failure is non-fatal.
+  _buildTurnInput(text, attachments, messageId) {
+    let outText = text
+    const imageItems = []
+    if (attachments?.length) {
+      try {
+        const binary = attachments.filter((a) => a && typeof a.data === 'string')
+        // #6614 review — defence-in-depth: the WS layer already converts/rejects
+        // file_refs upstream (absolute + `..` paths are refused there), so this
+        // branch is effectively unreachable on the wire — but don't hand an
+        // unconfined path to a localImage item for any future non-WS caller. Skip
+        // + warn on an absolute or parent-traversing path.
+        const fileRefs = attachments.filter((a) => {
+          if (!a || a.type !== 'file_ref' || typeof a.path !== 'string') return false
+          if (a.path.startsWith('/') || a.path.split(/[/\\]/).includes('..')) {
+            ;(this._log || log).warn(`codex attachment: skipping non-relative file_ref path "${a.path}"`)
+            return false
+          }
+          return true
+        })
+        if (binary.length && !this._attachDir) this._attachDir = mkdtempSync(join(tmpdir(), 'chroxy-codex-attach-'))
+        const materialized = binary.length ? materializeAttachments(binary, this._attachDir, messageId) : []
+        const refFiles = fileRefs.map((a) => ({ path: a.path, name: a.name || basename(a.path), mediaType: '', size: 0 }))
+        const all = [...materialized, ...refFiles]
+        for (const f of all.filter((f) => this._isImageFile(f))) imageItems.push({ type: 'localImage', path: f.path })
+        const suffix = buildAttachmentsPromptSuffix(all.filter((f) => !this._isImageFile(f)))
+        if (suffix.suffix) outText = (outText || '') + suffix.suffix
+        // #6614 review — surface anything we couldn't place (no `data` and not a
+        // usable file_ref) instead of dropping it silently.
+        const dropped = attachments.length - all.length
+        if (dropped > 0) {
+          ;(this._log || log).warn(`codex attachments: ${dropped} of ${attachments.length} not attachable (no data / invalid file_ref) — omitted (msg=${messageId})`)
+        }
+        ;(this._log || log).info(`codex attachments prepared (msg=${messageId} images=${imageItems.length} docs=${all.length - imageItems.length})`)
+      } catch (err) {
+        // #6614 review — truly fall back to text-only so the log is accurate: an
+        // exception AFTER some images were pushed / the suffix appended must not
+        // leave a half-built input. Reset both to the un-suffixed prompt.
+        imageItems.length = 0
+        outText = text
+        ;(this._log || log).warn(`codex attachment materialization failed (msg=${messageId}): ${err.message} — sending prompt without attachments`)
+      }
+    }
+    return [{ type: 'text', text: outText }, ...imageItems]
+  }
+
+  _isImageFile(f) {
+    if ((f?.mediaType || '').toLowerCase().startsWith('image/')) return true
+    return IMAGE_EXTS.has(extname(f?.path || '').toLowerCase())
   }
 
   // ------------------------------------------------------------------
@@ -493,6 +558,8 @@ export class CodexAppServerSession extends BaseSession {
     this._clearResultTimeout()
     this._endTurnAbort() // resolve any in-flight approval as a deny before teardown
     try { this._permissions?.destroy() } catch { /* noop */ }
+    // #6609 — drop the materialized-attachment temp dir.
+    if (this._attachDir) { try { rmSync(this._attachDir, { recursive: true, force: true }) } catch { /* noop */ } this._attachDir = null }
     try { this._client?.kill() } catch { /* already gone */ }
     this._client = null
     this._activeTurn = null
