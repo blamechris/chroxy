@@ -22,6 +22,7 @@ import { DeepSeekSession } from './deepseek-session.js'
 import { OllamaSession } from './ollama-session.js'
 import { GeminiSession } from './gemini-session.js'
 import { CodexSession } from './codex-session.js'
+import { CodexAppServerSession } from './codex-app-server-session.js'
 import { UserShellSession } from './user-shell-session.js'
 import { registerProviderRegistry } from './models.js'
 import { BILLING_CLASSES } from './billing-class.js'
@@ -52,6 +53,12 @@ const PROVIDERS = {
   'ollama': OllamaSession,
   'gemini': GeminiSession,
   'codex': CodexSession,
+  // #6605 — codex via the app-server JSON-RPC protocol (persistent) instead of
+  // one-shot `codex exec`. Hidden (not a user-selectable provider): it's the
+  // opt-in swap target for the 'codex' key, selected in getProvider() when
+  // CHROXY_CODEX_APPSERVER=1. Registered here so validateProviderClass runs its
+  // contract check at module load.
+  'codex-appserver': CodexAppServerSession,
   // #5983 (epic #5982) — general-purpose user shell ($SHELL via node-pty).
   // Gated OFF by default (userShell.enabled, #5985a) and primary-token-only
   // on create + every terminal_* op (#5985b); excluded from mailbox injection
@@ -73,7 +80,7 @@ export { DEFAULT_PROVIDER, USER_SHELL_PROVIDER }
 // created via a dedicated shell affordance (#5986/#5987), never the chat
 // provider picker. Hiding it keeps it out of listProviders() so it can't be
 // selected as a (fake-ready) chat backend. getProvider/create still resolve it.
-const HIDDEN = new Set([USER_SHELL_PROVIDER])
+const HIDDEN = new Set([USER_SHELL_PROVIDER, 'codex-appserver'])
 
 /** Required methods every provider class prototype must expose. */
 const REQUIRED_METHODS = ['sendMessage', 'interrupt', 'setModel', 'setPermissionMode', 'start', 'destroy']
@@ -163,6 +170,15 @@ export function getRegisteredProviderNames() {
  * @throws {Error} If provider is not registered
  */
 export function getProvider(name) {
+  // #6605 — opt-in: drive codex through the app-server JSON-RPC protocol
+  // (persistent, approval-capable) instead of one-shot `codex exec`. Env-gated
+  // at resolve time (not in the PROVIDERS literal, which is validated at load)
+  // so it's a safe no-op until explicitly enabled. getProvider is the single
+  // chokepoint SessionManager uses to both construct and preflight, so this one
+  // branch covers every path.
+  if (name === 'codex' && process.env.CHROXY_CODEX_APPSERVER === '1') {
+    return CodexAppServerSession
+  }
   const ProviderClass = PROVIDERS[name]
   if (!ProviderClass) {
     const available = Object.keys(PROVIDERS).join(', ')
