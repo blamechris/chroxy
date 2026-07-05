@@ -434,6 +434,13 @@ export class ClaudeTuiSession extends BaseSession {
     // UTF-8 strings already decoded, but the relevant control bytes
     // are 7-bit ASCII and survive the decode unchanged.
     this._outputTailRaw = Buffer.alloc(0)
+    // #6601: PTY output-quiescence readiness signal. `_lastOutputMs` is the
+    // monotonic time of the most recent onData chunk; `_sawFirstOutput` gates the
+    // signal until claude has actually rendered something on THIS spawn (so the
+    // `now - 0` at init doesn't read as "already quiescent"). Together (checkReady)
+    // they detect a settled composer when no ~/.claude/sessions file exists.
+    this._lastOutputMs = 0
+    this._sawFirstOutput = false
     // #5835 Phase 1: live remote-viewer mirror. PTY onData fires very frequently
     // during a TUI redraw, so coalesce bytes into a buffer and flush one
     // `terminal_output` event per tick (MIRROR_FLUSH_MS) — bounding the broadcast
@@ -1207,6 +1214,16 @@ export class ClaudeTuiSession extends BaseSession {
   // transitions are sub-second once the session is up.
   static get SPAWN_WARMUP_MAX_MS() { return 15_000 }
   static get TURN_PROMPT_WAIT_MAX_MS() { return 5_000 }
+  // #6601: how long PTY output must be quiet before the composer counts as ready
+  // when no session file resolves (current claude's INTERACTIVE TUI writes none,
+  // so the file probe never resolves and the caller used to burn the full
+  // warmup/turn ceiling then "write anyway"). The composer's render burst settles
+  // well within this window; the idle TUI then stays silent for seconds. Validated
+  // live: cold composer ready ~1.1s (vs the 15s warmup ceiling), between-turn
+  // redraw sub-second (vs the 5s per-turn ceiling). Comfortably above the observed
+  // intra-render gaps (~270ms) so it can't false-trigger mid-render; the
+  // warmup/turn ceilings still backstop a genuinely-stuck TUI.
+  static get READY_QUIESCENCE_MS() { return 400 }
   // #5317 (WP-2.3) — grace window between destroy()'s SIGTERM and the SIGKILL
   // escalation. Long enough for claude to flush its Stop hook + reap its own
   // tool children on a clean SIGTERM, short enough that a hung claude (or a
@@ -1881,6 +1898,11 @@ export class ClaudeTuiSession extends BaseSession {
     // the first spawn; this covers every subsequent _respawnPty.
     this._outputTail = ''
     this._outputTailRaw = Buffer.alloc(0)
+    // #6601: re-evaluate output-quiescence readiness for THIS spawn — require
+    // fresh output before trusting a quiet stretch, so a leftover _lastOutputMs
+    // from the prior process can't read as "ready" the instant we respawn.
+    this._sawFirstOutput = false
+    this._lastOutputMs = this._nowMonotonic()
 
     // #5794: a fresh PTY can swallow the first submit again, so re-arm the
     // first-turn submit nudge for the first message on THIS spawn. Reset after
@@ -2061,7 +2083,22 @@ export class ClaudeTuiSession extends BaseSession {
         sessFile = ClaudeTuiSession.resolveSessionFile(this._sessionId, pid, { allowDirScan })
         this._resolvedSessionFile = sessFile
       }
-      if (!sessFile) return false
+      if (!sessFile) {
+        // #6601: no session file resolved. Current claude's INTERACTIVE TUI
+        // writes no ~/.claude/sessions/<pid>.json at all, so the file probe
+        // never resolves and the caller used to burn the full warmup/turn
+        // ceiling then "write anyway" (the degraded path). Fall back to PTY
+        // OUTPUT QUIESCENCE: once claude has rendered on this spawn and output
+        // has been quiet for READY_QUIESCENCE_MS, the composer's render burst has
+        // settled and it is ready for input. Validated live (cold ready ~1.1s,
+        // between-turn redraw sub-second). The file path below is UNCHANGED for
+        // -p / claude-desktop / any version that DOES write a file; the
+        // warmup/turn ceilings still backstop a genuinely-stuck TUI, and the
+        // auth-failure scan (poll loop, above this) still runs first so a
+        // logged-out banner can't be mistaken for a settled composer.
+        return this._sawFirstOutput &&
+          (this._nowMonotonic() - this._lastOutputMs) >= ClaudeTuiSession.READY_QUIESCENCE_MS
+      }
       // A matching file was resolved → we have this session's readiness signal.
       sawStatus = true
       const status = ClaudeTuiSession.readSessionStatus(sessFile)
@@ -2115,6 +2152,11 @@ export class ClaudeTuiSession extends BaseSession {
    * covers CSI / OSC / SS3 / single-char terminal-mode codes (#4031).
    */
   _appendToOutputTail(data) {
+    // #6601: output-quiescence readiness — stamp the recency of PTY output so
+    // checkReady can detect a settled composer (see READY_QUIESCENCE_MS) when no
+    // session file exists. Two cheap field writes on a hot (per-redraw) path.
+    this._lastOutputMs = this._nowMonotonic()
+    this._sawFirstOutput = true
     const rawStr = String(data)
     const chunk = Buffer.from(rawStr, 'utf8')
     // #5794/#5809: monotonic total — never capped, so the nudge's progress check

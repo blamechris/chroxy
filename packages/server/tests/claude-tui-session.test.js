@@ -1716,6 +1716,51 @@ describe('ClaudeTuiSession', () => {
       assert.equal(ready, false, 'absent session file is treated as not-ready')
     })
 
+    // #6601: current claude's INTERACTIVE TUI writes no ~/.claude/sessions file,
+    // so the file probe never resolves. The probe then falls back to PTY output
+    // QUIESCENCE — once claude has rendered on this spawn and output has been
+    // quiet for READY_QUIESCENCE_MS, the composer has settled and is ready. These
+    // pin that fallback and its guards (no false-ready before render / while busy).
+    it('#6601 _waitForPrompt resolves true when no session file but output has quiesced', async () => {
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._term = { write: () => {}, kill: () => {}, pid: fakePid }
+      // no session file written; simulate a rendered-then-settled composer
+      session._sawFirstOutput = true
+      session._lastOutputMs = session._nowMonotonic() - (ClaudeTuiSession.READY_QUIESCENCE_MS + 200)
+      const ready = await session._waitForPrompt(100)
+      assert.equal(ready, true, 'quiescent output (no file) counts as ready')
+    })
+
+    it('#6601 _waitForPrompt stays not-ready while output is still flowing (not yet quiesced)', async () => {
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._term = { write: () => {}, kill: () => {}, pid: fakePid }
+      session._sawFirstOutput = true
+      session._lastOutputMs = session._nowMonotonic() // just now — 0ms quiet
+      const ready = await session._waitForPrompt(50) // well under READY_QUIESCENCE_MS
+      assert.equal(ready, false, 'output still flowing (not quiescent) is not ready')
+    })
+
+    it('#6601 _waitForPrompt stays not-ready before ANY output (cold, pre-render — quiet-by-default trap)', async () => {
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._term = { write: () => {}, kill: () => {}, pid: fakePid }
+      // _sawFirstOutput defaults false; _lastOutputMs defaults 0 (so now-0 LOOKS
+      // quiescent) — the _sawFirstOutput guard is what prevents a false-ready.
+      const ready = await session._waitForPrompt(50)
+      assert.equal(ready, false, 'no output yet must NOT count as ready')
+    })
+
+    it('#6601 a busy session file overrides output quiescence (no false-ready)', async () => {
+      // Precedence: when a file DOES resolve and says busy, quiescence must not
+      // override it — the file path returns before the quiescence fallback.
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._term = { write: () => {}, kill: () => {}, pid: fakePid }
+      writeSessionFile(fakePid, 'busy')
+      session._sawFirstOutput = true
+      session._lastOutputMs = session._nowMonotonic() - 10_000 // very quiescent
+      const ready = await session._waitForPrompt(50)
+      assert.equal(ready, false, 'status=busy file wins over quiescence')
+    })
+
     it('_waitForPrompt returns false when pid is missing or invalid (Copilot review on #4040)', async () => {
       // Returning true on a missing/invalid pid would silently disable
       // readiness gating on any platform/runtime where node-pty fails to
