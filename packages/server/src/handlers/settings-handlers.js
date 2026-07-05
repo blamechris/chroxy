@@ -28,14 +28,13 @@ import {
 } from '../per-session-settings.js'
 import { createPermissionResolver, resolveOriginSessionId } from '../permission-resolver.js'
 import { sanitizeToolInput, PULL_MAX_INPUT_CHARS } from '../redaction.js'
-
-// Tools that are eligible to be whitelisted via set_permission_rules.
-// These are safe file-operation tools that don't execute code or make network requests.
-const ELIGIBLE_TOOLS = new Set(['Read', 'Write', 'Edit', 'NotebookEdit', 'Glob', 'Grep'])
-
-
-// Tools that must never be auto-allowed regardless of user rules.
-const NEVER_AUTO_ALLOW = new Set(['Bash', 'Task', 'WebFetch', 'WebSearch'])
+// #6605 — SINGLE source of truth for the rule-eligibility sets. These used to be
+// a duplicate hard-coded copy here, which silently drifted from
+// permission-manager's when codex's `apply_patch` (rule-eligible, like Write) and
+// `shell` (never-auto-allow, like Bash) were added — so set_permission_rules
+// validation and PermissionManager's enforcement could disagree. Import the
+// exported sets so the two layers can never diverge again.
+import { ELIGIBLE_TOOLS, NEVER_AUTO_ALLOW } from '../permission-manager.js'
 
 const log = createLogger('ws')
 

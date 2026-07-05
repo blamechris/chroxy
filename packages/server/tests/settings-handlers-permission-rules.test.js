@@ -13,6 +13,7 @@
 import { describe, it, beforeEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { settingsHandlers, ELIGIBLE_TOOLS, NEVER_AUTO_ALLOW } from '../src/handlers/settings-handlers.js'
+import { ELIGIBLE_TOOLS as PM_ELIGIBLE_TOOLS, NEVER_AUTO_ALLOW as PM_NEVER_AUTO_ALLOW } from '../src/permission-manager.js'
 import { sendSessionInfo } from '../src/ws-history.js'
 import { PermissionAuditLog } from '../src/permission-audit.js'
 import { nsCtx } from './test-helpers.js'
@@ -129,6 +130,21 @@ describe('handleSetPermissionRules — valid rules', () => {
     // Should not throw
     handler(WS, client, { type: 'set_permission_rules', rules }, ctx)
     assert.equal(ctx.transport.broadcastToSession.mock.callCount(), 1)
+  })
+})
+
+describe('rule-eligibility sets share ONE source of truth (#6605/#6613)', () => {
+  it('settings-handlers re-exports the SAME sets as permission-manager (no drift)', () => {
+    // A duplicate hard-coded copy here silently drifted from permission-manager's
+    // when codex tool names were added (Copilot, PR #6613). Same-reference asserts
+    // the single source of truth so validation + enforcement can never disagree.
+    assert.equal(ELIGIBLE_TOOLS, PM_ELIGIBLE_TOOLS, 'ELIGIBLE_TOOLS is permission-manager\'s set')
+    assert.equal(NEVER_AUTO_ALLOW, PM_NEVER_AUTO_ALLOW, 'NEVER_AUTO_ALLOW is permission-manager\'s set')
+  })
+
+  it('codex tool names are governed: apply_patch eligible, shell never-auto-allow', () => {
+    assert.ok(ELIGIBLE_TOOLS.has('apply_patch'), 'codex file edits are session-rule eligible')
+    assert.ok(NEVER_AUTO_ALLOW.has('shell'), 'codex command execution can never be rule-whitelisted')
   })
 })
 
