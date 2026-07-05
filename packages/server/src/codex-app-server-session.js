@@ -1,6 +1,7 @@
 import { BaseSession, buildBaseSessionOpts } from './base-session.js'
 import { CodexSession, resolveCodexSandbox } from './codex-session.js'
 import { CodexAppServerClient } from './codex-app-server-client.js'
+import { PermissionManager, wirePermissionManager } from './permission-manager.js'
 import { buildSpawnEnv } from './utils/spawn-env.js'
 import { createLogger, loggerForSession } from './logger.js'
 
@@ -12,13 +13,20 @@ const log = createLogger('codex-app-server')
  * codex-session.js). This is the foundation for surfacing codex's approval
  * requests through Chroxy's permission pipeline (epic #6605).
  *
- * PHASE 1 (this file) is the DRIVING LAYER only: it runs turns and maps the
- * app-server's streaming notifications onto Chroxy's standard event contract,
- * at behaviour-parity with the exec path. It uses `approvalPolicy: 'never'`
- * (codex runs commands within its sandbox without prompting, exactly like
- * `codex exec`), and does NOT yet surface approvals — `capabilities.permissions`
- * stays false. Phase 2 flips the policy to `on-request` and wires the
- * server → client approval RPC into a PermissionManager.
+ * PHASE 1 was the DRIVING LAYER: run turns + map the app-server's streaming
+ * notifications onto Chroxy's standard event contract.
+ *
+ * PHASE 2 (#6605) surfaces codex's APPROVALS through Chroxy's permission
+ * pipeline. `approvalPolicy` is derived from the session's permission mode
+ * (`auto` → `never`, else `on-request`), so codex asks before running a command
+ * or editing a file; the server → client approval RPC
+ * (`item/commandExecution/requestApproval` / `item/fileChange/requestApproval`)
+ * is routed into a PermissionManager exactly like SdkSession's `canUseTool`
+ * bridge — it emits `permission_request`, waits for the user's
+ * `permission_response`, and answers codex with the correct per-method decision
+ * enum (CommandExecutionApprovalDecision vs ReviewDecision). `capabilities`
+ * therefore advertises `permissions` / `inProcessPermissions` /
+ * `permissionModeSwitch`.
  *
  * Selected only when `CHROXY_CODEX_APPSERVER=1` (see providers.js `getProvider`);
  * otherwise the exec-based CodexSession is used, so this is a no-op by default.
@@ -46,12 +54,11 @@ export class CodexAppServerSession extends BaseSession {
 
   static get capabilities() {
     return {
-      // Phase 1 is behaviour-parity with exec: no approval surfacing yet.
-      // Phase 2 flips permissions/inProcessPermissions to true.
-      permissions: false,
-      inProcessPermissions: false,
+      // Phase 2 (#6605): approvals are surfaced through the permission pipeline.
+      permissions: true,
+      inProcessPermissions: true, // requires respondToPermission + respondToQuestion
       modelSwitch: true,
-      permissionModeSwitch: false,
+      permissionModeSwitch: true, // mode drives approvalPolicy + PermissionManager
       planMode: false,
       resume: false, // matches exec CodexSession; app-server resume is a follow-up
       terminal: false,
@@ -72,6 +79,17 @@ export class CodexAppServerSession extends BaseSession {
     this._activeTurn = null // { messageId, turnId, didStreamStart }
     this._lastUsage = null
     this._skillsPrepended = false // #6606 — inject the skills prefix once, on turn 1
+    this._turnAbort = null // per-turn AbortController — cancels pending approvals
+
+    // #6605 Phase 2 — surface codex approvals through the same PermissionManager
+    // bridge SdkSession uses. wirePermissionManager re-emits permission_request /
+    // permission_resolved / user_question on THIS session and back-links
+    // _pendingPermissions/_lastPermissionData for ws-permissions.js.
+    this._permissions = new PermissionManager({ log })
+    wirePermissionManager(this, this._permissions, {
+      onRequest: () => this._pauseResultTimeoutForPermission(),
+      onResolved: () => this._resumeResultTimeoutForPermission(),
+    })
   }
 
   _buildChildEnv() { return buildSpawnEnv('codex') }
@@ -94,7 +112,7 @@ export class CodexAppServerSession extends BaseSession {
 
     await this._client.initialize({ name: 'chroxy', version: '1' })
     const started = await this._client.request('thread/start', {
-      approvalPolicy: 'never', // Phase 1: sandboxed, no prompts (parity with exec)
+      approvalPolicy: this._approvalPolicy(), // #6605 P2 — derived from permission mode
       cwd: this.cwd,
       sandbox,
       ...(this.model ? { model: this.model } : {}),
@@ -125,6 +143,9 @@ export class CodexAppServerSession extends BaseSession {
     const messageId = `msg-${this._messageIdPrefix}-${this._messageCounter}`
     this._currentMessageId = messageId
     this._activeTurn = { messageId, turnId: null, didStreamStart: false }
+    // Fresh abort scope for this turn's approvals — interrupt()/destroy() abort it
+    // so a pending permission_request resolves (deny) instead of hanging the turn.
+    this._turnAbort = new AbortController()
     this._armResultTimeout()
 
     // #6606 review — mirror the exec path: prepend the combined skills prefix on
@@ -145,7 +166,7 @@ export class CodexAppServerSession extends BaseSession {
     try {
       const res = await this._client.request('turn/start', {
         threadId: this._threadId,
-        approvalPolicy: 'never',
+        approvalPolicy: this._approvalPolicy(), // #6605 P2 — per-turn, tracks mode changes
         input: [{ type: 'text', text }],
         // #6608 — pass the CURRENT model per turn (turn/start accepts it) so a
         // mid-session set_model actually takes effect, matching the exec path's
@@ -270,6 +291,7 @@ export class CodexAppServerSession extends BaseSession {
       'turn_ended_with_orphan_tool_start',
     )
     this._activeTurn = null
+    this._endTurnAbort()
     // #6606 review — disarm the intentional-stop flag on a NORMAL completion too
     // (mirrors sdk-session.js). interrupt() arms it; if the turn then completes
     // cleanly, only _failTurn would otherwise consume it, so a leftover flag
@@ -287,8 +309,18 @@ export class CodexAppServerSession extends BaseSession {
     if (wasIntentional) this.emit('stopped', {})
     else this.emit('error', { message })
     this._activeTurn = null
+    this._endTurnAbort()
     this._clearMessageState()
     this._maybeDequeue()
+  }
+
+  // Abort this turn's approval scope (any pending permission_request resolves as
+  // a deny) and drop the controller. Safe to call with no active turn.
+  _endTurnAbort() {
+    if (this._turnAbort) {
+      try { this._turnAbort.abort() } catch { /* noop */ }
+      this._turnAbort = null
+    }
   }
 
   _maybeDequeue() {
@@ -315,16 +347,102 @@ export class CodexAppServerSession extends BaseSession {
   }
 
   // ------------------------------------------------------------------
-  // Server → client requests (approvals). Phase 1: not enabled.
+  // Server → client requests (approvals) — routed into the permission pipeline
   // ------------------------------------------------------------------
 
-  _onServerRequest({ id, method }) {
-    // With approvalPolicy:'never' the server should not ask; if it does (future
-    // codex behaviour / a policy we didn't set), decline cleanly rather than
-    // wedge the turn. Phase 2 routes these into the permission pipeline.
-    ;(this._log || log).warn(`codex app-server unexpected serverRequest ${method} — declining (approvals land in Phase 2)`)
-    this._client?.respondError(id, -32601, 'approvals not enabled (Chroxy Phase 1)')
+  // Codex asks before running a command / editing a file (approvalPolicy
+  // 'on-request'). Route the two clean approval families through the
+  // PermissionManager; safe-decline the scope-escalation variant (#6610).
+  _onServerRequest({ id, method, params }) {
+    if (method === 'item/commandExecution/requestApproval' || method === 'item/fileChange/requestApproval') {
+      this._routeApproval(id, method, params)
+      return
+    }
+    if (method === 'item/permissions/requestApproval') {
+      // Scope-escalation (codex wants BROADER permissions than its sandbox). The
+      // response is a permission-grant object, not a simple decision — safe-deny
+      // (grant nothing) so the turn proceeds without escalating. Full surfacing
+      // is tracked in #6610.
+      ;(this._log || log).info('codex app-server: declining permissions-escalation request (grant nothing) — #6610')
+      this._client?.respond(id, { permissions: {}, scope: 'none' })
+      return
+    }
+    ;(this._log || log).warn(`codex app-server: unsupported serverRequest ${method} — declining`)
+    this._client?.respondError(id, -32601, 'unsupported request')
   }
+
+  // Bridge one codex approval RPC → a Chroxy permission_request and back. Mirrors
+  // SdkSession's canUseTool: handlePermission emits permission_request, resolves
+  // when the user answers (or on rule/mode short-circuit, timeout, or abort), and
+  // we answer codex with the decision enum that matches THIS approval family.
+  async _routeApproval(rpcId, method, params) {
+    const { tool, input } = this._describeApproval(method, params)
+    let result
+    try {
+      // Pass a sentinel `suggestions` entry so an "Allow always" response sets
+      // `updatedPermissions` on the result (respondToPermission only echoes it
+      // when suggestions were provided) — that's how we detect a SESSION grant
+      // and answer codex with acceptForSession/approved_for_session. The sentinel
+      // is never persisted (no SDK behind this path); it's a local marker only.
+      const suggestions = [{ codexApproval: method }]
+      result = await this._permissions.handlePermission(tool, input, this._turnAbort?.signal, this.permissionMode, suggestions)
+    } catch (err) {
+      result = { behavior: 'deny', message: err?.message || 'permission error' }
+    }
+    const allow = result?.behavior === 'allow'
+    const session = allow && !!result?.updatedPermissions // "always allow" → session grant
+    this._client?.respond(rpcId, this._codexDecision(method, allow, session))
+  }
+
+  // Map a codex approval request into the (tool, input) shape PermissionManager
+  // renders. `description`/`command`/`file_path` drive the human-facing prompt.
+  _describeApproval(method, params) {
+    if (method === 'item/fileChange/requestApproval') {
+      return {
+        tool: 'apply_patch',
+        input: { description: params?.reason || 'Apply file changes', file_path: params?.grantRoot },
+      }
+    }
+    // item/commandExecution/requestApproval
+    return {
+      tool: 'shell',
+      input: { command: params?.command, cwd: params?.cwd, description: params?.reason },
+    }
+  }
+
+  // The two approval families use DIFFERENT decision vocabularies (from the
+  // app-server JSON schema): fileChange → ReviewDecision, commandExecution →
+  // CommandExecutionApprovalDecision.
+  _codexDecision(method, allow, session) {
+    if (method === 'item/fileChange/requestApproval') {
+      if (!allow) return { decision: 'denied' }
+      return { decision: session ? 'approved_for_session' : 'approved' }
+    }
+    if (!allow) return { decision: 'decline' }
+    return { decision: session ? 'acceptForSession' : 'accept' }
+  }
+
+  // 'auto' (skip all prompts) → codex runs without asking. Every other mode →
+  // 'on-request': codex asks per action and the PermissionManager applies the
+  // mode/rules (auto-allow for acceptEdits/rules, prompt for 'approve').
+  _approvalPolicy() {
+    return this.permissionMode === 'auto' ? 'never' : 'on-request'
+  }
+
+  // In-process permission responses (capabilities.inProcessPermissions) — thin
+  // delegators to the PermissionManager, mirroring SdkSession.
+  respondToPermission(requestId, decision, editedInput) {
+    return this._permissions.respondToPermission(requestId, decision, editedInput)
+  }
+
+  respondToQuestion(text, answers) {
+    return this._permissions.respondToQuestion(text, answers)
+  }
+
+  // A permission prompt can outlast the result timeout while it waits on a human;
+  // pause the timer on request, re-arm it once the decision lands (#3920 pattern).
+  _pauseResultTimeoutForPermission() { this._clearResultTimeout() }
+  _resumeResultTimeoutForPermission() { if (this._activeTurn) this._armResultTimeout() }
 
   _onClientExit({ code, signal, error }) {
     if (this._destroying) return
@@ -353,6 +471,8 @@ export class CodexAppServerSession extends BaseSession {
     this.clearOutgoingQueue({ emit: false })
     this._clearIntentionalStop()
     this._clearResultTimeout()
+    this._endTurnAbort() // resolve any in-flight approval as a deny before teardown
+    try { this._permissions?.destroy() } catch { /* noop */ }
     try { this._client?.kill() } catch { /* already gone */ }
     this._client = null
     this._activeTurn = null

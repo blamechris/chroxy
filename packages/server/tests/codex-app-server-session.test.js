@@ -163,16 +163,6 @@ describe('CodexAppServerSession — lifecycle guards', () => {
     cleanup()
   })
 
-  it('declines an unexpected server approval request in Phase 1 (no wedge)', () => {
-    const { s, cleanup } = mkSession()
-    let responded = null
-    s._client = { respondError: (id, code, msg) => (responded = { id, code, msg }) }
-    s._onServerRequest({ id: 3, method: 'item/commandExecution/requestApproval', params: {} })
-    assert.equal(responded.id, 3)
-    assert.match(responded.msg, /Phase 1/)
-    cleanup()
-  })
-
   it('prepends the skills prefix on the FIRST turn only, and the current model (#6606)', async () => {
     const { s, cleanup } = mkSession()
     s._processReady = true
@@ -191,10 +181,10 @@ describe('CodexAppServerSession — lifecycle guards', () => {
     cleanup()
   })
 
-  it('capabilities: permissions off (Phase 1), streaming + modelSwitch on', () => {
+  it('capabilities: streaming + modelSwitch on, approvals surfaced (Phase 2)', () => {
     const c = CodexAppServerSession.capabilities
-    assert.equal(c.permissions, false)
-    assert.equal(c.inProcessPermissions, false)
+    assert.equal(c.permissions, true)
+    assert.equal(c.inProcessPermissions, true)
     assert.equal(c.streaming, true)
     assert.equal(c.modelSwitch, true)
   })
@@ -268,6 +258,127 @@ describe('CodexAppServerSession — crash / stop paths (#6607)', () => {
     s._onNotification({ method: 'item/started', params: { item: { type: 'commandExecution', id: 'orphan', command: 'sleep 999', cwd: '/tmp' } } })
     s._onNotification({ method: 'turn/completed', params: { turn: {} } })
     assert.ok(ev.some(([, p]) => p.toolUseId === 'orphan'), 'orphan tool_start got a synthetic tool_result')
+    cleanup()
+  })
+})
+
+describe('CodexAppServerSession — approval surfacing (#6605 Phase 2)', () => {
+  const tick = () => new Promise((r) => setImmediate(r))
+  function mkApprovalSession(mode = 'approve') {
+    const { s, cleanup } = mkSession()
+    const responded = []
+    s._processReady = true
+    s.permissionMode = mode
+    s._turnAbort = new AbortController()
+    s._client = {
+      respond: (id, r) => responded.push([id, r]),
+      respondError: (id, code, message) => responded.push([id, { error: { code, message } }]),
+    }
+    return { s, cleanup, responded }
+  }
+
+  it('capabilities advertise permissions + inProcessPermissions + permissionModeSwitch', () => {
+    const c = CodexAppServerSession.capabilities
+    assert.equal(c.permissions, true)
+    assert.equal(c.inProcessPermissions, true)
+    assert.equal(c.permissionModeSwitch, true)
+  })
+
+  it('exposes the in-process permission responders', () => {
+    const { s, cleanup } = mkSession()
+    assert.equal(typeof s.respondToPermission, 'function')
+    assert.equal(typeof s.respondToQuestion, 'function')
+    cleanup()
+  })
+
+  it('approvalPolicy: auto → never, every other mode → on-request', () => {
+    const { s, cleanup } = mkSession()
+    s.permissionMode = 'auto'; assert.equal(s._approvalPolicy(), 'never')
+    s.permissionMode = 'approve'; assert.equal(s._approvalPolicy(), 'on-request')
+    s.permissionMode = 'acceptEdits'; assert.equal(s._approvalPolicy(), 'on-request')
+    cleanup()
+  })
+
+  it('commandExecution approval → permission_request; allow → {decision:accept}', async () => {
+    const { s, cleanup, responded } = mkApprovalSession()
+    const reqs = capture(s, ['permission_request'])
+    s._onServerRequest({ id: 5, method: 'item/commandExecution/requestApproval', params: { command: 'rm x', cwd: '/tmp', reason: 'Delete x?' } })
+    assert.equal(reqs.length, 1, 'emitted a permission_request')
+    assert.equal(reqs[0][1].tool, 'shell')
+    s.respondToPermission(reqs[0][1].requestId, 'allow')
+    await tick()
+    assert.deepEqual(responded, [[5, { decision: 'accept' }]])
+    cleanup()
+  })
+
+  it('commandExecution deny → {decision:decline}', async () => {
+    const { s, cleanup, responded } = mkApprovalSession()
+    const reqs = capture(s, ['permission_request'])
+    s._onServerRequest({ id: 6, method: 'item/commandExecution/requestApproval', params: { command: 'rm -rf /', reason: 'nope' } })
+    s.respondToPermission(reqs[0][1].requestId, 'deny')
+    await tick()
+    assert.deepEqual(responded, [[6, { decision: 'decline' }]])
+    cleanup()
+  })
+
+  it('commandExecution allowAlways → {decision:acceptForSession}', async () => {
+    const { s, cleanup, responded } = mkApprovalSession()
+    const reqs = capture(s, ['permission_request'])
+    s._onServerRequest({ id: 7, method: 'item/commandExecution/requestApproval', params: { command: 'ls', reason: 'list' } })
+    s.respondToPermission(reqs[0][1].requestId, 'allowAlways')
+    await tick()
+    assert.deepEqual(responded, [[7, { decision: 'acceptForSession' }]])
+    cleanup()
+  })
+
+  it('fileChange approval uses ReviewDecision (allow→approved, deny→denied, session→approved_for_session)', async () => {
+    for (const [decision, expected] of [['allow', 'approved'], ['deny', 'denied'], ['allowAlways', 'approved_for_session']]) {
+      const { s, cleanup, responded } = mkApprovalSession()
+      const reqs = capture(s, ['permission_request'])
+      s._onServerRequest({ id: 9, method: 'item/fileChange/requestApproval', params: { grantRoot: '/repo', reason: 'edit files' } })
+      assert.equal(reqs[0][1].tool, 'apply_patch')
+      s.respondToPermission(reqs[0][1].requestId, decision)
+      await tick()
+      assert.deepEqual(responded, [[9, { decision: expected }]], `fileChange ${decision} → ${expected}`)
+      cleanup()
+    }
+  })
+
+  it('auto mode auto-allows without emitting a prompt (accept)', async () => {
+    const { s, cleanup, responded } = mkApprovalSession('auto')
+    const reqs = capture(s, ['permission_request'])
+    s._onServerRequest({ id: 10, method: 'item/commandExecution/requestApproval', params: { command: 'echo hi' } })
+    await tick()
+    assert.equal(reqs.length, 0, 'auto mode does not prompt')
+    assert.deepEqual(responded, [[10, { decision: 'accept' }]])
+    cleanup()
+  })
+
+  it('permissions-escalation request is safe-denied (grant nothing) without a prompt', () => {
+    const { s, cleanup, responded } = mkApprovalSession()
+    const reqs = capture(s, ['permission_request'])
+    s._onServerRequest({ id: 11, method: 'item/permissions/requestApproval', params: { scope: 'disk-full-access' } })
+    assert.equal(reqs.length, 0, 'escalation is not surfaced as a normal prompt in Phase 2')
+    assert.deepEqual(responded, [[11, { permissions: {}, scope: 'none' }]])
+    cleanup()
+  })
+
+  it('an unsupported serverRequest is declined with a JSON-RPC error', () => {
+    const { s, cleanup, responded } = mkApprovalSession()
+    s._onServerRequest({ id: 12, method: 'some/futureRequest', params: {} })
+    assert.equal(responded[0][0], 12)
+    assert.ok(responded[0][1].error, 'answered with an error')
+    cleanup()
+  })
+
+  it('an aborted turn scope resolves a pending approval as deny (decline)', async () => {
+    const { s, cleanup, responded } = mkApprovalSession()
+    const reqs = capture(s, ['permission_request'])
+    s._onServerRequest({ id: 13, method: 'item/commandExecution/requestApproval', params: { command: 'sleep 999' } })
+    assert.equal(reqs.length, 1)
+    s._endTurnAbort() // interrupt()/turn-end aborts the scope
+    await tick()
+    assert.deepEqual(responded, [[13, { decision: 'decline' }]], 'abort → decline')
     cleanup()
   })
 })
