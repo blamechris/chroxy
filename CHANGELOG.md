@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-07-05
+
+The **Codex-controllable-like-Claude** release. Codex now flows through Chroxy's
+permission pipeline **by default** — you approve/deny its commands and file edits,
+switch permission modes, and send it image attachments, exactly the way you do
+with Claude. Plus device-friendly **persistent pairing tokens** and two claude-tui
+reliability fixes.
+
+> This release also ships the previously-unreleased **0.9.47** "model-serving
+> freshness + operator-security" changes (see the [0.9.47] section) — v0.9.47 was
+> prepared but never tagged, so everything since v0.9.46 lands here.
+
+### Added
+
+- **Codex approvals surfaced through the permission pipeline (epic #6605).** A new
+  persistent `codex app-server` (JSON-RPC) session driver routes Codex's approval
+  requests into the same `PermissionManager` Claude uses, so you approve/deny
+  Codex's shell commands and file edits from the dashboard/app, and switch
+  permission modes mid-session (#6606 driving layer, #6611 approval surfacing,
+  #6613 permission-mode mapping). Per-mode: `approve` prompts everything,
+  `acceptEdits` auto-approves edits but prompts commands, `auto` runs freely.
+- **Codex image attachments + document references (#6609).** Image attachments
+  become native `localImage` vision input; documents / file references are named
+  in a prompt suffix Codex can read. (The legacy exec path rejected attachments
+  entirely.)
+- **Codex intra-session conversation memory** — the persistent app-server thread
+  keeps context across turns within a session (the exec path was stateless).
+- **Persistent, configurable pairing tokens (#6598).** Paired-device session
+  tokens now survive daemon restarts (encrypted at rest) and use a configurable
+  **sliding TTL** (default 30 days) via `CHROXY_SESSION_TOKEN_TTL` — so a device
+  that keeps connecting stays paired and only an *idle* device expires. No more
+  re-pairing every restart.
+
+### Changed
+
+- **Codex now drives the app-server path by default (#6616).** It's a strict
+  superset of `codex exec` (approvals + attachments + intra-session memory, no
+  regression). Set `CHROXY_CODEX_APPSERVER=0` (or `false`/`no`/`off`) to fall back
+  to the legacy `codex exec` path.
+
+### Fixed
+
+- **claude-tui first-message stall (#6578).** Current `claude` releases no longer
+  write the session-status file the readiness probe relied on; resolve the session
+  file by session id and fall back gracefully so the first message is no longer
+  swallowed into a multi-minute wedge.
+- **claude-tui readiness via PTY-output quiescence (#6601).** Detect readiness from
+  the PTY output settling instead of the dropped status field, cutting
+  first-message readiness from a ~15s degraded wait to ~1s.
+
 ## [0.9.47] - 2026-06-25
 
 A **model-serving freshness** release with **operator-security hardening**. The headline: you no longer need to release a new build to **call, add, or re-price a model** the provider's API already exposes — across the whole provider matrix. Alongside that: a **host-local user-shell approval** control, completion of the **#6201 Open/Closed catalog** refactor, an **OpenAI-compatible provider**, a **mobile mission-control** read-only slice, a deep **store-core/protocol contract-typing** wave, and broad reliability/UX polish.
