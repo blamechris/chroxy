@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'fs'
+import { mkdtempSync, rmSync, existsSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { CodexAppServerSession } from '../src/codex-app-server-session.js'
@@ -433,6 +433,56 @@ describe('CodexAppServerSession — approval surfacing (#6605 Phase 2)', () => {
     s._endTurnAbort() // interrupt()/turn-end aborts the scope
     await tick()
     assert.deepEqual(responded, [[13, { decision: 'decline' }]], 'abort → decline')
+    cleanup()
+  })
+})
+
+describe('CodexAppServerSession — attachments (#6609)', () => {
+  const PNG_B64 = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex').toString('base64')
+
+  it('text-only input when there are no attachments', () => {
+    const { s, cleanup } = mkSession()
+    assert.deepEqual(s._buildTurnInput('hi', undefined, 'm1'), [{ type: 'text', text: 'hi' }])
+    cleanup()
+  })
+
+  it('a binary image becomes a localImage item (codex vision), prompt text unchanged', async () => {
+    const { s, cleanup } = mkSession()
+    const input = s._buildTurnInput('look at this', [{ type: 'image', mediaType: 'image/png', data: PNG_B64, name: 'shot.png' }], 'm2')
+    assert.equal(input[0].type, 'text')
+    assert.equal(input[0].text, 'look at this', 'prompt text is not suffixed for an image')
+    const img = input.find((i) => i.type === 'localImage')
+    assert.ok(img && img.path.endsWith('.png'), 'a localImage item points at the materialized file')
+    assert.ok(existsSync(img.path), 'the image bytes were written to disk')
+    await s.destroy()
+    cleanup()
+  })
+
+  it('a document is named in a text suffix, not a localImage', async () => {
+    const { s, cleanup } = mkSession()
+    const input = s._buildTurnInput('read this', [{ type: 'document', mediaType: 'text/plain', data: Buffer.from('hello').toString('base64'), name: 'notes.txt' }], 'm3')
+    assert.equal(input.filter((i) => i.type === 'localImage').length, 0, 'documents are not localImage items')
+    assert.match(input[0].text, /notes\.txt|att-1/, 'document referenced in the text suffix')
+    await s.destroy()
+    cleanup()
+  })
+
+  it('a file_ref image path is used directly (no copy) as a localImage', () => {
+    const { s, cleanup } = mkSession()
+    const input = s._buildTurnInput('see', [{ type: 'file_ref', path: '/tmp/pic.jpg', name: 'pic.jpg' }], 'm4')
+    const img = input.find((i) => i.type === 'localImage')
+    assert.equal(img?.path, '/tmp/pic.jpg', 'file_ref path passed straight through, no temp copy')
+    assert.equal(s._attachDir, null, 'no temp dir created when there are no binary attachments')
+    cleanup()
+  })
+
+  it('destroy() removes the materialized-attachment temp dir', async () => {
+    const { s, cleanup } = mkSession()
+    s._buildTurnInput('x', [{ type: 'image', mediaType: 'image/png', data: PNG_B64, name: 'a.png' }], 'm5')
+    const dir = s._attachDir
+    assert.ok(dir && existsSync(dir), 'temp dir created for a binary attachment')
+    await s.destroy()
+    assert.ok(!existsSync(dir), 'temp dir removed on destroy')
     cleanup()
   })
 })

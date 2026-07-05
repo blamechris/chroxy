@@ -39,7 +39,7 @@ The registry lives in [`packages/server/src/providers.js`](../packages/server/sr
 | `claude-tui` *(default)* | `claude` (Claude Code CLI, interactive TUI) | `claude` CLI login (rejects `ANTHROPIC_API_KEY` — strips it from spawn env) | Deferred to `claude` TUI | Subscription login only | Persistent PTY, one warmup per session; permission hook via HTTP; deliver-on-complete (no live streaming); bills as interactive subscription. The zero-config default (see #5819), to keep setups off the metered programmatic-credit pool. |
 | `claude-channel` *(research preview)* | `claude --channels` (Claude Code CLI, MCP channel transport) | `claude` CLI login (rejects `ANTHROPIC_API_KEY`). Requires `claude` ≥ 2.1.80 + `--dangerously-load-development-channels` | Deferred to `claude` | Subscription login only | **Scaffold — not yet runnable** (`start()` throws; bridge in #3954). Documented MCP contract instead of TUI scrape; live streaming; first-party permission relay; bills as interactive subscription |
 | `gemini` | `gemini` (Gemini CLI) | `GEMINI_API_KEY` / `GOOGLE_API_KEY`, **or** `gemini login` OAuth | `gemini-2.5-pro` | Google AI Studio API key or a `gemini login` session | No permissions, no plan mode, no resume, no attachments |
-| `codex` | `codex` (OpenAI Codex CLI) | `OPENAI_API_KEY`, **or** `codex login` OAuth | CLI default (`~/.codex/config.toml`) | OpenAI API key or a `codex login` session | Default (`codex exec`): no permissions, no plan mode, no resume, no attachments. Opt-in `CHROXY_CODEX_APPSERVER=1` (app-server): **approvals + permission-mode switching** surfaced in Chroxy (still no attachments/resume — see the "Codex app-server + approvals" section below) |
+| `codex` | `codex` (OpenAI Codex CLI) | `OPENAI_API_KEY`, **or** `codex login` OAuth | CLI default (`~/.codex/config.toml`) | OpenAI API key or a `codex login` session | Default (`codex exec`): no permissions, no plan mode, no resume, no attachments. Opt-in `CHROXY_CODEX_APPSERVER=1` (app-server): **approvals + permission-mode switching + image attachments** surfaced in Chroxy (no resume yet — see the "Codex app-server + approvals" section below) |
 | `claude-byok` | `@anthropic-ai/sdk` (npm) → Anthropic Messages API | `ANTHROPIC_API_KEY` (or `anthropicApiKey` in `~/.chroxy/credentials.json`) | `claude-opus-4-8` | Anthropic API key (per-token billing) | No `claude` binary — Chroxy's own in-process agent loop (streaming, tools, in-process permissions, MCP); no cross-restart resume (#4047) |
 | `deepseek` | `@anthropic-ai/sdk` → DeepSeek's Anthropic-compatible endpoint | `DEEPSEEK_API_KEY` (or `deepseekApiKey` in `~/.chroxy/credentials.json`); `DEEPSEEK_BASE_URL` (optional endpoint override) | `deepseek-chat` | DeepSeek API key (per-token billing) | Subclass of `claude-byok` — same agent loop with DeepSeek credentials, endpoint, and pricing |
 | `ollama` | `@anthropic-ai/sdk` → local Ollama daemon (v0.14+) | `CHROXY_OLLAMA_BASE_URL` / `OLLAMA_HOST` (optional endpoint overrides) | `qwen3-coder` | None — local inference | Local models via Ollama's Anthropic-compatible API; full BYOK agent loop (tools, permissions, MCP); cost always $0; any `ollama pull`ed model id accepted |
@@ -366,11 +366,18 @@ escalates that single action. `apply_patch` (codex's file edit) is treated like
 `Write`/`Edit`, and `shell` (codex's command execution) like `Bash` — so
 arbitrary codex command execution can't be permanently rule-whitelisted.
 
-**Still opt-in (not the default) because** the app-server path does not yet
-materialize attachments (#6609) that the exec path supports, and it wants
-broader real-world validation first. Enable it per-host when you want approval
-control over codex; the exec path remains the default until parity + a
-validation period. Codex's own scope-escalation requests
+**Attachments (#6609).** The app-server path accepts attachments (the exec path
+rejects them outright). Image attachments become codex `localImage` input items
+(real vision — verified end-to-end); documents / non-image `file_ref`s are
+materialized and named in a text suffix codex can read. So on attachments the
+app-server path is a strict improvement over exec, not a regression.
+
+**Still opt-in (not the default)** — purely to bank a broader real-world
+validation period; there is no longer a feature gap versus the exec path (it's a
+strict superset: approvals, intra-session conversation memory, and attachments,
+with no attachment/resume regression). Enable it per-host today when you want
+approval control over codex; flipping it on by default is a follow-up once it has
+soaked. Codex's own scope-escalation requests
 (`item/permissions/requestApproval`) are currently safe-denied — full surfacing
 is tracked in #6610.
 
