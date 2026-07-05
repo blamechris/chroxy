@@ -202,7 +202,19 @@ export class CodexAppServerSession extends BaseSession {
     if (attachments?.length) {
       try {
         const binary = attachments.filter((a) => a && typeof a.data === 'string')
-        const fileRefs = attachments.filter((a) => a && a.type === 'file_ref' && typeof a.path === 'string')
+        // #6614 review — defence-in-depth: the WS layer already converts/rejects
+        // file_refs upstream (absolute + `..` paths are refused there), so this
+        // branch is effectively unreachable on the wire — but don't hand an
+        // unconfined path to a localImage item for any future non-WS caller. Skip
+        // + warn on an absolute or parent-traversing path.
+        const fileRefs = attachments.filter((a) => {
+          if (!a || a.type !== 'file_ref' || typeof a.path !== 'string') return false
+          if (a.path.startsWith('/') || a.path.split(/[/\\]/).includes('..')) {
+            ;(this._log || log).warn(`codex attachment: skipping non-relative file_ref path "${a.path}"`)
+            return false
+          }
+          return true
+        })
         if (binary.length && !this._attachDir) this._attachDir = mkdtempSync(join(tmpdir(), 'chroxy-codex-attach-'))
         const materialized = binary.length ? materializeAttachments(binary, this._attachDir, messageId) : []
         const refFiles = fileRefs.map((a) => ({ path: a.path, name: a.name || basename(a.path), mediaType: '', size: 0 }))
@@ -210,8 +222,19 @@ export class CodexAppServerSession extends BaseSession {
         for (const f of all.filter((f) => this._isImageFile(f))) imageItems.push({ type: 'localImage', path: f.path })
         const suffix = buildAttachmentsPromptSuffix(all.filter((f) => !this._isImageFile(f)))
         if (suffix.suffix) outText = (outText || '') + suffix.suffix
+        // #6614 review — surface anything we couldn't place (no `data` and not a
+        // usable file_ref) instead of dropping it silently.
+        const dropped = attachments.length - all.length
+        if (dropped > 0) {
+          ;(this._log || log).warn(`codex attachments: ${dropped} of ${attachments.length} not attachable (no data / invalid file_ref) — omitted (msg=${messageId})`)
+        }
         ;(this._log || log).info(`codex attachments prepared (msg=${messageId} images=${imageItems.length} docs=${all.length - imageItems.length})`)
       } catch (err) {
+        // #6614 review — truly fall back to text-only so the log is accurate: an
+        // exception AFTER some images were pushed / the suffix appended must not
+        // leave a half-built input. Reset both to the un-suffixed prompt.
+        imageItems.length = 0
+        outText = text
         ;(this._log || log).warn(`codex attachment materialization failed (msg=${messageId}): ${err.message} — sending prompt without attachments`)
       }
     }

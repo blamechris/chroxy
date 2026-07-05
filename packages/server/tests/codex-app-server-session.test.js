@@ -467,11 +467,11 @@ describe('CodexAppServerSession — attachments (#6609)', () => {
     cleanup()
   })
 
-  it('a file_ref image path is used directly (no copy) as a localImage', () => {
+  it('a relative file_ref image path is used directly (no copy) as a localImage', () => {
     const { s, cleanup } = mkSession()
-    const input = s._buildTurnInput('see', [{ type: 'file_ref', path: '/tmp/pic.jpg', name: 'pic.jpg' }], 'm4')
+    const input = s._buildTurnInput('see', [{ type: 'file_ref', path: 'pics/shot.jpg', name: 'shot.jpg' }], 'm4')
     const img = input.find((i) => i.type === 'localImage')
-    assert.equal(img?.path, '/tmp/pic.jpg', 'file_ref path passed straight through, no temp copy')
+    assert.equal(img?.path, 'pics/shot.jpg', 'relative file_ref path passed straight through, no temp copy')
     assert.equal(s._attachDir, null, 'no temp dir created when there are no binary attachments')
     cleanup()
   })
@@ -483,6 +483,24 @@ describe('CodexAppServerSession — attachments (#6609)', () => {
     assert.ok(dir && existsSync(dir), 'temp dir created for a binary attachment')
     await s.destroy()
     assert.ok(!existsSync(dir), 'temp dir removed on destroy')
+    cleanup()
+  })
+
+  it('skips an absolute / parent-traversing file_ref path (defence-in-depth, #6614)', () => {
+    const { s, cleanup } = mkSession()
+    for (const bad of ['/etc/passwd.jpg', '../secrets/key.png']) {
+      const input = s._buildTurnInput('see', [{ type: 'file_ref', path: bad, name: 'x.png' }], 'm6')
+      assert.equal(input.filter((i) => i.type === 'localImage').length, 0, `unconfined file_ref not turned into a localImage: ${bad}`)
+      assert.deepEqual(input, [{ type: 'text', text: 'see' }])
+    }
+    cleanup()
+  })
+
+  it('does not silently drop an unattachable attachment (no data, not a file_ref)', () => {
+    const { s, cleanup } = mkSession()
+    // No throw, prompt still sent; the malformed entry is omitted (and warn-logged).
+    const input = s._buildTurnInput('hi', [{ type: 'image', mediaType: 'image/png', name: 'nodata.png' }], 'm7')
+    assert.deepEqual(input, [{ type: 'text', text: 'hi' }], 'malformed attachment omitted, prompt preserved')
     cleanup()
   })
 })
