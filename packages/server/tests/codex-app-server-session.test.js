@@ -344,6 +344,28 @@ describe('CodexAppServerSession — approval surfacing (#6605 Phase 2)', () => {
     }
   })
 
+  it('acceptEdits auto-approves a codex file edit (fileChange) without a prompt', async () => {
+    const { s, cleanup, responded } = mkApprovalSession('acceptEdits')
+    const reqs = capture(s, ['permission_request'])
+    s._onServerRequest({ id: 30, method: 'item/fileChange/requestApproval', params: { grantRoot: '/repo', reason: 'edit' } })
+    await tick()
+    assert.equal(reqs.length, 0, 'acceptEdits does not prompt for a codex edit')
+    assert.deepEqual(responded, [[30, { decision: 'approved' }]])
+    cleanup()
+  })
+
+  it('acceptEdits still PROMPTS for a codex shell command (not an edit)', async () => {
+    const { s, cleanup, responded } = mkApprovalSession('acceptEdits')
+    const reqs = capture(s, ['permission_request'])
+    s._onServerRequest({ id: 31, method: 'item/commandExecution/requestApproval', params: { command: 'rm x' } })
+    assert.equal(reqs.length, 1, 'acceptEdits prompts for a shell command')
+    assert.equal(responded.length, 0, 'no decision until the user answers')
+    s.respondToPermission(reqs[0][1].requestId, 'deny')
+    await tick()
+    assert.deepEqual(responded, [[31, { decision: 'decline' }]])
+    cleanup()
+  })
+
   it('auto mode auto-allows without emitting a prompt (accept)', async () => {
     const { s, cleanup, responded } = mkApprovalSession('auto')
     const reqs = capture(s, ['permission_request'])

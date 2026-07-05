@@ -724,7 +724,8 @@ describe('PermissionManager', () => {
 
   describe('ELIGIBLE_TOOLS and NEVER_AUTO_ALLOW constants', () => {
     it('ELIGIBLE_TOOLS contains the expected file operation tools', () => {
-      const expected = ['Read', 'Write', 'Edit', 'NotebookEdit', 'Glob', 'Grep']
+      // apply_patch = codex's file-edit tool (#6605), eligible like Write/Edit.
+      const expected = ['Read', 'Write', 'Edit', 'NotebookEdit', 'Glob', 'Grep', 'apply_patch']
       for (const tool of expected) {
         assert.ok(ELIGIBLE_TOOLS.has(tool), `Expected ELIGIBLE_TOOLS to contain ${tool}`)
       }
@@ -732,7 +733,8 @@ describe('PermissionManager', () => {
     })
 
     it('NEVER_AUTO_ALLOW contains the expected dangerous tools', () => {
-      const expected = ['Bash', 'Task', 'WebFetch', 'WebSearch']
+      // shell = codex's command-execution tool (#6605), never-whitelistable like Bash.
+      const expected = ['Bash', 'Task', 'WebFetch', 'WebSearch', 'shell']
       for (const tool of expected) {
         assert.ok(NEVER_AUTO_ALLOW.has(tool), `Expected NEVER_AUTO_ALLOW to contain ${tool}`)
       }

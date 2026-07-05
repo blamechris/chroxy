@@ -8,14 +8,18 @@ import { sanitizeToolInput, redactValue } from './redaction.js'
 
 const _fallbackLog = createLogger('permission-manager')
 
-// Tools that acceptEdits mode auto-approves
-const ACCEPT_EDITS_TOOLS = new Set(['Read', 'Write', 'Edit', 'NotebookEdit', 'Glob', 'Grep'])
+// Tools that acceptEdits mode auto-approves. `apply_patch` is codex's file-edit
+// approval (item/fileChange/requestApproval, #6605) — the codex analogue of
+// Write/Edit, so acceptEdits auto-approves codex edits too.
+const ACCEPT_EDITS_TOOLS = new Set(['Read', 'Write', 'Edit', 'NotebookEdit', 'Glob', 'Grep', 'apply_patch'])
 
-// Tools eligible for session-scoped auto-allow rules
-export const ELIGIBLE_TOOLS = new Set(['Read', 'Write', 'Edit', 'NotebookEdit', 'Glob', 'Grep'])
+// Tools eligible for session-scoped auto-allow rules (`apply_patch` = codex edits).
+export const ELIGIBLE_TOOLS = new Set(['Read', 'Write', 'Edit', 'NotebookEdit', 'Glob', 'Grep', 'apply_patch'])
 
-// Tools that can never be auto-allowed by rules (too dangerous to whitelist)
-export const NEVER_AUTO_ALLOW = new Set(['Bash', 'Task', 'WebFetch', 'WebSearch'])
+// Tools that can never be auto-allowed by rules (too dangerous to whitelist).
+// `shell` is codex's command-execution approval — the codex analogue of Bash, so
+// arbitrary codex command execution can't be rule-whitelisted either (#6605).
+export const NEVER_AUTO_ALLOW = new Set(['Bash', 'Task', 'WebFetch', 'WebSearch', 'shell'])
 
 // Default permission timeout (5 minutes)
 const DEFAULT_TIMEOUT_MS = 300_000
