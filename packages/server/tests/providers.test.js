@@ -1551,31 +1551,28 @@ describe('validateProviderClass — inProcessPermissions guard (#5379)', () => {
 describe('codex provider default — app-server (#6616)', () => {
   const KEY = 'CHROXY_CODEX_APPSERVER'
   const orig = process.env[KEY]
-  const restore = () => { if (orig === undefined) delete process.env[KEY]; else process.env[KEY] = orig }
+  // try/finally so a failed assertion can't leave CHROXY_CODEX_APPSERVER mutated
+  // and leak into later tests (Copilot #6617 review).
+  const withEnv = (val, fn) => {
+    if (val === undefined) delete process.env[KEY]; else process.env[KEY] = val
+    try { fn() } finally { if (orig === undefined) delete process.env[KEY]; else process.env[KEY] = orig }
+  }
 
   it('defaults to the app-server driver when the env is unset', () => {
-    delete process.env[KEY]
-    assert.equal(getProvider('codex'), CodexAppServerSession)
-    restore()
+    withEnv(undefined, () => assert.equal(getProvider('codex'), CodexAppServerSession))
   })
 
   it('any non-opt-out value keeps the app-server driver (e.g. "1")', () => {
-    process.env[KEY] = '1'
-    assert.equal(getProvider('codex'), CodexAppServerSession)
-    restore()
+    withEnv('1', () => assert.equal(getProvider('codex'), CodexAppServerSession))
   })
 
   it('opts out to the exec CodexSession for 0/false/no/off (case-insensitive)', () => {
     for (const v of ['0', 'false', 'no', 'off', 'OFF', ' false ']) {
-      process.env[KEY] = v
-      assert.equal(getProvider('codex'), CodexSession, `opt-out value: "${v}"`)
+      withEnv(v, () => assert.equal(getProvider('codex'), CodexSession, `opt-out value: "${v}"`))
     }
-    restore()
   })
 
   it('the opt-out never affects non-codex providers', () => {
-    process.env[KEY] = '0'
-    assert.equal(getProvider('claude-cli'), CliSession)
-    restore()
+    withEnv('0', () => assert.equal(getProvider('claude-cli'), CliSession))
   })
 })
