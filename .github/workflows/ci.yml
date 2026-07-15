@@ -212,11 +212,13 @@ jobs:
     defaults:
       run:
         working-directory: packages/server
-        # pwsh, NOT bash: on a self-hosted Windows runner `shell: bash` resolves
-        # to C:\Windows\System32\bash.exe (WSL), which has no distro under the
-        # service account and fails every step. The run commands here are plain
-        # npm/node invocations that work identically under pwsh.
-        shell: pwsh
+        # Windows PowerShell, NOT bash: on a self-hosted Windows runner
+        # `shell: bash` resolves to C:\Windows\System32\bash.exe (WSL), which has
+        # no distro under the service account and fails every step. `pwsh`
+        # (PowerShell Core) isn't installed on the box either, so use `powershell`
+        # (Windows PowerShell 5.1, always present). The run commands are plain
+        # npm/node invocations that behave identically under it.
+        shell: powershell
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -789,9 +791,10 @@ jobs:
     defaults:
       run:
         working-directory: packages/desktop/src-tauri
-        # pwsh, NOT bash — see the Server Windows Tests job (self-hosted `bash`
-        # is WSL bash, which has no distro under the service account).
-        shell: pwsh
+        # Windows PowerShell, NOT bash or pwsh — see the Server Windows Tests
+        # job (self-hosted `bash` is WSL bash with no distro; PowerShell Core
+        # `pwsh` isn't installed on the runner).
+        shell: powershell
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
