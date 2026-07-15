@@ -2558,6 +2558,98 @@ describe('InputBar voice shortcut (#5668)', () => {
     expect(voice.stop).not.toHaveBeenCalled()
   })
 
+  it('Control key-repeat while arming does not restart the timer or double-arm', () => {
+    vi.useFakeTimers()
+    const start = vi.fn()
+    render(<ControlledBar voiceInput={makeVoice({ start })} initial="" />)
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+
+    fireEvent.keyDown(textarea, { key: 'Control', ctrlKey: true })
+    act(() => { vi.advanceTimersByTime(100) })
+    // Browser key-repeat fires more Control keydowns while held — must NOT re-arm.
+    fireEvent.keyDown(textarea, { key: 'Control', ctrlKey: true })
+    fireEvent.keyDown(textarea, { key: 'Control', ctrlKey: true })
+    act(() => { vi.advanceTimersByTime(150) }) // 250ms total from the FIRST keydown
+
+    expect(start).toHaveBeenCalledTimes(1)
+  })
+
+  it('a non-Control keydown while a Control-hold recording is live stops capture', () => {
+    vi.useFakeTimers()
+    const start = vi.fn()
+    const stop = vi.fn()
+    render(<ControlledBar voiceInput={makeVoice({ start, stop })} initial="" />)
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+
+    fireEvent.keyDown(textarea, { key: 'Control', ctrlKey: true })
+    act(() => { vi.advanceTimersByTime(250) })
+    expect(start).toHaveBeenCalledTimes(1)
+
+    fireEvent.keyDown(textarea, { key: 'a' })
+    expect(stop).toHaveBeenCalledTimes(1)
+  })
+
+  it('blur while a Control-hold recording is live stops capture (no stuck mic)', () => {
+    vi.useFakeTimers()
+    const start = vi.fn()
+    const stop = vi.fn()
+    render(<ControlledBar voiceInput={makeVoice({ start, stop })} initial="" />)
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+
+    fireEvent.keyDown(textarea, { key: 'Control', ctrlKey: true })
+    act(() => { vi.advanceTimersByTime(250) })
+    expect(start).toHaveBeenCalledTimes(1)
+
+    fireEvent.blur(textarea)
+    expect(stop).toHaveBeenCalledTimes(1)
+  })
+
+  it('unmounting while a Control-hold recording is live stops capture', () => {
+    vi.useFakeTimers()
+    const start = vi.fn()
+    const stop = vi.fn()
+    const { unmount } = render(<ControlledBar voiceInput={makeVoice({ start, stop })} initial="" />)
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+
+    fireEvent.keyDown(textarea, { key: 'Control', ctrlKey: true })
+    act(() => { vi.advanceTimersByTime(250) })
+    expect(start).toHaveBeenCalledTimes(1)
+
+    unmount()
+    expect(stop).toHaveBeenCalledTimes(1)
+  })
+
+  it('a pointer press during a Control hold cancels the arm (macOS Ctrl+click gesture)', () => {
+    vi.useFakeTimers()
+    const voice = makeVoice()
+    render(<ControlledBar voiceInput={voice} initial="" />)
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+
+    // Control down (arming), then a mouse press with no intervening keydown —
+    // the Ctrl+click / right-click gesture. It must cancel the arm, not record.
+    fireEvent.keyDown(textarea, { key: 'Control', ctrlKey: true })
+    fireEvent.mouseDown(textarea)
+    act(() => { vi.advanceTimersByTime(250) })
+
+    expect(voice.start).not.toHaveBeenCalled()
+    expect(voice.stop).not.toHaveBeenCalled()
+  })
+
+  it('a pointer press stops a live Control-hold recording', () => {
+    vi.useFakeTimers()
+    const start = vi.fn()
+    const stop = vi.fn()
+    render(<ControlledBar voiceInput={makeVoice({ start, stop })} initial="" />)
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+
+    fireEvent.keyDown(textarea, { key: 'Control', ctrlKey: true })
+    act(() => { vi.advanceTimersByTime(250) })
+    expect(start).toHaveBeenCalledTimes(1)
+
+    fireEvent.mouseDown(textarea)
+    expect(stop).toHaveBeenCalledTimes(1)
+  })
+
   it('Ctrl+Shift+M cancels a pending Control hold and still toggles voice', () => {
     vi.useFakeTimers()
     const voice = makeVoice()

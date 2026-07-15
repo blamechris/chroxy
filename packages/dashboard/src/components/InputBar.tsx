@@ -459,6 +459,13 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, c
   // required suppressing and re-inserting native spaces in a controlled
   // textarea. Under fast typing this could reorder text or move the caret, so
   // voice now uses an explicit modifier chord and leaves Space entirely native.
+  //
+  // Known collision: Cmd/Ctrl+Shift+M is bound by some browsers/tools (e.g.
+  // Firefox's Responsive Design Mode, VS Code). preventDefault() on a textarea
+  // keydown cannot reliably beat a browser-chrome accelerator, so in those
+  // environments the chord may both toggle voice AND trigger the browser tool.
+  // Documented rather than remapped to keep the affordance familiar; revisit if
+  // it proves annoying in practice.
   const isVoiceShortcut = useCallback((e: KeyboardEvent<HTMLTextAreaElement>) => {
     return (
       (e.key === 'm' || e.key === 'M') &&
@@ -526,6 +533,18 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, c
   }, [clearControlPttTimer, stopControlPttRecording])
 
   const handleControlPttBlur = useCallback(() => {
+    cancelControlPttArm()
+    stopControlPttRecording()
+  }, [cancelControlPttArm, stopControlPttRecording])
+
+  // A pointer press while Control is held means Control was a click-modifier
+  // (e.g. macOS Ctrl+click / right-click), NOT a push-to-talk hold. Mouse events
+  // fire no keydown, so without this an armed Control-hold would still tip into
+  // recording ~250ms later and open the mic. Cancelling the arm (and stopping an
+  // already-live Control-hold capture) on pointer-down closes that gesture hole.
+  // A mic-button recording is unaffected — it never enters the 'recording' state
+  // this guards on.
+  const handleControlPttPointerDown = useCallback(() => {
     cancelControlPttArm()
     stopControlPttRecording()
   }, [cancelControlPttArm, stopControlPttRecording])
@@ -1051,6 +1070,7 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, c
           onKeyDown={handleKeyDown}
           onKeyUp={handleControlPttKeyUp}
           onBlur={handleControlPttBlur}
+          onMouseDown={handleControlPttPointerDown}
           onPaste={handlePaste}
           // Scroll-sync the overlay to the textarea so multi-line drafts
           // keep keyword highlights aligned as the user scrolls within the
