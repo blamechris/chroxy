@@ -1,10 +1,11 @@
 /**
  * OS keychain integration for secure token storage.
  *
- * Uses native CLI tools (no npm dependencies):
+ * Uses native OS crypto (no npm dependencies):
  * - macOS: `security` command (Keychain Services)
  * - Linux: `secret-tool` (libsecret)
- * - Windows/fallback: returns null (caller falls back to chmod 600 file)
+ * - Windows: DPAPI via PowerShell, ciphertext under %LOCALAPPDATA%\Chroxy (#6644)
+ * - Fallback (no usable backend): returns null → caller uses the 0600 file
  */
 import { execFileSync } from 'child_process'
 import { existsSync, readFileSync, mkdirSync, unlinkSync } from 'node:fs'

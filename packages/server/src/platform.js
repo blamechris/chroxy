@@ -201,11 +201,16 @@ export function writeFileRestricted(
   // `writeFileSync`'s `mode` is mostly a no-op on Win32. The temp+rename
   // pattern still applies for atomicity (#4913).
   if (onWindows) {
-    writeFileSync(tmpPath, data)
-    // Stamp an owner-only DACL on the temp file BEFORE the rename — NTFS
-    // preserves an explicit DACL across a same-directory rename, so the final
-    // file lands owner-only with no exposure window (#6644).
+    // Create/truncate the temp file EMPTY, stamp the owner-only DACL, THEN write
+    // the data — so the secret bytes only ever exist while the file is already
+    // owner-only. Writing first would leave a window where the freshly-written
+    // bytes carry the parent's (possibly group-readable) inherited ACL, and this
+    // also re-restricts a stale, permissively-ACL'd temp left by a prior crash.
+    // The DACL survives the same-directory rename (NTFS preserves explicit DACLs
+    // across MoveFileEx), so the final file lands owner-only (#6644).
+    writeFileSync(tmpPath, '')
     _stampAcl(tmpPath)
+    writeFileSync(tmpPath, data)
   } else {
     writeFileSync(tmpPath, data, { mode: 0o600 })
     chmodSync(tmpPath, 0o600)
