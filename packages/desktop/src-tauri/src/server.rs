@@ -1376,7 +1376,7 @@ impl ServerManager {
         }
 
         Err(
-            "Could not find chroxy server. Checked: bundled .app resources, monorepo layout, CHROXY_SERVER_PATH env, and PATH (which chroxy)."
+            "Could not find chroxy server. Checked: bundled resources (next-to-exe on Windows/Linux, Contents/Resources on macOS), monorepo layout, CHROXY_SERVER_PATH env, and PATH (which/where chroxy)."
                 .to_string(),
         )
     }
