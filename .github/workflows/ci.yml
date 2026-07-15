@@ -202,9 +202,9 @@ jobs:
     # Scope is the Windows-RELEVANT suites, not the full server set: much of the
     # suite depends on node-pty / POSIX signals / shell scripts with no Windows
     # analogue, so the ubuntu `server-tests` job stays the source of truth for
-    # the rest. `service.test.js` is intentionally excluded until its POSIX-path
-    # assertions are guarded for win32 (#6651). Now that this runs on the free
-    # self-hosted box it fires on every same-repo push/PR (the old
+    # the rest. `service.test.js` runs here too since #6651 (its POSIX/darwin/
+    # linux-only assertions are now guarded with a win32 skip). Now that this runs
+    # on the free self-hosted box it fires on every same-repo push/PR (the old
     # platform-changed-only gate existed only to spare windows-latest minutes).
     needs: runner-target
     runs-on: ${{ fromJSON(needs.runner-target.outputs.winrunner) }}
@@ -241,8 +241,9 @@ jobs:
         # (sandbox guard via `--import ./tests/_setup.mjs`,
         # `--experimental-test-module-mocks`) but scoped to the Windows-relevant
         # suites. `c8` is omitted — the ubuntu job is the coverage source of
-        # truth. All of these are green on a real Windows host (verified locally);
-        # `service.test.js` is excluded pending #6651.
+        # truth. All of these are green on a real Windows host (verified
+        # locally); `service.test.js`'s POSIX/darwin/linux-only tests are win32-
+        # guarded (#6651) so it runs here too.
         run: >-
           node --import ./tests/_setup.mjs --experimental-test-module-mocks --test
           ./tests/platform.test.js
@@ -252,6 +253,7 @@ jobs:
           ./tests/resolve-binary.test.js
           ./tests/control-room-wsl.test.js
           ./tests/keychain-windows.test.js
+          ./tests/service.test.js
 
   server-lint:
     name: Server Lint
