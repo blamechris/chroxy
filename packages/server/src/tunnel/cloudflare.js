@@ -1,6 +1,7 @@
 import { spawn, execFileSync } from 'child_process'
 import { BaseTunnelAdapter } from './base.js'
 import { createLogger, redactSensitive } from '../logger.js'
+import { cloudflaredInstallHint } from '../platform.js'
 
 const log = createLogger('tunnel')
 
@@ -43,7 +44,7 @@ export class CloudflareTunnelAdapter extends BaseTunnelAdapter {
       stableUrl: false,
       binaryName: 'cloudflared',
       setupRequired: false,
-      installHint: 'brew install cloudflared',
+      installHint: cloudflaredInstallHint(),
     }
   }
 
@@ -60,7 +61,7 @@ export class CloudflareTunnelAdapter extends BaseTunnelAdapter {
       return {
         available: false,
         version: null,
-        hint: 'Install with: brew install cloudflared',
+        hint: `Install with: ${cloudflaredInstallHint()}`,
       }
     }
   }
@@ -147,7 +148,7 @@ export class CloudflareTunnelAdapter extends BaseTunnelAdapter {
 
       proc.on('error', (err) => {
         if (!resolved) {
-          reject(new Error(`Failed to start cloudflared: ${err.message}. Install with: brew install cloudflared`))
+          reject(new Error(`Failed to start cloudflared: ${err.message}. Install with: ${cloudflaredInstallHint()}`))
         }
       })
 
@@ -176,7 +177,7 @@ export class CloudflareTunnelAdapter extends BaseTunnelAdapter {
           timedOut = true
           proc.kill()
           const tail = redactedTail(outputTailRaw)
-          reject(new Error(`Tunnel timed out after 30s. Is cloudflared installed and logged in? (brew install cloudflared)${tail ? `. Last output: ${tail}` : ''}`))
+          reject(new Error(`Tunnel timed out after 30s. Is cloudflared installed and logged in? (${cloudflaredInstallHint()})${tail ? `. Last output: ${tail}` : ''}`))
         }
       }, 30_000)
       // Don't let the 30s start-timeout timer pin the event loop on success —
@@ -241,7 +242,7 @@ export class CloudflareTunnelAdapter extends BaseTunnelAdapter {
 
       proc.on('error', (err) => {
         if (!resolved) {
-          reject(new Error(`Failed to start cloudflared: ${err.message}. Install with: brew install cloudflared`))
+          reject(new Error(`Failed to start cloudflared: ${err.message}. Install with: ${cloudflaredInstallHint()}`))
         }
       })
 
@@ -267,7 +268,7 @@ export class CloudflareTunnelAdapter extends BaseTunnelAdapter {
           timedOut = true
           proc.kill()
           const tail = redactedTail(outputTailRaw)
-          reject(new Error(`Tunnel timed out after 30s. Is cloudflared installed? (brew install cloudflared)${tail ? `. Last output: ${tail}` : ''}`))
+          reject(new Error(`Tunnel timed out after 30s. Is cloudflared installed? (${cloudflaredInstallHint()})${tail ? `. Last output: ${tail}` : ''}`))
         }
       }, 30_000)
       // Don't let the 30s start-timeout timer pin the event loop on success.

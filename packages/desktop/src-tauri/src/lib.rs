@@ -27,6 +27,19 @@ pub fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Per-platform "how to install cloudflared" hint for user-facing errors —
+/// Windows → winget, macOS → Homebrew, Linux → the Cloudflare package repo
+/// (parity with the JS `cloudflaredInstallHint`, #6649).
+fn cloudflared_install_hint() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "brew install cloudflared"
+    } else if cfg!(target_os = "windows") {
+        "winget install Cloudflare.cloudflared"
+    } else {
+        "see https://pkg.cloudflare.com/"
+    }
+}
+
 use tauri::{
     menu::{
         CheckMenuItem, CheckMenuItemBuilder, MenuBuilder, MenuItem, MenuItemBuilder, SubmenuBuilder,
@@ -289,7 +302,7 @@ fn set_tunnel_mode(app: tauri::AppHandle, mode: String) -> Result<(), String> {
 
     // Validate cloudflared for tunnel modes
     if mode != "none" && !ServerManager::check_cloudflared() {
-        return Err("cloudflared not found. Install with: brew install cloudflared".to_string());
+        return Err(format!("cloudflared not found. Install with: {}", cloudflared_install_hint()));
     }
 
     // Update settings
@@ -1909,7 +1922,7 @@ fn handle_start(app: &tauri::AppHandle) {
         send_notification(
             app,
             "Tunnel Unavailable",
-            "cloudflared not found. Install with: brew install cloudflared",
+            &format!("cloudflared not found. Install with: {}", cloudflared_install_hint()),
         );
         // Fall back to local-only mode for this start
     }
@@ -2227,7 +2240,7 @@ fn handle_set_tunnel_mode(app: &tauri::AppHandle, mode: &str) {
         send_notification(
             app,
             "Tunnel Unavailable",
-            "cloudflared not found. Install with: brew install cloudflared",
+            &format!("cloudflared not found. Install with: {}", cloudflared_install_hint()),
         );
         // Revert the checkbox to current mode
         let current = app
