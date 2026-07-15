@@ -8,6 +8,71 @@ export const isWindows = process.platform === 'win32'
 export const isMac = process.platform === 'darwin'
 export const isLinux = process.platform === 'linux'
 
+// Windows rename failures worth one retry: an open handle held by antivirus or
+// Windows Search briefly locks the destination (#6644 / #4927).
+const WIN_RENAME_RETRY_CODES = new Set(['EPERM', 'EACCES', 'EBUSY', 'EEXIST'])
+// Well-known SYSTEM SID — locale-independent (the NAME "SYSTEM" is localized, so
+// icacls grants must use the SID form to work on non-English Windows).
+const SID_SYSTEM = 'S-1-5-18'
+// Absolute System32 dir so `whoami`/`icacls` resolve to the real Windows tools
+// regardless of PATH order (a shell like Git Bash puts its own `whoami` first).
+const WIN_SYSTEM32 = `${process.env.SystemRoot || process.env.windir || 'C:\\Windows'}\\System32`
+
+let _cachedUserSid
+/**
+ * The current user's SID (e.g. `S-1-5-21-…`), resolved once via `whoami /user`
+ * and cached for the process. SIDs (not account names) are used for icacls so
+ * the grant is correct regardless of domain membership or OS display language.
+ * Returns null if it can't be resolved (caller then leaves inherited ACLs).
+ */
+function currentUserSid() {
+  if (_cachedUserSid !== undefined) return _cachedUserSid
+  _cachedUserSid = null
+  try {
+    const out = execFileSync(`${WIN_SYSTEM32}\\whoami.exe`, ['/user', '/fo', 'csv', '/nh'], {
+      encoding: 'utf-8',
+      windowsHide: true,
+      timeout: 5000,
+    })
+    const m = out.match(/S-1-[0-9-]+/)
+    if (m) _cachedUserSid = m[0]
+  } catch {
+    // whoami unavailable / failed — leave null; the file keeps inherited ACLs.
+  }
+  return _cachedUserSid
+}
+
+/**
+ * Stamp an owner-only DACL on a Windows file (#6644): strip inherited ACEs and
+ * grant Full control to ONLY the current user + SYSTEM. This is the NTFS
+ * analogue of POSIX 0o600 — without it, files under `%LOCALAPPDATA%` /
+ * `~/.chroxy` inherit the parent directory's ACL, which the audit found could
+ * include a secondary group able to read the secrets. Best-effort: an icacls
+ * failure is logged, not thrown — the file is still written (just at inherited
+ * perms), and the caller's write must not fail over a hardening step.
+ */
+function stampWindowsAcl(filePath) {
+  // Real-Windows only: icacls/whoami don't exist elsewhere. The `_isWindowsOverride`
+  // seam drives the write/rename path on POSIX CI runners, but must NOT shell out
+  // to Windows tools there — those tests inject `_stampAcl` to assert this call.
+  if (!isWindows) return
+  const sid = currentUserSid()
+  if (!sid) {
+    log.warn(`could not resolve current-user SID — leaving inherited ACL on ${filePath}`)
+    return
+  }
+  try {
+    execFileSync(`${WIN_SYSTEM32}\\icacls.exe`, [
+      filePath,
+      '/inheritance:r',
+      '/grant:r', `*${sid}:F`,
+      '/grant:r', `*${SID_SYSTEM}:F`,
+    ], { stdio: 'ignore', windowsHide: true, timeout: 5000 })
+  } catch (err) {
+    log.warn(`icacls could not stamp owner-only ACL on ${filePath}: ${err.message}`)
+  }
+}
+
 /**
  * Per-platform "how to install cloudflared" hint for user-facing errors:
  * Windows → winget, macOS → Homebrew, Linux → the Cloudflare package repo.
@@ -104,7 +169,14 @@ export function defaultShell({ platform = process.platform, env = process.env } 
 export function writeFileRestricted(
   filePath,
   data,
-  { tmpSuffix = '.tmp', _isWindowsOverride } = {},
+  {
+    tmpSuffix = '.tmp',
+    _isWindowsOverride,
+    // Test seams (#6644): inject the ACL stamper / rename so the Windows ACL +
+    // one-shot-retry paths are exercisable on a POSIX CI runner.
+    _stampAcl = stampWindowsAcl,
+    _rename = renameSync,
+  } = {},
 ) {
   const onWindows = _isWindowsOverride ?? isWindows
   const tmpPath = `${filePath}${tmpSuffix}`
@@ -132,13 +204,27 @@ export function writeFileRestricted(
   // pattern still applies for atomicity (#4913).
   if (onWindows) {
     writeFileSync(tmpPath, data)
+    // Stamp an owner-only DACL on the temp file BEFORE the rename — NTFS
+    // preserves an explicit DACL across a same-directory rename, so the final
+    // file lands owner-only with no exposure window (#6644).
+    _stampAcl(tmpPath)
   } else {
     writeFileSync(tmpPath, data, { mode: 0o600 })
     chmodSync(tmpPath, 0o600)
   }
   try {
-    renameSync(tmpPath, filePath)
+    _rename(tmpPath, filePath)
   } catch (err) {
+    // Windows: an AV / Windows Search handle can briefly lock the destination
+    // (EPERM/EACCES/EBUSY/EEXIST). Retry once before giving up (#6644 / #4927).
+    if (onWindows && err && WIN_RENAME_RETRY_CODES.has(err.code)) {
+      try {
+        _rename(tmpPath, filePath)
+        return
+      } catch {
+        // fall through to cleanup + rethrow the original error below
+      }
+    }
     try {
       unlinkSync(tmpPath)
     } catch (cleanupErr) {

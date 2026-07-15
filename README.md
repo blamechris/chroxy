@@ -243,7 +243,7 @@ Then:
    ```
 2. In the Chroxy app, tap **"Enter manually"** and enter:
    - URL: `ws://YOUR_IP:8765`
-   - Token: the API token printed during `chroxy init` (stored in OS keychain, or `~/.chroxy/config.json` as fallback)
+   - Token: the API token printed during `chroxy init` (stored in your OS keychain — macOS Keychain / Linux libsecret / Windows DPAPI — or `~/.chroxy/config.json` as fallback)
 3. For the web dashboard, open `http://YOUR_IP:8765/dashboard?token=YOUR_TOKEN` the first time. The token query sets the dashboard auth cookie and lets the browser app open its WebSocket connection. After that, plain `/dashboard` can load the page, but reconnecting may still need the full token URL if browser storage was cleared.
 
 ### Tunnel Modes

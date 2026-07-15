@@ -7,11 +7,30 @@
  * - Windows/fallback: returns null (caller falls back to chmod 600 file)
  */
 import { execFileSync } from 'child_process'
-import { existsSync } from 'node:fs'
-import { isMac, isLinux } from './platform.js'
+import { existsSync, readFileSync, mkdirSync, unlinkSync } from 'node:fs'
+import { join } from 'node:path'
+import { homedir } from 'node:os'
+import { isMac, isLinux, isWindows, writeFileRestricted } from './platform.js'
 
 const DEFAULT_SERVICE = 'chroxy'
 const ACCOUNT = 'api-token'
+
+// -- Windows DPAPI backend (#6644) --
+// Windows has no launchd/systemd-style secret CLI, so the keychain "token"
+// (e.g. the credential-cipher data key, the API token) is protected with the
+// per-user DPAPI master key and stored under %LOCALAPPDATA%\Chroxy\. Protect/
+// Unprotect run in PowerShell with the secret passed over STDIN (never argv —
+// process args are world-readable via WMI on Windows), mirroring the Linux
+// secret-tool stdin pattern. The ciphertext file is written owner-only via
+// writeFileRestricted (icacls DACL, #6644).
+// Read LAZILY (not a module const) so tests can redirect LOCALAPPDATA to a temp
+// dir and stay hermetic, mirroring the keychain off-switch's per-call read.
+function winCredDir() {
+  return join(process.env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local'), 'Chroxy')
+}
+const WIN_POWERSHELL = `${process.env.SystemRoot || process.env.windir || 'C:\\Windows'}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`
+const PS_PROTECT = "$ErrorActionPreference='Stop';Add-Type -AssemblyName System.Security;$p=[Console]::In.ReadToEnd();$b=[Text.Encoding]::UTF8.GetBytes($p);$e=[Security.Cryptography.ProtectedData]::Protect($b,$null,'CurrentUser');[Console]::Out.Write([Convert]::ToBase64String($e))"
+const PS_UNPROTECT = "$ErrorActionPreference='Stop';Add-Type -AssemblyName System.Security;$b=[Convert]::FromBase64String(([Console]::In.ReadToEnd()).Trim());$d=[Security.Cryptography.ProtectedData]::Unprotect($b,$null,'CurrentUser');[Console]::Out.Write([Text.Encoding]::UTF8.GetString($d))"
 
 /**
  * Global off-switch for OS keychain access.
@@ -97,6 +116,10 @@ function _probeKeychainUsable() {
       return false
     }
   }
+  if (isWindows) {
+    // DPAPI is usable if a Protect→Unprotect round-trip works for this user.
+    return _probeDpapiUsable()
+  }
   return false
 }
 
@@ -148,8 +171,9 @@ export function isKeychainBroken() {
 /**
  * @typedef {object} KeychainHealth
  * @property {'usable'|'broken'|'disabled'|'unsupported'} status — keychain state.
- * @property {'keychain'|'file'} backend — where credentials are ACTUALLY stored
- *   right now (the file/env fallback whenever the keychain isn't usable).
+ * @property {'keychain'|'dpapi'|'file'} backend — where credentials are ACTUALLY
+ *   stored right now: the OS keychain (mac/linux), Windows DPAPI (#6644), or the
+ *   0600 file/env fallback whenever no secret backend is usable.
  * @property {string} detail — one-line human explanation of the status.
  * @property {string} [repairHint] — present only for `broken`: how to fix it.
  */
@@ -171,6 +195,21 @@ export function keychainHealth() {
       status: 'disabled',
       backend: 'file',
       detail: 'OS keychain disabled via CHROXY_DISABLE_KEYCHAIN — using the 0600 file/env fallback',
+    }
+  }
+  if (isWindows) {
+    // Windows uses DPAPI (per-user), not a keychain CLI (#6644).
+    if (keychainUsable()) {
+      return {
+        status: 'usable',
+        backend: 'dpapi',
+        detail: 'credentials are protected with Windows DPAPI (per-user, CurrentUser scope)',
+      }
+    }
+    return {
+      status: 'unsupported',
+      backend: 'file',
+      detail: 'Windows DPAPI/PowerShell unavailable — using the 0600 file/env fallback',
     }
   }
   if (!isMac && !isLinux) {
@@ -218,6 +257,9 @@ export function getToken(service = DEFAULT_SERVICE, account = ACCOUNT) {
   if (isLinux) {
     return _linuxGetToken(service, account)
   }
+  if (isWindows) {
+    return _winGetToken(service, account)
+  }
   return null
 }
 
@@ -257,12 +299,14 @@ export function getToken(service = DEFAULT_SERVICE, account = ACCOUNT) {
 export function getTokenStatus(service = DEFAULT_SERVICE) {
   // The explicit off-switch (tests) → 'absent': the file fallback owns identity.
   if (keychainDisabled()) return { status: 'absent', value: null, error: null }
-  // Platforms with NO keychain backend (Windows/other) → 'absent': there is no
-  // keychain that could hold an identity, so the file legitimately owns it (the
-  // documented "other platforms" contract). This must come BEFORE the broken
-  // check — `keychainUsable()` is always false on those platforms, and reporting
-  // 'error' there would wrongly block identity loading.
-  if (!isMac && !isLinux) return { status: 'absent', value: null, error: null }
+  // Platforms with NO secret backend at all → 'absent': there is nothing that
+  // could hold an identity, so the file legitimately owns it (the documented
+  // "other platforms" contract). Windows HAS a backend (DPAPI, #6644) so it is
+  // not lumped in here.
+  if (!isMac && !isLinux && !isWindows) return { status: 'absent', value: null, error: null }
+  // Windows with DPAPI/PowerShell unavailable also has no usable backend → the
+  // file owns identity, so report 'absent' (not the mac/linux broken → 'error').
+  if (isWindows && !keychainUsable()) return { status: 'absent', value: null, error: null }
   // #5615 fail-safe: on mac/linux a BROKEN/missing keychain reads as 'error',
   // NOT 'absent' — an identity caller that re-mints on 'absent' would false-MITM
   // every already-pinned client. 'error' fails safe (don't rotate) AND avoids
@@ -272,6 +316,9 @@ export function getTokenStatus(service = DEFAULT_SERVICE) {
   }
   if (isMac) {
     return _macGetTokenStatus(service)
+  }
+  if (isWindows) {
+    return _winGetTokenStatus(service)
   }
   return _linuxGetTokenStatus(service)
 }
@@ -289,6 +336,8 @@ export function setToken(token, service = DEFAULT_SERVICE) {
     _macSetToken(service, token)
   } else if (isLinux) {
     _linuxSetToken(service, token)
+  } else if (isWindows) {
+    _winSetToken(service, token)
   }
 }
 
@@ -302,6 +351,8 @@ export function deleteToken(service = DEFAULT_SERVICE) {
     _macDeleteToken(service)
   } else if (isLinux) {
     _linuxDeleteToken(service)
+  } else if (isWindows) {
+    _winDeleteToken(service)
   }
 }
 
@@ -454,5 +505,87 @@ function _linuxDeleteToken(service) {
     ], { stdio: 'pipe' })
   } catch {
     // Not found — that's fine
+  }
+}
+
+// -- Windows implementation (DPAPI via PowerShell) --
+
+// Ciphertext file for a (service, account) pair. Non-filename characters are
+// squashed so a service like `chroxy-cred-key` maps to a safe path; the pair is
+// preserved so different accounts under one service never collide.
+function _winCredFile(service, account) {
+  const safe = (s) => String(s).replace(/[^A-Za-z0-9._-]/g, '_')
+  return join(winCredDir(), `${safe(service)}__${safe(account)}.dpapi`)
+}
+
+// Run a DPAPI Protect/Unprotect. The secret (plaintext to protect, or base64
+// ciphertext to unprotect) is passed on STDIN; the result comes back on STDOUT.
+// Nothing sensitive is ever placed in argv.
+function _dpapi(script, input) {
+  return String(execFileSync(WIN_POWERSHELL, ['-NoProfile', '-NonInteractive', '-Command', script], {
+    input: Buffer.from(input, 'utf-8'),
+    encoding: 'utf-8',
+    windowsHide: true,
+    timeout: 5000,
+    stdio: ['pipe', 'pipe', 'pipe'],
+  }))
+}
+
+function _winSetToken(service, token) {
+  const cipher = _dpapi(PS_PROTECT, token).trim()
+  if (!cipher) throw new Error('DPAPI Protect returned empty ciphertext')
+  const dir = winCredDir()
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+  // Owner-only DACL is stamped by writeFileRestricted (icacls, #6644).
+  writeFileRestricted(_winCredFile(service, ACCOUNT), cipher)
+}
+
+function _winGetToken(service, account = ACCOUNT) {
+  const file = _winCredFile(service, account)
+  if (!existsSync(file)) return null
+  try {
+    const plain = _dpapi(PS_UNPROTECT, readFileSync(file, 'utf-8')).replace(/\r?\n$/, '')
+    return plain || null
+  } catch {
+    // Corrupt ciphertext, wrong user (DPAPI is per-user), or PowerShell/DPAPI
+    // unavailable → treat as unreadable (caller falls back / re-prompts).
+    return null
+  }
+}
+
+function _winGetTokenStatus(service) {
+  const file = _winCredFile(service, ACCOUNT)
+  if (!existsSync(file)) return { status: 'absent', value: null, error: null }
+  try {
+    const plain = _dpapi(PS_UNPROTECT, readFileSync(file, 'utf-8')).replace(/\r?\n$/, '')
+    return plain
+      ? { status: 'found', value: plain, error: null }
+      : { status: 'absent', value: null, error: null }
+  } catch (err) {
+    // A stored-but-unreadable entry is an ERROR (not absence): a caller that
+    // re-mints on 'absent' must fail safe here (mirrors the mac/linux contract).
+    return { status: 'error', value: null, error: (err && err.message) || 'DPAPI unprotect failed' }
+  }
+}
+
+function _winDeleteToken(service) {
+  const file = _winCredFile(service, ACCOUNT)
+  try {
+    if (existsSync(file)) unlinkSync(file)
+  } catch {
+    // Best-effort — a missing/locked file is fine.
+  }
+}
+
+// DPAPI availability probe: a round-trip of a marker string. Proves PowerShell +
+// ProtectedData are usable for THIS user before we advertise the backend.
+function _probeDpapiUsable() {
+  try {
+    const marker = 'chroxy-dpapi-probe'
+    const cipher = _dpapi(PS_PROTECT, marker).trim()
+    if (!cipher) return false
+    return _dpapi(PS_UNPROTECT, cipher).replace(/\r?\n$/, '') === marker
+  } catch {
+    return false
   }
 }

@@ -251,6 +251,7 @@ jobs:
           ./tests/windows-cmd-routing.test.js
           ./tests/resolve-binary.test.js
           ./tests/control-room-wsl.test.js
+          ./tests/keychain-windows.test.js
 
   server-lint:
     name: Server Lint

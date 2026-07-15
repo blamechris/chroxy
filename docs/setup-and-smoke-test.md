@@ -53,8 +53,9 @@ Generates an API token and writes `~/.chroxy/config.json`:
 PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy init
 ```
 
-- The token is stored in your **OS keychain** when available (macOS Keychain);
-  otherwise it lives in `config.json`. Either way `chroxy start` finds it.
+- The token is stored in your **OS keychain** when available (macOS Keychain,
+  Linux libsecret, or Windows DPAPI under `%LOCALAPPDATA%\Chroxy`); otherwise it
+  lives in `config.json`. Either way `chroxy start` finds it.
 - **Re-running `init`** on an existing setup needs `chroxy init --force` and
   **regenerates the token — which unpairs every already-paired device.** Only do
   that if you intend to re-pair everything. For a running daemon you usually want
