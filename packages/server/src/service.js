@@ -203,9 +203,11 @@ export function getWindowsAlternatives() {
  * daemon with output redirected to the log dir.
  *
  * Unlike launchd/systemd there is NO keychain to resolve here, so NOTHING
- * sensitive is written into this file or the task action: the daemon reads any
- * Windows-stored credentials from its own encrypted store at runtime (DPAPI,
- * #6644). Keeping secrets out of the task action is an explicit #6647 goal.
+ * sensitive is written into this file or the task action: the daemon reads its
+ * config/credentials from its own store at runtime (today plaintext under
+ * `~/.chroxy`; DPAPI-encrypted per-user storage is planned in #6644, and the
+ * wrapper runs AS the user so those creds will be reachable once it lands).
+ * Keeping secrets out of the task action is an explicit #6647 goal.
  *
  * @param {object} config
  * @param {string} config.nodePath - Resolved node binary path.
@@ -656,9 +658,10 @@ export function installService(config) {
  *
  * ONLOGON + `/IT` (vs `/SC ONSTART` with `/RU SYSTEM`) is deliberate: Chroxy is a
  * per-user dev daemon. Running at boot as SYSTEM would start it before anyone
- * logs on, with no access to the user's DPAPI credential store (#6644) and no
- * interactive session — wrong for this workload. The trade-off (daemon starts at
- * logon, not boot) is documented for the user in `service-cmd.js`.
+ * logs on, as SYSTEM rather than the user — no interactive session, and (once
+ * per-user credential encryption lands, DPAPI, #6644) no access to the user's
+ * credentials — wrong for this workload. The trade-off (daemon starts at logon,
+ * not boot) is documented for the user in `service-cmd.js`.
  *
  * NOTE: creating an ONLOGON task requires an elevated (Administrator) token —
  * a non-elevated `schtasks /Create /SC ONLOGON` fails with "Access is denied."
