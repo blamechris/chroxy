@@ -2,7 +2,7 @@
  * InputBar tests (#1162)
  */
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { render, screen, fireEvent, cleanup, waitFor, act } from '@testing-library/react'
+import { render, screen, fireEvent, cleanup, waitFor, act, createEvent } from '@testing-library/react'
 import { useState } from 'react'
 import { InputBar } from './InputBar'
 import type { EvaluatorResultPayload } from '../store/types'
@@ -2420,8 +2420,8 @@ describe('InputBar — thinking-keyword highlight overlay (#4306)', () => {
   })
 })
 
-// #5610 — push-to-talk (hold Space to dictate).
-describe('InputBar push-to-talk (#5610)', () => {
+// #5668 — voice input must not intercept Space in the message textarea.
+describe('InputBar voice shortcut (#5668)', () => {
   // Controlled wrapper so we can read the textarea value back after the
   // component's setValue() flows through React. Mirrors how App.tsx drives
   // InputBar (controlledValue + onValueChange for per-session drafts).
@@ -2461,181 +2461,250 @@ describe('InputBar push-to-talk (#5610)', () => {
     vi.useRealTimers()
   })
 
-  it('a quick tap of Space types a normal space and does NOT start recording', () => {
-    vi.useFakeTimers()
+  it('leaves Space keydown native even when voice is available', () => {
     const voice = makeVoice()
     render(<ControlledBar voiceInput={voice} initial="hi" />)
     const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
-    // Caret at end.
     textarea.setSelectionRange(2, 2)
 
-    fireEvent.keyDown(textarea, { key: ' ' })
-    // Released well before the 300ms threshold.
-    act(() => { vi.advanceTimersByTime(100) })
-    fireEvent.keyUp(textarea, { key: ' ' })
+    const event = createEvent.keyDown(textarea, { key: ' ' })
+    fireEvent(textarea, event)
 
+    expect(event.defaultPrevented).toBe(false)
     expect(voice.start).not.toHaveBeenCalled()
-    expect(textarea.value).toBe('hi ')
+    expect(voice.stop).not.toHaveBeenCalled()
   })
 
-  it('holding Space past the threshold starts recording', () => {
-    vi.useFakeTimers()
+  it('does not start or stop voice on a held Space sequence', () => {
     const voice = makeVoice()
     render(<ControlledBar voiceInput={voice} initial="hi" />)
     const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
     textarea.setSelectionRange(2, 2)
 
     fireEvent.keyDown(textarea, { key: ' ' })
-    act(() => { vi.advanceTimersByTime(300) })
-
-    expect(voice.start).toHaveBeenCalledTimes(1)
-    // The held Space must not have flooded the field.
-    expect(textarea.value).toBe('hi')
-  })
-
-  it('does not flood the field with spaces while recording (key-repeat suppressed)', () => {
-    vi.useFakeTimers()
-    const voice = makeVoice()
-    render(<ControlledBar voiceInput={voice} initial="" />)
-    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
-
-    fireEvent.keyDown(textarea, { key: ' ' })
-    act(() => { vi.advanceTimersByTime(300) })
-    // Browser key-repeat fires more keydowns while the key stays held.
-    fireEvent.keyDown(textarea, { key: ' ' })
-    fireEvent.keyDown(textarea, { key: ' ' })
-    fireEvent.keyDown(textarea, { key: ' ' })
-
-    expect(voice.start).toHaveBeenCalledTimes(1)
-    expect(textarea.value).toBe('')
-  })
-
-  it('pressing another key during the arm window cancels PTT and re-inserts the space', () => {
-    vi.useFakeTimers()
-    const voice = makeVoice()
-    render(<ControlledBar voiceInput={voice} initial="" />)
-    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
-
-    fireEvent.keyDown(textarea, { key: ' ' })
-    // User starts typing before the threshold — they meant a real space + char.
-    act(() => { vi.advanceTimersByTime(100) })
-    fireEvent.keyDown(textarea, { key: 'a' })
-    // Let any (cancelled) timer elapse.
-    act(() => { vi.advanceTimersByTime(300) })
+    fireEvent.keyUp(textarea, { key: ' ' })
 
     expect(voice.start).not.toHaveBeenCalled()
-    // The suppressed space was re-inserted; the 'a' itself is delivered by the
-    // browser's native input (jsdom doesn't synthesise it from keyDown), so we
-    // only assert the space came back.
-    expect(textarea.value).toBe(' ')
+    expect(voice.stop).not.toHaveBeenCalled()
   })
 
-  it('releasing Space while recording stops capture', () => {
+  it('holding Control past the threshold starts voice at the caret and releasing stops it', () => {
     vi.useFakeTimers()
-    const voice = makeVoice()
-    render(<ControlledBar voiceInput={voice} initial="" />)
-    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
-
-    fireEvent.keyDown(textarea, { key: ' ' })
-    act(() => { vi.advanceTimersByTime(300) })
-    expect(voice.start).toHaveBeenCalledTimes(1)
-
-    fireEvent.keyUp(textarea, { key: ' ' })
-    expect(voice.stop).toHaveBeenCalledTimes(1)
-  })
-
-  it('inserts the transcript at the caret anchor captured when the hold began', () => {
-    vi.useFakeTimers()
-    // Drive the real lifecycle: start() flips isRecording true, and only then
-    // does a transcript arrive. The anchor is the caret at the arming keydown,
-    // so the transcript must splice there rather than append at the end.
+    const start = vi.fn()
+    const stop = vi.fn()
+    let captured = 'foobar'
     const { rerender } = render(
       <InputBar
         onSend={vi.fn()}
         onInterrupt={vi.fn()}
-        controlledValue="foobar"
-        onValueChange={() => {}}
-        voiceInput={makeVoice()}
+        controlledValue={captured}
+        onValueChange={v => { captured = v }}
+        voiceInput={makeVoice({ start })}
       />,
     )
     const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
-    // Caret in the middle: "foo|bar".
     textarea.setSelectionRange(3, 3)
 
-    const voiceRecording = makeVoice({ isRecording: true, transcript: 'hello world' })
-    // Hold past the threshold (still on the non-recording voiceInput) to set
-    // the anchor at index 3, then re-render as the hook would once recording
-    // is live and the first transcript chunk has streamed in.
-    fireEvent.keyDown(textarea, { key: ' ' })
-    act(() => { vi.advanceTimersByTime(300) })
+    fireEvent.keyDown(textarea, { key: 'Control', ctrlKey: true })
+    act(() => { vi.advanceTimersByTime(249) })
+    expect(start).not.toHaveBeenCalled()
 
-    let captured = 'foobar'
+    act(() => { vi.advanceTimersByTime(1) })
+    expect(start).toHaveBeenCalledTimes(1)
+
     rerender(
       <InputBar
         onSend={vi.fn()}
         onInterrupt={vi.fn()}
         controlledValue={captured}
         onValueChange={v => { captured = v }}
-        voiceInput={voiceRecording}
+        voiceInput={makeVoice({ isRecording: true, transcript: 'hello world', stop })}
       />,
     )
-
-    // The transcript is spliced *in place* at the anchor (index 3): the prefix
-    // "foo" and the suffix "bar" both survive, with the transcript in between.
     expect(captured).toBe('foo hello world bar')
+
+    fireEvent.keyUp(textarea, { key: 'Control' })
+    expect(stop).toHaveBeenCalledTimes(1)
   })
 
-  it('cleans up the open mic when the input loses focus mid-recording', () => {
+  it('releasing Control before the threshold cancels push-to-talk', () => {
     vi.useFakeTimers()
     const voice = makeVoice()
     render(<ControlledBar voiceInput={voice} initial="" />)
     const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
 
-    fireEvent.keyDown(textarea, { key: ' ' })
-    act(() => { vi.advanceTimersByTime(300) })
-    expect(voice.start).toHaveBeenCalledTimes(1)
+    fireEvent.keyDown(textarea, { key: 'Control', ctrlKey: true })
+    act(() => { vi.advanceTimersByTime(100) })
+    fireEvent.keyUp(textarea, { key: 'Control' })
+    act(() => { vi.advanceTimersByTime(250) })
 
-    fireEvent.blur(textarea)
-    expect(voice.stop).toHaveBeenCalledTimes(1)
+    expect(voice.start).not.toHaveBeenCalled()
+    expect(voice.stop).not.toHaveBeenCalled()
   })
 
-  it('stops the mic on unmount mid-recording using the latest stop (not a stale closure)', () => {
+  it('pressing another key during a Control hold cancels the arm and preserves the shortcut key event', () => {
     vi.useFakeTimers()
-    // The engine — and therefore the memoised stop — is selected after mount,
-    // so the unmount cleanup must call the *current* stop, not the one captured
-    // on the first render. Re-render with a fresh stop before unmounting and
-    // assert that one is invoked.
-    const firstStop = vi.fn()
+    const voice = makeVoice()
+    render(<ControlledBar voiceInput={voice} initial="" />)
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+
+    fireEvent.keyDown(textarea, { key: 'Control', ctrlKey: true })
+    const event = createEvent.keyDown(textarea, { key: 'a', ctrlKey: true })
+    fireEvent(textarea, event)
+    act(() => { vi.advanceTimersByTime(250) })
+
+    expect(event.defaultPrevented).toBe(false)
+    expect(voice.start).not.toHaveBeenCalled()
+    expect(voice.stop).not.toHaveBeenCalled()
+  })
+
+  it('Control key-repeat while arming does not restart the timer or double-arm', () => {
+    vi.useFakeTimers()
     const start = vi.fn()
-    const { rerender, unmount } = render(
+    render(<ControlledBar voiceInput={makeVoice({ start })} initial="" />)
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+
+    fireEvent.keyDown(textarea, { key: 'Control', ctrlKey: true })
+    act(() => { vi.advanceTimersByTime(100) })
+    // Browser key-repeat fires more Control keydowns while held — must NOT re-arm.
+    fireEvent.keyDown(textarea, { key: 'Control', ctrlKey: true })
+    fireEvent.keyDown(textarea, { key: 'Control', ctrlKey: true })
+    act(() => { vi.advanceTimersByTime(150) }) // 250ms total from the FIRST keydown
+
+    expect(start).toHaveBeenCalledTimes(1)
+  })
+
+  it('a non-Control keydown while a Control-hold recording is live stops capture', () => {
+    vi.useFakeTimers()
+    const start = vi.fn()
+    const stop = vi.fn()
+    render(<ControlledBar voiceInput={makeVoice({ start, stop })} initial="" />)
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+
+    fireEvent.keyDown(textarea, { key: 'Control', ctrlKey: true })
+    act(() => { vi.advanceTimersByTime(250) })
+    expect(start).toHaveBeenCalledTimes(1)
+
+    fireEvent.keyDown(textarea, { key: 'a' })
+    expect(stop).toHaveBeenCalledTimes(1)
+  })
+
+  it('blur while a Control-hold recording is live stops capture (no stuck mic)', () => {
+    vi.useFakeTimers()
+    const start = vi.fn()
+    const stop = vi.fn()
+    render(<ControlledBar voiceInput={makeVoice({ start, stop })} initial="" />)
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+
+    fireEvent.keyDown(textarea, { key: 'Control', ctrlKey: true })
+    act(() => { vi.advanceTimersByTime(250) })
+    expect(start).toHaveBeenCalledTimes(1)
+
+    fireEvent.blur(textarea)
+    expect(stop).toHaveBeenCalledTimes(1)
+  })
+
+  it('unmounting while a Control-hold recording is live stops capture', () => {
+    vi.useFakeTimers()
+    const start = vi.fn()
+    const stop = vi.fn()
+    const { unmount } = render(<ControlledBar voiceInput={makeVoice({ start, stop })} initial="" />)
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+
+    fireEvent.keyDown(textarea, { key: 'Control', ctrlKey: true })
+    act(() => { vi.advanceTimersByTime(250) })
+    expect(start).toHaveBeenCalledTimes(1)
+
+    unmount()
+    expect(stop).toHaveBeenCalledTimes(1)
+  })
+
+  it('a pointer press during a Control hold cancels the arm (macOS Ctrl+click gesture)', () => {
+    vi.useFakeTimers()
+    const voice = makeVoice()
+    render(<ControlledBar voiceInput={voice} initial="" />)
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+
+    // Control down (arming), then a mouse press with no intervening keydown —
+    // the Ctrl+click / right-click gesture. It must cancel the arm, not record.
+    fireEvent.keyDown(textarea, { key: 'Control', ctrlKey: true })
+    fireEvent.mouseDown(textarea)
+    act(() => { vi.advanceTimersByTime(250) })
+
+    expect(voice.start).not.toHaveBeenCalled()
+    expect(voice.stop).not.toHaveBeenCalled()
+  })
+
+  it('a pointer press stops a live Control-hold recording', () => {
+    vi.useFakeTimers()
+    const start = vi.fn()
+    const stop = vi.fn()
+    render(<ControlledBar voiceInput={makeVoice({ start, stop })} initial="" />)
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+
+    fireEvent.keyDown(textarea, { key: 'Control', ctrlKey: true })
+    act(() => { vi.advanceTimersByTime(250) })
+    expect(start).toHaveBeenCalledTimes(1)
+
+    fireEvent.mouseDown(textarea)
+    expect(stop).toHaveBeenCalledTimes(1)
+  })
+
+  it('Ctrl+Shift+M cancels a pending Control hold and still toggles voice', () => {
+    vi.useFakeTimers()
+    const voice = makeVoice()
+    render(<ControlledBar voiceInput={voice} initial="" />)
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+
+    fireEvent.keyDown(textarea, { key: 'Control', ctrlKey: true })
+    fireEvent.keyDown(textarea, { key: 'Shift', ctrlKey: true, shiftKey: true })
+    act(() => { vi.advanceTimersByTime(250) })
+    expect(voice.start).not.toHaveBeenCalled()
+
+    fireEvent.keyDown(textarea, { key: 'M', ctrlKey: true, shiftKey: true })
+    expect(voice.start).toHaveBeenCalledTimes(1)
+  })
+
+  it('Cmd+Shift+M starts voice and inserts the transcript at the caret anchor', () => {
+    const voice = makeVoice()
+    let captured = 'foobar'
+    const { rerender } = render(
       <InputBar
         onSend={vi.fn()}
         onInterrupt={vi.fn()}
-        controlledValue=""
-        onValueChange={() => {}}
-        voiceInput={{ isRecording: false, isAvailable: true, transcript: '', error: null, start, stop: firstStop }}
+        controlledValue={captured}
+        onValueChange={v => { captured = v }}
+        voiceInput={voice}
       />,
     )
     const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
-    fireEvent.keyDown(textarea, { key: ' ' })
-    act(() => { vi.advanceTimersByTime(300) })
-    expect(start).toHaveBeenCalledTimes(1)
+    textarea.setSelectionRange(3, 3)
 
-    // Engine selected → a new memoised stop replaces the original.
-    const latestStop = vi.fn()
+    fireEvent.keyDown(textarea, { key: 'm', metaKey: true, shiftKey: true })
+    expect(voice.start).toHaveBeenCalledTimes(1)
+
     rerender(
       <InputBar
         onSend={vi.fn()}
         onInterrupt={vi.fn()}
-        controlledValue=""
-        onValueChange={() => {}}
-        voiceInput={{ isRecording: true, isAvailable: true, transcript: '', error: null, start, stop: latestStop }}
+        controlledValue={captured}
+        onValueChange={v => { captured = v }}
+        voiceInput={makeVoice({ isRecording: true, transcript: 'hello world' })}
       />,
     )
 
-    unmount()
-    expect(firstStop).not.toHaveBeenCalled()
-    expect(latestStop).toHaveBeenCalledTimes(1)
+    expect(captured).toBe('foo hello world bar')
+  })
+
+  it('Ctrl+Shift+M also starts voice for non-mac keyboards', () => {
+    const start = vi.fn()
+    const voice = makeVoice({ start })
+    render(<ControlledBar voiceInput={voice} initial="" />)
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+
+    fireEvent.keyDown(textarea, { key: 'M', ctrlKey: true, shiftKey: true })
+
+    expect(start).toHaveBeenCalledTimes(1)
   })
 
   // #5668 — a voice failure must be surfaced, not flipped off silently.
@@ -2667,132 +2736,37 @@ describe('InputBar push-to-talk (#5610)', () => {
     expect(alert).toHaveTextContent('Microphone access was denied.')
   })
 
-  it('does not arm PTT when voice is unavailable (Space types normally)', () => {
-    vi.useFakeTimers()
+  it('does not consume the voice shortcut when voice is unavailable', () => {
     const voice = makeVoice({ isAvailable: false })
     render(<ControlledBar voiceInput={voice} initial="hi" />)
     const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
-    textarea.setSelectionRange(2, 2)
 
-    fireEvent.keyDown(textarea, { key: ' ' })
-    act(() => { vi.advanceTimersByTime(300) })
+    const event = createEvent.keyDown(textarea, { key: 'm', metaKey: true, shiftKey: true })
+    fireEvent(textarea, event)
 
-    expect(voice.start).not.toHaveBeenCalled()
-    // preventDefault was never called, so the native space falls through —
-    // jsdom doesn't synthesise the character from keyDown, but the important
-    // contract is that we didn't suppress it or start recording.
-  })
-
-  it('Space with a modifier does not arm PTT', () => {
-    vi.useFakeTimers()
-    const voice = makeVoice()
-    render(<ControlledBar voiceInput={voice} initial="" />)
-    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
-
-    fireEvent.keyDown(textarea, { key: ' ', ctrlKey: true })
-    act(() => { vi.advanceTimersByTime(300) })
-
+    expect(event.defaultPrevented).toBe(false)
     expect(voice.start).not.toHaveBeenCalled()
   })
 
-  // #5666 — fast typing must never hit the suppress-then-reinsert path that
-  // races overlapping keystrokes and reorders characters around spaces.
-  describe('typing-cadence guard (#5666)', () => {
-    it('a Space typed right after another key takes the native path (no arm, no programmatic splice)', () => {
-      vi.useFakeTimers()
-      const nowSpy = vi.spyOn(performance, 'now')
-      const voice = makeVoice()
-      const onValueChange = vi.fn()
-      render(
-        <InputBar
-          onSend={vi.fn()}
-          onInterrupt={vi.fn()}
-          controlledValue="hello"
-          onValueChange={onValueChange}
-          voiceInput={voice}
-        />,
-      )
-      const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
-      textarea.setSelectionRange(5, 5)
-
-      // A letter at t=1000, then Space 100ms later — well inside the 250ms
-      // typing window, so the user is clearly typing words, not holding to talk.
-      nowSpy.mockReturnValue(1000)
-      fireEvent.keyDown(textarea, { key: 'o' })
-      nowSpy.mockReturnValue(1100)
-      fireEvent.keyDown(textarea, { key: ' ' })
-      act(() => { vi.advanceTimersByTime(300) })
-
-      // Never armed → never started recording.
-      expect(voice.start).not.toHaveBeenCalled()
-      // Native path → we never programmatically spliced a space (which is what
-      // raced the fast keystrokes in #5625). onValueChange is only called by the
-      // deferred re-insert, so it must not have fired.
-      expect(onValueChange).not.toHaveBeenCalled()
-      nowSpy.mockRestore()
-    })
-
-    it('a navigation key (Arrow) right before a Space hold does NOT block PTT (caret-anchored dictation)', () => {
-      vi.useFakeTimers()
-      const nowSpy = vi.spyOn(performance, 'now')
-      const voice = makeVoice()
-      render(<ControlledBar voiceInput={voice} initial="hello world" />)
-      const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
-      textarea.setSelectionRange(11, 11)
-
-      // Arrow the caret into place, then immediately (0ms later) hold Space to
-      // dictate at that caret. Arrow is not text typing, so it must not poison
-      // the cadence guard — PTT must still arm.
-      nowSpy.mockReturnValue(1000)
-      fireEvent.keyDown(textarea, { key: 'ArrowLeft' })
-      nowSpy.mockReturnValue(1000)
-      fireEvent.keyDown(textarea, { key: ' ' })
-      act(() => { vi.advanceTimersByTime(300) })
-
-      expect(voice.start).toHaveBeenCalledTimes(1)
-      nowSpy.mockRestore()
-    })
-
-    it('a deliberate Space hold after a typing pause still arms PTT', () => {
-      vi.useFakeTimers()
-      const nowSpy = vi.spyOn(performance, 'now')
-      const voice = makeVoice()
-      render(<ControlledBar voiceInput={voice} initial="hi" />)
-      const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
-      textarea.setSelectionRange(2, 2)
-
-      // Last key at t=1000; the Space comes 400ms later — past the guard, so a
-      // hold is a genuine push-to-talk gesture and must still arm.
-      nowSpy.mockReturnValue(1000)
-      fireEvent.keyDown(textarea, { key: 'i' })
-      nowSpy.mockReturnValue(1400)
-      fireEvent.keyDown(textarea, { key: ' ' })
-      act(() => { vi.advanceTimersByTime(300) })
-
-      expect(voice.start).toHaveBeenCalledTimes(1)
-      expect(textarea.value).toBe('hi')
-      nowSpy.mockRestore()
-    })
-  })
-
-  // #5668 — a Space hold landing on top of an already-running (button-started)
-  // recording must not arm PTT: arming would let the later release stop a
-  // recording PTT never started, and re-enter start() (wiping the transcript).
-  it('does not arm PTT when a recording is already in progress, and release does not stop it (#5668)', () => {
-    vi.useFakeTimers()
+  it('voice shortcut stops an existing recording without re-starting it', () => {
     const start = vi.fn()
     const stop = vi.fn()
     const voice = makeVoice({ isRecording: true, start, stop })
     render(<ControlledBar voiceInput={voice} initial="" />)
     const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
 
-    fireEvent.keyDown(textarea, { key: ' ' })
-    act(() => { vi.advanceTimersByTime(300) })
-    fireEvent.keyUp(textarea, { key: ' ' })
+    fireEvent.keyDown(textarea, { key: 'm', metaKey: true, shiftKey: true })
 
-    // PTT never armed → never re-invoked start() and never stopped the button
-    // recording on release.
     expect(start).not.toHaveBeenCalled()
-    expect(stop).not.toHaveBeenCalled()
+    expect(stop).toHaveBeenCalledTimes(1)
+  })
+
+  it('mic button exposes the voice keyboard shortcut metadata', () => {
+    const voice = makeVoice()
+    render(<ControlledBar voiceInput={voice} initial="" />)
+    const button = screen.getByTestId('mic-button')
+
+    expect(button).toHaveAttribute('aria-keyshortcuts', 'Control Meta+Shift+M Control+Shift+M')
+    expect(button).toHaveAttribute('title', 'Hold Control to dictate, or Cmd/Ctrl+Shift+M to toggle')
   })
 })
