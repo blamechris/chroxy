@@ -353,6 +353,8 @@ This binds the server locally and prints a **token-gated dashboard URL**. With `
 
 Download the latest MSI from the [Releases page](https://github.com/blamechris/chroxy/releases/latest) and double-click to install. WebView2 is preinstalled on Windows 11; on Windows 10, install it once from https://developer.microsoft.com/microsoft-edge/webview2/.
 
+**Prerequisite — Node.js 22.** The MSI bundles the Chroxy server but **not** a Node runtime, so the tray launches the server with your **system Node** (discovered from `%ProgramFiles%\nodejs`, nvm-windows, or `PATH`). Install it first — `winget install OpenJS.NodeJS.LTS` — otherwise the tray window opens but the server won't start (you'll see a "Node not found" message; install Node 22+ and use the tray's Start/Restart).
+
 ### Desktop tray app — build from source
 
 Only needed if you want to compile locally:
