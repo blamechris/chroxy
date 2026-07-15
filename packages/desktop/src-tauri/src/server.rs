@@ -1106,7 +1106,23 @@ impl ServerManager {
     pub fn stop(&mut self) {
         self.user_stopped.store(true, Ordering::Relaxed);
         self.auto_restart_pending.store(false, Ordering::Relaxed);
+        // #6645 — the node server owns cloudflared as a GRANDCHILD. kill_child
+        // only signals the direct child (TerminateProcess on Windows gives it no
+        // cleanup window), so the server's own tunnel.stop() never runs and
+        // cloudflared is orphaned — the public *.trycloudflare.com URL then
+        // outlives the app. kill_orphan_cloudflared previously ran ONLY on
+        // start(), so an orphaned tunnel stayed live between quit and next
+        // launch. Reap it here too (this covers user-stop, window close/exit,
+        // and Drop, which all route through stop()). Only when a child actually
+        // existed — a childless stop() (e.g. unit tests, or stop with no server
+        // running) must NOT spawn a process scan or risk killing an unrelated
+        // cloudflared. No-op when the server already stopped its own tunnel
+        // (graceful POSIX shutdown).
+        let had_child = self.child.is_some();
         self.stop_process();
+        if had_child {
+            Self::kill_orphan_cloudflared(self.config.port, &self.log_buffer);
+        }
     }
 
     /// Restart: stop then start (resets auto-restart state via start()).
