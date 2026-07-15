@@ -12,7 +12,7 @@ export function registerServiceCommand(program) {
 
   serviceCmd
     .command('install')
-    .description('Register Chroxy as a system daemon (launchd/systemd)')
+    .description('Register Chroxy as a system daemon (launchd / systemd / Windows Task Scheduler)')
     .option('--cwd <path>', 'Working directory for Claude sessions')
     .option('--start-at-login', 'Start automatically on login')
     .action(async (options) => {

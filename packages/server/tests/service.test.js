@@ -289,6 +289,25 @@ describe('service', () => {
       assert.ok(loadServiceState(stateDir))
     })
 
+    it('install surfaces schtasks stderr + an elevation hint when /Create is denied (#6647)', () => {
+      // Creating an ONLOGON task requires elevation; a non-elevated schtasks
+      // /Create fails "Access is denied." — surface it, not a bare "Command failed".
+      const failingExec = () => {
+        const e = new Error('Command failed: schtasks /Create ...')
+        e.stderr = 'ERROR: Access is denied.'
+        throw e
+      }
+      assert.throws(
+        () => installService({
+          nodePath: 'C:\\node.exe', chroxyBin: 'C:\\cli.js',
+          _platform: 'win32', _stateDir: join(tmpDir, 'state-denied'),
+          _logDir: join(tmpDir, 'l-denied'), _wrapperPath: join(tmpDir, 'state-denied', 'w.cmd'),
+          _exec: failingExec,
+        }),
+        (err) => /Access is denied/i.test(err.message) && /Administrator/i.test(err.message),
+      )
+    })
+
     it('start runs the scheduled task (schtasks /Run)', () => {
       const { calls, exec } = spy()
       const r = startService({ _platform: 'win32', _exec: exec })
@@ -342,6 +361,8 @@ describe('service', () => {
       assert.match(w, /cd \/d "C:\\work"/)
       assert.match(w, /"C:\\nodejs\\node\.exe" "C:\\chroxy\\cli\.js" start >> "C:\\logs\\chroxy-stdout\.log" 2>> "C:\\logs\\chroxy-stderr\.log"/)
       assert.doesNotMatch(w, /security|token|password/i, 'no secret material in the wrapper')
+      assert.ok(w.includes('\r\n'), 'CRLF line endings for a generated .cmd')
+      assert.doesNotMatch(w, /[^\x00-\x7F]/, 'ASCII-only (cmd.exe OEM code page renders non-ASCII as garbage)')
     })
   })
 
