@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { UserShellSession } from '../src/user-shell-session.js'
+import { UserShellSession, resolveShell } from '../src/user-shell-session.js'
 import { getProvider, validateProviderClass } from '../src/providers.js'
 
 /**
@@ -61,6 +61,61 @@ describe('UserShellSession — class contract (#5983)', () => {
     const s = new UserShellSession({ cwd: '/tmp' })
     assert.equal(s.sendMessage('hi'), false)
     assert.equal(s.interrupt(), false)
+  })
+})
+
+describe('resolveShell (#6646)', () => {
+  const WIN_PS = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
+
+  it('POSIX: honours $SHELL when it exists', () => {
+    assert.equal(
+      resolveShell({ platform: 'linux', env: { SHELL: '/usr/bin/fish' }, exists: (p) => p === '/usr/bin/fish' }),
+      '/usr/bin/fish',
+    )
+  })
+
+  it('POSIX: falls back through zsh/bash/sh, then /bin/sh as last resort', () => {
+    assert.equal(
+      resolveShell({ platform: 'linux', env: {}, exists: (p) => p === '/bin/bash' }),
+      '/bin/bash',
+    )
+    assert.equal(
+      resolveShell({ platform: 'linux', env: {}, exists: () => false }),
+      '/bin/sh',
+    )
+  })
+
+  it('Windows: prefers Windows PowerShell 5.1 at the fixed System32 path', () => {
+    assert.equal(
+      resolveShell({ platform: 'win32', env: { SystemRoot: 'C:\\Windows' }, exists: (p) => p === WIN_PS }),
+      WIN_PS,
+    )
+  })
+
+  it('Windows: an explicit $SHELL that exists wins (pin pwsh.exe)', () => {
+    const pwsh = 'C:\\Program Files\\PowerShell\\7\\pwsh.exe'
+    assert.equal(
+      resolveShell({ platform: 'win32', env: { SHELL: pwsh, SystemRoot: 'C:\\Windows' }, exists: (p) => p === pwsh }),
+      pwsh,
+    )
+  })
+
+  it('Windows: falls back to COMSPEC/cmd.exe (defaultShell) when PowerShell is absent', () => {
+    const cmd = 'C:\\Windows\\System32\\cmd.exe'
+    assert.equal(
+      resolveShell({ platform: 'win32', env: { SystemRoot: 'C:\\Windows', COMSPEC: cmd }, exists: () => false }),
+      cmd,
+    )
+    assert.equal(
+      resolveShell({ platform: 'win32', env: {}, exists: () => false }),
+      'cmd.exe',
+      'bare cmd.exe when COMSPEC is unset',
+    )
+  })
+
+  it('never returns a POSIX /bin path on Windows (the #6646 spawn-failure regression)', () => {
+    const resolved = resolveShell({ platform: 'win32', env: { SystemRoot: 'C:\\Windows' }, exists: (p) => p === WIN_PS })
+    assert.doesNotMatch(resolved, /^\/bin\//, 'a /bin/* shell would fail node-pty spawn on Windows')
   })
 })
 
@@ -141,8 +196,9 @@ describe('UserShellSession — lifecycle (#5983)', () => {
     assert.equal(typeof s.start, 'function')
   })
 
-  it('destroy SIGTERMs the live PTY, clears timers, and stops being runnable', () => {
+  it('destroy (POSIX) SIGTERMs the live PTY, clears timers, and stops being runnable', () => {
     const s = makeLiveShell()
+    s._isWindowsOverride = false // force the POSIX branch regardless of test host
     const term = s._term
     s.destroy()
     assert.deepEqual(term._calls.kill, ['SIGTERM'])
@@ -152,12 +208,33 @@ describe('UserShellSession — lifecycle (#5983)', () => {
     assert.equal(s._mirrorTimer, null)
   })
 
-  it('destroy after exit does not double-kill', () => {
+  it('destroy (Windows) reaps the whole tree via taskkill, no SIGTERM/grace timer (#6646)', () => {
     const s = makeLiveShell()
+    s._isWindowsOverride = true // force the Windows branch regardless of test host
+    const treeKills = []
+    s._killProcessTree = (t, opts) => treeKills.push({ pid: t.pid, opts })
     const term = s._term
-    s._onShellExit({ exitCode: 0 }, 'exit')
     s.destroy()
-    assert.equal(term._calls.kill.length, 0, 'no SIGTERM — PTY already exited')
+    assert.deepEqual(treeKills, [{ pid: 4242, opts: { force: true } }],
+      'the whole descendant tree is force-reaped in one taskkill /T /F')
+    assert.deepEqual(term._calls.kill, [], 'no direct SIGTERM/SIGKILL — the tree-kill is the teardown')
+    assert.equal(s._killTimer, null, 'no POSIX grace-escalation timer on Windows')
+    assert.equal(s._term, null)
+    assert.equal(s._shellAlive, false)
+  })
+
+  it('destroy after exit does not double-kill (either platform)', () => {
+    for (const onWindows of [false, true]) {
+      const s = makeLiveShell()
+      s._isWindowsOverride = onWindows
+      const treeKills = []
+      s._killProcessTree = (t) => treeKills.push(t.pid)
+      const term = s._term
+      s._onShellExit({ exitCode: 0 }, 'exit')
+      s.destroy()
+      assert.equal(term._calls.kill.length, 0, 'no signal — PTY already exited')
+      assert.equal(treeKills.length, 0, 'no taskkill — PTY already exited')
+    }
   })
 
   describe('_buildShellEnv secret stripping (#6311)', () => {

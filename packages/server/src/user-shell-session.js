@@ -18,6 +18,7 @@ import { realpathSync, existsSync } from 'fs'
 import { USER_SHELL_PROVIDER } from '@chroxy/protocol'
 import { BaseSession, buildBaseSessionOpts } from './base-session.js'
 import { createLogger } from './logger.js'
+import { isWindows, defaultShell, killProcessTree } from './platform.js'
 import { CHROXY_SECRET_DENYLIST } from './utils/spawn-env.js'
 
 const log = createLogger('user-shell-session')
@@ -31,17 +32,43 @@ const MIRROR_FLUSH_MS = 50
 // SIGTERM → grace → SIGKILL the process group on destroy.
 const DESTROY_GRACE_MS = 3000
 
+// Windows PowerShell 5.1 ships in-box at this fixed System32 path on every
+// Windows install (the `v1.0` dir name is a historical constant, not the PS
+// version). Preferred over cmd.exe for a real interactive terminal.
+const WIN_POWERSHELL_RELATIVE = 'System32\\WindowsPowerShell\\v1.0\\powershell.exe'
+
 /**
- * Resolve the shell to spawn: `$SHELL` if it exists, then common fallbacks.
- * Returns the first path that exists; if none do (a truly unusual host), falls
- * back to `/bin/sh` as a last resort — start() then surfaces a clean spawn error
- * if that path is also missing.
+ * Resolve the interactive shell to spawn.
+ *
+ * POSIX: `$SHELL` if it exists, then `/bin/zsh|bash|sh`, then `/bin/sh` as a
+ * last resort (start() surfaces a clean spawn error if even that is missing).
+ *
+ * Windows (#6646): the POSIX candidates never exist, so the old code returned
+ * `/bin/sh` and node-pty's spawn always failed — the embedded shell never
+ * launched. Prefer a real interactive shell instead: an explicit `$SHELL` that
+ * exists wins (lets a user pin e.g. `pwsh.exe`), then Windows PowerShell 5.1 at
+ * its fixed System32 path, then `defaultShell()` (COMSPEC/cmd.exe).
+ *
+ * `platform`/`env`/`exists` are injectable so both platform branches are
+ * unit-testable on any CI host — the Windows path can't rely on a Windows
+ * runner being present. Production callers pass no args.
  */
-function resolveShell() {
-  const shell = process.env.SHELL
-  if (typeof shell === 'string' && shell && existsSync(shell)) return shell
+export function resolveShell({
+  platform = process.platform,
+  env = process.env,
+  exists = existsSync,
+} = {}) {
+  const shell = env.SHELL
+  if (platform === 'win32') {
+    if (typeof shell === 'string' && shell && exists(shell)) return shell
+    const systemRoot = env.SystemRoot || env.windir || 'C:\\Windows'
+    const winPowerShell = `${systemRoot}\\${WIN_POWERSHELL_RELATIVE}`
+    if (exists(winPowerShell)) return winPowerShell
+    return defaultShell({ platform, env })
+  }
+  if (typeof shell === 'string' && shell && exists(shell)) return shell
   for (const cand of ['/bin/zsh', '/bin/bash', '/bin/sh']) {
-    if (existsSync(cand)) return cand
+    if (exists(cand)) return cand
   }
   return '/bin/sh'
 }
@@ -99,6 +126,9 @@ export class UserShellSession extends BaseSession {
     this._mirrorTimer = null
     this._terminalMirrorActive = false
     this._killTimer = null
+    // Windows tree-reaper for destroy() (taskkill /T /F). Injectable so a test
+    // can assert the Windows branch without spawning a real taskkill (#6646).
+    this._killProcessTree = killProcessTree
   }
 
   /**
@@ -351,10 +381,19 @@ export class UserShellSession extends BaseSession {
   }
 
   /**
-   * Kill the PTY (no respawn) and clear all timers. SIGTERM, then after a grace
-   * window SIGKILL the whole process group so backgrounded jobs die too. The
-   * liveness probe + _ptyExited latch narrow escalation to a genuinely-hung
-   * shell (never a recycled pid).
+   * Kill the PTY (no respawn) and clear all timers.
+   *
+   * POSIX: SIGTERM, then after a grace window SIGKILL the whole process GROUP so
+   * backgrounded jobs die too. The liveness probe + `_ptyExited` latch narrow
+   * escalation to a genuinely-hung shell (never a recycled pid).
+   *
+   * Windows (#6646): there is no graceful SIGTERM (node-pty maps `kill()` to
+   * `TerminateProcess` on the direct pid) and no process groups, so a direct
+   * kill would orphan the shell's children — acute here because a shell often
+   * launches `.cmd`/`.bat` wrappers whose real process is a grandchild. Reap the
+   * whole descendant tree at once with `taskkill /PID <pid> /T /F` (via
+   * killProcessTree); no grace window, since the shell can't run a SIGTERM
+   * handler on Windows anyway.
    */
   destroy() {
     // Idempotent: a second destroy() (or a destroy racing the exit path) is a
@@ -370,27 +409,32 @@ export class UserShellSession extends BaseSession {
     }
     this._mirrorBuffer = ''
 
+    const onWindows = this._isWindowsOverride ?? isWindows
     const term = this._term
     const pid = term?.pid
     if (term && !this._ptyExited) {
-      try { term.kill('SIGTERM') } catch { /* already gone */ }
-      if (Number.isInteger(pid) && pid > 0) {
-        this._killTimer = setTimeout(() => {
-          this._killTimer = null
-          if (this._ptyExited) return
-          try { process.kill(pid, 0) } catch { return /* already exited */ }
-          log.warn(`user-shell PTY (pid=${pid}) did not exit ${DESTROY_GRACE_MS}ms after SIGTERM — escalating to SIGKILL`)
-          let killed = false
-          if (process.platform !== 'win32') {
-            try { process.kill(-pid, 'SIGKILL'); killed = true } catch { /* group gone */ }
-          }
-          if (!killed) {
-            try { term.kill('SIGKILL') } catch {
-              try { process.kill(pid, 'SIGKILL') } catch { /* already gone */ }
+      if (onWindows) {
+        this._killProcessTree(term, { force: true })
+      } else {
+        try { term.kill('SIGTERM') } catch { /* already gone */ }
+        if (Number.isInteger(pid) && pid > 0) {
+          this._killTimer = setTimeout(() => {
+            this._killTimer = null
+            if (this._ptyExited) return
+            try { process.kill(pid, 0) } catch { return /* already exited */ }
+            log.warn(`user-shell PTY (pid=${pid}) did not exit ${DESTROY_GRACE_MS}ms after SIGTERM — escalating to SIGKILL`)
+            // SIGKILL the whole process group so backgrounded jobs die too; fall
+            // back to the direct pid if the group is already gone.
+            try {
+              process.kill(-pid, 'SIGKILL')
+            } catch {
+              try { term.kill('SIGKILL') } catch {
+                try { process.kill(pid, 'SIGKILL') } catch { /* already gone */ }
+              }
             }
-          }
-        }, DESTROY_GRACE_MS)
-        if (typeof this._killTimer.unref === 'function') this._killTimer.unref()
+          }, DESTROY_GRACE_MS)
+          if (typeof this._killTimer.unref === 'function') this._killTimer.unref()
+        }
       }
     }
     this._term = null
