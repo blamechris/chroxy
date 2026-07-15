@@ -223,6 +223,29 @@ describe('UserShellSession — lifecycle (#5983)', () => {
     assert.equal(s._shellAlive, false)
   })
 
+  it('_reapTerm (start destroy-race): POSIX SIGTERMs, Windows tree-kills (#6646)', () => {
+    // POSIX branch — direct SIGTERM, no tree-kill.
+    const posix = makeLiveShell()
+    posix._isWindowsOverride = false
+    const posixTree = []
+    posix._killProcessTree = (t) => posixTree.push(t.pid)
+    posix._reapTerm(posix._term)
+    assert.deepEqual(posix._term._calls.kill, ['SIGTERM'])
+    assert.equal(posixTree.length, 0, 'POSIX never tree-kills')
+
+    // Windows branch — tree-kill, no direct signal.
+    const win = makeLiveShell()
+    win._isWindowsOverride = true
+    const winTree = []
+    win._killProcessTree = (t, opts) => winTree.push({ pid: t.pid, opts })
+    win._reapTerm(win._term)
+    assert.deepEqual(winTree, [{ pid: 4242, opts: { force: true } }])
+    assert.deepEqual(win._term._calls.kill, [], 'Windows reaps the tree, no direct kill')
+
+    // null term is a no-op (never reached in practice, but defensive).
+    assert.doesNotThrow(() => posix._reapTerm(null))
+  })
+
   it('destroy after exit does not double-kill (either platform)', () => {
     for (const onWindows of [false, true]) {
       const s = makeLiveShell()

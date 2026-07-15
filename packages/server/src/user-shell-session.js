@@ -198,9 +198,11 @@ export class UserShellSession extends BaseSession {
     }
 
     // destroy() can race the spawn (it set _destroying while we awaited the
-    // import): kill the fresh PTY so it isn't orphaned, then bail.
+    // import): reap the fresh PTY so it isn't orphaned, then bail. Uses the same
+    // Windows tree-kill as destroy() (#6646) — a shell rc/profile can spawn a
+    // child immediately, so a direct kill on Windows would orphan it here too.
     if (this._destroying) {
-      try { this._term.kill('SIGTERM') } catch { /* already gone */ }
+      this._reapTerm(this._term)
       this._term = null
       return
     }
@@ -450,6 +452,24 @@ export class UserShellSession extends BaseSession {
     if (this._killTimer) {
       clearTimeout(this._killTimer)
       this._killTimer = null
+    }
+  }
+
+  /**
+   * One-shot teardown of a term with no grace window — used by the start()
+   * destroy-race path where the shell was just spawned. POSIX: a direct SIGTERM
+   * (nothing is running in the fresh shell to gracefully save). Windows (#6646):
+   * the whole descendant tree via taskkill /T /F (a shell rc/profile may already
+   * have spawned a child, and node-pty's kill() would orphan it). destroy()'s
+   * own kill path stays separate because it adds the POSIX grace-escalation.
+   */
+  _reapTerm(term) {
+    if (!term) return
+    const onWindows = this._isWindowsOverride ?? isWindows
+    if (onWindows) {
+      this._killProcessTree(term, { force: true })
+    } else {
+      try { term.kill('SIGTERM') } catch { /* already gone */ }
     }
   }
 }
