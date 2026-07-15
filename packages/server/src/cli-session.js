@@ -9,7 +9,7 @@ import { BaseSession, buildBaseSessionOpts } from './base-session.js'
 import { buildContentBlocks } from './content-blocks.js'
 import { ALLOWED_MODEL_IDS } from './models.js'
 import { CLAUDE_FALLBACK_MODELS, claudeModelMetadata } from './claude-model-catalog.js'
-import { forceKill } from './platform.js'
+import { forceKill, killProcessTree } from './platform.js'
 import { MessageTransformPipeline } from './message-transform.js'
 import { emitToolResults } from './tool-result.js'
 import { buildToolStartData, extractToolInputSemantics } from './claude-stream-parser.js'
@@ -1478,7 +1478,12 @@ export class CliSession extends BaseSession {
       // tests with a mock child that never emits 'close').
       if (typeof forceKillTimer.unref === 'function') forceKillTimer.unref()
 
-      oldChild.kill('SIGTERM')
+      // #6643 — on Windows a plain SIGTERM only TerminateProcess-es the cmd.exe
+      // shim wrapping a `.cmd` provider (claude/codex/…); the real node
+      // grandchild is orphaned and the wrapper's `close` above then cancels the
+      // forceKill escalation before it can fire. killProcessTree reaps the whole
+      // tree (POSIX behaviour is an identical graceful SIGTERM).
+      killProcessTree(oldChild)
     } else {
       this._respawning = false
       this._respawnCount = 0

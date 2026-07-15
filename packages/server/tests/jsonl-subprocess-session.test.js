@@ -4,6 +4,7 @@ import { writeFileSync, unlinkSync, existsSync, chmodSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { JsonlSubprocessSession } from '../src/jsonl-subprocess-session.js'
+import { isWindows } from '../src/platform.js'
 import { addLogListener, removeLogListener } from '../src/logger.js'
 import { waitFor } from './test-helpers.js'
 
@@ -251,10 +252,17 @@ describe('JsonlSubprocessSession (base)', () => {
       s.start()
       await waitFor(() => s.isReady, { label: 'isReady' })
 
+      // #6643 — destroy() now routes through killProcessTree so a `.cmd`-shim
+      // provider's node grandchild is reaped on Windows, not just the wrapper.
+      // For this pid-less mock: POSIX still sends a graceful SIGTERM; on Windows
+      // (no real pid to taskkill) it falls back to a direct kill. Either way the
+      // child is terminated and state is cleared. The real Windows tree-kill is
+      // covered by platform.test.js.
       let killed = null
       s._process = { kill: (sig) => { killed = sig } }
       s.destroy()
-      assert.equal(killed, 'SIGTERM')
+      assert.ok(killed, 'destroy() should terminate the child process')
+      if (!isWindows) assert.equal(killed, 'SIGTERM', 'POSIX destroy uses a graceful SIGTERM')
       assert.equal(s._process, null)
       assert.equal(s.isReady, false)
       assert.equal(s.isRunning, false)

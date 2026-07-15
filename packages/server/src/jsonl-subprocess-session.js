@@ -5,6 +5,7 @@ import { createLogger } from './logger.js'
 import { guardChildStreams } from './child-stream-guard.js'
 import { getErrorMessage } from './utils/error-message.js'
 import { prepareSpawn } from './utils/win-spawn.js'
+import { killProcessTree } from './platform.js'
 
 const log = createLogger('jsonl-subprocess-session')
 
@@ -159,9 +160,11 @@ export class JsonlSubprocessSession extends BaseSession {
     // this session instance. Mirrors CliSession.destroy() (#4602).
     this._clearIntentionalStop()
     if (this._process) {
-      try {
-        this._process.kill('SIGTERM')
-      } catch { /* already dead */ }
+      // #6643 — on Windows SIGTERM only TerminateProcess-es the cmd.exe shim
+      // wrapping a `.cmd` provider (codex/gemini/…), orphaning the real node
+      // grandchild (there is no forceKill escalation on this path). Reap the
+      // whole tree; POSIX behaviour is an identical graceful SIGTERM.
+      killProcessTree(this._process)
       this._process = null
     }
     this.removeAllListeners()
