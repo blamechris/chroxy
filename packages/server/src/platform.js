@@ -21,9 +21,15 @@ export function cloudflaredInstallHint() {
   return 'see https://pkg.cloudflare.com/ for installation'
 }
 
-export function defaultShell() {
-  if (isWindows) return process.env.COMSPEC || 'cmd.exe'
-  return process.env.SHELL || '/bin/zsh'
+/**
+ * The OS default shell: Windows → `COMSPEC` (cmd.exe), POSIX → `$SHELL`
+ * (falling back to zsh). `platform`/`env` are injectable so callers that resolve
+ * a shell for a spawn (e.g. the embedded user-shell, #6646) can unit-test both
+ * platform branches on any CI host; production calls pass no args.
+ */
+export function defaultShell({ platform = process.platform, env = process.env } = {}) {
+  if (platform === 'win32') return env.COMSPEC || 'cmd.exe'
+  return env.SHELL || '/bin/zsh'
 }
 
 /**
