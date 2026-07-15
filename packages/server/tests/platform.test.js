@@ -541,9 +541,9 @@ try {
         stdio: 'ignore',
         windowsHide: true,
       })
+      let grandPid = null
       try {
         // Wait (<=15s) for the grandchild to report its pid.
-        let grandPid = null
         for (let i = 0; i < 150 && grandPid === null; i++) {
           try {
             const raw = readFileSync(pidFile, 'utf-8').trim()
@@ -565,6 +565,9 @@ try {
         assert.ok(dead, 'forceKill must reap the node grandchild, not just the cmd wrapper')
       } finally {
         try { forceKill(child) } catch {}
+        // Defensive: if the fix regressed and the grandchild survived, don't
+        // leak a live node orphan on the runner.
+        try { if (grandPid) process.kill(grandPid, 'SIGKILL') } catch {}
         try { rmSync(script, { force: true }) } catch {}
         try { rmSync(pidFile, { force: true }) } catch {}
       }

@@ -983,6 +983,10 @@ describe('_killAndRespawn behavioral tests (#1009)', () => {
   it('setModel kills old child and respawns after close', async () => {
     const session = createReadySession({ model: 'sonnet' })
     const oldChild = session._child
+    // #6643: null the mock pid so killProcessTree takes its deterministic
+    // no-pid fallback (a direct kill) on Windows instead of shelling out to
+    // `taskkill /PID <mock>` against a real bystander process on a local run.
+    oldChild.pid = null
 
     // Stub start() to prevent actual process spawning
     let startCalled = false
@@ -1284,6 +1288,9 @@ describe('CliSession setPermissionMode panic-button mid-turn (#3735)', () => {
     const session = createReadySession({ permissionMode: 'approve' })
     sessions.push(session)
     const oldChild = session._child
+    // #6643: null the mock pid so killProcessTree takes its deterministic
+    // no-pid fallback on Windows (see the setModel respawn test).
+    oldChild.pid = null
 
     // Simulate the user being mid-turn: claude -p is running, _isBusy=true,
     // a messageId+ctx are set, and the result timer is armed.
