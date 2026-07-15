@@ -91,6 +91,10 @@ export class Supervisor extends EventEmitter {
     this._tunnel = null
     this._heartbeatInterval = null
     this._currentWsUrl = null
+    // #6641: true while the tunnel is up but not routable — the server runs
+    // local/LAN-only and advertises no remote/QR access. Read by the degrade
+    // test; a natural gate for a future auto-reverify.
+    this._tunnelDegraded = false
     this._signalsRegistered = false
     this._restartScheduledAt = null
     this._restartDelayMs = null
@@ -321,41 +325,87 @@ export class Supervisor extends EventEmitter {
       this._log.error(message)
     })
 
-    // 2-3. Wait for the tunnel to be routable, then display + persist connection
-    // info. #5314 (WP-1.4) — every step here runs while cloudflared is already
-    // up (this._tunnel.start() above) but BEFORE the child is forked, so ANY
-    // throw must stop cloudflared first or it leaks as an orphan. waitForTunnel
-    // THROWS on a routine DNS-settle failure; _displayQr (QR encode) and
-    // writeConnectionInfo (disk) can also throw. _failBoot() is the single
-    // cleanup path. (The PID write below has its own non-fatal guard, and the
-    // child fork is past the no-leak boundary.)
+    // 2. Wait for the tunnel to be routable. #6641 — a not-yet-routable tunnel
+    // must NOT abort the whole daemon. The default `chroxy start` used to
+    // exit(1) here whenever a warming quick-tunnel edge answered with a status
+    // outside {502,530} (e.g. a bare 404 during route propagation), taking down
+    // local + LAN access with it. Instead, degrade to local/LAN: start the
+    // child anyway so the server is usable right now.
+    //
+    // Degraded mode does NOT auto-recover to remote: `tunnel_recovered` only
+    // fires when the cloudflared PROCESS flaps (tunnel/base.js), not when an
+    // alive-but-unroutable tunnel finishes propagating, and there is no
+    // routability re-poll. So we advertise NO remote/QR access and tell the
+    // operator to restart (or use --tunnel named) once the tunnel is routable,
+    // rather than promising a QR that would never appear. (An auto re-verify in
+    // degraded mode is a possible follow-up — see #6641.)
+    //
+    // #5314 (WP-1.4) note: on the SIGINT/SIGTERM path the no-orphan guarantee
+    // still holds — shutdown() stops the tunnel and the supervised child
+    // together. (The crash-loop give-up path, _serveTerminalDown(), does not
+    // stop the tunnel — a pre-existing gap, not introduced here.) A
+    // NON-routability error (an unexpected throw) still takes the old
+    // stop-cloudflared-then-exit cleanup path via _failBoot().
+    let tunnelRoutable = true
     try {
       await this._waitForTunnel(httpUrl)
+    } catch (err) {
+      if (err?.code !== 'TUNNEL_NOT_ROUTABLE') {
+        await this._failBoot(err)
+        return
+      }
+      tunnelRoutable = false
+      this._tunnelDegraded = true
+      this._log.warn(
+        'Tunnel not routable — starting in local/LAN mode; remote access is ' +
+        'unavailable. Restart once your network/tunnel is ready, or use ' +
+        `--tunnel named for a stable URL. ${err.message}`
+      )
+    }
 
-      // 3. Display connection info
+    // 3. Display + persist connection info. The QR is shown ONLY for a routable
+    // tunnel — a QR to a not-yet-routable endpoint just hangs the app (the exact
+    // failure #6641 addresses), so in degraded mode we advertise local/LAN only.
+    // A throw in this block (QR encode / disk write) still routes to _failBoot().
+    try {
       const connectionUrl = `chroxy://${wsUrl.replace('wss://', '')}?token=${this._apiToken}`
 
-      this._log.info(`${this._modeLabel} ready`)
-      process.stdout.write('📱 Scan this QR code with the Chroxy app:\n\n')
-      await this._displayQr(connectionUrl)
-      process.stdout.write('\nOr connect manually:\n')
-      process.stdout.write(`   URL:   ${wsUrl}\n`)
-      process.stdout.write(`   Token: ${maskToken(this._apiToken)}\n`)
-      const dashboardBase = httpUrl || `http://localhost:${this._port}`
-      process.stdout.write(`   Dashboard: ${dashboardBase.replace(/\/+$/, '')}/dashboard\n`)
-      process.stdout.write('\n')
+      if (tunnelRoutable) {
+        // 3a. Display connection info
+        this._log.info(`${this._modeLabel} ready`)
+        process.stdout.write('📱 Scan this QR code with the Chroxy app:\n\n')
+        await this._displayQr(connectionUrl)
+        process.stdout.write('\nOr connect manually:\n')
+        process.stdout.write(`   URL:   ${wsUrl}\n`)
+        process.stdout.write(`   Token: ${maskToken(this._apiToken)}\n`)
+        const dashboardBase = httpUrl || `http://localhost:${this._port}`
+        process.stdout.write(`   Dashboard: ${dashboardBase.replace(/\/+$/, '')}/dashboard\n`)
+        process.stdout.write('\n')
+      } else {
+        // 3a. Degraded: local/LAN only, no QR to a dead endpoint, and no false
+        // promise of auto-recovery (#6641 review).
+        process.stdout.write('\n⚠️  Tunnel not routable — serving on local/LAN only (no remote/QR access).\n')
+        process.stdout.write(`   Dashboard: http://localhost:${this._port}/dashboard\n`)
+        process.stdout.write(`   LAN:       http://<this-machine-ip>:${this._port}/dashboard\n`)
+        process.stdout.write(`   Token: ${maskToken(this._apiToken)}\n`)
+        process.stdout.write('   For remote (phone) access, restart once the tunnel is routable, or use --tunnel named.\n\n')
+      }
 
-      // 3b. Write connection info file for programmatic access
+      // 3b. Write connection info file for programmatic access. In degraded mode
+      // OMIT the public wsUrl/httpUrl/connectionUrl (they're not routable) so no
+      // consumer advertises a dead endpoint — notably the dashboard /qr route
+      // falls back to connectionUrl, which would otherwise resurface the exact
+      // dead QR #6641 kills, just in the dashboard modal (#6641 review). The
+      // local `port` is still written so loopback CLIs (chroxy publish / pages)
+      // hit the right port even in tunnel mode (#5683).
       writeConnectionInfo({
-        wsUrl,
-        httpUrl,
-        // #5683: the LOCAL listen port, so loopback CLIs (chroxy publish / pages)
-        // hit the right port even in tunnel mode, where httpUrl is the public
-        // trycloudflare URL with no :port to parse.
+        wsUrl: tunnelRoutable ? wsUrl : null,
+        httpUrl: tunnelRoutable ? httpUrl : null,
         port: this._port,
         apiToken: this._apiToken,
-        connectionUrl,
+        connectionUrl: tunnelRoutable ? connectionUrl : null,
         tunnelMode: this._modeLabel,
+        tunnelDegraded: !tunnelRoutable,
         startedAt: new Date().toISOString(),
         pid: process.pid,
       })
