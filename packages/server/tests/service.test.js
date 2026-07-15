@@ -29,6 +29,25 @@ import {
 } from '../src/service.js'
 import { statSync } from 'fs'
 
+// #6651 — service.test.js also runs on the windows-latest CI job. These suites
+// assert POSIX/darwin/linux-specific behaviour (launchd/systemd paths, 0o700
+// chmod perms, `which`-based node/claude resolution, `process.getuid()`
+// bootstrap) that does not apply on Windows, so guard them per-test. The
+// Windows-relevant coverage — getServicePaths('win32'), the schtasks backend,
+// generateWindowsServiceWrapper, getWindowsTaskStatus — still runs there.
+const posixOnly = process.platform === 'win32'
+  ? 'POSIX/darwin/linux-only — not applicable on Windows (#6651)'
+  : false
+
+// #6651 — the getFullServiceStatus tests fetch a REAL localhost port (8765 /
+// config) and assert nothing answers. The self-hosted `chroxy-win` runner is a
+// developer box that may have a live chroxy daemon on 8765, which would make
+// them flake. Skip on Windows; the port-parsing + fetch-timeout logic they cover
+// is platform-agnostic and stays green on the ubuntu/macOS jobs.
+const skipRealPortOnWin = process.platform === 'win32'
+  ? 'fetches a real localhost port that may be live on the self-hosted Windows runner (#6651)'
+  : false
+
 describe('service', () => {
   let tmpDir
 
@@ -41,7 +60,7 @@ describe('service', () => {
   })
 
   describe('getServicePaths()', () => {
-    it('returns launchd paths on darwin', () => {
+    it('returns launchd paths on darwin', { skip: posixOnly }, () => {
       const paths = getServicePaths('darwin')
       assert.equal(paths.type, 'launchd')
       assert.ok(paths.plistPath.includes('LaunchAgents'))
@@ -49,7 +68,7 @@ describe('service', () => {
       assert.ok(paths.logDir.includes('.chroxy/logs'))
     })
 
-    it('returns systemd paths on linux', () => {
+    it('returns systemd paths on linux', { skip: posixOnly }, () => {
       const paths = getServicePaths('linux')
       assert.equal(paths.type, 'systemd')
       assert.ok(paths.unitPath.includes('systemd/user'))
@@ -378,7 +397,7 @@ describe('service', () => {
       assert.ok(existsSync(nodePath), `Node path does not exist: ${nodePath}`)
     })
 
-    it('returned node is version 22', () => {
+    it('returned node is version 22', { skip: posixOnly }, () => {
       const nodePath = resolveNode22Path()
       const version = execFileSync(nodePath, ['--version'], { encoding: 'utf-8' }).trim()
       assert.ok(version.startsWith('v22'), `Expected v22.x, got ${version}`)
@@ -839,7 +858,7 @@ describe('service', () => {
   })
 
   describe('getFullServiceStatus fetch timeout and port parsing (#745)', () => {
-    it('handles fetch timeout when server is not responding', async () => {
+    it('handles fetch timeout when server is not responding', { skip: skipRealPortOnWin }, async () => {
       const dir = mkdtempSync(join(tmpdir(), 'chroxy-timeout-'))
       try {
         saveServiceState({ installed: true, type: 'launchd' }, dir)
@@ -853,7 +872,7 @@ describe('service', () => {
       }
     })
 
-    it('reads port from config.json when available', async () => {
+    it('reads port from config.json when available', { skip: skipRealPortOnWin }, async () => {
       const dir = mkdtempSync(join(tmpdir(), 'chroxy-timeout-'))
       try {
         saveServiceState({ installed: true, type: 'launchd' }, dir)
@@ -867,7 +886,7 @@ describe('service', () => {
       }
     })
 
-    it('falls back to default port 8765 when no port info available', async () => {
+    it('falls back to default port 8765 when no port info available', { skip: skipRealPortOnWin }, async () => {
       const dir = mkdtempSync(join(tmpdir(), 'chroxy-timeout-'))
       try {
         saveServiceState({ installed: true, type: 'launchd' }, dir)
@@ -927,7 +946,7 @@ describe('service', () => {
   // ---- #5491: launchd robustness (PATH baking, keychain wrapper, start UX) ----
 
   describe('resolveClaudeBin() (#5491 gap 1)', () => {
-    it('returns the path resolved by `which claude`', () => {
+    it('returns the path resolved by `which claude`', { skip: posixOnly }, () => {
       // Inject a fake `which` that points at a real file (this test file).
       const fakePath = fileURLToPath(import.meta.url)
       const which = (cmd, args) => {
@@ -1086,7 +1105,7 @@ describe('service', () => {
   })
 
   describe('writeServiceWrapper() (#5491 gap 2)', () => {
-    it('writes the wrapper 0700 (owner rwx only)', () => {
+    it('writes the wrapper 0700 (owner rwx only)', { skip: posixOnly }, () => {
       const wrapperPath = join(tmpDir, '.chroxy', 'service-wrapper.sh')
       writeServiceWrapper(wrapperPath, '#!/bin/sh\necho hi\n')
       assert.ok(existsSync(wrapperPath))
@@ -1102,7 +1121,7 @@ describe('service', () => {
   })
 
   describe('installService() writes wrapper and bakes PATH (#5491)', () => {
-    it('writes a 0700 wrapper with the security invocation on darwin', () => {
+    it('writes a 0700 wrapper with the security invocation on darwin', { skip: posixOnly }, () => {
       const serviceDir = join(tmpDir, 'LaunchAgents')
       mkdirSync(serviceDir, { recursive: true })
       const logDir = join(tmpDir, 'logs')
@@ -1164,7 +1183,7 @@ describe('service', () => {
   })
 
   describe('startService() bootout-then-bootstrap + EIO hint (#5491 gap 3)', () => {
-    it('boots out the stale label before bootstrapping', () => {
+    it('boots out the stale label before bootstrapping', { skip: posixOnly }, () => {
       const serviceDir = join(tmpDir, 'LaunchAgents')
       mkdirSync(serviceDir, { recursive: true })
       const servicePath = join(serviceDir, 'com.chroxy.server.plist')
@@ -1191,7 +1210,7 @@ describe('service', () => {
       assert.ok(bootoutIdx < bootstrapIdx, 'bootout must run before bootstrap')
     })
 
-    it('ignores bootout failure (label not loaded) and still bootstraps', () => {
+    it('ignores bootout failure (label not loaded) and still bootstraps', { skip: posixOnly }, () => {
       const serviceDir = join(tmpDir, 'LaunchAgents')
       mkdirSync(serviceDir, { recursive: true })
       const servicePath = join(serviceDir, 'com.chroxy.server.plist')
@@ -1215,7 +1234,7 @@ describe('service', () => {
       assert.ok(bootstrapped, 'bootstrap should still run after a failed bootout')
     })
 
-    it('translates Bootstrap failed: 5: Input/output error into an actionable hint', () => {
+    it('translates Bootstrap failed: 5: Input/output error into an actionable hint', { skip: posixOnly }, () => {
       const serviceDir = join(tmpDir, 'LaunchAgents')
       mkdirSync(serviceDir, { recursive: true })
       const servicePath = join(serviceDir, 'com.chroxy.server.plist')
