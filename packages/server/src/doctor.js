@@ -2,11 +2,12 @@ import { execFileSync } from 'child_process'
 import { existsSync, readFileSync } from 'fs'
 import { dirname, isAbsolute, join, resolve } from 'path'
 import { fileURLToPath } from 'url'
-import { homedir, platform } from 'os'
+import { homedir } from 'os'
 import { createServer } from 'net'
 import { validateConfig } from './config.js'
 import { resolveBinary } from './utils/resolve-binary.js'
 import { prepareSpawn } from './utils/win-spawn.js'
+import { cloudflaredInstallHint } from './platform.js'
 import { getProvider, DEFAULT_PROVIDER } from './providers.js'
 import { registerAnthropicCompatibleProviders } from './anthropic-compatible-session.js'
 import { registerOpenAiCompatibleProviders } from './openai-compatible-session.js'
@@ -292,8 +293,6 @@ export async function checkTunnelRoutability(deps = {}) {
  */
 export async function runDoctorChecks({ port, providers, verbose: _verbose, pkgDir = SERVER_PKG_DIR, now = Date.now(), tunnelProbe } = {}) {
   const checks = []
-  const isMac = platform() === 'darwin'
-  const isLinux = platform() === 'linux'
 
   // 1. Node.js version
   const nodeVersion = process.versions.node
@@ -315,9 +314,7 @@ export async function runDoctorChecks({ port, providers, verbose: _verbose, pkgD
       '/usr/local/bin/cloudflared',
       join(homedir(), '.local/bin/cloudflared'),
     ],
-    installHint: isMac ? 'brew install cloudflared'
-      : isLinux ? 'see https://pkg.cloudflare.com/ for installation'
-      : 'see https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/',
+    installHint: cloudflaredInstallHint(),
   }))
 
   // 3. Load config (once) — used for both the Config check and provider resolution.

@@ -5,7 +5,7 @@ import { mkdtempSync, readFileSync, writeFileSync, rmSync, statSync, existsSync 
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { pathToFileURL } from 'node:url'
-import { defaultShell, writeFileRestricted, forceKill, isWindows } from '../src/platform.js'
+import { defaultShell, writeFileRestricted, forceKill, isWindows, isMac, cloudflaredInstallHint } from '../src/platform.js'
 
 // Production code in `platform.js` imports from `'fs'` etc. via ESM — the
 // subprocess shims below need to use `file:` URLs for both the `--import`
@@ -29,6 +29,17 @@ describe('platform', () => {
       const shell = defaultShell()
       assert.strictEqual(typeof shell, 'string')
       assert.ok(shell.length > 0)
+    })
+  })
+
+  describe('cloudflaredInstallHint()', () => {
+    it('returns an actionable, platform-appropriate install hint (#6649)', () => {
+      const hint = cloudflaredInstallHint()
+      assert.strictEqual(typeof hint, 'string')
+      assert.ok(hint.length > 0)
+      if (isWindows) assert.match(hint, /winget install Cloudflare\.cloudflared/)
+      else if (isMac) assert.match(hint, /brew install cloudflared/)
+      else assert.match(hint, /pkg\.cloudflare\.com/)
     })
   })
 
