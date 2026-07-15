@@ -37,14 +37,21 @@
       "icons/icon.png"
     ],
     "resources": {
-      "server-bundle": "server",
-      "swift/speech-helper": "speech-helper"
+      "server-bundle": "server"
     },
     "createUpdaterArtifacts": true,
     "macOS": {
       "signingIdentity": "$APPLE_SIGNING_IDENTITY",
       "infoPlist": "Info.plist",
       "entitlements": "entitlements.plist"
+    },
+    "windows": {
+      "webviewInstallMode": {
+        "type": "embedBootstrapper"
+      },
+      "nsis": {
+        "installMode": "currentUser"
+      }
     }
   },
   "plugins": {
