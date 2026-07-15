@@ -48,8 +48,8 @@ Slot into the existing `win32` branches. `getServiceStatus` can keep the `proces
 ### Finding 4 — CONFIRMED: `writeFileRestricted` sets no ACL; a secondary group can read secrets
 `platform.js:113-118` — on Windows writes with no mode, relying on NTFS inheritance. **Live check of the actual files:**
 ```
-C:\Users\chris_3zal3ta\.chroxy\config.json
-   Solace\CodexSandboxUsers:(I)(RX)   ← a secondary local GROUP can READ
+C:\Users\<user>\.chroxy\config.json
+   <HOST>\<group>:(I)(RX)   ← a secondary local GROUP can READ
    ...all ACEs (I) = inherited; no explicit owner-only ACE
 ```
 Same inherited ACL on `server-identity.json`, `ingest-secret`, `session-state.json`, and would be on `credentials.json`. macOS `0600` excludes group/other entirely — concrete parity gap + actual secret-exposure path. Also omits the AV-lock retry `_rotateToBak` has; `saveServiceState` (`service.js:421`) has no caller-level retry.
@@ -72,4 +72,4 @@ Same inherited ACL on `server-identity.json`, `ingest-secret`, `session-state.js
 6. **Long paths:** `\\?\` prefixing or `LongPathsEnabled` preflight for deep worktree/container paths.
 
 ## 4. Overall rating + verdict — 2.5 / 5
-Chroxy's Windows story is a tale of two layers. The **static** platform primitives are excellent and clearly written by someone who understands Win32. But the **dynamic and security** layers are where macOS parity collapses: `forceKill` is a copy-paste no-op that I proved orphans the real claude/codex process on every Stop; credentials sit in plaintext because DPAPI was never wired despite the cipher being ready for it; `service install` hard-fails past its own working `schtasks` guidance; secret files inherit a group-readable ACL I found leaking to `CodexSandboxUsers`; and the embedded shell can't even launch. Every required primitive (`taskkill /T`, DPAPI, `schtasks`, `icacls`, `COMSPEC`) is present and I verified each works — but until Findings 1–2 land, running Chroxy on Windows leaks processes and stores your API keys in the clear.
+Chroxy's Windows story is a tale of two layers. The **static** platform primitives are excellent and clearly written by someone who understands Win32. But the **dynamic and security** layers are where macOS parity collapses: `forceKill` is a copy-paste no-op that I proved orphans the real claude/codex process on every Stop; credentials sit in plaintext because DPAPI was never wired despite the cipher being ready for it; `service install` hard-fails past its own working `schtasks` guidance; secret files inherit a group-readable ACL I found leaking to `<group>`; and the embedded shell can't even launch. Every required primitive (`taskkill /T`, DPAPI, `schtasks`, `icacls`, `COMSPEC`) is present and I verified each works — but until Findings 1–2 land, running Chroxy on Windows leaks processes and stores your API keys in the clear.

@@ -71,7 +71,7 @@
 |---|---|---|
 | "Encrypted credentials at rest (OS keychain)" (CLAUDE.md / README) | On Windows: **plaintext 0600 file**, no OS keychain. `docs/security/credentials-at-rest.md` is honest; the headline isn't. | Skeptic, Guardian, Windows Expert |
 | README "double-click the MSI to install" (desktop) | Silently requires a **separately-installed Node 22**; not bundled, no Windows setup guide. | Skeptic, Tauri Expert |
-| `platform.js` comment: profile dir grants "user-only ACLs" | **False in practice** — live check showed `CodexSandboxUsers:(I)(RX)` (a secondary group can read secrets). | Windows Expert |
+| `platform.js` comment: profile dir grants "user-only ACLs" | **False in practice** — live check showed `<group>:(I)(RX)` (a secondary group can read secrets). | Windows Expert |
 | `.gitattributes` `* text=auto eol=lf` | On-disk `.sh` files are **CRLF** (`core.autocrlf=true` masks it); breaks `./script` execution under WSL. | Tester |
 | Repo version v0.10.0 (package.json) | Latest *released* MSI is **v0.9.46**; 0.10.0 hasn't shipped a desktop build. | Skeptic |
 
