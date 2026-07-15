@@ -38,8 +38,11 @@ permissions:
 #
 # The macOS desktop job uses the separate self-hosted macOS runner and routes on
 # the same boolean inline in its `if:` (it has no shared `runs-on` array, so it
-# is not a `runner-target` consumer). The Windows job stays GitHub-hosted (no
-# self-hosted Windows box). After the Linux runner was bumped to 24GB (#6046),
+# is not a `runner-target` consumer). The Windows jobs route through a second
+# output, `runner-target.outputs.winrunner`: the self-hosted `chroxy-win` box for
+# same-repo events, `windows-latest` for fork PRs (untrusted code stays off the
+# self-hosted box). The heavier Windows desktop Rust build is same-repo-only,
+# mirroring the macOS desktop job. After the Linux runner was bumped to 24GB (#6046),
 # Store Core Tests and App Tests moved to the self-hosted pool (their blocker was
 # npm-ci/transform OOM, not arch). Server Tests moved too once #6075 made the
 # suite container-portable (the 9 ARM64-container failures were genuine env
@@ -63,15 +66,20 @@ jobs:
     timeout-minutes: 1
     outputs:
       runner: ${{ steps.resolve.outputs.runner }}
+      winrunner: ${{ steps.resolve.outputs.winrunner }}
     steps:
       - id: resolve
         # The condition is the same routing predicate the per-job ternary used:
         # push events and same-repo PRs are trusted; fork PRs are not.
+        #   * runner    — Linux pool (self-hosted ARM64) / ubuntu-24.04 for forks
+        #   * winrunner — Windows pool (self-hosted chroxy-win) / windows-latest for forks
         run: |
           if [ "${{ github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository }}" = "true" ]; then
             echo 'runner=["self-hosted", "Linux", "ARM64"]' >> "$GITHUB_OUTPUT"
+            echo 'winrunner=["self-hosted", "Windows", "X64", "chroxy-win"]' >> "$GITHUB_OUTPUT"
           else
             echo 'runner="ubuntu-24.04"' >> "$GITHUB_OUTPUT"
+            echo 'winrunner="windows-latest"' >> "$GITHUB_OUTPUT"
           fi
   server-tests:
     name: Server Tests
@@ -184,48 +192,33 @@ jobs:
               - '.github/workflows/ci.yml'
 
   server-tests-windows:
-    name: Server Platform Tests (Windows)
-    # Real Windows runner coverage for `writeFileRestricted`'s Windows
-    # code path (#4927). The cross-platform tests in `platform.test.js`
-    # already exercise the Windows branch on POSIX runners via the
-    # `_isWindowsOverride` option, but a handful of edge cases — ACL
-    # inheritance from the per-user storage directory, native
-    # `MoveFileExW` atomicity, and behaviour under real Windows fs.renameSync
-    # error codes — can ONLY be validated on `windows-latest`. The
-    # additional Windows-specific suite lives in `platform-windows.test.js`.
+    name: Server Windows Tests
+    # Windows coverage for the platform / spawn / binary-resolution / WSL layers
+    # on a REAL Windows host. Runs on the self-hosted `chroxy-win` runner for
+    # same-repo events (free, always-on) and falls back to `windows-latest` for
+    # fork PRs (untrusted code never touches the self-hosted box) — see the
+    # `winrunner` output on `runner-target`.
     #
-    # Scope is deliberately narrow: we run ONLY the platform suites
-    # (not the full server test set), because (a) GitHub-hosted Windows
-    # runners are slow and cost more, and (b) much of the server suite
-    # depends on node-pty / POSIX signals / shell scripts that don't have
-    # a Windows analogue. The full POSIX suite continues to run on
-    # `ubuntu-24.04` in the `server-tests` job above.
-    #
-    # Trigger gate (#5002): `windows-latest` is 5x the per-minute cost
-    # of `ubuntu-24.04`. To avoid paying that on every PR push:
-    #   * On `push` to `main` we ALWAYS run — catches transitive breakage
-    #     from PRs that merged without touching platform.js but broke
-    #     something the Windows suite covers.
-    #   * On `pull_request` we only run when the `changes` job flagged
-    #     a platform-related edit. Filter scope (see `changes` above) is
-    #     deliberately a touch broader than just `platform.js` to cover
-    #     the foreseeable refactor that splits the file in two.
-    needs: changes
-    # `always()` is required because the `changes` job is gated to
-    # `pull_request` and gets skipped on `push` events. Without it,
-    # the default `needs:` semantics ("skip downstream when any
-    # dependency is skipped") would also skip this job on pushes to
-    # `main`, which is the exact opposite of what we want.
-    if: |
-      always() &&
-      (github.event_name == 'push' ||
-       (github.event_name == 'pull_request' && needs.changes.result == 'success' && needs.changes.outputs.platform == 'true'))
-    runs-on: windows-latest
-    timeout-minutes: 10
+    # Scope is the Windows-RELEVANT suites, not the full server set: much of the
+    # suite depends on node-pty / POSIX signals / shell scripts with no Windows
+    # analogue, so the ubuntu `server-tests` job stays the source of truth for
+    # the rest. `service.test.js` is intentionally excluded until its POSIX-path
+    # assertions are guarded for win32 (#6651). Now that this runs on the free
+    # self-hosted box it fires on every same-repo push/PR (the old
+    # platform-changed-only gate existed only to spare windows-latest minutes).
+    needs: runner-target
+    runs-on: ${{ fromJSON(needs.runner-target.outputs.winrunner) }}
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: packages/server
-        shell: bash
+        # Windows PowerShell, NOT bash: on a self-hosted Windows runner
+        # `shell: bash` resolves to C:\Windows\System32\bash.exe (WSL), which has
+        # no distro under the service account and fails every step. `pwsh`
+        # (PowerShell Core) isn't installed on the box either, so use `powershell`
+        # (Windows PowerShell 5.1, always present). The run commands are plain
+        # npm/node invocations that behave identically under it.
+        shell: powershell
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -243,21 +236,21 @@ jobs:
         run: npm run build
         working-directory: packages/protocol
 
-      - name: Run platform tests (cross-platform + Windows-only)
-        # Invoke node's built-in test runner directly with the two platform
-        # test files. Mirrors the flags from `npm test` (sandbox guard via
-        # `--import ./tests/_setup.mjs`, `--experimental-test-module-mocks`)
-        # but scopes to the platform suite to keep the Windows job fast.
-        # `c8` is intentionally omitted — we don't need coverage from the
-        # Windows runner; the ubuntu job is the source of truth there.
-        #
-        # No `--test-force-exit` (#5480): it can silently truncate a run (exit 0
-        # while trailing suites are still queued). These two files have no leaked
-        # async handles — platform.test.js already runs flag-free as part of the
-        # main `npm test` glob, and platform-windows.test.js only uses sync
-        # spawnSync/fs (its forceKill is a synchronous child.kill, no timer) — so
-        # the runner exits naturally and a truncated run can't masquerade as green.
-        run: node --import ./tests/_setup.mjs --experimental-test-module-mocks --test ./tests/platform.test.js ./tests/platform-windows.test.js
+      - name: Run Windows-relevant server tests
+        # node's built-in test runner directly, mirroring `npm test`'s flags
+        # (sandbox guard via `--import ./tests/_setup.mjs`,
+        # `--experimental-test-module-mocks`) but scoped to the Windows-relevant
+        # suites. `c8` is omitted — the ubuntu job is the coverage source of
+        # truth. All of these are green on a real Windows host (verified locally);
+        # `service.test.js` is excluded pending #6651.
+        run: >-
+          node --import ./tests/_setup.mjs --experimental-test-module-mocks --test
+          ./tests/platform.test.js
+          ./tests/platform-windows.test.js
+          ./tests/win-spawn.test.js
+          ./tests/windows-cmd-routing.test.js
+          ./tests/resolve-binary.test.js
+          ./tests/control-room-wsl.test.js
 
   server-lint:
     name: Server Lint
@@ -783,6 +776,65 @@ jobs:
       - name: Run verify-entitlements.sh tests (#4801)
         working-directory: packages/desktop
         run: bash scripts/verify-entitlements.test.sh
+
+  desktop-tests-windows:
+    name: Desktop Rust Tests (Windows)
+    # Per-PR Windows compile + unit tests for the Tauri desktop crate on the
+    # self-hosted `chroxy-win` runner. Catches Windows-only regressions in the
+    # `#[cfg(windows)]` Rust and the bundle/resource path layout (e.g. #6640's
+    # resolve_cli_js) that previously only surfaced at release-tag time. SECURITY:
+    # same-repo only — a heavy Rust build must never run untrusted fork code on
+    # the self-hosted box (mirrors the macOS `desktop-tests` gate); fork PRs skip.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, Windows, X64, chroxy-win]
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: packages/desktop/src-tauri
+        # Windows PowerShell, NOT bash or pwsh — see the Server Windows Tests
+        # job (self-hosted `bash` is WSL bash with no distro; PowerShell Core
+        # `pwsh` isn't installed on the runner).
+        shell: powershell
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install Rust toolchain
+        # A self-hosted Windows runner has no preinstalled rustup (unlike
+        # GitHub-hosted windows-latest), so `dtolnay/rust-toolchain` can't find
+        # it. Install rustup on first use and add cargo to PATH; the MSVC target
+        # links against the box's Visual Studio Build Tools (auto-detected via
+        # vswhere). Cached under the runner's CARGO_HOME across runs.
+        run: |
+          if (-not (Get-Command rustup -ErrorAction SilentlyContinue)) {
+            $ProgressPreference = 'SilentlyContinue'
+            $init = Join-Path $env:RUNNER_TEMP 'rustup-init.exe'
+            Invoke-WebRequest -Uri 'https://win.rustup.rs/x86_64' -OutFile $init
+            & $init -y --default-toolchain stable-x86_64-pc-windows-msvc --profile minimal
+            if ($LASTEXITCODE -ne 0) { throw "rustup-init failed ($LASTEXITCODE)" }
+            "$env:USERPROFILE\.cargo\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          } else {
+            rustup toolchain install stable-x86_64-pc-windows-msvc --profile minimal
+            rustup default stable-x86_64-pc-windows-msvc
+          }
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            packages/desktop/src-tauri/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('packages/desktop/src-tauri/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Create stub resource directories for the Tauri build script
+        # tauri-build validates that `bundle.resources` paths exist; the real
+        # server bundle is staged only for a full `cargo tauri build`, so stub
+        # them for a compile/test pass (mirrors the macOS desktop-tests job).
+        run: New-Item -ItemType Directory -Force -Path server-bundle, ../dist | Out-Null
+
+      - name: Run desktop tests
+        run: cargo test --locked
 
   scripts-tests:
     name: Scripts Tests
