@@ -1,7 +1,7 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, writeFileSync, rmSync, statSync, existsSync } from 'fs'
+import { mkdtempSync, readFileSync, writeFileSync, rmSync, statSync, existsSync, renameSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { pathToFileURL } from 'node:url'
@@ -582,6 +582,75 @@ try {
         try { rmSync(script, { force: true }) } catch {}
         try { rmSync(pidFile, { force: true }) } catch {}
       }
+    })
+  })
+
+  describe('writeFileRestricted — Windows ACL + rename retry (#6644)', () => {
+    let dir
+    beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'wfr-acl-')) })
+    afterEach(() => { rmSync(dir, { recursive: true, force: true }) })
+
+    it('stamps the owner-only ACL on the temp file before rename (Windows branch)', () => {
+      const filePath = join(dir, 'sec.json')
+      const stamped = []
+      writeFileRestricted(filePath, 'secret', {
+        _isWindowsOverride: true,
+        _stampAcl: (p) => stamped.push(p),
+      })
+      // The DACL is stamped on the TEMP path — NTFS preserves it across the
+      // same-dir rename, so the final file lands owner-only with no window.
+      assert.deepEqual(stamped, [`${filePath}.tmp`])
+      assert.equal(readFileSync(filePath, 'utf-8'), 'secret')
+    })
+
+    it('does NOT stamp an ACL on the POSIX branch (chmod handles it)', () => {
+      const filePath = join(dir, 'sec-posix.json')
+      const stamped = []
+      writeFileRestricted(filePath, 'secret', {
+        _isWindowsOverride: false,
+        _stampAcl: (p) => stamped.push(p),
+      })
+      assert.equal(stamped.length, 0)
+      assert.equal(readFileSync(filePath, 'utf-8'), 'secret')
+    })
+
+    it('retries the rename once on a Windows AV/Search lock (EBUSY) and succeeds', () => {
+      const filePath = join(dir, 'sec-retry.json')
+      let calls = 0
+      writeFileRestricted(filePath, 'secret', {
+        _isWindowsOverride: true,
+        _stampAcl: () => {},
+        _rename: (from, to) => {
+          calls++
+          if (calls === 1) { const e = new Error('locked'); e.code = 'EBUSY'; throw e }
+          renameSync(from, to) // the retry actually moves it
+        },
+      })
+      assert.equal(calls, 2, 'one failure + one successful retry')
+      assert.equal(readFileSync(filePath, 'utf-8'), 'secret')
+    })
+
+    it('rethrows the original error and cleans up the temp file if the retry also fails', () => {
+      const filePath = join(dir, 'sec-fail.json')
+      let calls = 0
+      assert.throws(() => writeFileRestricted(filePath, 'secret', {
+        _isWindowsOverride: true,
+        _stampAcl: () => {},
+        _rename: () => { calls++; const e = new Error('still locked'); e.code = 'EPERM'; throw e },
+      }), /still locked/)
+      assert.equal(calls, 2, 'original attempt + one retry, both fail')
+      assert.equal(existsSync(`${filePath}.tmp`), false, 'orphaned temp cleaned up')
+    })
+
+    it('does NOT retry on a non-retryable rename error', () => {
+      const filePath = join(dir, 'sec-nospc.json')
+      let calls = 0
+      assert.throws(() => writeFileRestricted(filePath, 'secret', {
+        _isWindowsOverride: true,
+        _stampAcl: () => {},
+        _rename: () => { calls++; const e = new Error('disk full'); e.code = 'ENOSPC'; throw e },
+      }), /disk full/)
+      assert.equal(calls, 1, 'non-retryable code → no retry')
     })
   })
 })
