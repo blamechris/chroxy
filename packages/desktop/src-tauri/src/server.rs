@@ -1977,9 +1977,13 @@ mod tests {
         // hardcoded "/usr" does not exist on Windows, so set_node_path's
         // `.exists()` filter dropped it and this test failed on a Windows runner.
         let existing = std::env::temp_dir();
-        let existing_str = existing.to_str().expect("temp dir path is valid UTF-8");
-        mgr.set_node_path(Some(existing_str));
-        assert_eq!(mgr.node_path, Some(PathBuf::from(existing_str)));
+        // A non-UTF-8 temp dir (rare, mainly Windows) can't be passed through
+        // set_node_path's &str API — skip rather than panic; the UTF-8 contract
+        // is unchanged (#6659 review).
+        if let Some(existing_str) = existing.to_str() {
+            mgr.set_node_path(Some(existing_str));
+            assert_eq!(mgr.node_path, Some(PathBuf::from(existing_str)));
+        }
     }
 
     #[test]
