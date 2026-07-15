@@ -2,6 +2,7 @@ import { describe, it, mock, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'events'
 import { CloudflareTunnelAdapter } from '../../src/tunnel/cloudflare.js'
+import { cloudflaredInstallHint } from '../../src/platform.js'
 import { waitForEvent } from '../test-helpers.js'
 
 /**
@@ -488,7 +489,7 @@ describe('CloudflareTunnelAdapter', () => {
       const caps = CloudflareTunnelAdapter.capabilities
       assert.deepEqual(caps.modes, ['quick', 'named'])
       assert.equal(caps.binaryName, 'cloudflared')
-      assert.equal(caps.installHint, 'brew install cloudflared')
+      assert.equal(caps.installHint, cloudflaredInstallHint())
     })
 
     it('has correct static name', () => {

@@ -17,7 +17,7 @@ export const isLinux = process.platform === 'linux'
 export function cloudflaredInstallHint() {
   if (isMac) return 'brew install cloudflared'
   if (isWindows) return 'winget install Cloudflare.cloudflared'
-  return 'see https://pkg.cloudflare.com/'
+  return 'see https://pkg.cloudflare.com/ for installation'
 }
 
 export function defaultShell() {
