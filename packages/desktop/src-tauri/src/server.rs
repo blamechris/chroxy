@@ -1973,9 +1973,13 @@ mod tests {
         let mut mgr = ServerManager::new();
         assert!(mgr.node_path.is_none());
 
-        // Use a path that exists on all systems
-        mgr.set_node_path(Some("/usr"));
-        assert_eq!(mgr.node_path, Some(PathBuf::from("/usr")));
+        // A directory that genuinely exists on every platform. The previous
+        // hardcoded "/usr" does not exist on Windows, so set_node_path's
+        // `.exists()` filter dropped it and this test failed on a Windows runner.
+        let existing = std::env::temp_dir();
+        let existing_str = existing.to_str().expect("temp dir path is valid UTF-8");
+        mgr.set_node_path(Some(existing_str));
+        assert_eq!(mgr.node_path, Some(PathBuf::from(existing_str)));
     }
 
     #[test]
