@@ -39,6 +39,15 @@ const posixOnly = process.platform === 'win32'
   ? 'POSIX/darwin/linux-only — not applicable on Windows (#6651)'
   : false
 
+// #6651 — the getFullServiceStatus tests fetch a REAL localhost port (8765 /
+// config) and assert nothing answers. The self-hosted `chroxy-win` runner is a
+// developer box that may have a live chroxy daemon on 8765, which would make
+// them flake. Skip on Windows; the port-parsing + fetch-timeout logic they cover
+// is platform-agnostic and stays green on the ubuntu/macOS jobs.
+const skipRealPortOnWin = process.platform === 'win32'
+  ? 'fetches a real localhost port that may be live on the self-hosted Windows runner (#6651)'
+  : false
+
 describe('service', () => {
   let tmpDir
 
@@ -849,7 +858,7 @@ describe('service', () => {
   })
 
   describe('getFullServiceStatus fetch timeout and port parsing (#745)', () => {
-    it('handles fetch timeout when server is not responding', async () => {
+    it('handles fetch timeout when server is not responding', { skip: skipRealPortOnWin }, async () => {
       const dir = mkdtempSync(join(tmpdir(), 'chroxy-timeout-'))
       try {
         saveServiceState({ installed: true, type: 'launchd' }, dir)
@@ -863,7 +872,7 @@ describe('service', () => {
       }
     })
 
-    it('reads port from config.json when available', async () => {
+    it('reads port from config.json when available', { skip: skipRealPortOnWin }, async () => {
       const dir = mkdtempSync(join(tmpdir(), 'chroxy-timeout-'))
       try {
         saveServiceState({ installed: true, type: 'launchd' }, dir)
@@ -877,7 +886,7 @@ describe('service', () => {
       }
     })
 
-    it('falls back to default port 8765 when no port info available', async () => {
+    it('falls back to default port 8765 when no port info available', { skip: skipRealPortOnWin }, async () => {
       const dir = mkdtempSync(join(tmpdir(), 'chroxy-timeout-'))
       try {
         saveServiceState({ installed: true, type: 'launchd' }, dir)
