@@ -377,6 +377,21 @@ cargo tauri build
 
 The MSI lands at `packages\desktop\src-tauri\target\release\bundle\msi\Chroxy_<version>_x64_en-US.msi`.
 
+### Running the Linux server under WSL2
+
+If you want the exact Linux runtime, run the daemon inside WSL2 instead of the native-Windows server. Verified on Ubuntu:
+
+```bash
+# Inside WSL2 (Ubuntu) — clone NATIVELY (not under /mnt/c; see the note below)
+git clone https://github.com/blamechris/chroxy && cd chroxy
+npm install                       # a native Linux install — node-pty needs its Linux prebuild
+npx chroxy start --host 0.0.0.0   # 0.0.0.0 is required to reach it from Windows
+```
+
+- **Reaching it from Windows:** WSL2's localhost-forwarding only forwards to a **`0.0.0.0`-bound** server, so `http://localhost:8765` works from a Windows browser. A `--host 127.0.0.1` bind is **not** forwarded and silently isolates the daemon inside WSL — use `--host 0.0.0.0` (chroxy's default) here.
+- **Phone / remote access:** WSL2 sits behind NAT, so run the Cloudflare tunnel **inside** WSL2 (its outbound connection traverses the NAT cleanly): install `cloudflared` in the distro, then plain `npx chroxy start`. Exposing a WSL2 port inbound instead would need a Windows-side `netsh interface portproxy` rule.
+- **Clone natively, not from `/mnt/c`:** a Windows checkout mounted at `/mnt/c` carries two hazards — node-pty's Windows prebuilds don't load under Linux (hence the native `npm install`), and `.sh` scripts a Windows checkout wrote with `core.autocrlf` have CRLF endings that break `./script.sh` (`bash script.sh` tolerates it). The repo stores every script LF (`.gitattributes`), so a native WSL clone is clean.
+
 ## Project Structure
 
 ```

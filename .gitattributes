@@ -1,5 +1,11 @@
 * text=auto eol=lf
 
+# Shell scripts MUST stay LF even on a Windows checkout with core.autocrlf=true —
+# CRLF breaks direct execution under WSL/Linux (`./script.sh` fails with
+# `bash\r: not found`). Explicit over the `* text=auto eol=lf` rule above so a
+# .sh can never fall back to content auto-detection (#6652).
+*.sh text eol=lf
+
 *.png binary
 *.jpg binary
 *.jpeg binary
