@@ -132,7 +132,9 @@ export function writeFileRestricted(
 }
 
 /**
- * Terminate `child` AND its entire descendant tree.
+ * Terminate `child` — its whole descendant TREE on Windows (taskkill /T), or
+ * just the DIRECT process on POSIX (see the per-platform notes below; callers
+ * that need the whole POSIX group spawn `detached` and signal the negative pid).
  *
  * POSIX: `child.kill(force ? 'SIGKILL' : 'SIGTERM')` on the direct process —
  * the long-standing behaviour (callers that need the whole group spawn
@@ -163,6 +165,10 @@ export function killProcessTree(child, { force = false } = {}) {
         execFileSync('taskkill', ['/PID', String(pid), '/T', '/F'], {
           stdio: 'ignore',
           windowsHide: true,
+          // Bound the teardown path: a wedged taskkill must not hang stop /
+          // respawn. On timeout execFileSync throws and we fall back to the
+          // direct child.kill() below (#6657 review).
+          timeout: 5000,
         })
         return
       } catch {
