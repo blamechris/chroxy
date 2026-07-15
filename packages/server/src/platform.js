@@ -152,19 +152,17 @@ export function defaultShell({ platform = process.platform, env = process.env } 
  * cleanup wrappers in environment-manager.js / session-state-persistence.js
  * had this warn before the hoist in #4874).
  *
- * AV-held-handle retry decision (#4927). On Windows, an open handle held
- * by antivirus / Windows Search can cause `renameSync` to fail with
- * EPERM / EACCES / EBUSY / EEXIST. `session-state-persistence.js._rotateToBak`
- * handles this with a one-shot retry, but `writeFileRestricted` does NOT
- * replicate that pattern — every existing caller already has its own
- * retry / fallback path (session manager debounce loop, models cache TTL
- * refresh, env manager next-tick re-persist), so an inner retry would
- * mask the error from the caller without changing the outcome.
- * `_rotateToBak`'s retry is special because rotation has no caller-level
- * retry — a missed rotation silently loses the prior-generation `.bak`
- * until the next write. If a future site without its own retry adopts
- * `writeFileRestricted`, revisit this decision. See `platform-windows.test.js`
- * for the full rationale.
+ * AV-held-handle retry (#4927 / #6644). On Windows, an open handle held by
+ * antivirus / Windows Search can cause `renameSync` to fail with EPERM /
+ * EACCES / EBUSY / EEXIST. This helper now does a ONE-SHOT retry on those codes
+ * (Windows only) before giving up — matching `session-state-persistence.js.
+ * _rotateToBak`. The original #4927 decision was to NOT retry here, on the
+ * grounds that every caller then had its own retry/fallback; that reasoning was
+ * flagged for revisit "if a future site without its own retry adopts
+ * `writeFileRestricted`", and #6644's DPAPI `_winSetToken` is exactly that site
+ * (a keychain write with no outer retry). The retry is bounded to a single extra
+ * attempt and to the transient-lock error codes, so a genuine failure (e.g.
+ * ENOSPC, a bad path) still surfaces immediately. See `platform-windows.test.js`.
  */
 export function writeFileRestricted(
   filePath,

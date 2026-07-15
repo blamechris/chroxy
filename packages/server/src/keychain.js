@@ -23,6 +23,12 @@ const ACCOUNT = 'api-token'
 // process args are world-readable via WMI on Windows), mirroring the Linux
 // secret-tool stdin pattern. The ciphertext file is written owner-only via
 // writeFileRestricted (icacls DACL, #6644).
+//
+// Every value stored here is ASCII and newline-free (a base64 data key, an API
+// token), so the stdin round-trip is encoding-agnostic and the read-side
+// trailing-newline trim is a defensive no-op. If a non-ASCII / trailing-newline
+// secret is ever stored, pin the console encoding (Input/OutputEncoding = UTF8)
+// in the PS scripts first.
 // Read LAZILY (not a module const) so tests can redirect LOCALAPPDATA to a temp
 // dir and stay hermetic, mirroring the keychain off-switch's per-call read.
 function winCredDir() {
@@ -304,9 +310,16 @@ export function getTokenStatus(service = DEFAULT_SERVICE) {
   // "other platforms" contract). Windows HAS a backend (DPAPI, #6644) so it is
   // not lumped in here.
   if (!isMac && !isLinux && !isWindows) return { status: 'absent', value: null, error: null }
-  // Windows with DPAPI/PowerShell unavailable also has no usable backend → the
-  // file owns identity, so report 'absent' (not the mac/linux broken → 'error').
-  if (isWindows && !keychainUsable()) return { status: 'absent', value: null, error: null }
+  // Windows with DPAPI/PowerShell unavailable: if a ciphertext file EXISTS but
+  // we can't decrypt it, that is stored-but-unreadable → 'error' so an identity
+  // caller fails safe (does not re-mint and false-MITM already-pinned clients,
+  // #5615). With NO stored file the file/env fallback legitimately owns identity
+  // → 'absent' (the documented no-backend contract).
+  if (isWindows && !keychainUsable()) {
+    return existsSync(_winCredFile(service, ACCOUNT))
+      ? { status: 'error', value: null, error: 'DPAPI unavailable — stored credential cannot be read' }
+      : { status: 'absent', value: null, error: null }
+  }
   // #5615 fail-safe: on mac/linux a BROKEN/missing keychain reads as 'error',
   // NOT 'absent' — an identity caller that re-mints on 'absent' would false-MITM
   // every already-pinned client. 'error' fails safe (don't rotate) AND avoids
