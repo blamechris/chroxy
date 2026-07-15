@@ -100,6 +100,13 @@ describe('resolveShell (#6646)', () => {
     )
   })
 
+  it('Windows: $SHELL set but non-existent falls through to PowerShell (not honoured)', () => {
+    assert.equal(
+      resolveShell({ platform: 'win32', env: { SHELL: 'C:\\nope\\bad.exe', SystemRoot: 'C:\\Windows' }, exists: (p) => p === WIN_PS }),
+      WIN_PS,
+    )
+  })
+
   it('Windows: falls back to COMSPEC/cmd.exe (defaultShell) when PowerShell is absent', () => {
     const cmd = 'C:\\Windows\\System32\\cmd.exe'
     assert.equal(

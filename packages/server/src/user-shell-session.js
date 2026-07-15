@@ -29,7 +29,9 @@ const DEFAULT_COLS = 120
 const DEFAULT_ROWS = 30
 // Coalesce PTY bytes into one terminal_output per tick (bounds broadcast churn).
 const MIRROR_FLUSH_MS = 50
-// SIGTERM → grace → SIGKILL the process group on destroy.
+// POSIX destroy() escalation window: SIGTERM → grace → SIGKILL the process
+// group. Windows has no grace — destroy() reaps the whole tree at once via
+// taskkill (#6646), so this constant is POSIX-only.
 const DESTROY_GRACE_MS = 3000
 
 // Windows PowerShell 5.1 ships in-box at this fixed System32 path on every
