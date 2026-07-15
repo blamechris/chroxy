@@ -11,8 +11,9 @@ export const isLinux = process.platform === 'linux'
 /**
  * Per-platform "how to install cloudflared" hint for user-facing errors:
  * Windows → winget, macOS → Homebrew, Linux → the Cloudflare package repo.
- * Centralized so the tunnel adapter, doctor, and the desktop app all give an
- * actionable command for the host they're actually running on (#6649).
+ * The tunnel adapter and doctor share this single source of truth; the desktop
+ * app mirrors the same logic in Rust (`cloudflared_install_hint` in lib.rs), as
+ * it can't call across the JS/Rust boundary (#6649).
  */
 export function cloudflaredInstallHint() {
   if (isMac) return 'brew install cloudflared'
