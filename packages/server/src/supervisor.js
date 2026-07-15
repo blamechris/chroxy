@@ -91,6 +91,10 @@ export class Supervisor extends EventEmitter {
     this._tunnel = null
     this._heartbeatInterval = null
     this._currentWsUrl = null
+    // #6641: true while the tunnel is up but not routable — the server runs
+    // local/LAN-only and advertises no remote/QR access. Read by the degrade
+    // test; a natural gate for a future auto-reverify.
+    this._tunnelDegraded = false
     this._signalsRegistered = false
     this._restartScheduledAt = null
     this._restartDelayMs = null
@@ -325,15 +329,22 @@ export class Supervisor extends EventEmitter {
     // must NOT abort the whole daemon. The default `chroxy start` used to
     // exit(1) here whenever a warming quick-tunnel edge answered with a status
     // outside {502,530} (e.g. a bare 404 during route propagation), taking down
-    // local + LAN access with it. Instead, degrade to local/LAN: keep
-    // cloudflared alive (so the tunnel_recovered handler can advertise remote
-    // access if it becomes routable) and start the child anyway.
+    // local + LAN access with it. Instead, degrade to local/LAN: start the
+    // child anyway so the server is usable right now.
     //
-    // #5314 (WP-1.4) note: the no-orphan guarantee is preserved a different way.
-    // Previously a tunnel-verify throw meant "stop cloudflared, then exit" so it
-    // couldn't leak. Now cloudflared stays up but the child is forked and
-    // supervised, so BOTH are torn down together in shutdown() — no orphan.
-    // A NON-routability error (an unexpected throw) still takes the old
+    // Degraded mode does NOT auto-recover to remote: `tunnel_recovered` only
+    // fires when the cloudflared PROCESS flaps (tunnel/base.js), not when an
+    // alive-but-unroutable tunnel finishes propagating, and there is no
+    // routability re-poll. So we advertise NO remote/QR access and tell the
+    // operator to restart (or use --tunnel named) once the tunnel is routable,
+    // rather than promising a QR that would never appear. (An auto re-verify in
+    // degraded mode is a possible follow-up — see #6641.)
+    //
+    // #5314 (WP-1.4) note: on the SIGINT/SIGTERM path the no-orphan guarantee
+    // still holds — shutdown() stops the tunnel and the supervised child
+    // together. (The crash-loop give-up path, _serveTerminalDown(), does not
+    // stop the tunnel — a pre-existing gap, not introduced here.) A
+    // NON-routability error (an unexpected throw) still takes the old
     // stop-cloudflared-then-exit cleanup path via _failBoot().
     let tunnelRoutable = true
     try {
@@ -346,8 +357,9 @@ export class Supervisor extends EventEmitter {
       tunnelRoutable = false
       this._tunnelDegraded = true
       this._log.warn(
-        'Tunnel not routable yet — starting in local/LAN mode. Remote (QR) access ' +
-        `will be advertised if the tunnel becomes routable. ${err.message}`
+        'Tunnel not routable — starting in local/LAN mode; remote access is ' +
+        'unavailable. Restart once your network/tunnel is ready, or use ' +
+        `--tunnel named for a stable URL. ${err.message}`
       )
     }
 
@@ -370,24 +382,30 @@ export class Supervisor extends EventEmitter {
         process.stdout.write(`   Dashboard: ${dashboardBase.replace(/\/+$/, '')}/dashboard\n`)
         process.stdout.write('\n')
       } else {
-        // 3a. Degraded: local/LAN only, no QR to a dead endpoint.
-        process.stdout.write('\n⚠️  Tunnel not routable yet — serving on local/LAN only.\n')
+        // 3a. Degraded: local/LAN only, no QR to a dead endpoint, and no false
+        // promise of auto-recovery (#6641 review).
+        process.stdout.write('\n⚠️  Tunnel not routable — serving on local/LAN only (no remote/QR access).\n')
         process.stdout.write(`   Dashboard: http://localhost:${this._port}/dashboard\n`)
+        process.stdout.write(`   LAN:       http://<this-machine-ip>:${this._port}/dashboard\n`)
         process.stdout.write(`   Token: ${maskToken(this._apiToken)}\n`)
-        process.stdout.write('   Remote (phone) access will be advertised here if the tunnel becomes routable.\n\n')
+        process.stdout.write('   For remote (phone) access, restart once the tunnel is routable, or use --tunnel named.\n\n')
       }
 
-      // 3b. Write connection info file for programmatic access
+      // 3b. Write connection info file for programmatic access. In degraded mode
+      // OMIT the public wsUrl/httpUrl/connectionUrl (they're not routable) so no
+      // consumer advertises a dead endpoint — notably the dashboard /qr route
+      // falls back to connectionUrl, which would otherwise resurface the exact
+      // dead QR #6641 kills, just in the dashboard modal (#6641 review). The
+      // local `port` is still written so loopback CLIs (chroxy publish / pages)
+      // hit the right port even in tunnel mode (#5683).
       writeConnectionInfo({
-        wsUrl,
-        httpUrl,
-        // #5683: the LOCAL listen port, so loopback CLIs (chroxy publish / pages)
-        // hit the right port even in tunnel mode, where httpUrl is the public
-        // trycloudflare URL with no :port to parse.
+        wsUrl: tunnelRoutable ? wsUrl : null,
+        httpUrl: tunnelRoutable ? httpUrl : null,
         port: this._port,
         apiToken: this._apiToken,
-        connectionUrl,
+        connectionUrl: tunnelRoutable ? connectionUrl : null,
         tunnelMode: this._modeLabel,
+        tunnelDegraded: !tunnelRoutable,
         startedAt: new Date().toISOString(),
         pid: process.pid,
       })

@@ -237,6 +237,18 @@ describe('Supervisor', () => {
       // No QR to a dead endpoint; degraded local/LAN banner instead.
       assert.doesNotMatch(output, /Scan this QR/, 'no QR when the tunnel is not routable')
       assert.match(output, /local\/LAN only/, 'shows the degraded local/LAN banner')
+      // #6641 review: must NOT promise auto-advertised remote access (it never
+      // happens for an alive-but-unroutable tunnel) — give actionable guidance.
+      assert.doesNotMatch(output, /will be advertised/i, 'no false auto-advertise promise')
+      assert.match(output, /--tunnel named|restart/i, 'gives actionable remote-access guidance')
+      // Degraded connection.json must NOT carry a dead public URL — the dashboard
+      // /qr route falls back to connectionUrl and would otherwise resurface a
+      // dead QR in the modal.
+      const connInfo = JSON.parse(readFileSync(join(process.env.CHROXY_CONFIG_DIR, 'connection.json'), 'utf-8'))
+      assert.equal(connInfo.connectionUrl, null, 'degraded connection.json omits the public connectionUrl')
+      assert.equal(connInfo.wsUrl, null, 'degraded connection.json omits the public wsUrl')
+      assert.equal(connInfo.tunnelDegraded, true)
+      assert.equal(connInfo.port, supervisor._port, 'local port is still written for loopback CLIs')
     })
 
     it('#6641: still aborts (stops cloudflared + exits) on a non-routability tunnel error', async () => {
