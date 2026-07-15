@@ -30,8 +30,11 @@ if (typeof mock.module !== 'function') {
   }
   mock.module('child_process', { namedExports: cpMock })
 
-  // Mock platform detection so tests run on any OS
-  const platformMock = { isMac: true, isLinux: false, isWindows: false }
+  // Mock platform detection so tests run on any OS. writeFileRestricted is
+  // imported by keychain.js for the Windows DPAPI path (#6644) but never called
+  // on the mac/linux paths these tests exercise — stub it so the module mock
+  // provides every named export keychain.js imports.
+  const platformMock = { isMac: true, isLinux: false, isWindows: false, writeFileRestricted: () => {} }
   mock.module('../src/platform.js', { namedExports: platformMock })
 
   // Import keychain AFTER mocking
