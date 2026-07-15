@@ -328,12 +328,21 @@ winget install Git.Git
 # Restart PowerShell so the new tools land on PATH, then:
 git clone https://github.com/blamechris/chroxy
 cd chroxy
-npm install
+npm install          # no Visual Studio / node-gyp needed — node-pty ships prebuilt Windows binaries
+npx chroxy doctor    # verify Node, cloudflared, and the port are ready
 npx chroxy init
 npx chroxy start
 ```
 
 Same QR-code / manual-entry connection flow as macOS. All session features (model switching, files, git, plan mode, agents) work identically.
+
+**Quickest start — local/LAN, no Cloudflare account, no tunnel:**
+
+```powershell
+npx chroxy start --tunnel none --host 127.0.0.1 --show-token
+```
+
+This binds the server locally and prints a **token-gated dashboard URL**. With `--show-token` the printed URL includes the `?token=…`, so you can open it directly in any Windows browser for the full chat/terminal UI — no desktop app needed. (Without the flag the URL and token are masked in the output; add `--show-token`, or append the token yourself.) Drop `--host 127.0.0.1` (the default is `0.0.0.0`) to also reach it from your phone over the LAN. Plain `npx chroxy start` (a Cloudflare Quick Tunnel) works too; if the edge isn't routable yet it degrades to local/LAN instead of aborting — pass `--tunnel named` for a stable remote URL.
 
 **Run at startup:** native Windows service install is not supported by the CLI. Pick one of:
 - **Task Scheduler** — schedule `node <chroxy-path> start` at logon
