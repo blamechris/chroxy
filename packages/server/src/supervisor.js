@@ -321,29 +321,61 @@ export class Supervisor extends EventEmitter {
       this._log.error(message)
     })
 
-    // 2-3. Wait for the tunnel to be routable, then display + persist connection
-    // info. #5314 (WP-1.4) — every step here runs while cloudflared is already
-    // up (this._tunnel.start() above) but BEFORE the child is forked, so ANY
-    // throw must stop cloudflared first or it leaks as an orphan. waitForTunnel
-    // THROWS on a routine DNS-settle failure; _displayQr (QR encode) and
-    // writeConnectionInfo (disk) can also throw. _failBoot() is the single
-    // cleanup path. (The PID write below has its own non-fatal guard, and the
-    // child fork is past the no-leak boundary.)
+    // 2. Wait for the tunnel to be routable. #6641 — a not-yet-routable tunnel
+    // must NOT abort the whole daemon. The default `chroxy start` used to
+    // exit(1) here whenever a warming quick-tunnel edge answered with a status
+    // outside {502,530} (e.g. a bare 404 during route propagation), taking down
+    // local + LAN access with it. Instead, degrade to local/LAN: keep
+    // cloudflared alive (so the tunnel_recovered handler can advertise remote
+    // access if it becomes routable) and start the child anyway.
+    //
+    // #5314 (WP-1.4) note: the no-orphan guarantee is preserved a different way.
+    // Previously a tunnel-verify throw meant "stop cloudflared, then exit" so it
+    // couldn't leak. Now cloudflared stays up but the child is forked and
+    // supervised, so BOTH are torn down together in shutdown() — no orphan.
+    // A NON-routability error (an unexpected throw) still takes the old
+    // stop-cloudflared-then-exit cleanup path via _failBoot().
+    let tunnelRoutable = true
     try {
       await this._waitForTunnel(httpUrl)
+    } catch (err) {
+      if (err?.code !== 'TUNNEL_NOT_ROUTABLE') {
+        await this._failBoot(err)
+        return
+      }
+      tunnelRoutable = false
+      this._tunnelDegraded = true
+      this._log.warn(
+        'Tunnel not routable yet — starting in local/LAN mode. Remote (QR) access ' +
+        `will be advertised if the tunnel becomes routable. ${err.message}`
+      )
+    }
 
-      // 3. Display connection info
+    // 3. Display + persist connection info. The QR is shown ONLY for a routable
+    // tunnel — a QR to a not-yet-routable endpoint just hangs the app (the exact
+    // failure #6641 addresses), so in degraded mode we advertise local/LAN only.
+    // A throw in this block (QR encode / disk write) still routes to _failBoot().
+    try {
       const connectionUrl = `chroxy://${wsUrl.replace('wss://', '')}?token=${this._apiToken}`
 
-      this._log.info(`${this._modeLabel} ready`)
-      process.stdout.write('📱 Scan this QR code with the Chroxy app:\n\n')
-      await this._displayQr(connectionUrl)
-      process.stdout.write('\nOr connect manually:\n')
-      process.stdout.write(`   URL:   ${wsUrl}\n`)
-      process.stdout.write(`   Token: ${maskToken(this._apiToken)}\n`)
-      const dashboardBase = httpUrl || `http://localhost:${this._port}`
-      process.stdout.write(`   Dashboard: ${dashboardBase.replace(/\/+$/, '')}/dashboard\n`)
-      process.stdout.write('\n')
+      if (tunnelRoutable) {
+        // 3a. Display connection info
+        this._log.info(`${this._modeLabel} ready`)
+        process.stdout.write('📱 Scan this QR code with the Chroxy app:\n\n')
+        await this._displayQr(connectionUrl)
+        process.stdout.write('\nOr connect manually:\n')
+        process.stdout.write(`   URL:   ${wsUrl}\n`)
+        process.stdout.write(`   Token: ${maskToken(this._apiToken)}\n`)
+        const dashboardBase = httpUrl || `http://localhost:${this._port}`
+        process.stdout.write(`   Dashboard: ${dashboardBase.replace(/\/+$/, '')}/dashboard\n`)
+        process.stdout.write('\n')
+      } else {
+        // 3a. Degraded: local/LAN only, no QR to a dead endpoint.
+        process.stdout.write('\n⚠️  Tunnel not routable yet — serving on local/LAN only.\n')
+        process.stdout.write(`   Dashboard: http://localhost:${this._port}/dashboard\n`)
+        process.stdout.write(`   Token: ${maskToken(this._apiToken)}\n`)
+        process.stdout.write('   Remote (phone) access will be advertised here if the tunnel becomes routable.\n\n')
+      }
 
       // 3b. Write connection info file for programmatic access
       writeConnectionInfo({
