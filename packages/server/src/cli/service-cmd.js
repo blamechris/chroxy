@@ -12,7 +12,7 @@ export function registerServiceCommand(program) {
 
   serviceCmd
     .command('install')
-    .description('Register Chroxy as a system daemon (launchd/systemd)')
+    .description('Register Chroxy as a system daemon (launchd / systemd / Windows Task Scheduler)')
     .option('--cwd <path>', 'Working directory for Claude sessions')
     .option('--start-at-login', 'Start automatically on login')
     .action(async (options) => {
@@ -24,12 +24,6 @@ export function registerServiceCommand(program) {
         loadServiceState,
         installService,
       } = await import('../service.js')
-
-      if (isWindows) {
-        console.error('Error: Service install is not supported on Windows.')
-        console.error('Only macOS (launchd) and Linux (systemd) are supported.')
-        process.exit(1)
-      }
 
       const existing = loadServiceState()
       if (existing) {
@@ -76,7 +70,7 @@ export function registerServiceCommand(program) {
       const startAtLogin = options.startAtLogin || false
 
       try {
-        installService({
+        const result = installService({
           nodePath,
           chroxyBin,
           claudeBin,
@@ -85,22 +79,37 @@ export function registerServiceCommand(program) {
         })
 
         const paths = getServicePaths()
-        const servicePath = paths.type === 'launchd' ? paths.plistPath : paths.unitPath
 
         console.log('\n\u2705 Chroxy service installed successfully!\n')
         console.log(`  Node:         ${nodePath}`)
         console.log(`  Chroxy CLI:   ${chroxyBin}`)
         console.log(`  Claude CLI:   ${claudeBin}`)
-        console.log(`  Service file: ${servicePath}`)
-        console.log(`  Log dir:      ${paths.logDir}`)
-        console.log(`  Working dir:  ${cwd}`)
-        console.log(`  Start on login: ${startAtLogin}`)
-        if (paths.type === 'launchd') {
-          console.log('\nThe service is installed but not running. To start it now:')
-          console.log('  launchctl start com.chroxy.server')
+
+        if (paths.type === 'windows') {
+          console.log(`  Task:         ${result?.taskName || 'Chroxy'} (Windows Task Scheduler)`)
+          console.log(`  Wrapper:      ${result?.wrapperPath}`)
+          console.log(`  Log dir:      ${paths.logDir}`)
+          console.log(`  Working dir:  ${cwd}`)
+          console.log('  Start on login: true (ONLOGON)')
+          console.log('\nThe scheduled task is registered and will start Chroxy at your next logon.')
+          console.log('To start it now:   chroxy service start')
+          console.log('To check it:       chroxy service status')
+          console.log('\nNote: the task runs at LOGON as your user (schtasks /SC ONLOGON /IT), not at')
+          console.log('boot. A boot-time daemon would run as SYSTEM with no access to your credential')
+          console.log('store or session \u2014 the wrong model for a per-user dev daemon.')
         } else {
-          console.log('\nThe service is enabled and running. To restart it:')
-          console.log('  systemctl --user restart chroxy.service')
+          const servicePath = paths.type === 'launchd' ? paths.plistPath : paths.unitPath
+          console.log(`  Service file: ${servicePath}`)
+          console.log(`  Log dir:      ${paths.logDir}`)
+          console.log(`  Working dir:  ${cwd}`)
+          console.log(`  Start on login: ${startAtLogin}`)
+          if (paths.type === 'launchd') {
+            console.log('\nThe service is installed but not running. To start it now:')
+            console.log('  launchctl start com.chroxy.server')
+          } else {
+            console.log('\nThe service is enabled and running. To restart it:')
+            console.log('  systemctl --user restart chroxy.service')
+          }
         }
       } catch (err) {
         console.error(`Error installing service: ${err.message}`)
@@ -126,6 +135,8 @@ export function registerServiceCommand(program) {
         console.log('  Service file and state have been removed.')
         if (state.platform === 'darwin') {
           console.log('  The launchd job has been unloaded.')
+        } else if (state.platform === 'win32') {
+          console.log('  The Windows scheduled task has been deleted.')
         } else {
           console.log('  The systemd unit has been disabled and stopped.')
         }
@@ -190,7 +201,7 @@ export function registerServiceCommand(program) {
     .command('status')
     .description('Show daemon status')
     .action(async () => {
-      const { getFullServiceStatus } = await import('../service.js')
+      const { getFullServiceStatus, getWindowsTaskStatus } = await import('../service.js')
       const status = await getFullServiceStatus()
 
       console.log('\nChroxy Service Status\n')
@@ -202,6 +213,15 @@ export function registerServiceCommand(program) {
       }
 
       console.log('  Installed:  Yes')
+
+      // On Windows, surface the scheduled task's registration/run state
+      // (schtasks /Query /V) alongside the daemon-liveness (PID) check (#6647).
+      if (isWindows) {
+        const task = getWindowsTaskStatus()
+        console.log('  Task:       ' + (task.registered
+          ? `registered${task.status ? ` (${task.status})` : ''}`
+          : 'not registered'))
+      }
 
       if (!status.running) {
         if (status.stale) {

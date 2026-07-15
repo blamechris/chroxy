@@ -6,6 +6,7 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'no
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { CliSession } from '../src/cli-session.js'
+import { isWindows } from '../src/platform.js'
 import { SessionStatePersistence } from '../src/session-state-persistence.js'
 
 /**
@@ -982,6 +983,10 @@ describe('_killAndRespawn behavioral tests (#1009)', () => {
   it('setModel kills old child and respawns after close', async () => {
     const session = createReadySession({ model: 'sonnet' })
     const oldChild = session._child
+    // #6643: null the mock pid so killProcessTree takes its deterministic
+    // no-pid fallback (a direct kill) on Windows instead of shelling out to
+    // `taskkill /PID <mock>` against a real bystander process on a local run.
+    oldChild.pid = null
 
     // Stub start() to prevent actual process spawning
     let startCalled = false
@@ -996,7 +1001,9 @@ describe('_killAndRespawn behavioral tests (#1009)', () => {
     assert.equal(session._processReady, false)
     assert.equal(session._child, null, 'Old child should be detached')
     assert.equal(oldChild.kill.mock.calls.length, 1, 'kill() should be called on old child')
-    assert.equal(oldChild.kill.mock.calls[0].arguments[0], 'SIGTERM')
+    // #6643 — respawn routes through killProcessTree: POSIX still sends a
+    // graceful SIGTERM; on Windows the pid-less mock falls back to a direct kill.
+    if (!isWindows) assert.equal(oldChild.kill.mock.calls[0].arguments[0], 'SIGTERM')
 
     // start() not called yet (waiting for close)
     assert.equal(startCalled, false)
@@ -1281,6 +1288,9 @@ describe('CliSession setPermissionMode panic-button mid-turn (#3735)', () => {
     const session = createReadySession({ permissionMode: 'approve' })
     sessions.push(session)
     const oldChild = session._child
+    // #6643: null the mock pid so killProcessTree takes its deterministic
+    // no-pid fallback on Windows (see the setModel respawn test).
+    oldChild.pid = null
 
     // Simulate the user being mid-turn: claude -p is running, _isBusy=true,
     // a messageId+ctx are set, and the result timer is armed.
@@ -1308,8 +1318,9 @@ describe('CliSession setPermissionMode panic-button mid-turn (#3735)', () => {
     assert.equal(session._respawning, true)
     assert.equal(session._processReady, false)
     assert.equal(session._child, null, 'old child detached during respawn')
-    assert.equal(oldChild.kill.mock.calls.length, 1, 'SIGTERM sent to in-flight process')
-    assert.equal(oldChild.kill.mock.calls[0].arguments[0], 'SIGTERM')
+    assert.equal(oldChild.kill.mock.calls.length, 1, 'kill sent to in-flight process')
+    // #6643 — see killProcessTree note above; POSIX still uses a graceful SIGTERM.
+    if (!isWindows) assert.equal(oldChild.kill.mock.calls[0].arguments[0], 'SIGTERM')
 
     // start() is deferred until the old child's 'close' event fires.
     assert.equal(startCalled, 0, 'start() waits for old child to close')

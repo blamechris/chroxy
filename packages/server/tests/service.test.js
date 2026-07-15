@@ -10,7 +10,9 @@ import {
   generateLaunchdPlist,
   generateSystemdUnit,
   generateServiceWrapper,
+  generateWindowsServiceWrapper,
   getWindowsAlternatives,
+  getWindowsTaskStatus,
   resolveNode22Path,
   resolveChroxyBin,
   resolveClaudeBin,
@@ -222,19 +224,145 @@ describe('service', () => {
     })
   })
 
-  describe('installService() on Windows', () => {
-    it('returns guidance instead of throwing on win32', () => {
+  describe('Windows service via Task Scheduler (schtasks) — #6647', () => {
+    const spy = () => {
+      const calls = []
+      return { calls, exec: (cmd, args) => { calls.push({ cmd, args }); return '' } }
+    }
+
+    it('install writes the .cmd wrapper and registers an ONLOGON /IT /RL HIGHEST task', () => {
       const stateDir = join(tmpDir, 'state')
+      const logDir = join(tmpDir, 'logs')
+      const wrapperPath = join(stateDir, 'service-wrapper.cmd')
+      const { calls, exec } = spy()
       const result = installService({
         nodePath: 'C:\\Program Files\\nodejs\\node.exe',
         chroxyBin: 'C:\\chroxy\\cli.js',
-        _skipRegister: true,
+        claudeBin: 'C:\\Users\\me\\AppData\\claude.cmd',
+        cwd: 'C:\\work',
         _platform: 'win32',
         _stateDir: stateDir,
+        _logDir: logDir,
+        _wrapperPath: wrapperPath,
+        _exec: exec,
       })
-      assert.equal(result.installed, false)
-      assert.ok(result.message.includes('Windows'))
-      assert.ok(result.alternatives)
+
+      assert.deepEqual(result, {
+        installed: true, platform: 'win32', taskName: 'Chroxy', wrapperPath,
+      })
+
+      // wrapper written to disk
+      assert.ok(existsSync(wrapperPath))
+      const wrapper = readFileSync(wrapperPath, 'utf-8')
+      assert.match(wrapper, /cd \/d "C:\\work"/)
+      assert.match(wrapper, /"C:\\Program Files\\nodejs\\node\.exe" "C:\\chroxy\\cli\.js" start/)
+      assert.match(wrapper, /chroxy-stdout\.log/)
+
+      // exactly one schtasks /Create with the required flags; /TR quoted; no secret
+      assert.equal(calls.length, 1)
+      assert.equal(calls[0].cmd, 'schtasks')
+      const a = calls[0].args
+      assert.deepEqual(a.slice(0, 3), ['/Create', '/TN', 'Chroxy'])
+      assert.equal(a[a.indexOf('/SC') + 1], 'ONLOGON')
+      assert.equal(a[a.indexOf('/RL') + 1], 'HIGHEST')
+      assert.ok(a.includes('/IT'), '/IT avoids a stored-password prompt')
+      assert.ok(a.includes('/F'), '/F makes reinstall idempotent')
+      assert.equal(a[a.indexOf('/TR') + 1], `"${wrapperPath}"`, '/TR is the quoted wrapper path only')
+
+      // state records the win32 platform + task name
+      const state = loadServiceState(stateDir)
+      assert.equal(state.platform, 'win32')
+      assert.equal(state.taskName, 'Chroxy')
+      assert.equal(state.wrapperPath, wrapperPath)
+      assert.equal(state.startAtLogin, true)
+    })
+
+    it('install with _skipRegister writes wrapper + state but runs no schtasks', () => {
+      const stateDir = join(tmpDir, 'state-skip')
+      const { calls, exec } = spy()
+      installService({
+        nodePath: 'C:\\node.exe', chroxyBin: 'C:\\cli.js',
+        _platform: 'win32', _stateDir: stateDir, _logDir: join(tmpDir, 'l-skip'),
+        _wrapperPath: join(stateDir, 'w.cmd'), _skipRegister: true, _exec: exec,
+      })
+      assert.equal(calls.length, 0)
+      assert.ok(loadServiceState(stateDir))
+    })
+
+    it('install surfaces schtasks stderr + an elevation hint when /Create is denied (#6647)', () => {
+      // Creating an ONLOGON task requires elevation; a non-elevated schtasks
+      // /Create fails "Access is denied." — surface it, not a bare "Command failed".
+      const failingExec = () => {
+        const e = new Error('Command failed: schtasks /Create ...')
+        e.stderr = 'ERROR: Access is denied.'
+        throw e
+      }
+      assert.throws(
+        () => installService({
+          nodePath: 'C:\\node.exe', chroxyBin: 'C:\\cli.js',
+          _platform: 'win32', _stateDir: join(tmpDir, 'state-denied'),
+          _logDir: join(tmpDir, 'l-denied'), _wrapperPath: join(tmpDir, 'state-denied', 'w.cmd'),
+          _exec: failingExec,
+        }),
+        (err) => /Access is denied/i.test(err.message) && /Administrator/i.test(err.message),
+      )
+    })
+
+    it('start runs the scheduled task (schtasks /Run)', () => {
+      const { calls, exec } = spy()
+      const r = startService({ _platform: 'win32', _exec: exec })
+      assert.equal(r.started, true)
+      assert.deepEqual(calls, [{ cmd: 'schtasks', args: ['/Run', '/TN', 'Chroxy'] }])
+    })
+
+    it('stop ends the scheduled task (schtasks /End)', () => {
+      const { calls, exec } = spy()
+      const r = stopService({ _platform: 'win32', _exec: exec })
+      assert.equal(r.stopped, true)
+      assert.deepEqual(calls, [{ cmd: 'schtasks', args: ['/End', '/TN', 'Chroxy'] }])
+    })
+
+    it('uninstall deletes the scheduled task (schtasks /Delete /F) and cleans up', () => {
+      const stateDir = join(tmpDir, 'state-uninstall')
+      const wrapperPath = join(stateDir, 'service-wrapper.cmd')
+      installService({
+        nodePath: 'C:\\node.exe', chroxyBin: 'C:\\cli.js',
+        _platform: 'win32', _stateDir: stateDir, _logDir: join(tmpDir, 'l-uninstall'),
+        _wrapperPath: wrapperPath, _skipRegister: true, _exec: () => '',
+      })
+      assert.ok(existsSync(wrapperPath))
+
+      const { calls, exec } = spy()
+      uninstallService({ _stateDir: stateDir, _exec: exec })
+      assert.deepEqual(calls, [{ cmd: 'schtasks', args: ['/Delete', '/TN', 'Chroxy', '/F'] }])
+      assert.ok(!existsSync(wrapperPath), 'wrapper removed')
+      assert.equal(loadServiceState(stateDir), null, 'state removed')
+    })
+
+    it('getWindowsTaskStatus parses the schtasks /Query Status line', () => {
+      const exec = () => 'TaskName: \\Chroxy\r\nStatus:  Running\r\nLogon Mode: Interactive only\r\n'
+      assert.deepEqual(getWindowsTaskStatus({ _exec: exec }), { registered: true, status: 'Running' })
+    })
+
+    it('getWindowsTaskStatus reports not-registered when schtasks errors', () => {
+      const exec = () => { throw new Error('ERROR: The system cannot find the file specified.') }
+      assert.deepEqual(getWindowsTaskStatus({ _exec: exec }), { registered: false, status: null })
+    })
+
+    it('generateWindowsServiceWrapper sets cwd/PATH, redirects logs, and bakes no secret', () => {
+      const w = generateWindowsServiceWrapper({
+        nodePath: 'C:\\nodejs\\node.exe',
+        chroxyBin: 'C:\\chroxy\\cli.js',
+        claudeBin: 'C:\\claude\\claude.cmd',
+        cwd: 'C:\\work',
+        logDir: 'C:\\logs',
+      })
+      assert.match(w, /set "PATH=C:\\nodejs;C:\\claude;%PATH%"/)
+      assert.match(w, /cd \/d "C:\\work"/)
+      assert.match(w, /"C:\\nodejs\\node\.exe" "C:\\chroxy\\cli\.js" start >> "C:\\logs\\chroxy-stdout\.log" 2>> "C:\\logs\\chroxy-stderr\.log"/)
+      assert.doesNotMatch(w, /security|token|password/i, 'no secret material in the wrapper')
+      assert.ok(w.includes('\r\n'), 'CRLF line endings for a generated .cmd')
+      assert.doesNotMatch(w, /[^\x00-\x7F]/, 'ASCII-only (cmd.exe OEM code page renders non-ASCII as garbage)')
     })
   })
 
@@ -447,12 +575,10 @@ describe('service', () => {
       assert.equal(typeof result.message, 'string')
     })
 
-    it('returns helpful guidance on windows', () => {
+    it('starts the scheduled task on windows (#6647)', () => {
       const result = startService({ _skipExec: true, _platform: 'win32' })
-      assert.equal(result.started, false)
-      assert.ok(result.message.includes('Windows'))
-      assert.ok(result.alternatives)
-      assert.ok(result.alternatives.length > 0)
+      assert.equal(result.started, true)
+      assert.equal(typeof result.message, 'string')
     })
   })
 
@@ -469,10 +595,10 @@ describe('service', () => {
       assert.equal(typeof result.message, 'string')
     })
 
-    it('returns guidance on windows', () => {
+    it('ends the scheduled task on windows (#6647)', () => {
       const result = stopService({ _skipExec: true, _platform: 'win32' })
-      assert.equal(result.stopped, false)
-      assert.ok(result.message.includes('Windows'))
+      assert.equal(result.stopped, true)
+      assert.equal(typeof result.message, 'string')
     })
   })
 

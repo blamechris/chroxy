@@ -1,0 +1,8 @@
+{
+  "bundle": {
+    "resources": {
+      "server-bundle": "server",
+      "swift/speech-helper": "speech-helper"
+    }
+  }
+}

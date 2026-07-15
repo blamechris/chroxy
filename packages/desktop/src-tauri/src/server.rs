@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -1106,7 +1106,23 @@ impl ServerManager {
     pub fn stop(&mut self) {
         self.user_stopped.store(true, Ordering::Relaxed);
         self.auto_restart_pending.store(false, Ordering::Relaxed);
+        // #6645 — the node server owns cloudflared as a GRANDCHILD. kill_child
+        // only signals the direct child (TerminateProcess on Windows gives it no
+        // cleanup window), so the server's own tunnel.stop() never runs and
+        // cloudflared is orphaned — the public *.trycloudflare.com URL then
+        // outlives the app. kill_orphan_cloudflared previously ran ONLY on
+        // start(), so an orphaned tunnel stayed live between quit and next
+        // launch. Reap it here too (this covers user-stop, window close/exit,
+        // and Drop, which all route through stop()). Only when a child actually
+        // existed — a childless stop() (e.g. unit tests, or stop with no server
+        // running) must NOT spawn a process scan or risk killing an unrelated
+        // cloudflared. No-op when the server already stopped its own tunnel
+        // (graceful POSIX shutdown).
+        let had_child = self.child.is_some();
         self.stop_process();
+        if had_child {
+            Self::kill_orphan_cloudflared(self.config.port, &self.log_buffer);
+        }
     }
 
     /// Restart: stop then start (resets auto-restart state via start()).
@@ -1299,14 +1315,16 @@ impl ServerManager {
     }
 
     /// Resolve the chroxy CLI entry point (cli.js).
-    /// Checks: bundled .app resources, monorepo relative, CHROXY_SERVER_PATH env, `which chroxy`.
+    /// Checks: bundled resources (next-to-exe on Windows/Linux, Contents/Resources
+    /// on macOS), monorepo relative, CHROXY_SERVER_PATH env, `which`/`where chroxy`.
     fn resolve_cli_js() -> Result<PathBuf, String> {
-        // Strategy 1: Bundled inside .app (macOS).
-        // Binary lives at Contents/MacOS/chroxy-desktop,
-        // resources at Contents/Resources/server/src/cli.js.
+        // Strategy 1: Bundled with the installed desktop app. Tauri v2 stages
+        // `bundle.resources` next to the executable on Windows (MSI) and Linux
+        // (AppImage/deb), and under Contents/Resources on macOS. #6640 — the old
+        // code only checked the macOS layout, so the installed Windows/Linux tray
+        // could never find its own bundled server and failed to start the daemon.
         if let Ok(exe) = std::env::current_exe() {
-            if let Some(contents_dir) = exe.parent().and_then(|p| p.parent()) {
-                let bundled = contents_dir.join("Resources/server/src/cli.js");
+            for bundled in bundled_cli_js_candidates(&exe) {
                 if bundled.exists() {
                     return Ok(bundled);
                 }
@@ -1354,7 +1372,16 @@ impl ServerManager {
         #[cfg(windows)]
         let which_cmd = "where";
         if let Ok(output) = Command::new(which_cmd).arg("chroxy").output() {
-            let which_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            // #6640 — `where` on Windows can print multiple matches (one per
+            // line, e.g. chroxy + chroxy.cmd); take only the first. `which`
+            // prints a single path. Without this, a multi-line string becomes a
+            // single nonsensical PathBuf.
+            let which_path = String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string();
             if !which_path.is_empty() {
                 // chroxy bin is a Node script, the actual cli.js should be nearby
                 let p = PathBuf::from(&which_path);
@@ -1365,10 +1392,34 @@ impl ServerManager {
         }
 
         Err(
-            "Could not find chroxy server. Checked: bundled .app resources, monorepo layout, CHROXY_SERVER_PATH env, and PATH (which chroxy)."
+            "Could not find chroxy server. Checked: bundled resources (next-to-exe on Windows/Linux, Contents/Resources on macOS), monorepo layout, CHROXY_SERVER_PATH env, and PATH (which/where chroxy)."
                 .to_string(),
         )
     }
+}
+
+/// Candidate `cli.js` locations for a bundled desktop install, derived from the
+/// desktop binary path and ordered by preference. Existence is checked by the
+/// caller. #6640 — the next-to-exe layout must come first so the installed
+/// Windows MSI (`<install>\server\src\cli.js`) and Linux AppImage/deb resolve;
+/// macOS `.app` places resources under `Contents/Resources` instead.
+fn bundled_cli_js_candidates(exe: &Path) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    // Windows (MSI) + Linux (AppImage/deb): resources sit next to the exe.
+    if let Some(dir) = exe.parent() {
+        candidates.push(dir.join("server").join("src").join("cli.js"));
+    }
+    // macOS .app: Contents/MacOS/<bin> -> Contents/Resources/server/src/cli.js
+    if let Some(contents_dir) = exe.parent().and_then(|p| p.parent()) {
+        candidates.push(
+            contents_dir
+                .join("Resources")
+                .join("server")
+                .join("src")
+                .join("cli.js"),
+        );
+    }
+    candidates
 }
 
 impl Drop for ServerManager {
@@ -1380,6 +1431,37 @@ impl Drop for ServerManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- resolve_cli_js candidate layout (#6640) --
+    //
+    // The installed desktop app must find its bundled server on every platform.
+    // Tauri v2 stages resources next to the exe on Windows (MSI) / Linux
+    // (AppImage/deb) and under Contents/Resources on macOS. These pin the path
+    // derivation — the actual #6640 bug was that the old code only knew the
+    // macOS layout, so the installed Windows tray never found its own server.
+
+    #[test]
+    fn bundled_cli_js_offers_next_to_exe_first() {
+        let exe = PathBuf::from("C:/Program Files/Chroxy/Chroxy.exe");
+        let cands = bundled_cli_js_candidates(&exe);
+        assert!(cands.len() >= 2, "expected next-to-exe and macOS candidates");
+        // Windows MSI / Linux AppImage/deb layout must be tried first.
+        assert!(cands[0].ends_with("server/src/cli.js"), "got {:?}", cands[0]);
+        assert!(cands[0].starts_with("C:/Program Files/Chroxy"), "got {:?}", cands[0]);
+    }
+
+    #[test]
+    fn bundled_cli_js_still_handles_macos_app_layout() {
+        let exe = PathBuf::from("/Applications/Chroxy.app/Contents/MacOS/chroxy-desktop");
+        let cands = bundled_cli_js_candidates(&exe);
+        assert!(
+            cands
+                .iter()
+                .any(|p| p.ends_with("Contents/Resources/server/src/cli.js")),
+            "macOS Resources layout must still be a candidate: {:?}",
+            cands
+        );
+    }
 
     // -- bind_host_env (#5356) --
     //
@@ -1973,9 +2055,17 @@ mod tests {
         let mut mgr = ServerManager::new();
         assert!(mgr.node_path.is_none());
 
-        // Use a path that exists on all systems
-        mgr.set_node_path(Some("/usr"));
-        assert_eq!(mgr.node_path, Some(PathBuf::from("/usr")));
+        // A directory that genuinely exists on every platform. The previous
+        // hardcoded "/usr" does not exist on Windows, so set_node_path's
+        // `.exists()` filter dropped it and this test failed on a Windows runner.
+        let existing = std::env::temp_dir();
+        // A non-UTF-8 temp dir (rare, mainly Windows) can't be passed through
+        // set_node_path's &str API — skip rather than panic; the UTF-8 contract
+        // is unchanged (#6659 review).
+        if let Some(existing_str) = existing.to_str() {
+            mgr.set_node_path(Some(existing_str));
+            assert_eq!(mgr.node_path, Some(PathBuf::from(existing_str)));
+        }
     }
 
     #[test]

@@ -1,11 +1,11 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { spawnSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync, statSync, existsSync } from 'fs'
+import { spawn, spawnSync } from 'node:child_process'
+import { mkdtempSync, readFileSync, writeFileSync, rmSync, statSync, existsSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { pathToFileURL } from 'node:url'
-import { defaultShell, writeFileRestricted, forceKill, isWindows } from '../src/platform.js'
+import { defaultShell, writeFileRestricted, forceKill, isWindows, isMac, cloudflaredInstallHint } from '../src/platform.js'
 
 // Production code in `platform.js` imports from `'fs'` etc. via ESM — the
 // subprocess shims below need to use `file:` URLs for both the `--import`
@@ -29,6 +29,17 @@ describe('platform', () => {
       const shell = defaultShell()
       assert.strictEqual(typeof shell, 'string')
       assert.ok(shell.length > 0)
+    })
+  })
+
+  describe('cloudflaredInstallHint()', () => {
+    it('returns an actionable, platform-appropriate install hint (#6649)', () => {
+      const hint = cloudflaredInstallHint()
+      assert.strictEqual(typeof hint, 'string')
+      assert.ok(hint.length > 0)
+      if (isWindows) assert.match(hint, /winget install Cloudflare\.cloudflared/)
+      else if (isMac) assert.match(hint, /brew install cloudflared/)
+      else assert.match(hint, /pkg\.cloudflare\.com/)
     })
   })
 
@@ -514,6 +525,63 @@ try {
       forceKill(fakeChild)
       assert.ok(killed)
       assert.strictEqual(signal, 'SIGKILL')
+    })
+
+    // #6643 — on Windows, forceKill must reap the WHOLE descendant tree, not
+    // just the tracked pid. `.cmd` provider shims run under `cmd.exe /d /s /c`,
+    // so the real node process is a GRANDCHILD; a naive TerminateProcess on the
+    // cmd wrapper orphans it (still editing files / burning tokens after Stop).
+    // Only validatable on a real Windows runner — spawn cmd.exe -> node, kill
+    // the cmd wrapper, and assert the node grandchild dies too.
+    it('reaps the whole child -> grandchild process tree on Windows (#6643)', { skip: !isWindows }, async () => {
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+      const isAlive = (pid) => {
+        try { process.kill(pid, 0); return true } catch (e) { return e.code === 'EPERM' }
+      }
+      const stamp = `${process.pid}-${Date.now()}`
+      const pidFile = join(tmpdir(), `chroxy-treekill-${stamp}.pid`)
+      const script = join(tmpdir(), `chroxy-treekill-${stamp}.cjs`)
+      // Grandchild: record its own pid to a file, then stay alive.
+      writeFileSync(
+        script,
+        `require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1e9)`,
+      )
+      // cmd.exe is the tracked child; `node <script>` is the grandchild — the
+      // same shape as `cmd /c claude.cmd` -> node.
+      const child = spawn('cmd.exe', ['/d', '/s', '/c', 'node', script], {
+        stdio: 'ignore',
+        windowsHide: true,
+      })
+      let grandPid = null
+      try {
+        // Wait (<=15s) for the grandchild to report its pid.
+        for (let i = 0; i < 150 && grandPid === null; i++) {
+          try {
+            const raw = readFileSync(pidFile, 'utf-8').trim()
+            if (raw) grandPid = parseInt(raw, 10)
+          } catch { /* not written yet */ }
+          if (grandPid === null) await sleep(100)
+        }
+        assert.ok(Number.isInteger(grandPid) && grandPid > 0, 'grandchild should report a pid')
+        assert.ok(isAlive(grandPid), 'grandchild should be alive before forceKill')
+
+        // Kill the tracked cmd wrapper — the node grandchild must die too.
+        forceKill(child)
+
+        let dead = false
+        for (let i = 0; i < 80 && !dead; i++) {
+          if (!isAlive(grandPid)) { dead = true; break }
+          await sleep(100)
+        }
+        assert.ok(dead, 'forceKill must reap the node grandchild, not just the cmd wrapper')
+      } finally {
+        try { forceKill(child) } catch {}
+        // Defensive: if the fix regressed and the grandchild survived, don't
+        // leak a live node orphan on the runner.
+        try { if (grandPid) process.kill(grandPid, 'SIGKILL') } catch {}
+        try { rmSync(script, { force: true }) } catch {}
+        try { rmSync(pidFile, { force: true }) } catch {}
+      }
     })
   })
 })

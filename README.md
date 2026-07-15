@@ -328,12 +328,21 @@ winget install Git.Git
 # Restart PowerShell so the new tools land on PATH, then:
 git clone https://github.com/blamechris/chroxy
 cd chroxy
-npm install
+npm install          # no Visual Studio / node-gyp needed — node-pty ships prebuilt Windows binaries
+npx chroxy doctor    # verify Node, cloudflared, and the port are ready
 npx chroxy init
 npx chroxy start
 ```
 
 Same QR-code / manual-entry connection flow as macOS. All session features (model switching, files, git, plan mode, agents) work identically.
+
+**Quickest start — local/LAN, no Cloudflare account, no tunnel:**
+
+```powershell
+npx chroxy start --tunnel none --host 127.0.0.1 --show-token
+```
+
+This binds the server locally and prints a **token-gated dashboard URL**. With `--show-token` the printed URL includes the `?token=…`, so you can open it directly in any Windows browser for the full chat/terminal UI — no desktop app needed. (Without the flag the URL and token are masked in the output; add `--show-token`, or append the token yourself.) Drop `--host 127.0.0.1` (the default is `0.0.0.0`) to also reach it from your phone over the LAN. Plain `npx chroxy start` (a Cloudflare Quick Tunnel) works too; if the edge isn't routable yet it degrades to local/LAN instead of aborting — pass `--tunnel named` for a stable remote URL.
 
 **Run at startup:** native Windows service install is not supported by the CLI. Pick one of:
 - **Task Scheduler** — schedule `node <chroxy-path> start` at logon
@@ -343,6 +352,8 @@ Same QR-code / manual-entry connection flow as macOS. All session features (mode
 ### Desktop tray app (recommended)
 
 Download the latest MSI from the [Releases page](https://github.com/blamechris/chroxy/releases/latest) and double-click to install. WebView2 is preinstalled on Windows 11; on Windows 10, install it once from https://developer.microsoft.com/microsoft-edge/webview2/.
+
+**Prerequisite — Node.js 22.** The MSI bundles the Chroxy server but **not** a Node runtime, so the tray launches the server with your **system Node** (discovered from `%ProgramFiles%\nodejs`, nvm-windows, or `PATH`). Install it first — `winget install OpenJS.NodeJS.LTS` — otherwise the tray window opens but the server won't start, failing with a "Could not find Node.js >= 22" error (the in-app hint points to nodejs.org / nvm-windows). Install Node 22+, then use the tray's Start/Restart.
 
 ### Desktop tray app — build from source
 
@@ -365,6 +376,21 @@ cargo tauri build
 ```
 
 The MSI lands at `packages\desktop\src-tauri\target\release\bundle\msi\Chroxy_<version>_x64_en-US.msi`.
+
+### Running the Linux server under WSL2
+
+If you want the exact Linux runtime, run the daemon inside WSL2 instead of the native-Windows server. Verified on Ubuntu:
+
+```bash
+# Inside WSL2 (Ubuntu) — clone NATIVELY (not under /mnt/c; see the note below)
+git clone https://github.com/blamechris/chroxy && cd chroxy
+npm install                       # a native Linux install — node-pty needs its Linux prebuild
+npx chroxy start --host 0.0.0.0   # 0.0.0.0 is required to reach it from Windows
+```
+
+- **Reaching it from Windows:** WSL2's localhost-forwarding only forwards to a **`0.0.0.0`-bound** server, so `http://localhost:8765` works from a Windows browser. A `--host 127.0.0.1` bind is **not** forwarded and silently isolates the daemon inside WSL — use `--host 0.0.0.0` (chroxy's default) here.
+- **Phone / remote access:** WSL2 sits behind NAT, so run the Cloudflare tunnel **inside** WSL2 (its outbound connection traverses the NAT cleanly): install `cloudflared` in the distro, then plain `npx chroxy start`. Exposing a WSL2 port inbound instead would need a Windows-side `netsh interface portproxy` rule.
+- **Clone natively, not from `/mnt/c`:** a Windows checkout mounted at `/mnt/c` carries two hazards — node-pty's Windows prebuilds don't load under Linux (hence the native `npm install`), and `.sh` scripts a Windows checkout wrote with `core.autocrlf` have CRLF endings that break `./script.sh` (`bash script.sh` tolerates it). The repo stores every script LF (`.gitattributes`), so a native WSL clone is clean.
 
 ## Project Structure
 

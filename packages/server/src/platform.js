@@ -1,4 +1,5 @@
 import { writeFileSync, chmodSync, renameSync, unlinkSync } from 'fs'
+import { execFileSync } from 'child_process'
 import { createLogger } from './logger.js'
 
 const log = createLogger('platform')
@@ -7,9 +8,28 @@ export const isWindows = process.platform === 'win32'
 export const isMac = process.platform === 'darwin'
 export const isLinux = process.platform === 'linux'
 
-export function defaultShell() {
-  if (isWindows) return process.env.COMSPEC || 'cmd.exe'
-  return process.env.SHELL || '/bin/zsh'
+/**
+ * Per-platform "how to install cloudflared" hint for user-facing errors:
+ * Windows → winget, macOS → Homebrew, Linux → the Cloudflare package repo.
+ * The tunnel adapter and doctor share this single source of truth; the desktop
+ * app mirrors the same logic in Rust (`cloudflared_install_hint` in lib.rs), as
+ * it can't call across the JS/Rust boundary (#6649).
+ */
+export function cloudflaredInstallHint() {
+  if (isMac) return 'brew install cloudflared'
+  if (isWindows) return 'winget install Cloudflare.cloudflared'
+  return 'see https://pkg.cloudflare.com/ for installation'
+}
+
+/**
+ * The OS default shell: Windows → `COMSPEC` (cmd.exe), POSIX → `$SHELL`
+ * (falling back to zsh). `platform`/`env` are injectable so callers that resolve
+ * a shell for a spawn (e.g. the embedded user-shell, #6646) can unit-test both
+ * platform branches on any CI host; production calls pass no args.
+ */
+export function defaultShell({ platform = process.platform, env = process.env } = {}) {
+  if (platform === 'win32') return env.COMSPEC || 'cmd.exe'
+  return env.SHELL || '/bin/zsh'
 }
 
 /**
@@ -130,10 +150,62 @@ export function writeFileRestricted(
   }
 }
 
-export function forceKill(child) {
+/**
+ * Terminate `child` — its whole descendant TREE on Windows (taskkill /T), or
+ * just the DIRECT process on POSIX (see the per-platform notes below; callers
+ * that need the whole POSIX group spawn `detached` and signal the negative pid).
+ *
+ * POSIX: `child.kill(force ? 'SIGKILL' : 'SIGTERM')` on the direct process —
+ * the long-standing behaviour (callers that need the whole group spawn
+ * `detached` and signal the negative pid themselves). `force:false` stays a
+ * graceful SIGTERM so a caller's existing SIGTERM→SIGKILL escalation is
+ * unchanged.
+ *
+ * Windows: there is no process-group signal and no graceful console-tree
+ * termination — Node maps BOTH `SIGTERM` and `SIGKILL` to `TerminateProcess`
+ * on the DIRECT pid, so descendants are orphaned. This is acute for Chroxy:
+ * `.cmd`/`.bat` provider shims (claude, codex, gemini, …) run under
+ * `cmd.exe /d /s /c`, so the real agent/node process is a GRANDCHILD of the
+ * tracked pid. `cmd /c` waits for its child, so actively killing the wrapper
+ * (respawn / model-switch / destroy) leaves node running — still editing files
+ * and burning tokens — after Stop/teardown (#6643). Reap the whole tree with
+ * `taskkill /PID <pid> /T /F`. The `force` flag is POSIX-only; on Windows the
+ * kill is always forced (matching Node's existing TerminateProcess semantics,
+ * where SIGTERM was never graceful anyway). Best-effort: an already-exited pid
+ * or a taskkill failure falls back to a direct `child.kill()` — this never
+ * throws, so it is safe to call from a teardown path.
+ */
+export function killProcessTree(child, { force = false } = {}) {
+  if (!child) return
   if (isWindows) {
-    child.kill('SIGKILL')
-  } else {
-    child.kill('SIGKILL')
+    const pid = child.pid
+    if (pid) {
+      try {
+        execFileSync('taskkill', ['/PID', String(pid), '/T', '/F'], {
+          stdio: 'ignore',
+          windowsHide: true,
+          // Bound the teardown path: a wedged taskkill must not hang stop /
+          // respawn. On timeout execFileSync throws and we fall back to the
+          // direct child.kill() below (#6657 review).
+          timeout: 5000,
+        })
+        return
+      } catch {
+        // pid already gone, or taskkill unavailable/failed — fall through to a
+        // direct kill so teardown still makes progress.
+      }
+    }
+    try { child.kill('SIGKILL') } catch { /* already gone */ }
+    return
   }
+  try { child.kill(force ? 'SIGKILL' : 'SIGTERM') } catch { /* already gone */ }
+}
+
+/**
+ * Force-kill `child` and its whole descendant tree (#6643). POSIX sends
+ * SIGKILL to the process; Windows reaps the tree via taskkill. See
+ * {@link killProcessTree}.
+ */
+export function forceKill(child) {
+  killProcessTree(child, { force: true })
 }

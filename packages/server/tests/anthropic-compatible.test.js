@@ -191,10 +191,12 @@ describe('anthropic-compatible config validation', () => {
     })
 
     it('never echoes an apiKeyEnv value that evades the secret heuristic', () => {
-      // Real keys without a recognized prefix (AIza…-style, short vendor
-      // hex tokens) slip past looksLikeInlineSecret; the invalid-NAME
-      // warning must still not print the value.
-      const evading = 'AIzaSyD-9tSrke72PouQMnMX-a7eZSW0jkFMBWY'
+      // Real keys without a recognized prefix (e.g. Google AIza… keys or
+      // short vendor hex tokens) slip past looksLikeInlineSecret; the
+      // invalid-NAME warning must still not print the value. The fixture
+      // below is a SYNTHETIC non-NAME that evades the heuristic — it is
+      // deliberately NOT in any real key format so secret scanners ignore it.
+      const evading = 'deadbeef-cafef00d-not-a-real-key'
       const { entries, warnings } = validateAnthropicCompatibleProviders([
         makeEntry({ apiKeyEnv: evading }),
       ])

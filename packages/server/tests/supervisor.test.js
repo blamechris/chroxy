@@ -211,6 +211,60 @@ describe('Supervisor', () => {
       clearInterval(supervisor._heartbeatInterval)
     })
 
+    it('#6641: degrades to local/LAN instead of exiting when the tunnel is not routable', async () => {
+      const { supervisor } = setup()
+      const err = new Error('Tunnel failed to become routable after 20 attempts (108s). Last failure: HTTP 404.')
+      err.code = 'TUNNEL_NOT_ROUTABLE'
+      supervisor._waitForTunnel = () => Promise.reject(err)
+
+      const chunks = []
+      mock.method(process.stdout, 'write', (chunk) => { chunks.push(String(chunk)); return true })
+      try {
+        await supervisor.start()
+      } finally {
+        mock.restoreAll()
+        supervisor._shuttingDown = true
+        if (supervisor._heartbeatInterval) clearInterval(supervisor._heartbeatInterval)
+      }
+      const output = chunks.join('')
+
+      // The daemon must NOT exit and MUST fork the child so local + LAN work.
+      assert.equal(supervisor._exitCalled, null, 'should not exit on a not-routable tunnel')
+      assert.equal(supervisor._mockChildren.length, 1, 'child (local server) should still start')
+      // cloudflared is kept alive so it can recover — NOT stopped here.
+      assert.equal(supervisor._mockTunnel.stop.mock.callCount(), 0, 'cloudflared should stay up')
+      assert.equal(supervisor._tunnelDegraded, true)
+      // No QR to a dead endpoint; degraded local/LAN banner instead.
+      assert.doesNotMatch(output, /Scan this QR/, 'no QR when the tunnel is not routable')
+      assert.match(output, /local\/LAN only/, 'shows the degraded local/LAN banner')
+      // #6641 review: must NOT promise auto-advertised remote access (it never
+      // happens for an alive-but-unroutable tunnel) — give actionable guidance.
+      assert.doesNotMatch(output, /will be advertised/i, 'no false auto-advertise promise')
+      assert.match(output, /--tunnel named|restart/i, 'gives actionable remote-access guidance')
+      // Degraded connection.json must NOT carry a dead public URL — the dashboard
+      // /qr route falls back to connectionUrl and would otherwise resurface a
+      // dead QR in the modal.
+      const connInfo = JSON.parse(readFileSync(join(process.env.CHROXY_CONFIG_DIR, 'connection.json'), 'utf-8'))
+      assert.equal(connInfo.connectionUrl, null, 'degraded connection.json omits the public connectionUrl')
+      assert.equal(connInfo.wsUrl, null, 'degraded connection.json omits the public wsUrl')
+      assert.equal(connInfo.tunnelDegraded, true)
+      assert.equal(connInfo.port, supervisor._port, 'local port is still written for loopback CLIs')
+    })
+
+    it('#6641: still aborts (stops cloudflared + exits) on a non-routability tunnel error', async () => {
+      const { supervisor } = setup()
+      supervisor._waitForTunnel = () => Promise.reject(new Error('boom: unexpected tunnel failure'))
+
+      await supervisor.start()
+
+      assert.equal(supervisor._exitCalled, 1, 'a non-TUNNEL_NOT_ROUTABLE error still fails boot')
+      assert.equal(supervisor._mockTunnel.stop.mock.callCount(), 1, 'cloudflared is stopped on hard boot failure')
+      assert.equal(supervisor._mockChildren.length, 0, 'no child forked on hard boot failure')
+
+      supervisor._shuttingDown = true
+      if (supervisor._heartbeatInterval) clearInterval(supervisor._heartbeatInterval)
+    })
+
     it('writes PID file on start', async () => {
       const { supervisor, config } = setup()
       await supervisor.start()
