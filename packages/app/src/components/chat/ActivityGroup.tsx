@@ -114,7 +114,7 @@ function ActivityEntry({
             red alert icon instead of the green check. */}
         {hasResult ? (
           message.toolResultIsError ? (
-            <Icon name="alertCircle" size={12} color={COLORS.accentRed} testID={`activity-entry-error-${message.id}`} />
+            <Icon name="alertCircle" size={12} color={COLORS.accentRed} testID={`activity-entry-error-${message.id}`} accessibilityLabel="tool failed" />
           ) : (
             <Icon name="check" size={12} color={COLORS.accentGreen} />
           )

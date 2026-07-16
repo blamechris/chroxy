@@ -98,6 +98,11 @@ describe('ActivityGroup / ActivityEntry — structured-renderer wiring (#4201)',
     const ok = renderGroup([makeToolMessage({ id: 'm2', toolResult: 'ok' })]);
     expandGroup(ok);
     expect(findByTestId(ok, 'activity-entry-error-m2')).toHaveLength(0);
+
+    // Pending (no result yet) also shows no error icon.
+    const pending = renderGroup([makeToolMessage({ id: 'm3', toolResult: undefined })]);
+    expandGroup(pending);
+    expect(findByTestId(pending, 'activity-entry-error-m3')).toHaveLength(0);
   });
 
   it('does not render the TodoList when only the group is expanded but the entry is not', () => {

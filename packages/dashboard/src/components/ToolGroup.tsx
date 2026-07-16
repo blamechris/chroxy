@@ -181,6 +181,8 @@ function ToolGroupEntry({
         <span className={markerClass} aria-hidden="true">
           {resultIsError ? '✕' : hasResult ? '✓' : '›'}
         </span>
+        {/* #6712: the marker is aria-hidden, so surface the failure to AT. */}
+        {resultIsError && <span className="sr-only">tool failed</span>}
         <span className="tool-group-entry-name">{toolName}</span>
         {summary && <span className="tool-group-entry-input">{summary}</span>}
         <span className="tool-group-entry-toggle" aria-hidden="true">
