@@ -514,32 +514,49 @@ export class CodexAppServerSession extends BaseSession {
     this._client?.respond(rpcId, this._codexPermissionsGrant(allow, session, params?.permissions))
   }
 
-  // Build the PermissionsRequestApprovalResponse. Approve → grant EXACTLY what
-  // codex requested (RequestPermissionProfile and GrantedPermissionProfile share
-  // the same {fileSystem?, network?} shape, so echoing the request is schema-valid
-  // by construction) with scope 'session' for an "always allow" else 'turn'. Deny →
-  // an empty `permissions` object with `scope` OMITTED (an explicit 'none' is an
-  // invalid PermissionGrantScope enum and wedges the turn — #6612).
+  // Build the PermissionsRequestApprovalResponse. Approve → grant EXACTLY what codex
+  // requested. RequestPermissionProfile and GrantedPermissionProfile share the same
+  // {fileSystem?, network?} shape (the request is even additionalProperties:false), so
+  // we reconstruct the grant from those two known fields rather than echoing the raw
+  // request object: that grants precisely the requested scope while making a malformed
+  // frame (an array — typeof [] === 'object' — or any unexpected key) structurally
+  // unable to reach the wire and wedge the turn (#6612). Scope 'session' for an
+  // "always allow" else 'turn'. Deny → an empty `permissions` object with `scope`
+  // OMITTED (an explicit 'none' is an invalid PermissionGrantScope enum and wedges
+  // the turn — #6612).
   _codexPermissionsGrant(allow, session, requestedPermissions) {
     if (!allow) return { permissions: {} }
-    const permissions = requestedPermissions && typeof requestedPermissions === 'object'
+    const src = requestedPermissions && typeof requestedPermissions === 'object' && !Array.isArray(requestedPermissions)
       ? requestedPermissions
       : {}
+    const permissions = {}
+    if (src.fileSystem !== undefined) permissions.fileSystem = src.fileSystem
+    if (src.network !== undefined) permissions.network = src.network
     return { permissions, scope: session ? 'session' : 'turn' }
   }
 
   // Human-readable summary of the requested scope for the approval prompt, so the
-  // operator sees WHAT codex wants to broaden before granting it.
+  // operator sees WHAT codex wants to broaden before granting it. The prompt is
+  // truncated to 200 chars downstream, so cap each list to a few entries + a
+  // "+N more" tail (keeps the most-load-bearing detail — including the trailing
+  // "network access" — from being sliced off) and stringify every path defensively.
   _describePermissionsRequest(params) {
+    const MAX_ENTRIES = 3
+    const summarize = (arr, render) => {
+      const shown = arr.slice(0, MAX_ENTRIES).map(render)
+      const extra = arr.length - shown.length
+      return extra > 0 ? [...shown, `+${extra} more`] : shown
+    }
     const parts = []
     const fs = params?.permissions?.fileSystem
-    if (fs) {
-      for (const e of Array.isArray(fs.entries) ? fs.entries : []) {
+    if (fs && typeof fs === 'object') {
+      const entries = Array.isArray(fs.entries) ? fs.entries : []
+      for (const p of summarize(entries, (e) => {
         const path = e?.path?.path ?? e?.path?.pattern ?? e?.path?.value?.kind ?? 'a path'
-        parts.push(`filesystem ${e?.access ?? 'access'} → ${path}`)
-      }
-      if (Array.isArray(fs.read) && fs.read.length) parts.push(`filesystem read: ${fs.read.join(', ')}`)
-      if (Array.isArray(fs.write) && fs.write.length) parts.push(`filesystem write: ${fs.write.join(', ')}`)
+        return `filesystem ${e?.access ?? 'access'} → ${String(path)}`
+      })) parts.push(p)
+      if (Array.isArray(fs.read) && fs.read.length) parts.push(`filesystem read: ${summarize(fs.read, String).join(', ')}`)
+      if (Array.isArray(fs.write) && fs.write.length) parts.push(`filesystem write: ${summarize(fs.write, String).join(', ')}`)
     }
     if (params?.permissions?.network?.enabled) parts.push('network access')
     const scope = parts.length ? parts.join('; ') : 'broader permissions'

@@ -19,7 +19,9 @@ export const ELIGIBLE_TOOLS = new Set(['Read', 'Write', 'Edit', 'NotebookEdit', 
 // Tools that can never be auto-allowed by rules (too dangerous to whitelist).
 // `shell` is codex's command-execution approval — the codex analogue of Bash, so
 // arbitrary codex command execution can't be rule-whitelisted either (#6605).
-export const NEVER_AUTO_ALLOW = new Set(['Bash', 'Task', 'WebFetch', 'WebSearch', 'shell'])
+// `request_permissions` is codex's sandbox-escalation approval (#6610) — broadening
+// filesystem/network scope must always prompt, never be silently rule-whitelisted.
+export const NEVER_AUTO_ALLOW = new Set(['Bash', 'Task', 'WebFetch', 'WebSearch', 'shell', 'request_permissions'])
 
 // Default permission timeout (5 minutes)
 const DEFAULT_TIMEOUT_MS = 300_000
