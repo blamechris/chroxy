@@ -22,6 +22,7 @@ import { controlRoomHandlers } from './handlers/control-room-handlers.js'
 import { summarizeHandlers } from './handlers/summarize-handlers.js'
 import { pairingHandlers } from './handlers/pairing-handlers.js'
 import { tokenHandlers } from './handlers/token-handlers.js'
+import { orchestrationHandlers } from './handlers/orchestration-handlers.js'
 
 const log = createLogger('ws')
 
@@ -41,6 +42,7 @@ const handlerRegistry = new Map([
   ...Object.entries(summarizeHandlers),
   ...Object.entries(pairingHandlers),
   ...Object.entries(tokenHandlers),
+  ...Object.entries(orchestrationHandlers),
 ])
 
 /**

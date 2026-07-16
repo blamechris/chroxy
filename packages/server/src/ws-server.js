@@ -22,7 +22,7 @@ import { handleAuthMessage, handlePairMessage, handlePairRequestMessage, handleK
 import { postPairLinkToDiscord } from './discord-pair-delivery.js'
 import { sendPostAuthInfo, replayHistory, flushPostAuthQueue, sendSessionInfo } from './ws-history.js'
 import { createDevicePreferences } from './device-preferences.js'
-import { isUserShellEnabled, isIdeFeatureEnabled } from './config.js'
+import { isUserShellEnabled, isIdeFeatureEnabled, isOrchestrationEnabled } from './config.js'
 import { createHttpHandler } from './http-routes.js'
 import { CheckpointManager } from './checkpoint-manager.js'
 import { DevPreviewManager } from './dev-preview.js'
@@ -884,6 +884,10 @@ export class WsServer {
         // Lazily created on the first webhook delivery, so null until then —
         // the survey handler treats a null store as an empty (schema-valid) feed.
         get repoEventStore() { return self._repoEventStore ?? null },
+        // #6691: the OrchestrationManager, wired for real in E-4. Null until then
+        // (and whenever the feature is off) — the handlers treat a null manager
+        // as "engine not running" and reply with an unavailable error.
+        get orchestrationManager() { return self._orchestrationManager ?? null },
       },
       runtime: {
         get draining() { return self._draining },
@@ -964,6 +968,10 @@ export class WsServer {
       // `ide` capability so clients gate IDE UI. Late-bound getter so a test
       // mutating self.config is seen.
       get ideEnabled() { return isIdeFeatureEnabled(self.config) },
+      // #6691: whether the orchestration harness is enabled on THIS server,
+      // surfaced as the `orchestration` capability so the dashboard reveals the
+      // Runs surface. Server-wide gate, not token-scoped; fail-closed.
+      get orchestrationEnabled() { return isOrchestrationEnabled(self.config) },
       // #6006: whether the operator panic button (revoke_token) can fire — true
       // iff a usable rotating TokenManager exists (i.e. auth is on). Mirrors the
       // token-handlers availability check (`typeof revoke === 'function'`) so the
@@ -2289,6 +2297,15 @@ export class WsServer {
       { type: 'repo_events_delta', generatedAt: new Date().toISOString(), event },
       (client) => !client.boundSessionId,
     )
+  }
+
+  // #6691: push a single orchestration run delta to host-level (unbound) clients
+  // only — runs are host-wide cross-session objects; a session-bound token never
+  // receives them. Called by the OrchestrationManager (E-4); the `delta`
+  // already carries its own type/runId/seq (schemas/server/orchestration.ts).
+  _broadcastOrchestrationDelta(delta) {
+    if (!delta) return
+    this._broadcast(delta, (client) => !client.boundSessionId)
   }
 
   /**
