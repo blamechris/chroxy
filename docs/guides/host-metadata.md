@@ -35,8 +35,12 @@ echo "$CHROXY_HOST_APP $CHROXY_HOST_VERSION ($CHROXY_HOST_CHANNEL) — $CHROXY_H
 - **Subprocess providers** (Claude CLI/TUI, Codex, Gemini, …) receive the block
   via `buildSpawnEnv` — the single chokepoint that builds every child process's
   environment.
-- **The in-process Claude SDK** provider inherits it because the daemon publishes
-  the same block into its own `process.env` at startup.
+- **The in-process Claude SDK** and BYOK-family providers (DeepSeek, Ollama,
+  Anthropic-/OpenAI-compatible) inherit it because the daemon publishes the same
+  block into its own `process.env` at startup.
+- **Containerized providers** (`docker-cli`, `docker-sdk`, `docker-byok`, and the
+  k8s backend) forward the block across the container boundary, so an agent
+  running *inside* an isolated container/pod sees the same host identity.
 
 ## Using it in a skill or agent prompt
 

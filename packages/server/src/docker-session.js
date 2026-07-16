@@ -3,6 +3,7 @@ import { createInterface } from 'readline'
 import { CliSession } from './cli-session.js'
 import { createLogger } from './logger.js'
 import { BILLING_CLASSES } from './billing-class.js'
+import { getChroxyHostEnv } from './chroxy-host-metadata.js'
 
 const log = createLogger('docker-session')
 
@@ -283,6 +284,14 @@ export class DockerSession extends CliSession {
     // Always forward CHROXY_HOST if set
     if (env.CHROXY_HOST) {
       dockerArgs.push('--env', `CHROXY_HOST=${env.CHROXY_HOST}`)
+    }
+    // #6633: forward Chroxy's own (non-sensitive) host identity so an agent
+    // INSIDE the container can still answer "what build am I in?". Sourced from
+    // the authoritative computed block; the `CHROXY_HOST_` prefix (trailing
+    // underscore) is distinct from the permission-hook `CHROXY_HOST` routing var
+    // above.
+    for (const [key, val] of Object.entries(getChroxyHostEnv())) {
+      dockerArgs.push('--env', `${key}=${val}`)
     }
 
     dockerArgs.push(this._containerId, 'claude', ...claudeArgs)

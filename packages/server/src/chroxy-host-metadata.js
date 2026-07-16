@@ -41,11 +41,20 @@ function readPackageVersion() {
  * `.git`, so this returns `{}` there. Guarded and time-boxed — computing host
  * identity must never block or fail a session spawn.
  *
+ * Only a chroxy SOURCE checkout reports git identity. When chroxy is installed as
+ * a dependency (`…/node_modules/chroxy/…`), `git rev-parse` would otherwise walk
+ * up to the USER's project `.git` and mislabel the build `dev` while leaking the
+ * user's branch/SHA into third-party (codex/gemini) subprocesses. The
+ * node_modules guard makes that impossible — an installed chroxy is `release`.
+ *
  * @param {typeof execFileSync} [exec] - injectable for tests
+ * @param {string} [moduleDir] - injectable module directory (for tests)
  * @returns {{ sha?: string, branch?: string }}
  */
-export function readGitIdentity(exec = execFileSync) {
-  const cwd = dirname(fileURLToPath(import.meta.url))
+export function readGitIdentity(exec = execFileSync, moduleDir = dirname(fileURLToPath(import.meta.url))) {
+  // Installed-as-a-dependency → never inspect the surrounding repo's git.
+  if (moduleDir.split(/[/\\]/).includes('node_modules')) return {}
+  const cwd = moduleDir
   const run = (args) => String(exec('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 2000 })).trim()
   try {
     const sha = run(['rev-parse', '--short', 'HEAD'])

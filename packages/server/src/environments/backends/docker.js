@@ -1,6 +1,7 @@
 import { execFile, spawn } from 'child_process'
 import { createLogger } from '../../logger.js'
 import { VALID_USERNAME_RE } from '../../utils/validation-patterns.js'
+import { getChroxyHostEnv } from '../../chroxy-host-metadata.js'
 
 const log = createLogger('docker-backend')
 
@@ -514,6 +515,13 @@ export class DockerBackend {
           dockerArgs.push('--env', `${key}=${val}`)
         }
       }
+    }
+    // #6633: also forward Chroxy's own (non-sensitive) host identity so an agent
+    // INSIDE the container can answer "what build am I in?". Sourced from the
+    // authoritative computed block (not `env`), so it lands regardless of how the
+    // caller built its env.
+    for (const [key, val] of Object.entries(getChroxyHostEnv())) {
+      dockerArgs.push('--env', `${key}=${val}`)
     }
 
     // Override HOME and PATH for the container user.

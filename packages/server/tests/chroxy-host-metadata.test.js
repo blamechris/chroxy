@@ -75,6 +75,22 @@ describe('chroxy-host-metadata (#6633)', () => {
       const exec = () => '  \n'
       assert.deepEqual(readGitIdentity(exec), {})
     })
+
+    it('installed as a dependency (path under node_modules) → {} without touching git', () => {
+      // Guards the privacy fix: an npm-installed chroxy must NOT walk up to the
+      // user's project .git and leak their branch/SHA into third-party subprocesses.
+      let called = false
+      const exec = () => { called = true; return 'abcdef1\n' }
+      const out = readGitIdentity(exec, '/home/u/proj/node_modules/chroxy/packages/server/src')
+      assert.deepEqual(out, {}, 'no git identity for an installed package')
+      assert.equal(called, false, 'git is never invoked when under node_modules')
+    })
+
+    it('a source checkout (no node_modules ancestor) still queries git', () => {
+      const exec = (_c, args) => (args.includes('--abbrev-ref') ? 'main\n' : 'abcdef1\n')
+      const out = readGitIdentity(exec, '/home/u/src/chroxy/packages/server/src')
+      assert.deepEqual(out, { sha: 'abcdef1', branch: 'main' })
+    })
   })
 
   describe('getChroxyHostEnv memoization', () => {

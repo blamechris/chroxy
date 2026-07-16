@@ -311,13 +311,24 @@ describe('buildSpawnEnv', () => {
       })
     })
 
-    it('host identity is authoritative — an operator CHROXY_HOST_* export cannot spoof it', () => {
+    it('host identity is authoritative — an operator CHROXY_HOST_* export cannot spoof it (allowlist)', () => {
       // The values are COMPUTED, not passed through, so a shell export of the
       // same name is overridden by the real identity (important for allowlist
       // mode, where it also proves the value did not merely leak through).
       withEnv({ OPENAI_API_KEY: 'sk', CHROXY_HOST_VERSION: '0.0.0-spoofed', CHROXY_HOST_APP: 'NotChroxy' }, () => {
         const env = buildSpawnEnv('codex')
         assert.notEqual(env.CHROXY_HOST_VERSION, '0.0.0-spoofed', 'computed version wins over an operator export')
+        assert.equal(env.CHROXY_HOST_APP, 'Chroxy', 'app name is authoritative')
+      })
+    })
+
+    it('operator CHROXY_HOST_* export cannot spoof it in DENYLIST mode either', () => {
+      // Denylist mode is where spoofing actually has teeth: parentEnv carries the
+      // operator's export, so correctness depends entirely on `...getChroxyHostEnv()`
+      // being spread AFTER `...parentEnv`. Guard that ordering against regression.
+      withEnv({ CHROXY_HOST_VERSION: '0.0.0-spoofed', CHROXY_HOST_APP: 'NotChroxy' }, () => {
+        const env = buildSpawnEnv('claude')
+        assert.notEqual(env.CHROXY_HOST_VERSION, '0.0.0-spoofed', 'computed version overrides the operator export from parentEnv')
         assert.equal(env.CHROXY_HOST_APP, 'Chroxy', 'app name is authoritative')
       })
     })

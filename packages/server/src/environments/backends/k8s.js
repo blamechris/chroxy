@@ -4,6 +4,7 @@ import { PassThrough } from 'stream'
 import { KubeConfig, CoreV1Api, PortForward } from '@kubernetes/client-node'
 import WebSocket from 'ws'
 import { createLogger } from '../../logger.js'
+import { getChroxyHostEnv } from '../../chroxy-host-metadata.js'
 
 const log = createLogger('k8s-backend')
 
@@ -1228,6 +1229,14 @@ export class K8sBackend {
       for (const [name, value] of Object.entries(containerEnv)) {
         env.push({ name, value: String(value) })
       }
+    }
+
+    // #6633: Chroxy's own (non-sensitive) host identity, so an agent exec'd into
+    // the pod can answer "what build am I in?" — pod-spec env is inherited by
+    // `kubectl exec` processes. Added after containerEnv so the computed identity
+    // is authoritative.
+    for (const [name, value] of Object.entries(getChroxyHostEnv())) {
+      env.push({ name, value: String(value) })
     }
 
     // 4. Resolve imagePullPolicy: per-call opt > constructor opt > omit (K8s default)
