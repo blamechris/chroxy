@@ -17,7 +17,7 @@
  * survives a row scrolling out of and back into the window.
  */
 import { memo, useRef, useState, useCallback, useEffect, useLayoutEffect, useMemo, type ReactNode, type CSSProperties } from 'react'
-import { bumpRenderCount, type ChatActivityState } from '@chroxy/store-core'
+import { bumpRenderCount, type ChatActivityState, type MessageAttachment } from '@chroxy/store-core'
 import { WorkingIndicator } from './WorkingIndicator'
 import { renderMarkdown } from '../lib/markdown'
 import { handleMarkdownLinkClick } from '../lib/links'
@@ -113,6 +113,8 @@ export interface ChatViewMessage {
    * for legacy errors without a structured code.
    */
   code?: string
+  /** #6632: attachments on a user_input message, for transcript previews. */
+  attachments?: MessageAttachment[]
 }
 
 export interface ChatViewProps {
@@ -291,6 +293,7 @@ const DefaultMessageRow = memo(function DefaultMessageRow({
   content,
   timestamp,
   isStreaming,
+  attachments,
   queued,
   onCancelQueued,
   queuePosition,
@@ -300,6 +303,8 @@ const DefaultMessageRow = memo(function DefaultMessageRow({
   content: string
   timestamp: number
   isStreaming?: boolean
+  /** #6632: user-message attachments (images/documents) to preview. */
+  attachments?: ChatViewMessage['attachments']
   /** #5939: this user_input is held in the server's outgoing queue. */
   queued?: boolean
   /** #5939: cancel this queued follow-up (stable callback from ChatView). */
@@ -339,6 +344,28 @@ const DefaultMessageRow = memo(function DefaultMessageRow({
             actions alongside it. */}
         {type === 'response' && !isStreaming && content.trim() !== '' && <CopyButton content={content} />}
         {body}
+        {/* #6632: preview what the user attached to their message — image
+            thumbnails, and a compact chip for non-image documents. */}
+        {type === 'user_input' && attachments && attachments.length > 0 && (
+          <div className="msg-attachments" data-testid={`msg-attachments-${id}`}>
+            {attachments.map((att) =>
+              att.type === 'image' ? (
+                <img
+                  key={att.id}
+                  className="msg-attachment-image"
+                  src={att.uri}
+                  alt={att.name}
+                  title={att.name}
+                  data-testid={`msg-attachment-image-${att.id}`}
+                />
+              ) : (
+                <span key={att.id} className="msg-attachment-doc" title={att.name} data-testid={`msg-attachment-doc-${att.id}`}>
+                  <span aria-hidden="true">📄</span> {att.name}
+                </span>
+              ),
+            )}
+          </div>
+        )}
         {queued && (
           <span className="msg-queued" data-testid={`msg-queued-${id}`}>
             <span className="msg-queued-label">Queued</span>
@@ -793,6 +820,7 @@ function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, inFlig
                   content={msg.content}
                   timestamp={msg.timestamp}
                   isStreaming={msg.isStreaming}
+                  attachments={msg.attachments}
                   queued={queuedIds?.has(msg.id) ?? false}
                   queuePosition={queuePositions?.get(msg.id)}
                   onCancelQueued={onCancelQueued}

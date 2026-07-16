@@ -45,6 +45,31 @@ describe('ChatView', () => {
     expect(screen.queryAllByTestId('msg-copy-button')).toHaveLength(1)
   })
 
+  it('previews image + document attachments on a sent user message (#6632)', () => {
+    const messages: ChatViewMessage[] = [
+      {
+        id: 'u1',
+        type: 'user_input',
+        content: 'here you go',
+        timestamp: 1,
+        attachments: [
+          { id: 'img-1', type: 'image', uri: 'data:image/png;base64,abc', name: 'shot.png', mediaType: 'image/png', size: 10 },
+          { id: 'doc-1', type: 'document', uri: 'blob:x', name: 'notes.pdf', mediaType: 'application/pdf', size: 20 },
+        ],
+      },
+    ]
+    render(<ChatView messages={messages} isStreaming={false} />)
+    const img = screen.getByTestId('msg-attachment-image-img-1')
+    expect(img).toHaveAttribute('src', 'data:image/png;base64,abc')
+    expect(img).toHaveAttribute('alt', 'shot.png')
+    expect(screen.getByTestId('msg-attachment-doc-doc-1')).toHaveTextContent('notes.pdf')
+  })
+
+  it('renders no attachment container on a message without attachments (#6632)', () => {
+    render(<ChatView messages={[{ id: 'u2', type: 'user_input', content: 'plain', timestamp: 1 }]} isStreaming={false} />)
+    expect(screen.queryByTestId('msg-attachments-u2')).not.toBeInTheDocument()
+  })
+
   it('renders thinking as a collapsed disclosure (chat redesign #6391)', () => {
     const messages: ChatViewMessage[] = [
       { id: 't1', type: 'thinking', content: 'deep-secret-reasoning', timestamp: Date.now() },
