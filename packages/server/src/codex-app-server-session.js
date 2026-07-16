@@ -596,15 +596,33 @@ export class CodexAppServerSession extends BaseSession {
         url: typeof params?.url === 'string' ? params.url : null,
         message: typeof params?.message === 'string' ? params.message : null,
       }
+      // The sentinel is inert for this tool (unlike command/file/escalation, we
+      // don't read updatedPermissions): an elicitation "allow" is a one-shot
+      // accept, never a persisted rule — kept only for handlePermission symmetry.
       const suggestions = [{ codexApproval: 'mcpServer/elicitation/request' }]
       result = await this._permissions.handlePermission('mcp_elicitation', input, this._turnAbort?.signal, this.permissionMode, suggestions)
     } catch (err) {
       result = { behavior: 'deny', message: err?.message || 'permission error' }
     }
-    // accept on allow; decline otherwise (a user deny, timeout, or abort). We never
-    // synthesize `content`, so a form-mode elicitation gets an action-only accept.
-    const action = result?.behavior === 'allow' ? 'accept' : 'decline'
+    const allow = result?.behavior === 'allow'
+    // #6635: we can't collect structured `content` yet (#6684), so a form-mode
+    // elicitation that REQUIRES fields is DECLINED even on allow — an action-only
+    // accept could make the connector act on empty/default params the user never
+    // saw. Confirmation-style (no required fields) + url-mode accept normally; a
+    // decline is always the safe status quo (matches the pre-#6635 -32601 outcome).
+    const action = allow && !this._elicitationRequiresContent(params) ? 'accept' : 'decline'
     this._client?.respond(rpcId, { action })
+  }
+
+  // True when accepting would need structured `content` we can't yet collect:
+  // `openai/form` (freeform content) or a `form` whose schema declares required
+  // properties. `url`-mode and content-less confirmation forms return false.
+  _elicitationRequiresContent(params) {
+    const mode = params?.mode
+    if (mode === 'openai/form') return true
+    if (mode !== 'form') return false
+    const required = params?.requestedSchema?.required
+    return Array.isArray(required) && required.length > 0
   }
 
   // Human-readable elicitation prompt: which connector is asking, and what for.
@@ -616,8 +634,11 @@ export class CodexAppServerSession extends BaseSession {
     const url = params?.mode === 'url' && typeof params?.url === 'string' && params.url.trim()
       ? ` (opens ${params.url.trim()})`
       : ''
-    const ask = msg || 'is requesting your input'
-    return `Codex connector "${server}" ${msg ? 'asks' : ''}: ${ask}${url}`.replace(/\s+:/, ':')
+    // Build the two shapes explicitly rather than post-cleaning whitespace: with a
+    // message → `connector "x" asks: <msg>`, without → `connector "x": is requesting…`.
+    return msg
+      ? `Codex connector "${server}" asks: ${msg}${url}`
+      : `Codex connector "${server}": is requesting your input${url}`
   }
 
   // 'auto' (skip all prompts) → codex runs without asking. Every other mode →

@@ -80,8 +80,11 @@ Each family answers Codex in **its own** vocabulary — the `PermissionManager`
 | `mcpServer/elicitation/request` (#6635) | `{ action: 'accept' }` | (no session grant) | `{ action: 'decline' }` |
 
 The elicitation response also permits structured `content` (for `form`-mode) and
-`{ action: 'cancel' }`; the current implementation answers with the action only —
-see §8.
+`{ action: 'cancel' }`. The current implementation answers action-only: a
+confirmation-style (no required fields) or `url`-mode elicitation accepts; a
+`form`/`openai/form` elicitation that **requires fields** is *declined even on
+allow* (a safe status quo — an action-only accept could make the connector act on
+empty params the user never saw), until #6684 collects content. See §8.
 
 The escalation grant is reconstructed from the two `GrantedPermissionProfile`
 fields (`fileSystem`, `network`) the request carried — never an echo of the raw

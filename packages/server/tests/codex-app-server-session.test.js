@@ -566,6 +566,47 @@ describe('CodexAppServerSession — approval surfacing (#6605 Phase 2)', () => {
       s.respondToPermission(reqs[0][1].requestId, 'deny')
       cleanup()
     })
+
+    it('a REQUIRED-field form is declined even on allow (no incomplete accept until #6684)', async () => {
+      const { s, cleanup, responded } = mkApprovalSession('approve')
+      const reqs = capture(s, ['permission_request'])
+      // form-mode with a required property → we can't collect content yet, so an
+      // action-only accept could write empty/default params → decline instead.
+      s._onServerRequest({ id: 35, method: 'mcpServer/elicitation/request', params: { serverName: 'github', threadId: 't1', mode: 'form', message: 'Fill the release notes', requestedSchema: { required: ['notes'] } } })
+      s.respondToPermission(reqs[0][1].requestId, 'allow')
+      await tick()
+      assert.deepEqual(responded, [[35, { action: 'decline' }]], 'required-field form → decline even on allow')
+      cleanup()
+    })
+
+    it('openai/form is declined even on allow (freeform content not yet collectable)', async () => {
+      const { s, cleanup, responded } = mkApprovalSession('approve')
+      const reqs = capture(s, ['permission_request'])
+      s._onServerRequest({ id: 36, method: 'mcpServer/elicitation/request', params: { serverName: 'x', threadId: 't1', mode: 'openai/form', message: 'give feedback', requestedSchema: true } })
+      s.respondToPermission(reqs[0][1].requestId, 'allow')
+      await tick()
+      assert.deepEqual(responded, [[36, { action: 'decline' }]])
+      cleanup()
+    })
+
+    it('auto mode auto-accepts a connector elicitation (bypass) without prompting', async () => {
+      const { s, cleanup, responded } = mkApprovalSession('auto')
+      const reqs = capture(s, ['permission_request'])
+      s._onServerRequest({ id: 37, method: 'mcpServer/elicitation/request', params: elicitParams })
+      await tick()
+      assert.equal(reqs.length, 0, 'auto mode does not prompt')
+      assert.deepEqual(responded, [[37, { action: 'accept' }]])
+      cleanup()
+    })
+
+    it('a missing serverName falls back to a generic connector label', () => {
+      const { s, cleanup } = mkApprovalSession('approve')
+      const reqs = capture(s, ['permission_request'])
+      s._onServerRequest({ id: 38, method: 'mcpServer/elicitation/request', params: { threadId: 't1', mode: 'form', message: 'proceed?', requestedSchema: {} } })
+      assert.match(reqs[0][1].description, /an MCP connector/)
+      s.respondToPermission(reqs[0][1].requestId, 'deny')
+      cleanup()
+    })
   })
 
   it('interrupt() aborts a pending approval → Stop unblocks the turn (decline)', async () => {
