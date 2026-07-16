@@ -344,6 +344,64 @@ describe('CodexAppServerSession — approval surfacing (#6605 Phase 2)', () => {
     }
   })
 
+  describe('apply_patch diff preview (#6638)', () => {
+    const fcItem = () => ({
+      type: 'fileChange',
+      id: 'fc-1',
+      changes: [
+        { path: 'src/a.js', kind: 'update', diff: '@@ -1 +1 @@\n-a\n+b' },
+        { path: 'src/b.js', kind: 'add', diff: '+new' },
+      ],
+    })
+
+    it('correlates the fileChange item changes into the approval (paths summary + raw changes)', () => {
+      const { s, cleanup } = mkApprovalSession('approve')
+      s._activeTurn = { messageId: 'm1', turnId: 't1', didStreamStart: true }
+      const reqs = capture(s, ['permission_request'])
+      const item = fcItem()
+      s._onItemStarted(item) // caches changes keyed by itemId 'fc-1'
+      s._onServerRequest({ id: 40, method: 'item/fileChange/requestApproval', params: { itemId: 'fc-1', grantRoot: '/repo', reason: 'edit' } })
+      const req = reqs[0][1]
+      assert.equal(req.tool, 'apply_patch')
+      assert.match(req.description, /2 files: src\/a\.js, src\/b\.js/, 'description names the files being changed')
+      assert.deepEqual(req.input.changes, item.changes, 'raw diff passed through for client rendering')
+      s.respondToPermission(req.requestId, 'deny')
+      cleanup()
+    })
+
+    it('gracefully omits the diff when no matching item was seen (no regression)', () => {
+      const { s, cleanup } = mkApprovalSession('approve')
+      const reqs = capture(s, ['permission_request'])
+      s._onServerRequest({ id: 41, method: 'item/fileChange/requestApproval', params: { itemId: 'unseen', grantRoot: '/repo', reason: 'edit files' } })
+      const req = reqs[0][1]
+      assert.equal(req.description, 'edit files', 'falls back to the reason')
+      assert.equal(req.input.changes, null)
+      s.respondToPermission(req.requestId, 'deny')
+      cleanup()
+    })
+
+    it('releases the cached diff on item completion', () => {
+      const { s, cleanup } = mkApprovalSession('approve')
+      s._activeTurn = { messageId: 'm1', didStreamStart: true }
+      const reqs = capture(s, ['permission_request'])
+      s._onItemStarted(fcItem())
+      s._onItemCompleted({ type: 'fileChange', id: 'fc-1', status: 'ok' })
+      s._onServerRequest({ id: 42, method: 'item/fileChange/requestApproval', params: { itemId: 'fc-1', grantRoot: '/repo', reason: 'edit' } })
+      assert.equal(reqs[0][1].input.changes, null, 'a completed item is no longer cached')
+      s.respondToPermission(reqs[0][1].requestId, 'deny')
+      cleanup()
+    })
+
+    it('_summarizeFileChanges caps the path list with a +N more tail', () => {
+      const { s, cleanup } = mkApprovalSession()
+      const many = Array.from({ length: 6 }, (_, i) => ({ path: `f${i}.js`, kind: 'update', diff: 'd' }))
+      assert.match(s._summarizeFileChanges(many), /6 files: f0\.js, f1\.js, f2\.js, \+3 more/)
+      assert.equal(s._summarizeFileChanges([]), null)
+      assert.equal(s._summarizeFileChanges(null), null)
+      cleanup()
+    })
+  })
+
   it('acceptEdits auto-approves a codex file edit (fileChange) without a prompt', async () => {
     const { s, cleanup, responded } = mkApprovalSession('acceptEdits')
     const reqs = capture(s, ['permission_request'])
