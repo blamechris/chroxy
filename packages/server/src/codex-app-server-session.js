@@ -417,8 +417,9 @@ export class CodexAppServerSession extends BaseSession {
   // ------------------------------------------------------------------
 
   // Codex asks before running a command / editing a file (approvalPolicy
-  // 'on-request'). Route the two clean approval families through the
-  // PermissionManager; safe-decline the scope-escalation variant (#6610).
+  // 'on-request'). All three approval families route through the PermissionManager:
+  // command/file as decision enums, and the scope-escalation variant as a
+  // permission-grant prompt (#6610). See docs/design/codex-permission-model.md.
   _onServerRequest({ id, method, params }) {
     if (method === 'item/commandExecution/requestApproval' || method === 'item/fileChange/requestApproval') {
       this._routeApproval(id, method, params)
