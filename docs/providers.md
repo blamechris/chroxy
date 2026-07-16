@@ -18,6 +18,8 @@ Three additional providers register automatically when `environments.enabled=tru
 
 Beyond the built-ins, any service or local server that exposes an **Anthropic-compatible Messages API** (Z.ai GLM, Moonshot Kimi, MiniMax, LM Studio, llama.cpp server, vLLM, OpenRouter, custom proxies) can be registered straight from `config.json` — no code required. See [Anthropic-compatible endpoints (config-driven)](#anthropic-compatible-endpoints-config-driven). Endpoints that speak the **OpenAI Chat Completions API** instead (OpenAI, OpenRouter, LM Studio, vLLM, Together, Groq, …) register the same way under a sibling block — see [OpenAI-compatible endpoints (config-driven)](#openai-compatible-endpoints-config-driven).
 
+Regardless of provider, every session's environment carries Chroxy's own **host identity** (`CHROXY_HOST_VERSION`, `CHROXY_HOST_GIT_SHA`, `CHROXY_HOST_CHANNEL`, …) so an agent can confirm the exact running build — see [Chroxy host metadata](guides/host-metadata.md).
+
 ## Setting credentials from the dashboard
 
 The **primary** way to supply provider credentials is the **Settings → Provider Credentials** pane in the desktop dashboard (and the browser dashboard — same authenticated WebSocket path). It lets you view, set, rotate, test, and remove an API key per provider without dropping to a terminal to export environment variables:

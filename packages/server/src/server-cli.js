@@ -13,6 +13,7 @@ import { createTunnel, parseTunnelArg } from './tunnel/index.js'
 import { waitForTunnel } from './tunnel-check.js'
 import { PushManager, settlePush } from './push.js'
 import { ensureIngestSecret } from './event-ingest.js'
+import { getChroxyHostEnv } from './chroxy-host-metadata.js'
 import { PushNotificationHandler } from './server-cli/push-notification-handler.js'
 import { StartupDisplay } from './server-cli/startup-display.js'
 import { TunnelLifecycleHandler } from './server-cli/tunnel-lifecycle-handler.js'
@@ -447,6 +448,12 @@ export async function startCliServer(config) {
   }
 
   initFileLoggingFromConfig(config)
+
+  // #6633: publish Chroxy's host identity into this process's environment so the
+  // in-process SDK provider's Bash tools inherit it (subprocess providers get it
+  // via buildSpawnEnv). Computed + authoritative — a session can read
+  // $CHROXY_HOST_VERSION / _GIT_SHA / _CHANNEL to confirm the exact running build.
+  Object.assign(process.env, getChroxyHostEnv())
 
   const PORT = config.port || parseInt(process.env.PORT || '8765', 10)
   const NO_AUTH = !!config.noAuth
