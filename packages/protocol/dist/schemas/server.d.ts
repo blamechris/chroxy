@@ -18,3 +18,4 @@ export * from './server/file-ops.ts';
 export * from './server/ide.ts';
 export * from './server/environment.ts';
 export * from './server/messages.ts';
+export * from './server/orchestration.ts';

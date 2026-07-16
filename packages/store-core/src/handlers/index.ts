@@ -200,6 +200,13 @@ export * from './environment'
 export * from './usage'
 
 // ---------------------------------------------------------------------------
+// Orchestration / delegation harness ("committee") reducers (epic #6691, S-1):
+// pure runs-list upsert + seq-gapped run-delta application. Client wiring is a
+// later step (dashboard S-3 #6702); these are shared, tested groundwork.
+// ---------------------------------------------------------------------------
+export * from './orchestration'
+
+// ---------------------------------------------------------------------------
 // server_error / server_shutdown / server_status (legacy) handlers moved to
 // ./error.ts (audit P2-3 split). Exported via the ./error re-export above.
 // ---------------------------------------------------------------------------
