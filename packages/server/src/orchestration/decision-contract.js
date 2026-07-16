@@ -130,15 +130,43 @@ function extractBlockText(text) {
   )
 }
 
+// Strip //, /* */ comments and trailing commas that are OUTSIDE JSON strings,
+// so a `//` (e.g. a URL) or a `, }` inside a string value is never mangled.
+// Smart quotes are normalized everywhere (they only ever appear as a typo for
+// real quotes, and a smart quote inside a value is still not valid JSON).
+function stripNoise(s) {
+  let out = ''
+  let inStr = false
+  let esc = false
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i]
+    if (inStr) {
+      out += ch
+      if (esc) esc = false
+      else if (ch === '\\') esc = true
+      else if (ch === '"') inStr = false
+      continue
+    }
+    if (ch === '"') { inStr = true; out += ch; continue }
+    // line comment
+    if (ch === '/' && s[i + 1] === '/') { while (i < s.length && s[i] !== '\n' && s[i] !== '\r') i++; i--; continue }
+    // block comment
+    if (ch === '/' && s[i + 1] === '*') { i += 2; while (i < s.length && !(s[i] === '*' && s[i + 1] === '/')) i++; i++; continue }
+    // trailing comma: a comma followed (after whitespace) by } or ]
+    if (ch === ',') {
+      let j = i + 1
+      while (j < s.length && /\s/.test(s[j])) j++
+      if (s[j] === '}' || s[j] === ']') continue // drop the comma
+    }
+    out += ch
+  }
+  return out
+}
+
 function tolerantParse(raw) {
   try { return JSON.parse(raw) } catch { /* fall through to tolerant pass */ }
-  const cleaned = raw
-    .replace(/\/\/[^\n\r]*/g, '') // line comments
-    .replace(/\/\*[\s\S]*?\*\//g, '') // block comments
-    .replace(/[“”]/g, '"') // smart double quotes
-    .replace(/[‘’]/g, "'") // smart single quotes
-    .replace(/,(\s*[}\]])/g, '$1') // trailing commas
-  return JSON.parse(cleaned) // may throw — caller wraps
+  const normalized = raw.replace(/[“”]/g, '"').replace(/[‘’]/g, "'")
+  return JSON.parse(stripNoise(normalized)) // may throw — caller wraps
 }
 
 function zodErrorSummary(error) {

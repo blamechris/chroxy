@@ -64,6 +64,14 @@ describe('extractDecision — happy paths', () => {
     const text = 'note: {"kind":"work_result","summary":"contains } and { in text"}'
     assert.equal(extractDecision(text, 'work_result').decision.summary, 'contains } and { in text')
   })
+
+  it('tolerant parse does NOT mangle // or commas inside string values (fallback string-aware)', () => {
+    // trailing comma → strict parse fails → tolerant pass; the URL "//" and the
+    // in-string ", " must survive untouched.
+    const raw = '```chroxy-decision\n{"kind":"work_result","summary":"see http://example.com/a, and /* not a comment */ more",}\n```'
+    const { decision } = extractDecision(raw, 'work_result')
+    assert.equal(decision.summary, 'see http://example.com/a, and /* not a comment */ more')
+  })
 })
 
 describe('extractDecision — fail-closed', () => {

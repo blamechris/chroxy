@@ -143,4 +143,41 @@ describe('TurnDriver — failure modes', () => {
     const e = await driver.driveTurn('nope', 'go').then(() => null, (err) => err)
     assert.equal(e.code, 'SESSION_GONE')
   })
+
+  it('dispose() rejects a turn queued behind the mutex (no hang)', async () => {
+    const { sm, addSession } = mkStub()
+    addSession('s1')
+    driver = new TurnDriver({ sessionManager: sm })
+    const p1 = driver.driveTurn('s1', 'first')
+    const p2 = driver.driveTurn('s1', 'second') // queued behind the mutex
+    driver.dispose()
+    driver = null // afterEach won't double-dispose
+    const e1 = await p1.then(() => null, (err) => err)
+    const e2 = await p2.then(() => null, (err) => err)
+    assert.equal(e1.code, 'SESSION_GONE')
+    assert.equal(e2.code, 'SESSION_GONE', 'queued turn settled, not left hanging')
+  })
+})
+
+describe('TurnDriver — post-timeout drain (no cross-turn misattribution)', () => {
+  it('swallows a timed-out turn\'s trailing events; the next turn keeps its own', async () => {
+    const { sm, addSession } = mkStub()
+    addSession('s1')
+    driver = new TurnDriver({ sessionManager: sm })
+    // turn-1 times out fast → interrupt + drain (mutex held)
+    const p1 = driver.driveTurn('s1', 'first', { timeoutMs: 10 })
+    const p2 = driver.driveTurn('s1', 'second') // queued behind the drain
+    const e1 = await p1.then(() => null, (err) => err)
+    assert.equal(e1.code, 'TURN_TIMEOUT')
+    // turn-1's LATE trailing output arrives after the timeout — must be swallowed
+    sm.ev('s1', 'stream_delta', { messageId: 'm1', delta: 'STALE-from-turn-1' })
+    sm.ev('s1', 'result', { cost: 99, duration: 99, usage: { input_tokens: 999 } }) // ends the drain
+    // now turn-2 runs and gets ITS output
+    await Promise.resolve()
+    sm.ev('s1', 'stream_delta', { messageId: 'm2', delta: 'fresh-turn-2' })
+    sm.ev('s1', 'result', { cost: 2, duration: 2, usage: { input_tokens: 2 } })
+    const r2 = await p2
+    assert.equal(r2.text, 'fresh-turn-2', 'turn-2 did not absorb turn-1 stale delta')
+    assert.equal(r2.result.cost, 2, 'turn-2 did not absorb turn-1 stale result')
+  })
 })
