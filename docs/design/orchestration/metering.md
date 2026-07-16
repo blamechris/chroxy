@@ -1,8 +1,7 @@
-All load-bearing recon facts for this slice are now verified against source. Producing the design document.
-
 # Design: Orchestration Metering, Token Ledger & Data Capture
 
-All facts below verified against source at the cited lines on branch `codex/fix-voice-control-hotkey`.
+> Provenance: authored 2026-07-15 during epic #6691 design; all cited file:line facts were
+> verified against the then-current tree and drift over time — re-verify before load-bearing use.
 
 ## 0. Verified ground truth (corrections/refinements to recon)
 

@@ -22,12 +22,19 @@ monolithic frontier-model session. First dogfood: a full self-audit of this repo
 
 The three slice docs were written by independent design passes and then adversarially reviewed.
 **Where a slice doc conflicts with the reconciliations below, the reconciliations win.**
+Note on prior art: #5018 and #5020 are CLOSED (completed) — #5018 shipped the subagent *profile
+registry* but its per-profile *model override* AC was deferred and remains unbuilt (byok Task
+children still inherit the parent model, `byok-session.js:1367`), so metering.md's "that PR must
+split the synthesized map" note still applies to whichever future PR adds the override.
 
 ## Canonical reconciliations (supersede the slice docs)
 
 1. **Enums** — protocol (`schemas/server/orchestration.ts`) is the single source; the engine
-   imports them. Run states: `created, planning, plan_review, executing, budget_paused,
-   synthesizing, cancelling, suspended, completed, failed, cancelled`. Subtask states: `pending,
+   imports them. Run states: `created, planning, plan_review, executing, paused, budget_paused,
+   synthesizing, cancelling, suspended, completed, failed, cancelled` (`paused` = user-requested
+   pause via `orchestration_run_action`; distinct from `budget_paused` so the UI can render the
+   cause — without it, reconciliation 10's `resume`-from-`paused` would be unserializable in the
+   strict wire enum). Subtask states: `pending,
    spawning, briefing, poa_review, executing, result_review, respawning, merging, conflict_fixup,
    escalated, done, skipped, failed, cancelled, interrupted`. Committee verdicts:
    `approve | revise | redelegate | escalate` (engine's `accept` renamed). (F1, F2, F10)
@@ -36,7 +43,12 @@ The three slice docs were written by independent design passes and then adversar
    only; architect reviews are timeline entries, not gates. Decisions:
    `approve | reject | revise | skip` (+ `budgetUsd` on budget_overrun approve — the only v1
    budget-change path). Gate statuses include `expired` (timeout, `resolvedBy:'policy'`; the
-   permission gate checks request liveness before answering at timeout). (F3, F17, F19, F23, F27)
+   permission gate checks request liveness before answering at timeout). The gate policy must
+   cover the **full, current** `NEVER_AUTO_ALLOW` roster — now 7 entries including
+   `request_permissions` (#6610) and `mcp_elicitation` (#6635), not the 5 engine.md §8 lists —
+   with an explicit posture per entry: audit workers/architect → deny; implement workers →
+   escalate; enumerate the roster from `permission-manager.js` at implementation time, not from
+   the design doc. (F3, F17, F19, F23, F27)
 3. **Store** — metering's RunLedger directory layout wins (`~/.chroxy/orchestration/` with
    `runs-index.json` + `runs/<runId>/{run.json, events.jsonl, report.*}`); the engine's
    `run-store.js` single file is deleted from the design. runId = `run_<ts>_<rand>`. Engine
@@ -62,7 +74,7 @@ The three slice docs were written by independent design passes and then adversar
    `worker.audit`, `worker.implement`, `worker.fixup`). (F9, F29, F22-adjacent)
 8. **Budget v1** — config `{maxUsd, warnPercent}` only (perRole/maxTokens deferred); wire levels
    `ok | warned | capped`; evaluation before every new delegation AND every committee turn;
-   one-shot latches; refunds recompute level without unfiring latches. (F8, F21→F25, F22, F24)
+   one-shot latches; refunds recompute level without unfiring latches. (F8, F22, F24, F25)
 9. **Wire additions for the dogfood** — client `orchestration_run_annotate {runId,
    baselineSessionId?, verdictQuality?}`; terminal `orchestration_run_snapshot` carries optional
    `report{json, markdown}`. Dedicated `RunUsageSchema` (tokens + `costUsd` + `pricedCostUsd` +

@@ -1,8 +1,7 @@
-All load-bearing facts verified. Final design document follows.
-
----
-
 # Orchestration ("Committee") — Wire Protocol & Dashboard Surface Design
+
+> Provenance: authored 2026-07-15 during epic #6691 design; all cited file:line facts were
+> verified against the then-current tree and drift over time — re-verify before load-bearing use.
 
 Scope: client-facing slice only (protocol messages, lint compliance, dashboard panel, session-view integration, HTTP posture, build order). Engine/state-machine internals are referenced only where the wire contract constrains them.
 
@@ -43,7 +42,7 @@ Reuse of `agent_spawned`/`agent_completed`/`agent_event` is rejected:
 - Reconnect/late-join needs no replay: opening the Runs tab (or re-activating it after staleness) pulls `orchestration_runs_snapshot`; selecting a run pulls `orchestration_run_snapshot` carrying a `seq` high-water mark. Deltas are merged only when `runId` matches a held snapshot and `seq === held.seq + 1`; any gap ⇒ silently re-request the run snapshot. Clients that never fetched simply ignore deltas (repo-events contract).
 - This avoids inventing a subscription protocol (no `subscribe_run`), keeps the engine free to coalesce, and matches how every Control Room tab already behaves (staleness guard comes free from the `CONTROL_ROOM_TABS` registry).
 
-### 1.3 Client → server messages (4 new types, `packages/protocol/src/schemas/client.ts`)
+### 1.3 Client → server messages (5 new types, `packages/protocol/src/schemas/client.ts`)
 
 ```ts
 // Survey: list all runs (active + recent). Host authority (unbound clients only).
