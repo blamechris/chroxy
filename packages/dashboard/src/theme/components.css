@@ -3301,10 +3301,12 @@ button.sidebar-token-view-session-row:hover {
   gap: 8px;
   padding: 6px 4px 4px 4px;
   border-top: 1px dashed color-mix(in srgb, var(--border-primary) 50%, transparent);
-  /* #6620: min-width:0 so a long unbreakable shell line (e.g. a long
-     `./path:line` with no spaces) can't blow the flex item past the card's
-     width — same fix as `.msg` (#4757). Without it the intrinsic content width
-     wins and the detail panel escapes the right edge of the bubble. */
+  /* #6620: defensive min-width:0. NOTE the load-bearing fix for the reported
+     overflow is `overflow-wrap: anywhere` on the -content <pre> below (it shrinks
+     a long unbreakable line's min-content). This subtree is all column-flex, so
+     width is the CROSS axis where min-width:auto already resolves to 0 — this is
+     house-style belt, not the mechanism (unlike `.msg` #4757, which sits on the
+     actual `.chat-messages` flex item). */
   min-width: 0;
 }
 
@@ -3312,7 +3314,7 @@ button.sidebar-token-view-session-row:hover {
   display: flex;
   flex-direction: column;
   gap: 3px;
-  min-width: 0; /* #6620 — see above; keep the <pre> constrained by the card. */
+  min-width: 0; /* #6620 — defensive, see the note above. */
 }
 
 .tool-group-entry-detail-label {

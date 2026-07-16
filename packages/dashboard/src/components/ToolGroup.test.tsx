@@ -18,22 +18,26 @@ const componentsCss = fs.readFileSync(path.resolve(__dirname, '../theme/componen
 afterEach(cleanup)
 
 describe('expanded shell/tool output containment (#6620)', () => {
-  it('keeps the detail <pre> inside the card: wrap/break + min-width:0 + max-width', () => {
-    const rule = componentsCss.match(/\.tool-group-entry-detail-content\s*\{[^}]*\}/)?.[0] ?? ''
-    // A long unbreakable shell line must wrap/break rather than escape the card…
-    expect(rule).toMatch(/overflow-wrap:\s*anywhere/)
-    expect(rule).toMatch(/white-space:\s*pre-wrap/)
-    // …and the box is width-constrained with a scrollbar as the last resort.
-    expect(rule).toMatch(/max-width:\s*100%/)
-    expect(rule).toMatch(/min-width:\s*0/)
-    expect(rule).toMatch(/overflow:\s*auto/)
+  // Strip /* comments */ so we assert on DECLARATIONS, not explanatory prose
+  // that happens to mention the same property names.
+  const stripComments = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, '')
+  const ruleFor = (selector: string) =>
+    stripComments(componentsCss.match(new RegExp(`\\${selector}\\s*\\{[^}]*\\}`))?.[0] ?? '')
+
+  it('keeps the detail <pre> inside the card: the load-bearing overflow-wrap + wrap + scroll-of-last-resort', () => {
+    const rule = ruleFor('.tool-group-entry-detail-content')
+    // `overflow-wrap: anywhere` is the actual fix — it shrinks a long unbreakable
+    // token's min-content so it can't push the panel past the card.
+    expect(rule).toMatch(/overflow-wrap:\s*anywhere\s*;/)
+    expect(rule).toMatch(/white-space:\s*pre-wrap\s*;/)
+    // Width-constrained, with a horizontal scrollbar only as the last resort.
+    expect(rule).toMatch(/max-width:\s*100%\s*;/)
+    expect(rule).toMatch(/overflow:\s*auto\s*;/)
   })
 
-  it('gives the detail flex chain min-width:0 so a long line cannot blow the bubble width', () => {
-    const detail = componentsCss.match(/\.tool-group-entry-detail\s*\{[^}]*\}/)?.[0] ?? ''
-    const section = componentsCss.match(/\.tool-group-entry-detail-section\s*\{[^}]*\}/)?.[0] ?? ''
-    expect(detail).toMatch(/min-width:\s*0/)
-    expect(section).toMatch(/min-width:\s*0/)
+  it('adds defensive min-width:0 to the detail flex chain (house-style, harmless in this column subtree)', () => {
+    expect(ruleFor('.tool-group-entry-detail')).toMatch(/min-width:\s*0\s*;/)
+    expect(ruleFor('.tool-group-entry-detail-section')).toMatch(/min-width:\s*0\s*;/)
   })
 })
 
