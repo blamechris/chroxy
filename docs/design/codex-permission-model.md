@@ -30,10 +30,12 @@ Everything under **Current state** is grounded in the code as of this writing;
 | Approval surface | Yes — 3 families via `PermissionManager` | **None** — runs under Codex's own sandbox only |
 | `permissions` / `inProcessPermissions` / `permissionModeSwitch` caps | `true` / `true` / `true` | `false` / `false` / `false` |
 | Attachments (image vision / file refs) | Yes (#6609) | Rejected |
-| Intra-session memory | Yes | No (one-shot) |
-| Resume | No (neither path) | No |
+| Intra-session memory (turn-to-turn) | Yes (persistent session) | Yes — resumes the same thread via `codex exec resume <id>` (a fresh subprocess per turn; thread id captured from `thread.started`, #3865) |
+| Resume across daemon restart | No | No |
 
-The app-server path is a strict superset. `getProvider('codex')` returns the
+The app-server path is a strict superset — its edge over exec is the **approval
+surface** (this doc) plus attachments, not turn-to-turn memory, which both keep.
+`getProvider('codex')` returns the
 app-server class unless the env var opts out (`providers.js`). Since #6618/#6676
 the picker capabilities and the startup label also track the runtime driver, so
 "what a live codex session can do" is consistent across the picker and the session.
