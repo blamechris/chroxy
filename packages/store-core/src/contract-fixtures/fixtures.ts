@@ -1786,6 +1786,41 @@ export const SWITCH_FIXTURES: ContractFixture[] = [
     },
   },
   {
+    // #6627/#6707 — status-aware parity: with an interleaved queue
+    // [confirmed-orphan, pending, confirmed] and queueLength 1, both clients must
+    // reap ONLY the oldest CONFIRMED orphan (a dropped dequeue) and preserve the
+    // optimistic pending entry (a live, not-yet-confirmed send) plus the newest
+    // confirmed one. This is the strong removal-guard fixture: seed length 3 →
+    // expect length 2, so a deleted/stripped reconcile fails it, and a client
+    // that trims the pending entry (the #5950-class regression) fails too.
+    name: 'result reap keeps an interleaved pending entry while trimming a confirmed orphan',
+    type: 'result',
+    init: {
+      activeSessionId: 's1',
+      sessions: {
+        s1: {
+          messages: [{ id: 'resp-1', type: 'response', content: 'done' } as unknown as ChatMessage],
+          queuedMessages: [
+            { clientMessageId: 'uin-0', text: 'orphan', queuedAt: 9, status: 'confirmed' },
+            { clientMessageId: 'uin-1', text: 'live', queuedAt: 10, status: 'pending' },
+            { clientMessageId: 'uin-2', text: 'a', queuedAt: 11, status: 'confirmed' },
+          ],
+        },
+      },
+    },
+    message: { type: 'result', sessionId: 's1', cost: 0.01, duration: 1200, queueLength: 1 },
+    expect: {
+      sessions: {
+        s1: {
+          queuedMessages: [
+            { clientMessageId: 'uin-1', text: 'live', queuedAt: 10, status: 'pending' },
+            { clientMessageId: 'uin-2', text: 'a', queuedAt: 11, status: 'confirmed' },
+          ],
+        },
+      },
+    },
+  },
+  {
     // stream_end is the asymmetric teardown gap (stream_start IS pinned above):
     // both clients clear `streamingMessageId` and refresh the messages REFERENCE
     // but leave the transcript untouched. Seed the in-flight response bubble and
