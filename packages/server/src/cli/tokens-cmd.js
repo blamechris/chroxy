@@ -41,6 +41,17 @@ const UNREADABLE_NOTE =
   'permissions, or corrupt). Refusing to touch it so a readable store is never lost. Fix the ' +
   'store access (or stop the daemon and inspect ~/.chroxy/session-tokens.json) and retry.'
 
+// A decoded store SHOULD be `[token, meta]` tuples, but a hand-edited / partially
+// corrupt store could carry a non-tuple element. These accessors never throw on
+// one, so a single bad row can't crash `list`/`revoke` — the bad row shows as
+// malformed and is preserved (not silently dropped) across a targeted revoke.
+function tokenOf(entry) {
+  return Array.isArray(entry) && typeof entry[0] === 'string' ? entry[0] : ''
+}
+function metaOf(entry) {
+  return Array.isArray(entry) && entry[1] && typeof entry[1] === 'object' ? entry[1] : {}
+}
+
 /**
  * List persisted session tokens. Pure aside from the injected store/writer/clock,
  * so a test drives it with an in-memory store.
@@ -63,11 +74,15 @@ export function runTokensList(deps = {}) {
     return { count: 0, tokens: [] }
   }
 
-  const rows = entries.map(([token, meta]) => ({
-    handle: String(token).slice(0, 12),
-    sessionId: (meta && typeof meta.sessionId === 'string' && meta.sessionId) || '(none)',
-    ageMs: meta && typeof meta.createdAt === 'number' ? now - meta.createdAt : null,
-  }))
+  const rows = entries.map((entry) => {
+    const token = tokenOf(entry)
+    const meta = metaOf(entry)
+    return {
+      handle: token ? token.slice(0, 12) : '(malformed)',
+      sessionId: (typeof meta.sessionId === 'string' && meta.sessionId) || '(none)',
+      ageMs: typeof meta.createdAt === 'number' ? now - meta.createdAt : null,
+    }
+  })
 
   out(`${rows.length} paired session token(s):`)
   for (const r of rows) {
@@ -130,7 +145,9 @@ export function runTokensRevoke(target, options = {}, deps = {}) {
     return { revoked: 0, mode: 'one', error: 'no-target' }
   }
 
-  const matches = list.filter(([token]) => String(token).startsWith(target))
+  // target is non-empty here (guarded above), so a malformed row (tokenOf === '')
+  // never matches and is preserved in `remaining`.
+  const matches = list.filter((e) => tokenOf(e).startsWith(target))
   if (matches.length === 0) {
     out(`No session token matches "${target}". Run: chroxy tokens list`)
     return { revoked: 0, mode: 'one', error: 'no-match' }
@@ -141,7 +158,7 @@ export function runTokensRevoke(target, options = {}, deps = {}) {
     return { revoked: 0, mode: 'one', error: 'ambiguous', matches: matches.length }
   }
 
-  const remaining = list.filter(([token]) => !String(token).startsWith(target))
+  const remaining = list.filter((e) => !tokenOf(e).startsWith(target))
   if (!store.save(remaining)) {
     out(`Failed to write the session-token store — nothing revoked. ${UNREADABLE_NOTE}`)
     return { revoked: 0, mode: 'one', error: 'persist-failed' }

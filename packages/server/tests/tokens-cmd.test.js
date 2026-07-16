@@ -70,6 +70,19 @@ describe('chroxy tokens — list (#6599)', () => {
     assert.match(w.text(), /age=unknown/)
   })
 
+  it('does not crash on a corrupt-but-array store (non-tuple row shown as malformed)', () => {
+    // A hand-edited store could decode to an array containing a non-tuple element.
+    const w = cap()
+    const store = fakeStore([])
+    // Inject malformed rows past the tuple-cloning constructor via loadResult.
+    store.loadResult = () => ({ status: 'ok', entries: [['good00000000_secret', { createdAt: NOW, sessionId: 's' }], 'not-a-tuple', [42]] })
+    const res = runTokensList({ store, write: w.write, now: NOW })
+    assert.equal(res.count, 3)
+    assert.equal(res.tokens[0].handle, 'good00000000')
+    assert.equal(res.tokens[1].handle, '(malformed)')
+    assert.equal(res.tokens[2].handle, '(malformed)')
+  })
+
   it('an UNREADABLE store is reported as an error, never as "empty"', () => {
     const w = cap()
     // A present-but-unreadable store (bad perms / no keychain key / corrupt) must
@@ -152,6 +165,18 @@ describe('chroxy tokens — revoke one (#6599)', () => {
     assert.equal(res.error, 'persist-failed')
     assert.equal(res.revoked, 0)
     assert.match(w.text(), /Failed to write/)
+  })
+
+  it('a targeted revoke preserves a malformed row (never drops or crashes on it)', () => {
+    const store = fakeStore([])
+    let saved = null
+    store.loadResult = () => ({ status: 'ok', entries: [['keepme00_secret', { createdAt: NOW }], 'not-a-tuple', ['dropme00_secret', { createdAt: NOW }]] })
+    store.save = (next) => { saved = next; return true }
+    const w = cap()
+    const res = runTokensRevoke('dropme00', {}, { store, write: w.write })
+    assert.equal(res.revoked, 1)
+    // the real token is dropped; the good one AND the malformed row are preserved
+    assert.deepEqual(saved.map((e) => (Array.isArray(e) ? e[0] : e)), ['keepme00_secret', 'not-a-tuple'])
   })
 })
 
