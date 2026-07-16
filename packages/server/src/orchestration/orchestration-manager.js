@@ -152,10 +152,17 @@ export class OrchestrationManager extends EventEmitter {
     } catch (err) {
       return this._failRun(run, `PLAN_${err instanceof DecisionParseError ? 'PARSE' : 'FAILED'}`, err)
     }
-    // materialize subtasks (audit preset coerces every subtask to role:'audit')
+    // Materialize subtasks. E-2 is the READ/audit path: every subtask runs
+    // read-only regardless of the role the architect proposed, so coerce all of
+    // them to 'audit' — labeling a subtask worker.implement while it actually
+    // runs through the read-only worker path would make the run record lie. The
+    // implement path (respecting spec.role for non-audit runs) is E-3.
     for (const spec of plan.subtasks) {
       const subtaskId = `st_${randomBytes(4).toString('hex')}`
-      const role = run.preset?.forceRole === 'audit' ? 'audit' : spec.role
+      if (spec.role && spec.role !== 'audit') {
+        this._log?.warn?.(`orchestration: subtask "${spec.title}" requested role '${spec.role}'; coerced to audit (read path only)`)
+      }
+      const role = 'audit'
       this._ledger.createSubtask(runId, { subtaskId, role: `worker.${role}`, title: spec.title })
       run.subtasks.set(subtaskId, { iterations: 0, spec: { ...spec, role }, state: 'pending', poa: null, result: null })
     }
@@ -520,7 +527,9 @@ export class OrchestrationManager extends EventEmitter {
   }
   _sessionHeadroom() {
     const size = typeof this._sm.listSessions === 'function' ? this._sm.listSessions().length : this._sm._sessions?.size ?? 0
-    return size <= (this._maxSessions - this._cfg.reserveSessions)
+    // Room to spawn ONE more session while still leaving reserveSessions slots
+    // free — strict, so the reserve is preserved AFTER the new session exists.
+    return size + 1 <= this._maxSessions - this._cfg.reserveSessions
   }
 
   // --- read API (consumed by the S-2 handlers; wire projection is E-4) -----

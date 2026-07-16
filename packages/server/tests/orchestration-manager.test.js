@@ -499,6 +499,27 @@ test('cancel during a turn keeps status cancelled (no failed overwrite)', async 
   }
 })
 
+test('coerces an implement subtask to audit even without a preset (E-2 read path)', async () => {
+  const decide = (ctx) => {
+    if (ctx.kind === 'epic_plan') return { kind: 'epic_plan', subtasks: [{ title: 'A', goal: 'g', role: 'implement' }] }
+    return happyDecider(ctx)
+  }
+  const { sm, ledger, mgr, cleanup } = makeHarness(decide)
+  try {
+    const rec = mgr.createRun({ goal: 'Audit', cwd: '/repo', autoApprovePlan: true }) // NO preset
+    const done = waitFor(mgr, ['run_completed'])
+    await mgr.startRun(rec.runId)
+    await done
+    const record = ledger.getRun(rec.runId)
+    assert.equal(record.subtasks[0].role, 'worker.audit', 'ledger role coerced to audit')
+    // and the actual session was spawned read-only, matching the label
+    const worker = sm.created.find((c) => c.opts.metadata?.orchestrationRole === 'worker.audit')
+    assert.ok(worker, 'worker spawned as worker.audit (not worker.implement)')
+  } finally {
+    cleanup()
+  }
+})
+
 test('repo-audit preset supplies the goal and forces audit role', async () => {
   // architect proposes an implement subtask; preset coerces it to audit.
   const decide = (ctx) => {
