@@ -7243,6 +7243,19 @@ describe('handleToolResult', () => {
     expect(out!.resultText).toBe('visible-text')
   })
 
+  // #6712 — carry isError so a failed tool_result (codex mcpToolCall / orphan
+  // sweep) can be styled by the renderers.
+  it('patches toolResultIsError from a boolean msg.isError', () => {
+    expect(handleToolResult({ toolUseId: 'tu-1', result: 'boom', isError: true }, 's')!.patch.toolResultIsError).toBe(true)
+    expect(handleToolResult({ toolUseId: 'tu-1', result: 'ok', isError: false }, 's')!.patch.toolResultIsError).toBe(false)
+  })
+
+  it('defaults toolResultIsError to false when isError is absent or non-boolean', () => {
+    expect(handleToolResult({ toolUseId: 'tu-1', result: 'ok' }, 's')!.patch.toolResultIsError).toBe(false)
+    // non-boolean coerces to the safe default (matches the truncated guard)
+    expect(handleToolResult({ toolUseId: 'tu-1', result: 'ok', isError: 'true' as unknown as boolean }, 's')!.patch.toolResultIsError).toBe(false)
+  })
+
   it('resolves sessionId from message when present', () => {
     const out = handleToolResult(
       { toolUseId: 'tu-1', sessionId: 'sess-1', result: 'ok' },

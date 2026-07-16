@@ -365,6 +365,17 @@ describe('EventNormalizer', () => {
       assert.deepEqual(msg.images, images)
     })
 
+    it('forwards isError onto the wire so a failed result round-trips (#6712)', () => {
+      const data = { toolUseId: 'tu1', result: 'connection refused', truncated: false, isError: true }
+      const msg = normalizer.normalize('tool_result', data, makeCtx()).messages[0].msg
+      assert.equal(msg.isError, true)
+    })
+
+    it('omits isError when not a boolean (successful/legacy results carry no flag)', () => {
+      const msg = normalizer.normalize('tool_result', { toolUseId: 'tu1', result: 'ok', truncated: false }, makeCtx()).messages[0].msg
+      assert.equal('isError' in msg, false)
+    })
+
     it('omits images when not present', () => {
       const data = { toolUseId: 'tu1', result: 'text only', truncated: false }
       const result = normalizer.normalize('tool_result', data, makeCtx())

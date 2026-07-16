@@ -344,7 +344,7 @@ function _isSecureRequest(req) {
  *   { type: 'terminal_size', sessionId, cols, rows }   — #5835 Phase 2 authoritative live-PTY grid size; sent to a client on terminal_subscribe and broadcast to all terminal subscribers on a primary-driven terminal_resize so observers re-letterbox to the same grid
  *   { type: 'tool_start',   messageId, toolUseId, tool, input, serverName? } — tool invocation (serverName present for MCP tools)
  *   { type: 'tool_input_delta', messageId, toolUseId, partialJson } — #4080/#4081: incremental partial JSON for the streaming tool_use `input`; concatenate per-toolUseId for the live bubble preview
- *   { type: 'tool_result',  toolUseId, result, truncated, images? }  — tool result (images: [{mediaType, data}])
+ *   { type: 'tool_result',  toolUseId, result, truncated, images?, isError? }  — tool result (images: [{mediaType, data}]; #6712 isError flags a failed tool for the error affordance)
  *   { type: 'mcp_servers',  servers: [{ name, status }] }     — connected MCP servers
  *   { type: 'result',       ... }                     — query stats
  *   { type: 'status',       connected: true }         — connection status

@@ -3274,6 +3274,16 @@ button.sidebar-token-view-session-row:hover {
   color: var(--text-muted);
 }
 
+/* #6712 — a failed tool_result (codex mcpToolCall / orphan sweep). */
+.tool-group-entry-marker--error {
+  color: var(--accent-red, #d6685f);
+}
+
+.tool-group-entry--error {
+  background: var(--accent-red-light);
+  border-left: 2px solid var(--accent-red, #d6685f);
+}
+
 .tool-group-entry-name {
   color: var(--accent-purple);
   font-weight: 500;

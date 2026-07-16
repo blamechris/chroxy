@@ -210,6 +210,11 @@ Object.assign(EVENT_MAP, {
   tool_result: (data) => {
     const msg = { type: 'tool_result', toolUseId: data.toolUseId, result: data.result, truncated: data.truncated }
     if (data.images?.length) msg.images = data.images
+    // #6712: forward the failed-tool flag onto the LIVE wire (this normalizer is
+    // the serialization choke point for both backends). Without it a failed
+    // codex mcpToolCall / orphan-sweep result would render plain live but
+    // error-styled after a history replay (which sends the entry raw).
+    if (typeof data.isError === 'boolean') msg.isError = data.isError
     return { messages: [{ msg }] }
   },
 

@@ -109,6 +109,22 @@ describe('ToolGroup', () => {
     expect(screen.getByTestId('tool-group-entry-2')).toHaveTextContent('›')
   })
 
+  it('renders an error marker (✕) + error attribute for a failed tool_result (#6712)', () => {
+    const messages = [
+      tool('1', 'db/query', { toolResult: 'connection refused', toolResultIsError: true }),
+      tool('2', 'Bash', { toolResult: 'ok' }),
+    ]
+    render(<ToolGroup messages={messages} isActive={true} />)
+    const errored = screen.getByTestId('tool-group-entry-1')
+    expect(errored).toHaveTextContent('✕')
+    expect(errored).toHaveAttribute('data-error', 'true')
+    expect(errored).toHaveClass('tool-group-entry--error')
+    // A successful result is unaffected — still the check marker, no error attr.
+    const ok = screen.getByTestId('tool-group-entry-2')
+    expect(ok).toHaveTextContent('✓')
+    expect(ok).not.toHaveAttribute('data-error')
+  })
+
   it('counts an empty toolResult as complete (server may emit "")', () => {
     const messages = [
       tool('1', 'Bash', { toolResult: '' }),

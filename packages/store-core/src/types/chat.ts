@@ -90,6 +90,14 @@ export interface ChatMessage {
   toolResult?: string;
   toolResultTruncated?: boolean;
   /**
+   * #6712: whether the tool_result represents a FAILED tool execution (a failed
+   * codex `mcpToolCall`, or a synthetic orphan-sweep result). Renderers surface
+   * an error affordance (red tint / warning icon) when `true`. Optional: only
+   * `true` is meaningful — a missing/`false` value is a normal result. store-core
+   * defaults a missing wire `isError` to `false`.
+   */
+  toolResultIsError?: boolean;
+  /**
    * #4476: structured error code for `type: 'error'` bubbles. Mirrors the
    * `code` field on `ServerMessageSchema` — populated when the server tags
    * an error with a known machine-readable identifier (e.g. `'stream_stall'`
