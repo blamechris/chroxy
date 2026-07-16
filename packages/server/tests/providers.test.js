@@ -183,6 +183,40 @@ describe('Provider Registry', () => {
     }
   })
 
+  // #6618: the picker (listProviders) advertised codex's EXEC capability shape
+  // (from the static PROVIDERS literal) while a live codex session is the
+  // app-server driver (getProvider default), so the two disagreed on
+  // permissions/inProcessPermissions/permissionModeSwitch. listProviders now
+  // resolves through getProvider so the picker tracks the runtime driver,
+  // honoring CHROXY_CODEX_APPSERVER.
+  it('listProviders codex caps match the runtime driver, honoring CHROXY_CODEX_APPSERVER (#6618)', () => {
+    const orig = process.env.CHROXY_CODEX_APPSERVER
+    const CAP_KEYS = ['permissions', 'inProcessPermissions', 'permissionModeSwitch']
+    try {
+      for (const [label, val] of [['default (app-server)', undefined], ['opt-out (=0)', '0']]) {
+        if (val === undefined) delete process.env.CHROXY_CODEX_APPSERVER
+        else process.env.CHROXY_CODEX_APPSERVER = val
+        const codexEntry = listProviders().find(p => p.name === 'codex')
+        assert.ok(codexEntry, `codex provider registered (${label})`)
+        const runtimeCaps = getProvider('codex').capabilities
+        for (const k of CAP_KEYS) {
+          assert.equal(codexEntry.capabilities[k], runtimeCaps[k],
+            `picker codex.${k} must match the runtime driver in ${label}`)
+        }
+      }
+      // Concretely: default = app-server (approval-capable), =0 = exec (no approvals).
+      delete process.env.CHROXY_CODEX_APPSERVER
+      assert.equal(listProviders().find(p => p.name === 'codex').capabilities.permissions, true,
+        'codex default (app-server) advertises approvals in the picker')
+      process.env.CHROXY_CODEX_APPSERVER = '0'
+      assert.equal(listProviders().find(p => p.name === 'codex').capabilities.permissions, false,
+        'codex exec opt-out advertises no approvals in the picker')
+    } finally {
+      if (orig === undefined) delete process.env.CHROXY_CODEX_APPSERVER
+      else process.env.CHROXY_CODEX_APPSERVER = orig
+    }
+  })
+
   // #3404 audit (F1+F5): listProviders must surface auth/credentials state
   // so the dashboard can grey-out unusable providers and show a billing-
   // identity confidence panel without making the user run `chroxy doctor`.
