@@ -95,25 +95,44 @@ export interface RepoEventGroup {
 }
 
 /**
+ * The active-repo scope to filter events against. `#6539`: prefer the server's
+ * EXACT `owner/repo` set (`exactRepos`, resolved from each session's git remote);
+ * fall back to the best-effort cwd-`basenames` guess only when the server didn't
+ * send it (older daemon, `exactRepos: null`).
+ */
+export interface RepoEventsScope {
+  /** Exact `owner/repo` set from the snapshot's `activeRepos`, or null if absent. */
+  exactRepos: ReadonlySet<string> | null
+  /** Fallback: cwd basenames derived client-side. Used only when `exactRepos` is null. */
+  basenames: ReadonlySet<string>
+}
+
+/**
  * Scope + group events for display. The store feed is most-recent-LAST, so we
- * reverse to newest-first. When `showAll` is false and there's a non-empty set
- * of active-repo basenames, events are filtered to those repos; otherwise all
- * events pass. Returns the visible groups (ordered by their newest event) plus
- * how many events were hidden by scoping (0 when unscoped).
+ * reverse to newest-first. When `showAll` is false and the active set is
+ * non-empty, events are filtered to those repos; otherwise all events pass.
+ * `#6539`: matches by EXACT `owner/repo` when the server sent `activeRepos`,
+ * else by cwd basename (backward-compatible fallback). Returns the visible
+ * groups (ordered by their newest event) plus how many events were hidden.
  */
 export function scopeAndGroupEvents(
   events: readonly RepoEvent[],
-  activeBasenames: Set<string>,
+  scope: RepoEventsScope,
   showAll: boolean,
 ): { groups: RepoEventGroup[]; hiddenCount: number } {
   const newestFirst = events.slice().reverse()
-  const scoped = !showAll && activeBasenames.size > 0
+  const useExact = scope.exactRepos !== null
+  const activeSet = useExact ? scope.exactRepos! : scope.basenames
+  const scoped = !showAll && activeSet.size > 0
   let hiddenCount = 0
   const byRepo = new Map<string, RepoEvent[]>()
   for (const ev of newestFirst) {
     if (scoped) {
-      const base = repoBasename(ev.repo)
-      if (!base || !activeBasenames.has(base)) {
+      // Exact: the event's `owner/repo` must be in the set (case-insensitive —
+      // GitHub names are, and a git-config remote can differ in case from the
+      // canonical `full_name` the webhook stamps). Fallback: its cwd basename.
+      const filterKey = useExact ? (ev.repo ? ev.repo.toLowerCase() : null) : repoBasename(ev.repo)
+      if (!filterKey || !activeSet.has(filterKey)) {
         hiddenCount++
         continue
       }
@@ -211,9 +230,16 @@ export function RepoEventsSection({
   const generatedAtMs = snapshot ? Date.parse(snapshot.generatedAt) : NaN
 
   const events = snapshot?.events ?? []
-  const activeBasenames = activeRepoBasenames(sessions ?? [])
-  const { groups, hiddenCount } = scopeAndGroupEvents(events, activeBasenames, showAll)
-  const scopingActive = !showAll && activeBasenames.size > 0
+  // #6539: prefer the server's exact `owner/repo` set; fall back to cwd basenames
+  // when an older daemon omits it. `exactRepos: null` ⇒ use the basename guess.
+  // Lowercased for case-insensitive matching (GitHub names are case-insensitive).
+  const exactRepos = Array.isArray(snapshot?.activeRepos)
+    ? new Set(snapshot.activeRepos.map((r) => r.toLowerCase()))
+    : null
+  const basenames = activeRepoBasenames(sessions ?? [])
+  const { groups, hiddenCount } = scopeAndGroupEvents(events, { exactRepos, basenames }, showAll)
+  const activeScopeSize = exactRepos !== null ? exactRepos.size : basenames.size
+  const scopingActive = !showAll && activeScopeSize > 0
 
   return (
     <div className="cr-section" data-testid="repo-events-section">
@@ -289,7 +315,7 @@ export function RepoEventsSection({
             <span className="cr-chip" data-testid="repo-events-chip-repos">
               Repos: <b data-testid="repo-events-chip-count-repos">{new Set(events.map((e) => e.repo ?? '(unknown repo)')).size}</b>
             </span>
-            {activeBasenames.size > 0 && (
+            {activeScopeSize > 0 && (
               <label className="cr-chip" data-testid="repo-events-show-all">
                 <input
                   type="checkbox"

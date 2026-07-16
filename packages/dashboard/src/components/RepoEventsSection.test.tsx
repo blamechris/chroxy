@@ -72,30 +72,76 @@ describe('RepoEventsSection pure helpers (#5966)', () => {
     expect([...set].sort()).toEqual(['chroxy', 'widget'])
   })
 
+  // Backward-compat basename fallback (older daemon: exactRepos null).
+  const basenameScope = (bases: string[]) => ({ exactRepos: null, basenames: new Set(bases) })
+
   it('scopeAndGroupEvents reverses to newest-first and groups by repo', () => {
     const events = [
       ev({ repo: 'a/one', at: '2026-07-02T10:00:00.000Z', summary: 'old' }),
       ev({ repo: 'a/two', at: '2026-07-02T11:00:00.000Z', summary: 'mid' }),
       ev({ repo: 'a/one', at: '2026-07-02T12:00:00.000Z', summary: 'new' }),
     ]
-    const { groups, hiddenCount } = scopeAndGroupEvents(events, new Set(), false)
+    const { groups, hiddenCount } = scopeAndGroupEvents(events, basenameScope([]), false)
     // newest event (a/one 'new') ranks its group first
     expect(groups.map((g) => g.repo)).toEqual(['one', 'two'].map((x) => `a/${x}`))
     expect(groups[0]!.events.map((e) => e.summary)).toEqual(['new', 'old'])
     expect(hiddenCount).toBe(0)
   })
 
-  it('scopeAndGroupEvents filters to active repos and counts the hidden', () => {
+  it('scopeAndGroupEvents filters by basename fallback when exactRepos is null', () => {
     const events = [ev({ repo: 'blamechris/chroxy' }), ev({ repo: 'someone/other' })]
-    const { groups, hiddenCount } = scopeAndGroupEvents(events, new Set(['chroxy']), false)
+    const { groups, hiddenCount } = scopeAndGroupEvents(events, basenameScope(['chroxy']), false)
     expect(groups.map((g) => g.repo)).toEqual(['blamechris/chroxy'])
     expect(hiddenCount).toBe(1)
   })
 
-  it('scopeAndGroupEvents shows everything when showAll is true or no active repos', () => {
+  it('scopeAndGroupEvents shows everything when showAll is true or the active set is empty', () => {
     const events = [ev({ repo: 'blamechris/chroxy' }), ev({ repo: 'someone/other' })]
-    expect(scopeAndGroupEvents(events, new Set(['chroxy']), true).hiddenCount).toBe(0)
-    expect(scopeAndGroupEvents(events, new Set(), false).groups.length).toBe(2)
+    expect(scopeAndGroupEvents(events, basenameScope(['chroxy']), true).hiddenCount).toBe(0)
+    expect(scopeAndGroupEvents(events, basenameScope([]), false).groups.length).toBe(2)
+  })
+
+  // #6539: exact owner/repo scoping (the server-provided set takes precedence).
+  it('scopeAndGroupEvents matches by EXACT owner/repo when exactRepos is provided', () => {
+    const events = [ev({ repo: 'blamechris/chroxy' }), ev({ repo: 'someone/chroxy' })]
+    // Both share basename "chroxy", but exact scoping keeps only the right owner.
+    const scope = { exactRepos: new Set(['blamechris/chroxy']), basenames: new Set(['chroxy']) }
+    const { groups, hiddenCount } = scopeAndGroupEvents(events, scope, false)
+    expect(groups.map((g) => g.repo)).toEqual(['blamechris/chroxy'])
+    expect(hiddenCount).toBe(1)
+  })
+
+  it('scopeAndGroupEvents with an empty exact set (no GitHub-remote sessions) shows all, not none', () => {
+    const events = [ev({ repo: 'blamechris/chroxy' }), ev({ repo: 'someone/other' })]
+    const scope = { exactRepos: new Set<string>(), basenames: new Set(['chroxy']) }
+    // exactRepos is provided-but-empty ⇒ no scoping (don't erroneously hide all).
+    expect(scopeAndGroupEvents(events, scope, false).groups.length).toBe(2)
+  })
+
+  it('scopeAndGroupEvents prefers exactRepos over the basename fallback', () => {
+    const events = [ev({ repo: 'blamechris/chroxy' }), ev({ repo: 'someone/other' })]
+    // basenames would keep 'other'; exact set does not — exact wins.
+    const scope = { exactRepos: new Set(['blamechris/chroxy']), basenames: new Set(['chroxy', 'other']) }
+    const { groups } = scopeAndGroupEvents(events, scope, false)
+    expect(groups.map((g) => g.repo)).toEqual(['blamechris/chroxy'])
+  })
+
+  it('scopeAndGroupEvents matches exactRepos case-insensitively (canonical full_name vs git remote casing)', () => {
+    const events = [ev({ repo: 'blamechris/chroxy' })]
+    // The server lowercases activeRepos; the event's canonical full_name matches
+    // regardless of the git remote's original casing.
+    const scope = { exactRepos: new Set(['blamechris/chroxy']), basenames: new Set<string>() }
+    expect(scopeAndGroupEvents(events, scope, false).groups.map((g) => g.repo)).toEqual(['blamechris/chroxy'])
+  })
+
+  it('scopeAndGroupEvents hides an event with a null/bare repo under exact scoping (revealed by Show all)', () => {
+    const events = [ev({ repo: null }), ev({ repo: 'blamechris/chroxy' })]
+    const scope = { exactRepos: new Set(['blamechris/chroxy']), basenames: new Set<string>() }
+    const { groups, hiddenCount } = scopeAndGroupEvents(events, scope, false)
+    expect(groups.map((g) => g.repo)).toEqual(['blamechris/chroxy'])
+    expect(hiddenCount).toBe(1)
+    // Show all reveals it, grouped under the unknown-repo bucket.
+    expect(scopeAndGroupEvents(events, scope, true).groups.length).toBe(2)
   })
 
   it('formatAgo renders a relative label or a dash', () => {
