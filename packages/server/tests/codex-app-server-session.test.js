@@ -134,6 +134,8 @@ describe('CodexAppServerSession — app-server → Chroxy event mapping', () => 
     assert.equal(ev[0][0], 'tool_start')
     assert.equal(ev[0][1].tool, 'github/create_issue')
     assert.equal(ev[0][1].toolUseId, 't1')
+    assert.equal(ev[0][1].input.server, 'github')
+    assert.equal(ev[0][1].input.tool, 'create_issue')
     assert.deepEqual(ev[0][1].input.arguments, { title: 'x' })
     assert.equal(ev[1][0], 'tool_result')
     assert.equal(ev[1][1].toolUseId, 't1')
@@ -181,8 +183,9 @@ describe('CodexAppServerSession — app-server → Chroxy event mapping', () => 
     // structuredContent fallback when there is no content array
     const structured = s._summarizeMcpResult({ status: 'completed', result: { structuredContent: { ok: true } } })
     assert.equal(structured.result, '{"ok":true}')
-    // status fallback when there is nothing renderable
+    // status fallback when there is nothing renderable (result {} or null)
     assert.equal(s._summarizeMcpResult({ status: 'completed', result: {} }).result, 'completed')
+    assert.equal(s._summarizeMcpResult({ status: 'completed', result: null }).result, 'completed')
     // cap: a >10k text result is truncated with a marker
     const huge = 'x'.repeat(20_000)
     const capped = s._summarizeMcpResult({ status: 'completed', result: { content: [{ type: 'text', text: huge }] } })
