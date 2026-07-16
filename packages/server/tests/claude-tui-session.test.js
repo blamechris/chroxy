@@ -1761,6 +1761,50 @@ describe('ClaudeTuiSession', () => {
       assert.equal(ready, false, 'status=busy file wins over quiescence')
     })
 
+    it('#6604 the per-spawn reset drops a previously-quiesced session back to not-ready until fresh output', async () => {
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._term = { write: () => {}, kill: () => {}, pid: fakePid }
+
+      // A session that HAD rendered and quiesced reads ready...
+      session._sawFirstOutput = true
+      session._lastOutputMs = session._nowMonotonic() - (ClaudeTuiSession.READY_QUIESCENCE_MS + 200)
+      assert.equal(await session._waitForPrompt(100), true, 'sanity: a quiesced session reads ready')
+
+      // ...but the per-spawn reset (run by _spawnPty on every respawn) must drop it
+      // back to not-ready — the stale _lastOutputMs can't count until fresh output.
+      session._resetQuiescenceForSpawn()
+      assert.equal(session._sawFirstOutput, false, 'reset clears the saw-first-output gate')
+      assert.equal(await session._waitForPrompt(50), false,
+        'respawn reset reads not-ready despite the leftover (stale) _lastOutputMs')
+
+      // Fresh output on the new spawn re-arms the gate; once it quiesces, ready again.
+      session._appendToOutputTail('composer render')
+      assert.equal(session._sawFirstOutput, true, 'fresh output re-arms the gate')
+      session._lastOutputMs = session._nowMonotonic() - (ClaudeTuiSession.READY_QUIESCENCE_MS + 200)
+      assert.equal(await session._waitForPrompt(100), true, 'ready again after fresh output quiesces')
+    })
+
+    it('#6603 READY_QUIESCENCE_MS honours CHROXY_TUI_READY_QUIESCENCE_MS (positive int, else 400)', () => {
+      const prev = process.env.CHROXY_TUI_READY_QUIESCENCE_MS
+      try {
+        process.env.CHROXY_TUI_READY_QUIESCENCE_MS = '1200'
+        assert.equal(ClaudeTuiSession.READY_QUIESCENCE_MS, 1200, 'a positive override is applied')
+        process.env.CHROXY_TUI_READY_QUIESCENCE_MS = '  700  '
+        assert.equal(ClaudeTuiSession.READY_QUIESCENCE_MS, 700, 'surrounding whitespace is trimmed')
+        // Strict digits-only: partial-numeric / non-integer strings are rejected
+        // (not silently truncated by parseInt), matching the documented contract.
+        for (const bad of ['0', '-50', 'abc', '', '1200ms', '3.9', '1e3', '0x10', ' ']) {
+          process.env.CHROXY_TUI_READY_QUIESCENCE_MS = bad
+          assert.equal(ClaudeTuiSession.READY_QUIESCENCE_MS, 400, `invalid "${bad}" falls back to 400`)
+        }
+        delete process.env.CHROXY_TUI_READY_QUIESCENCE_MS
+        assert.equal(ClaudeTuiSession.READY_QUIESCENCE_MS, 400, 'unset falls back to 400')
+      } finally {
+        if (prev === undefined) delete process.env.CHROXY_TUI_READY_QUIESCENCE_MS
+        else process.env.CHROXY_TUI_READY_QUIESCENCE_MS = prev
+      }
+    })
+
     it('_waitForPrompt returns false when pid is missing or invalid (Copilot review on #4040)', async () => {
       // Returning true on a missing/invalid pid would silently disable
       // readiness gating on any platform/runtime where node-pty fails to

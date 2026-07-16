@@ -1223,7 +1223,22 @@ export class ClaudeTuiSession extends BaseSession {
   // redraw sub-second (vs the 5s per-turn ceiling). Comfortably above the observed
   // intra-render gaps (~270ms) so it can't false-trigger mid-render; the
   // warmup/turn ceilings still backstop a genuinely-stuck TUI.
-  static get READY_QUIESCENCE_MS() { return 400 }
+  //
+  // Override with CHROXY_TUI_READY_QUIESCENCE_MS (positive integer ms) to widen
+  // the window on a flaky/slow host — a genuine mid-warmup pause (MCP enumeration,
+  // a slow skills-dir read, a loaded host) exceeding 400ms would fire quiescence
+  // early and land the throttled prompt on a not-yet-ready composer. In the
+  // no-session-file case quiescence is the only readiness signal, so if it fires
+  // early the #5794 first-turn nudge (a bare `\r` re-send) is the backstop that
+  // recovers the composer — an early fire is a brief wedge at worst (#6603).
+  static get READY_QUIESCENCE_MS() {
+    // Strict digits-only (after trim) so a partial-numeric value like "1200ms"
+    // is rejected → 400, matching the documented "positive integer" contract
+    // (parseInt alone would silently accept "1200ms" as 1200).
+    const raw = (process.env.CHROXY_TUI_READY_QUIESCENCE_MS || '').trim()
+    const override = /^\d+$/.test(raw) ? parseInt(raw, 10) : NaN
+    return override > 0 ? override : 400
+  }
   // #5317 (WP-2.3) — grace window between destroy()'s SIGTERM and the SIGKILL
   // escalation. Long enough for claude to flush its Stop hook + reap its own
   // tool children on a clean SIGTERM, short enough that a hung claude (or a
@@ -1900,9 +1915,8 @@ export class ClaudeTuiSession extends BaseSession {
     this._outputTailRaw = Buffer.alloc(0)
     // #6601: re-evaluate output-quiescence readiness for THIS spawn — require
     // fresh output before trusting a quiet stretch, so a leftover _lastOutputMs
-    // from the prior process can't read as "ready" the instant we respawn.
-    this._sawFirstOutput = false
-    this._lastOutputMs = this._nowMonotonic()
+    // from the prior process can't read as "ready" the instant we respawn (#6604).
+    this._resetQuiescenceForSpawn()
 
     // #5794: a fresh PTY can swallow the first submit again, so re-arm the
     // first-turn submit nudge for the first message on THIS spawn. Reset after
@@ -2131,6 +2145,19 @@ export class ClaudeTuiSession extends BaseSession {
     const ready = checkReady()
     this._lastProbeSawStatus = sawStatus
     return finish(ready)
+  }
+
+  /**
+   * #6601: reset the output-quiescence readiness state for a fresh (re)spawn —
+   * clear the "saw first output" gate and re-stamp `_lastOutputMs` to now, so a
+   * leftover `_lastOutputMs` from the prior process can't read as "ready" the
+   * instant we respawn. The counterpart to `_appendToOutputTail` (which SETS
+   * these). Extracted from `_spawnPty` so the guard is unit-testable without a
+   * real PTY (#6604).
+   */
+  _resetQuiescenceForSpawn() {
+    this._sawFirstOutput = false
+    this._lastOutputMs = this._nowMonotonic()
   }
 
   /**
