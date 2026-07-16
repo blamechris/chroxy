@@ -9,10 +9,11 @@
 //   claude -> .claude/skills/<name>/SKILL.md        (md + YAML frontmatter; v2.1.x "skills")
 //   gemini -> .gemini/commands/<name>.toml          (TOML: prompt + description; {{args}})
 //   codex  -> ~/.codex/prompts/<name>.md            (md; $ARGUMENTS; user-global, /prompts:<name>)
+//   pi     -> ~/.pi/agent/skills/<name>/SKILL.md    (md + YAML frontmatter; user-global, /skill:<name>)
 //
 // Targets come from `.claude/skill-profile.md` (a `targets:` line) unless
-// overridden with --targets. Codex is opt-in (user-global; still supported by
-// codex-cli via ~/.codex/prompts/).
+// overridden with --targets. Codex and Pi are opt-in (user-global home dirs:
+// ~/.codex/prompts/ and ~/.pi/agent/skills/).
 //
 // Usage:
 //   node scripts/compile-skill-targets.mjs [--name <name>] [--targets claude,gemini]
@@ -24,16 +25,20 @@ import { join, dirname, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 
-const ALL_TARGETS = ['claude', 'gemini', 'codex']
+export const ALL_TARGETS = ['claude', 'gemini', 'codex', 'pi']
 
 // #6571 — home-dir marker(s) for coding agents whose skills are USER-GLOBAL and
-// OPT-IN. Only `codex` qualifies: its skills land in `~/.codex/prompts/` (a home
-// dir, not the repo) and it is deliberately off the committed default target list,
-// so a Codex contributor can silently miss the dev-workflow skills. `gemini` is
-// NOT here — it's in the default `targets:` and compiles into the repo's
-// `.gemini/commands/` (version-controlled), so a missing Gemini skill is visible
-// in the repo and its home dir (`~/.gemini`) says nothing about compile coverage.
-const AGENT_HOME_MARKERS = { codex: '.codex' }
+// OPT-IN. `codex` (`~/.codex/prompts/`) and `pi` (`~/.pi/agent/skills/`, #6573)
+// qualify: their skills land in a home dir, not the repo, and both are deliberately
+// off the committed default target list, so a Codex/Pi contributor can silently miss
+// the dev-workflow skills. `gemini` is NOT here — it's in the default `targets:` and
+// compiles into the repo's `.gemini/commands/` (version-controlled), so a missing
+// Gemini skill is visible in the repo and its home dir (`~/.gemini`) says nothing
+// about compile coverage.
+const AGENT_HOME_MARKERS = { codex: '.codex', pi: '.pi' }
+
+// User-global skill dir per opt-in target, for the "installed but not selected" hint.
+const AGENT_SKILL_DIRS = { codex: '~/.codex/prompts/', pi: '~/.pi/agent/skills/' }
 
 /**
  * #6571 — detect coding agents that are installed on this machine (their home dir
@@ -203,7 +208,27 @@ function emitCodex(name, body, description) {
   }
 }
 
-const EMITTERS = { claude: emitClaude, gemini: emitGemini, codex: emitCodex }
+// #6573 — Pi Coding Agent (earendil-works/pi) skills. Format is Markdown +
+// YAML frontmatter in `<name>/SKILL.md` (nearly identical to the claude target),
+// but user-global at ~/.pi/agent/skills/ and OPT-IN (like codex). Pi REQUIRES a
+// `name` field that matches the parent directory. Invoked as /skill:<name>; Pi
+// appends invocation args as `User: <args>` rather than substituting inline, so
+// $ARGUMENTS (the neutral arg token) has no in-body Pi equivalent — the body
+// passes through literally and a `warn` flags any arg token the author used.
+export function emitPi(name, body, description) {
+  // Warn on arg tokens only OUTSIDE fenced code blocks (a shell `${1:-…}` in a
+  // ```code``` block is a positional, not a skill-arg concern) — mirrors emitGemini.
+  const prose = body.replace(/```[\s\S]*?```/g, '')
+  const usesArgs = /\$ARGUMENTS\b/.test(prose) || /\$[1-9]\b/.test(prose)
+  return {
+    path: join(homedir(), '.pi/agent/skills', name, 'SKILL.md'),
+    content: `---\nname: ${name}\ndescription: ${yamlDq(description)}\n---\n\n${body}`,
+    note: `pi: invoke as /skill:${name} (user-global ~/.pi/agent/skills/)`,
+    warn: usesArgs ? `pi: appends args as "User: <args>" — inline arg tokens ($ARGUMENTS / $N) are NOT substituted` : null,
+  }
+}
+
+const EMITTERS = { claude: emitClaude, gemini: emitGemini, codex: emitCodex, pi: emitPi }
 
 function compileOne(name, srcPath, targets, repo, dryRun) {
   const raw = readFileSync(srcPath, 'utf8')
@@ -256,9 +281,11 @@ function main() {
   const uncompiled = detectUncompiledAgents(targets)
   if (uncompiled.length) {
     const dirs = uncompiled.map((t) => `~/${AGENT_HOME_MARKERS[t]}`).join(', ')
-    // Codex prompts write to ~/.codex/prompts/ (user-global); name that so the hint
-    // can't be misread as compiling into the home dir for a repo-local target.
-    console.log(`Hint: ${dirs} present but ${uncompiled.join(', ')} not a selected target — pass --targets ${[...targets, ...uncompiled].join(',')} to also compile into ~/.codex/prompts/ (see docs/dev-workflow-skills.md).`)
+    // Name each target's actual user-global skill dir (codex → ~/.codex/prompts/,
+    // pi → ~/.pi/agent/skills/) so the hint can't be misread as compiling into the
+    // home dir for a repo-local target.
+    const skillDirs = uncompiled.map((t) => AGENT_SKILL_DIRS[t] || `~/${AGENT_HOME_MARKERS[t]}`).join(', ')
+    console.log(`Hint: ${dirs} present but ${uncompiled.join(', ')} not a selected target — pass --targets ${[...targets, ...uncompiled].join(',')} to also compile into ${skillDirs} (see docs/dev-workflow-skills.md).`)
   }
 
   const names = args.name ? [args.name] : readdirSync(cmdDir).filter((f) => f.endsWith('.md')).map((f) => f.replace(/\.md$/, ''))

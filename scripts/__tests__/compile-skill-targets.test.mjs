@@ -20,7 +20,7 @@ const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 const helperPath = resolve(__dirname, '..', 'compile-skill-targets.mjs')
 
-const { deriveDescription, detectUncompiledAgents } = await import(helperPath)
+const { deriveDescription, detectUncompiledAgents, emitPi, ALL_TARGETS } = await import(helperPath)
 
 let pass = 0
 let fail = 0
@@ -184,6 +184,44 @@ await test('detectUncompiledAgents returns nothing when no agent home dirs exist
   try {
     const out = detectUncompiledAgents(['claude'], home)
     assert(out.length === 0, `no agent dirs present, expected [], got ${JSON.stringify(out)}`)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// --- Pi target (#6573) ----------------------------------------------------
+
+await test('pi is a known compile target', () => {
+  assert(ALL_TARGETS.includes('pi'), `expected 'pi' in ALL_TARGETS, got ${JSON.stringify(ALL_TARGETS)}`)
+})
+
+await test('emitPi writes ~/.pi/agent/skills/<name>/SKILL.md with name + description frontmatter', () => {
+  const out = emitPi('demo-skill', '# Body\nDo the thing.\n', 'Does the thing.')
+  assert(/[/\\]\.pi[/\\]agent[/\\]skills[/\\]demo-skill[/\\]SKILL\.md$/.test(out.path), `unexpected path: ${out.path}`)
+  // Pi REQUIRES a `name` field matching the parent dir (unlike the claude emitter).
+  assert(out.content.startsWith('---\nname: demo-skill\ndescription: '), `missing name/description frontmatter:\n${out.content}`)
+  assert(out.content.includes('# Body\nDo the thing.'), 'body must pass through verbatim')
+  assert(/\/skill:demo-skill/.test(out.note), `note should document /skill: invocation, got: ${out.note}`)
+})
+
+await test('emitPi warns when the body uses arg tokens Pi will not substitute', () => {
+  const withArgs = emitPi('a', 'Summarize $ARGUMENTS please\n', 'x')
+  assert(withArgs.warn && /not substituted/i.test(withArgs.warn), `expected an arg-token warning, got: ${withArgs.warn}`)
+  const noArgs = emitPi('b', 'No args here\n', 'x')
+  assert(!noArgs.warn, `expected no warning for an arg-free body, got: ${noArgs.warn}`)
+})
+
+await test('emitPi does not warn for a shell positional inside a fenced code block', () => {
+  const out = emitPi('c', 'Run it:\n```bash\necho "${1:-default}"\n```\n', 'x')
+  assert(!out.warn, `a shell positional in a code fence must not warn, got: ${out.warn}`)
+})
+
+await test('detectUncompiledAgents flags an installed-but-unselected pi (~/.pi)', () => {
+  const home = mkdtempSync(pjoin(tmpdir(), 'skill-home-'))
+  try {
+    mkdirSync(pjoin(home, '.pi'))
+    const out = detectUncompiledAgents(['claude', 'gemini'], home)
+    assert(out.includes('pi'), `expected pi flagged, got ${JSON.stringify(out)}`)
   } finally {
     rmSync(home, { recursive: true, force: true })
   }

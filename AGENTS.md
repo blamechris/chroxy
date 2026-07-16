@@ -127,12 +127,18 @@ custom-command format, so the same skill is first-party under whichever model yo
   not version-controlled). Codex CLI still supports `~/.codex/prompts/` (recent versions also ship
   a `~/.codex/skills/` dir); the emitter targets the stable prompts path. Off by default — the
   compiler prints a hint if `~/.codex` exists but `codex` isn't a selected target.
+- **pi** *(opt-in)* → `~/.pi/agent/skills/<name>/SKILL.md` (Pi Coding Agent, `earendil-works/pi`;
+  invoked `/skill:<name>`; user-global, not version-controlled). Markdown + YAML frontmatter
+  (`name` + `description`) like the claude target, but Pi **appends** invocation args as
+  `User: <args>` rather than substituting inline — so `$ARGUMENTS`/`$N` in the body pass through
+  literally and the compiler `warn`s if a body uses them. Off by default — the compiler prints a
+  hint if `~/.pi` exists but `pi` isn't a selected target. (#6573)
 
 The active target list is the `targets:` line in `.claude/skill-profile.md` (this repo:
-`claude, gemini` — both in-repo/version-controlled; codex is per-machine opt-in via
-`--targets codex`, kept out of the committed default so a clone never writes to an unaware
-machine's `~/.codex`). With no `targets:` line the compiler falls back to `claude` only and
-`/skill` prompts you. After editing a skill's generic source by hand, recompile:
+`claude, gemini` — both in-repo/version-controlled; codex and pi are per-machine opt-in via
+`--targets codex` / `--targets pi`, kept out of the committed default so a clone never writes to an
+unaware machine's `~/.codex` or `~/.pi`). With no `targets:` line the compiler falls back to
+`claude` only and `/skill` prompts you. After editing a skill's generic source by hand, recompile:
 `node scripts/compile-skill-targets.mjs --name <name>` (`--dry-run` to preview).
 
 This repo carries `.claude/skill-profile.md` (the customization profile + `targets:`) and
