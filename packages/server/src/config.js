@@ -673,6 +673,16 @@ export function isIdeFeatureEnabled(config) {
   return config?.features?.ide === true
 }
 
+// #6691 — the opt-in orchestration/delegation harness ("committee"). Fail-closed
+// like isIdeFeatureEnabled: only an explicit env=1 or `features.orchestration
+// === true` enables it. Gates the WS handler surface AND the `orchestration`
+// capability advertised in auth_ok, so a client only reveals the Runs surface
+// when the operator has opted in.
+export function isOrchestrationEnabled(config) {
+  if (process.env.CHROXY_ENABLE_ORCHESTRATION === '1') return true
+  return config?.features?.orchestration === true
+}
+
 // #6277: single source of truth for "does a user-shell spawn need host-local
 // approval first?". Fail-closed — only an explicit `userShell.requireApproval
 // === true` enables the gate. Independent of `enabled`: the gate only bites when

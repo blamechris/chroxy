@@ -186,6 +186,10 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     // so clients reveal IDE navigation/editing UI. Optional — absent → false
     // (fail-closed) for old servers / callers.
     ideEnabled,
+    // #6691: whether the orchestration harness is enabled on this server,
+    // surfaced as the `orchestration` capability so the dashboard reveals the
+    // Runs surface. Optional — absent → false (fail-closed) for old servers.
+    orchestrationEnabled,
     // #6006: whether the server has a rotating TokenManager (i.e. auth is on),
     // so the operator panic button (`revoke_token`) can fire. Surfaced as the
     // `tokenRevoke` capability, gated to primary-token clients below. Optional —
@@ -408,6 +412,11 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     // (fail-closed). A server-wide feature gate, not token-scoped — available to
     // every client when the operator opts in.
     ide: ideEnabled === true,
+    // #6691: the opt-in orchestration/delegation harness ("committee") is
+    // enabled on THIS server (features.orchestration / CHROXY_ENABLE_ORCHESTRATION).
+    // Clients gate the Runs surface on this flag; absent/false (default, or older
+    // servers) → no orchestration chrome (fail-closed).
+    orchestration: orchestrationEnabled === true,
     // #5986 (epic #5982) — the embedded user-shell terminal is available to THIS
     // client: the server has it enabled (userShell.enabled) AND this connection
     // holds the primary token. Both conditions of the create gate are reflected

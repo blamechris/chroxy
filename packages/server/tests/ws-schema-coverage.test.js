@@ -100,16 +100,11 @@ describe('WS protocol schema coverage', () => {
       // schema-coverage check and no longer belongs in KNOWN_PRE_REGISTRY.
       // #5271 (Control Room Phase 2a): cancel_activity likewise now has a real
       // handler (input-handlers.js), so its temporary entry was removed here.
-      // #6691 orchestration harness (S-1): the client->server contract lands
-      // in @chroxy/protocol first; the server handlers register in S-2 (#6697),
-      // at which point these are removed from KNOWN_PRE_REGISTRY (as
-      // host_status_request / cancel_activity were above).
-      'orchestration_runs_request',
-      'orchestration_run_detail_request',
-      'orchestration_run_start',
-      'orchestration_gate_response',
-      'orchestration_run_action',
-      'orchestration_run_annotate',
+      // #6691 orchestration harness (S-2, #6697): the six orchestration_* client
+      // types now have real handlers (orchestration-handlers.js), so they are
+      // covered by the forward schema-coverage check and were removed from
+      // KNOWN_PRE_REGISTRY here (they were parked here by S-1 while only the
+      // protocol contract existed — as host_status_request / cancel_activity were).
     ])
 
     const unexplained = schemaOnly.filter((t) => !KNOWN_PRE_REGISTRY.has(t))

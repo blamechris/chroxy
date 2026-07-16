@@ -142,6 +142,10 @@ export const CTX_NAMESPACES = {
     // #5966: bounded RepoEventStore drained by the Control Room repo-events
     // survey. Null until the first GitHub-webhook delivery lazily creates it.
     'repoEventStore',
+    // #6691: the OrchestrationManager (delegation harness). Present only when
+    // the orchestration feature is enabled and the engine is wired (E-4); the
+    // handlers (S-2) treat an absent manager as "engine not running".
+    'orchestrationManager',
   ],
   runtime: [
     'draining',

@@ -465,7 +465,7 @@ export declare const ServerOrchestrationRunSnapshotSchema: z.ZodObject<{
     requestId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
     generatedAt: z.ZodString;
     seq: z.ZodNumber;
-    run: z.ZodObject<{
+    run: z.ZodNullable<z.ZodObject<{
         runId: z.ZodString;
         title: z.ZodString;
         preset: z.ZodNullable<z.ZodString>;
@@ -645,7 +645,7 @@ export declare const ServerOrchestrationRunSnapshotSchema: z.ZodObject<{
             json: z.ZodString;
             markdown: z.ZodString;
         }, z.core.$strip>>;
-    }, z.core.$loose>;
+    }, z.core.$loose>>;
     error: z.ZodOptional<z.ZodObject<{
         code: z.ZodString;
         message: z.ZodString;
