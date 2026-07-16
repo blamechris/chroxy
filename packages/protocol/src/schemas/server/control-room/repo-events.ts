@@ -74,6 +74,15 @@ export const ServerRepoEventsSnapshotSchema = z.object({
   requestId: z.string().nullable().optional(),
   generatedAt: z.string().datetime(),
   events: z.array(RepoEventSchema),
+  /**
+   * #6539 — the EXACT `owner/repo` set the live sessions are working in, resolved
+   * server-side from each active session's git `origin` remote. The dashboard
+   * scopes events to this set (exact `owner/repo` match), replacing the
+   * best-effort cwd-basename guess. Additive + optional: an older server omits it,
+   * and the dashboard falls back to basename scoping. Sessions with no
+   * recognizable GitHub remote are simply absent (not scoped out erroneously).
+   */
+  activeRepos: z.array(z.string()).optional(),
   /** Present only on a refusal (e.g. a session-bound token surveying the host). */
   error: z.object({ code: z.string(), message: z.string() }).optional(),
 })

@@ -89,6 +89,7 @@ export declare const ServerRepoEventsSnapshotSchema: z.ZodObject<{
         url: z.ZodOptional<z.ZodNullable<z.ZodString>>;
         summary: z.ZodString;
     }, z.core.$loose>>;
+    activeRepos: z.ZodOptional<z.ZodArray<z.ZodString>>;
     error: z.ZodOptional<z.ZodObject<{
         code: z.ZodString;
         message: z.ZodString;

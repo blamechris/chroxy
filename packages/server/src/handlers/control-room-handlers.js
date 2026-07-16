@@ -32,7 +32,7 @@ import { realpathSync } from 'fs'
 import { resolve } from 'path'
 import { createLogger } from '../logger.js'
 import { resolveRepoSet, DEFAULT_CONTROL_ROOM_ROOT } from '../control-room/repo-set.js'
-import { surveyRepos } from '../control-room/survey.js'
+import { surveyRepos, resolveActiveRepos } from '../control-room/survey.js'
 import { surveyRunners, DEFAULT_RUNNER_ROOT } from '../control-room/runners.js'
 import { surveyContainers } from '../control-room/containers.js'
 import { surveyRepoRuntimeConfig, hostRuntimeDefaults } from '../control-room/repo-runtime-config.js'
@@ -74,6 +74,9 @@ const simulatorInFlight = new WeakSet()
 const emulatorInFlight = new WeakSet()
 // #6138: same again for the WSL distro survey — independent of all above.
 const wslInFlight = new WeakSet()
+// #6539: repo-events became an async survey (it now resolves active sessions'
+// git remotes for exact scoping), so it gains an in-flight guard like the rest.
+const repoEventsInFlight = new WeakSet()
 
 /**
  * #5377 — shared builder for the survey error-snapshots. The error reply is a
@@ -1894,29 +1897,56 @@ const handleExternalSessionsRequest = makeSyncHostSurvey({
 })
 
 /**
+ * #6539 — build a schema-valid `repo_events_snapshot`. `events`/`activeRepos`
+ * default empty (the FORBIDDEN / in-progress / failed replies), overwritten by
+ * the success path. `generatedAt` is stamped fresh per reply.
+ */
+function repoEventsSnapshot(requestId, fields = {}) {
+  return {
+    type: 'repo_events_snapshot',
+    requestId: requestId ?? null,
+    generatedAt: new Date().toISOString(),
+    events: [],
+    activeRepos: [],
+    ...fields,
+  }
+}
+
+/**
  * #5966 (epic #5422 phase 5) — reply to a `repo_events_request` with a
  * point-in-time snapshot of the GitHub-webhook repo events the daemon buffered
  * in its bounded RepoEventStore (github-webhook.js, HMAC-verified ingest #6468).
- * Reads the in-memory store only (no git/gh survey), so — like the mailbox /
- * external-session surveys — it is synchronous and has no in-flight guard. The
- * store is lazily created on the first webhook delivery, so a null store is the
- * valid "nothing buffered yet" state and yields an empty (schema-valid) feed.
  *
- * A bounded tail (`limit: 50`) keeps the snapshot small even though the store
- * caps at 200 — the pane shows recent activity, not the whole ring. Host-level
- * survey: a pairing-bound (share-a-session) token is rejected, like
- * `host_status_request`, still with a schema-valid empty snapshot carrying an
- * additive `error` so the pane renders the refusal rather than spinning.
+ * #6539: the reply now also carries `activeRepos` — the EXACT `owner/repo` set
+ * the live sessions are working in, resolved server-side from each active
+ * session's git `origin` remote — so the dashboard scopes events by exact match
+ * rather than guessing from cwd basenames. Resolving remotes is async git I/O, so
+ * this moved from a synchronous store read to the async survey factory (gaining
+ * the shared host-authority gate + in-flight guard). A bounded tail (`limit: 50`)
+ * keeps the events small even though the store caps at 200. `ctx.resolveActiveRepos`
+ * is a test seam; production falls through to the real implementation.
  */
-const handleRepoEventsRequest = makeSyncHostSurvey({
-  type: 'repo_events_snapshot',
-  emptyFields: { events: [] },
-  forbiddenMessage: 'repo_events_request requires host-level authority (a session-bound token cannot survey the host)',
-  resolve: (ctx) => {
+const handleRepoEventsRequest = makeSurveyHandler({
+  inFlight: repoEventsInFlight,
+  logName: 'repo events survey',
+  forbidden: ({ requestId }) => repoEventsSnapshot(requestId, {
+    error: {
+      code: 'FORBIDDEN',
+      message: 'repo_events_request requires host-level authority (a session-bound token cannot survey the host)',
+    },
+  }),
+  inProgress: ({ requestId }) => repoEventsSnapshot(requestId, {
+    error: { code: 'SURVEY_IN_PROGRESS', message: 'A repo events survey is already in progress for this client' },
+  }),
+  failed: ({ requestId, err }) => repoEventsSnapshot(requestId, {
+    error: { code: 'SURVEY_FAILED', message: getErrorMessage(err, 'repo events survey failed') },
+  }),
+  run: async ({ ctx, requestId }) => {
     const store = ctx?.services?.repoEventStore
-    return {
-      events: typeof store?.list === 'function' ? store.list({ limit: 50 }) : [],
-    }
+    const events = typeof store?.list === 'function' ? store.list({ limit: 50 }) : []
+    const resolveFn = typeof ctx?.resolveActiveRepos === 'function' ? ctx.resolveActiveRepos : resolveActiveRepos
+    const activeRepos = await resolveFn(activeSessionCwds(ctx?.sessions?.sessionManager))
+    return repoEventsSnapshot(requestId, { events, activeRepos })
   },
 })
 

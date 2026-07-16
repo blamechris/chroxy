@@ -24,6 +24,9 @@ function makeCtx(overrides = {}) {
   return nsCtx({
     send: sendSpy,
     repoEventStore: { list: ({ limit } = {}) => (typeof limit === 'number' ? SAMPLE.slice(-limit) : SAMPLE.slice()) },
+    // #6539: the handler resolves active-session git remotes (async). Inject a
+    // deterministic stub so tests don't spawn git; overridable per test.
+    resolveActiveRepos: async () => ['blamechris/chroxy'],
     ...overrides,
     _send: sendSpy,
   })
@@ -33,55 +36,92 @@ function lastSent(ctx) {
   return ctx.transport.send.lastCall[1]
 }
 
-describe('repo_events_request handler (#5966)', () => {
+describe('repo_events_request handler (#5966, #6539)', () => {
   it('is registered in the controlRoomHandlers map', () => {
     assert.equal(typeof controlRoomHandlers.repo_events_request, 'function')
   })
 
-  it('replies with a schema-valid snapshot carrying the buffered events', () => {
+  it('replies with a schema-valid snapshot carrying the buffered events + exact activeRepos', async () => {
     const ctx = makeCtx()
-    controlRoomHandlers.repo_events_request({}, {}, { type: 'repo_events_request', requestId: 'r1' }, ctx)
+    await controlRoomHandlers.repo_events_request({}, {}, { type: 'repo_events_request', requestId: 'r1' }, ctx)
     const msg = lastSent(ctx)
     assert.equal(msg.type, 'repo_events_snapshot')
     assert.equal(msg.requestId, 'r1')
     assert.equal(msg.events.length, 2)
     assert.equal(msg.events[1].number, 42)
+    // #6539: the exact active-repo set from the resolver
+    assert.deepEqual(msg.activeRepos, ['blamechris/chroxy'])
     assert.equal(msg.error, undefined)
     assert.ok(ServerRepoEventsSnapshotSchema.safeParse(msg).success)
   })
 
-  it('requests a bounded tail (limit 50) from the store', () => {
+  it('requests a bounded tail (limit 50) from the store', async () => {
     let seen = null
     const ctx = makeCtx({ repoEventStore: { list: (opts) => { seen = opts; return SAMPLE } } })
-    controlRoomHandlers.repo_events_request({}, {}, { type: 'repo_events_request' }, ctx)
+    await controlRoomHandlers.repo_events_request({}, {}, { type: 'repo_events_request' }, ctx)
     assert.deepEqual(seen, { limit: 50 })
   })
 
-  it('echoes a null requestId when none is provided', () => {
+  it('echoes a null requestId when none is provided', async () => {
     const ctx = makeCtx()
-    controlRoomHandlers.repo_events_request({}, {}, { type: 'repo_events_request' }, ctx)
+    await controlRoomHandlers.repo_events_request({}, {}, { type: 'repo_events_request' }, ctx)
     const msg = lastSent(ctx)
     assert.equal(msg.requestId, null)
     assert.ok(ServerRepoEventsSnapshotSchema.safeParse(msg).success)
   })
 
-  it('refuses a session-bound (pairing) token with an error + empty events', () => {
+  it('carries an empty activeRepos when no session has a recognizable remote', async () => {
+    const ctx = makeCtx({ resolveActiveRepos: async () => [] })
+    await controlRoomHandlers.repo_events_request({}, {}, { type: 'repo_events_request' }, ctx)
+    const msg = lastSent(ctx)
+    assert.deepEqual(msg.activeRepos, [])
+    assert.equal(msg.events.length, 2, 'events still flow when scoping is empty')
+    assert.ok(ServerRepoEventsSnapshotSchema.safeParse(msg).success)
+  })
+
+  it('refuses a session-bound (pairing) token with an error + empty events', async () => {
     const ctx = makeCtx()
-    controlRoomHandlers.repo_events_request({}, { boundSessionId: 'sess-1' }, { type: 'repo_events_request', requestId: 'r2' }, ctx)
+    await controlRoomHandlers.repo_events_request({}, { boundSessionId: 'sess-1' }, { type: 'repo_events_request', requestId: 'r2' }, ctx)
     const msg = lastSent(ctx)
     assert.equal(msg.type, 'repo_events_snapshot')
     assert.equal(msg.requestId, 'r2')
     assert.deepEqual(msg.events, [])
+    assert.deepEqual(msg.activeRepos, [])
     assert.equal(msg.error.code, 'FORBIDDEN')
     assert.ok(ServerRepoEventsSnapshotSchema.safeParse(msg).success)
   })
 
-  it('degrades to an empty snapshot when the store is absent (no webhook delivered yet)', () => {
+  it('degrades to an empty snapshot when the store is absent (no webhook delivered yet)', async () => {
     const ctx = makeCtx({ repoEventStore: null })
-    controlRoomHandlers.repo_events_request({}, {}, { type: 'repo_events_request' }, ctx)
+    await controlRoomHandlers.repo_events_request({}, {}, { type: 'repo_events_request' }, ctx)
     const msg = lastSent(ctx)
     assert.deepEqual(msg.events, [])
     assert.ok(ServerRepoEventsSnapshotSchema.safeParse(msg).success)
+  })
+
+  it('replies SURVEY_FAILED when remote resolution throws (does not crash)', async () => {
+    const ctx = makeCtx({ resolveActiveRepos: async () => { throw new Error('git exploded') } })
+    await controlRoomHandlers.repo_events_request({}, {}, { type: 'repo_events_request', requestId: 'r3' }, ctx)
+    const msg = lastSent(ctx)
+    assert.equal(msg.requestId, 'r3')
+    assert.equal(msg.error.code, 'SURVEY_FAILED')
+    assert.ok(ServerRepoEventsSnapshotSchema.safeParse(msg).success)
+  })
+
+  it('rejects a concurrent survey for the same client with SURVEY_IN_PROGRESS', async () => {
+    // A resolver that never settles until we release it keeps the first survey
+    // in-flight while the second arrives.
+    let release
+    const gate = new Promise((r) => { release = r })
+    const client = {}
+    const ctx = makeCtx({ resolveActiveRepos: async () => { await gate; return ['blamechris/chroxy'] } })
+    const first = controlRoomHandlers.repo_events_request({}, client, { type: 'repo_events_request', requestId: 'a' }, ctx)
+    await controlRoomHandlers.repo_events_request({}, client, { type: 'repo_events_request', requestId: 'b' }, ctx)
+    const inProgressMsg = lastSent(ctx)
+    assert.equal(inProgressMsg.requestId, 'b')
+    assert.equal(inProgressMsg.error.code, 'SURVEY_IN_PROGRESS')
+    release()
+    await first
   })
 })
 

@@ -28,6 +28,7 @@ import {
   parseGithubPrsUrl,
   parseAheadBehind,
   detectAttribution,
+  resolveActiveRepos,
   DEFAULT_THRESHOLDS,
 } from '../src/control-room/survey.js'
 
@@ -191,6 +192,53 @@ describe('parseGithubOwnerRepo (#5501 shared derivation)', () => {
     assert.equal(parseGithubOwnerRepo('git@gitlab.com:owner/repo.git'), null)
     assert.equal(parseGithubOwnerRepo('git@github.com:owner/repo/extra.git'), null)
     assert.equal(parseGithubOwnerRepo(null), null)
+  })
+})
+
+describe('resolveActiveRepos (#6539 exact repo-events scoping)', () => {
+  // Stub the promisified execFile: map cwd → origin remote stdout, or throw for
+  // a non-repo / no-origin cwd (matching real `git remote get-url` failure).
+  const makeExec = (byCwd) => async (_file, _args, opts) => {
+    const remote = byCwd[opts?.cwd]
+    if (remote === undefined) throw new Error('not a git repository')
+    return { stdout: remote }
+  }
+
+  it('resolves each active cwd to its exact owner/repo (deduped + sorted)', async () => {
+    const exec = makeExec({
+      '/a': 'git@github.com:blamechris/chroxy.git',
+      '/b': 'https://github.com/octocat/hello.git',
+      '/c': 'git@github.com:blamechris/chroxy.git', // dup remote, different cwd (worktree)
+    })
+    const out = await resolveActiveRepos(['/a', '/b', '/c'], { execFn: exec })
+    assert.deepEqual(out, ['blamechris/chroxy', 'octocat/hello'])
+  })
+
+  it('drops cwds with no repo / no origin / a non-GitHub remote (graceful degrade)', async () => {
+    const exec = makeExec({
+      '/gh': 'https://github.com/o/r.git',
+      '/gitlab': 'git@gitlab.com:o/r.git', // non-GitHub → dropped
+      // '/bare' is absent from the map → exec throws → dropped
+    })
+    const out = await resolveActiveRepos(['/gh', '/gitlab', '/bare'], { execFn: exec })
+    assert.deepEqual(out, ['o/r'])
+  })
+
+  it('returns [] for an empty / non-array cwd list without spawning git', async () => {
+    let called = false
+    const exec = async () => { called = true; return { stdout: '' } }
+    assert.deepEqual(await resolveActiveRepos([], { execFn: exec }), [])
+    assert.deepEqual(await resolveActiveRepos(undefined, { execFn: exec }), [])
+    assert.equal(called, false)
+  })
+
+  it('distinguishes two repos that share a basename across owners (the bug #6539 fixes)', async () => {
+    const exec = makeExec({
+      '/x': 'git@github.com:alice/app.git',
+      '/y': 'git@github.com:bob/app.git',
+    })
+    const out = await resolveActiveRepos(['/x', '/y'], { execFn: exec })
+    assert.deepEqual(out, ['alice/app', 'bob/app'], 'same basename "app", distinct owner/repo')
   })
 })
 

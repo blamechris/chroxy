@@ -202,6 +202,34 @@ export function parseGithubPrsUrl(remote) {
 }
 
 /**
+ * #6539 — resolve the EXACT active-repo set for repo-events scoping. For each
+ * distinct active-session cwd, read its `origin` remote (`git remote get-url
+ * origin`, failure-tolerant) and map it to `owner/repo` via
+ * {@link parseGithubOwnerRepo}. A cwd that isn't a git repo, has no origin, or
+ * has a non-GitHub remote resolves to null and is dropped — so a session without
+ * a recognizable GitHub remote is simply absent from the set (the dashboard
+ * degrades to "show all" for it rather than scoping it out). Deduped + sorted so
+ * the snapshot field is deterministic.
+ *
+ * @param {string[]} cwds - active-session working directories.
+ * @param {object} [opts]
+ * @param {Function} [opts.execFn] - promisified execFile seam (tests inject a stub).
+ * @param {number} [opts.concurrency]
+ * @returns {Promise<string[]>} sorted, deduped `owner/repo` full names.
+ */
+export async function resolveActiveRepos(cwds, { execFn = execFileAsync, concurrency = 4 } = {}) {
+  const distinct = [...new Set((Array.isArray(cwds) ? cwds : []).filter((c) => typeof c === 'string' && c.length > 0))]
+  if (distinct.length === 0) return []
+  const tasks = distinct.map((cwd) => async () => {
+    const remote = await tryExec(execFn, 'git', ['remote', 'get-url', 'origin'], cwd)
+    const parsed = parseGithubOwnerRepo(remote)
+    return parsed ? `${parsed.owner}/${parsed.repo}` : null
+  })
+  const names = await mapWithCap(tasks, concurrency)
+  return [...new Set(names.filter(Boolean))].sort()
+}
+
+/**
  * Conclusions/states from a `gh` statusCheckRollup entry that count as a failed
  * check. `gh pr list --json statusCheckRollup` mixes two node shapes: CheckRun
  * (GitHub Actions etc., carries `status` + `conclusion`) and StatusContext
