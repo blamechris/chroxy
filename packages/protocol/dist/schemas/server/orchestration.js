@@ -10,9 +10,11 @@ import { z } from 'zod';
  * `*_VALUES` arrays so the wire contract and the engine state machines can
  * never drift. See docs/design/orchestration/.
  *
- * v1 is dashboard-only (locked product decision): these types are handled by
- * the dashboard message-handler and listed in the store-core coverage guard's
- * DASHBOARD_ONLY allowlist. Mobile parity is a later fast-follow.
+ * v1 is dashboard-only (locked product decision). In this step (S-1) the
+ * contract + shared store-core reducers land, and these types are parked in the
+ * coverage guard's UNHANDLED_BY_DESIGN allowlist; S-3 (#6702) wires the
+ * dashboard message-handler and moves them to DASHBOARD_ONLY. Mobile parity is
+ * a later fast-follow.
  */
 // --- canonical enums (engine imports these) --------------------------------
 // Run lifecycle. `paused` = user-requested pause (orchestration_run_action),

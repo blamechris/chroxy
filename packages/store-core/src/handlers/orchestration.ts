@@ -83,9 +83,13 @@ export function applyRunDelta(
   if (delta.seq !== held.seq + 1) return { held, resync: true }
 
   let detail: RunDetail = held.detail
-  // delta.run carries only RunSummary-level keys, so spreading it updates the
-  // header (status/usage/budget/nodeCounts/pendingUserGates/...) and leaves the
-  // detail-only keys (nodes/gates/timeline/epicPrompt/...) intact.
+  // delta.run is a RunSummary, whose key set is a strict subset of RunDetail's
+  // (RunDetail extends RunSummary), so spreading it updates the header
+  // (status/usage/budget/nodeCounts/pendingUserGates/...) and leaves the
+  // detail-only keys (nodes/gates/timeline/epicPrompt/...) intact. RunSummary
+  // is `.passthrough()`, so a buggy server COULD smuggle an extra key; the
+  // server (the sole delta author, our own code) is trusted not to, and the
+  // detail-only fields have their own dedicated delta channels above.
   if (delta.run) detail = { ...detail, ...delta.run }
   if (delta.node) {
     detail = { ...detail, nodes: upsertById<RunNode>(detail.nodes, delta.node, (n) => n.nodeId) }
