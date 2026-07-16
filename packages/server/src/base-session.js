@@ -1442,24 +1442,58 @@ export class BaseSession extends EventEmitter {
   }
 
   /**
-   * #4628: emit `result` after sweeping any in-flight tool_starts. All
-   * provider sessions should route through this rather than calling
-   * `this.emit('result', ...)` directly, so orphan tool_starts get
-   * paired with a synthetic tool_result BEFORE the result fires (and
-   * BEFORE state is persisted, since session-message-history listens
-   * for both events).
+   * #4628: emit `result` after sweeping any in-flight tool_starts. Provider
+   * sessions should route through this WHEN they need the orphan sweep, so
+   * orphan tool_starts get paired with a synthetic tool_result BEFORE the
+   * result fires (and BEFORE state is persisted, since session-message-history
+   * listens for both events). Some providers deliberately emit `this.emit(
+   * 'result', ...)` directly (they don't want the sweep); the queueLength stamp
+   * is applied to those too via the emit() override below.
    *
    * @param {object} payload — the result event payload ({cost, duration, usage, sessionId})
    * @param {string} [sweepReason] — optional override for the sweep reason
    */
   _emitResult(payload, sweepReason = 'stream_completed_without_result') {
     this._sweepUnresolvedToolStarts(sweepReason)
-    // #6627: stamp every turn-complete result with the authoritative outgoing-queue
-    // length so clients reconcile any stale "Queued" bubble on a turn boundary — a
-    // dropped/late `message_dequeued` no longer leaves a stale badge until the next
-    // queue event. The count is pre-flush (the imminent dequeue emits its own
-    // event); reconcileQueueLength only trims confirmed orphans, never a live entry.
-    this.emit('result', { ...payload, queueLength: this._outgoingQueue.length })
+    // queueLength is stamped centrally in the emit() override below (#6627/#6706).
+    this.emit('result', payload)
+  }
+
+  /**
+   * #6627 / #6706: single choke point for the turn-boundary queue-length stamp.
+   *
+   * Every `result` event carries the session's authoritative outgoing-queue
+   * length so clients reconcile a stale "Queued" bubble on a turn boundary — a
+   * dropped/late `message_dequeued` no longer leaves a stale badge until the
+   * next queue event. The count is pre-flush (the imminent dequeue emits its own
+   * event); `reconcileQueueLength` only trims confirmed orphans, never a live
+   * entry, so it is safe to stamp on every result.
+   *
+   * Stamping here (rather than at each call site) is deliberate: `_emitResult`
+   * is NOT the only emitter — several providers emit `result` directly (CLI /
+   * exec-codex / gemini / byok / stall fallbacks) because they don't want the
+   * orphan sweep, and the #6705 review missed 3 of the 8 sites. Centralizing on
+   * the one method every `result` passes through makes the self-heal uniform
+   * and un-forgettable for future emit sites too.
+   *
+   * Idempotent: a payload that already carries `queueLength` (none today, but a
+   * caller could pre-stamp) is left untouched. `_outgoingQueue` is a BaseSession
+   * field initialized before any subclass method can run; the `?` guard is
+   * belt-and-braces and yields 0 for the should-never-happen case of a subclass
+   * emitting `result` inside `super()` before the field is set.
+   *
+   * @param {string} event
+   * @param {...any} args
+   * @returns {boolean} whether the event had listeners (EventEmitter contract)
+   */
+  emit(event, ...args) {
+    if (event === 'result') {
+      const payload = args[0]
+      if (payload && typeof payload === 'object' && payload.queueLength === undefined) {
+        args[0] = { ...payload, queueLength: this._outgoingQueue ? this._outgoingQueue.length : 0 }
+      }
+    }
+    return super.emit(event, ...args)
   }
 
   _clearMessageState() {
