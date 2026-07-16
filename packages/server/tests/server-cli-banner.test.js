@@ -24,7 +24,8 @@ describe('buildServerBanner (#2953)', () => {
 
   it('uses the OpenAI Codex label for codex (no fallthrough to raw id)', () => {
     const line = buildServerBanner({ version: '1.2.3', provider: 'codex' })
-    assert.match(line, /Chroxy Server v1\.2\.3 \(OpenAI Codex\)/)
+    // #6676: the banner now names the active codex driver — app-server by default.
+    assert.match(line, /Chroxy Server v1\.2\.3 \(OpenAI Codex \(app-server\)\)/)
     assert.doesNotMatch(line, /\(codex\)/)
   })
 
