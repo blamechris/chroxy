@@ -21,6 +21,7 @@ export default [
         TextEncoder: 'readonly',
         TextDecoder: 'readonly',
         crypto: 'readonly',
+        structuredClone: 'readonly',
         fetch: 'readonly',
         Response: 'readonly',
         Headers: 'readonly',
