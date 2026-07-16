@@ -734,7 +734,9 @@ describe('PermissionManager', () => {
 
     it('NEVER_AUTO_ALLOW contains the expected dangerous tools', () => {
       // shell = codex's command-execution tool (#6605), never-whitelistable like Bash.
-      const expected = ['Bash', 'Task', 'WebFetch', 'WebSearch', 'shell']
+      // request_permissions = codex's sandbox-escalation tool (#6610) — broadening
+      // filesystem/network scope must always prompt, never be rule-whitelisted.
+      const expected = ['Bash', 'Task', 'WebFetch', 'WebSearch', 'shell', 'request_permissions']
       for (const tool of expected) {
         assert.ok(NEVER_AUTO_ALLOW.has(tool), `Expected NEVER_AUTO_ALLOW to contain ${tool}`)
       }

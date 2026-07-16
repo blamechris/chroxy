@@ -380,8 +380,13 @@ vision + file references), with no regression (resume is unsupported on *both*
 paths). The only thing that kept it opt-in was a soak period; it now ships on by
 default, with the exec path one env var away (`CHROXY_CODEX_APPSERVER=0`) as a
 fallback. Codex's own scope-escalation requests
-(`item/permissions/requestApproval`) are currently safe-denied — full surfacing
-is tracked in #6610.
+(`item/permissions/requestApproval`) are surfaced through the normal permission
+prompt (#6610): when codex asks to broaden its sandbox (new filesystem write
+scopes or network access), you get a distinctly-worded approval prompt describing
+the requested scope. Approve grants exactly that scope for the current turn,
+"always allow" grants it for the session, and deny grants nothing. Like `shell`,
+sandbox escalations can never be permanently rule-whitelisted — they always
+prompt.
 
 ## Gemini
 

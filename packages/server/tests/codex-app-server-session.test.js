@@ -376,15 +376,141 @@ describe('CodexAppServerSession — approval surfacing (#6605 Phase 2)', () => {
     cleanup()
   })
 
-  it('permissions-escalation request is safe-denied (grant nothing, no scope) without a prompt', () => {
-    const { s, cleanup, responded } = mkApprovalSession()
-    const reqs = capture(s, ['permission_request'])
-    s._onServerRequest({ id: 11, method: 'item/permissions/requestApproval', params: { scope: 'disk-full-access' } })
-    assert.equal(reqs.length, 0, 'escalation is not surfaced as a normal prompt in Phase 2')
-    // grant nothing: empty permissions, scope OMITTED (an explicit 'none' is an
-    // invalid PermissionGrantScope enum value and would wedge the turn — #6612).
-    assert.deepEqual(responded, [[11, { permissions: {} }]])
-    cleanup()
+  describe('permissions-escalation surfacing (#6610)', () => {
+    // A real PermissionsRequestApprovalParams (codex asks to broaden its sandbox).
+    const escalationParams = {
+      cwd: '/repo', itemId: 'i1', threadId: 't1', turnId: 'turn1', startedAtMs: 0,
+      reason: 'install deps',
+      permissions: {
+        fileSystem: { entries: [{ access: 'write', path: { type: 'path', path: '/repo/node_modules' } }] },
+        network: { enabled: true },
+      },
+    }
+
+    it('surfaces the escalation as a distinctly-worded prompt describing the requested scope', () => {
+      const { s, cleanup } = mkApprovalSession('approve')
+      const reqs = capture(s, ['permission_request'])
+      s._onServerRequest({ id: 11, method: 'item/permissions/requestApproval', params: escalationParams })
+      assert.equal(reqs.length, 1, 'escalation is surfaced (no longer safe-denied silently)')
+      const req = reqs[0][1]
+      assert.match(req.description, /broaden its sandbox permissions/)
+      assert.match(req.description, /install deps/)
+      assert.match(req.description, /filesystem write/)
+      assert.match(req.description, /network access/)
+      // structured detail passed through for any client that wants to render it
+      assert.deepEqual(req.input.requestedPermissions, escalationParams.permissions)
+      s.respondToPermission(req.requestId, 'deny') // resolve so no pending timeout timer leaks past cleanup
+      cleanup()
+    })
+
+    it('approve → grants EXACTLY the requested permissions for this turn', async () => {
+      const { s, cleanup, responded } = mkApprovalSession('approve')
+      const reqs = capture(s, ['permission_request'])
+      s._onServerRequest({ id: 12, method: 'item/permissions/requestApproval', params: escalationParams })
+      s.respondToPermission(reqs[0][1].requestId, 'allow')
+      await tick()
+      assert.deepEqual(responded, [[12, { permissions: escalationParams.permissions, scope: 'turn' }]])
+      cleanup()
+    })
+
+    it('approve-always → grants the requested permissions for the SESSION', async () => {
+      const { s, cleanup, responded } = mkApprovalSession('approve')
+      const reqs = capture(s, ['permission_request'])
+      s._onServerRequest({ id: 13, method: 'item/permissions/requestApproval', params: escalationParams })
+      s.respondToPermission(reqs[0][1].requestId, 'allowAlways')
+      await tick()
+      assert.deepEqual(responded, [[13, { permissions: escalationParams.permissions, scope: 'session' }]])
+      cleanup()
+    })
+
+    it('deny → grants NOTHING (empty permissions, scope omitted per #6612)', async () => {
+      const { s, cleanup, responded } = mkApprovalSession('approve')
+      const reqs = capture(s, ['permission_request'])
+      s._onServerRequest({ id: 14, method: 'item/permissions/requestApproval', params: escalationParams })
+      s.respondToPermission(reqs[0][1].requestId, 'deny')
+      await tick()
+      assert.deepEqual(responded, [[14, { permissions: {} }]])
+      cleanup()
+    })
+
+    it('the grant response conforms to PermissionsRequestApprovalResponse (schema shape)', async () => {
+      const { s, cleanup, responded } = mkApprovalSession('approve')
+      const reqs = capture(s, ['permission_request'])
+      s._onServerRequest({ id: 15, method: 'item/permissions/requestApproval', params: escalationParams })
+      s.respondToPermission(reqs[0][1].requestId, 'allow')
+      await tick()
+      const resp = responded[0][1]
+      assert.equal(typeof resp.permissions, 'object', 'permissions is the required GrantedPermissionProfile object')
+      assert.ok(['turn', 'session'].includes(resp.scope), 'scope is a valid PermissionGrantScope enum')
+      assert.deepEqual(
+        Object.keys(resp).filter((k) => !['permissions', 'scope', 'strictAutoReview'].includes(k)),
+        [],
+        'no fields outside the schema',
+      )
+      cleanup()
+    })
+
+    it('abort mid-escalation → responds { permissions: {} } (answers codex, no turn wedge #6612)', async () => {
+      const { s, cleanup, responded } = mkApprovalSession('approve')
+      const reqs = capture(s, ['permission_request'])
+      s._onServerRequest({ id: 16, method: 'item/permissions/requestApproval', params: escalationParams })
+      assert.equal(reqs.length, 1, 'escalation prompted')
+      s._endTurnAbort() // Stop / turn-end aborts the pending escalation
+      await tick()
+      assert.deepEqual(responded, [[16, { permissions: {} }]], 'abort grants nothing but still answers codex')
+      cleanup()
+    })
+
+    it('malformed permissions (an array) is coerced to an empty grant, never echoed (no wedge)', async () => {
+      const { s, cleanup, responded } = mkApprovalSession('approve')
+      const reqs = capture(s, ['permission_request'])
+      // typeof [] === 'object': a naive echo would put an array on the wire where codex
+      // expects a {fileSystem?, network?} object → deserialize failure → wedged turn (#6612).
+      s._onServerRequest({ id: 17, method: 'item/permissions/requestApproval', params: { ...escalationParams, permissions: [] } })
+      s.respondToPermission(reqs[0][1].requestId, 'allow')
+      await tick()
+      assert.deepEqual(responded, [[17, { permissions: {}, scope: 'turn' }]], 'array dropped, grants an empty (valid) profile')
+      cleanup()
+    })
+
+    it('grants ONLY fileSystem/network — an unexpected requested field never reaches the wire', async () => {
+      const { s, cleanup, responded } = mkApprovalSession('approve')
+      const reqs = capture(s, ['permission_request'])
+      const params = { ...escalationParams, permissions: { ...escalationParams.permissions, bogus: 'x' } }
+      s._onServerRequest({ id: 18, method: 'item/permissions/requestApproval', params })
+      s.respondToPermission(reqs[0][1].requestId, 'allow')
+      await tick()
+      assert.deepEqual(
+        responded[0][1],
+        { permissions: { fileSystem: escalationParams.permissions.fileSystem, network: escalationParams.permissions.network }, scope: 'turn' },
+        'only the two GrantedPermissionProfile fields are granted; a request-only key is dropped',
+      )
+      cleanup()
+    })
+
+    it('describes the legacy read/write filesystem shape (not just entries)', () => {
+      const { s, cleanup } = mkApprovalSession('approve')
+      const reqs = capture(s, ['permission_request'])
+      const params = { ...escalationParams, reason: null, permissions: { fileSystem: { read: ['/etc/hosts'], write: ['/var/log'] } } }
+      s._onServerRequest({ id: 19, method: 'item/permissions/requestApproval', params })
+      assert.match(reqs[0][1].description, /filesystem read: \/etc\/hosts/)
+      assert.match(reqs[0][1].description, /filesystem write: \/var\/log/)
+      s.respondToPermission(reqs[0][1].requestId, 'deny') // resolve so no pending timeout timer leaks past cleanup
+      cleanup()
+    })
+
+    it('caps a huge filesystem scope with a "+N more" tail so the prompt stays bounded and keeps network access', () => {
+      const { s, cleanup } = mkApprovalSession('approve')
+      const reqs = capture(s, ['permission_request'])
+      const entries = Array.from({ length: 10 }, (_, i) => ({ access: 'write', path: { type: 'path', path: `/p/${i}` } }))
+      const params = { ...escalationParams, reason: null, permissions: { fileSystem: { entries }, network: { enabled: true } } }
+      s._onServerRequest({ id: 22, method: 'item/permissions/requestApproval', params })
+      const desc = reqs[0][1].description
+      assert.match(desc, /\+7 more/, 'summarizes the tail instead of listing all 10 entries')
+      assert.match(desc, /network access/, 'the trailing network scope survives the cap')
+      s.respondToPermission(reqs[0][1].requestId, 'deny')
+      cleanup()
+    })
   })
 
   it('interrupt() aborts a pending approval → Stop unblocks the turn (decline)', async () => {
