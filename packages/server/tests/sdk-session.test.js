@@ -2998,3 +2998,79 @@ describe('SdkSession state-persistence roundtrip (#4700)', () => {
       'Map insertion order must round-trip so "most-recent" semantics survive a restart')
   })
 })
+
+// #6692 — per-model usage forwarding: the result payload must surface the
+// SDK's modelUsage split (normalized to snake_case) plus num_turns /
+// duration_api_ms instead of discarding them.
+describe('per-model usage forwarding (#6692)', () => {
+  it('forwards normalized modelUsage + numTurns + apiDurationMs on result', async () => {
+    const s = createSession()
+    s._processReady = true
+    const results = []
+    s.on('result', (r) => results.push(r))
+    s._callQuery = () => {
+      return (async function* () {
+        yield {
+          type: 'result',
+          session_id: 'usage-test',
+          total_cost_usd: 0.05,
+          duration_ms: 1234,
+          duration_api_ms: 987,
+          num_turns: 3,
+          usage: { input_tokens: 100, output_tokens: 50 },
+          modelUsage: {
+            'claude-opus-4-8': {
+              inputTokens: 100,
+              outputTokens: 50,
+              cacheReadInputTokens: 25,
+              cacheCreationInputTokens: 5,
+              webSearchRequests: 0,
+              costUSD: 0.05,
+              contextWindow: 200000,
+            },
+          },
+        }
+      })()
+    }
+    await s.sendMessage('hello')
+    assert.equal(results.length, 1)
+    const r = results[0]
+    assert.equal(r.numTurns, 3)
+    assert.equal(r.apiDurationMs, 987)
+    assert.deepEqual(r.modelUsage, {
+      'claude-opus-4-8': {
+        input_tokens: 100,
+        output_tokens: 50,
+        cache_read_input_tokens: 25,
+        cache_creation_input_tokens: 5,
+        web_search_requests: 0,
+        cost_usd: 0.05,
+      },
+    })
+    s.destroy()
+  })
+
+  it('degrades numTurns/apiDurationMs/modelUsage to null when the result omits them', async () => {
+    const s = createSession()
+    s._processReady = true
+    const results = []
+    s.on('result', (r) => results.push(r))
+    s._callQuery = () => {
+      return (async function* () {
+        yield {
+          type: 'result',
+          session_id: 'usage-test-2',
+          total_cost_usd: 0,
+          duration_ms: 1,
+          usage: {},
+        }
+      })()
+    }
+    await s.sendMessage('hello')
+    assert.equal(results.length, 1)
+    assert.equal(results[0].numTurns, null)
+    assert.equal(results[0].apiDurationMs, null)
+    assert.equal(results[0].modelUsage, null)
+    s.destroy()
+  })
+})
