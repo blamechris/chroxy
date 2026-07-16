@@ -31,15 +31,14 @@ function mkManager(overrides = {}) {
   }
 }
 
-function mkCtx({ enabled = true, manager = mkManager(), cwdAllowlist = null } = {}) {
+function mkCtx({ enabled = true, manager = mkManager() } = {}) {
   const sent = []
   const ctx = {
     transport: { send: (_ws, msg) => sent.push(msg) },
     services: {
       config: {
         features: { orchestration: enabled },
-        homeOverride: REAL_HOME,
-        ...(cwdAllowlist ? { allowedCwds: cwdAllowlist } : {}),
+        homeOverride: REAL_HOME, // scopes validateCwdAllowed's "within home" check to the temp home
       },
       orchestrationManager: manager,
     },
