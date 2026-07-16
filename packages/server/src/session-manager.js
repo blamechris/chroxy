@@ -1110,7 +1110,7 @@ export class SessionManager extends EventEmitter {
    *   full-destroy path on start failure.
    * @returns {string} sessionId
    */
-  createSession({ name, cwd, model, permissionMode, resumeSessionId, provider, worktree, restoreWorktreePath, restoreWorktreeRepoDir, sandbox, containerId, containerUser, containerCliPath, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, stdinForwardingDisabled, bootedModel, messageCounter, skipPermissions, agentCommId, skipPersist = false, preserveId, isRestore = false } = {}) {
+  createSession({ name, cwd, model, permissionMode, resumeSessionId, provider, worktree, restoreWorktreePath, restoreWorktreeRepoDir, sandbox, codexSandbox, containerId, containerUser, containerCliPath, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, stdinForwardingDisabled, bootedModel, messageCounter, skipPermissions, agentCommId, skipPersist = false, preserveId, isRestore = false } = {}) {
     // #6036 — front-half SRP extraction: preflight + isolation + provider/preset
     // resolution (incl. the limit guard, cwd check, id/name, #2962 preflight,
     // #5985 user-shell gate, #3403 model fallback, worktree create/restore, and
@@ -1160,6 +1160,10 @@ export class SessionManager extends EventEmitter {
       // ProviderClass via getProvider() — the registry key.
       provider: resolvedProvider,
     }
+    // #6638: per-session codex sandbox mode (read-only / workspace-write /
+    // danger-full-access). Codex-specific opt read directly by CodexAppServerSession;
+    // ignored by other providers.
+    if (codexSandbox) providerOpts.codexSandbox = codexSandbox
     if (this._maxToolInput) providerOpts.maxToolInput = this._maxToolInput
     if (this._resultTimeoutMs != null) providerOpts.resultTimeoutMs = this._resultTimeoutMs
     if (this._hardTimeoutMs != null) providerOpts.hardTimeoutMs = this._hardTimeoutMs

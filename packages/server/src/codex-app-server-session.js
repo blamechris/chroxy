@@ -93,6 +93,9 @@ export class CodexAppServerSession extends BaseSession {
     this._lastUsage = null
     this._skillsPrepended = false // #6606 — inject the skills prefix once, on turn 1
     this._turnAbort = null // per-turn AbortController — cancels pending approvals
+    // #6638: per-session sandbox override (create_session `codexSandbox`) — wins
+    // over CHROXY_CODEX_SANDBOX / the default. Applied at thread start.
+    this._codexSandbox = opts.codexSandbox || null
     // #6638: fileChange item.changes cached by itemId, so a fileChange approval
     // (whose params carry NO diff) can surface WHAT will change. Cleared per turn.
     this._pendingFileChanges = new Map()
@@ -116,7 +119,7 @@ export class CodexAppServerSession extends BaseSession {
   // ------------------------------------------------------------------
 
   async start() {
-    const sandbox = resolveCodexSandbox()
+    const sandbox = resolveCodexSandbox(this._codexSandbox)
     this._client = new CodexAppServerClient({
       bin: CodexAppServerSession.resolvedBinary,
       cwd: this.cwd,

@@ -979,6 +979,19 @@ describe('CodexSession', () => {
       assert.equal(withModel[idxModel + 1], 'workspace-write')
     })
 
+    it('honors a per-session sandbox override on the exec path (#6638)', () => {
+      // Not a silent no-op under CHROXY_CODEX_APPSERVER=0: a valid override wins
+      // regardless of env (invalid-override → env/default precedence is covered
+      // by the resolveCodexSandbox tests).
+      const args = buildCodexArgs('hi', null, null, 'read-only')
+      assert.equal(args[args.indexOf('--sandbox') + 1], 'read-only')
+      // On the resume path too, --sandbox stays before the resume subcommand.
+      const resume = buildCodexArgs('hi', null, 'thr-1', 'danger-full-access')
+      const ri = resume.indexOf('--sandbox')
+      assert.equal(resume[ri + 1], 'danger-full-access')
+      assert.ok(ri < resume.indexOf('resume'), '--sandbox stays before the resume subcommand')
+    })
+
     // #3865: multi-turn context loss. Without a threadId, every sendMessage
     // spawns `codex exec "<prompt>"` as a fresh thread and Codex has no
     // memory of prior turns. When a threadId is supplied, argv switches to
@@ -1126,6 +1139,22 @@ describe('CodexSession', () => {
         } finally {
           console.warn = origWarn
         }
+      })
+
+      it('resolveCodexSandbox(override) — a valid per-session override wins over env/default (#6638)', () => {
+        process.env.CHROXY_CODEX_SANDBOX = 'read-only'
+        assert.equal(resolveCodexSandbox('danger-full-access'), 'danger-full-access', 'override beats env')
+        delete process.env.CHROXY_CODEX_SANDBOX
+        assert.equal(resolveCodexSandbox('read-only'), 'read-only', 'override beats the default')
+        assert.equal(resolveCodexSandbox('  workspace-write  '), 'workspace-write', 'override is trimmed')
+      })
+
+      it('resolveCodexSandbox(override) — an invalid/absent override falls through to env/default (#6638)', () => {
+        process.env.CHROXY_CODEX_SANDBOX = 'read-only'
+        assert.equal(resolveCodexSandbox('gimme-root'), 'read-only', 'invalid override → env resolution')
+        delete process.env.CHROXY_CODEX_SANDBOX
+        assert.equal(resolveCodexSandbox('bogus'), 'workspace-write', 'invalid override + no env → default')
+        assert.equal(resolveCodexSandbox(undefined), 'workspace-write', 'no override → default')
       })
 
       // #3981: resolveCodexSandbox() runs on every sendMessage(). Without

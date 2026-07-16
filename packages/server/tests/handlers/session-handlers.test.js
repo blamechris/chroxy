@@ -253,6 +253,23 @@ describe('session-handlers', () => {
       assert.equal(sent.sessionId, 'new-id')
     })
 
+    it('threads a valid codexSandbox to createSession and drops an invalid one (#6638)', () => {
+      const ctx = makeCtx()
+      const session = createMockSession()
+      const spy = createSpy(() => 'new-id')
+      ctx.sessions.sessionManager.createSession = spy
+      ctx._sessions.set('new-id', { session, name: 'New', cwd: '/tmp' })
+
+      sessionHandlers.create_session(makeWs(), makeClient(), { name: 'A', codexSandbox: 'read-only' }, ctx)
+      assert.equal(spy.lastCall[0].codexSandbox, 'read-only', 'a valid codexSandbox is threaded to createSession')
+
+      // NB: over the wire an invalid codexSandbox is rejected by the schema
+      // (ClientMessageSchema) before reaching here; this asserts the handler's
+      // defense-in-depth for an internal caller that bypasses the schema.
+      sessionHandlers.create_session(makeWs(), makeClient(), { name: 'B', codexSandbox: 'gimme-root' }, ctx)
+      assert.equal(spy.lastCall[0].codexSandbox, undefined, 'an invalid codexSandbox is dropped (→ env/default)')
+    })
+
     it('sends session_error when worktree requested without cwd', () => {
       const ctx = makeCtx()
       sessionHandlers.create_session(makeWs(), makeClient(), { worktree: true }, ctx)
