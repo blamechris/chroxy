@@ -218,8 +218,28 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
   // hoist the provider to function scope.
   let authOkProvider = null
   if (sessionManager) {
-    let activeId = defaultSessionId
-    let entry = activeId ? sessionManager.getSession(activeId) : null
+    // #6687: resolve the active session with the SAME precedence block 2 uses to
+    // restore the client — the per-device persisted active session (#4835) first,
+    // then defaultSessionId → firstSessionId, then the bound-session override — so
+    // auth_ok's cwd + permission-mode copy describe the session the client is
+    // actually switched to, not the server default.
+    let activeId = null
+    let entry = null
+    const persistedDeviceId = client.deviceInfo?.deviceId
+    if (devicePreferences && persistedDeviceId) {
+      const persistedId = devicePreferences.getActiveSessionId(persistedDeviceId)
+      if (persistedId) {
+        const persistedEntry = sessionManager.getSession(persistedId)
+        if (persistedEntry) {
+          activeId = persistedId
+          entry = persistedEntry
+        }
+      }
+    }
+    if (!entry) {
+      activeId = defaultSessionId
+      entry = activeId ? sessionManager.getSession(activeId) : null
+    }
     if (!entry) {
       activeId = sessionManager.firstSessionId
       entry = activeId ? sessionManager.getSession(activeId) : null

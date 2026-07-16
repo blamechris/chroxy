@@ -1292,6 +1292,26 @@ describe('sendPostAuthInfo — auth_bootstrap (#5555)', () => {
     assert.deepEqual(permModes.modes, PERMISSION_MODES)
   })
 
+  it('a codex active session at connect gets codex-tuned mode copy (#6638)', () => {
+    const { manager } = createMockSessionManager([
+      { id: 'sess-cx', name: 'Codex', cwd: '/repo', provider: 'codex' },
+    ])
+    const ws = makeFakeWs()
+    const ctx = makeCtx({ sessionManager: manager, defaultSessionId: 'sess-cx' })
+    registerClient(ctx, ws)
+
+    sendPostAuthInfo(ctx, ws)
+    // Both the folded auth_ok list (new clients) and the discrete frame (old
+    // clients) should carry codex copy — same ids, codex-specific descriptions.
+    const authOk = ctx._sends.find(m => m.type === 'auth_ok')
+    const frame = ctx._sends.find(m => m.type === 'available_permission_modes')
+    for (const modes of [authOk.availablePermissionModes, frame.modes]) {
+      assert.deepEqual(modes.map(m => m.id), PERMISSION_MODES.map(m => m.id), 'ids unchanged')
+      assert.match(modes.find(m => m.id === 'acceptEdits').description, /apply_patch/, 'codex copy')
+      assert.doesNotMatch(modes.find(m => m.id === 'auto').description, /dangerously-skip-permissions/, 'no Claude flag')
+    }
+  })
+
   it('multi-session: emits an auth_bootstrap burst with providers + slashCommands + agents', async () => {
     const { manager } = createMockSessionManager([
       { id: 'sess-1', name: 'Alpha', cwd: '/alpha' },
@@ -2840,6 +2860,29 @@ describe('sendPostAuthInfo — per-device active session restore (#4835)', () =>
     assert.ok(switchMsg, 'session_switched not sent')
     assert.equal(switchMsg.sessionId, 'sess-big')
     assert.equal(switchMsg.name, 'Ltl')
+  })
+
+  it('auth_ok cwd + permission-mode copy follow the DEVICE-PERSISTED session, not the default (#6687)', () => {
+    // Default is a Claude session; the device previously switched to a codex one.
+    // auth_ok (which new clients read directly) must describe the restored codex
+    // session — block 1 now uses the same device-preference precedence as block 2.
+    const { manager } = createMockSessionManager([
+      { id: 'sess-default', name: 'Claude', cwd: '/claude', provider: 'claude-sdk' },
+      { id: 'sess-codex', name: 'Codex', cwd: '/codex', provider: 'codex' },
+    ])
+    const devicePrefs = inMemoryDevicePrefs({ 'laptop': 'sess-codex' })
+    const ws = makeFakeWs()
+    const ctx = makeCtx({ sessionManager: manager, defaultSessionId: 'sess-default', devicePreferences: devicePrefs })
+    registerClient(ctx, ws, { deviceInfo: { deviceId: 'laptop', deviceName: 'Laptop', deviceType: 'desktop', platform: 'darwin' } })
+
+    sendPostAuthInfo(ctx, ws)
+    const authOk = ctx._sends.find(m => m.type === 'auth_ok')
+    assert.equal(authOk.cwd, '/codex', 'auth_ok.cwd follows the device-persisted session, not the default')
+    assert.match(
+      authOk.availablePermissionModes.find(m => m.id === 'acceptEdits').description,
+      /apply_patch/,
+      'auth_ok mode copy is codex-tuned for the device-persisted codex session',
+    )
   })
 
   it('falls back to firstSessionId when the deviceId has no recorded preference', () => {
