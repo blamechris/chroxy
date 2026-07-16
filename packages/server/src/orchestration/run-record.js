@@ -215,6 +215,15 @@ export function applyEvent(record, event) {
       const tokens = normalizeUsage(event.usage)
       const cost = Number.isFinite(event.cost) ? event.cost : undefined
       const priced = Number.isFinite(event.pricedCostUsd) ? event.pricedCostUsd : undefined
+      // Defense-in-depth: the engine is expected to gate on "finite cost OR
+      // finite tokens" before recording (the single-counting invariant), but a
+      // both-null synthetic (stream-stall recovery) must never inflate turn
+      // counts / unknownCostTurns even if one slips through. Deterministic, so
+      // live and replay skip identically.
+      const hasTokens = tokens.inputTokens > 0 || tokens.outputTokens > 0
+        || tokens.cacheReadTokens > 0 || tokens.cacheCreationTokens > 0
+        || tokens.webSearchRequests > 0
+      if (cost === undefined && priced === undefined && !hasTokens) break
       foldCell(record.usageTotals.overall, tokens, cost, priced)
       if (event.role) foldCell(ensureCell(record.usageTotals.byRole, event.role), tokens, cost, priced)
       if (event.model) foldCell(ensureCell(record.usageTotals.byModel, event.model), tokens, cost, priced)

@@ -257,8 +257,15 @@ export class RunLedger extends EventEmitter {
       body = ''
       truncated = true
       this._emitEvent(runId, { type: 'events_dropped', count: 1, reason: 'journal_cap' }, { lifecycle: false })
-    } else if (body.length > COMMITTEE_BODY_MAX) {
-      body = body.slice(0, COMMITTEE_BODY_MAX)
+    } else if (Buffer.byteLength(body, 'utf8') > COMMITTEE_BODY_MAX) {
+      // Cap by BYTES (the constant is a byte budget), not UTF-16 code units — a
+      // multibyte body could otherwise be ~3-4x over. TextDecoder with
+      // stream:true decodes only the COMPLETE codepoints within the budget and
+      // holds back a trailing partial sequence (rather than emitting a 3-byte
+      // U+FFFD that could push the re-encoded result back over budget), so the
+      // result is guaranteed <= COMMITTEE_BODY_MAX bytes and valid JSON.
+      const buf = Buffer.from(body, 'utf8').subarray(0, COMMITTEE_BODY_MAX)
+      body = new TextDecoder('utf8').decode(buf, { stream: true })
       truncated = true
     }
     this._emitEvent(runId, {

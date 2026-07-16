@@ -141,13 +141,22 @@ describe('RunLedger crash recovery', () => {
     const staleSeq = 2 // run_created(1) + subtask_created(2); turn_usage(3) not yet in snapshot
     snap.lastSeq = staleSeq
     snap.usageTotals = makeRunRecord({ runId: run.runId }).usageTotals // zeroed
+    // Also zero the per-subtask fold so replay must reconstruct it too, not just
+    // the run totals — proves the reducer folds subtask cells on replay.
+    if (snap.subtasks[0]) {
+      snap.subtasks[0].usage = makeUsageCell()
+      snap.subtasks[0].numTurns = 0
+      snap.subtasks[0].apiDurationMs = 0
+    }
     writeFileSync(snapPath, JSON.stringify(snap))
 
     const led2 = mkLedger()
     const recovered = led2.recoverRuns()
     assert.equal(recovered.length, 1)
     const r = led2.getRun(run.runId)
-    assert.equal(r.usageTotals.overall.costUsd, 0.4, 'turn_usage(3) replayed from journal')
+    assert.equal(r.usageTotals.overall.costUsd, 0.4, 'turn_usage(3) replayed into run totals')
+    assert.equal(r.subtasks[0].usage.costUsd, 0.4, 'turn_usage(3) replayed into the subtask cell')
+    assert.equal(r.subtasks[0].usage.inputTokens, 10)
     assert.equal(r.lastSeq, 3)
     led2.dispose()
   })
@@ -196,7 +205,21 @@ describe('RunLedger committee body cap', () => {
     const journal = readFileSync(join(baseDir, 'runs', run.runId, 'events.jsonl'), 'utf8')
     const line = journal.trim().split('\n').map((l) => JSON.parse(l)).find((e) => e.type === 'committee_review')
     assert.equal(line.truncated, true)
-    assert.ok(line.notes.length <= 32 * 1024)
+    assert.ok(Buffer.byteLength(line.notes, 'utf8') <= 32 * 1024, 'body capped by bytes')
+    led.dispose()
+  })
+
+  it('caps a multibyte committee body by BYTES, not UTF-16 code units', () => {
+    const led = mkLedger()
+    const run = led.createRun({})
+    led.createSubtask(run.runId, { subtaskId: 'st1', role: 'a' })
+    // '你' is 3 bytes / 1 code unit — 20k code units ≈ 60KB, well over the 32KB
+    // byte cap despite being under it in .length terms.
+    led.recordCommitteeReview(run.runId, 'st1', { phase: 'plan', verdict: 'approve', notes: '你'.repeat(20 * 1024) })
+    const journal = readFileSync(join(baseDir, 'runs', run.runId, 'events.jsonl'), 'utf8')
+    const line = journal.trim().split('\n').map((l) => JSON.parse(l)).find((e) => e.type === 'committee_review')
+    assert.equal(line.truncated, true)
+    assert.ok(Buffer.byteLength(line.notes, 'utf8') <= 32 * 1024, 'multibyte body capped by bytes')
     led.dispose()
   })
 })
