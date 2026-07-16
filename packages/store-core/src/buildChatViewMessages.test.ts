@@ -314,5 +314,10 @@ describe('buildChatViewMessages', () => {
       expect('attachments' in toChatViewMessage(msg({ id: 'u1', type: 'user_input', content: 'no files' }))).toBe(false)
       expect('attachments' in toChatViewMessage(msg({ id: 'u2', type: 'user_input', content: 'empty', attachments: [] }))).toBe(false)
     })
+
+    it('does NOT propagate attachments for a non-user_input message (contract: user messages only)', () => {
+      const attachments = [{ id: 'a1', type: 'image' as const, uri: 'data:image/png;base64,x', name: 'x.png', mediaType: 'image/png', size: 1 }]
+      expect('attachments' in toChatViewMessage(msg({ id: 'r1', type: 'response', content: 'hi', attachments }))).toBe(false)
+    })
   })
 })

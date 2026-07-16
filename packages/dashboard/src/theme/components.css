@@ -2963,6 +2963,7 @@ button.sidebar-token-view-session-row:hover {
 }
 
 .msg-attachment-image {
+  display: block; /* avoid the inline-image baseline gap inside the grid */
   max-width: 160px;
   max-height: 160px;
   border-radius: var(--radius-sm, 6px);

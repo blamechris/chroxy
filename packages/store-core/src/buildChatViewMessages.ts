@@ -112,7 +112,9 @@ export function toChatViewMessage(msg: ChatMessage): ChatViewMessage {
     ...(msg.code ? { code: msg.code } : {}),
     // #6632: carry user-message attachments through so the transcript can
     // preview them (dropped previously → no thumbnail on the sent message).
-    ...(msg.attachments?.length ? { attachments: msg.attachments } : {}),
+    // Gated to `user_input` to match the contract (attachments live only on user
+    // messages) — don't thread attachment data onto non-user bubbles.
+    ...(msg.type === 'user_input' && msg.attachments?.length ? { attachments: msg.attachments } : {}),
   }
 }
 

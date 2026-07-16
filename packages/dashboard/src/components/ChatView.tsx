@@ -359,6 +359,8 @@ const DefaultMessageRow = memo(function DefaultMessageRow({
                   src={att.uri}
                   alt={att.name}
                   title={att.name}
+                  loading="lazy"
+                  decoding="async"
                   data-testid={`msg-attachment-image-${att.id}`}
                 />
               ) : (
