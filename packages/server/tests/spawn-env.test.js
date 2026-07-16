@@ -289,4 +289,37 @@ describe('buildSpawnEnv', () => {
       })
     })
   })
+
+  // #6633: every agent subprocess gets Chroxy's host identity so a session can
+  // answer "what build am I in?" — via buildSpawnEnv for all subprocess providers.
+  describe('host identity injection (#6633)', () => {
+    it('injects CHROXY_HOST_* into an allowlist-mode child (codex)', () => {
+      withEnv({ OPENAI_API_KEY: 'sk' }, () => {
+        const env = buildSpawnEnv('codex')
+        assert.equal(env.CHROXY_HOST_APP, 'Chroxy')
+        assert.ok(env.CHROXY_HOST_VERSION && env.CHROXY_HOST_VERSION.length > 0)
+        assert.ok(['dev', 'release'].includes(env.CHROXY_HOST_CHANNEL))
+        assert.ok(env.CHROXY_HOST_PLATFORM, 'platform is present')
+      })
+    })
+
+    it('injects CHROXY_HOST_* into a denylist-mode child (claude)', () => {
+      withEnv({}, () => {
+        const env = buildSpawnEnv('claude')
+        assert.equal(env.CHROXY_HOST_APP, 'Chroxy')
+        assert.ok(env.CHROXY_HOST_VERSION && env.CHROXY_HOST_VERSION.length > 0)
+      })
+    })
+
+    it('host identity is authoritative — an operator CHROXY_HOST_* export cannot spoof it', () => {
+      // The values are COMPUTED, not passed through, so a shell export of the
+      // same name is overridden by the real identity (important for allowlist
+      // mode, where it also proves the value did not merely leak through).
+      withEnv({ OPENAI_API_KEY: 'sk', CHROXY_HOST_VERSION: '0.0.0-spoofed', CHROXY_HOST_APP: 'NotChroxy' }, () => {
+        const env = buildSpawnEnv('codex')
+        assert.notEqual(env.CHROXY_HOST_VERSION, '0.0.0-spoofed', 'computed version wins over an operator export')
+        assert.equal(env.CHROXY_HOST_APP, 'Chroxy', 'app name is authoritative')
+      })
+    })
+  })
 })

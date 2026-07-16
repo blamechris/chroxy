@@ -24,6 +24,7 @@
  * non-denylisted credential keys are eligible for store injection.
  */
 import { resolveCredential, isKnownCredentialKey } from '../credential-store.js'
+import { getChroxyHostEnv } from '../chroxy-host-metadata.js'
 
 // Standard vars every child process needs for its runtime to function.
 // Shell PATH, locale, TERM, TMPDIR, user/home identity.
@@ -163,7 +164,11 @@ export function buildSpawnEnv(provider, extras = {}) {
         if (resolved.value) env[key] = resolved.value
       }
     }
-    return { ...env, ...extras }
+    // #6633: inject Chroxy's own host identity (version/channel/git/platform).
+    // These are COMPUTED (not passed through from process.env), so they are
+    // authoritative and safe for allowlist-mode providers — non-sensitive
+    // metadata, never an operator secret. `extras` still wins on any collision.
+    return { ...env, ...getChroxyHostEnv(), ...extras }
   }
 
   // denylist mode: start from full parent env, remove sensitive keys.
@@ -189,5 +194,6 @@ export function buildSpawnEnv(provider, extras = {}) {
     const resolved = resolveCredential(key)
     if (resolved.value) parentEnv[key] = resolved.value
   }
-  return { ...parentEnv, ...extras }
+  // #6633: Chroxy host identity, computed and authoritative (see allowlist branch).
+  return { ...parentEnv, ...getChroxyHostEnv(), ...extras }
 }
