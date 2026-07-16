@@ -33,6 +33,7 @@ describe('run transitions', () => {
     assert.throws(() => assertRunTransition('completed', 'executing'), TransitionError)
     assert.throws(() => assertRunTransition('executing', 'nonsense'), TransitionError)
     assert.throws(() => assertRunTransition('completed', 'cancelling'), TransitionError) // terminal source
+    assert.throws(() => assertRunTransition('bogus_from', 'cancelling'), TransitionError) // unknown source
   })
   it('isTerminalRunStatus', () => {
     assert.equal(isTerminalRunStatus('completed'), true)
@@ -60,6 +61,7 @@ describe('node (subtask) transitions', () => {
     assert.throws(() => assertNodeTransition('pending', 'merging'), TransitionError)
     assert.throws(() => assertNodeTransition('done', 'executing'), TransitionError)
     assert.throws(() => assertNodeTransition('done', 'interrupted'), TransitionError) // terminal source
+    assert.throws(() => assertNodeTransition('bogus_from', 'cancelled'), TransitionError) // unknown source
   })
   it('isTerminalNodeStatus', () => {
     assert.equal(isTerminalNodeStatus('done'), true)
@@ -74,6 +76,10 @@ describe('gate registry', () => {
   })
   it('makeGate rejects an unknown kind', () => {
     assert.throws(() => makeGate({ gateId: 'g', runId: 'r', kind: 'bogus', summary: 's' }))
+  })
+  it('makeGate requires a numeric openedAt (wire contract)', () => {
+    assert.throws(() => makeGate({ gateId: 'g', runId: 'r', kind: 'epic_plan', summary: 's' }))
+    assert.equal(makeGate({ gateId: 'g', runId: 'r', kind: 'epic_plan', summary: 's', openedAt: 5 }).openedAt, 5)
   })
   it('resolveGate maps decisions to statuses and is a pure copy', () => {
     const g = makeGate({ gateId: 'g1', runId: 'r1', kind: 'epic_plan', summary: 'approve plan', openedAt: 1 })

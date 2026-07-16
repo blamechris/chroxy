@@ -83,6 +83,7 @@ export class TransitionError extends Error {
 /** Throw unless `from -> to` is a legal RUN transition. cancelling/suspended are
  *  reachable from any non-terminal state; a self-loop on executing is allowed. */
 export function assertRunTransition(from, to) {
+  if (!RUN_STATUSES.has(from)) throw new TransitionError('run', `${from} (unknown state)`, to)
   if (!RUN_STATUSES.has(to)) throw new TransitionError('run', from, `${to} (unknown state)`)
   if (from === to && to === 'executing') return true
   if ((to === 'cancelling' || to === 'suspended') && !TERMINAL_RUN_STATUSES.has(from)) return true
@@ -94,6 +95,7 @@ export function assertRunTransition(from, to) {
 /** Throw unless `from -> to` is a legal SUBTASK transition. cancelled/interrupted
  *  are reachable from any non-terminal state (run cancel / restart). */
 export function assertNodeTransition(from, to) {
+  if (!NODE_STATUSES.has(from)) throw new TransitionError('node', `${from} (unknown state)`, to)
   if (!NODE_STATUSES.has(to)) throw new TransitionError('node', from, `${to} (unknown state)`)
   if ((to === 'cancelled' || to === 'interrupted') && !TERMINAL_NODE_STATUSES.has(from)) return true
   const allowed = NODE_TRANSITIONS[from]
@@ -124,6 +126,9 @@ export function nextGateId(runId) {
  */
 export function makeGate({ gateId, runId, kind, nodeId = null, summary, detail = null, budgetUsd = null, openedAt }) {
   if (!RUN_GATE_KIND_VALUES.includes(kind)) throw new Error(`unknown gate kind: ${kind}`)
+  // openedAt is a REQUIRED number on the wire (RunGateSchema); run-model is
+  // clock-free, so the caller (which has the clock) must stamp it.
+  if (!Number.isFinite(openedAt)) throw new Error('makeGate requires a numeric openedAt')
   return {
     gateId,
     runId,
@@ -133,7 +138,7 @@ export function makeGate({ gateId, runId, kind, nodeId = null, summary, detail =
     summary: summary ?? '',
     detail,
     budgetUsd,
-    openedAt: openedAt ?? null,
+    openedAt,
     resolvedAt: null,
     resolvedBy: null,
     note: null,

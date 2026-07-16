@@ -25,7 +25,8 @@ function mkStub() {
   }
   // emit a session_event for a session
   sm.ev = (id, event, data) => sm.emit('session_event', { sessionId: id, event, data })
-  sm.destroy = (id) => sm.emit('session_destroyed', { sessionId: id })
+  // destroy: remove from the map (so getSession re-fetch fails) AND emit the event
+  sm.destroy = (id) => { sessions.delete(id); sm.emit('session_destroyed', { sessionId: id }) }
   return { sm, addSession }
 }
 
@@ -142,6 +143,20 @@ describe('TurnDriver — failure modes', () => {
     driver = new TurnDriver({ sessionManager: sm })
     const e = await driver.driveTurn('nope', 'go').then(() => null, (err) => err)
     assert.equal(e.code, 'SESSION_GONE')
+  })
+
+  it('a queued turn rejects SESSION_GONE if its session is destroyed while waiting', async () => {
+    const { sm, addSession } = mkStub()
+    addSession('s1')
+    driver = new TurnDriver({ sessionManager: sm })
+    const p1 = driver.driveTurn('s1', 'first')
+    const p2 = driver.driveTurn('s1', 'second') // queued behind the mutex
+    // destroy the session — turn-1 rejects; turn-2 re-fetches at start and finds it gone
+    sm.destroy('s1')
+    const e1 = await p1.then(() => null, (err) => err)
+    const e2 = await p2.then(() => null, (err) => err)
+    assert.equal(e1.code, 'SESSION_GONE')
+    assert.equal(e2.code, 'SESSION_GONE', 'queued turn re-validates the session at start time')
   })
 
   it('dispose() rejects a turn queued behind the mutex (no hang)', async () => {

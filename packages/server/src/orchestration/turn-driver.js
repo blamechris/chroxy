@@ -98,7 +98,7 @@ export class TurnDriver {
     if (!entry || !entry.session) return Promise.reject(new TurnError('SESSION_GONE', `session ${sessionId} not found`))
 
     return new Promise((resolve, reject) => {
-      const start = () => this._beginTurn(sessionId, entry, prompt, { label, timeoutMs }, resolve, reject)
+      const start = () => this._beginTurn(sessionId, prompt, { label, timeoutMs }, resolve, reject)
       if (!this._occupied.has(sessionId)) {
         this._occupied.add(sessionId)
         start()
@@ -110,7 +110,15 @@ export class TurnDriver {
     })
   }
 
-  _beginTurn(sessionId, entry, prompt, { label, timeoutMs }, resolve, reject) {
+  _beginTurn(sessionId, prompt, { label, timeoutMs }, resolve, reject) {
+    // Re-fetch the session at START time, not at driveTurn() time: a queued turn
+    // may have waited behind the mutex while its session was destroyed/replaced.
+    const entry = this._sm.getSession?.(sessionId)
+    if (!entry || !entry.session) {
+      reject(new TurnError('SESSION_GONE', `session ${sessionId} gone before its turn started`))
+      this._startNext(sessionId)
+      return
+    }
     const ctx = {
       sessionId,
       label,
