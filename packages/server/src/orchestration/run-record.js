@@ -280,14 +280,22 @@ export function applyEvent(record, event) {
       break
 
     case 'budget_lifted':
-      // a raise / refund brought a capped run back under; keep capReachedAt for
-      // history, record when it lifted.
+      // An explicit setBudget RAISE brought a capped run back under. Record
+      // when it lifted (capLiftedAt is the "was capped, then lifted" history
+      // marker) and RE-ARM the one-shot latches so the new, higher ceiling can
+      // warn/cap freshly. This is distinct from a REFUND-driven un-cap (signed
+      // cost drop), where latches are deliberately kept to avoid warning spam.
       record.budgetState.capLiftedAt = finiteOr(event.ts, record.budgetState.capLiftedAt)
+      record.budgetState.warnedAt = null
+      record.budgetState.capReachedAt = null
       break
 
     case 'budget_updated':
-      if (record.configSnapshot && event.budget && typeof event.budget === 'object') {
-        record.configSnapshot.budget = event.budget
+      if (event.budget && typeof event.budget === 'object') {
+        // configSnapshot defaults to null on a run created without one; a
+        // setBudget on such a run must still take effect, so initialize it.
+        if (!record.configSnapshot) record.configSnapshot = { budget: event.budget }
+        else record.configSnapshot.budget = event.budget
       }
       break
 

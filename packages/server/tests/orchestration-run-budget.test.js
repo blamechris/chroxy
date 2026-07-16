@@ -118,7 +118,7 @@ describe('RunLedger budget integration', () => {
     led.dispose()
   })
 
-  it('setBudget raise un-caps a capped run (capLiftedAt recorded, capReachedAt kept)', () => {
+  it('setBudget raise un-caps a capped run and re-arms latches (capLiftedAt = history)', () => {
     const led = mk()
     const run = runWith(led, 10)
     led.recordTurnUsage(run.runId, { subtaskId: 'st1', sessionId: 's1', role: 'worker.audit', data: { cost: 12, usage: { input_tokens: 1 } } })
@@ -126,8 +126,9 @@ describe('RunLedger budget integration', () => {
     const e = led.setBudget(run.runId, { maxUsd: 50 })
     assert.equal(e.level, 'ok', 'raised cap un-caps')
     const bs = led.getRun(run.runId).budgetState
-    assert.equal(bs.capReachedAt != null, true, 'capReachedAt kept for history')
-    assert.equal(bs.capLiftedAt != null, true, 'capLiftedAt recorded')
+    assert.equal(bs.capReachedAt, null, 're-armed so the new ceiling can notify again')
+    assert.equal(bs.warnedAt, null, 're-armed')
+    assert.equal(bs.capLiftedAt != null, true, 'capLiftedAt is the "was capped, then lifted" history marker')
     led.dispose()
   })
 
@@ -149,6 +150,52 @@ describe('RunLedger budget integration', () => {
     assert.equal(e.level, 'capped')
     assert.equal(fired.length, 0, 'no re-fire after recovery')
     led2.dispose()
+  })
+
+  it('setBudget applies on a run created WITHOUT a configSnapshot', () => {
+    const led = mk()
+    const run = led.createRun({}) // no configSnapshot → budget null
+    led.createSubtask(run.runId, { subtaskId: 'st1', role: 'a' })
+    led.attachSession(run.runId, 'st1', { sessionId: 's1', provider: 'claude-byok', model: 'opus' })
+    led.recordTurnUsage(run.runId, { subtaskId: 'st1', sessionId: 's1', role: 'a', data: { cost: 80, usage: { input_tokens: 1 } } })
+    // impose a $10 cap after the fact — must take effect (was a silent no-op)
+    const e = led.setBudget(run.runId, { maxUsd: 10 })
+    assert.equal(e.level, 'capped')
+    assert.equal(e.ok, false)
+    assert.equal(led.getRun(run.runId).configSnapshot.budget.maxUsd, 10)
+    led.dispose()
+  })
+
+  it('a raise re-arms the latches so the new ceiling notifies again', () => {
+    const led = mk()
+    const warns = [], caps = []
+    led.on('run_budget_warning', () => warns.push('w'))
+    led.on('run_budget_cap_reached', () => caps.push('c'))
+    const run = runWith(led, 10)
+    led.recordTurnUsage(run.runId, { subtaskId: 'st1', sessionId: 's1', role: 'worker.audit', data: { cost: 12, usage: { input_tokens: 1 } } })
+    assert.equal(warns.length, 1)
+    assert.equal(caps.length, 1)
+    // raise to $100 → un-caps + re-arms latches
+    led.setBudget(run.runId, { maxUsd: 100 })
+    const bs = led.getRun(run.runId).budgetState
+    assert.equal(bs.warnedAt, null, 'warn latch re-armed')
+    assert.equal(bs.capReachedAt, null, 'cap latch re-armed')
+    assert.equal(bs.capLiftedAt != null, true, 'lift recorded as history')
+    // now cross the NEW ceiling → fresh warn + cap fire
+    led.recordTurnUsage(run.runId, { subtaskId: 'st1', sessionId: 's1', role: 'worker.audit', data: { cost: 95, usage: { input_tokens: 1 } } }) // $107 total
+    assert.equal(warns.length, 2, 'warn re-fires on the raised ceiling')
+    assert.equal(caps.length, 2, 'cap re-fires on the raised ceiling')
+    led.dispose()
+  })
+
+  it('setBudget with an empty patch is a no-op (no wasted journal write)', () => {
+    const led = mk()
+    const run = runWith(led, 10)
+    const before = readFileSync(join(baseDir, 'runs', run.runId, 'events.jsonl'), 'utf8').length
+    led.setBudget(run.runId, {})
+    const after = readFileSync(join(baseDir, 'runs', run.runId, 'events.jsonl'), 'utf8').length
+    assert.equal(before, after, 'no budget_updated journaled for an empty patch')
+    led.dispose()
   })
 
   it('recordDelegationBlocked writes an audit line', () => {

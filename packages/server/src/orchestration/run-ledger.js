@@ -253,7 +253,7 @@ export class RunLedger extends EventEmitter {
    * Evaluate the run's soft budget against current totals. Pure read PLUS the
    * one-shot latch side effects: the first warn/cap crossing journals a
    * budget_warning / budget_cap_reached (which stamps the latch via applyEvent,
-   * so it survives recovery) and emits a run_budget_warning / run_budget_cap
+   * so it survives recovery) and emits a run_budget_warning / run_budget_cap_reached
    * event for the engine to relay. Returns the BudgetEval. Uncapped runs
    * (maxUsd null) are always ok and fire nothing.
    */
@@ -288,11 +288,20 @@ export class RunLedger extends EventEmitter {
   setBudget(runId, patch = {}) {
     const record = this._records.get(runId)
     if (!record) return null
-    const wasCapped = record.budgetState.capReachedAt != null
-      && evaluateBudget({ budget: record.configSnapshot?.budget ?? null, budgetState: record.budgetState, totals: record.usageTotals.overall }).level === 'capped'
+    // No-op on an empty patch — don't burn a lifecycle fsync for nothing.
+    if (!patch || typeof patch !== 'object' || Object.keys(patch).length === 0) {
+      return this.evaluateBudget(runId)
+    }
+    const wasCapped = evaluateBudget({
+      budget: record.configSnapshot?.budget ?? null,
+      budgetState: record.budgetState,
+      totals: record.usageTotals.overall,
+    }).level === 'capped'
     const nextBudget = { ...(record.configSnapshot?.budget ?? {}), ...patch }
     this._emitEvent(runId, { type: 'budget_updated', budget: nextBudget }, { lifecycle: true })
     const evalResult = this.evaluateBudget(runId)
+    // Re-arm on a RAISE that un-caps (budget_lifted clears the latches). A
+    // lower-into-cap keeps wasCapped false here, so it re-fires cap normally.
     if (wasCapped && evalResult.level !== 'capped') {
       this._emitEvent(runId, { type: 'budget_lifted' }, { lifecycle: true })
     }
