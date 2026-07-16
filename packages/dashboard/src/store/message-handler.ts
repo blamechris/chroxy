@@ -4432,14 +4432,22 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           // replayed in-flight tool_start then re-adds the entry with a
           // fresh Date.now() startedAt, restoring the exact "Running X · 1s"
           // clock-reset symptom #4466 set out to fix.
+          // #6627 — self-heal a stale "Queued" bubble on the turn boundary.
+          // LIVE results only: a REPLAYED result (on switch_session) carries a
+          // stale queueLength that must not trim the current queue (mirrors the
+          // activeTools replay guard below). Only patch queuedMessages when the
+          // reconcile actually trimmed an orphan — reconcileQueueLength returns
+          // the same array reference in the common in-sync case, so gating on
+          // referential inequality avoids a needless write/rerender every turn.
+          const currentQueue = ss.queuedMessages ?? [];
+          const reconciledQueue =
+            queueReconcile && !_replayingSessions.has(targetId)
+              ? queueReconcile.applyTo(currentQueue).queuedMessages
+              : currentQueue;
           const patch: Partial<SessionState> = {
             ...resultPatch,
             messages: [...ss.messages],
-            // #6627 — self-heal a stale "Queued" bubble on the turn boundary.
-            // LIVE results only: a REPLAYED result (on switch_session) carries a
-            // stale queueLength that must not trim the current queue (mirrors the
-            // activeTools replay guard below).
-            ...(queueReconcile && !_replayingSessions.has(targetId) ? queueReconcile.applyTo(ss.queuedMessages ?? []) : {}),
+            ...(reconciledQueue !== currentQueue ? { queuedMessages: reconciledQueue } : {}),
           };
           // #4493 — gate per target session id. A live `result` for
           // session B during A's replay must still sweep B's activeTools.
