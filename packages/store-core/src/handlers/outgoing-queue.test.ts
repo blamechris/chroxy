@@ -2,6 +2,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest'
 import {
   handleMessageQueued,
   handleMessageDequeued,
+  handleResultQueueReconcile,
   enqueueOptimisticQueuedMessage,
   removeQueuedMessage,
   reconcileQueueLength,
@@ -355,5 +356,41 @@ describe('handleMessageDequeued', () => {
     const current = [confirmed('uin-1', 'a')]
     const builder = handleMessageDequeued({ sessionId: 's1', clientMessageId: 'uin-9', reason: 'flush' }, null)
     expect(builder.applyTo(current).queuedMessages).toBe(current)
+  })
+})
+
+describe('handleResultQueueReconcile (#6627 — self-heal a stale queued bubble on turn boundary)', () => {
+  it('returns null when the result carries no queueLength (older server) — caller skips', () => {
+    expect(handleResultQueueReconcile({ sessionId: 's1' }, null)).toBeNull()
+    expect(handleResultQueueReconcile({ sessionId: 's1', queueLength: undefined }, null)).toBeNull()
+  })
+
+  it('trims a stale CONFIRMED orphan down to the result queueLength (dropped message_dequeued)', () => {
+    // Client still shows 2 confirmed, but the server flushed one and the
+    // message_dequeued was lost — the next result carries queueLength: 1.
+    const current = [confirmed('uin-1', 'a'), confirmed('uin-2', 'b')]
+    const builder = handleResultQueueReconcile({ sessionId: 's1', queueLength: 1 }, null)!
+    const next = builder.applyTo(current).queuedMessages
+    expect(next.map((m) => m.clientMessageId)).toEqual(['uin-2'])
+  })
+
+  it('is a referential no-op when already in sync (React skips the re-render)', () => {
+    const current = [confirmed('uin-1', 'a')]
+    const builder = handleResultQueueReconcile({ sessionId: 's1', queueLength: 1 }, null)!
+    expect(builder.applyTo(current).queuedMessages).toBe(current)
+  })
+
+  it('never trims a PENDING (unconfirmed) entry — only confirmed orphans', () => {
+    // A just-sent optimistic entry legitimately makes the local queue longer than
+    // the server's confirmed count; it must survive a result reconcile.
+    const current = [confirmed('uin-1', 'a'), pending('uin-2', 'b')]
+    const builder = handleResultQueueReconcile({ sessionId: 's1', queueLength: 0 }, null)!
+    const next = builder.applyTo(current).queuedMessages
+    expect(next.map((m) => m.clientMessageId)).toEqual(['uin-2'])
+  })
+
+  it('resolves the target session from the result msg', () => {
+    const builder = handleResultQueueReconcile({ sessionId: 'sess-x', queueLength: 0 }, 'active')!
+    expect(builder.sessionId).toBe('sess-x')
   })
 })

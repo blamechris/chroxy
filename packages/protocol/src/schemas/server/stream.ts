@@ -123,6 +123,10 @@ export const ServerResultSchema = z.object({
   duration: z.number().optional(),
   usage: z.any().optional(),
   sessionId: z.string().nullable().optional(),
+  // #6627: the session's authoritative outgoing-queue length at turn end, so
+  // clients reconcile a stale "Queued" bubble on the turn boundary (self-heals a
+  // dropped/late message_dequeued). Absent from older servers.
+  queueLength: z.number().int().nonnegative().optional(),
 })
 
 export const ServerModelChangedSchema = z.object({

@@ -91,6 +91,7 @@ import {
   // mcp_servers / session_usage / web_task_list / web_feature_status migrated
   // to the shared dispatch table (#5556 slice 2)
   handleResultUsage as sharedResultUsage,
+  handleResultQueueReconcile,
   handleServerError as sharedServerError,
   handleServerStatusLegacy as sharedServerStatusLegacy,
   // web_task_created / web_task_updated — migrated to the shared dispatch table
@@ -2811,6 +2812,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         lastResultDuration: normalized.lastResultDuration,
       };
       const targetId = normalized.sessionId;
+      // #6627 — reconcile the queue against the result's authoritative queueLength
+      // so a stale "Queued" bubble (from a dropped/late message_dequeued) self-heals
+      // on this turn boundary. Null when the server sent no queueLength (older).
+      const queueReconcile = handleResultQueueReconcile(msg, get().activeSessionId);
       // Notify if a background session just finished (was streaming)
       if (targetId && get().sessionStates[targetId]?.streamingMessageId) {
         pushSessionNotification(targetId, 'completed', 'Task completed');
@@ -2820,10 +2825,26 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         if (effectiveId && get().sessionStates[effectiveId]) {
           // Force a new messages array reference so selectors detect the change,
           // even when flushPendingDeltas() was a no-op (timer already flushed).
-          updateSession(effectiveId, (ss) => ({
-            ...resultPatch,
-            messages: [...ss.messages],
-          }));
+          updateSession(effectiveId, (ss) => {
+            // #6627 — reconcile the queue on the turn boundary so a stale "Queued"
+            // bubble (dropped/late message_dequeued) self-heals. Apply only for a
+            // LIVE, OWN-session result: skip during replay (stale queueLength) and
+            // when effectiveId fell back to the active session (effectiveId !==
+            // targetId → the queueLength is from a different session) — matching
+            // the dashboard's targetId-scoped gate. Only patch queuedMessages when
+            // the reconcile actually trimmed an orphan (referential no-op otherwise
+            // → no needless write/rerender every turn).
+            const currentQueue = ss.queuedMessages ?? [];
+            const reconciledQueue =
+              queueReconcile && effectiveId === targetId && !_ctx.replayingSessions.has(effectiveId)
+                ? queueReconcile.applyTo(currentQueue).queuedMessages
+                : currentQueue;
+            return {
+              ...resultPatch,
+              messages: [...ss.messages],
+              ...(reconciledQueue !== currentQueue ? { queuedMessages: reconciledQueue } : {}),
+            };
+          });
         }
       }
       break;

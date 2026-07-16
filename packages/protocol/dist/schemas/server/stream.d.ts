@@ -60,6 +60,7 @@ export declare const ServerResultSchema: z.ZodObject<{
     duration: z.ZodOptional<z.ZodNumber>;
     usage: z.ZodOptional<z.ZodAny>;
     sessionId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    queueLength: z.ZodOptional<z.ZodNumber>;
 }, z.core.$strip>;
 export declare const ServerModelChangedSchema: z.ZodObject<{
     type: z.ZodLiteral<"model_changed">;

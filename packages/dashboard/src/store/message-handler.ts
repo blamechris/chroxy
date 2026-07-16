@@ -86,6 +86,7 @@ import {
   handleEnvironmentError as sharedEnvironmentError,
   // mcp_servers / session_usage migrated to the shared dispatch table (#5556 slice 2)
   handleResultUsage as sharedResultUsage,
+  handleResultQueueReconcile,
   handleServerError as sharedServerError,
   handleServerStatusLegacy as sharedServerStatusLegacy,
   // web_task_created / web_task_updated — migrated to the shared dispatch table
@@ -4404,6 +4405,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         lastResultCost: resolvedCost,
         lastResultDuration: normalized.lastResultDuration,
       };
+      // #6627 — reconcile the queue against the result's authoritative queueLength
+      // so a stale "Queued" bubble (from a dropped/late message_dequeued) self-heals
+      // on this turn boundary. Null when the server sent no queueLength (older).
+      const queueReconcile = handleResultQueueReconcile(msg, get().activeSessionId);
       // Notify if a background session just finished (was streaming)
       if (targetId && get().sessionStates[targetId]?.streamingMessageId) {
         pushSessionNotification(targetId, 'completed', 'Task completed');
@@ -4427,9 +4432,22 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           // replayed in-flight tool_start then re-adds the entry with a
           // fresh Date.now() startedAt, restoring the exact "Running X · 1s"
           // clock-reset symptom #4466 set out to fix.
+          // #6627 — self-heal a stale "Queued" bubble on the turn boundary.
+          // LIVE results only: a REPLAYED result (on switch_session) carries a
+          // stale queueLength that must not trim the current queue (mirrors the
+          // activeTools replay guard below). Only patch queuedMessages when the
+          // reconcile actually trimmed an orphan — reconcileQueueLength returns
+          // the same array reference in the common in-sync case, so gating on
+          // referential inequality avoids a needless write/rerender every turn.
+          const currentQueue = ss.queuedMessages ?? [];
+          const reconciledQueue =
+            queueReconcile && !_replayingSessions.has(targetId)
+              ? queueReconcile.applyTo(currentQueue).queuedMessages
+              : currentQueue;
           const patch: Partial<SessionState> = {
             ...resultPatch,
             messages: [...ss.messages],
+            ...(reconciledQueue !== currentQueue ? { queuedMessages: reconciledQueue } : {}),
           };
           // #4493 — gate per target session id. A live `result` for
           // session B during A's replay must still sweep B's activeTools.
