@@ -3301,12 +3301,20 @@ button.sidebar-token-view-session-row:hover {
   gap: 8px;
   padding: 6px 4px 4px 4px;
   border-top: 1px dashed color-mix(in srgb, var(--border-primary) 50%, transparent);
+  /* #6620: defensive min-width:0. NOTE the load-bearing fix for the reported
+     overflow is `overflow-wrap: anywhere` on the -content <pre> below (it shrinks
+     a long unbreakable line's min-content). This subtree is all column-flex, so
+     width is the CROSS axis where min-width:auto already resolves to 0 — this is
+     house-style belt, not the mechanism (unlike `.msg` #4757, which sits on the
+     actual `.chat-messages` flex item). */
+  min-width: 0;
 }
 
 .tool-group-entry-detail-section {
   display: flex;
   flex-direction: column;
   gap: 3px;
+  min-width: 0; /* #6620 — defensive, see the note above. */
 }
 
 .tool-group-entry-detail-label {
@@ -3326,7 +3334,15 @@ button.sidebar-token-view-session-row:hover {
   padding: 6px 8px;
   border-radius: 4px;
   white-space: pre-wrap;
+  /* #6620: `overflow-wrap: anywhere` breaks a long unbreakable token (long path
+     / URL with no spaces) that `word-break: break-word` can leave overflowing;
+     `max-width: 100%` + `min-width: 0` keep the <pre> inside the card, and the
+     `overflow: auto` below gives a horizontal scrollbar as the last resort
+     instead of bleeding past the boundary. */
+  overflow-wrap: anywhere;
   word-break: break-word;
+  max-width: 100%;
+  min-width: 0;
   /*
    * #4283: outer .tool-group-list caps at 220px; the inner scroller has to
    * sit comfortably under that so the outer wins first instead of nesting
