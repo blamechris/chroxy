@@ -29,8 +29,19 @@ export const AUDIT_WORKER_PREAMBLE = [
   '`chroxy-decision` JSON block, exactly as the turn instructs — no prose after it.',
 ].join(' ')
 
+export const IMPLEMENT_WORKER_PREAMBLE = [
+  'You are an IMPLEMENT WORKER on a code committee. You carry out one subtask by',
+  'editing files IN YOUR ISOLATED WORKTREE ONLY — never touch paths outside it.',
+  'First propose a short plan-of-attack for the architect to approve; then make',
+  'the change and report a concise summary of what you did and which files you',
+  'touched. Keep changes minimal and focused on the subtask. Every turn ends with',
+  'a single fenced `chroxy-decision` JSON block, exactly as the turn instructs —',
+  'no prose after it.',
+].join(' ')
+
 export function architectPreamble() { return ARCHITECT_PREAMBLE }
 export function auditWorkerPreamble() { return AUDIT_WORKER_PREAMBLE }
+export function implementWorkerPreamble() { return IMPLEMENT_WORKER_PREAMBLE }
 
 const join = (...parts) => parts.filter((p) => p != null && p !== '').join('\n\n')
 
@@ -66,20 +77,36 @@ export function buildPoaReviewPrompt({ subtask, poa }) {
 
 /** Worker: execute the (approved) subtask and report a result. */
 export function buildExecutePrompt({ subtask, feedback = null }) {
+  const implement = subtask.role === 'implement'
   return join(
-    `Carry out the audit for subtask "${subtask.title}" and report your findings.`,
+    implement
+      ? `Carry out subtask "${subtask.title}" by editing files in your worktree, then report a concise summary of what you changed.`
+      : `Carry out the audit for subtask "${subtask.title}" and report your findings.`,
     feedback ? `ARCHITECT FEEDBACK to address:\n${feedback}` : null,
     decisionInstruction('work_result'),
   )
 }
 
-/** Architect: review a worker's result. */
-export function buildResultReviewPrompt({ subtask, result }) {
+/** Architect: review a worker's result. For implement subtasks the orchestrator
+ * attaches a capped diff of the actual change. */
+export function buildResultReviewPrompt({ subtask, result, diff = null }) {
+  const implement = subtask.role === 'implement'
   return join(
-    `Review this worker's audit result for subtask "${subtask.title}".`,
+    `Review this worker's ${implement ? 'implementation' : 'audit'} result for subtask "${subtask.title}".`,
     `RESULT:\n${result.summary}`,
+    diff && diff.patch ? `DIFF (${diff.truncated ? 'truncated' : 'full'}):\n${diff.stat || ''}\n${diff.patch}` : null,
     `Verdict: approve (accept), revise (send feedback, same worker retries), redelegate (fresh worker), or escalate.`,
     decisionInstruction('result_review'),
+  )
+}
+
+/** Fixup worker: resolve merge conflicts in the integration worktree. */
+export function buildFixupPrompt({ subtask, conflictFiles = [] }) {
+  return join(
+    `A merge of subtask "${subtask.title}" into the integration branch hit conflicts.`,
+    `Resolve the conflicts in these files, keeping BOTH changes' intent where possible: ${conflictFiles.join(', ') || '(see git status)'}.`,
+    `Edit the files to remove all conflict markers. Do not commit — the orchestrator commits after verifying the tree is clean.`,
+    decisionInstruction('work_result'),
   )
 }
 

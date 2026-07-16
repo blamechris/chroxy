@@ -1,9 +1,19 @@
 /**
- * OrchestrationManager (engine, epic #6691, step E-2) — the committee engine.
- * Owns run lifecycle for the READ/audit path: an architect session plans the
- * epic, worker sessions execute audit subtasks, the architect reviews each
- * plan-of-attack and result, and a synthesis turn produces the report. Write-
- * capable workers + merge-back are E-3; the wire projection is E-4.
+ * OrchestrationManager (engine, epic #6691, steps E-2 + E-3) — the committee
+ * engine. Owns run lifecycle: an architect session plans the epic, worker
+ * sessions execute subtasks, the architect reviews each plan-of-attack and
+ * result, and a synthesis turn produces the report.
+ *
+ * Two worker kinds:
+ *  - audit (read-only): read/search the repo, report findings. sdk/byok/codex.
+ *  - implement (write-capable, E-3): edit files in an ISOLATED worktree, then
+ *    the orchestrator commits + merges the branch into a run-owned integration
+ *    worktree. codex-ONLY in v1 (codexSandbox:'workspace-write' is the only
+ *    verified path jail; sdk/byok write pending #6735). The engine NEVER touches
+ *    the user's branch/working tree and NEVER pushes — output is branches.
+ *
+ * The wire projection is E-4; restart-reconcile / orphan-sweep / gate-timeouts /
+ * pause-resume + the automated conflict-fixup worker are E-3 part 3.
  *
  * Wires the merged foundations: RunLedger (M-2) for durable state + usage,
  * run-budget (M-3) for soft caps, TurnDriver (E-1) to drive sessions,
@@ -21,10 +31,11 @@ import { randomBytes } from 'node:crypto'
 import { extractDecision, DecisionParseError, buildRepairPrompt } from './decision-contract.js'
 import { makeGate, resolveGate as resolveGateModel, nextGateId } from './run-model.js'
 import {
-  architectPreamble, auditWorkerPreamble, presetFor,
+  architectPreamble, auditWorkerPreamble, implementWorkerPreamble, presetFor,
   buildPlanPrompt, buildPoaPrompt, buildPoaReviewPrompt,
   buildExecutePrompt, buildResultReviewPrompt, buildSynthesisPrompt,
 } from './role-prompts.js'
+import { createGitOps } from './git-ops.js'
 
 const DEFAULTS = {
   maxParallelWorkers: 2,
@@ -32,11 +43,20 @@ const DEFAULTS = {
   maxCommitteeIterations: 4,
   maxParseRetries: 2,
   turnTimeoutMs: 30 * 60 * 1000,
+  diff: { maxBytes: 65536, maxFileBytes: 8192 },
+  bash: { implementAllowlist: [] },
 }
 
 // Providers whose sessions can be metered AND permission-gated read-only (S-2
 // design matrix). audit workers must be one of these.
 const AUDIT_ELIGIBLE_PROVIDERS = new Set(['claude-sdk', 'claude-byok', 'codex'])
+
+// v1: write/implement workers are codex-ONLY. codexSandbox:'workspace-write' is a
+// verified OS jail confining edits to the worktree; acceptEdits/allow rules are
+// path-AGNOSTIC and do NOT confine paths, so sdk/byok can't be safely write-
+// capable until their sandbox is verified (tracked in #6735). A run whose worker
+// provider isn't implement-eligible has its implement subtasks coerced to audit.
+const IMPLEMENT_ELIGIBLE_PROVIDERS = new Set(['codex'])
 
 // Engine-side subtask states that end scheduling. 'escalated' is deliberately
 // excluded — it awaits a user gate, so it must block synthesis.
@@ -51,7 +71,7 @@ export class OrchestrationManager extends EventEmitter {
    *   now?: () => number, log?: object,
    * }} opts
    */
-  constructor({ sessionManager, ledger, turnDriver, permissionGateFactory = null, config = {}, roles = null, validateCwd = null, now = () => Date.now(), log = null }) {
+  constructor({ sessionManager, ledger, turnDriver, gitOps = null, permissionGateFactory = null, config = {}, roles = null, validateCwd = null, now = () => Date.now(), log = null }) {
     super()
     if (!sessionManager) throw new Error('OrchestrationManager requires a sessionManager')
     if (!ledger) throw new Error('OrchestrationManager requires a ledger')
@@ -59,8 +79,15 @@ export class OrchestrationManager extends EventEmitter {
     this._sm = sessionManager
     this._ledger = ledger
     this._driver = turnDriver
-    this._cfg = { ...DEFAULTS, ...(config.orchestration || config || {}) }
-    this._roles = roles || (config.orchestration && config.orchestration.roles) || null
+    const cfg = config.orchestration || config || {}
+    this._cfg = {
+      ...DEFAULTS,
+      ...cfg,
+      diff: { ...DEFAULTS.diff, ...(cfg.diff || {}) },
+      bash: { ...DEFAULTS.bash, ...(cfg.bash || {}) },
+    }
+    this._gitOps = gitOps || createGitOps()
+    this._roles = roles || cfg.roles || null
     this._validateCwd = validateCwd
     this._now = now
     this._log = log
@@ -76,6 +103,7 @@ export class OrchestrationManager extends EventEmitter {
         isOwnedSession: (sid) => this._isOwnedSession(sid),
         policyForSession: (sid) => this._roleClassForSession(sid),
         emitEscalation: (info) => this._onPermissionEscalation(info),
+        bashAllowlist: this._cfg.bash.implementAllowlist || [],
         log,
       })
     }
@@ -100,6 +128,7 @@ export class OrchestrationManager extends EventEmitter {
     if (!effectiveGoal) throw new Error('createRun requires a goal or a preset that provides one')
 
     const roleModels = this._resolveRoles(roleOverrides)
+    const implementEligible = IMPLEMENT_ELIGIBLE_PROVIDERS.has(roleModels.worker.provider)
     const configSnapshot = {
       cwd,
       roleModels,
@@ -115,11 +144,13 @@ export class OrchestrationManager extends EventEmitter {
       preset: presetDef,
       autoApprovePlan: autoApprovePlan === true,
       roleModels,
+      implementEligible, // codex-only in v1 (#6735) — else implement subtasks coerce to audit
       architectSessionId: null,
-      ownedSessions: new Map(), // sessionId -> { role: 'architect'|'audit', subtaskId }
+      ownedSessions: new Map(), // sessionId -> { role: 'architect'|'audit'|'implement'|'fixup', subtaskId }
       gates: new Map(), // gateId -> gate
-      subtasks: new Map(), // subtaskId -> { iterations, poa, result, state }
+      subtasks: new Map(), // subtaskId -> { iterations, poa, result, state, role, branch, baseSha, worktreePath }
       results: [], // accepted { title, summary }
+      integration: null, // { worktreePath, branch, merged: [] } — lazily created on first accepted implement subtask
       phase: 'created',
       cancelled: false,
     })
@@ -152,19 +183,20 @@ export class OrchestrationManager extends EventEmitter {
     } catch (err) {
       return this._failRun(run, `PLAN_${err instanceof DecisionParseError ? 'PARSE' : 'FAILED'}`, err)
     }
-    // Materialize subtasks. E-2 is the READ/audit path: every subtask runs
-    // read-only regardless of the role the architect proposed, so coerce all of
-    // them to 'audit' — labeling a subtask worker.implement while it actually
-    // runs through the read-only worker path would make the run record lie. The
-    // implement path (respecting spec.role for non-audit runs) is E-3.
+    // Materialize subtasks. A subtask runs 'implement' (write-capable) ONLY when
+    // the architect asked for it AND the run's worker provider is
+    // implement-eligible (codex, #6735) AND no preset forces audit. Otherwise it
+    // is coerced to read-only 'audit' — labeling it worker.implement while it
+    // actually runs read-only would make the run record lie.
     for (const spec of plan.subtasks) {
       const subtaskId = `st_${randomBytes(4).toString('hex')}`
-      if (spec.role && spec.role !== 'audit') {
-        this._log?.warn?.(`orchestration: subtask "${spec.title}" requested role '${spec.role}'; coerced to audit (read path only)`)
+      const wantsImplement = spec.role === 'implement'
+      const role = run.preset?.forceRole ?? (wantsImplement && run.implementEligible ? 'implement' : 'audit')
+      if (wantsImplement && role !== 'implement') {
+        this._log?.warn?.(`orchestration: subtask "${spec.title}" requested implement; coerced to audit (${run.preset?.forceRole ? 'preset forces audit' : 'worker provider not implement-eligible'})`)
       }
-      const role = 'audit'
       this._ledger.createSubtask(runId, { subtaskId, role: `worker.${role}`, title: spec.title })
-      run.subtasks.set(subtaskId, { iterations: 0, spec: { ...spec, role }, state: 'pending', poa: null, result: null })
+      run.subtasks.set(subtaskId, { iterations: 0, spec: { ...spec, role }, state: 'pending', poa: null, result: null, branch: null, baseSha: null, worktreePath: null })
     }
 
     if (run.autoApprovePlan) {
@@ -245,14 +277,14 @@ export class OrchestrationManager extends EventEmitter {
       st.state = 'active'
       this._runSubtask(run, subtaskId).catch((err) => {
         this._log?.warn?.(`subtask ${subtaskId} crashed: ${err?.message || err}`)
-        this._finishSubtask(run, subtaskId, 'failed')
+        this._finishSubtask(run, subtaskId, 'failed').catch(() => {})
       })
     }
   }
 
   async _runSubtask(run, subtaskId) {
     const st = run.subtasks.get(subtaskId)
-    let sessionId = this._spawnWorker(run, subtaskId)
+    let sessionId = await this._spawnWorker(run, subtaskId)
 
     let feedback = null
     // committee loop for this subtask
@@ -278,79 +310,110 @@ export class OrchestrationManager extends EventEmitter {
       if (poaReview.verdict === 'revise' || poaReview.verdict === 'redelegate') {
         st.iterations += 1
         feedback = poaReview.feedback ?? null
-        if (poaReview.verdict === 'redelegate') sessionId = this._respawnWorker(run, subtaskId, sessionId)
+        if (poaReview.verdict === 'redelegate') sessionId = await this._respawnWorker(run, subtaskId, sessionId)
         continue
       }
       // 3) execute
       this._ledger.updateSubtask(run.runId, subtaskId, { status: 'executing' })
       const result = await this._driveDecision(run, sessionId, buildExecutePrompt({ subtask: st.spec, feedback }), 'work_result', 'execute', subtaskId).then((r) => r.decision)
       st.result = result
-      // 4) architect reviews the result
+      // 3b) implement subtasks: commit the worktree and compute a review diff so
+      // the architect reviews the ACTUAL change, not just the worker's summary.
+      const diff = st.spec.role === 'implement' ? await this._commitAndDiff(run, subtaskId, sessionId) : null
+      // 4) architect reviews the result (+ diff for implement)
       this._ledger.updateSubtask(run.runId, subtaskId, { status: 'result_review' })
-      const resultReview = await this._architectReview(run, buildResultReviewPrompt({ subtask: st.spec, result }), 'result_review')
+      const resultReview = await this._architectReview(run, buildResultReviewPrompt({ subtask: st.spec, result, diff }), 'result_review')
       this._ledger.recordCommitteeReview(run.runId, subtaskId, { phase: 'result', verdict: resultReview.verdict, reviewerSessionId: run.architectSessionId, notes: resultReview.feedback ?? '' })
       if (resultReview.verdict === 'approve') {
+        if (st.spec.role === 'implement') return await this._acceptImplement(run, subtaskId, sessionId, result)
         run.results.push({ title: st.spec.title, summary: result.summary })
-        this._destroySession(run, sessionId)
+        await this._destroySession(run, sessionId)
         return this._finishSubtask(run, subtaskId, 'done')
       }
       if (resultReview.verdict === 'escalate') return this._escalateSubtask(run, subtaskId, resultReview.feedback || 'architect escalated the result')
       // revise / redelegate → loop with feedback (redelegate gets a fresh worker)
       st.iterations += 1
       feedback = resultReview.feedback ?? null
-      if (resultReview.verdict === 'redelegate') sessionId = this._respawnWorker(run, subtaskId, sessionId)
+      if (resultReview.verdict === 'redelegate') sessionId = await this._respawnWorker(run, subtaskId, sessionId)
     }
   }
 
   // Spawn + register + rule-gate + attach a worker session for a subtask.
-  _spawnWorker(run, subtaskId) {
-    const sessionId = this._spawnSession(run, { role: 'audit', subtaskId })
-    run.ownedSessions.set(sessionId, { role: 'audit', subtaskId })
+  async _spawnWorker(run, subtaskId) {
+    const st = run.subtasks.get(subtaskId)
+    const role = st.spec.role === 'implement' ? 'implement' : 'audit'
+    const sessionId = this._spawnSession(run, { role, subtaskId })
+    run.ownedSessions.set(sessionId, { role, subtaskId })
     this._ledger.updateSubtask(run.runId, subtaskId, { status: 'briefing' })
-    this._applyReadOnlyRules(sessionId)
+    if (role === 'implement') {
+      // The write worker got an isolated worktree (worktree:true) — put it on a
+      // named branch and record the branch-point so the review diff + merge are
+      // reproducible. Its writes are confined by the OS sandbox (codex
+      // workspace-write), NOT by permission rules, so we do NOT apply read-only
+      // rules (they would deny the edits acceptEdits is meant to allow).
+      const worktreePath = this._workerWorktreePath(sessionId)
+      st.worktreePath = worktreePath
+      if (worktreePath) {
+        const branchName = `chroxy/orch/${run.runId}/${subtaskId}`
+        try {
+          const branchExists = await this._gitOps.branchExists(worktreePath, branchName)
+          if (branchExists.exists) await this._gitOps.deleteBranch(worktreePath, branchName)
+          const { branch, baseSha } = await this._gitOps.createBranch(worktreePath, branchName)
+          st.branch = branch
+          st.baseSha = baseSha
+        } catch (err) {
+          this._log?.warn?.(`orchestration: createBranch failed for ${subtaskId}: ${err?.message || err}`)
+        }
+      }
+    } else {
+      this._applyReadOnlyRules(sessionId)
+    }
     this._ledger.attachSession(run.runId, subtaskId, { sessionId, provider: run.roleModels.worker.provider, model: run.roleModels.worker.model, meterable: true })
     return sessionId
   }
 
   // redelegate: tear down the current worker and hand the subtask to a fresh one.
-  _respawnWorker(run, subtaskId, oldSessionId) {
-    this._destroySession(run, oldSessionId)
+  async _respawnWorker(run, subtaskId, oldSessionId) {
+    await this._destroySession(run, oldSessionId)
     this._ledger.updateSubtask(run.runId, subtaskId, { status: 'respawning' })
     return this._spawnWorker(run, subtaskId)
   }
 
-  _finishSubtask(run, subtaskId, status) {
+  // Release every session a subtask still owns (worker + any fixup). Awaits the
+  // auto-commit-before-destroy of an implement worktree so no work is lost.
+  async _releaseSubtaskSessions(run, subtaskId) {
+    for (const [sid, meta] of [...run.ownedSessions]) {
+      if (meta.subtaskId === subtaskId && meta.role !== 'architect') await this._destroySession(run, sid)
+    }
+  }
+
+  async _finishSubtask(run, subtaskId, status) {
     if (run.cancelled || !this._runs.has(run.runId)) return
     const st = run.subtasks.get(subtaskId)
     if (st) st.state = status
     this._ledger.updateSubtask(run.runId, subtaskId, { status })
-    // release the worker if still owned
-    for (const [sid, meta] of run.ownedSessions) {
-      if (meta.subtaskId === subtaskId && meta.role === 'audit') this._destroySession(run, sid)
-    }
+    await this._releaseSubtaskSessions(run, subtaskId)
     this._schedule(run)
   }
 
-  _escalateSubtask(run, subtaskId, reason) {
+  async _escalateSubtask(run, subtaskId, reason) {
     const st = run.subtasks.get(subtaskId)
     if (st) st.state = 'escalated'
     this._ledger.updateSubtask(run.runId, subtaskId, { status: 'escalated' })
     // Free this subtask's worker so a pending sibling can take the slot while
-    // the user resolves the escalation gate.
-    for (const [sid, meta] of [...run.ownedSessions]) {
-      if (meta.subtaskId === subtaskId && meta.role === 'audit') this._destroySession(run, sid)
-    }
+    // the user resolves the escalation gate (auto-commits implement work first).
+    await this._releaseSubtaskSessions(run, subtaskId)
     const gate = this._openGate(run, { kind: 'escalation', nodeId: subtaskId, summary: `Subtask "${st?.spec?.title ?? subtaskId}" escalated`, detail: reason })
     this.emit('gate_opened', { runId: run.runId, gate })
     this._schedule(run)
     return { runId: run.runId, subtaskId, escalated: true, gateId: gate.gateId }
   }
 
-  _resolveEscalation(run, gate, decision, note) {
+  async _resolveEscalation(run, gate, decision, note) {
     const subtaskId = gate.nodeId
     const st = subtaskId ? run.subtasks.get(subtaskId) : null
     if (!st) return { runId: run.runId, resolved: true }
-    if (decision === 'skip') { this._finishSubtask(run, subtaskId, 'skipped'); return { runId: run.runId, subtaskId, skipped: true } }
+    if (decision === 'skip') { await this._finishSubtask(run, subtaskId, 'skipped'); return { runId: run.runId, subtaskId, skipped: true } }
     if (decision === 'reject') return this._failRun(run, 'ESCALATION_REJECTED', new Error(note || 'user failed the run'))
     // approve / revise → re-drive the subtask (iteration reset via a fresh worker)
     st.state = 'pending'
@@ -365,12 +428,15 @@ export class OrchestrationManager extends EventEmitter {
     const { decision } = await this._driveDecision(run, run.architectSessionId, buildSynthesisPrompt({ goal: run.goal, results: run.results }), 'synthesis', 'synthesis', null)
     // The report lives in memory until M-4 (run-report.js) persists report.{json,md}.
     this._rememberReport(run.runId, decision.reportMarkdown)
-    this._destroySession(run, run.architectSessionId)
+    await this._destroySession(run, run.architectSessionId)
+    // Remove the integration worktree; its branch (the run's output) is kept.
+    const integrationBranch = run.integration?.branch ?? null
+    await this._cleanupIntegration(run)
     run.phase = 'completed'
     this._ledger.setStatus(run.runId, 'completed')
-    this.emit('run_completed', { runId: run.runId, reportMarkdown: decision.reportMarkdown })
+    this.emit('run_completed', { runId: run.runId, reportMarkdown: decision.reportMarkdown, integrationBranch })
     this._runs.delete(run.runId)
-    return { runId: run.runId, phase: 'completed', reportMarkdown: decision.reportMarkdown }
+    return { runId: run.runId, phase: 'completed', reportMarkdown: decision.reportMarkdown, integrationBranch }
   }
 
   // --- turn driving + decisions -------------------------------------------
@@ -383,6 +449,67 @@ export class OrchestrationManager extends EventEmitter {
     // review's LINK to the subtask is recorded separately via recordCommitteeReview.
     const { decision } = await this._driveDecision(run, run.architectSessionId, prompt, kind, kind, null)
     return decision
+  }
+
+  // --- implement (write) path ---------------------------------------------
+
+  // Auto-commit an implement worker's worktree and compute a capped review diff
+  // so the architect reviews the actual change.
+  async _commitAndDiff(run, subtaskId, sessionId) {
+    const st = run.subtasks.get(subtaskId)
+    const worktreePath = st.worktreePath || this._workerWorktreePath(sessionId)
+    if (!worktreePath || !st.baseSha) return null
+    try {
+      await this._gitOps.autoCommit({ worktreePath, subtaskId })
+      return await this._gitOps.computeCappedDiff({
+        repoDir: worktreePath, baseSha: st.baseSha, headRef: 'HEAD',
+        maxBytes: this._cfg.diff.maxBytes, maxFileBytes: this._cfg.diff.maxFileBytes,
+      })
+    } catch (err) {
+      this._log?.warn?.(`orchestration: commit/diff failed for ${subtaskId}: ${err?.message || err}`)
+      return null
+    }
+  }
+
+  // Accept an approved implement subtask: destroy the worker (auto-commits its
+  // worktree) then sequentially merge its branch into the run's integration
+  // worktree. Clean → done. Conflict → abort + escalate (the automated single
+  // fixup worker is deferred to E-3 part 3; the user resolves via the gate).
+  async _acceptImplement(run, subtaskId, sessionId, result) {
+    const st = run.subtasks.get(subtaskId)
+    this._ledger.updateSubtask(run.runId, subtaskId, { status: 'merging' })
+    await this._destroySession(run, sessionId)
+    if (!st.branch || !st.baseSha) return this._escalateSubtask(run, subtaskId, 'no branch/worktree to merge')
+    const integration = await this._ensureIntegration(run, st.baseSha)
+    if (!integration) return this._escalateSubtask(run, subtaskId, 'could not create the integration worktree')
+    let merge
+    try {
+      merge = await this._gitOps.mergeNoFf({ integrationWorktree: integration.worktreePath, branch: st.branch, subtaskId })
+    } catch (err) {
+      return this._escalateSubtask(run, subtaskId, `merge failed: ${err?.message || err}`)
+    }
+    if (merge.ok) {
+      integration.merged.push(subtaskId)
+      run.results.push({ title: st.spec.title, summary: result.summary, branch: st.branch })
+      return this._finishSubtask(run, subtaskId, 'done')
+    }
+    try { await this._gitOps.abortMerge(integration.worktreePath) } catch { /* best-effort */ }
+    return this._escalateSubtask(run, subtaskId, `merge conflict in: ${(merge.conflictFiles || []).join(', ') || '(see git status)'}`)
+  }
+
+  // Lazily create the run's integration worktree on the first accepted implement
+  // subtask (audit-only / repo-audit runs never create one).
+  async _ensureIntegration(run, baseSha) {
+    if (run.integration) return run.integration
+    const branchName = `chroxy/orch/${run.runId}/integration`
+    try {
+      const { worktreePath, branch } = await this._gitOps.createIntegrationWorktree({ repoDir: run.cwd, runId: run.runId, branchName, baseSha })
+      run.integration = { worktreePath, branch, merged: [] }
+      return run.integration
+    } catch (err) {
+      this._log?.warn?.(`orchestration: createIntegrationWorktree failed: ${err?.message || err}`)
+      return null
+    }
   }
 
   // Drive one turn and extract its decision, with a repair-reprompt ladder.
@@ -416,19 +543,35 @@ export class OrchestrationManager extends EventEmitter {
 
   _spawnSession(run, { role, subtaskId = null }) {
     const spec = role === 'architect' ? run.roleModels.architect : run.roleModels.worker
+    const preamble = role === 'architect' ? architectPreamble()
+      : role === 'implement' ? implementWorkerPreamble()
+      : auditWorkerPreamble()
     const opts = {
       name: `orch:${run.runId}:${role}${subtaskId ? `:${subtaskId}` : ''}`,
       cwd: run.cwd,
       provider: spec.provider,
       model: spec.model,
-      permissionMode: 'approve',
-      sessionPreamble: role === 'architect' ? architectPreamble() : auditWorkerPreamble(),
+      // implement workers accept their own edits (path confinement comes from the
+      // OS sandbox, NOT permission rules); everyone else prompts (gate answers).
+      permissionMode: role === 'implement' ? 'acceptEdits' : 'approve',
+      sessionPreamble: preamble,
       metadata: { orchestrationRunId: run.runId, orchestrationRole: role === 'architect' ? 'architect' : `worker.${role}` },
     }
-    // codex audit workers get the read-only sandbox (#6690).
-    if (spec.provider === 'codex') opts.codexSandbox = 'read-only'
+    if (role === 'implement') {
+      // Isolated write worktree + the OS write jail (codex-only in v1, #6735).
+      opts.worktree = true
+      if (spec.provider === 'codex') opts.codexSandbox = 'workspace-write'
+    } else if (spec.provider === 'codex') {
+      opts.codexSandbox = 'read-only' // architect + audit are read-only (#6690)
+    }
     const sessionId = this._sm.createSession(opts)
     return sessionId
+  }
+
+  // The isolated worktree dir SessionManager created for a worktree:true session.
+  _workerWorktreePath(sessionId) {
+    const entry = this._sm.getSession?.(sessionId)
+    return entry?.worktreePath || entry?.session?.worktreePath || null
   }
 
   _applyReadOnlyRules(sessionId) {
@@ -441,8 +584,21 @@ export class OrchestrationManager extends EventEmitter {
     }
   }
 
-  _destroySession(run, sessionId) {
+  // The single teardown choke point. For an implement worker, auto-commit its
+  // worktree FIRST — destroySession removes the worktree, which would delete
+  // uncommitted work. This covers every release path (accept, finish, escalate,
+  // redelegate, fail, cancel) at one site.
+  async _destroySession(run, sessionId) {
     if (!sessionId) return
+    const meta = run.ownedSessions.get(sessionId)
+    if (meta?.role === 'implement' && meta.subtaskId) {
+      const st = run.subtasks.get(meta.subtaskId)
+      const worktreePath = st?.worktreePath || this._workerWorktreePath(sessionId)
+      if (worktreePath) {
+        try { await this._gitOps.autoCommit({ worktreePath, subtaskId: meta.subtaskId }) }
+        catch (err) { this._log?.warn?.(`orchestration: auto-commit before destroy failed for ${sessionId}: ${err?.message || err}`) }
+      }
+    }
     run.ownedSessions.delete(sessionId)
     try { this._sm.destroySession?.(sessionId) } catch { /* best-effort */ }
   }
@@ -467,32 +623,47 @@ export class OrchestrationManager extends EventEmitter {
     this.emit('permission_escalation', { runId: run.runId, ...info })
   }
 
-  _failRun(run, code, err) {
+  async _failRun(run, code, err) {
     // A cancel that already tore the run down wins: don't overwrite the
     // terminal 'cancelled' status with 'failed' (or double-emit lifecycle
     // events) when an in-flight turn rejects SESSION_GONE on the next tick.
     if (run.cancelled || !this._runs.has(run.runId)) return { runId: run.runId, phase: run.phase }
     run.phase = 'failed'
     this._ledger.setStatus(run.runId, 'failed', code)
-    // tear down any owned sessions
-    for (const sid of [...run.ownedSessions.keys()]) this._destroySession(run, sid)
+    // tear down any owned sessions (auto-commits implement worktrees first)
+    for (const sid of [...run.ownedSessions.keys()]) await this._destroySession(run, sid)
+    await this._cleanupIntegration(run)
     this.emit('run_failed', { runId: run.runId, code, message: err?.message || String(err) })
     this._runs.delete(run.runId)
     return { runId: run.runId, phase: 'failed', code }
   }
 
-  cancelRun(runId, { reason = 'user' } = {}) {
+  async cancelRun(runId, { reason = 'user' } = {}) {
     const run = this._runs.get(runId)
     if (!run) return null
     run.cancelled = true
+    // interrupt every in-flight owned session, then release (auto-commit → destroy)
+    // so no implement worker's uncommitted work is lost.
     for (const sid of [...run.ownedSessions.keys()]) {
       try { this._sm.getSession?.(sid)?.session?.interrupt?.() } catch { /* ignore */ }
-      this._destroySession(run, sid)
     }
+    for (const sid of [...run.ownedSessions.keys()]) await this._destroySession(run, sid)
+    await this._cleanupIntegration(run)
     this._ledger.setStatus(runId, 'cancelled', reason)
     this.emit('run_cancelled', { runId, reason })
     this._runs.delete(runId)
     return { runId, phase: 'cancelled' }
+  }
+
+  // Remove the run's integration WORKTREE (orchestrator-owned, under the
+  // worktrees root). The integration BRANCH is KEPT — it is the run's output.
+  async _cleanupIntegration(run) {
+    if (!run.integration?.worktreePath) return
+    try {
+      await this._gitOps.removeWorktree({ repoDir: run.cwd, worktreePath: run.integration.worktreePath })
+      await this._gitOps.pruneWorktrees(run.cwd)
+    } catch (err) { this._log?.warn?.(`orchestration: integration cleanup failed: ${err?.message || err}`) }
+    run.integration = null
   }
 
   _get(runId) {
@@ -505,14 +676,15 @@ export class OrchestrationManager extends EventEmitter {
     return false
   }
   _roleClassForSession(sessionId) {
-    // The architect is read-only too (it plans/reviews, never edits), so it maps
-    // to the 'audit' policy: reads are rule-allowed and never reach the gate;
-    // anything else (Bash) is denied. Returning null here would make the gate
-    // IGNORE the architect, wedging any non-rule tool it emits until the turn
-    // watchdog fires and fails the run.
+    // The gate policy per owned session:
+    //  - implement/fixup → 'implement' (Bash matched against the allowlist; else escalate)
+    //  - architect/audit → 'audit' (read-only; reads are rule-allowed and never
+    //    reach the gate, anything else is denied). The architect maps to 'audit'
+    //    rather than null so the gate answers (denies) it instead of IGNORING it
+    //    and wedging a stray tool until the turn watchdog fires.
     for (const run of this._runs.values()) {
       const meta = run.ownedSessions.get(sessionId)
-      if (meta) return 'audit'
+      if (meta) return (meta.role === 'implement' || meta.role === 'fixup') ? 'implement' : 'audit'
     }
     return null
   }
