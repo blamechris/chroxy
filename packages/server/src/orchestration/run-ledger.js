@@ -280,10 +280,13 @@ export class RunLedger extends EventEmitter {
   }
 
   /**
-   * Raise/lower the run's budget mid-flight. Journals budget_updated (frozen
-   * configSnapshot's budget is the one mutable field); if the change lifts a
-   * previously-capped run back under the cap, journals budget_lifted (keeping
-   * capReachedAt for history). Returns the fresh BudgetEval.
+   * Raise/lower the run's budget mid-flight. `configSnapshot` is otherwise
+   * frozen at createRun; its `budget` is the one field setBudget mutates (via
+   * the journaled budget_updated event, so the change survives recovery). If a
+   * RAISE lifts a previously-capped run back under the cap, journals
+   * budget_lifted, which re-arms the one-shot latches (clearing warnedAt/
+   * capReachedAt) so the higher ceiling notifies again — capLiftedAt is the
+   * "was capped, then lifted" history marker. Returns the fresh BudgetEval.
    */
   setBudget(runId, patch = {}) {
     const record = this._records.get(runId)

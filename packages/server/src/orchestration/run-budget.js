@@ -13,9 +13,11 @@
  * `unknownCostTurns`, and unmeterable sessions land in `meteringGaps`, so a
  * consumer can caveat "observed spend >= shown".
  *
- * Latches (billing-budget.js contract): `warnedAt`/`capReachedAt` fire the
- * warn/cap events exactly once. A refund (#4099, signed cost) that drops
- * `effectiveUsd` back under a threshold re-computes `level` (so a capped run can
+ * Latches: `warnedAt`/`capReachedAt` fire the warn/cap events exactly once
+ * (the same one-shot posture as billing-budget.js's `justWarned`/`justExceeded`
+ * return flags, though the field names here are our own). A refund (#4099,
+ * signed cost) that drops `effectiveUsd` back under a threshold re-computes
+ * `level` (so a capped run can
  * resume delegating) but never un-fires a latch — no warning spam.
  *
  * v1 config is `{ maxUsd, warnPercent }` only; per-role caps and token caps are
@@ -40,7 +42,10 @@ export function makeBudgetState() {
  */
 export function evaluateBudget({ budget, budgetState, totals, meteringGaps = [], role = null }) {
   const maxUsd = budget && Number.isFinite(budget.maxUsd) && budget.maxUsd > 0 ? budget.maxUsd : null
-  const warnPercent = budget && Number.isFinite(budget.warnPercent) ? budget.warnPercent : DEFAULT_WARN_PERCENT
+  // Clamp to [0,100] so an out-of-range config can't warn-immediately (<=0) or
+  // effectively disable the warn tier (>100 pushing the threshold above the cap).
+  const rawWarn = budget && Number.isFinite(budget.warnPercent) ? budget.warnPercent : DEFAULT_WARN_PERCENT
+  const warnPercent = Math.min(100, Math.max(0, rawWarn))
   const effectiveUsd = Number.isFinite(totals?.effectiveUsd) ? totals.effectiveUsd : 0
   const spentUsd = Number.isFinite(totals?.costUsd) ? totals.costUsd : 0
   const pricedUsd = Number.isFinite(totals?.pricedCostUsd) ? totals.pricedCostUsd : 0

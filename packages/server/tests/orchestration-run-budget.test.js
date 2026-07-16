@@ -60,6 +60,16 @@ describe('evaluateBudget (pure)', () => {
     assert.equal(e.justExceeded, false)
   })
 
+  it('clamps an out-of-range warnPercent to [0,100]', () => {
+    // >100 would push the warn threshold above the cap (disabling the warn tier);
+    // clamped to 100 → warn threshold == cap, so warned only at the cap.
+    const hi = evaluateBudget({ budget: { maxUsd: 10, warnPercent: 500 }, budgetState: zeroState(), totals: totals(9) })
+    assert.equal(hi.level, 'ok', '9 < cap and warn clamped to 100% == cap')
+    // <=0 would warn immediately; clamped to 0 → any positive spend is warned
+    const lo = evaluateBudget({ budget: { maxUsd: 10, warnPercent: -5 }, budgetState: zeroState(), totals: totals(0.01) })
+    assert.equal(lo.level, 'warned')
+  })
+
   it('carries unknownCostTurns + meteringGaps for the honesty caveat', () => {
     const e = evaluateBudget({
       budget: { maxUsd: 10 }, budgetState: zeroState(),
