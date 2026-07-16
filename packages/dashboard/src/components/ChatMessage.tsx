@@ -6,6 +6,7 @@
  */
 import { useMemo } from 'react'
 import { renderMarkdown } from '../lib/markdown'
+import { handleMarkdownLinkClick } from '../lib/links'
 
 export interface ChatMessageProps {
   id: string
@@ -46,7 +47,9 @@ export function ChatMessage({ id, type, content, isStreaming }: ChatMessageProps
       data-muted={type === 'system' ? 'true' : undefined}
     >
       {html !== null ? (
-        <div dangerouslySetInnerHTML={{ __html: html }} />
+        // #6625: modifier-click a rendered link to open it in the browser; a
+        // plain click keeps the text selectable (handler suppresses navigation).
+        <div onClick={handleMarkdownLinkClick} dangerouslySetInnerHTML={{ __html: html }} />
       ) : (
         content
       )}
