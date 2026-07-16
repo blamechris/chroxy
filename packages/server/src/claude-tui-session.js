@@ -2144,6 +2144,19 @@ export class ClaudeTuiSession extends BaseSession {
   }
 
   /**
+   * #6601: reset the output-quiescence readiness state for a fresh (re)spawn —
+   * clear the "saw first output" gate and re-stamp `_lastOutputMs` to now, so a
+   * leftover `_lastOutputMs` from the prior process can't read as "ready" the
+   * instant we respawn. The counterpart to `_appendToOutputTail` (which SETS
+   * these). Extracted from `_spawnPty` so the guard is unit-testable without a
+   * real PTY (#6604).
+   */
+  _resetQuiescenceForSpawn() {
+    this._sawFirstOutput = false
+    this._lastOutputMs = this._nowMonotonic()
+  }
+
+  /**
    * Append a PTY onData chunk to the recent-output tails (#3919).
    *
    * Maintains two tails:
@@ -2161,19 +2174,6 @@ export class ClaudeTuiSession extends BaseSession {
    * visual-render the PTY, so the colors aren't useful. Strip pattern
    * covers CSI / OSC / SS3 / single-char terminal-mode codes (#4031).
    */
-  /**
-   * #6601: reset the output-quiescence readiness state for a fresh (re)spawn —
-   * clear the "saw first output" gate and re-stamp `_lastOutputMs` to now, so a
-   * leftover `_lastOutputMs` from the prior process can't read as "ready" the
-   * instant we respawn. The counterpart to `_appendToOutputTail` (which SETS
-   * these). Extracted from `_spawnPty` so the guard is unit-testable without a
-   * real PTY (#6604).
-   */
-  _resetQuiescenceForSpawn() {
-    this._sawFirstOutput = false
-    this._lastOutputMs = this._nowMonotonic()
-  }
-
   _appendToOutputTail(data) {
     // #6601: output-quiescence readiness — stamp the recency of PTY output so
     // checkReady can detect a settled composer (see READY_QUIESCENCE_MS) when no
