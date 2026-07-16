@@ -211,9 +211,22 @@ await test('emitPi warns when the body uses arg tokens Pi will not substitute', 
   assert(!noArgs.warn, `expected no warning for an arg-free body, got: ${noArgs.warn}`)
 })
 
-await test('emitPi does not warn for a shell positional inside a fenced code block', () => {
-  const out = emitPi('c', 'Run it:\n```bash\necho "${1:-default}"\n```\n', 'x')
-  assert(!out.warn, `a shell positional in a code fence must not warn, got: ${out.warn}`)
+await test('emitPi does not warn for an arg token inside a fenced code block (but does in prose)', () => {
+  // Use `$1` — a token that DOES match the warn regex — so the test actually
+  // exercises the code-fence stripping rather than passing trivially.
+  const fenced = emitPi('c', 'Run it:\n```bash\necho $1\n```\n', 'x')
+  assert(!fenced.warn, `a bare $1 inside a code fence must not warn, got: ${fenced.warn}`)
+  const prose = emitPi('c', 'Pass echo $1 to the tool\n', 'x')
+  assert(prose.warn && /not substituted/i.test(prose.warn), `a bare $1 in prose must warn, got: ${prose.warn}`)
+})
+
+await test('emitPi warns on a non-Pi-valid skill name (Pi rejects it at load)', () => {
+  for (const bad of ['My_Skill', 'has space', '-leading', 'trailing-', 'double--hyphen', 'UPPER']) {
+    const out = emitPi(bad, 'body\n', 'x')
+    assert(out.warn && /not Pi-valid/.test(out.warn), `expected a name-format warning for "${bad}", got: ${out.warn}`)
+  }
+  const ok = emitPi('good-name-123', 'body\n', 'x')
+  assert(!ok.warn || !/not Pi-valid/.test(ok.warn), `a valid kebab name must not warn, got: ${ok.warn}`)
 })
 
 await test('detectUncompiledAgents flags an installed-but-unselected pi (~/.pi)', () => {

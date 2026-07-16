@@ -216,15 +216,28 @@ function emitCodex(name, body, description) {
 // $ARGUMENTS (the neutral arg token) has no in-body Pi equivalent — the body
 // passes through literally and a `warn` flags any arg token the author used.
 export function emitPi(name, body, description) {
-  // Warn on arg tokens only OUTSIDE fenced code blocks (a shell `${1:-…}` in a
+  const warns = []
+  // Warn on arg tokens only OUTSIDE fenced code blocks (a shell `echo $1` in a
   // ```code``` block is a positional, not a skill-arg concern) — mirrors emitGemini.
   const prose = body.replace(/```[\s\S]*?```/g, '')
-  const usesArgs = /\$ARGUMENTS\b/.test(prose) || /\$[1-9]\b/.test(prose)
+  if (/\$ARGUMENTS\b/.test(prose) || /\$[1-9]\b/.test(prose)) {
+    warns.push('pi: appends args as "User: <args>" — inline arg tokens ($ARGUMENTS / $N) are NOT substituted')
+  }
+  // Pi REJECTS a non-conforming name at load (lowercase a-z / 0-9 / single hyphens,
+  // ≤64 chars, matching the parent dir) — unlike claude/gemini/codex, which accept
+  // anything. Warn rather than silently emit a SKILL.md Pi won't load. (All current
+  // skill names conform; this guards a future one.)
+  if (!/^[a-z0-9]+(-[a-z0-9]+)*$/.test(name) || name.length > 64) {
+    warns.push(`pi: skill name "${name}" is not Pi-valid (lowercase a-z, 0-9, single hyphens, ≤64 chars) — Pi will reject it at load`)
+  }
+  // `name` is kept UNQUOTED: every valid Pi name is a YAML-safe plain scalar, and
+  // Pi matches it against the parent directory name — quoting risks a raw-string
+  // mismatch. A non-conforming name is surfaced by the warn above instead.
   return {
     path: join(homedir(), '.pi/agent/skills', name, 'SKILL.md'),
     content: `---\nname: ${name}\ndescription: ${yamlDq(description)}\n---\n\n${body}`,
     note: `pi: invoke as /skill:${name} (user-global ~/.pi/agent/skills/)`,
-    warn: usesArgs ? `pi: appends args as "User: <args>" — inline arg tokens ($ARGUMENTS / $N) are NOT substituted` : null,
+    warn: warns.length ? warns.join('; ') : null,
   }
 }
 
