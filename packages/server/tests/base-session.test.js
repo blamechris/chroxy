@@ -1696,6 +1696,27 @@ describe('BaseSession', () => {
       s.emit('result', payload)
       assert.equal('queueLength' in payload, false, 'original payload is not mutated')
     })
+
+    it("preserves the EventEmitter 'error' contract through the override", () => {
+      // The override must NOT swallow or reshape 'error': an unhandled 'error'
+      // still throws (Node's default), and a handled one is delivered verbatim
+      // (never queueLength-stamped). This is the override's highest-risk path.
+      assert.throws(() => s.emit('error', new Error('boom')), /boom/)
+      let received = null
+      s.on('error', (e) => { received = e })
+      const errPayload = { message: 'handled', queueLength: undefined }
+      s.emit('error', errPayload)
+      assert.equal(received, errPayload, 'error payload delivered by identity, unstamped')
+      assert.equal('queueLength' in received && received.queueLength !== undefined, false)
+    })
+
+    it('forwards all args for non-result events (multi-arg pass-through)', () => {
+      const seen = []
+      s.on('foo', (a, b, c) => seen.push(a, b, c))
+      const had = s.emit('foo', 1, 'two', { three: true })
+      assert.equal(had, true)
+      assert.deepStrictEqual(seen, [1, 'two', { three: true }])
+    })
   })
 })
 

@@ -1442,12 +1442,13 @@ export class BaseSession extends EventEmitter {
   }
 
   /**
-   * #4628: emit `result` after sweeping any in-flight tool_starts. All
-   * provider sessions should route through this rather than calling
-   * `this.emit('result', ...)` directly, so orphan tool_starts get
-   * paired with a synthetic tool_result BEFORE the result fires (and
-   * BEFORE state is persisted, since session-message-history listens
-   * for both events).
+   * #4628: emit `result` after sweeping any in-flight tool_starts. Provider
+   * sessions should route through this WHEN they need the orphan sweep, so
+   * orphan tool_starts get paired with a synthetic tool_result BEFORE the
+   * result fires (and BEFORE state is persisted, since session-message-history
+   * listens for both events). Some providers deliberately emit `this.emit(
+   * 'result', ...)` directly (they don't want the sweep); the queueLength stamp
+   * is applied to those too via the emit() override below.
    *
    * @param {object} payload — the result event payload ({cost, duration, usage, sessionId})
    * @param {string} [sweepReason] — optional override for the sweep reason
@@ -1478,7 +1479,8 @@ export class BaseSession extends EventEmitter {
    * Idempotent: a payload that already carries `queueLength` (none today, but a
    * caller could pre-stamp) is left untouched. `_outgoingQueue` is a BaseSession
    * field initialized before any subclass method can run; the `?` guard is
-   * belt-and-braces and yields 0 for the impossible early-emit case.
+   * belt-and-braces and yields 0 for the should-never-happen case of a subclass
+   * emitting `result` inside `super()` before the field is set.
    *
    * @param {string} event
    * @param {...any} args
