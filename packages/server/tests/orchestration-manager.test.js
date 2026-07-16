@@ -51,6 +51,7 @@ class FakeSession extends EventEmitter {
     queueMicrotask(() => {
       if (this.destroyed) return
       const out = this._decide({ role: this.role, kind, prompt: String(prompt), n: this.kindCalls[kind], model: this._model })
+      if (out == null) return // sentinel: hang this turn (no result emitted)
       const text = typeof out === 'string' ? out : fenced(out)
       this._sm.emit('session_event', { sessionId: this.sessionId, event: 'stream_delta', data: { messageId: 'm1', delta: text } })
       this._sm.emit('session_event', {
@@ -382,6 +383,119 @@ test('rejects a cwd that fails validation', () => {
     assert.doesNotThrow(() => mgr.createRun({ goal: 'x', cwd: '/ok' }))
   } finally {
     mgr.dispose(); driver.dispose(); rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('architect session is spawned read-only', async () => {
+  const { sm, mgr, cleanup } = makeHarness(happyDecider)
+  try {
+    const rec = mgr.createRun({ goal: 'Audit', cwd: '/repo', autoApprovePlan: true })
+    const done = waitFor(mgr, ['run_completed'])
+    await mgr.startRun(rec.runId)
+    await done
+    const arch = sm.created.find((c) => c.opts.metadata?.orchestrationRole === 'architect')
+    assert.ok(arch, 'architect session created')
+    const rules = arch.session.permissionRules
+    assert.ok(Array.isArray(rules), 'architect got permission rules')
+    assert.ok(rules.some((r) => r.tool === 'Read' && r.decision === 'allow'), 'architect Read allowed')
+    assert.ok(rules.some((r) => r.tool === 'Write' && r.decision === 'deny'), 'architect Write denied')
+  } finally {
+    cleanup()
+  }
+})
+
+test('gate denies an architect Bash request (never ignores it)', async () => {
+  // C2: with a permission gate, an owned architect session that emits Bash is
+  // answered (deny), not left to wedge.
+  const { sm, mgr, cleanup } = makeHarness(happyDecider, { permissionGate: true })
+  try {
+    const rec = mgr.createRun({ goal: 'Audit', cwd: '/repo', autoApprovePlan: false })
+    const gated = waitFor(mgr, ['gate_opened'])
+    await mgr.startRun(rec.runId)
+    await gated // plan done; architect session still owned (destroyed at synthesis)
+    const arch = sm.created.find((c) => c.opts.metadata?.orchestrationRole === 'architect').session
+    sm.emit('session_event', { sessionId: arch.sessionId, event: 'permission_request', data: { requestId: 'rq', tool: 'Bash', input: { command: 'ls' } } })
+    assert.deepEqual(arch.permissionResponses, [{ requestId: 'rq', decision: 'deny' }])
+  } finally {
+    cleanup()
+  }
+})
+
+test('redelegate spawns a fresh worker session', async () => {
+  const decide = (ctx) => {
+    if (ctx.kind === 'epic_plan') return { kind: 'epic_plan', subtasks: [{ title: 'A', goal: 'g', role: 'audit' }] }
+    if (ctx.role === 'architect' && ctx.kind === 'poa_review') {
+      return { kind: 'poa_review', verdict: ctx.n === 1 ? 'redelegate' : 'approve' }
+    }
+    return happyDecider(ctx)
+  }
+  const { sm, ledger, mgr, cleanup } = makeHarness(decide)
+  try {
+    const rec = mgr.createRun({ goal: 'Audit', cwd: '/repo', autoApprovePlan: true })
+    const done = waitFor(mgr, ['run_completed'])
+    await mgr.startRun(rec.runId)
+    await done
+    assert.equal(ledger.getRun(rec.runId).status, 'completed')
+    // one subtask, redelegated once → TWO worker sessions were created for it
+    const workers = sm.created.filter((c) => c.opts.metadata?.orchestrationRole === 'worker.audit')
+    assert.equal(workers.length, 2, 'redelegate created a fresh worker')
+  } finally {
+    cleanup()
+  }
+})
+
+test('architect review usage lands in architect.review, not the subtask cell', async () => {
+  const { ledger, mgr, cleanup } = makeHarness(happyDecider)
+  try {
+    const rec = mgr.createRun({ goal: 'Audit', cwd: '/repo', autoApprovePlan: true })
+    const done = waitFor(mgr, ['run_completed'])
+    await mgr.startRun(rec.runId)
+    await done
+    const record = ledger.getRun(rec.runId)
+    // architect: plan + synthesis = 2 turns; architect.review: 2 subtasks × 2 reviews = 4
+    assert.equal(record.usageTotals.byRole.architect.turns, 2)
+    assert.equal(record.usageTotals.byRole['architect.review'].turns, 4)
+    // each subtask cell holds only its worker's 2 turns (poa + execute), and the
+    // architect's review turns did NOT flip modelDrift on it
+    for (const st of record.subtasks) {
+      assert.equal(st.usage.turns, 2, 'subtask cell = worker turns only')
+      assert.notEqual(st.modelDrift, true, 'no spurious modelDrift from the review turn')
+    }
+  } finally {
+    cleanup()
+  }
+})
+
+test('startRun is rejected if the run already started', async () => {
+  const { mgr, cleanup } = makeHarness(happyDecider)
+  try {
+    const rec = mgr.createRun({ goal: 'Audit', cwd: '/repo', autoApprovePlan: false })
+    const gated = waitFor(mgr, ['gate_opened'])
+    await mgr.startRun(rec.runId)
+    await gated
+    await assert.rejects(() => mgr.startRun(rec.runId), /already started/)
+  } finally {
+    cleanup()
+  }
+})
+
+test('cancel during a turn keeps status cancelled (no failed overwrite)', async () => {
+  // architect plan turn hangs; cancel mid-turn destroys it → the turn rejects
+  // SESSION_GONE → _plan throws → _failRun must NOT overwrite cancelled.
+  const decide = (ctx) => (ctx.kind === 'epic_plan' ? null : happyDecider(ctx))
+  const { ledger, mgr, cleanup } = makeHarness(decide)
+  try {
+    const rec = mgr.createRun({ goal: 'Audit', cwd: '/repo', autoApprovePlan: true })
+    let failed = false
+    mgr.on('run_failed', () => { failed = true })
+    const startP = mgr.startRun(rec.runId)
+    await new Promise((r) => setTimeout(r, 10)) // let the plan turn start + hang
+    mgr.cancelRun(rec.runId)
+    await startP
+    assert.equal(ledger.getRun(rec.runId).status, 'cancelled')
+    assert.equal(failed, false, 'no run_failed emitted after cancel')
+  } finally {
+    cleanup()
   }
 })
 

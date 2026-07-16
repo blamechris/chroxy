@@ -47,6 +47,20 @@ describe('OrchestrationPermissionGate', () => {
     assert.deepEqual(s.responses, [{ requestId: 'r1', decision: 'deny' }])
   })
 
+  it('reads the production `tool` key (not just toolName)', () => {
+    // the real permission_request payload carries `tool`; the gate falls back to
+    // it. Exercise that key explicitly so a rename of the fallback is caught.
+    const { sm, add } = mkStub()
+    const s = add('s1')
+    gate = new OrchestrationPermissionGate({
+      sessionManager: sm,
+      isOwnedSession: () => true,
+      policyForSession: () => 'audit',
+    })
+    sm.req('s1', { requestId: 'r1', tool: 'Bash', input: { command: 'ls' } })
+    assert.deepEqual(s.responses, [{ requestId: 'r1', decision: 'deny' }])
+  })
+
   it('always denies Task/WebFetch/WebSearch regardless of role', () => {
     const { sm, add } = mkStub()
     const s = add('s1')

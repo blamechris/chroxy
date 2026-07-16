@@ -143,6 +143,7 @@ export class OrchestrationManager extends EventEmitter {
 
   async startRun(runId) {
     const run = this._get(runId)
+    if (run.phase !== 'created') throw new Error(`run ${runId} already started (phase ${run.phase})`)
     run.phase = 'planning'
     this._ledger.setStatus(runId, 'planning')
     let plan
@@ -174,6 +175,12 @@ export class OrchestrationManager extends EventEmitter {
     const sessionId = this._spawnSession(run, { role: 'architect' })
     run.architectSessionId = sessionId
     run.ownedSessions.set(sessionId, { role: 'architect', subtaskId: null })
+    // The architect reads/greps the repo to plan and review; it never edits.
+    // Give it the same read-only rules as workers so its Read/Glob/Grep are
+    // settled without prompting (else — with no rules and the gate deliberately
+    // deny-only for it — a read request would wedge until the turn watchdog
+    // fires and fails the run). Anything else it emits (Bash) hits the gate.
+    this._applyReadOnlyRules(sessionId)
     const repoMap = ''
     const prompt = buildPlanPrompt({ goal: run.goal, repoMap, maxSubtasks: 8 })
     const { decision } = await this._driveDecision(run, sessionId, prompt, 'epic_plan', 'plan', null)
@@ -238,37 +245,42 @@ export class OrchestrationManager extends EventEmitter {
 
   async _runSubtask(run, subtaskId) {
     const st = run.subtasks.get(subtaskId)
-    const sessionId = this._spawnSession(run, { role: 'audit', subtaskId })
-    run.ownedSessions.set(sessionId, { role: 'audit', subtaskId })
-    this._ledger.updateSubtask(run.runId, subtaskId, { status: 'briefing' })
-    this._ledger.attachSession(run.runId, subtaskId, { sessionId, provider: run.roleModels.worker.provider, model: run.roleModels.worker.model, meterable: true })
-
-    // read-only rules for audit workers (write-deny; reads allowed)
-    this._applyAuditRules(sessionId)
+    let sessionId = this._spawnWorker(run, subtaskId)
 
     let feedback = null
     // committee loop for this subtask
     while (true) {
-      if (st.iterations > this._cfg.maxCommitteeIterations) {
+      // Bail if the run was cancelled/torn down while an await was in flight —
+      // don't drive more turns or write status on a dead run.
+      if (run.cancelled || !this._runs.has(run.runId)) return null
+      // `iterations` counts committee round-trips already spent; at the cap we
+      // stop and escalate rather than looping forever on a stubborn subtask.
+      if (st.iterations >= this._cfg.maxCommitteeIterations) {
         return this._escalateSubtask(run, subtaskId, 'committee iteration cap exceeded')
       }
       // 1) plan-of-attack
       this._ledger.updateSubtask(run.runId, subtaskId, { status: 'briefing' })
       const poa = await this._driveDecision(run, sessionId, buildPoaPrompt({ subtask: st.spec }), 'plan_of_attack', 'poa', subtaskId).then((r) => r.decision)
       st.poa = poa
-      // 2) architect reviews the PoA
+      // 2) architect reviews the PoA (usage attributed to architect.review, NOT
+      // the subtask cell — see _architectReview)
       this._ledger.updateSubtask(run.runId, subtaskId, { status: 'poa_review' })
-      const poaReview = await this._architectReview(run, buildPoaReviewPrompt({ subtask: st.spec, poa }), 'poa_review', subtaskId)
+      const poaReview = await this._architectReview(run, buildPoaReviewPrompt({ subtask: st.spec, poa }), 'poa_review')
       this._ledger.recordCommitteeReview(run.runId, subtaskId, { phase: 'plan', verdict: poaReview.verdict, reviewerSessionId: run.architectSessionId, notes: poaReview.feedback ?? '' })
       if (poaReview.verdict === 'escalate') return this._escalateSubtask(run, subtaskId, poaReview.feedback || 'architect escalated the plan')
-      if (poaReview.verdict === 'revise' || poaReview.verdict === 'redelegate') { st.iterations += 1; feedback = poaReview.feedback ?? null; continue }
+      if (poaReview.verdict === 'revise' || poaReview.verdict === 'redelegate') {
+        st.iterations += 1
+        feedback = poaReview.feedback ?? null
+        if (poaReview.verdict === 'redelegate') sessionId = this._respawnWorker(run, subtaskId, sessionId)
+        continue
+      }
       // 3) execute
       this._ledger.updateSubtask(run.runId, subtaskId, { status: 'executing' })
       const result = await this._driveDecision(run, sessionId, buildExecutePrompt({ subtask: st.spec, feedback }), 'work_result', 'execute', subtaskId).then((r) => r.decision)
       st.result = result
       // 4) architect reviews the result
       this._ledger.updateSubtask(run.runId, subtaskId, { status: 'result_review' })
-      const resultReview = await this._architectReview(run, buildResultReviewPrompt({ subtask: st.spec, result }), 'result_review', subtaskId)
+      const resultReview = await this._architectReview(run, buildResultReviewPrompt({ subtask: st.spec, result }), 'result_review')
       this._ledger.recordCommitteeReview(run.runId, subtaskId, { phase: 'result', verdict: resultReview.verdict, reviewerSessionId: run.architectSessionId, notes: resultReview.feedback ?? '' })
       if (resultReview.verdict === 'approve') {
         run.results.push({ title: st.spec.title, summary: result.summary })
@@ -276,13 +288,32 @@ export class OrchestrationManager extends EventEmitter {
         return this._finishSubtask(run, subtaskId, 'done')
       }
       if (resultReview.verdict === 'escalate') return this._escalateSubtask(run, subtaskId, resultReview.feedback || 'architect escalated the result')
-      // revise / redelegate → loop with feedback
+      // revise / redelegate → loop with feedback (redelegate gets a fresh worker)
       st.iterations += 1
       feedback = resultReview.feedback ?? null
+      if (resultReview.verdict === 'redelegate') sessionId = this._respawnWorker(run, subtaskId, sessionId)
     }
   }
 
+  // Spawn + register + rule-gate + attach a worker session for a subtask.
+  _spawnWorker(run, subtaskId) {
+    const sessionId = this._spawnSession(run, { role: 'audit', subtaskId })
+    run.ownedSessions.set(sessionId, { role: 'audit', subtaskId })
+    this._ledger.updateSubtask(run.runId, subtaskId, { status: 'briefing' })
+    this._applyReadOnlyRules(sessionId)
+    this._ledger.attachSession(run.runId, subtaskId, { sessionId, provider: run.roleModels.worker.provider, model: run.roleModels.worker.model, meterable: true })
+    return sessionId
+  }
+
+  // redelegate: tear down the current worker and hand the subtask to a fresh one.
+  _respawnWorker(run, subtaskId, oldSessionId) {
+    this._destroySession(run, oldSessionId)
+    this._ledger.updateSubtask(run.runId, subtaskId, { status: 'respawning' })
+    return this._spawnWorker(run, subtaskId)
+  }
+
   _finishSubtask(run, subtaskId, status) {
+    if (run.cancelled || !this._runs.has(run.runId)) return
     const st = run.subtasks.get(subtaskId)
     if (st) st.state = status
     this._ledger.updateSubtask(run.runId, subtaskId, { status })
@@ -337,8 +368,13 @@ export class OrchestrationManager extends EventEmitter {
 
   // --- turn driving + decisions -------------------------------------------
 
-  async _architectReview(run, prompt, kind, subtaskId) {
-    const { decision } = await this._driveDecision(run, run.architectSessionId, prompt, kind, kind, subtaskId)
+  async _architectReview(run, prompt, kind) {
+    // subtaskId is intentionally null: the review turn's tokens belong to the
+    // architect.review role, NOT the subtask's own usage cell (which tracks the
+    // worker's cost). Folding it in would price the architect's turn with the
+    // worker's provider and spuriously flip the subtask's modelDrift flag. The
+    // review's LINK to the subtask is recorded separately via recordCommitteeReview.
+    const { decision } = await this._driveDecision(run, run.architectSessionId, prompt, kind, kind, null)
     return decision
   }
 
@@ -388,7 +424,7 @@ export class OrchestrationManager extends EventEmitter {
     return sessionId
   }
 
-  _applyAuditRules(sessionId) {
+  _applyReadOnlyRules(sessionId) {
     const session = this._sm.getSession?.(sessionId)?.session
     if (session && typeof session.setPermissionRules === 'function') {
       session.setPermissionRules([
@@ -425,6 +461,10 @@ export class OrchestrationManager extends EventEmitter {
   }
 
   _failRun(run, code, err) {
+    // A cancel that already tore the run down wins: don't overwrite the
+    // terminal 'cancelled' status with 'failed' (or double-emit lifecycle
+    // events) when an in-flight turn rejects SESSION_GONE on the next tick.
+    if (run.cancelled || !this._runs.has(run.runId)) return { runId: run.runId, phase: run.phase }
     run.phase = 'failed'
     this._ledger.setStatus(run.runId, 'failed', code)
     // tear down any owned sessions
@@ -458,9 +498,14 @@ export class OrchestrationManager extends EventEmitter {
     return false
   }
   _roleClassForSession(sessionId) {
+    // The architect is read-only too (it plans/reviews, never edits), so it maps
+    // to the 'audit' policy: reads are rule-allowed and never reach the gate;
+    // anything else (Bash) is denied. Returning null here would make the gate
+    // IGNORE the architect, wedging any non-rule tool it emits until the turn
+    // watchdog fires and fails the run.
     for (const run of this._runs.values()) {
       const meta = run.ownedSessions.get(sessionId)
-      if (meta) return meta.role === 'audit' ? 'audit' : null // architect never gets gated tool prompts
+      if (meta) return 'audit'
     }
     return null
   }
