@@ -292,7 +292,9 @@ export class CodexAppServerSession extends BaseSession {
 
   _onItemStarted(item) {
     if (!item) return
-    // commandExecution / fileChange / mcpToolCall map to Chroxy tools.
+    // commandExecution / fileChange map to Chroxy tools. mcpToolCall items are
+    // NOT surfaced (no tool_start, no approval) — the connector-approval gap
+    // documented in docs/design/codex-permission-model.md §8 (#6635).
     if (item.type === 'commandExecution') {
       const toolUseId = item.id
       this.emit('tool_start', {

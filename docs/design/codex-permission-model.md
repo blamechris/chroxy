@@ -109,8 +109,10 @@ Consequences:
 
 `CHROXY_CODEX_SANDBOX` selects one of `CODEX_SANDBOX_MODES` =
 `read-only` | `workspace-write` | `danger-full-access`, default
-`workspace-write` (`CODEX_DEFAULT_SANDBOX`; the #3846 stopgop so fresh sessions
-can edit files). Applied at thread start and per-turn.
+`workspace-write` (`CODEX_DEFAULT_SANDBOX`; the #3846 stopgap so fresh sessions
+can edit files). Applied **once at thread start** — the per-turn parameter is the
+`approvalPolicy` (§2), not the sandbox, so a mid-session sandbox change would need
+a new thread.
 
 This is a **Codex-only concept** with no Claude equivalent, and it is
 **env-only** — not exposed per-session in the UI or the `create_session` API.
@@ -168,7 +170,7 @@ Each carries a recommendation, but the call is yours.
    *Recommendation:* yes, but as its own slice — add `sandbox` to `create_session` for Codex + a session control, defaulting to `workspace-write`. It's the most operator-visible Codex-specific lever. Bigger than a copy tweak (protocol + both clients).
 
 3. **Should scope-escalation requests remain prompts (post-#6610), and be visible in history?**
-   *Recommendation:* keep the prompt (shipped in #6610). Separately decide whether a *resolved* escalation leaves a compact audit line in the transcript — recommend yes, for auditability, tracked with the general "resolved permissions in history" UX (relates to #6626/#6627).
+   *Recommendation:* keep the prompt (shipped in #6610). Separately decide whether a *resolved* escalation leaves a compact audit line in the transcript — recommend yes, for auditability, tracked with the resolved-permissions-in-history UX (#6627).
 
 4. **What should `allowAlways`/session grants mean for Codex, given `shell` is never-auto-allow?**
    *Recommendation:* keep current semantics — `allowAlways` maps to Codex's session grant per family; `shell`/`request_permissions` never auto-allow (always prompt). Document this so the "Allow for Session" button's meaning on a Codex `shell` prompt is clear (it's a Codex session grant, not a Chroxy rule) — or hide "Allow for Session" on never-auto-allow Codex tools to avoid implying a persisted rule.
@@ -191,4 +193,4 @@ Each carries a recommendation, but the call is yours.
 
 ---
 
-*Related: #6610 (escalation surfacing), #6618/#6676 (runtime-driver parity), #6635 (connector approval gap), #6626/#6627 (permission/queued resolved-state UX).*
+*Related: #6610 (escalation surfacing), #6618/#6676 (runtime-driver parity), #6635 (connector approval gap), #6626 (Codex shell-prompt formatting), #6627 (permission/queued resolved-state UX).*
