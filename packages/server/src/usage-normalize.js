@@ -60,8 +60,17 @@ export function normalizeSdkModelUsage(raw) {
  * model per session (byok family, codex, gemini). `usage` is the provider's
  * flat snake_case turn usage; absent fields clamp to 0. Returns null when
  * the model id is unknown or the usage object carries no token signal at
- * all (mirrors `_trackUsage`'s finite-tokens gate so a both-null synthetic
- * result never fabricates an all-zero per-model row).
+ * all, so a both-null synthetic result (stream-stall recovery) never
+ * fabricates an all-zero per-model row.
+ *
+ * Note the gate is BROADER than `_trackUsage`'s (session-manager.js), which
+ * keys only on a finite `input_tokens`: this returns a row when ANY of the 5
+ * token fields is finite. They coincide today because every provider call
+ * site emits a finite `input_tokens` (0 or positive) whenever `usage` is an
+ * object, so the sole divergence (an output-or-cache-only turn) can't arise.
+ * A future consumer that sums these rows against `cumulativeUsage` should not
+ * assume literal parity — if an output-only provider ever appears, this would
+ * synthesize a row `_trackUsage` skips.
  */
 export function synthesizeModelUsage(model, usage, costUsd = null) {
   if (!model || typeof model !== 'string') return null
