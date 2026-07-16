@@ -91,6 +91,7 @@ import {
   // mcp_servers / session_usage / web_task_list / web_feature_status migrated
   // to the shared dispatch table (#5556 slice 2)
   handleResultUsage as sharedResultUsage,
+  handleResultQueueReconcile,
   handleServerError as sharedServerError,
   handleServerStatusLegacy as sharedServerStatusLegacy,
   // web_task_created / web_task_updated — migrated to the shared dispatch table
@@ -2811,6 +2812,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         lastResultDuration: normalized.lastResultDuration,
       };
       const targetId = normalized.sessionId;
+      // #6627 — reconcile the queue against the result's authoritative queueLength
+      // so a stale "Queued" bubble (from a dropped/late message_dequeued) self-heals
+      // on this turn boundary. Null when the server sent no queueLength (older).
+      const queueReconcile = handleResultQueueReconcile(msg, get().activeSessionId);
       // Notify if a background session just finished (was streaming)
       if (targetId && get().sessionStates[targetId]?.streamingMessageId) {
         pushSessionNotification(targetId, 'completed', 'Task completed');
@@ -2823,6 +2828,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           updateSession(effectiveId, (ss) => ({
             ...resultPatch,
             messages: [...ss.messages],
+            // #6627 — LIVE results only: a REPLAYED result (on switch_session)
+            // carries a stale queueLength that must not trim the current queue.
+            ...(queueReconcile && !_ctx.replayingSessions.has(effectiveId) ? queueReconcile.applyTo(ss.queuedMessages ?? []) : {}),
           }));
         }
       }

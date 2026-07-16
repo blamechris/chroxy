@@ -331,3 +331,28 @@ export function handleMessageDequeued(
     }),
   }
 }
+
+/**
+ * #6627 — reconcile the queued list against a turn-complete `result`'s
+ * authoritative `queueLength`. `message_dequeued` self-heals only on queue events;
+ * if that frame is dropped/late, a stale "Queued" bubble would otherwise persist
+ * until the next queue event (or a reconnect). Stamping every `result` with the
+ * server's queue length gives a self-heal point on every turn boundary.
+ *
+ * Returns null when the result carries no finite `queueLength` (older server), so
+ * the caller skips the state write entirely. `reconcileQueueLength` only trims
+ * CONFIRMED orphans down to the server's count — it never drops a `'pending'`
+ * (unconfirmed) entry or a genuinely-still-queued message, so this is safe to run
+ * on every result.
+ */
+export function handleResultQueueReconcile(
+  msg: Record<string, unknown>,
+  activeSessionId: string | null,
+): QueuedMessagesBuilder | null {
+  const queueLength = optionalNumber(msg, 'queueLength')
+  if (queueLength === undefined) return null
+  return {
+    sessionId: resolveSessionId(msg, activeSessionId),
+    applyTo: (current) => ({ queuedMessages: reconcileQueueLength(current, queueLength) }),
+  }
+}

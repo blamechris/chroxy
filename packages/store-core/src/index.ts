@@ -545,6 +545,9 @@ export {
   // #5950 — orphan-badge safety net: reconcile local queue length to the
   // server's authoritative count so a dropped message_dequeued self-heals.
   reconcileQueueLength,
+  // #6627 — reconcile the queue on a turn-complete result too, so a stale
+  // "Queued" bubble self-heals on the next turn boundary (not only queue events).
+  handleResultQueueReconcile,
   handleDevPreview,
   handleDevPreviewStopped,
   handleAuthOk,

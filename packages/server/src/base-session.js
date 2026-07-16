@@ -1454,7 +1454,12 @@ export class BaseSession extends EventEmitter {
    */
   _emitResult(payload, sweepReason = 'stream_completed_without_result') {
     this._sweepUnresolvedToolStarts(sweepReason)
-    this.emit('result', payload)
+    // #6627: stamp every turn-complete result with the authoritative outgoing-queue
+    // length so clients reconcile any stale "Queued" bubble on a turn boundary — a
+    // dropped/late `message_dequeued` no longer leaves a stale badge until the next
+    // queue event. The count is pre-flush (the imminent dequeue emits its own
+    // event); reconcileQueueLength only trims confirmed orphans, never a live entry.
+    this.emit('result', { ...payload, queueLength: this._outgoingQueue.length })
   }
 
   _clearMessageState() {
