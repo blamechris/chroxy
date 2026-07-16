@@ -263,6 +263,9 @@ describe('session-handlers', () => {
       sessionHandlers.create_session(makeWs(), makeClient(), { name: 'A', codexSandbox: 'read-only' }, ctx)
       assert.equal(spy.lastCall[0].codexSandbox, 'read-only', 'a valid codexSandbox is threaded to createSession')
 
+      // NB: over the wire an invalid codexSandbox is rejected by the schema
+      // (ClientMessageSchema) before reaching here; this asserts the handler's
+      // defense-in-depth for an internal caller that bypasses the schema.
       sessionHandlers.create_session(makeWs(), makeClient(), { name: 'B', codexSandbox: 'gimme-root' }, ctx)
       assert.equal(spy.lastCall[0].codexSandbox, undefined, 'an invalid codexSandbox is dropped (→ env/default)')
     })

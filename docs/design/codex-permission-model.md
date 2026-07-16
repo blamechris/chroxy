@@ -128,8 +128,11 @@ a new thread.
 This is a **Codex-only concept** with no Claude equivalent. The env var is the
 server-wide default; since #6638 a session can **override it at creation** via the
 `create_session` `codexSandbox` field (one of the three modes), which wins over
-the env/default and is applied at that session's thread start. A client **selector
-UI** to set it is a follow-up — the API + server wiring ship here.
+the env/default on **both** the app-server and legacy-exec paths, applied at that
+session's thread start. A client **selector UI** to set it is a follow-up (#6689)
+— the API + server wiring ship here. (The per-session choice isn't persisted, so a
+session restored after a daemon restart reverts to the env/default — harmless
+today since codex `resume` is unsupported and a restore starts a fresh thread.)
 Scope-escalation (`request_permissions`) is how Codex asks, mid-turn, to broaden
 beyond its sandbox; approving it grants the requested filesystem/network scope
 for the turn or session (§3).

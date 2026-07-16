@@ -202,15 +202,17 @@ export function resolveCodexSandbox(override) {
  *                                 form so the CLI replays prior conversation
  *                                 state instead of treating each message as
  *                                 a fresh thread (#3865).
+ * @param {string} [sandboxOverride]  #6638 — per-session sandbox mode; wins over
+ *                                 the CHROXY_CODEX_SANDBOX env / default if valid.
  * @returns {string[]}
  */
-export function buildCodexArgs(text, model, threadId = null) {
+export function buildCodexArgs(text, model, threadId = null, sandboxOverride = undefined) {
   // INVARIANT: --sandbox must be passed to the parent `exec`, not to the
   // `resume` subcommand. `codex exec resume --sandbox ...` errors out with
   // `unexpected argument '--sandbox' found` (verified against codex-cli
   // 0.128.0) because --sandbox is only declared on the parent `exec` command.
   // Keep --sandbox BEFORE the `resume` subcommand on the resume path.
-  const sandbox = resolveCodexSandbox()
+  const sandbox = resolveCodexSandbox(sandboxOverride)
   const args = threadId
     ? ['exec', '--sandbox', sandbox, 'resume', threadId, text, '--json', '--skip-git-repo-check']
     : ['exec', text, '--json', '--skip-git-repo-check', '--sandbox', sandbox]
@@ -512,6 +514,9 @@ export class CodexSession extends JsonlSubprocessSession {
       model: opts.model || DEFAULT_MODEL,
       resumeSessionId: opts.resumeSessionId,
     }))
+    // #6638: per-session sandbox override — honored on the exec path too, so a
+    // read-only/full-access session isn't a silent no-op under CHROXY_CODEX_APPSERVER=0.
+    this._codexSandbox = opts.codexSandbox || null
   }
 
   // ------------------------------------------------------------------
@@ -519,7 +524,7 @@ export class CodexSession extends JsonlSubprocessSession {
   // ------------------------------------------------------------------
 
   _buildArgs(text) {
-    return buildCodexArgs(text, this.model, this.resumeSessionId)
+    return buildCodexArgs(text, this.model, this.resumeSessionId, this._codexSandbox)
   }
 
   _buildChildEnv() {
