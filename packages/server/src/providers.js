@@ -256,8 +256,16 @@ export function getProviderDataDirs() {
  */
 export function listProviders() {
   const list = []
-  for (const [name, ProviderClass] of Object.entries(PROVIDERS)) {
+  for (const name of Object.keys(PROVIDERS)) {
     if (HIDDEN.has(name)) continue
+    // #6618 — resolve to the class that will ACTUALLY be instantiated for this
+    // provider id. getProvider honors CHROXY_CODEX_APPSERVER for codex (app-server
+    // by default, exec on opt-out), so the picker's advertised capabilities match
+    // what a live session reports in session_info. For every other provider
+    // getProvider is just PROVIDERS[name], so this is a no-op. codex's app-server
+    // class delegates dataDir/resolveAuth/preflight to the exec class, so `auth` is
+    // unchanged — only the capability shape follows the runtime driver.
+    const ProviderClass = getProvider(name)
     list.push({
       name,
       capabilities: {
