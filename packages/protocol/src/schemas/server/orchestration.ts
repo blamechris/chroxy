@@ -196,14 +196,23 @@ export const ServerOrchestrationRunSnapshotSchema = z.object({
 // else re-requests the snapshot. `run` also updates the runs-list row.
 export const ServerOrchestrationRunDeltaSchema = z.object({
   type: z.literal('orchestration_run_delta'),
-  runId: z.string(),
+  runId: z.string(), // routing key — the reducer applies this delta to the held run
   seq: z.number().int().nonnegative(),
   generatedAt: z.string().datetime(),
   run: RunSummarySchema.optional(), // upsert list row + header
   node: RunNodeSchema.optional(), // upsert by nodeId
   gate: RunGateSchema.optional(), // upsert by gateId
   timeline: RunTimelineEntrySchema.optional(), // append
-}).passthrough()
+}).passthrough().refine(
+  // The nested run/node/gate each carry their own runId (they are
+  // self-describing for rendering). The top-level runId is authoritative for
+  // routing; reject a delta whose nested runId disagrees so a server bug can't
+  // file a node/gate under the wrong run.
+  (m) => (!m.run || m.run.runId === m.runId)
+    && (!m.node || m.node.runId === m.runId)
+    && (!m.gate || m.gate.runId === m.runId),
+  { message: 'nested run/node/gate runId must match the delta runId' },
+)
 
 // Positive ack for start / gate_response / run_action / annotate.
 export const ServerOrchestrationActionAckSchema = z.object({
