@@ -186,6 +186,12 @@ export const ServerSessionListEntrySchema = z.object({
     // present). Optional in the schema so pre-#4307 servers that omit
     // the field still parse; consumers should treat `undefined` as `[]`.
     pendingBackgroundShells: z.array(ServerPendingBackgroundShellSchema).optional(),
+    // #6691 orchestration: when a session is an architect/worker of a delegation
+    // run, these badge it so the client can link it to its run. Absent on all
+    // non-orchestration sessions; populated by the engine via createSession
+    // metadata (E-4).
+    orchestrationRunId: z.string().nullable().optional(),
+    orchestrationRole: z.string().nullable().optional(),
 }).passthrough();
 export const ServerSessionListSchema = z.object({
     type: z.literal('session_list'),

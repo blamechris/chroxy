@@ -108,6 +108,8 @@ export declare const ServerSessionListEntrySchema: z.ZodObject<{
         command: z.ZodString;
         startedAt: z.ZodNumber;
     }, z.core.$strip>>>;
+    orchestrationRunId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    orchestrationRole: z.ZodOptional<z.ZodNullable<z.ZodString>>;
 }, z.core.$loose>;
 export declare const ServerSessionListSchema: z.ZodObject<{
     type: z.ZodLiteral<"session_list">;
@@ -151,6 +153,8 @@ export declare const ServerSessionListSchema: z.ZodObject<{
             command: z.ZodString;
             startedAt: z.ZodNumber;
         }, z.core.$strip>>>;
+        orchestrationRunId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+        orchestrationRole: z.ZodOptional<z.ZodNullable<z.ZodString>>;
     }, z.core.$loose>>;
 }, z.core.$strip>;
 /**

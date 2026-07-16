@@ -1424,6 +1424,68 @@ export const SummarizeSessionSchema = z.object({
   requestId: z.string().max(128).optional(),
 })
 
+// -- Orchestration / delegation harness ("committee", epic #6691, S-1) --
+// v1 is dashboard-only + host-authority (unbound clients); run_start and
+// spend-unblocking gate approvals additionally require the PRIMARY token
+// (enforced server-side in the handler, not the schema).
+
+export const OrchestrationRunsRequestSchema = z.object({
+  type: z.literal('orchestration_runs_request'),
+  requestId: z.string().max(128).optional(),
+})
+
+export const OrchestrationRunDetailRequestSchema = z.object({
+  type: z.literal('orchestration_run_detail_request'),
+  runId: z.string().min(1).max(128),
+  requestId: z.string().max(128).optional(),
+})
+
+export const OrchestrationRunStartSchema = z.object({
+  type: z.literal('orchestration_run_start'),
+  preset: z.string().min(1).max(64).optional(), // e.g. 'repo-audit' (built-in)
+  epicPrompt: z.string().min(1).max(20_000).optional(),
+  cwd: z.string().min(1).max(1024), // validated server-side against the cwd allowlist
+  title: z.string().max(200).optional(),
+  budgetUsd: z.number().positive().finite().optional(),
+  autoApprovePlan: z.boolean().optional(),
+  roles: z.record(z.string(), z.object({
+    provider: z.string().min(1).max(64),
+    model: z.string().min(1).max(128),
+  })).optional(),
+  requestId: z.string().max(128).optional(),
+}).refine((m) => Boolean(m.preset) || Boolean(m.epicPrompt), {
+  message: 'preset or epicPrompt required',
+})
+
+export const OrchestrationGateResponseSchema = z.object({
+  type: z.literal('orchestration_gate_response'),
+  runId: z.string().min(1).max(128),
+  gateId: z.string().min(1).max(128),
+  decision: z.enum(['approve', 'reject', 'revise', 'skip']),
+  note: z.string().max(4000).optional(),
+  budgetUsd: z.number().positive().finite().optional(), // approve-with-raise on budget_overrun
+  requestId: z.string().max(128).optional(),
+})
+
+export const OrchestrationRunActionSchema = z.object({
+  type: z.literal('orchestration_run_action'),
+  runId: z.string().min(1).max(128),
+  action: z.enum(['cancel', 'pause', 'resume']),
+  requestId: z.string().max(128).optional(),
+})
+
+// Attach a monolithic-session baseline and/or a human verdict-quality note to
+// a run — the dogfood measurement path (#6691).
+export const OrchestrationRunAnnotateSchema = z.object({
+  type: z.literal('orchestration_run_annotate'),
+  runId: z.string().min(1).max(128),
+  baselineSessionId: z.string().min(1).max(256).optional(),
+  verdictQuality: z.string().max(20_000).optional(),
+  requestId: z.string().max(128).optional(),
+}).refine((m) => Boolean(m.baselineSessionId) || m.verdictQuality !== undefined, {
+  message: 'baselineSessionId or verdictQuality required',
+})
+
 // -- Encrypted envelope --
 
 export const EncryptedEnvelopeSchema = z.object({
@@ -1550,6 +1612,12 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   EmulatorActionSchema,
   WslActionSchema,
   SummarizeSessionSchema,
+  OrchestrationRunsRequestSchema,
+  OrchestrationRunDetailRequestSchema,
+  OrchestrationRunStartSchema,
+  OrchestrationGateResponseSchema,
+  OrchestrationRunActionSchema,
+  OrchestrationRunAnnotateSchema,
   PairApproveSchema,
   PairDenySchema,
 ])
@@ -1593,6 +1661,12 @@ export type SimulatorActionMessage = z.infer<typeof SimulatorActionSchema>
 export type EmulatorActionMessage = z.infer<typeof EmulatorActionSchema>
 export type WslActionMessage = z.infer<typeof WslActionSchema>
 export type SummarizeSessionMessage = z.infer<typeof SummarizeSessionSchema>
+export type OrchestrationRunsRequestMessage = z.infer<typeof OrchestrationRunsRequestSchema>
+export type OrchestrationRunDetailRequestMessage = z.infer<typeof OrchestrationRunDetailRequestSchema>
+export type OrchestrationRunStartMessage = z.infer<typeof OrchestrationRunStartSchema>
+export type OrchestrationGateResponseMessage = z.infer<typeof OrchestrationGateResponseSchema>
+export type OrchestrationRunActionMessage = z.infer<typeof OrchestrationRunActionSchema>
+export type OrchestrationRunAnnotateMessage = z.infer<typeof OrchestrationRunAnnotateSchema>
 export type SessionPresetGetMessage = z.infer<typeof SessionPresetGetSchema>
 export type SessionPresetSetMessage = z.infer<typeof SessionPresetSetSchema>
 export type SessionPresetApproveMessage = z.infer<typeof SessionPresetApproveSchema>

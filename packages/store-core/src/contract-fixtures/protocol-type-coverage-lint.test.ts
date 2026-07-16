@@ -242,6 +242,14 @@ const UNHANDLED_BY_DESIGN = new Set<string>([
                                           //   no dedicated handler yet (dashboard exposure is a deferred follow-up)
   'stdin_dropped_totals',                 // #3544 transient counter — surface is the SessionInfo flag on
                                           //   session_list, not a dedicated wire-event handler
+  // Orchestration harness (#6691, S-1): the protocol contract + shared store-core
+  // reducers land first (this PR); the dashboard client handlers that consume
+  // them are the next step (S-3, #6702), which will MOVE these to DASHBOARD_ONLY
+  // (dashboard-only v1 — the mobile app is a later fast-follow).
+  'orchestration_runs_snapshot',
+  'orchestration_run_snapshot',
+  'orchestration_run_delta',
+  'orchestration_action_ack',
 ])
 
 // ---------------------------------------------------------------------------

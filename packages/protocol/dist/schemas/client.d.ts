@@ -844,6 +844,60 @@ export declare const SummarizeSessionSchema: z.ZodObject<{
     sessionId: z.ZodString;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
+export declare const OrchestrationRunsRequestSchema: z.ZodObject<{
+    type: z.ZodLiteral<"orchestration_runs_request">;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
+export declare const OrchestrationRunDetailRequestSchema: z.ZodObject<{
+    type: z.ZodLiteral<"orchestration_run_detail_request">;
+    runId: z.ZodString;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
+export declare const OrchestrationRunStartSchema: z.ZodObject<{
+    type: z.ZodLiteral<"orchestration_run_start">;
+    preset: z.ZodOptional<z.ZodString>;
+    epicPrompt: z.ZodOptional<z.ZodString>;
+    cwd: z.ZodString;
+    title: z.ZodOptional<z.ZodString>;
+    budgetUsd: z.ZodOptional<z.ZodNumber>;
+    autoApprovePlan: z.ZodOptional<z.ZodBoolean>;
+    roles: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodObject<{
+        provider: z.ZodString;
+        model: z.ZodString;
+    }, z.core.$strip>>>;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
+export declare const OrchestrationGateResponseSchema: z.ZodObject<{
+    type: z.ZodLiteral<"orchestration_gate_response">;
+    runId: z.ZodString;
+    gateId: z.ZodString;
+    decision: z.ZodEnum<{
+        approve: "approve";
+        reject: "reject";
+        revise: "revise";
+        skip: "skip";
+    }>;
+    note: z.ZodOptional<z.ZodString>;
+    budgetUsd: z.ZodOptional<z.ZodNumber>;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
+export declare const OrchestrationRunActionSchema: z.ZodObject<{
+    type: z.ZodLiteral<"orchestration_run_action">;
+    runId: z.ZodString;
+    action: z.ZodEnum<{
+        cancel: "cancel";
+        pause: "pause";
+        resume: "resume";
+    }>;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
+export declare const OrchestrationRunAnnotateSchema: z.ZodObject<{
+    type: z.ZodLiteral<"orchestration_run_annotate">;
+    runId: z.ZodString;
+    baselineSessionId: z.ZodOptional<z.ZodString>;
+    verdictQuality: z.ZodOptional<z.ZodString>;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
 export declare const EncryptedEnvelopeSchema: z.ZodObject<{
     type: z.ZodLiteral<"encrypted">;
     d: z.ZodString;
@@ -1385,6 +1439,54 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     sessionId: z.ZodString;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"orchestration_runs_request">;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"orchestration_run_detail_request">;
+    runId: z.ZodString;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"orchestration_run_start">;
+    preset: z.ZodOptional<z.ZodString>;
+    epicPrompt: z.ZodOptional<z.ZodString>;
+    cwd: z.ZodString;
+    title: z.ZodOptional<z.ZodString>;
+    budgetUsd: z.ZodOptional<z.ZodNumber>;
+    autoApprovePlan: z.ZodOptional<z.ZodBoolean>;
+    roles: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodObject<{
+        provider: z.ZodString;
+        model: z.ZodString;
+    }, z.core.$strip>>>;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"orchestration_gate_response">;
+    runId: z.ZodString;
+    gateId: z.ZodString;
+    decision: z.ZodEnum<{
+        approve: "approve";
+        reject: "reject";
+        revise: "revise";
+        skip: "skip";
+    }>;
+    note: z.ZodOptional<z.ZodString>;
+    budgetUsd: z.ZodOptional<z.ZodNumber>;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"orchestration_run_action">;
+    runId: z.ZodString;
+    action: z.ZodEnum<{
+        cancel: "cancel";
+        pause: "pause";
+        resume: "resume";
+    }>;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"orchestration_run_annotate">;
+    runId: z.ZodString;
+    baselineSessionId: z.ZodOptional<z.ZodString>;
+    verdictQuality: z.ZodOptional<z.ZodString>;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"pair_approve">;
     requestId: z.ZodString;
 }, z.core.$loose>, z.ZodObject<{
@@ -1428,6 +1530,12 @@ export type SimulatorActionMessage = z.infer<typeof SimulatorActionSchema>;
 export type EmulatorActionMessage = z.infer<typeof EmulatorActionSchema>;
 export type WslActionMessage = z.infer<typeof WslActionSchema>;
 export type SummarizeSessionMessage = z.infer<typeof SummarizeSessionSchema>;
+export type OrchestrationRunsRequestMessage = z.infer<typeof OrchestrationRunsRequestSchema>;
+export type OrchestrationRunDetailRequestMessage = z.infer<typeof OrchestrationRunDetailRequestSchema>;
+export type OrchestrationRunStartMessage = z.infer<typeof OrchestrationRunStartSchema>;
+export type OrchestrationGateResponseMessage = z.infer<typeof OrchestrationGateResponseSchema>;
+export type OrchestrationRunActionMessage = z.infer<typeof OrchestrationRunActionSchema>;
+export type OrchestrationRunAnnotateMessage = z.infer<typeof OrchestrationRunAnnotateSchema>;
 export type SessionPresetGetMessage = z.infer<typeof SessionPresetGetSchema>;
 export type SessionPresetSetMessage = z.infer<typeof SessionPresetSetSchema>;
 export type SessionPresetApproveMessage = z.infer<typeof SessionPresetApproveSchema>;

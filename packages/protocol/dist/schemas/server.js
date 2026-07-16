@@ -18,3 +18,4 @@ export * from "./server/file-ops.js";
 export * from "./server/ide.js";
 export * from "./server/environment.js";
 export * from "./server/messages.js";
+export * from "./server/orchestration.js";
