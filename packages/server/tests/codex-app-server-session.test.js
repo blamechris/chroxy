@@ -525,6 +525,7 @@ describe('CodexAppServerSession — approval surfacing (#6605 Phase 2)', () => {
       assert.match(reqs[0][1].description, /github/)
       assert.match(reqs[0][1].description, /issue #42/)
       s.respondToPermission(reqs[0][1].requestId, 'deny')
+      cleanup()
     })
 
     it('accept → { action: accept }', async () => {
