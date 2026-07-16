@@ -292,7 +292,9 @@ export class CodexAppServerSession extends BaseSession {
 
   _onItemStarted(item) {
     if (!item) return
-    // commandExecution / fileChange / mcpToolCall map to Chroxy tools.
+    // commandExecution / fileChange map to Chroxy tools. mcpToolCall items are
+    // NOT surfaced (no tool_start, no approval) — the connector-approval gap
+    // documented in docs/design/codex-permission-model.md §8 (#6635).
     if (item.type === 'commandExecution') {
       const toolUseId = item.id
       this.emit('tool_start', {
@@ -417,8 +419,9 @@ export class CodexAppServerSession extends BaseSession {
   // ------------------------------------------------------------------
 
   // Codex asks before running a command / editing a file (approvalPolicy
-  // 'on-request'). Route the two clean approval families through the
-  // PermissionManager; safe-decline the scope-escalation variant (#6610).
+  // 'on-request'). All three approval families route through the PermissionManager:
+  // command/file as decision enums, and the scope-escalation variant as a
+  // permission-grant prompt (#6610). See docs/design/codex-permission-model.md.
   _onServerRequest({ id, method, params }) {
     if (method === 'item/commandExecution/requestApproval' || method === 'item/fileChange/requestApproval') {
       this._routeApproval(id, method, params)

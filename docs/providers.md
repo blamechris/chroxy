@@ -350,6 +350,11 @@ The codex provider drives a persistent **`codex app-server`** (JSON-RPC) session
 same way you do Claude, and can switch permission modes mid-session — and it
 carries intra-session conversation memory + attachments (below).
 
+For the full permission/sandbox model — the mode × request-class matrix, the
+per-family decision vocabularies, session-grant vs Chroxy-rule semantics, the
+MCP/connector gap, and the open design decisions — see
+[docs/design/codex-permission-model.md](design/codex-permission-model.md).
+
 To fall back to the legacy `codex exec --json` path (one subprocess per turn, **no
 approval surface** — codex runs whatever its sandbox allows without asking, and no
 attachments), set `CHROXY_CODEX_APPSERVER=0` (also accepts `false`/`no`/`off`).
