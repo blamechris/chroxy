@@ -513,6 +513,61 @@ describe('CodexAppServerSession — approval surfacing (#6605 Phase 2)', () => {
     })
   })
 
+  describe('MCP connector elicitation surfacing (#6635)', () => {
+    const elicitParams = { serverName: 'github', threadId: 't1', mode: 'form', message: 'Allow writing a comment to issue #42?', requestedSchema: {} }
+
+    it('surfaces the elicitation as a prompt naming the connector + message (was -32601 declined)', () => {
+      const { s, cleanup } = mkApprovalSession('approve')
+      const reqs = capture(s, ['permission_request'])
+      s._onServerRequest({ id: 30, method: 'mcpServer/elicitation/request', params: elicitParams })
+      assert.equal(reqs.length, 1, 'connector elicitation is surfaced, not silently declined')
+      assert.equal(reqs[0][1].tool, 'mcp_elicitation')
+      assert.match(reqs[0][1].description, /github/)
+      assert.match(reqs[0][1].description, /issue #42/)
+      s.respondToPermission(reqs[0][1].requestId, 'deny')
+    })
+
+    it('accept → { action: accept }', async () => {
+      const { s, cleanup, responded } = mkApprovalSession('approve')
+      const reqs = capture(s, ['permission_request'])
+      s._onServerRequest({ id: 31, method: 'mcpServer/elicitation/request', params: elicitParams })
+      s.respondToPermission(reqs[0][1].requestId, 'allow')
+      await tick()
+      assert.deepEqual(responded, [[31, { action: 'accept' }]])
+      cleanup()
+    })
+
+    it('deny → { action: decline } (a missed connector approval is now an explicit decline)', async () => {
+      const { s, cleanup, responded } = mkApprovalSession('approve')
+      const reqs = capture(s, ['permission_request'])
+      s._onServerRequest({ id: 32, method: 'mcpServer/elicitation/request', params: elicitParams })
+      s.respondToPermission(reqs[0][1].requestId, 'deny')
+      await tick()
+      assert.deepEqual(responded, [[32, { action: 'decline' }]])
+      cleanup()
+    })
+
+    it('abort mid-elicitation → { action: decline } (answers codex, no wedge)', async () => {
+      const { s, cleanup, responded } = mkApprovalSession('approve')
+      const reqs = capture(s, ['permission_request'])
+      s._onServerRequest({ id: 33, method: 'mcpServer/elicitation/request', params: elicitParams })
+      assert.equal(reqs.length, 1)
+      s._endTurnAbort()
+      await tick()
+      assert.deepEqual(responded, [[33, { action: 'decline' }]])
+      cleanup()
+    })
+
+    it('url-mode surfaces the link in the prompt', () => {
+      const { s, cleanup } = mkApprovalSession('approve')
+      const reqs = capture(s, ['permission_request'])
+      s._onServerRequest({ id: 34, method: 'mcpServer/elicitation/request', params: { serverName: 'github', threadId: 't1', mode: 'url', elicitationId: 'e1', message: 'Authorize access', url: 'https://example.com/oauth' } })
+      assert.match(reqs[0][1].description, /https:\/\/example\.com\/oauth/)
+      s.respondToPermission(reqs[0][1].requestId, 'deny')
+      cleanup()
+    })
+  })
+
   it('interrupt() aborts a pending approval → Stop unblocks the turn (decline)', async () => {
     const { s, cleanup, responded } = mkApprovalSession()
     capture(s, ['permission_request'])

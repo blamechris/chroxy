@@ -433,6 +433,16 @@ export class CodexAppServerSession extends BaseSession {
       this._routePermissionsApproval(id, params)
       return
     }
+    if (method === 'mcpServer/elicitation/request') {
+      // A codex MCP server (connector, e.g. GitHub) is eliciting the user — most
+      // commonly a write/action confirmation. Previously this fell through to the
+      // -32601 decline below, so the connector approval was silently rejected and
+      // "missed" (#6635). Surface it as an accept/decline prompt. NOTE: structured
+      // form-content collection and interactive url-mode flows are a follow-up —
+      // accept currently answers with the action only, no `content`.
+      this._routeMcpElicitation(id, params)
+      return
+    }
     ;(this._log || log).warn(`codex app-server: unsupported serverRequest ${method} — declining`)
     this._client?.respondError(id, -32601, 'unsupported request')
   }
@@ -567,6 +577,47 @@ export class CodexAppServerSession extends BaseSession {
       ? ` — ${params.reason.trim()}`
       : ''
     return `Codex is requesting to broaden its sandbox permissions${reason}: ${scope}`
+  }
+
+  // #6635: an MCP server (connector) is eliciting the user. Surface it as an
+  // accept/decline prompt through the permission pipeline (was silently declined
+  // with -32601, so a GitHub-connector write approval was "missed" and the tool
+  // call rejected). The elicitation response is { action: accept|decline|cancel,
+  // content? }; we answer with the action only — structured `content` collection
+  // (form / openai/form modes) and interactive url-mode flows are a follow-up.
+  async _routeMcpElicitation(rpcId, params) {
+    let result
+    try {
+      const input = {
+        description: this._describeMcpElicitation(params),
+        serverName: params?.serverName ?? null,
+        mode: params?.mode ?? null,
+        // Surfaced so the client can show a url-mode elicitation's link.
+        url: typeof params?.url === 'string' ? params.url : null,
+        message: typeof params?.message === 'string' ? params.message : null,
+      }
+      const suggestions = [{ codexApproval: 'mcpServer/elicitation/request' }]
+      result = await this._permissions.handlePermission('mcp_elicitation', input, this._turnAbort?.signal, this.permissionMode, suggestions)
+    } catch (err) {
+      result = { behavior: 'deny', message: err?.message || 'permission error' }
+    }
+    // accept on allow; decline otherwise (a user deny, timeout, or abort). We never
+    // synthesize `content`, so a form-mode elicitation gets an action-only accept.
+    const action = result?.behavior === 'allow' ? 'accept' : 'decline'
+    this._client?.respond(rpcId, { action })
+  }
+
+  // Human-readable elicitation prompt: which connector is asking, and what for.
+  _describeMcpElicitation(params) {
+    const server = typeof params?.serverName === 'string' && params.serverName.trim()
+      ? params.serverName.trim()
+      : 'an MCP connector'
+    const msg = typeof params?.message === 'string' && params.message.trim() ? params.message.trim() : ''
+    const url = params?.mode === 'url' && typeof params?.url === 'string' && params.url.trim()
+      ? ` (opens ${params.url.trim()})`
+      : ''
+    const ask = msg || 'is requesting your input'
+    return `Codex connector "${server}" ${msg ? 'asks' : ''}: ${ask}${url}`.replace(/\s+:/, ':')
   }
 
   // 'auto' (skip all prompts) → codex runs without asking. Every other mode →
