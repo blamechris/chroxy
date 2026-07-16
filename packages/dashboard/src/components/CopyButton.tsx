@@ -24,6 +24,11 @@ export function CopyButton({ content, label = 'Copy response' }: { content: stri
       // Don't let the copy click also trigger the bubble/row click handlers
       // (e.g. the #6625 link handler or a future select-message gesture).
       e.stopPropagation()
+      // Reset the confirmation at the start of every attempt so the visual
+      // state always reflects the LATEST click — a re-click whose write then
+      // fails must not keep showing a stale ✓ until the old timer expires.
+      if (timer.current) { clearTimeout(timer.current); timer.current = null }
+      setCopied(false)
       void writeText(content).then((ok) => {
         if (!mounted.current) return // row windowed-out mid-write — don't touch state
         if (!ok) {
@@ -31,7 +36,6 @@ export function CopyButton({ content, label = 'Copy response' }: { content: stri
           return
         }
         setCopied(true)
-        if (timer.current) clearTimeout(timer.current)
         timer.current = setTimeout(() => { if (mounted.current) setCopied(false) }, 1500)
       })
     },

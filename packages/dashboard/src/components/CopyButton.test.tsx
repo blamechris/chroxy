@@ -43,6 +43,20 @@ describe('CopyButton (#6631)', () => {
     addServerError.mockRestore()
   })
 
+  it('resets the copied ✓ when a re-click fails (latest attempt wins)', async () => {
+    mockWriteText.mockResolvedValueOnce(true).mockResolvedValueOnce(false)
+    const addServerError = vi.spyOn(useConnectionStore.getState(), 'addServerError').mockImplementation(() => {})
+    render(<CopyButton content="x" />)
+    const btn = screen.getByTestId('msg-copy-button')
+    fireEvent.click(btn)
+    await waitFor(() => expect(btn).toHaveAttribute('data-copied', 'true'))
+    // Second click fails — the stale ✓ must clear rather than linger.
+    fireEvent.click(btn)
+    await waitFor(() => expect(addServerError).toHaveBeenCalled())
+    expect(btn).not.toHaveAttribute('data-copied')
+    addServerError.mockRestore()
+  })
+
   it('stops the click from propagating to parent handlers', () => {
     mockWriteText.mockResolvedValue(true)
     const parentClick = vi.fn()

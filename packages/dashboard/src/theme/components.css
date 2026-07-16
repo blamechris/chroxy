@@ -2932,12 +2932,17 @@ button.sidebar-token-view-session-row:hover {
   border-radius: var(--radius-sm, 6px);
   cursor: pointer;
   opacity: 0;
+  /* Hidden ⇒ not a click target, so an invisible top-right hotspot can't eat a
+     selection/link click; re-enabled below when the control is actually shown. */
+  pointer-events: none;
   transition: opacity 0.12s ease, color 0.12s ease;
 }
 
 .msg:hover .msg-copy-btn,
-.msg-copy-btn:focus-visible {
+.msg-copy-btn:focus-visible,
+.msg-copy-btn[data-copied='true'] {
   opacity: 1;
+  pointer-events: auto;
 }
 
 .msg-copy-btn:hover {
