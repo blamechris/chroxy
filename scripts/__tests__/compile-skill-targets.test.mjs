@@ -198,8 +198,9 @@ await test('pi is a known compile target', () => {
 await test('emitPi writes ~/.pi/agent/skills/<name>/SKILL.md with name + description frontmatter', () => {
   const out = emitPi('demo-skill', '# Body\nDo the thing.\n', 'Does the thing.')
   assert(/[/\\]\.pi[/\\]agent[/\\]skills[/\\]demo-skill[/\\]SKILL\.md$/.test(out.path), `unexpected path: ${out.path}`)
-  // Pi REQUIRES a `name` field matching the parent dir (unlike the claude emitter).
-  assert(out.content.startsWith('---\nname: demo-skill\ndescription: '), `missing name/description frontmatter:\n${out.content}`)
+  // Pi REQUIRES a `name` field matching the parent dir (unlike the claude emitter);
+  // it's quoted so a YAML-significant char in a filename can't break the frontmatter.
+  assert(out.content.startsWith('---\nname: "demo-skill"\ndescription: '), `missing name/description frontmatter:\n${out.content}`)
   assert(out.content.includes('# Body\nDo the thing.'), 'body must pass through verbatim')
   assert(/\/skill:demo-skill/.test(out.note), `note should document /skill: invocation, got: ${out.note}`)
 })
@@ -218,6 +219,12 @@ await test('emitPi does not warn for an arg token inside a fenced code block (bu
   assert(!fenced.warn, `a bare $1 inside a code fence must not warn, got: ${fenced.warn}`)
   const prose = emitPi('c', 'Pass echo $1 to the tool\n', 'x')
   assert(prose.warn && /not substituted/i.test(prose.warn), `a bare $1 in prose must warn, got: ${prose.warn}`)
+})
+
+await test('emitPi quotes the name so a YAML-significant char in a filename stays valid YAML', () => {
+  // A Linux filename could carry `:` — unquoted `name: weird:name` would misparse.
+  const out = emitPi('weird:name', 'body\n', 'x')
+  assert(out.content.startsWith('---\nname: "weird:name"\n'), `name must be quoted, got:\n${out.content}`)
 })
 
 await test('emitPi warns on a non-Pi-valid skill name (Pi rejects it at load)', () => {

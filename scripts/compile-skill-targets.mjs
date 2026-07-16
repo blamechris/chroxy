@@ -230,12 +230,14 @@ export function emitPi(name, body, description) {
   if (!/^[a-z0-9]+(-[a-z0-9]+)*$/.test(name) || name.length > 64) {
     warns.push(`pi: skill name "${name}" is not Pi-valid (lowercase a-z, 0-9, single hyphens, ≤64 chars) — Pi will reject it at load`)
   }
-  // `name` is kept UNQUOTED: every valid Pi name is a YAML-safe plain scalar, and
-  // Pi matches it against the parent directory name — quoting risks a raw-string
-  // mismatch. A non-conforming name is surfaced by the warn above instead.
+  // Quote `name` (like `description`) so the frontmatter is ALWAYS valid YAML even
+  // if a source filename carried a YAML-significant char (`:`, `#`, `"`) — an
+  // unquoted `name: weird:name` would misparse. A quoted scalar YAML-parses back to
+  // the exact string, so Pi's match against the parent directory name still holds
+  // (any charset violation is separately surfaced by the warn above).
   return {
     path: join(homedir(), '.pi/agent/skills', name, 'SKILL.md'),
-    content: `---\nname: ${name}\ndescription: ${yamlDq(description)}\n---\n\n${body}`,
+    content: `---\nname: ${yamlDq(name)}\ndescription: ${yamlDq(description)}\n---\n\n${body}`,
     note: `pi: invoke as /skill:${name} (user-global ~/.pi/agent/skills/)`,
     warn: warns.length ? warns.join('; ') : null,
   }
