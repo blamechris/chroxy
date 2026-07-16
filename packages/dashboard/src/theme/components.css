@@ -2925,8 +2925,10 @@ button.sidebar-token-view-session-row:hover {
   font-size: 12px;
   line-height: 1;
   color: var(--text-muted);
-  background: var(--surface-raised, rgba(0, 0, 0, 0.25));
-  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.12));
+  /* theme-neutral fallbacks (match the repo's --surface-raised fallback at
+     .cr-* usage) so the control reads correctly in BOTH light and dark. */
+  background: var(--surface-raised, rgba(127, 127, 127, 0.12));
+  border: 1px solid var(--border-subtle, rgba(127, 127, 127, 0.22));
   border-radius: var(--radius-sm, 6px);
   cursor: pointer;
   opacity: 0;
@@ -2944,7 +2946,7 @@ button.sidebar-token-view-session-row:hover {
 
 .msg-copy-btn[data-copied='true'] {
   opacity: 1;
-  color: var(--accent-green, #4ade80);
+  color: var(--accent-green, #22c55e);
 }
 
 .msg pre {

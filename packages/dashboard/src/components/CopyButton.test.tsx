@@ -29,11 +29,13 @@ describe('CopyButton (#6631)', () => {
     expect(mockWriteText).toHaveBeenCalledWith('the full response text')
     await waitFor(() => expect(screen.getByTestId('msg-copy-button')).toHaveAttribute('data-copied', 'true'))
     expect(screen.getByTestId('msg-copy-button')).toHaveAttribute('aria-label', 'Copied')
+    // a11y: the success is announced through a polite live region
+    expect(screen.getByRole('status')).toHaveTextContent('Copied')
   })
 
   it('surfaces a warning toast and does NOT show copied when the clipboard write fails', async () => {
     mockWriteText.mockResolvedValue(false)
-    const addServerError = vi.spyOn(useConnectionStore.getState(), 'addServerError')
+    const addServerError = vi.spyOn(useConnectionStore.getState(), 'addServerError').mockImplementation(() => {})
     render(<CopyButton content="x" />)
     fireEvent.click(screen.getByTestId('msg-copy-button'))
     await waitFor(() => expect(addServerError).toHaveBeenCalledWith(expect.stringContaining('Failed to copy'), undefined, 'warning'))
