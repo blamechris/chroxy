@@ -862,6 +862,32 @@ describe('claude-channel provider scaffold (#3953)', () => {
     assert.match(label, /channel/i)
   })
 
+  // #6676 — resolveProviderLabel('codex') must report the RUNTIME driver's label
+  // (matching a live session), not the static exec label, honoring the opt-out.
+  it('resolveProviderLabel(codex) tracks the runtime driver, honoring CHROXY_CODEX_APPSERVER', async () => {
+    const { resolveProviderLabel, getProvider } = await import('../src/providers.js')
+    const orig = process.env.CHROXY_CODEX_APPSERVER
+    try {
+      delete process.env.CHROXY_CODEX_APPSERVER
+      assert.equal(resolveProviderLabel('codex'), getProvider('codex').displayLabel, 'default: matches the app-server driver')
+      assert.match(resolveProviderLabel('codex'), /app-server/, 'default codex label names the app-server driver')
+      process.env.CHROXY_CODEX_APPSERVER = '0'
+      assert.equal(resolveProviderLabel('codex'), getProvider('codex').displayLabel, 'opt-out: matches the exec driver')
+      assert.equal(resolveProviderLabel('codex'), 'OpenAI Codex', 'exec opt-out label has no app-server suffix')
+    } finally {
+      if (orig === undefined) delete process.env.CHROXY_CODEX_APPSERVER
+      else process.env.CHROXY_CODEX_APPSERVER = orig
+    }
+  })
+
+  it('resolveProviderLabel falls back to the raw name for an unknown provider', async () => {
+    const { resolveProviderLabel } = await import('../src/providers.js')
+    // getProvider throws for an unknown name; the label must degrade to the id.
+    assert.equal(resolveProviderLabel('totally-unknown-provider'), 'totally-unknown-provider')
+    assert.equal(resolveProviderLabel(''), 'unknown')
+    assert.equal(resolveProviderLabel(null), 'unknown')
+  })
+
   it('shares the ~/.claude dataDir without duplicating it in getProviderDataDirs', async () => {
     const { getProviderDataDirs } = await import('../src/providers.js')
     const { homedir } = await import('node:os')
@@ -1138,7 +1164,9 @@ describe('resolveProviderLabel helper (#2953)', () => {
     const { resolveProviderLabel } = await import('../src/providers.js')
     assert.equal(resolveProviderLabel('claude-cli'), 'Claude Code (CLI)')
     assert.equal(resolveProviderLabel('claude-sdk'), 'Claude Code (SDK)')
-    assert.equal(resolveProviderLabel('codex'), 'OpenAI Codex')
+    // #6676: codex now resolves to its runtime driver's label — app-server by
+    // default (dedicated env-honoring coverage in the #6676 test above).
+    assert.equal(resolveProviderLabel('codex'), 'OpenAI Codex (app-server)')
     assert.equal(resolveProviderLabel('gemini'), 'Google Gemini')
   })
 

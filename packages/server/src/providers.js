@@ -202,12 +202,23 @@ export function getProvider(name) {
  * the server still boots with a readable banner even if someone registers a
  * custom provider without a label, and returns `'unknown'` for empty input.
  *
+ * #6676 — resolves through `getProvider(name)` (not the static `PROVIDERS[name]`),
+ * so codex reports the label of its RUNTIME driver (app-server by default →
+ * "OpenAI Codex (app-server)", exec on `CHROXY_CODEX_APPSERVER=0` → "OpenAI
+ * Codex"), matching what a live session's `constructor.displayLabel` reports.
+ * `getProvider` throws for an unknown name, so those fall back to the raw name.
+ *
  * @param {string | undefined | null} name - Provider identifier
  * @returns {string} Human-readable label
  */
 export function resolveProviderLabel(name) {
   if (!name || typeof name !== 'string') return 'unknown'
-  const ProviderClass = PROVIDERS[name]
+  let ProviderClass
+  try {
+    ProviderClass = getProvider(name)
+  } catch {
+    ProviderClass = PROVIDERS[name]
+  }
   if (ProviderClass && typeof ProviderClass.displayLabel === 'string' && ProviderClass.displayLabel.length > 0) {
     return ProviderClass.displayLabel
   }
