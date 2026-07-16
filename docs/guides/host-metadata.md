@@ -28,8 +28,13 @@ stray `CHROXY_HOST_*` export cannot spoof them.
 Any provider that can run shell commands reads them directly:
 
 ```bash
-echo "$CHROXY_HOST_APP $CHROXY_HOST_VERSION ($CHROXY_HOST_CHANNEL) — $CHROXY_HOST_GIT_BRANCH@$CHROXY_HOST_GIT_SHA on $CHROXY_HOST_PLATFORM"
-# Chroxy 0.10.0 (dev) — feat/6633-host-metadata@4ebf6bf on darwin
+echo "$CHROXY_HOST_APP $CHROXY_HOST_VERSION ($CHROXY_HOST_CHANNEL) on $CHROXY_HOST_PLATFORM"
+# Chroxy 0.10.0 (dev) on darwin
+
+# The git vars are set only on dev builds — guard for them on a release build,
+# where they are unset (so a bare "@" would otherwise print):
+[ -n "$CHROXY_HOST_GIT_SHA" ] && echo "build: ${CHROXY_HOST_GIT_BRANCH:-detached}@$CHROXY_HOST_GIT_SHA"
+# build: feat/6633-host-metadata@4ebf6bf
 ```
 
 - **Subprocess providers** (Claude CLI/TUI, Codex, Gemini, …) receive the block

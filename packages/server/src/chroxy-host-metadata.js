@@ -19,8 +19,9 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-// Synchronous read at module scope is fine: the file is tiny and never changes
-// mid-process (mirrors byok-mcp-client's readPackageVersion). Never block on a
+// A synchronous read is fine: the file is tiny and never changes mid-process,
+// and getChroxyHostEnv memoizes the result so this runs at most once on demand
+// (mirrors byok-mcp-client's readPackageVersion). Never block on a
 // missing/unreadable package.json — fall back to a sentinel.
 function readPackageVersion() {
   try {

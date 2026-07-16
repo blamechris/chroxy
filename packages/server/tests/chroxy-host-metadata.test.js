@@ -44,9 +44,9 @@ describe('chroxy-host-metadata (#6633)', () => {
     assert.ok(!('CHROXY_HOST_GIT_BRANCH' in env), 'branch omitted when git reports none')
   })
 
-  it('falls back to a sentinel version when package.json is unreadable is handled by the real read', () => {
-    // Exercise the real (un-injected) path: version comes from the server
-    // package.json, so it is a non-empty semver-ish string, never undefined.
+  it('reads a real, non-empty version from package.json via the un-injected path', () => {
+    // Exercise the real (un-injected) read: version comes from the server
+    // package.json, so it is always a non-empty string, never undefined.
     const env = buildChroxyHostEnv({ git: {}, platform: 'linux', node: '22.0.0', pid: 1 })
     assert.equal(typeof env.CHROXY_HOST_VERSION, 'string')
     assert.ok(env.CHROXY_HOST_VERSION.length > 0, 'version is populated from package.json')
