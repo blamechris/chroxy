@@ -30,6 +30,21 @@ describe('ChatView', () => {
     expect(screen.getByText('Message 2')).toBeInTheDocument()
   })
 
+  it('shows the copy control only on finished, non-empty response bubbles (#6631)', () => {
+    const messages: ChatViewMessage[] = [
+      { id: 'r-done', type: 'response', content: 'finished answer', timestamp: 1 },
+      { id: 'r-stream', type: 'response', content: 'partial…', timestamp: 2, isStreaming: true },
+      { id: 'r-empty', type: 'response', content: '   ', timestamp: 3 },
+      { id: 'tool', type: 'tool_use', content: 'tool text', timestamp: 4 },
+      { id: 'sys', type: 'system', content: 'system note', timestamp: 5 },
+      { id: 'usr', type: 'user_input', content: 'my question', timestamp: 6 },
+    ]
+    render(<ChatView messages={messages} isStreaming={false} />)
+    // Exactly one — the finished, non-empty response. A regression that dropped
+    // the `!isStreaming` / `type === 'response'` / non-empty gate would fail here.
+    expect(screen.queryAllByTestId('msg-copy-button')).toHaveLength(1)
+  })
+
   it('renders thinking as a collapsed disclosure (chat redesign #6391)', () => {
     const messages: ChatViewMessage[] = [
       { id: 't1', type: 'thinking', content: 'deep-secret-reasoning', timestamp: Date.now() },

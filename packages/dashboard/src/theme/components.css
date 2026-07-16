@@ -2671,6 +2671,8 @@ button.sidebar-token-view-session-row:hover {
 }
 
 .msg {
+  /* #6631: anchor the absolutely-positioned copy control to the bubble. */
+  position: relative;
   max-width: 85%;
   /* #4757: flex/grid child needs min-width: 0 so a long <pre> or wide
      inline-code line can't push the bubble past its 85% cap. Without
@@ -2907,6 +2909,51 @@ button.sidebar-token-view-session-row:hover {
 }
 
 /* ---- Markdown in messages ---- */
+/* #6631 — subtle per-response copy control. Hidden until the bubble is hovered
+   or focused (keyboard), so it doesn't clutter the transcript. */
+.msg-copy-btn {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--text-muted);
+  /* theme-neutral fallbacks (match the repo's --surface-raised fallback at
+     .cr-* usage) so the control reads correctly in BOTH light and dark. */
+  background: var(--surface-raised, rgba(127, 127, 127, 0.12));
+  border: 1px solid var(--border-subtle, rgba(127, 127, 127, 0.22));
+  border-radius: var(--radius-sm, 6px);
+  cursor: pointer;
+  opacity: 0;
+  /* Hidden ⇒ not a click target, so an invisible top-right hotspot can't eat a
+     selection/link click; re-enabled below when the control is actually shown. */
+  pointer-events: none;
+  transition: opacity 0.12s ease, color 0.12s ease;
+}
+
+.msg:hover .msg-copy-btn,
+.msg-copy-btn:focus-visible,
+.msg-copy-btn[data-copied='true'] {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.msg-copy-btn:hover {
+  color: var(--text-heading);
+}
+
+.msg-copy-btn[data-copied='true'] {
+  opacity: 1;
+  color: var(--accent-green, #22c55e);
+}
+
 .msg pre {
   background: var(--bg-code-block);
   border-radius: 6px;

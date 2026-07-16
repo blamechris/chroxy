@@ -21,6 +21,7 @@ import { bumpRenderCount, type ChatActivityState } from '@chroxy/store-core'
 import { WorkingIndicator } from './WorkingIndicator'
 import { renderMarkdown } from '../lib/markdown'
 import { handleMarkdownLinkClick } from '../lib/links'
+import { CopyButton } from './CopyButton'
 import { MessageRowShell } from './MeasuredRow'
 import { ChatExpandContext, type ChatExpandRegistry } from './chatExpandRegistry'
 import { useWindowedRange } from './useWindowedRange'
@@ -333,6 +334,10 @@ const DefaultMessageRow = memo(function DefaultMessageRow({
     <>
       {type !== 'user_input' && icon}
       <div className={`msg ${TYPE_CLASS[type] || 'assistant'}${isStreaming ? ' streaming' : ''}${queued ? ' queued' : ''}`}>
+        {/* #6631: a subtle copy control on assistant responses (not while still
+            streaming — copy the finished text). Room for future per-response
+            actions alongside it. */}
+        {type === 'response' && !isStreaming && content.trim() !== '' && <CopyButton content={content} />}
         {body}
         {queued && (
           <span className="msg-queued" data-testid={`msg-queued-${id}`}>
