@@ -6,7 +6,7 @@
  */
 import { USER_SHELL_PROVIDER } from '@chroxy/protocol'
 import { auditShellCreate } from '../shell-audit.js'
-import { validateCwdAllowed, broadcastFocusChanged, autoSubscribeOtherClients, buildSessionTokenMismatchPayload, sendSessionError, isSessionViewer, isUserShellSession, ALLOWED_PERMISSION_MODE_IDS } from '../handler-utils.js'
+import { validateCwdAllowed, broadcastFocusChanged, autoSubscribeOtherClients, buildSessionTokenMismatchPayload, sendSessionError, isSessionViewer, isUserShellSession, ALLOWED_PERMISSION_MODE_IDS, getPermissionModes } from '../handler-utils.js'
 import { getRegistryForProvider } from '../models.js'
 import { isUserShellEnabled, isUserShellApprovalRequired } from '../config.js'
 import { createLogger, loggerForSession } from '../logger.js'
@@ -81,6 +81,9 @@ function handleSwitchSession(ws, client, msg, ctx) {
   const switchProvider = entry.provider || null
   const switchRegistry = getRegistryForProvider(switchProvider)
   ctx.transport.send(ws, { type: 'available_models', models: switchRegistry.getModels(), defaultModel: switchRegistry.getDefaultModelId(), provider: switchProvider })
+  // #6638: also re-send the permission-mode copy so switching to/from a Codex
+  // session updates the mode descriptions (Codex has different tools + no plan mode).
+  ctx.transport.send(ws, { type: 'available_permission_modes', modes: getPermissionModes(switchProvider) })
   broadcastFocusChanged(client, targetId, ctx)
 }
 

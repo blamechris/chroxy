@@ -23,6 +23,7 @@ import {
   validateCwdAllowed,
   FORBIDDEN_HOME_SUBDIRS,
   PERMISSION_MODES,
+  getPermissionModes,
   ALLOWED_PERMISSION_MODE_IDS,
   MAX_ATTACHMENT_COUNT,
   MAX_IMAGE_SIZE,
@@ -1562,5 +1563,36 @@ describe('sendError fail-safe send guard (#5702 8a)', () => {
     sendError(ws, 'r3', 'CODE', 'message')
     assert.strictEqual(sent.length, 1)
     assert.strictEqual(sent[0].code, 'CODE')
+  })
+})
+
+describe('getPermissionModes provider-aware copy (#6638)', () => {
+  const idsOf = (modes) => modes.map((m) => m.id)
+  const byId = (modes, id) => modes.find((m) => m.id === id)
+
+  it('non-codex providers get the default (Claude) modes', () => {
+    for (const p of [null, undefined, 'claude-sdk', 'gemini', 'unknown']) {
+      assert.deepEqual(getPermissionModes(p), PERMISSION_MODES, `provider ${p} → default modes`)
+    }
+  })
+
+  it('codex gets codex-tuned descriptions with the SAME mode ids', () => {
+    const codex = getPermissionModes('codex')
+    // ids are provider-independent (validation must stay uniform)
+    assert.deepEqual(idsOf(codex), idsOf(PERMISSION_MODES))
+    // but the descriptions are codex-specific — no Claude-only copy
+    const joined = codex.map((m) => m.description).join(' ')
+    assert.doesNotMatch(joined, /dangerously-skip-permissions/, 'no Claude CLI flag')
+    assert.doesNotMatch(joined, /Read\/Write\/Edit/, 'no Claude tool names')
+    assert.match(byId(codex, 'acceptEdits').description, /apply_patch/, 'names the codex edit tool')
+    assert.match(byId(codex, 'plan').description, /no plan enforcement|behaves like Approve/i, 'plan ≈ approve for codex')
+    assert.match(byId(codex, 'auto').description, /approvalPolicy/, 'names the codex bypass mechanism')
+  })
+
+  it('every codex mode has a non-empty label + description', () => {
+    for (const m of getPermissionModes('codex')) {
+      assert.ok(m.label && m.label.length > 0, `${m.id} has a label`)
+      assert.ok(m.description && m.description.length > 0, `${m.id} has a description`)
+    }
   })
 })
