@@ -25,6 +25,7 @@ import { randomBytes } from 'node:crypto'
 import { join } from 'node:path'
 import { loadJsonState, saveJsonState } from '../json-state-file.js'
 import { applyEvent, makeRunRecord, isTerminalStatus } from './run-record.js'
+import { evaluateBudget } from './run-budget.js'
 import { createLogger } from '../logger.js'
 
 const log = createLogger('run-ledger')
@@ -244,7 +245,75 @@ export class RunLedger extends EventEmitter {
       meterable,
     })
     this.emit('run_usage_updated', { runId, usageTotals: record.usageTotals })
-    return { cell: st ? st.usage : record.usageTotals.overall, event }
+    const budget = this.evaluateBudget(runId, { role })
+    return { cell: st ? st.usage : record.usageTotals.overall, event, budget }
+  }
+
+  /**
+   * Evaluate the run's soft budget against current totals. Pure read PLUS the
+   * one-shot latch side effects: the first warn/cap crossing journals a
+   * budget_warning / budget_cap_reached (which stamps the latch via applyEvent,
+   * so it survives recovery) and emits a run_budget_warning / run_budget_cap_reached
+   * event for the engine to relay. Returns the BudgetEval. Uncapped runs
+   * (maxUsd null) are always ok and fire nothing.
+   */
+  evaluateBudget(runId, { role = null } = {}) {
+    const record = this._records.get(runId)
+    if (!record) return null
+    const budget = record.configSnapshot?.budget ?? null
+    const evalResult = evaluateBudget({
+      budget,
+      budgetState: record.budgetState,
+      totals: record.usageTotals.overall,
+      meteringGaps: record.meteringGaps,
+      role,
+    })
+    if (evalResult.justWarned) {
+      this._emitEvent(runId, { type: 'budget_warning', role }, { lifecycle: true })
+      this.emit('run_budget_warning', { runId, ...evalResult })
+    }
+    if (evalResult.justExceeded) {
+      this._emitEvent(runId, { type: 'budget_cap_reached', role }, { lifecycle: true })
+      this.emit('run_budget_cap_reached', { runId, ...evalResult })
+    }
+    return evalResult
+  }
+
+  /**
+   * Raise/lower the run's budget mid-flight. `configSnapshot` is otherwise
+   * frozen at createRun; its `budget` is the one field setBudget mutates (via
+   * the journaled budget_updated event, so the change survives recovery). If a
+   * RAISE lifts a previously-capped run back under the cap, journals
+   * budget_lifted, which re-arms the one-shot latches (clearing warnedAt/
+   * capReachedAt) so the higher ceiling notifies again — capLiftedAt is the
+   * "was capped, then lifted" history marker. Returns the fresh BudgetEval.
+   */
+  setBudget(runId, patch = {}) {
+    const record = this._records.get(runId)
+    if (!record) return null
+    // No-op on an empty patch — don't burn a lifecycle fsync for nothing.
+    if (!patch || typeof patch !== 'object' || Object.keys(patch).length === 0) {
+      return this.evaluateBudget(runId)
+    }
+    const wasCapped = evaluateBudget({
+      budget: record.configSnapshot?.budget ?? null,
+      budgetState: record.budgetState,
+      totals: record.usageTotals.overall,
+    }).level === 'capped'
+    const nextBudget = { ...(record.configSnapshot?.budget ?? {}), ...patch }
+    this._emitEvent(runId, { type: 'budget_updated', budget: nextBudget }, { lifecycle: true })
+    const evalResult = this.evaluateBudget(runId)
+    // Re-arm on a RAISE that un-caps (budget_lifted clears the latches). A
+    // lower-into-cap keeps wasCapped false here, so it re-fires cap normally.
+    if (wasCapped && evalResult.level !== 'capped') {
+      this._emitEvent(runId, { type: 'budget_lifted' }, { lifecycle: true })
+    }
+    return evalResult
+  }
+
+  /** Audit line: the engine refused a delegation because the run is capped. */
+  recordDelegationBlocked(runId, { role = null } = {}) {
+    this._emitEvent(runId, { type: 'delegation_blocked_budget', role }, { lifecycle: false })
   }
 
   recordCommitteeReview(runId, subtaskId, { phase, verdict, reviewerSessionId = null, notes = '' }) {
