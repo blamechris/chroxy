@@ -4,6 +4,7 @@ import { mkdtempSync, mkdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { orchestrationHandlers } from '../src/handlers/orchestration-handlers.js'
+import { ServerOrchestrationRunSnapshotSchema } from '@chroxy/protocol'
 
 // run_start's validateCwdAllowed requires the cwd to be within $HOME. Use a
 // temp "home" (config.homeOverride) with the cwd under it — hermetic, no writes
@@ -81,6 +82,8 @@ describe('orchestration handlers — surveys', () => {
     await orchestrationHandlers.orchestration_run_detail_request(WS, hostClient, { type: 'orchestration_run_detail_request', runId: 'missing' }, ctx)
     assert.equal(sent[1].run, null)
     assert.equal(sent[1].error.code, 'not_found')
+    // the degraded run:null reply must still validate against the wire schema
+    assert.equal(ServerOrchestrationRunSnapshotSchema.safeParse(sent[1]).success, true)
   })
 
   it('a session-bound client is refused (host authority)', async () => {

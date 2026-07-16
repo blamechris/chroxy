@@ -167,7 +167,10 @@ export const ServerOrchestrationRunSnapshotSchema = z.object({
     requestId: z.string().max(128).nullable().optional(),
     generatedAt: z.string().datetime(),
     seq: z.number().int().nonnegative(),
-    run: RunDetailSchema,
+    // nullable: a degraded reply (not_found / a survey failure / a session-bound
+    // refusal) carries `run: null` + `error`, mirroring the runs-snapshot's empty
+    // `runs` + `error` degraded shape.
+    run: RunDetailSchema.nullable(),
     error: z.object({ code: z.string(), message: z.string() }).optional(),
 }).passthrough();
 // Server-initiated push (no request). Broadcast to unbound clients only. A

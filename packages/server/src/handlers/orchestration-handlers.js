@@ -167,7 +167,15 @@ function orchestration_run_start(ws, client, msg, ctx) {
       autoApprovePlan: msg.autoApprovePlan === true,
       roleOverrides: msg.roles ?? null,
     }))
-    .then((run) => sendAck(ws, ctx, msg, 'start', run?.runId ?? null))
+    .then((run) => {
+      // The ack's runId is a required string on the wire; a manager that
+      // resolved without one is a bug — surface it as an error, not a null ack.
+      if (!run || typeof run.runId !== 'string') {
+        orchestrationActionError(ws, ctx, msg, 'start-failed', 'run started but no runId was returned')
+        return
+      }
+      sendAck(ws, ctx, msg, 'start', run.runId)
+    })
     .catch((err) => {
       log.warn(`orchestration_run_start failed: ${getErrorMessage(err, 'unknown')}`)
       orchestrationActionError(ws, ctx, msg, 'start-failed', getErrorMessage(err, 'failed to start run'))
@@ -179,7 +187,12 @@ function orchestration_gate_response(ws, client, msg, ctx) {
   if (!guardAction(ws, client, msg, ctx, { requirePrimary: gateNeedsPrimary(msg) })) return
   Promise.resolve()
     .then(() => manager(ctx).resolveGate(msg.runId, msg.gateId, {
-      decision: msg.decision, note: msg.note ?? null, budgetUsd: msg.budgetUsd ?? null,
+      decision: msg.decision,
+      note: msg.note ?? null,
+      // budgetUsd is a raise, valid ONLY on an approve (of a budget_overrun gate)
+      // — it is what strict-primary gates. Forwarding it on reject/revise/skip
+      // would decouple the raise from the primary-token check, so drop it there.
+      budgetUsd: msg.decision === 'approve' ? (msg.budgetUsd ?? null) : null,
     }))
     .then(() => sendAck(ws, ctx, msg, 'gate_response', msg.runId, msg.gateId))
     .catch((err) => orchestrationActionError(ws, ctx, msg, 'gate-failed', getErrorMessage(err, 'failed to resolve gate')))
