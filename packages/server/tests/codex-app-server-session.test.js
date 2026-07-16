@@ -234,6 +234,51 @@ describe('CodexAppServerSession — app-server → Chroxy event mapping', () => 
     cleanup()
   })
 
+  // #6692 — codex token usage: emit under the key `_trackUsage` reads
+  // (`cache_read_input_tokens`, not `cached_input_tokens`) and keep input
+  // DISJOINT from the cached subset (OpenAI reports cached inside input).
+  describe('_mapUsage (#6692 codex cache-token fix)', () => {
+    it('emits cache_read_input_tokens and subtracts the cached subset from input', () => {
+      const { s, cleanup } = mkSession()
+      const u = s._mapUsage({ usage: { inputTokens: 1000, outputTokens: 200, cachedInputTokens: 300 } })
+      assert.equal(u.cache_read_input_tokens, 300, 'cached maps to the key _trackUsage reads')
+      assert.equal(u.input_tokens, 700, 'input excludes the cached subset (no double-count)')
+      assert.equal(u.output_tokens, 200)
+      assert.equal(u.cached_input_tokens, 300, 'legacy alias kept one release')
+      cleanup()
+    })
+
+    it('accepts snake_case fields and clamps a cached value larger than input', () => {
+      const { s, cleanup } = mkSession()
+      const u = s._mapUsage({ usage: { input_tokens: 50, output_tokens: 10, cached_input_tokens: 999 } })
+      assert.equal(u.cache_read_input_tokens, 50, 'cached clamped to input')
+      assert.equal(u.input_tokens, 0, 'input never goes negative')
+      cleanup()
+    })
+
+    it('defaults missing / non-finite usage fields to 0', () => {
+      const { s, cleanup } = mkSession()
+      const u = s._mapUsage({})
+      assert.deepEqual(u, { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cached_input_tokens: 0 })
+      const bad = s._mapUsage({ usage: { inputTokens: -5, outputTokens: Infinity, cachedInputTokens: 'x' } })
+      assert.deepEqual(bad, { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cached_input_tokens: 0 })
+      cleanup()
+    })
+
+    it('flows the corrected usage through thread/tokenUsage/updated → turn/completed result', () => {
+      const { s, cleanup } = mkSession()
+      const ev = capture(s, ['result'])
+      s._isBusy = true
+      s._activeTurn = { messageId: 'm1', turnId: 't1', didStreamStart: true }
+      s._onNotification({ method: 'thread/tokenUsage/updated', params: { usage: { inputTokens: 800, outputTokens: 100, cachedInputTokens: 200 } } })
+      s._onNotification({ method: 'turn/completed', params: { turn: { durationMs: 5 } } })
+      const usage = ev[0][1].usage
+      assert.equal(usage.cache_read_input_tokens, 200)
+      assert.equal(usage.input_tokens, 600)
+      cleanup()
+    })
+  })
+
   it('a short agentMessage with no prior deltas still emits its text (fallback)', () => {
     const { s, cleanup } = mkSession()
     const ev = capture(s, ['stream_start', 'stream_delta'])

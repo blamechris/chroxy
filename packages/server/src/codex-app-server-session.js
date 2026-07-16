@@ -439,10 +439,24 @@ export class CodexAppServerSession extends BaseSession {
 
   _mapUsage(params) {
     const u = params?.usage || params || {}
+    const num = (x) => (Number.isFinite(Number(x)) && Number(x) >= 0 ? Number(x) : 0)
+    const totalInput = num(u.inputTokens ?? u.input_tokens)
+    // #6692: codex/OpenAI reports cached tokens as a SUBSET of the input count,
+    // but chroxy's usage model (`session-manager._trackUsage`) accumulates
+    // input_tokens and cache_read_input_tokens as DISJOINT counters (the
+    // Anthropic convention). Two bugs followed: (1) the cached value was emitted
+    // under `cached_input_tokens`, but `_trackUsage` reads `cache_read_input_tokens`
+    // — so codex cache tokens were silently dropped; (2) had they matched, the
+    // cached portion would double-count (it's already inside input). Fix both:
+    // emit under the key `_trackUsage` reads, and subtract the cached subset from
+    // input so the two counters stay disjoint. `cached_input_tokens` is kept as a
+    // legacy alias for one release for any consumer of the old key.
+    const cacheRead = Math.min(num(u.cachedInputTokens ?? u.cached_input_tokens), totalInput)
     return {
-      input_tokens: u.inputTokens ?? u.input_tokens ?? 0,
-      output_tokens: u.outputTokens ?? u.output_tokens ?? 0,
-      cached_input_tokens: u.cachedInputTokens ?? u.cached_input_tokens ?? 0,
+      input_tokens: Math.max(0, totalInput - cacheRead),
+      output_tokens: num(u.outputTokens ?? u.output_tokens),
+      cache_read_input_tokens: cacheRead,
+      cached_input_tokens: cacheRead,
     }
   }
 
