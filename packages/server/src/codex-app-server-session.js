@@ -323,9 +323,11 @@ export class CodexAppServerSession extends BaseSession {
       })
       this._trackToolStart(toolUseId, 'apply_patch')
       // #6638: remember the changes so a later fileChange approval (keyed by the
-      // same itemId, but carrying no diff) can show what will change. Bounded —
-      // deleted on item completion / cleared per turn; evict oldest at the cap.
-      if (toolUseId != null) {
+      // same itemId, but carrying no diff) can show what will change. Only cache a
+      // non-null diff — a null-change item would just waste a slot and evict a real
+      // diff earlier. Bounded: deleted on item completion / cleared per turn; evict
+      // oldest at the cap.
+      if (toolUseId != null && changes != null) {
         if (this._pendingFileChanges.size >= MAX_PENDING_FILE_CHANGES) {
           this._pendingFileChanges.delete(this._pendingFileChanges.keys().next().value)
         }

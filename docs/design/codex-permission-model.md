@@ -138,7 +138,7 @@ for the turn or session (§3).
 | Family | `tool` | prompt input |
 |---|---|---|
 | command exec | `shell` | `{ command, cwd, description: reason \|\| command \|\| 'Run a shell command' }` |
-| file edit | `apply_patch` | `{ description: reason + files summary, file_path: grantRoot, changes }` — the approval params carry no diff, so the `changes` (`FileUpdateChange[]` = `{path,kind,diff}`) are correlated from the fileChange item by `itemId` (#6638); the description names the files (`"reason — 2 files: a.js, b.js"`) and `changes` carries the raw diff for a client that renders it |
+| file edit | `apply_patch` | `{ description: reason + files summary, file_path: grantRoot, changes }` — the approval params carry no diff, so the `changes` (`FileUpdateChange[]` = `{path,kind,diff}`) are correlated from the fileChange item by `itemId` (#6638); the description always names the files (`"reason — 2 files: a.js, b.js"`), and `changes` carries the raw diff for a client that renders it (subject to the permission broadcast's `sanitizeToolInput` ~10K cap — a very large patch collapses to a truncation marker, so the file summary is the guaranteed-visible part) |
 | escalation | `request_permissions` | `{ description: <human-readable scope summary>, requestedPermissions }` |
 
 Descriptions are redacted and capped at ≤200 chars downstream. The escalation
@@ -187,7 +187,7 @@ Each carries a recommendation, but the call is yours.
    *Recommendation:* keep current semantics — `allowAlways` maps to Codex's session grant per family; `shell`/`request_permissions` never auto-allow (always prompt). Document this so the "Allow for Session" button's meaning on a Codex `shell` prompt is clear (it's a Codex session grant, not a Chroxy rule) — or hide "Allow for Session" on never-auto-allow Codex tools to avoid implying a persisted rule.
 
 5. **Required approval-UI detail for Codex** (full command, cwd, env, patch/diff preview, redaction, drilldown)?
-   *Update:* command + cwd ship today, and the **`apply_patch` diff preview shipped** (#6638) — the fileChange item's `changes` are correlated into the approval by `itemId`: the prompt names the files, and the raw `changes` ride along for a client that renders a diff. Still open: a scope drilldown for escalations. Env is sensitive — keep redacted/omitted by default.
+   *Update:* command + cwd ship today, and the **`apply_patch` diff preview shipped** (#6638) — the fileChange item's `changes` are correlated into the approval by `itemId`: the prompt always names the files, and the raw `changes` ride along for a client that renders a diff (bounded by the broadcast `sanitizeToolInput` ~10K cap; a very large patch truncates, so the file summary is the guaranteed part). Still open: a scope drilldown for escalations. Env is sensitive — keep redacted/omitted by default.
 
 6. **MCP / connector approval path (the #6635 gap) — the elicitation approval shipped.**
    Connector elicitations (`mcpServer/elicitation/request`) now surface as an accept/decline prompt via the `mcp_elicitation` tool (`NEVER_AUTO_ALLOW`), fixing the "missed approval → rejected tool call" case. *Remaining:* structured `content` collection for `form`/`openai/form` elicitations and interactive `url`-mode flows, plus rendering the `mcpToolCall` execution item as a `tool_start` — tracked in #6684.
