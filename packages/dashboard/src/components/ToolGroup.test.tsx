@@ -8,10 +8,34 @@
  */
 import { describe, it, expect, afterEach } from 'vitest'
 import { render, screen, fireEvent, cleanup } from '@testing-library/react'
+import * as fs from 'fs'
+import * as path from 'path'
 import type { ChatMessage } from '@chroxy/store-core'
 import { ToolGroup } from './ToolGroup'
 
+const componentsCss = fs.readFileSync(path.resolve(__dirname, '../theme/components.css'), 'utf-8')
+
 afterEach(cleanup)
+
+describe('expanded shell/tool output containment (#6620)', () => {
+  it('keeps the detail <pre> inside the card: wrap/break + min-width:0 + max-width', () => {
+    const rule = componentsCss.match(/\.tool-group-entry-detail-content\s*\{[^}]*\}/)?.[0] ?? ''
+    // A long unbreakable shell line must wrap/break rather than escape the card…
+    expect(rule).toMatch(/overflow-wrap:\s*anywhere/)
+    expect(rule).toMatch(/white-space:\s*pre-wrap/)
+    // …and the box is width-constrained with a scrollbar as the last resort.
+    expect(rule).toMatch(/max-width:\s*100%/)
+    expect(rule).toMatch(/min-width:\s*0/)
+    expect(rule).toMatch(/overflow:\s*auto/)
+  })
+
+  it('gives the detail flex chain min-width:0 so a long line cannot blow the bubble width', () => {
+    const detail = componentsCss.match(/\.tool-group-entry-detail\s*\{[^}]*\}/)?.[0] ?? ''
+    const section = componentsCss.match(/\.tool-group-entry-detail-section\s*\{[^}]*\}/)?.[0] ?? ''
+    expect(detail).toMatch(/min-width:\s*0/)
+    expect(section).toMatch(/min-width:\s*0/)
+  })
+})
 
 function tool(id: string, name: string, extra: Partial<ChatMessage> = {}): ChatMessage {
   return {
