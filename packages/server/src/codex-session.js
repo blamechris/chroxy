@@ -109,9 +109,19 @@ const _warnedSandboxValues = new Set()
  * Read at call time (not module-load time) so the override responds to test
  * harnesses, hot reload, and in-process env changes.
  *
+ * #6638: a per-session `override` (from create_session `codexSandbox`) wins over
+ * the env when it is a valid mode — so a session can pick read-only / full-access
+ * without changing the server-wide env. An invalid override is ignored and the
+ * env → default resolution proceeds (the schema already gates the wire value, so
+ * this only bites an internal caller passing garbage).
+ *
+ * @param {string} [override] - per-session sandbox mode, wins over the env if valid
  * @returns {'read-only'|'workspace-write'|'danger-full-access'}
  */
-export function resolveCodexSandbox() {
+export function resolveCodexSandbox(override) {
+  if (typeof override === 'string' && CODEX_SANDBOX_MODES.includes(override.trim())) {
+    return override.trim()
+  }
   const raw = process.env.CHROXY_CODEX_SANDBOX
   if (typeof raw !== 'string' || raw.length === 0) return CODEX_DEFAULT_SANDBOX
   const trimmed = raw.trim()

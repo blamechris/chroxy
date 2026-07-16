@@ -342,6 +342,11 @@ export declare const CreateSessionSchema: z.ZodObject<{
         }, z.core.$loose>>;
         autoAllowBashIfSandboxed: z.ZodOptional<z.ZodBoolean>;
     }, z.core.$loose>>;
+    codexSandbox: z.ZodOptional<z.ZodEnum<{
+        "read-only": "read-only";
+        "workspace-write": "workspace-write";
+        "danger-full-access": "danger-full-access";
+    }>>;
     isolation: z.ZodOptional<z.ZodEnum<{
         worktree: "worktree";
         sandbox: "sandbox";
@@ -981,6 +986,11 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
         }, z.core.$loose>>;
         autoAllowBashIfSandboxed: z.ZodOptional<z.ZodBoolean>;
     }, z.core.$loose>>;
+    codexSandbox: z.ZodOptional<z.ZodEnum<{
+        "read-only": "read-only";
+        "workspace-write": "workspace-write";
+        "danger-full-access": "danger-full-access";
+    }>>;
     isolation: z.ZodOptional<z.ZodEnum<{
         worktree: "worktree";
         sandbox: "sandbox";

@@ -8,6 +8,7 @@ import { USER_SHELL_PROVIDER } from '@chroxy/protocol'
 import { auditShellCreate } from '../shell-audit.js'
 import { validateCwdAllowed, broadcastFocusChanged, autoSubscribeOtherClients, buildSessionTokenMismatchPayload, sendSessionError, isSessionViewer, isUserShellSession, ALLOWED_PERMISSION_MODE_IDS, getPermissionModes } from '../handler-utils.js'
 import { getRegistryForProvider } from '../models.js'
+import { CODEX_SANDBOX_MODES } from '../codex-session.js'
 import { isUserShellEnabled, isUserShellApprovalRequired } from '../config.js'
 import { createLogger, loggerForSession } from '../logger.js'
 
@@ -115,6 +116,10 @@ function handleCreateSession(ws, client, msg, ctx) {
   const permissionMode = rawPermMode && ALLOWED_PERMISSION_MODE_IDS.has(rawPermMode) ? rawPermMode : undefined
   const worktree = msg.worktree === true ? true : undefined
   const sandbox = (msg.sandbox && typeof msg.sandbox === 'object' && !Array.isArray(msg.sandbox)) ? msg.sandbox : undefined
+  // #6638: per-session codex sandbox mode. Schema-gated to the valid enum; the
+  // guard keeps an unexpected value from reaching the session (→ env/default).
+  const rawCodexSandbox = (typeof msg.codexSandbox === 'string' && msg.codexSandbox.trim()) ? msg.codexSandbox.trim() : undefined
+  const codexSandbox = rawCodexSandbox && CODEX_SANDBOX_MODES.includes(rawCodexSandbox) ? rawCodexSandbox : undefined
   const environmentId = (typeof msg.environmentId === 'string' && msg.environmentId.trim()) ? msg.environmentId.trim() : undefined
   // #4208: opt-in TUI flag — preserve strict booleans so an explicit `false`
   // can override a server-wide `defaultSkipPermissions: true` on a per-session
@@ -209,7 +214,7 @@ function handleCreateSession(ws, client, msg, ctx) {
 
   // #6277 — build the create options + audit identity ONCE; both the synchronous
   // path and the host-approval deferred path replay the identical create.
-  const createOptions = { name, cwd, provider, model, permissionMode, worktree, sandbox, skipPermissions, agentCommId, ...envOpts }
+  const createOptions = { name, cwd, provider, model, permissionMode, worktree, sandbox, codexSandbox, skipPermissions, agentCommId, ...envOpts }
   const isUserShell = provider === USER_SHELL_PROVIDER
   // Capture the audit identity at REQUEST time: the deferred (approved) path may
   // run after the requesting socket is gone, so it can't read a live `client`.

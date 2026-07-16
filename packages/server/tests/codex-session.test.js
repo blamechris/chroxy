@@ -1128,6 +1128,22 @@ describe('CodexSession', () => {
         }
       })
 
+      it('resolveCodexSandbox(override) — a valid per-session override wins over env/default (#6638)', () => {
+        process.env.CHROXY_CODEX_SANDBOX = 'read-only'
+        assert.equal(resolveCodexSandbox('danger-full-access'), 'danger-full-access', 'override beats env')
+        delete process.env.CHROXY_CODEX_SANDBOX
+        assert.equal(resolveCodexSandbox('read-only'), 'read-only', 'override beats the default')
+        assert.equal(resolveCodexSandbox('  workspace-write  '), 'workspace-write', 'override is trimmed')
+      })
+
+      it('resolveCodexSandbox(override) — an invalid/absent override falls through to env/default (#6638)', () => {
+        process.env.CHROXY_CODEX_SANDBOX = 'read-only'
+        assert.equal(resolveCodexSandbox('gimme-root'), 'read-only', 'invalid override → env resolution')
+        delete process.env.CHROXY_CODEX_SANDBOX
+        assert.equal(resolveCodexSandbox('bogus'), 'workspace-write', 'invalid override + no env → default')
+        assert.equal(resolveCodexSandbox(undefined), 'workspace-write', 'no override → default')
+      })
+
       // #3981: resolveCodexSandbox() runs on every sendMessage(). Without
       // a per-value warn cache, a single typo in an operator's environment
       // would spam console.warn for every turn for the lifetime of the

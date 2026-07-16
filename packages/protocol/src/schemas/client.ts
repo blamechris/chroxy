@@ -449,6 +449,9 @@ export const CreateSessionSchema = z.object({
   permissionMode: z.enum(['approve', 'acceptEdits', 'auto', 'plan']).optional(),
   worktree: z.boolean().optional(),
   sandbox: SandboxSchema.optional(),
+  // #6638: per-session Codex sandbox mode (codex provider only; ignored by
+  // others). Overrides the server-wide CHROXY_CODEX_SANDBOX / the default.
+  codexSandbox: z.enum(['read-only', 'workspace-write', 'danger-full-access']).optional(),
   isolation: z.enum(['none', 'worktree', 'sandbox', 'container']).optional(),
   environmentId: z.string().max(256).optional(),
   // #4208: opt-in to spawning the claude TUI with

@@ -11,9 +11,9 @@ import { CodexAppServerClient } from '../src/codex-app-server-client.js'
 // WITHOUT spawning a real `codex app-server` (the live end-to-end round-trip is
 // validated separately).
 
-function mkSession() {
+function mkSession(extraOpts = {}) {
   const sk = mkdtempSync(join(tmpdir(), 'chroxy-cas-'))
-  const s = new CodexAppServerSession({ cwd: '/tmp', skillsDir: sk, repoSkillsDir: null })
+  const s = new CodexAppServerSession({ cwd: '/tmp', skillsDir: sk, repoSkillsDir: null, ...extraOpts })
   return { s, cleanup: () => rmSync(sk, { recursive: true, force: true }) }
 }
 function capture(s, events) {
@@ -297,6 +297,15 @@ describe('CodexAppServerSession — approval surfacing (#6605 Phase 2)', () => {
     s.permissionMode = 'approve'; assert.equal(s._approvalPolicy(), 'on-request')
     s.permissionMode = 'acceptEdits'; assert.equal(s._approvalPolicy(), 'on-request')
     cleanup()
+  })
+
+  it('stores a per-session codexSandbox opt for start() to apply (#6638)', () => {
+    const withOverride = mkSession({ codexSandbox: 'read-only' })
+    assert.equal(withOverride.s._codexSandbox, 'read-only', 'the per-session sandbox override is captured')
+    withOverride.cleanup()
+    const without = mkSession()
+    assert.equal(without.s._codexSandbox, null, 'no opt → null (start() falls back to env/default)')
+    without.cleanup()
   })
 
   it('commandExecution approval → permission_request; allow → {decision:accept}', async () => {

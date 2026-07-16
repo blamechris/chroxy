@@ -125,8 +125,11 @@ can edit files). Applied **once at thread start** — the per-turn parameter is 
 `approvalPolicy` (§2), not the sandbox, so a mid-session sandbox change would need
 a new thread.
 
-This is a **Codex-only concept** with no Claude equivalent, and it is
-**env-only** — not exposed per-session in the UI or the `create_session` API.
+This is a **Codex-only concept** with no Claude equivalent. The env var is the
+server-wide default; since #6638 a session can **override it at creation** via the
+`create_session` `codexSandbox` field (one of the three modes), which wins over
+the env/default and is applied at that session's thread start. A client **selector
+UI** to set it is a follow-up — the API + server wiring ship here.
 Scope-escalation (`request_permissions`) is how Codex asks, mid-turn, to broaden
 beyond its sandbox; approving it grants the requested filesystem/network scope
 for the turn or session (§3).
@@ -178,7 +181,7 @@ Each carries a recommendation, but the call is yours.
    *Recommendation:* yes, low-effort — make the mode copy provider-aware so Codex doesn't show `--dangerously-skip-permissions`/plan-mode language that doesn't apply. At minimum, note in the copy that `plan` ≈ `approve` and `skipPermissions` is a no-op for Codex.
 
 2. **Expose sandbox mode per session (UI/API) instead of env-only?**
-   *Recommendation:* yes, but as its own slice — add `sandbox` to `create_session` for Codex + a session control, defaulting to `workspace-write`. It's the most operator-visible Codex-specific lever. Bigger than a copy tweak (protocol + both clients).
+   *Update:* the **API + server wiring shipped** (#6638) — `create_session` takes a `codexSandbox` mode that overrides the env/default for that session. Still open: the client **session control** (app/dashboard selector) to set it. Default stays `workspace-write`.
 
 3. **Should scope-escalation requests remain prompts (post-#6610), and be visible in history?**
    *Recommendation:* keep the prompt (shipped in #6610). Separately decide whether a *resolved* escalation leaves a compact audit line in the transcript — recommend yes, for auditability, tracked with the resolved-permissions-in-history UX (#6627).
