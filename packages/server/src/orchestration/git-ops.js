@@ -26,7 +26,7 @@
 
 import { execFile as execFileCb } from 'node:child_process'
 import { promisify } from 'node:util'
-import { join } from 'node:path'
+import { join, resolve, sep } from 'node:path'
 import { homedir } from 'node:os'
 import { rmSync, mkdirSync, existsSync } from 'node:fs'
 import { GIT } from '../git.js'
@@ -34,7 +34,30 @@ import { GIT } from '../git.js'
 const execFileAsync = promisify(execFileCb)
 
 const DEFAULT_TIMEOUT_MS = 30_000
-const DEFAULT_MAX_BUFFER = 4 * 1024 * 1024 // git diff of a large subtask can be big; we cap what we KEEP separately
+const DEFAULT_MAX_BUFFER = 8 * 1024 * 1024
+// A raw `git diff`/`status` can be far larger than what we KEEP; buffer
+// generously so a big real change is never misread as empty (we cap the KEPT
+// bytes separately in computeCappedDiff).
+const DIFF_MAX_BUFFER = 64 * 1024 * 1024
+
+// Reject a ref/path that git would parse as an OPTION (leading '-') or that
+// carries a NUL/newline — defense-in-depth so a caller can never turn a branch
+// name into a git flag. execFile already blocks SHELL injection; this blocks
+// ARGUMENT injection.
+function assertSafeRef(name, kind = 'ref') {
+  if (typeof name !== 'string' || name.length === 0) throw new GitOpsError(`empty ${kind}`)
+  if (name.startsWith('-') || /[\0\n\r]/.test(name)) throw new GitOpsError(`unsafe ${kind}: ${JSON.stringify(name)}`)
+}
+
+// Byte-accurate UTF-8 truncation that drops an incomplete trailing multibyte
+// char (String.slice counts UTF-16 code units, so it can overshoot a byte
+// budget ~3x on CJK content and split surrogate pairs into U+FFFD).
+function byteSliceUtf8(str, maxBytes) {
+  const buf = Buffer.from(str, 'utf8')
+  if (buf.length <= maxBytes) return str
+  // stream:true holds back an incomplete trailing sequence instead of emitting U+FFFD.
+  return new TextDecoder('utf-8').decode(buf.subarray(0, maxBytes), { stream: true })
+}
 
 // Orchestrator commit identity — the daemon env has no configured git identity,
 // so a bare `git commit` would fail. Passed per-invocation via `-c`, never
@@ -100,18 +123,21 @@ export function createGitOps({ git = GIT, now = () => Date.now(), worktreesRoot 
 
   // A worker worktree is created DETACHED at HEAD; put it on a named branch.
   const createBranch = async (worktreePath, branchName) => {
+    assertSafeRef(branchName, 'branch')
     const base = await captureHead(worktreePath)
     await runOrThrow(['-C', worktreePath, 'switch', '-c', branchName])
     return { branch: branchName, baseSha: base.sha }
   }
 
   const branchExists = async (repoDir, branchName) => {
+    assertSafeRef(branchName, 'branch')
     const r = await run(['-C', repoDir, 'rev-parse', '--verify', '--quiet', `refs/heads/${branchName}`])
     return { exists: r.ok }
   }
 
   const deleteBranch = async (repoDir, branchName) => {
-    const r = await run(['-C', repoDir, 'branch', '-D', branchName])
+    assertSafeRef(branchName, 'branch')
+    const r = await run(['-C', repoDir, 'branch', '-D', '--', branchName])
     return { deleted: r.ok }
   }
 
@@ -121,10 +147,23 @@ export function createGitOps({ git = GIT, now = () => Date.now(), worktreesRoot 
   // and total byte caps with explicit truncation markers so a small worker
   // model isn't handed a 2MB patch.
   const computeCappedDiff = async ({ repoDir, baseSha, headRef = 'HEAD', maxBytes = 65_536, maxFileBytes = 8_192 }) => {
-    const statR = await run(['-C', repoDir, 'diff', '--stat', `${baseSha}..${headRef}`])
-    const patchR = await run(['-C', repoDir, 'diff', `${baseSha}..${headRef}`])
+    const statR = await run(['-C', repoDir, 'diff', '--stat', `${baseSha}..${headRef}`], { maxBuffer: DIFF_MAX_BUFFER })
+    const patchR = await run(['-C', repoDir, 'diff', `${baseSha}..${headRef}`], { maxBuffer: DIFF_MAX_BUFFER })
     const stat = statR.ok ? statR.stdout : ''
-    const fullPatch = patchR.ok ? patchR.stdout : ''
+    // If the raw diff couldn't be produced/buffered, NEVER return an empty patch
+    // as if clean — that would let a huge unreviewed change look like no change.
+    // Report it honestly as truncated with an explicit marker.
+    if (!patchR.ok) {
+      return {
+        stat,
+        patch: `// diff unavailable (${patchR.stderr || 'exceeded buffer'})\n`,
+        truncated: true,
+        omittedFiles: [],
+        includedFiles: [],
+        error: patchR.stderr || 'diff_unavailable',
+      }
+    }
+    const fullPatch = patchR.stdout
 
     // Split into per-file sections on the `diff --git` boundary.
     const sections = []
@@ -158,10 +197,11 @@ export function createGitOps({ git = GIT, now = () => Date.now(), worktreesRoot 
       }
       let piece = section
       if (Buffer.byteLength(piece, 'utf8') > maxFileBytes) {
-        // Truncate on a char boundary at/below the byte budget.
-        piece = piece.slice(0, maxFileBytes)
-        const omittedBytes = Buffer.byteLength(section, 'utf8') - Buffer.byteLength(piece, 'utf8')
-        piece += `\n// … ${omittedBytes} bytes omitted (file diff truncated)\n`
+        // Byte-accurate truncation (not String.slice, which counts UTF-16 units
+        // and overshoots the byte budget on multibyte content).
+        const kept = byteSliceUtf8(piece, maxFileBytes)
+        const omittedBytes = Buffer.byteLength(section, 'utf8') - Buffer.byteLength(kept, 'utf8')
+        piece = `${kept}\n// … ${omittedBytes} bytes omitted (file diff truncated)\n`
         truncated = true
       }
       // Total-budget check after per-file truncation.
@@ -180,20 +220,27 @@ export function createGitOps({ git = GIT, now = () => Date.now(), worktreesRoot 
 
   // --- auto-commit (the load-bearing safety primitive) ---------------------
 
+  // THROWS on a git-status failure rather than reporting clean — a false "clean"
+  // would make autoCommit a no-op and let teardown delete uncommitted work. A
+  // caller must treat an indeterminate tree as "do not destroy".
   const isDirty = async (worktreePath) => {
-    const r = await run(['-C', worktreePath, 'status', '--porcelain'])
-    return { dirty: r.ok ? r.stdout.trim().length > 0 : false }
+    const r = await runOrThrow(['-C', worktreePath, 'status', '--porcelain'], { maxBuffer: DIFF_MAX_BUFFER })
+    return { dirty: r.stdout.trim().length > 0 }
   }
 
   // Commit everything in a worker worktree. Called ALWAYS before destroying an
   // implement worker (destroySession removes the worktree, deleting uncommitted
-  // work). A clean tree is a no-op, not an error.
+  // work). A clean tree is a no-op, not an error. --no-verify / --no-gpg-sign:
+  // these are the daemon's OWN bookkeeping commits — they must not run the
+  // user's pre-commit/commit-msg hooks (a rejecting hook would throw here and
+  // lose the worker's output) or require a GPG key the daemon doesn't have.
   const autoCommit = async ({ worktreePath, subtaskId, message = null, identity: id = identity }) => {
     const { dirty } = await isDirty(worktreePath)
     if (!dirty) return { committed: false }
     await runOrThrow(['-C', worktreePath, 'add', '-A'])
     const msg = message || `chroxy-orch(${subtaskId}): auto-commit`
-    await runOrThrow(['-C', worktreePath, '-c', `user.name=${id.name}`, '-c', `user.email=${id.email}`, 'commit', '-m', msg])
+    await runOrThrow(['-C', worktreePath, '-c', `user.name=${id.name}`, '-c', `user.email=${id.email}`,
+      'commit', '--no-verify', '--no-gpg-sign', '-m', msg])
     const head = await captureHead(worktreePath)
     return { committed: true, sha: head.sha }
   }
@@ -201,6 +248,7 @@ export function createGitOps({ git = GIT, now = () => Date.now(), worktreesRoot 
   // --- integration worktree + sequential merge -----------------------------
 
   const createIntegrationWorktree = async ({ repoDir, runId, branchName, baseSha }) => {
+    assertSafeRef(branchName, 'branch')
     const worktreePath = integrationWorktreePath(runId)
     fs.mkdirSync(runWorktreesDir(runId), { recursive: true })
     await runOrThrow(['-C', repoDir, 'worktree', 'add', '-b', branchName, worktreePath, baseSha])
@@ -213,8 +261,13 @@ export function createGitOps({ git = GIT, now = () => Date.now(), worktreesRoot 
   }
 
   const mergeNoFf = async ({ integrationWorktree, branch, subtaskId, identity: id = identity }) => {
+    assertSafeRef(branch, 'branch')
+    // --no-verify / --no-gpg-sign for the same reason as autoCommit: the merge
+    // commit is the daemon's bookkeeping, so a user commit-msg/pre-merge-commit
+    // hook must not be able to reject it (that would look like a non-conflict
+    // failure and wedge the integration worktree with MERGE_HEAD set).
     const r = await run(['-C', integrationWorktree, '-c', `user.name=${id.name}`, '-c', `user.email=${id.email}`,
-      'merge', '--no-ff', branch, '-m', `chroxy-orch: merge ${subtaskId}`])
+      'merge', '--no-ff', '--no-verify', '--no-gpg-sign', '-m', `chroxy-orch: merge ${subtaskId}`, branch])
     if (r.ok) return { ok: true }
     const files = await conflictFiles(integrationWorktree)
     if (files.length > 0 || /conflict/i.test(r.stderr) || /conflict/i.test(r.stdout)) {
@@ -231,14 +284,21 @@ export function createGitOps({ git = GIT, now = () => Date.now(), worktreesRoot 
 
   // --- teardown + reconcile ------------------------------------------------
 
-  // Remove an ORCHESTRATOR-OWNED worktree. --force is safe here BECAUSE the
-  // path is one we created under the worktrees root; the rm fallback covers a
-  // git that refuses (locked/partial). NEVER call this on a user worktree.
+  // Remove an ORCHESTRATOR-OWNED worktree. --force + the rm fallback are safe
+  // ONLY under the worktrees root — this guard ENFORCES that invariant so a
+  // corrupted ledger record or a buggy caller can never `rm -rf` the user's
+  // repo, the ledger's runs/ dir, or any path outside the root. The root itself
+  // is also refused (we only ever remove `<root>/<runId>/…`).
   const removeWorktree = async ({ repoDir, worktreePath }) => {
-    const r = await run(['-C', repoDir, 'worktree', 'remove', '--force', worktreePath])
+    const base = resolve(rootDir())
+    const target = resolve(String(worktreePath || ''))
+    if (target === base || !target.startsWith(base + sep)) {
+      throw new GitOpsError(`refusing to remove a path outside the worktrees root: ${worktreePath}`)
+    }
+    const r = await run(['-C', repoDir, 'worktree', 'remove', '--force', target])
     if (r.ok) return { removed: true, method: 'git' }
-    if (fs.existsSync(worktreePath)) {
-      try { fs.rmSync(worktreePath, { recursive: true, force: true }) } catch { /* best-effort */ }
+    if (fs.existsSync(target)) {
+      try { fs.rmSync(target, { recursive: true, force: true }) } catch { /* best-effort */ }
     }
     return { removed: true, method: 'rm' }
   }
