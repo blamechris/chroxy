@@ -20,6 +20,7 @@ import { memo, useRef, useState, useCallback, useEffect, useLayoutEffect, useMem
 import { bumpRenderCount, type ChatActivityState } from '@chroxy/store-core'
 import { WorkingIndicator } from './WorkingIndicator'
 import { renderMarkdown } from '../lib/markdown'
+import { handleMarkdownLinkClick } from '../lib/links'
 import { MessageRowShell } from './MeasuredRow'
 import { ChatExpandContext, type ChatExpandRegistry } from './chatExpandRegistry'
 import { useWindowedRange } from './useWindowedRange'
@@ -322,7 +323,8 @@ const DefaultMessageRow = memo(function DefaultMessageRow({
 
   const body =
     type === 'response' || type === 'tool_use'
-      ? <div dangerouslySetInnerHTML={{ __html: renderMarkdown(content) }} />
+      // #6625: modifier-click opens a rendered link; plain click keeps selection.
+      ? <div onClick={handleMarkdownLinkClick} dangerouslySetInnerHTML={{ __html: renderMarkdown(content) }} />
       : type === 'thinking'
         ? <ThinkingBody content={content} streaming={!!isStreaming} />
         : content
