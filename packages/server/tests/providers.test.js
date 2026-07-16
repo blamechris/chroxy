@@ -206,11 +206,22 @@ describe('Provider Registry', () => {
       }
       // Concretely: default = app-server (approval-capable), =0 = exec (no approvals).
       delete process.env.CHROXY_CODEX_APPSERVER
-      assert.equal(listProviders().find(p => p.name === 'codex').capabilities.permissions, true,
+      const defaultList = listProviders()
+      assert.equal(defaultList.find(p => p.name === 'codex').capabilities.permissions, true,
         'codex default (app-server) advertises approvals in the picker')
       process.env.CHROXY_CODEX_APPSERVER = '0'
-      assert.equal(listProviders().find(p => p.name === 'codex').capabilities.permissions, false,
+      const optOutList = listProviders()
+      assert.equal(optOutList.find(p => p.name === 'codex').capabilities.permissions, false,
         'codex exec opt-out advertises no approvals in the picker')
+
+      // No-op for every OTHER provider: resolving through getProvider only swaps
+      // codex, so a non-codex entry's caps must be identical across the env flip.
+      for (const name of ['claude-sdk', 'claude-cli']) {
+        const a = defaultList.find(p => p.name === name)
+        const b = optOutList.find(p => p.name === name)
+        if (a && b) assert.deepEqual(a.capabilities, b.capabilities,
+          `${name} caps must not change with CHROXY_CODEX_APPSERVER (only codex is resolved)`)
+      }
     } finally {
       if (orig === undefined) delete process.env.CHROXY_CODEX_APPSERVER
       else process.env.CHROXY_CODEX_APPSERVER = orig
