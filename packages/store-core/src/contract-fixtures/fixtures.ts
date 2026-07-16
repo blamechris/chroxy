@@ -1614,7 +1614,42 @@ export const SWITCH_FIXTURES: ContractFixture[] = [
     expect: {
       // Both clients attach the result onto the same bubble; assert the bubble
       // is still a single tool_use entry carrying the result text.
-      sessions: { s1: { messages: [{ type: 'tool_use', toolUseId: 'tu-1' }] } },
+      sessions: { s1: { messages: [{ type: 'tool_use', toolUseId: 'tu-1', toolResult: 'file contents here' }] } },
+    },
+  },
+  {
+    // #6712 — a FAILED tool_result (codex mcpToolCall failure / orphan sweep)
+    // flags `isError` on the wire; both clients must attach `toolResultIsError`
+    // (+ the error text) onto the tool_use bubble so the renderers can style it.
+    name: 'tool_result flags isError + truncated onto the tool_use bubble',
+    type: 'tool_result',
+    init: {
+      activeSessionId: 's1',
+      sessions: {
+        s1: {
+          messages: [
+            { id: 'tool-tu-2', type: 'tool_use', tool: 'db/query', toolUseId: 'tu-2', content: '' } as unknown as ChatMessage,
+          ],
+          activeTools: [{ toolUseId: 'tu-2', tool: 'db/query', startedAt: 1 }],
+        },
+      },
+    },
+    message: {
+      type: 'tool_result',
+      sessionId: 's1',
+      toolUseId: 'tu-2',
+      result: 'connection refused',
+      isError: true,
+      truncated: false,
+    },
+    expect: {
+      sessions: {
+        s1: {
+          messages: [
+            { type: 'tool_use', toolUseId: 'tu-2', toolResult: 'connection refused', toolResultIsError: true, toolResultTruncated: false },
+          ],
+        },
+      },
     },
   },
   {

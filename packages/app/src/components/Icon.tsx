@@ -78,11 +78,12 @@ interface IconProps {
   name: IconName;
   size?: number;
   color?: string;
+  testID?: string;
 }
 
 /** Render a vector icon by semantic name */
-export function Icon({ name, size = 20, color = COLORS.textMuted }: IconProps) {
+export function Icon({ name, size = 20, color = COLORS.textMuted, testID }: IconProps) {
   const glyphName = iconMap[name];
   if (!glyphName) return null;
-  return <Ionicons name={glyphName as keyof typeof Ionicons.glyphMap} size={size} color={color} />;
+  return <Ionicons name={glyphName as keyof typeof Ionicons.glyphMap} size={size} color={color} testID={testID} />;
 }

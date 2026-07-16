@@ -370,12 +370,13 @@ export class CodexAppServerSession extends BaseSession {
       this._trackToolResult(item.id)
       if (item.id != null) this._pendingFileChanges.delete(item.id) // #6638: done — release the cached diff
     } else if (item.type === 'mcpToolCall') {
-      // #6684: emit the connector tool's output as a tool_result. A failed call
-      // surfaces error.message as the result TEXT — the wire tool_result carries
-      // no isError field (ServerToolResultSchema is {toolUseId, result,
-      // truncated}), so error styling is out of scope here (tracked in #6712).
+      // #6684/#6712: emit the connector tool's output as a tool_result. A failed
+      // call surfaces error.message as the result text AND flags `isError` (which
+      // now round-trips the wire → clients style the error). Large output is
+      // capped and flagged `truncated`.
       const { result, truncated } = this._summarizeMcpResult(item)
-      this.emit('tool_result', { toolUseId: item.id, result, truncated })
+      const isError = item.status === 'failed' || item.error != null
+      this.emit('tool_result', { toolUseId: item.id, result, truncated, isError })
       this._trackToolResult(item.id)
     } else if (item.type === 'agentMessage') {
       // Fallback: if the final text never arrived as deltas (short replies can
@@ -396,11 +397,11 @@ export class CodexAppServerSession extends BaseSession {
     return tool || server || 'mcp'
   }
 
-  // #6684: reduce an mcpToolCall completion to a { result, truncated } tool_result.
-  // Prefers the connector's error message (failed calls convey failure via this
-  // text, not styling — #6712), then the MCP content array (text parts inline,
-  // non-text parts as a `[type]` marker), then structuredContent, then the bare
-  // status so the card is never blank. Text is bounded by MAX_MCP_RESULT_CHARS.
+  // #6684: reduce an mcpToolCall completion to a { result, truncated } tool_result
+  // (the caller adds `isError` from the item status). Prefers the connector's
+  // error message, then the MCP content array (text parts inline, non-text parts
+  // as a `[type]` marker), then structuredContent, then the bare status so the
+  // card is never blank. Text is bounded by MAX_MCP_RESULT_CHARS.
   _summarizeMcpResult(item) {
     if (item?.error && typeof item.error.message === 'string' && item.error.message) {
       return this._capMcpResult(item.error.message)

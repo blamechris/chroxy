@@ -47,6 +47,7 @@ export declare const ServerToolResultSchema: z.ZodObject<{
     toolUseId: z.ZodString;
     result: z.ZodAny;
     truncated: z.ZodOptional<z.ZodBoolean>;
+    isError: z.ZodOptional<z.ZodBoolean>;
 }, z.core.$strip>;
 export declare const ServerToolInputDeltaSchema: z.ZodObject<{
     type: z.ZodLiteral<"tool_input_delta">;

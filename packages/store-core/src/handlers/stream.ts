@@ -408,8 +408,8 @@ export interface ToolResultPayload {
  * Otherwise returns a payload with:
  * - `sessionId`: resolved from string-typed `msg.sessionId` falling back to
  *   `activeSessionId`. Non-string values are ignored.
- * - `patch`: `{ toolResult, toolResultTruncated }`, plus `toolResultImages`
- *   only when `msg.images` is a non-empty array.
+ * - `patch`: `{ toolResult, toolResultTruncated, toolResultIsError }`, plus
+ *   `toolResultImages` only when `msg.images` is a non-empty array.
  * - `resultText`: the raw result string (string-validated) for the caller's
  *   terminal preview.
  * - `applyTo(messages)`: locates the matching `tool_use` entry by
@@ -432,6 +432,7 @@ export function handleToolResult(
   const sessionId = msgSessionId || activeSessionId
   const resultText = typeof msg.result === 'string' ? msg.result : ''
   const truncated = typeof msg.truncated === 'boolean' ? msg.truncated : false
+  const isError = typeof msg.isError === 'boolean' ? msg.isError : false
   const images = Array.isArray(msg.images)
     ? (msg.images as ToolResultImage[])
     : undefined
@@ -439,6 +440,7 @@ export function handleToolResult(
   const patch: Partial<ChatMessage> = {
     toolResult: resultText,
     toolResultTruncated: truncated,
+    toolResultIsError: isError,
   }
   if (images?.length) patch.toolResultImages = images
 

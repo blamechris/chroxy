@@ -107,7 +107,11 @@ function ToolGroupEntry({
   const hasResult =
     message.toolResult !== undefined ||
     (message.toolResultImages?.length ?? 0) > 0
-  const markerClass = `tool-group-entry-marker tool-group-entry-marker--${hasResult ? 'complete' : 'pending'}`
+  // #6712: a failed tool_result (codex mcpToolCall / orphan sweep) gets an error
+  // marker + entry class so the renderer can tint it distinctly from a success.
+  const resultIsError = hasResult && message.toolResultIsError === true
+  const markerState = resultIsError ? 'error' : hasResult ? 'complete' : 'pending'
+  const markerClass = `tool-group-entry-marker tool-group-entry-marker--${markerState}`
 
   // #4279 / #4282: the parent group's toggle now lives on a dedicated
   // header <button> that is a SIBLING of the entry list — not an ancestor
@@ -152,8 +156,9 @@ function ToolGroupEntry({
 
   return (
     <div
-      className={`tool-group-entry${expanded ? ' tool-group-entry--expanded' : ''}`}
+      className={`tool-group-entry${expanded ? ' tool-group-entry--expanded' : ''}${resultIsError ? ' tool-group-entry--error' : ''}`}
       data-testid={`tool-group-entry-${message.id}`}
+      data-error={resultIsError ? 'true' : undefined}
     >
       {/*
         #4281: the click target is the ROW, not the outer entry container.
@@ -174,7 +179,7 @@ function ToolGroupEntry({
         onKeyDown={handleKeyDown}
       >
         <span className={markerClass} aria-hidden="true">
-          {hasResult ? '✓' : '›'}
+          {resultIsError ? '✕' : hasResult ? '✓' : '›'}
         </span>
         <span className="tool-group-entry-name">{toolName}</span>
         {summary && <span className="tool-group-entry-input">{summary}</span>}

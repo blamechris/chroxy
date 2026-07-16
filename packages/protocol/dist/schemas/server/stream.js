@@ -88,6 +88,11 @@ export const ServerToolResultSchema = z.object({
     toolUseId: z.string(),
     result: z.any(),
     truncated: z.boolean().optional(),
+    // #6712: the result represents a FAILED tool execution (a failed codex
+    // mcpToolCall, or a synthetic orphan-sweep result), so clients can render an
+    // error affordance instead of a plain result. Additive/optional — absent on
+    // older servers and for successful results.
+    isError: z.boolean().optional(),
 });
 // #4080 / #4081: incremental partial-JSON chunk for a streaming tool_use
 // `input`. Emitted between `tool_start` and `tool_result` while the

@@ -144,7 +144,7 @@ describe('CodexAppServerSession — app-server → Chroxy event mapping', () => 
     cleanup()
   })
 
-  it('a failed mcpToolCall surfaces the error message as the result text (#6712 tracks styling)', () => {
+  it('a failed mcpToolCall surfaces the error message as the result text AND flags isError (#6712)', () => {
     const { s, cleanup } = mkSession()
     const ev = capture(s, ['tool_result'])
     s._activeTurn = { messageId: 'm1', turnId: null, didStreamStart: false }
@@ -153,10 +153,22 @@ describe('CodexAppServerSession — app-server → Chroxy event mapping', () => 
       method: 'item/completed',
       params: { item: { type: 'mcpToolCall', id: 't2', status: 'failed', error: { message: 'connection refused' } } },
     })
-    // The wire tool_result carries no isError (ServerToolResultSchema strips it),
-    // so the failure is conveyed by the error TEXT — assert that, not a flag.
+    // #6712: isError now round-trips the wire so clients can style the failure.
     assert.equal(ev[0][1].result, 'connection refused')
-    assert.equal('isError' in ev[0][1], false, 'no dead isError field on the wire payload')
+    assert.equal(ev[0][1].isError, true)
+    cleanup()
+  })
+
+  it('a successful mcpToolCall flags isError false', () => {
+    const { s, cleanup } = mkSession()
+    const ev = capture(s, ['tool_result'])
+    s._activeTurn = { messageId: 'm1', turnId: null, didStreamStart: false }
+    s._onNotification({ method: 'item/started', params: { item: { type: 'mcpToolCall', id: 't3', server: 'db', tool: 'query' } } })
+    s._onNotification({
+      method: 'item/completed',
+      params: { item: { type: 'mcpToolCall', id: 't3', status: 'completed', result: { content: [{ type: 'text', text: 'ok' }] } } },
+    })
+    assert.equal(ev[0][1].isError, false)
     cleanup()
   })
 

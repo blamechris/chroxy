@@ -110,7 +110,17 @@ function ActivityEntry({
       testID={`activity-entry-${message.id}`}
     >
       <View style={styles.activityEntryRow}>
-        {hasResult ? <Icon name="check" size={12} color={COLORS.accentGreen} /> : <Icon name="chevronRight" size={12} color={COLORS.textMuted} />}
+        {/* #6712: a failed tool_result (codex mcpToolCall / orphan sweep) shows a
+            red alert icon instead of the green check. */}
+        {hasResult ? (
+          message.toolResultIsError ? (
+            <Icon name="alertCircle" size={12} color={COLORS.accentRed} testID={`activity-entry-error-${message.id}`} />
+          ) : (
+            <Icon name="check" size={12} color={COLORS.accentGreen} />
+          )
+        ) : (
+          <Icon name="chevronRight" size={12} color={COLORS.textMuted} />
+        )}
         <Text style={styles.activityEntryTool}>{displayTool}</Text>
         {imageCount > 0 && (
           <Text style={styles.activityImageBadge}>{imageCount === 1 ? '1 image' : `${imageCount} images`}</Text>

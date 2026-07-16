@@ -99,6 +99,11 @@ function normalize(messages: unknown[]): Array<Record<string, unknown>> {
     // fixture can assert streamed tool input. toMatchObject is partial, so
     // existing fixtures that don't assert it are unaffected.
     toolInputPartial: m.toolInputPartial,
+    // #6712: the tool_result patch fields, so a fixture can assert a result was
+    // attached (and flagged truncated / isError) onto its tool_use bubble.
+    toolResult: m.toolResult,
+    toolResultTruncated: m.toolResultTruncated,
+    toolResultIsError: m.toolResultIsError,
   }))
 }
 
