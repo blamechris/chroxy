@@ -356,6 +356,8 @@ export function createMockSessionManager(sessions = [], overrides = {}) {
       cwd: s.cwd || '/tmp',
       type: s.type || 'cli',
       isBusy: s.isRunning || false,
+      // Real entries carry the provider; needed for provider-scoped models/modes.
+      ...(s.provider !== undefined ? { provider: s.provider } : {}),
     })
   }
 

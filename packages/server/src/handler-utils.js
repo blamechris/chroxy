@@ -16,14 +16,48 @@ const log = createLogger('handler-utils')
 // `description` is a short, plain-English sentence the dashboard
 // surfaces as a tooltip / inline hint (#4013). Keep terse — the picker
 // space is limited and screen readers re-narrate the whole string.
-// The auto-mode description deliberately names `--dangerously-skip-permissions`
-// so users searching for that Claude CLI flag find the chroxy equivalent.
-export const PERMISSION_MODES = [
-  { id: 'approve', label: 'Approve', description: 'Default. Every tool call gates on your approval in the dashboard or mobile app.' },
-  { id: 'acceptEdits', label: 'Accept Edits', description: 'Auto-approve Read/Write/Edit/NotebookEdit/Glob/Grep. Bash, MCP, and other tools still gate on approval.' },
-  { id: 'auto', label: 'Auto (skip all prompts)', description: 'Auto-approve every tool call without prompting. Equivalent to `claude --dangerously-skip-permissions`.' },
-  { id: 'plan', label: 'Plan', description: 'Plan mode — Claude is asked to plan before acting; each tool call still gates on approval.' },
-]
+// The default (Claude) auto-mode description deliberately names
+// `--dangerously-skip-permissions` so users searching for that Claude CLI flag
+// find the chroxy equivalent.
+//
+// #6638: the mode IDs are provider-independent, but the descriptions are NOT —
+// the default copy is Claude-oriented (Read/Write/Edit tool names, the
+// `--dangerously-skip-permissions` flag, real plan mode). Codex has different
+// tools (apply_patch / shell / connectors) and no plan enforcement, so
+// `getPermissionModes('codex')` returns codex-tuned copy. Callers pass the active
+// session's provider; a switch re-sends `available_permission_modes` (session-handlers).
+const MODE_LABELS = { approve: 'Approve', acceptEdits: 'Accept Edits', auto: 'Auto (skip all prompts)', plan: 'Plan' }
+const MODE_DESCRIPTIONS = {
+  default: {
+    approve: 'Default. Every tool call gates on your approval in the dashboard or mobile app.',
+    acceptEdits: 'Auto-approve Read/Write/Edit/NotebookEdit/Glob/Grep. Bash, MCP, and other tools still gate on approval.',
+    auto: 'Auto-approve every tool call without prompting. Equivalent to `claude --dangerously-skip-permissions`.',
+    plan: 'Plan mode — Claude is asked to plan before acting; each tool call still gates on approval.',
+  },
+  codex: {
+    approve: 'Default. Every codex command, file edit, and connector action gates on your approval.',
+    acceptEdits: 'Auto-approve codex file edits (apply_patch). Shell commands, connector actions, and permission escalations still gate on approval.',
+    auto: 'Auto-approve every codex action without prompting (codex runs with approvalPolicy `never`).',
+    plan: 'Not a distinct codex mode — behaves like Approve (codex has no plan enforcement).',
+  },
+}
+const MODE_IDS = ['approve', 'acceptEdits', 'auto', 'plan']
+const buildModes = (desc) => MODE_IDS.map((id) => ({ id, label: MODE_LABELS[id], description: desc[id] }))
+
+// The default (Claude) mode list. Kept as a named export for back-compat.
+export const PERMISSION_MODES = buildModes(MODE_DESCRIPTIONS.default)
+
+/**
+ * The permission-mode list with descriptions tuned to the given provider (#6638).
+ * Codex gets codex-specific copy; everything else gets the default. The mode IDs
+ * are identical across providers, so validation (ALLOWED_PERMISSION_MODE_IDS) is
+ * provider-independent.
+ * @param {string|null|undefined} provider
+ */
+export function getPermissionModes(provider) {
+  return provider === 'codex' ? buildModes(MODE_DESCRIPTIONS.codex) : PERMISSION_MODES
+}
+
 export const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
 
 // -- Attachment validation constants --

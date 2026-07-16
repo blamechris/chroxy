@@ -117,6 +117,17 @@ describe('session-handlers', () => {
       assert.equal(sent.conversationId, 'conv-1')
     })
 
+    it('re-sends provider-scoped permission modes on switch (codex → codex copy) (#6638)', () => {
+      const ctx = makeCtx()
+      const session = createMockSession()
+      ctx._sessions.set('sess-cx', { session, name: 'Codex', cwd: '/tmp', provider: 'codex' })
+      sessionHandlers.switch_session(makeWs(), makeClient(), { sessionId: 'sess-cx' }, ctx)
+      const modesMsg = ctx._sent.find(m => m.type === 'available_permission_modes')
+      assert.ok(modesMsg, 'available_permission_modes re-sent on switch')
+      const acceptEdits = modesMsg.modes.find(m => m.id === 'acceptEdits')
+      assert.match(acceptEdits.description, /apply_patch/, 'switch to codex → codex-tuned mode copy')
+    })
+
     it('sends session_error when session not found', () => {
       const ctx = makeCtx()
       sessionHandlers.switch_session(makeWs(), makeClient(), { sessionId: 'missing' }, ctx)

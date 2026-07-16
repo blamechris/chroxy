@@ -5,7 +5,7 @@
  * handshake and history replay concerns from core server orchestration.
  */
 import { toShortModelId, getRegistryForProvider } from './models.js'
-import { PERMISSION_MODES } from './handler-utils.js'
+import { getPermissionModes } from './handler-utils.js'
 import { listProviders, getProvider } from './providers.js'
 import { createLogger } from './logger.js'
 import { createKeyPair, deriveSharedKey, deriveConnectionKey, signExchangeKey } from '@chroxy/store-core/crypto'
@@ -213,9 +213,33 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
 
   // Get initial session info for auth_ok payload
   let sessionInfo = {}
+  // #6638: the active session's provider, captured for the auth_ok permission-mode
+  // copy (Codex gets codex-tuned descriptions). `entry` below is block-scoped, so
+  // hoist the provider to function scope.
+  let authOkProvider = null
   if (sessionManager) {
-    let activeId = defaultSessionId
-    let entry = activeId ? sessionManager.getSession(activeId) : null
+    // #6687: resolve the active session with the SAME precedence block 2 uses to
+    // restore the client — the per-device persisted active session (#4835) first,
+    // then defaultSessionId → firstSessionId, then the bound-session override — so
+    // auth_ok's cwd + permission-mode copy describe the session the client is
+    // actually switched to, not the server default.
+    let activeId = null
+    let entry = null
+    const persistedDeviceId = client.deviceInfo?.deviceId
+    if (devicePreferences && persistedDeviceId) {
+      const persistedId = devicePreferences.getActiveSessionId(persistedDeviceId)
+      if (persistedId) {
+        const persistedEntry = sessionManager.getSession(persistedId)
+        if (persistedEntry) {
+          activeId = persistedId
+          entry = persistedEntry
+        }
+      }
+    }
+    if (!entry) {
+      activeId = defaultSessionId
+      entry = activeId ? sessionManager.getSession(activeId) : null
+    }
     if (!entry) {
       activeId = sessionManager.firstSessionId
       entry = activeId ? sessionManager.getSession(activeId) : null
@@ -232,6 +256,7 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     }
     if (entry) {
       sessionInfo.cwd = entry.cwd
+      authOkProvider = entry.provider || null
     }
   } else if (cliSession) {
     sessionInfo.cwd = cliSession.cwd
@@ -467,7 +492,7 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     // client never has to wait for (or react to) the discrete
     // `available_permission_modes` burst frame. The discrete frame is still
     // sent below for older clients that read the enum only from it.
-    availablePermissionModes: PERMISSION_MODES,
+    availablePermissionModes: getPermissionModes(authOkProvider),
     resultTimeoutMs: effectiveResultTimeoutMs,
     hardTimeoutMs: effectiveHardTimeoutMs,
     streamStallTimeoutMs: effectiveStreamStallTimeoutMs,
@@ -691,7 +716,7 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     // schedule. With no active session activeProvider is null and there is nothing
     // to refresh (scheduleProviderModelsRefresh no-ops on a null provider).
     scheduleProviderModelsRefresh(ctx, ws, activeProvider)
-    send(ws, { type: 'available_permission_modes', modes: PERMISSION_MODES })
+    send(ws, { type: 'available_permission_modes', modes: getPermissionModes(activeProvider) })
     permissions.resendPendingPermissions(ws, client)
     // #5555: fire the connect-time bootstrap burst (providers + slash commands
     // + agents) so a new client never sends its 3-request list_* round trip.
@@ -730,7 +755,7 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
       type: 'permission_mode_changed',
       mode: cliSession.permissionMode || 'approve',
     })
-    send(ws, { type: 'available_permission_modes', modes: PERMISSION_MODES })
+    send(ws, { type: 'available_permission_modes', modes: getPermissionModes(legacyProvider) })
   }
 
   permissions.resendPendingPermissions(ws)
