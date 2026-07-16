@@ -27,6 +27,7 @@ import { registerProvidersCommand } from './cli/providers-cmd.js'
 import { registerPagesCommands } from './cli/pages-cmd.js'
 import { registerShellApprovalCommand } from './cli/shell-cmd.js'
 import { registerIdentityCommand } from './cli/identity-cmd.js'
+import { registerTokensCommand } from './cli/tokens-cmd.js'
 
 const require = createRequire(import.meta.url)
 const { version } = require('../package.json')
@@ -56,5 +57,6 @@ registerProvidersCommand(program)
 registerPagesCommands(program)
 registerShellApprovalCommand(program)
 registerIdentityCommand(program)
+registerTokensCommand(program)
 
 program.parse()
