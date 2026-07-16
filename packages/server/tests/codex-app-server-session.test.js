@@ -924,3 +924,60 @@ describe('CodexAppServerSession — attachments (#6609)', () => {
     cleanup()
   })
 })
+
+// #6692 — codex reports cached input as a SUBSET of inputTokens (OpenAI
+// convention). Chroxy's accounting keys are additive, so _mapUsage must split
+// into uncached input + cache_read (previously the cache count lived only
+// under `cached_input_tokens`, a key _trackUsage never reads — dropped).
+describe('usage mapping (#6692)', () => {
+  it('splits subset-cached input into uncached input + cache_read and synthesizes modelUsage', () => {
+    const { s, cleanup } = mkSession({ model: 'gpt-5.1-codex' })
+    const ev = capture(s, ['result'])
+    s._isBusy = true
+    s._activeTurn = { messageId: 'm1', turnId: 't1', didStreamStart: false }
+    s._onNotification({
+      method: 'thread/tokenUsage/updated',
+      params: { usage: { inputTokens: 1000, cachedInputTokens: 600, outputTokens: 42 } },
+    })
+    s._onNotification({ method: 'turn/completed', params: { turn: { durationMs: 7 } } })
+    assert.equal(ev.length, 1)
+    const r = ev[0][1]
+    assert.deepEqual(r.usage, {
+      input_tokens: 400,
+      output_tokens: 42,
+      cache_read_input_tokens: 600,
+      cached_input_tokens: 600, // deprecated duplicate, one release
+    })
+    assert.deepEqual(r.modelUsage, {
+      'gpt-5.1-codex': {
+        input_tokens: 400,
+        output_tokens: 42,
+        cache_read_input_tokens: 600,
+        cache_creation_input_tokens: 0,
+        web_search_requests: 0,
+        cost_usd: null,
+      },
+    })
+    cleanup()
+  })
+
+  it('a turn with no tokenUsage notification emits usage null and no fabricated modelUsage', () => {
+    const { s, cleanup } = mkSession({ model: 'gpt-5.1-codex' })
+    const ev = capture(s, ['result'])
+    s._isBusy = true
+    s._activeTurn = { messageId: 'm1', turnId: 't1', didStreamStart: false }
+    s._onNotification({ method: 'turn/completed', params: { turn: { durationMs: 7 } } })
+    assert.equal(ev[0][1].usage, null)
+    assert.equal(ev[0][1].modelUsage, null)
+    cleanup()
+  })
+
+  it('clamps an additive-reporting future build instead of going negative', () => {
+    const { s, cleanup } = mkSession({ model: 'gpt-5.1-codex' })
+    // cached > input: impossible under subset semantics; the split clamps to 0
+    const mapped = s._mapUsage({ usage: { inputTokens: 100, cachedInputTokens: 600, outputTokens: 1 } })
+    assert.equal(mapped.input_tokens, 0)
+    assert.equal(mapped.cache_read_input_tokens, 600)
+    cleanup()
+  })
+})

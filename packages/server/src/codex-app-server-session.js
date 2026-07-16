@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join, basename, extname } from 'path'
 import { BaseSession, buildBaseSessionOpts } from './base-session.js'
+import { nonNegInt, synthesizeModelUsage } from './usage-normalize.js'
 import { CodexSession, resolveCodexSandbox } from './codex-session.js'
 import { CodexAppServerClient } from './codex-app-server-client.js'
 import { PermissionManager, wirePermissionManager } from './permission-manager.js'
@@ -439,10 +440,25 @@ export class CodexAppServerSession extends BaseSession {
 
   _mapUsage(params) {
     const u = params?.usage || params || {}
+    const rawInput = nonNegInt(u.inputTokens ?? u.input_tokens)
+    const cached = nonNegInt(u.cachedInputTokens ?? u.cached_input_tokens)
     return {
-      input_tokens: u.inputTokens ?? u.input_tokens ?? 0,
-      output_tokens: u.outputTokens ?? u.output_tokens ?? 0,
-      cached_input_tokens: u.cachedInputTokens ?? u.cached_input_tokens ?? 0,
+      // #6692: codex reports cached tokens as a SUBSET of input (OpenAI's
+      // prompt_tokens_details convention; corroborated in-repo by the exec
+      // path's context ratchet treating input_tokens as the full prompt —
+      // codex-session.js). Chroxy's accounting keys are ADDITIVE (Anthropic
+      // shape: input excludes cache reads), so split into uncached input +
+      // cache_read. The subtraction is clamped, so a future codex build that
+      // switched to additive reporting would undercount input rather than
+      // go negative. Before this fix the cache count was emitted only under
+      // `cached_input_tokens`, a key `_trackUsage` never reads — codex cache
+      // tokens were silently dropped from cumulativeUsage.
+      input_tokens: nonNegInt(rawInput - cached),
+      output_tokens: nonNegInt(u.outputTokens ?? u.output_tokens),
+      cache_read_input_tokens: cached,
+      // Deprecated duplicate of cache_read_input_tokens — kept one release
+      // for any external reader of the raw result payload (#6692).
+      cached_input_tokens: cached,
     }
   }
 
@@ -452,7 +468,15 @@ export class CodexAppServerSession extends BaseSession {
     this._clearResultTimeout()
     if (t.didStreamStart) this.emit('stream_end', { messageId: t.messageId })
     this._emitResult(
-      { cost: null, duration: turn?.durationMs ?? null, usage: this._lastUsage, sessionId: this._threadId },
+      {
+        cost: null,
+        duration: turn?.durationMs ?? null,
+        usage: this._lastUsage,
+        // #6692: single-model split (codex runs one model per session; cost
+        // is unknown at the source — pricing happens downstream).
+        modelUsage: synthesizeModelUsage(this.model, this._lastUsage),
+        sessionId: this._threadId,
+      },
       'turn_ended_with_orphan_tool_start',
     )
     this._activeTurn = null

@@ -1,5 +1,6 @@
 import { JsonlSubprocessSession } from './jsonl-subprocess-session.js'
 import { buildBaseSessionOpts } from './base-session.js'
+import { synthesizeModelUsage } from './usage-normalize.js'
 import { homedir } from 'os'
 import { join } from 'path'
 import { resolveBinary } from './utils/resolve-binary.js'
@@ -418,6 +419,11 @@ export class GeminiSession extends JsonlSubprocessSession {
             input_tokens: inputTokens,
             output_tokens: outputTokens,
           },
+          // #6692: single-model split (gemini reports no cache/cost fields)
+          modelUsage: synthesizeModelUsage(this.model, {
+            input_tokens: inputTokens,
+            output_tokens: outputTokens,
+          }),
           sessionId: null,
         })
         break
@@ -485,6 +491,11 @@ export class GeminiSession extends JsonlSubprocessSession {
             input_tokens: usage.input_tokens || 0,
             output_tokens: usage.output_tokens || 0,
           },
+          // #6692: keep the legacy/test path shape-identical to production
+          modelUsage: synthesizeModelUsage(this.model, {
+            input_tokens: usage.input_tokens || 0,
+            output_tokens: usage.output_tokens || 0,
+          }),
           sessionId: null,
         })
         break

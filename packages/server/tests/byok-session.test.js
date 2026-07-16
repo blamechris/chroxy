@@ -4705,3 +4705,54 @@ describe('ClaudeByokSession', () => {
     })
   })
 })
+
+// #6692 — byok runs one model per session; the result (and partial-spend
+// error) payloads gain a synthesized single-model split carrying the same
+// cost the flat payload reports.
+describe('per-model usage on result (#6692)', () => {
+  it('synthesizes a single-model modelUsage with the turn cost', async () => {
+    const session = new ClaudeByokSession({ cwd: '/tmp', model: 'claude-opus-4-8' })
+    session._client = {
+      messages: {
+        stream: () =>
+          fakeStream([], {
+            stop_reason: 'end_turn',
+            content: [{ type: 'text', text: 'hi' }],
+            usage: { input_tokens: 100, output_tokens: 50 },
+          }),
+      },
+    }
+    const captured = captureEvents(session)
+    await session.start()
+    await session.sendMessage('q')
+    const result = captured.find((e) => e.name === 'result')
+    assert.ok(result, 'result event must fire')
+    const mu = result.payload.modelUsage['claude-opus-4-8']
+    assert.ok(mu, 'modelUsage entry for the session model')
+    assert.equal(mu.input_tokens, 100)
+    assert.equal(mu.output_tokens, 50)
+    assert.equal(mu.cost_usd, result.payload.cost)
+    assert.ok(Number.isFinite(result.payload.cost), 'known-pricing model yields finite cost')
+    await session.destroy()
+  })
+
+  it('cost_usd is null in modelUsage when pricing is unknown (#5630 parity)', async () => {
+    const session = new ClaudeByokSession({ cwd: '/tmp', model: 'claude-future-model-9-9' })
+    session._client = {
+      messages: {
+        stream: () =>
+          fakeStream([], {
+            stop_reason: 'end_turn',
+            content: [{ type: 'text', text: 'hi' }],
+            usage: { input_tokens: 100, output_tokens: 50 },
+          }),
+      },
+    }
+    const captured = captureEvents(session)
+    await session.start()
+    await session.sendMessage('q')
+    const result = captured.find((e) => e.name === 'result')
+    assert.equal(result.payload.modelUsage['claude-future-model-9-9'].cost_usd, null)
+    await session.destroy()
+  })
+})

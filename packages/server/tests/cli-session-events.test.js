@@ -1166,3 +1166,60 @@ describe('CliSession stream-event handling', () => {
     })
   })
 })
+
+// #6692 — the CLI's stream-json result line carries the same modelUsage /
+// num_turns / duration_api_ms fields as the SDK (shared runtime); forward
+// them normalized, degrading to null on older CLI builds.
+describe('per-model usage forwarding (#6692)', () => {
+  it('forwards modelUsage/num_turns/duration_api_ms from the result line', () => {
+    const session = createSession()
+    const results = []
+    session.on('result', (r) => results.push(r))
+    session._handleEvent({
+      type: 'result',
+      session_id: 's1',
+      subtype: 'success',
+      result: 'ok',
+      total_cost_usd: 0.01,
+      duration_ms: 5,
+      duration_api_ms: 3,
+      num_turns: 2,
+      usage: { input_tokens: 1, output_tokens: 1 },
+      modelUsage: {
+        'claude-opus-4-8': { inputTokens: 1, outputTokens: 1, costUSD: 0.01 },
+      },
+    })
+    assert.equal(results.length, 1)
+    assert.equal(results[0].numTurns, 2)
+    assert.equal(results[0].apiDurationMs, 3)
+    assert.deepEqual(results[0].modelUsage, {
+      'claude-opus-4-8': {
+        input_tokens: 1,
+        output_tokens: 1,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+        web_search_requests: 0,
+        cost_usd: 0.01,
+      },
+    })
+  })
+
+  it('degrades all three fields to null on an older CLI result line', () => {
+    const session = createSession()
+    const results = []
+    session.on('result', (r) => results.push(r))
+    session._handleEvent({
+      type: 'result',
+      session_id: 's1',
+      subtype: 'success',
+      result: 'ok',
+      total_cost_usd: 0,
+      duration_ms: 5,
+      usage: {},
+    })
+    assert.equal(results.length, 1)
+    assert.equal(results[0].numTurns, null)
+    assert.equal(results[0].apiDurationMs, null)
+    assert.equal(results[0].modelUsage, null)
+  })
+})

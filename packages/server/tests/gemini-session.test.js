@@ -812,3 +812,26 @@ describe('GeminiSession', () => {
     })
   })
 })
+
+// #6692 — gemini reports input/output only; the result payload gains a
+// synthesized single-model split so per-model accounting works uniformly.
+describe('per-model usage on result (#6692)', () => {
+  it('production _processJsonlLine result carries synthesized modelUsage', () => {
+    const session = new GeminiSession({ cwd: '/tmp', model: 'gemini-2.5-pro' })
+    const results = []
+    session.on('result', (r) => results.push(r))
+    const ctx = { messageId: 'g1', didStreamStart: false, didEmitResult: false }
+    session._processJsonlLine({ type: 'result', usage: { input_tokens: 10, output_tokens: 5 } }, ctx)
+    assert.equal(results.length, 1)
+    assert.deepEqual(results[0].modelUsage, {
+      'gemini-2.5-pro': {
+        input_tokens: 10,
+        output_tokens: 5,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+        web_search_requests: 0,
+        cost_usd: null,
+      },
+    })
+  })
+})

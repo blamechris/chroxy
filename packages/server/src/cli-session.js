@@ -1,6 +1,7 @@
 import { spawn } from 'child_process'
 import { createInterface } from 'readline'
 import { randomBytes } from 'crypto'
+import { normalizeSdkModelUsage } from './usage-normalize.js'
 import { homedir } from 'os'
 import { join } from 'path'
 import { createPermissionHookManager } from './permission-hook.js'
@@ -1212,6 +1213,13 @@ export class CliSession extends BaseSession {
           cost: data.total_cost_usd,
           duration: data.duration_ms,
           usage: data.usage,
+          // #6692: the CLI's stream-json result is produced by the same
+          // runtime as the SDK's; when it carries modelUsage/num_turns/
+          // duration_api_ms, forward them — all three degrade to null on
+          // older CLI builds that omit them.
+          numTurns: Number.isFinite(data.num_turns) ? data.num_turns : null,
+          apiDurationMs: Number.isFinite(data.duration_api_ms) ? data.duration_api_ms : null,
+          modelUsage: normalizeSdkModelUsage(data.modelUsage),
         })
 
         // Message complete — ready for next message

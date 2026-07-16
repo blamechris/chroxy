@@ -4,6 +4,7 @@ import { homedir } from 'os'
 import { updateModels, saveModelsCache, updateContextWindow, getModels, ALLOWED_MODEL_IDS } from './models.js'
 import { CLAUDE_FALLBACK_MODELS, claudeModelMetadata } from './claude-model-catalog.js'
 import { BaseSession, buildBaseSessionOpts } from './base-session.js'
+import { normalizeSdkModelUsage } from './usage-normalize.js'
 import { buildContentBlocks } from './content-blocks.js'
 import { MessageTransformPipeline } from './message-transform.js'
 import { emitToolResults } from './tool-result.js'
@@ -931,6 +932,12 @@ export class SdkSession extends BaseSession {
               cost: msg.total_cost_usd,
               duration: msg.duration_ms,
               usage: msg.usage,
+              // #6692: surface the per-model split + turn metadata the SDK
+              // already reports instead of discarding them. Additive — every
+              // existing result consumer ignores unknown fields.
+              numTurns: Number.isFinite(msg.num_turns) ? msg.num_turns : null,
+              apiDurationMs: Number.isFinite(msg.duration_api_ms) ? msg.duration_api_ms : null,
+              modelUsage: normalizeSdkModelUsage(msg.modelUsage),
             }, 'turn_ended_with_orphan_tool_start')
 
             this._clearMessageState()

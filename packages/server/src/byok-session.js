@@ -18,6 +18,7 @@ import Anthropic, { APIUserAbortError } from '@anthropic-ai/sdk'
 import { join } from 'path'
 import { homedir } from 'os'
 import { BaseSession, buildBaseSessionOpts } from './base-session.js'
+import { synthesizeModelUsage } from './usage-normalize.js'
 import { PermissionManager, wirePermissionManager } from './permission-manager.js'
 import { createLogger } from './logger.js'
 import { isOperatorTimeoutInRange } from './duration.js'
@@ -893,6 +894,16 @@ export class ClaudeByokSession extends BaseSession {
         // #5630: emit null when no round produced a known cost so the UI
         // shows "n/a" instead of a misleading $0.00.
         cost: turnCostKnown ? turnCost : null,
+        // #6692: single-model split. Task-subagent usage is folded into
+        // turnUsage under the parent's model, which is CORRECT today because
+        // children hard-inherit the parent model (see _executeTaskTool). If a
+        // per-profile model override ever lands (#5018's deferred AC), that
+        // change must split this map by actual child model (#5020).
+        modelUsage: synthesizeModelUsage(
+          this.model || this._defaultModel,
+          turnUsage,
+          turnCostKnown ? turnCost : null,
+        ),
       })
     } catch (err) {
       // #4118: extend the synchronous stream-init rollback (#4109) to
@@ -935,6 +946,13 @@ export class ClaudeByokSession extends BaseSession {
         // #5630: null when no priced round committed before the error so the
         // partial-cost line shows "n/a" rather than $0.00.
         cost: turnCostKnown ? turnCost : null,
+        // #6692: partial-spend turns get the same single-model split as the
+        // success path so per-model accounting survives errored turns.
+        modelUsage: synthesizeModelUsage(
+          this.model || this._defaultModel,
+          turnUsage,
+          turnCostKnown ? turnCost : null,
+        ),
       })
     } finally {
       // #4080: per-turn isolation guarantee. The per-round clear after
@@ -1798,7 +1816,7 @@ export class ClaudeByokSession extends BaseSession {
         messageId,
         message: 'Interrupted by user',
         code: 'ABORT',
-        ...(partials ? { usage: partials.usage, cost: partials.cost } : {}),
+        ...(partials ? { usage: partials.usage, cost: partials.cost, modelUsage: partials.modelUsage ?? null } : {}),
       })
       return
     }
@@ -1808,7 +1826,7 @@ export class ClaudeByokSession extends BaseSession {
       messageId,
       message,
       code,
-      ...(partials ? { usage: partials.usage, cost: partials.cost } : {}),
+      ...(partials ? { usage: partials.usage, cost: partials.cost, modelUsage: partials.modelUsage ?? null } : {}),
     })
   }
 
