@@ -128,9 +128,11 @@ export function scopeAndGroupEvents(
   const byRepo = new Map<string, RepoEvent[]>()
   for (const ev of newestFirst) {
     if (scoped) {
-      // Exact: the event's `owner/repo` must be in the set. Fallback: its basename.
-      const key = useExact ? ev.repo ?? null : repoBasename(ev.repo)
-      if (!key || !activeSet.has(key)) {
+      // Exact: the event's `owner/repo` must be in the set (case-insensitive —
+      // GitHub names are, and a git-config remote can differ in case from the
+      // canonical `full_name` the webhook stamps). Fallback: its cwd basename.
+      const filterKey = useExact ? (ev.repo ? ev.repo.toLowerCase() : null) : repoBasename(ev.repo)
+      if (!filterKey || !activeSet.has(filterKey)) {
         hiddenCount++
         continue
       }
@@ -230,7 +232,10 @@ export function RepoEventsSection({
   const events = snapshot?.events ?? []
   // #6539: prefer the server's exact `owner/repo` set; fall back to cwd basenames
   // when an older daemon omits it. `exactRepos: null` ⇒ use the basename guess.
-  const exactRepos = Array.isArray(snapshot?.activeRepos) ? new Set(snapshot.activeRepos) : null
+  // Lowercased for case-insensitive matching (GitHub names are case-insensitive).
+  const exactRepos = Array.isArray(snapshot?.activeRepos)
+    ? new Set(snapshot.activeRepos.map((r) => r.toLowerCase()))
+    : null
   const basenames = activeRepoBasenames(sessions ?? [])
   const { groups, hiddenCount } = scopeAndGroupEvents(events, { exactRepos, basenames }, showAll)
   const activeScopeSize = exactRepos !== null ? exactRepos.size : basenames.size

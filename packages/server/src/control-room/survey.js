@@ -223,7 +223,11 @@ export async function resolveActiveRepos(cwds, { execFn = execFileAsync, concurr
   const tasks = distinct.map((cwd) => async () => {
     const remote = await tryExec(execFn, 'git', ['remote', 'get-url', 'origin'], cwd)
     const parsed = parseGithubOwnerRepo(remote)
-    return parsed ? `${parsed.owner}/${parsed.repo}` : null
+    // Lowercase: GitHub owner/repo are case-insensitive, but a manually-edited
+    // remote ('BlameChris/Chroxy') can differ in case from the canonical
+    // `full_name` the webhook stamps on `ev.repo` ('blamechris/chroxy'). Normalize
+    // so the dashboard's exact match doesn't erroneously hide events (#6539).
+    return parsed ? `${parsed.owner}/${parsed.repo}`.toLowerCase() : null
   })
   const names = await mapWithCap(tasks, concurrency)
   return [...new Set(names.filter(Boolean))].sort()

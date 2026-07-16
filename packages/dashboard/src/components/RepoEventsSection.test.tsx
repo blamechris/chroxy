@@ -126,6 +126,24 @@ describe('RepoEventsSection pure helpers (#5966)', () => {
     expect(groups.map((g) => g.repo)).toEqual(['blamechris/chroxy'])
   })
 
+  it('scopeAndGroupEvents matches exactRepos case-insensitively (canonical full_name vs git remote casing)', () => {
+    const events = [ev({ repo: 'blamechris/chroxy' })]
+    // The server lowercases activeRepos; the event's canonical full_name matches
+    // regardless of the git remote's original casing.
+    const scope = { exactRepos: new Set(['blamechris/chroxy']), basenames: new Set<string>() }
+    expect(scopeAndGroupEvents(events, scope, false).groups.map((g) => g.repo)).toEqual(['blamechris/chroxy'])
+  })
+
+  it('scopeAndGroupEvents hides an event with a null/bare repo under exact scoping (revealed by Show all)', () => {
+    const events = [ev({ repo: null }), ev({ repo: 'blamechris/chroxy' })]
+    const scope = { exactRepos: new Set(['blamechris/chroxy']), basenames: new Set<string>() }
+    const { groups, hiddenCount } = scopeAndGroupEvents(events, scope, false)
+    expect(groups.map((g) => g.repo)).toEqual(['blamechris/chroxy'])
+    expect(hiddenCount).toBe(1)
+    // Show all reveals it, grouped under the unknown-repo bucket.
+    expect(scopeAndGroupEvents(events, scope, true).groups.length).toBe(2)
+  })
+
   it('formatAgo renders a relative label or a dash', () => {
     expect(formatAgo('2026-07-02T12:00:00.000Z', NOW)).toBe('5m ago')
     expect(formatAgo('2026-07-02T12:05:00.000Z', NOW)).toBe('just now')

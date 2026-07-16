@@ -240,6 +240,14 @@ describe('resolveActiveRepos (#6539 exact repo-events scoping)', () => {
     const out = await resolveActiveRepos(['/x', '/y'], { execFn: exec })
     assert.deepEqual(out, ['alice/app', 'bob/app'], 'same basename "app", distinct owner/repo')
   })
+
+  it('lowercases the owner/repo so a case-mismatched git remote still matches the canonical full_name', async () => {
+    // A manually-edited remote can carry non-canonical casing; the webhook always
+    // stamps GitHub's canonical (lowercased-here) full_name on ev.repo.
+    const exec = makeExec({ '/a': 'git@github.com:BlameChris/Chroxy.git' })
+    const out = await resolveActiveRepos(['/a'], { execFn: exec })
+    assert.deepEqual(out, ['blamechris/chroxy'])
+  })
 })
 
 describe('parseGithubPrsUrl', () => {
