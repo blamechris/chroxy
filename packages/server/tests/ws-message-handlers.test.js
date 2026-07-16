@@ -519,8 +519,11 @@ describe('handleSessionMessage', () => {
       assert.equal(msg.decision, 'deny')
       assert.equal(Object.prototype.hasOwnProperty.call(msg, 'sessionId'), false,
         'unmapped legacy resolutions must not carry a sessionId')
-      assert.equal(filter({ id: 'responder' }), false)
-      assert.equal(filter({ id: 'other-client' }), true)
+      // #6590: the broadcast no longer excludes the resolving client (no filter
+      // arg) — the resolver needs its own permission_resolved to prune
+      // permissionInputs[requestId], and this matches the SDK path.
+      assert.equal(filter, undefined,
+        'legacy broadcast reaches ALL clients incl. the resolver (no exclusion filter, #6590)')
     })
   })
 
