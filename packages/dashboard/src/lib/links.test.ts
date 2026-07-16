@@ -82,6 +82,16 @@ describe('handleMarkdownLinkClick (#6625)', () => {
     expect(open).toHaveBeenCalledWith('https://example.com')
   })
 
+  it('resolves the anchor when the click target is a Text node inside the link', () => {
+    // Defensive: DOM click targets are normally Elements, but a Text node must
+    // still resolve to its parent anchor so navigation stays gated.
+    const a = anchor('https://example.com')
+    const textNode = a.firstChild! // the "link" text node
+    const open = vi.fn()
+    handleMarkdownLinkClick(mouse({ target: textNode, metaKey: true }), open)
+    expect(open).toHaveBeenCalledWith('https://example.com')
+  })
+
   it('resolves the anchor when the click lands on a child of the link', () => {
     const a = anchor('https://example.com')
     const span = document.createElement('span')

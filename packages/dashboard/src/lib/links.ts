@@ -63,7 +63,11 @@ export function handleMarkdownLinkClick(
     window.open(url, '_blank', 'noopener,noreferrer')
   },
 ): void {
-  const el = e.target as HTMLElement | null
+  // A click target is normally the deepest Element, but resolve a Text node to
+  // its parent (defensive) so `closest` can still reach the anchor and the
+  // native `target="_blank"` navigation stays gated.
+  const node = e.target
+  const el = node instanceof Element ? node : (node as { parentElement?: Element | null } | null)?.parentElement ?? null
   const anchor = el && typeof el.closest === 'function' ? el.closest('a[href]') : null
   if (!anchor) return // click wasn't on a link — leave selection/other handlers alone
   const url = resolveLinkOpen(anchor.getAttribute('href'), e)
