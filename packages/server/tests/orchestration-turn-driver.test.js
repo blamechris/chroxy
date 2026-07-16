@@ -57,6 +57,43 @@ describe('TurnDriver — happy path', () => {
     sm.ev('s1', 'result', { cost: 0, duration: 1, usage: {} })
     assert.equal((await p).text, 'compact summary')
   })
+
+  it('forwards the full terminal usage payload (modelUsage/model/numTurns/apiDurationMs)', async () => {
+    // #6692: per-model attribution must survive the turn-driver, or the ledger
+    // collapses every metered run to a single unknown model.
+    const { sm, addSession } = mkStub()
+    addSession('s1')
+    driver = new TurnDriver({ sessionManager: sm })
+    const p = driver.driveTurn('s1', 'go')
+    sm.ev('s1', 'result', {
+      cost: 0.2,
+      duration: 10,
+      usage: { input_tokens: 5 },
+      model: 'haiku',
+      modelUsage: { haiku: { input_tokens: 5, output_tokens: 2 } },
+      num_turns: 3, // snake_case from the wire — driver reads camelCase numTurns
+      numTurns: 3,
+      apiDurationMs: 8,
+    })
+    const { result } = await p
+    assert.equal(result.model, 'haiku')
+    assert.deepEqual(result.modelUsage, { haiku: { input_tokens: 5, output_tokens: 2 } })
+    assert.equal(result.numTurns, 3)
+    assert.equal(result.apiDurationMs, 8)
+  })
+
+  it('coerces missing/non-finite metadata fields to null', async () => {
+    const { sm, addSession } = mkStub()
+    addSession('s1')
+    driver = new TurnDriver({ sessionManager: sm })
+    const p = driver.driveTurn('s1', 'go')
+    sm.ev('s1', 'result', { cost: 0, duration: 1, usage: {} }) // no model/modelUsage/turns
+    const { result } = await p
+    assert.equal(result.model, null)
+    assert.equal(result.modelUsage, null)
+    assert.equal(result.numTurns, null)
+    assert.equal(result.apiDurationMs, null)
+  })
 })
 
 describe('TurnDriver — epoch guard + mutex', () => {
