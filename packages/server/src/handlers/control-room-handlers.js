@@ -1928,7 +1928,7 @@ function repoEventsSnapshot(requestId, fields = {}) {
  */
 const handleRepoEventsRequest = makeSurveyHandler({
   inFlight: repoEventsInFlight,
-  logName: 'repo events survey',
+  logName: 'repo_events_request',
   forbidden: ({ requestId }) => repoEventsSnapshot(requestId, {
     error: {
       code: 'FORBIDDEN',
