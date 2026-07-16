@@ -425,18 +425,9 @@ export class CodexAppServerSession extends BaseSession {
       return
     }
     if (method === 'item/permissions/requestApproval') {
-      // Scope-escalation (codex wants BROADER permissions than its sandbox). The
-      // response is a permission-grant object, not a simple decision — safe-deny
-      // (grant nothing) so the turn proceeds without escalating. Full surfacing
-      // is tracked in #6610.
-      //
-      // Send ONLY an empty `permissions` object and OMIT `scope`: per the
-      // app-server schema PermissionGrantScope accepts only 'turn'/'session', so
-      // an explicit 'none' is an invalid enum value that errors on deserialize
-      // (the field's serde default only applies when it's ABSENT) — which would
-      // wedge the turn, the opposite of a safe-deny (#6612).
-      ;(this._log || log).info('codex app-server: declining permissions-escalation request (grant nothing) — #6610')
-      this._client?.respond(id, { permissions: {} })
+      // Scope-escalation: codex wants BROADER permissions than its sandbox. Surface
+      // it through the permission pipeline as a distinctly-worded prompt (#6610).
+      this._routePermissionsApproval(id, params)
       return
     }
     ;(this._log || log).warn(`codex app-server: unsupported serverRequest ${method} — declining`)
@@ -494,6 +485,68 @@ export class CodexAppServerSession extends BaseSession {
     }
     if (!allow) return { decision: 'decline' }
     return { decision: session ? 'acceptForSession' : 'accept' }
+  }
+
+  // #6610: codex's THIRD approval family — item/permissions/requestApproval — is a
+  // scope-escalation (it wants broader filesystem/network access than its sandbox).
+  // Unlike the command/file families the response is a permission-GRANT object
+  // (PermissionsRequestApprovalResponse: { permissions, scope?, strictAutoReview? }),
+  // not a decision enum, so it needs its own routing + response mapping. It still
+  // flows through the same PermissionManager prompt (a distinctly-worded request),
+  // so existing clients render + answer it with the normal allow/deny UI.
+  async _routePermissionsApproval(rpcId, params) {
+    let result
+    try {
+      const input = {
+        description: this._describePermissionsRequest(params),
+        // Structured detail for any client that wants to render the exact scope.
+        requestedPermissions: params?.permissions ?? null,
+      }
+      // Sentinel suggestion → respondToPermission echoes updatedPermissions on an
+      // "always allow", which we read as a SESSION-scoped grant (mirrors _routeApproval).
+      const suggestions = [{ codexApproval: 'item/permissions/requestApproval' }]
+      result = await this._permissions.handlePermission('request_permissions', input, this._turnAbort?.signal, this.permissionMode, suggestions)
+    } catch (err) {
+      result = { behavior: 'deny', message: err?.message || 'permission error' }
+    }
+    const allow = result?.behavior === 'allow'
+    const session = allow && !!result?.updatedPermissions
+    this._client?.respond(rpcId, this._codexPermissionsGrant(allow, session, params?.permissions))
+  }
+
+  // Build the PermissionsRequestApprovalResponse. Approve → grant EXACTLY what
+  // codex requested (RequestPermissionProfile and GrantedPermissionProfile share
+  // the same {fileSystem?, network?} shape, so echoing the request is schema-valid
+  // by construction) with scope 'session' for an "always allow" else 'turn'. Deny →
+  // an empty `permissions` object with `scope` OMITTED (an explicit 'none' is an
+  // invalid PermissionGrantScope enum and wedges the turn — #6612).
+  _codexPermissionsGrant(allow, session, requestedPermissions) {
+    if (!allow) return { permissions: {} }
+    const permissions = requestedPermissions && typeof requestedPermissions === 'object'
+      ? requestedPermissions
+      : {}
+    return { permissions, scope: session ? 'session' : 'turn' }
+  }
+
+  // Human-readable summary of the requested scope for the approval prompt, so the
+  // operator sees WHAT codex wants to broaden before granting it.
+  _describePermissionsRequest(params) {
+    const parts = []
+    const fs = params?.permissions?.fileSystem
+    if (fs) {
+      for (const e of Array.isArray(fs.entries) ? fs.entries : []) {
+        const path = e?.path?.path ?? e?.path?.pattern ?? e?.path?.value?.kind ?? 'a path'
+        parts.push(`filesystem ${e?.access ?? 'access'} → ${path}`)
+      }
+      if (Array.isArray(fs.read) && fs.read.length) parts.push(`filesystem read: ${fs.read.join(', ')}`)
+      if (Array.isArray(fs.write) && fs.write.length) parts.push(`filesystem write: ${fs.write.join(', ')}`)
+    }
+    if (params?.permissions?.network?.enabled) parts.push('network access')
+    const scope = parts.length ? parts.join('; ') : 'broader permissions'
+    const reason = typeof params?.reason === 'string' && params.reason.trim()
+      ? ` — ${params.reason.trim()}`
+      : ''
+    return `Codex is requesting to broaden its sandbox permissions${reason}: ${scope}`
   }
 
   // 'auto' (skip all prompts) → codex runs without asking. Every other mode →

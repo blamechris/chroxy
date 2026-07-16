@@ -376,15 +376,78 @@ describe('CodexAppServerSession — approval surfacing (#6605 Phase 2)', () => {
     cleanup()
   })
 
-  it('permissions-escalation request is safe-denied (grant nothing, no scope) without a prompt', () => {
-    const { s, cleanup, responded } = mkApprovalSession()
-    const reqs = capture(s, ['permission_request'])
-    s._onServerRequest({ id: 11, method: 'item/permissions/requestApproval', params: { scope: 'disk-full-access' } })
-    assert.equal(reqs.length, 0, 'escalation is not surfaced as a normal prompt in Phase 2')
-    // grant nothing: empty permissions, scope OMITTED (an explicit 'none' is an
-    // invalid PermissionGrantScope enum value and would wedge the turn — #6612).
-    assert.deepEqual(responded, [[11, { permissions: {} }]])
-    cleanup()
+  describe('permissions-escalation surfacing (#6610)', () => {
+    // A real PermissionsRequestApprovalParams (codex asks to broaden its sandbox).
+    const escalationParams = {
+      cwd: '/repo', itemId: 'i1', threadId: 't1', turnId: 'turn1', startedAtMs: 0,
+      reason: 'install deps',
+      permissions: {
+        fileSystem: { entries: [{ access: 'write', path: { type: 'path', path: '/repo/node_modules' } }] },
+        network: { enabled: true },
+      },
+    }
+
+    it('surfaces the escalation as a distinctly-worded prompt describing the requested scope', () => {
+      const { s, cleanup } = mkApprovalSession('approve')
+      const reqs = capture(s, ['permission_request'])
+      s._onServerRequest({ id: 11, method: 'item/permissions/requestApproval', params: escalationParams })
+      assert.equal(reqs.length, 1, 'escalation is surfaced (no longer safe-denied silently)')
+      const req = reqs[0][1]
+      assert.match(req.description, /broaden its sandbox permissions/)
+      assert.match(req.description, /install deps/)
+      assert.match(req.description, /filesystem write/)
+      assert.match(req.description, /network access/)
+      // structured detail passed through for any client that wants to render it
+      assert.deepEqual(req.input.requestedPermissions, escalationParams.permissions)
+      cleanup()
+    })
+
+    it('approve → grants EXACTLY the requested permissions for this turn', async () => {
+      const { s, cleanup, responded } = mkApprovalSession('approve')
+      const reqs = capture(s, ['permission_request'])
+      s._onServerRequest({ id: 12, method: 'item/permissions/requestApproval', params: escalationParams })
+      s.respondToPermission(reqs[0][1].requestId, 'allow')
+      await tick()
+      assert.deepEqual(responded, [[12, { permissions: escalationParams.permissions, scope: 'turn' }]])
+      cleanup()
+    })
+
+    it('approve-always → grants the requested permissions for the SESSION', async () => {
+      const { s, cleanup, responded } = mkApprovalSession('approve')
+      const reqs = capture(s, ['permission_request'])
+      s._onServerRequest({ id: 13, method: 'item/permissions/requestApproval', params: escalationParams })
+      s.respondToPermission(reqs[0][1].requestId, 'allowAlways')
+      await tick()
+      assert.deepEqual(responded, [[13, { permissions: escalationParams.permissions, scope: 'session' }]])
+      cleanup()
+    })
+
+    it('deny → grants NOTHING (empty permissions, scope omitted per #6612)', async () => {
+      const { s, cleanup, responded } = mkApprovalSession('approve')
+      const reqs = capture(s, ['permission_request'])
+      s._onServerRequest({ id: 14, method: 'item/permissions/requestApproval', params: escalationParams })
+      s.respondToPermission(reqs[0][1].requestId, 'deny')
+      await tick()
+      assert.deepEqual(responded, [[14, { permissions: {} }]])
+      cleanup()
+    })
+
+    it('the grant response conforms to PermissionsRequestApprovalResponse (schema shape)', async () => {
+      const { s, cleanup, responded } = mkApprovalSession('approve')
+      const reqs = capture(s, ['permission_request'])
+      s._onServerRequest({ id: 15, method: 'item/permissions/requestApproval', params: escalationParams })
+      s.respondToPermission(reqs[0][1].requestId, 'allow')
+      await tick()
+      const resp = responded[0][1]
+      assert.equal(typeof resp.permissions, 'object', 'permissions is the required GrantedPermissionProfile object')
+      assert.ok(['turn', 'session'].includes(resp.scope), 'scope is a valid PermissionGrantScope enum')
+      assert.deepEqual(
+        Object.keys(resp).filter((k) => !['permissions', 'scope', 'strictAutoReview'].includes(k)),
+        [],
+        'no fields outside the schema',
+      )
+      cleanup()
+    })
   })
 
   it('interrupt() aborts a pending approval → Stop unblocks the turn (decline)', async () => {
