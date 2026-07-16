@@ -518,10 +518,15 @@ function handlePermissionResponse(ws, client, msg, ctx) {
   // broadcast). Legacy non-SDK sessions (no PermissionManager) keep an inline
   // broadcast for the unmapped case only — mirrors the prior `!originSessionId`.
   if (!result.sessionId) {
-    ctx.transport.broadcast(
-      { type: 'permission_resolved', requestId, decision },
-      (c) => c.id !== client.id
-    )
+    // #6590: broadcast to ALL clients INCLUDING the resolver (no `c.id !==
+    // client.id` exclusion). The resolving client needs its own
+    // `permission_resolved` to prune `permissionInputs[requestId]` (#6559) —
+    // append-only otherwise, so on this legacy path the entry used to linger
+    // until disconnect. The client handler is idempotent (guarded copy-delete
+    // prune; the notification re-stamp only touches not-yet-acked rows), and
+    // this matches the SDK path, which broadcasts session events to every
+    // subscriber without excluding the origin client.
+    ctx.transport.broadcast({ type: 'permission_resolved', requestId, decision })
   }
 }
 

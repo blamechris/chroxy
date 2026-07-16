@@ -558,6 +558,31 @@ describe('settings-handlers', () => {
       assert.deepEqual(session.respondToPermission.lastCall, ['req-1', 'allow', undefined]) // #6543: editedInput 3rd arg (absent here)
     })
 
+    it('#6590 legacy-unmapped resolve broadcasts permission_resolved to ALL clients incl. the resolver', () => {
+      // Legacy-unmapped path: the request is in the global pendingPermissions but
+      // NOT mapped to a session, so the resolver returns sessionId=null and the
+      // inline legacy broadcast fires. The resolving client must receive its own
+      // permission_resolved so it prunes permissionInputs[requestId] promptly (not
+      // only at disconnect) — i.e. the broadcast must NOT exclude it (#6590).
+      const ctx = makeCtx()
+      ctx.permissions.pendingPermissions = new Map([['req-legacy', { data: {} }]])
+      ctx.permissions.permissions = { resolvePermission: createSpy(() => true) }
+      // Unbound + no active session → originSessionId is null → result.sessionId null.
+      const client = makeClient({ id: 'client-resolver', activeSessionId: null, boundSessionId: null })
+
+      settingsHandlers.permission_response(makeWs(), client, { requestId: 'req-legacy', decision: 'allow' }, ctx)
+
+      assert.equal(ctx.permissions.permissions.resolvePermission.callCount, 1, 'legacy resolve invoked')
+      const call = ctx.transport.broadcast.calls.find(
+        (args) => args[0]?.type === 'permission_resolved' && args[0]?.requestId === 'req-legacy',
+      )
+      assert.ok(call, 'permission_resolved was broadcast on the legacy path')
+      assert.equal(call[0].decision, 'allow')
+      // The whole point of #6590: NO second (exclusion filter) argument, so the
+      // broadcast reaches every client including the resolver.
+      assert.equal(call.length, 1, 'broadcast has no client-exclusion filter (resolver included)')
+    })
+
     // Issue #2912: permission_response rejection for a bound-client must use
     // the same unified SESSION_TOKEN_MISMATCH payload (code + message +
     // boundSessionId + boundSessionName) as every other emit site. The only
