@@ -12,6 +12,11 @@ import { createLogger, loggerForSession } from './logger.js'
 // Image extensions codex can attach for VISION via a `localImage` input item.
 const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg'])
 
+// #6638: cap on cached fileChange diffs (itemId → changes). A turn deletes each on
+// completion and clears the map at turn end, so this only bites a pathological
+// flood of un-completed fileChange items.
+const MAX_PENDING_FILE_CHANGES = 500
+
 const log = createLogger('codex-app-server')
 
 /**
@@ -88,6 +93,9 @@ export class CodexAppServerSession extends BaseSession {
     this._lastUsage = null
     this._skillsPrepended = false // #6606 — inject the skills prefix once, on turn 1
     this._turnAbort = null // per-turn AbortController — cancels pending approvals
+    // #6638: fileChange item.changes cached by itemId, so a fileChange approval
+    // (whose params carry NO diff) can surface WHAT will change. Cleared per turn.
+    this._pendingFileChanges = new Map()
     this._attachDir = null // #6609 — lazily-created temp dir for materialized attachments
 
     // #6605 Phase 2 — surface codex approvals through the same PermissionManager
@@ -306,13 +314,25 @@ export class CodexAppServerSession extends BaseSession {
       this._trackToolStart(toolUseId, 'shell')
     } else if (item.type === 'fileChange') {
       const toolUseId = item.id
+      const changes = item.changes ?? item.patch ?? null
       this.emit('tool_start', {
         messageId: this._activeTurn.messageId,
         toolUseId,
         tool: 'apply_patch',
-        input: { changes: item.changes ?? item.patch ?? null },
+        input: { changes },
       })
       this._trackToolStart(toolUseId, 'apply_patch')
+      // #6638: remember the changes so a later fileChange approval (keyed by the
+      // same itemId, but carrying no diff) can show what will change. Only cache a
+      // non-null diff — a null-change item would just waste a slot and evict a real
+      // diff earlier. Bounded: deleted on item completion / cleared per turn; evict
+      // oldest at the cap.
+      if (toolUseId != null && changes != null) {
+        if (this._pendingFileChanges.size >= MAX_PENDING_FILE_CHANGES) {
+          this._pendingFileChanges.delete(this._pendingFileChanges.keys().next().value)
+        }
+        this._pendingFileChanges.set(toolUseId, changes)
+      }
     }
   }
 
@@ -324,6 +344,7 @@ export class CodexAppServerSession extends BaseSession {
     } else if (item.type === 'fileChange') {
       this.emit('tool_result', { toolUseId: item.id, result: item.status ?? '' })
       this._trackToolResult(item.id)
+      if (item.id != null) this._pendingFileChanges.delete(item.id) // #6638: done — release the cached diff
     } else if (item.type === 'agentMessage') {
       // Fallback: if the final text never arrived as deltas (short replies can
       // skip the delta stream), emit it once so the message isn't lost.
@@ -380,6 +401,13 @@ export class CodexAppServerSession extends BaseSession {
     this._endTurnAbort()
     this._clearMessageState()
     this._maybeDequeue()
+  }
+
+  // #6638: also release cached fileChange diffs when per-turn state is cleared
+  // (turn end / fail / destroy), so a diff can't outlive its turn.
+  _clearMessageState() {
+    super._clearMessageState()
+    this._pendingFileChanges.clear()
   }
 
   // Abort this turn's approval scope (any pending permission_request resolves as
@@ -474,9 +502,18 @@ export class CodexAppServerSession extends BaseSession {
   // renders. `description`/`command`/`file_path` drive the human-facing prompt.
   _describeApproval(method, params) {
     if (method === 'item/fileChange/requestApproval') {
+      // #6638: the approval params carry no diff, so correlate to the fileChange
+      // item's cached changes (same itemId) and surface WHAT changes — a paths
+      // summary in the description (visible with no client change) + the raw
+      // changes for a client that renders a diff.
+      const changes = params?.itemId != null ? this._pendingFileChanges.get(params.itemId) ?? null : null
+      const summary = this._summarizeFileChanges(changes)
+      const description = summary
+        ? (params?.reason ? `${params.reason} — ${summary}` : `Apply changes: ${summary}`)
+        : (params?.reason || 'Apply file changes')
       return {
         tool: 'apply_patch',
-        input: { description: params?.reason || 'Apply file changes', file_path: params?.grantRoot },
+        input: { description, file_path: params?.grantRoot, changes },
       }
     }
     // item/commandExecution/requestApproval
@@ -486,6 +523,21 @@ export class CodexAppServerSession extends BaseSession {
       // can't render an empty approval prompt (#6611 review nitpick).
       input: { command: params?.command, cwd: params?.cwd, description: params?.reason || params?.command || 'Run a shell command' },
     }
+  }
+
+  // #6638: summarize a fileChange `changes` array (FileUpdateChange[] =
+  // { path, kind, diff }) into a paths line for the approval prompt, e.g.
+  // "2 files: src/a.js, src/b.js". Caps the list (+N more) so it stays bounded
+  // for the ≤200-char prompt. Returns null when there's nothing to summarize.
+  _summarizeFileChanges(changes) {
+    if (!Array.isArray(changes) || changes.length === 0) return null
+    const MAX = 3
+    const paths = changes.map((c) => (c && typeof c.path === 'string' ? c.path : null)).filter(Boolean)
+    if (paths.length === 0) return `${changes.length} file change(s)`
+    const shown = paths.slice(0, MAX)
+    const extra = paths.length - shown.length
+    const list = shown.join(', ') + (extra > 0 ? `, +${extra} more` : '')
+    return `${paths.length} file${paths.length === 1 ? '' : 's'}: ${list}`
   }
 
   // The two approval families use DIFFERENT decision vocabularies (from the
