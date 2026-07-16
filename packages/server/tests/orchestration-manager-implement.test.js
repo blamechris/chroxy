@@ -350,8 +350,10 @@ test('auto-commit runs before the worker is destroyed on accept', async () => {
   }
 })
 
-test('cancel during an implement run auto-commits + cleans up the integration worktree', async () => {
-  // architect plan hangs → cancel mid-run.
+test('cancel during an implement run auto-commits the worker worktree before teardown', async () => {
+  // architect review hangs after the worker committed → cancel mid-run. (No
+  // integration worktree exists yet — that cleanup path is covered by the
+  // full-run test's removeWorktree assertion.)
   const decide = ({ role, kind, n }) => {
     if (role === 'architect' && kind === 'epic_plan') return { kind: 'epic_plan', subtasks: [{ title: 'A', goal: 'g', role: 'implement' }] }
     if (role === 'architect' && kind === 'poa_review') return null // hang so the run is mid-flight
