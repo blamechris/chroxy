@@ -63,7 +63,7 @@ Why the cells are what they are:
 - `apply_patch` is in `ACCEPT_EDITS_TOOLS`, so `acceptEdits` auto-approves Codex edits (the analogue of auto-approving Claude Write/Edit).
 - `shell`, `request_permissions`, and `mcp_elicitation` are in `NEVER_AUTO_ALLOW` — they always prompt (except under `auto`).
 - Under `auto`, `PermissionManager.handlePermission` short-circuits to allow, so requests are drained without a prompt. (`shell`/`apply_patch`/`request_permissions` also don't get *sent* under `auto` since Codex's `approvalPolicy` is `never`; a connector `mcp_elicitation` is a standalone MCP request that can still arrive, and is auto-allowed.)
-- **`mcp_elicitation`** = a connector eliciting the user (#6635), surfaced as accept/decline — the confirmation case. See §8 for what's still open (form `content`, url-mode, execution-item rendering).
+- **`mcp_elicitation`** = a connector eliciting the user (#6635), surfaced as accept/decline — the confirmation case. See §8 for what's still open (form `content`, url-mode). The connector tool *execution* (`mcpToolCall`) now renders as a `tool_start`/`tool_result` (#6684 part 4).
 
 ---
 
@@ -169,7 +169,7 @@ Both clients render these via the existing `PermissionPrompt` (`<tool>:
 
 | Gap | Detail | Related |
 |---|---|---|
-| **MCP connector elicitation — partially addressed (#6635)** | A connector eliciting the user (`mcpServer/elicitation/request`, e.g. a GitHub write approval) is now surfaced as an **accept/decline** prompt (previously `-32601`-declined, so the approval was "missed"). Still open: structured `content` collection for `form`/`openai/form` modes and interactive `url`-mode flows (accept currently answers action-only), and rendering the `mcpToolCall` execution item itself as a `tool_start` (#6684). | #6635 |
+| **MCP connector elicitation — partially addressed (#6635)** | A connector eliciting the user (`mcpServer/elicitation/request`, e.g. a GitHub write approval) is now surfaced as an **accept/decline** prompt (previously `-32601`-declined, so the approval was "missed"). The `mcpToolCall` execution item itself is now surfaced as a `tool_start`/`tool_result` too (#6684 part 4 — labelled `server/tool`, failures flagged `isError`). Still open: structured `content` collection for `form`/`openai/form` modes and interactive `url`-mode flows (accept currently answers action-only), and the experimental `item/tool/requestUserInput`. | #6635, #6684 |
 | **No session rules** | "Allow for Session" persists a rule for Claude SDK/BYOK; for Codex it's a Codex-side grant only (§4). | — |
 | **Provider-generic mode copy** | Mode labels/descriptions and `skipPermissions` (= `--dangerously-skip-permissions`) are Claude/TUI-oriented; `skipPermissions` is a no-op for Codex, and `plan` is a no-op alias for `approve`. | — |
 | **Sandbox not per-session** | `CHROXY_CODEX_SANDBOX` is env-only; a per-session selector would need protocol + UI. | — |
@@ -196,7 +196,7 @@ Each carries a recommendation, but the call is yours.
    *Update:* command + cwd ship today, and the **`apply_patch` diff preview shipped** (#6638) — the fileChange item's `changes` are correlated into the approval by `itemId`: the prompt always names the files, and the raw `changes` ride along for a client that renders a diff (bounded by the broadcast `sanitizeToolInput` ~10K cap; a very large patch truncates, so the file summary is the guaranteed part). Still open: a scope drilldown for escalations. Env is sensitive — keep redacted/omitted by default.
 
 6. **MCP / connector approval path (the #6635 gap) — the elicitation approval shipped.**
-   Connector elicitations (`mcpServer/elicitation/request`) now surface as an accept/decline prompt via the `mcp_elicitation` tool (`NEVER_AUTO_ALLOW`), fixing the "missed approval → rejected tool call" case. *Remaining:* structured `content` collection for `form`/`openai/form` elicitations and interactive `url`-mode flows, plus rendering the `mcpToolCall` execution item as a `tool_start` — tracked in #6684.
+   Connector elicitations (`mcpServer/elicitation/request`) now surface as an accept/decline prompt via the `mcp_elicitation` tool (`NEVER_AUTO_ALLOW`), fixing the "missed approval → rejected tool call" case. The `mcpToolCall` execution item now renders as a `tool_start`/`tool_result` (#6684 part 4). *Remaining:* structured `content` collection for `form`/`openai/form` elicitations, interactive `url`-mode flows, and the experimental `item/tool/requestUserInput` — tracked in #6684.
 
 7. **How should timeout/interrupt/auto-switch appear to the user?**
    *Recommendation:* surface a resolved state on the prompt (timed-out / cancelled / auto-approved) rather than silently dropping it — same UX work as #6627 (queued/permission resolved-state rendering).

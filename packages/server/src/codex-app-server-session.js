@@ -17,6 +17,11 @@ const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.
 // flood of un-completed fileChange items.
 const MAX_PENDING_FILE_CHANGES = 500
 
+// #6684: cap the rendered mcpToolCall result text. A connector tool can return an
+// arbitrarily large content array / structuredContent blob; bound it so a single
+// tool_result can't balloon the transcript or the persisted history ring.
+const MAX_MCP_RESULT_CHARS = 10_000
+
 const log = createLogger('codex-app-server')
 
 /**
@@ -303,9 +308,12 @@ export class CodexAppServerSession extends BaseSession {
 
   _onItemStarted(item) {
     if (!item) return
-    // commandExecution / fileChange map to Chroxy tools. mcpToolCall items are
-    // NOT surfaced (no tool_start, no approval) — the connector-approval gap
-    // documented in docs/design/codex-permission-model.md §8 (#6635).
+    // commandExecution / fileChange / mcpToolCall map to Chroxy tools. The
+    // mcpToolCall EXECUTION is surfaced as a tool_start/tool_result so connector
+    // tool calls are visible in the transcript (#6684 part 4). Note this is
+    // transcript visibility only — a connector tool execution does not itself go
+    // through the approval pipeline (that is the separate mcpServer/elicitation
+    // request, #6635); see docs/design/codex-permission-model.md §8.
     if (item.type === 'commandExecution') {
       const toolUseId = item.id
       this.emit('tool_start', {
@@ -336,6 +344,19 @@ export class CodexAppServerSession extends BaseSession {
         }
         this._pendingFileChanges.set(toolUseId, changes)
       }
+    } else if (item.type === 'mcpToolCall') {
+      // #6684: surface a connector tool EXECUTION in the transcript, labelled
+      // `server/tool` (e.g. `github/create_issue`) so the source connector is
+      // clear, with the call arguments as the input.
+      const toolUseId = item.id
+      const tool = this._mcpToolLabel(item)
+      this.emit('tool_start', {
+        messageId: this._activeTurn.messageId,
+        toolUseId,
+        tool,
+        input: { server: item.server, tool: item.tool, arguments: item.arguments },
+      })
+      this._trackToolStart(toolUseId, tool)
     }
   }
 
@@ -348,6 +369,14 @@ export class CodexAppServerSession extends BaseSession {
       this.emit('tool_result', { toolUseId: item.id, result: item.status ?? '' })
       this._trackToolResult(item.id)
       if (item.id != null) this._pendingFileChanges.delete(item.id) // #6638: done — release the cached diff
+    } else if (item.type === 'mcpToolCall') {
+      // #6684: emit the connector tool's output as a tool_result. A failed call
+      // surfaces error.message as the result TEXT — the wire tool_result carries
+      // no isError field (ServerToolResultSchema is {toolUseId, result,
+      // truncated}), so error styling is out of scope here (tracked in #6712).
+      const { result, truncated } = this._summarizeMcpResult(item)
+      this.emit('tool_result', { toolUseId: item.id, result, truncated })
+      this._trackToolResult(item.id)
     } else if (item.type === 'agentMessage') {
       // Fallback: if the final text never arrived as deltas (short replies can
       // skip the delta stream), emit it once so the message isn't lost.
@@ -356,6 +385,49 @@ export class CodexAppServerSession extends BaseSession {
         this.emit('stream_delta', { messageId: this._activeTurn.messageId, delta: item.text })
       }
     }
+  }
+
+  // #6684: `server/tool` label for an mcpToolCall (e.g. `github/create_issue`),
+  // degrading to whichever of the two is present, else a generic `mcp`.
+  _mcpToolLabel(item) {
+    const server = typeof item?.server === 'string' ? item.server.trim() : ''
+    const tool = typeof item?.tool === 'string' ? item.tool.trim() : ''
+    if (server && tool) return `${server}/${tool}`
+    return tool || server || 'mcp'
+  }
+
+  // #6684: reduce an mcpToolCall completion to a { result, truncated } tool_result.
+  // Prefers the connector's error message (failed calls convey failure via this
+  // text, not styling — #6712), then the MCP content array (text parts inline,
+  // non-text parts as a `[type]` marker), then structuredContent, then the bare
+  // status so the card is never blank. Text is bounded by MAX_MCP_RESULT_CHARS.
+  _summarizeMcpResult(item) {
+    if (item?.error && typeof item.error.message === 'string' && item.error.message) {
+      return this._capMcpResult(item.error.message)
+    }
+    const content = item?.result?.content
+    if (Array.isArray(content) && content.length > 0) {
+      const text = content
+        .map((c) => (c && typeof c.text === 'string' ? c.text : c && typeof c.type === 'string' ? `[${c.type}]` : null))
+        .filter(Boolean)
+        .join('\n')
+      if (text) return this._capMcpResult(text)
+    }
+    if (item?.result?.structuredContent != null) {
+      return this._capMcpResult(JSON.stringify(item.result.structuredContent))
+    }
+    return { result: item?.status ?? '', truncated: false }
+  }
+
+  // Cap the rendered text at MAX_MCP_RESULT_CHARS, signalling an over-cap slice via
+  // the wire `truncated` flag (ServerToolResultSchema.truncated → store-core's
+  // toolResultTruncated) rather than an in-band marker.
+  _capMcpResult(text) {
+    const s = String(text)
+    if (s.length > MAX_MCP_RESULT_CHARS) {
+      return { result: s.slice(0, MAX_MCP_RESULT_CHARS), truncated: true }
+    }
+    return { result: s, truncated: false }
   }
 
   _ensureStreamStart() {

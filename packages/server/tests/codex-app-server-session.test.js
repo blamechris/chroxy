@@ -110,6 +110,105 @@ describe('CodexAppServerSession — app-server → Chroxy event mapping', () => 
     cleanup()
   })
 
+  // #6684 part 4 — connector tool EXECUTIONS (mcpToolCall items) surface in the
+  // transcript as tool_start/tool_result, like commandExecution/fileChange.
+  it('maps an mcpToolCall item to tool_start / tool_result (server/tool label + content)', () => {
+    const { s, cleanup } = mkSession()
+    const ev = capture(s, ['tool_start', 'tool_result'])
+    s._activeTurn = { messageId: 'm1', turnId: null, didStreamStart: false }
+    s._onNotification({
+      method: 'item/started',
+      params: { item: { type: 'mcpToolCall', id: 't1', server: 'github', tool: 'create_issue', arguments: { title: 'x' } } },
+    })
+    s._onNotification({
+      method: 'item/completed',
+      params: {
+        item: {
+          type: 'mcpToolCall',
+          id: 't1',
+          status: 'completed',
+          result: { content: [{ type: 'text', text: 'issue #42 created' }] },
+        },
+      },
+    })
+    assert.equal(ev[0][0], 'tool_start')
+    assert.equal(ev[0][1].tool, 'github/create_issue')
+    assert.equal(ev[0][1].toolUseId, 't1')
+    assert.equal(ev[0][1].input.server, 'github')
+    assert.equal(ev[0][1].input.tool, 'create_issue')
+    assert.deepEqual(ev[0][1].input.arguments, { title: 'x' })
+    assert.equal(ev[1][0], 'tool_result')
+    assert.equal(ev[1][1].toolUseId, 't1')
+    assert.equal(ev[1][1].result, 'issue #42 created')
+    assert.equal(ev[1][1].truncated, false)
+    cleanup()
+  })
+
+  it('a failed mcpToolCall surfaces the error message as the result text (#6712 tracks styling)', () => {
+    const { s, cleanup } = mkSession()
+    const ev = capture(s, ['tool_result'])
+    s._activeTurn = { messageId: 'm1', turnId: null, didStreamStart: false }
+    s._onNotification({ method: 'item/started', params: { item: { type: 'mcpToolCall', id: 't2', server: 'db', tool: 'query' } } })
+    s._onNotification({
+      method: 'item/completed',
+      params: { item: { type: 'mcpToolCall', id: 't2', status: 'failed', error: { message: 'connection refused' } } },
+    })
+    // The wire tool_result carries no isError (ServerToolResultSchema strips it),
+    // so the failure is conveyed by the error TEXT — assert that, not a flag.
+    assert.equal(ev[0][1].result, 'connection refused')
+    assert.equal('isError' in ev[0][1], false, 'no dead isError field on the wire payload')
+    cleanup()
+  })
+
+  it('mcpToolCall label degrades gracefully (tool-only, then generic mcp)', () => {
+    const { s, cleanup } = mkSession()
+    assert.equal(s._mcpToolLabel({ tool: 'lonely_tool' }), 'lonely_tool')
+    assert.equal(s._mcpToolLabel({ server: 'srv' }), 'srv')
+    assert.equal(s._mcpToolLabel({}), 'mcp')
+    assert.equal(s._mcpToolLabel({ server: ' gh ', tool: ' t ' }), 'gh/t')
+    cleanup()
+  })
+
+  it('mcpToolCall result joins multiple content parts and marks non-text parts', () => {
+    const { s, cleanup } = mkSession()
+    const { result, truncated } = s._summarizeMcpResult({
+      status: 'completed',
+      result: { content: [{ type: 'text', text: 'line one' }, { type: 'image', data: '…' }, { type: 'text', text: 'line two' }] },
+    })
+    assert.equal(result, 'line one\n[image]\nline two')
+    assert.equal(truncated, false)
+    cleanup()
+  })
+
+  it('mcpToolCall falls back to structuredContent, then status, and caps huge output via the truncated flag', () => {
+    const { s, cleanup } = mkSession()
+    // structuredContent fallback when there is no content array
+    const structured = s._summarizeMcpResult({ status: 'completed', result: { structuredContent: { ok: true } } })
+    assert.equal(structured.result, '{"ok":true}')
+    assert.equal(structured.truncated, false)
+    // status fallback when there is nothing renderable (result {} or null)
+    assert.equal(s._summarizeMcpResult({ status: 'completed', result: {} }).result, 'completed')
+    assert.equal(s._summarizeMcpResult({ status: 'completed', result: null }).result, 'completed')
+    // cap: a >10k text result is sliced to the cap and flagged truncated (no
+    // in-band marker — the wire `truncated` field carries the signal, #6684).
+    const huge = 'x'.repeat(20_000)
+    const capped = s._summarizeMcpResult({ status: 'completed', result: { content: [{ type: 'text', text: huge }] } })
+    assert.equal(capped.result.length, 10_000, 'sliced to MAX_MCP_RESULT_CHARS')
+    assert.equal(capped.truncated, true, 'truncated flag set')
+    cleanup()
+  })
+
+  it('an orphan mcpToolCall tool_start is swept with a synthetic tool_result at turn end', () => {
+    const { s, cleanup } = mkSession()
+    const ev = capture(s, ['tool_result'])
+    s._isBusy = true
+    s._activeTurn = { messageId: 'm1', turnId: 't1', didStreamStart: true }
+    s._onNotification({ method: 'item/started', params: { item: { type: 'mcpToolCall', id: 'orphan-mcp', server: 'x', tool: 'y' } } })
+    s._onNotification({ method: 'turn/completed', params: { turn: { durationMs: 1 } } })
+    assert.ok(ev.some(([, p]) => p.toolUseId === 'orphan-mcp'), 'orphan mcpToolCall got a synthetic tool_result')
+    cleanup()
+  })
+
   it('turn/completed emits stream_end + result and clears busy', () => {
     const { s, cleanup } = mkSession()
     const ev = capture(s, ['stream_end', 'result'])
