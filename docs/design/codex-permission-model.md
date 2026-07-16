@@ -16,9 +16,9 @@ Everything under **Current state** is grounded in the code as of this writing;
 ## TL;DR
 
 - The **app-server driver** (`CodexAppServerSession`) is the canonical, approval-capable Codex path and the default. The legacy `codex exec` path (`CHROXY_CODEX_APPSERVER=0`) has **no** Chroxy approval surface — treat it as a fallback only.
-- Codex surfaces **three** approval families through the same `PermissionManager` the Claude providers use: shell commands, file edits, and (since #6610) sandbox scope-escalations.
+- Codex surfaces its approvals through the same `PermissionManager` the Claude providers use: shell commands, file edits, sandbox scope-escalations (#6610), and connector elicitations (#6635).
 - Codex **does not** support Chroxy session rules ("Allow for Session" persisted per-tool). "Always allow" maps to Codex's *own* per-turn/per-session grant vocabulary, not a Chroxy rule.
-- **MCP / connector tool calls are not surfaced** in the permission pipeline (the gap behind the missed-GitHub-connector-approval report, #6635).
+- **MCP connector elicitations** (e.g. a GitHub write approval) now surface as accept/decline (#6635); structured form-content / url-mode / execution-item rendering remain (#6684).
 - The **sandbox** (`read-only` / `workspace-write` / `danger-full-access`) is env-only (`CHROXY_CODEX_SANDBOX`), not per-session in the UI/API.
 
 ---
@@ -52,17 +52,18 @@ Codex maps them to a Codex `approvalPolicy` per turn: `auto → never` (Codex ne
 asks), every other mode → `on-request`. `plan` is **not** a real Codex mode
 (Codex has no plan enforcement) — it behaves like `approve`.
 
-| Request class → | `shell` (command exec) | `apply_patch` (file edit) | `request_permissions` (scope-escalation) | MCP / connector call |
+| Request class → | `shell` (command exec) | `apply_patch` (file edit) | `request_permissions` (scope-escalation) | `mcp_elicitation` (connector) |
 |---|---|---|---|---|
-| **approve** (default) | Prompt | Prompt | Prompt | **Not surfaced** |
-| **acceptEdits** | Prompt | **Auto-approve** | Prompt | **Not surfaced** |
-| **auto** | No prompt (Codex `never`) | No prompt | No prompt | Not surfaced |
-| **plan** | Prompt (= approve) | Prompt | Prompt | **Not surfaced** |
+| **approve** (default) | Prompt | Prompt | Prompt | Prompt |
+| **acceptEdits** | Prompt | **Auto-approve** | Prompt | Prompt |
+| **auto** | No prompt (Codex `never`) | No prompt | No prompt | Auto-allow |
+| **plan** | Prompt (= approve) | Prompt | Prompt | Prompt |
 
 Why the cells are what they are:
 - `apply_patch` is in `ACCEPT_EDITS_TOOLS`, so `acceptEdits` auto-approves Codex edits (the analogue of auto-approving Claude Write/Edit).
-- `shell` and `request_permissions` are in `NEVER_AUTO_ALLOW` — they always prompt (except under `auto`, where Codex's `approvalPolicy: never` means it doesn't send an approval request at all).
-- Under `auto`, `PermissionManager.handlePermission` also short-circuits to allow, so even a stray request is drained without a prompt.
+- `shell`, `request_permissions`, and `mcp_elicitation` are in `NEVER_AUTO_ALLOW` — they always prompt (except under `auto`).
+- Under `auto`, `PermissionManager.handlePermission` short-circuits to allow, so requests are drained without a prompt. (`shell`/`apply_patch`/`request_permissions` also don't get *sent* under `auto` since Codex's `approvalPolicy` is `never`; a connector `mcp_elicitation` is a standalone MCP request that can still arrive, and is auto-allowed.)
+- **`mcp_elicitation`** = a connector eliciting the user (#6635), surfaced as accept/decline — the confirmation case. See §8 for what's still open (form `content`, url-mode, execution-item rendering).
 
 ---
 
@@ -76,6 +77,14 @@ Each family answers Codex in **its own** vocabulary — the `PermissionManager`
 | `item/commandExecution/requestApproval` | `accept` | `acceptForSession` | `decline` |
 | `item/fileChange/requestApproval` | `approved` | `approved_for_session` | `denied` |
 | `item/permissions/requestApproval` (#6610) | `{ permissions: <requested>, scope: 'turn' }` | `{ permissions: <requested>, scope: 'session' }` | `{ permissions: {} }` (scope omitted) |
+| `mcpServer/elicitation/request` (#6635) | `{ action: 'accept' }` | (no session grant) | `{ action: 'decline' }` |
+
+The elicitation response also permits structured `content` (for `form`-mode) and
+`{ action: 'cancel' }`. The current implementation answers action-only: a
+confirmation-style (no required fields) or `url`-mode elicitation accepts; a
+`form`/`openai/form` elicitation that **requires fields** is *declined even on
+allow* (a safe status quo — an action-only accept could make the connector act on
+empty params the user never saw), until #6684 collects content. See §8.
 
 The escalation grant is reconstructed from the two `GrantedPermissionProfile`
 fields (`fileSystem`, `network`) the request carried — never an echo of the raw
@@ -154,7 +163,7 @@ Both clients render these via the existing `PermissionPrompt` (`<tool>:
 
 | Gap | Detail | Related |
 |---|---|---|
-| **MCP / connector approvals unsurfaced** | `mcpToolCall` items are not mapped to a `tool_start` or an approval — only `commandExecution` + `fileChange` are. Connector calls (e.g. GitHub) run under Codex's sandbox/`approvalPolicy` and never reach Chroxy's prompt. | #6635 |
+| **MCP connector elicitation — partially addressed (#6635)** | A connector eliciting the user (`mcpServer/elicitation/request`, e.g. a GitHub write approval) is now surfaced as an **accept/decline** prompt (previously `-32601`-declined, so the approval was "missed"). Still open: structured `content` collection for `form`/`openai/form` modes and interactive `url`-mode flows (accept currently answers action-only), and rendering the `mcpToolCall` execution item itself as a `tool_start` (#6684). | #6635 |
 | **No session rules** | "Allow for Session" persists a rule for Claude SDK/BYOK; for Codex it's a Codex-side grant only (§4). | — |
 | **Provider-generic mode copy** | Mode labels/descriptions and `skipPermissions` (= `--dangerously-skip-permissions`) are Claude/TUI-oriented; `skipPermissions` is a no-op for Codex, and `plan` is a no-op alias for `approve`. | — |
 | **Sandbox not per-session** | `CHROXY_CODEX_SANDBOX` is env-only; a per-session selector would need protocol + UI. | — |
@@ -180,8 +189,8 @@ Each carries a recommendation, but the call is yours.
 5. **Required approval-UI detail for Codex** (full command, cwd, env, patch/diff preview, redaction, drilldown)?
    *Recommendation:* command + cwd ship today; add a **diff/patch preview** for `apply_patch` (currently only `reason` + `grantRoot`) and a scope drilldown for escalations. Env is sensitive — keep redacted/omitted by default.
 
-6. **MCP / connector approval path (the #6635 gap).**
-   *Recommendation:* the highest-value fix here — map `mcpToolCall` items to a `tool_start` and, where Codex requests approval for them, into the permission pipeline (a `mcp`/connector tool class). Needs confirming which Codex app-server events carry connector approvals. Track as a dedicated issue.
+6. **MCP / connector approval path (the #6635 gap) — the elicitation approval shipped.**
+   Connector elicitations (`mcpServer/elicitation/request`) now surface as an accept/decline prompt via the `mcp_elicitation` tool (`NEVER_AUTO_ALLOW`), fixing the "missed approval → rejected tool call" case. *Remaining:* structured `content` collection for `form`/`openai/form` elicitations and interactive `url`-mode flows, plus rendering the `mcpToolCall` execution item as a `tool_start` — tracked in #6684.
 
 7. **How should timeout/interrupt/auto-switch appear to the user?**
    *Recommendation:* surface a resolved state on the prompt (timed-out / cancelled / auto-approved) rather than silently dropping it — same UX work as #6627 (queued/permission resolved-state rendering).

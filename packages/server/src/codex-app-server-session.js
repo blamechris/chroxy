@@ -433,6 +433,16 @@ export class CodexAppServerSession extends BaseSession {
       this._routePermissionsApproval(id, params)
       return
     }
+    if (method === 'mcpServer/elicitation/request') {
+      // A codex MCP server (connector, e.g. GitHub) is eliciting the user — most
+      // commonly a write/action confirmation. Previously this fell through to the
+      // -32601 decline below, so the connector approval was silently rejected and
+      // "missed" (#6635). Surface it as an accept/decline prompt. NOTE: structured
+      // form-content collection and interactive url-mode flows are a follow-up —
+      // accept currently answers with the action only, no `content`.
+      this._routeMcpElicitation(id, params)
+      return
+    }
     ;(this._log || log).warn(`codex app-server: unsupported serverRequest ${method} — declining`)
     this._client?.respondError(id, -32601, 'unsupported request')
   }
@@ -567,6 +577,68 @@ export class CodexAppServerSession extends BaseSession {
       ? ` — ${params.reason.trim()}`
       : ''
     return `Codex is requesting to broaden its sandbox permissions${reason}: ${scope}`
+  }
+
+  // #6635: an MCP server (connector) is eliciting the user. Surface it as an
+  // accept/decline prompt through the permission pipeline (was silently declined
+  // with -32601, so a GitHub-connector write approval was "missed" and the tool
+  // call rejected). The elicitation response is { action: accept|decline|cancel,
+  // content? }; we answer with the action only — structured `content` collection
+  // (form / openai/form modes) and interactive url-mode flows are a follow-up.
+  async _routeMcpElicitation(rpcId, params) {
+    let result
+    try {
+      const input = {
+        description: this._describeMcpElicitation(params),
+        serverName: params?.serverName ?? null,
+        mode: params?.mode ?? null,
+        // Surfaced so the client can show a url-mode elicitation's link.
+        url: typeof params?.url === 'string' ? params.url : null,
+        message: typeof params?.message === 'string' ? params.message : null,
+      }
+      // The sentinel is inert for this tool (unlike command/file/escalation, we
+      // don't read updatedPermissions): an elicitation "allow" is a one-shot
+      // accept, never a persisted rule — kept only for handlePermission symmetry.
+      const suggestions = [{ codexApproval: 'mcpServer/elicitation/request' }]
+      result = await this._permissions.handlePermission('mcp_elicitation', input, this._turnAbort?.signal, this.permissionMode, suggestions)
+    } catch (err) {
+      result = { behavior: 'deny', message: err?.message || 'permission error' }
+    }
+    const allow = result?.behavior === 'allow'
+    // #6635: we can't collect structured `content` yet (#6684), so a form-mode
+    // elicitation that REQUIRES fields is DECLINED even on allow — an action-only
+    // accept could make the connector act on empty/default params the user never
+    // saw. Confirmation-style (no required fields) + url-mode accept normally; a
+    // decline is always the safe status quo (matches the pre-#6635 -32601 outcome).
+    const action = allow && !this._elicitationRequiresContent(params) ? 'accept' : 'decline'
+    this._client?.respond(rpcId, { action })
+  }
+
+  // True when accepting would need structured `content` we can't yet collect:
+  // `openai/form` (freeform content) or a `form` whose schema declares required
+  // properties. `url`-mode and content-less confirmation forms return false.
+  _elicitationRequiresContent(params) {
+    const mode = params?.mode
+    if (mode === 'openai/form') return true
+    if (mode !== 'form') return false
+    const required = params?.requestedSchema?.required
+    return Array.isArray(required) && required.length > 0
+  }
+
+  // Human-readable elicitation prompt: which connector is asking, and what for.
+  _describeMcpElicitation(params) {
+    const server = typeof params?.serverName === 'string' && params.serverName.trim()
+      ? params.serverName.trim()
+      : 'an MCP connector'
+    const msg = typeof params?.message === 'string' && params.message.trim() ? params.message.trim() : ''
+    const url = params?.mode === 'url' && typeof params?.url === 'string' && params.url.trim()
+      ? ` (opens ${params.url.trim()})`
+      : ''
+    // Build the two shapes explicitly rather than post-cleaning whitespace: with a
+    // message → `connector "x" asks: <msg>`, without → `connector "x": is requesting…`.
+    return msg
+      ? `Codex connector "${server}" asks: ${msg}${url}`
+      : `Codex connector "${server}": is requesting your input${url}`
   }
 
   // 'auto' (skip all prompts) → codex runs without asking. Every other mode →
