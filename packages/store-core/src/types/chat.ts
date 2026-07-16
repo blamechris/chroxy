@@ -90,10 +90,11 @@ export interface ChatMessage {
   toolResult?: string;
   toolResultTruncated?: boolean;
   /**
-   * #6712: the tool_result represents a FAILED tool execution (a failed codex
-   * `mcpToolCall`, or a synthetic orphan-sweep result). Renderers can surface an
-   * error affordance (e.g. a red tint / warning icon on the result) instead of a
-   * plain result. Additive: absent on older servers / non-error results.
+   * #6712: whether the tool_result represents a FAILED tool execution (a failed
+   * codex `mcpToolCall`, or a synthetic orphan-sweep result). Renderers surface
+   * an error affordance (red tint / warning icon) when `true`. Optional: only
+   * `true` is meaningful — a missing/`false` value is a normal result. store-core
+   * defaults a missing wire `isError` to `false`.
    */
   toolResultIsError?: boolean;
   /**
