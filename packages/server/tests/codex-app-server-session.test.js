@@ -400,6 +400,25 @@ describe('CodexAppServerSession — approval surfacing (#6605 Phase 2)', () => {
       assert.equal(s._summarizeFileChanges(null), null)
       cleanup()
     })
+
+    it('clears the cached diffs when the turn ends (leak prevention)', () => {
+      const { s, cleanup } = mkApprovalSession('approve')
+      s.on('error', () => {}) // _failTurn emits 'error'; swallow so EventEmitter doesn't throw
+      s._activeTurn = { messageId: 'm1', didStreamStart: false }
+      s._onItemStarted(fcItem())
+      assert.equal(s._pendingFileChanges.size, 1, 'cached during the turn')
+      s._failTurn('boom') // a turn-teardown path → _clearMessageState → clears the cache
+      assert.equal(s._pendingFileChanges.size, 0, 'released at turn end')
+      cleanup()
+    })
+
+    it('_summarizeFileChanges tolerates a string patch and path-less entries', () => {
+      const { s, cleanup } = mkApprovalSession()
+      // #6638: item.changes ?? item.patch — patch can be a unified-diff STRING.
+      assert.equal(s._summarizeFileChanges('a-unified-diff-string'), null, 'a string patch → null, no throw')
+      assert.match(s._summarizeFileChanges([{ kind: 'update', diff: 'd' }, null]), /file change\(s\)/, 'entries without a path → count only')
+      cleanup()
+    })
   })
 
   it('acceptEdits auto-approves a codex file edit (fileChange) without a prompt', async () => {
