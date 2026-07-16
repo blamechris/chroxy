@@ -1327,7 +1327,7 @@ export interface ConnectionState {
   updateInputSettings: (settings: Partial<InputSettings>) => void;
   // #6453 — canonical WIRE attachment type (was an inline loose shape with a
   // `[key: string]: string` index); the dashboard sends both file_ref + image.
-  sendInput: (input: string, wireAttachments?: Attachment[], options?: { isVoice?: boolean }) => 'sent' | 'queued' | false;
+  sendInput: (input: string, wireAttachments?: Attachment[], options?: { isVoice?: boolean; previewAttachments?: MessageAttachment[] }) => 'sent' | 'queued' | false;
   /**
    * Interrupt the current turn. Defaults to the active session; pass an explicit
    * `sessionId` to interrupt a specific session (e.g. the Control Room

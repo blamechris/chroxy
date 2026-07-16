@@ -22,6 +22,7 @@ import { WorkingIndicator } from './WorkingIndicator'
 import { renderMarkdown } from '../lib/markdown'
 import { handleMarkdownLinkClick } from '../lib/links'
 import { CopyButton } from './CopyButton'
+import { isRenderableImageUri } from '../utils/attachment-preview'
 import { MessageRowShell } from './MeasuredRow'
 import { ChatExpandContext, type ChatExpandRegistry } from './chatExpandRegistry'
 import { useWindowedRange } from './useWindowedRange'
@@ -344,12 +345,14 @@ const DefaultMessageRow = memo(function DefaultMessageRow({
             actions alongside it. */}
         {type === 'response' && !isStreaming && content.trim() !== '' && <CopyButton content={content} />}
         {body}
-        {/* #6632: preview what the user attached to their message — image
-            thumbnails, and a compact chip for non-image documents. */}
+        {/* #6632: preview what the user attached — image thumbnails (only for a
+            renderable, safe image URI), otherwise a filename chip. A resumed
+            session's stripped `data:` URI, or a non-image document, falls back to
+            the chip so the user still sees WHAT was attached. */}
         {type === 'user_input' && attachments && attachments.length > 0 && (
           <div className="msg-attachments" data-testid={`msg-attachments-${id}`}>
             {attachments.map((att) =>
-              att.type === 'image' ? (
+              att.type === 'image' && isRenderableImageUri(att.uri) ? (
                 <img
                   key={att.id}
                   className="msg-attachment-image"
@@ -360,7 +363,7 @@ const DefaultMessageRow = memo(function DefaultMessageRow({
                 />
               ) : (
                 <span key={att.id} className="msg-attachment-doc" title={att.name} data-testid={`msg-attachment-doc-${att.id}`}>
-                  <span aria-hidden="true">📄</span> {att.name}
+                  <span aria-hidden="true">{att.type === 'image' ? '🖼' : '📄'}</span> {att.name}
                 </span>
               ),
             )}

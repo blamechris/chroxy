@@ -55,6 +55,9 @@ describe('ChatView', () => {
         attachments: [
           { id: 'img-1', type: 'image', uri: 'data:image/png;base64,abc', name: 'shot.png', mediaType: 'image/png', size: 10 },
           { id: 'doc-1', type: 'document', uri: 'blob:x', name: 'notes.pdf', mediaType: 'application/pdf', size: 20 },
+          // #6632: a resumed-session image whose data: URI was stripped by
+          // persistence → renders a filename chip, NOT a broken <img>.
+          { id: 'img-stripped', type: 'image', uri: '[data stripped]', name: 'old.png', mediaType: 'image/png', size: 0 },
         ],
       },
     ]
@@ -63,6 +66,9 @@ describe('ChatView', () => {
     expect(img).toHaveAttribute('src', 'data:image/png;base64,abc')
     expect(img).toHaveAttribute('alt', 'shot.png')
     expect(screen.getByTestId('msg-attachment-doc-doc-1')).toHaveTextContent('notes.pdf')
+    // stripped image → chip fallback (filename shown), no broken <img>
+    expect(screen.queryByTestId('msg-attachment-image-img-stripped')).not.toBeInTheDocument()
+    expect(screen.getByTestId('msg-attachment-doc-img-stripped')).toHaveTextContent('old.png')
   })
 
   it('renders no attachment container on a message without attachments (#6632)', () => {
