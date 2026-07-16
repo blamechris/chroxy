@@ -89,7 +89,7 @@ export class TurnDriver {
    * free, so no event can arrive before the accumulator exists (a fast provider
    * can emit before the returned promise is even awaited). Contended turns queue
    * FIFO and start synchronously when the prior turn releases.
-   * @returns {Promise<{ text: string, result: { cost, duration, usage } }>}
+   * @returns {Promise<{ text: string, result: { cost, duration, usage, modelUsage, model, numTurns, apiDurationMs } }>}
    * @throws {TurnError}
    */
   driveTurn(sessionId, prompt, { label = null, timeoutMs = null } = {}) {
@@ -200,10 +200,18 @@ export class TurnDriver {
         break
       }
       case 'result': {
+        // Forward the FULL terminal usage payload, not just cost/duration/usage:
+        // the ledger's recordTurnUsage keys off modelUsage/model/numTurns/
+        // apiDurationMs for per-model attribution (#6692). Dropping them here
+        // would silently collapse every metered run to a single unknown model.
         const result = {
           cost: data?.cost ?? null,
           duration: data?.duration ?? null,
           usage: data?.usage ?? null,
+          modelUsage: data?.modelUsage ?? null,
+          model: data?.model ?? null,
+          numTurns: Number.isFinite(data?.numTurns) ? data.numTurns : null,
+          apiDurationMs: Number.isFinite(data?.apiDurationMs) ? data.apiDurationMs : null,
         }
         const text = this._assembleText(ctx)
         this._finishTurn(ctx, () => ctx.resolve({ text, result }))
