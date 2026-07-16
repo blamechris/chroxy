@@ -270,6 +270,32 @@ export function applyEvent(record, event) {
       }
       break
 
+    case 'budget_warning':
+      // one-shot latch: only the first crossing stamps the time
+      if (record.budgetState.warnedAt == null) record.budgetState.warnedAt = finiteOr(event.ts, null)
+      break
+
+    case 'budget_cap_reached':
+      if (record.budgetState.capReachedAt == null) record.budgetState.capReachedAt = finiteOr(event.ts, null)
+      break
+
+    case 'budget_lifted':
+      // a raise / refund brought a capped run back under; keep capReachedAt for
+      // history, record when it lifted.
+      record.budgetState.capLiftedAt = finiteOr(event.ts, record.budgetState.capLiftedAt)
+      break
+
+    case 'budget_updated':
+      if (record.configSnapshot && event.budget && typeof event.budget === 'object') {
+        record.configSnapshot.budget = event.budget
+      }
+      break
+
+    case 'delegation_blocked_budget':
+      // audit-only: the engine records that a delegation was refused at the cap.
+      // No state change beyond the journal line.
+      break
+
     case 'events_dropped':
       record.droppedEvents += nonNegInt(event.count)
       break
