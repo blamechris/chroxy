@@ -46,7 +46,7 @@ import {
   type DisplayGroup,
 } from './group-messages'
 import { isRetryableAskUserQuestionError } from './ask-user-question-errors'
-import type { ChatMessage } from './types'
+import type { ChatMessage, MessageAttachment } from './types'
 
 /**
  * Flattened chat-view row.
@@ -66,6 +66,12 @@ export interface ChatViewMessage {
    * renderers can switch on it (e.g. `'stream_stall'` → chip + retry).
    */
   code?: string
+  /**
+   * #6632 — attachments on a `user_input` message (images / documents), mirrored
+   * from the store ChatMessage so the transcript can render a thumbnail/chip of
+   * what the user sent (confirming the attachment after submit / on resume).
+   */
+  attachments?: MessageAttachment[]
 }
 
 export interface ChatViewPipelineResult {
@@ -104,6 +110,11 @@ export function toChatViewMessage(msg: ChatMessage): ChatViewMessage {
     // renderMessage path can switch error bubbles into the
     // StreamStallChip variant.
     ...(msg.code ? { code: msg.code } : {}),
+    // #6632: carry user-message attachments through so the transcript can
+    // preview them (dropped previously → no thumbnail on the sent message).
+    // Gated to `user_input` to match the contract (attachments live only on user
+    // messages) — don't thread attachment data onto non-user bubbles.
+    ...(msg.type === 'user_input' && msg.attachments?.length ? { attachments: msg.attachments } : {}),
   }
 }
 

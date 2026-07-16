@@ -418,6 +418,25 @@ describe('useConnectionStore', () => {
       expect(payload.clientMessageId).toBe(bubble!.id);
     });
 
+    it('carries previewAttachments onto the optimistic user bubble (#6632)', async () => {
+      const { useConnectionStore, createEmptySessionState } = await import('./connection');
+      const send = vi.fn();
+      const openSocket = { readyState: WebSocket.OPEN, send } as unknown as WebSocket;
+      useConnectionStore.setState({
+        socket: openSocket,
+        activeSessionId: 's1',
+        sessionStates: { s1: { ...createEmptySessionState(), streamingMessageId: null, isIdle: true, messages: [], queuedMessages: [] } },
+      });
+      const previewAttachments = [
+        { id: 'img-0', type: 'image' as const, uri: 'data:image/png;base64,abc', name: 'shot.png', mediaType: 'image/png', size: 3 },
+      ];
+      useConnectionStore.getState().sendInput('look at this', undefined, { previewAttachments });
+      const bubble = useConnectionStore.getState().sessionStates.s1!.messages.find(m => m.type === 'user_input');
+      // The real send path (sendInput → addUserMessage) surfaces the previews so
+      // the transcript can render them — guards the wiring that was dead before.
+      expect(bubble?.attachments).toEqual(previewAttachments);
+    });
+
     it('preserves the in-progress turn thinking indicator when queueing a follow-up', async () => {
       const { useConnectionStore, createEmptySessionState } = await import('./connection');
       const send = vi.fn();

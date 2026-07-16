@@ -31,6 +31,7 @@ import { MultiTerminalView } from './components/MultiTerminalView'
 import { InputBar, type FileAttachment, type ImageAttachment } from './components/InputBar'
 import { useVoiceInput } from './hooks/useVoiceInput'
 import { toWireAttachments } from './utils/attachment-utils'
+import { toMessageAttachments } from './utils/attachment-preview'
 import { derivePendingPermissionCounts, totalPendingPermissions, selectNextPendingSession } from './utils/pendingPermissions'
 import { processImageFiles, filterImageFiles } from './utils/image-utils'
 import { getAuthToken } from './utils/auth'
@@ -1579,7 +1580,17 @@ export function App() {
     const blocks = sid ? pastedTextBlocksRef.current.get(sid) ?? [] : []
     const blockMap = new Map(blocks.map(b => [b.id, b.content]))
     const expanded = blockMap.size > 0 ? expandPasteMarkers(text, blockMap) : text
-    const sendResult = sendInput(expanded, wire.length > 0 ? wire : undefined)
+    // #6632: build transcript previews (composer images → data: URIs, files →
+    // chips) so the sent bubble shows what was attached.
+    const previews = toMessageAttachments(
+      imageAttachments.length > 0 ? imageAttachments : undefined,
+      allFiles.length > 0 ? allFiles : undefined,
+    )
+    const sendResult = sendInput(
+      expanded,
+      wire.length > 0 ? wire : undefined,
+      previews.length > 0 ? { previewAttachments: previews } : undefined,
+    )
     // #6295 — parity with the mobile app (SessionScreen handleSend): when the
     // socket is closed the send falls through to the offline queue and returns
     // 'queued'. Surface a transient info notice so the operator knows the

@@ -301,5 +301,23 @@ describe('buildChatViewMessages', () => {
       const v = toChatViewMessage(m)
       expect('code' in v).toBe(false)
     })
+
+    it('propagates user-message attachments so the transcript can preview them (#6632)', () => {
+      const attachments = [
+        { id: 'a1', type: 'image' as const, uri: 'data:image/png;base64,xxx', name: 'shot.png', mediaType: 'image/png', size: 12 },
+      ]
+      const v = toChatViewMessage(msg({ id: 'u1', type: 'user_input', content: 'see this', attachments }))
+      expect(v.attachments).toEqual(attachments)
+    })
+
+    it('omits `attachments` when absent or empty', () => {
+      expect('attachments' in toChatViewMessage(msg({ id: 'u1', type: 'user_input', content: 'no files' }))).toBe(false)
+      expect('attachments' in toChatViewMessage(msg({ id: 'u2', type: 'user_input', content: 'empty', attachments: [] }))).toBe(false)
+    })
+
+    it('does NOT propagate attachments for a non-user_input message (contract: user messages only)', () => {
+      const attachments = [{ id: 'a1', type: 'image' as const, uri: 'data:image/png;base64,x', name: 'x.png', mediaType: 'image/png', size: 1 }]
+      expect('attachments' in toChatViewMessage(msg({ id: 'r1', type: 'response', content: 'hi', attachments }))).toBe(false)
+    })
   })
 })

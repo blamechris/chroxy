@@ -2877,9 +2877,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const busy = active.streamingMessageId !== null || active.isIdle === false;
 
     // Show user message immediately (optimistic update + thinking indicator, or
-    // a queued badge when busy). Wire attachments use a different shape than
-    // MessageAttachment — pass text only for now.
-    get().addUserMessage(input, undefined, { clientMessageId, queued: busy });
+    // a queued badge when busy). #6632: carry the caller-built MessageAttachment
+    // previews (composer images → data: URIs, files → chips) onto the optimistic
+    // bubble so the transcript shows what was attached.
+    get().addUserMessage(input, options?.previewAttachments, { clientMessageId, queued: busy });
 
     const payload: Record<string, unknown> = { type: 'input', data: input, clientMessageId };
     if (activeSessionId) payload.sessionId = activeSessionId;
