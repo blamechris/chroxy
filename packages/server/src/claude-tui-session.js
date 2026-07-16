@@ -1232,8 +1232,12 @@ export class ClaudeTuiSession extends BaseSession {
   // early the #5794 first-turn nudge (a bare `\r` re-send) is the backstop that
   // recovers the composer — an early fire is a brief wedge at worst (#6603).
   static get READY_QUIESCENCE_MS() {
-    const override = parseInt(process.env.CHROXY_TUI_READY_QUIESCENCE_MS || '', 10)
-    return Number.isFinite(override) && override > 0 ? override : 400
+    // Strict digits-only (after trim) so a partial-numeric value like "1200ms"
+    // is rejected → 400, matching the documented "positive integer" contract
+    // (parseInt alone would silently accept "1200ms" as 1200).
+    const raw = (process.env.CHROXY_TUI_READY_QUIESCENCE_MS || '').trim()
+    const override = /^\d+$/.test(raw) ? parseInt(raw, 10) : NaN
+    return override > 0 ? override : 400
   }
   // #5317 (WP-2.3) — grace window between destroy()'s SIGTERM and the SIGKILL
   // escalation. Long enough for claude to flush its Stop hook + reap its own

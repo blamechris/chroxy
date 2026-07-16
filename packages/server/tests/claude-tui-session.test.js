@@ -1789,7 +1789,11 @@ describe('ClaudeTuiSession', () => {
       try {
         process.env.CHROXY_TUI_READY_QUIESCENCE_MS = '1200'
         assert.equal(ClaudeTuiSession.READY_QUIESCENCE_MS, 1200, 'a positive override is applied')
-        for (const bad of ['0', '-50', 'abc', '']) {
+        process.env.CHROXY_TUI_READY_QUIESCENCE_MS = '  700  '
+        assert.equal(ClaudeTuiSession.READY_QUIESCENCE_MS, 700, 'surrounding whitespace is trimmed')
+        // Strict digits-only: partial-numeric / non-integer strings are rejected
+        // (not silently truncated by parseInt), matching the documented contract.
+        for (const bad of ['0', '-50', 'abc', '', '1200ms', '3.9', '1e3', '0x10', ' ']) {
           process.env.CHROXY_TUI_READY_QUIESCENCE_MS = bad
           assert.equal(ClaudeTuiSession.READY_QUIESCENCE_MS, 400, `invalid "${bad}" falls back to 400`)
         }
