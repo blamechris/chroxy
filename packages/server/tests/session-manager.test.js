@@ -2953,6 +2953,19 @@ describe('SessionManager._trackUsage (#4072)', () => {
     assert.equal(got.turnsBilled, 2)
   })
 
+  it('accumulates codex cache_read_input_tokens into cumulativeUsage (field-name contract, #6692)', () => {
+    // The exact usage shape codex `_mapUsage` now emits after #6692 (input
+    // DISJOINT from the cache_read subset, under the key `_trackUsage` reads).
+    // Guards the cross-module field-name contract that silently dropped codex
+    // cache tokens when the two sides disagreed (`cached_input_tokens` vs
+    // `cache_read_input_tokens`).
+    const { mgr } = makeWiredManager()
+    mgr._trackUsage('s1', { usage: { input_tokens: 700, output_tokens: 100, cache_read_input_tokens: 300 }, cost: null })
+    const got = mgr.getCumulativeUsage('s1')
+    assert.equal(got.inputTokens, 700)
+    assert.equal(got.cacheReadTokens, 300, 'codex cache tokens now land in cumulativeUsage')
+  })
+
   it('emits session_usage on every priced result event', () => {
     const { mgr, session } = makeWiredManager()
     const events = captureSessionUsage(mgr)

@@ -439,7 +439,7 @@ export class CodexAppServerSession extends BaseSession {
 
   _mapUsage(params) {
     const u = params?.usage || params || {}
-    const num = (x) => (Number.isFinite(Number(x)) && Number(x) >= 0 ? Number(x) : 0)
+    const num = (x) => { const n = Number(x); return Number.isFinite(n) && n >= 0 ? n : 0 }
     const totalInput = num(u.inputTokens ?? u.input_tokens)
     // #6692: codex/OpenAI reports cached tokens as a SUBSET of the input count,
     // but chroxy's usage model (`session-manager._trackUsage`) accumulates
