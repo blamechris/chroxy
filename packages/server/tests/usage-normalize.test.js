@@ -85,6 +85,17 @@ describe('normalizeSdkModelUsage', () => {
     assert.equal(normalizeSdkModelUsage({ m: null, n: 3 }), null)
   })
 
+  it('skips unsafe model ids (prototype-pollution guard) and keeps real entries', () => {
+    // JSON.parse gives '__proto__'/'constructor' as real OWN keys (a provider's
+    // usage comes from parsed JSON), unlike an object literal where `__proto__:`
+    // sets the proto. Unsafe ids are dropped; safe ones pass through.
+    const raw = JSON.parse('{"__proto__": {"inputTokens": 1}, "constructor": {"inputTokens": 9}, "real": {"inputTokens": 2}}')
+    const out = normalizeSdkModelUsage(raw)
+    assert.equal(Object.prototype.inputTokens, undefined)
+    assert.deepEqual(Object.keys(out), ['real'])
+    assert.equal(out.real.input_tokens, 2)
+  })
+
   it('accepts already-snake_case entries (CLI stream-json forward-compat)', () => {
     const out = normalizeSdkModelUsage({
       m: { input_tokens: 5, output_tokens: 2, cache_read_input_tokens: 1, cost_usd: 0.5 },
@@ -142,12 +153,24 @@ describe('synthesizeModelUsage', () => {
   })
 
   it('returns null when the usage object carries no token signal (both-null synthetic results)', () => {
-    // Mirrors _trackUsage's finite-tokens gate: a stream-stall synthetic
-    // result must not fabricate an all-zero per-model row.
+    // A stream-stall synthetic result must not fabricate an all-zero per-model row.
     assert.equal(synthesizeModelUsage('m', {}), null)
     assert.equal(synthesizeModelUsage('m', { foo: 1 }), null)
     // an explicit zero IS a signal (finite number) — zero-token turns exist
     assert.notEqual(synthesizeModelUsage('m', { input_tokens: 0 }), null)
+  })
+
+  it('treats explicit null token fields as no-signal (Number(null)===0 must not fabricate a row)', () => {
+    assert.equal(synthesizeModelUsage('m', { input_tokens: null, output_tokens: null }), null)
+    // a real number alongside nulls still synthesizes
+    assert.notEqual(synthesizeModelUsage('m', { input_tokens: null, output_tokens: 5 }), null)
+  })
+
+  it('rejects unsafe model ids (prototype-pollution guard)', () => {
+    for (const id of ['__proto__', 'constructor', 'prototype']) {
+      assert.equal(synthesizeModelUsage(id, { input_tokens: 1 }), null, id)
+    }
+    assert.equal(Object.prototype.input_tokens, undefined)
   })
 })
 

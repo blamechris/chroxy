@@ -38,11 +38,16 @@ export function nonNegInt(x) {
  * entries) into the wire contract above. Returns null when the input is
  * absent, not an object, or normalizes to zero entries.
  */
+// model ids come from provider output (untrusted). Reject the keys that could
+// pollute a plain object so a hostile/buggy id can't reach `out[id] = …`.
+const UNSAFE_KEY = new Set(['__proto__', 'constructor', 'prototype'])
+const isSafeModelId = (id) => typeof id === 'string' && id.length > 0 && !UNSAFE_KEY.has(id)
+
 export function normalizeSdkModelUsage(raw) {
   if (!raw || typeof raw !== 'object') return null
   const out = {}
   for (const [modelId, u] of Object.entries(raw)) {
-    if (!modelId || !u || typeof u !== 'object') continue
+    if (!isSafeModelId(modelId) || !u || typeof u !== 'object') continue
     out[modelId] = {
       input_tokens: nonNegInt(u.inputTokens ?? u.input_tokens),
       output_tokens: nonNegInt(u.outputTokens ?? u.output_tokens),
@@ -73,13 +78,17 @@ export function normalizeSdkModelUsage(raw) {
  * synthesize a row `_trackUsage` skips.
  */
 export function synthesizeModelUsage(model, usage, costUsd = null) {
-  if (!model || typeof model !== 'string') return null
+  if (!isSafeModelId(model)) return null
   if (!usage || typeof usage !== 'object') return null
+  // A real numeric token field is the signal. Test `typeof === 'number'` (not
+  // Number(v)) so a provider's explicit null for a missing field is NOT read
+  // as 0 — `Number(null) === 0` is finite and would fabricate an all-zero row
+  // for a genuinely-empty turn. An explicit numeric 0 still counts as signal.
   const anyTokenSignal = [
     usage.input_tokens, usage.output_tokens,
     usage.cache_read_input_tokens, usage.cached_input_tokens,
     usage.cache_creation_input_tokens,
-  ].some((v) => Number.isFinite(Number(v)))
+  ].some((v) => typeof v === 'number' && Number.isFinite(v))
   if (!anyTokenSignal) return null
   return {
     [model]: {
