@@ -1637,6 +1637,66 @@ describe('BaseSession', () => {
       assert.equal(s._inFlightToolStarts.size, 0)
     })
   })
+
+  // #6706 — the turn-boundary queue-length stamp (#6627) is applied centrally in
+  // the emit() override, so EVERY `result` carries queueLength regardless of
+  // which provider emits it (the direct-emit providers — CLI/exec-codex/gemini/
+  // byok/stall fallbacks — bypass _emitResult but still pass through emit()).
+  describe('result queueLength stamping via emit() override (#6627/#6706)', () => {
+    let s
+    beforeEach(() => {
+      s = new BaseSession({ cwd: '/tmp', repoSkillsDir: null })
+    })
+
+    it('stamps queueLength: 0 on a direct emit when the outgoing queue is empty', () => {
+      let received = null
+      s.on('result', (ev) => { received = ev })
+      // Simulate a direct-emit provider (e.g. cli-session) bypassing _emitResult.
+      s.emit('result', { cost: null, duration: 5, usage: null, sessionId: 'sess_1' })
+      assert.equal(received.queueLength, 0)
+      assert.equal(received.sessionId, 'sess_1', 'original fields preserved')
+    })
+
+    it('stamps queueLength reflecting the current outgoing-queue length', () => {
+      s._outgoingQueue.push({ clientMessageId: 'uin-1' }, { clientMessageId: 'uin-2' })
+      let received = null
+      s.on('result', (ev) => { received = ev })
+      s.emit('result', { cost: 1, duration: 5, usage: null, sessionId: 'sess_1' })
+      assert.equal(received.queueLength, 2)
+    })
+
+    it('_emitResult results also carry queueLength (regression for #6627)', () => {
+      s._outgoingQueue.push({ clientMessageId: 'uin-1' })
+      let received = null
+      s.on('result', (ev) => { received = ev })
+      s._emitResult({ cost: null, duration: 100, usage: null, sessionId: 'sess_1' }, 'turn_end')
+      assert.equal(received.queueLength, 1)
+    })
+
+    it('does not overwrite a queueLength already present on the payload (idempotent)', () => {
+      s._outgoingQueue.push({ clientMessageId: 'uin-1' }, { clientMessageId: 'uin-2' })
+      let received = null
+      s.on('result', (ev) => { received = ev })
+      s.emit('result', { sessionId: 'sess_1', queueLength: 7 })
+      assert.equal(received.queueLength, 7, 'pre-stamped value is preserved')
+    })
+
+    it('leaves non-result events untouched and preserves the has-listeners return', () => {
+      let received = null
+      s.on('stream', (ev) => { received = ev })
+      const hadListeners = s.emit('stream', { chunk: 'x' })
+      assert.equal(hadListeners, true)
+      assert.deepStrictEqual(received, { chunk: 'x' }, 'no queueLength added to non-result events')
+      assert.equal(s.emit('result', { sessionId: 'n' }), false, 'returns false when result has no listener')
+    })
+
+    it('does not mutate the caller-supplied payload object (spreads a copy)', () => {
+      const payload = { cost: null, sessionId: 'sess_1' }
+      s.on('result', () => {})
+      s.emit('result', payload)
+      assert.equal('queueLength' in payload, false, 'original payload is not mutated')
+    })
+  })
 })
 
 // #4509: BaseSession's three per-session inactivity timeouts must also clamp
