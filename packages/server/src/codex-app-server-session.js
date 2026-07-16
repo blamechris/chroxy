@@ -371,9 +371,11 @@ export class CodexAppServerSession extends BaseSession {
       if (item.id != null) this._pendingFileChanges.delete(item.id) // #6638: done — release the cached diff
     } else if (item.type === 'mcpToolCall') {
       // #6684: emit the connector tool's output as a tool_result. A failed call
-      // surfaces the error message flagged isError so the client can style it.
-      const { result, isError } = this._summarizeMcpResult(item)
-      this.emit('tool_result', { toolUseId: item.id, result, isError })
+      // surfaces error.message as the result TEXT — the wire tool_result carries
+      // no isError field (ServerToolResultSchema is {toolUseId, result,
+      // truncated}), so error styling is out of scope here (tracked in #6712).
+      const { result, truncated } = this._summarizeMcpResult(item)
+      this.emit('tool_result', { toolUseId: item.id, result, truncated })
       this._trackToolResult(item.id)
     } else if (item.type === 'agentMessage') {
       // Fallback: if the final text never arrived as deltas (short replies can
@@ -394,33 +396,38 @@ export class CodexAppServerSession extends BaseSession {
     return tool || server || 'mcp'
   }
 
-  // #6684: reduce an mcpToolCall completion to a { result, isError } tool_result.
-  // Prefers the connector's error message (failed), then the MCP content array
-  // (text parts inline, non-text parts as a `[type]` marker), then
-  // structuredContent, then the bare status so the card is never blank. Bounded
-  // by MAX_MCP_RESULT_CHARS.
+  // #6684: reduce an mcpToolCall completion to a { result, truncated } tool_result.
+  // Prefers the connector's error message (failed calls convey failure via this
+  // text, not styling — #6712), then the MCP content array (text parts inline,
+  // non-text parts as a `[type]` marker), then structuredContent, then the bare
+  // status so the card is never blank. Text is bounded by MAX_MCP_RESULT_CHARS.
   _summarizeMcpResult(item) {
     if (item?.error && typeof item.error.message === 'string' && item.error.message) {
-      return { result: this._capMcpText(item.error.message), isError: true }
+      return this._capMcpResult(item.error.message)
     }
-    const isError = item?.status === 'failed'
     const content = item?.result?.content
     if (Array.isArray(content) && content.length > 0) {
       const text = content
         .map((c) => (c && typeof c.text === 'string' ? c.text : c && typeof c.type === 'string' ? `[${c.type}]` : null))
         .filter(Boolean)
         .join('\n')
-      if (text) return { result: this._capMcpText(text), isError }
+      if (text) return this._capMcpResult(text)
     }
     if (item?.result?.structuredContent != null) {
-      return { result: this._capMcpText(JSON.stringify(item.result.structuredContent)), isError }
+      return this._capMcpResult(JSON.stringify(item.result.structuredContent))
     }
-    return { result: item?.status ?? '', isError }
+    return { result: item?.status ?? '', truncated: false }
   }
 
-  _capMcpText(text) {
+  // Cap the rendered text at MAX_MCP_RESULT_CHARS, signalling an over-cap slice via
+  // the wire `truncated` flag (ServerToolResultSchema.truncated → store-core's
+  // toolResultTruncated) rather than an in-band marker.
+  _capMcpResult(text) {
     const s = String(text)
-    return s.length > MAX_MCP_RESULT_CHARS ? `${s.slice(0, MAX_MCP_RESULT_CHARS)}\n… (truncated)` : s
+    if (s.length > MAX_MCP_RESULT_CHARS) {
+      return { result: s.slice(0, MAX_MCP_RESULT_CHARS), truncated: true }
+    }
+    return { result: s, truncated: false }
   }
 
   _ensureStreamStart() {

@@ -140,11 +140,11 @@ describe('CodexAppServerSession — app-server → Chroxy event mapping', () => 
     assert.equal(ev[1][0], 'tool_result')
     assert.equal(ev[1][1].toolUseId, 't1')
     assert.equal(ev[1][1].result, 'issue #42 created')
-    assert.equal(ev[1][1].isError, false)
+    assert.equal(ev[1][1].truncated, false)
     cleanup()
   })
 
-  it('a failed mcpToolCall surfaces the error message flagged isError', () => {
+  it('a failed mcpToolCall surfaces the error message as the result text (#6712 tracks styling)', () => {
     const { s, cleanup } = mkSession()
     const ev = capture(s, ['tool_result'])
     s._activeTurn = { messageId: 'm1', turnId: null, didStreamStart: false }
@@ -153,8 +153,10 @@ describe('CodexAppServerSession — app-server → Chroxy event mapping', () => 
       method: 'item/completed',
       params: { item: { type: 'mcpToolCall', id: 't2', status: 'failed', error: { message: 'connection refused' } } },
     })
+    // The wire tool_result carries no isError (ServerToolResultSchema strips it),
+    // so the failure is conveyed by the error TEXT — assert that, not a flag.
     assert.equal(ev[0][1].result, 'connection refused')
-    assert.equal(ev[0][1].isError, true)
+    assert.equal('isError' in ev[0][1], false, 'no dead isError field on the wire payload')
     cleanup()
   })
 
@@ -169,28 +171,30 @@ describe('CodexAppServerSession — app-server → Chroxy event mapping', () => 
 
   it('mcpToolCall result joins multiple content parts and marks non-text parts', () => {
     const { s, cleanup } = mkSession()
-    const { result, isError } = s._summarizeMcpResult({
+    const { result, truncated } = s._summarizeMcpResult({
       status: 'completed',
       result: { content: [{ type: 'text', text: 'line one' }, { type: 'image', data: '…' }, { type: 'text', text: 'line two' }] },
     })
     assert.equal(result, 'line one\n[image]\nline two')
-    assert.equal(isError, false)
+    assert.equal(truncated, false)
     cleanup()
   })
 
-  it('mcpToolCall falls back to structuredContent, then status, and caps huge output', () => {
+  it('mcpToolCall falls back to structuredContent, then status, and caps huge output via the truncated flag', () => {
     const { s, cleanup } = mkSession()
     // structuredContent fallback when there is no content array
     const structured = s._summarizeMcpResult({ status: 'completed', result: { structuredContent: { ok: true } } })
     assert.equal(structured.result, '{"ok":true}')
+    assert.equal(structured.truncated, false)
     // status fallback when there is nothing renderable (result {} or null)
     assert.equal(s._summarizeMcpResult({ status: 'completed', result: {} }).result, 'completed')
     assert.equal(s._summarizeMcpResult({ status: 'completed', result: null }).result, 'completed')
-    // cap: a >10k text result is truncated with a marker
+    // cap: a >10k text result is sliced to the cap and flagged truncated (no
+    // in-band marker — the wire `truncated` field carries the signal, #6684).
     const huge = 'x'.repeat(20_000)
     const capped = s._summarizeMcpResult({ status: 'completed', result: { content: [{ type: 'text', text: huge }] } })
-    assert.ok(capped.result.length < huge.length, 'capped')
-    assert.ok(capped.result.endsWith('… (truncated)'), 'truncation marker appended')
+    assert.equal(capped.result.length, 10_000, 'sliced to MAX_MCP_RESULT_CHARS')
+    assert.equal(capped.truncated, true, 'truncated flag set')
     cleanup()
   })
 
