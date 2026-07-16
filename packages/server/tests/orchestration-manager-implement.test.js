@@ -85,15 +85,21 @@ class FakeSM extends EventEmitter {
   listSessions() { return [...this._sessions.keys()] }
 }
 
-function makeFakeGitOps({ conflict = false } = {}) {
+function makeFakeGitOps({ conflict = false, failCreateBranch = false } = {}) {
   const calls = []
+  const branches = new Set() // stateful so redelegate exercises delete-then-recreate
   const rec = (name, arg) => calls.push({ name, arg })
   return {
     calls,
     integrationWorktreePath: (runId) => `/wt/${runId}/integration`,
-    async branchExists() { return { exists: false } },
-    async deleteBranch(_r, b) { rec('deleteBranch', b); return { deleted: true } },
-    async createBranch(worktreePath, branchName) { rec('createBranch', { worktreePath, branchName }); return { branch: branchName, baseSha: `base_${branchName}` } },
+    async branchExists(_r, b) { return { exists: branches.has(b) } },
+    async deleteBranch(_r, b) { rec('deleteBranch', b); branches.delete(b); return { deleted: true } },
+    async createBranch(worktreePath, branchName) {
+      rec('createBranch', { worktreePath, branchName })
+      if (failCreateBranch) throw new Error('createBranch failed')
+      branches.add(branchName)
+      return { branch: branchName, baseSha: `base_${branchName}` }
+    },
     async autoCommit(a) { rec('autoCommit', a); return { committed: true, sha: 'sha1' } },
     async isDirty() { return { dirty: false } },
     async computeCappedDiff(a) { rec('computeCappedDiff', a); return { stat: '1 file', patch: '+added line', truncated: false, omittedFiles: [], includedFiles: ['f.js'] } },
@@ -171,6 +177,11 @@ test('full implement run: branch → commit → diff review → merge → done �
     assert.ok(names.includes('mergeNoFf'), 'branch merged')
     assert.ok(names.includes('removeWorktree'), 'integration worktree cleaned up on complete')
     assert.equal(payload.integrationBranch, 'chroxy/orch/' + rec.runId + '/integration')
+    // load-bearing ORDER: commit before the review diff, and the merge before cleanup
+    assert.ok(names.indexOf('autoCommit') < names.indexOf('computeCappedDiff'), 'commit before diff')
+    assert.ok(names.indexOf('autoCommit') < names.indexOf('mergeNoFf'), 'commit before merge')
+    assert.ok(names.indexOf('createBranch') < names.indexOf('mergeNoFf'), 'branch before merge')
+    assert.ok(names.indexOf('mergeNoFf') < names.lastIndexOf('removeWorktree'), 'merge before cleanup')
 
     // the implement worker was spawned write-capable
     const worker = sm.created.find((c) => c.opts.metadata?.orchestrationRole === 'worker.implement')
@@ -182,6 +193,89 @@ test('full implement run: branch → commit → diff review → merge → done �
     // the architect's result_review prompt carried the diff
     const arch = sm.created.find((c) => c.opts.metadata?.orchestrationRole === 'architect').session
     assert.ok(arch.sends.some((s) => s.includes('DIFF') && s.includes('+added line')), 'diff shown to reviewer')
+  } finally {
+    cleanup()
+  }
+})
+
+test('two implement subtasks merge sequentially into ONE integration worktree (no race)', async () => {
+  // architect plans TWO implement subtasks; both approved. maxParallelWorkers=2
+  // runs them concurrently, so the accept/merge path must serialize.
+  const decide = ({ role, kind }) => {
+    if (role === 'architect' && kind === 'epic_plan') {
+      return { kind: 'epic_plan', subtasks: [
+        { title: 'A', goal: 'g', role: 'implement' },
+        { title: 'B', goal: 'g', role: 'implement' },
+      ] }
+    }
+    if (role === 'architect' && kind === 'poa_review') return { kind: 'poa_review', verdict: 'approve' }
+    if (role === 'architect' && kind === 'result_review') return { kind: 'result_review', verdict: 'approve' }
+    if (role === 'architect' && kind === 'synthesis') return { kind: 'synthesis', reportMarkdown: '# Done' }
+    if (kind === 'plan_of_attack') return { kind: 'plan_of_attack', plan: 'p', summary: 'poa' }
+    if (kind === 'work_result') return { kind: 'work_result', summary: 's' }
+    throw new Error(`unexpected ${role}/${kind}`)
+  }
+  const { ledger, gitOps, mgr, cleanup } = harness(decide)
+  try {
+    const rec = mgr.createRun({ goal: 'Implement', cwd: '/repo', autoApprovePlan: true })
+    const done = waitFor(mgr, ['run_completed'])
+    await mgr.startRun(rec.runId)
+    await done
+    const record = ledger.getRun(rec.runId)
+    assert.equal(record.status, 'completed')
+    assert.ok(record.subtasks.every((s) => s.status === 'done'), 'both subtasks merged')
+    const names = gitOps.calls.map((c) => c.name)
+    assert.equal(names.filter((n) => n === 'createIntegrationWorktree').length, 1, 'integration worktree created EXACTLY once (no double-create race)')
+    assert.equal(names.filter((n) => n === 'mergeNoFf').length, 2, 'both branches merged')
+    assert.equal(names.filter((n) => n === 'abortMerge').length, 0, 'no spurious conflict/abort from a race')
+    assert.equal(names.filter((n) => n === 'removeWorktree').length, 1, 'integration worktree cleaned up once')
+    assert.equal(record.subtasks.length, 2)
+  } finally {
+    cleanup()
+  }
+})
+
+test('redelegate of an implement worker recreates the worktree + branch', async () => {
+  const decide = ({ role, kind, n }) => {
+    if (role === 'architect' && kind === 'epic_plan') return { kind: 'epic_plan', subtasks: [{ title: 'A', goal: 'g', role: 'implement' }] }
+    if (role === 'architect' && kind === 'poa_review') return { kind: 'poa_review', verdict: n === 1 ? 'redelegate' : 'approve' }
+    if (role === 'architect' && kind === 'result_review') return { kind: 'result_review', verdict: 'approve' }
+    if (role === 'architect' && kind === 'synthesis') return { kind: 'synthesis', reportMarkdown: '# Done' }
+    if (kind === 'plan_of_attack') return { kind: 'plan_of_attack', plan: 'p', summary: 'poa' }
+    if (kind === 'work_result') return { kind: 'work_result', summary: 's' }
+    throw new Error(`unexpected ${role}/${kind}`)
+  }
+  const { sm, ledger, gitOps, mgr, cleanup } = harness(decide)
+  try {
+    const rec = mgr.createRun({ goal: 'Implement', cwd: '/repo', autoApprovePlan: true })
+    const done = waitFor(mgr, ['run_completed'])
+    await mgr.startRun(rec.runId)
+    await done
+    assert.equal(ledger.getRun(rec.runId).status, 'completed')
+    // TWO implement workers created for the one subtask (original + redelegated)
+    const workers = sm.created.filter((c) => c.opts.metadata?.orchestrationRole === 'worker.implement')
+    assert.equal(workers.length, 2, 'redelegate spawned a fresh write worker')
+    const names = gitOps.calls.map((c) => c.name)
+    assert.equal(names.filter((n) => n === 'createBranch').length, 2, 'branch created for each worker')
+    assert.ok(names.includes('deleteBranch'), 'stale branch deleted before recreate on respawn')
+  } finally {
+    cleanup()
+  }
+})
+
+test('a failed createBranch at spawn escalates (does not crash the run)', async () => {
+  const { ledger, gitOps, mgr, cleanup } = harness(implementDecider(), { gitOpts: { failCreateBranch: true } })
+  try {
+    const rec = mgr.createRun({ goal: 'Implement', cwd: '/repo', autoApprovePlan: true })
+    const gated = waitFor(mgr, ['gate_opened'])
+    await mgr.startRun(rec.runId)
+    const { payload } = await gated
+    assert.equal(payload.gate.kind, 'escalation')
+    assert.ok(!gitOps.calls.some((c) => c.name === 'mergeNoFf'), 'never attempted a merge without a branch')
+    const done = waitFor(mgr, ['run_completed'])
+    await mgr.resolveGate(rec.runId, payload.gate.gateId, { decision: 'skip' })
+    await done
+    assert.equal(ledger.getRun(rec.runId).status, 'completed')
   } finally {
     cleanup()
   }
