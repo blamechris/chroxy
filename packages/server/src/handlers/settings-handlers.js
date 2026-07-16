@@ -522,9 +522,13 @@ function handlePermissionResponse(ws, client, msg, ctx) {
     // client.id` exclusion). The resolving client needs its own
     // `permission_resolved` to prune `permissionInputs[requestId]` (#6559) —
     // append-only otherwise, so on this legacy path the entry used to linger
-    // until disconnect. The client handler is idempotent (guarded copy-delete
-    // prune; the notification re-stamp only touches not-yet-acked rows), and
-    // this matches the SDK path, which broadcasts session events to every
+    // until disconnect. Echoing to the resolver is SAFE to re-apply: the
+    // `permissionInputs` prune is a guarded copy-delete, the notification
+    // read-stamp only touches not-yet-acked rows, and re-marking the
+    // already-answered prompt is functionally inert (its label reads from
+    // `resolvedPermissions`, and the pending-count only checks that `answered`
+    // is truthy — only `answeredAt` is refreshed to the server-confirmed time).
+    // This also matches the SDK path, which broadcasts session events to every
     // subscriber without excluding the origin client.
     ctx.transport.broadcast({ type: 'permission_resolved', requestId, decision })
   }
