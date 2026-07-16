@@ -20,7 +20,7 @@ function resolveChroxyDir(env = process.env) {
   return env.CHROXY_CONFIG_DIR || join(homedir(), '.chroxy')
 }
 
-/** Human-readable age; null when the entry has no createdAt. */
+/** Human-readable age string; 'unknown' when the caller passes a non-finite age. */
 function formatAge(ms) {
   if (typeof ms !== 'number' || !Number.isFinite(ms) || ms < 0) return 'unknown'
   const sec = Math.floor(ms / 1000)
@@ -33,7 +33,13 @@ function formatAge(ms) {
 }
 
 const ENFORCE_NOTE =
-  'Restart the daemon to enforce — a running daemon keeps already-issued tokens in memory until restart.'
+  'Restart the daemon to enforce — a running daemon keeps already-issued tokens in memory ' +
+  'and will re-persist (effectively restoring this token) if it writes before you restart.'
+
+const UNREADABLE_NOTE =
+  'The session-token store exists but could not be read (keychain unavailable, wrong file ' +
+  'permissions, or corrupt). Refusing to touch it so a readable store is never lost. Fix the ' +
+  'store access (or stop the daemon and inspect ~/.chroxy/session-tokens.json) and retry.'
 
 /**
  * List persisted session tokens. Pure aside from the injected store/writer/clock,
@@ -47,7 +53,11 @@ export function runTokensList(deps = {}) {
   const store = deps.store || createSessionTokenStore({ dir: resolveChroxyDir() })
   const now = typeof deps.now === 'number' ? deps.now : Date.now()
 
-  const entries = store.load()
+  const { status, entries } = store.loadResult()
+  if (status === 'unreadable') {
+    out(UNREADABLE_NOTE)
+    return { count: 0, tokens: [], error: 'unreadable' }
+  }
   if (!Array.isArray(entries) || entries.length === 0) {
     out('No paired session tokens. Devices pair via the dashboard QR / pairing code.')
     return { count: 0, tokens: [] }
@@ -80,7 +90,16 @@ export function runTokensList(deps = {}) {
 export function runTokensRevoke(target, options = {}, deps = {}) {
   const out = deps.write || console.log
   const store = deps.store || createSessionTokenStore({ dir: resolveChroxyDir() })
-  const entries = store.load()
+
+  // #6599 — never operate on a store we couldn't read: an 'unreadable' result
+  // (present file, bad perms / no keychain key / corrupt) must NOT be mistaken for
+  // an empty store, or `revoke --all` would silently overwrite real tokens with []
+  // and report "0". Refuse and exit non-zero instead.
+  const { status, entries } = store.loadResult()
+  if (status === 'unreadable') {
+    out(UNREADABLE_NOTE)
+    return { revoked: 0, mode: options.all ? 'all' : 'one', error: 'unreadable' }
+  }
   const list = Array.isArray(entries) ? entries : []
 
   if (options.all) {
@@ -98,7 +117,10 @@ export function runTokensRevoke(target, options = {}, deps = {}) {
       )
       return { revoked: 0, mode: 'all', confirmed: false }
     }
-    store.save([])
+    if (!store.save([])) {
+      out(`Failed to write the session-token store — nothing revoked. ${UNREADABLE_NOTE}`)
+      return { revoked: 0, mode: 'all', error: 'persist-failed' }
+    }
     out(`Revoked all ${list.length} session token(s). ${ENFORCE_NOTE}`)
     return { revoked: list.length, mode: 'all', confirmed: true }
   }
@@ -120,7 +142,10 @@ export function runTokensRevoke(target, options = {}, deps = {}) {
   }
 
   const remaining = list.filter(([token]) => !String(token).startsWith(target))
-  store.save(remaining)
+  if (!store.save(remaining)) {
+    out(`Failed to write the session-token store — nothing revoked. ${UNREADABLE_NOTE}`)
+    return { revoked: 0, mode: 'one', error: 'persist-failed' }
+  }
   out(`Revoked 1 session token (${target}…). ${ENFORCE_NOTE}`)
   return { revoked: 1, mode: 'one', confirmed: true }
 }
@@ -135,7 +160,8 @@ export function registerTokensCommand(program) {
     .description('List paired-device session tokens (handle, session, age)')
     .action(() => {
       try {
-        runTokensList()
+        const res = runTokensList()
+        if (res.error) process.exitCode = 1
       } catch (err) {
         console.error(`tokens list failed: ${err.message}`)
         process.exitCode = 1
@@ -149,7 +175,11 @@ export function registerTokensCommand(program) {
     .option('--yes', 'Confirm --all (without it, the command only explains what it would do)')
     .action((handle, options) => {
       try {
-        runTokensRevoke(handle, options)
+        const res = runTokensRevoke(handle, options)
+        // Exit non-zero on genuine operational failures (a store we couldn't read
+        // or write) so scripts/operators know the revoke did NOT happen. User-input
+        // guidance (no-match / ambiguous / no-target / unconfirmed --all) exits 0.
+        if (res.error === 'unreadable' || res.error === 'persist-failed') process.exitCode = 1
       } catch (err) {
         console.error(`tokens revoke failed: ${err.message}`)
         process.exitCode = 1

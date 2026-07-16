@@ -2,12 +2,25 @@ import { describe, it, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { runTokensList, runTokensRevoke } from '../src/cli/tokens-cmd.js'
 
-// In-memory session-token store fake matching the { load, save } adapter shape.
-function fakeStore(initial = []) {
+// In-memory session-token store fake matching the { load, loadResult, exists,
+// save } adapter shape. `opts.status` forces an 'unreadable' result; `opts.saveOk
+// = false` simulates a persist failure.
+function fakeStore(initial = [], opts = {}) {
   let entries = initial.map((e) => [e[0], { ...e[1] }])
+  const status = opts.status || 'ok'
+  const saveOk = opts.saveOk !== false
   return {
     load: () => entries.map((e) => [e[0], { ...e[1] }]),
-    save: (next) => { entries = next.map((e) => [e[0], { ...e[1] }]) },
+    loadResult: () => ({
+      status,
+      entries: status === 'unreadable' ? [] : entries.map((e) => [e[0], { ...e[1] }]),
+    }),
+    exists: () => status !== 'absent',
+    save: (next) => {
+      if (!saveOk) return false
+      entries = next.map((e) => [e[0], { ...e[1] }])
+      return true
+    },
     _current: () => entries,
   }
 }
@@ -56,6 +69,17 @@ describe('chroxy tokens — list (#6599)', () => {
     assert.equal(res.tokens[0].ageMs, null)
     assert.match(w.text(), /age=unknown/)
   })
+
+  it('an UNREADABLE store is reported as an error, never as "empty"', () => {
+    const w = cap()
+    // A present-but-unreadable store (bad perms / no keychain key / corrupt) must
+    // not masquerade as "no tokens".
+    const res = runTokensList({ store: fakeStore([['tok', { createdAt: NOW }]], { status: 'unreadable' }), write: w.write, now: NOW })
+    assert.equal(res.error, 'unreadable')
+    assert.equal(res.count, 0)
+    assert.match(w.text(), /could not be read/)
+    assert.doesNotMatch(w.text(), /No paired session tokens/)
+  })
 })
 
 describe('chroxy tokens — revoke one (#6599)', () => {
@@ -101,6 +125,34 @@ describe('chroxy tokens — revoke one (#6599)', () => {
     assert.equal(res.error, 'no-target')
     assert.equal(store._current().length, 2)
   })
+
+  it('an EMPTY-STRING target is refused (no-target) and never wipes a single-token store', () => {
+    // The `if (!target)` guard is load-bearing: '' would otherwise match every
+    // token via startsWith(''), and on a single-token store revoke exactly one.
+    const single = fakeStore([['only1token', { createdAt: NOW }]])
+    const w = cap()
+    const res = runTokensRevoke('', {}, { store: single, write: w.write })
+    assert.equal(res.error, 'no-target')
+    assert.equal(res.revoked, 0)
+    assert.equal(single._current().length, 1, 'the single token survives an empty target')
+  })
+
+  it('refuses to revoke against an UNREADABLE store (never overwrites it)', () => {
+    const s = fakeStore([[A, { createdAt: NOW }]], { status: 'unreadable' })
+    const w = cap()
+    const res = runTokensRevoke('aaaa', {}, { store: s, write: w.write })
+    assert.equal(res.error, 'unreadable')
+    assert.equal(s._current().length, 1, 'the unreadable store is left intact')
+  })
+
+  it('reports persist-failure instead of a false success', () => {
+    const s = fakeStore([[A, { createdAt: NOW }], [B, { createdAt: NOW }]], { saveOk: false })
+    const w = cap()
+    const res = runTokensRevoke('aaaa1111', {}, { store: s, write: w.write })
+    assert.equal(res.error, 'persist-failed')
+    assert.equal(res.revoked, 0)
+    assert.match(w.text(), /Failed to write/)
+  })
 })
 
 describe('chroxy tokens — revoke --all (#6599)', () => {
@@ -129,5 +181,25 @@ describe('chroxy tokens — revoke --all (#6599)', () => {
     const res = runTokensRevoke(undefined, { all: true, yes: true }, { store, write: w.write })
     assert.equal(res.revoked, 0)
     assert.equal(store._current().length, 0)
+  })
+
+  it('--all --yes REFUSES to overwrite a present-but-unreadable store (the key footgun)', () => {
+    // Two real tokens the CLI can't decrypt. A naive load()->[] + save([]) would
+    // destroy them and report "0". loadResult()==='unreadable' must block the wipe.
+    const s = fakeStore([['t1aaaa', { createdAt: NOW }], ['t2bbbb', { createdAt: NOW }]], { status: 'unreadable' })
+    const w = cap()
+    const res = runTokensRevoke(undefined, { all: true, yes: true }, { store: s, write: w.write })
+    assert.equal(res.error, 'unreadable')
+    assert.equal(res.revoked, 0)
+    assert.equal(s._current().length, 2, 'the unreadable store is NOT overwritten')
+    assert.match(w.text(), /could not be read/)
+  })
+
+  it('--all --yes reports persist-failure instead of a false success', () => {
+    const s = fakeStore([['t1aaaa', { createdAt: NOW }]], { saveOk: false })
+    const w = cap()
+    const res = runTokensRevoke(undefined, { all: true, yes: true }, { store: s, write: w.write })
+    assert.equal(res.error, 'persist-failed')
+    assert.match(w.text(), /Failed to write/)
   })
 })
