@@ -1726,6 +1726,101 @@ export const SWITCH_FIXTURES: ContractFixture[] = [
     },
   },
   {
+    // #6627/#6707 — a turn-complete `result` carries the server's authoritative
+    // outgoing-queue length. When a `message_dequeued` was dropped/late the
+    // client still shows a flushed message as "Queued"; both clients self-heal on
+    // the result by trimming the stale CONFIRMED orphan (oldest-first, FIFO) down
+    // to queueLength. The transcript is untouched. This fixture locks app +
+    // dashboard to the same outcome — the reconcile lives in each client's REAL
+    // `case 'result'`, not the shared dispatch table, so only the both-clients
+    // SWITCH harness enforces parity (the #6705 review's deferred gap).
+    name: 'result reconciles a stale queued orphan against queueLength (self-heal)',
+    type: 'result',
+    init: {
+      activeSessionId: 's1',
+      sessions: {
+        s1: {
+          messages: [{ id: 'resp-1', type: 'response', content: 'done' } as unknown as ChatMessage],
+          queuedMessages: [
+            { clientMessageId: 'uin-1', text: 'a', queuedAt: 10, status: 'confirmed' },
+            { clientMessageId: 'uin-2', text: 'b', queuedAt: 11, status: 'confirmed' },
+          ],
+        },
+      },
+    },
+    message: { type: 'result', sessionId: 's1', cost: 0.01, duration: 1200, queueLength: 1 },
+    expect: {
+      sessions: {
+        s1: {
+          messages: [{ id: 'resp-1', type: 'response', content: 'done' }],
+          // The oldest confirmed orphan (uin-1) is trimmed; the newest survives.
+          queuedMessages: [{ clientMessageId: 'uin-2', text: 'b', queuedAt: 11, status: 'confirmed' }],
+        },
+      },
+    },
+  },
+  {
+    // #6627/#6707 — when the client queue already matches the result's
+    // queueLength, the reconcile is a referential no-op: the genuinely-queued
+    // entry survives untouched. Guards against an over-eager trim clobbering a
+    // live queued message on every turn boundary.
+    name: 'result leaves the queue intact when queueLength already matches',
+    type: 'result',
+    init: {
+      activeSessionId: 's1',
+      sessions: {
+        s1: {
+          messages: [{ id: 'resp-1', type: 'response', content: 'done' } as unknown as ChatMessage],
+          queuedMessages: [{ clientMessageId: 'uin-1', text: 'still queued', queuedAt: 10, status: 'confirmed' }],
+        },
+      },
+    },
+    message: { type: 'result', sessionId: 's1', cost: 0.01, duration: 1200, queueLength: 1 },
+    expect: {
+      sessions: {
+        s1: {
+          messages: [{ id: 'resp-1', type: 'response', content: 'done' }],
+          queuedMessages: [{ clientMessageId: 'uin-1', text: 'still queued', queuedAt: 10, status: 'confirmed' }],
+        },
+      },
+    },
+  },
+  {
+    // #6627/#6707 — status-aware parity: with an interleaved queue
+    // [confirmed-orphan, pending, confirmed] and queueLength 1, both clients must
+    // reap ONLY the oldest CONFIRMED orphan (a dropped dequeue) and preserve the
+    // optimistic pending entry (a live, not-yet-confirmed send) plus the newest
+    // confirmed one. This is the strong removal-guard fixture: seed length 3 →
+    // expect length 2, so a deleted/stripped reconcile fails it, and a client
+    // that trims the pending entry (the #5950-class regression) fails too.
+    name: 'result reap keeps an interleaved pending entry while trimming a confirmed orphan',
+    type: 'result',
+    init: {
+      activeSessionId: 's1',
+      sessions: {
+        s1: {
+          messages: [{ id: 'resp-1', type: 'response', content: 'done' } as unknown as ChatMessage],
+          queuedMessages: [
+            { clientMessageId: 'uin-0', text: 'orphan', queuedAt: 9, status: 'confirmed' },
+            { clientMessageId: 'uin-1', text: 'live', queuedAt: 10, status: 'pending' },
+            { clientMessageId: 'uin-2', text: 'a', queuedAt: 11, status: 'confirmed' },
+          ],
+        },
+      },
+    },
+    message: { type: 'result', sessionId: 's1', cost: 0.01, duration: 1200, queueLength: 1 },
+    expect: {
+      sessions: {
+        s1: {
+          queuedMessages: [
+            { clientMessageId: 'uin-1', text: 'live', queuedAt: 10, status: 'pending' },
+            { clientMessageId: 'uin-2', text: 'a', queuedAt: 11, status: 'confirmed' },
+          ],
+        },
+      },
+    },
+  },
+  {
     // stream_end is the asymmetric teardown gap (stream_start IS pinned above):
     // both clients clear `streamingMessageId` and refresh the messages REFERENCE
     // but leave the transcript untouched. Seed the in-flight response bubble and
