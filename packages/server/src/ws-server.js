@@ -543,7 +543,7 @@ function _isSecureRequest(req) {
  *   - A session operation failed in an expected, user-facing way → `session_error`
  */
 export class WsServer {
-  constructor({ port, apiToken, cliSession, sessionManager, defaultSessionId, authRequired = true, pushManager = null, maxPayload, noEncrypt, keyExchangeTimeoutMs, localhostBypass, tokenManager, pairingManager, serverIdentity = null, maxPendingConnections, backpressureThreshold, environmentManager, config = null, diagnosticsRateLimit = null, devicePreferences = null, pagesStore = null, pagesRateLimiter } = {}) {
+  constructor({ port, apiToken, cliSession, sessionManager, defaultSessionId, authRequired = true, pushManager = null, maxPayload, noEncrypt, keyExchangeTimeoutMs, localhostBypass, tokenManager, pairingManager, serverIdentity = null, maxPendingConnections, backpressureThreshold, environmentManager, orchestrationManager = null, config = null, diagnosticsRateLimit = null, devicePreferences = null, pagesStore = null, pagesRateLimiter } = {}) {
     this.port = port
     this.apiToken = apiToken
     this._tokenManager = tokenManager || null
@@ -1068,6 +1068,10 @@ export class WsServer {
     // Multi-session support: prefer sessionManager, fall back to single cliSession
     this.sessionManager = sessionManager || null
     this.environmentManager = environmentManager || null
+    // #6691 (E-4): the OrchestrationManager (null when the feature is off). Its
+    // run_delta events are forwarded to host-level clients by server-cli via
+    // _broadcastOrchestrationDelta; the handlers read it off ctx.services.
+    this._orchestrationManager = orchestrationManager || null
     this.defaultSessionId = defaultSessionId || null
     this._checkpointManager = new CheckpointManager()
 
