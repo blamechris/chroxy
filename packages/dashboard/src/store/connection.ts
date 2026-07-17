@@ -1052,12 +1052,16 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     if (socket && socket.readyState === WebSocket.OPEN) {
       const loading = new Set(get().orchestrationRunDetailLoading);
       loading.add(runId);
-      const stale = { ...get().orchestrationRunDetailStale };
-      delete stale[runId];
+      // NOTE: the stale flag is NOT cleared here — it marks a seq gap and must
+      // persist (visible as "resyncing…") until a VALID snapshot lands (the
+      // snapshot handler clears it). A previous error IS cleared: this is a
+      // fresh attempt.
       const errors = { ...get().orchestrationRunDetailErrors };
       delete errors[runId];
-      set({ orchestrationRunDetailLoading: loading, orchestrationRunDetailStale: stale, orchestrationRunDetailErrors: errors });
-      wsSend(socket, { type: 'orchestration_run_detail_request', runId });
+      set({ orchestrationRunDetailLoading: loading, orchestrationRunDetailErrors: errors });
+      // requestId encodes the target run so the degraded `run: null` reply can
+      // be routed back to the right per-run error/loading slots.
+      wsSend(socket, { type: 'orchestration_run_detail_request', runId, requestId: `detail:${runId}` });
       return true;
     }
     return false;

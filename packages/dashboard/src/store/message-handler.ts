@@ -2715,13 +2715,23 @@ function handleOrchestrationRunSnapshot(msg: Record<string, unknown>, get: MsgGe
     set({ orchestrationRunDetails: details, orchestrationRunDetailLoading: loading, orchestrationRunDetailStale: stale, orchestrationRunDetailErrors: errors });
     return;
   }
-  // degraded: no run — we can't know which runId without echo, so clear ALL
-  // in-flight detail loading and record the error under the requestId when
-  // present (the panel keys its error banner off the selected run's absence).
-  const loading = new Set<string>();
-  const errors = { ...get().orchestrationRunDetailErrors };
-  if (typeof parsed.data.requestId === 'string' && error) errors[parsed.data.requestId] = error;
-  set({ orchestrationRunDetailLoading: loading, ...(error ? { orchestrationRunDetailErrors: errors } : {}) });
+  // degraded: no run — route back to the requesting run via the echoed
+  // requestId (`detail:<runId>`, set by requestOrchestrationRunDetail): clear
+  // ONLY that run's loading and record its error keyed by runId. A reply with
+  // no parseable echo (foreign requester) falls back to clearing all in-flight
+  // detail loading so nothing spins forever.
+  const echoed = typeof parsed.data.requestId === 'string' && parsed.data.requestId.startsWith('detail:')
+    ? parsed.data.requestId.slice('detail:'.length)
+    : null;
+  if (echoed) {
+    const loading = new Set(get().orchestrationRunDetailLoading);
+    loading.delete(echoed);
+    const errors = { ...get().orchestrationRunDetailErrors };
+    if (error) errors[echoed] = error;
+    set({ orchestrationRunDetailLoading: loading, ...(error ? { orchestrationRunDetailErrors: errors } : {}) });
+    return;
+  }
+  set({ orchestrationRunDetailLoading: new Set<string>() });
 }
 
 /**

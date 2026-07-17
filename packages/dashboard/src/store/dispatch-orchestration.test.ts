@@ -110,10 +110,28 @@ describe('orchestration dispatch (#6691 S-3)', () => {
     expect(s.orchestrationRunDetails.run_1!.seq).toBe(5)
     expect(s.orchestrationRunDetails.run_1!.detail.epicPrompt).toBe('Audit the repo thoroughly')
     expect(s.orchestrationRunDetailLoading.has('run_1')).toBe(false)
-    // degraded run:null
-    store.setState({ orchestrationRunDetailLoading: new Set(['run_x']) })
-    handleMessage({ type: 'orchestration_run_snapshot', requestId: 'req-1', generatedAt: '2026-07-17T00:00:00.000Z', seq: 0, run: null, error: { code: 'RUN_NOT_FOUND', message: 'nope' } }, ctx() as never)
+    // degraded run:null with the `detail:<runId>` echo routes to THAT run only
+    store.setState({ orchestrationRunDetailLoading: new Set(['run_x', 'run_y']) })
+    handleMessage({ type: 'orchestration_run_snapshot', requestId: 'detail:run_x', generatedAt: '2026-07-17T00:00:00.000Z', seq: 0, run: null, error: { code: 'RUN_NOT_FOUND', message: 'nope' } }, ctx() as never)
+    const s2 = store.getState()
+    expect(s2.orchestrationRunDetailLoading.has('run_x')).toBe(false)
+    expect(s2.orchestrationRunDetailLoading.has('run_y')).toBe(true, )
+    expect(s2.orchestrationRunDetailErrors.run_x!.code).toBe('RUN_NOT_FOUND')
+    // no parseable echo → fall back to clearing ALL loading (nothing spins forever)
+    handleMessage({ type: 'orchestration_run_snapshot', generatedAt: '2026-07-17T00:00:00.000Z', seq: 0, run: null, error: { code: 'UNAVAILABLE', message: 'engine off' } }, ctx() as never)
     expect(store.getState().orchestrationRunDetailLoading.size).toBe(0)
+  })
+
+  it('a resync request preserves the stale flag until a valid snapshot lands', () => {
+    // simulate: gap marked the run stale, resync issued, snapshot arrives
+    store.setState({
+      orchestrationRunDetailStale: { run_1: true },
+      orchestrationRunDetailLoading: new Set(['run_1']),
+    })
+    handleMessage({ type: 'orchestration_run_snapshot', generatedAt: '2026-07-17T00:02:00.000Z', seq: 7, run: runDetail(), requestId: 'detail:run_1' }, ctx() as never)
+    const s = store.getState()
+    expect(s.orchestrationRunDetailStale.run_1).toBeUndefined()
+    expect(s.orchestrationRunDetails.run_1!.seq).toBe(7)
   })
 
   it('in-order delta applies via the reducer (gate upsert + header update)', () => {
