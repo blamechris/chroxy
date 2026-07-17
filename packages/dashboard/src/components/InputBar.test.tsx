@@ -2694,12 +2694,51 @@ describe('InputBar voice shortcut (#5668)', () => {
     expect(start).not.toHaveBeenCalled()
   })
 
-  it('#6637: a modifier chord (Ctrl+Shift) does not arm the window-scoped hold', () => {
+  it('#6637: a modifier chord (Ctrl held, Shift pressed) does not arm the window-scoped hold', () => {
     vi.useFakeTimers()
     const start = vi.fn()
     render(<ControlledBar voiceInput={makeVoice({ start })} initial="" />)
     ;(document.activeElement as HTMLElement | null)?.blur?.()
-    fireEvent.keyDown(document, { key: 'Control', shiftKey: true })
+    // realistic sequence: Ctrl down (arms), THEN Shift down (chord → cancel).
+    // #6752 review: a non-Control key during the arm must cancel it.
+    fireEvent.keyDown(document, { key: 'Control' })
+    act(() => { vi.advanceTimersByTime(100) })
+    fireEvent.keyDown(document, { key: 'Shift', ctrlKey: true, shiftKey: true })
+    act(() => { vi.advanceTimersByTime(250) })
+    expect(start).not.toHaveBeenCalled()
+  })
+
+  it('#6637: a non-Control key stops a live window-scoped recording', () => {
+    vi.useFakeTimers()
+    const start = vi.fn()
+    const stop = vi.fn()
+    render(<ControlledBar voiceInput={makeVoice({ start, stop })} initial="" />)
+    ;(document.activeElement as HTMLElement | null)?.blur?.()
+    fireEvent.keyDown(document, { key: 'Control' })
+    act(() => { vi.advanceTimersByTime(250) })
+    expect(start).toHaveBeenCalledTimes(1)
+    fireEvent.keyDown(document, { key: 'a' })
+    expect(stop).toHaveBeenCalledTimes(1)
+  })
+
+  it('#6752: voice disabled DURING the arming window does not open the mic', () => {
+    vi.useFakeTimers()
+    const start = vi.fn()
+    function Wrapper({ disabled }: { disabled: boolean }) {
+      return (
+        <InputBar
+          onSend={vi.fn()}
+          onInterrupt={vi.fn()}
+          disabled={disabled}
+          voiceInput={makeVoice({ start })}
+        />
+      )
+    }
+    const { rerender } = render(<Wrapper disabled={false} />)
+    ;(document.activeElement as HTMLElement | null)?.blur?.()
+    fireEvent.keyDown(document, { key: 'Control' })
+    act(() => { vi.advanceTimersByTime(100) })
+    rerender(<Wrapper disabled={true} />)   // disabled mid-arm
     act(() => { vi.advanceTimersByTime(250) })
     expect(start).not.toHaveBeenCalled()
   })

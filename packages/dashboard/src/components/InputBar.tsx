@@ -196,6 +196,12 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, c
   const controlPttTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const voiceStopRef = useRef<(() => void) | undefined>(undefined)
   voiceStopRef.current = voiceInput?.stop
+  // #6752 review — current armability, read at arm-timer fire so a `disabled` /
+  // `isAvailable` / `isRecording` change DURING the 250ms arming window can't
+  // still tip the mic on. A ref (not effect teardown) so a benign re-render
+  // mid-arm never spuriously cancels a legitimate hold.
+  const pttArmableRef = useRef(false)
+  pttArmableRef.current = Boolean(voiceInput?.isAvailable) && !disabled && !voiceInput?.isRecording
   const [filePickerOpen, setFilePickerOpen] = useState(false)
   const [fileSelectedIndex, setFileSelectedIndex] = useState(0)
   const [pickerOpen, setPickerOpen] = useState(false)
@@ -528,6 +534,12 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, c
     controlPttTimerRef.current = setTimeout(() => {
       controlPttTimerRef.current = null
       if (controlPttStateRef.current !== 'arming') return
+      // #6752 review: voice may have been disabled / made unavailable / already
+      // started during the hold — never open the mic in that case.
+      if (!pttArmableRef.current) {
+        controlPttStateRef.current = 'idle'
+        return
+      }
       controlPttStateRef.current = 'recording'
       if (focusComposerFirst) textareaRef.current?.focus()
       startVoiceAtCaret()
@@ -583,7 +595,18 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, c
     if (!voiceInput?.isAvailable || disabled) return
 
     const onKeyDown = (e: globalThis.KeyboardEvent) => {
-      if (e.key !== 'Control' || e.metaKey || e.altKey || e.shiftKey) return
+      // Any non-Control key during an arm/recording is a chord (Ctrl+Shift+…) or
+      // a shortcut, not a push-to-talk hold — cancel the arm and stop a live
+      // capture, mirroring the composer-scoped handler. Without this, pressing
+      // Ctrl then Shift would still tip into recording ~250ms later (#6752
+      // review). The cancel/stop helpers are internally guarded, so this is a
+      // no-op unless we're actually arming/recording.
+      if (e.key !== 'Control') {
+        cancelControlPttArm()
+        stopControlPttRecording()
+        return
+      }
+      if (e.metaKey || e.altKey || e.shiftKey) return
       if (voiceInput.isRecording) return
       if (controlPttStateRef.current !== 'idle') return
       const active = document.activeElement
