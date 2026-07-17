@@ -766,7 +766,11 @@ export class OrchestrationManager extends EventEmitter {
       const run = this._runs.get(row.runId)
       if (run) return recordToRunSummary(record, this._snapshotExtras(run))
       const cached = this._completedSnapshots.get(row.runId)
-      return cached ? cached.run : recordToRunSummary(record, { report: this._reportExtra(row.runId) })
+      // cached.summary (a lean RunSummary) — NOT cached.run (a fat RunDetail):
+      // the runs list must stay lightweight (RunSummarySchema is .passthrough(),
+      // so a RunDetail would silently balloon every terminal row with its
+      // nodes/timeline/rollup).
+      return cached ? cached.summary : recordToRunSummary(record, { report: this._reportExtra(row.runId) })
     }).filter(Boolean)
   }
 
@@ -812,14 +816,26 @@ export class OrchestrationManager extends EventEmitter {
     return md ? { json: '', markdown: md } : null
   }
 
-  // On terminal, freeze the final wire projection so the snapshot survives the
-  // run's engine state being deleted from _runs.
+  // On terminal, freeze BOTH the detail (for getRunSnapshot) and the summary
+  // (for the lightweight runs list) so the snapshot survives the run's engine
+  // state being deleted from _runs. Never throws: a projection failure must not
+  // skip the caller's _runs.delete (a leaked run wedges createRun's one-run-at-
+  // a-time guard for the process lifetime).
   _cacheCompletedSnapshot(run) {
-    const record = this._ledger.getRun(run.runId)
-    if (!record) return
-    this._completedSnapshots.set(run.runId, { seq: run.wireSeq, run: recordToRunDetail(record, this._snapshotExtras(run)) })
-    while (this._completedSnapshots.size > this._maxCompletedSnapshots) {
-      this._completedSnapshots.delete(this._completedSnapshots.keys().next().value)
+    try {
+      const record = this._ledger.getRun(run.runId)
+      if (!record) return
+      const extras = this._snapshotExtras(run)
+      this._completedSnapshots.set(run.runId, {
+        seq: run.wireSeq,
+        run: recordToRunDetail(record, extras),
+        summary: recordToRunSummary(record, extras),
+      })
+      while (this._completedSnapshots.size > this._maxCompletedSnapshots) {
+        this._completedSnapshots.delete(this._completedSnapshots.keys().next().value)
+      }
+    } catch (err) {
+      this._log?.warn?.(`orchestration: caching terminal snapshot failed for ${run.runId}: ${err?.message || err}`)
     }
   }
 

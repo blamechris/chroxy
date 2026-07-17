@@ -185,7 +185,40 @@ test('read API (getRunSnapshot/listRuns) returns schema-valid wire shapes, live 
     assert.equal(terminal.run.status, 'completed')
     assert.ok(terminal.run.timeline.some((t) => t.kind === 'gate_resolved'), 'timeline has the gate_resolved entry')
     assert.ok(terminal.run.timeline.some((t) => t.kind === 'committee_review'), 'timeline has committee reviews')
+    // the terminal LIST row must be a lean RunSummary, NOT a fat RunDetail
+    const listRow = mgr.listRuns()[0]
+    assert.equal(RunSummarySchema.safeParse(listRow).success, true)
+    assert.equal(listRow.timeline, undefined, 'list row is summary-shaped (no detail timeline)')
+    assert.equal(listRow.nodes, undefined, 'list row is summary-shaped (no detail nodes)')
+    assert.equal(listRow.usageRollup, undefined, 'list row is summary-shaped (no detail rollup)')
+    // an unknown run → null snapshot, and absent from the list
+    assert.equal(mgr.getRunSnapshot('nope'), null)
+    assert.ok(!mgr.listRuns().some((r) => r.runId === 'nope'))
+  } finally {
+    cleanup()
+  }
+})
+
+test('a cancelled run is cached and served from the terminal snapshot', async () => {
+  // hang at the plan gate so the run is live, then cancel it.
+  const decide = ({ role, kind, n }) => {
+    if (role === 'architect' && kind === 'epic_plan') return { kind: 'epic_plan', subtasks: [{ title: 'A', goal: 'g', role: 'implement' }] }
+    if (role === 'architect' && kind === 'poa_review') return null // hang
+    return implementDecider()({ role, kind, n })
+  }
+  const { mgr, cleanup } = harness(decide)
+  try {
+    const rec = mgr.createRun({ goal: 'Implement', cwd: '/repo', autoApprovePlan: true })
+    const startP = mgr.startRun(rec.runId)
+    await new Promise((r) => setTimeout(r, 20))
+    await mgr.cancelRun(rec.runId)
+    await startP
+    const snap = mgr.getRunSnapshot(rec.runId)
+    assert.ok(snap, 'cancelled run still served from cache')
+    assert.equal(RunDetailSchema.safeParse(snap.run).success, true)
+    assert.equal(snap.run.status, 'cancelled')
     assert.equal(RunSummarySchema.safeParse(mgr.listRuns()[0]).success, true)
+    assert.equal(mgr.listRuns()[0].timeline, undefined, 'cancelled list row is summary-shaped')
   } finally {
     cleanup()
   }
