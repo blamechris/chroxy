@@ -278,6 +278,9 @@ export function applyEvent(record, event) {
         record.baseline = {
           sessionId: typeof event.baseline.sessionId === 'string' ? event.baseline.sessionId : null,
           effectiveUsd: finiteOr(event.baseline.effectiveUsd, 0),
+          // subscription-billed baseline: cost signal is 0 despite real work —
+          // the report must not render a money delta against it
+          unmetered: event.baseline.unmetered === true,
           inputTokens: nonNegInt(event.baseline.inputTokens),
           outputTokens: nonNegInt(event.baseline.outputTokens),
           cacheReadTokens: nonNegInt(event.baseline.cacheReadTokens),

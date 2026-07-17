@@ -863,7 +863,12 @@ export class OrchestrationManager extends EventEmitter {
     try {
       const record = this._ledger.getRun(runId)
       if (!record) return null
-      const narrative = this._reports.get(runId) ?? null
+      // The synthesis narrative's only durable copy is the persisted report's
+      // `synthesis` field — after a restart (or _reports LRU eviction) the
+      // in-memory copy is gone, and overwriting report.{json,md} without this
+      // fallback would DESTROY the narrative (a re-annotated old run would lose
+      // its audit findings forever).
+      const narrative = this._reports.get(runId) ?? this._persistedNarrative(runId)
       const report = buildRunReport(record)
       report.synthesis = narrative
       const markdown = (narrative ? `${narrative}\n\n---\n\n` : '') + renderReportMarkdown(report)
@@ -876,6 +881,19 @@ export class OrchestrationManager extends EventEmitter {
       return { json, markdown }
     } catch (err) {
       this._log?.warn?.(`orchestration: report generation failed for ${runId}: ${err?.message || err}`)
+      return null
+    }
+  }
+
+  // Recover the synthesis narrative from the persisted report.json (a restarted
+  // daemon / evicted in-memory copy). Null when absent or unparseable.
+  _persistedNarrative(runId) {
+    try {
+      const persisted = this._ledger.readReport?.(runId)
+      if (!persisted?.json) return null
+      const parsed = JSON.parse(persisted.json)
+      return typeof parsed?.synthesis === 'string' ? parsed.synthesis : null
+    } catch {
       return null
     }
   }
@@ -900,10 +918,18 @@ export class OrchestrationManager extends EventEmitter {
         throw err
       }
       const u = entry.cumulativeUsage || {}
+      const costUsd = Number.isFinite(u.costUsd) ? u.costUsd : 0
+      // A subscription-billed baseline (claude-tui, the default provider) keeps
+      // costUsd at 0 forever while doing real work — recording it as a $0
+      // baseline would render "delegation cost MORE than the monolithic run",
+      // the exact inversion the honesty rules exist to prevent. Flag it
+      // unmetered so the report suppresses the money delta and surfaces the gap.
+      const hadActivity = (u.turnsBilled ?? 0) > 0 || (u.inputTokens ?? 0) > 0 || (u.outputTokens ?? 0) > 0
       this._ledger.setBaseline(runId, {
         sessionId: baselineSessionId,
         // a plain session's spend signal is its provider-reported cumulative cost
-        effectiveUsd: Number.isFinite(u.costUsd) ? u.costUsd : 0,
+        effectiveUsd: costUsd,
+        unmetered: costUsd === 0 && hadActivity,
         inputTokens: u.inputTokens, outputTokens: u.outputTokens,
         cacheReadTokens: u.cacheReadTokens, cacheCreationTokens: u.cacheCreationTokens,
       })
@@ -914,8 +940,9 @@ export class OrchestrationManager extends EventEmitter {
       const cached = this._completedSnapshots.get(runId)
       if (cached) {
         const fresh = this._ledger.getRun(runId)
-        if (Number.isFinite(fresh?.baseline?.effectiveUsd)) cached.run.baselineEffectiveUsd = fresh.baseline.effectiveUsd
-        if (fresh?.notes?.verdictQuality != null) cached.run.verdictQuality = fresh.notes.verdictQuality
+        // suppress the money figure for an unmetered baseline (matches the report)
+        if (Number.isFinite(fresh?.baseline?.effectiveUsd) && fresh?.baseline?.unmetered !== true) cached.run.baselineEffectiveUsd = fresh.baseline.effectiveUsd
+        if (fresh?.notes?.verdictQuality != null) cached.run.verdictQuality = String(fresh.notes.verdictQuality)
         if (docs) cached.run.report = docs
       }
     }

@@ -147,6 +147,38 @@ test('writeReport/readReport round-trip persists report.{json,md}', () => {
   }
 })
 
+test('an unmetered baseline suppresses the money delta and surfaces the gap', () => {
+  const { ledger, cleanup } = mkLedger()
+  try {
+    const record0 = buildRecord(ledger)
+    ledger.setBaseline(record0.runId, { sessionId: 'tui', effectiveUsd: 0, unmetered: true, inputTokens: 90000, outputTokens: 12000 })
+    const r = buildRunReport(ledger.getRun(record0.runId))
+    assert.equal(r.baseline.unmetered, true)
+    assert.equal(r.baseline.deltaUsd, null, 'no money delta against a $0 subscription baseline')
+    assert.equal(r.baseline.ratio, null)
+    const md = renderReportMarkdown(r)
+    assert.match(md, /unmetered.*subscription-billed/i, 'warning surfaced')
+    assert.ok(!md.includes('| **Delta** |'), 'delta row suppressed')
+    assert.match(md, /\| Monolithic baseline \| 90000 \| 12000 \|/, 'token comparison shown instead')
+    assert.match(md, /## Metering gaps/, 'gap section present')
+  } finally {
+    cleanup()
+  }
+})
+
+test('markdown table cells escape pipes/newlines in titles', () => {
+  const { ledger, cleanup } = mkLedger()
+  try {
+    const rec = ledger.createRun({ title: 't', preset: null, configSnapshot: { cwd: '/r', roleModels: { architect: { provider: 'a', model: 'm' } }, budget: { maxUsd: null } } })
+    ledger.createSubtask(rec.runId, { subtaskId: 's1', role: 'worker.audit', title: 'evil | title\nwith newline' })
+    ledger.updateSubtask(rec.runId, 's1', { status: 'done' })
+    const md = renderReportMarkdown(buildRunReport(ledger.getRun(rec.runId)))
+    assert.match(md, /evil \\\| title with newline/, 'pipe escaped, newline flattened')
+  } finally {
+    cleanup()
+  }
+})
+
 test('a report from a degraded/empty record never throws', () => {
   const r = buildRunReport({})
   assert.equal(r.totals.effectiveUsd, 0)

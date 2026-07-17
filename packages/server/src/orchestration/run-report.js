@@ -13,6 +13,9 @@
 const nz = (v) => (Number.isFinite(v) ? v : 0)
 const usd = (v) => `$${nz(v).toFixed(4)}`
 const pct = (v) => `${(nz(v) * 100).toFixed(1)}%`
+// Titles come from user goals / architect-model output — escape the two things
+// that corrupt a markdown table cell (pipes and newlines).
+const cell = (s) => String(s ?? '').replace(/\|/g, '\\|').replace(/[\r\n]+/g, ' ')
 
 // Cache-hit ratio: what fraction of prompt-side tokens were cache reads.
 function cacheHitRatio(cell = {}) {
@@ -73,12 +76,19 @@ export function buildRunReport(record) {
   if (record?.baseline && Number.isFinite(record.baseline.effectiveUsd)) {
     const b = record.baseline
     const delegated = overall.effectiveUsd
+    const unmetered = b.unmetered === true
     baseline = {
       sessionId: b.sessionId ?? null,
       effectiveUsd: nz(b.effectiveUsd),
-      deltaUsd: delegated - nz(b.effectiveUsd),
+      // A subscription-billed baseline has NO cost signal — a money delta
+      // against $0 would falsely read "delegation cost more". Token counts
+      // still compare honestly.
+      unmetered,
+      deltaUsd: unmetered ? null : delegated - nz(b.effectiveUsd),
       // <1 = delegation was cheaper than the monolithic baseline
-      ratio: nz(b.effectiveUsd) > 0 ? delegated / nz(b.effectiveUsd) : null,
+      ratio: !unmetered && nz(b.effectiveUsd) > 0 ? delegated / nz(b.effectiveUsd) : null,
+      inputTokens: nz(b.inputTokens),
+      outputTokens: nz(b.outputTokens),
       annotatedAt: b.annotatedAt ?? null,
     }
   }
@@ -120,11 +130,22 @@ export function renderReportMarkdown(report) {
   if (report.baseline) {
     lines.push('## Delegated vs monolithic baseline')
     lines.push('')
-    lines.push('| | Effective USD |')
-    lines.push('|---|---|')
-    lines.push(`| Delegated (this run) | ${usd(report.totals.effectiveUsd)} |`)
-    lines.push(`| Monolithic baseline | ${usd(report.baseline.effectiveUsd)} |`)
-    lines.push(`| **Delta** | **${usd(report.baseline.deltaUsd)}** ${report.baseline.ratio != null ? `(${(report.baseline.ratio * 100).toFixed(0)}% of baseline)` : ''} |`)
+    if (report.baseline.unmetered) {
+      // No cost signal on the baseline (subscription-billed) — a money delta
+      // against $0 would falsely read "delegation cost more". Compare tokens.
+      lines.push(`> ⚠ The baseline session (\`${report.baseline.sessionId ?? 'unknown'}\`) is **unmetered** (subscription-billed — no cost signal). Money comparison suppressed; token comparison below.`)
+      lines.push('')
+      lines.push('| | Input tokens | Output tokens |')
+      lines.push('|---|---|---|')
+      lines.push(`| Delegated (this run) | ${report.totals.inputTokens + report.totals.cacheReadTokens} | ${report.totals.outputTokens} |`)
+      lines.push(`| Monolithic baseline | ${report.baseline.inputTokens} | ${report.baseline.outputTokens} |`)
+    } else {
+      lines.push('| | Effective USD |')
+      lines.push('|---|---|')
+      lines.push(`| Delegated (this run) | ${usd(report.totals.effectiveUsd)} |`)
+      lines.push(`| Monolithic baseline | ${usd(report.baseline.effectiveUsd)} |`)
+      lines.push(`| **Delta** | **${usd(report.baseline.deltaUsd)}** ${report.baseline.ratio != null ? `(${(report.baseline.ratio * 100).toFixed(0)}% of baseline)` : ''} |`)
+    }
     lines.push('')
   }
 
@@ -153,13 +174,14 @@ export function renderReportMarkdown(report) {
   lines.push('| Subtask | Role | Status | Iterations | Effective USD | Drift |')
   lines.push('|---|---|---|---|---|---|')
   for (const st of report.subtasks) {
-    lines.push(`| ${st.title || st.subtaskId} | ${st.role} | ${st.status} | ${st.committeeIterations} | ${usd(st.usage.effectiveUsd)} | ${st.modelDrift ? '⚠ model drift' : '—'} |`)
+    lines.push(`| ${cell(st.title || st.subtaskId)} | ${st.role} | ${st.status} | ${st.committeeIterations} | ${usd(st.usage.effectiveUsd)} | ${st.modelDrift ? '⚠ model drift' : '—'} |`)
   }
   lines.push('')
 
   const gaps = []
   if (report.unknownCostTurns > 0) gaps.push(`${report.unknownCostTurns} turn(s) with unknown cost`)
   if (report.meteringGaps.length > 0) gaps.push(`unmetered sessions: ${report.meteringGaps.join(', ')}`)
+  if (report.baseline?.unmetered) gaps.push('the baseline session is unmetered (subscription-billed) — no money comparison possible')
   if (report.droppedEvents > 0) gaps.push(`${report.droppedEvents} journal event(s) dropped`)
   if (gaps.length) {
     lines.push('## Metering gaps (observed spend ≥ shown)')

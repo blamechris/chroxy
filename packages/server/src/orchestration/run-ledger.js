@@ -20,7 +20,7 @@
  */
 
 import { EventEmitter } from 'node:events'
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { randomBytes } from 'node:crypto'
 import { join } from 'node:path'
 import { loadJsonState, saveJsonState } from '../json-state-file.js'
@@ -359,8 +359,14 @@ export class RunLedger extends EventEmitter {
     const dir = this._runDir(runId)
     try {
       mkdirSync(dir, { recursive: true })
-      writeFileSync(join(dir, 'report.json'), json)
-      writeFileSync(join(dir, 'report.md'), markdown)
+      // tmp+rename per file so a crash never leaves a HALF-WRITTEN artifact; a
+      // crash between the two renames can leave json/md from different builds,
+      // which is acceptable for derived state (regenerated on re-annotation).
+      for (const [name, content] of [['report.json', json], ['report.md', markdown]]) {
+        const tmp = join(dir, `${name}.tmp`)
+        writeFileSync(tmp, content)
+        renameSync(tmp, join(dir, name))
+      }
       return true
     } catch (err) {
       log.warn(`writeReport failed for ${runId}: ${err?.message || err}`)

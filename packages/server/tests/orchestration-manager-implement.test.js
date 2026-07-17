@@ -274,6 +274,70 @@ test('completion persists report.{json,md}; annotate attaches the baseline to a 
   }
 })
 
+test('annotate after a restart preserves the synthesis narrative (does not clobber report.md)', async () => {
+  // boot 1: complete a run (report.md persisted with the narrative)
+  const dir = mkdtempSync(join(tmpdir(), 'impl-restart-'))
+  const sm1 = new FakeSM(implementDecider())
+  const ledger1 = new RunLedger({ baseDir: dir })
+  const driver1 = new TurnDriver({ sessionManager: sm1 })
+  const mgr1 = new OrchestrationManager({ sessionManager: sm1, ledger: ledger1, turnDriver: driver1, gitOps: makeFakeGitOps(), roles: ROLES_CODEX })
+  let runId
+  try {
+    const rec = mgr1.createRun({ goal: 'Implement', cwd: '/repo', autoApprovePlan: true })
+    runId = rec.runId
+    const done = waitFor(mgr1, ['run_completed'])
+    await mgr1.startRun(runId)
+    await done
+    assert.match(ledger1.readReport(runId).markdown, /# Done/, 'narrative persisted at completion')
+  } finally {
+    mgr1.dispose(); driver1.dispose(); ledger1.dispose?.()
+  }
+
+  // boot 2: fresh manager over the same baseDir (in-memory narrative GONE)
+  const sm2 = new FakeSM(implementDecider())
+  const ledger2 = new RunLedger({ baseDir: dir })
+  ledger2.recoverRuns()
+  const driver2 = new TurnDriver({ sessionManager: sm2 })
+  const mgr2 = new OrchestrationManager({ sessionManager: sm2, ledger: ledger2, turnDriver: driver2, gitOps: makeFakeGitOps(), roles: ROLES_CODEX })
+  try {
+    const baseId = sm2.createSession({ cwd: '/repo' })
+    sm2._sessions.get(baseId).cumulativeUsage = { inputTokens: 100, outputTokens: 10, cacheReadTokens: 0, cacheCreationTokens: 0, costUsd: 1.25, turnsBilled: 2 }
+    await mgr2.annotate(runId, { baselineSessionId: baseId })
+    const after = ledger2.readReport(runId)
+    assert.match(after.markdown, /# Done/, 'narrative SURVIVED the post-restart annotate')
+    const parsed = JSON.parse(after.json)
+    assert.equal(parsed.synthesis, '# Done', 'synthesis field preserved in report.json')
+    assert.equal(parsed.baseline.effectiveUsd, 1.25, 'baseline attached')
+  } finally {
+    mgr2.dispose(); driver2.dispose(); ledger2.dispose?.()
+    rmSync(dir, { recursive: true, force: true })
+    rmSync(sm1._wtRoot, { recursive: true, force: true })
+    rmSync(sm2._wtRoot, { recursive: true, force: true })
+  }
+})
+
+test('an unmetered (subscription) baseline never projects a $0 comparison', async () => {
+  const { sm, ledger, mgr, cleanup } = harness(implementDecider())
+  try {
+    const rec = mgr.createRun({ goal: 'Implement', cwd: '/repo', autoApprovePlan: true })
+    const done = waitFor(mgr, ['run_completed'])
+    await mgr.startRun(rec.runId)
+    await done
+    // a subscription-billed baseline: real activity, zero cost signal
+    const baseId = sm.createSession({ cwd: '/repo' })
+    sm._sessions.get(baseId).cumulativeUsage = { inputTokens: 90000, outputTokens: 12000, cacheReadTokens: 0, cacheCreationTokens: 0, costUsd: 0, turnsBilled: 12 }
+    await mgr.annotate(rec.runId, { baselineSessionId: baseId })
+    const snap = mgr.getRunSnapshot(rec.runId)
+    assert.equal(snap.run.baselineEffectiveUsd, undefined, 'no misleading $0 baseline on the wire')
+    const report = JSON.parse(ledger.readReport(rec.runId).json)
+    assert.equal(report.baseline.unmetered, true)
+    assert.equal(report.baseline.deltaUsd, null)
+    assert.match(ledger.readReport(rec.runId).markdown, /unmetered/i)
+  } finally {
+    cleanup()
+  }
+})
+
 test('a cancelled run is cached and served from the terminal snapshot', async () => {
   // hang at the plan gate so the run is live, then cancel it.
   const decide = ({ role, kind, n }) => {
