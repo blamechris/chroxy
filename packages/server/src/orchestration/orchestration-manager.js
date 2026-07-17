@@ -36,7 +36,7 @@ import {
   buildExecutePrompt, buildResultReviewPrompt, buildSynthesisPrompt,
 } from './role-prompts.js'
 import { createGitOps } from './git-ops.js'
-import { recordToRunSummary, recordToRunDetail } from './to-wire.js'
+import { recordToRunSummary, recordToRunDetail, gateToWire } from './to-wire.js'
 
 const DEFAULTS = {
   maxParallelWorkers: 2,
@@ -216,6 +216,7 @@ export class OrchestrationManager extends EventEmitter {
     run.phase = 'plan_review'
     this._ledger.setStatus(runId, 'plan_review')
     this.emit('gate_opened', { runId, gate })
+    this._emitRunDelta(run, { gate })
     return { runId, phase: 'plan_review', gateId: gate.gateId }
   }
 
@@ -247,6 +248,7 @@ export class OrchestrationManager extends EventEmitter {
     run.gates.set(gateId, resolved)
     this._appendTimeline(run, { kind: 'gate_resolved', gateId, nodeId: gate.nodeId ?? null, summary: `${gate.kind} gate ${decision}`, detail: note })
     this.emit('gate_resolved', { runId, gate: resolved })
+    this._emitRunDelta(run, { gate: resolved })
 
     if (gate.kind === 'epic_plan') {
       if (decision === 'approve') return this._beginExecuting(run)
@@ -417,6 +419,7 @@ export class OrchestrationManager extends EventEmitter {
     await this._releaseSubtaskSessions(run, subtaskId)
     const gate = this._openGate(run, { kind: 'escalation', nodeId: subtaskId, summary: `Subtask "${st?.spec?.title ?? subtaskId}" escalated`, detail: reason })
     this.emit('gate_opened', { runId: run.runId, gate })
+    this._emitRunDelta(run, { gate })
     this._schedule(run)
     return { runId: run.runId, subtaskId, escalated: true, gateId: gate.gateId }
   }
@@ -447,6 +450,7 @@ export class OrchestrationManager extends EventEmitter {
     run.phase = 'completed'
     this._ledger.setStatus(run.runId, 'completed')
     this.emit('run_completed', { runId: run.runId, reportMarkdown: decision.reportMarkdown, integrationBranch })
+    this._emitRunDelta(run)
     this._cacheCompletedSnapshot(run)
     this._runs.delete(run.runId)
     return { runId: run.runId, phase: 'completed', reportMarkdown: decision.reportMarkdown, integrationBranch }
@@ -657,10 +661,31 @@ export class OrchestrationManager extends EventEmitter {
     if (run.timeline.length > 500) run.timeline.splice(0, run.timeline.length - 500)
   }
 
+  // Build + emit a wire `orchestration_run_delta` for host-level clients (the
+  // daemon forwards it to WsServer._broadcastOrchestrationDelta). Carries the
+  // updated run header (RunSummary) + the changed gate. `wireSeq` is bumped per
+  // emit; a gap self-heals via the client re-requesting the full snapshot (the
+  // reducer applies a delta only when seq === held + 1). No-op for a gone run.
+  _emitRunDelta(run, { gate = null } = {}) {
+    const record = this._ledger.getRun(run.runId)
+    if (!record) return
+    run.wireSeq += 1
+    const delta = {
+      type: 'orchestration_run_delta',
+      runId: run.runId,
+      seq: run.wireSeq,
+      generatedAt: new Date(this._now()).toISOString(),
+      run: recordToRunSummary(record, this._snapshotExtras(run)),
+    }
+    if (gate) delta.gate = gateToWire(gate)
+    this.emit('run_delta', delta)
+  }
+
   _pauseForBudget(run) {
     run.phase = 'budget_paused'
     this._ledger.setStatus(run.runId, 'budget_paused')
     this.emit('run_budget_paused', { runId: run.runId })
+    this._emitRunDelta(run)
   }
 
   _onPermissionEscalation(info) {
@@ -680,6 +705,7 @@ export class OrchestrationManager extends EventEmitter {
     for (const sid of [...run.ownedSessions.keys()]) await this._destroySession(run, sid)
     await this._cleanupIntegration(run)
     this.emit('run_failed', { runId: run.runId, code, message: err?.message || String(err) })
+    this._emitRunDelta(run)
     this._cacheCompletedSnapshot(run)
     this._runs.delete(run.runId)
     return { runId: run.runId, phase: 'failed', code }
@@ -698,6 +724,7 @@ export class OrchestrationManager extends EventEmitter {
     await this._cleanupIntegration(run)
     this._ledger.setStatus(runId, 'cancelled', reason)
     this.emit('run_cancelled', { runId, reason })
+    this._emitRunDelta(run)
     this._cacheCompletedSnapshot(run)
     this._runs.delete(runId)
     return { runId, phase: 'cancelled' }
