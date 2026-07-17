@@ -51,14 +51,17 @@ jobs:
           restore-keys: |
             repo-relay-state-${{ github.repository }}-
 
-      # Best-effort delivery: a failed notification (Discord outage, rate
-      # limit, session budget) must not red-X the PR — the step's own failure
-      # annotation stays visible in the run for debugging
-      - uses: blamechris/repo-relay@f08840b9c336b50f6aef8d6e157d8f7e705fa875 # v1.1.0
+      # best_effort replaces the old blanket continue-on-error: transient
+      # infra failures (Discord 5xx, timeouts, session budget) exit 0 with a
+      # warning annotation, while definitive config errors (revoked token,
+      # deleted channel, missing permissions) still fail loudly. Note the
+      # cache post-step saves on job success, so relay state persists across
+      # tolerated-failure runs — intended (state writes are incremental).
+      - uses: blamechris/repo-relay@3fa58908bfb9e6f69fed5236ddae4ff2180a1d54 # v1.2.0
         if: env.DISCORD_CONFIGURED == 'true'
-        continue-on-error: true
         with:
           discord_bot_token: ${{ secrets.DISCORD_BOT_TOKEN }}
           channel_prs: ${{ secrets.DISCORD_CHANNEL_PRS }}
           channel_issues: ${{ secrets.DISCORD_CHANNEL_ISSUES || secrets.DISCORD_CHANNEL_PRS }}
           channel_releases: ${{ secrets.DISCORD_CHANNEL_RELEASES || secrets.DISCORD_CHANNEL_PRS }}
+          best_effort: 'true'
