@@ -47,6 +47,7 @@ import { HostPruneSection } from './HostPruneSection'
 import { DeviceRuntimesSection } from './DeviceRuntimesSection'
 import { IntegrationsSection } from './IntegrationsSection'
 import { RepoEventsSection } from './RepoEventsSection'
+import { OrchestrationRunsSection } from './OrchestrationRunsSection'
 import { SkillsInventorySection } from './SkillsInventorySection'
 import { MailboxPanel } from './MailboxPanel'
 import { CrossSessionMissionControl } from './CrossSessionMissionControl'
@@ -95,11 +96,19 @@ type SurveyTabDescriptor = {
   readonly loadingKey: LoadingKey
   /** Store action that dispatches the survey request. */
   readonly requestKey: RequestKey
+  /**
+   * #6691 (S-3): optional server-capability gate. When set, the tab renders in
+   * the strip (and deep-links/persistence resolve to it) ONLY while
+   * `serverCapabilities[capability] === true` — fail-closed, so a feature-off
+   * daemon shows no dead chrome.
+   */
+  readonly capability?: string
 }
 type StaticTabDescriptor = {
   readonly key: string
   readonly label: string
   readonly survey: false
+  readonly capability?: string
 }
 type ControlRoomTabDescriptor = SurveyTabDescriptor | StaticTabDescriptor
 
@@ -247,6 +256,22 @@ export const CONTROL_ROOM_TABS = [
     key: 'mission-control',
     label: 'Mission control',
     survey: false,
+  },
+  // #6691 (S-3, epic #6702): the orchestration "Runs" tab — the committee
+  // engine's runs list + per-run detail (nodes, gates, timeline, report). Same
+  // survey:true request/snapshot flow as the others; ADDITIONALLY live
+  // `orchestration_run_delta` messages upsert between surveys. Capability-gated:
+  // hidden entirely unless the daemon advertises `orchestration` in auth_ok
+  // (feature-flagged engine, off by default).
+  {
+    key: 'runs',
+    label: 'Runs',
+    survey: true,
+    requestType: 'orchestration_runs_request',
+    snapshotKey: 'orchestrationRuns',
+    loadingKey: 'orchestrationRunsLoading',
+    requestKey: 'requestOrchestrationRuns',
+    capability: 'orchestration',
   },
   // #5544: the Settings tab converges the scattered preference surfaces
   // (notification categories, appearance, session defaults, BYOK, Tauri desktop
@@ -408,7 +433,19 @@ export function ControlRoomView({
   interventionPingEnabled,
   onToggleInterventionPing,
 }: ControlRoomViewProps = {}) {
-  const [tab, setTab] = useState<ControlRoomTab>(() => initialTab ?? loadPersistedTab())
+  const [rawTab, setTab] = useState<ControlRoomTab>(() => initialTab ?? loadPersistedTab())
+
+  // #6691 (S-3): capability gate — a tab whose descriptor names a capability is
+  // visible only while the server advertises it (auth_ok). Fail-closed: a
+  // deep-linked/persisted gated tab resolves to 'repos' instead of rendering
+  // dead chrome for a feature the daemon doesn't run.
+  const serverCapabilities = useConnectionStore((s) => s.serverCapabilities)
+  const isTabVisible = useCallback((key: ControlRoomTab): boolean => {
+    const d = CONTROL_ROOM_TABS.find((t) => t.key === key)
+    const cap = d && 'capability' in d ? d.capability : undefined
+    return !cap || serverCapabilities?.[cap] === true
+  }, [serverCapabilities])
+  const tab: ControlRoomTab = isTabVisible(rawTab) ? rawTab : 'repos'
 
   const selectTab = useCallback((next: ControlRoomTab) => {
     setTab(next)
@@ -640,7 +677,7 @@ export function ControlRoomView({
           onPointerCancel={endStripDrag}
           onPointerLeave={endStripDrag}
         >
-        {CONTROL_ROOM_TABS.map((t, i) => {
+        {CONTROL_ROOM_TABS.filter((t) => isTabVisible(t.key)).map((t, i) => {
           const active = tab === t.key
           return (
             <button
@@ -722,6 +759,8 @@ export function ControlRoomView({
         <MailboxPanel />
       ) : tab === 'repo-events' ? (
         <RepoEventsSection />
+      ) : tab === 'runs' ? (
+        <OrchestrationRunsSection />
       ) : tab === 'mission-control' ? (
         <MissionControlTab />
       ) : (
