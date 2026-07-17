@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { EventEmitter } from 'node:events'
 
-import { RunSummarySchema, RunDetailSchema } from '@chroxy/protocol'
+import { RunSummarySchema, RunDetailSchema, ServerOrchestrationRunDeltaSchema } from '@chroxy/protocol'
 import { OrchestrationManager } from '../src/orchestration/orchestration-manager.js'
 import { RunLedger } from '../src/orchestration/run-ledger.js'
 import { TurnDriver } from '../src/orchestration/turn-driver.js'
@@ -194,6 +194,40 @@ test('read API (getRunSnapshot/listRuns) returns schema-valid wire shapes, live 
     // an unknown run → null snapshot, and absent from the list
     assert.equal(mgr.getRunSnapshot('nope'), null)
     assert.ok(!mgr.listRuns().some((r) => r.runId === 'nope'))
+  } finally {
+    cleanup()
+  }
+})
+
+test('emits schema-valid run_delta events with monotonic seq across the run lifecycle', async () => {
+  const { mgr, cleanup } = harness(implementDecider())
+  try {
+    const deltas = []
+    mgr.on('run_delta', (d) => deltas.push(d))
+    const rec = mgr.createRun({ goal: 'Implement', cwd: '/repo', autoApprovePlan: false })
+    const gated = waitFor(mgr, ['gate_opened'])
+    await mgr.startRun(rec.runId)
+    const { payload } = await gated
+    // gate_opened produced a delta carrying the gate
+    assert.ok(deltas.length >= 1)
+    const g = deltas[deltas.length - 1]
+    assert.equal(ServerOrchestrationRunDeltaSchema.safeParse(g).success, true, 'gate delta is schema-valid')
+    assert.equal(g.runId, rec.runId)
+    assert.ok(g.gate, 'gate delta carries the gate')
+    assert.equal(g.run.status, 'plan_review')
+
+    const done = waitFor(mgr, ['run_completed'])
+    await mgr.resolveGate(rec.runId, payload.gate.gateId, { decision: 'approve' })
+    await done
+    // every delta is schema-valid and seq is strictly monotonic
+    let prev = 0
+    for (const d of deltas) {
+      assert.equal(ServerOrchestrationRunDeltaSchema.safeParse(d).success, true)
+      assert.ok(d.seq > prev, `seq strictly increasing (${d.seq} > ${prev})`)
+      prev = d.seq
+    }
+    // a terminal delta reflects the completed status
+    assert.equal(deltas[deltas.length - 1].run.status, 'completed')
   } finally {
     cleanup()
   }
