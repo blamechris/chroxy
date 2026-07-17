@@ -170,6 +170,17 @@ type EvaluatorState =
 const CONTROL_PTT_HOLD_MS = 250
 type ControlPttState = 'idle' | 'arming' | 'recording'
 
+// #6637 — window-scoped push-to-talk must not hijack Control while the user is
+// typing in some OTHER text field (a search box, a rename input, etc.). Only the
+// composer textarea and non-editable focus targets (body, buttons, the chat
+// scroller) arm voice; any other editable element is left to its own Control use.
+function isEditableElement(el: Element | null): boolean {
+  if (!el) return false
+  const tag = el.tagName
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true
+  return (el as HTMLElement).isContentEditable === true
+}
+
 export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, chatActivityState, placeholder, filePickerFiles, onFileTrigger, attachments, onRemoveAttachment, slashCommands, onSlashTrigger, onImagePaste, onImageDrop, imageAttachments, onRemoveImage, onFileAttach, controlledValue, onValueChange, sendOnEnter, voiceInput, onEvaluate, onLargePaste, pastedTextBlocks, onInspectPastedText, onRemovePastedText, userMessageHistory, highlightThinkingKeywords }: InputBarProps) {
   const [internalValue, setInternalValue] = useState('')
   const value = controlledValue !== undefined ? controlledValue : internalValue
@@ -505,22 +516,33 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, c
     }
   }, [])
 
-  const handleControlPttKeyDown = useCallback((e: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key !== 'Control') return false
-    if (!voiceInput?.isAvailable || disabled || voiceInput.isRecording) return false
-    if (e.metaKey || e.altKey || e.shiftKey) return false
-    if (controlPttStateRef.current !== 'idle') return true
-
+  // Shared arming primitive for both the composer-scoped handler and the
+  // window-scoped one (#6637). `focusComposerFirst` moves focus into the
+  // composer before recording tips in, so a window-scoped hold (fired while
+  // focus was elsewhere) still lands its transcript in the composer at the
+  // caret/end anchor.
+  const armControlPtt = useCallback((focusComposerFirst: boolean) => {
+    if (controlPttStateRef.current !== 'idle') return
     controlPttStateRef.current = 'arming'
     clearControlPttTimer()
     controlPttTimerRef.current = setTimeout(() => {
       controlPttTimerRef.current = null
       if (controlPttStateRef.current !== 'arming') return
       controlPttStateRef.current = 'recording'
+      if (focusComposerFirst) textareaRef.current?.focus()
       startVoiceAtCaret()
     }, CONTROL_PTT_HOLD_MS)
+  }, [clearControlPttTimer, startVoiceAtCaret])
+
+  const handleControlPttKeyDown = useCallback((e: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key !== 'Control') return false
+    if (!voiceInput?.isAvailable || disabled || voiceInput.isRecording) return false
+    if (e.metaKey || e.altKey || e.shiftKey) return false
+    if (controlPttStateRef.current !== 'idle') return true
+
+    armControlPtt(false)
     return true
-  }, [voiceInput, disabled, clearControlPttTimer, startVoiceAtCaret])
+  }, [voiceInput, disabled, armControlPtt])
 
   const handleControlPttKeyUp = useCallback((e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key !== 'Control') return
@@ -548,6 +570,50 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, c
     cancelControlPttArm()
     stopControlPttRecording()
   }, [cancelControlPttArm, stopControlPttRecording])
+
+  // #6637 — window-scoped push-to-talk. The composer-scoped textarea handlers
+  // above only fire when the composer is focused; this document-level listener
+  // extends the Control-hold gesture to anywhere in the Chroxy window. It stays
+  // out of the way when focus is in the composer (its own handler owns that) or
+  // in some OTHER editable element (never hijack another field's Control), and
+  // on fire it focuses the composer so the transcript lands there. Voice
+  // availability + the shared `controlPttStateRef` mean the two handlers can't
+  // double-arm, and keyup/pointerdown teardown is idempotent across both.
+  useEffect(() => {
+    if (!voiceInput?.isAvailable || disabled) return
+
+    const onKeyDown = (e: globalThis.KeyboardEvent) => {
+      if (e.key !== 'Control' || e.metaKey || e.altKey || e.shiftKey) return
+      if (voiceInput.isRecording) return
+      if (controlPttStateRef.current !== 'idle') return
+      const active = document.activeElement
+      if (active === textareaRef.current) return   // composer handler owns it
+      if (isEditableElement(active)) return          // don't hijack another field
+      armControlPtt(true)
+    }
+    const onKeyUp = (e: globalThis.KeyboardEvent) => {
+      if (e.key !== 'Control') return
+      if (controlPttStateRef.current === 'arming') {
+        clearControlPttTimer()
+        controlPttStateRef.current = 'idle'
+      } else {
+        stopControlPttRecording()
+      }
+    }
+    const onPointerDown = () => {
+      cancelControlPttArm()
+      stopControlPttRecording()
+    }
+
+    document.addEventListener('keydown', onKeyDown)
+    document.addEventListener('keyup', onKeyUp)
+    document.addEventListener('pointerdown', onPointerDown)
+    return () => {
+      document.removeEventListener('keydown', onKeyDown)
+      document.removeEventListener('keyup', onKeyUp)
+      document.removeEventListener('pointerdown', onPointerDown)
+    }
+  }, [voiceInput?.isAvailable, voiceInput?.isRecording, disabled, armControlPtt, clearControlPttTimer, stopControlPttRecording, cancelControlPttArm])
 
   useEffect(() => {
     return () => {

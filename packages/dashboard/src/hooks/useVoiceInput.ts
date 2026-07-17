@@ -105,6 +105,18 @@ function defaultLanguage(): string {
   return 'en-US'
 }
 
+/**
+ * #6634/#6636: native recognizer messages that represent a user cancellation or
+ * a no-speech timeout, not a real failure. The Swift helper already drops the
+ * common cancellation/no-speech error codes (216/301/1110) and speech.rs
+ * suppresses errors mid-stop, but this is the last line of defense so a benign
+ * cancellation never lights the red banner. Matched defensively on the message
+ * text (the native path delivers a localized string, not a code).
+ */
+function isBenignVoiceError(message: string): boolean {
+  return /cancel(?:l)?ed|no[\s-]?speech/i.test(message)
+}
+
 function permissionMessageForError(error: string): string {
   if (error === 'not-allowed' || error === 'service-not-allowed') {
     return 'Microphone permission denied. Please allow microphone access in your browser settings.'
@@ -228,6 +240,17 @@ export function useVoiceInput(options: UseVoiceInputOptions = {}): UseVoiceInput
       })
 
       const u2 = await listen<ErrorPayload>('voice_error', (e) => {
+        // #6634: an intentional stop (Control-release, mic toggle, or a
+        // modifier like Command mid-flow) races the native recognizer's
+        // cancellation error. Suppress it — the transcript already landed and
+        // the stop is expected. A benign no-speech/cancellation message is
+        // likewise dropped. Genuine failures (permission denied, mic gone,
+        // helper crash) still surface: they arrive without a preceding user
+        // stop and carry a non-benign message.
+        if (userStoppedRef.current || isBenignVoiceError(e.payload.message)) {
+          setIsRecording(false)
+          return
+        }
         setError(e.payload.message)
         setIsRecording(false)
       })

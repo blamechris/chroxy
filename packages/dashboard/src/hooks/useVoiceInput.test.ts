@@ -193,6 +193,36 @@ describe('useVoiceInput', () => {
       expect(mockInvoke).toHaveBeenCalledWith('start_voice_input')
       expect(lastRecognition).toBeNull()
     })
+
+    it('surfaces a genuine voice_error while recording', async () => {
+      const { result } = renderHook(() => useVoiceInput())
+      await waitFor(() => expect(result.current.isAvailable).toBe(true))
+      act(() => { result.current.start() })
+      act(() => { emit('voice_error', { message: 'Speech recognizer not available' }) })
+      expect(result.current.error).toBe('Speech recognizer not available')
+      expect(result.current.isRecording).toBe(false)
+    })
+
+    it('#6634: suppresses the cancellation voice_error that races an intentional stop', async () => {
+      const { result } = renderHook(() => useVoiceInput())
+      await waitFor(() => expect(result.current.isAvailable).toBe(true))
+      act(() => { result.current.start() })
+      // user releases Control / presses Command → stop() flips userStopped
+      act(() => { result.current.stop() })
+      act(() => { emit('voice_error', { message: 'Recognition request was canceled' }) })
+      expect(result.current.error).toBeNull()
+      expect(result.current.isRecording).toBe(false)
+    })
+
+    it('#6636: suppresses a benign no-speech voice_error even while recording', async () => {
+      const { result } = renderHook(() => useVoiceInput())
+      await waitFor(() => expect(result.current.isAvailable).toBe(true))
+      act(() => { result.current.start() })
+      // no stop() yet — the message itself is benign
+      act(() => { emit('voice_error', { message: 'No speech detected' }) })
+      expect(result.current.error).toBeNull()
+      expect(result.current.isRecording).toBe(false)
+    })
   })
 
   describe('web speech fallback', () => {

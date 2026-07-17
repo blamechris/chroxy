@@ -142,11 +142,17 @@ func startRecognition() {
             setDone()
         }
 
+        // Benign recognizer error codes that must NOT surface as a red banner:
+        //   216  = recognition canceled (normal stop via stdin "stop")
+        //   301  = "Recognition request was canceled" — the code the cancellation
+        //          path (task.cancel()) actually reports on current macOS. The old
+        //          216-only check leaked this as an error banner on every clean
+        //          push-to-talk release / Command press (#6634).
+        //   1110 = no speech detected (a benign silent push-to-talk hold, #6636)
+        let benignErrorCodes: Set<Int> = [216, 301, 1110]
         let task = recognizer.recognitionTask(with: request) { result, error in
             if let error = error as NSError? {
-                // 216 = canceled (normal stop via stdin "stop")
-                // 1110 = no speech detected
-                if error.code != 216 && error.code != 1110 {
+                if !benignErrorCodes.contains(error.code) {
                     printJSON(["error": error.localizedDescription])
                 }
                 teardown(stopEngine: true)
