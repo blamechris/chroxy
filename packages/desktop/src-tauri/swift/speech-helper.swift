@@ -100,6 +100,12 @@ func startRecognition() {
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
 
+        // #6752 — bias recognition toward the app's own proper nouns so
+        // dictation stops mishearing "Chroxy" as "proxy". contextualStrings
+        // seeds words that aren't in the system vocabulary; extend this list as
+        // other domain terms get mangled.
+        request.contextualStrings = ["Chroxy"]
+
         // Note: do NOT set requiresOnDeviceRecognition = true unconditionally.
         // When on-device assets are not downloaded for the user's locale, the
         // recognition task hangs silently (no result, no error). Letting Speech
