@@ -1388,6 +1388,10 @@ function envKeyForConfig(key) {
     // warning). Operators should migrate to
     // `CHROXY_DANGEROUSLY_SKIP_PERMISSIONS`.
     skipPermissions: 'CHROXY_SKIP_PERMISSIONS',
+    // #6691 (E-4): explicit mapping so the fallback doesn't become the very
+    // generic `ORCHESTRATION` (key.toUpperCase()), which an unrelated
+    // environment could plausibly set and have silently honored as config.
+    orchestration: 'CHROXY_ORCHESTRATION',
   }
   return envMap[key] || key.toUpperCase()
 }
