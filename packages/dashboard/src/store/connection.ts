@@ -507,6 +507,16 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // repo_events_snapshot handler. Null until the first survey lands.
   repoEventsSnapshot: null,
   repoEventsLoading: false,
+  // #6691 (S-3): orchestration Runs tab state (dashboard-only v1).
+  orchestrationRuns: null,
+  orchestrationRunsLoading: false,
+  orchestrationRunDetails: {},
+  orchestrationRunDetailLoading: new Set<string>(),
+  orchestrationRunDetailErrors: {},
+  orchestrationRunDetailStale: {},
+  orchestrationPendingActions: {},
+  orchestrationActionResults: {},
+  selectedRunId: null,
   // #5553: per-repo session presets keyed by cwd, fed by session_preset_snapshot.
   sessionPresetSnapshots: {},
   // #5553: server-provided composer seeds keyed by sessionId (drained by App).
@@ -1019,6 +1029,47 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       return true;
     }
     return false;
+  },
+
+  // #6691 (S-3): request the orchestration runs-list snapshot for the Runs tab.
+  // Mirrors requestRepoEvents — wire-or-nothing (loading flips only when the
+  // socket is OPEN).
+  requestOrchestrationRuns: (): boolean => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      set({ orchestrationRunsLoading: true });
+      wsSend(socket, { type: 'orchestration_runs_request' });
+      return true;
+    }
+    return false;
+  },
+
+  // #6691 (S-3): request one run's full detail snapshot. Also the resync path
+  // when a delta seq gap marks the held detail stale. Clears the run's stale
+  // flag/error on dispatch so the panel shows a clean loading state.
+  requestOrchestrationRunDetail: (runId: string): boolean => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      const loading = new Set(get().orchestrationRunDetailLoading);
+      loading.add(runId);
+      // NOTE: the stale flag is NOT cleared here — it marks a seq gap and must
+      // persist (visible as "resyncing…") until a VALID snapshot lands (the
+      // snapshot handler clears it). A previous error IS cleared: this is a
+      // fresh attempt.
+      const errors = { ...get().orchestrationRunDetailErrors };
+      delete errors[runId];
+      set({ orchestrationRunDetailLoading: loading, orchestrationRunDetailErrors: errors });
+      // requestId encodes the target run so the degraded `run: null` reply can
+      // be routed back to the right per-run error/loading slots.
+      wsSend(socket, { type: 'orchestration_run_detail_request', runId, requestId: `detail:${runId}` });
+      return true;
+    }
+    return false;
+  },
+
+  // #6691 (S-3): select a run in the Runs tab.
+  selectRun: (runId: string | null): void => {
+    set({ selectedRunId: runId });
   },
 
   // #6543 (IDE P3 feature B): pull the full redacted tool input for a pending
@@ -2284,6 +2335,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       if (get().wslActioningIds.size > 0) {
         set({ wslActioningIds: new Set<string>() });
       }
+      // #6691 (S-3): ditto for in-flight orchestration detail requests + pending
+      // mutating actions — a reply can never arrive on the dead socket.
+      if (get().orchestrationRunDetailLoading.size > 0) {
+        set({ orchestrationRunDetailLoading: new Set<string>() });
+      }
+      if (Object.keys(get().orchestrationPendingActions).length > 0) {
+        set({ orchestrationPendingActions: {} });
+      }
       // #6153: reset every Control Room survey *Loading flag that's still true on
       // a socket drop. Each survey section computes refreshDisabled = loading ||
       // !connected, so a refresh in flight when the socket dies would leave
@@ -2297,7 +2356,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         'repoRuntimeConfigLoading', 'byokPoolStatusLoading', 'hostPruneStatusLoading',
         'simulatorStatusLoading', 'emulatorStatusLoading', 'wslStatusLoading', 'integrationStatusLoading',
         'skillsInventoryLoading', 'mailboxStatusLoading', 'externalSessionsLoading',
-        'repoEventsLoading',
+        'repoEventsLoading', 'orchestrationRunsLoading',
       ] as const;
       const loadingReset: Partial<Record<(typeof surveyLoadingKeys)[number], boolean>> = {};
       for (const key of surveyLoadingKeys) {

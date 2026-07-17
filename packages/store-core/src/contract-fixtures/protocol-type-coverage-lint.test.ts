@@ -218,6 +218,14 @@ const DASHBOARD_ONLY = new Set<string>([
   'skills_inventory_snapshot',  // Control Room Skills inventory survey (#5554) — dashboard-only
   'skills_list',                // skills list response (#3209) — dashboard-only for v1
   'summarize_session_result',   // sidebar "Summarize & start new session" reply (#5547) — dashboard-only
+  // Orchestration harness (#6691, S-3 #6702): the Control Room Runs tab —
+  // dashboard-only v1 per the design's locked decisions; mobile parity is an
+  // explicit fast-follow. Moved here from UNHANDLED_BY_DESIGN when the
+  // dashboard handlers landed.
+  'orchestration_runs_snapshot', // Runs tab list survey
+  'orchestration_run_snapshot',  // one run's full detail (pull-only)
+  'orchestration_run_delta',     // live run update (store-core applyRunDelta, seq contract)
+  'orchestration_action_ack',    // mutating-action success echo
 ])
 
 // Handled by the APP only — no dashboard surface by design.
@@ -242,14 +250,6 @@ const UNHANDLED_BY_DESIGN = new Set<string>([
                                           //   no dedicated handler yet (dashboard exposure is a deferred follow-up)
   'stdin_dropped_totals',                 // #3544 transient counter — surface is the SessionInfo flag on
                                           //   session_list, not a dedicated wire-event handler
-  // Orchestration harness (#6691, S-1): the protocol contract + shared store-core
-  // reducers land first (this PR); the dashboard client handlers that consume
-  // them are the next step (S-3, #6702), which will MOVE these to DASHBOARD_ONLY
-  // (dashboard-only v1 — the mobile app is a later fast-follow).
-  'orchestration_runs_snapshot',
-  'orchestration_run_snapshot',
-  'orchestration_run_delta',
-  'orchestration_action_ack',
 ])
 
 // ---------------------------------------------------------------------------

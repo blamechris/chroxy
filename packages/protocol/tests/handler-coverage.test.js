@@ -187,6 +187,10 @@ const PLATFORM_SPECIFIC = {
   'external_sessions_snapshot': 'dashboard', // Control Room mission-control external-session survey reply (#5969, epic #5422) — host-level surface, dashboard-only (the mobile app has no Control Room); mobile parity is tracked by #5968
   'summarize_session_result': 'dashboard', // sidebar "Summarize & start new session" reply (#5547) — the sidebar context-menu idiom is dashboard-only; the mobile app is out of scope for v1 (the server endpoint is client-agnostic so the app can adopt later)
   'session_preset_snapshot': 'dashboard', // Control Room per-repo session-preset reply (#5553, epic #5159) — host-level surface (gear drawer + create-modal disclosure), dashboard-only; the server applies the preamble universally, so the mobile app needs no handler for v1 (explicitly out of scope per the issue)
+  'orchestration_runs_snapshot': 'dashboard', // Control Room "Runs" tab list survey (#6691 S-3, epic #6702) — host-level surface, dashboard-only v1; mobile parity is an explicit fast-follow per the design's locked decisions
+  'orchestration_run_snapshot': 'dashboard',  // one run's full detail (pull-only) for the Runs tab detail panel (#6691 S-3) — dashboard-only v1
+  'orchestration_run_delta': 'dashboard',     // live run update for the Runs tab (seq===held+1 contract via store-core applyRunDelta) (#6691 S-3) — dashboard-only v1
+  'orchestration_action_ack': 'dashboard',    // terminal success echo for mutating orchestration actions (#6691 S-3) — dashboard-only v1
   // 'agent_event' (#5016) is now handled by both dashboard and mobile
   // app (#5060 — mobile renders the same nested sub-bubbles inside the
   // parent Task tool_call). No PLATFORM_SPECIFIC entry needed; the
