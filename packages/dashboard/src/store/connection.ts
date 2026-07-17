@@ -1089,7 +1089,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     if (opts.preset) msg.preset = opts.preset;
     if (opts.epicPrompt) msg.epicPrompt = opts.epicPrompt;
     if (opts.title) msg.title = opts.title;
-    if (typeof opts.budgetUsd === 'number') msg.budgetUsd = opts.budgetUsd;
+    // the wire schema is z.number().positive().finite() — only forward a real cap
+    if (typeof opts.budgetUsd === 'number' && Number.isFinite(opts.budgetUsd) && opts.budgetUsd > 0) msg.budgetUsd = opts.budgetUsd;
     if (typeof opts.autoApprovePlan === 'boolean') msg.autoApprovePlan = opts.autoApprovePlan;
     if (opts.roles && Object.keys(opts.roles).length > 0) msg.roles = opts.roles;
     if (!wsSend(socket, msg)) return null;
@@ -1104,7 +1105,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const requestId = `orch-gate-${nextMessageId()}`;
     const msg: Record<string, unknown> = { type: 'orchestration_gate_response', runId, gateId, decision, requestId };
     if (note) msg.note = note;
-    if (typeof budgetUsd === 'number') msg.budgetUsd = budgetUsd;
+    // wire schema is z.number().positive().finite() — only forward a real cap
+    if (typeof budgetUsd === 'number' && Number.isFinite(budgetUsd) && budgetUsd > 0) msg.budgetUsd = budgetUsd;
     if (!wsSend(socket, msg)) return null;
     set({ orchestrationPendingActions: { ...get().orchestrationPendingActions, [requestId]: { kind: 'gate_response', runId, gateId, at: Date.now() } } });
     return requestId;

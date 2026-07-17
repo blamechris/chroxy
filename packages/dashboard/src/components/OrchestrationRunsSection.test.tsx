@@ -199,6 +199,40 @@ describe('OrchestrationRunsSection (#6691 S-3b)', () => {
     expect(gateResponseMock).toHaveBeenCalledWith('run_1', 'g1', 'revise', 'tighten scope', undefined)
   })
 
+  it('GateBanner: after a success ack the buttons lock and show "Response sent" (no duplicate response)', () => {
+    resetStore({
+      orchestrationRuns: snapshot([runSummary()]),
+      selectedRunId: 'run_1',
+      orchestrationRunDetails: { run_1: { detail: runDetail(), seq: 3 } },
+      // the ack already landed: pending cleared, result ok — the delta hasn't
+      // yet flipped gate.status off 'pending' (the banner is still mounted)
+      orchestrationPendingActions: {},
+      orchestrationActionResults: { 'orch-gate-1': { ok: true, error: null, at: 1 } },
+    })
+    gateResponseMock.mockReturnValue('orch-gate-1')
+    render(<OrchestrationRunsSection />)
+    fireEvent.click(screen.getByTestId('orch-gate-approve'))
+    expect(gateResponseMock).toHaveBeenCalledTimes(1)
+    // its result is now ok → buttons lock, "Response sent" shows, re-click is a no-op
+    expect(screen.getByTestId('orch-gate-sent')).toBeTruthy()
+    expect((screen.getByTestId('orch-gate-approve') as HTMLButtonElement).disabled).toBe(true)
+    fireEvent.click(screen.getByTestId('orch-gate-approve'))
+    expect(gateResponseMock).toHaveBeenCalledTimes(1) // still 1 — locked
+  })
+
+  it('GateBanner: a 0 or empty budget is not sent as a cap', () => {
+    const gate = { gateId: 'g2', runId: 'run_1', nodeId: null, kind: 'budget_overrun', status: 'pending', summary: 'Raise?', openedAt: 1, resolvedAt: null, resolvedBy: null, budgetUsd: 10 }
+    resetStore({
+      orchestrationRuns: snapshot([runSummary()]),
+      selectedRunId: 'run_1',
+      orchestrationRunDetails: { run_1: { detail: runDetail({ gates: [gate] }), seq: 3 } },
+    })
+    render(<OrchestrationRunsSection />)
+    fireEvent.change(screen.getByTestId('orch-gate-budget-input'), { target: { value: '0' } })
+    fireEvent.click(screen.getByTestId('orch-gate-approve'))
+    expect(gateResponseMock).toHaveBeenCalledWith('run_1', 'g2', 'approve', undefined, undefined)
+  })
+
   it('GateBanner: a budget_overrun gate exposes the new-cap input on approve', () => {
     const gate = { gateId: 'g2', runId: 'run_1', nodeId: null, kind: 'budget_overrun', status: 'pending', summary: 'Raise the cap?', openedAt: 1, resolvedAt: null, resolvedBy: null, budgetUsd: 10 }
     resetStore({

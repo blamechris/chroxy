@@ -26,6 +26,7 @@ import type { RunSummary, RunDetail, RunGate, RunNode, RunTimelineEntry, RunUsag
 import { formatGeneratedAgo } from './ControlRoomSection'
 import { renderMarkdown } from '../lib/markdown'
 import { handleMarkdownLinkClick } from '../lib/links'
+import { Modal } from './Modal'
 
 /** Server-authored spend figure — never computed client-side (AC-3). */
 function usd(usage: RunUsage | undefined | null): string {
@@ -139,11 +140,19 @@ function GateBanner({ runId, gate }: { runId: string; gate: RunGate }) {
   const inFlight = reqId != null && reqId in pending
   const result = reqId != null ? results[reqId] : undefined
   const isBudget = gate.kind === 'budget_overrun'
+  // Lock once we've sent — inFlight OR a recorded success. Prevents a duplicate
+  // gate response in the ack→delta window (the ack clears `pending` and flips
+  // inFlight false BEFORE the run-detail delta flips gate.status and unmounts
+  // this banner, briefly re-enabling the buttons otherwise).
+  const locked = inFlight || result?.ok === true
 
   const respond = (decision: 'approve' | 'reject' | 'revise' | 'skip') => {
+    if (locked) return
     if (decision === 'revise' && !note.trim()) return // require a note to request changes
-    const budgetUsd = isBudget && decision === 'approve' && budget.trim() ? Number(budget) : undefined
-    const id = send(runId, gate.gateId, decision, note.trim() || undefined, Number.isFinite(budgetUsd) ? budgetUsd : undefined)
+    // budget_overrun raise: only a positive, finite figure is a real cap
+    const parsed = isBudget && decision === 'approve' && budget.trim() ? Number(budget) : undefined
+    const budgetUsd = Number.isFinite(parsed) && (parsed as number) > 0 ? parsed : undefined
+    const id = send(runId, gate.gateId, decision, note.trim() || undefined, budgetUsd)
     if (id) setReqId(id)
   }
 
@@ -168,7 +177,7 @@ function GateBanner({ runId, gate }: { runId: string; gate: RunGate }) {
           className="cr-orch-gate-budget"
           data-testid="orch-gate-budget-input"
           type="number"
-          min="0"
+          min="0.01"
           step="0.01"
           placeholder="New budget cap (USD) — optional"
           value={budget}
@@ -177,12 +186,13 @@ function GateBanner({ runId, gate }: { runId: string; gate: RunGate }) {
         />
       )}
       <div className="cr-orch-gate-actions">
-        <button type="button" data-testid="orch-gate-approve" disabled={inFlight} onClick={() => respond('approve')}>Approve</button>
-        <button type="button" data-testid="orch-gate-revise" disabled={inFlight || !note.trim()} onClick={() => respond('revise')}>Request changes</button>
-        <button type="button" data-testid="orch-gate-reject" disabled={inFlight} onClick={() => respond('reject')}>Reject</button>
-        <button type="button" data-testid="orch-gate-skip" disabled={inFlight} onClick={() => respond('skip')}>Skip</button>
+        <button type="button" data-testid="orch-gate-approve" disabled={locked} onClick={() => respond('approve')}>Approve</button>
+        <button type="button" data-testid="orch-gate-revise" disabled={locked || !note.trim()} onClick={() => respond('revise')}>Request changes</button>
+        <button type="button" data-testid="orch-gate-reject" disabled={locked} onClick={() => respond('reject')}>Reject</button>
+        <button type="button" data-testid="orch-gate-skip" disabled={locked} onClick={() => respond('skip')}>Skip</button>
       </div>
       {inFlight && <span className="cr-dim" data-testid="orch-gate-pending">Sending…</span>}
+      {result?.ok && <span className="cr-ok" data-testid="orch-gate-sent">Response sent</span>}
       {result && !result.ok && <span className="cr-error" data-testid="orch-gate-error">{result.error}</span>}
     </li>
   )
@@ -283,7 +293,9 @@ function RunControls({ run }: { run: RunDetail }) {
   const [reqId, setReqId] = useState<string | null>(null)
   const inFlight = reqId != null && reqId in pending
 
-  if (TERMINAL_STATUSES.has(run.status)) return null
+  // hidden at terminal state AND while already cancelling (the cancel is
+  // in-flight server-side — re-clicking is pointless)
+  if (TERMINAL_STATUSES.has(run.status) || run.status === 'cancelling') return null
   const act = (action: 'cancel' | 'pause' | 'resume') => {
     if (action === 'cancel' && !window.confirm('Cancel this run? In-flight workers are stopped and their work auto-committed to their branches.')) return
     const id = send(run.runId, action)
@@ -354,8 +366,10 @@ function AnnotateForm({ runId }: { runId: string }) {
  * NewRunModal (#6691 S-3c) — start an orchestration run. v1 exposes the
  * repo-audit preset (or a free-form epic prompt), the working directory (cwd,
  * re-validated server-side against the allowlist), an optional budget cap, and
- * the auto-approve-plan opt-out. Role/model overrides use the daemon's
- * configured defaults unless supplied.
+ * an auto-approve-plan toggle (off by default, so the user reviews the epic
+ * plan gate unless they opt in). Role/model overrides use the daemon's
+ * configured defaults unless supplied. Uses the shared Modal for focus-trap +
+ * Escape + accessible naming; closeOnBackdrop is false since it holds form input.
  */
 function NewRunModal({ onClose }: { onClose: () => void }) {
   const start = useConnectionStore((s) => s.startOrchestrationRun)
@@ -382,22 +396,23 @@ function NewRunModal({ onClose }: { onClose: () => void }) {
 
   const submit = () => {
     if (!canSubmit) return
-    const budgetUsd = budget.trim() ? Number(budget) : undefined
+    // only a positive, finite figure is a real cap (schema is z.number().positive())
+    const parsed = budget.trim() ? Number(budget) : undefined
+    const budgetUsd = Number.isFinite(parsed) && (parsed as number) > 0 ? parsed : undefined
     const id = start({
       cwd: cwd.trim(),
       preset: usePreset ? preset : undefined,
       epicPrompt: !usePreset ? epicPrompt.trim() : undefined,
       title: title.trim() || undefined,
-      budgetUsd: Number.isFinite(budgetUsd) ? budgetUsd : undefined,
+      budgetUsd,
       autoApprovePlan: autoApprove,
     })
     if (id) setReqId(id)
   }
 
   return (
-    <div className="cr-orch-modal-backdrop" data-testid="orch-new-run-modal" role="dialog" aria-modal="true">
-      <div className="cr-orch-modal">
-        <h4>Start an orchestration run</h4>
+    <Modal open onClose={onClose} title="Start an orchestration run" closeOnBackdrop={false}>
+      <div className="cr-orch-modal" data-testid="orch-new-run-modal">
         <label className="cr-orch-field">
           <span>Preset</span>
           <select data-testid="orch-new-preset" value={preset} onChange={(e) => setPreset(e.target.value)} disabled={inFlight}>
@@ -421,7 +436,7 @@ function NewRunModal({ onClose }: { onClose: () => void }) {
         </label>
         <label className="cr-orch-field">
           <span>Budget cap USD (optional)</span>
-          <input data-testid="orch-new-budget" type="number" min="0" step="0.01" value={budget} onChange={(e) => setBudget(e.target.value)} disabled={inFlight} />
+          <input data-testid="orch-new-budget" type="number" min="0.01" step="0.01" value={budget} onChange={(e) => setBudget(e.target.value)} disabled={inFlight} />
         </label>
         <label className="cr-orch-check">
           <input type="checkbox" data-testid="orch-new-autoapprove" checked={autoApprove} onChange={(e) => setAutoApprove(e.target.checked)} disabled={inFlight} />
@@ -433,7 +448,7 @@ function NewRunModal({ onClose }: { onClose: () => void }) {
           <button type="button" data-testid="orch-new-submit" onClick={submit} disabled={!canSubmit}>{inFlight ? 'Starting…' : 'Start run'}</button>
         </div>
       </div>
-    </div>
+    </Modal>
   )
 }
 
