@@ -8,9 +8,9 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { RunSummarySchema, RunDetailSchema, RunNodeSchema, RunGateSchema, RunUsageSchema } from '@chroxy/protocol'
+import { RunSummarySchema, RunDetailSchema, RunNodeSchema, RunGateSchema, RunUsageSchema, RunTimelineEntrySchema } from '@chroxy/protocol'
 import { RunLedger } from '../src/orchestration/run-ledger.js'
-import { makeGate, resolveGate, nextGateId } from '../src/orchestration/run-model.js'
+import { makeGate, resolveGate, expireGate, nextGateId } from '../src/orchestration/run-model.js'
 import {
   usageToWire, budgetToWire, gateToWire, nodeToWire, timelineEntryToWire,
   recordToRunSummary, recordToRunDetail,
@@ -148,6 +148,70 @@ test('recordToRunDetail satisfies RunDetailSchema with nodes/gates/timeline/roll
     assert.ok(detail.usageRollup.byRole['worker.implement'], 'worker role in rollup')
     assert.equal(detail.verdictQuality ?? null, null)
     assert.deepEqual(detail.report, { json: '{"ok":true}', markdown: '# Report' })
+  } finally {
+    cleanup()
+  }
+})
+
+test('nodeCounts: skipped is excluded from all three buckets; interrupted counts as failed', () => {
+  const { ledger, cleanup } = mkLedger()
+  try {
+    const rec = ledger.createRun({ title: 't', preset: null, configSnapshot: { cwd: '/r', roleModels: { architect: { provider: 'a', model: 'm' } }, budget: { maxUsd: null } } })
+    const id = rec.runId
+    for (const [sid, status] of [['s1', 'done'], ['s2', 'failed'], ['s3', 'skipped'], ['s4', 'interrupted'], ['s5', 'executing']]) {
+      ledger.createSubtask(id, { subtaskId: sid, role: 'worker.audit', title: sid })
+      ledger.updateSubtask(id, sid, { status })
+    }
+    const nc = recordToRunSummary(ledger.getRun(id), {}).nodeCounts
+    assert.deepEqual(nc, { total: 5, done: 1, failed: 2, running: 1 }, 'interrupted→failed, skipped excluded, executing→running')
+    assert.equal(nc.running + nc.done + nc.failed, nc.total - 1, 'buckets sum to total MINUS the skipped node')
+  } finally {
+    cleanup()
+  }
+})
+
+test('gateToWire handles an expired (policy-resolved) gate and a budget_overrun gate', () => {
+  const runId = 'run_1'
+  const expired = expireGate(makeGate({ gateId: 'g1', runId, kind: 'escalation', nodeId: 'st', summary: 's', openedAt: 1 }), { resolvedAt: 99 })
+  const w = gateToWire(expired)
+  assert.equal(RunGateSchema.safeParse(w).success, true)
+  assert.equal(w.status, 'expired')
+  assert.equal(w.resolvedBy, 'policy')
+  const overrun = gateToWire(makeGate({ gateId: 'g2', runId, kind: 'budget_overrun', nodeId: null, summary: 'raise?', budgetUsd: 10, openedAt: 2 }))
+  assert.equal(RunGateSchema.safeParse(overrun).success, true)
+  assert.equal(overrun.budgetUsd, 10)
+})
+
+test('timeline longer than 500 is sliced to the last 500', () => {
+  const { ledger, cleanup } = mkLedger()
+  try {
+    const record = buildRecord(ledger)
+    const timeline = Array.from({ length: 700 }, (_, i) => ({ seq: i + 1, at: i, kind: 'k', summary: `e${i}` }))
+    const detail = recordToRunDetail(record, { epicPrompt: '', gates: [], timeline })
+    assert.equal(detail.timeline.length, 500)
+    assert.equal(detail.timeline[0].summary, 'e200', 'kept the LAST 500')
+    assert.equal(RunDetailSchema.safeParse(detail).success, true)
+  } finally {
+    cleanup()
+  }
+})
+
+test('null elements in manager arrays degrade gracefully (never throw, still schema-valid)', () => {
+  const { ledger, cleanup } = mkLedger()
+  try {
+    const record = buildRecord(ledger)
+    // manager arrays with null holes + a null in the record subtasks
+    record.subtasks.push(null)
+    const detail = recordToRunDetail(record, {
+      epicPrompt: 'x', gates: [null, makeGate({ gateId: 'g', runId: record.runId, kind: 'epic_plan', nodeId: null, summary: 's', openedAt: 1 })],
+      timeline: [null, { seq: 1, at: 1, kind: 'k', summary: 's' }],
+    })
+    assert.equal(RunDetailSchema.safeParse(detail).success, true, 'null holes filtered, still valid')
+    assert.equal(detail.gates.length, 1)
+    assert.equal(detail.timeline.length, 1)
+    assert.equal(detail.nodes.length, 1, 'null subtask filtered out')
+    // direct helper calls on null must not throw either
+    assert.equal(RunTimelineEntrySchema.safeParse(timelineEntryToWire(null)).success, true)
   } finally {
     cleanup()
   }

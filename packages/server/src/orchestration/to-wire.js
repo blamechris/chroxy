@@ -25,8 +25,9 @@ const NODE_DONE = new Set(['done'])
 const NODE_FAILED = new Set(['failed', 'cancelled', 'interrupted'])
 const NODE_OTHER_TERMINAL = new Set(['skipped'])
 
-/** A ledger usage cell → RunUsage. */
-export function usageToWire(cell = {}) {
+/** A ledger usage cell → RunUsage. Null-safe (a null element must not throw). */
+export function usageToWire(cellArg) {
+  const cell = cellArg || {}
   return {
     inputTokens: num(cell.inputTokens),
     outputTokens: num(cell.outputTokens),
@@ -52,7 +53,8 @@ export function budgetToWire(record) {
 }
 
 /** A manager gate object → RunGate (mostly passthrough with schema-safe defaults). */
-export function gateToWire(gate = {}) {
+export function gateToWire(gateArg) {
+  const gate = gateArg || {}
   const out = {
     gateId: str(gate.gateId),
     runId: str(gate.runId),
@@ -71,7 +73,8 @@ export function gateToWire(gate = {}) {
 }
 
 /** A manager timeline entry → RunTimelineEntry. */
-export function timelineEntryToWire(entry = {}) {
+export function timelineEntryToWire(entryArg) {
+  const entry = entryArg || {}
   const out = {
     seq: num(entry.seq),
     at: num(entry.at),
@@ -85,8 +88,10 @@ export function timelineEntryToWire(entry = {}) {
   return out
 }
 
-/** A ledger subtask record (+ per-node extras) → RunNode. */
-export function nodeToWire(subtask, runId, nodeExtra = {}) {
+/** A ledger subtask record (+ per-node extras) → RunNode. Null-safe. */
+export function nodeToWire(subtaskArg, runId, nodeExtraArg) {
+  const subtask = subtaskArg || {}
+  const nodeExtra = nodeExtraArg || {}
   const created = num(subtask.createdAt)
   return {
     nodeId: str(subtask.subtaskId),
@@ -109,12 +114,20 @@ export function nodeToWire(subtask, runId, nodeExtra = {}) {
   }
 }
 
-function nodeCounts(subtasks = []) {
-  let done = 0; let failed = 0; let other = 0
+// nodeCounts semantics for the UI consumer: 'skipped' is terminal-but-neither
+// (subtracted from running, counted in none of done/failed) so the three buckets
+// do NOT sum to total when skipped nodes exist; 'interrupted' counts as failed
+// (it shows failed until a resume moves it back to briefing).
+function nodeCounts(subtasksArg) {
+  const subtasks = subtasksArg || []
+  let done = 0
+  let failed = 0
+  let other = 0
   for (const s of subtasks) {
-    if (NODE_DONE.has(s.status)) done += 1
-    else if (NODE_FAILED.has(s.status)) failed += 1
-    else if (NODE_OTHER_TERMINAL.has(s.status)) other += 1
+    const status = s?.status
+    if (NODE_DONE.has(status)) done += 1
+    else if (NODE_FAILED.has(status)) failed += 1
+    else if (NODE_OTHER_TERMINAL.has(status)) other += 1
   }
   const total = subtasks.length
   return { total, done, failed, running: Math.max(0, total - done - failed - other) }
@@ -125,10 +138,10 @@ function updatedAtOf(record) {
 }
 
 /** A ledger record (+ extras) → RunSummary. */
-export function recordToRunSummary(record, extras = {}) {
+export function recordToRunSummary(record = {}, extras = {}) {
   const cfg = record.configSnapshot || {}
   const architect = cfg.roleModels?.architect || {}
-  const gates = extras.gates || []
+  const gates = (extras.gates || []).filter(Boolean)
   return {
     runId: str(record.runId),
     title: str(record.title),
@@ -147,7 +160,7 @@ export function recordToRunSummary(record, extras = {}) {
 }
 
 /** A ledger record (+ extras) → RunDetail. */
-export function recordToRunDetail(record, extras = {}) {
+export function recordToRunDetail(record = {}, extras = {}) {
   const nodeExtras = extras.nodeExtras || {}
   const rollup = {
     total: usageToWire(record.usageTotals?.overall),
@@ -157,9 +170,10 @@ export function recordToRunDetail(record, extras = {}) {
   const detail = {
     ...recordToRunSummary(record, extras),
     epicPrompt: str(extras.epicPrompt),
-    nodes: (record.subtasks || []).map((s) => nodeToWire(s, record.runId, nodeExtras[s.subtaskId] || {})),
-    gates: (extras.gates || []).map(gateToWire),
-    timeline: (extras.timeline || []).slice(-500).map(timelineEntryToWire),
+    // filter falsy elements — a null in a manager-supplied array must not throw.
+    nodes: (record.subtasks || []).filter(Boolean).map((s) => nodeToWire(s, record.runId, nodeExtras[s.subtaskId] || {})),
+    gates: (extras.gates || []).filter(Boolean).map(gateToWire),
+    timeline: (extras.timeline || []).filter(Boolean).slice(-500).map(timelineEntryToWire),
     usageRollup: rollup,
     meteringGaps: Array.isArray(record.meteringGaps) ? record.meteringGaps.slice() : [],
   }
