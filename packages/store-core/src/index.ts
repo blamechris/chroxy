@@ -512,6 +512,8 @@ export type {
   SessionCostThresholdCrossedPayload,
   NotificationPrefsState,
   NotificationPrefsPayload,
+  // #6691 (S-3): orchestration held-detail shape consumed by the dashboard store
+  HeldRunDetail,
 } from './handlers'
 
 export {
@@ -648,6 +650,12 @@ export {
   handleNotificationPrefs,
   // #5454 — pure core of the #554 stream-split block (permission_request)
   resolvePermissionStreamSplit,
+  // #6691 (S-3): orchestration list/detail reducers (dashboard-only v1) — the
+  // dashboard message handlers are thin wrappers over these; never reimplement
+  // the merge/seq logic client-side.
+  upsertRunSummary,
+  applyRunDelta,
+  RUN_TIMELINE_MAX,
 } from './handlers'
 
 // #4591: shared device-list formatters. Eliminates duplicated copies of

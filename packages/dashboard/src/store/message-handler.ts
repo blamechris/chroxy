@@ -129,9 +129,13 @@ import {
   createDispatchTable,
   runDispatch,
   type ClientStoreAdapter,
+  // #6691 (S-3): orchestration list/detail reducers — the handlers below are
+  // thin wrappers over these (never reimplement the merge/seq logic here).
+  upsertRunSummary,
+  applyRunDelta,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
-import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerByokPoolStatusSnapshotSchema, ServerByokPoolActionAckSchema, ServerHostPruneStatusSnapshotSchema, ServerHostPruneActionAckSchema, ServerSimulatorStatusSnapshotSchema, ServerSimulatorActionAckSchema, ServerEmulatorStatusSnapshotSchema, ServerEmulatorActionAckSchema, ServerWslStatusSnapshotSchema, ServerWslActionAckSchema, ServerIntegrationStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerExternalSessionsSnapshotSchema, ServerRepoEventsSnapshotSchema, ServerRepoEventsDeltaSchema, ServerPermissionInputSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerSessionPresetSnapshotSchema, ServerPairPendingSchema, ServerPairResolvedSchema, ServerBillingCanarySchema, BillingCanarySnapshotSchema, ServerSymbolsSnapshotSchema, ServerSymbolLocationSchema, ServerSearchResultsSchema, ServerReferencesResultSchema } from '@chroxy/protocol/schemas'
+import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerByokPoolStatusSnapshotSchema, ServerByokPoolActionAckSchema, ServerHostPruneStatusSnapshotSchema, ServerHostPruneActionAckSchema, ServerSimulatorStatusSnapshotSchema, ServerSimulatorActionAckSchema, ServerEmulatorStatusSnapshotSchema, ServerEmulatorActionAckSchema, ServerWslStatusSnapshotSchema, ServerWslActionAckSchema, ServerIntegrationStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerExternalSessionsSnapshotSchema, ServerRepoEventsSnapshotSchema, ServerRepoEventsDeltaSchema, ServerPermissionInputSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerSessionPresetSnapshotSchema, ServerPairPendingSchema, ServerPairResolvedSchema, ServerBillingCanarySchema, BillingCanarySnapshotSchema, ServerSymbolsSnapshotSchema, ServerSymbolLocationSchema, ServerSearchResultsSchema, ServerReferencesResultSchema, ServerOrchestrationRunsSnapshotSchema, ServerOrchestrationRunSnapshotSchema, ServerOrchestrationRunDeltaSchema, ServerOrchestrationActionAckSchema } from '@chroxy/protocol/schemas'
 import { resolveSummarizeRequest, rejectSummarizeRequest } from './summarizeRequests'
 import {
   createKeyPair,
@@ -2679,6 +2683,108 @@ function handleRepoEventsDelta(msg: Record<string, unknown>, get: MsgGet, set: M
 }
 
 /**
+ * #6691 (S-3) — `orchestration_runs_snapshot`: the Runs-tab list survey.
+ * REPLACES the held snapshot wholesale (survey posture; delta.run upserts rows
+ * between surveys). The degraded `runs: [] + error` shape is schema-valid and
+ * stored as-is (the section renders the error). Malformed → drop WITHOUT
+ * clearing loading (matches the survey-family convention).
+ */
+function handleOrchestrationRunsSnapshot(msg: Record<string, unknown>, _get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const parsed = ServerOrchestrationRunsSnapshotSchema.safeParse(msg);
+  if (!parsed.success) return;
+  set({ orchestrationRuns: parsed.data, orchestrationRunsLoading: false });
+}
+
+/**
+ * #6691 (S-3) — `orchestration_run_snapshot`: one run's full detail (pull-only —
+ * issued on selection or as the seq-gap resync). `run: null` is the degraded
+ * not-found/unavailable reply: store the error per-run and clear loading.
+ */
+function handleOrchestrationRunSnapshot(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const parsed = ServerOrchestrationRunSnapshotSchema.safeParse(msg);
+  if (!parsed.success) return;
+  const { run, seq, error } = parsed.data;
+  if (run) {
+    const details = { ...get().orchestrationRunDetails, [run.runId]: { detail: run, seq } };
+    const loading = new Set(get().orchestrationRunDetailLoading);
+    loading.delete(run.runId);
+    const stale = { ...get().orchestrationRunDetailStale };
+    delete stale[run.runId];
+    const errors = { ...get().orchestrationRunDetailErrors };
+    delete errors[run.runId];
+    set({ orchestrationRunDetails: details, orchestrationRunDetailLoading: loading, orchestrationRunDetailStale: stale, orchestrationRunDetailErrors: errors });
+    return;
+  }
+  // degraded: no run — we can't know which runId without echo, so clear ALL
+  // in-flight detail loading and record the error under the requestId when
+  // present (the panel keys its error banner off the selected run's absence).
+  const loading = new Set<string>();
+  const errors = { ...get().orchestrationRunDetailErrors };
+  if (typeof parsed.data.requestId === 'string' && error) errors[parsed.data.requestId] = error;
+  set({ orchestrationRunDetailLoading: loading, ...(error ? { orchestrationRunDetailErrors: errors } : {}) });
+}
+
+/**
+ * #6691 (S-3) — `orchestration_run_delta`: live run update pushed to host-level
+ * clients. Two independent applications:
+ *  - list row: `delta.run` (a RunSummary) upserts into the held runs snapshot
+ *    via the store-core reducer; a delta before the first survey with pending
+ *    user gates triggers one list fetch (so the gate badge can appear).
+ *  - held detail: applied via applyRunDelta under the strict seq===held+1
+ *    contract; a gap marks the run stale and issues ONE resync re-request.
+ */
+function handleOrchestrationRunDelta(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const parsed = ServerOrchestrationRunDeltaSchema.safeParse(msg);
+  if (!parsed.success) return;
+  const delta = parsed.data;
+
+  // list row upsert (or a one-shot list fetch when nothing is held yet)
+  const list = get().orchestrationRuns;
+  if (list && delta.run) {
+    set({ orchestrationRuns: { ...list, runs: upsertRunSummary(list.runs, delta.run), generatedAt: delta.generatedAt } });
+  } else if (!list && delta.run && delta.run.pendingUserGates > 0 && !get().orchestrationRunsLoading) {
+    // no survey yet but a gate needs the user — fetch the list so the badge shows
+    get().requestOrchestrationRuns();
+  }
+
+  // held-detail application via the shared reducer
+  const held = get().orchestrationRunDetails[delta.runId] ?? null;
+  if (!held) return;
+  const { held: next, resync } = applyRunDelta(held, delta);
+  if (resync) {
+    // seq gap: mark stale; issue exactly one re-request (the request action
+    // no-ops into `false` when the socket is closed, and the loading Set guards
+    // duplicate resyncs while one is already in flight)
+    const stale = { ...get().orchestrationRunDetailStale, [delta.runId]: true };
+    set({ orchestrationRunDetailStale: stale });
+    if (!get().orchestrationRunDetailLoading.has(delta.runId)) {
+      get().requestOrchestrationRunDetail(delta.runId);
+    }
+    return;
+  }
+  if (next && next !== held) {
+    set({ orchestrationRunDetails: { ...get().orchestrationRunDetails, [delta.runId]: next } });
+  }
+}
+
+/**
+ * #6691 (S-3) — `orchestration_action_ack`: terminal success echo for a mutating
+ * orchestration action (start/gate_response/cancel/pause/resume/annotate).
+ * Clears the pending entry and records the result keyed by requestId. The
+ * failure path arrives as `session_error{ORCHESTRATION_ACTION_FAILED}` instead.
+ */
+function handleOrchestrationActionAck(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const parsed = ServerOrchestrationActionAckSchema.safeParse(msg);
+  if (!parsed.success) return;
+  const requestId = parsed.data.requestId ?? null;
+  if (!requestId) return;
+  const pending = { ...get().orchestrationPendingActions };
+  delete pending[requestId];
+  const results = { ...get().orchestrationActionResults, [requestId]: { ok: true, error: null, at: Date.now() } };
+  set({ orchestrationPendingActions: pending, orchestrationActionResults: results });
+}
+
+/**
  * #6543 (IDE P3 feature B) — `permission_input`: store the pulled full (secret-
  * redacted) tool input keyed by requestId so the permission prompt can build a
  * per-hunk pre-write diff. Zod-validated (drop-on-malformed). Both `found:true`
@@ -3299,6 +3405,12 @@ const HANDLERS: Record<string, Handler> = {
   repo_events_snapshot: handleRepoEventsSnapshot,
   // #6536 (PR-2 of #5966): live repo-events delta appended to the pane.
   repo_events_delta: handleRepoEventsDelta,
+  // #6691 (S-3): orchestration Runs tab (dashboard-only v1) — list survey,
+  // pull-only run detail, live run delta (store-core reducers), action ack.
+  orchestration_runs_snapshot: handleOrchestrationRunsSnapshot,
+  orchestration_run_snapshot: handleOrchestrationRunSnapshot,
+  orchestration_run_delta: handleOrchestrationRunDelta,
+  orchestration_action_ack: handleOrchestrationActionAck,
   // #6543 (IDE P3 feature B): pulled full redacted tool input for a pre-write diff.
   permission_input: handlePermissionInput,
   session_preset_snapshot: handleSessionPresetSnapshot,
@@ -4048,6 +4160,22 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           resolveReindex(get, set, msg.repoPath, {
             counts: null,
             error: parsed.message || 'Reindex failed.',
+          });
+        }
+      } else if (parsed.code === 'ORCHESTRATION_ACTION_FAILED' && typeof msg.requestId === 'string') {
+        // #6691 (S-3): a failed orchestration action echoes the requestId —
+        // clear the pending entry and record the failure inline (the generic
+        // toast below still fires, matching the INTEGRATION_ACTION_FAILED
+        // precedent).
+        const orchPending = { ...get().orchestrationPendingActions };
+        if (msg.requestId in orchPending) {
+          delete orchPending[msg.requestId];
+          set({
+            orchestrationPendingActions: orchPending,
+            orchestrationActionResults: {
+              ...get().orchestrationActionResults,
+              [msg.requestId]: { ok: false, error: parsed.message || 'Orchestration action failed.', at: Date.now() },
+            },
           });
         }
       } else if (parsed.code === 'CONTAINER_ACTION_FAILED' && typeof msg.environmentId === 'string') {

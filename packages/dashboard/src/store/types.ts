@@ -16,7 +16,8 @@ import type { PermissionMode } from '@chroxy/store-core'
 // #5175: Host/Repo Status Control Room snapshot type (epic #5170). The store
 // holds the latest `host_status_snapshot` so the Control Room section can render
 // the fleet table; the type is the protocol contract pinned in @chroxy/protocol.
-import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerContainersStatusSnapshotMessage, ServerRepoRuntimeConfigSnapshotMessage, ServerByokPoolStatusSnapshotMessage, ServerHostPruneStatusSnapshotMessage, ServerSimulatorStatusSnapshotMessage, ServerEmulatorStatusSnapshotMessage, ServerWslStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, ServerSkillsInventorySnapshotMessage, ServerMailboxStatusSnapshotMessage, ServerExternalSessionsSnapshotMessage, ServerRepoEventsSnapshotMessage, ServerPermissionInputMessage, ServerSymbolsSnapshotMessage, ServerSearchResultsMessage, ServerReferencesResultMessage, IntegrationActionCounts, ServerPairPendingMessage, ServerSessionPresetFull, Attachment } from '@chroxy/protocol'
+import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerContainersStatusSnapshotMessage, ServerRepoRuntimeConfigSnapshotMessage, ServerByokPoolStatusSnapshotMessage, ServerHostPruneStatusSnapshotMessage, ServerSimulatorStatusSnapshotMessage, ServerEmulatorStatusSnapshotMessage, ServerWslStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, ServerSkillsInventorySnapshotMessage, ServerMailboxStatusSnapshotMessage, ServerExternalSessionsSnapshotMessage, ServerRepoEventsSnapshotMessage, ServerPermissionInputMessage, ServerSymbolsSnapshotMessage, ServerSearchResultsMessage, ServerReferencesResultMessage, IntegrationActionCounts, ServerPairPendingMessage, ServerSessionPresetFull, Attachment, ServerOrchestrationRunsSnapshot } from '@chroxy/protocol'
+import type { HeldRunDetail } from '@chroxy/store-core'
 // #5184: header cost-badge display mode. Defined in a plain lib module
 // (which owns the union + runtime guard) — the store only needs the type
 // for its state slot, and avoids importing a `.tsx` component here.
@@ -1049,6 +1050,35 @@ export interface ConnectionState {
   /** #5966 — true between dispatching a `repo_events_request` and its snapshot. */
   repoEventsLoading: boolean;
   /**
+   * #6691 (S-3) — the orchestration runs-list snapshot (wire shape, replaced
+   * wholesale per survey; delta.run upserts rows between surveys), or null
+   * before the first one lands.
+   */
+  orchestrationRuns: ServerOrchestrationRunsSnapshot | null;
+  /** #6691 — true between dispatching `orchestration_runs_request` and its snapshot. */
+  orchestrationRunsLoading: boolean;
+  /**
+   * #6691 — per-run held detail (store-core HeldRunDetail: the RunDetail plus
+   * the wire-seq high-water mark it was last consistent at). Deltas apply via
+   * the store-core reducer under the strict seq===held+1 contract.
+   */
+  orchestrationRunDetails: Record<string, HeldRunDetail>;
+  /** #6691 — runIds with an in-flight `orchestration_run_detail_request`. */
+  orchestrationRunDetailLoading: Set<string>;
+  /** #6691 — degraded `run: null` replies, keyed by runId. */
+  orchestrationRunDetailErrors: Record<string, { code: string; message: string }>;
+  /** #6691 — runIds whose held detail hit a delta seq gap (resync pending). */
+  orchestrationRunDetailStale: Record<string, boolean>;
+  /**
+   * #6691 — outstanding mutating actions keyed by requestId; cleared by the
+   * matching `orchestration_action_ack` or `session_error{ORCHESTRATION_ACTION_FAILED}`.
+   */
+  orchestrationPendingActions: Record<string, { kind: string; runId: string; gateId?: string; at: number }>;
+  /** #6691 — terminal results for recent orchestration actions, keyed by requestId. */
+  orchestrationActionResults: Record<string, { ok: boolean; error: string | null; at: number }>;
+  /** #6691 — the run selected in the Runs tab (detail panel target). */
+  selectedRunId: string | null;
+  /**
    * #6138 — true between dispatching a `wsl_status_request` and the matching
    * snapshot arriving (Refresh spinner). Cleared when a VALID snapshot lands (a
    * malformed payload is dropped and leaves this true).
@@ -1656,6 +1686,12 @@ export interface ConnectionState {
   requestExternalSessions: () => boolean;
   /** #5966 — request the buffered repo-events snapshot for the Control Room pane. */
   requestRepoEvents: () => boolean;
+  /** #6691 (S-3) — request the orchestration runs-list snapshot for the Runs tab. */
+  requestOrchestrationRuns: () => boolean;
+  /** #6691 — request one run's full detail snapshot (also the seq-gap resync path). */
+  requestOrchestrationRunDetail: (runId: string) => boolean;
+  /** #6691 — select a run in the Runs tab (detail panel target). */
+  selectRun: (runId: string | null) => void;
   /** #6543 — pull the full redacted tool input for a pending permission (for the pre-write diff). */
   requestPermissionInput: (requestId: string) => boolean;
 

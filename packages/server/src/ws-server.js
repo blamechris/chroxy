@@ -502,6 +502,10 @@ function _isSecureRequest(req) {
  *   { type: 'evaluator_rewrite', sessionId, originalDraft, rewritten, reasoning, evaluatorIterationId } — auto-evaluator rewrite verdict broadcast (#3208 schema, #3186 emit, #3188 dashboard handler)
  *   { type: 'evaluator_clarify', sessionId, originalDraft, clarification, reasoning, evaluatorIterationId, evaluatorIteration } — auto-evaluator clarify verdict broadcast (#3208 schema, #3186 emit, #3188 dashboard handler)
  *   { type: 'stdin_dropped_totals', sessionId, bytes, count, reason, escalated } — cumulative SidecarProcess pre-dial-cap drop totals (#3544, transient)
+ *   { type: 'orchestration_runs_snapshot', requestId?, generatedAt, runs: [RunSummary], error? } — orchestration runs-list survey (#6691, dashboard-only v1)
+ *   { type: 'orchestration_run_snapshot', requestId?, generatedAt, seq, run: RunDetail|null, error? } — one run's full detail (pull-only; run:null = degraded reply) (#6691)
+ *   { type: 'orchestration_run_delta', runId, seq, generatedAt, run?, node?, gate?, timeline? } — live run update pushed to host-level clients; client applies iff seq===held+1 (#6691)
+ *   { type: 'orchestration_action_ack', requestId?, action, runId, gateId? } — terminal success echo for a mutating orchestration action (#6691)
  *
  * Encrypted envelope (bidirectional, wraps any message above after key exchange):
  *   { type: 'encrypted', d: '<base64 ciphertext>', n: <nonce counter> }
