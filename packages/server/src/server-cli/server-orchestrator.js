@@ -33,6 +33,7 @@ export class ServerOrchestrator {
     pairingManager,
     pushManager = null,
     billingCanaryMonitor = null,
+    orchestrationManager = null,
     modelsOverlayWatcher = null,
     getWorktreeReapTimer,
     emergencyCleanupSync,
@@ -52,6 +53,10 @@ export class ServerOrchestrator {
     this._pairingManager = pairingManager
     this._pushManager = pushManager
     this._billingCanaryMonitor = billingCanaryMonitor
+    // #6691 (E-4): the orchestration engine (null when the feature is off).
+    // Disposed on shutdown: unhooks its SessionManager listeners (permission
+    // gate + turn driver) and flushes the run ledger's pending snapshot writes.
+    this._orchestrationManager = orchestrationManager
     // #5932: the models.json overlay fs-watcher handle (or null when watching
     // couldn't be established). Closed on shutdown so the watch doesn't outlive
     // the daemon.
@@ -108,6 +113,14 @@ export class ServerOrchestrator {
     // wouldn't block exit, but clearing it avoids a recompute racing shutdown.
     if (this._billingCanaryMonitor) {
       try { this._billingCanaryMonitor.stop() } catch {}
+    }
+    // #6691 (E-4): tear down the orchestration engine BEFORE destroying the
+    // sessions it may own — dispose unhooks its listeners and flushes the run
+    // ledger, so the subsequent destroyAll can't race a debounced snapshot write.
+    if (this._orchestrationManager) {
+      try { this._orchestrationManager.dispose() } catch (err) {
+        log.warn(`Orchestration engine dispose failed: ${err?.message || err}`)
+      }
     }
     // Persist sessions before destroying (enables restore on restart)
     try { this._sessionManager.serializeState() } catch (err) {

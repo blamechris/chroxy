@@ -48,6 +48,7 @@ import { getRegistryForProvider, watchModelsOverlay } from './models.js'
 // (`if (config?.environments?.enabled)`).
 import { UNREACHABLE_STATUSES } from './environment-statuses.js'
 import { resolveSkipPermissions, buildEnvironmentBackend, isUserShellEnabled, getAllowAnyModelProviders } from './config.js'
+import { buildOrchestrationManager } from './orchestration/build-manager.js'
 import { parseDuration } from './duration.js'
 import { createSessionTokenStore } from './session-token-store.js'
 
@@ -934,10 +935,15 @@ export async function startCliServer(config) {
     sessionTokenStore: createSessionTokenStore({ dir: chroxyDir }),
   })
 
+  // #6691 (E-4): the orchestration engine (null when the feature is off or if
+  // construction fails — never a throw, so it can't break daemon boot).
+  const orchestrationManager = buildOrchestrationManager({ sessionManager, config, chroxyDir, log })
+
   wsServer = new WsServer({
     port: PORT,
     apiToken: API_TOKEN,
     sessionManager,
+    orchestrationManager,
     defaultSessionId,
     authRequired: !NO_AUTH,
     pushManager,
@@ -962,6 +968,15 @@ export async function startCliServer(config) {
   // Resolve the bind address. --no-auth forces loopback; otherwise an explicit
   // config.host (e.g. --host 127.0.0.1) binds that interface with auth still
   // on, and the default (undefined) binds 0.0.0.0 as before.
+  // #6691 (E-4): forward engine run deltas to host-level (unbound) dashboard
+  // clients. The manager already projects each delta to the wire shape; the
+  // WsServer only routes it. Guarded so a broadcast error never bubbles.
+  if (orchestrationManager) {
+    orchestrationManager.on('run_delta', (delta) => {
+      try { wsServer._broadcastOrchestrationDelta(delta) } catch (err) { log.warn(`orchestration delta broadcast failed: ${err?.message || err}`) }
+    })
+  }
+
   const bindHost = resolveBindHost({ noAuth: NO_AUTH, host: config.host })
   // #5356 (visibility layer): one warning when binding non-loopback (the
   // default 0.0.0.0 included) — LAN peers can reach the unauthenticated
@@ -1215,6 +1230,7 @@ export async function startCliServer(config) {
     pairingManager,
     pushManager,
     billingCanaryMonitor,
+    orchestrationManager,
     modelsOverlayWatcher,
     getWorktreeReapTimer: () => worktreeReapTimer,
     emergencyCleanupSync,

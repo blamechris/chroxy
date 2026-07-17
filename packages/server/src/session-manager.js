@@ -1108,9 +1108,15 @@ export class SessionManager extends EventEmitter {
    *   handler preserves the restored history + worktree (registers a failed-restore)
    *   instead of fully destroying the session. Fresh sessions omit it and take the
    *   full-destroy path on start failure.
+   * @param {object|null} [options.metadata] - #6691 (E-4): opaque per-session annotations
+   *   set by an in-process caller (the orchestration engine tags its sessions with
+   *   `{ orchestrationRunId, orchestrationRole }`, surfaced as optional session-list badge
+   *   fields). NOT settable over the wire (the create_session handler whitelists its
+   *   fields), and NOT persisted — in-memory only in v1; restart-reconcile re-establishes
+   *   it (#6743).
    * @returns {string} sessionId
    */
-  createSession({ name, cwd, model, permissionMode, resumeSessionId, provider, worktree, restoreWorktreePath, restoreWorktreeRepoDir, sandbox, codexSandbox, containerId, containerUser, containerCliPath, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, stdinForwardingDisabled, bootedModel, messageCounter, skipPermissions, agentCommId, skipPersist = false, preserveId, isRestore = false } = {}) {
+  createSession({ name, cwd, model, permissionMode, resumeSessionId, provider, worktree, restoreWorktreePath, restoreWorktreeRepoDir, sandbox, codexSandbox, containerId, containerUser, containerCliPath, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, stdinForwardingDisabled, bootedModel, messageCounter, skipPermissions, agentCommId, metadata = null, skipPersist = false, preserveId, isRestore = false } = {}) {
     // #6036 — front-half SRP extraction: preflight + isolation + provider/preset
     // resolution (incl. the limit guard, cwd check, id/name, #2962 preflight,
     // #5985 user-shell gate, #3403 model fallback, worktree create/restore, and
@@ -1312,6 +1318,11 @@ export class SessionManager extends EventEmitter {
       // editable into the new session's composer. Not persisted — it is
       // re-resolved from disk on every fresh create, and restores skip folding.
       sessionPreset: presetDescriptor,
+      // #6691 (E-4): opaque per-session annotations set by the caller (the
+      // orchestration engine tags its sessions with { orchestrationRunId,
+      // orchestrationRole } for the session-list badges). In-memory only in v1 —
+      // not persisted; a restart-reconcile re-establishes it (E-3 part 3).
+      metadata: metadata || null,
     }
 
     this._sessions.set(sessionId, entry)
@@ -1673,6 +1684,11 @@ export class SessionManager extends EventEmitter {
         worktree: entry.worktreePath != null,
         repoCwd: entry.worktreeRepoDir || null,
         isolation: entry.isolation || 'none',
+        // #6691 (E-4): orchestration badges — present only for engine-owned
+        // sessions (architect / worker.*), absent otherwise. Optional on the wire
+        // (ServerSessionListEntry), so a plain session omits them entirely.
+        ...(entry.metadata?.orchestrationRunId ? { orchestrationRunId: entry.metadata.orchestrationRunId } : {}),
+        ...(entry.metadata?.orchestrationRole ? { orchestrationRole: entry.metadata.orchestrationRole } : {}),
         // #4664: per-session toggle/string settings (promptEvaluator,
         // chroxyContextHint, sessionPreamble) surface through the
         // registry so the dashboard can hydrate every knob's current
