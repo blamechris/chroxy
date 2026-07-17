@@ -24,6 +24,8 @@ import { useEffect } from 'react'
 import { useConnectionStore } from '../store/connection'
 import type { RunSummary, RunDetail, RunGate, RunNode, RunTimelineEntry, RunUsage } from '@chroxy/protocol'
 import { formatGeneratedAgo } from './ControlRoomSection'
+import { renderMarkdown } from '../lib/markdown'
+import { handleMarkdownLinkClick } from '../lib/links'
 
 /** Server-authored spend figure — never computed client-side (AC-3). */
 function usd(usage: RunUsage | undefined | null): string {
@@ -187,7 +189,14 @@ function DetailPanel({ runId, onOpenSession }: { runId: string; onOpenSession: (
       {TERMINAL_STATUSES.has(run.status) && run.report && (
         <>
           <h5>Report</h5>
-          <pre className="cr-orch-report" data-testid="orch-report-markdown">{run.report.markdown}</pre>
+          {/* the shared sanitized markdown pipeline (same as ChatMessage) — the
+              report is model-authored, so it must never render unsanitized */}
+          <div
+            className="cr-orch-report markdown-content"
+            data-testid="orch-report-markdown"
+            onClick={handleMarkdownLinkClick}
+            dangerouslySetInnerHTML={{ __html: renderMarkdown(run.report.markdown) }}
+          />
           <details>
             <summary className="cr-dim">Raw report JSON</summary>
             <pre className="cr-orch-report-json" data-testid="orch-report-json">{run.report.json}</pre>

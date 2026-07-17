@@ -95,15 +95,18 @@ describe('OrchestrationRunsSection (#6691 S-3b)', () => {
     expect(screen.getByTestId('orch-run-spend').textContent).toContain('$0.1234')
   })
 
-  it('clicking a run selects it; an unheld selection pulls the detail via the effect', () => {
+  it('clicking a run selects it', () => {
     resetStore({ orchestrationRuns: snapshot([runSummary()]) })
     render(<OrchestrationRunsSection />)
     fireEvent.click(screen.getByTestId('orch-run-row'))
     expect(selectRunMock).toHaveBeenCalledWith('run_1')
-    // selection held in store → rerender with selectedRunId set but detail absent
+  })
+
+  it('an unheld selection pulls the detail via the effect', () => {
     resetStore({ orchestrationRuns: snapshot([runSummary()]), selectedRunId: 'run_1' })
     render(<OrchestrationRunsSection />)
     expect(requestDetailMock).toHaveBeenCalledWith('run_1')
+    expect(requestDetailMock).toHaveBeenCalledTimes(1)
   })
 
   it('renders the detail panel: nodes, pending gate, timeline; Open session jumps', () => {
@@ -149,7 +152,10 @@ describe('OrchestrationRunsSection (#6691 S-3b)', () => {
       orchestrationRunDetails: { run_1: { detail: runDetail({ status: 'completed', report: { json: '{"ok":true}', markdown: '# Audit report' } }), seq: 9 } },
     })
     render(<OrchestrationRunsSection />)
-    expect(screen.getByTestId('orch-report-markdown').textContent).toContain('# Audit report')
+    // rendered through the sanitized markdown pipeline → an <h1>, so the '#' is
+    // gone from textContent but the heading text remains
+    expect(screen.getByTestId('orch-report-markdown').textContent).toContain('Audit report')
+    expect(screen.getByTestId('orch-report-markdown').querySelector('h1')).toBeTruthy()
     expect(screen.getByTestId('orch-report-json').textContent).toContain('"ok"')
   })
 
