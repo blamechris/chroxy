@@ -36,6 +36,7 @@ import {
   buildExecutePrompt, buildResultReviewPrompt, buildSynthesisPrompt,
 } from './role-prompts.js'
 import { createGitOps } from './git-ops.js'
+import { recordToRunSummary, recordToRunDetail } from './to-wire.js'
 
 const DEFAULTS = {
   maxParallelWorkers: 2,
@@ -94,6 +95,10 @@ export class OrchestrationManager extends EventEmitter {
     this._runs = new Map() // runId -> engine state
     this._reports = new Map() // runId -> reportMarkdown (in-memory until M-4 persists report.md)
     this._maxReports = 32
+    // Final wire-projected snapshots for terminal runs (their engine state is
+    // deleted from _runs, so gates/timeline would otherwise be gone). Bounded.
+    this._completedSnapshots = new Map() // runId -> { seq, run: RunDetail }
+    this._maxCompletedSnapshots = 32
     this._maxSessions = Number.isFinite(config.maxSessions) ? config.maxSessions : 5
 
     // Owned-session registry drives the permission gate (answers ONLY our sessions).
@@ -152,6 +157,9 @@ export class OrchestrationManager extends EventEmitter {
       results: [], // accepted { title, summary }
       integration: null, // { worktreePath, branch, merged: [] } — lazily created on first accepted implement subtask
       mergeChain: Promise.resolve(), // per-run mutex serializing integration-worktree ops (create/merge/abort)
+      timeline: [], // [RunTimelineEntry] activity feed (gate opens/resolves + committee reviews)
+      timelineSeq: 0, // monotonic per-run seq for timeline entries
+      wireSeq: 0, // per-run wire delta seq (bumped on successful broadcast in E-4 part 3)
       phase: 'created',
       cancelled: false,
     })
@@ -237,6 +245,7 @@ export class OrchestrationManager extends EventEmitter {
     }
     const resolved = resolveGateModel(gate, { decision, note, budgetUsd, resolvedAt: this._now() })
     run.gates.set(gateId, resolved)
+    this._appendTimeline(run, { kind: 'gate_resolved', gateId, nodeId: gate.nodeId ?? null, summary: `${gate.kind} gate ${decision}`, detail: note })
     this.emit('gate_resolved', { runId, gate: resolved })
 
     if (gate.kind === 'epic_plan') {
@@ -307,6 +316,7 @@ export class OrchestrationManager extends EventEmitter {
       this._ledger.updateSubtask(run.runId, subtaskId, { status: 'poa_review' })
       const poaReview = await this._architectReview(run, buildPoaReviewPrompt({ subtask: st.spec, poa }), 'poa_review')
       this._ledger.recordCommitteeReview(run.runId, subtaskId, { phase: 'plan', verdict: poaReview.verdict, reviewerSessionId: run.architectSessionId, notes: poaReview.feedback ?? '' })
+      this._appendTimeline(run, { kind: 'committee_review', nodeId: subtaskId, verdict: poaReview.verdict, summary: `plan-of-attack ${poaReview.verdict}`, detail: poaReview.feedback ?? null })
       if (poaReview.verdict === 'escalate') return this._escalateSubtask(run, subtaskId, poaReview.feedback || 'architect escalated the plan')
       if (poaReview.verdict === 'revise' || poaReview.verdict === 'redelegate') {
         st.iterations += 1
@@ -325,6 +335,7 @@ export class OrchestrationManager extends EventEmitter {
       this._ledger.updateSubtask(run.runId, subtaskId, { status: 'result_review' })
       const resultReview = await this._architectReview(run, buildResultReviewPrompt({ subtask: st.spec, result, diff }), 'result_review')
       this._ledger.recordCommitteeReview(run.runId, subtaskId, { phase: 'result', verdict: resultReview.verdict, reviewerSessionId: run.architectSessionId, notes: resultReview.feedback ?? '' })
+      this._appendTimeline(run, { kind: 'committee_review', nodeId: subtaskId, verdict: resultReview.verdict, summary: `result ${resultReview.verdict}`, detail: resultReview.feedback ?? null })
       if (resultReview.verdict === 'approve') {
         if (st.spec.role === 'implement') return await this._acceptImplement(run, subtaskId, sessionId, result)
         run.results.push({ title: st.spec.title, summary: result.summary })
@@ -436,6 +447,7 @@ export class OrchestrationManager extends EventEmitter {
     run.phase = 'completed'
     this._ledger.setStatus(run.runId, 'completed')
     this.emit('run_completed', { runId: run.runId, reportMarkdown: decision.reportMarkdown, integrationBranch })
+    this._cacheCompletedSnapshot(run)
     this._runs.delete(run.runId)
     return { runId: run.runId, phase: 'completed', reportMarkdown: decision.reportMarkdown, integrationBranch }
   }
@@ -634,7 +646,15 @@ export class OrchestrationManager extends EventEmitter {
   _openGate(run, { kind, nodeId = null, summary, detail = null, budgetUsd = null }) {
     const gate = makeGate({ gateId: nextGateId(run.runId), runId: run.runId, kind, nodeId, summary, detail, budgetUsd, openedAt: this._now() })
     run.gates.set(gate.gateId, gate)
+    this._appendTimeline(run, { kind: 'gate_opened', gateId: gate.gateId, nodeId, summary })
     return gate
+  }
+
+  // Append a bounded activity-feed entry (projected to RunTimelineEntry by to-wire).
+  _appendTimeline(run, { kind, summary, nodeId = null, gateId = null, verdict = null, detail = null }) {
+    run.timelineSeq += 1
+    run.timeline.push({ seq: run.timelineSeq, at: this._now(), kind, summary, nodeId, gateId, verdict, detail })
+    if (run.timeline.length > 500) run.timeline.splice(0, run.timeline.length - 500)
   }
 
   _pauseForBudget(run) {
@@ -660,6 +680,7 @@ export class OrchestrationManager extends EventEmitter {
     for (const sid of [...run.ownedSessions.keys()]) await this._destroySession(run, sid)
     await this._cleanupIntegration(run)
     this.emit('run_failed', { runId: run.runId, code, message: err?.message || String(err) })
+    this._cacheCompletedSnapshot(run)
     this._runs.delete(run.runId)
     return { runId: run.runId, phase: 'failed', code }
   }
@@ -677,6 +698,7 @@ export class OrchestrationManager extends EventEmitter {
     await this._cleanupIntegration(run)
     this._ledger.setStatus(runId, 'cancelled', reason)
     this.emit('run_cancelled', { runId, reason })
+    this._cacheCompletedSnapshot(run)
     this._runs.delete(runId)
     return { runId, phase: 'cancelled' }
   }
@@ -730,17 +752,75 @@ export class OrchestrationManager extends EventEmitter {
     return size + 1 <= this._maxSessions - this._cfg.reserveSessions
   }
 
-  // --- read API (consumed by the S-2 handlers; wire projection is E-4) -----
+  // --- read API (consumed by the S-2 handlers) — wire-projected via to-wire ---
 
+  // RunSummary[] for the runs list. Active runs use their live engine extras (so
+  // pendingUserGates is accurate); a terminal run whose engine state is gone
+  // uses its cached final snapshot, else projects from the record alone.
   listRuns() {
-    return this._ledger.listRuns()
+    // The ledger index gives ordering (newest first) + the run ids; project each
+    // from its full record so the summary is complete.
+    return this._ledger.listRuns().map((row) => {
+      const record = this._ledger.getRun(row.runId)
+      if (!record) return null
+      const run = this._runs.get(row.runId)
+      if (run) return recordToRunSummary(record, this._snapshotExtras(run))
+      const cached = this._completedSnapshots.get(row.runId)
+      return cached ? cached.run : recordToRunSummary(record, { report: this._reportExtra(row.runId) })
+    }).filter(Boolean)
   }
+
+  // { seq, run: RunDetail } for one run.
   getRunSnapshot(runId) {
+    const run = this._runs.get(runId)
+    if (run) {
+      const record = this._ledger.getRun(runId)
+      if (!record) return null
+      return { seq: run.wireSeq, run: recordToRunDetail(record, this._snapshotExtras(run)) }
+    }
+    const cached = this._completedSnapshots.get(runId)
+    if (cached) return cached
     const record = this._ledger.getRun(runId)
     if (!record) return null
-    // E-4 projects this into the wire RunDetail; for now hand back the record
-    // plus the in-memory report (M-4 will persist + project it).
-    return { seq: 0, run: record, reportMarkdown: this._reports.get(runId) ?? null }
+    return { seq: 0, run: recordToRunDetail(record, { report: this._reportExtra(runId) }) }
+  }
+
+  // Assemble the projection `extras` bag from a run's live engine state.
+  _snapshotExtras(run) {
+    const nodeExtras = {}
+    for (const [subtaskId, st] of run.subtasks) {
+      nodeExtras[subtaskId] = {
+        branch: st.branch ?? null,
+        worktreePath: st.worktreePath ?? null,
+        planSummary: st.poa?.plan ?? null,
+        resultSummary: st.result?.summary ?? null,
+        attempt: st.iterations ?? 0,
+        committeeIterations: st.iterations ?? 0,
+      }
+    }
+    return {
+      epicPrompt: run.goal ?? '',
+      gates: [...run.gates.values()],
+      timeline: run.timeline,
+      nodeExtras,
+      report: this._reportExtra(run.runId),
+    }
+  }
+
+  _reportExtra(runId) {
+    const md = this._reports.get(runId)
+    return md ? { json: '', markdown: md } : null
+  }
+
+  // On terminal, freeze the final wire projection so the snapshot survives the
+  // run's engine state being deleted from _runs.
+  _cacheCompletedSnapshot(run) {
+    const record = this._ledger.getRun(run.runId)
+    if (!record) return
+    this._completedSnapshots.set(run.runId, { seq: run.wireSeq, run: recordToRunDetail(record, this._snapshotExtras(run)) })
+    while (this._completedSnapshots.size > this._maxCompletedSnapshots) {
+      this._completedSnapshots.delete(this._completedSnapshots.keys().next().value)
+    }
   }
 
   _rememberReport(runId, markdown) {

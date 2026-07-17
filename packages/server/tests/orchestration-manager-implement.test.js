@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { EventEmitter } from 'node:events'
 
+import { RunSummarySchema, RunDetailSchema } from '@chroxy/protocol'
 import { OrchestrationManager } from '../src/orchestration/orchestration-manager.js'
 import { RunLedger } from '../src/orchestration/run-ledger.js'
 import { TurnDriver } from '../src/orchestration/turn-driver.js'
@@ -156,6 +157,39 @@ function implementDecider(planRole = 'implement') {
 }
 
 // --- tests -----------------------------------------------------------------
+
+test('read API (getRunSnapshot/listRuns) returns schema-valid wire shapes, live and terminal', async () => {
+  const { mgr, cleanup } = harness(implementDecider())
+  try {
+    const rec = mgr.createRun({ goal: 'Implement it well', cwd: '/repo', autoApprovePlan: false })
+    // gate open → the run is live in _runs; project a live RunDetail
+    const gated = waitFor(mgr, ['gate_opened'])
+    await mgr.startRun(rec.runId)
+    const { payload } = await gated
+    const live = mgr.getRunSnapshot(rec.runId)
+    assert.equal(RunDetailSchema.safeParse(live.run).success, true, 'live RunDetail is schema-valid')
+    assert.ok(live.run.gates.length >= 1, 'the epic_plan gate is in the snapshot')
+    assert.ok(live.run.timeline.some((t) => t.kind === 'gate_opened'), 'timeline has the gate_opened entry')
+    assert.equal(live.run.pendingUserGates, 1)
+    // listRuns projects RunSummary[]
+    const list = mgr.listRuns()
+    assert.equal(list.length, 1)
+    assert.equal(RunSummarySchema.safeParse(list[0]).success, true, 'RunSummary is schema-valid')
+
+    // run to completion → snapshot survives from the terminal cache
+    const done = waitFor(mgr, ['run_completed'])
+    await mgr.resolveGate(rec.runId, payload.gate.gateId, { decision: 'approve' })
+    await done
+    const terminal = mgr.getRunSnapshot(rec.runId)
+    assert.equal(RunDetailSchema.safeParse(terminal.run).success, true, 'terminal RunDetail is schema-valid (from cache)')
+    assert.equal(terminal.run.status, 'completed')
+    assert.ok(terminal.run.timeline.some((t) => t.kind === 'gate_resolved'), 'timeline has the gate_resolved entry')
+    assert.ok(terminal.run.timeline.some((t) => t.kind === 'committee_review'), 'timeline has committee reviews')
+    assert.equal(RunSummarySchema.safeParse(mgr.listRuns()[0]).success, true)
+  } finally {
+    cleanup()
+  }
+})
 
 test('full implement run: branch → commit → diff review → merge → done → completed', async () => {
   const { sm, ledger, gitOps, mgr, cleanup } = harness(implementDecider())
