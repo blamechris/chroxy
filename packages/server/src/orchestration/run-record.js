@@ -270,6 +270,23 @@ export function applyEvent(record, event) {
       }
       break
 
+    // M-4 (#6701): the monolithic-session comparison anchor set via
+    // orchestration_run_annotate. Idempotent (last write wins) so the user can
+    // re-annotate with a different baseline session.
+    case 'baseline_set':
+      if (event.baseline && typeof event.baseline === 'object') {
+        record.baseline = {
+          sessionId: typeof event.baseline.sessionId === 'string' ? event.baseline.sessionId : null,
+          effectiveUsd: finiteOr(event.baseline.effectiveUsd, 0),
+          inputTokens: nonNegInt(event.baseline.inputTokens),
+          outputTokens: nonNegInt(event.baseline.outputTokens),
+          cacheReadTokens: nonNegInt(event.baseline.cacheReadTokens),
+          cacheCreationTokens: nonNegInt(event.baseline.cacheCreationTokens),
+          annotatedAt: finiteOr(event.ts, null),
+        }
+      }
+      break
+
     case 'budget_warning':
       // one-shot latch: only the first crossing stamps the time
       if (record.budgetState.warnedAt == null) record.budgetState.warnedAt = finiteOr(event.ts, null)

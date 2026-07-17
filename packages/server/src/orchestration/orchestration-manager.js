@@ -37,6 +37,7 @@ import {
 } from './role-prompts.js'
 import { createGitOps } from './git-ops.js'
 import { recordToRunSummary, recordToRunDetail, gateToWire } from './to-wire.js'
+import { buildRunReport, renderReportMarkdown } from './run-report.js'
 
 const DEFAULTS = {
   maxParallelWorkers: 2,
@@ -93,7 +94,8 @@ export class OrchestrationManager extends EventEmitter {
     this._now = now
     this._log = log
     this._runs = new Map() // runId -> engine state
-    this._reports = new Map() // runId -> reportMarkdown (in-memory until M-4 persists report.md)
+    this._reports = new Map() // runId -> the architect's synthesis narrative markdown
+    this._reportDocs = new Map() // runId -> { json, markdown } — the persisted M-4 report artifacts
     this._maxReports = 32
     // Final wire-projected snapshots for terminal runs (their engine state is
     // deleted from _runs, so gates/timeline would otherwise be gone). Bounded.
@@ -441,7 +443,7 @@ export class OrchestrationManager extends EventEmitter {
     run.phase = 'synthesizing'
     this._ledger.setStatus(run.runId, 'synthesizing')
     const { decision } = await this._driveDecision(run, run.architectSessionId, buildSynthesisPrompt({ goal: run.goal, results: run.results }), 'synthesis', 'synthesis', null)
-    // The report lives in memory until M-4 (run-report.js) persists report.{json,md}.
+    // Keep the architect's narrative in memory (it feeds the persisted report).
     this._rememberReport(run.runId, decision.reportMarkdown)
     await this._destroySession(run, run.architectSessionId)
     // Remove the integration worktree; its branch (the run's output) is kept.
@@ -449,6 +451,9 @@ export class OrchestrationManager extends EventEmitter {
     await this._cleanupIntegration(run)
     run.phase = 'completed'
     this._ledger.setStatus(run.runId, 'completed')
+    // M-4: derive + persist report.{json,md} (metrics report with the synthesis
+    // narrative prepended) so the artifact survives restarts.
+    this._buildAndPersistReport(run.runId)
     this.emit('run_completed', { runId: run.runId, reportMarkdown: decision.reportMarkdown, integrationBranch })
     this._emitRunDelta(run)
     this._cacheCompletedSnapshot(run)
@@ -838,9 +843,83 @@ export class OrchestrationManager extends EventEmitter {
     }
   }
 
+  // The report artifacts for a run, in preference order: the in-memory docs
+  // (built at completion / re-annotation), then the persisted report.{json,md}
+  // (a restarted daemon), then the bare synthesis narrative (legacy fallback).
   _reportExtra(runId) {
+    const docs = this._reportDocs.get(runId)
+    if (docs) return docs
+    const persisted = this._ledger.readReport?.(runId)
+    if (persisted) return persisted
     const md = this._reports.get(runId)
     return md ? { json: '', markdown: md } : null
+  }
+
+  // M-4: derive the metrics report from the ledger record, prepend the
+  // architect's synthesis narrative, persist report.{json,md}, and keep the
+  // docs in memory for snapshots. Never throws (derived state; the journal is
+  // ground truth and the report can be regenerated).
+  _buildAndPersistReport(runId) {
+    try {
+      const record = this._ledger.getRun(runId)
+      if (!record) return null
+      const narrative = this._reports.get(runId) ?? null
+      const report = buildRunReport(record)
+      report.synthesis = narrative
+      const markdown = (narrative ? `${narrative}\n\n---\n\n` : '') + renderReportMarkdown(report)
+      const json = JSON.stringify(report, null, 2)
+      this._ledger.writeReport(runId, { json, markdown })
+      this._reportDocs.set(runId, { json, markdown })
+      while (this._reportDocs.size > this._maxReports) {
+        this._reportDocs.delete(this._reportDocs.keys().next().value)
+      }
+      return { json, markdown }
+    } catch (err) {
+      this._log?.warn?.(`orchestration: report generation failed for ${runId}: ${err?.message || err}`)
+      return null
+    }
+  }
+
+  // M-4 (#6701): annotate a run for the dogfood measurement — attach the
+  // monolithic-baseline session's usage and/or a verdict-quality note. Works on
+  // live AND terminal runs (operates via the ledger, not engine state); on a
+  // terminal run the persisted report + frozen snapshot are refreshed.
+  async annotate(runId, { baselineSessionId = null, verdictQuality = undefined } = {}) {
+    const record = this._ledger.getRun(runId)
+    if (!record) {
+      const err = new Error(`run ${runId} not found`)
+      err.code = 'RUN_NOT_FOUND'
+      throw err
+    }
+    if (verdictQuality !== undefined) this._ledger.note(runId, { verdictQuality })
+    if (baselineSessionId) {
+      const entry = this._sm.getSession?.(baselineSessionId)
+      if (!entry) {
+        const err = new Error(`baseline session ${baselineSessionId} not found`)
+        err.code = 'BASELINE_SESSION_NOT_FOUND'
+        throw err
+      }
+      const u = entry.cumulativeUsage || {}
+      this._ledger.setBaseline(runId, {
+        sessionId: baselineSessionId,
+        // a plain session's spend signal is its provider-reported cumulative cost
+        effectiveUsd: Number.isFinite(u.costUsd) ? u.costUsd : 0,
+        inputTokens: u.inputTokens, outputTokens: u.outputTokens,
+        cacheReadTokens: u.cacheReadTokens, cacheCreationTokens: u.cacheCreationTokens,
+      })
+    }
+    // refresh derived artifacts for a terminal run (a live run rebuilds at completion)
+    if (!this._runs.has(runId)) {
+      const docs = this._buildAndPersistReport(runId)
+      const cached = this._completedSnapshots.get(runId)
+      if (cached) {
+        const fresh = this._ledger.getRun(runId)
+        if (Number.isFinite(fresh?.baseline?.effectiveUsd)) cached.run.baselineEffectiveUsd = fresh.baseline.effectiveUsd
+        if (fresh?.notes?.verdictQuality != null) cached.run.verdictQuality = fresh.notes.verdictQuality
+        if (docs) cached.run.report = docs
+      }
+    }
+    return { runId, annotated: true }
   }
 
   // On terminal, freeze BOTH the detail (for getRunSnapshot) and the summary

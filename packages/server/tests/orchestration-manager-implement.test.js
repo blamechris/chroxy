@@ -81,7 +81,10 @@ class FakeSM extends EventEmitter {
     this.created.push({ sessionId, opts, session })
     return sessionId
   }
-  getSession(id) { const s = this._sessions.get(id); return s ? { session: s, worktreePath: s.worktreePath } : null }
+  getSession(id) {
+    const s = this._sessions.get(id)
+    return s ? { session: s, worktreePath: s.worktreePath, cumulativeUsage: s.cumulativeUsage ?? null } : null
+  }
   destroySession(id) { const s = this._sessions.get(id); if (s) { s.destroyed = true; this._sessions.delete(id); this.destroyedIds.push(id) } }
   listSessions() { return [...this._sessions.keys()] }
 }
@@ -228,6 +231,44 @@ test('emits schema-valid run_delta events with monotonic seq across the run life
     }
     // a terminal delta reflects the completed status
     assert.equal(deltas[deltas.length - 1].run.status, 'completed')
+  } finally {
+    cleanup()
+  }
+})
+
+test('completion persists report.{json,md}; annotate attaches the baseline to a terminal run', async () => {
+  const { sm, ledger, mgr, cleanup } = harness(implementDecider())
+  try {
+    const rec = mgr.createRun({ goal: 'Implement', cwd: '/repo', autoApprovePlan: true })
+    const done = waitFor(mgr, ['run_completed'])
+    await mgr.startRun(rec.runId)
+    await done
+
+    // report persisted at completion, carried in the snapshot, narrative first
+    const snap = mgr.getRunSnapshot(rec.runId)
+    assert.ok(snap.run.report, 'terminal snapshot carries the report')
+    assert.match(snap.run.report.markdown, /# Done[\s\S]*Orchestration run report/, 'synthesis narrative + metrics report')
+    const persisted = ledger.readReport(rec.runId)
+    assert.ok(persisted, 'report.{json,md} persisted')
+    assert.equal(JSON.parse(persisted.json).status, 'completed')
+
+    // a "monolithic baseline" session with cumulative usage
+    const baseId = sm.createSession({ cwd: '/repo', metadata: null })
+    sm._sessions.get(baseId).cumulativeUsage = { inputTokens: 9000, outputTokens: 1500, cacheReadTokens: 0, cacheCreationTokens: 0, costUsd: 2.5, turnsBilled: 4 }
+    await mgr.annotate(rec.runId, { baselineSessionId: baseId, verdictQuality: 'good' })
+
+    // the terminal snapshot + persisted report reflect the annotation
+    const snap2 = mgr.getRunSnapshot(rec.runId)
+    assert.equal(snap2.run.baselineEffectiveUsd, 2.5)
+    assert.equal(snap2.run.verdictQuality, 'good')
+    const report2 = JSON.parse(ledger.readReport(rec.runId).json)
+    assert.equal(report2.baseline.effectiveUsd, 2.5)
+    assert.equal(report2.verdictQuality, 'good')
+    assert.ok(report2.baseline.ratio > 0, 'delegated/baseline ratio computed')
+
+    // unknown run / unknown baseline session → typed errors
+    await assert.rejects(() => mgr.annotate('run_nope', { verdictQuality: 'x' }), /not found/)
+    await assert.rejects(() => mgr.annotate(rec.runId, { baselineSessionId: 'sess_nope' }), /baseline session/)
   } finally {
     cleanup()
   }
