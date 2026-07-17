@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-launch-private-no-it-all"
+description = "Enables the launch_private_no_it_all command without any pre-configured scope."
+commands.allow = ["launch_private_no_it_all"]
+
+[[permission]]
+identifier = "deny-launch-private-no-it-all"
+description = "Denies the launch_private_no_it_all command without any pre-configured scope."
+commands.deny = ["launch_private_no_it_all"]

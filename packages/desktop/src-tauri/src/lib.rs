@@ -15,8 +15,10 @@ pub mod setup;
 pub mod speech;
 pub mod window;
 
+use serde::Serialize;
 use server::{ServerManager, ServerStatus};
 use settings::DesktopSettings;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
@@ -277,6 +279,7 @@ fn get_tunnel_mode(settings_state: tauri::State<'_, Mutex<DesktopSettings>>) -> 
     }
 }
 
+
 #[tauri::command]
 fn set_tunnel_mode(app: tauri::AppHandle, mode: String) -> Result<(), String> {
     // Validate mode
@@ -378,6 +381,203 @@ fn update_tray_badge(app: tauri::AppHandle, blocked: u32, failed: u32) -> Result
         let _ = (&app, count);
     }
     Ok(())
+}
+
+/// Status for the private no-it-all launcher. This is intentionally a
+/// dev-build helper, not a bundled Chroxy feature: it only points at a local
+/// sibling checkout and release builds refuse to launch it.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrivateNoItAllStatus {
+    pub enabled: bool,
+    pub available: bool,
+    pub repo_path: Option<String>,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrivateNoItAllLaunchResult {
+    pub app_path: String,
+}
+
+#[tauri::command]
+fn private_no_it_all_status(window: tauri::Window) -> Result<PrivateNoItAllStatus, String> {
+    require_main_window(&window)?;
+    Ok(private_no_it_all_status_for(private_no_it_all_repo_path()))
+}
+
+#[tauri::command]
+fn launch_private_no_it_all(window: tauri::Window) -> Result<PrivateNoItAllLaunchResult, String> {
+    require_main_window(&window)?;
+    launch_private_no_it_all_from(private_no_it_all_repo_path())
+}
+
+fn private_no_it_all_repo_path() -> Option<PathBuf> {
+    if let Ok(path) = std::env::var("CHROXY_NO_IT_ALL_REPO") {
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            return Some(PathBuf::from(trimmed));
+        }
+    }
+    default_private_no_it_all_repo_path_from(Path::new(env!("CARGO_MANIFEST_DIR")))
+}
+
+pub fn default_private_no_it_all_repo_path_from(manifest_dir: &Path) -> Option<PathBuf> {
+    let chroxy_root = manifest_dir.ancestors().nth(3)?;
+    chroxy_root.parent().map(|parent| parent.join("no-it-all"))
+}
+
+pub fn private_no_it_all_status_for(repo_path: Option<PathBuf>) -> PrivateNoItAllStatus {
+    let repo_path_string = repo_path.as_ref().map(|p| p.to_string_lossy().to_string());
+
+    if !cfg!(debug_assertions) {
+        return PrivateNoItAllStatus {
+            enabled: false,
+            available: false,
+            repo_path: repo_path_string,
+            reason: Some("private no-it-all launcher is disabled in release builds".into()),
+        };
+    }
+
+    if !cfg!(target_os = "macos") {
+        return PrivateNoItAllStatus {
+            enabled: false,
+            available: false,
+            repo_path: repo_path_string,
+            reason: Some("private no-it-all launcher is macOS-only".into()),
+        };
+    }
+
+    let Some(repo) = repo_path else {
+        return PrivateNoItAllStatus {
+            enabled: true,
+            available: false,
+            repo_path: None,
+            reason: Some("could not infer the sibling no-it-all checkout path".into()),
+        };
+    };
+
+    let script = repo.join("scripts/dev-build.sh");
+    let project = repo.join("project.yml");
+    if !project.is_file() || !script.is_file() {
+        return PrivateNoItAllStatus {
+            enabled: true,
+            available: false,
+            repo_path: Some(repo.to_string_lossy().to_string()),
+            reason: Some("no-it-all checkout not found at the expected path".into()),
+        };
+    }
+
+    PrivateNoItAllStatus {
+        enabled: true,
+        available: true,
+        repo_path: Some(repo.to_string_lossy().to_string()),
+        reason: None,
+    }
+}
+
+fn launch_private_no_it_all_from(
+    repo_path: Option<PathBuf>,
+) -> Result<PrivateNoItAllLaunchResult, String> {
+    let status = private_no_it_all_status_for(repo_path.clone());
+    if !status.enabled || !status.available {
+        return Err(status
+            .reason
+            .unwrap_or_else(|| "private no-it-all launcher is unavailable".into()));
+    }
+
+    let repo = repo_path.ok_or("could not infer the sibling no-it-all checkout path")?;
+    let script = repo.join("scripts/dev-build.sh");
+    let output = std::process::Command::new("bash")
+        .arg(&script)
+        .current_dir(&repo)
+        .output()
+        .map_err(|e| format!("failed to run {}: {}", script.display(), e))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "no-it-all dev build failed with status {}:\n{}",
+            output.status.code().unwrap_or(-1),
+            command_output_tail(&output)
+        ));
+    }
+
+    let app_path = extract_built_app_path(&output)
+        .or_else(find_latest_scratchpad_app)
+        .ok_or("no-it-all build succeeded, but Scratchpad.app was not found")?;
+
+    if !app_path.is_dir() {
+        return Err(format!(
+            "built app path does not exist: {}",
+            app_path.display()
+        ));
+    }
+
+    let open_status = std::process::Command::new("open")
+        .arg(&app_path)
+        .status()
+        .map_err(|e| format!("failed to invoke open for {}: {}", app_path.display(), e))?;
+    if !open_status.success() {
+        return Err(format!(
+            "open {} exited with status {}",
+            app_path.display(),
+            open_status.code().unwrap_or(-1)
+        ));
+    }
+
+    Ok(PrivateNoItAllLaunchResult {
+        app_path: app_path.to_string_lossy().to_string(),
+    })
+}
+
+fn extract_built_app_path(output: &std::process::Output) -> Option<PathBuf> {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout.lines().find_map(|line| {
+        let (_, tail) = line.split_once("built:")?;
+        let path = tail.trim();
+        if path.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(path))
+        }
+    })
+}
+
+fn find_latest_scratchpad_app() -> Option<PathBuf> {
+    let root = dirs::home_dir()?.join("Library/Developer/Xcode/DerivedData");
+    let mut candidates = Vec::new();
+    for entry in std::fs::read_dir(root).ok()?.flatten() {
+        let name = entry.file_name();
+        if !name.to_string_lossy().starts_with("NoItAll-") {
+            continue;
+        }
+        let app = entry.path().join("Build/Products/Debug/Scratchpad.app");
+        if !app.is_dir() {
+            continue;
+        }
+        let modified = std::fs::metadata(&app)
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::UNIX_EPOCH);
+        candidates.push((modified, app));
+    }
+    candidates.sort_by_key(|(modified, _)| *modified);
+    candidates.pop().map(|(_, app)| app)
+}
+
+fn command_output_tail(output: &std::process::Output) -> String {
+    let mut combined = String::new();
+    combined.push_str(String::from_utf8_lossy(&output.stdout).as_ref());
+    if !output.stderr.is_empty() {
+        if !combined.ends_with('\n') && !combined.is_empty() {
+            combined.push('\n');
+        }
+        combined.push_str(String::from_utf8_lossy(&output.stderr).as_ref());
+    }
+    let trimmed = combined.trim();
+    let chars: Vec<char> = trimmed.chars().collect();
+    let start = chars.len().saturating_sub(2000);
+    chars[start..].iter().collect()
 }
 
 /// #5356 — current "expose on LAN" setting. False (loopback-only) is the
@@ -914,6 +1114,8 @@ pub fn run() {
             get_allow_auto_permission_mode,
             set_allow_auto_permission_mode,
             update_tray_badge,
+            private_no_it_all_status,
+            launch_private_no_it_all,
             #[cfg(target_os = "macos")]
             voice_available,
             #[cfg(target_os = "macos")]
@@ -2491,6 +2693,58 @@ mod tests {
     }
 
     #[test]
+    fn default_private_no_it_all_path_points_to_sibling_checkout() {
+        let manifest = Path::new("/Users/me/Projects/chroxy/packages/desktop/src-tauri");
+        let expected = Path::new("/Users/me/Projects/no-it-all");
+        assert_eq!(
+            default_private_no_it_all_repo_path_from(manifest).as_deref(),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn private_no_it_all_status_requires_checkout_files() {
+        let dir = TempDir::new().unwrap();
+        let status = private_no_it_all_status_for(Some(dir.path().to_path_buf()));
+
+        if cfg!(debug_assertions) && cfg!(target_os = "macos") {
+            assert!(status.enabled);
+            assert!(!status.available);
+            assert!(status
+                .reason
+                .as_deref()
+                .unwrap_or("")
+                .contains("checkout not found"));
+        } else {
+            assert!(!status.enabled);
+            assert!(!status.available);
+        }
+    }
+
+    #[test]
+    fn private_no_it_all_status_detects_local_checkout_shape() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("scripts")).unwrap();
+        std::fs::write(dir.path().join("project.yml"), "name: NoItAll\n").unwrap();
+        std::fs::write(
+            dir.path().join("scripts/dev-build.sh"),
+            "#!/usr/bin/env bash\n",
+        )
+        .unwrap();
+
+        let status = private_no_it_all_status_for(Some(dir.path().to_path_buf()));
+
+        if cfg!(debug_assertions) && cfg!(target_os = "macos") {
+            assert!(status.enabled);
+            assert!(status.available);
+            assert!(status.reason.is_none());
+        } else {
+            assert!(!status.enabled);
+            assert!(!status.available);
+        }
+    }
+
+    #[test]
     fn writes_flag_to_new_config_file_with_0o600() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("config.json");
@@ -2573,4 +2827,3 @@ mod tests {
         assert!(read_flag(&path));
     }
 }
-

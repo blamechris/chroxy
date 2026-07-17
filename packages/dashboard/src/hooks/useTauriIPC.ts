@@ -16,6 +16,17 @@ interface ServerInfo {
   isRunning: boolean
 }
 
+export interface PrivateNoItAllStatus {
+  enabled: boolean
+  available: boolean
+  repoPath: string | null
+  reason: string | null
+}
+
+export interface PrivateNoItAllLaunchResult {
+  appPath: string
+}
+
 /** Invoke a Tauri command (returns null if not in Tauri context) */
 async function tauriInvoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T | null> {
   const invoke = getTauriInvoke()
@@ -140,6 +151,32 @@ export async function setAllowAutoPermissionMode(value: boolean): Promise<void> 
     throw new Error('Tauri invoke is unavailable')
   }
   await invoke('set_allow_auto_permission_mode', { value })
+}
+
+/**
+ * Probe the private no-it-all dev launcher. The Rust side only reports
+ * `available=true` for local debug builds with a sibling no-it-all checkout.
+ */
+export async function getPrivateNoItAllStatus(): Promise<PrivateNoItAllStatus | null> {
+  if (!isTauri()) return null
+  const invoke = getTauriInvoke()
+  if (!invoke) {
+    throw new Error('Tauri invoke is unavailable')
+  }
+  return await invoke('private_no_it_all_status', undefined) as PrivateNoItAllStatus
+}
+
+/**
+ * Build and open the local no-it-all dev app. Throws on unavailable/release
+ * builds or when the sibling checkout build fails.
+ */
+export async function launchPrivateNoItAll(): Promise<PrivateNoItAllLaunchResult | null> {
+  if (!isTauri()) return null
+  const invoke = getTauriInvoke()
+  if (!invoke) {
+    throw new Error('Tauri invoke is unavailable')
+  }
+  return await invoke('launch_private_no_it_all', undefined) as PrivateNoItAllLaunchResult
 }
 
 /**

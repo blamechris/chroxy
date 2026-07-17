@@ -40,6 +40,9 @@ import {
   getServerInfo,
   getAllowAutoPermissionMode,
   setAllowAutoPermissionMode,
+  getPrivateNoItAllStatus,
+  launchPrivateNoItAll,
+  type PrivateNoItAllStatus,
 } from '../hooks/useTauriIPC'
 import { useDebouncedSetter } from '../hooks/useDebouncedSetter'
 
@@ -754,6 +757,7 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
   const activeSessionSessionPreamble = sessions.find(s => s.sessionId === activeSessionId)?.sessionPreamble
   const themes = getAvailableThemes()
   const inTauri = isTauri()
+  const privateNoItAllDevEnabled = inTauri && isMacPlatform() && Boolean(import.meta.env?.DEV)
   const [tunnelMode, setTunnelModeState] = useState<string>('none')
   const [tunnelError, setTunnelError] = useState<string | null>(null)
   const [serverTunnelMode, setServerTunnelMode] = useState<string>('none')
@@ -770,6 +774,10 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
   const [summonHotkeySaved, setSummonHotkeySaved] = useState<string | null>(null)
   const [summonHotkeyError, setSummonHotkeyError] = useState<string | null>(null)
   const [summonHotkeySaving, setSummonHotkeySaving] = useState<boolean>(false)
+  const [privateNoItAllStatus, setPrivateNoItAllStatus] = useState<PrivateNoItAllStatus | null>(null)
+  const [privateNoItAllLaunching, setPrivateNoItAllLaunching] = useState<boolean>(false)
+  const [privateNoItAllError, setPrivateNoItAllError] = useState<string | null>(null)
+  const [privateNoItAllAppPath, setPrivateNoItAllAppPath] = useState<string | null>(null)
   // #4052: paste-API-key form state. Lives in the component (not the
   // store) so the raw key is never observable beyond this one render.
   const [byokKeyInput, setByokKeyInput] = useState('')
@@ -861,6 +869,17 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
     // #5294 — reset hotkey edit state, then load the persisted accelerator.
     setSummonHotkeyError(null)
     setSummonHotkeySaving(false)
+    setPrivateNoItAllError(null)
+    setPrivateNoItAllAppPath(null)
+    setPrivateNoItAllLaunching(false)
+    setPrivateNoItAllStatus(null)
+    if (privateNoItAllDevEnabled) {
+      getPrivateNoItAllStatus().then(status => {
+        setPrivateNoItAllStatus(status)
+      }).catch(err => {
+        setPrivateNoItAllError(err instanceof Error ? err.message : String(err))
+      })
+    }
     getSummonHotkey().then(hk => {
       setSummonHotkeySaved(hk ?? null)
       setSummonHotkeyInput(hk ?? '')
@@ -894,7 +913,7 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
     }).catch(err => {
       setAutoPermError(err instanceof Error ? err.message : String(err))
     })
-  }, [isOpen, inTauri])
+  }, [isOpen, inTauri, privateNoItAllDevEnabled])
 
   // #4052: Pull the latest credentials status whenever the panel opens so
   // it's accurate even after an out-of-band change (e.g. the user edited
@@ -1097,6 +1116,20 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
       setSummonHotkeyError(err instanceof Error ? err.message : String(err))
     } finally {
       setSummonHotkeySaving(false)
+    }
+  }, [])
+
+  const handleLaunchPrivateNoItAll = useCallback(async () => {
+    setPrivateNoItAllError(null)
+    setPrivateNoItAllAppPath(null)
+    setPrivateNoItAllLaunching(true)
+    try {
+      const result = await launchPrivateNoItAll()
+      setPrivateNoItAllAppPath(result?.appPath ?? null)
+    } catch (err) {
+      setPrivateNoItAllError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setPrivateNoItAllLaunching(false)
     }
   }, [])
 
@@ -2022,6 +2055,35 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
                   &ldquo;Show Chroxy&rdquo; item is always available.
                 </p>
               </div>
+              {privateNoItAllDevEnabled && privateNoItAllStatus?.available && (
+                <div className="settings-field">
+                  <label>No It All</label>
+                  <button
+                    type="button"
+                    className="settings-secondary-button"
+                    disabled={privateNoItAllLaunching}
+                    onClick={handleLaunchPrivateNoItAll}
+                    data-testid="private-no-it-all-launch"
+                  >
+                    {privateNoItAllLaunching ? 'Building...' : 'Build and Open'}
+                  </button>
+                  <p className="settings-hint">
+                    Private dev launcher for the local sibling checkout at{' '}
+                    <code>{privateNoItAllStatus.repoPath}</code>. It is not
+                    bundled into release builds.
+                  </p>
+                  {privateNoItAllAppPath && (
+                    <p className="settings-hint" data-testid="private-no-it-all-app-path">
+                      Opened <code>{privateNoItAllAppPath}</code>.
+                    </p>
+                  )}
+                  {privateNoItAllError && (
+                    <p className="tunnel-mode-error" data-testid="private-no-it-all-error">
+                      {privateNoItAllError}
+                    </p>
+                  )}
+                </div>
+              )}
             </section>
           )}
     </div>

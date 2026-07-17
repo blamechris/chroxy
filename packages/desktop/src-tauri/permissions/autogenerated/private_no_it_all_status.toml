@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-private-no-it-all-status"
+description = "Enables the private_no_it_all_status command without any pre-configured scope."
+commands.allow = ["private_no_it_all_status"]
+
+[[permission]]
+identifier = "deny-private-no-it-all-status"
+description = "Denies the private_no_it_all_status command without any pre-configured scope."
+commands.deny = ["private_no_it_all_status"]

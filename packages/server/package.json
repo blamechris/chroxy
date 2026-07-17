@@ -4,6 +4,19 @@
   "description": "Chroxy server daemon and CLI",
   "type": "module",
   "main": "src/cli.js",
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "src",
+    "!src/dashboard-next/node_modules",
+    "hooks",
+    "sidecar",
+    "!sidecar/node_modules",
+    "scripts/fix-node-pty-helper.js",
+    "CONFIG.md",
+    "README.md"
+  ],
   "bin": {
     "chroxy": "src/cli.js"
   },
@@ -16,13 +29,14 @@
     "test:integration": "node --import ./tests/_setup.mjs --test ./tests/*.integration.test.js",
     "test:integration:k8s": "RUN_K8S_INTEGRATION=1 node --import ./tests/_setup.mjs --test ./tests/integration/k8s-sidecar-roundtrip.test.js",
     "lint": "eslint src/",
+    "prepack": "node scripts/copy-dashboard-dist.mjs",
     "postinstall": "node scripts/fix-node-pty-helper.js"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.0",
     "@anthropic-ai/sdk": "^0.81.0",
-    "@chroxy/protocol": "*",
-    "@chroxy/store-core": "*",
+    "@chroxy/protocol": "0.10.0",
+    "@chroxy/store-core": "0.10.0",
     "@kubernetes/client-node": "^1.4.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@xterm/addon-fit": "^0.10.0",

@@ -39,6 +39,8 @@
     "allow-get-allow-auto-permission-mode",
     "allow-set-allow-auto-permission-mode",
     "allow-update-tray-badge",
+    "allow-private-no-it-all-status",
+    "allow-launch-private-no-it-all",
     "allow-voice-available",
     "allow-start-voice-input",
     "allow-stop-voice-input",
