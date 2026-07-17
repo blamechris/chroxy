@@ -20,12 +20,13 @@
  * ControlRoomView strip/deep-link layer — this component assumes it only
  * renders when the engine is enabled.
  */
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { useConnectionStore } from '../store/connection'
 import type { RunSummary, RunDetail, RunGate, RunNode, RunTimelineEntry, RunUsage } from '@chroxy/protocol'
 import { formatGeneratedAgo } from './ControlRoomSection'
 import { renderMarkdown } from '../lib/markdown'
 import { handleMarkdownLinkClick } from '../lib/links'
+import { Modal } from './Modal'
 
 /** Server-authored spend figure — never computed client-side (AC-3). */
 function usd(usage: RunUsage | undefined | null): string {
@@ -111,14 +112,88 @@ function NodeRow({ node, onOpenSession }: { node: RunNode; onOpenSession: (sessi
   )
 }
 
-/** Pending gates render display-only in S-3b; approve/deny controls are S-3c. */
+/** A resolved gate (or the summary line of a pending one) — display only. */
 function GateRow({ gate }: { gate: RunGate }) {
   return (
     <li className="cr-orch-gate" data-testid="orch-gate-row" data-gate-status={gate.status}>
       <span className="cr-tag" data-accent={gate.status === 'pending' ? 'warn' : 'neutral'}>{gate.kind.replace(/_/g, ' ')}</span>
       <span data-testid="orch-gate-summary">{gate.summary}</span>
       {gate.status !== 'pending' && <span className="cr-dim"> · {gate.status}{gate.resolvedBy ? ` by ${gate.resolvedBy}` : ''}</span>}
-      {gate.status === 'pending' && <span className="cr-dim" data-testid="orch-gate-pending-hint"> · awaiting your decision (respond in S-3c)</span>}
+    </li>
+  )
+}
+
+/**
+ * GateBanner (#6691 S-3c) — an actionable pending gate. Approve / Request
+ * changes (→ revise, requires a note) / Reject / Skip; a budget_overrun gate
+ * additionally takes a new-cap input on approve. The request is correlated by
+ * requestId; the row shows a pending → ack/error state inline.
+ */
+function GateBanner({ runId, gate }: { runId: string; gate: RunGate }) {
+  const send = useConnectionStore((s) => s.sendOrchestrationGateResponse)
+  const pending = useConnectionStore((s) => s.orchestrationPendingActions)
+  const results = useConnectionStore((s) => s.orchestrationActionResults)
+  const [note, setNote] = useState('')
+  const [budget, setBudget] = useState('')
+  const [reqId, setReqId] = useState<string | null>(null)
+
+  const inFlight = reqId != null && reqId in pending
+  const result = reqId != null ? results[reqId] : undefined
+  const isBudget = gate.kind === 'budget_overrun'
+  // Lock once we've sent — inFlight OR a recorded success. Prevents a duplicate
+  // gate response in the ack→delta window (the ack clears `pending` and flips
+  // inFlight false BEFORE the run-detail delta flips gate.status and unmounts
+  // this banner, briefly re-enabling the buttons otherwise).
+  const locked = inFlight || result?.ok === true
+
+  const respond = (decision: 'approve' | 'reject' | 'revise' | 'skip') => {
+    if (locked) return
+    if (decision === 'revise' && !note.trim()) return // require a note to request changes
+    // budget_overrun raise: only a positive, finite figure is a real cap
+    const parsed = isBudget && decision === 'approve' && budget.trim() ? Number(budget) : undefined
+    const budgetUsd = Number.isFinite(parsed) && (parsed as number) > 0 ? parsed : undefined
+    const id = send(runId, gate.gateId, decision, note.trim() || undefined, budgetUsd)
+    if (id) setReqId(id)
+  }
+
+  return (
+    <li className="cr-orch-gate-banner" data-testid="orch-gate-banner" data-gate-kind={gate.kind}>
+      <div className="cr-orch-gate-head">
+        <span className="cr-tag" data-accent="warn">{gate.kind.replace(/_/g, ' ')}</span>
+        <span data-testid="orch-gate-summary">{gate.summary}</span>
+      </div>
+      {gate.detail && <p className="cr-dim cr-orch-gate-detail">{gate.detail}</p>}
+      <textarea
+        className="cr-orch-gate-note"
+        data-testid="orch-gate-note"
+        placeholder="Note (required to request changes)"
+        value={note}
+        onChange={(e) => setNote(e.target.value)}
+        rows={2}
+        disabled={inFlight}
+      />
+      {isBudget && (
+        <input
+          className="cr-orch-gate-budget"
+          data-testid="orch-gate-budget-input"
+          type="number"
+          min="0.01"
+          step="0.01"
+          placeholder="New budget cap (USD) — optional"
+          value={budget}
+          onChange={(e) => setBudget(e.target.value)}
+          disabled={inFlight}
+        />
+      )}
+      <div className="cr-orch-gate-actions">
+        <button type="button" data-testid="orch-gate-approve" disabled={locked} onClick={() => respond('approve')}>Approve</button>
+        <button type="button" data-testid="orch-gate-revise" disabled={locked || !note.trim()} onClick={() => respond('revise')}>Request changes</button>
+        <button type="button" data-testid="orch-gate-reject" disabled={locked} onClick={() => respond('reject')}>Reject</button>
+        <button type="button" data-testid="orch-gate-skip" disabled={locked} onClick={() => respond('skip')}>Skip</button>
+      </div>
+      {inFlight && <span className="cr-dim" data-testid="orch-gate-pending">Sending…</span>}
+      {result?.ok && <span className="cr-ok" data-testid="orch-gate-sent">Response sent</span>}
+      {result && !result.ok && <span className="cr-error" data-testid="orch-gate-error">{result.error}</span>}
     </li>
   )
 }
@@ -158,10 +233,12 @@ function DetailPanel({ runId, onOpenSession }: { runId: string; onOpenSession: (
       </div>
       {run.epicPrompt && <p className="cr-dim cr-orch-epic" data-testid="orch-detail-epic">{run.epicPrompt}</p>}
 
+      <RunControls run={run} />
+
       {pendingGates.length > 0 && (
         <>
           <h5>Gates awaiting you</h5>
-          <ul className="cr-orch-gates" data-testid="orch-pending-gates">{pendingGates.map((g) => <GateRow key={g.gateId} gate={g} />)}</ul>
+          <ul className="cr-orch-gates" data-testid="orch-pending-gates">{pendingGates.map((g) => <GateBanner key={g.gateId} runId={run.runId} gate={g} />)}</ul>
         </>
       )}
 
@@ -203,7 +280,175 @@ function DetailPanel({ runId, onOpenSession }: { runId: string; onOpenSession: (
           </details>
         </>
       )}
+
+      {TERMINAL_STATUSES.has(run.status) && <AnnotateForm runId={run.runId} />}
     </div>
+  )
+}
+
+/** Cancel/pause/resume controls, gated by the run's current status. */
+function RunControls({ run }: { run: RunDetail }) {
+  const send = useConnectionStore((s) => s.sendOrchestrationRunAction)
+  const pending = useConnectionStore((s) => s.orchestrationPendingActions)
+  const [reqId, setReqId] = useState<string | null>(null)
+  const inFlight = reqId != null && reqId in pending
+
+  // hidden at terminal state AND while already cancelling (the cancel is
+  // in-flight server-side — re-clicking is pointless)
+  if (TERMINAL_STATUSES.has(run.status) || run.status === 'cancelling') return null
+  const act = (action: 'cancel' | 'pause' | 'resume') => {
+    if (action === 'cancel' && !window.confirm('Cancel this run? In-flight workers are stopped and their work auto-committed to their branches.')) return
+    const id = send(run.runId, action)
+    if (id) setReqId(id)
+  }
+  const canPause = run.status === 'executing'
+  const canResume = run.status === 'paused' || run.status === 'budget_paused' || run.status === 'suspended'
+  return (
+    <div className="cr-orch-run-controls" data-testid="orch-run-controls">
+      {canPause && <button type="button" data-testid="orch-action-pause" disabled={inFlight} onClick={() => act('pause')}>Pause</button>}
+      {canResume && <button type="button" data-testid="orch-action-resume" disabled={inFlight} onClick={() => act('resume')}>Resume</button>}
+      <button type="button" className="cr-danger-btn" data-testid="orch-action-cancel" disabled={inFlight} onClick={() => act('cancel')}>Cancel run</button>
+      {inFlight && <span className="cr-dim" data-testid="orch-action-pending">Sending…</span>}
+    </div>
+  )
+}
+
+/**
+ * AnnotateForm (#6691 S-3c) — the dogfood measurement affordance: attach a
+ * monolithic-baseline session id and/or a verdict-quality note to a terminal
+ * run. The report's delegated-vs-baseline comparison reads these.
+ */
+function AnnotateForm({ runId }: { runId: string }) {
+  const send = useConnectionStore((s) => s.sendOrchestrationRunAnnotate)
+  const pending = useConnectionStore((s) => s.orchestrationPendingActions)
+  const results = useConnectionStore((s) => s.orchestrationActionResults)
+  const [baseline, setBaseline] = useState('')
+  const [quality, setQuality] = useState('')
+  const [reqId, setReqId] = useState<string | null>(null)
+  const inFlight = reqId != null && reqId in pending
+  const result = reqId != null ? results[reqId] : undefined
+
+  const submit = () => {
+    if (!baseline.trim() && !quality.trim()) return
+    const id = send(runId, { baselineSessionId: baseline.trim() || undefined, verdictQuality: quality.trim() || undefined })
+    if (id) setReqId(id)
+  }
+  return (
+    <details className="cr-orch-annotate" data-testid="orch-annotate">
+      <summary className="cr-dim">Annotate for the cost comparison</summary>
+      <input
+        className="cr-orch-annotate-baseline"
+        data-testid="orch-annotate-baseline"
+        placeholder="Monolithic baseline session id"
+        value={baseline}
+        onChange={(e) => setBaseline(e.target.value)}
+        disabled={inFlight}
+      />
+      <textarea
+        className="cr-orch-annotate-quality"
+        data-testid="orch-annotate-quality"
+        placeholder="Verdict quality note (optional)"
+        value={quality}
+        onChange={(e) => setQuality(e.target.value)}
+        rows={2}
+        disabled={inFlight}
+      />
+      <button type="button" data-testid="orch-annotate-submit" disabled={inFlight || (!baseline.trim() && !quality.trim())} onClick={submit}>Save annotation</button>
+      {inFlight && <span className="cr-dim" data-testid="orch-annotate-pending">Saving…</span>}
+      {result && (result.ok
+        ? <span className="cr-ok" data-testid="orch-annotate-ok">Saved</span>
+        : <span className="cr-error" data-testid="orch-annotate-error">{result.error}</span>)}
+    </details>
+  )
+}
+
+/**
+ * NewRunModal (#6691 S-3c) — start an orchestration run. v1 exposes the
+ * repo-audit preset (or a free-form epic prompt), the working directory (cwd,
+ * re-validated server-side against the allowlist), an optional budget cap, and
+ * an auto-approve-plan toggle (off by default, so the user reviews the epic
+ * plan gate unless they opt in). Role/model overrides use the daemon's
+ * configured defaults unless supplied. Uses the shared Modal for focus-trap +
+ * Escape + accessible naming; closeOnBackdrop is false since it holds form input.
+ */
+function NewRunModal({ onClose }: { onClose: () => void }) {
+  const start = useConnectionStore((s) => s.startOrchestrationRun)
+  const pending = useConnectionStore((s) => s.orchestrationPendingActions)
+  const results = useConnectionStore((s) => s.orchestrationActionResults)
+  const [preset, setPreset] = useState('repo-audit')
+  const [epicPrompt, setEpicPrompt] = useState('')
+  const [cwd, setCwd] = useState('')
+  const [title, setTitle] = useState('')
+  const [budget, setBudget] = useState('')
+  const [autoApprove, setAutoApprove] = useState(false)
+  const [reqId, setReqId] = useState<string | null>(null)
+
+  const inFlight = reqId != null && reqId in pending
+  const result = reqId != null ? results[reqId] : undefined
+  const usePreset = preset !== ''
+  const canSubmit = Boolean(cwd.trim()) && (usePreset || Boolean(epicPrompt.trim())) && !inFlight
+
+  // Close the modal once the start action succeeds (its ack cleared the pending
+  // entry and recorded ok:true); the list delta brings the new run in.
+  useEffect(() => {
+    if (result?.ok) onClose()
+  }, [result, onClose])
+
+  const submit = () => {
+    if (!canSubmit) return
+    // only a positive, finite figure is a real cap (schema is z.number().positive())
+    const parsed = budget.trim() ? Number(budget) : undefined
+    const budgetUsd = Number.isFinite(parsed) && (parsed as number) > 0 ? parsed : undefined
+    const id = start({
+      cwd: cwd.trim(),
+      preset: usePreset ? preset : undefined,
+      epicPrompt: !usePreset ? epicPrompt.trim() : undefined,
+      title: title.trim() || undefined,
+      budgetUsd,
+      autoApprovePlan: autoApprove,
+    })
+    if (id) setReqId(id)
+  }
+
+  return (
+    <Modal open onClose={onClose} title="Start an orchestration run" closeOnBackdrop={false}>
+      <div className="cr-orch-modal" data-testid="orch-new-run-modal">
+        <label className="cr-orch-field">
+          <span>Preset</span>
+          <select data-testid="orch-new-preset" value={preset} onChange={(e) => setPreset(e.target.value)} disabled={inFlight}>
+            <option value="repo-audit">repo-audit</option>
+            <option value="">Custom epic prompt…</option>
+          </select>
+        </label>
+        {!usePreset && (
+          <label className="cr-orch-field">
+            <span>Epic prompt</span>
+            <textarea data-testid="orch-new-epic" rows={3} value={epicPrompt} onChange={(e) => setEpicPrompt(e.target.value)} placeholder="Describe the epic to decompose…" disabled={inFlight} />
+          </label>
+        )}
+        <label className="cr-orch-field">
+          <span>Working directory</span>
+          <input data-testid="orch-new-cwd" value={cwd} onChange={(e) => setCwd(e.target.value)} placeholder="/path/to/repo" disabled={inFlight} />
+        </label>
+        <label className="cr-orch-field">
+          <span>Title (optional)</span>
+          <input data-testid="orch-new-title" value={title} onChange={(e) => setTitle(e.target.value)} disabled={inFlight} />
+        </label>
+        <label className="cr-orch-field">
+          <span>Budget cap USD (optional)</span>
+          <input data-testid="orch-new-budget" type="number" min="0.01" step="0.01" value={budget} onChange={(e) => setBudget(e.target.value)} disabled={inFlight} />
+        </label>
+        <label className="cr-orch-check">
+          <input type="checkbox" data-testid="orch-new-autoapprove" checked={autoApprove} onChange={(e) => setAutoApprove(e.target.checked)} disabled={inFlight} />
+          <span>Auto-approve plan (skips the epic-plan gate)</span>
+        </label>
+        {result && !result.ok && <p className="cr-error" data-testid="orch-new-error">{result.error}</p>}
+        <div className="cr-orch-modal-actions">
+          <button type="button" data-testid="orch-new-cancel" onClick={onClose} disabled={inFlight}>Cancel</button>
+          <button type="button" data-testid="orch-new-submit" onClick={submit} disabled={!canSubmit}>{inFlight ? 'Starting…' : 'Start run'}</button>
+        </div>
+      </div>
+    </Modal>
   )
 }
 
@@ -221,6 +466,7 @@ export function OrchestrationRunsSection({ now = Date.now }: OrchestrationRunsSe
   const selectedRunId = useConnectionStore((s) => s.selectedRunId)
   const selectRun = useConnectionStore((s) => s.selectRun)
   const switchSession = useConnectionStore((s) => s.switchSession)
+  const [showNewRun, setShowNewRun] = useState(false)
 
   // Pull the selected run's detail when it isn't held yet (selection persists
   // across tab flips; the delta stream keeps a held detail current).
@@ -241,16 +487,29 @@ export function OrchestrationRunsSection({ now = Date.now }: OrchestrationRunsSe
           <h3>Runs</h3>
           {snapshot && <span className="cr-dim" data-testid="orch-generated-ago">{formatGeneratedAgo(Date.parse(snapshot.generatedAt), now())}</span>}
         </div>
-        <button
-          type="button"
-          className="cr-refresh-btn"
-          data-testid="orch-refresh"
-          disabled={!connected || loading}
-          onClick={() => requestRuns()}
-        >
-          {loading ? 'Refreshing…' : 'Refresh'}
-        </button>
+        <div className="cr-orch-header-actions">
+          <button
+            type="button"
+            className="cr-primary-btn"
+            data-testid="orch-new-run"
+            disabled={!connected}
+            onClick={() => setShowNewRun(true)}
+          >
+            New run
+          </button>
+          <button
+            type="button"
+            className="cr-refresh-btn"
+            data-testid="orch-refresh"
+            disabled={!connected || loading}
+            onClick={() => requestRuns()}
+          >
+            {loading ? 'Refreshing…' : 'Refresh'}
+          </button>
+        </div>
       </header>
+
+      {showNewRun && <NewRunModal onClose={() => setShowNewRun(false)} />}
 
       {snapshot?.error && (
         <p className="cr-error" data-testid="orch-runs-error">{snapshot.error.code}: {snapshot.error.message}</p>

@@ -1692,6 +1692,14 @@ export interface ConnectionState {
   requestOrchestrationRunDetail: (runId: string) => boolean;
   /** #6691 — select a run in the Runs tab (detail panel target). */
   selectRun: (runId: string | null) => void;
+  /** #6691 (S-3c) — start an orchestration run. Returns the requestId (or null if not sent). */
+  startOrchestrationRun: (opts: { preset?: string; epicPrompt?: string; cwd: string; title?: string; budgetUsd?: number; autoApprovePlan?: boolean; roles?: Record<string, { provider: string; model: string }> }) => string | null;
+  /** #6691 (S-3c) — respond to a run gate. Returns the requestId (or null if not sent). */
+  sendOrchestrationGateResponse: (runId: string, gateId: string, decision: 'approve' | 'reject' | 'revise' | 'skip', note?: string, budgetUsd?: number) => string | null;
+  /** #6691 (S-3c) — cancel/pause/resume a run. Returns the requestId (or null if not sent). */
+  sendOrchestrationRunAction: (runId: string, action: 'cancel' | 'pause' | 'resume') => string | null;
+  /** #6691 (S-3c) — annotate a run (baseline session + verdict quality). Returns the requestId (or null if not sent). */
+  sendOrchestrationRunAnnotate: (runId: string, opts: { baselineSessionId?: string; verdictQuality?: string }) => string | null;
   /** #6543 — pull the full redacted tool input for a pending permission (for the pre-write diff). */
   requestPermissionInput: (requestId: string) => boolean;
 
