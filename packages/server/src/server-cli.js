@@ -1230,6 +1230,7 @@ export async function startCliServer(config) {
     pairingManager,
     pushManager,
     billingCanaryMonitor,
+    orchestrationManager,
     modelsOverlayWatcher,
     getWorktreeReapTimer: () => worktreeReapTimer,
     emergencyCleanupSync,

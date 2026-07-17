@@ -1,6 +1,6 @@
 import { describe, it, before } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'fs'
+import { mkdtempSync, rmSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { EventEmitter } from 'events'
@@ -81,6 +81,35 @@ describe('session-list orchestration badges (#6691 E-4)', () => {
       })
       const entry = mgr.listSessions().find((s) => s.sessionId === id)
       assert.equal(entry.orchestrationRole, 'architect')
+    } finally {
+      cleanup(mgr)
+    }
+  })
+
+  it('metadata is NOT persisted: a serialize→restore round-trip yields no badges', () => {
+    const mgr = makeMgr()
+    const stateFile = join(mgr._tmpDir, 'state.json')
+    try {
+      mgr.createSession({
+        cwd: '/tmp', provider: 'test-noop-badge',
+        metadata: { orchestrationRunId: 'run_abc', orchestrationRole: 'worker.audit' },
+      })
+      mgr.serializeState()
+      // the persisted state carries NO metadata (engine ownership is in-memory;
+      // restart-reconcile re-establishes it — #6743)
+      const raw = JSON.parse(readFileSync(stateFile, 'utf8'))
+      assert.ok(!JSON.stringify(raw).includes('orchestrationRunId'), 'metadata absent from persisted state')
+      // a fresh manager restoring that state lists the session WITHOUT badges
+      const mgr2 = new SessionManager({ skipPreflight: true, maxSessions: 10, defaultCwd: '/tmp', stateFilePath: stateFile })
+      mgr2._tmpDir = mkdtempSync(join(tmpdir(), 'sm-badge-r-'))
+      try {
+        mgr2.restoreState()
+        for (const s of mgr2.listSessions()) {
+          assert.equal('orchestrationRunId' in s, false, 'restored session has no badge')
+        }
+      } finally {
+        cleanup(mgr2)
+      }
     } finally {
       cleanup(mgr)
     }
