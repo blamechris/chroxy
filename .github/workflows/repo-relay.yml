@@ -30,10 +30,21 @@ jobs:
       github.actor != 'github-actions[bot]' &&
       (github.event_name != 'pull_request' ||
        github.event.pull_request.head.repo.full_name == github.repository)
+    # The secrets context isn't readable in a job-level `if`, so surface
+    # "are the Discord secrets configured?" through env and gate each step
+    # on it — an unconfigured repo (or fork) skips cleanly instead of
+    # failing every PR with a red notify check
+    env:
+      DISCORD_CONFIGURED: ${{ secrets.DISCORD_BOT_TOKEN != '' && secrets.DISCORD_CHANNEL_PRS != '' }}
     steps:
+      - name: Note missing Discord configuration
+        if: env.DISCORD_CONFIGURED != 'true'
+        run: echo "::notice::DISCORD_BOT_TOKEN / DISCORD_CHANNEL_PRS repo secrets are not set — skipping Discord notification."
+
       # Persist SQLite state between runs. Per-run key: cache entries are
       # immutable, so a constant key would freeze state at the first run.
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        if: env.DISCORD_CONFIGURED == 'true'
         with:
           path: ~/.repo-relay
           key: repo-relay-state-${{ github.repository }}-${{ github.run_id }}
@@ -41,6 +52,7 @@ jobs:
             repo-relay-state-${{ github.repository }}-
 
       - uses: blamechris/repo-relay@f08840b9c336b50f6aef8d6e157d8f7e705fa875 # v1.1.0
+        if: env.DISCORD_CONFIGURED == 'true'
         with:
           discord_bot_token: ${{ secrets.DISCORD_BOT_TOKEN }}
           channel_prs: ${{ secrets.DISCORD_CHANNEL_PRS }}
