@@ -2650,6 +2650,99 @@ describe('InputBar voice shortcut (#5668)', () => {
     expect(stop).toHaveBeenCalledTimes(1)
   })
 
+  // #6637 — window-scoped push-to-talk: the Control-hold gesture works anywhere
+  // in the Chroxy window, not only when the composer textarea is focused.
+  it('#6637: holding Control with the composer NOT focused starts voice and focuses it', () => {
+    vi.useFakeTimers()
+    const start = vi.fn()
+    render(<ControlledBar voiceInput={makeVoice({ start })} initial="" />)
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    // focus is on the body (composer unfocused) — the document-level handler owns it
+    ;(document.activeElement as HTMLElement | null)?.blur?.()
+    fireEvent.keyDown(document, { key: 'Control' })
+    act(() => { vi.advanceTimersByTime(250) })
+    expect(start).toHaveBeenCalledTimes(1)
+    expect(document.activeElement).toBe(textarea)   // composer focused on fire
+    fireEvent.keyUp(document, { key: 'Control' })
+  })
+
+  it('#6637: does NOT hijack Control while another editable element is focused', () => {
+    vi.useFakeTimers()
+    const start = vi.fn()
+    render(
+      <>
+        <input data-testid="other-field" />
+        <ControlledBar voiceInput={makeVoice({ start })} initial="" />
+      </>,
+    )
+    const other = screen.getByTestId('other-field') as HTMLInputElement
+    act(() => { other.focus() })
+    fireEvent.keyDown(document, { key: 'Control' })
+    act(() => { vi.advanceTimersByTime(250) })
+    expect(start).not.toHaveBeenCalled()
+  })
+
+  it('#6637: releasing Control before the threshold cancels a window-scoped hold', () => {
+    vi.useFakeTimers()
+    const start = vi.fn()
+    render(<ControlledBar voiceInput={makeVoice({ start })} initial="" />)
+    ;(document.activeElement as HTMLElement | null)?.blur?.()
+    fireEvent.keyDown(document, { key: 'Control' })
+    act(() => { vi.advanceTimersByTime(100) })
+    fireEvent.keyUp(document, { key: 'Control' })
+    act(() => { vi.advanceTimersByTime(250) })
+    expect(start).not.toHaveBeenCalled()
+  })
+
+  it('#6637: a modifier chord (Ctrl held, Shift pressed) does not arm the window-scoped hold', () => {
+    vi.useFakeTimers()
+    const start = vi.fn()
+    render(<ControlledBar voiceInput={makeVoice({ start })} initial="" />)
+    ;(document.activeElement as HTMLElement | null)?.blur?.()
+    // realistic sequence: Ctrl down (arms), THEN Shift down (chord → cancel).
+    // #6752 review: a non-Control key during the arm must cancel it.
+    fireEvent.keyDown(document, { key: 'Control' })
+    act(() => { vi.advanceTimersByTime(100) })
+    fireEvent.keyDown(document, { key: 'Shift', ctrlKey: true, shiftKey: true })
+    act(() => { vi.advanceTimersByTime(250) })
+    expect(start).not.toHaveBeenCalled()
+  })
+
+  it('#6637: a non-Control key stops a live window-scoped recording', () => {
+    vi.useFakeTimers()
+    const start = vi.fn()
+    const stop = vi.fn()
+    render(<ControlledBar voiceInput={makeVoice({ start, stop })} initial="" />)
+    ;(document.activeElement as HTMLElement | null)?.blur?.()
+    fireEvent.keyDown(document, { key: 'Control' })
+    act(() => { vi.advanceTimersByTime(250) })
+    expect(start).toHaveBeenCalledTimes(1)
+    fireEvent.keyDown(document, { key: 'a' })
+    expect(stop).toHaveBeenCalledTimes(1)
+  })
+
+  it('#6752: voice disabled DURING the arming window does not open the mic', () => {
+    vi.useFakeTimers()
+    const start = vi.fn()
+    function Wrapper({ disabled }: { disabled: boolean }) {
+      return (
+        <InputBar
+          onSend={vi.fn()}
+          onInterrupt={vi.fn()}
+          disabled={disabled}
+          voiceInput={makeVoice({ start })}
+        />
+      )
+    }
+    const { rerender } = render(<Wrapper disabled={false} />)
+    ;(document.activeElement as HTMLElement | null)?.blur?.()
+    fireEvent.keyDown(document, { key: 'Control' })
+    act(() => { vi.advanceTimersByTime(100) })
+    rerender(<Wrapper disabled={true} />)   // disabled mid-arm
+    act(() => { vi.advanceTimersByTime(250) })
+    expect(start).not.toHaveBeenCalled()
+  })
+
   it('Ctrl+Shift+M cancels a pending Control hold and still toggles voice', () => {
     vi.useFakeTimers()
     const voice = makeVoice()

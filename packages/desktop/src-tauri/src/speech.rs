@@ -114,8 +114,20 @@ pub fn is_available() -> bool {
 /// `voice_error`. Stays silent on the clean-stop / forced-kill path
 /// (`user_requested_stop`), when the helper already reported an error on stdout
 /// (`emitted_error`), and on a successful exit (`exit_failed == false`). (#5668)
-fn should_surface_failure(emitted_error: bool, user_requested_stop: bool, exit_failed: bool) -> bool {
-    !emitted_error && !user_requested_stop && exit_failed
+fn should_surface_failure(
+    emitted_error: bool,
+    user_requested_stop: bool,
+    exit_failed: bool,
+    has_stderr: bool,
+) -> bool {
+    // #6636: a non-zero exit with EMPTY stderr and no stdout error is
+    // indistinguishable from a benign no-speech / idle timeout, and the old
+    // "reinstall Chroxy" copy scared users during a normal silent Control-hold.
+    // Require actual diagnostic output before surfacing a helper failure — a
+    // genuine crash (panic, assert, missing dylib) writes to stderr, while
+    // permission / availability failures come through the stdout error path and
+    // the `check` command instead of here.
+    !emitted_error && !user_requested_stop && exit_failed && has_stderr
 }
 
 /// Bounded wait for the stderr drain thread to finish (#6281): poll `reader_done`
@@ -242,10 +254,18 @@ pub fn start(state: &SpeechState, app: &tauri::AppHandle) -> Result<(), String> 
             match serde_json::from_str::<HelperOutput>(&line) {
                 Ok(output) => {
                     if let Some(error) = output.error {
-                        emitted_error = true;
-                        let _ = app_handle.emit("voice_error", VoiceErrorEvent {
-                            message: error,
-                        });
+                        // #6634: an stdout error arriving while we're stopping is
+                        // the recognizer's cancellation racing the user's stop —
+                        // benign, don't raise a banner. A genuine error during
+                        // active recording (stopping == false) still forwards.
+                        if stopping.load(Ordering::SeqCst) {
+                            // benign cancellation race — swallow it
+                        } else {
+                            emitted_error = true;
+                            let _ = app_handle.emit("voice_error", VoiceErrorEvent {
+                                message: error,
+                            });
+                        }
                     } else if let Some(text) = output.text {
                         let is_final = output.is_final.unwrap_or(false);
                         let _ = app_handle.emit("voice_transcription", TranscriptionEvent {
@@ -290,14 +310,14 @@ pub fn start(state: &SpeechState, app: &tauri::AppHandle) -> Result<(), String> 
         // the clean-stop and forced-kill paths to avoid false positives.
         let user_requested_stop = stopping.load(Ordering::SeqCst);
         let failed = exit_status.map(|s| !s.success()).unwrap_or(false);
-        if should_surface_failure(emitted_error, user_requested_stop, failed) {
-            let message = if stderr_tail.is_empty() {
-                "Voice helper exited unexpectedly. Speech recognition may be unavailable — try reinstalling Chroxy."
-                    .to_string()
-            } else {
-                format!("Voice helper failed: {}", stderr_tail)
-            };
-            let _ = app_handle.emit("voice_error", VoiceErrorEvent { message });
+        // #6636: only surface a helper failure when there's real stderr
+        // diagnostics — an empty-stderr non-zero exit is the benign no-speech /
+        // idle-timeout path and must stay quiet (the `voice_stopped` event below
+        // still reverts the mic). Genuine crashes carry a stderr reason.
+        if should_surface_failure(emitted_error, user_requested_stop, failed, !stderr_tail.is_empty()) {
+            let _ = app_handle.emit("voice_error", VoiceErrorEvent {
+                message: format!("Voice helper failed: {}", stderr_tail),
+            });
         }
 
         let _ = app_handle.emit("voice_stopped", ());
@@ -377,27 +397,36 @@ mod tests {
 
     #[test]
     fn surfaces_unexpected_failure() {
-        // Helper died on its own with a failure status and no prior error.
-        assert!(should_surface_failure(false, false, true));
+        // Helper died on its own with a failure status, no prior error, AND left
+        // a stderr reason — a genuine crash worth surfacing.
+        assert!(should_surface_failure(false, false, true, true));
+    }
+
+    #[test]
+    fn silent_on_empty_stderr_failure() {
+        // #6636: a non-zero exit with NO stderr diagnostics is the benign
+        // no-speech / idle-timeout path — must stay quiet (no scary reinstall
+        // banner during a normal silent Control-hold).
+        assert!(!should_surface_failure(false, false, true, false));
     }
 
     #[test]
     fn silent_on_user_requested_stop() {
         // A clean stop (or the 3s safety-net SIGTERM) must never raise an error,
-        // even though the forced exit reports as a failure.
-        assert!(!should_surface_failure(false, true, true));
+        // even though the forced exit reports as a failure with stderr.
+        assert!(!should_surface_failure(false, true, true, true));
     }
 
     #[test]
     fn silent_when_error_already_emitted() {
         // The helper already reported its error on stdout — don't double-report.
-        assert!(!should_surface_failure(true, false, true));
+        assert!(!should_surface_failure(true, false, true, true));
     }
 
     #[test]
     fn silent_on_clean_exit() {
         // Exited successfully on its own — nothing to surface.
-        assert!(!should_surface_failure(false, false, false));
+        assert!(!should_surface_failure(false, false, false, true));
     }
 
     // #6362 — stderr-drain deadline (#6281). The reader must never park forever
