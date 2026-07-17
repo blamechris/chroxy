@@ -16,6 +16,8 @@
  * resultSummary, attempt, committeeIterations } } }.
  */
 
+import { RUN_GATE_KIND_VALUES, COMMITTEE_VERDICT_VALUES } from './run-model.js'
+
 const num = (v, d = 0) => (Number.isFinite(v) ? v : d)
 const str = (v, d = '') => (typeof v === 'string' ? v : d)
 const nstr = (v) => (typeof v === 'string' ? v : null)
@@ -83,9 +85,19 @@ export function timelineEntryToWire(entryArg) {
   }
   if (entry.nodeId != null) out.nodeId = String(entry.nodeId)
   if (entry.gateId != null) out.gateId = String(entry.gateId)
-  if (entry.verdict != null) out.verdict = entry.verdict
+  // verdict is optional AND enum-constrained — only pass a valid one through, else
+  // omit it (an out-of-enum string would make safeParse reject the whole entry).
+  if (COMMITTEE_VERDICT_VALUES.includes(entry.verdict)) out.verdict = entry.verdict
   if (entry.detail != null) out.detail = String(entry.detail)
   return out
+}
+
+// A gate is projectable only with a schema-valid `kind` (a required enum with no
+// safe default). A malformed gate is dropped from a run's gate list rather than
+// emitted as an invalid RunGate — from the real path makeGate guarantees a valid
+// kind, so this only guards a corrupted/hand-built gate.
+function isProjectableGate(gate) {
+  return gate && RUN_GATE_KIND_VALUES.includes(gate.kind)
 }
 
 /** A ledger subtask record (+ per-node extras) → RunNode. Null-safe. */
@@ -141,7 +153,7 @@ function updatedAtOf(record) {
 export function recordToRunSummary(record = {}, extras = {}) {
   const cfg = record.configSnapshot || {}
   const architect = cfg.roleModels?.architect || {}
-  const gates = (extras.gates || []).filter(Boolean)
+  const gates = (extras.gates || []).filter(isProjectableGate)
   return {
     runId: str(record.runId),
     title: str(record.title),
@@ -172,7 +184,7 @@ export function recordToRunDetail(record = {}, extras = {}) {
     epicPrompt: str(extras.epicPrompt),
     // filter falsy elements — a null in a manager-supplied array must not throw.
     nodes: (record.subtasks || []).filter(Boolean).map((s) => nodeToWire(s, record.runId, nodeExtras[s.subtaskId] || {})),
-    gates: (extras.gates || []).filter(Boolean).map(gateToWire),
+    gates: (extras.gates || []).filter(isProjectableGate).map(gateToWire),
     timeline: (extras.timeline || []).filter(Boolean).slice(-500).map(timelineEntryToWire),
     usageRollup: rollup,
     meteringGaps: Array.isArray(record.meteringGaps) ? record.meteringGaps.slice() : [],

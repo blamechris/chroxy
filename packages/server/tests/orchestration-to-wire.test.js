@@ -217,6 +217,25 @@ test('null elements in manager arrays degrade gracefully (never throw, still sch
   }
 })
 
+test('a gate with an invalid kind is dropped; an out-of-enum verdict is omitted (never emitted invalid)', () => {
+  const { ledger, cleanup } = mkLedger()
+  try {
+    const record = buildRecord(ledger)
+    const good = makeGate({ gateId: 'g', runId: record.runId, kind: 'epic_plan', nodeId: null, summary: 's', openedAt: 1 })
+    const detail = recordToRunDetail(record, {
+      epicPrompt: 'x',
+      gates: [good, { gateId: 'bad', runId: record.runId, kind: 'not_a_kind', summary: 's', openedAt: 1, status: 'pending' }],
+      timeline: [{ seq: 1, at: 1, kind: 'k', summary: 's', verdict: 'bogus_verdict' }],
+    })
+    assert.equal(detail.gates.length, 1, 'malformed-kind gate dropped')
+    assert.equal(detail.gates[0].gateId, 'g')
+    assert.equal(detail.timeline[0].verdict, undefined, 'out-of-enum verdict omitted')
+    assert.equal(RunDetailSchema.safeParse(detail).success, true)
+  } finally {
+    cleanup()
+  }
+})
+
 test('a degraded/empty record still projects to a schema-valid summary + detail', () => {
   const { ledger, cleanup } = mkLedger()
   try {
