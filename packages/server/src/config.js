@@ -110,6 +110,13 @@ const CONFIG_SCHEMA = {
   // CHROXY_ENABLE_IDE=1 env override) reveals the IDE navigation/editing features;
   // off by default so it never risks the core offering. See isIdeFeatureEnabled().
   features: 'object',
+  // #6691 (E-4): the orchestration engine's config block ({ roles, bash, diff,
+  // maxParallelWorkers, ... } — consumed by OrchestrationManager via
+  // buildOrchestrationManager). Declared here so a configured block doesn't
+  // trip the misleading "Unknown config key ... (will be ignored)" warning —
+  // mergeConfig passes unknown file keys through regardless, but the warning
+  // suggested otherwise.
+  orchestration: 'object',
   externalUrl: 'string',
   repos: 'array',
   // #5172 (Control Room v2): filesystem root the Host Status survey scans
