@@ -20,7 +20,7 @@
  */
 
 import { EventEmitter } from 'node:events'
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { randomBytes } from 'node:crypto'
 import { join } from 'node:path'
 import { loadJsonState, saveJsonState } from '../json-state-file.js'
@@ -344,6 +344,47 @@ export class RunLedger extends EventEmitter {
 
   note(runId, patch) {
     this._emitEvent(runId, { type: 'run_note', patch }, { lifecycle: true })
+  }
+
+  // M-4 (#6701): set the monolithic-baseline comparison anchor (journaled, so
+  // it survives restart + replay). Last write wins.
+  setBaseline(runId, baseline) {
+    this._emitEvent(runId, { type: 'baseline_set', baseline }, { lifecycle: true })
+    return this.getRun(runId)
+  }
+
+  // M-4: persist the final report artifacts next to run.json. Overwrites on
+  // re-annotation (the report is derived state — the journal is ground truth).
+  writeReport(runId, { json = '', markdown = '' } = {}) {
+    const dir = this._runDir(runId)
+    try {
+      mkdirSync(dir, { recursive: true })
+      // tmp+rename per file so a crash never leaves a HALF-WRITTEN artifact; a
+      // crash between the two renames can leave json/md from different builds,
+      // which is acceptable for derived state (regenerated on re-annotation).
+      for (const [name, content] of [['report.json', json], ['report.md', markdown]]) {
+        const tmp = join(dir, `${name}.tmp`)
+        writeFileSync(tmp, content)
+        renameSync(tmp, join(dir, name))
+      }
+      return true
+    } catch (err) {
+      log.warn(`writeReport failed for ${runId}: ${err?.message || err}`)
+      return false
+    }
+  }
+
+  // M-4: read persisted report artifacts (null when absent) — lets a restarted
+  // daemon serve a terminal run's report without the in-memory copy.
+  readReport(runId) {
+    const dir = this._runDir(runId)
+    try {
+      const json = readFileSync(join(dir, 'report.json'), 'utf8')
+      const markdown = readFileSync(join(dir, 'report.md'), 'utf8')
+      return { json, markdown }
+    } catch {
+      return null
+    }
   }
 
   getRun(runId) {

@@ -189,8 +189,10 @@ export function recordToRunDetail(record = {}, extras = {}) {
     usageRollup: rollup,
     meteringGaps: Array.isArray(record.meteringGaps) ? record.meteringGaps.slice() : [],
   }
+  // An unmetered (subscription-billed) baseline has no cost signal — omitting
+  // the figure beats projecting a misleading $0 (matches run-report.js).
   const baseline = record.baseline?.effectiveUsd
-  if (Number.isFinite(baseline)) detail.baselineEffectiveUsd = baseline
+  if (Number.isFinite(baseline) && record.baseline?.unmetered !== true) detail.baselineEffectiveUsd = baseline
   if (record.notes?.verdictQuality != null) detail.verdictQuality = String(record.notes.verdictQuality)
   if (extras.report && typeof extras.report === 'object') {
     detail.report = { json: str(extras.report.json), markdown: str(extras.report.markdown) }
