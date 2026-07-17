@@ -846,11 +846,17 @@ export class OrchestrationManager extends EventEmitter {
   // The report artifacts for a run, in preference order: the in-memory docs
   // (built at completion / re-annotation), then the persisted report.{json,md}
   // (a restarted daemon), then the bare synthesis narrative (legacy fallback).
+  // The disk read is SKIPPED for live runs: a report only exists at terminal
+  // state, and _snapshotExtras runs on hot paths (every delta emit, listRuns) —
+  // probing the filesystem per delta for a file that can't exist yet would be
+  // pure waste.
   _reportExtra(runId) {
     const docs = this._reportDocs.get(runId)
     if (docs) return docs
-    const persisted = this._ledger.readReport?.(runId)
-    if (persisted) return persisted
+    if (!this._runs.has(runId)) {
+      const persisted = this._ledger.readReport?.(runId)
+      if (persisted) return persisted
+    }
     const md = this._reports.get(runId)
     return md ? { json: '', markdown: md } : null
   }
@@ -917,21 +923,22 @@ export class OrchestrationManager extends EventEmitter {
         err.code = 'BASELINE_SESSION_NOT_FOUND'
         throw err
       }
-      const u = entry.cumulativeUsage || {}
-      const costUsd = Number.isFinite(u.costUsd) ? u.costUsd : 0
+      const u = entry.cumulativeUsage || null
+      const costUsd = Number.isFinite(u?.costUsd) ? u.costUsd : 0
       // A subscription-billed baseline (claude-tui, the default provider) keeps
       // costUsd at 0 forever while doing real work — recording it as a $0
       // baseline would render "delegation cost MORE than the monolithic run",
-      // the exact inversion the honesty rules exist to prevent. Flag it
+      // the exact inversion the honesty rules exist to prevent. Same for a
+      // session with NO usage accumulator at all: no signal ≠ $0. Flag both
       // unmetered so the report suppresses the money delta and surfaces the gap.
-      const hadActivity = (u.turnsBilled ?? 0) > 0 || (u.inputTokens ?? 0) > 0 || (u.outputTokens ?? 0) > 0
+      const hadActivity = (u?.turnsBilled ?? 0) > 0 || (u?.inputTokens ?? 0) > 0 || (u?.outputTokens ?? 0) > 0
       this._ledger.setBaseline(runId, {
         sessionId: baselineSessionId,
         // a plain session's spend signal is its provider-reported cumulative cost
         effectiveUsd: costUsd,
-        unmetered: costUsd === 0 && hadActivity,
-        inputTokens: u.inputTokens, outputTokens: u.outputTokens,
-        cacheReadTokens: u.cacheReadTokens, cacheCreationTokens: u.cacheCreationTokens,
+        unmetered: !u || (costUsd === 0 && hadActivity),
+        inputTokens: u?.inputTokens, outputTokens: u?.outputTokens,
+        cacheReadTokens: u?.cacheReadTokens, cacheCreationTokens: u?.cacheCreationTokens,
       })
     }
     // refresh derived artifacts for a terminal run (a live run rebuilds at completion)
