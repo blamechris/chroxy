@@ -13,10 +13,15 @@ const requestRunsMock = vi.fn(() => true)
 const requestDetailMock = vi.fn(() => true)
 const selectRunMock = vi.fn()
 const switchSessionMock = vi.fn()
+const startRunMock = vi.fn(() => 'orch-start-1')
+const gateResponseMock = vi.fn(() => 'orch-gate-1')
+const runActionMock = vi.fn(() => 'orch-action-1')
+const annotateMock = vi.fn(() => 'orch-annotate-1')
 let storeState: Record<string, unknown> = {}
 
 function resetStore(over: Record<string, unknown> = {}) {
   requestRunsMock.mockClear(); requestDetailMock.mockClear(); selectRunMock.mockClear(); switchSessionMock.mockClear()
+  startRunMock.mockClear(); gateResponseMock.mockClear(); runActionMock.mockClear(); annotateMock.mockClear()
   storeState = {
     connectionPhase: 'connected',
     orchestrationRuns: null,
@@ -25,11 +30,17 @@ function resetStore(over: Record<string, unknown> = {}) {
     orchestrationRunDetailLoading: new Set<string>(),
     orchestrationRunDetailErrors: {},
     orchestrationRunDetailStale: {},
+    orchestrationPendingActions: {},
+    orchestrationActionResults: {},
     selectedRunId: null,
     requestOrchestrationRuns: requestRunsMock,
     requestOrchestrationRunDetail: requestDetailMock,
     selectRun: selectRunMock,
     switchSession: switchSessionMock,
+    startOrchestrationRun: startRunMock,
+    sendOrchestrationGateResponse: gateResponseMock,
+    sendOrchestrationRunAction: runActionMock,
+    sendOrchestrationRunAnnotate: annotateMock,
     ...over,
   }
 }
@@ -167,5 +178,108 @@ describe('OrchestrationRunsSection (#6691 S-3b)', () => {
     resetStore({ orchestrationRuns: snapshot([]), orchestrationRunsLoading: true })
     rerender(<OrchestrationRunsSection />)
     expect((screen.getByTestId('orch-refresh') as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  // ---- S-3c mutating affordances ----
+
+  it('GateBanner: approve sends a gate response; request-changes requires a note', () => {
+    resetStore({
+      orchestrationRuns: snapshot([runSummary()]),
+      selectedRunId: 'run_1',
+      orchestrationRunDetails: { run_1: { detail: runDetail(), seq: 3 } },
+    })
+    render(<OrchestrationRunsSection />)
+    // request-changes disabled until a note is typed
+    expect((screen.getByTestId('orch-gate-revise') as HTMLButtonElement).disabled).toBe(true)
+    fireEvent.click(screen.getByTestId('orch-gate-approve'))
+    expect(gateResponseMock).toHaveBeenCalledWith('run_1', 'g1', 'approve', undefined, undefined)
+    // typing a note enables revise
+    fireEvent.change(screen.getByTestId('orch-gate-note'), { target: { value: 'tighten scope' } })
+    fireEvent.click(screen.getByTestId('orch-gate-revise'))
+    expect(gateResponseMock).toHaveBeenCalledWith('run_1', 'g1', 'revise', 'tighten scope', undefined)
+  })
+
+  it('GateBanner: a budget_overrun gate exposes the new-cap input on approve', () => {
+    const gate = { gateId: 'g2', runId: 'run_1', nodeId: null, kind: 'budget_overrun', status: 'pending', summary: 'Raise the cap?', openedAt: 1, resolvedAt: null, resolvedBy: null, budgetUsd: 10 }
+    resetStore({
+      orchestrationRuns: snapshot([runSummary()]),
+      selectedRunId: 'run_1',
+      orchestrationRunDetails: { run_1: { detail: runDetail({ gates: [gate] }), seq: 3 } },
+    })
+    render(<OrchestrationRunsSection />)
+    fireEvent.change(screen.getByTestId('orch-gate-budget-input'), { target: { value: '12.5' } })
+    fireEvent.click(screen.getByTestId('orch-gate-approve'))
+    expect(gateResponseMock).toHaveBeenCalledWith('run_1', 'g2', 'approve', undefined, 12.5)
+  })
+
+  it('RunControls: cancel confirms then sends; pause shown for an executing run', () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    resetStore({
+      orchestrationRuns: snapshot([runSummary()]),
+      selectedRunId: 'run_1',
+      orchestrationRunDetails: { run_1: { detail: runDetail({ status: 'executing' }), seq: 3 } },
+    })
+    render(<OrchestrationRunsSection />)
+    expect(screen.getByTestId('orch-action-pause')).toBeTruthy()
+    fireEvent.click(screen.getByTestId('orch-action-cancel'))
+    expect(confirmSpy).toHaveBeenCalled()
+    expect(runActionMock).toHaveBeenCalledWith('run_1', 'cancel')
+    confirmSpy.mockRestore()
+  })
+
+  it('RunControls: resume shown for a paused run, hidden at terminal state', () => {
+    resetStore({
+      orchestrationRuns: snapshot([runSummary({ status: 'paused' })]),
+      selectedRunId: 'run_1',
+      orchestrationRunDetails: { run_1: { detail: runDetail({ status: 'paused' }), seq: 3 } },
+    })
+    const { rerender } = render(<OrchestrationRunsSection />)
+    fireEvent.click(screen.getByTestId('orch-action-resume'))
+    expect(runActionMock).toHaveBeenCalledWith('run_1', 'resume')
+    // terminal → no controls at all
+    resetStore({
+      orchestrationRuns: snapshot([runSummary({ status: 'completed' })]),
+      selectedRunId: 'run_1',
+      orchestrationRunDetails: { run_1: { detail: runDetail({ status: 'completed' }), seq: 9 } },
+    })
+    rerender(<OrchestrationRunsSection />)
+    expect(screen.queryByTestId('orch-run-controls')).toBeNull()
+  })
+
+  it('AnnotateForm: submits baseline + verdict quality at terminal state', () => {
+    resetStore({
+      orchestrationRuns: snapshot([runSummary({ status: 'completed' })]),
+      selectedRunId: 'run_1',
+      orchestrationRunDetails: { run_1: { detail: runDetail({ status: 'completed' }), seq: 9 } },
+    })
+    render(<OrchestrationRunsSection />)
+    fireEvent.change(screen.getByTestId('orch-annotate-baseline'), { target: { value: 'sess_mono' } })
+    fireEvent.change(screen.getByTestId('orch-annotate-quality'), { target: { value: 'excellent' } })
+    fireEvent.click(screen.getByTestId('orch-annotate-submit'))
+    expect(annotateMock).toHaveBeenCalledWith('run_1', { baselineSessionId: 'sess_mono', verdictQuality: 'excellent' })
+  })
+
+  it('NewRunModal: opens, requires cwd, and starts a preset run', () => {
+    resetStore({ orchestrationRuns: snapshot([]) })
+    render(<OrchestrationRunsSection />)
+    fireEvent.click(screen.getByTestId('orch-new-run'))
+    expect(screen.getByTestId('orch-new-run-modal')).toBeTruthy()
+    // submit disabled until cwd is provided
+    expect((screen.getByTestId('orch-new-submit') as HTMLButtonElement).disabled).toBe(true)
+    fireEvent.change(screen.getByTestId('orch-new-cwd'), { target: { value: '/repo' } })
+    fireEvent.click(screen.getByTestId('orch-new-autoapprove'))
+    fireEvent.click(screen.getByTestId('orch-new-submit'))
+    expect(startRunMock).toHaveBeenCalledWith(expect.objectContaining({ cwd: '/repo', preset: 'repo-audit', autoApprovePlan: true }))
+  })
+
+  it('NewRunModal: custom epic prompt path (no preset)', () => {
+    resetStore({ orchestrationRuns: snapshot([]) })
+    render(<OrchestrationRunsSection />)
+    fireEvent.click(screen.getByTestId('orch-new-run'))
+    fireEvent.change(screen.getByTestId('orch-new-preset'), { target: { value: '' } })
+    fireEvent.change(screen.getByTestId('orch-new-cwd'), { target: { value: '/repo' } })
+    fireEvent.change(screen.getByTestId('orch-new-epic'), { target: { value: 'Refactor the auth module' } })
+    fireEvent.click(screen.getByTestId('orch-new-submit'))
+    expect(startRunMock).toHaveBeenCalledWith(expect.objectContaining({ cwd: '/repo', epicPrompt: 'Refactor the auth module', preset: undefined }))
   })
 })

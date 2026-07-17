@@ -1072,6 +1072,67 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     set({ selectedRunId: runId });
   },
 
+  // #6691 (S-3c): the mutating orchestration actions. All wire-or-nothing —
+  // the pending entry is written ONLY after wsSend genuinely puts the message on
+  // the wire (never queued offline), keyed by the requestId the server echoes on
+  // the orchestration_action_ack / ORCHESTRATION_ACTION_FAILED session_error.
+  startOrchestrationRun: (opts: {
+    preset?: string; epicPrompt?: string; cwd: string; title?: string;
+    budgetUsd?: number; autoApprovePlan?: boolean;
+    roles?: Record<string, { provider: string; model: string }>;
+  }): string | null => {
+    const { socket } = get();
+    if (!opts.cwd || (!opts.preset && !opts.epicPrompt)) return null;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return null;
+    const requestId = `orch-start-${nextMessageId()}`;
+    const msg: Record<string, unknown> = { type: 'orchestration_run_start', cwd: opts.cwd, requestId };
+    if (opts.preset) msg.preset = opts.preset;
+    if (opts.epicPrompt) msg.epicPrompt = opts.epicPrompt;
+    if (opts.title) msg.title = opts.title;
+    if (typeof opts.budgetUsd === 'number') msg.budgetUsd = opts.budgetUsd;
+    if (typeof opts.autoApprovePlan === 'boolean') msg.autoApprovePlan = opts.autoApprovePlan;
+    if (opts.roles && Object.keys(opts.roles).length > 0) msg.roles = opts.roles;
+    if (!wsSend(socket, msg)) return null;
+    set({ orchestrationPendingActions: { ...get().orchestrationPendingActions, [requestId]: { kind: 'start', runId: '', at: Date.now() } } });
+    return requestId;
+  },
+
+  sendOrchestrationGateResponse: (runId: string, gateId: string, decision: 'approve' | 'reject' | 'revise' | 'skip', note?: string, budgetUsd?: number): string | null => {
+    const { socket } = get();
+    if (!runId || !gateId) return null;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return null;
+    const requestId = `orch-gate-${nextMessageId()}`;
+    const msg: Record<string, unknown> = { type: 'orchestration_gate_response', runId, gateId, decision, requestId };
+    if (note) msg.note = note;
+    if (typeof budgetUsd === 'number') msg.budgetUsd = budgetUsd;
+    if (!wsSend(socket, msg)) return null;
+    set({ orchestrationPendingActions: { ...get().orchestrationPendingActions, [requestId]: { kind: 'gate_response', runId, gateId, at: Date.now() } } });
+    return requestId;
+  },
+
+  sendOrchestrationRunAction: (runId: string, action: 'cancel' | 'pause' | 'resume'): string | null => {
+    const { socket } = get();
+    if (!runId) return null;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return null;
+    const requestId = `orch-action-${nextMessageId()}`;
+    if (!wsSend(socket, { type: 'orchestration_run_action', runId, action, requestId })) return null;
+    set({ orchestrationPendingActions: { ...get().orchestrationPendingActions, [requestId]: { kind: action, runId, at: Date.now() } } });
+    return requestId;
+  },
+
+  sendOrchestrationRunAnnotate: (runId: string, opts: { baselineSessionId?: string; verdictQuality?: string }): string | null => {
+    const { socket } = get();
+    if (!runId || (!opts.baselineSessionId && opts.verdictQuality === undefined)) return null;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return null;
+    const requestId = `orch-annotate-${nextMessageId()}`;
+    const msg: Record<string, unknown> = { type: 'orchestration_run_annotate', runId, requestId };
+    if (opts.baselineSessionId) msg.baselineSessionId = opts.baselineSessionId;
+    if (opts.verdictQuality !== undefined) msg.verdictQuality = opts.verdictQuality;
+    if (!wsSend(socket, msg)) return null;
+    set({ orchestrationPendingActions: { ...get().orchestrationPendingActions, [requestId]: { kind: 'annotate', runId, at: Date.now() } } });
+    return requestId;
+  },
+
   // #6543 (IDE P3 feature B): pull the full redacted tool input for a pending
   // permission so the prompt can render a per-hunk pre-write diff. The reply is a
   // single `permission_input` handled into `permissionInputs[requestId]`. Returns
