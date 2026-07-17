@@ -1108,6 +1108,12 @@ export class SessionManager extends EventEmitter {
    *   handler preserves the restored history + worktree (registers a failed-restore)
    *   instead of fully destroying the session. Fresh sessions omit it and take the
    *   full-destroy path on start failure.
+   * @param {object|null} [options.metadata] - #6691 (E-4): opaque per-session annotations
+   *   set by an in-process caller (the orchestration engine tags its sessions with
+   *   `{ orchestrationRunId, orchestrationRole }`, surfaced as optional session-list badge
+   *   fields). NOT settable over the wire (the create_session handler whitelists its
+   *   fields), and NOT persisted — in-memory only in v1; restart-reconcile re-establishes
+   *   it (#6743).
    * @returns {string} sessionId
    */
   createSession({ name, cwd, model, permissionMode, resumeSessionId, provider, worktree, restoreWorktreePath, restoreWorktreeRepoDir, sandbox, codexSandbox, containerId, containerUser, containerCliPath, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, stdinForwardingDisabled, bootedModel, messageCounter, skipPermissions, agentCommId, metadata = null, skipPersist = false, preserveId, isRestore = false } = {}) {
