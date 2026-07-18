@@ -134,6 +134,83 @@ describe('#6771 PermissionRuleStore', () => {
     const corrupt = new PermissionRuleStore({ filePath: corruptPath, logger: silentLog }).load()
     assert.deepEqual(corrupt.getRules('/proj/a'), [])
   })
+
+  // -- load() hardening (Copilot review on PR #6826) --
+
+  it('double-load leaves exactly the file\'s rules — no ghosts, no duplicates', () => {
+    const store = new PermissionRuleStore({ filePath, logger: silentLog })
+    store.addRule('/proj/a', { tool: 'Write', decision: 'allow' })
+    store.addRule('/proj/b', { tool: 'Read', decision: 'allow' })
+
+    // Re-loading the same file must be idempotent (no per-project duplicates).
+    store.load()
+    store.load()
+    assert.deepEqual(store.getRules('/proj/a'), [{ tool: 'Write', decision: 'allow' }])
+    assert.deepEqual(store.getRules('/proj/b'), [{ tool: 'Read', decision: 'allow' }])
+
+    // Overwrite the file externally with a REDUCED set, then re-load: the
+    // dropped project must not survive as an in-memory ghost that a later
+    // _persist would resurrect.
+    writeFileSync(filePath, JSON.stringify({
+      version: 1,
+      projects: { '/proj/b': { rules: [{ tool: 'Read', decision: 'allow' }] } },
+    }))
+    store.load()
+    assert.deepEqual(store.getRules('/proj/a'), [], 'externally-removed project does not ghost')
+    assert.deepEqual(store.getRules('/proj/b'), [{ tool: 'Read', decision: 'allow' }])
+
+    // Delete the file entirely, re-load: empty (stale rules dropped).
+    rmSync(filePath)
+    store.load()
+    assert.deepEqual(store.getRules('/proj/b'), [], 'load after file deletion resets to empty')
+  })
+
+  it('load() rejects an unknown store version whole (fail-open empty, no crash, no partial read)', () => {
+    writeFileSync(filePath, JSON.stringify({
+      version: 999,
+      projects: { '/proj/a': { rules: [{ tool: 'Write', decision: 'allow' }] } },
+    }))
+    const store = new PermissionRuleStore({ filePath, logger: silentLog }).load()
+    assert.deepEqual(store.getRules('/proj/a'), [], 'unknown version is never partially read')
+
+    // A missing version field is equally rejected (not silently assumed v1).
+    writeFileSync(filePath, JSON.stringify({
+      projects: { '/proj/a': { rules: [{ tool: 'Write', decision: 'allow' }] } },
+    }))
+    const store2 = new PermissionRuleStore({ filePath, logger: silentLog }).load()
+    assert.deepEqual(store2.getRules('/proj/a'), [])
+  })
+
+  it('load() re-normalizes hand-edited non-normalized keys so the session\'s normalized cwd still matches', () => {
+    writeFileSync(filePath, JSON.stringify({
+      version: 1,
+      projects: {
+        '/proj/a/': { rules: [{ tool: 'Write', decision: 'allow' }] },          // trailing slash
+        '/proj/x/../b': { rules: [{ tool: 'Read', decision: 'allow' }] },       // .. traversal
+      },
+    }))
+    const store = new PermissionRuleStore({ filePath, logger: silentLog }).load()
+    assert.deepEqual(store.getRules('/proj/a'), [{ tool: 'Write', decision: 'allow' }])
+    assert.deepEqual(store.getRules('/proj/b'), [{ tool: 'Read', decision: 'allow' }])
+  })
+
+  it('load() merges two file keys that normalize to the same cwd without duplicating rules', () => {
+    writeFileSync(filePath, JSON.stringify({
+      version: 1,
+      projects: {
+        '/proj/a': { rules: [{ tool: 'Write', decision: 'allow' }] },
+        '/proj/a/': { rules: [
+          { tool: 'Write', decision: 'deny' },   // same tool — first key wins, no dup
+          { tool: 'Read', decision: 'allow' },   // new tool — merged in
+        ] },
+      },
+    }))
+    const store = new PermissionRuleStore({ filePath, logger: silentLog }).load()
+    assert.deepEqual(
+      store.getRules('/proj/a').sort((x, y) => x.tool.localeCompare(y.tool)),
+      [{ tool: 'Read', decision: 'allow' }, { tool: 'Write', decision: 'allow' }],
+    )
+  })
 })
 
 describe('#6771 PermissionManager + durable rules', () => {

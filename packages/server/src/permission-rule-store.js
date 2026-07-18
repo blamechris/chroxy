@@ -89,14 +89,26 @@ export class PermissionRuleStore {
   }
 
   /**
-   * Load rules from disk. Idempotent — safe to call once at daemon start. A
-   * missing file is treated as an empty store; an unparseable / malformed file
-   * is logged and skipped (fail-open to "no persisted rules" rather than
-   * crashing daemon start over a corrupt sidecar).
+   * Load rules from disk, REPLACING any in-memory state — load() is a true
+   * snapshot of the file, so a second load() (or a load after the file was
+   * deleted or corrupted) can never keep stale in-memory rules alive and
+   * re-persist them on the next write. A missing file is treated as an empty
+   * store; an unparseable / malformed / unknown-version file is logged and
+   * skipped whole (fail-open to "no persisted rules", never a partial read).
+   *
+   * Project keys are re-normalized through {@link normalizeProjectKey} on load
+   * (the same function every read/write path uses), so a hand-edited
+   * non-normalized key (trailing slash, `..` segments) can't create a shadow
+   * entry that a session's normalized cwd never matches. Two file keys that
+   * normalize to the same cwd merge (first key's rule wins per tool, matching
+   * the per-project dedupe).
    * @returns {this}
    */
   load() {
     this._loaded = true
+    // Reset FIRST — see the doc block: every early return below must leave the
+    // store EMPTY, not holding the previous load's (now unbacked) rules.
+    this._projects.clear()
     let raw
     try {
       raw = fs.readFileSync(this._filePath, 'utf-8')
@@ -113,11 +125,24 @@ export class PermissionRuleStore {
       this._log.warn(`Failed to parse permission rules at ${this._filePath}: ${err.message} — ignoring`)
       return this
     }
-    const projects = parsed && typeof parsed === 'object' ? parsed.projects : null
+    if (!parsed || typeof parsed !== 'object') return this
+    // Version gate: an unknown (future / hand-mangled) version is skipped WHOLE
+    // rather than partially read against the wrong shape assumptions.
+    if (parsed.version !== STORE_VERSION) {
+      this._log.warn(`Unsupported permission-rules version ${JSON.stringify(parsed.version)} at ${this._filePath} (expected ${STORE_VERSION}) — ignoring`)
+      return this
+    }
+    const projects = parsed.projects
     if (!projects || typeof projects !== 'object') return this
-    for (const [key, entry] of Object.entries(projects)) {
+    for (const [rawKey, entry] of Object.entries(projects)) {
+      // Re-normalize the file key so non-normalized spellings can't shadow the
+      // normalized key every runtime read/write uses. An unkeyable entry is dropped.
+      const key = normalizeProjectKey(rawKey)
+      if (!key) continue
       const rules = entry && Array.isArray(entry.rules) ? entry.rules : []
-      const clean = []
+      // Merge base: rules already loaded under the same NORMALIZED key from an
+      // earlier (differently-spelled) file key — dedupe by tool, first key wins.
+      const clean = this._projects.get(key)?.slice() ?? []
       for (const rule of rules) {
         if (!rule || typeof rule.tool !== 'string') continue
         if (rule.decision !== 'allow' && rule.decision !== 'deny') continue
