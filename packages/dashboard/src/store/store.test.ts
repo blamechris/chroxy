@@ -2141,6 +2141,27 @@ describe('resolvedPermissions + Allow for Session (#2833, #2834)', () => {
     _testMessageHandler.clearContext();
   });
 
+  it('switchSession clears the permission audit history so it never shows another session\'s entries', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const { createEmptySessionState } = await import('./utils');
+
+    useConnectionStore.setState({
+      activeSessionId: 's1',
+      sessionStates: { s1: { ...createEmptySessionState() }, s2: { ...createEmptySessionState() } },
+      sessionNotifications: [],
+      permissionAudit: [{ type: 'decision', sessionId: 's1', decision: 'allow', timestamp: 1 }],
+      permissionAuditLoading: true,
+      socket: null,
+    });
+
+    useConnectionStore.getState().switchSession('s2');
+
+    const state = useConnectionStore.getState();
+    expect(state.activeSessionId).toBe('s2');
+    expect(state.permissionAudit).toBeNull();
+    expect(state.permissionAuditLoading).toBe(false);
+  });
+
   it('permission_expired for an already-resolved requestId does not mutate the prompt message', async () => {
     const { useConnectionStore } = await import('./connection');
     const { createEmptySessionState } = await import('./utils');

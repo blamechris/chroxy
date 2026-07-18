@@ -4035,6 +4035,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // a stale banner doesn't outlive the resolution.
     if (get().sessionNotFoundError) set({ sessionNotFoundError: null });
 
+    // #6772 (PR #6836 review) — the permission audit history is a FLAT,
+    // per-session pull (queryPermissionAudit scopes to the active session).
+    // Clear it on every switch so the SettingsPanel "Permission history" view
+    // never shows the PREVIOUS session's entries against the new session; the
+    // user re-pulls on demand. The loading flag resets too so an in-flight
+    // pull for the old session can't wedge the button.
+    set({ permissionAudit: null, permissionAuditLoading: false });
+
     // Optimistically switch to cached state + mark notifications for target
     // session as read. #4890 — pre-widget we filtered the target session's
     // alerts out entirely, but the new Slack-style widget needs the entries

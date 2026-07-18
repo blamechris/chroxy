@@ -531,6 +531,57 @@ describe('settings-handlers', () => {
       assert.equal(ctx._sent[0].entries.length, 1)
     })
 
+    // #6837 — a pairing-bound (share-a-session) token is scoped to its OWN
+    // session's audit trail: cross-session and global (omit-sessionId) queries
+    // are rejected. Mirrors the authority gate on the adjacent
+    // handleGetPermissionInput / handleSetPermissionRules.
+    it('rejects a bound client querying ANOTHER session\'s audit', () => {
+      const ctx = makeCtx()
+      ctx.permissions.permissionAudit = { query: createSpy(() => [{ id: 1 }]) }
+      const client = makeClient({ boundSessionId: 's-own' })
+
+      settingsHandlers.query_permission_audit(makeWs(), client, { sessionId: 's-other' }, ctx)
+
+      assert.equal(ctx.permissions.permissionAudit.query.calls.length, 0, 'audit log never queried')
+      assert.equal(ctx._sent[0].type, 'error')
+      assert.equal(ctx._sent[0].code, 'PERMISSION_AUDIT_FORBIDDEN_BOUND_CLIENT')
+      assert.ok(!ctx._sent.some((m) => m.type === 'permission_audit_result'), 'no audit result leaked')
+    })
+
+    it('rejects a bound client\'s GLOBAL query (sessionId omitted)', () => {
+      const ctx = makeCtx()
+      ctx.permissions.permissionAudit = { query: createSpy(() => [{ id: 1 }]) }
+      const client = makeClient({ boundSessionId: 's-own' })
+
+      settingsHandlers.query_permission_audit(makeWs(), client, {}, ctx)
+
+      assert.equal(ctx.permissions.permissionAudit.query.calls.length, 0, 'audit log never queried')
+      assert.equal(ctx._sent[0].type, 'error')
+      assert.equal(ctx._sent[0].code, 'PERMISSION_AUDIT_FORBIDDEN_BOUND_CLIENT')
+    })
+
+    it('allows a bound client to query its OWN session\'s audit', () => {
+      const ctx = makeCtx()
+      ctx.permissions.permissionAudit = { query: createSpy(() => [{ id: 1 }]) }
+      const client = makeClient({ boundSessionId: 's-own' })
+
+      settingsHandlers.query_permission_audit(makeWs(), client, { sessionId: 's-own' }, ctx)
+
+      assert.equal(ctx._sent[0].type, 'permission_audit_result')
+      assert.equal(ctx._sent[0].entries.length, 1)
+    })
+
+    it('leaves an unbound (primary) client unrestricted — global and cross-session queries work', () => {
+      const ctx = makeCtx()
+      ctx.permissions.permissionAudit = { query: createSpy(() => [{ id: 1 }]) }
+
+      settingsHandlers.query_permission_audit(makeWs(), makeClient(), {}, ctx)
+      settingsHandlers.query_permission_audit(makeWs(), makeClient(), { sessionId: 'any-session' }, ctx)
+
+      assert.equal(ctx._sent.length, 2)
+      assert.ok(ctx._sent.every((m) => m.type === 'permission_audit_result'))
+    })
+
     // #6772 — the dashboard "Permission history" view queries this API scoped to
     // the active session. Prove the existing API genuinely serves a per-session
     // query end-to-end through the handler with a REAL audit log (no server change
