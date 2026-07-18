@@ -11,7 +11,7 @@
  * the next turn's tool list.
  */
 
-import { MCPClient, MCP_STATES, DEFAULT_TOOL_CALL_TIMEOUT_MS } from './byok-mcp-client.js'
+import { createMcpClient, MCP_STATES, DEFAULT_TOOL_CALL_TIMEOUT_MS } from './byok-mcp-client.js'
 import {
   loadTrustStore,
   recordTrust,
@@ -89,18 +89,20 @@ export class MCPFleet {
           return withTrustStoreLock(resolvedTrustPath, async () => {
             const store = loadTrustStore(resolvedTrustPath, { log: opts.log })
             if (isTrusted(store, cfg)) return true
-            const allowed = await permissionManager.requestMcpTrust({
-              name: cfg.name,
-              command: cfg.command,
-              args: cfg.args,
-              envKeys: Object.keys(cfg.env || {}).sort(),
-            })
+            // #6821: a remote server has no command/args — prompt on
+            // (name, url) + header KEY names. Header VALUES (tokens) never
+            // reach the permission payload, the trust store, or any log.
+            const isRemote = typeof cfg.url === 'string' && cfg.url.length > 0
+            const trustReq = isRemote
+              ? { name: cfg.name, url: cfg.url, headerKeys: Object.keys(cfg.headers || {}).sort() }
+              : { name: cfg.name, command: cfg.command, args: cfg.args, envKeys: Object.keys(cfg.env || {}).sort() }
+            const allowed = await permissionManager.requestMcpTrust(trustReq)
             if (allowed) recordTrust(cfg, resolvedTrustPath)
             return allowed
           })
         }
       }
-      return new MCPClient(cfg, clientOpts)
+      return createMcpClient(cfg, clientOpts)
     })
   }
 

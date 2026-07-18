@@ -79,10 +79,140 @@ function coerceEnv(value, { warnings, serverName }) {
 }
 
 /**
+ * Coerce an HTTP `headers` object to string→string only, for remote (#6821)
+ * MCP transports. Same defensive shape as coerceEnv: one warning per dropped
+ * key naming the field (`headers.<KEY>`), and the whole field is dropped with
+ * a single warning if it is not a plain object. Header VALUES (bearer tokens,
+ * api keys) are never logged or surfaced — the warning names only the key.
+ */
+function coerceHeaders(value, { warnings, serverName }) {
+  if (value == null) return {}
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    warnings.push(
+      `MCP server ${serverName}: ignoring headers (expected object, got ${Array.isArray(value) ? 'array' : typeof value})`,
+    )
+    return {}
+  }
+  const headers = {}
+  for (const [key, raw] of Object.entries(value)) {
+    if (typeof key !== 'string' || key.length === 0) continue
+    if (typeof raw === 'string') {
+      headers[key] = raw
+    } else {
+      warnings.push(
+        `MCP server ${serverName}: dropping headers.${key} (expected string, got ${typeof raw})`,
+      )
+    }
+  }
+  return headers
+}
+
+/**
+ * True when a hostname (or a bare IP from dns.lookup) targets the cloud
+ * metadata service / IPv4 link-local range — never a legitimate MCP server
+ * (#6821, sharpest edge of #6834). Covers:
+ *   - 169.254.0.0/16 (link-local; the metadata endpoint 169.254.169.254
+ *     lives here). The WHATWG URL parser canonicalizes hex/decimal/octal
+ *     host tricks (0xa9fea9fe, 2852039166) to dotted-quad first, so a
+ *     literal-host check on the PARSED hostname catches those too.
+ *   - IPv4-mapped IPv6 forms of the same range: the URL parser serializes
+ *     them as hex groups (`::ffff:a9fe:xxxx`; a9fe == 169.254), dns.lookup
+ *     may return the dotted form (`::ffff:169.254.x.x`).
+ *   - fd00:ec2::254, the AWS IMDS IPv6 endpoint (URL-canonical compressed
+ *     form plus the expanded spelling).
+ * Deliberately does NOT block loopback / RFC1918 generally — localhost MCP
+ * servers are legitimate; the broader egress policy is #6834's scope.
+ */
+export function isBlockedMetadataHost(hostname) {
+  if (typeof hostname !== 'string' || hostname.length === 0) return false
+  let h = hostname.toLowerCase()
+  if (h.startsWith('[') && h.endsWith(']')) h = h.slice(1, -1)
+  const v4 = h.match(/^(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/)
+  if (v4) return Number(v4[1]) === 169 && Number(v4[2]) === 254
+  if (/^::ffff:a9fe:[0-9a-f]{1,4}$/.test(h)) return true
+  const mapped = h.match(/^::ffff:(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/)
+  if (mapped) return Number(mapped[1]) === 169 && Number(mapped[2]) === 254
+  if (h === 'fd00:ec2::254' || h === 'fd00:ec2:0:0:0:0:0:254') return true
+  return false
+}
+
+/**
+ * Return a credential-stripped form of an MCP server url, safe to log or
+ * surface as metadata (#6821). Strips URL userinfo (`user:pass@`), the query
+ * string, and the fragment — any of which can carry a token — while keeping
+ * the origin + path that identify the endpoint. An unparseable url yields a
+ * fixed placeholder so a malformed value can never leak verbatim.
+ */
+export function redactMcpUrl(url) {
+  if (typeof url !== 'string' || url.length === 0) return ''
+  try {
+    const u = new URL(url)
+    u.username = ''
+    u.password = ''
+    u.search = ''
+    u.hash = ''
+    return u.toString()
+  } catch {
+    return '[unparseable url]'
+  }
+}
+
+/**
+ * Parse a remote (streamable-HTTP / SSE) MCP server entry (#6821). Claude
+ * Code represents these in `~/.claude.json` as `{ "type": "http"|"sse",
+ * "url": "https://...", "headers": { ... } }` — no `command`. Returns a
+ * normalized `{ name, type, url, headers }` server or null (with a warning)
+ * when the entry is unusable. Only http(s) urls are accepted; file:/ws:/etc.
+ * are rejected so a config typo can't point the transport at a local socket.
+ */
+function parseRemoteEntry(name, entry, { warnings }) {
+  const url = typeof entry.url === 'string' ? entry.url.trim() : ''
+  if (!url) {
+    warnings.push(`Skipping MCP server ${name}: url is required for a remote (http/sse) server`)
+    return null
+  }
+  let parsedUrl
+  try {
+    parsedUrl = new URL(url)
+  } catch {
+    warnings.push(`Skipping MCP server ${name}: url is not a valid URL`)
+    return null
+  }
+  if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
+    warnings.push(`Skipping MCP server ${name}: url must be http(s) (got ${parsedUrl.protocol})`)
+    return null
+  }
+  // #6834 sharp edge, folded in pre-merge: the cloud-metadata service /
+  // link-local range is never a legitimate MCP server. Refused again at
+  // request time in MCPRemoteClient for configs that bypass this parser.
+  if (isBlockedMetadataHost(parsedUrl.hostname)) {
+    warnings.push(`Skipping MCP server ${name}: url targets a cloud-metadata / link-local address (refused)`)
+    return null
+  }
+  const rawType = typeof entry.type === 'string' ? entry.type.trim().toLowerCase() : ''
+  // 'sse' selects the legacy HTTP+SSE two-endpoint transport; everything else
+  // ('http', 'streamable-http', or an inferred remote with only a url) maps to
+  // the modern Streamable HTTP transport.
+  const type = rawType === 'sse' ? 'sse' : 'http'
+  return {
+    name,
+    type,
+    url,
+    headers: coerceHeaders(entry.headers, { warnings, serverName: name }),
+  }
+}
+
+/**
  * Parse a Claude-style MCP config object.
  *
+ * Handles two server shapes (#6821):
+ *   - stdio: `{ command, args, env }` — spawned as a local child process.
+ *   - remote: `{ type: 'http'|'sse', url, headers }` — connected over the
+ *     network. A remote entry is recognised by an explicit `type` of
+ *     http/streamable-http/sse, or by carrying a `url` without a `command`.
+ *
  * @param {unknown} raw
- * @returns {{ servers: Array<{ name: string, command: string, args: string[], env: Record<string, string> }>, warnings: string[] }}
+ * @returns {{ servers: Array<object>, warnings: string[] }}
  */
 export function parseClaudeMcpConfig(raw) {
   const warnings = []
@@ -105,7 +235,17 @@ export function parseClaudeMcpConfig(raw) {
       warnings.push(`Skipping MCP server ${name}: entry must be an object`)
       continue
     }
-    if (typeof entry.command !== 'string' || entry.command.length === 0) {
+    const rawType = typeof entry.type === 'string' ? entry.type.trim().toLowerCase() : ''
+    const hasCommand = typeof entry.command === 'string' && entry.command.length > 0
+    const hasUrl = typeof entry.url === 'string' && entry.url.trim().length > 0
+    const isRemote =
+      rawType === 'http' || rawType === 'streamable-http' || rawType === 'sse' || (!hasCommand && hasUrl)
+    if (isRemote) {
+      const remote = parseRemoteEntry(name, entry, { warnings })
+      if (remote) servers.push(remote)
+      continue
+    }
+    if (!hasCommand) {
       warnings.push(`Skipping MCP server ${name}: command is required`)
       continue
     }
@@ -150,6 +290,17 @@ export function loadClaudeMcpConfig(filePath = defaultClaudeConfigPath()) {
 }
 
 export function toMcpServerMetadata(server) {
+  // Remote transport (#6821): expose the transport type + a credential-stripped
+  // url + header KEY names only. Header values (bearer tokens, api keys) and any
+  // url userinfo/query never appear in metadata that could reach a log or wire.
+  if (typeof server.url === 'string' && server.url.length > 0) {
+    return Object.freeze({
+      name: server.name,
+      type: server.type || 'http',
+      url: redactMcpUrl(server.url),
+      headerKeys: Object.freeze(Object.keys(server.headers || {}).sort()),
+    })
+  }
   return Object.freeze({
     name: server.name,
     command: server.command,

@@ -6,6 +6,7 @@ import { createLogger } from './logger.js'
 // the same redaction as the hook path. Shared sanitizer + value redactor live in
 // redaction.js (a leaf module — no import cycle / HTTP-handler weight).
 import { sanitizeToolInput, redactValue } from './redaction.js'
+import { redactMcpUrl } from './byok-mcp-config.js'
 
 const _fallbackLog = createLogger('permission-manager')
 
@@ -838,22 +839,37 @@ export class PermissionManager extends EventEmitter {
    *  - On deny: resolves to false; caller marks the client DEAD.
    *  - On timeout (default permissionTimeout): treated as deny.
    *
-   * @param {{ name: string, command: string, args?: string[], envKeys?: string[] }} server
+   * #6821: also handles REMOTE (streamable-HTTP / SSE) servers, which carry a
+   * `url` + `headerKeys` instead of `command`/`args`/`envKeys`. The url is
+   * credential-stripped (via redactMcpUrl) before it reaches the description
+   * or the broadcast input; header VALUES are never passed in.
+   *
+   * @param {{ name: string, command?: string, args?: string[], envKeys?: string[], url?: string, headerKeys?: string[] }} server
    * @returns {Promise<boolean>}
    */
   requestMcpTrust(server) {
     return new Promise((resolve) => {
       const requestId = `mcp-trust-${this._idNonce}-${++this._permissionCounter}-${Date.now()}`
+      const isRemote = typeof server.url === 'string' && server.url.length > 0
       const argv0 = Array.isArray(server.args) && server.args.length > 0 ? server.args[0] : ''
+      const safeUrl = isRemote ? redactMcpUrl(server.url) : ''
       const input = {
-        mcpServer: {
-          name: server.name,
-          command: server.command,
-          args: Array.isArray(server.args) ? [...server.args] : [],
-          envKeys: Array.isArray(server.envKeys) ? [...server.envKeys] : [],
-        },
+        mcpServer: isRemote
+          ? {
+              name: server.name,
+              url: safeUrl,
+              headerKeys: Array.isArray(server.headerKeys) ? [...server.headerKeys] : [],
+            }
+          : {
+              name: server.name,
+              command: server.command,
+              args: Array.isArray(server.args) ? [...server.args] : [],
+              envKeys: Array.isArray(server.envKeys) ? [...server.envKeys] : [],
+            },
       }
-      const description = `Spawn MCP server "${server.name}" running ${server.command}${argv0 ? ' ' + argv0 : ''}`
+      const description = isRemote
+        ? `Connect to MCP server "${server.name}" at ${safeUrl}`
+        : `Spawn MCP server "${server.name}" running ${server.command}${argv0 ? ' ' + argv0 : ''}`
 
       // Wrap pending entry so respondToPermission's standard mapping
       // ({behavior:'allow'} or {behavior:'deny'}) translates to a boolean

@@ -86,6 +86,28 @@ describe('byok-mcp-trust', () => {
       const b = trustTupleKey({ name: 'x', command: 'y", "c", "d', args: [''] })
       assert.notEqual(a, b)
     })
+
+    // #6821 — remote transport keys on (name, sanitized-url).
+    it('keys a remote server on (name, url), distinct from any stdio tuple', () => {
+      const remote = trustTupleKey({ name: 'gh', url: 'https://mcp.example.com/api' })
+      assert.equal(remote, JSON.stringify(['gh', 'https://mcp.example.com/api']))
+      const stdio = trustTupleKey({ name: 'gh', command: 'node', args: ['mcp.js'] })
+      assert.notEqual(remote, stdio, 'a 2-element remote tuple can never alias a 3-element stdio tuple')
+    })
+
+    it('strips url credentials + query + fragment from the remote key (no re-prompt on token rotation)', () => {
+      const a = trustTupleKey({ name: 'gh', url: 'https://u:p1@mcp.example.com/api?t=1#x' })
+      const b = trustTupleKey({ name: 'gh', url: 'https://u:p2@mcp.example.com/api?t=2#y' })
+      assert.equal(a, b, 'rotated credentials / changed query must not re-prompt for the same endpoint')
+      assert.equal(a, JSON.stringify(['gh', 'https://mcp.example.com/api']))
+      assert.ok(!a.includes('p1') && !a.includes('t=1'), 'no credential may reach the key')
+    })
+
+    it('distinguishes different remote endpoints', () => {
+      const a = trustTupleKey({ name: 'gh', url: 'https://mcp.example.com/a' })
+      const b = trustTupleKey({ name: 'gh', url: 'https://mcp.example.com/b' })
+      assert.notEqual(a, b)
+    })
   })
 
   describe('loadTrustStore', () => {
@@ -266,6 +288,58 @@ describe('byok-mcp-trust', () => {
       recordTrust({ name: 'gh', command: 'node', args: ['mcp.js'] }, storePath)
       const store = loadTrustStore(storePath)
       assert.equal(isTrusted(store, { name: 'gh', command: '/bin/rm', args: ['-rf'] }), false)
+    })
+  })
+
+  // #6821 — remote transport trust round-trips through the same store.
+  describe('remote servers (#6821)', () => {
+    it('records + loads a remote server, persisting name + sanitized url only', () => {
+      const server = { name: 'remote', type: 'http', url: 'https://u:pw@mcp.example.com/api?tok=secret', headers: { Authorization: 'Bearer x' } }
+      recordTrust(server, storePath)
+      const raw = JSON.parse(readFileSync(storePath, 'utf8'))
+      assert.equal(raw.trustedTuples.length, 1)
+      const entry = raw.trustedTuples[0]
+      assert.equal(entry.name, 'remote')
+      assert.equal(entry.url, 'https://mcp.example.com/api', 'stored url must be credential-stripped')
+      assert.equal(entry.command, undefined, 'remote entries carry no command')
+      const disk = readFileSync(storePath, 'utf8')
+      assert.ok(!disk.includes('Bearer') && !disk.includes('pw') && !disk.includes('tok=secret'),
+        'no header value or url credential may ever be written to the trust store')
+      const store = loadTrustStore(storePath)
+      assert.equal(isTrusted(store, server), true)
+    })
+
+    it('does not confuse a remote trust with a same-named stdio server', () => {
+      recordTrust({ name: 'gh', url: 'https://mcp.example.com/api' }, storePath)
+      const store = loadTrustStore(storePath)
+      assert.equal(isTrusted(store, { name: 'gh', url: 'https://mcp.example.com/api' }), true)
+      assert.equal(isTrusted(store, { name: 'gh', command: 'node', args: ['mcp.js'] }), false)
+    })
+
+    it('survives a load-time recompute (not dropped as tampered)', () => {
+      recordTrust({ name: 'remote', url: 'https://mcp.example.com/api' }, storePath)
+      const warned = []
+      const store = loadTrustStore(storePath, { log: { warn: (m) => warned.push(m) } })
+      assert.equal(store.tuples.size, 1)
+      assert.equal(warned.length, 0, 'a well-formed remote entry must not warn')
+    })
+
+    it('never persists credential material from an UNPARSEABLE url', () => {
+      // Space in the authority makes this URL-unparseable, yet it still embeds
+      // a password and a token-ish query. Pre-fix, sanitizeTrustUrl returned
+      // the raw input on parse failure and recordTrust wrote it to disk.
+      const server = { name: 'weird', url: 'http://u:hunter2@bad host/api?token=tok123' }
+      recordTrust(server, storePath)
+      const disk = readFileSync(storePath, 'utf8')
+      assert.ok(!disk.includes('hunter2'), 'password must not reach disk')
+      assert.ok(!disk.includes('tok123'), 'query token must not reach disk')
+      assert.ok(!disk.includes('bad host'), 'no fragment of the raw url may reach disk')
+      // The placeholder key still round-trips: same malformed url → trusted;
+      // recompute on load does not drop it as tampered.
+      const warned = []
+      const store = loadTrustStore(storePath, { log: { warn: (m) => warned.push(m) } })
+      assert.equal(warned.length, 0)
+      assert.equal(isTrusted(store, server), true)
     })
   })
 
