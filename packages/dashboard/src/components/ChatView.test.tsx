@@ -2,15 +2,22 @@
  * ChatView + ThinkingDots tests (#1156)
  */
 import { describe, it, expect, afterEach, vi } from 'vitest'
-import { render, screen, fireEvent, cleanup, act } from '@testing-library/react'
+import { render, screen, fireEvent, cleanup, act, waitFor } from '@testing-library/react'
 import { ChatView, type ChatViewMessage } from './ChatView'
 import { ThinkingDots } from './ThinkingDots'
+import { writeText } from '../utils/clipboard'
 import * as fs from 'fs'
 import * as path from 'path'
 
+vi.mock('../utils/clipboard', () => ({ writeText: vi.fn() }))
+const mockWriteText = vi.mocked(writeText)
+
 const componentsCss = fs.readFileSync(path.resolve(__dirname, '../theme/components.css'), 'utf-8')
 
-afterEach(cleanup)
+afterEach(() => {
+  cleanup()
+  mockWriteText.mockReset()
+})
 
 function makeMessages(count: number): ChatViewMessage[] {
   return Array.from({ length: count }, (_, i) => ({
@@ -43,6 +50,72 @@ describe('ChatView', () => {
     // Exactly one — the finished, non-empty response. A regression that dropped
     // the `!isStreaming` / `type === 'response'` / non-empty gate would fail here.
     expect(screen.queryAllByTestId('msg-copy-button')).toHaveLength(1)
+  })
+
+  describe('per-code-block copy button (#6793)', () => {
+    it('renders one copy button per fenced code block, independent of the whole-message copy control', () => {
+      const messages: ChatViewMessage[] = [
+        {
+          id: 'r1',
+          type: 'response',
+          content: 'here are two snippets\n\n```js\nconst a = 1\n```\n\nand\n\n```py\ndef b(): pass\n```',
+          timestamp: 1,
+        },
+      ]
+      render(<ChatView messages={messages} isStreaming={false} />)
+      expect(screen.getAllByTestId('code-copy-button')).toHaveLength(2)
+      // The whole-message CopyButton still renders alongside them.
+      expect(screen.getAllByTestId('msg-copy-button')).toHaveLength(1)
+    })
+
+    it('clicking a code block\'s copy button copies ONLY that block\'s text, not the whole message', async () => {
+      mockWriteText.mockResolvedValue(true)
+      const messages: ChatViewMessage[] = [
+        {
+          id: 'r1',
+          type: 'response',
+          content: 'intro text\n\n```js\nconst first = 1\n```\n\nmiddle text\n\n```js\nconst second = 2\n```',
+          timestamp: 1,
+        },
+      ]
+      render(<ChatView messages={messages} isStreaming={false} />)
+      const buttons = screen.getAllByTestId('code-copy-button')
+      expect(buttons).toHaveLength(2)
+      fireEvent.click(buttons[1]!)
+      await waitFor(() => expect(mockWriteText).toHaveBeenCalledTimes(1))
+      expect(mockWriteText).toHaveBeenCalledWith('const second = 2\n')
+      // Never called with the raw markdown source or the other block's text.
+      expect(mockWriteText).not.toHaveBeenCalledWith(messages[0]!.content)
+      expect(mockWriteText).not.toHaveBeenCalledWith('const first = 1\n')
+    })
+
+    it('shows a transient copied indicator on the clicked button without affecting the others', async () => {
+      mockWriteText.mockResolvedValue(true)
+      const messages: ChatViewMessage[] = [
+        { id: 'r1', type: 'response', content: '```\nblock one\n```\n\n```\nblock two\n```', timestamp: 1 },
+      ]
+      render(<ChatView messages={messages} isStreaming={false} />)
+      const codeCopyButtons = screen.getAllByTestId('code-copy-button')
+      const first = codeCopyButtons[0]!
+      const second = codeCopyButtons[1]!
+      fireEvent.click(first)
+      await waitFor(() => expect(first).toHaveAttribute('data-copied', 'true'))
+      expect(second).not.toHaveAttribute('data-copied')
+    })
+
+    it('clicking the copy button does not trigger the #6625 markdown link-click handler on the same container', () => {
+      // A code block sits in the same dangerouslySetInnerHTML container as any
+      // rendered links; the copy click must not fall through to link handling.
+      mockWriteText.mockResolvedValue(true)
+      const messages: ChatViewMessage[] = [
+        { id: 'r1', type: 'response', content: 'see https://example.com\n\n```\nsnippet\n```', timestamp: 1 },
+      ]
+      render(<ChatView messages={messages} isStreaming={false} />)
+      const openSpy = vi.spyOn(window, 'open').mockImplementation(() => null)
+      fireEvent.click(screen.getByTestId('code-copy-button'), { metaKey: true })
+      expect(openSpy).not.toHaveBeenCalled()
+      openSpy.mockRestore()
+    })
   })
 
   it('previews image + document attachments on a sent user message (#6632)', () => {

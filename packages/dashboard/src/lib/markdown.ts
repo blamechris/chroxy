@@ -25,7 +25,25 @@ export function renderMarkdown(text: string): string {
     const lang = rawLang ? rawLang.trim().split(/\s+/)[0] : ''
     const cls = lang ? ` class="language-${lang}"` : ''
     const highlighted = lang ? highlightCode(code, lang) : escapeHtml(code)
-    codeBlocks.push(`<pre><code${cls}>${highlighted}</code></pre>`)
+    // #6793 — wrap each fenced block in a `.code-block` container carrying a
+    // hover-revealed copy button. The button does NOT carry the block's raw
+    // text as a `data-*` attribute: DOMPurify's SAFE_FOR_XML guard strips any
+    // attribute whose value contains a comment/CDATA closer or a
+    // `</script|style|title|...>` substring (verified against this repo's
+    // DOMPurify version — it silently drops the whole attribute, not just the
+    // dangerous part), which real code snippets can easily contain (e.g. a
+    // block demonstrating `</script>` or a `-->` comment). Instead, the copy
+    // handler reads the rendered block's `textContent` at click time —
+    // `highlightCode`/`escapeHtml` above only wrap each character in
+    // `<span>`/entity-escape it, never drop or reorder text, so `<code>`'s
+    // `textContent` reconstructs the exact original block. This string
+    // pipeline is rendered via `dangerouslySetInnerHTML` (CSP `script-src
+    // 'self'`, no inline handlers), so the click is wired up via event
+    // delegation in the consuming component (ChatView.tsx), NOT an inline
+    // `onclick="…"` attribute.
+    codeBlocks.push(
+      `<div class="code-block"><button type="button" class="code-copy-btn" data-testid="code-copy-button" aria-label="Copy code" title="Copy code">⧉</button><pre><code${cls}>${highlighted}</code></pre></div>`,
+    )
     return placeholder
   })
 

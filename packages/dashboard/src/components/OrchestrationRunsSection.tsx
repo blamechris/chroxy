@@ -25,7 +25,7 @@ import { useConnectionStore } from '../store/connection'
 import type { RunSummary, RunDetail, RunGate, RunNode, RunTimelineEntry, RunUsage } from '@chroxy/protocol'
 import { formatGeneratedAgo } from './ControlRoomSection'
 import { renderMarkdown } from '../lib/markdown'
-import { handleMarkdownLinkClick } from '../lib/links'
+import { handleMarkdownBodyClick } from '../lib/codeCopy'
 import { Modal } from './Modal'
 
 /** Server-authored spend figure — never computed client-side (AC-3). */
@@ -271,7 +271,7 @@ function DetailPanel({ runId, onOpenSession }: { runId: string; onOpenSession: (
           <div
             className="cr-orch-report markdown-content"
             data-testid="orch-report-markdown"
-            onClick={handleMarkdownLinkClick}
+            onClick={handleMarkdownBodyClick}
             dangerouslySetInnerHTML={{ __html: renderMarkdown(run.report.markdown) }}
           />
           <details>

@@ -3018,6 +3018,58 @@ button.sidebar-token-view-session-row:hover {
   overflow-wrap: normal;
 }
 
+/* #6793 — per-fenced-code-block copy button. `.code-block` is emitted
+   exclusively by `renderMarkdown` (lib/markdown.ts) as the wrapper around
+   every fenced `<pre><code>`, so this is intentionally unscoped (not
+   `.msg .code-block`) — it also covers OrchestrationRunsSection.tsx's run
+   reports, the other live consumer of the shared markdown pipeline. */
+.code-block {
+  position: relative;
+}
+
+.code-copy-btn {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--text-muted);
+  /* theme-neutral fallbacks (matches .msg-copy-btn, #6631) so the control
+     reads correctly in both light and dark. */
+  background: var(--surface-raised, rgba(127, 127, 127, 0.12));
+  border: 1px solid var(--border-subtle, rgba(127, 127, 127, 0.22));
+  border-radius: var(--radius-sm, 6px);
+  cursor: pointer;
+  opacity: 0;
+  /* Hidden ⇒ not a click target, so an invisible top-right hotspot can't eat
+     a selection click over the code below; re-enabled below when shown. */
+  pointer-events: none;
+  transition: opacity 0.12s ease, color 0.12s ease;
+}
+
+.code-block:hover .code-copy-btn,
+.code-copy-btn:focus-visible,
+.code-copy-btn[data-copied='true'] {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.code-copy-btn:hover {
+  color: var(--text-heading);
+}
+
+.code-copy-btn[data-copied='true'] {
+  opacity: 1;
+  color: var(--accent-green, #22c55e);
+}
+
 .msg code {
   font-family: var(--font-mono);
   background: var(--bg-code-block);

@@ -1,9 +1,14 @@
-import React, { useMemo } from 'react';
-import { View, Text, StyleSheet, Platform, Linking, Alert, StyleProp, TextStyle, ScrollView } from 'react-native';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { View, Text, StyleSheet, Platform, Linking, Alert, StyleProp, TextStyle, ScrollView, TouchableOpacity } from 'react-native';
+import * as Clipboard from 'expo-clipboard';
 import { ICON_BULLET, ICON_CHECKBOX_CHECKED, ICON_CHECKBOX_UNCHECKED } from '../constants/icons';
 import { COLORS } from '../constants/colors';
 import { tokenize, SYNTAX_COLORS } from '../utils/syntax';
 import type { TokenType } from '../utils/syntax';
+import { Icon } from './Icon';
+
+/** How long the ✓ "copied" confirmation stays up before reverting to the copy icon. */
+const CODE_COPY_RESET_MS = 1500;
 
 
 // -- Constants --
@@ -589,6 +594,55 @@ const HighlightedCode = React.memo(({ code, language }: { code: string; language
 });
 HighlightedCode.displayName = 'HighlightedCode';
 
+/**
+ * #6793 — per-fenced-code-block copy button (mobile). Copies exactly this
+ * block's raw source (the same `block.content` string `HighlightedCode`
+ * renders — pre-tokenization, so no syntax-highlighting artifacts) via the
+ * same `expo-clipboard` API the multi-select transcript copy already uses
+ * (`SessionScreen.tsx`'s `handleCopy` → `Clipboard.setStringAsync`), and
+ * flashes a brief checkmark confirmation. Unlike the dashboard's hover-only
+ * `.code-copy-btn` (#6793, no hover on touch devices), this renders as an
+ * always-visible small icon in a header row above the code, so it's
+ * discoverable and tappable without a long-press gesture.
+ */
+const CodeCopyButton = React.memo(({ code }: { code: string }) => {
+  const [copied, setCopied] = useState(false);
+  const resetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => () => {
+    if (resetTimer.current) clearTimeout(resetTimer.current);
+  }, []);
+
+  const handlePress = useCallback(() => {
+    if (resetTimer.current) {
+      clearTimeout(resetTimer.current);
+      resetTimer.current = null;
+    }
+    Clipboard.setStringAsync(code)
+      .then(() => {
+        setCopied(true);
+        resetTimer.current = setTimeout(() => setCopied(false), CODE_COPY_RESET_MS);
+      })
+      .catch((error) => {
+        console.error('Failed to copy code block to clipboard', error);
+      });
+  }, [code]);
+
+  return (
+    <TouchableOpacity
+      onPress={handlePress}
+      style={md.codeCopyButton}
+      hitSlop={{ top: 8, right: 8, bottom: 8, left: 8 }}
+      accessibilityRole="button"
+      accessibilityLabel={copied ? 'Copied' : 'Copy code'}
+      testID="code-copy-button"
+    >
+      <Icon name={copied ? 'check' : 'copy'} size={14} color={copied ? COLORS.accentGreen : COLORS.textDim} />
+    </TouchableOpacity>
+  );
+});
+CodeCopyButton.displayName = 'CodeCopyButton';
+
 /** Formatted response -- renders Claude's markdown as styled blocks.
  *
  *  `messageTextStyle` is threaded through to FormattedTextBlock so the
@@ -604,7 +658,14 @@ function FormattedResponseImpl({ content, messageTextStyle }: { content: string;
         if (block.kind === 'code') {
           return (
             <View key={`b${i}`} style={md.codeBlock}>
-              {block.lang ? <Text style={md.codeLang}>{block.lang}</Text> : null}
+              {/* #6793 — header row: language label (if any) on the left, the
+                  per-block copy button on the right. Always rendered (even
+                  language-less blocks) so the copy affordance is consistent
+                  across every fenced block. */}
+              <View style={md.codeBlockHeader}>
+                {block.lang ? <Text style={md.codeLang}>{block.lang}</Text> : <View />}
+                <CodeCopyButton code={block.content} />
+              </View>
               <HighlightedCode code={block.content} language={block.lang} />
             </View>
           );
@@ -674,12 +735,24 @@ export const md = StyleSheet.create({
     borderWidth: 1,
     borderColor: COLORS.borderPrimary,
   },
+  // #6793 — language label + copy button share a row so the copy icon never
+  // overlaps the label text, and so language-less blocks still get a
+  // (empty-left) row with just the button.
+  codeBlockHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
   codeLang: {
     color: COLORS.textDim,
     fontSize: 10,
-    marginBottom: 4,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     textTransform: 'uppercase',
+  },
+  codeCopyButton: {
+    padding: 4,
+    borderRadius: 4,
   },
   codeText: {
     color: COLORS.textCodeBlock,

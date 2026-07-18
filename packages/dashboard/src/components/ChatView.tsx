@@ -20,7 +20,7 @@ import { memo, useRef, useState, useCallback, useEffect, useLayoutEffect, useMem
 import { bumpRenderCount, type ChatActivityState, type MessageAttachment } from '@chroxy/store-core'
 import { WorkingIndicator } from './WorkingIndicator'
 import { renderMarkdown } from '../lib/markdown'
-import { handleMarkdownLinkClick } from '../lib/links'
+import { handleMarkdownBodyClick } from '../lib/codeCopy'
 import { CopyButton } from './CopyButton'
 import { isRenderableImageUri } from '../utils/attachment-preview'
 import { MessageRowShell } from './MeasuredRow'
@@ -331,7 +331,8 @@ const DefaultMessageRow = memo(function DefaultMessageRow({
   const body =
     type === 'response' || type === 'tool_use'
       // #6625: modifier-click opens a rendered link; plain click keeps selection.
-      ? <div onClick={handleMarkdownLinkClick} dangerouslySetInnerHTML={{ __html: renderMarkdown(content) }} />
+      // #6793: same container also owns the per-code-block copy button click.
+      ? <div onClick={handleMarkdownBodyClick} dangerouslySetInnerHTML={{ __html: renderMarkdown(content) }} />
       : type === 'thinking'
         ? <ThinkingBody content={content} streaming={!!isStreaming} />
         : content
