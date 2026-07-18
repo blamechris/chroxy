@@ -21,6 +21,15 @@ export interface StatusBarProps {
    * meter label. Absent = no occupancy signal — the meter hides entirely
    * (honest dash state); it is NEVER derived from the billing input/output
    * counts below, which sum across agent-loop rounds and over-read fill.
+   *
+   * NOTE the two denominators are deliberately different: the label's
+   * `total` is the RAW `contextWindow`, while `contextPercent` is metered
+   * against the effective ceiling (the SDK's real autoCompactThreshold, or
+   * the reserve-adjusted window — see store-core `contextMeterCeiling`).
+   * A percent recomputed from the label therefore reads slightly LOWER than
+   * the displayed `contextPercent`. That's intentional: the label answers
+   * "how big is the window?", the percent answers "how much usable space is
+   * left before auto-compact?".
    */
   contextTokens?: number
   /**
