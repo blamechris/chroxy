@@ -23,6 +23,7 @@
  */
 import { useCallback, useEffect, useState } from 'react'
 import { isTauri } from '../utils/tauri'
+import { isMacPlatform } from '../utils/platform'
 import { Modal } from './Modal'
 import {
   checkDependencies,
@@ -183,7 +184,13 @@ export function SetupWizard() {
               testId="setup-wizard-dep-cloudflared"
               label="cloudflared"
               found={deps?.cloudflared.found}
-              hint="Install with: brew install cloudflared"
+              // #6814 review — the app is cross-platform, so a Homebrew-only
+              // hint is wrong off-Mac. Uses the dashboard's shared platform
+              // detection; the non-Mac pointer matches the Rust side's
+              // cloudflared_install_hint() fallback (pkg.cloudflare.com).
+              hint={isMacPlatform()
+                ? 'Install with: brew install cloudflared'
+                : 'See the cloudflared install docs: https://pkg.cloudflare.com/'}
               checking={depsChecking}
             />
             <DependencyRow

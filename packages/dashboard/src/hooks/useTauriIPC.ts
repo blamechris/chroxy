@@ -206,9 +206,12 @@ export async function checkDependencies(): Promise<DependencyCheckResult | null>
  * Persist the first-run wizard's chosen port + tunnel mode (#6787) and clear
  * the Rust-side `IS_FIRST_RUN` flag so the wizard never shows again. No-ops
  * outside Tauri. Throws when invoke is unavailable inside Tauri, or when the
- * Rust side rejects the config write (bad tunnel mode, IO/parse error) — the
- * wizard keeps its fields and surfaces the failure rather than silently
- * closing on a save that didn't actually persist.
+ * Rust side fails to persist — a settings save failure, or a read/parse/write
+ * error on `~/.chroxy/config.json` — so the wizard keeps its fields and
+ * surfaces the failure rather than silently closing on a save that didn't
+ * actually persist. Note the tunnel mode is persisted as-is: unlike
+ * `set_tunnel_mode`, the Rust `save_setup_config` does not validate the
+ * enum, so callers must only pass 'none' | 'quick' | 'named'.
  */
 export async function saveSetupConfig(port: number, tunnelMode: string): Promise<void> {
   if (!isTauri()) return
