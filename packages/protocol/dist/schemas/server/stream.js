@@ -314,7 +314,11 @@ export const ServerPermissionInputSchema = z.discriminatedUnion('found', [
  *   - `decision`         — requestId / decision (allow|deny|allowAlways) / reason
  *     (`reason:'persisted_rule'` — #6830 — is a decision entry with NO human
  *     responder: a durable project rule auto-approved the tool with no prompt
- *     ever shown; `clientId` is null just like the other auto-deny reasons)
+ *     ever shown; `clientId` is null and there is no requestId. These are
+ *     COALESCED server-side per (sessionId, tool, projectKey) — `count` is
+ *     the number of coalesced approvals, `firstAt` the first one's time,
+ *     `timestamp` the latest — so a rule matching at machine speed can never
+ *     flood the audit ring; see permission-audit.js logPersistedRuleApproval)
  * The entry `type` is a PLAIN `z.string()` (PR #6836 review), for two reasons:
  *   1. Forward compatibility — a closed enum would fail the WHOLE payload parse
  *      the moment the server adds a new audit kind; clients render unknown kinds
@@ -350,6 +354,10 @@ export const ServerPermissionAuditEntrySchema = z
     tool: z.string().nullable().optional(),
     persist: z.string().nullable().optional(),
     projectKey: z.string().nullable().optional(),
+    // #6830 — coalesced persisted-rule entries only: number of approvals
+    // folded into this entry, and the first approval's timestamp.
+    count: z.number().optional(),
+    firstAt: z.number().optional(),
 })
     .passthrough();
 /**

@@ -2939,8 +2939,24 @@ describe('SettingsPanel — permission rules + audit history (#6772/#6829)', () 
         tool: 'Write',
         persist: 'project',
         projectKey: '/abs/proj',
+        count: 1,
         timestamp: 0,
       }),
     ).toBe('Auto-allowed Write (persisted rule)')
+
+    // PR #6842 review — persisted-rule entries are coalesced server-side;
+    // count > 1 renders as ×N so one row summarizes the whole run.
+    expect(
+      describePermissionAuditEntry({
+        type: 'decision',
+        decision: 'allow',
+        reason: 'persisted_rule',
+        tool: 'Write',
+        persist: 'project',
+        projectKey: '/abs/proj',
+        count: 50,
+        timestamp: 0,
+      }),
+    ).toBe('Auto-allowed Write ×50 (persisted rule)')
   })
 })

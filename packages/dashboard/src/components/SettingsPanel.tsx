@@ -75,7 +75,8 @@ const EMPTY_PERMISSION_RULES: PermissionRule[] = []
  *   - `reason:'persisted_rule'` is a rule silently auto-approving a tool call
  *     with NO prompt ever shown (permission-manager.js
  *     _auditPersistedRuleAutoApprove) — rendered distinctly ("Auto-allowed")
- *     rather than folded into the generic allow/deny verb.
+ *     rather than folded into the generic allow/deny verb. These entries are
+ *     coalesced server-side (PR #6842 review): `count` > 1 renders as "×N".
  */
 export function describePermissionAuditEntry(entry: PermissionAuditEntry): string {
   switch (entry.type) {
@@ -88,7 +89,10 @@ export function describePermissionAuditEntry(entry: PermissionAuditEntry): strin
       if (entry.reason === 'persisted_rule') {
         // A durable project rule auto-approved with no prompt shown — no
         // human responder, so there's no "(user)"/reason suffix to add.
-        return `Auto-allowed${toolPart} (persisted rule)`
+        // Coalesced server-side: count > 1 means N approvals folded into
+        // this one entry (PR #6842 review).
+        const countPart = typeof entry.count === 'number' && entry.count > 1 ? ` ×${entry.count}` : ''
+        return `Auto-allowed${toolPart}${countPart} (persisted rule)`
       }
       const verb = entry.decision === 'deny' ? 'Denied' : entry.decision === 'allowAlways' ? 'Always-allowed' : 'Allowed'
       const persistPart = entry.persist === 'project'

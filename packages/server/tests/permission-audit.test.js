@@ -118,6 +118,60 @@ describe('PermissionAuditLog (#1851)', () => {
     assert.equal(entries[0].projectKey, null)
   })
 
+  // #6830 (PR #6842 review) — persisted-rule auto-approves are COALESCED per
+  // (sessionId, tool, projectKey): a convenience rule matching at machine
+  // speed must never flood the 500-entry ring and evict the high-value
+  // entries (whitelist changes, user decisions) #6830 set out to preserve.
+  describe('logPersistedRuleApproval coalescing (#6830 / PR #6842 review)', () => {
+    it('N=50 identical approvals produce ONE entry with count=50', () => {
+      for (let i = 0; i < 50; i++) {
+        log.logPersistedRuleApproval({ sessionId: 's1', tool: 'Write', projectKey: '/proj/a' })
+      }
+      const entries = log.query({ type: 'decision' })
+      assert.equal(entries.length, 1, 'bounded: one coalesced entry, not 50')
+      assert.equal(entries[0].count, 50)
+      assert.equal(entries[0].reason, 'persisted_rule')
+      assert.equal(entries[0].decision, 'allow')
+      assert.equal(entries[0].tool, 'Write')
+      assert.equal(entries[0].persist, 'project')
+      assert.equal(entries[0].projectKey, '/proj/a')
+      assert.equal(entries[0].clientId, null, 'no human responder')
+      assert.equal(entries[0].requestId, undefined, 'no prompt was ever minted')
+      assert.equal(typeof entries[0].firstAt, 'number')
+      assert.ok(entries[0].firstAt <= entries[0].timestamp)
+    })
+
+    it('a repeat approval refreshes timestamp, preserves firstAt, and moves the entry to the ring tail', () => {
+      log.logPersistedRuleApproval({ sessionId: 's1', tool: 'Write', projectKey: '/proj/a' })
+      // Backdate the stored entry so the refresh is observable, then interleave
+      // an unrelated entry so tail position is meaningful.
+      const stored = log.query({ type: 'decision' })[0]
+      stored.timestamp = 1000
+      stored.firstAt = 1000
+      log.logDecision({ clientId: 'c1', sessionId: 's1', requestId: 'r-mid', decision: 'deny' })
+
+      log.logPersistedRuleApproval({ sessionId: 's1', tool: 'Write', projectKey: '/proj/a' })
+
+      const entries = log.query()
+      assert.equal(entries.length, 2)
+      const tail = entries[entries.length - 1]
+      assert.equal(tail.reason, 'persisted_rule', 'coalesced entry moved to the tail (query contract: recent = tail)')
+      assert.equal(tail.count, 2)
+      assert.equal(tail.firstAt, 1000, 'firstAt preserved across coalesces')
+      assert.ok(tail.timestamp > 1000, 'timestamp refreshed to the latest approval')
+    })
+
+    it('distinct (sessionId, tool, projectKey) keys keep distinct entries', () => {
+      log.logPersistedRuleApproval({ sessionId: 's1', tool: 'Write', projectKey: '/proj/a' })
+      log.logPersistedRuleApproval({ sessionId: 's1', tool: 'Read', projectKey: '/proj/a' })
+      log.logPersistedRuleApproval({ sessionId: 's2', tool: 'Write', projectKey: '/proj/a' })
+      log.logPersistedRuleApproval({ sessionId: 's1', tool: 'Write', projectKey: '/proj/b' })
+      const entries = log.query({ type: 'decision' })
+      assert.equal(entries.length, 4)
+      assert.ok(entries.every((e) => e.count === 1))
+    })
+  })
+
   it('defaults reason to "user" for backwards compatibility (#3057)', () => {
     // Older callers (and any code we missed) pass no reason — they should
     // be tagged 'user' so forensic queries can still filter on the new

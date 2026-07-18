@@ -1,6 +1,7 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { PermissionManager, ELIGIBLE_TOOLS, NEVER_AUTO_ALLOW } from '../src/permission-manager.js'
+import { EventEmitter } from 'events'
+import { PermissionManager, wirePermissionManager, ELIGIBLE_TOOLS, NEVER_AUTO_ALLOW } from '../src/permission-manager.js'
 
 /**
  * Tests for PermissionManager — permission request lifecycle,
@@ -969,47 +970,100 @@ describe('PermissionManager', () => {
   // ZERO audit trail: handlePermission short-circuits before a requestId is
   // ever minted or a permission_request emitted, so the audit log had no way
   // to answer "why did tool X auto-approve after a restart?" These pin the
-  // gap-fill signal (_auditPersistedRuleAutoApprove, wired through the
-  // existing permission_resolved event) and its precedence rules.
+  // gap-fill signal and its precedence rules.
+  //
+  // PR #6842 review — the signal is a DIRECT audit sink callback, NOT a
+  // permission_resolved emission: permission_resolved rides ws-forwarding →
+  // broadcastToSession, so emitting it here would spam every client with a
+  // wire message per rule-matched tool call. The zero-emission contract is
+  // pinned below via a wirePermissionManager forwarding spy.
   describe('handlePermission with persistent (project) rules — #6830 audit gap', () => {
-    it('auto-allowing via a PERSISTENT rule emits an audit-only permission_resolved with tool + persist + reason', async () => {
-      const resolvedEvents = []
-      pm.on('permission_resolved', (data) => resolvedEvents.push(data))
-      const requestEvents = []
-      pm.on('permission_request', (data) => requestEvents.push(data))
-      pm._persistentRules = [{ tool: 'Write', decision: 'allow' }]
+    it('auto-allowing via a PERSISTENT rule calls the audit sink with tool + projectKey and emits NOTHING', async () => {
+      const sinkCalls = []
+      const events = []
+      const cwdPm = createManager({ cwd: '/proj/a' })
+      try {
+        cwdPm.setAuditSink((info) => sinkCalls.push(info))
+        cwdPm.on('permission_resolved', (data) => events.push(['permission_resolved', data]))
+        cwdPm.on('permission_request', (data) => events.push(['permission_request', data]))
+        cwdPm._persistentRules = [{ tool: 'Write', decision: 'allow' }]
 
-      const result = await pm.handlePermission('Write', { file_path: '/tmp/x' }, null, 'approve')
-      assert.equal(result.behavior, 'allow')
-      assert.equal(requestEvents.length, 0, 'no prompt was ever shown')
-      assert.equal(resolvedEvents.length, 1, 'the gap-fill audit signal must fire')
-      assert.equal(resolvedEvents[0].decision, 'allow')
-      assert.equal(resolvedEvents[0].reason, 'persisted_rule')
-      assert.equal(resolvedEvents[0].tool, 'Write')
-      assert.equal(resolvedEvents[0].persist, 'project')
-      assert.ok(resolvedEvents[0].requestId, 'needs a stable correlation key')
-      assert.match(resolvedEvents[0].requestId, /^rule-/)
+        const result = await cwdPm.handlePermission('Write', { file_path: '/tmp/x' }, null, 'approve')
+        assert.equal(result.behavior, 'allow')
+        assert.equal(events.length, 0, 'no prompt AND no wire-lane event — audit sink only')
+        assert.deepEqual(sinkCalls, [{ tool: 'Write', projectKey: '/proj/a' }])
+      } finally {
+        cwdPm.destroy()
+      }
     })
 
-    it('a SESSION rule match does NOT emit the persisted-rule audit signal (session rules shadow persistent rules)', async () => {
-      const resolvedEvents = []
-      pm.on('permission_resolved', (data) => resolvedEvents.push(data))
+    it('N=50 persisted-rule approvals forward ZERO permission_resolved through wirePermissionManager (the wire lane)', async () => {
+      const cwdPm = createManager({ cwd: '/proj/a' })
+      const session = new EventEmitter()
+      const forwarded = []
+      try {
+        // The exact wiring every provider (sdk/byok/codex) uses — anything the
+        // session re-emits here is what SessionManager → ws-forwarding →
+        // broadcastToSession would put on the wire.
+        wirePermissionManager(session, cwdPm)
+        session.on('permission_resolved', (d) => forwarded.push(d))
+        session.on('permission_request', (d) => forwarded.push(d))
+
+        const sinkCalls = []
+        cwdPm.setAuditSink((info) => sinkCalls.push(info))
+        cwdPm._persistentRules = [{ tool: 'Read', decision: 'allow' }]
+
+        for (let i = 0; i < 50; i++) {
+          const result = await cwdPm.handlePermission('Read', { file_path: `/tmp/f${i}` }, null, 'approve')
+          assert.equal(result.behavior, 'allow')
+        }
+        assert.equal(forwarded.length, 0, 'zero wire emissions across 50 silent auto-approves')
+        assert.equal(sinkCalls.length, 50, 'every approve still reaches the audit sink (coalescing is ring-side)')
+      } finally {
+        cwdPm.destroy()
+      }
+    })
+
+    it('a missing sink is a safe no-op, and a throwing sink never breaks tool approval', async () => {
+      pm._persistentRules = [{ tool: 'Write', decision: 'allow' }]
+      // No sink wired at all.
+      const r1 = await pm.handlePermission('Write', { file_path: '/tmp/x' }, null, 'approve')
+      assert.equal(r1.behavior, 'allow')
+      // A sink that throws.
+      pm.setAuditSink(() => { throw new Error('sink boom') })
+      const r2 = await pm.handlePermission('Write', { file_path: '/tmp/y' }, null, 'approve')
+      assert.equal(r2.behavior, 'allow', 'sink failure must not affect the approval')
+    })
+
+    it('wirePermissionManager installs the setPermissionAuditSink delegate on the session', () => {
+      const session = new EventEmitter()
+      wirePermissionManager(session, pm)
+      assert.equal(typeof session.setPermissionAuditSink, 'function')
+      const sinkCalls = []
+      session.setPermissionAuditSink((info) => sinkCalls.push(info))
+      pm._auditSink({ tool: 'Read', projectKey: null })
+      assert.equal(sinkCalls.length, 1, 'delegate routes to the manager sink slot')
+    })
+
+    it('a SESSION rule match does NOT call the persisted-rule audit sink (session rules shadow persistent rules)', async () => {
+      const sinkCalls = []
+      pm.setAuditSink((info) => sinkCalls.push(info))
       pm.setRules([{ tool: 'Write', decision: 'allow' }])
       pm._persistentRules = [{ tool: 'Write', decision: 'allow' }] // same tool, both sets
 
       const result = await pm.handlePermission('Write', { file_path: '/tmp/x' }, null, 'approve')
       assert.equal(result.behavior, 'allow')
-      assert.equal(resolvedEvents.length, 0, 'session rule wins precedence — no persisted-rule audit needed')
+      assert.equal(sinkCalls.length, 0, 'session rule wins precedence — no persisted-rule audit needed')
     })
 
-    it('a persistent DENY rule match does not emit the (allow-only) audit signal', async () => {
-      const resolvedEvents = []
-      pm.on('permission_resolved', (data) => resolvedEvents.push(data))
+    it('a persistent DENY rule match does not call the (allow-only) audit sink', async () => {
+      const sinkCalls = []
+      pm.setAuditSink((info) => sinkCalls.push(info))
       pm._persistentRules = [{ tool: 'Write', decision: 'deny' }]
 
       const result = await pm.handlePermission('Write', { file_path: '/tmp/x' }, null, 'approve')
       assert.equal(result.behavior, 'deny')
-      assert.equal(resolvedEvents.length, 0)
+      assert.equal(sinkCalls.length, 0)
     })
 
     it('_persistentRuleSourced reflects session-rule shadowing directly', () => {

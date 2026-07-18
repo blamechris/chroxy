@@ -1836,34 +1836,48 @@ describe('audit trail for auto-deny resolution paths (#3057)', () => {
     )
   })
 
-  // #6830 — a persisted-rule auto-approve (permission-manager.js
-  // _auditPersistedRuleAutoApprove) reaches this same listener as a
-  // permission_resolved session_event with reason:'persisted_rule' and no
-  // human responder (clientId stays null, matching the other auto-* reasons).
-  // The tool/persist/projectKey fields must pass through into the stored entry.
-  it('records tool/persist/projectKey for a persisted-rule auto-approve (#6830)', () => {
+  // #6830 (PR #6842 review) — persisted-rule auto-approves bypass the
+  // session-event broadcast lane entirely: the WsServer wires a direct sink
+  // (session.setPermissionAuditSink → logPersistedRuleApproval) on
+  // session_created, and the log coalesces repeats so tool-call-speed
+  // matches can never flood the ring.
+  it('attaches a coalescing persisted-rule audit sink on session_created (#6830)', () => {
     const manager = makeManager()
+    let sink = null
+    const session = { setPermissionAuditSink: (fn) => { sink = fn } }
+    manager.getSession = (id) => (id === 'sess-x' ? { session } : null)
     server = new WsServer({ port: 0, apiToken: 'test-token', sessionManager: manager })
 
-    manager.emit('session_event', {
-      sessionId: 'sess-x',
-      event: 'permission_resolved',
-      data: {
-        requestId: 'rule-abc-1-123',
-        decision: 'allow',
-        reason: 'persisted_rule',
-        tool: 'Write',
-        persist: 'project',
-        projectKey: '/abs/proj',
-      },
-    })
+    manager.emit('session_created', { sessionId: 'sess-x' })
+    assert.equal(typeof sink, 'function', 'sink wired on session_created')
+
+    // N=50 rule-matched approvals → ONE coalesced audit entry, count 50.
+    for (let i = 0; i < 50; i++) sink({ tool: 'Write', projectKey: '/proj/a' })
 
     const entries = server._permissionAudit.query({ type: 'decision' })
-    assert.equal(entries.length, 1)
-    assert.equal(entries[0].clientId, null, 'no human responder for a rule-driven auto-approve')
+    assert.equal(entries.length, 1, 'coalesced — the ring is never flooded')
+    assert.equal(entries[0].count, 50)
+    assert.equal(entries[0].sessionId, 'sess-x')
     assert.equal(entries[0].tool, 'Write')
     assert.equal(entries[0].persist, 'project')
-    assert.equal(entries[0].projectKey, '/abs/proj')
+    assert.equal(entries[0].projectKey, '/proj/a')
+    assert.equal(entries[0].reason, 'persisted_rule')
+    assert.equal(entries[0].clientId, null, 'no human responder for a rule-driven auto-approve')
+  })
+
+  it('attaches the audit sink retroactively to sessions restored before WsServer construction (#6830)', () => {
+    const manager = makeManager()
+    let sink = null
+    const session = { setPermissionAuditSink: (fn) => { sink = fn } }
+    manager._sessions = new Map([['sess-restored', { session }]])
+    manager.getSession = (id) => (id === 'sess-restored' ? { session } : null)
+    server = new WsServer({ port: 0, apiToken: 'test-token', sessionManager: manager })
+
+    assert.equal(typeof sink, 'function', 'retroactive scan wires restored sessions (same shape as #3716)')
+    sink({ tool: 'Read', projectKey: '/proj/b' })
+    const entries = server._permissionAudit.query({ type: 'decision' })
+    assert.equal(entries.length, 1)
+    assert.equal(entries[0].sessionId, 'sess-restored')
   })
 
   it('skips user-initiated resolutions to avoid double-auditing the inline WS path', () => {

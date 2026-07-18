@@ -305,7 +305,11 @@ export interface PermissionRule {
  * project cwd the rule is scoped to). Set on an `allowAlways` that actually
  * persisted a project rule, and on a `reason:'persisted_rule'` entry — a
  * durable rule silently auto-approving a tool call with NO prompt ever shown
- * (clientId is null there, same as the other auto-deny reasons).
+ * (clientId is null, no requestId). Persisted-rule entries are COALESCED
+ * server-side per (sessionId, tool, projectKey): `count` is how many
+ * approvals folded into the entry, `firstAt` the first one's time,
+ * `timestamp` the latest (PR #6842 review — keeps the audit ring from being
+ * flooded at tool-call speed).
  */
 export interface PermissionAuditEntry {
   type: string;
@@ -324,6 +328,8 @@ export interface PermissionAuditEntry {
   tool?: string | null;
   persist?: string | null;
   projectKey?: string | null;
+  count?: number;
+  firstAt?: number;
 }
 
 /**

@@ -5,6 +5,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { PermissionRuleStore, normalizeProjectKey, isPersistableTool } from '../src/permission-rule-store.js'
 import { PermissionManager } from '../src/permission-manager.js'
+import { PermissionAuditLog } from '../src/permission-audit.js'
 
 /**
  * #6771 — durable "always allow" permission rules.
@@ -247,26 +248,39 @@ describe('#6771 PermissionManager + durable rules', () => {
     }
   })
 
-  // #6830 — end-to-end (real PermissionRuleStore, not a hand-set _persistentRules
-  // array): a rule seeded from disk auto-approving a tool call must leave a
-  // trace in the audit pipeline (an auditor can't answer "why did tool X
-  // auto-approve after a restart?" otherwise — no prompt, no requestId, no
-  // permission_resolved at all pre-#6830).
-  it('a store-seeded persistent rule auto-approve emits the audit-only permission_resolved signal', async () => {
+  // #6830 (PR #6842 review) — end-to-end with a real PermissionRuleStore AND a
+  // real PermissionAuditLog wired the way ws-server's
+  // _attachPermissionAuditSink does it: a rule seeded from disk silently
+  // auto-approving N=50 tool calls must (a) put ZERO events on the wire lane
+  // (no permission_resolved, no permission_request — those broadcast to every
+  // client) and (b) land as ONE coalesced audit entry, not 50 ring slots.
+  it('a store-seeded persistent rule auto-approve is audited via the sink — one coalesced entry, zero wire events', async () => {
     const store = makeStore()
     store.addRule('/proj/a', { tool: 'Write', decision: 'allow' })
 
+    const auditLog = new PermissionAuditLog()
     const pm = new PermissionManager({ log: silentLog, cwd: '/proj/a', ruleStore: store })
     try {
-      const resolvedEvents = []
-      pm.on('permission_resolved', (d) => resolvedEvents.push(d))
-      const result = await pm.handlePermission('Write', { file_path: 'src/x.js' }, null, 'approve')
-      assert.equal(result.behavior, 'allow')
-      assert.equal(resolvedEvents.length, 1)
-      assert.equal(resolvedEvents[0].reason, 'persisted_rule')
-      assert.equal(resolvedEvents[0].tool, 'Write')
-      assert.equal(resolvedEvents[0].persist, 'project')
-      assert.equal(resolvedEvents[0].projectKey, '/proj/a')
+      // Same wiring shape as ws-server.js _attachPermissionAuditSink.
+      pm.setAuditSink((info) => auditLog.logPersistedRuleApproval({ sessionId: 's1', tool: info?.tool, projectKey: info?.projectKey ?? null }))
+      const wireEvents = []
+      pm.on('permission_resolved', (d) => wireEvents.push(d))
+      pm.on('permission_request', (d) => wireEvents.push(d))
+
+      for (let i = 0; i < 50; i++) {
+        const result = await pm.handlePermission('Write', { file_path: `src/x${i}.js` }, null, 'approve')
+        assert.equal(result.behavior, 'allow')
+      }
+
+      assert.equal(wireEvents.length, 0, 'zero broadcast-lane emissions across 50 silent auto-approves')
+      const entries = auditLog.query({ type: 'decision' })
+      assert.equal(entries.length, 1, 'one coalesced entry — the ring is never flooded')
+      assert.equal(entries[0].count, 50)
+      assert.equal(entries[0].reason, 'persisted_rule')
+      assert.equal(entries[0].tool, 'Write')
+      assert.equal(entries[0].persist, 'project')
+      assert.equal(entries[0].projectKey, '/proj/a')
+      assert.equal(entries[0].sessionId, 's1')
     } finally {
       pm.destroy()
     }
