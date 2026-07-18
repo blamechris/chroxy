@@ -14,6 +14,11 @@ import { CLAUDE_TUI_PTY_SIZE } from '@chroxy/protocol'
 // (RESUME_UNKNOWN_STDERR_PATTERNS, #4929/#4950) via this matcher: the PTY
 // merges stdout+stderr, so claude's resume rejection lands in _outputTail.
 import { stderrIndicatesUnknownResume } from './cli-session.js'
+// #6820 — the interactive TUI exposes no runtime MCP status (unlike SDK/CLI
+// stream-json `system/init`), so for MCP visibility parity we emit the
+// CONFIGURED server list discovered from the same ~/.claude.json / .mcp.json
+// sources Claude Code reads, labelled `configured` (not live).
+import { discoverConfiguredMcpServers } from './byok-mcp-config.js'
 import { ALLOWED_MODEL_IDS } from './models.js'
 import { CLAUDE_FALLBACK_MODELS, claudeModelMetadata } from './claude-model-catalog.js'
 import { RespawnRateLimiter } from './utils/respawn-rate-limiter.js'
@@ -1398,6 +1403,41 @@ export class ClaudeTuiSession extends BaseSession {
 
     this._processReady = true
     this.emit('ready', { sessionId: this._sessionId, model: this.model, tools: [] })
+    this._emitConfiguredMcpServers()
+  }
+
+  /**
+   * #6820 — emit the CONFIGURED MCP server list for MCP visibility parity.
+   *
+   * The interactive claude TUI communicates over a PTY + hook payloads and
+   * exposes NO runtime MCP status (unlike the SDK/CLI stream-json `system/init`
+   * event, which carries live `mcp_servers` with real connection status). The
+   * honest signal we CAN give is what the config DECLARES: the merged
+   * user/global + project + `.mcp.json` server list for this session's cwd,
+   * emitted with status `configured` (never `connected`) so the client renders
+   * a neutral, not-live indicator. Emits even an empty list so a stale list
+   * clears on respawn — mirroring sdk/cli-session's "including empty list to
+   * clear stale state" behaviour. Best-effort: a discovery failure logs a warn
+   * and never blocks the ready path.
+   */
+  _emitConfiguredMcpServers() {
+    try {
+      const { servers, warnings } = discoverConfiguredMcpServers(this.cwd)
+      for (const warning of warnings) {
+        ;(this._log || log).warn(`MCP config: ${warning}`)
+      }
+      const payload = servers.map((s) => ({ name: s.name, status: 'configured' }))
+      if (payload.length > 0) {
+        ;(this._log || log).info(
+          `MCP servers (configured, not live): ${payload.map((s) => s.name).join(', ')}`,
+        )
+      }
+      this.emit('mcp_servers', { servers: payload })
+    } catch (err) {
+      ;(this._log || log).warn(
+        `MCP configured-server discovery failed: ${err?.message || String(err)}`,
+      )
+    }
   }
 
   /**
@@ -1731,6 +1771,7 @@ export class ClaudeTuiSession extends BaseSession {
     this._didFallbackFromUnknownResume = false
     this._processReady = true
     this.emit('ready', { sessionId: this._sessionId, model: this.model, tools: [] })
+    this._emitConfiguredMcpServers()
   }
 
   /**

@@ -1432,6 +1432,67 @@ button.sidebar-token-view-session-row:hover {
   flex-shrink: 0;
 }
 
+/* #6820 — read-only MCP server list in the sidebar panel slot. Desktop
+ * analogue of the mobile SettingsBar "MCP Servers (N)" section: a status dot +
+ * name + status per server, no toggle (enable/disable is #6824). */
+.sidebar-mcp-view {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sidebar-mcp-view-empty {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-style: italic;
+}
+
+.sidebar-mcp-view-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sidebar-mcp-view-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.sidebar-mcp-view-dot {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  /* Default (muted) — e.g. claude-tui "configured" (declared, not live). */
+  background: var(--text-muted);
+  align-self: center;
+}
+
+/* Green only for a live "connected" status (sdk/cli-mode sessions). */
+.sidebar-mcp-view-dot.connected {
+  background: var(--accent-green, #22c55e);
+}
+
+.sidebar-mcp-view-name {
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.sidebar-mcp-view-status {
+  margin-left: auto;
+  flex-shrink: 0;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
 /* #5163 (epic #5159) — Control Room panel: live read-only activity tree. */
 .control-room-panel {
   display: flex;

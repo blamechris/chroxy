@@ -5,14 +5,16 @@
  * Collapsible with Cmd+B toggle.
  */
 import { useState, useCallback, useRef, useMemo } from 'react'
-import type { CumulativeUsage, SessionInfo, SessionVisualStatus, SessionRole, ChatActivityState } from '@chroxy/store-core'
+import type { CumulativeUsage, McpServer, SessionInfo, SessionVisualStatus, SessionRole, ChatActivityState } from '@chroxy/store-core'
 import { formatCostBadge, formatCostBreakdown } from '@chroxy/store-core'
 import { DEFAULT_PROVIDER } from '@chroxy/protocol'
+import { useConnectionStore } from '../store/connection'
 import { ConversationSearch } from './ConversationSearch'
 import { ServerPicker } from './ServerPicker'
 import { ViewersIndicator } from './ViewersIndicator'
 import { SidebarPanelSlot, type SidebarPanelView, type SidebarPanelLauncher } from './SidebarPanelSlot'
 import { SidebarTokenView, tokenViewCollapsedMetric } from './SidebarTokenView'
+import { SidebarMcpView, mcpViewCollapsedMetric } from './SidebarMcpView'
 import type { SearchResult, ConnectedClient, MonthlyBudgetState } from '../store/types'
 import {
   persistSidebarPanelHeight,
@@ -127,6 +129,10 @@ function abbreviateTunnel(url: string): string {
   }
 }
 
+// #6820 — stable empty array so the active-session MCP selector's fallback keeps
+// a referentially-stable identity across renders (avoids render loops).
+const EMPTY_MCP_SERVERS: McpServer[] = []
+
 export function Sidebar({
   repos,
   activeSessionId,
@@ -200,8 +206,17 @@ export function Sidebar({
     persistSidebarPanelCollapsed(next)
   }, [])
 
+  // #6820 — active session's MCP servers, for the read-only "MCP" panel view
+  // and its collapsed-header metric. Reads the same store field the mobile
+  // SettingsBar renders (written by the `mcp_servers` broadcast handler); the
+  // stable EMPTY_MCP_SERVERS fallback keeps a referentially-stable identity.
+  const activeMcpServers = useConnectionStore((s) => {
+    const id = s.activeSessionId
+    return id && s.sessionStates[id] ? s.sessionStates[id].mcpServers : EMPTY_MCP_SERVERS
+  })
+
   // #4303 — view registry. Order here = order in the tab strip. Adding a
-  // future view (MCP, skills, etc.) is a one-entry append.
+  // future view (skills, etc.) is a one-entry append.
   const panelViews = useMemo<SidebarPanelView[]>(() => ([
     {
       id: 'tokens',
@@ -216,10 +231,18 @@ export function Sidebar({
       ),
       collapsedHeaderMetric: () => tokenViewCollapsedMetric(sessions),
     },
+    // #6820 — read-only MCP server list for the active session (name + status),
+    // the desktop analogue of the mobile SettingsBar "MCP Servers (N)" section.
+    {
+      id: 'mcp',
+      label: 'MCP',
+      render: () => <SidebarMcpView servers={activeMcpServers} />,
+      collapsedHeaderMetric: () => mcpViewCollapsedMetric(activeMcpServers),
+    },
     // #5176 (epic #5170) — the Control Room v1 sidebar panel was retired here;
     // the per-session activity tree now drills down inside the main-tab
     // ControlRoomSection (mapped repo → active session → activity tree).
-  ]), [sessions, activeSessionId, onSessionClick, monthlyBudget])
+  ]), [sessions, activeSessionId, onSessionClick, monthlyBudget, activeMcpServers])
 
   // #5200 — Control Room launcher in the slot header. The host/repo table is
   // wide, so the launcher opens it in the main content area (via
