@@ -1,17 +1,23 @@
 /**
- * MCP child-process lifecycle for the claude-byok provider (#4077).
+ * MCP client lifecycle for the claude-byok provider (#4077, #6821).
  *
- * One MCPClient owns one MCP server child. Handles spawn, JSON-RPC handshake
- * (initialize → initialized → tools/list), crash detection with exponential
- * backoff between restart attempts (1s/2s/4s, #4453), and SIGTERM/SIGKILL
- * grace on destroy.
+ * Two transports live here behind one interface (state / tools / start() /
+ * callTool() / destroy() + the same state/ready/dead events):
  *
- * Per #4077 scope:
- *   - Lazy spawn: caller decides when to call start().
- *   - Crash detection on child exit / spawn error → schedule restart per the
- *     RESTART_BACKOFF_MS schedule (1s/2s/4s).
- *   - After MAX_RESTART_ATTEMPTS failures, state=dead and tools=[].
- *   - Session destroy sends SIGTERM, escalates to SIGKILL at KILL_GRACE_MS.
+ *   - MCPClient       — stdio: owns one MCP server CHILD PROCESS. Handles
+ *     spawn, JSON-RPC handshake (initialize → initialized → tools/list), crash
+ *     detection with exponential backoff between restart attempts (1s/2s/4s,
+ *     #4453), and SIGTERM/SIGKILL grace on destroy.
+ *   - MCPRemoteClient — network (#6821): speaks the MCP Streamable HTTP
+ *     transport (POST JSON-RPC to a url, honour the Mcp-Session-Id header,
+ *     read an SSE-upgraded response when the server streams one) with a
+ *     legacy HTTP+SSE fallback for `type: 'sse'` servers. No child process,
+ *     so the process-restart model does not apply — a network client makes a
+ *     single connect attempt and surfaces a clear status on failure (notably
+ *     `oauth-required` on a 401, deferred to #6822).
+ *
+ * `createMcpClient(config, opts)` picks the transport from the config shape
+ * (a `url` selects the remote client) so the fleet stays transport-agnostic.
  *
  * Out of scope (next stages):
  *   - Materializing into Anthropic SDK tools[] (#4078).
@@ -401,4 +407,535 @@ export class MCPClient extends EventEmitter {
     this._state = next
     this.emit('state', { prev, next })
   }
+}
+
+// ---------------------------------------------------------------------------
+// Remote transport (#6821): MCP Streamable HTTP + legacy HTTP+SSE.
+// ---------------------------------------------------------------------------
+
+/**
+ * Iterate a fetch response body as chunks. Node's `fetch` returns a web
+ * ReadableStream (undici); prefer async iteration when available, else fall
+ * back to an explicit reader so the SSE loop works across node versions.
+ */
+async function* iterateStream(stream) {
+  if (!stream) return
+  if (typeof stream[Symbol.asyncIterator] === 'function') {
+    yield* stream
+    return
+  }
+  const reader = stream.getReader()
+  try {
+    for (;;) {
+      const { value, done } = await reader.read()
+      if (done) return
+      if (value) yield value
+    }
+  } finally {
+    try { reader.releaseLock() } catch { /* stream already closed */ }
+  }
+}
+
+/**
+ * Parse one SSE event block into `{ event, data }`. Per the SSE grammar a
+ * `data:` field drops a single leading space and multiple `data:` lines join
+ * with newlines; `id:`/`retry:`/comment (`:`) lines are ignored — we only
+ * need the event name and its JSON-RPC data payload.
+ */
+function parseSseEvent(rawEvent) {
+  let event = 'message'
+  const dataLines = []
+  for (const line of rawEvent.split('\n')) {
+    if (line.length === 0 || line.startsWith(':')) continue
+    if (line.startsWith('event:')) event = line.slice(6).replace(/^ /, '').trim()
+    else if (line.startsWith('data:')) dataLines.push(line.slice(5).replace(/^ /, ''))
+  }
+  return { event, data: dataLines.length > 0 ? dataLines.join('\n') : null }
+}
+
+/** Parse a POST body (single object or JSON-RPC batch array) for the response matching `id`. */
+function extractJsonRpcResponse(text, id) {
+  let parsed
+  try { parsed = JSON.parse(text) } catch { return null }
+  const list = Array.isArray(parsed) ? parsed : [parsed]
+  return list.find((m) => m && m.id === id) || null
+}
+
+export class MCPRemoteClient extends EventEmitter {
+  constructor(config, opts = {}) {
+    super()
+    this.name = config.name
+    this._config = config
+    this._log = opts.log || createLogger('byok-mcp')
+    // Injectable HTTP client (defaults to the global fetch), mirroring the
+    // fetchImpl seam in get-public-ip / discord-webhook-client so tests can
+    // drive the transport against an in-process http server. fetch is a node
+    // primitive — no new npm dependency, consistent with the hand-rolled
+    // stdio client above.
+    this._fetchImpl = opts.fetchImpl || globalThis.fetch
+    // #4457 parity: optional async trust gate consulted before the first
+    // connect. true → proceed; false / throw → permanent DEAD, no request
+    // ever leaves the process.
+    this._trustGate = opts.trustGate || null
+    // #4454 parity: per-request handshake timeout. Same precedence + defensive
+    // guard as the stdio client (opts > config > module default).
+    this._handshakeTimeoutMs =
+      (Number.isFinite(opts.handshakeTimeoutMs) && opts.handshakeTimeoutMs > 0 && opts.handshakeTimeoutMs) ||
+      (Number.isFinite(config?.handshakeTimeoutMs) && config.handshakeTimeoutMs > 0 && config.handshakeTimeoutMs) ||
+      DEFAULT_HANDSHAKE_TIMEOUT_MS
+    this._url = config.url
+    // 'sse' → legacy HTTP+SSE two-endpoint transport; anything else → modern
+    // Streamable HTTP (single endpoint, POST + optional SSE-upgraded response).
+    this._transportType = config.type === 'sse' ? 'sse' : 'http'
+    this._headers = config.headers || {}
+    this._state = MCP_STATES.IDLE
+    this._tools = []
+    this._nextId = 1
+    this._sessionId = null
+    this._negotiatedProtocolVersion = null
+    // 'oauth-required' after a 401/407 (needs the OAuth flow from #6822), else
+    // null. Read for status surfacing — never carries any header/token value.
+    this._statusReason = null
+    this._destroyed = false
+    // In-flight AbortControllers, aborted on destroy() so a hung request or a
+    // persistent SSE stream cannot keep the process alive after teardown.
+    this._controllers = new Set()
+    // Legacy-SSE only: resolved POST endpoint + pending-request registry
+    // (streamable HTTP awaits each POST inline, so it leaves these empty).
+    this._endpointUrl = null
+    this._pending = new Map()
+    this._endpointTimer = null
+    this._endpointResolve = null
+    this._endpointReject = null
+  }
+
+  get state() { return this._state }
+  get tools() { return this._tools }
+  get statusReason() { return this._statusReason }
+
+  async start() {
+    if (this._destroyed) throw new Error('MCPRemoteClient destroyed')
+    if (this._state === MCP_STATES.READY || this._state === MCP_STATES.DEAD) return
+    // #4457 parity: trust gate fires BEFORE any network request. Deny/throw →
+    // permanent DEAD, fail-closed.
+    if (this._trustGate) {
+      let allowed
+      try {
+        allowed = await this._trustGate()
+      } catch (err) {
+        this._log.warn(`MCP server ${this.name}: trust gate threw: ${err?.message || err}`)
+        allowed = false
+      }
+      if (!allowed) {
+        this._toDead()
+        return
+      }
+    }
+    this._setState(MCP_STATES.STARTING)
+    try {
+      if (this._transportType === 'sse') await this._connectLegacySse()
+      else await this._handshakeStreamableHttp()
+      if (this._destroyed) { this._setState(MCP_STATES.DESTROYED); return }
+      this._setState(MCP_STATES.READY)
+      this.emit('ready', this._tools)
+    } catch (err) {
+      if (this._destroyed) { this._setState(MCP_STATES.DESTROYED); return }
+      if (err && err._oauthRequired) {
+        // Deferred to #6822 — surface a clear status instead of crashing.
+        this._statusReason = 'oauth-required'
+        this._log.warn(`MCP server ${this.name}: requires OAuth — not yet supported (#6822)`)
+      } else {
+        this._log.warn(`MCP server ${this.name}: connect failed: ${err?.message || err}`)
+      }
+      this._toDead()
+    }
+  }
+
+  async callTool(toolName, args, timeoutMs = DEFAULT_TOOL_CALL_TIMEOUT_MS) {
+    if (this._state !== MCP_STATES.READY) {
+      throw new Error(`MCP server ${this.name} not ready (state=${this._state})`)
+    }
+    const params = { name: toolName, arguments: args || {} }
+    return this._transportType === 'sse'
+      ? this._rpcViaEndpoint('tools/call', params, timeoutMs)
+      : this._rpcPost('tools/call', params, timeoutMs)
+  }
+
+  async destroy() {
+    if (this._destroyed) return
+    this._destroyed = true
+    if (this._endpointTimer) { clearTimeout(this._endpointTimer); this._endpointTimer = null }
+    this._rejectAllPending(new Error('MCP remote client destroyed'))
+    for (const c of this._controllers) { try { c.abort() } catch { /* already settled */ } }
+    this._controllers.clear()
+    // Best-effort Streamable HTTP session teardown (spec: DELETE with the
+    // session header). Bounded by KILL_GRACE_MS and fully error-swallowed —
+    // it must never make destroy() hang or throw.
+    if (this._transportType === 'http' && this._sessionId && typeof this._fetchImpl === 'function') {
+      const controller = new AbortController()
+      const timer = setTimeout(() => { try { controller.abort() } catch {} }, KILL_GRACE_MS)
+      try {
+        const res = await this._fetchImpl(this._url, {
+          method: 'DELETE',
+          headers: this._buildHeaders(),
+          signal: controller.signal,
+        })
+        await this._discardBody(res)
+      } catch { /* teardown is best-effort */ } finally {
+        clearTimeout(timer)
+      }
+    }
+    this._setState(MCP_STATES.DESTROYED)
+  }
+
+  // --- Streamable HTTP -----------------------------------------------------
+
+  async _handshakeStreamableHttp() {
+    const initResult = await this._rpcPost('initialize', {
+      protocolVersion: MCP_PROTOCOL_VERSION,
+      capabilities: {},
+      clientInfo: { name: 'chroxy-byok', version: MCP_CLIENT_VERSION },
+    }, this._handshakeTimeoutMs, { captureSession: true })
+    this._applyInitResult(initResult)
+    await this._notifyPost('notifications/initialized')
+    const toolsResult = await this._rpcPost('tools/list', {}, this._handshakeTimeoutMs)
+    this._setTools(toolsResult)
+  }
+
+  /** POST one JSON-RPC request; resolve its result from a JSON or SSE-upgraded response. */
+  async _rpcPost(method, params, timeoutMs, { captureSession = false } = {}) {
+    const id = this._nextId++
+    const payload = JSON.stringify({ jsonrpc: '2.0', id, method, params })
+    const controller = new AbortController()
+    this._controllers.add(controller)
+    let timedOut = false
+    const timer = setTimeout(() => { timedOut = true; try { controller.abort() } catch {} }, timeoutMs)
+    try {
+      let res
+      try {
+        res = await this._fetchImpl(this._url, {
+          method: 'POST',
+          headers: this._buildHeaders({ json: true, acceptStream: true }),
+          body: payload,
+          signal: controller.signal,
+        })
+      } catch (err) {
+        if (timedOut) throw new Error(`MCP ${method} timeout`)
+        throw err
+      }
+      this._checkStatus(res, method)
+      if (captureSession) {
+        const sid = res.headers.get('mcp-session-id')
+        if (sid) this._sessionId = sid
+      }
+      const contentType = (res.headers.get('content-type') || '').toLowerCase()
+      let message
+      if (contentType.includes('text/event-stream')) {
+        message = await this._readSseUntilId(res.body, id)
+      } else {
+        let text
+        try { text = await res.text() } catch (err) {
+          if (timedOut) throw new Error(`MCP ${method} timeout`)
+          throw err
+        }
+        message = extractJsonRpcResponse(text, id)
+      }
+      if (message == null) {
+        if (timedOut) throw new Error(`MCP ${method} timeout`)
+        throw new Error(`MCP ${method}: no matching JSON-RPC response`)
+      }
+      if (message.error) throw new Error(message.error?.message || `MCP ${method} RPC error`)
+      return message.result
+    } finally {
+      clearTimeout(timer)
+      this._controllers.delete(controller)
+    }
+  }
+
+  /** POST a JSON-RPC notification (no id, no response expected). Best-effort but honours a 401. */
+  async _notifyPost(method, params) {
+    const controller = new AbortController()
+    this._controllers.add(controller)
+    const timer = setTimeout(() => { try { controller.abort() } catch {} }, this._handshakeTimeoutMs)
+    try {
+      let res
+      try {
+        res = await this._fetchImpl(this._url, {
+          method: 'POST',
+          headers: this._buildHeaders({ json: true, acceptStream: true }),
+          body: JSON.stringify({ jsonrpc: '2.0', method, params }),
+          signal: controller.signal,
+        })
+      } catch {
+        return // initialize already succeeded; a lost `initialized` is non-fatal
+      }
+      if (res.status === 401 || res.status === 407) {
+        const err = new Error(`MCP server ${this.name} requires OAuth (HTTP ${res.status})`)
+        err._oauthRequired = true
+        throw err
+      }
+      await this._discardBody(res)
+    } finally {
+      clearTimeout(timer)
+      this._controllers.delete(controller)
+    }
+  }
+
+  /** Read an SSE stream until the JSON-RPC response with `id` arrives (or the stream ends). */
+  async _readSseUntilId(body, id) {
+    if (!body) return null
+    const decoder = new TextDecoder()
+    let buf = ''
+    for await (const chunk of iterateStream(body)) {
+      buf += decoder.decode(chunk, { stream: true })
+      buf = buf.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+      let idx
+      while ((idx = buf.indexOf('\n\n')) !== -1) {
+        const { data } = parseSseEvent(buf.slice(0, idx))
+        buf = buf.slice(idx + 2)
+        if (data == null) continue
+        let msg
+        try { msg = JSON.parse(data) } catch { continue }
+        if (msg && msg.id === id) return msg
+        // Server-initiated notifications/requests before the response: ignore.
+      }
+    }
+    return null
+  }
+
+  // --- Legacy HTTP+SSE (type: 'sse') ---------------------------------------
+
+  async _connectLegacySse() {
+    const controller = new AbortController()
+    this._controllers.add(controller)
+    let res
+    try {
+      res = await this._fetchImpl(this._url, {
+        method: 'GET',
+        headers: { ...this._headers, Accept: 'text/event-stream' },
+        signal: controller.signal,
+      })
+    } catch (err) {
+      this._controllers.delete(controller)
+      throw err
+    }
+    if (res.status === 401 || res.status === 407) {
+      const err = new Error(`MCP server ${this.name} requires OAuth (HTTP ${res.status})`)
+      err._oauthRequired = true
+      throw err
+    }
+    if (res.status < 200 || res.status >= 300) {
+      throw new Error(`MCP server ${this.name} HTTP ${res.status} opening SSE stream`)
+    }
+    const endpointReady = new Promise((resolve, reject) => {
+      this._endpointResolve = resolve
+      this._endpointReject = reject
+      this._endpointTimer = setTimeout(
+        () => reject(new Error(`MCP server ${this.name}: timeout waiting for SSE endpoint`)),
+        this._handshakeTimeoutMs,
+      )
+    })
+    // Background dispatch loop: resolves the endpoint, then routes responses.
+    this._runSseDispatchLoop(res.body)
+    await endpointReady
+    await this._legacyHandshake()
+  }
+
+  async _legacyHandshake() {
+    const initResult = await this._rpcViaEndpoint('initialize', {
+      protocolVersion: MCP_PROTOCOL_VERSION,
+      capabilities: {},
+      clientInfo: { name: 'chroxy-byok', version: MCP_CLIENT_VERSION },
+    }, this._handshakeTimeoutMs)
+    this._applyInitResult(initResult)
+    await this._notifyViaEndpoint('notifications/initialized')
+    const toolsResult = await this._rpcViaEndpoint('tools/list', {}, this._handshakeTimeoutMs)
+    this._setTools(toolsResult)
+  }
+
+  async _runSseDispatchLoop(body) {
+    const decoder = new TextDecoder()
+    let buf = ''
+    try {
+      for await (const chunk of iterateStream(body)) {
+        buf += decoder.decode(chunk, { stream: true })
+        buf = buf.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+        let idx
+        while ((idx = buf.indexOf('\n\n')) !== -1) {
+          this._handleLegacyEvent(buf.slice(0, idx))
+          buf = buf.slice(idx + 2)
+        }
+      }
+    } catch (err) {
+      if (!this._destroyed) this._log.debug(`MCP server ${this.name}: SSE stream error: ${err?.message || err}`)
+    } finally {
+      if (!this._destroyed) this._rejectAllPending(new Error('SSE stream closed'))
+    }
+  }
+
+  _handleLegacyEvent(rawEvent) {
+    const { event, data } = parseSseEvent(rawEvent)
+    if (event === 'endpoint') {
+      if (!this._endpointResolve) return
+      let endpoint = null
+      try { endpoint = new URL(data, this._url).toString() } catch { endpoint = null }
+      if (this._endpointTimer) { clearTimeout(this._endpointTimer); this._endpointTimer = null }
+      if (endpoint) {
+        this._endpointUrl = endpoint
+        this._endpointResolve()
+      } else {
+        this._endpointReject?.(new Error(`MCP server ${this.name}: invalid SSE endpoint event`))
+      }
+      this._endpointResolve = null
+      this._endpointReject = null
+      return
+    }
+    if (data == null) return
+    let msg
+    try { msg = JSON.parse(data) } catch { return }
+    if (msg && msg.id != null && this._pending.has(msg.id)) {
+      const settle = this._pending.get(msg.id)
+      settle(msg)
+    }
+  }
+
+  /** POST a JSON-RPC request to the legacy endpoint; await the response off the persistent SSE stream. */
+  async _rpcViaEndpoint(method, params, timeoutMs) {
+    if (!this._endpointUrl) throw new Error(`MCP server ${this.name}: no SSE endpoint`)
+    const id = this._nextId++
+    const responsePromise = new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this._pending.delete(id)
+        resolve({ id, error: { message: `MCP ${method} timeout` } })
+      }, timeoutMs)
+      this._pending.set(id, (msg) => { clearTimeout(timer); this._pending.delete(id); resolve(msg) })
+    })
+    const controller = new AbortController()
+    this._controllers.add(controller)
+    const postTimer = setTimeout(() => { try { controller.abort() } catch {} }, timeoutMs)
+    try {
+      const res = await this._fetchImpl(this._endpointUrl, {
+        method: 'POST',
+        headers: this._buildHeaders({ json: true }),
+        body: JSON.stringify({ jsonrpc: '2.0', id, method, params }),
+        signal: controller.signal,
+      })
+      this._checkStatus(res, method)
+      await this._discardBody(res)
+    } catch (err) {
+      this._pending.delete(id)
+      throw err
+    } finally {
+      clearTimeout(postTimer)
+      this._controllers.delete(controller)
+    }
+    const msg = await responsePromise
+    if (msg.error) throw new Error(msg.error?.message || `MCP ${method} RPC error`)
+    return msg.result
+  }
+
+  async _notifyViaEndpoint(method, params) {
+    if (!this._endpointUrl) return
+    const controller = new AbortController()
+    this._controllers.add(controller)
+    const timer = setTimeout(() => { try { controller.abort() } catch {} }, this._handshakeTimeoutMs)
+    try {
+      const res = await this._fetchImpl(this._endpointUrl, {
+        method: 'POST',
+        headers: this._buildHeaders({ json: true }),
+        body: JSON.stringify({ jsonrpc: '2.0', method, params }),
+        signal: controller.signal,
+      })
+      await this._discardBody(res)
+    } catch { /* best-effort */ } finally {
+      clearTimeout(timer)
+      this._controllers.delete(controller)
+    }
+  }
+
+  // --- shared helpers ------------------------------------------------------
+
+  _applyInitResult(initResult) {
+    if (!initResult || typeof initResult !== 'object') {
+      throw new Error('initialize returned non-object result')
+    }
+    const serverVersion = initResult.protocolVersion
+    if (typeof serverVersion === 'string') {
+      this._negotiatedProtocolVersion = serverVersion
+      if (serverVersion !== MCP_PROTOCOL_VERSION) {
+        this._log.warn(`MCP server ${this.name}: protocolVersion mismatch — requested=${MCP_PROTOCOL_VERSION} server=${serverVersion} (negotiating to server value)`)
+      }
+    }
+  }
+
+  _setTools(toolsResult) {
+    const tools = Array.isArray(toolsResult?.tools) ? toolsResult.tools : []
+    this._tools = Object.freeze(tools.map((t) => Object.freeze({ ...t })))
+  }
+
+  _buildHeaders({ json = false, acceptStream = false } = {}) {
+    const headers = { ...this._headers }
+    if (acceptStream) headers.Accept = 'application/json, text/event-stream'
+    if (json) headers['Content-Type'] = 'application/json'
+    // #6821 Streamable HTTP: echo the session id + negotiated protocol version
+    // on every post-initialize request per the 2025-03-26 / 2025-06-18 spec.
+    if (this._sessionId) headers['Mcp-Session-Id'] = this._sessionId
+    if (this._negotiatedProtocolVersion) headers['MCP-Protocol-Version'] = this._negotiatedProtocolVersion
+    return headers
+  }
+
+  _checkStatus(res, method) {
+    const status = res.status
+    if (status === 401 || status === 407) {
+      const err = new Error(`MCP server ${this.name} requires OAuth (HTTP ${status})`)
+      err._oauthRequired = true
+      throw err
+    }
+    if (status === 404) {
+      // Session expired / endpoint gone — drop the session so a future connect
+      // re-initializes; this request still fails below.
+      this._sessionId = null
+    }
+    if (status < 200 || status >= 300) {
+      throw new Error(`MCP server ${this.name} HTTP ${status} on ${method}`)
+    }
+  }
+
+  async _discardBody(res) {
+    try {
+      if (res?.body && typeof res.body.cancel === 'function') await res.body.cancel()
+      else if (res && typeof res.arrayBuffer === 'function') await res.arrayBuffer()
+    } catch { /* nothing to drain */ }
+  }
+
+  _rejectAllPending(err) {
+    for (const settle of this._pending.values()) {
+      try { settle({ id: null, error: { message: err.message } }) } catch { /* already settled */ }
+    }
+    this._pending.clear()
+  }
+
+  _toDead() {
+    this._tools = []
+    this._rejectAllPending(new Error('MCP remote client dead'))
+    this._setState(MCP_STATES.DEAD)
+    this.emit('dead')
+  }
+
+  _setState(next) {
+    if (this._state === next) return
+    const prev = this._state
+    this._state = next
+    this.emit('state', { prev, next })
+  }
+}
+
+/**
+ * Pick the transport for a parsed MCP server config (#6821). A `url` selects
+ * the remote (Streamable HTTP / SSE) client; otherwise the stdio child-process
+ * client. Keeps byok-mcp-fleet.js transport-agnostic — it just calls this.
+ */
+export function createMcpClient(config, opts = {}) {
+  const isRemote = typeof config?.url === 'string' && config.url.length > 0
+  return isRemote ? new MCPRemoteClient(config, opts) : new MCPClient(config, opts)
 }

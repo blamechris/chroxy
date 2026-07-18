@@ -8,6 +8,7 @@ import {
   discoverConfiguredMcpServers,
   loadClaudeMcpConfig,
   parseClaudeMcpConfig,
+  redactMcpUrl,
   toMcpServerMetadata,
 } from '../src/byok-mcp-config.js'
 
@@ -125,6 +126,92 @@ describe('byok-mcp-config', () => {
       args: ['server.js'],
       envKeys: ['A_TOKEN', 'Z_TOKEN'],
     })
+  })
+})
+
+// #6821 — remote (streamable-HTTP / SSE) transport parsing. A remote server
+// carries a url/type instead of a command; the parser must keep it (not drop
+// it as pre-#6821 did) while leaving stdio entries byte-identical.
+describe('byok-mcp-config remote transport (#6821)', () => {
+  it('parses an explicit http remote server with headers', () => {
+    const parsed = parseClaudeMcpConfig({
+      mcpServers: {
+        remote: {
+          type: 'http',
+          url: 'https://mcp.example.com/api',
+          headers: { Authorization: 'Bearer tok', COUNT: 7 },
+        },
+      },
+    })
+    assert.deepEqual(parsed.servers, [
+      { name: 'remote', type: 'http', url: 'https://mcp.example.com/api', headers: { Authorization: 'Bearer tok' } },
+    ])
+    // The non-string header value is dropped with a naming-only warning.
+    assert.equal(parsed.warnings.length, 1)
+    assert.match(parsed.warnings[0], /headers\.COUNT/)
+    assert.ok(!parsed.warnings[0].includes('Bearer'), 'header value must never appear in a warning')
+  })
+
+  it('normalizes streamable-http and infers a remote entry from a bare url', () => {
+    const parsed = parseClaudeMcpConfig({
+      mcpServers: {
+        a: { type: 'streamable-http', url: 'https://a/mcp' },
+        b: { url: 'https://b/mcp' }, // no command, no type → inferred remote
+      },
+    })
+    assert.deepEqual(parsed.servers, [
+      { name: 'a', type: 'http', url: 'https://a/mcp', headers: {} },
+      { name: 'b', type: 'http', url: 'https://b/mcp', headers: {} },
+    ])
+  })
+
+  it('parses an sse remote server (legacy transport)', () => {
+    const parsed = parseClaudeMcpConfig({
+      mcpServers: { s: { type: 'sse', url: 'https://s/sse' } },
+    })
+    assert.deepEqual(parsed.servers, [{ name: 's', type: 'sse', url: 'https://s/sse', headers: {} }])
+  })
+
+  it('rejects a non-http(s) url and a missing url with warnings, keeps siblings', () => {
+    const parsed = parseClaudeMcpConfig({
+      mcpServers: {
+        good: { type: 'http', url: 'https://good/mcp' },
+        badproto: { type: 'http', url: 'file:///etc/passwd' },
+        nourl: { type: 'http' },
+        stdio: { command: 'node', args: ['x.js'] },
+      },
+    })
+    assert.deepEqual(parsed.servers.map((s) => s.name), ['good', 'stdio'])
+    assert.ok(parsed.warnings.some((w) => /badproto.*http/.test(w)))
+    assert.ok(parsed.warnings.some((w) => /nourl.*url is required/.test(w)))
+    // stdio entry keeps its exact legacy shape.
+    assert.deepEqual(parsed.servers.find((s) => s.name === 'stdio'), {
+      name: 'stdio', command: 'node', args: ['x.js'], env: {},
+    })
+  })
+
+  it('toMcpServerMetadata redacts remote url credentials + exposes header keys only', () => {
+    const metadata = toMcpServerMetadata({
+      name: 'remote',
+      type: 'http',
+      url: 'https://user:pass@mcp.example.com/api?token=abc#frag',
+      headers: { Authorization: 'Bearer secret', 'X-Api-Key': 'k' },
+    })
+    assert.deepEqual(metadata, {
+      name: 'remote',
+      type: 'http',
+      url: 'https://mcp.example.com/api',
+      headerKeys: ['Authorization', 'X-Api-Key'],
+    })
+    const s = JSON.stringify(metadata)
+    assert.ok(!s.includes('secret') && !s.includes('pass') && !s.includes('token=abc'),
+      'no credential (header value, url userinfo, or query token) may survive into metadata')
+  })
+
+  it('redactMcpUrl strips userinfo, query, and fragment', () => {
+    assert.equal(redactMcpUrl('https://u:p@h.example/path?k=v#x'), 'https://h.example/path')
+    assert.equal(redactMcpUrl('not a url'), '[unparseable url]')
+    assert.equal(redactMcpUrl(''), '')
   })
 })
 
