@@ -4,7 +4,7 @@
  * Shows checkpoints as nodes on a vertical timeline with:
  * - Name, description, and timestamp
  * - Message count and git snapshot badge
- * - Restore (branch from any point) and delete actions
+ * - Restore files to a checkpoint and delete actions
  * - Create checkpoint button
  */
 import { useState, useEffect, useCallback, useMemo } from 'react'
@@ -102,7 +102,7 @@ function CheckpointNode({
             type="button"
             className="cp-btn cp-restore"
             onClick={() => onRestore(checkpoint.id)}
-            title="Restore to this checkpoint (creates new session)"
+            title="Restore files to this checkpoint (opens a new session)"
           >
             Restore
           </button>

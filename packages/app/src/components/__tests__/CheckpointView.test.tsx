@@ -155,7 +155,7 @@ describe('CheckpointView', () => {
 
     expect(alertSpy).toHaveBeenCalledWith(
       'Restore Checkpoint',
-      expect.stringContaining('Restore to "Initial setup"'),
+      'Restore files to "Initial setup"? Your working files will be reverted to this checkpoint and a new session will open.',
       expect.arrayContaining([
         expect.objectContaining({ text: 'Cancel', style: 'cancel' }),
         expect.objectContaining({ text: 'Restore' }),

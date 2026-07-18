@@ -62,8 +62,14 @@ async function acquireCwdLock(cwd) {
  * This avoids touching the shared stash stack, making concurrent sessions
  * in the same repository safe.
  *
- * Rewind creates a new session that resumes from the checkpoint's
- * conversation ID, effectively branching the conversation.
+ * The manager owns the git snapshot and the checkpoint metadata only. It does
+ * NOT branch the conversation itself — that is decided at restore time by the
+ * WS handler based on the session's provider (#6766): for a fork-capable
+ * provider (the SDK, via `forkSession`/`upToMessageId`) restore forks the
+ * conversation truncated to the checkpoint's `boundaryMessageId`, so the
+ * rewound session's transcript stops at the checkpoint. For providers that
+ * cannot truncate a resumed transcript the restore is files-only. The
+ * `boundaryMessageId` captured here is what makes that truncation possible.
  */
 export class CheckpointManager extends EventEmitter {
   /**
@@ -103,9 +109,13 @@ export class CheckpointManager extends EventEmitter {
    * @param {string} [params.name] - User-provided checkpoint name
    * @param {string} [params.description] - Auto-generated description (e.g., last message)
    * @param {number} [params.messageCount] - Number of messages at checkpoint time
+   * @param {string} [params.boundaryMessageId] - #6766: the SDK transcript UUID
+   *   marking this checkpoint's conversation boundary. When present (SDK
+   *   provider), restore forks the conversation truncated up to and including
+   *   this message; absent → the restore is files-only for this checkpoint.
    * @returns {Promise<object>} The created checkpoint
    */
-  async createCheckpoint({ sessionId, resumeSessionId, cwd, name, description, messageCount }) {
+  async createCheckpoint({ sessionId, resumeSessionId, cwd, name, description, messageCount, boundaryMessageId }) {
     const checkpoints = this._getCheckpoints(sessionId)
 
     // Enforce max checkpoints — remove oldest if at limit
@@ -126,6 +136,10 @@ export class CheckpointManager extends EventEmitter {
       name: name || `Checkpoint ${(this._counters.get(sessionId) || 0) + 1}`,
       description: description || '',
       messageCount: messageCount || 0,
+      // #6766: fork boundary for a true conversation rewind at restore. Stored
+      // as null when the provider can't supply one (subprocess providers) so a
+      // restore of that checkpoint honestly degrades to files-only.
+      boundaryMessageId: typeof boundaryMessageId === 'string' && boundaryMessageId ? boundaryMessageId : null,
       createdAt: Date.now(),
       gitRef: null,
     }
@@ -193,11 +207,17 @@ export class CheckpointManager extends EventEmitter {
 
   /**
    * Restore file state from a checkpoint's git snapshot.
-   * Does NOT restore conversation state — that requires creating a new session
-   * with the checkpoint's resumeSessionId (handled by session-manager).
+   *
+   * This restores the working tree only. The conversation side of a rewind is
+   * the WS restore handler's responsibility (#6766): it reads the returned
+   * `resumeSessionId` + `boundaryMessageId` and, for a fork-capable provider,
+   * forks the conversation truncated to the boundary; otherwise it resumes
+   * files-only. Kept here so the git snapshot and the conversation decision stay
+   * decoupled across providers.
    * @param {string} sessionId
    * @param {string} checkpointId
-   * @returns {Promise<object>} The checkpoint data (including resumeSessionId)
+   * @returns {Promise<object>} The checkpoint data (including resumeSessionId
+   *   and boundaryMessageId)
    */
   async restoreCheckpoint(sessionId, checkpointId) {
     const checkpoint = this.getCheckpoint(sessionId, checkpointId)

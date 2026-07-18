@@ -1,4 +1,4 @@
-import { query } from '@anthropic-ai/claude-agent-sdk'
+import { query, forkSession } from '@anthropic-ai/claude-agent-sdk'
 import { join } from 'path'
 import { homedir } from 'os'
 import { updateModels, saveModelsCache, updateContextWindow, getModels, ALLOWED_MODEL_IDS } from './models.js'
@@ -352,6 +352,18 @@ export class SdkSession extends BaseSession {
     this._query = null
     this._thinkingLevel = null
 
+    // #6766: last SDK transcript message UUID seen this session. Captured from
+    // each full `assistant` message in the query loop and used as the fork
+    // boundary (`upToMessageId`) when a checkpoint created just after this
+    // point is later restored — so rewind truncates the conversation to the
+    // checkpoint instead of resuming the full latest transcript. Only the SDK
+    // provider tracks this; subprocess providers leave `lastMessageUuid` null.
+    this._lastMessageUuid = null
+    // #6766: injectable handle for the SDK's standalone `forkSession` so tests
+    // can stub the on-disk transcript fork without a live session (mirrors the
+    // instance-level `_query` injection the rest of the suite uses).
+    this._forkSessionImpl = forkSession
+
     // #5269 (Control Room Phase 2a): map a Task subagent's tool_use_id (the id
     // chroxy keys activity/agent nodes by) → the SDK's separate `task_id`,
     // captured from `task_started` system messages. cancelActivity() needs the
@@ -431,6 +443,69 @@ export class SdkSession extends BaseSession {
   /** Public accessor for the SDK session ID used to resume conversations. */
   get resumeSessionId() {
     return this._sdkSessionId
+  }
+
+  /**
+   * #6766: the transcript UUID of the last full assistant message seen this
+   * session, or null before the first turn completes. Checkpoint creation reads
+   * this to record a fork boundary; `null` on providers that don't track it.
+   * @returns {string|null}
+   */
+  get lastMessageUuid() {
+    return this._lastMessageUuid || null
+  }
+
+  /**
+   * #6766: whether this provider can fork/truncate a resumed conversation to a
+   * message boundary. True for the SDK provider (the Agent SDK exposes
+   * `forkSession({ upToMessageId })`); overridden false where the transcript is
+   * not reachable by the host-side fork (see DockerSdkSession — the transcript
+   * lives inside the container). The checkpoint restore path gates the real
+   * conversation rewind on this; when false it degrades to a files-only restore.
+   * @returns {boolean}
+   */
+  get supportsConversationFork() {
+    return true
+  }
+
+  /**
+   * #6766: record the fork boundary from a full SDK message. Guarded so a
+   * message without a string `uuid` leaves the previous boundary intact.
+   * Extracted from the query loop so it can be unit-tested directly.
+   * @param {object} msg - An SDK stream message (expects a `uuid` field).
+   */
+  _captureBoundaryMessage(msg) {
+    if (msg && typeof msg.uuid === 'string' && msg.uuid) {
+      this._lastMessageUuid = msg.uuid
+    }
+  }
+
+  /**
+   * #6766: fork a conversation into a new, independent SDK session truncated to
+   * a message boundary. Wraps the Agent SDK's standalone `forkSession`, which
+   * copies the source transcript (remapping UUIDs) up to and including
+   * `upToMessageId`, then returns the new session's id — resumable like any
+   * other conversation id. This is what makes checkpoint "Rewind" actually
+   * branch the conversation (not just the files) for the SDK provider.
+   *
+   * @param {object} params
+   * @param {string} [params.sessionId] - Source conversation id to fork.
+   *   Defaults to this session's current SDK id.
+   * @param {string} [params.upToMessageId] - Fork boundary (inclusive). Omitted
+   *   → full copy.
+   * @returns {Promise<string|null>} The forked conversation id, or null if the
+   *   SDK returned no id.
+   */
+  async forkConversation({ sessionId, upToMessageId } = {}) {
+    const source = sessionId || this._sdkSessionId
+    if (!source) throw new Error('Cannot fork conversation: no source session id')
+    const opts = {}
+    if (typeof upToMessageId === 'string' && upToMessageId) opts.upToMessageId = upToMessageId
+    // Scope the transcript search to this session's project dir when known; the
+    // SDK falls back to searching all project dirs when `dir` is omitted.
+    if (this.cwd) opts.dir = this.cwd
+    const result = await this._forkSessionImpl(source, opts)
+    return result?.sessionId || null
   }
 
   /**
@@ -841,6 +916,11 @@ export class SdkSession extends BaseSession {
           }
 
           case 'assistant': {
+            // #6766: remember this message's transcript UUID as the fork
+            // boundary. A checkpoint auto-created at the start of the NEXT turn
+            // captures this as its boundary, so restoring that checkpoint can
+            // fork the conversation truncated to exactly this point.
+            this._captureBoundaryMessage(msg)
             // Full assistant message — process content blocks for tool detection
             const content = msg.message?.content
             if (!Array.isArray(content)) break

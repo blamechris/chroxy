@@ -3074,3 +3074,72 @@ describe('per-model usage forwarding (#6692)', () => {
     s.destroy()
   })
 })
+
+// ──────────────────────────────────────────────────────────────────────────────
+// #6766 — conversation fork boundary + fork wrapper. These make checkpoint
+// "Rewind" actually branch the conversation truncated to the checkpoint (for the
+// SDK provider) rather than resuming the full latest transcript.
+// ──────────────────────────────────────────────────────────────────────────────
+
+describe('SdkSession conversation fork (#6766)', () => {
+  it('captures the latest assistant transcript uuid as the fork boundary during a turn', async () => {
+    const s = createSession()
+    s._processReady = true
+    assert.equal(s.lastMessageUuid, null, 'null before any turn')
+    s._callQuery = () => (async function* () {
+      yield { type: 'assistant', uuid: 'asst-1', message: { content: [{ type: 'text', text: 'hi' }] } }
+      yield { type: 'assistant', uuid: 'asst-2', message: { content: [{ type: 'text', text: 'more' }] } }
+      yield { type: 'result', session_id: 'conv-x', total_cost_usd: 0, duration_ms: 1, usage: {} }
+    })()
+    await s.sendMessage('hello')
+    assert.equal(s.lastMessageUuid, 'asst-2', 'boundary tracks the latest assistant message of the turn')
+    s.destroy()
+  })
+
+  it('_captureBoundaryMessage ignores messages without a string uuid', () => {
+    const s = createSession()
+    s._captureBoundaryMessage({ uuid: 'm-1' })
+    assert.equal(s.lastMessageUuid, 'm-1')
+    s._captureBoundaryMessage({}) // no uuid — keep previous
+    assert.equal(s.lastMessageUuid, 'm-1')
+    s._captureBoundaryMessage({ uuid: 42 }) // non-string — keep previous
+    assert.equal(s.lastMessageUuid, 'm-1')
+    s._captureBoundaryMessage({ uuid: 'm-2' })
+    assert.equal(s.lastMessageUuid, 'm-2')
+    s.destroy()
+  })
+
+  it('supportsConversationFork is true for the SDK provider', () => {
+    const s = createSession()
+    assert.equal(s.supportsConversationFork, true)
+    s.destroy()
+  })
+
+  it('forkConversation wraps the SDK forkSession with the boundary + project dir', async () => {
+    const s = createSession({ cwd: '/repo' })
+    const calls = []
+    s._forkSessionImpl = async (id, opts) => { calls.push([id, opts]); return { sessionId: 'forked-xyz' } }
+    const forked = await s.forkConversation({ sessionId: 'conv-1', upToMessageId: 'm-2' })
+    assert.equal(forked, 'forked-xyz')
+    assert.deepEqual(calls, [['conv-1', { upToMessageId: 'm-2', dir: '/repo' }]])
+    s.destroy()
+  })
+
+  it('forkConversation defaults the source to the live session and returns null when the SDK gives no id', async () => {
+    const s = createSession({ cwd: '/repo' })
+    s._sdkSessionId = 'live-conv'
+    let seen = null
+    s._forkSessionImpl = async (id) => { seen = id; return {} } // no sessionId
+    const forked = await s.forkConversation({ upToMessageId: 'm-9' })
+    assert.equal(seen, 'live-conv', 'defaults to the live SDK session id')
+    assert.equal(forked, null)
+    s.destroy()
+  })
+
+  it('forkConversation throws when there is no source conversation', async () => {
+    const s = createSession()
+    s._sdkSessionId = null
+    await assert.rejects(() => s.forkConversation({}), /no source session id/)
+    s.destroy()
+  })
+})
