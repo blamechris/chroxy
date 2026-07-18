@@ -13,17 +13,39 @@ import { SidebarCostBadge, type CostBadgeMode } from './SidebarCostBadge'
 export interface StatusBarProps {
   cost?: number
   context?: string
-  /** #3858: percent of model window the last turn used (drives contextTooltip). */
+  /** #6769: percent of the meter ceiling the conversation fills (occupancy-driven). */
   contextPercent?: number | null
-  /** #4205: raw input tokens for the most-recent turn (drives the tooltip breakdown). */
+  /**
+   * #6769: window occupancy in tokens from the provider's SNAPSHOT (SDK
+   * getContextUsage() / byok final-round prompt). Drives the `used / total`
+   * meter label. Absent = no occupancy signal — the meter hides entirely
+   * (honest dash state); it is NEVER derived from the billing input/output
+   * counts below, which sum across agent-loop rounds and over-read fill.
+   *
+   * NOTE the two denominators are deliberately different: the label's
+   * `total` is the RAW `contextWindow`, while `contextPercent` is metered
+   * against the effective ceiling (the SDK's real autoCompactThreshold, or
+   * the reserve-adjusted window — see store-core `contextMeterCeiling`).
+   * A percent recomputed from the label therefore reads slightly LOWER than
+   * the displayed `contextPercent`. That's intentional: the label answers
+   * "how big is the window?", the percent answers "how much usable space is
+   * left before auto-compact?".
+   */
+  contextTokens?: number
+  /**
+   * #6769: true when the snapshot is byok's final-round estimate rather than
+   * the SDK's authoritative context-usage API — the tooltip flags it.
+   */
+  contextEstimated?: boolean
+  /** #4205: raw input tokens billed for the most-recent turn (tooltip breakdown). */
   inputTokens?: number
-  /** #4205: raw output tokens for the most-recent turn (drives the tooltip breakdown). */
+  /** #4205: raw output tokens billed for the most-recent turn (tooltip breakdown). */
   outputTokens?: number
   /**
-   * #5065: model context window in tokens. Combined with `inputTokens +
-   * outputTokens` to render the `used / total tokens` meter alongside the
-   * percent text. Hidden entirely when missing so the meter doesn't show
-   * an empty bar when no session/model is active.
+   * #5065: model context window in tokens. Combined with the occupancy
+   * (`contextTokens`) to render the `used / total tokens` meter alongside
+   * the percent text. Hidden entirely when missing so the meter doesn't
+   * show an empty bar when no session/model is active.
    */
   contextWindow?: number
   isBusy?: boolean
@@ -62,7 +84,8 @@ export const STATUS_COMPACT_SUGGEST_THRESHOLD = 80
 export const STATUS_OVER_BUDGET_THRESHOLD = 100
 
 export function StatusBar({
-  cost, context, contextPercent, inputTokens, outputTokens, contextWindow,
+  cost, context, contextPercent, contextTokens, contextEstimated,
+  inputTokens, outputTokens, contextWindow,
   isBusy, agentCount, provider, model, costBadgeMode,
 }: StatusBarProps) {
   const prov = provider ? getProviderInfo(provider) : null
@@ -70,23 +93,24 @@ export function StatusBar({
   // `title` + `aria-label` mirror pair can't drift if the formatter
   // ever takes a code path with side effects.
   const costTip = costTooltip({ cost, provider })
-  // #4205: pass through input/output tokens so the context chip's
-  // tooltip carries the in/out/total breakdown alongside the percent.
+  // #6769: occupancy-driven tooltip; the last-turn billing in/out counts ride
+  // along as a clearly-labelled secondary breakdown.
   const contextTip = contextTooltip({
     percent: contextPercent ?? null,
     contextSummary: context,
     inputTokens,
     outputTokens,
+    estimated: contextEstimated,
   })
   const agentTip = agentCountTooltip(agentCount)
 
-  // #5065: compute the `used / total tokens` label + bar when we have
-  // BOTH the raw token counts AND the model's context window. Without
-  // the window we'd be guessing, and the existing context chip text
-  // already covers the no-window case (it falls back to the raw count
-  // without a meter). Render is gated on `usedTokens > 0` so an idle
-  // session — no turns yet — doesn't show an empty `0 / 1M` bar.
-  const usedTokens = (inputTokens ?? 0) + (outputTokens ?? 0)
+  // #5065/#6769: compute the `used / total tokens` label + bar ONLY when the
+  // provider reported an occupancy snapshot (`contextTokens`) AND the window
+  // is known. There is deliberately NO fallback to input+output — those are
+  // per-turn billing counts summed across agent-loop rounds and would
+  // over-read fill ≈N× on an N-round turn (the #6816 review finding).
+  // Providers with no snapshot show no meter at all (honest dash state).
+  const usedTokens = contextTokens ?? 0
   const showMeter = usedTokens > 0
     && contextWindow != null
     && contextWindow > 0

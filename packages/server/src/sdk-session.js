@@ -95,6 +95,12 @@ export class SdkSession extends BaseSession {
   // model ids + the shared models registry). Docker subclasses inherit it.
   static claudeFamily = true
 
+  // #6769: cap on how long the end-of-turn getContextUsage() control request
+  // may delay the `result` broadcast. The CLI answers in milliseconds when
+  // alive; the cap only bites when the process is already shutting down —
+  // in which case the snapshot is skipped and the result emits without it.
+  static CONTEXT_USAGE_SNAPSHOT_TIMEOUT_MS = 2000
+
   /**
    * Human-readable label shown in the startup banner and anywhere else the
    * server needs to name this provider (#2953). Each provider owns its own
@@ -1076,6 +1082,17 @@ export class SdkSession extends BaseSession {
               this.emit('models_updated', { models: getModels() })
             }
 
+            // #6769: end-of-turn occupancy snapshot via the SDK's
+            // getContextUsage() control API — the same number Claude Code's
+            // own /context shows. Queried while `this._query` is still live
+            // (we're inside the for-await; the CLI process is alive until
+            // the generator completes). `msg.usage` below is the per-turn
+            // BILLING aggregate (summed across agent-loop rounds) and must
+            // never be read as occupancy — see context-window.ts (#6769).
+            // Null on timeout/old-CLI/error → field omitted → clients keep
+            // their previous snapshot (or the honest dash state).
+            const contextUsageSnapshot = await this._getContextUsageSnapshot()
+
             // #4628: sweep any orphan tool_starts before emitting result
             // so the dashboard's activeTools clears as part of the same
             // turn-end burst. _clearMessageState (called next) would also
@@ -1092,6 +1109,10 @@ export class SdkSession extends BaseSession {
               numTurns: Number.isFinite(msg.num_turns) ? msg.num_turns : null,
               apiDurationMs: Number.isFinite(msg.duration_api_ms) ? msg.duration_api_ms : null,
               modelUsage: normalizeSdkModelUsage(msg.modelUsage),
+              // #6769: occupancy snapshot (or absent when unavailable).
+              // Wire field is contextOccupancy — NOT contextUsage — so it can
+              // never be confused with the billing `usage` aggregate above.
+              ...(contextUsageSnapshot ? { contextOccupancy: contextUsageSnapshot } : {}),
             }, 'turn_ended_with_orphan_tool_start')
 
             this._clearMessageState()
@@ -1171,6 +1192,63 @@ export class SdkSession extends BaseSession {
    */
   _callQuery(queryArgs) {
     return query(queryArgs)
+  }
+
+  /**
+   * #6769: fetch the end-of-turn context-window OCCUPANCY snapshot from the
+   * SDK's `getContextUsage()` control API (verified on
+   * @anthropic-ai/claude-agent-sdk 0.2.114: sdk.d.ts declares
+   * `Query.getContextUsage(): Promise<SDKControlGetContextUsageResponse>` with
+   * `totalTokens` / `maxTokens` / `percentage` / `autoCompactThreshold` (in
+   * TOKENS — the CLI compares it directly against token counts) /
+   * `isAutoCompactEnabled`).
+   *
+   * This is the ONLY honest occupancy source for this provider: the result
+   * message's own `usage` is the per-turn billing aggregate summed across
+   * agent-loop rounds (+ subagents) and over-reads window fill ≈N× on an
+   * N-round turn.
+   *
+   * Fail-soft by design — returns null (result emits without the field) when:
+   *   - the query is gone or the installed SDK predates the API (typeof guard)
+   *   - the control request errors (CLI already shutting down post-result)
+   *   - the response doesn't arrive within the timeout (bounds the latency
+   *     this adds to the turn-end result broadcast)
+   *   - the response lacks a finite totalTokens
+   * Clients treat a missing field as "keep the previous snapshot / dash".
+   *
+   * @returns {Promise<{totalTokens: number, maxTokens: number|null, autoCompactThreshold: number|null, isAutoCompactEnabled: boolean|null, source: 'context-usage-api'}|null>}
+   */
+  async _getContextUsageSnapshot() {
+    const q = this._query
+    if (!q || typeof q.getContextUsage !== 'function') return null
+    let timer = null
+    try {
+      const timeout = new Promise((resolve) => {
+        timer = setTimeout(() => resolve(null), SdkSession.CONTEXT_USAGE_SNAPSHOT_TIMEOUT_MS)
+        // Don't hold the process open for a race that already resolved (#6027).
+        if (typeof timer.unref === 'function') timer.unref()
+      })
+      const res = await Promise.race([q.getContextUsage(), timeout])
+      if (!res || typeof res.totalTokens !== 'number' || !Number.isFinite(res.totalTokens) || res.totalTokens < 0) {
+        if (!res) {
+          ;(this._log || log).debug('getContextUsage() timed out or returned nothing — result emits without occupancy')
+        }
+        return null
+      }
+      const pos = (v) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : null)
+      return {
+        totalTokens: res.totalTokens,
+        maxTokens: pos(res.maxTokens),
+        autoCompactThreshold: pos(res.autoCompactThreshold),
+        isAutoCompactEnabled: typeof res.isAutoCompactEnabled === 'boolean' ? res.isAutoCompactEnabled : null,
+        source: 'context-usage-api',
+      }
+    } catch (err) {
+      ;(this._log || log).debug(`getContextUsage() failed (${err?.message || err}) — result emits without occupancy`)
+      return null
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
   }
 
   /**

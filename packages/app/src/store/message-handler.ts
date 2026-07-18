@@ -2861,6 +2861,13 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       const resultPatch = {
         streamingMessageId: null as string | null,
         contextUsage: normalized.contextUsage,
+        // #6769: the occupancy snapshot PERSISTS across turns — only a result
+        // that carries a new snapshot moves it (including DOWN after a
+        // compaction). A result without one keeps the last value rather than
+        // blanking the meter.
+        ...(normalized.contextOccupancy
+          ? { contextOccupancy: normalized.contextOccupancy }
+          : {}),
         lastResultCost: normalized.lastResultCost,
         lastResultDuration: normalized.lastResultDuration,
       };

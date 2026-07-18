@@ -76,6 +76,13 @@ export interface AppHeaderProps {
   cost?: number
   context?: string
   contextPercent: number | null
+  // #6769: window occupancy in tokens from the provider's snapshot — drives
+  // the header meter's `used / total` label. Absent = no occupancy signal
+  // (the meter hides; honest dash state).
+  contextTokens?: number
+  // #6769: true when the snapshot is byok's final-round estimate rather than
+  // the SDK's authoritative context-usage API — the tooltip says so.
+  contextEstimated?: boolean
   inputTokens?: number
   outputTokens?: number
   contextWindow?: number
@@ -293,6 +300,8 @@ export function AppHeader(props: AppHeaderProps) {
           cost={props.cost}
           context={props.context}
           contextPercent={props.contextPercent}
+          contextTokens={props.contextTokens}
+          contextEstimated={props.contextEstimated}
           inputTokens={props.inputTokens}
           outputTokens={props.outputTokens}
           // #5065: surface the absolute `used / total` token meter in

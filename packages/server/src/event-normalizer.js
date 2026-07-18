@@ -492,7 +492,21 @@ Object.assign(EVENT_MAP, {
 
   result: (data, ctx) => {
     const messages = [
-      { msg: { type: 'result', cost: data.cost, duration: data.duration, usage: data.usage, sessionId: data.sessionId } },
+      {
+        msg: {
+          type: 'result',
+          cost: data.cost,
+          duration: data.duration,
+          usage: data.usage,
+          sessionId: data.sessionId,
+          // #6769: occupancy snapshot (claude-sdk getContextUsage() / the
+          // byok agent loop's final-round prompt, incl. subclasses like
+          // ollama whose endpoint reports usage). Only forwarded when the
+          // session emitted one — providers with no occupancy signal keep
+          // the field off the wire so clients render their honest dash state.
+          ...(data.contextOccupancy ? { contextOccupancy: data.contextOccupancy } : {}),
+        },
+      },
       { msg: { type: 'agent_idle' } },
     ]
     const sideEffects = [{ type: 'session_list' }]

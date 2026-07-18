@@ -17,6 +17,7 @@ describe('createEmptyBaseSessionState', () => {
       activeModel: null,
       permissionMode: null,
       contextUsage: null,
+      contextOccupancy: null,
       lastResultCost: null,
       lastResultDuration: null,
       sessionCost: null,

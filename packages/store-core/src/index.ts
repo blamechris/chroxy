@@ -15,10 +15,19 @@ export { DEFAULT_CONTEXT_WINDOW } from './types'
 // default — for providers that legitimately report no window (ollama sends
 // `contextWindow: null` on purpose) `resolveContextWindow` returns null and
 // clients render an "unknown window" state instead of a % against 200k.
+// #6769: context-window fill from the occupancy SNAPSHOT (result.contextUsage
+// wire field), never from billing usage — a result's `usage` is summed across
+// agent-loop rounds and over-reads occupancy ≈N× on an N-round turn. See
+// context-window.ts for the full semantic model and per-provider sources.
 export {
   isClaudeBackedProvider,
   resolveContextWindow,
   CLAUDE_BACKED_DOCKER_IDS,
+  contextOccupancyTokens,
+  contextMeterCeiling,
+  effectiveContextWindow,
+  contextFillPercent,
+  CONTEXT_AUTO_COMPACT_RESERVE,
 } from './context-window'
 
 // #4853: runtime type-guard for `VoiceInputMode` — keyed off an
@@ -63,6 +72,8 @@ export type {
   EvaluatorRewriteMeta,
   SavedConnection,
   ContextUsage,
+  // #6769: occupancy snapshot type (the context meter's only honest input).
+  ContextOccupancy,
   CumulativeUsage,
   InputSettings,
   // #4825: consolidated VoiceInputMode union previously declared in

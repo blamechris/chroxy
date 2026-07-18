@@ -2,11 +2,19 @@
  * Status-chip tooltips (#3858).
  *
  * Both StatusBar (top header) and FooterBar (bottom) render the same
- * read-only status chips — cost, context %, model, agent count, per-turn
- * token chip. Each one looks interactable but isn't, and the values are
- * easy to misread (especially context %, which shows the LAST TURN's
- * prompt size as a fraction of the model window, NOT a cumulative session
- * total — 100% red looks alarming but is purely per-turn).
+ * read-only status chips — cost, context %, model, agent count, token
+ * chip. Each one looks interactable but isn't, and the values are easy to
+ * misread.
+ *
+ * #6769: the context % is window OCCUPANCY — how many tokens the conversation
+ * currently occupies in the model's window, from the provider's end-of-turn
+ * snapshot (SDK getContextUsage() / byok final-round prompt), metered against
+ * the real auto-compact threshold when known. It grows as the conversation
+ * grows and steps DOWN after a compaction. It is NEVER computed from the
+ * billing usage aggregate (which sums across agent-loop rounds and over-reads
+ * fill), and it is NOT the pre-#6769 per-turn prompt size that reset each
+ * turn. The tooltip copy below reflects the occupancy meaning; the last-turn
+ * billing in/out counts appear only as a clearly-labelled secondary line.
  *
  * This module returns the `title=` strings each chip surfaces on hover.
  * Native `title=` is enough (matches the existing QR / Share / cwd
@@ -45,21 +53,28 @@ export function costTooltip({ cost, provider }: CostTooltipArgs): string {
 }
 
 export interface ContextTooltipArgs {
-  /** Percent of model window the most-recent turn consumed (may exceed 100). */
+  /**
+   * #6769: percent of the meter ceiling (real auto-compact threshold when
+   * known) the conversation currently occupies. May exceed 100 past the
+   * ceiling. Null when the provider has no occupancy signal.
+   */
   percent: number | null
-  /** Formatted summary string ("90k / 200k tokens"). */
+  /** Formatted summary string ("110.0k tokens"). */
   contextSummary?: string
   /**
-   * #4205: raw input/output token counts for the most-recent turn. When
-   * both are present, the tooltip appends an
-   * `${in}k input + ${out}k output = ${total}k tokens` breakdown so the
-   * chip explains where the percent came from (#3858's original
-   * acceptance criterion — the helper was implemented + tested in #4204
-   * but left unwired pending this issue). Either undefined skips the
-   * breakdown so pre-first-turn renders stay clean.
+   * #4205: raw input/output token counts BILLED for the most-recent turn.
+   * When both are present the tooltip appends a clearly-labelled last-turn
+   * billing line — deliberately separate from the occupancy lead, because
+   * billing counts are summed across agent-loop rounds and do NOT describe
+   * window fill. Either undefined skips the line.
    */
   inputTokens?: number
   outputTokens?: number
+  /**
+   * #6769: true when the occupancy comes from byok's final-round prompt
+   * estimate rather than the SDK's authoritative context-usage API.
+   */
+  estimated?: boolean
 }
 
 export function contextTooltip({
@@ -67,43 +82,52 @@ export function contextTooltip({
   contextSummary,
   inputTokens,
   outputTokens,
+  estimated,
 }: ContextTooltipArgs): string {
   if (percent == null && !contextSummary && inputTokens == null && outputTokens == null) {
     return 'No context usage yet — meter fills after the first turn completes.'
   }
-  // KEY: clarify per-turn vs cumulative. The #3858 issue calls this out
-  // as the most confusing one because 100% red looks alarming but the
-  // value is the LAST TURN's prompt size, not a cumulative spend.
+  // #6769: this is window OCCUPANCY from the provider's end-of-turn snapshot.
+  // The auto-compact phrasing ("usable space before auto-compact" / "steps
+  // down after a compaction") applies ONLY to sources with a REAL threshold
+  // (the SDK snapshot). Estimated sources (the byok final-round family —
+  // there's no compaction boundary behind their reserve-fallback ceiling)
+  // phrase it as plain context-window fill, flagged as estimated.
   // Percent rounds to 1 decimal — App.tsx computes it as a float
-  // ((total/contextWindow)*100) so without rounding we'd get
-  // "12.3456789%" in the tooltip (Copilot review on #4204).
+  // (occupancy / ceiling * 100) so without rounding we'd get
+  // "12.3456789%" in the tooltip.
   const lead = percent != null
-    ? `Most recent turn used ${roundPercent(percent)}% of the model's context window.`
-    : 'Most recent turn context usage.'
+    ? estimated
+      ? `Conversation fills ${roundPercent(percent)}% of the model's context window (estimated).`
+      : `Conversation occupies ${roundPercent(percent)}% of the context window's usable space (before auto-compact).`
+    : estimated
+      ? 'Context-window fill (estimated).'
+      : 'Context-window occupancy.'
   const detail = contextSummary ? ` (${contextSummary})` : ''
-  // #4205: when both input/output are known, append the breakdown so the
-  // single chip carries both the percent ("how full?") and the in/out
-  // split ("what filled it?"). Composed rather than added as a separate
-  // chip — the issue's "out of scope" pins this to enriching the
-  // existing context chip.
+  const behaviour = estimated
+    ? ' Estimated from the last API round — grows with the conversation.'
+    : ' Grows with the conversation and steps down after a compaction.'
+  // #4205: the last-turn billing line stays available on hover, clearly
+  // labelled so it can't be read as window fill (#6769).
   const breakdown = (inputTokens != null && outputTokens != null)
     ? ' ' + tokenChipTooltip({ inputTokens, outputTokens })
     : ''
-  return `${lead}${detail} This is per-turn — resets each turn and the visible width caps at 100%.${breakdown}`
+  return `${lead}${detail}${behaviour}${breakdown}`
 }
 
 export interface TokenChipTooltipArgs {
-  /** Input tokens the most-recent turn sent (prompt + context). */
+  /** Input tokens billed for the most-recent turn (all agent-loop rounds). */
   inputTokens: number
-  /** Output tokens the most-recent turn produced (assistant reply). */
+  /** Output tokens billed for the most-recent turn (all agent-loop rounds). */
   outputTokens: number
 }
 
 /**
- * #4205 (re-introduced from #4204): "1.2k input + 0.3k output = 1.5k
- * tokens" breakdown for the context chip's hover. Composed into
- * `contextTooltip` rather than rendered as its own chip — the issue's
- * "out of scope" section pins this to enriching the existing chip.
+ * #4205/#6769: last-turn BILLING breakdown for the context chip's hover.
+ *
+ * These are the turn's billed token counts (summed across the turn's
+ * agent-loop rounds) — labelled as billing so they can't be mistaken for
+ * window occupancy, which the tooltip lead covers from the snapshot.
  *
  * Token counts under 1000 render in raw form ("450 tokens"); 1000+
  * abbreviate as kilo ("1.5k") via the canonical `formatTokensCompact`,
@@ -112,7 +136,7 @@ export interface TokenChipTooltipArgs {
  */
 export function tokenChipTooltip({ inputTokens, outputTokens }: TokenChipTooltipArgs): string {
   const total = inputTokens + outputTokens
-  return `Breakdown: ${formatTokensCompact(inputTokens)} input + ${formatTokensCompact(outputTokens)} output = ${formatTokensCompact(total)} tokens.`
+  return `Last turn billed: ${formatTokensCompact(inputTokens)} input + ${formatTokensCompact(outputTokens)} output = ${formatTokensCompact(total)} tokens.`
 }
 
 function roundPercent(n: number): string {

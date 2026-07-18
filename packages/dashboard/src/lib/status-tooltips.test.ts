@@ -42,12 +42,13 @@ describe('costTooltip (#3858)', () => {
   })
 })
 
-describe('contextTooltip (#3858)', () => {
-  it('explicitly calls out the per-turn nature (not cumulative)', () => {
+describe('contextTooltip (#3858 / #6769)', () => {
+  it('describes cumulative context-window fill, NOT per-turn (#6769)', () => {
     const t = contextTooltip({ percent: 45, contextSummary: '90k / 200k tokens' })
-    // The issue's key requirement: disambiguate per-turn vs cumulative.
-    expect(t).toMatch(/per[- ]turn|this turn|last turn|most recent turn/i)
-    expect(t).not.toMatch(/cumulative|session total/i)
+    // #6769 reversed #3858's per-turn framing: the meter now tracks the whole
+    // conversation's fill, so the tooltip must NOT claim it resets each turn.
+    expect(t).toMatch(/whole conversation|fills 45% of the model's context window|before auto-compact/i)
+    expect(t).not.toMatch(/per[- ]turn|resets each turn|most recent turn used/i)
   })
 
   it('includes the percent and the summary string when both are present', () => {
@@ -189,6 +190,15 @@ describe('tokenChipTooltip (#4205)', () => {
     expect(t).toContain('0 output')
     expect(t).toContain('1.5k tokens')
   })
+
+  // #6769: the breakdown is the last turn's BILLING counts (summed across the
+  // turn's agent-loop rounds) — labelled as billing so it can't be mistaken
+  // for window occupancy, which the contextTooltip lead covers separately.
+  it('labels the breakdown as last-turn billing, not window fill (#6769)', () => {
+    const t = tokenChipTooltip({ inputTokens: 1200, outputTokens: 8000 })
+    expect(t).toMatch(/last turn billed/i)
+    expect(t).not.toMatch(/cached history|occupan|window/i)
+  })
 })
 
 describe('contextTooltip + token breakdown (#4205)', () => {
@@ -232,5 +242,44 @@ describe('contextTooltip + token breakdown (#4205)', () => {
   it('still returns the "no usage yet" fallback when ALL inputs are absent', () => {
     const t = contextTooltip({ percent: null })
     expect(t).toMatch(/no context usage yet|first turn/i)
+  })
+
+  // #6769: byok's final-round snapshot is an estimate — the tooltip must say
+  // so; the SDK's authoritative snapshot must not carry the caveat.
+  it('flags a byok final-round snapshot as estimated (#6769)', () => {
+    const t = contextTooltip({
+      percent: 50,
+      contextSummary: '92.0k tokens',
+      estimated: true,
+    })
+    expect(t).toContain('50%')
+    expect(t).toMatch(/estimated/i)
+    expect(t).toMatch(/estimated from the last api round/i)
+  })
+
+  // #6769 (review note 3): the auto-compact phrasing belongs ONLY to sources
+  // with a real threshold. Estimated sources (byok final-round family — the
+  // reserve-fallback ceiling has no compaction behind it) must phrase the
+  // value as plain context-window fill.
+  it('drops the auto-compact phrasing for estimated sources (#6769)', () => {
+    const t = contextTooltip({
+      percent: 50,
+      contextSummary: '92.0k tokens',
+      estimated: true,
+    })
+    expect(t).not.toMatch(/before auto-compact|steps down after a compaction/i)
+    expect(t).toMatch(/fills 50% of the model's context window \(estimated\)/i)
+  })
+
+  it('omits the estimate caveat for the SDK snapshot (#6769)', () => {
+    const t = contextTooltip({ percent: 50, contextSummary: '110.0k tokens' })
+    expect(t).not.toMatch(/estimated/i)
+  })
+
+  it('describes occupancy that grows and steps down after compaction (#6769)', () => {
+    const t = contextTooltip({ percent: 66, contextSummary: '110.0k tokens' })
+    expect(t).toMatch(/occup/i)
+    expect(t).toMatch(/steps down after a compaction/i)
+    expect(t).not.toMatch(/per[- ]turn|resets each turn/i)
   })
 })

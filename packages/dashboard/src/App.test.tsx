@@ -2598,20 +2598,20 @@ describe('#6301 create-session spinner reset (#6285 App-layer branches)', () => 
 // window is the local model file's num_ctx), so the header meter must fall
 // back to the raw token-count chip instead of rendering a fabricated
 // "% of 200k". Claude-backed providers keep the 200k default — it's real.
-describe('context meter with unknown context window (#5424)', () => {
-  const contextUsage = { inputTokens: 12_000, outputTokens: 500 }
-
-  function sessionState(activeModel: string) {
+describe('context meter — occupancy snapshot semantics (#5424 / #6769)', () => {
+  function sessionState(activeModel: string, overrides: Record<string, unknown> = {}) {
     return {
       messages: [],
       streamingMessageId: null,
       activeModel,
       permissionMode: null,
-      contextUsage,
+      contextUsage: null,
+      contextOccupancy: null,
       sessionCost: null,
       isIdle: true,
       activeAgents: [],
       isPlanPending: false,
+      ...overrides,
     }
   }
 
@@ -2631,7 +2631,16 @@ describe('context meter with unknown context window (#5424)', () => {
     }
   }
 
-  it('hides the percent meter and shows the raw token count for an ollama model with no contextWindow', () => {
+  /** byok-style final-round snapshot (no window/threshold on the snapshot). */
+  const byokSnapshot = (totalTokens: number) => ({
+    totalTokens,
+    maxTokens: null,
+    autoCompactThreshold: null,
+    isAutoCompactEnabled: null,
+    source: 'final-round-prompt' as const,
+  })
+
+  it('shows the raw occupancy count (no percent) when the window is unknown (#5424)', () => {
     stateOverrides = {
       connectionPhase: 'connected',
       sessions: [session('ollama')],
@@ -2641,28 +2650,30 @@ describe('context meter with unknown context window (#5424)', () => {
         // drops it, so the entry simply has no contextWindow here.
         { id: 'llama3:8b', label: 'llama3:8b', fullId: 'llama3:8b' },
       ],
-      getActiveSessionState: () => sessionState('llama3:8b'),
+      getActiveSessionState: () =>
+        sessionState('llama3:8b', { contextOccupancy: byokSnapshot(12_500) }),
     }
     const { container } = render(<App />)
     // No used/total meter — there is no known total to meter against.
     expect(screen.queryByTestId('status-context-meter')).not.toBeInTheDocument()
-    // The chip falls back to the raw token count (12.5k tokens), no percent.
+    // The chip falls back to the raw occupancy count, no percent.
     const chip = container.querySelector('#header .status-context')
     expect(chip).toBeTruthy()
     expect(chip!.textContent).toContain('12.5k tokens')
   })
 
-  it('still meters against the 200k default for a claude provider whose model entry lacks contextWindow', () => {
+  it('meters a byok snapshot against the 200k claude default when the model entry lacks contextWindow', () => {
     stateOverrides = {
       connectionPhase: 'connected',
-      sessions: [session('claude-sdk')],
+      sessions: [session('claude-byok')],
       activeSessionId: 's1',
       availableModels: [
         // Legacy servers can omit contextWindow on claude models — the
         // 200k default is genuine there.
         { id: 'sonnet', label: 'Sonnet 4.6', fullId: 'claude-sonnet-4-6' },
       ],
-      getActiveSessionState: () => sessionState('sonnet'),
+      getActiveSessionState: () =>
+        sessionState('sonnet', { contextOccupancy: byokSnapshot(12_500) }),
     }
     render(<App />)
     const label = screen.getByTestId('status-context-label')
@@ -2670,20 +2681,105 @@ describe('context meter with unknown context window (#5424)', () => {
     expect(label.textContent).toContain('200.0k')
   })
 
-  it('meters against the reported window when an ollama model does report one', () => {
+  // #6769 core: an SDK snapshot meters at the SDK's own numbers — and the
+  // BILLING aggregate sitting on the same session state must not leak in.
+  it('meters the SDK snapshot against its real autoCompactThreshold, ignoring billing usage (#6769)', () => {
     stateOverrides = {
       connectionPhase: 'connected',
-      sessions: [session('ollama')],
+      sessions: [session('claude-sdk')],
       activeSessionId: 's1',
       availableModels: [
-        { id: 'llama3:8b', label: 'llama3:8b', fullId: 'llama3:8b', contextWindow: 32_000 },
+        { id: 'sonnet', label: 'Sonnet 4.6', fullId: 'claude-sonnet-4-6', contextWindow: 200_000 },
       ],
-      getActiveSessionState: () => sessionState('llama3:8b'),
+      getActiveSessionState: () =>
+        sessionState('sonnet', {
+          // The billing aggregate of an 8-round turn — ≈816k of cache_read.
+          // Reading THIS as occupancy was the pre-review bug: the meter
+          // pinned 100% red on every real multi-tool turn.
+          contextUsage: {
+            inputTokens: 3_200,
+            outputTokens: 7_200,
+            cacheRead: 800_000,
+            cacheCreation: 6_000,
+          },
+          // The SDK's occupancy snapshot after the same turn.
+          contextOccupancy: {
+            totalTokens: 110_000,
+            maxTokens: 200_000,
+            autoCompactThreshold: 167_000,
+            isAutoCompactEnabled: true,
+            source: 'context-usage-api' as const,
+          },
+        }),
     }
     render(<App />)
     const label = screen.getByTestId('status-context-label')
-    expect(label.textContent).toContain('12.5k')
-    expect(label.textContent).toContain('32.0k')
+    // Label reads the snapshot (110k / 200k), not the ≈816k aggregate.
+    expect(label.textContent).toContain('110.0k')
+    expect(label.textContent).toContain('200.0k')
+    // Percent = 110k / 167k threshold ≈ 66% — sane, NOT clamped at 100%.
+    const bars = screen.getAllByRole('progressbar', { name: /context window usage/i })
+    expect(bars.length).toBeGreaterThan(0)
+    for (const bar of bars) {
+      const now = Number(bar.getAttribute('aria-valuenow'))
+      expect(now).toBeGreaterThanOrEqual(65)
+      expect(now).toBeLessThanOrEqual(67)
+    }
+  })
+
+  // #6769: no occupancy snapshot → NO meter and NO chip, even when billing
+  // usage exists (claude-cli / codex / gemini / claude-tui — the honest dash).
+  it('renders the dash state when a session has billing usage but no occupancy snapshot (#6769)', () => {
+    stateOverrides = {
+      connectionPhase: 'connected',
+      sessions: [session('claude-cli')],
+      activeSessionId: 's1',
+      availableModels: [
+        { id: 'sonnet', label: 'Sonnet 4.6', fullId: 'claude-sonnet-4-6', contextWindow: 200_000 },
+      ],
+      getActiveSessionState: () =>
+        sessionState('sonnet', {
+          contextUsage: {
+            inputTokens: 3_200,
+            outputTokens: 7_200,
+            cacheRead: 800_000,
+            cacheCreation: 6_000,
+          },
+          contextOccupancy: null,
+        }),
+    }
+    const { container } = render(<App />)
+    expect(screen.queryByTestId('status-context-meter')).not.toBeInTheDocument()
+    expect(screen.queryByRole('progressbar', { name: /context window usage/i })).not.toBeInTheDocument()
+    // The header chip stays the empty placeholder — no fabricated number.
+    const chip = container.querySelector('#header .status-context')
+    expect(chip?.textContent ?? '').not.toMatch(/tokens/)
+  })
+
+  it('prefers the snapshot maxTokens over the registry window for the meter label (#6769)', () => {
+    stateOverrides = {
+      connectionPhase: 'connected',
+      sessions: [session('claude-sdk')],
+      activeSessionId: 's1',
+      availableModels: [
+        // Registry thinks 200k; the SDK snapshot says the window is 1M.
+        { id: 'sonnet', label: 'Sonnet 4.6', fullId: 'claude-sonnet-4-6', contextWindow: 200_000 },
+      ],
+      getActiveSessionState: () =>
+        sessionState('sonnet', {
+          contextOccupancy: {
+            totalTokens: 110_000,
+            maxTokens: 1_000_000,
+            autoCompactThreshold: 900_000,
+            isAutoCompactEnabled: true,
+            source: 'context-usage-api' as const,
+          },
+        }),
+    }
+    render(<App />)
+    const label = screen.getByTestId('status-context-label')
+    expect(label.textContent).toContain('110.0k')
+    expect(label.textContent).toContain('1M')
   })
 })
 

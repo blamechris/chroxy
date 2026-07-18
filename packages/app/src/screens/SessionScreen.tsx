@@ -17,7 +17,7 @@ import {
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useConnectionStore, selectMessages, selectClaudeReady, selectStreamingMessageId, selectActiveModel, selectPermissionMode, selectContextUsage, selectLastResultCost, selectLastResultDuration, selectIsIdle, selectQueuedMessages, stripAnsi, nextMessageId } from '../store/connection';
+import { useConnectionStore, selectMessages, selectClaudeReady, selectStreamingMessageId, selectActiveModel, selectPermissionMode, selectContextOccupancy, selectLastResultCost, selectLastResultDuration, selectIsIdle, selectQueuedMessages, stripAnsi, nextMessageId } from '../store/connection';
 import type { ChatMessage, ConnectionPhase, AgentInfo, McpServer, DevPreview } from '../store/connection';
 import type { SessionIntervention } from '@chroxy/store-core';
 // #4875: shared typed predicate for the AskUserQuestion freeform shape.
@@ -153,7 +153,9 @@ export function SessionScreen() {
   const defaultModelId = useConnectionStore((s) => s.defaultModelId);
   const permissionMode = useConnectionStore(selectPermissionMode);
   const availablePermissionModes = useConnectionStore((s) => s.availablePermissionModes);
-  const contextUsage = useConnectionStore(selectContextUsage);
+  // #6769: occupancy snapshot drives the SettingsBar meter (the billing
+  // contextUsage aggregate must never feed it).
+  const contextOccupancy = useConnectionStore(selectContextOccupancy);
   const lastResultCost = useConnectionStore(selectLastResultCost);
   const lastResultDuration = useConnectionStore(selectLastResultDuration);
   const activeSessionId = useConnectionStore((s) => s.activeSessionId);
@@ -1267,7 +1269,7 @@ export function SessionScreen() {
       )}
 
       {/* Collapsible settings bar (CLI mode or PTY mode with status data) */}
-      {(isCliMode && !activeSession?.hasTerminal && (availableModels.length > 0 || lastResultCost != null || contextUsage)) && (
+      {(isCliMode && !activeSession?.hasTerminal && (availableModels.length > 0 || lastResultCost != null || contextOccupancy)) && (
         <SettingsBar
           expanded={settingsExpanded}
           onToggle={() => {
@@ -1284,7 +1286,7 @@ export function SessionScreen() {
           sessionCost={sessionCost}
           cumulativeUsage={cumulativeUsage}
           costBudget={costBudget}
-          contextUsage={contextUsage}
+          contextOccupancy={contextOccupancy}
           sessionCwd={sessionCwd}
           serverMode={serverMode}
           isIdle={isIdle}

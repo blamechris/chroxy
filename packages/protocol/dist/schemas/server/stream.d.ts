@@ -58,6 +58,48 @@ export declare const ServerToolInputDeltaSchema: z.ZodObject<{
     toolUseId: z.ZodString;
     partialJson: z.ZodString;
 }, z.core.$strip>;
+/**
+ * #6769: end-of-turn context-window OCCUPANCY snapshot — how many tokens the
+ * conversation currently occupies in the model's context window.
+ *
+ * Named `contextOccupancy` on the wire deliberately: the sibling `usage`
+ * field (client-side `contextUsage` state) is the per-turn BILLING aggregate
+ * summed across every agent-loop round (a 5-round tool-use turn re-reads the
+ * history from cache 5×, so its `cache_read` is ≈5× the real window fill —
+ * see byok-session.js #4056). `contextOccupancy` is a snapshot of the window
+ * state after the turn, safe to meter against the window; sharing the
+ * `contextUsage` name across those two different quantities was a naming trap
+ * (#6816 review).
+ *
+ * Sources (`source`):
+ *   - 'context-usage-api'   — claude-sdk: the Agent SDK's `getContextUsage()`
+ *     control response (the same number Claude Code's own /context shows).
+ *     Carries `maxTokens` (raw window) and the real `autoCompactThreshold`
+ *     (in TOKENS) + `isAutoCompactEnabled`.
+ *   - 'final-round-prompt'  — the byok agent loop: the FINAL round's
+ *     individual `input_tokens + cache_read_input_tokens +
+ *     cache_creation_input_tokens`, which is that round's true prompt size
+ *     (= conversation size). No threshold — clients apply a documented
+ *     presentation reserve and label the value as estimated. Emitted by
+ *     ClaudeByokSession AND the subclasses that reuse its agent loop
+ *     (docker-byok, deepseek, ollama, anthropic-compatible) WHENEVER their
+ *     endpoint reports per-round usage — an endpoint that reports none
+ *     omits the field.
+ *
+ * Providers with no occupancy signal at all (claude-cli, claude-tui, codex,
+ * gemini, …) omit the field entirely; clients render their unknown/dash
+ * state rather than a fabricated number.
+ */
+export declare const ServerContextOccupancySnapshotSchema: z.ZodObject<{
+    totalTokens: z.ZodNumber;
+    maxTokens: z.ZodOptional<z.ZodNullable<z.ZodNumber>>;
+    autoCompactThreshold: z.ZodOptional<z.ZodNullable<z.ZodNumber>>;
+    isAutoCompactEnabled: z.ZodOptional<z.ZodNullable<z.ZodBoolean>>;
+    source: z.ZodOptional<z.ZodEnum<{
+        "context-usage-api": "context-usage-api";
+        "final-round-prompt": "final-round-prompt";
+    }>>;
+}, z.core.$strip>;
 export declare const ServerResultSchema: z.ZodObject<{
     type: z.ZodLiteral<"result">;
     cost: z.ZodOptional<z.ZodNullable<z.ZodNumber>>;
@@ -65,6 +107,16 @@ export declare const ServerResultSchema: z.ZodObject<{
     usage: z.ZodOptional<z.ZodAny>;
     sessionId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
     queueLength: z.ZodOptional<z.ZodNumber>;
+    contextOccupancy: z.ZodOptional<z.ZodNullable<z.ZodObject<{
+        totalTokens: z.ZodNumber;
+        maxTokens: z.ZodOptional<z.ZodNullable<z.ZodNumber>>;
+        autoCompactThreshold: z.ZodOptional<z.ZodNullable<z.ZodNumber>>;
+        isAutoCompactEnabled: z.ZodOptional<z.ZodNullable<z.ZodBoolean>>;
+        source: z.ZodOptional<z.ZodEnum<{
+            "context-usage-api": "context-usage-api";
+            "final-round-prompt": "final-round-prompt";
+        }>>;
+    }, z.core.$strip>>>;
 }, z.core.$strip>;
 export declare const ServerModelChangedSchema: z.ZodObject<{
     type: z.ZodLiteral<"model_changed">;

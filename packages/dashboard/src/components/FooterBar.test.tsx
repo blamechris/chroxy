@@ -151,10 +151,11 @@ describe('FooterBar', () => {
       expect(cost!.getAttribute('title')).toMatch(/estimated client-side/i)
     })
 
-    it('context chip tooltip explicitly says per-turn', () => {
+    it('context chip tooltip describes cumulative fill (not per-turn) (#6769)', () => {
       const { container } = render(<FooterBar {...baseProps} context="90k tokens" contextPercent={45} />)
       const ctx = container.querySelector('.footer-context')
-      expect(ctx!.getAttribute('title')).toMatch(/per[- ]turn|this turn|most recent turn/i)
+      expect(ctx!.getAttribute('title')).toMatch(/whole conversation|before auto-compact/i)
+      expect(ctx!.getAttribute('title')).not.toMatch(/per[- ]turn|resets each turn/i)
       expect(ctx!.getAttribute('title')).toContain('45%')
     })
 
@@ -214,6 +215,22 @@ describe('FooterBar', () => {
       const title = ctx!.getAttribute('title') ?? ''
       expect(title).toContain('45%')
       expect(title).not.toMatch(/input \+/)
+    })
+
+    // #6769: byok's final-round snapshot is an estimate — the chip tooltip
+    // says so; the SDK's authoritative snapshot carries no caveat.
+    it('flags the byok estimate in the context tooltip (#6769)', () => {
+      const { container } = render(
+        <FooterBar
+          {...baseProps}
+          context="92.0k tokens"
+          contextPercent={50}
+          contextEstimated
+        />,
+      )
+      const title = container.querySelector('.footer-context')!.getAttribute('title') ?? ''
+      expect(title).toContain('50%')
+      expect(title).toMatch(/estimated from the last api round/i)
     })
   })
 

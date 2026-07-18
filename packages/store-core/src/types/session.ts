@@ -6,11 +6,44 @@
 
 import type { ChatMessage } from './chat'
 
+/**
+ * Per-turn BILLING token counts from the most recent `result.usage` — the
+ * aggregate summed across every agent-loop round of the turn (a 5-round
+ * tool-use turn re-reads the conversation from cache 5×, so `cacheRead` here
+ * is ≈5× the real window fill). Drives cost estimation and the last-turn
+ * billing breakdown — NEVER the context meter (#6769); occupancy comes from
+ * {@link ContextOccupancy}.
+ */
 export interface ContextUsage {
   inputTokens: number;
   outputTokens: number;
   cacheCreation: number;
   cacheRead: number;
+}
+
+/**
+ * #6769: end-of-turn context-window OCCUPANCY snapshot — how many tokens the
+ * conversation currently occupies in the model's window. Parsed from the
+ * `result` message's optional `contextOccupancy` field (see
+ * `ServerContextOccupancySnapshotSchema` in @chroxy/protocol for the wire
+ * contract and per-provider sources). This is the ONLY honest input for the
+ * context meter; the billing `ContextUsage` above over-reads by the turn's
+ * agent-loop round count.
+ */
+export interface ContextOccupancy {
+  /** Tokens currently occupying the window (system prompt + tools + messages). */
+  totalTokens: number;
+  /** Raw context window in tokens when the source reports it (SDK), else null. */
+  maxTokens: number | null;
+  /**
+   * Auto-compact trigger in TOKENS (SDK only) — the real ceiling the meter
+   * reads 100% at. Null when the source has no compaction concept (byok).
+   */
+  autoCompactThreshold: number | null;
+  /** Whether auto-compact is enabled (SDK only); null when unknown. */
+  isAutoCompactEnabled: boolean | null;
+  /** Provenance: authoritative SDK API vs byok final-round estimate. */
+  source: 'context-usage-api' | 'final-round-prompt' | null;
 }
 
 /**
@@ -330,6 +363,14 @@ export interface BaseSessionState {
   activeModel: string | null;
   permissionMode: string | null;
   contextUsage: ContextUsage | null;
+  // #6769: occupancy snapshot from the latest result that carried one.
+  // Persists across turns (a result WITHOUT the field keeps the previous
+  // snapshot) and only moves when a new snapshot lands — including DOWN
+  // after a compaction. Null until the provider reports occupancy at all
+  // (claude-cli / claude-tui / codex / gemini stay null → dash; the byok
+  // agent-loop family — incl. ollama / deepseek / anthropic-compatible —
+  // reports a final-round snapshot whenever its endpoint returns usage).
+  contextOccupancy: ContextOccupancy | null;
   lastResultCost: number | null;
   lastResultDuration: number | null;
   sessionCost: number | null;

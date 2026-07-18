@@ -1,10 +1,10 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, Platform, Animated, AccessibilityInfo, Alert, Modal, Pressable, ScrollView } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
-import { resolveContextWindow } from '@chroxy/store-core';
+import { resolveContextWindow, contextOccupancyTokens, contextFillPercent } from '@chroxy/store-core';
 import type { CumulativeUsage, PendingPermissionConfirm, SessionIntervention } from '@chroxy/store-core';
 import { formatCostBadge } from '@chroxy/store-core';
-import type { ModelInfo, ContextUsage, AgentInfo, ConnectedClient, CustomAgent, SessionContext, McpServer, PermissionMode } from '../store/connection';
+import type { ModelInfo, ContextOccupancy, AgentInfo, ConnectedClient, CustomAgent, SessionContext, McpServer, PermissionMode } from '../store/connection';
 import { Icon } from './Icon';
 import { COLORS } from '../constants/colors';
 
@@ -57,7 +57,11 @@ export interface SettingsBarProps {
   // token breakdown.
   cumulativeUsage?: CumulativeUsage | null;
   costBudget?: number | null;
-  contextUsage: ContextUsage | null;
+  // #6769: occupancy snapshot — the meter's only input. Null = no occupancy
+  // signal (claude-cli / claude-tui / codex / gemini — plus any byok-loop
+  // subclass, e.g. ollama, whose endpoint reports no usage) -> no meter,
+  // the honest dash state. Never fed from the billing usage aggregate.
+  contextOccupancy: ContextOccupancy | null;
   sessionCwd: string | null;
   serverMode: 'cli' | null;
   isIdle: boolean;
@@ -192,7 +196,7 @@ export function SettingsBar({
   sessionCost,
   cumulativeUsage,
   costBudget,
-  contextUsage,
+  contextOccupancy,
   sessionCwd,
   serverMode,
   isIdle,
@@ -333,16 +337,24 @@ export function SettingsBar({
       summaryParts.push(`$${lastResultCost.toFixed(2)}`);
     }
   }
-  if (contextUsage) {
-    const total = contextUsage.inputTokens + contextUsage.outputTokens;
+  if (contextOccupancy) {
+    // #6769: the meter reads the provider's occupancy SNAPSHOT — never the
+    // billing usage aggregate (summed across agent-loop rounds; over-reads
+    // fill ≈N× on an N-round turn). No snapshot → no summary entry at all
+    // (the honest dash state for claude-cli / claude-tui / codex / gemini
+    // and any byok-loop subclass whose endpoint reports no usage).
+    const total = contextOccupancyTokens(contextOccupancy) ?? 0;
     if (total > 0) {
       const mInfo = availableModels.find((m) => m.id === activeModel || m.fullId === activeModel);
-      const cw = resolveContextWindow(mInfo, provider);
-      // #5424: when the window is genuinely unknown (e.g. ollama reports
-      // none), show the raw token count instead of a fabricated "% of 200k".
+      const cw = contextOccupancy.maxTokens ?? resolveContextWindow(mInfo, provider);
+      // Percent metered against the snapshot's real autoCompactThreshold
+      // when present, else the documented reserve below the window. #5424:
+      // when the window is genuinely unknown, show the raw token count
+      // instead of a fabricated "% of 200k".
+      const pct = contextFillPercent(contextOccupancy, cw);
       summaryParts.push(
-        cw != null
-          ? `${Math.min(Math.round((total / cw) * 100), 100)}%`
+        pct != null
+          ? `${Math.min(Math.round(pct), 100)}%`
           : formatTokenCount(total),
       );
     }
@@ -559,7 +571,7 @@ export function SettingsBar({
                   </Text>
                 );
               })()}
-              {(lastResultCost != null || sessionCost != null || contextUsage) && (
+              {(lastResultCost != null || sessionCost != null || contextOccupancy) && (
                 <View style={styles.contextRow}>
                   {sessionCost != null ? (
                     <Text style={styles.contextText}>
@@ -573,12 +585,20 @@ export function SettingsBar({
                       {lastResultDuration != null ? ` \u00B7 ${(lastResultDuration / 1000).toFixed(1)}s` : ''}
                     </Text>
                   ) : null}
-                  {contextUsage && (() => {
-                    const total = contextUsage.inputTokens + contextUsage.outputTokens;
+                  {contextOccupancy && (() => {
+                    // #6769: occupancy SNAPSHOT only — never the billing
+                    // usage aggregate (summed across agent-loop rounds, so
+                    // it over-reads window fill ≈N× on an N-round turn).
+                    const total = contextOccupancyTokens(contextOccupancy) ?? 0;
                     if (total === 0) return null;
                     const modelInfo = availableModels.find((m) => m.id === activeModel || m.fullId === activeModel);
-                    const contextWindow = resolveContextWindow(modelInfo, provider);
-                    if (contextWindow == null) {
+                    const contextWindow =
+                      contextOccupancy.maxTokens ?? resolveContextWindow(modelInfo, provider);
+                    // Percent metered against the snapshot's real
+                    // autoCompactThreshold when present (desktop /context
+                    // parity), else the documented reserve below the window.
+                    const pct = contextFillPercent(contextOccupancy, contextWindow);
+                    if (contextWindow == null || pct == null) {
                       // #5424: window genuinely unknown (e.g. ollama reports
                       // none — the real limit is the local model file's
                       // num_ctx). Show the raw token count, no percentage or
@@ -590,7 +610,6 @@ export function SettingsBar({
                         </Text>
                       );
                     }
-                    const pct = (total / contextWindow) * 100;
                     const barColor = pct >= 80 ? COLORS.accentRed : pct >= 50 ? COLORS.accentOrange : COLORS.accentGreen;
                     return (
                       <>

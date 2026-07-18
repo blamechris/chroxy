@@ -31,10 +31,16 @@ export interface FooterBarProps {
   cost?: number
   context?: string
   contextPercent?: number | null
-  /** #4205: raw input tokens for the most-recent turn (drives the tooltip breakdown). */
+  /** #4205: raw input tokens billed for the most-recent turn (tooltip breakdown). */
   inputTokens?: number
-  /** #4205: raw output tokens for the most-recent turn (drives the tooltip breakdown). */
+  /** #4205: raw output tokens billed for the most-recent turn (tooltip breakdown). */
   outputTokens?: number
+  /**
+   * #6769: true when the occupancy snapshot is byok's final-round estimate
+   * rather than the SDK's authoritative context-usage API — the tooltip
+   * flags it.
+   */
+  contextEstimated?: boolean
   isBusy?: boolean
   agentCount?: number
   onShowQr?: () => void
@@ -109,6 +115,7 @@ export function FooterBar({
   contextPercent,
   inputTokens,
   outputTokens,
+  contextEstimated,
   isBusy,
   agentCount,
   onShowQr,
@@ -150,14 +157,14 @@ export function FooterBar({
   // #4204 Copilot review: compute each chip's tooltip once so the
   // `title` + `aria-label` mirror pair stays in lockstep.
   const costTip = costTooltip({ cost: cost ?? undefined, provider })
-  // #4205: thread input/output tokens through so the chip's tooltip
-  // carries the in/out/total breakdown (the #3858 acceptance criterion
-  // PR #4204 added the helper for but left unwired).
+  // #6769: occupancy-driven tooltip; the last-turn billing in/out counts ride
+  // along as a clearly-labelled secondary breakdown.
   const contextTip = contextTooltip({
     percent: contextPercent ?? null,
     contextSummary: context,
     inputTokens,
     outputTokens,
+    estimated: contextEstimated,
   })
   const modelTip = modelTooltip({ model, contextWindow })
   const agentTip = agentCountTooltip(agentCount)

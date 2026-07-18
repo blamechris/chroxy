@@ -7983,6 +7983,9 @@ describe('handleResultUsage', () => {
         cacheCreation: 50,
         cacheRead: 25,
       },
+      // #6769: no `contextUsage` wire field on the message → no occupancy
+      // snapshot. Billing usage must never fabricate one.
+      contextOccupancy: null,
       lastResultCost: 0.42,
       lastResultDuration: 1234,
     })

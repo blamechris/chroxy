@@ -143,10 +143,11 @@ describe('StatusBar', () => {
         .toMatch(/estimated client-side/i)
     })
 
-    it('context chip tooltip explicitly says per-turn and includes the percent', () => {
+    it('context chip tooltip describes cumulative fill (not per-turn) and includes the percent (#6769)', () => {
       const { container } = render(<StatusBar context="90k tokens" contextPercent={45} />)
       const ctx = container.querySelector('.status-context')
-      expect(ctx!.getAttribute('title')).toMatch(/per[- ]turn|most recent turn/i)
+      expect(ctx!.getAttribute('title')).toMatch(/whole conversation|before auto-compact/i)
+      expect(ctx!.getAttribute('title')).not.toMatch(/per[- ]turn|resets each turn/i)
       expect(ctx!.getAttribute('title')).toContain('45%')
     })
 
@@ -198,8 +199,7 @@ describe('StatusBar', () => {
       render(
         <StatusBar
           contextPercent={3}
-          inputTokens={25000}
-          outputTokens={5000}
+          contextTokens={30000}
           contextWindow={1_000_000}
         />,
       )
@@ -211,8 +211,7 @@ describe('StatusBar', () => {
       render(
         <StatusBar
           contextPercent={30}
-          inputTokens={60000}
-          outputTokens={0}
+          contextTokens={60000}
           contextWindow={200_000}
         />,
       )
@@ -227,8 +226,7 @@ describe('StatusBar', () => {
       const { container } = render(
         <StatusBar
           contextPercent={130}
-          inputTokens={1_300_000}
-          outputTokens={0}
+          contextTokens={1_300_000}
           contextWindow={1_000_000}
         />,
       )
@@ -244,8 +242,7 @@ describe('StatusBar', () => {
       const { container } = render(
         <StatusBar
           contextPercent={120}
-          inputTokens={1_200_000}
-          outputTokens={0}
+          contextTokens={1_200_000}
           contextWindow={1_000_000}
         />,
       )
@@ -257,8 +254,7 @@ describe('StatusBar', () => {
       const { container } = render(
         <StatusBar
           contextPercent={85}
-          inputTokens={850_000}
-          outputTokens={0}
+          contextTokens={850_000}
           contextWindow={1_000_000}
         />,
       )
@@ -271,8 +267,7 @@ describe('StatusBar', () => {
       const { container } = render(
         <StatusBar
           contextPercent={60}
-          inputTokens={600_000}
-          outputTokens={0}
+          contextTokens={600_000}
           contextWindow={1_000_000}
         />,
       )
@@ -322,6 +317,52 @@ describe('StatusBar', () => {
       expect(screen.queryByTestId('status-context-meter')).not.toBeInTheDocument()
     })
 
+    // #6769: the `used / total` label is driven by the occupancy SNAPSHOT
+    // (`contextTokens`) — NOT by the billing input+output counts, which are
+    // summed across agent-loop rounds and over-read fill ≈N× per turn.
+    it('uses the occupancy snapshot (contextTokens) for the used/total label (#6769)', () => {
+      render(
+        <StatusBar
+          contextPercent={66}
+          contextTokens={110_000}
+          inputTokens={3200}
+          outputTokens={7200}
+          contextWindow={200_000}
+        />,
+      )
+      // Label reads the 110k snapshot, not the billing counts.
+      expect(screen.getByTestId('status-context-label')).toHaveTextContent('110.0k / 200.0k tokens')
+    })
+
+    it('shows NO meter when there is no occupancy snapshot, even with billing counts (#6769)', () => {
+      // A provider with billing usage but no occupancy signal (claude-cli,
+      // codex, gemini…) must render the honest dash state — deriving a meter
+      // from the multi-round billing aggregate is the bug #6769 fixed.
+      render(
+        <StatusBar
+          contextPercent={null}
+          inputTokens={3200}
+          outputTokens={7200}
+          contextWindow={1_000_000}
+        />,
+      )
+      expect(screen.queryByTestId('status-context-meter')).not.toBeInTheDocument()
+    })
+
+    it('flags the byok estimate in the meter tooltip (#6769)', () => {
+      render(
+        <StatusBar
+          context="92.0k tokens"
+          contextPercent={50}
+          contextTokens={92_000}
+          contextEstimated
+          contextWindow={200_000}
+        />,
+      )
+      const meter = screen.getByTestId('status-context-meter')
+      expect(meter.getAttribute('title')).toMatch(/estimated from the last api round/i)
+    })
+
     // #5179 (C1): the fill bar sits BENEATH the `used / total tokens`
     // label, not inline to its left. We assert both the stacked layout
     // hook (`status-context-meter--stacked`) AND the DOM order (label
@@ -331,8 +372,7 @@ describe('StatusBar', () => {
         render(
           <StatusBar
             contextPercent={30}
-            inputTokens={60000}
-            outputTokens={0}
+            contextTokens={60000}
             contextWindow={200_000}
           />,
         )
@@ -344,8 +384,7 @@ describe('StatusBar', () => {
         render(
           <StatusBar
             contextPercent={30}
-            inputTokens={60000}
-            outputTokens={0}
+            contextTokens={60000}
             contextWindow={200_000}
           />,
         )
@@ -365,8 +404,7 @@ describe('StatusBar', () => {
         render(
           <StatusBar
             contextPercent={45}
-            inputTokens={90000}
-            outputTokens={0}
+            contextTokens={90000}
             contextWindow={200_000}
           />,
         )
@@ -379,6 +417,7 @@ describe('StatusBar', () => {
       render(
         <StatusBar
           contextPercent={30}
+          contextTokens={30000}
           inputTokens={25000}
           outputTokens={5000}
           contextWindow={1_000_000}

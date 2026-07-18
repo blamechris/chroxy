@@ -12,6 +12,8 @@ import {
   formatTokensCompact,
   expandPasteMarkers,
   resolveContextWindow,
+  contextOccupancyTokens,
+  contextFillPercent,
   providerSupportsMultiQuestion,
   formatToolName,
   getToolPresentation,
@@ -19,7 +21,7 @@ import {
   type SessionInfo,
 } from '@chroxy/store-core'
 import { useConnectionStore } from './store/connection'
-import type { BaseSessionState } from '@chroxy/store-core'
+import type { BaseSessionState, ContextOccupancy } from '@chroxy/store-core'
 
 import { Sidebar, type RepoNode, type ContextMenuTarget } from './components/Sidebar'
 import { resolveActivePrimaryClientId } from './components/ViewersIndicator'
@@ -119,18 +121,23 @@ export function getChroxyConfig(): ChroxyConfig | undefined {
 
 
 /**
- * Format context usage as a compact `<n> tokens` chip label.
+ * Format the context chip label from the occupancy SNAPSHOT (#6769).
+ *
+ * The total is `ContextOccupancy.totalTokens` — the end-of-turn window
+ * occupancy reported by the provider (SDK getContextUsage() / byok
+ * final-round prompt). NEVER derived from the billing `contextUsage`
+ * aggregate, which sums across agent-loop rounds and over-reads ≈N× on an
+ * N-round turn. Undefined (chip hidden — the honest dash state) when the
+ * provider has no occupancy signal.
  *
  * Delegates the number formatting to the canonical `formatTokensCompact`
  * helper in `@chroxy/store-core` (#5094) so the chip label, the header
- * meter, and the status-tooltip breakdown all share one casing/decimal
- * rule and one (correct) 1M rollover. Keeps only the ` tokens` suffix and
- * the "hide when empty" behaviour here.
+ * meter, and the status-tooltip summary all share one casing/decimal
+ * rule and one (correct) 1M rollover.
  */
-function formatContext(usage: { inputTokens: number; outputTokens: number } | null): string | undefined {
-  if (!usage) return undefined
-  const total = usage.inputTokens + usage.outputTokens
-  if (total === 0) return undefined
+function formatContext(occupancy: ContextOccupancy | null): string | undefined {
+  const total = contextOccupancyTokens(occupancy)
+  if (total == null || total === 0) return undefined
   return `${formatTokensCompact(total)} tokens`
 }
 
@@ -266,6 +273,8 @@ export function App() {
     activeModel,
     permissionMode,
     contextUsage,
+    // #6769: occupancy snapshot — the context meter's only input.
+    contextOccupancy,
     sessionCost,
     isIdle,
     activeAgents,
@@ -1915,16 +1924,36 @@ export function App() {
     return resolveContextWindow(modelInfo, activeSessionProvider)
   }, [availableModels, activeModel, activeSessionProvider])
 
-  // Compute context window usage percentage from active model metadata.
-  // Null when the window is unknown (#5424) — the chips then fall back to
-  // the raw token-count text instead of a percentage/progress bar.
-  const contextPercent = useMemo(() => {
-    if (!contextUsage) return null
-    if (activeContextWindow == null) return null
-    const total = contextUsage.inputTokens + contextUsage.outputTokens
-    if (total === 0) return null
-    return (total / activeContextWindow) * 100
-  }, [contextUsage, activeContextWindow])
+  // #6769: the context meter reads the OCCUPANCY SNAPSHOT, never the billing
+  // `contextUsage` aggregate (which sums cache_read across agent-loop rounds
+  // and over-reads window fill ≈N× on an N-round turn — the #6816 review
+  // finding). The snapshot persists across turns and steps DOWN after a
+  // compaction; providers with no snapshot (claude-cli / claude-tui / codex /
+  // gemini — plus any byok-loop subclass, e.g. ollama, whose endpoint
+  // reports no usage) yield null → the chips render their honest dash state.
+  // (Compaction *markers* are #6768, a separate issue.)
+  const contextTokens = useMemo(
+    () => contextOccupancyTokens(contextOccupancy),
+    [contextOccupancy],
+  )
+
+  // #6769: percent of the meter ceiling the conversation fills. The ceiling
+  // is the SDK's real autoCompactThreshold when the snapshot carries one
+  // (desktop /context parity); byok snapshots fall back to the documented
+  // reserve below the registry-resolved window. Null when either the
+  // snapshot or every window source is unknown — the chips then fall back
+  // to the raw token-count text (#5424) or hide entirely.
+  const contextPercent = useMemo(
+    () => contextFillPercent(contextOccupancy, activeContextWindow),
+    [contextOccupancy, activeContextWindow],
+  )
+
+  // Window total for the header meter label: prefer the snapshot's own
+  // maxTokens (authoritative, SDK) over the registry-resolved window.
+  const contextWindowForMeter = useMemo(
+    () => contextOccupancy?.maxTokens ?? activeContextWindow,
+    [contextOccupancy, activeContextWindow],
+  )
 
   // #5184: human-readable model label for the `provider-model` cost-badge
   // mode. Prefer the server-supplied `label`; fall back to the raw model id
@@ -2087,11 +2116,13 @@ export function App() {
         onCopyTranscript={handleCopyTranscript}
         onOpenSettings={openSettings}
         cost={sessionCost ?? undefined}
-        context={formatContext(contextUsage)}
+        context={formatContext(contextOccupancy)}
         contextPercent={contextPercent}
+        contextTokens={contextTokens ?? undefined}
+        contextEstimated={contextOccupancy?.source === 'final-round-prompt'}
         inputTokens={contextUsage?.inputTokens}
         outputTokens={contextUsage?.outputTokens}
-        contextWindow={activeModel ? activeContextWindow ?? undefined : undefined}
+        contextWindow={activeModel ? contextWindowForMeter ?? undefined : undefined}
         isBusy={!isIdle}
         agentCount={activeAgents.length}
         provider={sessions.find(s => s.sessionId === activeSessionId)?.provider}
@@ -2553,8 +2584,9 @@ export function App() {
         cwd={activeSessionCwd ?? sessionCwd ?? undefined}
         model={activeModel || undefined}
         cost={sessionCost ?? undefined}
-        context={formatContext(contextUsage)}
+        context={formatContext(contextOccupancy)}
         contextPercent={contextPercent}
+        contextEstimated={contextOccupancy?.source === 'final-round-prompt'}
         inputTokens={contextUsage?.inputTokens}
         outputTokens={contextUsage?.outputTokens}
         isBusy={!isIdle}
@@ -2564,8 +2596,9 @@ export function App() {
         provider={sessions.find(s => s.sessionId === activeSessionId)?.provider}
         // #5424: null when the window is genuinely unknown (e.g. ollama) —
         // the model tooltip then omits the context-window sentence instead
-        // of claiming a fabricated 200k.
-        contextWindow={activeContextWindow ?? undefined}
+        // of claiming a fabricated 200k. #6769: prefers the snapshot's own
+        // maxTokens (authoritative) when a snapshot carries one.
+        contextWindow={contextWindowForMeter ?? undefined}
         // #3857: surface a clickable "/compact" suggestion past 80% so the
         // user gets a remedy hint rather than just a red bar. Only enabled
         // when there's an active session to route the input through — without
