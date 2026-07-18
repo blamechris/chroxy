@@ -293,5 +293,34 @@ describe('FilePicker', () => {
       const rows = screen.getAllByTestId('file-picker-resource')
       expect(rows[0]!.className).toContain('selected')
     })
+
+    it('with >200 files the resource index continues after the CAPPED rows, not the full list (#6844 review)', () => {
+      // 250 files → the DOM renders only 200 file rows (display cap) + the
+      // overflow hint, then the resource section. Arrow-down past the last
+      // rendered file row lands on the first resource at flat index 200 —
+      // NOT at 250 (the uncapped length, which desynced highlight/scroll).
+      const manyFiles: FilePickerItem[] = Array.from({ length: 250 }, (_, i) => ({
+        path: `src/file-${String(i).padStart(3, '0')}.ts`,
+        type: 'file',
+        size: 1,
+      }))
+      render(
+        <FilePicker
+          files={manyFiles}
+          resources={resources}
+          filter=""
+          onSelect={vi.fn()}
+          onSelectResource={vi.fn()}
+          onClose={vi.fn()}
+          selectedIndex={200}
+        />
+      )
+      const resourceRows = screen.getAllByTestId('file-picker-resource')
+      expect(resourceRows[0]!.className).toContain('selected')
+      expect(resourceRows[0]!.getAttribute('aria-selected')).toBe('true')
+      // Exactly one option is highlighted — no file row shares index 200.
+      const selected = document.querySelectorAll('[role="option"][aria-selected="true"]')
+      expect(selected.length).toBe(1)
+    })
   })
 })

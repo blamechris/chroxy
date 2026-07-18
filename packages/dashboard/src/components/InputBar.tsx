@@ -6,7 +6,7 @@
  * image paste/drag-drop (#1288), and image preview thumbnails (#1289).
  */
 import { useState, useEffect, useMemo, useId, useRef, useCallback, type KeyboardEvent, type ChangeEvent, type ClipboardEvent, type DragEvent, type UIEvent } from 'react'
-import { FilePicker, type FilePickerItem } from './FilePicker'
+import { FilePicker, FILE_PICKER_DISPLAY_CAP, type FilePickerItem } from './FilePicker'
 import { AttachmentChip } from './AttachmentChip'
 import { SlashCommandPicker } from './SlashCommandPicker'
 import { ImageThumbnail } from './ImageThumbnail'
@@ -313,7 +313,12 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, c
     return list.filter(r => r.uri.toLowerCase().includes(lower) || r.name.toLowerCase().includes(lower))
   }, [mcpResources, fileFilter])
 
-  const pickerItemCount = filteredFiles.length + filteredResources.length
+  // #6844 review: keyboard nav must span the rows the DOM actually renders.
+  // FilePicker caps file rows at FILE_PICKER_DISPLAY_CAP (then shows an
+  // overflow hint), so the navigable file count — and the offset where the
+  // resource rows start — is the CAPPED count, not filteredFiles.length.
+  const visibleFileCount = Math.min(filteredFiles.length, FILE_PICKER_DISPLAY_CAP)
+  const pickerItemCount = visibleFileCount + filteredResources.length
 
   const insertAtTrigger = useCallback((text: string) => {
     if (triggerAtIdx >= 0) {
@@ -340,16 +345,17 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, c
     setFileSelectedIndex(0)
   }, [insertAtTrigger])
 
-  // Flat-index selection: files [0..N), then resources [N..N+M).
+  // Flat-index selection over the RENDERED rows: capped files [0..C), then
+  // resources [C..C+M) — C = visibleFileCount (#6844 review).
   const selectPickerIndex = useCallback((idx: number) => {
-    if (idx < filteredFiles.length) {
+    if (idx < visibleFileCount) {
       const f = filteredFiles[idx]
       if (f) selectFile(f.path)
       return
     }
-    const r = filteredResources[idx - filteredFiles.length]
+    const r = filteredResources[idx - visibleFileCount]
     if (r) selectResource(r.uri)
-  }, [filteredFiles, filteredResources, selectFile, selectResource])
+  }, [filteredFiles, visibleFileCount, filteredResources, selectFile, selectResource])
 
   // Derive slash filter from current value (text after "/")
   const slashFilter = pickerOpen && value.startsWith('/') ? value.slice(1) : ''

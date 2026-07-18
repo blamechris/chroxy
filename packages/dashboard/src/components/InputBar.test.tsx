@@ -806,6 +806,36 @@ describe('InputBar file picker (#1286)', () => {
     expect(items[1]).toHaveAttribute('aria-selected', 'true')
   })
 
+  it('with >200 files, arrow-down lands on the first MCP resource right after the capped rows (#6844 review)', () => {
+    // 250 files but the picker renders only 200 (display cap) before the
+    // resource section — the nav bound and the resource offset must use the
+    // CAPPED count. Pre-fix, indices 200..249 walked phantom (unrendered) file
+    // rows: the highlight vanished and Enter selected an invisible file.
+    const manyFiles = Array.from({ length: 250 }, (_, i) => ({
+      path: `src/file-${String(i).padStart(3, '0')}.ts`,
+      type: 'file' as const,
+      size: 1,
+    }))
+    const resources = [{ uri: 'db://users', name: 'Users', server: 'stub' }]
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        filePickerFiles={manyFiles}
+        mcpResources={resources}
+      />
+    )
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    fireEvent.change(textarea, { target: { value: '@' } })
+    // 201 presses: one past the last rendered file row (index 199) — must land
+    // on (and clamp at) the resource row at flat index 200.
+    for (let i = 0; i < 201; i++) fireEvent.keyDown(textarea, { key: 'ArrowDown' })
+    const resourceRow = screen.getByTestId('file-picker-resource')
+    expect(resourceRow).toHaveAttribute('aria-selected', 'true')
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+    expect(textarea.value).toContain('db://users')
+  })
+
   it('calls onFileTrigger when @ is typed', () => {
     const onFileTrigger = vi.fn()
     render(

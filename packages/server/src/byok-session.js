@@ -1943,8 +1943,15 @@ export class ClaudeByokSession extends BaseSession {
   async _resolveMcpPromptToText(match) {
     const declared = Array.isArray(match.promptDef?.arguments) ? match.promptDef.arguments : []
     let args
-    if (declared.length > 0 && match.rest && typeof declared[0]?.name === 'string') {
-      args = { [declared[0].name]: match.rest }
+    // #6844 review: require a NON-EMPTY declared argument name — a server
+    // advertising `arguments: [{ name: '' }]` (or whitespace) must not produce
+    // a bogus `{ "": text }` argument map; treat it as no declared args and
+    // call prompts/get without arguments.
+    const firstArgName = typeof declared[0]?.name === 'string' && declared[0].name.trim()
+      ? declared[0].name
+      : null
+    if (firstArgName && match.rest) {
+      args = { [firstArgName]: match.rest }
     }
     const result = await this._mcpFleet.getPrompt(
       match.prefixedName,

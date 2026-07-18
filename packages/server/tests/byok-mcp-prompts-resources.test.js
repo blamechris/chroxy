@@ -497,6 +497,34 @@ describe('ClaudeByokSession MCP prompts/resources (#6823)', () => {
     await session.destroy()
   })
 
+  it('an empty/whitespace declared argument name never produces a bogus {"": text} map (#6844 review)', async () => {
+    const session = new ClaudeByokSession({ cwd: '/tmp' })
+    const captured = []
+    // Fake fleet: two prompts with degenerate declared-arg names ('' and
+    // whitespace) plus one valid. getPrompt captures the exact args forwarded.
+    session._mcpFleet = {
+      prompts: [
+        { name: 'mcp__stub__emptyname', arguments: [{ name: '' }] },
+        { name: 'mcp__stub__blankname', arguments: [{ name: '   ' }] },
+        { name: 'mcp__stub__valid', arguments: [{ name: 'who' }] },
+      ],
+      getPrompt: async (name, args) => {
+        captured.push({ name, args })
+        return { messages: [{ role: 'user', content: { type: 'text', text: 'ok' } }] }
+      },
+    }
+    // Empty-string name → treated as no declared args → no arguments passed.
+    await session._resolveMcpPromptToText(session._matchMcpPromptCommand('/mcp__stub__emptyname some text'))
+    // Whitespace-only name → same.
+    await session._resolveMcpPromptToText(session._matchMcpPromptCommand('/mcp__stub__blankname some text'))
+    // Valid name still maps the trailing text.
+    await session._resolveMcpPromptToText(session._matchMcpPromptCommand('/mcp__stub__valid Ada'))
+    assert.equal(captured.length, 3)
+    assert.equal(captured[0].args, undefined, 'empty arg name must not produce { "": text }')
+    assert.equal(captured[1].args, undefined, 'whitespace arg name must not produce a bogus key')
+    assert.deepEqual(captured[2].args, { who: 'Ada' }, 'a real declared arg still receives the raw text')
+  })
+
   it('a failing MCP prompt releases busy and emits an error (no turn started)', async () => {
     const session = new ClaudeByokSession({ cwd: '/tmp' })
     session._processReady = true

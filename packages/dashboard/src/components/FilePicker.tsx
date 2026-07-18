@@ -10,6 +10,14 @@ import type { FilePickerItem, MCPResourceItem } from '../store/types'
 
 export type { FilePickerItem }
 
+/**
+ * Max file rows rendered before the "N more files..." overflow hint. Exported
+ * (#6844 review) so InputBar's keyboard-nav math can span the SAME capped row
+ * count the DOM renders — resource rows start right after the capped files,
+ * not after the uncapped list.
+ */
+export const FILE_PICKER_DISPLAY_CAP = 200
+
 export interface FilePickerProps {
   files: FilePickerItem[] | null
   filter: string
@@ -76,12 +84,14 @@ export function FilePicker({
   }
 
   const filesList = filtered ?? []
-  const DISPLAY_CAP = 200
-  const overflow = filesList.length > DISPLAY_CAP ? filesList.length - DISPLAY_CAP : 0
-  const display = overflow > 0 ? filesList.slice(0, DISPLAY_CAP) : filesList
-  // Resource rows continue the flat keyboard-nav index after ALL files (the
-  // uncapped count), matching InputBar's index math so the highlight lines up.
-  const resourceBase = filesList.length
+  const overflow = filesList.length > FILE_PICKER_DISPLAY_CAP ? filesList.length - FILE_PICKER_DISPLAY_CAP : 0
+  const display = overflow > 0 ? filesList.slice(0, FILE_PICKER_DISPLAY_CAP) : filesList
+  // #6844 review: resource rows continue the flat keyboard-nav index after the
+  // CAPPED file rows actually rendered (display.length), not the uncapped
+  // filesList.length — with >200 files the uncapped base desynced the
+  // highlight/scroll-into-view from the DOM's option order. InputBar's nav
+  // math uses the same FILE_PICKER_DISPLAY_CAP so selection stays aligned.
+  const resourceBase = display.length
 
   if (filesList.length === 0 && filteredResources.length === 0) {
     return (
