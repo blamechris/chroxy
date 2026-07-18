@@ -98,10 +98,12 @@ export function mergeEditedInput(originalInput, editedInput, toolName) {
 }
 
 /**
- * #6794 — does this tool input target a protected path? Extracts the first
- * present {@link PROTECTED_PATH_INPUT_FIELDS} value, resolves it against the
- * session cwd (so absolute paths, a leading `./`, and `..` traversal all
- * normalize), then tests the path RELATIVE to cwd segment-by-segment.
+ * #6794 — does this tool input target a protected path? Inspects EVERY present
+ * {@link PROTECTED_PATH_INPUT_FIELDS} value (a benign `file_path` must not
+ * shadow a protected `path`), resolves each against the session cwd (so
+ * absolute paths, a leading `./`, and `..` traversal all normalize), then
+ * tests the path RELATIVE to cwd segment-by-segment. ANY protected field
+ * floors the input.
  *
  * Matching relative-to-cwd (not the raw absolute path) is deliberate: the
  * session's OWN location can never trigger a false positive — e.g. a git
@@ -128,31 +130,26 @@ export function mergeEditedInput(originalInput, editedInput, toolName) {
  */
 export function isProtectedPathTarget(input, cwd) {
   if (!input || typeof input !== 'object') return false
-  let target
-  for (const field of PROTECTED_PATH_INPUT_FIELDS) {
-    if (typeof input[field] === 'string' && input[field].length > 0) {
-      target = input[field]
-      break
-    }
-  }
-  if (!target) return false
   const base = (typeof cwd === 'string' && cwd.length > 0) ? cwd : process.cwd()
-  // resolve() absorbs absolute paths, a leading `./`, and `..` traversal; the
-  // relative path is what we segment-match so cwd's own name can't false-match.
-  const rel = relative(base, resolve(base, target))
-  // Lowercase every segment before matching: on case-insensitive filesystems
-  // (macOS APFS, Windows) `.GIT/config` IS `.git/config`, so a case-sensitive
-  // match would let case variants evade the floor. Over-flooring a genuinely
-  // distinct `.GIT` on case-sensitive Linux is fine — the floor only forces a
-  // prompt, never denies.
-  const segments = rel.split(sep)
-    .filter((s) => s.length > 0 && s !== '..')
-    .map((s) => s.toLowerCase())
-  for (let i = 0; i < segments.length; i++) {
-    const seg = segments[i]
-    if (PROTECTED_DIR_SEGMENTS.has(seg)) return true
-    if (seg === '.env' || seg.startsWith('.env.')) return true
-    if (seg === '.config' && segments[i + 1] === 'git') return true
+  for (const field of PROTECTED_PATH_INPUT_FIELDS) {
+    if (typeof input[field] !== 'string' || input[field].length === 0) continue
+    // resolve() absorbs absolute paths, a leading `./`, and `..` traversal; the
+    // relative path is what we segment-match so cwd's own name can't false-match.
+    const rel = relative(base, resolve(base, input[field]))
+    // Lowercase every segment before matching: on case-insensitive filesystems
+    // (macOS APFS, Windows) `.GIT/config` IS `.git/config`, so a case-sensitive
+    // match would let case variants evade the floor. Over-flooring a genuinely
+    // distinct `.GIT` on case-sensitive Linux is fine — the floor only forces a
+    // prompt, never denies.
+    const segments = rel.split(sep)
+      .filter((s) => s.length > 0 && s !== '..')
+      .map((s) => s.toLowerCase())
+    for (let i = 0; i < segments.length; i++) {
+      const seg = segments[i]
+      if (PROTECTED_DIR_SEGMENTS.has(seg)) return true
+      if (seg === '.env' || seg.startsWith('.env.')) return true
+      if (seg === '.config' && segments[i + 1] === 'git') return true
+    }
   }
   return false
 }

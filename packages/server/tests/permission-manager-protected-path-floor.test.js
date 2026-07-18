@@ -246,6 +246,11 @@ describe('isProtectedPathTarget (#6794)', () => {
     { file_path: '.ENV' },
     { file_path: '.Env.local' },
     { file_path: '.Config/Git/config' },
+    // Multi-field inputs — EVERY present path field is inspected, so a benign
+    // field can't shadow a protected one (and order doesn't matter).
+    { file_path: 'src/ok.js', path: '.git/config' },
+    { file_path: '.git/config', path: 'src/ok.js' },
+    { file_path: 'src/ok.js', notebook_path: '.env' },
   ]
   for (const input of floored) {
     it(`floors ${JSON.stringify(input)}`, () => {
@@ -261,6 +266,7 @@ describe('isProtectedPathTarget (#6794)', () => {
     { file_path: '.environment/config' }, // .env* prefix must be exactly .env or .env.
     { file_path: '.gitignore' }, // a file named .gitignore is not the .git dir
     { file_path: 'docs/readme.md' },
+    { file_path: 'src/a.js', path: 'src/b.js', notebook_path: 'nb/c.ipynb' }, // all-benign multi-field
     { command: 'rm -rf /' }, // no path field → never floored (command-shaped)
     {}, // empty input
     null, // non-object
