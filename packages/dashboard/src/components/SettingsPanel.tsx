@@ -5,7 +5,8 @@
  * and persist to localStorage.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useConnectionStore } from '../store/connection'
+import { useConnectionStore, isRuleEligibleProvider } from '../store/connection'
+import type { PermissionRule, PermissionAuditEntry } from '../store/types'
 import { ShortcutsSection } from '../shortcuts/ShortcutsSection'
 import { ProviderCredentialsPane } from './ProviderCredentialsPane'
 import { getAvailableThemes, applyTheme } from '../theme/theme-engine'
@@ -46,6 +47,38 @@ import { useDebouncedSetter } from '../hooks/useDebouncedSetter'
 /** Confirmation copy from issue #3077 — keep verbatim. */
 const AUTO_PERMISSION_CONFIRM_MESSAGE =
   'Auto-permission mode disables all per-tool prompts for non-paired clients. Continue?'
+
+/**
+ * #6772/#6829 — stable empty reference for the permission-rules selectors so
+ * Zustand doesn't re-render the panel on every unrelated store write (mirrors the
+ * mobile SettingsScreen `EMPTY_RULES`).
+ */
+const EMPTY_PERMISSION_RULES: PermissionRule[] = []
+
+/**
+ * #6772 — human label for one permission audit entry. The server's audit log
+ * (permission-audit.js) records heterogeneous kinds; render each known kind by
+ * its distinguishing fields (a `decision` entry carries no tool name — the audit
+ * log keys on requestId, not tool). `entry.type` is an OPEN string (PR #6836
+ * review — the wire schema is forward-compatible), so any UNKNOWN kind falls
+ * through to the generic label rather than breaking the list. Pure +
+ * exported-shape so the SettingsPanel test can assert on the rendered text.
+ */
+export function describePermissionAuditEntry(entry: PermissionAuditEntry): string {
+  switch (entry.type) {
+    case 'mode_change':
+      return `Permission mode: ${entry.previousMode ?? '?'} → ${entry.newMode ?? '?'}`
+    case 'whitelist_change':
+      return `Session rules changed (${entry.rules?.length ?? 0} rule${(entry.rules?.length ?? 0) === 1 ? '' : 's'})`
+    case 'decision': {
+      const verb = entry.decision === 'deny' ? 'Denied' : 'Allowed'
+      const reason = entry.reason && entry.reason !== 'user' ? ` (${entry.reason})` : ''
+      return `${verb}${reason}`
+    }
+    default:
+      return 'Permission event'
+  }
+}
 
 /**
  * #4588: confirmation copy for clearing the current device's per-device
@@ -752,6 +785,27 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
   // (older servers pre-#4660 omit it entirely). The server is the
   // authoritative trim/cap site so we render exactly what it confirmed.
   const activeSessionSessionPreamble = sessions.find(s => s.sessionId === activeSessionId)?.sessionPreamble
+  // #6772/#6829 — per-session permission rules viewer + audit history. sessionRules /
+  // persistentRules live on sessionStates (kept current by `permission_rules_updated`);
+  // the active session's cwd (project-rule scope label) + provider are on the sessions
+  // list. Stable empty refs keep the selectors from re-rendering on unrelated writes.
+  const activeSessionRules = useConnectionStore(s => {
+    const id = s.activeSessionId
+    return (id ? s.sessionStates?.[id]?.sessionRules : undefined) ?? EMPTY_PERMISSION_RULES
+  })
+  const activePersistentRules = useConnectionStore(s => {
+    const id = s.activeSessionId
+    return (id ? s.sessionStates?.[id]?.persistentRules : undefined) ?? EMPTY_PERMISSION_RULES
+  })
+  const activeSessionCwd = sessions.find(s => s.sessionId === activeSessionId)?.cwd ?? null
+  const activeSessionProvider = sessions.find(s => s.sessionId === activeSessionId)?.provider ?? null
+  const providerSupportsRules = isRuleEligibleProvider(activeSessionProvider, availableProviders)
+  const setPermissionRules = useConnectionStore(s => s.setPermissionRules)
+  const setProjectPermissionRules = useConnectionStore(s => s.setProjectPermissionRules)
+  const queryPermissionAudit = useConnectionStore(s => s.queryPermissionAudit)
+  const permissionAudit = useConnectionStore(s => s.permissionAudit)
+  const permissionAuditLoading = useConnectionStore(s => s.permissionAuditLoading)
+  const permissionAuditError = useConnectionStore(s => s.permissionAuditError)
   const themes = getAvailableThemes()
   const inTauri = isTauri()
   const [tunnelMode, setTunnelModeState] = useState<string>('none')
@@ -1480,6 +1534,160 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
                     across server restarts.
                   </p>
                 </div>
+              )}
+            </section>
+          )}
+
+          {/* #6772/#6829 — Session Rules viewer. Mirrors the mobile
+              SettingsScreen SESSION RULES / PROJECT RULES lists: view the active
+              session's auto-approval rules (session-scoped AND durable per-project
+              "always allow" grants, clearly distinguished by scope), remove one, or
+              clear all. Removing/clearing sends set_permission_rules via the store.
+              Rendered when the active session's provider supports rules OR there are
+              already-standing rules to manage. */}
+          {activeSessionId != null && (providerSupportsRules || activeSessionRules.length > 0 || activePersistentRules.length > 0) && (
+            <section className="settings-section" data-testid="session-rules-section">
+              <h3>Session rules</h3>
+              <p className="settings-hint">
+                Tools you auto-approved for this session (<strong>Allow for Session</strong>)
+                and durable grants that survive daemon restarts
+                (<strong>Always allow</strong>). Remove one to require a prompt again.
+              </p>
+
+              {/* Session-scoped rules */}
+              <div className="settings-field" data-testid="session-rules-list">
+                <label>Session-scoped</label>
+                {activeSessionRules.length === 0 ? (
+                  <p className="settings-hint" data-testid="session-rules-empty">No active session rules.</p>
+                ) : (
+                  <>
+                    <ul className="perm-rules-list">
+                      {activeSessionRules.map((rule, index) => (
+                        <li
+                          key={`session-${rule.tool}-${rule.decision}-${index}`}
+                          className="perm-rule-row"
+                          data-testid={`session-rule-item-${rule.tool}`}
+                        >
+                          <span className="perm-rule-label">
+                            <span className="perm-rule-scope perm-rule-scope-session">session</span>
+                            {' '}<code>{rule.tool}</code> — {rule.decision === 'allow' ? 'auto-allow' : 'auto-deny'}
+                          </span>
+                          <button
+                            type="button"
+                            className="perm-rule-remove"
+                            aria-label={`Remove session rule ${rule.tool}`}
+                            data-testid={`session-rule-remove-${rule.tool}`}
+                            onClick={() => setPermissionRules(activeSessionRules.filter((_, i) => i !== index))}
+                          >
+                            Remove
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                    <button
+                      type="button"
+                      className="settings-secondary-button"
+                      data-testid="session-rules-clear"
+                      onClick={() => setPermissionRules([])}
+                    >
+                      Clear all session rules
+                    </button>
+                  </>
+                )}
+              </div>
+
+              {/* Durable per-project ("always allow") rules — only shown when present */}
+              {activePersistentRules.length > 0 && (
+                <div className="settings-field" data-testid="project-rules-list">
+                  <label data-testid="project-rules-header">Project (always allow)</label>
+                  <p className="settings-hint">
+                    Persisted for{' '}
+                    <code data-testid="project-rules-path">{activeSessionCwd ?? 'this project'}</code>
+                    {' '}— survives daemon restarts.
+                  </p>
+                  <ul className="perm-rules-list">
+                    {activePersistentRules.map((rule, index) => (
+                      <li
+                        key={`project-${rule.tool}-${rule.decision}-${index}`}
+                        className="perm-rule-row"
+                        data-testid={`project-rule-item-${rule.tool}`}
+                      >
+                        <span className="perm-rule-label">
+                          <span className="perm-rule-scope perm-rule-scope-project">project</span>
+                          {' '}<code>{rule.tool}</code> — {rule.decision === 'allow' ? 'always allow' : 'always deny'}
+                        </span>
+                        <button
+                          type="button"
+                          className="perm-rule-remove"
+                          aria-label={`Remove project rule ${rule.tool}`}
+                          data-testid={`project-rule-remove-${rule.tool}`}
+                          onClick={() => setProjectPermissionRules(activePersistentRules.filter((_, i) => i !== index))}
+                        >
+                          Remove
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                  <button
+                    type="button"
+                    className="settings-secondary-button"
+                    data-testid="project-rules-clear"
+                    onClick={() => setProjectPermissionRules([])}
+                  >
+                    Clear all project rules
+                  </button>
+                </div>
+              )}
+            </section>
+          )}
+
+          {/* #6772 — Permission history. Read-only view of the server's permission
+              audit trail (mode changes, session-rule changes, allow/deny decisions)
+              for the active session — the first client to query the daemon's
+              query_permission_audit API. Pull-on-demand (not live) so it never adds
+              wire traffic unless opened. */}
+          {activeSessionId != null && (
+            <section className="settings-section" data-testid="permission-history-section">
+              <h3>Permission history</h3>
+              <p className="settings-hint">
+                Recent permission decisions and rule changes for this session, from the
+                server's audit log.
+              </p>
+              <button
+                type="button"
+                className="settings-secondary-button"
+                data-testid="permission-history-load"
+                disabled={permissionAuditLoading}
+                onClick={() => queryPermissionAudit()}
+              >
+                {permissionAuditLoading ? 'Loading…' : permissionAudit == null ? 'Load history' : 'Refresh'}
+              </button>
+              {/* PR #6836 review — a malformed reply clears loading and lands here
+                  instead of wedging the button; retry via the same Load button. */}
+              {permissionAuditError && (
+                <p className="settings-hint" role="alert" data-testid="permission-history-error">
+                  Couldn't load permission history. Try again.
+                </p>
+              )}
+              {permissionAudit != null && (
+                permissionAudit.length === 0 ? (
+                  <p className="settings-hint" data-testid="permission-history-empty">
+                    No permission events recorded for this session yet.
+                  </p>
+                ) : (
+                  <ul className="perm-audit-list" data-testid="permission-history-list">
+                    {permissionAudit.map((entry, index) => (
+                      <li
+                        key={`audit-${entry.timestamp}-${index}`}
+                        className="perm-audit-row"
+                        data-testid={`permission-audit-entry-${index}`}
+                      >
+                        <span className="perm-audit-label">{describePermissionAuditEntry(entry)}</span>
+                        <span className="perm-audit-time">{formatRelativeTime(entry.timestamp)}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )
               )}
             </section>
           )}

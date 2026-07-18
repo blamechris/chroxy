@@ -10436,6 +10436,81 @@ button.sidebar-token-view-session-row:hover {
   cursor: not-allowed;
 }
 
+/* #6772/#6829 — Session Rules viewer + Permission history layout. Pure layout;
+   buttons reuse .settings-secondary-button. */
+.perm-rules-list,
+.perm-audit-list {
+  list-style: none;
+  margin: 6px 0 8px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.perm-rule-row,
+.perm-audit-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 8px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-primary);
+  border-radius: 4px;
+  font-size: var(--text-sm);
+}
+
+.perm-rule-label,
+.perm-audit-label {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.perm-rule-scope {
+  display: inline-block;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 1px 5px;
+  border-radius: 3px;
+  vertical-align: middle;
+}
+
+.perm-rule-scope-session {
+  background: rgba(80, 140, 220, 0.18);
+  color: var(--text-secondary);
+}
+
+.perm-rule-scope-project {
+  background: rgba(90, 190, 120, 0.18);
+  color: var(--text-secondary);
+}
+
+.perm-rule-remove {
+  flex: 0 0 auto;
+  background: transparent;
+  border: 1px solid var(--border-primary);
+  color: var(--text-secondary);
+  border-radius: 4px;
+  padding: 1px 8px;
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+
+.perm-rule-remove:hover {
+  background: rgba(220, 40, 40, 0.12);
+  border-color: rgba(220, 40, 40, 0.6);
+  color: var(--text-primary);
+}
+
+.perm-audit-time {
+  flex: 0 0 auto;
+  color: var(--text-tertiary, var(--text-secondary));
+  font-size: 11px;
+  white-space: nowrap;
+}
+
 .settings-error {
   background: rgba(220, 40, 40, 0.12);
   border: 1px solid rgba(220, 40, 40, 0.6);

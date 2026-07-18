@@ -8,7 +8,7 @@ import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react'
 import fs from 'node:fs'
 import path from 'node:path'
-import { SettingsPanel } from './SettingsPanel'
+import { SettingsPanel, describePermissionAuditEntry } from './SettingsPanel'
 
 // Mock theme-engine
 vi.mock('../theme/theme-engine', () => ({
@@ -126,6 +126,13 @@ setMockState()
 
 vi.mock('../store/connection', () => ({
   useConnectionStore: (selector: (s: Record<string, unknown>) => unknown) => selector(mockState),
+  // #6772/#6829: SettingsPanel now imports this pure capability helper. Faithful
+  // reimplementation (a provider supports rules iff its caps say sessionRules:true)
+  // so the Session Rules section's visibility gate behaves like production.
+  isRuleEligibleProvider: (
+    provider: string | null | undefined,
+    providers: { name: string; capabilities?: { sessionRules?: boolean } }[] | undefined,
+  ) => !!provider && providers?.find((p) => p.name === provider)?.capabilities?.sessionRules === true,
 }))
 
 beforeEach(() => {
@@ -2734,5 +2741,160 @@ describe('SettingsPanel', () => {
       fireEvent.click(toggle)
       await waitFor(() => expect(toggle.checked).toBe(false))
     })
+  })
+})
+
+// #6772/#6829 — Session Rules viewer + Permission history (the desktop-parity
+// half of the permission-rules panel). Mirrors the mobile SettingsScreen SESSION
+// RULES / PROJECT RULES lists on the dashboard's primary surface.
+describe('SettingsPanel — permission rules + audit history (#6772/#6829)', () => {
+  const rulesState = (extra: Record<string, unknown> = {}) => ({
+    activeSessionId: 's1',
+    sessions: [{ sessionId: 's1', name: 'Session 1', cwd: '/home/me/proj', provider: 'claude-sdk' }],
+    availableProviders: [{ name: 'claude-sdk', capabilities: { sessionRules: true } }],
+    sessionStates: {
+      s1: {
+        sessionRules: [{ tool: 'Edit', decision: 'allow' }],
+        persistentRules: [{ tool: 'Write', decision: 'allow', persist: 'project' }],
+      },
+    },
+    ...extra,
+  })
+
+  it('renders session AND project rules with distinct scope labels', () => {
+    setMockState(rulesState())
+    render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+
+    // Section header + both scoped lists present.
+    expect(screen.getByTestId('session-rules-section')).toBeInTheDocument()
+    const sessionRow = screen.getByTestId('session-rule-item-Edit')
+    const projectRow = screen.getByTestId('project-rule-item-Write')
+    expect(sessionRow).toHaveTextContent('session')
+    expect(sessionRow).toHaveTextContent('Edit')
+    expect(sessionRow).toHaveTextContent('auto-allow')
+    expect(projectRow).toHaveTextContent('project')
+    expect(projectRow).toHaveTextContent('Write')
+    expect(projectRow).toHaveTextContent('always allow')
+    // Project scope shows the durable rule's project path.
+    expect(screen.getByTestId('project-rules-path')).toHaveTextContent('/home/me/proj')
+  })
+
+  it('removing a session rule sends the reduced list via setPermissionRules', () => {
+    const setPermissionRules = vi.fn()
+    setMockState(rulesState({ setPermissionRules }))
+    render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+
+    fireEvent.click(screen.getByTestId('session-rule-remove-Edit'))
+    // Only one session rule → filtering it out sends an empty list.
+    expect(setPermissionRules).toHaveBeenCalledTimes(1)
+    expect(setPermissionRules).toHaveBeenCalledWith([])
+  })
+
+  it('clearing all session rules sends [] via setPermissionRules', () => {
+    const setPermissionRules = vi.fn()
+    setMockState(
+      rulesState({
+        setPermissionRules,
+        sessionStates: {
+          s1: {
+            sessionRules: [
+              { tool: 'Edit', decision: 'allow' },
+              { tool: 'Read', decision: 'allow' },
+            ],
+            persistentRules: [],
+          },
+        },
+      }),
+    )
+    render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+
+    fireEvent.click(screen.getByTestId('session-rules-clear'))
+    expect(setPermissionRules).toHaveBeenCalledWith([])
+  })
+
+  it('removing a project rule sends the reduced list via setProjectPermissionRules', () => {
+    const setProjectPermissionRules = vi.fn()
+    setMockState(rulesState({ setProjectPermissionRules }))
+    render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+
+    fireEvent.click(screen.getByTestId('project-rule-remove-Write'))
+    expect(setProjectPermissionRules).toHaveBeenCalledTimes(1)
+    expect(setProjectPermissionRules).toHaveBeenCalledWith([])
+  })
+
+  it('does not render the Session Rules section for a provider without rules and no standing rules', () => {
+    setMockState({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S', cwd: '/x', provider: 'codex' }],
+      availableProviders: [{ name: 'codex', capabilities: { sessionRules: false } }],
+      sessionStates: { s1: { sessionRules: [], persistentRules: [] } },
+    })
+    render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+    expect(screen.queryByTestId('session-rules-section')).not.toBeInTheDocument()
+  })
+
+  it('Permission history: Load history triggers queryPermissionAudit and renders returned entries', () => {
+    const queryPermissionAudit = vi.fn()
+    setMockState(
+      rulesState({
+        queryPermissionAudit,
+        permissionAudit: [
+          { type: 'decision', sessionId: 's1', decision: 'allow', timestamp: Date.now() },
+          { type: 'mode_change', sessionId: 's1', previousMode: 'approve', newMode: 'auto', timestamp: Date.now() },
+        ],
+        permissionAuditLoading: false,
+      }),
+    )
+    render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+
+    // The section renders and the pull button is wired.
+    expect(screen.getByTestId('permission-history-section')).toBeInTheDocument()
+    fireEvent.click(screen.getByTestId('permission-history-load'))
+    expect(queryPermissionAudit).toHaveBeenCalledTimes(1)
+
+    // The two mocked entries render with their described labels.
+    const list = screen.getByTestId('permission-history-list')
+    expect(list).toHaveTextContent('Allowed')
+    expect(list).toHaveTextContent('Permission mode: approve → auto')
+  })
+
+  it('Permission history: empty result shows the no-events hint', () => {
+    setMockState(rulesState({ permissionAudit: [], permissionAuditLoading: false }))
+    render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+    expect(screen.getByTestId('permission-history-empty')).toBeInTheDocument()
+  })
+
+  it('Permission history: parse-failure error state shows the load-failed hint and keeps the button actionable', () => {
+    setMockState(rulesState({ permissionAudit: null, permissionAuditLoading: false, permissionAuditError: true }))
+    render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+    expect(screen.getByTestId('permission-history-error')).toBeInTheDocument()
+    // The button is NOT wedged in a disabled loading state — retry stays possible.
+    expect(screen.getByTestId('permission-history-load')).not.toBeDisabled()
+  })
+
+  it('Permission history: an UNKNOWN audit kind renders with the generic fallback label', () => {
+    setMockState(
+      rulesState({
+        permissionAudit: [{ type: 'rule_expired', sessionId: 's1', timestamp: Date.now() }],
+        permissionAuditLoading: false,
+      }),
+    )
+    render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+    expect(screen.getByTestId('permission-history-list')).toHaveTextContent('Permission event')
+  })
+
+  it('describePermissionAuditEntry labels each audit kind', () => {
+    expect(describePermissionAuditEntry({ type: 'mode_change', previousMode: 'approve', newMode: 'auto', timestamp: 0 })).toBe(
+      'Permission mode: approve → auto',
+    )
+    expect(
+      describePermissionAuditEntry({ type: 'whitelist_change', rules: [{ tool: 'Edit', decision: 'allow' }], timestamp: 0 }),
+    ).toBe('Session rules changed (1 rule)')
+    expect(describePermissionAuditEntry({ type: 'decision', decision: 'deny', reason: 'timeout', timestamp: 0 })).toBe(
+      'Denied (timeout)',
+    )
+    expect(describePermissionAuditEntry({ type: 'decision', decision: 'allow', reason: 'user', timestamp: 0 })).toBe('Allowed')
+    // Forward-compat (#6836 review): an unknown future kind gets the generic label.
+    expect(describePermissionAuditEntry({ type: 'rule_expired', timestamp: 0 })).toBe('Permission event')
   })
 })

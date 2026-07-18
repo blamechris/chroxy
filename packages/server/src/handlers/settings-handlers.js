@@ -554,6 +554,20 @@ function handlePermissionResponse(ws, client, msg, ctx) {
 }
 
 function handleQueryPermissionAudit(ws, client, msg, ctx) {
+  // #6837 — same authority principle as the adjacent handleGetPermissionInput: a
+  // pairing-bound (share-a-session) token is scoped to ITS OWN session. Without
+  // this gate a bound client could read another session's decision history, or
+  // omit sessionId entirely and pull the GLOBAL cross-session audit log. Bound
+  // clients must name their own boundSessionId explicitly; the global query is
+  // host-authority (unbound / primary token) only.
+  if (client.boundSessionId && msg.sessionId !== client.boundSessionId) {
+    loggerForSession('ws', client.boundSessionId).warn(`Client ${client.id} (bound to ${client.boundSessionId}) attempted to query permission audit for ${msg.sessionId || 'ALL sessions'} — rejected`)
+    sendError(ws, msg?.requestId, 'PERMISSION_AUDIT_FORBIDDEN_BOUND_CLIENT',
+      "Pairing-issued session tokens can only query their own session's permission audit.",
+      undefined, ctx)
+    return
+  }
+
   if (ctx.permissions.permissionAudit) {
     const entries = ctx.permissions.permissionAudit.query({
       sessionId: msg.sessionId,
@@ -771,21 +785,50 @@ function handleSetPermissionRules(ws, client, msg, ctx) {
   const entry = resolveSessionOrError(ws, ctx, msg, client)
   if (!entry) return
 
-  if (!requireSessionMethod(ws, ctx, entry, 'setPermissionRules', 'This provider does not support permission rules')) {
-    return
+  // #6829 — the two halves have DIFFERENT capability gates. Session rules need
+  // the session-rule setter (`setPermissionRules` — absent on codex by design,
+  // so it keeps advertising sessionRules:false). Durable project rules need only
+  // the persistent re-seed setter (`setPersistentPermissionRules` — which codex
+  // HAS since #6829). Gating the whole handler on `setPermissionRules` made the
+  // projectRules remove/clear path dead on codex: durable rules could be CREATED
+  // (allowAlways resolves inside the PermissionManager, no handler involved) but
+  // never removed from any client.
+  const supportsSessionRules = typeof entry.session?.setPermissionRules === 'function'
+
+  if (projectRules === undefined) {
+    // Session-rules-only request — unchanged legacy gate: providers without the
+    // session-rule setter (codex, cli, tui, gemini) are rejected.
+    if (!requireSessionMethod(ws, ctx, entry, 'setPermissionRules', 'This provider does not support permission rules')) {
+      return
+    }
+  } else {
+    // projectRules present — the durable half needs the persistent setter (all
+    // in-process-permission providers: sdk / byok / codex). Providers with no
+    // PermissionManager at all stay rejected, as before.
+    if (!requireSessionMethod(ws, ctx, entry, 'setPersistentPermissionRules', 'This provider does not support persistent permission rules')) {
+      return
+    }
+    // A NON-EMPTY session-rule set aimed at a provider without the session-rule
+    // setter must fail loudly, not be silently dropped. The rules:[] echo the
+    // clients send alongside a project-rule removal is a no-op and passes.
+    if (!supportsSessionRules && rules.length > 0) {
+      sendSessionError(ws, ctx, 'This provider does not support session permission rules')
+      return
+    }
   }
 
-  entry.session.setPermissionRules(rules)
+  if (supportsSessionRules) {
+    entry.session.setPermissionRules(rules)
+  }
 
   // #6771 — apply the durable project-rule replacement (if any) to the store,
   // then re-seed THIS session's in-memory persistent set so it takes effect
-  // immediately. The store is keyed by the session's cwd.
+  // immediately. The store is keyed by the session's cwd. (The persistent-setter
+  // gate above already guaranteed the method exists on this path.)
   const ruleStore = ctx.sessions.sessionManager?.permissionRuleStore
   if (projectRules !== undefined && ruleStore && typeof ruleStore.setRules === 'function') {
     const stored = ruleStore.setRules(entry.session.cwd, projectRules)
-    if (typeof entry.session.setPersistentPermissionRules === 'function') {
-      entry.session.setPersistentPermissionRules(stored)
-    }
+    entry.session.setPersistentPermissionRules(stored)
   }
 
   // Audit the whitelist change

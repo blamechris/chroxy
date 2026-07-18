@@ -203,6 +203,99 @@ describe('handleSetPermissionRules — projectRules (#6771)', () => {
   })
 })
 
+// #6829 (PR #6836 review) — the projectRules half must be applicable on a
+// CODEX-shaped session: one WITH the persistent setter/getters but WITHOUT
+// `setPermissionRules` (deliberately absent so codex advertises
+// sessionRules:false). The old handler gated the WHOLE request on
+// `setPermissionRules`, making durable-rule remove/clear dead on codex.
+describe('handleSetPermissionRules — codex-shaped session (persistent setter, no session-rule setter) (#6829)', () => {
+  let ctx, client, session, store, dir
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'chroxy-sh-codex-rules-'))
+    store = new PermissionRuleStore({ filePath: join(dir, 'permission-rules.json'), logger: { info() {}, warn() {}, error() {} } })
+    let _persistent = []
+    // NO setPermissionRules — the codex capability shape.
+    session = {
+      isReady: true,
+      cwd: '/proj/codex',
+      permissionMode: 'approve',
+      getPermissionRules: mock.fn(() => []),
+      setPersistentPermissionRules: mock.fn((r) => { _persistent = r.slice() }),
+      getPersistentPermissionRules: mock.fn(() => _persistent.map((r) => ({ ...r, persist: 'project' }))),
+    }
+    const entry = { session, cwd: '/proj/codex', name: 'codex-test' }
+    ctx = makeCtx(entry, {
+      sessionManager: {
+        getSession: (id) => (id === 'sess-1' ? entry : null),
+        permissionRuleStore: store,
+      },
+    })
+    client = makeClient()
+  })
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('removing a persistent rule succeeds (store updated + re-seeded) and broadcasts persistentRules', () => {
+    store.setRules('/proj/codex', [{ tool: 'apply_patch', decision: 'allow' }, { tool: 'Read', decision: 'allow' }])
+
+    handler(WS, client, { type: 'set_permission_rules', rules: [], projectRules: [{ tool: 'Read', decision: 'allow' }] }, ctx)
+
+    // No rejection.
+    assert.equal(ctx.transport.send.mock.callCount(), 0, 'no error frame')
+    // Store reduced + session re-seeded.
+    assert.deepEqual(store.getRules('/proj/codex'), [{ tool: 'Read', decision: 'allow' }])
+    assert.equal(session.setPersistentPermissionRules.mock.callCount(), 1)
+    // Broadcast carries the updated persistentRules (the codex getters from #6829).
+    const [sid, msg] = ctx.transport.broadcastToSession.mock.calls[0].arguments
+    assert.equal(sid, 'sess-1')
+    assert.equal(msg.type, 'permission_rules_updated')
+    assert.deepEqual(msg.persistentRules, [{ tool: 'Read', decision: 'allow', persist: 'project' }])
+  })
+
+  it('clearing all persistent rules (projectRules: []) succeeds', () => {
+    store.setRules('/proj/codex', [{ tool: 'Write', decision: 'allow' }])
+    handler(WS, client, { type: 'set_permission_rules', rules: [], projectRules: [] }, ctx)
+    assert.equal(ctx.transport.send.mock.callCount(), 0, 'no error frame')
+    assert.deepEqual(store.getRules('/proj/codex'), [])
+  })
+
+  it('a session-rules-only request is still rejected (no setPermissionRules)', () => {
+    handler(WS, client, { type: 'set_permission_rules', rules: [{ tool: 'Read', decision: 'allow' }] }, ctx)
+    const errMsg = ctx.transport.send.mock.calls[0]?.arguments[1]
+    assert.equal(errMsg?.type, 'session_error')
+    assert.match(errMsg?.message ?? '', /does not support permission rules/)
+    assert.equal(ctx.transport.broadcastToSession.mock.callCount(), 0, 'no broadcast')
+  })
+
+  it('a NON-EMPTY session-rule set alongside projectRules is rejected loudly, not silently dropped', () => {
+    handler(WS, client, {
+      type: 'set_permission_rules',
+      rules: [{ tool: 'Read', decision: 'allow' }],
+      projectRules: [{ tool: 'Write', decision: 'allow' }],
+    }, ctx)
+    const errMsg = ctx.transport.send.mock.calls[0]?.arguments[1]
+    assert.equal(errMsg?.type, 'session_error')
+    assert.match(errMsg?.message ?? '', /session permission rules/)
+    assert.deepEqual(store.getRules('/proj/codex'), [], 'nothing persisted')
+  })
+
+  it('a projectRules request on a session WITHOUT the persistent setter is rejected', () => {
+    const bare = { isReady: true, cwd: '/proj/cli', permissionMode: 'approve' }
+    const entry = { session: bare, cwd: '/proj/cli', name: 'cli-test' }
+    const cliCtx = makeCtx(entry, {
+      sessionManager: { getSession: (id) => (id === 'sess-1' ? entry : null), permissionRuleStore: store },
+    })
+    handler(WS, makeClient(), { type: 'set_permission_rules', rules: [], projectRules: [{ tool: 'Write', decision: 'allow' }] }, cliCtx)
+    const errMsg = cliCtx.transport.send.mock.calls[0]?.arguments[1]
+    assert.equal(errMsg?.type, 'session_error')
+    assert.match(errMsg?.message ?? '', /persistent permission rules/)
+    assert.deepEqual(store.getRules('/proj/cli'), [], 'nothing persisted')
+  })
+})
+
 describe('rule-eligibility sets share ONE source of truth (#6605/#6613)', () => {
   it('settings-handlers re-exports the SAME sets as permission-manager (no drift)', () => {
     // A duplicate hard-coded copy here silently drifted from permission-manager's

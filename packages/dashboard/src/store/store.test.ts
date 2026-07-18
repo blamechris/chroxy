@@ -2034,6 +2034,190 @@ describe('resolvedPermissions + Allow for Session (#2833, #2834)', () => {
     expect(sent.some((m) => m.type === 'set_permission_rules')).toBe(false);
   });
 
+  // #6772/#6829 — Session Rules viewer store actions (the SettingsPanel remove /
+  // clear-all path). These assert the exact wire shape the panel produces.
+  it('setPermissionRules sends set_permission_rules with the (bare) session rule list', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const { createEmptySessionState } = await import('./utils');
+
+    const sent: Array<Record<string, unknown>> = [];
+    const mockSocket = { readyState: 1, send: (d: string) => { sent.push(JSON.parse(d)); } };
+    useConnectionStore.setState({
+      activeSessionId: 's1',
+      sessionStates: { s1: { ...createEmptySessionState(), sessionRules: [{ tool: 'Edit', decision: 'allow' }] } },
+      socket: mockSocket as unknown as WebSocket,
+    });
+
+    // Remove the only session rule → send an empty list.
+    useConnectionStore.getState().setPermissionRules([]);
+
+    const msg = sent.find((m) => m.type === 'set_permission_rules');
+    expect(msg).toBeDefined();
+    expect(msg!.sessionId).toBe('s1');
+    expect(msg!.rules).toEqual([]);
+    expect(msg!.projectRules).toBeUndefined();
+  });
+
+  it('setProjectPermissionRules sends the reduced projectRules AND re-sends the current session rules (stripped of persist)', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const { createEmptySessionState } = await import('./utils');
+
+    const sent: Array<Record<string, unknown>> = [];
+    const mockSocket = { readyState: 1, send: (d: string) => { sent.push(JSON.parse(d)); } };
+    useConnectionStore.setState({
+      activeSessionId: 's1',
+      sessionStates: {
+        s1: {
+          ...createEmptySessionState(),
+          sessionRules: [{ tool: 'Glob', decision: 'allow' }],
+          persistentRules: [
+            { tool: 'Write', decision: 'allow', persist: 'project' },
+            { tool: 'Edit', decision: 'allow', persist: 'project' },
+          ],
+        },
+      },
+      socket: mockSocket as unknown as WebSocket,
+    });
+
+    // Remove the first project rule (Write) → send the reduced project list.
+    useConnectionStore.getState().setProjectPermissionRules([{ tool: 'Edit', decision: 'allow', persist: 'project' }]);
+
+    const msg = sent.find((m) => m.type === 'set_permission_rules');
+    expect(msg).toBeDefined();
+    expect(msg!.sessionId).toBe('s1');
+    // Session rules preserved (server's single handler would otherwise clobber them).
+    expect(msg!.rules).toEqual([{ tool: 'Glob', decision: 'allow' }]);
+    // projectRules carry only { tool, decision } — the client-only `persist` marker is stripped.
+    expect(msg!.projectRules).toEqual([{ tool: 'Edit', decision: 'allow' }]);
+  });
+
+  it('queryPermissionAudit sets the loading flag and sends query_permission_audit scoped to the active session', async () => {
+    const { useConnectionStore } = await import('./connection');
+
+    const sent: Array<Record<string, unknown>> = [];
+    const mockSocket = { readyState: 1, send: (d: string) => { sent.push(JSON.parse(d)); } };
+    useConnectionStore.setState({
+      activeSessionId: 's1',
+      socket: mockSocket as unknown as WebSocket,
+      permissionAudit: null,
+      permissionAuditLoading: false,
+    });
+
+    useConnectionStore.getState().queryPermissionAudit();
+
+    expect(useConnectionStore.getState().permissionAuditLoading).toBe(true);
+    const msg = sent.find((m) => m.type === 'query_permission_audit');
+    expect(msg).toBeDefined();
+    expect(msg!.sessionId).toBe('s1');
+  });
+
+  it('permission_audit_result populates permissionAudit and clears the loading flag', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const { _testMessageHandler } = await import('./message-handler');
+
+    useConnectionStore.setState({ permissionAudit: null, permissionAuditLoading: true });
+    _testMessageHandler.setContext({
+      url: 'ws://localhost:3000',
+      token: 'test-token',
+      isReconnect: false,
+      silent: false,
+      socket: { send: () => {}, readyState: 1 } as unknown as WebSocket,
+    });
+
+    _testMessageHandler.handle({
+      type: 'permission_audit_result',
+      entries: [
+        { type: 'decision', sessionId: 's1', decision: 'allow', reason: 'user', timestamp: 1 },
+        { type: 'mode_change', sessionId: 's1', previousMode: 'approve', newMode: 'auto', timestamp: 2 },
+      ],
+    });
+
+    const state = useConnectionStore.getState();
+    expect(state.permissionAuditLoading).toBe(false);
+    expect(state.permissionAudit).toHaveLength(2);
+    expect(state.permissionAudit![0]!.type).toBe('decision');
+    expect(state.permissionAudit![1]!.newMode).toBe('auto');
+    expect(state.permissionAuditError).toBe(false);
+
+    _testMessageHandler.clearContext();
+  });
+
+  it('a MALFORMED permission_audit_result clears the loading flag and raises the error state (no wedge)', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const { _testMessageHandler } = await import('./message-handler');
+
+    useConnectionStore.setState({ permissionAudit: null, permissionAuditLoading: true, permissionAuditError: false });
+    _testMessageHandler.setContext({
+      url: 'ws://localhost:3000',
+      token: 'test-token',
+      isReconnect: false,
+      silent: false,
+      socket: { send: () => {}, readyState: 1 } as unknown as WebSocket,
+    });
+
+    // entries must be an array — a scalar fails the schema parse.
+    _testMessageHandler.handle({ type: 'permission_audit_result', entries: 'not-an-array' });
+
+    const state = useConnectionStore.getState();
+    expect(state.permissionAuditLoading).toBe(false); // button unwedged
+    expect(state.permissionAuditError).toBe(true);    // generic load-failed state
+    expect(state.permissionAudit).toBeNull();         // no garbage stored
+
+    _testMessageHandler.clearContext();
+  });
+
+  it('an UNKNOWN audit entry type still parses (forward-compatible wire schema)', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const { _testMessageHandler } = await import('./message-handler');
+
+    useConnectionStore.setState({ permissionAudit: null, permissionAuditLoading: true, permissionAuditError: false });
+    _testMessageHandler.setContext({
+      url: 'ws://localhost:3000',
+      token: 'test-token',
+      isReconnect: false,
+      silent: false,
+      socket: { send: () => {}, readyState: 1 } as unknown as WebSocket,
+    });
+
+    // A future server-side audit kind must not fail the WHOLE payload (#6836 review).
+    _testMessageHandler.handle({
+      type: 'permission_audit_result',
+      entries: [
+        { type: 'rule_expired', sessionId: 's1', timestamp: 1 },
+        { type: 'decision', sessionId: 's1', decision: 'allow', timestamp: 2 },
+      ],
+    });
+
+    const state = useConnectionStore.getState();
+    expect(state.permissionAuditLoading).toBe(false);
+    expect(state.permissionAuditError).toBe(false);
+    expect(state.permissionAudit).toHaveLength(2);
+    expect(state.permissionAudit![0]!.type).toBe('rule_expired');
+
+    _testMessageHandler.clearContext();
+  });
+
+  it('switchSession clears the permission audit history so it never shows another session\'s entries', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const { createEmptySessionState } = await import('./utils');
+
+    useConnectionStore.setState({
+      activeSessionId: 's1',
+      sessionStates: { s1: { ...createEmptySessionState() }, s2: { ...createEmptySessionState() } },
+      sessionNotifications: [],
+      permissionAudit: [{ type: 'decision', sessionId: 's1', decision: 'allow', timestamp: 1 }],
+      permissionAuditLoading: true,
+      socket: null,
+    });
+
+    useConnectionStore.getState().switchSession('s2');
+
+    const state = useConnectionStore.getState();
+    expect(state.activeSessionId).toBe('s2');
+    expect(state.permissionAudit).toBeNull();
+    expect(state.permissionAuditLoading).toBe(false);
+  });
+
   it('permission_expired for an already-resolved requestId does not mutate the prompt message', async () => {
     const { useConnectionStore } = await import('./connection');
     const { createEmptySessionState } = await import('./utils');

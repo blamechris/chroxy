@@ -813,6 +813,48 @@ export class CodexAppServerSession extends BaseSession {
     return this._permissions.respondToQuestion(text, answers)
   }
 
+  // #6829 — permission-rule accessors, mirroring SdkSession/ByokSession. Codex's
+  // PermissionManager already owns a rule store (seeded per-cwd in the ctor), but
+  // without these thin wrappers a codex session's rules were invisible on the
+  // wire: the `permission_rules_updated` broadcast (settings-handlers.js) and the
+  // ws-history reconnect replay (ws-history.js) both gate on `getPermissionRules`
+  // / `getPersistentPermissionRules`, and the projectRules re-seed calls
+  // `setPersistentPermissionRules` — so on codex an allowAlways persisted at the
+  // enforcement layer but never broadcast, replayed, or re-seeded. Session-rule
+  // MUTATION (`setPermissionRules`) is intentionally NOT exposed so codex keeps
+  // advertising `sessionRules:false` in the provider picker (providers.js derives
+  // the capability from `setPermissionRules` presence); only the durable
+  // project-rule read/replay surface is wired.
+
+  /** Current session-scoped permission rules. Delegates to PermissionManager. */
+  getPermissionRules() {
+    if (typeof this._permissions.getRules === 'function') {
+      return this._permissions.getRules()
+    }
+    return []
+  }
+
+  /**
+   * #6771/#6829 — durable (project-scoped) permission rules applied to this
+   * session, tagged `persist:'project'`. Delegates to PermissionManager.
+   */
+  getPersistentPermissionRules() {
+    if (typeof this._permissions.getPersistentRules === 'function') {
+      return this._permissions.getPersistentRules()
+    }
+    return []
+  }
+
+  /**
+   * #6771/#6829 — re-seed this session's in-memory durable rule set (no persist;
+   * the caller owns the store write). Delegates to PermissionManager.
+   */
+  setPersistentPermissionRules(rules) {
+    if (typeof this._permissions.setPersistentRules === 'function') {
+      this._permissions.setPersistentRules(rules)
+    }
+  }
+
   // A permission prompt can outlast the result timeout while it waits on a human;
   // pause the timer on request, re-arm it once the decision lands (#3920 pattern).
   _pauseResultTimeoutForPermission() { this._clearResultTimeout() }

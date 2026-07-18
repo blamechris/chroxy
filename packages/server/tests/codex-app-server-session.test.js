@@ -981,3 +981,70 @@ describe('usage mapping (#6692)', () => {
     cleanup()
   })
 })
+
+// #6829 — the permission-rule accessors that #6826 gave SdkSession/ByokSession
+// but left off CodexAppServerSession, so a codex session's rules never broadcast
+// (permission_rules_updated) or replayed on reconnect (ws-history gates on the
+// getters). Mirrors the SdkSession seeding test in
+// settings-handlers-permission-rules.test.js.
+describe('CodexAppServerSession — permission rule accessors (#6829)', () => {
+  it('getPermissionRules / getPersistentPermissionRules / setPersistentPermissionRules delegate to the PermissionManager', () => {
+    const { s, cleanup } = mkSession()
+    try {
+      // Session rules — codex keeps setPermissionRules OFF (sessionRules:false in
+      // the picker), so seed the manager directly to prove the getter delegates.
+      s._permissions.setRules([{ tool: 'Read', decision: 'allow' }])
+      assert.deepEqual(s.getPermissionRules(), [{ tool: 'Read', decision: 'allow' }])
+
+      // Persistent (project) rules — the setter re-seeds the in-memory set, the
+      // getter tags each `persist:'project'` (the shape the wire broadcast carries).
+      s.setPersistentPermissionRules([{ tool: 'Write', decision: 'allow' }])
+      assert.deepEqual(s.getPersistentPermissionRules(), [
+        { tool: 'Write', decision: 'allow', persist: 'project' },
+      ])
+    } finally {
+      s.destroy()
+      cleanup()
+    }
+  })
+
+  it('seeds persistent rules from the injected rule store for its cwd', async () => {
+    const { PermissionRuleStore } = await import('../src/permission-rule-store.js')
+    const dir = mkdtempSync(join(tmpdir(), 'chroxy-codex-seed-'))
+    try {
+      const store = new PermissionRuleStore({
+        filePath: join(dir, 'permission-rules.json'),
+        logger: { info() {}, warn() {}, error() {} },
+      })
+      store.addRule('/proj/codex-seed', { tool: 'apply_patch', decision: 'allow' })
+
+      const { s, cleanup } = mkSession({ cwd: '/proj/codex-seed', permissionRuleStore: store })
+      assert.deepEqual(s.getPersistentPermissionRules(), [
+        { tool: 'apply_patch', decision: 'allow', persist: 'project' },
+      ])
+      s.destroy()
+      cleanup()
+
+      // A codex session in a DIFFERENT cwd does not inherit the rule.
+      const other = mkSession({ cwd: '/proj/other', permissionRuleStore: store })
+      assert.deepEqual(other.s.getPersistentPermissionRules(), [])
+      other.s.destroy()
+      other.cleanup()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('getPermissionRules / getPersistentPermissionRules return [] when the delegate is absent', () => {
+    const { s, cleanup } = mkSession()
+    try {
+      delete s._permissions.getRules
+      delete s._permissions.getPersistentRules
+      assert.deepEqual(s.getPermissionRules(), [])
+      assert.deepEqual(s.getPersistentPermissionRules(), [])
+    } finally {
+      s.destroy()
+      cleanup()
+    }
+  })
+})
