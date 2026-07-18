@@ -245,7 +245,9 @@ export class ClaudeByokSession extends BaseSession {
     // PermissionManager + event re-emission via the shared wiring (P2-9) so the
     // dashboard / mobile permission UI and the audit log work uniformly across
     // providers. ByokSession passes no pause/resume hooks (no result-timeout).
-    this._permissions = new PermissionManager({ log })
+    // #6794 — pass cwd so the protected-path floor can resolve relative tool
+    // targets (.git/.claude/.env…) against this session's working directory.
+    this._permissions = new PermissionManager({ log, cwd: this.cwd })
     wirePermissionManager(this, this._permissions)
 
     // Realpath cache used by the tool executor's path-safety check. One
