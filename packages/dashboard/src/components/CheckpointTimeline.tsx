@@ -102,7 +102,7 @@ function CheckpointNode({
             type="button"
             className="cp-btn cp-restore"
             onClick={() => onRestore(checkpoint.id)}
-            title="Restore files to this checkpoint"
+            title="Restore files to this checkpoint (opens a new session)"
           >
             Restore
           </button>
