@@ -83,6 +83,41 @@ describe('PermissionAuditLog (#1851)', () => {
     )
   })
 
+  // #6830 — an allowAlways decision (or a persisted-rule auto-approve) needs
+  // `requestId -> tool` in the audit log alone; _lastPermissionData (where the
+  // tool name otherwise lives) is deleted on resolution.
+  it('records tool/persist/projectKey when provided (#6830)', () => {
+    log.logDecision({
+      clientId: 'c1',
+      sessionId: 's1',
+      requestId: 'req-allow-always',
+      decision: 'allowAlways',
+      tool: 'Write',
+      persist: 'project',
+      projectKey: '/abs/proj',
+    })
+
+    const entries = log.query({ type: 'decision' })
+    assert.equal(entries.length, 1)
+    assert.equal(entries[0].tool, 'Write')
+    assert.equal(entries[0].persist, 'project')
+    assert.equal(entries[0].projectKey, '/abs/proj')
+  })
+
+  it('defaults tool/persist/projectKey to null when omitted (#6830, backwards compat)', () => {
+    log.logDecision({
+      clientId: 'c1',
+      sessionId: 's1',
+      requestId: 'req-plain',
+      decision: 'allow',
+    })
+
+    const entries = log.query({ type: 'decision' })
+    assert.equal(entries[0].tool, null)
+    assert.equal(entries[0].persist, null)
+    assert.equal(entries[0].projectKey, null)
+  })
+
   it('defaults reason to "user" for backwards compatibility (#3057)', () => {
     // Older callers (and any code we missed) pass no reason — they should
     // be tagged 'user' so forensic queries can still filter on the new

@@ -1836,6 +1836,36 @@ describe('audit trail for auto-deny resolution paths (#3057)', () => {
     )
   })
 
+  // #6830 — a persisted-rule auto-approve (permission-manager.js
+  // _auditPersistedRuleAutoApprove) reaches this same listener as a
+  // permission_resolved session_event with reason:'persisted_rule' and no
+  // human responder (clientId stays null, matching the other auto-* reasons).
+  // The tool/persist/projectKey fields must pass through into the stored entry.
+  it('records tool/persist/projectKey for a persisted-rule auto-approve (#6830)', () => {
+    const manager = makeManager()
+    server = new WsServer({ port: 0, apiToken: 'test-token', sessionManager: manager })
+
+    manager.emit('session_event', {
+      sessionId: 'sess-x',
+      event: 'permission_resolved',
+      data: {
+        requestId: 'rule-abc-1-123',
+        decision: 'allow',
+        reason: 'persisted_rule',
+        tool: 'Write',
+        persist: 'project',
+        projectKey: '/abs/proj',
+      },
+    })
+
+    const entries = server._permissionAudit.query({ type: 'decision' })
+    assert.equal(entries.length, 1)
+    assert.equal(entries[0].clientId, null, 'no human responder for a rule-driven auto-approve')
+    assert.equal(entries[0].tool, 'Write')
+    assert.equal(entries[0].persist, 'project')
+    assert.equal(entries[0].projectKey, '/abs/proj')
+  })
+
   it('skips user-initiated resolutions to avoid double-auditing the inline WS path', () => {
     const manager = makeManager()
     server = new WsServer({ port: 0, apiToken: 'test-token', sessionManager: manager })

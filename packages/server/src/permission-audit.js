@@ -55,18 +55,34 @@ export class PermissionAuditLog {
    * @param {string|null} params.clientId - Identifies the responder. Three states:
    *   - WS-origin user response: the connection's synthetic id (e.g. an 8-char hex)
    *   - HTTP-origin user response: the literal string 'http' (#3059)
-   *   - Auto-deny paths (timeout / aborted / cleared): null (no responder)
+   *   - Auto-deny paths (timeout / aborted / cleared) and rule-driven
+   *     auto-approvals (#6830): null (no human responder)
    * @param {string|null} params.sessionId - Session the permission belongs to,
    *   or null for genuinely unmapped legacy HTTP requests (see ws-permissions.js
    *   legacy branch — pendingPermissions entry with no permissionSessionMap entry).
    * @param {string} params.requestId - The permission request ID
-   * @param {string} params.decision - 'allow' or 'deny'
+   * @param {string} params.decision - 'allow', 'deny', or 'allowAlways'
    * @param {string} [params.reason] - How the permission was resolved.
    *   Defaults to 'user' for backwards compatibility with the inline WS-path
    *   audit. Auto-deny paths pass 'timeout' | 'aborted' | 'cleared' so
    *   forensic queries can distinguish user denies from auto-denies (#3057).
+   *   A persisted-rule auto-approve (no prompt ever shown) passes
+   *   'persisted_rule' (#6830).
+   * @param {string|null} [params.tool] - The tool the decision applied to
+   *   (#6830). Without this, `_lastPermissionData` (which carries the tool
+   *   name) is already deleted by the time an auditor queries the log, so a
+   *   `requestId -> tool` lookup is impossible from the audit trail alone.
+   *   Defaults to null so pre-#6830 callers keep working.
+   * @param {string|null} [params.persist] - `'project'` when this decision
+   *   resulted in (or matched) a DURABLE project-scoped rule (#6771/#6830) —
+   *   set on an `allowAlways` that the rule store actually persisted, and on
+   *   a `reason:'persisted_rule'` auto-approve. Null otherwise (a one-shot
+   *   allow/deny, or an `allowAlways` on a NEVER_AUTO_ALLOW / non-eligible
+   *   tool that degrades to a one-time allow with nothing persisted).
+   * @param {string|null} [params.projectKey] - The normalized project cwd the
+   *   persisted rule is scoped to (present only alongside `persist:'project'`).
    */
-  logDecision({ clientId, sessionId, requestId, decision, reason = 'user' }) {
+  logDecision({ clientId, sessionId, requestId, decision, reason = 'user', tool = null, persist = null, projectKey = null }) {
     this._append({
       type: 'decision',
       clientId,
@@ -74,6 +90,9 @@ export class PermissionAuditLog {
       requestId,
       decision,
       reason,
+      tool,
+      persist,
+      projectKey,
       timestamp: Date.now(),
     })
   }

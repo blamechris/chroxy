@@ -351,6 +351,56 @@ export class PermissionManager extends EventEmitter {
   }
 
   /**
+   * #6830 — was the 'allow' decision _matchesRule just returned for `toolName`
+   * SOURCED from a durable project-scoped rule (as opposed to a session rule)?
+   * Mirrors _matchesRule's own precedence (session rules are checked first and
+   * shadow a persistent rule for the same tool) WITHOUT changing _matchesRule's
+   * tested return contract (a plain 'allow'|'deny'|null string, asserted
+   * directly in permission-manager.test.js). Used only to decide whether a
+   * silent auto-approve needs an audit-only signal (see
+   * _auditPersistedRuleAutoApprove) — a session-rule-sourced allow is an
+   * explicit, non-durable decision the user already made this session and
+   * needs no extra trail beyond what's already logged for it.
+   * @param {string} toolName
+   * @returns {boolean}
+   */
+  _persistentRuleSourced(toolName) {
+    if (this._sessionRules.some((r) => r.tool === toolName)) return false
+    return this._persistentRules.some((r) => r.tool === toolName && r.decision === 'allow')
+  }
+
+  /**
+   * #6830 — audit-only signal for a persisted (project-scoped) rule silently
+   * auto-approving `toolName` with NO visible prompt: handlePermission
+   * short-circuits BEFORE minting a requestId or emitting permission_request,
+   * so without this the audit log has ZERO trace of the tool call — an
+   * auditor querying permission history can't answer "why did tool X
+   * auto-approve after a restart?" from the log alone.
+   *
+   * Emits the EXISTING `permission_resolved` event — already wired through
+   * wirePermissionManager -> session -> SessionManager (`permission_resolved`
+   * is in session-manager.js's builtinTransient list) -> ws-server's
+   * `_sessionEventAuditHandler`, which records any non-'user'-reason
+   * resolution. A synthetic id (same `<prefix>-<nonce>-<counter>-<ms>` scheme
+   * as a real prompt, `rule-` prefixed so it reads distinctly from a real
+   * `perm-` id in logs) gives the entry a stable, unique correlation key; it
+   * is audit-only and is never registered in `_pendingPermissions` — there is
+   * nothing to resolve later.
+   * @param {string} toolName
+   */
+  _auditPersistedRuleAutoApprove(toolName) {
+    const requestId = `rule-${this._idNonce}-${++this._permissionCounter}-${Date.now()}`
+    this.emit('permission_resolved', {
+      requestId,
+      decision: 'allow',
+      reason: 'persisted_rule',
+      tool: toolName,
+      persist: 'project',
+      projectKey: this._cwd,
+    })
+  }
+
+  /**
    * Handle a permission check from the SDK canUseTool callback.
    *
    * For AskUserQuestion: emits user_question and waits for respondToQuestion().
@@ -403,6 +453,12 @@ export class PermissionManager extends EventEmitter {
     if (ruleDecision !== null && !(protectedTarget && ruleDecision === 'allow')) {
       this._logInfo(`Permission rule matched for ${toolName}: ${ruleDecision}`)
       if (ruleDecision === 'allow') {
+        // #6830 — a durable project rule (not a session rule) just silently
+        // auto-approved this tool call. Emit the audit-only signal so the
+        // permission audit log has a trace even though no prompt was shown.
+        if (this._persistentRuleSourced(toolName)) {
+          this._auditPersistedRuleAutoApprove(toolName)
+        }
         return Promise.resolve({ behavior: 'allow', updatedInput: input || {} })
       }
       return Promise.resolve({ behavior: 'deny', message: 'Denied by session rule' })

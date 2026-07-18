@@ -247,6 +247,31 @@ describe('#6771 PermissionManager + durable rules', () => {
     }
   })
 
+  // #6830 — end-to-end (real PermissionRuleStore, not a hand-set _persistentRules
+  // array): a rule seeded from disk auto-approving a tool call must leave a
+  // trace in the audit pipeline (an auditor can't answer "why did tool X
+  // auto-approve after a restart?" otherwise — no prompt, no requestId, no
+  // permission_resolved at all pre-#6830).
+  it('a store-seeded persistent rule auto-approve emits the audit-only permission_resolved signal', async () => {
+    const store = makeStore()
+    store.addRule('/proj/a', { tool: 'Write', decision: 'allow' })
+
+    const pm = new PermissionManager({ log: silentLog, cwd: '/proj/a', ruleStore: store })
+    try {
+      const resolvedEvents = []
+      pm.on('permission_resolved', (d) => resolvedEvents.push(d))
+      const result = await pm.handlePermission('Write', { file_path: 'src/x.js' }, null, 'approve')
+      assert.equal(result.behavior, 'allow')
+      assert.equal(resolvedEvents.length, 1)
+      assert.equal(resolvedEvents[0].reason, 'persisted_rule')
+      assert.equal(resolvedEvents[0].tool, 'Write')
+      assert.equal(resolvedEvents[0].persist, 'project')
+      assert.equal(resolvedEvents[0].projectKey, '/proj/a')
+    } finally {
+      pm.destroy()
+    }
+  })
+
   it('a different cwd does NOT inherit another project\'s persistent rules', async () => {
     const store = makeStore()
     store.addRule('/proj/a', { tool: 'Write', decision: 'allow' })

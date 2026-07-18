@@ -1153,6 +1153,13 @@ export class WsServer {
           requestId: data.requestId,
           decision: data.decision,
           reason: data.reason,
+          // #6830 — the persisted-rule auto-approve signal (permission-manager.js
+          // _auditPersistedRuleAutoApprove) carries tool/persist/projectKey;
+          // other auto-deny reasons (timeout/aborted/cleared/auto_mode) don't
+          // set these, so they fall back to logDecision's own null defaults.
+          tool: data.tool ?? null,
+          persist: data.persist ?? null,
+          projectKey: data.projectKey ?? null,
         })
       }
       sessionManager.on('session_created', this._sessionCreatedHandler)

@@ -336,7 +336,10 @@ export const ServerPermissionInputSchema = z.discriminatedUnion('found', [
  * fields are all optional so a single object covers every kind. Known kinds:
  *   - `mode_change`      — previousMode / newMode
  *   - `whitelist_change` — rules (the new session-rule set)
- *   - `decision`         — requestId / decision (allow|deny) / reason
+ *   - `decision`         — requestId / decision (allow|deny|allowAlways) / reason
+ *     (`reason:'persisted_rule'` — #6830 — is a decision entry with NO human
+ *     responder: a durable project rule auto-approved the tool with no prompt
+ *     ever shown; `clientId` is null just like the other auto-deny reasons)
  * The entry `type` is a PLAIN `z.string()` (PR #6836 review), for two reasons:
  *   1. Forward compatibility — a closed enum would fail the WHOLE payload parse
  *      the moment the server adds a new audit kind; clients render unknown kinds
@@ -363,6 +366,15 @@ export const ServerPermissionAuditEntrySchema = z
     requestId: z.string().optional(),
     decision: z.string().optional(),
     reason: z.string().optional(),
+    // #6830 — decision enrichment: the tool the decision applied to, and (for
+    // an `allowAlways` that actually persisted, or a `persisted_rule`
+    // auto-approve) the durable-rule marker + the project cwd it's scoped to.
+    // Nullable (not just optional): existing callers explicitly pass `null`
+    // for "known absent" rather than omitting the key (permission-audit.js
+    // `logDecision` defaults).
+    tool: z.string().nullable().optional(),
+    persist: z.string().nullable().optional(),
+    projectKey: z.string().nullable().optional(),
   })
   .passthrough()
 

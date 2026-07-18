@@ -47,12 +47,19 @@ import { createPermissionResolver } from '../src/permission-resolver.js'
 const OWNER = 'sess-OWNER'
 const OTHER = 'sess-OTHER'
 
-function makeSdkSession({ pending = [] } = {}) {
+function makeSdkSession({ pending = [], lastPermissionData, persistentRules, cwd } = {}) {
   const set = new Set(pending)
-  return {
+  const session = {
     _pendingPermissions: { has: (id) => set.has(id) },
     respondToPermission: mock.fn((id) => { const had = set.has(id); set.delete(id); return had }),
   }
+  // #6830 — only wired when the test opts in, so pre-existing fixtures (no
+  // tool info at all) keep producing the exact same resolver.audit() call
+  // shape they always have.
+  if (lastPermissionData) session._lastPermissionData = lastPermissionData
+  if (persistentRules) session.getPersistentPermissionRules = () => persistentRules
+  if (cwd) session.cwd = cwd
+  return session
 }
 
 function build({ map = [], legacy = [], ownerSession } = {}) {
@@ -156,5 +163,91 @@ describe('permission-resolver — audit (D)', () => {
     const { resolver, audited } = build({ map: [['perm-8', OWNER]] })
     resolver.resolve('perm-8', 'allow', OTHER, { clientId: 'c1' })
     assert.equal(audited.length, 0)
+  })
+})
+
+// #6830 — the allowAlways audit entry omits the tool name and a durable-rule
+// marker (filed from PR #6826's security review). The resolver is the ONE
+// place both transports (WS via settings-handlers.js, HTTP via
+// ws-permissions.js) route their audit call through, so the tool/persist
+// capture belongs here.
+describe('permission-resolver — #6830 tool + persist enrichment', () => {
+  it('captures the tool name from _lastPermissionData BEFORE respondToPermission consumes it', () => {
+    const lastPermissionData = new Map([['perm-9', { tool: 'Read' }]])
+    const owner = makeSdkSession({ pending: ['perm-9'], lastPermissionData })
+    const { resolver, audited } = build({ map: [['perm-9', OWNER]], ownerSession: owner })
+    resolver.resolve('perm-9', 'allow', null, { clientId: 'c1' })
+    assert.equal(audited.length, 1)
+    assert.equal(audited[0].tool, 'Read')
+    assert.equal(audited[0].persist, undefined, 'a plain allow never sets persist')
+  })
+
+  it('allowAlways that persisted a durable project rule carries tool + persist:"project" + projectKey', () => {
+    const lastPermissionData = new Map([['perm-10', { tool: 'Write' }]])
+    const owner = makeSdkSession({
+      pending: ['perm-10'],
+      lastPermissionData,
+      persistentRules: [{ tool: 'Write', decision: 'allow', persist: 'project' }],
+      cwd: '/abs/proj',
+    })
+    const { resolver, audited } = build({ map: [['perm-10', OWNER]], ownerSession: owner })
+    resolver.resolve('perm-10', 'allowAlways', null, { clientId: 'c1' })
+    assert.equal(audited.length, 1)
+    assert.deepEqual(audited[0], {
+      clientId: 'c1',
+      sessionId: OWNER,
+      requestId: 'perm-10',
+      decision: 'allowAlways',
+      reason: 'user',
+      tool: 'Write',
+      persist: 'project',
+      projectKey: '/abs/proj',
+    })
+  })
+
+  it('allowAlways on a tool that degraded to a one-shot allow (nothing durable) carries tool but no persist marker', () => {
+    // e.g. Bash — NEVER_AUTO_ALLOW, so the rule store never persists it; the
+    // session's persistent set does NOT include it.
+    const lastPermissionData = new Map([['perm-11', { tool: 'Bash' }]])
+    const owner = makeSdkSession({
+      pending: ['perm-11'],
+      lastPermissionData,
+      persistentRules: [],
+      cwd: '/abs/proj',
+    })
+    const { resolver, audited } = build({ map: [['perm-11', OWNER]], ownerSession: owner })
+    resolver.resolve('perm-11', 'allowAlways', null, { clientId: 'c1' })
+    assert.equal(audited.length, 1)
+    assert.equal(audited[0].tool, 'Bash')
+    assert.equal(audited[0].persist, undefined)
+    assert.equal(audited[0].projectKey, undefined)
+  })
+
+  it('a fixture with no tool info at all produces the exact pre-#6830 5-field audit shape (backwards compat)', () => {
+    const owner = makeSdkSession({ pending: ['perm-12'] })
+    const { resolver, audited } = build({ map: [['perm-12', OWNER]], ownerSession: owner })
+    resolver.resolve('perm-12', 'deny', null, { clientId: 'http' })
+    assert.deepEqual(audited[0], { clientId: 'http', sessionId: OWNER, requestId: 'perm-12', decision: 'deny', reason: 'user' })
+  })
+
+  it('the legacy HTTP path captures tool from pendingPermissions.data BEFORE resolveLegacyPermission runs', () => {
+    const pendingPermissions = new Map([['perm-13', { data: { tool: 'Edit' } }]])
+    const audited = []
+    const resolver = createPermissionResolver({
+      permissionSessionMap: new Map(),
+      pendingPermissions,
+      getSessionManager: () => null,
+      resolveLegacyPermission: (requestId, decision) => {
+        // Mirrors ws-permissions.js: the entry is gone from pendingPermissions
+        // by the time resolveLegacyPermission's caller-side cleanup runs.
+        pendingPermissions.delete(requestId)
+      },
+      getPermissionAudit: () => ({ logDecision: (e) => audited.push(e) }),
+    })
+    const r = resolver.resolve('perm-13', 'allow', null, { clientId: 'http' })
+    assert.equal(r.kind, 'resolved')
+    assert.equal(r.via, 'legacy')
+    assert.equal(audited[0].tool, 'Edit')
+    assert.equal(audited[0].persist, undefined, 'legacy sessions have no durable-rule concept')
   })
 })

@@ -965,6 +965,61 @@ describe('PermissionManager', () => {
     })
   })
 
+  // #6830 — a persisted (project-scoped) rule auto-approving a tool call had
+  // ZERO audit trail: handlePermission short-circuits before a requestId is
+  // ever minted or a permission_request emitted, so the audit log had no way
+  // to answer "why did tool X auto-approve after a restart?" These pin the
+  // gap-fill signal (_auditPersistedRuleAutoApprove, wired through the
+  // existing permission_resolved event) and its precedence rules.
+  describe('handlePermission with persistent (project) rules — #6830 audit gap', () => {
+    it('auto-allowing via a PERSISTENT rule emits an audit-only permission_resolved with tool + persist + reason', async () => {
+      const resolvedEvents = []
+      pm.on('permission_resolved', (data) => resolvedEvents.push(data))
+      const requestEvents = []
+      pm.on('permission_request', (data) => requestEvents.push(data))
+      pm._persistentRules = [{ tool: 'Write', decision: 'allow' }]
+
+      const result = await pm.handlePermission('Write', { file_path: '/tmp/x' }, null, 'approve')
+      assert.equal(result.behavior, 'allow')
+      assert.equal(requestEvents.length, 0, 'no prompt was ever shown')
+      assert.equal(resolvedEvents.length, 1, 'the gap-fill audit signal must fire')
+      assert.equal(resolvedEvents[0].decision, 'allow')
+      assert.equal(resolvedEvents[0].reason, 'persisted_rule')
+      assert.equal(resolvedEvents[0].tool, 'Write')
+      assert.equal(resolvedEvents[0].persist, 'project')
+      assert.ok(resolvedEvents[0].requestId, 'needs a stable correlation key')
+      assert.match(resolvedEvents[0].requestId, /^rule-/)
+    })
+
+    it('a SESSION rule match does NOT emit the persisted-rule audit signal (session rules shadow persistent rules)', async () => {
+      const resolvedEvents = []
+      pm.on('permission_resolved', (data) => resolvedEvents.push(data))
+      pm.setRules([{ tool: 'Write', decision: 'allow' }])
+      pm._persistentRules = [{ tool: 'Write', decision: 'allow' }] // same tool, both sets
+
+      const result = await pm.handlePermission('Write', { file_path: '/tmp/x' }, null, 'approve')
+      assert.equal(result.behavior, 'allow')
+      assert.equal(resolvedEvents.length, 0, 'session rule wins precedence — no persisted-rule audit needed')
+    })
+
+    it('a persistent DENY rule match does not emit the (allow-only) audit signal', async () => {
+      const resolvedEvents = []
+      pm.on('permission_resolved', (data) => resolvedEvents.push(data))
+      pm._persistentRules = [{ tool: 'Write', decision: 'deny' }]
+
+      const result = await pm.handlePermission('Write', { file_path: '/tmp/x' }, null, 'approve')
+      assert.equal(result.behavior, 'deny')
+      assert.equal(resolvedEvents.length, 0)
+    })
+
+    it('_persistentRuleSourced reflects session-rule shadowing directly', () => {
+      pm._persistentRules = [{ tool: 'Read', decision: 'allow' }]
+      assert.equal(pm._persistentRuleSourced('Read'), true)
+      pm._sessionRules = [{ tool: 'Read', decision: 'deny' }]
+      assert.equal(pm._persistentRuleSourced('Read'), false, 'a session rule for the same tool shadows the persistent rule')
+    })
+  })
+
   // -- clearRules on mode change --
 
   describe('clearRules on mode change', () => {
