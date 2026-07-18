@@ -278,6 +278,8 @@ export function App() {
     // multi-question AskUserQuestion deny shipped in #4648) in the
     // FooterBar counter chip so users can tell when chroxy intervened.
     interventions,
+    // #6790: active dev-server preview tunnels for the header DevPreviewChip.
+    devPreviews,
   } = useConnectionStore(useShallow(s => s.getActiveSessionState()))
 
   // #3205: stable Set for SkillsPanel mismatch indicator. useMemo
@@ -594,6 +596,8 @@ export function App() {
   // re-render unrelated chrome.
   const markSessionNotificationRead = useConnectionStore(s => s.markSessionNotificationRead)
   const markAllSessionNotificationsRead = useConnectionStore(s => s.markAllSessionNotificationsRead)
+  // #6790 — dismiss an active dev-server preview tunnel from the header chip.
+  const closeDevPreview = useConnectionStore(s => s.closeDevPreview)
   const conversationHistory = useConnectionStore(s => s.conversationHistory)
   const fetchConversationHistory = useConnectionStore(s => s.fetchConversationHistory)
   const resumeConversation = useConnectionStore(s => s.resumeConversation)
@@ -2063,6 +2067,8 @@ export function App() {
         provider={sessions.find(s => s.sessionId === activeSessionId)?.provider}
         modelLabel={activeModelLabel}
         costBadgeMode={costBadgeMode}
+        devPreviews={devPreviews}
+        onCloseDevPreview={closeDevPreview}
       />
 
       {/* Sidebar */}

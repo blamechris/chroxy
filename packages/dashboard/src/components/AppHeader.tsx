@@ -3,8 +3,10 @@ import { ChatSettingsDropdown } from './ChatSettingsDropdown'
 import { NotificationsWidget } from './NotificationsWidget'
 import { HeaderOverflowMenu, type HeaderOverflowItem } from './HeaderOverflowMenu'
 import { StatusBar } from './StatusBar'
+import { DevPreviewChip } from './DevPreviewChip'
 import { formatShortcutKeys } from '../utils/platform'
 import type { ChatActivityState } from '@chroxy/store-core'
+import type { DevPreview } from '../store/types'
 
 declare const __APP_VERSION__: string
 
@@ -82,6 +84,11 @@ export interface AppHeaderProps {
   provider?: string
   modelLabel?: string
   costBadgeMode: ComponentProps<typeof StatusBar>['costBadgeMode']
+  // Dev-server preview tunnels (#6790) — active session's live devPreviews
+  // (server-detected localhost dev server, auto-tunneled). Empty array
+  // renders nothing; DevPreviewChip self-gates.
+  devPreviews: DevPreview[]
+  onCloseDevPreview: (port: number) => void
 }
 
 export function AppHeader(props: AppHeaderProps) {
@@ -168,6 +175,12 @@ export function AppHeader(props: AppHeaderProps) {
         />
       </div>
       <div className="header-right">
+        {/* #6790 — active dev-server preview tunnels for this session. The
+            server auto-detects a localhost dev server and opens a Cloudflare
+            tunnel; this chip is the only dashboard surface that makes the
+            resulting URL discoverable (previously only visible by scrolling
+            raw tool output). Self-gates on an empty devPreviews array. */}
+        <DevPreviewChip previews={props.devPreviews} onClose={props.onCloseDevPreview} />
         {/* #4890 — Slack-style intervention notifications widget. Bell
             with unread badge → dropdown listing every intervention alert
             (read + unread) so the operator gets a durable "do I have
