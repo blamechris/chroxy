@@ -985,6 +985,23 @@ export function sendSessionInfo(ctx, ws, sessionId, opts = {}) {
     }
   }
 
+  // #6832: replay the last-known `mcp_servers` list so a client subscribing
+  // to an already-warmed session (dashboard reconnect, second client joining
+  // a shared session) sees the current server list without waiting on the
+  // next emission. `mcp_servers` is a transient event (not recorded in
+  // history) — sdk/cli sessions emit it once at the stream-json `system/init`
+  // and claude-tui re-derives it on warmup/respawn (#6820/#6831), so a late
+  // joiner previously saw "No MCP servers" until the next respawn. The
+  // session caches the last payload (BaseSession `getMcpServersSnapshot()`,
+  // set via a self-listener on `mcp_servers`); null means this session has
+  // never emitted one, so there is nothing to replay.
+  if (typeof session.getMcpServersSnapshot === 'function') {
+    const mcpSnapshot = session.getMcpServersSnapshot()
+    if (mcpSnapshot) {
+      send(ws, { ...mcpSnapshot, sessionId })
+    }
+  }
+
   // #5731 T5 / #5623 / #5613: re-sync the session's primary owner so the
   // presence badge ("Observing" / "Take over" / driver name) doesn't go
   // stale across a reconnect or tab switch. `session_role` is otherwise only
