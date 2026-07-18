@@ -1,4 +1,4 @@
-import { describe, it, before, after, beforeEach, afterEach } from 'node:test'
+import { describe, it, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import {
@@ -276,7 +276,8 @@ describe('createMcpClient factory (#6821)', () => {
 // Legacy HTTP+SSE two-endpoint transport (type: 'sse').
 // endpointOverride: literal absolute url to emit (SSRF tests, e.g. an attacker origin).
 // sameOriginAbsolute: emit this server's OWN absolute origin + /messages (regression guard).
-function startMockSseServer({ tools = DEFAULT_TOOLS, endpointOverride = null, sameOriginAbsolute = false } = {}) {
+// notifyStatus: HTTP status for NOTIFICATION posts (id == null) — e.g. 401 for the oauth path.
+function startMockSseServer({ tools = DEFAULT_TOOLS, endpointOverride = null, sameOriginAbsolute = false, notifyStatus = null } = {}) {
   let sseRes = null
   let ownOrigin = null
   const server = createServer((req, res) => {
@@ -294,6 +295,10 @@ function startMockSseServer({ tools = DEFAULT_TOOLS, endpointOverride = null, sa
     req.on('end', () => {
       let msg = null
       try { msg = JSON.parse(Buffer.concat(chunks).toString('utf8')) } catch { msg = null }
+      if (notifyStatus && msg && msg.id == null) {
+        res.writeHead(notifyStatus).end()
+        return
+      }
       res.writeHead(202).end()
       if (!msg || msg.id == null || !sseRes) return
       let result
@@ -334,6 +339,20 @@ describe('MCPRemoteClient — legacy HTTP+SSE (#6821)', () => {
     assert.deepEqual(client.tools.map((t) => t.name), ['echo'])
     const result = await client.callTool('echo', { z: 9 })
     assert.equal(result.content[0].text, JSON.stringify({ z: 9 }))
+    await client.destroy()
+  })
+
+  it('401 on the initialized NOTIFICATION → oauth-required DEAD, not silently ignored', async () => {
+    // Pre-fix, _notifyViaEndpoint swallowed every HTTP status, so a server
+    // rejecting our requests after initialize let the handshake sail past
+    // `initialized`. It now shares _checkStatus semantics with every other
+    // call site.
+    srv = await startMockSseServer({ notifyStatus: 401 })
+    const client = new MCPRemoteClient({ name: 'legacy', type: 'sse', url: srv.url, headers: {} }, { log: silentLog() })
+    await client.start() // must resolve, not throw
+    assert.equal(client.state, MCP_STATES.DEAD)
+    assert.equal(client.statusReason, 'oauth-required')
+    assert.equal(client.tools.length, 0)
     await client.destroy()
   })
 })

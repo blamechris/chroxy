@@ -874,15 +874,25 @@ export class MCPRemoteClient extends EventEmitter {
     this._controllers.add(controller)
     const timer = setTimeout(() => { try { controller.abort() } catch {} }, this._handshakeTimeoutMs)
     try {
-      const res = await this._fetchImpl(this._endpointUrl, {
-        method: 'POST',
-        headers: this._buildHeaders({ json: true }),
-        body: JSON.stringify({ jsonrpc: '2.0', method, params }),
-        redirect: 'manual', // #6834: never follow a redirect off-origin
-        signal: controller.signal,
-      })
+      let res
+      try {
+        res = await this._fetchImpl(this._endpointUrl, {
+          method: 'POST',
+          headers: this._buildHeaders({ json: true }),
+          body: JSON.stringify({ jsonrpc: '2.0', method, params }),
+          redirect: 'manual', // #6834: never follow a redirect off-origin
+          signal: controller.signal,
+        })
+      } catch {
+        return // network-level failure is best-effort — initialize already succeeded
+      }
+      // Same status semantics as every other call site (_checkStatus): 401/407
+      // → oauth-required (propagates → DEAD), redirect/other non-2xx → error →
+      // DEAD. Pre-fix this swallowed ALL statuses, letting the handshake
+      // proceed past `initialized` while the server was rejecting our requests.
+      this._checkStatus(res, method)
       await this._discardBody(res)
-    } catch { /* best-effort */ } finally {
+    } finally {
       clearTimeout(timer)
       this._controllers.delete(controller)
     }

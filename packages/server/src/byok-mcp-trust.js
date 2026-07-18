@@ -76,7 +76,12 @@ export function defaultTrustStorePath() {
  * use as a trust key (#6821). Strips userinfo (`user:pass@`), query, and
  * fragment — none of those belong on disk, and stripping them means a
  * rotated token or a changed query param does not re-prompt for the same
- * endpoint. An unparseable url is keyed verbatim (best-effort stable key).
+ * endpoint. An unparseable url maps to a fixed placeholder — NEVER the raw
+ * input: recordTrust persists this value to disk, and a malformed url can
+ * still embed credential material (`user:pass@`, `?token=`). Collapsing all
+ * unparseable urls for a server name onto one key is fail-safe, because an
+ * unparseable url can never be connected to anyway (config parsing rejects
+ * it and fetch would throw).
  */
 function sanitizeTrustUrl(url) {
   if (typeof url !== 'string' || url.length === 0) return ''
@@ -88,7 +93,7 @@ function sanitizeTrustUrl(url) {
     u.hash = ''
     return u.toString()
   } catch {
-    return url
+    return 'invalid-url'
   }
 }
 

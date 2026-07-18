@@ -323,6 +323,24 @@ describe('byok-mcp-trust', () => {
       assert.equal(store.tuples.size, 1)
       assert.equal(warned.length, 0, 'a well-formed remote entry must not warn')
     })
+
+    it('never persists credential material from an UNPARSEABLE url', () => {
+      // Space in the authority makes this URL-unparseable, yet it still embeds
+      // a password and a token-ish query. Pre-fix, sanitizeTrustUrl returned
+      // the raw input on parse failure and recordTrust wrote it to disk.
+      const server = { name: 'weird', url: 'http://u:hunter2@bad host/api?token=tok123' }
+      recordTrust(server, storePath)
+      const disk = readFileSync(storePath, 'utf8')
+      assert.ok(!disk.includes('hunter2'), 'password must not reach disk')
+      assert.ok(!disk.includes('tok123'), 'query token must not reach disk')
+      assert.ok(!disk.includes('bad host'), 'no fragment of the raw url may reach disk')
+      // The placeholder key still round-trips: same malformed url → trusted;
+      // recompute on load does not drop it as tampered.
+      const warned = []
+      const store = loadTrustStore(storePath, { log: { warn: (m) => warned.push(m) } })
+      assert.equal(warned.length, 0)
+      assert.equal(isTrusted(store, server), true)
+    })
   })
 
   describe('withTrustStoreLock (#4460)', () => {
