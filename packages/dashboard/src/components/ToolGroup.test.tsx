@@ -10,7 +10,7 @@ import { describe, it, expect, afterEach } from 'vitest'
 import { render, screen, fireEvent, cleanup } from '@testing-library/react'
 import * as fs from 'fs'
 import * as path from 'path'
-import type { ChatMessage } from '@chroxy/store-core'
+import type { ChatMessage, ToolResultImage } from '@chroxy/store-core'
 import { ToolGroup } from './ToolGroup'
 
 const componentsCss = fs.readFileSync(path.resolve(__dirname, '../theme/components.css'), 'utf-8')
@@ -525,6 +525,96 @@ describe('ToolGroup', () => {
       // panel must NOT toggle the entry — only the row is the click target.
       fireEvent.click(detail)
       expect(screen.getByTestId('tool-group-entry-detail-1')).toBeInTheDocument()
+    })
+  })
+
+  // ---------------------------------------------------------------------------
+  // #6755 — tool-result images (computer-use screenshots, browser tools
+  // returning base64 PNGs) render as thumbnails in the grouped entry's
+  // detail panel, replacing the previous "Result: (no result)" placeholder
+  // for the images-only case, with click-to-zoom into a full-resolution
+  // lightbox. Mirrors the ToolBubble behavior (#6755) for the 2+-tool
+  // grouped path.
+  // ---------------------------------------------------------------------------
+  describe('tool-result image rendering in the grouped entry detail (#6755)', () => {
+    // Fixed-length tuple (not a bare array) so indexed access stays typed as
+    // `ToolResultImage`, not `ToolResultImage | undefined`, under the
+    // dashboard's `noUncheckedIndexedAccess` tsconfig.
+    const image1: ToolResultImage = { mediaType: 'image/png', data: 'iVBORw0KGgoAAAANSUhEUg==' }
+    const image2: ToolResultImage = { mediaType: 'image/png', data: 'ZmFrZS1zZWNvbmQtaW1hZ2U=' }
+    const images: [ToolResultImage, ToolResultImage] = [image1, image2]
+
+    it('renders an image thumbnail for an images-only result instead of "(no result)"', () => {
+      const messages = [
+        tool('1', 'screenshot', { toolResultImages: [image1] }),
+      ]
+      render(<ToolGroup messages={messages} isActive={true} />)
+      fireEvent.click(screen.getByTestId('tool-group-entry-row-1'))
+      const detail = screen.getByTestId('tool-group-entry-detail-1')
+      expect(detail).not.toHaveTextContent('(no result)')
+      const grid = screen.getByTestId('tool-group-entry-images-1')
+      expect(grid).toBeInTheDocument()
+      const thumbBtn = screen.getByTestId('tool-group-entry-image-1-0')
+      expect(thumbBtn.querySelector('img')).toHaveAttribute(
+        'src',
+        `data:${images[0].mediaType};base64,${images[0].data}`,
+      )
+    })
+
+    it('renders one thumbnail per image for a multi-image result', () => {
+      const messages = [tool('1', 'screenshot', { toolResultImages: images })]
+      render(<ToolGroup messages={messages} isActive={true} />)
+      fireEvent.click(screen.getByTestId('tool-group-entry-row-1'))
+      expect(screen.getByTestId('tool-group-entry-image-1-0')).toBeInTheDocument()
+      expect(screen.getByTestId('tool-group-entry-image-1-1')).toBeInTheDocument()
+    })
+
+    it('still shows the Result text section when a tool has both text and images', () => {
+      const messages = [
+        tool('1', 'Bash', { toolResult: 'saved screenshot', toolResultImages: [images[0]] }),
+      ]
+      render(<ToolGroup messages={messages} isActive={true} />)
+      fireEvent.click(screen.getByTestId('tool-group-entry-row-1'))
+      const detail = screen.getByTestId('tool-group-entry-detail-1')
+      expect(detail).toHaveTextContent('saved screenshot')
+      expect(screen.getByTestId('tool-group-entry-images-1')).toBeInTheDocument()
+    })
+
+    it('still shows "(no result)" for a resolved empty-string result with no images (regression guard)', () => {
+      const messages = [tool('1', 'Bash', { toolResult: '' })]
+      render(<ToolGroup messages={messages} isActive={true} />)
+      fireEvent.click(screen.getByTestId('tool-group-entry-row-1'))
+      expect(screen.getByTestId('tool-group-entry-detail-1')).toHaveTextContent('(no result)')
+    })
+
+    it('still shows "(no result yet)" for a pending tool with no images (regression guard)', () => {
+      const messages = [tool('1', 'Bash', { toolInput: { command: 'sleep 5' } })]
+      render(<ToolGroup messages={messages} isActive={true} />)
+      fireEvent.click(screen.getByTestId('tool-group-entry-row-1'))
+      expect(screen.getByTestId('tool-group-entry-detail-1')).toHaveTextContent('(no result yet)')
+    })
+
+    it('opens the full-resolution lightbox on thumbnail click without collapsing the entry or group', () => {
+      const messages = [tool('1', 'screenshot', { toolResultImages: [images[0]] })]
+      render(<ToolGroup messages={messages} isActive={true} />)
+      fireEvent.click(screen.getByTestId('tool-group-entry-row-1'))
+      expect(screen.queryByTestId('image-lightbox-img')).not.toBeInTheDocument()
+      fireEvent.click(screen.getByTestId('tool-group-entry-image-1-0'))
+      const lightboxImg = screen.getByTestId('image-lightbox-img')
+      expect(lightboxImg).toHaveAttribute('src', `data:${images[0].mediaType};base64,${images[0].data}`)
+      // Neither the entry nor the parent group collapsed.
+      expect(screen.getByTestId('tool-group-entry-detail-1')).toBeInTheDocument()
+      expect(screen.getByTestId('tool-group')).toHaveAttribute('aria-expanded', 'true')
+    })
+
+    it('dismisses the lightbox via its close button', () => {
+      const messages = [tool('1', 'screenshot', { toolResultImages: [images[0]] })]
+      render(<ToolGroup messages={messages} isActive={true} />)
+      fireEvent.click(screen.getByTestId('tool-group-entry-row-1'))
+      fireEvent.click(screen.getByTestId('tool-group-entry-image-1-0'))
+      expect(screen.getByTestId('image-lightbox-img')).toBeInTheDocument()
+      fireEvent.click(screen.getByRole('button', { name: 'Close image' }))
+      expect(screen.queryByTestId('image-lightbox-img')).not.toBeInTheDocument()
     })
   })
 

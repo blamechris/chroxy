@@ -5,6 +5,7 @@
  */
 import { describe, it, expect, afterEach, vi } from 'vitest'
 import { render, screen, fireEvent, cleanup } from '@testing-library/react'
+import type { ToolResultImage } from '@chroxy/store-core'
 import { ToolBubble } from './ToolBubble'
 
 afterEach(() => {
@@ -389,6 +390,148 @@ describe('ToolBubble', () => {
         />,
       )
       expect(screen.getByTestId('tool-bubble-pulse-tu-5')).toBeInTheDocument()
+    })
+  })
+
+  // ---------------------------------------------------------------------------
+  // #6755 — tool-result images (computer-use screenshots, browser tools
+  // returning base64 PNGs) render as thumbnails in the expanded body, with
+  // click-to-zoom into a full-resolution lightbox. Mirrors the mobile
+  // ToolDetailModal image grid + ImageViewer.
+  // ---------------------------------------------------------------------------
+  describe('tool-result image rendering (#6755)', () => {
+    // Fixed-length tuple (not a bare array) so indexed access stays typed as
+    // `ToolResultImage`, not `ToolResultImage | undefined`, under the
+    // dashboard's `noUncheckedIndexedAccess` tsconfig.
+    const image1: ToolResultImage = { mediaType: 'image/png', data: 'iVBORw0KGgoAAAANSUhEUg==' }
+    const image2: ToolResultImage = { mediaType: 'image/png', data: 'ZmFrZS1zZWNvbmQtaW1hZ2U=' }
+    const images: [ToolResultImage, ToolResultImage] = [image1, image2]
+
+    it('renders a thumbnail for an images-only result (result === undefined)', () => {
+      render(
+        <ToolBubble
+          toolName="screenshot"
+          toolUseId="tu-img-1"
+          input={{ url: 'https://example.com' }}
+          resultImages={[images[0]]}
+        />,
+      )
+      fireEvent.click(screen.getByRole('button'))
+      const grid = screen.getByTestId('tool-result-images-tu-img-1')
+      expect(grid).toBeInTheDocument()
+      const thumbBtn = screen.getByTestId('tool-result-image-tu-img-1-0')
+      const img = thumbBtn.querySelector('img')
+      expect(img).toHaveAttribute('src', `data:${images[0].mediaType};base64,${images[0].data}`)
+    })
+
+    it('renders one thumbnail per image for a multi-image result (grid)', () => {
+      render(
+        <ToolBubble
+          toolName="screenshot"
+          toolUseId="tu-img-2"
+          resultImages={images}
+        />,
+      )
+      fireEvent.click(screen.getByRole('button'))
+      expect(screen.getByTestId('tool-result-image-tu-img-2-0')).toBeInTheDocument()
+      expect(screen.getByTestId('tool-result-image-tu-img-2-1')).toBeInTheDocument()
+    })
+
+    it('does not render an image grid when resultImages is absent', () => {
+      render(<ToolBubble toolName="Read" toolUseId="tu-img-3" input="/f" result="contents" />)
+      fireEvent.click(screen.getByRole('button'))
+      expect(screen.queryByTestId('tool-result-images-tu-img-3')).not.toBeInTheDocument()
+    })
+
+    it('renders both the text result and the image grid when a tool resolves with both', () => {
+      render(
+        <ToolBubble
+          toolName="Bash"
+          toolUseId="tu-img-4"
+          input={{ command: 'screenshot.sh' }}
+          result="saved to /tmp/out.png"
+          resultImages={[images[0]]}
+        />,
+      )
+      fireEvent.click(screen.getByRole('button'))
+      expect(screen.getByText('saved to /tmp/out.png')).toBeInTheDocument()
+      expect(screen.getByTestId('tool-result-images-tu-img-4')).toBeInTheDocument()
+    })
+
+    it('opens the full-resolution lightbox on thumbnail click', () => {
+      render(
+        <ToolBubble
+          toolName="screenshot"
+          toolUseId="tu-img-5"
+          resultImages={[images[0]]}
+        />,
+      )
+      fireEvent.click(screen.getByRole('button'))
+      expect(screen.queryByTestId('image-lightbox-img')).not.toBeInTheDocument()
+      fireEvent.click(screen.getByTestId('tool-result-image-tu-img-5-0'))
+      const lightboxImg = screen.getByTestId('image-lightbox-img')
+      expect(lightboxImg).toHaveAttribute('src', `data:${images[0].mediaType};base64,${images[0].data}`)
+    })
+
+    it('dismisses the lightbox via its close button without collapsing the parent bubble', () => {
+      render(
+        <ToolBubble
+          toolName="screenshot"
+          toolUseId="tu-img-6"
+          resultImages={[images[0]]}
+        />,
+      )
+      const toggle = screen.getByRole('button')
+      fireEvent.click(toggle)
+      fireEvent.click(screen.getByTestId('tool-result-image-tu-img-6-0'))
+      expect(screen.getByTestId('image-lightbox-img')).toBeInTheDocument()
+      fireEvent.click(screen.getByRole('button', { name: 'Close image' }))
+      expect(screen.queryByTestId('image-lightbox-img')).not.toBeInTheDocument()
+      // The bubble itself must still be expanded — dismissing the lightbox
+      // must not bubble into the outer toggle.
+      expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    })
+
+    it('dismisses the lightbox on Escape', () => {
+      render(
+        <ToolBubble
+          toolName="screenshot"
+          toolUseId="tu-img-7"
+          resultImages={[images[0]]}
+        />,
+      )
+      fireEvent.click(screen.getByRole('button'))
+      fireEvent.click(screen.getByTestId('tool-result-image-tu-img-7-0'))
+      expect(screen.getByTestId('image-lightbox-img')).toBeInTheDocument()
+      fireEvent.keyDown(document, { key: 'Escape' })
+      expect(screen.queryByTestId('image-lightbox-img')).not.toBeInTheDocument()
+    })
+
+    it('labels the lightbox with position among multiple images', () => {
+      render(
+        <ToolBubble
+          toolName="screenshot"
+          toolUseId="tu-img-8"
+          resultImages={images}
+        />,
+      )
+      fireEvent.click(screen.getByRole('button'))
+      fireEvent.click(screen.getByTestId('tool-result-image-tu-img-8-1'))
+      expect(screen.getByText('Image 2 of 2')).toBeInTheDocument()
+    })
+
+    it('sets aria-controls when the tool resolved with images only (no text)', () => {
+      render(<ToolBubble toolName="screenshot" toolUseId="tu-img-9" resultImages={[images[0]]} />)
+      const toggle = screen.getByRole('button')
+      expect(toggle).not.toHaveAttribute('aria-controls')
+      fireEvent.click(toggle)
+      expect(toggle).toHaveAttribute('aria-controls', 'tool-result-tu-img-9')
+    })
+
+    it('does not render the images-only panel when resultImages is an empty array', () => {
+      render(<ToolBubble toolName="screenshot" toolUseId="tu-img-10" resultImages={[]} />)
+      fireEvent.click(screen.getByRole('button'))
+      expect(screen.queryByTestId('tool-result-images-tu-img-10')).not.toBeInTheDocument()
     })
   })
 

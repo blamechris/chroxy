@@ -35,6 +35,7 @@ import {
 import type { ChildAgentEvent, ToolResultImage } from '@chroxy/store-core'
 import { TodoList, parseTodoList } from './TodoList'
 import { ChildAgentEventList } from './ChildAgentEventList'
+import { ImageLightbox } from './ImageLightbox'
 import { useInitialExpanded } from './chatExpandRegistry'
 
 export interface ToolBubbleProps {
@@ -141,6 +142,25 @@ export function ToolBubble({ toolName, toolUseId, input, inputPartial, result, s
   // ActivityIndicator's in-flight predicate. Without this the header
   // pulses forever for computer-use / screenshot tools.
   const hasResult = result !== undefined || (resultImages?.length ?? 0) > 0
+  // #6755 — split `hasResult` into its two constituents so the expanded
+  // body can render text and images independently (a tool can resolve
+  // with either, both, or neither). `hasTextResult` excludes the empty
+  // string on purpose: an empty-string result renders nothing (matches
+  // the pre-#6755 behavior where the whole panel was gated on `result`
+  // being truthy), while an images-only result must still show the
+  // image grid instead of a blank/missing panel.
+  const hasTextResult = result !== undefined && result !== ''
+  const hasImages = (resultImages?.length ?? 0) > 0
+  // #6755 — full-resolution click-to-zoom. Stores the INDEX into
+  // `resultImages` (not the data URI) so the lightbox label can read
+  // "Image N of M" without a second lookup.
+  const [lightboxIndex, setLightboxIndex] = useState<number | null>(null)
+  const lightboxImage = lightboxIndex != null ? resultImages?.[lightboxIndex] : undefined
+  const lightboxUri = lightboxImage ? `data:${lightboxImage.mediaType};base64,${lightboxImage.data}` : null
+  const lightboxLabel =
+    resultImages && resultImages.length > 1 && lightboxIndex != null
+      ? `Image ${lightboxIndex + 1} of ${resultImages.length}`
+      : 'Image'
   // #4667 — internal-shape tools (currently AskUserQuestion) must never
   // surface raw `tool_input` JSON in the chat surface; the structured
   // render path owns the display. Gate computed once so both the
@@ -240,7 +260,7 @@ export function ToolBubble({ toolName, toolUseId, input, inputPartial, result, s
       role="button"
       tabIndex={0}
       aria-expanded={expanded}
-      aria-controls={expanded && result ? resultId : undefined}
+      aria-controls={expanded && (hasTextResult || hasImages) ? resultId : undefined}
       onClick={toggle}
       onKeyDown={handleKeyDown}
     >
@@ -266,7 +286,7 @@ export function ToolBubble({ toolName, toolUseId, input, inputPartial, result, s
           {summary}
         </span>
       )}
-      {expanded && result && (
+      {expanded && (hasTextResult || hasImages) && (
         // #4139: click inside the result area must not bubble up to the
         // outer onClick that collapses the bubble — otherwise selecting
         // text or interacting with the checklist accidentally re-toggles.
@@ -277,7 +297,7 @@ export function ToolBubble({ toolName, toolUseId, input, inputPartial, result, s
         >
           {todoParsed ? (
             <TodoList parsed={todoParsed} />
-          ) : isLongResult && !resultExpanded ? (
+          ) : hasTextResult && isLongResult && !resultExpanded ? (
             <>
               <pre>{result!.split('\n').slice(0, TOOL_OUTPUT_COLLAPSE_HEAD_LINES).join('\n')}</pre>
               <button
@@ -289,7 +309,7 @@ export function ToolBubble({ toolName, toolUseId, input, inputPartial, result, s
                 Show {resultLineCount - TOOL_OUTPUT_COLLAPSE_HEAD_LINES} more lines
               </button>
             </>
-          ) : (
+          ) : hasTextResult ? (
             <>
               <pre>{result}</pre>
               {isLongResult && (
@@ -303,6 +323,37 @@ export function ToolBubble({ toolName, toolUseId, input, inputPartial, result, s
                 </button>
               )}
             </>
+          ) : null}
+          {/* #6755 — tools that resolve with images-only (computer-use
+              screenshots, browser tools returning base64 PNGs) leave
+              `result === undefined`; render the thumbnail grid instead of
+              a blank panel. Click a thumbnail to open the full-resolution
+              lightbox. Mirrors the mobile ToolDetailModal image grid. */}
+          {hasImages && (
+            <div className="tool-result-images" data-testid={`tool-result-images-${toolUseId}`}>
+              {resultImages!.map((img, i) => (
+                <button
+                  key={i}
+                  type="button"
+                  className="tool-result-image-btn"
+                  data-testid={`tool-result-image-${toolUseId}-${i}`}
+                  onClick={() => setLightboxIndex(i)}
+                  aria-label={
+                    resultImages!.length > 1
+                      ? `View image ${i + 1} of ${resultImages!.length}`
+                      : 'View image'
+                  }
+                >
+                  <img
+                    src={`data:${img.mediaType};base64,${img.data}`}
+                    alt=""
+                    className="tool-result-image-thumb"
+                    loading="lazy"
+                    decoding="async"
+                  />
+                </button>
+              ))}
+            </div>
           )}
         </div>
       )}
@@ -343,6 +394,9 @@ export function ToolBubble({ toolName, toolUseId, input, inputPartial, result, s
           <pre>{partialPreview.text}</pre>
         </div>
       )}
+      {/* #6755 — full-resolution click-to-zoom for a tool-result thumbnail.
+          Renders nothing while lightboxUri is null. */}
+      <ImageLightbox uri={lightboxUri} onClose={() => setLightboxIndex(null)} label={lightboxLabel} />
     </div>
   )
 }
