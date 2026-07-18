@@ -28,10 +28,60 @@
  */
 import { createHash, randomBytes } from 'node:crypto'
 import { URL, URLSearchParams } from 'node:url'
+import { lookup } from 'node:dns/promises'
 import { createLogger } from './logger.js'
+import { isBlockedMetadataHost } from './byok-mcp-config.js'
 
 const DEFAULT_TIMEOUT_MS = 10_000
 const CLIENT_NAME = 'Chroxy'
+
+// -- SSRF hardening (#6822 / #6834) -----------------------------------------
+//
+// Every OAuth endpoint the daemon fetches — the resource_metadata URL from a
+// server's WWW-Authenticate header, the authorization server's issuer, and the
+// registration/token endpoints inside the discovered AS metadata — is
+// ATTACKER-INFLUENCEABLE (a malicious/compromised MCP server chooses them). A
+// server could point any of them at the cloud-metadata service (169.254.169.254
+// / fd00:ec2::254) to make the daemon fetch instance credentials on its behalf.
+// This is the exact hole the remote transport closed in #6834; the OAuth flow
+// threads the SAME guard. Loopback / RFC1918 are deliberately NOT blocked — a
+// localhost authorization server is legitimate (that broader egress policy is
+// #6834's scope, which the user chose to keep permissive).
+
+/**
+ * Return a refusal reason when `url` targets the cloud-metadata service /
+ * link-local range (literal host OR a DNS name that resolves into it), else
+ * null. Mirrors MCPRemoteClient._refuseMetadataTarget: literal hosts are checked
+ * directly (the URL parser already canonicalized hex/decimal tricks); DNS names
+ * get a best-effort lookup so a name resolving into the blocked range is refused
+ * too. Lookup ERRORS pass through (the subsequent fetch surfaces them as an
+ * ordinary connect failure). An unparseable url returns null — fetch surfaces it.
+ *
+ * @param {string} url
+ * @returns {Promise<string|null>}
+ */
+async function refuseUnsafeMetadataUrl(url) {
+  let hostname
+  try {
+    hostname = new URL(url).hostname
+  } catch {
+    return null
+  }
+  if (isBlockedMetadataHost(hostname)) {
+    return 'refusing cloud-metadata / link-local OAuth endpoint (never a legitimate authorization server)'
+  }
+  const bare = hostname.startsWith('[') && hostname.endsWith(']') ? hostname.slice(1, -1) : hostname
+  const isLiteral = /^[\d.]+$/.test(bare) || bare.includes(':')
+  if (!isLiteral) {
+    try {
+      const addrs = await lookup(bare, { all: true })
+      if (addrs.some(({ address }) => isBlockedMetadataHost(address))) {
+        return 'refusing DNS name resolving to a cloud-metadata / link-local address'
+      }
+    } catch { /* resolution failures surface via the fetch */ }
+  }
+  return null
+}
 
 // -- PKCE (RFC 7636) --------------------------------------------------------
 
@@ -75,6 +125,19 @@ async function fetchJson(fetchImpl, url, init, timeoutMs) {
   return { status: res.status, json, res }
 }
 
+/**
+ * SSRF-guarded `fetchJson`: refuse a cloud-metadata / link-local target BEFORE
+ * any request leaves the process, and force `redirect: 'manual'` so a benign URL
+ * that 3xx-redirects to an internal host can never carry the request off-origin
+ * (a host check on only the initial URL would otherwise be bypassed by a 302).
+ * A refused target throws — `fetchImpl` is never called for it.
+ */
+async function guardedFetchJson(fetchImpl, url, init, timeoutMs) {
+  const refusal = await refuseUnsafeMetadataUrl(url)
+  if (refusal) throw new Error(`MCP OAuth: ${refusal}`)
+  return fetchJson(fetchImpl, url, { redirect: 'manual', ...init }, timeoutMs)
+}
+
 // -- Discovery --------------------------------------------------------------
 
 /**
@@ -109,7 +172,9 @@ export async function discoverProtectedResource({ serverUrl, wwwAuthenticate, fe
 
   for (const url of candidates) {
     try {
-      const { status, json } = await fetchJson(fetchImpl, url, { method: 'GET', headers: { Accept: 'application/json' } }, timeoutMs)
+      // (a) resource_metadata is attacker-influenceable (WWW-Authenticate) —
+      // SSRF-guarded + redirect:'manual' via guardedFetchJson.
+      const { status, json } = await guardedFetchJson(fetchImpl, url, { method: 'GET', headers: { Accept: 'application/json' } }, timeoutMs)
       if (status >= 200 && status < 300 && json && typeof json === 'object') {
         const servers = Array.isArray(json.authorization_servers) ? json.authorization_servers.filter((s) => typeof s === 'string') : []
         return {
@@ -118,7 +183,7 @@ export async function discoverProtectedResource({ serverUrl, wwwAuthenticate, fe
           scopesSupported: Array.isArray(json.scopes_supported) ? json.scopes_supported.filter((s) => typeof s === 'string') : [],
         }
       }
-    } catch { /* try the next candidate */ }
+    } catch { /* refused target or fetch failure — try the next candidate */ }
   }
   return { authorizationServers: [], resource: null, scopesSupported: [] }
 }
@@ -145,11 +210,17 @@ export async function discoverAuthorizationServer({ issuer, fetchImpl, timeoutMs
   ]
   for (const url of candidates) {
     try {
-      const { status, json } = await fetchJson(fetchImpl, url, { method: 'GET', headers: { Accept: 'application/json' } }, timeoutMs)
+      // (b) the issuer (→ these well-known URLs) is attacker-influenceable
+      // (resource metadata's authorization_servers) — SSRF-guarded.
+      const { status, json } = await guardedFetchJson(fetchImpl, url, { method: 'GET', headers: { Accept: 'application/json' } }, timeoutMs)
       if (status >= 200 && status < 300 && json && typeof json.authorization_endpoint === 'string' && typeof json.token_endpoint === 'string') {
+        // RFC 8414 §3.3: the metadata `issuer` MUST exactly match the issuer
+        // that was used to build the well-known URL. A mismatch is a mix-up /
+        // spoofing signal — reject it rather than trusting the endpoints.
+        if (typeof json.issuer === 'string' && json.issuer !== issuer) continue
         return json
       }
-    } catch { /* try the next candidate */ }
+    } catch { /* refused target or fetch failure — try the next candidate */ }
   }
   return null
 }
@@ -166,6 +237,12 @@ export async function discoverAuthorizationServer({ issuer, fetchImpl, timeoutMs
  */
 export async function registerClient({ registrationEndpoint, redirectUri, scope, fetchImpl, timeoutMs = DEFAULT_TIMEOUT_MS }) {
   if (typeof registrationEndpoint !== 'string' || !registrationEndpoint) return null
+  // (c) registration_endpoint comes from the (attacker-influenceable) AS
+  // metadata body — refuse a cloud-metadata / link-local target BEFORE the POST.
+  // A refusal THROWS (propagates to beginAuthorization) rather than returning
+  // null so it is never confused with "the AS supports no DCR".
+  const refusal = await refuseUnsafeMetadataUrl(registrationEndpoint)
+  if (refusal) throw new Error(`MCP OAuth: ${refusal}`)
   const body = {
     client_name: CLIENT_NAME,
     redirect_uris: [redirectUri],
@@ -241,6 +318,10 @@ function normalizeTokenResponse(json) {
  *   redirectUri: string, codeVerifier: string, resource?: string, fetchImpl: Function, timeoutMs?: number }} args
  */
 export async function redeemCode({ tokenEndpoint, clientId, clientSecret, code, redirectUri, codeVerifier, resource, fetchImpl, timeoutMs = DEFAULT_TIMEOUT_MS }) {
+  // (d) token_endpoint comes from the (attacker-influenceable) AS metadata —
+  // refuse a cloud-metadata / link-local target before the credentialed POST.
+  const refusal = await refuseUnsafeMetadataUrl(tokenEndpoint)
+  if (refusal) throw new Error(`MCP OAuth: ${refusal}`)
   const form = new URLSearchParams({
     grant_type: 'authorization_code',
     code,
@@ -272,6 +353,10 @@ export async function redeemCode({ tokenEndpoint, clientId, clientSecret, code, 
  *   scope?: string, resource?: string, fetchImpl: Function, timeoutMs?: number }} args
  */
 export async function refreshAccessToken({ tokenEndpoint, clientId, clientSecret, refreshToken, scope, resource, fetchImpl, timeoutMs = DEFAULT_TIMEOUT_MS }) {
+  // (d) token_endpoint (from stored record / AS metadata) — same SSRF guard as
+  // redeemCode so a refresh can't be steered at the metadata service either.
+  const refusal = await refuseUnsafeMetadataUrl(tokenEndpoint)
+  if (refusal) throw new Error(`MCP OAuth: ${refusal}`)
   const form = new URLSearchParams({
     grant_type: 'refresh_token',
     refresh_token: refreshToken,

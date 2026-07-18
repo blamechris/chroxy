@@ -27,6 +27,7 @@ import { join, dirname } from 'node:path'
 import { homedir } from 'node:os'
 import { randomBytes } from 'node:crypto'
 import * as realKeychain from './keychain.js'
+import { createLogger } from './logger.js'
 import {
   isEncryptedEnvelope,
   decryptEnvelope,
@@ -34,6 +35,21 @@ import {
   getMasterKey,
   getOrCreateMasterKey,
 } from './credential-cipher.js'
+
+// One-time breadcrumb when an intact encrypted token record exists on disk but
+// its keychain data key is currently unavailable (locked keychain / transient
+// probe failure) — matches credential-store's warnKeychainUnavailableOnce so a
+// silent unauthenticated MCP reconnect is observable. The value is NEVER logged.
+const _log = createLogger('mcp-oauth-store')
+let _keychainUnavailableWarned = false
+function warnKeychainUnavailableOnce() {
+  if (_keychainUnavailableWarned) return
+  _keychainUnavailableWarned = true
+  _log.warn(
+    'an MCP OAuth token is stored (encrypted) but its OS keychain data key is currently unavailable — ' +
+    'resolving as absent; the server may re-prompt for authorization. Unlock the OS keychain and retry.',
+  )
+}
 
 // A keychain stub reporting "no keychain here" — selects the plaintext fallback.
 const NO_KEYCHAIN = { isKeychainAvailable: () => false }
@@ -160,6 +176,16 @@ function writeStoreAtomically(nextObj) {
     if (process.platform !== 'win32') chmodSync(tmp, 0o600)
     renameSync(tmp, target)
     renamed = true
+    // Post-rename mode re-check (POSIX), matching credential-store: if the file
+    // landed with anything other than 0600, remove it and fail rather than
+    // leaving tokens at a more permissive mode.
+    if (process.platform !== 'win32') {
+      const perms = statSync(target).mode & 0o777
+      if (perms !== 0o600) {
+        try { unlinkSync(target) } catch { /* best-effort */ }
+        throw new Error(`mcp-oauth-tokens ended up with mode ${perms.toString(8)} after write; refused`)
+      }
+    }
   } finally {
     if (!renamed && existsSync(tmp)) {
       try { unlinkSync(tmp) } catch { /* best-effort */ }
@@ -194,8 +220,14 @@ function writeStoreAtomically(nextObj) {
 export function getStoredToken(url) {
   const serverKey = serverKeyForUrl(url)
   if (!serverKey) return null
-  const { data, error } = readStore()
-  if (error) return null
+  const { data, error, keychainUnavailable } = readStore()
+  if (error) {
+    // Distinguish the RECOVERABLE keychain-locked case (intact envelope, key
+    // temporarily unfetchable) from a corrupt/bad-mode read: only the former
+    // gets the one-time breadcrumb, matching credential-store's discipline.
+    if (keychainUnavailable) warnKeychainUnavailableOnce()
+    return null
+  }
   const rec = data[serverKey]
   if (!rec || typeof rec !== 'object' || typeof rec.accessToken !== 'string' || !rec.accessToken) return null
   return rec

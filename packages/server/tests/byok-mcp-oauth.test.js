@@ -332,3 +332,112 @@ describe('redirect URI configuration', () => {
     assert.equal(mcpOAuthRedirectUri(), 'https://tunnel.example/mcp/oauth/callback')
   })
 })
+
+// A Response-like stub + a fetch spy that records every (url, init) it sees.
+function fakeRes(status, body, headers = {}) {
+  const lower = {}
+  for (const [k, v] of Object.entries(headers)) lower[k.toLowerCase()] = v
+  return {
+    status,
+    headers: { get: (k) => (k.toLowerCase() in lower ? lower[k.toLowerCase()] : null) },
+    text: async () => (typeof body === 'string' ? body : JSON.stringify(body)),
+  }
+}
+function spyFetch(handler) {
+  const calls = []
+  const fn = async (url, init) => { calls.push({ url: String(url), init }); return handler(url, init) }
+  fn.calls = calls
+  return fn
+}
+
+describe('SSRF hardening on OAuth endpoint fetches (#6822 / #6834)', () => {
+  const IMDS = 'http://169.254.169.254'
+  const IMDS_V6 = 'http://[fd00:ec2::254]'
+
+  it('(a) refuses a 169.254 resource_metadata target — never fetched', async () => {
+    const fetchImpl = spyFetch(async () => fakeRes(404, ''))
+    const res = await discoverProtectedResource({
+      serverUrl: 'http://127.0.0.1:1/mcp',
+      wwwAuthenticate: `Bearer resource_metadata="${IMDS}/latest/meta-data/"`,
+      fetchImpl,
+    })
+    assert.deepEqual(res.authorizationServers, [])
+    assert.ok(!fetchImpl.calls.some((c) => c.url.includes('169.254')), 'the metadata service must never be fetched')
+  })
+
+  it('(a) also refuses the IPv6 IMDS resource_metadata (fd00:ec2::254)', async () => {
+    const fetchImpl = spyFetch(async () => fakeRes(404, ''))
+    await discoverProtectedResource({
+      serverUrl: 'http://127.0.0.1:1/mcp',
+      wwwAuthenticate: `Bearer resource_metadata="${IMDS_V6}/x"`,
+      fetchImpl,
+    })
+    assert.ok(!fetchImpl.calls.some((c) => c.url.includes('fd00:ec2')), 'the IPv6 metadata endpoint must never be fetched')
+  })
+
+  it('(b) refuses a 169.254 issuer for AS metadata — never fetched, returns null', async () => {
+    const fetchImpl = spyFetch(async () => fakeRes(200, { issuer: IMDS, authorization_endpoint: `${IMDS}/a`, token_endpoint: `${IMDS}/t` }))
+    const as = await discoverAuthorizationServer({ issuer: IMDS, fetchImpl })
+    assert.equal(as, null)
+    assert.equal(fetchImpl.calls.length, 0, 'no candidate under the metadata host may be fetched')
+  })
+
+  it('(c) refuses a 169.254 registration_endpoint — throws, never fetched', async () => {
+    const fetchImpl = spyFetch(async () => fakeRes(201, { client_id: 'x' }))
+    await assert.rejects(
+      () => registerClient({ registrationEndpoint: `${IMDS}/register`, redirectUri: 'http://127.0.0.1/cb', fetchImpl }),
+      /cloud-metadata|link-local/,
+    )
+    assert.equal(fetchImpl.calls.length, 0)
+  })
+
+  it('(d) refuses a 169.254 token_endpoint on redeem AND refresh — throws, never fetched', async () => {
+    const fetchImpl = spyFetch(async () => fakeRes(200, { access_token: 'x' }))
+    await assert.rejects(
+      () => redeemCode({ tokenEndpoint: `${IMDS}/token`, clientId: 'c', code: 'x', redirectUri: 'http://127.0.0.1/cb', codeVerifier: 'v', fetchImpl }),
+      /cloud-metadata|link-local/,
+    )
+    await assert.rejects(
+      () => refreshAccessToken({ tokenEndpoint: `${IMDS}/token`, clientId: 'c', refreshToken: 'r', fetchImpl }),
+      /cloud-metadata|link-local/,
+    )
+    assert.equal(fetchImpl.calls.length, 0, 'the credentialed token POST must never reach the metadata service')
+  })
+
+  it('does not follow a 3xx on a metadata GET — redirect:manual, 302→internal not chased', async () => {
+    // A benign resource_metadata URL that 302s to the metadata service. With
+    // redirect:'manual' the daemon sees the 302 and does NOT follow it.
+    const fetchImpl = spyFetch(async () => fakeRes(302, '', { location: `${IMDS}/` }))
+    const res = await discoverProtectedResource({
+      serverUrl: 'http://127.0.0.1:1/mcp',
+      wwwAuthenticate: 'Bearer resource_metadata="http://127.0.0.1:2/.well-known/oauth-protected-resource"',
+      fetchImpl,
+    })
+    assert.deepEqual(res.authorizationServers, [], 'a 302 yields no metadata (not followed)')
+    assert.ok(fetchImpl.calls.length > 0 && fetchImpl.calls.every((c) => c.init.redirect === 'manual'),
+      'every metadata GET must set redirect:manual')
+    assert.ok(!fetchImpl.calls.some((c) => c.url.includes('169.254')), 'the 302 target must never be fetched')
+  })
+})
+
+describe('AS metadata issuer validation (RFC 8414, #6822)', () => {
+  it('rejects AS metadata whose issuer does not match the requested issuer', async () => {
+    const fetchImpl = async () => fakeRes(200, {
+      issuer: 'http://127.0.0.1:1111/evil',
+      authorization_endpoint: 'http://127.0.0.1:9999/authorize',
+      token_endpoint: 'http://127.0.0.1:9999/token',
+    })
+    const as = await discoverAuthorizationServer({ issuer: 'http://127.0.0.1:9999/as', fetchImpl })
+    assert.equal(as, null, 'an issuer mix-up must be rejected')
+  })
+
+  it('accepts AS metadata whose issuer matches exactly', async () => {
+    const fetchImpl = async () => fakeRes(200, {
+      issuer: 'http://127.0.0.1:9999/as',
+      authorization_endpoint: 'http://127.0.0.1:9999/authorize',
+      token_endpoint: 'http://127.0.0.1:9999/token',
+    })
+    const as = await discoverAuthorizationServer({ issuer: 'http://127.0.0.1:9999/as', fetchImpl })
+    assert.ok(as && as.token_endpoint === 'http://127.0.0.1:9999/token')
+  })
+})
