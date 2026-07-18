@@ -499,6 +499,14 @@ Object.assign(EVENT_MAP, {
           duration: data.duration,
           usage: data.usage,
           sessionId: data.sessionId,
+          // #6819: the session's authoritative outgoing-queue length, stamped
+          // centrally by base-session.js's emit() override (#6627/#6706) onto
+          // every `result` payload. Forwarding it lets store-core's
+          // result-boundary reconcile self-heal a stale "Queued" bubble left
+          // by a dropped/late message_dequeued. Only forwarded when finite —
+          // absent/non-finite keeps the field off the wire so older-server
+          // semantics (client takes the no-op reconcile path) are preserved.
+          ...(Number.isFinite(data.queueLength) ? { queueLength: data.queueLength } : {}),
           // #6769: occupancy snapshot (claude-sdk getContextUsage() / the
           // byok agent loop's final-round prompt, incl. subclasses like
           // ollama whose endpoint reports usage). Only forwarded when the

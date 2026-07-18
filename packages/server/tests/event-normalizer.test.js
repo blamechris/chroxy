@@ -88,6 +88,41 @@ describe('EventNormalizer', () => {
     })
   })
 
+  // ---- EVENT_MAP: result queueLength passthrough (#6819) ----
+
+  describe('result event queueLength passthrough (#6819)', () => {
+    it('forwards a finite queueLength to the wire (base-session #6627/#6706 stamp)', () => {
+      const result = normalizer.normalize(
+        'result',
+        { cost: 0.01, duration: 5, usage: { input_tokens: 1 }, sessionId: 'sess-1', queueLength: 2 },
+        makeCtx(),
+      )
+      const resultMsg = result.messages.find((m) => m.msg.type === 'result')
+      assert.equal(resultMsg.msg.queueLength, 2)
+    })
+
+    it('forwards a zero queueLength (finite, not truthy — must not be treated as absent)', () => {
+      const result = normalizer.normalize(
+        'result',
+        { cost: 0.01, duration: 5, usage: { input_tokens: 1 }, sessionId: 'sess-1', queueLength: 0 },
+        makeCtx(),
+      )
+      const resultMsg = result.messages.find((m) => m.msg.type === 'result')
+      assert.equal(resultMsg.msg.queueLength, 0)
+    })
+
+    it('omits queueLength from the wire when the session did not stamp one (older/non-finite)', () => {
+      const result = normalizer.normalize(
+        'result',
+        { cost: 0.01, duration: 5, usage: { input_tokens: 1 }, sessionId: 'sess-1' },
+        makeCtx(),
+      )
+      const resultMsg = result.messages.find((m) => m.msg.type === 'result')
+      assert.equal('queueLength' in resultMsg.msg, false,
+        'absent/non-finite queueLength stays off the wire so clients take the no-op reconcile path')
+    })
+  })
+
   // ---- EVENT_MAP: ready ----
 
   describe('ready event', () => {
