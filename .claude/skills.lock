@@ -106,6 +106,14 @@
       "hash": "21fa678",
       "installed": "2026-06-03"
     },
+    "tiered-delegation": {
+      "hash": "01903fb",
+      "installed": "2026-07-18",
+      "targets": [
+        "claude",
+        "gemini"
+      ]
+    },
     "visual-brief": {
       "hash": "a4c08cb",
       "installed": "2026-06-10",
