@@ -641,6 +641,9 @@ export interface DispatchMessageMap {
     newSessionId?: string
     // #6766: true when only files were restored (conversation NOT branched).
     filesOnly?: boolean
+    // #6767: selective-restore mode the server ran. 'files' omits newSessionId
+    // (current session kept — no switch); 'conversation'/'both' carry it.
+    mode?: 'files' | 'conversation' | 'both'
   }
   search_results: {
     type: 'search_results'

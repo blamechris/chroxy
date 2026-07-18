@@ -16,7 +16,7 @@ jest.mock('../../store/connection', () => ({
 
 const mockUseConnectionStore = useConnectionStore as unknown as jest.Mock;
 
-function setupStore(checkpoints: any[] = []) {
+function setupStore(checkpoints: any[] = [], opts: { canFork?: boolean } = {}) {
   mockUseConnectionStore.mockImplementation((selector: any) => {
     const state = {
       checkpoints,
@@ -24,6 +24,14 @@ function setupStore(checkpoints: any[] = []) {
       restoreCheckpoint: mockRestoreCheckpoint,
       deleteCheckpoint: mockDeleteCheckpoint,
       createCheckpoint: mockCreateCheckpoint,
+      // #6767: restore-mode picker capability lookup. Default provider is a
+      // non-fork one (claude-tui) so 'Conversation' is disabled unless canFork.
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', provider: opts.canFork ? 'claude-sdk' : 'claude-tui' }],
+      availableProviders: [
+        { name: 'claude-sdk', capabilities: { conversationFork: true } },
+        { name: 'claude-tui', capabilities: {} },
+      ],
     };
     return selector(state);
   });
@@ -70,6 +78,11 @@ function findTextNodes(root: ReactTestInstance, text: string): ReactTestInstance
 /** Find a touchable by accessibilityLabel */
 function findByLabel(root: ReactTestInstance, label: string): ReactTestInstance {
   return root.findByProps({ accessibilityLabel: label });
+}
+
+/** Find an element by testID */
+function findByTestID(root: ReactTestInstance, id: string): ReactTestInstance {
+  return root.findByProps({ testID: id });
 }
 
 describe('CheckpointView', () => {
@@ -153,9 +166,10 @@ describe('CheckpointView', () => {
       findByLabel(root!.root, 'Restore checkpoint Initial setup').props.onPress();
     });
 
+    // #6767: default mode is 'both' — copy reflects files revert + conversation branch.
     expect(alertSpy).toHaveBeenCalledWith(
       'Restore Checkpoint',
-      'Restore files to "Initial setup"? Your working files will be reverted to this checkpoint and a new session will open.',
+      'Revert your working files to "Initial setup" and branch the conversation into a new session?',
       expect.arrayContaining([
         expect.objectContaining({ text: 'Cancel', style: 'cancel' }),
         expect.objectContaining({ text: 'Restore' }),
@@ -182,7 +196,8 @@ describe('CheckpointView', () => {
     );
     restoreBtn?.onPress?.();
 
-    expect(mockRestoreCheckpoint).toHaveBeenCalledWith('cp-2');
+    // #6767: default restore mode is 'both'.
+    expect(mockRestoreCheckpoint).toHaveBeenCalledWith('cp-2', 'both');
     expect(onClose).toHaveBeenCalled();
   });
 
@@ -206,6 +221,68 @@ describe('CheckpointView', () => {
     expect(cancelBtn?.style).toBe('cancel');
     expect(mockRestoreCheckpoint).not.toHaveBeenCalled();
     expect(onClose).not.toHaveBeenCalled();
+  });
+
+  // #6767 — selective restore-mode picker.
+  describe('restore-mode picker (#6767)', () => {
+    it("restores with 'files' mode when Files is picked (keeps the current session)", () => {
+      const alertSpy = jest.spyOn(Alert, 'alert');
+      setupStore(sampleCheckpoints);
+      let root: renderer.ReactTestRenderer;
+      act(() => {
+        root = renderer.create(<CheckpointView visible={true} onClose={onClose} />);
+      });
+
+      // Pick 'Files' mode, then tap Restore on cp-1.
+      act(() => {
+        findByTestID(root!.root, 'checkpoint-mode-files').props.onPress();
+      });
+      act(() => {
+        findByLabel(root!.root, 'Restore checkpoint Initial setup').props.onPress();
+      });
+
+      // Copy must be the files-only variant (no "new session" claim).
+      expect(alertSpy).toHaveBeenCalledWith(
+        'Restore Files',
+        'Revert your working files to "Initial setup"? Your conversation and session stay as they are.',
+        expect.anything(),
+      );
+      const restoreBtn = alertSpy.mock.calls[0][2]?.find((b: any) => b.text === 'Restore');
+      restoreBtn?.onPress?.();
+      expect(mockRestoreCheckpoint).toHaveBeenCalledWith('cp-1', 'files');
+    });
+
+    it('disables the Conversation option when the active provider cannot fork', () => {
+      setupStore(sampleCheckpoints, { canFork: false });
+      let root: renderer.ReactTestRenderer;
+      act(() => {
+        root = renderer.create(<CheckpointView visible={true} onClose={onClose} />);
+      });
+      const conv = findByTestID(root!.root, 'checkpoint-mode-conversation');
+      expect(conv.props.disabled).toBe(true);
+      expect(conv.props.accessibilityState?.disabled).toBe(true);
+    });
+
+    it('enables Conversation and restores with it when the provider can fork', () => {
+      const alertSpy = jest.spyOn(Alert, 'alert');
+      setupStore(sampleCheckpoints, { canFork: true });
+      let root: renderer.ReactTestRenderer;
+      act(() => {
+        root = renderer.create(<CheckpointView visible={true} onClose={onClose} />);
+      });
+      const conv = findByTestID(root!.root, 'checkpoint-mode-conversation');
+      expect(conv.props.disabled).toBe(false);
+
+      act(() => {
+        conv.props.onPress();
+      });
+      act(() => {
+        findByLabel(root!.root, 'Restore checkpoint Added auth').props.onPress();
+      });
+      const restoreBtn = alertSpy.mock.calls[0][2]?.find((b: any) => b.text === 'Restore');
+      restoreBtn?.onPress?.();
+      expect(mockRestoreCheckpoint).toHaveBeenCalledWith('cp-2', 'conversation');
+    });
   });
 
   it('shows delete confirmation via Alert on delete press', () => {

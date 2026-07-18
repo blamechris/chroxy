@@ -550,6 +550,11 @@ export declare const ListCheckpointsSchema: z.ZodObject<{
 export declare const RestoreCheckpointSchema: z.ZodObject<{
     type: z.ZodLiteral<"restore_checkpoint">;
     checkpointId: z.ZodString;
+    mode: z.ZodOptional<z.ZodEnum<{
+        files: "files";
+        conversation: "conversation";
+        both: "both";
+    }>>;
 }, z.core.$strip>;
 export declare const CreateCheckpointSchema: z.ZodObject<{
     type: z.ZodLiteral<"create_checkpoint">;
@@ -1167,6 +1172,11 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"restore_checkpoint">;
     checkpointId: z.ZodString;
+    mode: z.ZodOptional<z.ZodEnum<{
+        files: "files";
+        conversation: "conversation";
+        both: "both";
+    }>>;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"create_checkpoint">;
     name: z.ZodOptional<z.ZodString>;

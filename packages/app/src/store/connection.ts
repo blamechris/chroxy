@@ -85,6 +85,7 @@ import type {
   ContextUsage,
   ContextOccupancy,
   MessageAttachment,
+  RestoreCheckpointMode,
   SavedConnection,
   SessionInfo,
   SessionState,
@@ -2467,8 +2468,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     sendIfOpen({ type: 'list_checkpoints' });
   },
 
-  restoreCheckpoint: (checkpointId: string) => {
-    sendIfOpen({ type: 'restore_checkpoint', checkpointId });
+  restoreCheckpoint: (checkpointId: string, mode?: RestoreCheckpointMode) => {
+    // #6767: only send `mode` for a non-default choice so the wire matches
+    // pre-#6767 for the common 'both' path.
+    sendIfOpen(
+      mode && mode !== 'both'
+        ? { type: 'restore_checkpoint', checkpointId, mode }
+        : { type: 'restore_checkpoint', checkpointId },
+    );
   },
 
   deleteCheckpoint: (checkpointId: string) => {

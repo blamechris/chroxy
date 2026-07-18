@@ -1988,6 +1988,27 @@ describe('handleCheckpointRestored', () => {
   it('returns null when newSessionId is whitespace only', () => {
     expect(handleCheckpointRestored({ newSessionId: '   ' })).toBeNull()
   })
+
+  // #6767: selective-restore mode echo. 'conversation'/'both' carry a
+  // newSessionId (session-creating), 'files' never reaches here (no newSessionId).
+  it('carries mode when the server echoes a valid selective-restore mode', () => {
+    expect(
+      handleCheckpointRestored({ newSessionId: 'sess-new', filesOnly: false, mode: 'conversation' }),
+    ).toEqual({ newSessionId: 'sess-new', filesOnly: false, mode: 'conversation' })
+    expect(
+      handleCheckpointRestored({ newSessionId: 'sess-new', filesOnly: false, mode: 'both' }),
+    ).toEqual({ newSessionId: 'sess-new', filesOnly: false, mode: 'both' })
+  })
+
+  it('omits mode when the server sends an unknown/absent mode (pre-#6767 shape)', () => {
+    expect(
+      handleCheckpointRestored({ newSessionId: 'sess-new', mode: 'bogus' }),
+    ).toEqual({ newSessionId: 'sess-new', filesOnly: true })
+    expect(handleCheckpointRestored({ newSessionId: 'sess-new' })).toEqual({
+      newSessionId: 'sess-new',
+      filesOnly: true,
+    })
+  })
 })
 
 // ---------------------------------------------------------------------------

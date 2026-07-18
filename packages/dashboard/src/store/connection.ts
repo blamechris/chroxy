@@ -48,6 +48,7 @@ export type {
   ConversationSummary,
   SearchResult,
   ConnectionState,
+  RestoreCheckpointMode,
 } from './types';
 
 // Re-export utility functions for backward compatibility
@@ -62,6 +63,7 @@ import type {
   ConnectionContext,
   ConnectionState,
   InputSettings,
+  RestoreCheckpointMode,
   ServerEntry,
   SessionInfo,
   SessionState,
@@ -4223,10 +4225,17 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
   },
 
-  restoreCheckpoint: (checkpointId: string) => {
+  restoreCheckpoint: (checkpointId: string, mode?: RestoreCheckpointMode) => {
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
-      wsSend(socket, { type: 'restore_checkpoint', checkpointId });
+      // #6767: only send `mode` when the caller picked a non-default one, so the
+      // wire stays identical to pre-#6767 for the common 'both' path.
+      const msg: { type: 'restore_checkpoint'; checkpointId: string; mode?: RestoreCheckpointMode } = {
+        type: 'restore_checkpoint',
+        checkpointId,
+      };
+      if (mode && mode !== 'both') msg.mode = mode;
+      wsSend(socket, msg);
     }
   },
 

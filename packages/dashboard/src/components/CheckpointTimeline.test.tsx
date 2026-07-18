@@ -21,10 +21,27 @@ vi.mock('../store/connection', () => ({
       restoreCheckpoint: mockRestoreCheckpoint,
       deleteCheckpoint: mockDeleteCheckpoint,
       connectionPhase: storeState.connectionPhase ?? 'connected',
+      // #6767: restore-mode picker capability lookup.
+      activeSessionId: storeState.activeSessionId ?? null,
+      sessions: storeState.sessions ?? [],
+      availableProviders: storeState.availableProviders ?? [],
     }
     return selector(store)
   },
 }))
+
+// #6767: an active session whose provider CAN branch the conversation.
+const FORK_CAPABLE = {
+  activeSessionId: 's1',
+  sessions: [{ sessionId: 's1', provider: 'claude-sdk' }],
+  availableProviders: [{ name: 'claude-sdk', capabilities: { conversationFork: true } }],
+}
+// A provider that CANNOT fork (the default when nothing is set, made explicit).
+const NON_FORK = {
+  activeSessionId: 's1',
+  sessions: [{ sessionId: 's1', provider: 'claude-tui' }],
+  availableProviders: [{ name: 'claude-tui', capabilities: {} }],
+}
 
 afterEach(() => cleanup())
 
@@ -88,12 +105,49 @@ describe('CheckpointTimeline', () => {
     expect(screen.getByText('85 msgs')).toBeTruthy()
   })
 
-  it('calls restoreCheckpoint when Restore is clicked', () => {
+  it('calls restoreCheckpoint with the default mode (both) when Restore is clicked', () => {
     storeState.checkpoints = [CHECKPOINTS[0]!]
     render(<CheckpointTimeline />)
 
     fireEvent.click(screen.getByText('Restore'))
-    expect(mockRestoreCheckpoint).toHaveBeenCalledWith('cp-1')
+    // #6767: default restore mode is 'both'.
+    expect(mockRestoreCheckpoint).toHaveBeenCalledWith('cp-1', 'both')
+  })
+
+  // #6767 — selective restore-mode picker.
+  describe('restore-mode picker (#6767)', () => {
+    it('renders the three restore modes with Both selected by default', () => {
+      storeState.checkpoints = [CHECKPOINTS[0]!]
+      render(<CheckpointTimeline />)
+      expect(screen.getByTestId('checkpoint-mode-both').getAttribute('aria-pressed')).toBe('true')
+      expect(screen.getByTestId('checkpoint-mode-files').getAttribute('aria-pressed')).toBe('false')
+      expect(screen.getByTestId('checkpoint-mode-conversation').getAttribute('aria-pressed')).toBe('false')
+    })
+
+    it('restores with the chosen mode (files) — keeps the current session', () => {
+      storeState.checkpoints = [CHECKPOINTS[0]!]
+      render(<CheckpointTimeline />)
+      fireEvent.click(screen.getByTestId('checkpoint-mode-files'))
+      fireEvent.click(screen.getByText('Restore'))
+      expect(mockRestoreCheckpoint).toHaveBeenCalledWith('cp-1', 'files')
+    })
+
+    it('disables Conversation when the active session provider cannot fork', () => {
+      Object.assign(storeState, NON_FORK, { checkpoints: [CHECKPOINTS[0]!] })
+      render(<CheckpointTimeline />)
+      const conv = screen.getByTestId('checkpoint-mode-conversation') as HTMLButtonElement
+      expect(conv.disabled).toBe(true)
+    })
+
+    it('enables Conversation and restores with it when the provider can fork', () => {
+      Object.assign(storeState, FORK_CAPABLE, { checkpoints: [CHECKPOINTS[0]!] })
+      render(<CheckpointTimeline />)
+      const conv = screen.getByTestId('checkpoint-mode-conversation') as HTMLButtonElement
+      expect(conv.disabled).toBe(false)
+      fireEvent.click(conv)
+      fireEvent.click(screen.getByText('Restore'))
+      expect(mockRestoreCheckpoint).toHaveBeenCalledWith('cp-1', 'conversation')
+    })
   })
 
   it('shows delete confirmation on Delete click', () => {

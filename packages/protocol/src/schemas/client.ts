@@ -822,6 +822,12 @@ export const ListCheckpointsSchema = z.object({
 export const RestoreCheckpointSchema = z.object({
   type: z.literal('restore_checkpoint'),
   checkpointId: z.string().max(256),
+  // #6767: selective restore. 'files' reverts only the working tree (current
+  // session/conversation continue — no new session); 'conversation' branches
+  // the conversation at the checkpoint (working tree untouched — fork-capable
+  // providers only, else rejected); 'both' (default, and the pre-#6767
+  // behaviour) does both. Optional so older clients that omit it get 'both'.
+  mode: z.enum(['files', 'conversation', 'both']).optional(),
 })
 
 export const CreateCheckpointSchema = z.object({

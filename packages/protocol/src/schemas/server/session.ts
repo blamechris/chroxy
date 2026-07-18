@@ -577,20 +577,28 @@ export const ServerCheckpointListSchema = z.object({
   checkpoints: z.array(CheckpointSchema),
 })
 
-// NOTE: checkpoint_restored keys are exactly { type, checkpointId,
-// newSessionId, name, filesOnly? } — no `sessionId`. `newSessionId` is the
-// fresh session the restore created; the client re-homes to it via
-// switchSession. `filesOnly` (#6766) is true when only the working tree was
-// restored and the conversation was NOT branched (the provider can't fork /
-// truncate a resumed transcript); false when the conversation was forked and
-// truncated to the checkpoint. Optional for back-compat with older servers
-// that never branched — a missing value is treated as files-only.
+// NOTE: checkpoint_restored keys are { type, checkpointId, newSessionId?,
+// name?, filesOnly?, mode? } — no `sessionId`. `newSessionId` is the fresh
+// session a restore created; the client re-homes to it via switchSession.
+// `filesOnly` (#6766) is true when only the working tree was restored and the
+// conversation was NOT branched (the provider can't fork / truncate a resumed
+// transcript); false when the conversation was forked and truncated to the
+// checkpoint. Optional for back-compat with older servers that never branched
+// — a missing value is treated as files-only.
+//
+// #6767: `mode` echoes the selective-restore mode the server ran ('files' |
+// 'conversation' | 'both'). `newSessionId`/`name` are now OPTIONAL: a 'files'
+// restore reverts only the working tree and keeps the CURRENT session (no new
+// session, no re-home), so it omits both — 'conversation' and 'both' still
+// create and re-home to a rewound session and carry them. Optional so older
+// servers (which always created a new session) round-trip unchanged.
 export const ServerCheckpointRestoredSchema = z.object({
   type: z.literal('checkpoint_restored'),
   checkpointId: z.string(),
-  newSessionId: z.string(),
-  name: z.string(),
+  newSessionId: z.string().optional(),
+  name: z.string().optional(),
   filesOnly: z.boolean().optional(),
+  mode: z.enum(['files', 'conversation', 'both']).optional(),
 })
 
 // #6332 (batch 2b of #6314): idle-timeout lifecycle. `session_warning` is the
