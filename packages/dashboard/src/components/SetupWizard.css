@@ -1,0 +1,179 @@
+/* SetupWizard — desktop first-run setup panel (#6787).
+   Overlay/content/title chrome comes from the shared Modal component
+   (.modal-overlay / .modal-content / .modal-title in theme/components.css);
+   only the wizard-internal styles live here.
+
+   Tokens-only (lint-no-raw-color-literals): every color is a bare
+   var(--token) from the generated theme.css — no hex literals, no
+   fallbacks (the lint flags hex anywhere outside comments, including
+   inside var() fallbacks). */
+
+.setup-wizard {
+  max-height: 75vh;
+  overflow-y: auto;
+}
+
+.setup-wizard-subtitle {
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+  margin: 0 0 20px;
+}
+
+.setup-wizard-section {
+  margin-bottom: 20px;
+}
+
+.setup-wizard-section h3 {
+  color: var(--text-primary);
+  font-size: 1rem;
+  margin: 0 0 10px;
+}
+
+.setup-wizard-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.setup-wizard-section-header h3 {
+  margin: 0;
+}
+
+.setup-wizard-recheck-btn {
+  background: transparent;
+  color: var(--accent-blue);
+  border: 1px solid var(--accent-blue-border);
+  border-radius: var(--radius-sm);
+  padding: 4px 10px;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.setup-wizard-recheck-btn:hover:not(:disabled) {
+  background: var(--accent-blue-subtle);
+}
+
+.setup-wizard-recheck-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.setup-wizard-dep-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.setup-wizard-dep-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  /* --bg-card, not --bg-secondary: the latter equals --bg-modal, which
+     would make the rows invisible against the modal surface. */
+  background: var(--bg-card);
+  font-size: 0.9rem;
+}
+
+.setup-wizard-dep-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.25em;
+  font-weight: 700;
+}
+
+.setup-wizard-dep-row--pass .setup-wizard-dep-icon {
+  color: var(--status-connected);
+}
+
+.setup-wizard-dep-row--fail .setup-wizard-dep-icon {
+  color: var(--accent-red);
+}
+
+.setup-wizard-dep-row--unknown .setup-wizard-dep-icon,
+.setup-wizard-dep-row--checking .setup-wizard-dep-icon {
+  color: var(--warning-fg);
+}
+
+.setup-wizard-dep-label {
+  color: var(--text-primary);
+  flex: 1;
+}
+
+.setup-wizard-dep-detail {
+  color: var(--text-muted);
+  font-size: 0.85em;
+}
+
+.setup-wizard-dep-hint {
+  flex-basis: 100%;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  font-family: var(--font-mono);
+}
+
+.setup-wizard-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 12px;
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+}
+
+.setup-wizard-field input,
+.setup-wizard-field select {
+  background: var(--bg-session-bar);
+  color: var(--text-primary);
+  border: 1px solid var(--scrollbar-thumb);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  font-size: 0.9rem;
+}
+
+.setup-wizard-field input:focus,
+.setup-wizard-field select:focus {
+  outline: none;
+  border-color: var(--accent-blue);
+}
+
+.setup-wizard-error {
+  color: var(--text-error);
+  background: var(--accent-red-light);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  font-size: 0.85rem;
+  margin-bottom: 16px;
+}
+
+.setup-wizard-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.setup-wizard-finish-btn {
+  background: var(--accent-blue);
+  color: var(--text-primary);
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 10px 20px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.setup-wizard-finish-btn:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+
+.setup-wizard-finish-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}

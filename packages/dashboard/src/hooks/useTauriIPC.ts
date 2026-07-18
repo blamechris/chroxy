@@ -16,6 +16,29 @@ interface ServerInfo {
   isRunning: boolean
 }
 
+/** Payload returned by the Rust `get_setup_state` command (#6787). */
+export interface SetupState {
+  /** True when the desktop config was just created (no prior `~/.chroxy/config.json`). */
+  isFirstRun: boolean
+  port: number
+  tunnelMode: string
+  isRunning: boolean
+}
+
+/** One dependency's found/version probe, as returned by `check_dependencies` (#6787). */
+export interface DependencyStatus {
+  found: boolean
+  path?: string | null
+  version?: string | null
+}
+
+/** Payload returned by the Rust `check_dependencies` command (#6787). */
+export interface DependencyCheckResult {
+  node22: DependencyStatus
+  cloudflared: DependencyStatus
+  claude: DependencyStatus
+}
+
 /** Invoke a Tauri command (returns null if not in Tauri context) */
 async function tauriInvoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T | null> {
   const invoke = getTauriInvoke()
@@ -159,4 +182,42 @@ export async function revealInFinder(path: string): Promise<void> {
     throw new Error('Tauri invoke is unavailable')
   }
   await invoke('reveal_in_finder', { path })
+}
+
+/**
+ * Read first-run wizard state (#6787): whether setup has never completed,
+ * plus the current port / tunnel mode / server-running snapshot so the
+ * wizard can pre-fill its fields. Returns `null` outside Tauri.
+ */
+export async function getSetupState(): Promise<SetupState | null> {
+  return tauriInvoke<SetupState>('get_setup_state')
+}
+
+/**
+ * Probe for Node 22, cloudflared, and the `claude` CLI on PATH (#6787).
+ * Used by the first-run wizard's dependency checklist (initial check + the
+ * "Re-check" button). Returns `null` outside Tauri.
+ */
+export async function checkDependencies(): Promise<DependencyCheckResult | null> {
+  return tauriInvoke<DependencyCheckResult>('check_dependencies')
+}
+
+/**
+ * Persist the first-run wizard's chosen port + tunnel mode (#6787) and clear
+ * the Rust-side `IS_FIRST_RUN` flag so the wizard never shows again. No-ops
+ * outside Tauri. Throws when invoke is unavailable inside Tauri, or when the
+ * Rust side fails to persist — a settings save failure, or a read/parse/write
+ * error on `~/.chroxy/config.json` — so the wizard keeps its fields and
+ * surfaces the failure rather than silently closing on a save that didn't
+ * actually persist. Note the tunnel mode is persisted as-is: unlike
+ * `set_tunnel_mode`, the Rust `save_setup_config` does not validate the
+ * enum, so callers must only pass 'none' | 'quick' | 'named'.
+ */
+export async function saveSetupConfig(port: number, tunnelMode: string): Promise<void> {
+  if (!isTauri()) return
+  const invoke = getTauriInvoke()
+  if (!invoke) {
+    throw new Error('Tauri invoke is unavailable')
+  }
+  await invoke('save_setup_config', { port, tunnelMode })
 }
