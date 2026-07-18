@@ -95,4 +95,35 @@ describe('Tauri IPC commands (#1108)', () => {
   test('TypeScript hook exports setSummonHotkey', () => {
     expect(hookSrc).toMatch(/export async function setSummonHotkey/)
   })
+
+  // #6787 — first-run setup wizard wiring.
+  test('Rust has check_dependencies command', () => {
+    expect(libSrc).toMatch(/#\[tauri::command\][\s\S]*?fn check_dependencies/)
+  })
+
+  test('Rust has get_setup_state command', () => {
+    expect(libSrc).toMatch(/#\[tauri::command\][\s\S]*?fn get_setup_state/)
+  })
+
+  test('Rust has save_setup_config command', () => {
+    expect(libSrc).toMatch(/#\[tauri::command\][\s\S]*?fn save_setup_config/)
+  })
+
+  test('setup wizard commands registered in generate_handler', () => {
+    expect(libSrc).toMatch(/generate_handler!\[[\s\S]*?check_dependencies/)
+    expect(libSrc).toMatch(/generate_handler!\[[\s\S]*?get_setup_state/)
+    expect(libSrc).toMatch(/generate_handler!\[[\s\S]*?save_setup_config/)
+  })
+
+  test('TypeScript hook exports checkDependencies', () => {
+    expect(hookSrc).toMatch(/export async function checkDependencies/)
+  })
+
+  test('TypeScript hook exports getSetupState', () => {
+    expect(hookSrc).toMatch(/export async function getSetupState/)
+  })
+
+  test('TypeScript hook exports saveSetupConfig', () => {
+    expect(hookSrc).toMatch(/export async function saveSetupConfig/)
+  })
 })

@@ -95,6 +95,7 @@ import { type RepoInvestigateRequest, type RepoOpenSessionRequest } from './comp
 import { ControlRoomView } from './components/ControlRoomView'
 import { AppModals } from './components/AppModals'
 import { AppHeader } from './components/AppHeader'
+import { SetupWizard } from './components/SetupWizard'
 
 /** Server-injected config from <meta name="chroxy-config"> tag */
 interface ChroxyConfig {
@@ -1946,6 +1947,10 @@ export function App() {
 
   return (
     <div id="app" className={sidebarRepos.length > 0 ? 'with-sidebar' : ''}>
+      {/* #6787 — desktop first-run setup wizard. Self-contained: resolves
+          get_setup_state itself and renders null outside Tauri or once
+          setup is complete, so it can sit unconditionally at the root. */}
+      <SetupWizard />
       {/* #4873 — single page-level live region that announces only the
           SETTLED connection phase after a debounce. Replaces the
           per-status-dot role=status announcements that flooded SR
