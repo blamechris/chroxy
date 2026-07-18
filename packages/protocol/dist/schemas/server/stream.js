@@ -14,21 +14,34 @@ import { MAX_SANE_DURATION_MS } from "./connection.js";
 // one-way numbers from the RTT-split method instead (see app/dashboard
 // latency-stats). Always optional so older servers/clients interop unchanged.
 const ServerTsSchema = z.number().int().nonnegative().finite().optional();
+// #6756: an optional flag marking a stream_start/delta/end as carrying the
+// model's extended-thinking (reasoning) content rather than the visible
+// response text. Providers that surface thinking (claude SDK, BYOK) emit these
+// with a DISTINCT `messageId` (e.g. `<turnId>-thinking-<n>`) so a thinking
+// stream never collides with the response stream, and clients route them to a
+// `type: 'thinking'` chat bubble instead of the response slot. Always optional
+// so older servers/clients interop unchanged (absent === not thinking). Because
+// the id is distinct from the ephemeral placeholder id `'thinking'`, the
+// client's `filterThinking` still only strips the placeholder.
+const ThinkingFlagSchema = z.boolean().optional();
 export const ServerStreamStartSchema = z.object({
     type: z.literal('stream_start'),
     messageId: z.string(),
     serverTs: ServerTsSchema,
+    thinking: ThinkingFlagSchema,
 });
 export const ServerStreamDeltaSchema = z.object({
     type: z.literal('stream_delta'),
     messageId: z.string(),
     delta: z.string(),
     serverTs: ServerTsSchema,
+    thinking: ThinkingFlagSchema,
 });
 export const ServerStreamEndSchema = z.object({
     type: z.literal('stream_end'),
     messageId: z.string(),
     serverTs: ServerTsSchema,
+    thinking: ThinkingFlagSchema,
 });
 export const ServerMessageSchema = z.object({
     type: z.literal('message'),

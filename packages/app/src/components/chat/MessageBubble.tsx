@@ -74,6 +74,40 @@ export function buildPromptSessionLabel(
   return provider ? `${name} · ${provider}` : name;
 }
 
+/**
+ * #6756 — content-capable thinking view. The mobile parity of the dashboard's
+ * `ThinkingBody`: a quiet collapsible disclosure ("▸ Thinking…" while streaming,
+ * "▸ Thought" once done) that reveals the model's reasoning text on tap. Used
+ * only when a thinking bubble actually carries reasoning content; an empty
+ * thinking bubble (the ephemeral placeholder) keeps the `ThinkingIndicator`
+ * animation.
+ */
+function ThinkingBubble({ content, streaming }: { content: string; streaming: boolean }) {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <View style={styles.thinkingBubble} testID="thinking-bubble">
+      <TouchableOpacity
+        onPress={() => {
+          LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+          setExpanded((v) => !v);
+        }}
+        testID="thinking-toggle"
+        accessibilityRole="button"
+        accessibilityLabel={streaming ? 'Thinking' : 'Thought'}
+      >
+        <Text style={styles.thinkingToggle}>
+          {expanded ? '▾' : '▸'} {streaming ? 'Thinking…' : 'Thought'}
+        </Text>
+      </TouchableOpacity>
+      {expanded && (
+        <Text style={styles.thinkingContent} testID="thinking-content" selectable>
+          {content}
+        </Text>
+      )}
+    </View>
+  );
+}
+
 function MessageBubbleImpl({ message, queued, onCancelQueued, onSelectOption, onSubmitMultiQuestion, allowMultiQuestion, allowSingleMultiSelect, isSelected, isSelecting, onLongPress, onPress, onOpenDetail, onImagePress, onRetryStreamStall, getInitialExpanded, onExpandedChange }: {
   message: ChatMessage;
   /**
@@ -329,6 +363,15 @@ function MessageBubbleImpl({ message, queued, onCancelQueued, onSelectOption, on
   };
 
   if (isThinking) {
+    // #6756 — render the model's reasoning content as an expandable disclosure
+    // when present; fall back to the generic animation for the contentless
+    // placeholder (or a thinking block that hasn't streamed any text yet).
+    const thinkingContent = typeof message.content === 'string' ? message.content : '';
+    if (thinkingContent.trim().length > 0) {
+      return (
+        <ThinkingBubble content={thinkingContent} streaming={message.thinkingStreaming === true} />
+      );
+    }
     return <ThinkingIndicator />;
   }
 
@@ -786,6 +829,24 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     marginBottom: 12,
     maxWidth: '85%',
+  },
+  // #6756 — content-capable thinking disclosure (mobile parity with the
+  // dashboard's ThinkingBody). Deliberately low-noise: a muted toggle line and,
+  // when expanded, the reasoning text. No card chrome.
+  thinkingBubble: {
+    marginBottom: 12,
+    maxWidth: '90%',
+  },
+  thinkingToggle: {
+    color: COLORS.textMuted,
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  thinkingContent: {
+    marginTop: 6,
+    color: COLORS.textSecondary,
+    fontSize: 13,
+    lineHeight: 19,
   },
   // Chat redesign #6391 (mobile no-bubble): bare assistant response — no card,
   // flush, so a long turn reads like a document. User/prompt/tool keep cards.

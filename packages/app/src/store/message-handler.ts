@@ -40,6 +40,10 @@ import {
   handleStreamStart as sharedStreamStart,
   sharedStreamDelta,
   handleStreamEnd as sharedStreamEnd,
+  // #6756 — extended-thinking (reasoning) content stream.
+  handleThinkingStreamStart as sharedThinkingStart,
+  handleThinkingDelta as sharedThinkingDelta,
+  handleThinkingStreamEnd as sharedThinkingEnd,
   handleAuthOk as sharedAuthOk,
   parseConnectedClients as sharedParseConnectedClients,
   handleAuthFail as sharedAuthFail,
@@ -2563,6 +2567,20 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'stream_start': {
+      // #6756 — a thinking stream_start opens a reasoning bubble on a distinct
+      // id. Route to the thinking handler (does NOT touch streamingMessageId —
+      // the 'pending' sentinel / response stream own the turn's busy state).
+      if (msg.thinking === true) {
+        const thinkingTargetId = (msg.sessionId as string) || get().activeSessionId;
+        if (thinkingTargetId && get().sessionStates[thinkingTargetId]) {
+          updateSession(thinkingTargetId, (ss) => {
+            const out = sharedThinkingStart(msg, get().activeSessionId, ss.messages);
+            if (!out.isNewMessage || !out.newMessage) return {};
+            return { messages: [...filterThinking(ss.messages), out.newMessage] };
+          });
+        }
+        break;
+      }
       const targetId = (msg.sessionId as string) || get().activeSessionId;
       if (targetId && get().sessionStates[targetId]) {
         updateSession(targetId, (ss) => {
@@ -2603,6 +2621,21 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'stream_delta': {
+      // #6756 — a thinking stream_delta accumulates reasoning content onto the
+      // thinking bubble (lazy-created if its stream_start was missed).
+      if (msg.thinking === true) {
+        const payload = sharedThinkingDelta(msg, get().activeSessionId);
+        if (payload) {
+          const thinkingTargetId = payload.sessionId;
+          if (thinkingTargetId && get().sessionStates[thinkingTargetId]) {
+            updateSession(thinkingTargetId, (ss) => {
+              const next = payload.applyTo(ss.messages);
+              return next === ss.messages ? {} : { messages: next };
+            });
+          }
+        }
+        break;
+      }
       // #5515 (epic #5514): record the server-stamped serverTs and the local
       // recv time of the OLDEST un-rendered delta for this messageId, so
       // flushPendingDeltas can measure token-to-render. First-write-wins until
@@ -2687,6 +2720,19 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'stream_end':
+      // #6756 — a thinking stream_end finalises the reasoning bubble's label
+      // ("Thinking…" → "Thought") without touching the response stream state.
+      if (msg.thinking === true) {
+        const payload = sharedThinkingEnd(msg, get().activeSessionId);
+        const thinkingTargetId = payload.sessionId;
+        if (thinkingTargetId && get().sessionStates[thinkingTargetId]) {
+          updateSession(thinkingTargetId, (ss) => {
+            const next = payload.applyTo(ss.messages);
+            return next === ss.messages ? {} : { messages: next };
+          });
+        }
+        break;
+      }
       // Flush any buffered deltas immediately before clearing streaming state
       _ctx.deltaFlusher.flushNow();
       {

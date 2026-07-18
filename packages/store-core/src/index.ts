@@ -506,6 +506,10 @@ export type {
   StreamEndPayload,
   StreamDeltaContext,
   PendingDelta,
+  // #6756 — thinking-stream handler payload shapes.
+  ThinkingStreamStartPayload,
+  ThinkingDeltaPayload,
+  ThinkingStreamEndPayload,
   ResultUsagePayload,
   // #5454 — remaining both-sides duplicates extracted into store-core
   PairFailPayload,
@@ -640,6 +644,11 @@ export {
   handleStreamStart,
   sharedStreamDelta,
   handleStreamEnd,
+  // #6756 — extended-thinking (reasoning) stream handlers.
+  handleThinkingStreamStart,
+  handleThinkingDelta,
+  handleThinkingStreamEnd,
+  MAX_THINKING_CONTENT_LEN,
   handleResultUsage,
   // #5454 — remaining both-sides duplicates extracted into store-core
   handleRawOutput,

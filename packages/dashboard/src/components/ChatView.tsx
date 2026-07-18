@@ -111,6 +111,12 @@ export interface ChatViewMessage {
   timestamp: number
   isStreaming?: boolean
   /**
+   * #6756: on a `thinking` row, whether reasoning content is still streaming
+   * (drives ThinkingBody's "Thinking…" vs "Thought" label). Mirrored from the
+   * store ChatMessage; distinct from `isStreaming` (the response text stream).
+   */
+  thinkingStreaming?: boolean
+  /**
    * #4476: structured error code mirrored from the store ChatMessage.
    * Renderers may switch on this to surface a distinct variant for known
    * error categories (e.g. `'stream_stall'` → chip + retry). Undefined
@@ -327,6 +333,7 @@ const DefaultMessageRow = memo(function DefaultMessageRow({
   content,
   timestamp,
   isStreaming,
+  thinkingStreaming,
   attachments,
   queued,
   onCancelQueued,
@@ -337,6 +344,9 @@ const DefaultMessageRow = memo(function DefaultMessageRow({
   content: string
   timestamp: number
   isStreaming?: boolean
+  /** #6756: on a `thinking` row, whether reasoning content is still streaming
+   *  (drives the ThinkingBody "Thinking…" vs "Thought" label). */
+  thinkingStreaming?: boolean
   /** #6632: user-message attachments (images/documents) to preview. */
   attachments?: ChatViewMessage['attachments']
   /** #5939: this user_input is held in the server's outgoing queue. */
@@ -367,7 +377,7 @@ const DefaultMessageRow = memo(function DefaultMessageRow({
       // #6793: same container also owns the per-code-block copy button click.
       ? <div onClick={handleMarkdownBodyClick} dangerouslySetInnerHTML={{ __html: renderMarkdown(content) }} />
       : type === 'thinking'
-        ? <ThinkingBody content={content} streaming={!!isStreaming} />
+        ? <ThinkingBody content={content} streaming={!!thinkingStreaming} />
         : content
 
   return (
@@ -970,6 +980,7 @@ function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, inFlig
                   content={msg.content}
                   timestamp={msg.timestamp}
                   isStreaming={msg.isStreaming}
+                  thinkingStreaming={msg.thinkingStreaming}
                   attachments={msg.attachments}
                   queued={queuedIds?.has(msg.id) ?? false}
                   queuePosition={queuePositions?.get(msg.id)}

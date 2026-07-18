@@ -62,6 +62,13 @@ export interface ChatViewMessage {
   timestamp: number
   isStreaming?: boolean
   /**
+   * #6756 — mirrored from the store ChatMessage on `thinking` rows: `true`
+   * while reasoning content is still streaming (label "Thinking…"), `false`
+   * once the thinking block ended (label "Thought"). Distinct from
+   * `isStreaming` (which tracks the response text via `streamingMessageId`).
+   */
+  thinkingStreaming?: boolean
+  /**
    * #4476 — structured error code mirrored from the store ChatMessage so
    * renderers can switch on it (e.g. `'stream_stall'` → chip + retry).
    */
@@ -110,6 +117,12 @@ export function toChatViewMessage(msg: ChatMessage): ChatViewMessage {
     // renderMessage path can switch error bubbles into the
     // StreamStallChip variant.
     ...(msg.code ? { code: msg.code } : {}),
+    // #6756: carry the thinking streaming flag through on thinking rows so the
+    // ThinkingBody disclosure can label "Thinking…" vs "Thought". Gated to
+    // `thinking` to match the contract (the field lives only on thinking bubbles).
+    ...(msg.type === 'thinking' && msg.thinkingStreaming !== undefined
+      ? { thinkingStreaming: msg.thinkingStreaming }
+      : {}),
     // #6632: carry user-message attachments through so the transcript can
     // preview them (dropped previously → no thumbnail on the sent message).
     // Gated to `user_input` to match the contract (attachments live only on user

@@ -1270,6 +1270,212 @@ export function handleStreamEnd(
 }
 
 // ---------------------------------------------------------------------------
+// thinking stream (#6756)
+//
+// Extended-thinking / reasoning content forwarded by the providers that
+// produce it (claude SDK, BYOK) arrives on the SAME wire messages as the
+// visible response text (stream_start / stream_delta / stream_end) but tagged
+// with `thinking: true` and a DISTINCT `messageId` (`<turnId>-thinking-<n>`).
+// The caller diverts those to these handlers BEFORE the response-stream
+// machinery (pendingDeltas / continuation-split / etc.), so the two streams
+// never share the buffered-append hot path. A thinking message is a plain
+// `type: 'thinking'` ChatMessage whose `content` accumulates the reasoning
+// text — feeding the dashboard's ThinkingBody disclosure and the mobile
+// content-capable thinking view. Its id is distinct from the ephemeral
+// placeholder id `'thinking'`, so `filterThinking` still strips only the
+// placeholder.
+// ---------------------------------------------------------------------------
+
+/**
+ * Upper bound (UTF-16 code units, matching {@link MAX_TOOL_INPUT_PARTIAL_LEN})
+ * on a thinking bubble's accumulated `content`. Reasoning can be long; this is
+ * the same defence-in-depth ceiling the streaming tool-input accumulator uses
+ * so a runaway/adversarial thinking stream can't balloon client `messages`
+ * state. On truncation the buffer is sliced to exactly this length and the
+ * `thinkingTruncated` boolean is set; further deltas drop idempotently.
+ */
+export const MAX_THINKING_CONTENT_LEN = MAX_TOOL_INPUT_PARTIAL_LEN
+
+/** Result returned from {@link handleThinkingStreamStart}. */
+export interface ThinkingStreamStartPayload {
+  /** Resolved target session, or null when no session context exists. */
+  sessionId: string | null
+  /** Stable id of the thinking bubble (the server-stamped `messageId`). */
+  thinkingMessageId: string
+  /**
+   * Whether the caller should append a new thinking message. False when a
+   * thinking bubble with this id already exists (duplicate/replayed start) —
+   * the caller then leaves the messages array untouched.
+   */
+  isNewMessage: boolean
+  /** Pre-built `type: 'thinking'` ChatMessage when `isNewMessage` is true. */
+  newMessage: ChatMessage | null
+}
+
+/**
+ * Resolve a thinking `stream_start` (a `stream_start` with `thinking: true`).
+ *
+ * Builds a fresh `{ type: 'thinking', content: '', thinkingStreaming: true }`
+ * bubble at the server-stamped id unless one already exists (dedup on
+ * reconnect/replay). The caller drops the ephemeral `'thinking'` placeholder
+ * via `filterThinking` and appends `newMessage`. Does NOT touch
+ * `streamingMessageId` — the turn's `'pending'` sentinel (set at send) keeps
+ * the busy/stop state correct across the whole turn; the thinking label is
+ * driven by the bubble's own `thinkingStreaming` field.
+ */
+export function handleThinkingStreamStart(
+  msg: Record<string, unknown>,
+  activeSessionId: string | null,
+  existingMessages: readonly ChatMessage[],
+): ThinkingStreamStartPayload {
+  const thinkingMessageId =
+    typeof msg.messageId === 'string' && msg.messageId
+      ? msg.messageId
+      : nextMessageId('thinking')
+  const sessionId = typeof msg.sessionId === 'string' ? msg.sessionId : activeSessionId
+  const existing = existingMessages.find((m) => m.id === thinkingMessageId)
+  if (existing) {
+    return { sessionId, thinkingMessageId, isNewMessage: false, newMessage: null }
+  }
+  const newMessage: ChatMessage = {
+    id: thinkingMessageId,
+    type: 'thinking',
+    content: '',
+    thinkingStreaming: true,
+    timestamp: Date.now(),
+  }
+  return { sessionId, thinkingMessageId, isNewMessage: true, newMessage }
+}
+
+/** Result returned from {@link handleThinkingDelta} when the message is well-formed. */
+export interface ThinkingDeltaPayload {
+  /** Resolved target session, or null when no session context exists. */
+  sessionId: string | null
+  /** The thinking bubble id the delta accumulates onto. */
+  thinkingMessageId: string
+  /**
+   * Apply the delta to a session's `messages` array: locate the `thinking`
+   * bubble by id and append `delta` to its `content` (bounded at
+   * {@link MAX_THINKING_CONTENT_LEN}). If no bubble exists yet (a delta beat
+   * its `stream_start`, or the provider emits deltas only), one is lazily
+   * created — the ephemeral `'thinking'` placeholder is dropped in that case.
+   * Returns the same reference (no-op) only when the bubble is already
+   * truncated.
+   */
+  applyTo: (messages: ChatMessage[]) => ChatMessage[]
+}
+
+/**
+ * Validate and build an accumulator for a thinking `stream_delta` (a
+ * `stream_delta` with `thinking: true`). Returns `null` when `messageId` or
+ * `delta` is missing/non-string — both required by the wire shape; malformed
+ * payloads drop silently rather than throw.
+ */
+export function handleThinkingDelta(
+  msg: Record<string, unknown>,
+  activeSessionId: string | null,
+): ThinkingDeltaPayload | null {
+  if (typeof msg.messageId !== 'string' || !msg.messageId) return null
+  if (typeof msg.delta !== 'string') return null
+  const thinkingMessageId = msg.messageId
+  const delta = msg.delta
+  const sessionId = parseRawStringField(msg, 'sessionId') || activeSessionId
+
+  return {
+    sessionId,
+    thinkingMessageId,
+    applyTo: (messages) => {
+      const idx = messages.findIndex(
+        (m) => m.id === thinkingMessageId && m.type === 'thinking',
+      )
+      if (idx === -1) {
+        // Lazy-create: a delta arrived before (or without) its stream_start.
+        // Drop the ephemeral placeholder and seed a fresh thinking bubble.
+        let seed = delta
+        let truncated = false
+        if (seed.length > MAX_THINKING_CONTENT_LEN) {
+          seed = seed.slice(0, MAX_THINKING_CONTENT_LEN)
+          truncated = true
+        }
+        const created: ChatMessage = {
+          id: thinkingMessageId,
+          type: 'thinking',
+          content: seed,
+          thinkingStreaming: true,
+          ...(truncated ? { thinkingTruncated: true } : null),
+          timestamp: Date.now(),
+        }
+        return [...messages.filter((m) => m.id !== 'thinking'), created]
+      }
+      const existing = messages[idx]!
+      // Idempotent terminal state: once truncated, drop further deltas.
+      if (existing.thinkingTruncated) return messages
+      const prev = existing.content || ''
+      let next: string
+      let truncated = false
+      if (prev.length + delta.length > MAX_THINKING_CONTENT_LEN) {
+        const headroom = MAX_THINKING_CONTENT_LEN - prev.length
+        next = prev + delta.slice(0, Math.max(0, headroom))
+        truncated = true
+      } else {
+        next = prev + delta
+      }
+      const updated = [...messages]
+      updated[idx] = {
+        ...existing,
+        content: next,
+        thinkingStreaming: true,
+        ...(truncated ? { thinkingTruncated: true } : null),
+      }
+      return updated
+    },
+  }
+}
+
+/** Result returned from {@link handleThinkingStreamEnd}. */
+export interface ThinkingStreamEndPayload {
+  /** Resolved target session, or null when no session context exists. */
+  sessionId: string | null
+  /** The thinking bubble id whose streaming label should finalise. */
+  thinkingMessageId: string | null
+  /**
+   * Apply the finalisation to a session's `messages` array: flip the matching
+   * `thinking` bubble's `thinkingStreaming` to `false` (label → "Thought").
+   * Returns the same reference (no-op) when no matching bubble is present, so
+   * callers can skip the state write.
+   */
+  applyTo: (messages: ChatMessage[]) => ChatMessage[]
+}
+
+/**
+ * Resolve a thinking `stream_end` (a `stream_end` with `thinking: true`).
+ * Finalises the bubble's streaming label without touching `streamingMessageId`.
+ */
+export function handleThinkingStreamEnd(
+  msg: Record<string, unknown>,
+  activeSessionId: string | null,
+): ThinkingStreamEndPayload {
+  const sessionId = typeof msg.sessionId === 'string' ? msg.sessionId : activeSessionId
+  const thinkingMessageId = parseRawStringField(msg, 'messageId')
+  return {
+    sessionId,
+    thinkingMessageId,
+    applyTo: (messages) => {
+      if (!thinkingMessageId) return messages
+      const idx = messages.findIndex(
+        (m) => m.id === thinkingMessageId && m.type === 'thinking',
+      )
+      if (idx === -1) return messages
+      const existing = messages[idx]!
+      if (existing.thinkingStreaming !== true) return messages
+      const updated = [...messages]
+      updated[idx] = { ...existing, thinkingStreaming: false }
+      return updated
+    },
+  }
+}
+
+// ---------------------------------------------------------------------------
 // result — payload-normalization parts only
 //
 // Streaming-state cleanup (`flushPendingDeltas`, `clearTimeout(deltaFlushTimer)`,

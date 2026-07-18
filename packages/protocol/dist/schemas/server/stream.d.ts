@@ -10,17 +10,20 @@ export declare const ServerStreamStartSchema: z.ZodObject<{
     type: z.ZodLiteral<"stream_start">;
     messageId: z.ZodString;
     serverTs: z.ZodOptional<z.ZodNumber>;
+    thinking: z.ZodOptional<z.ZodBoolean>;
 }, z.core.$strip>;
 export declare const ServerStreamDeltaSchema: z.ZodObject<{
     type: z.ZodLiteral<"stream_delta">;
     messageId: z.ZodString;
     delta: z.ZodString;
     serverTs: z.ZodOptional<z.ZodNumber>;
+    thinking: z.ZodOptional<z.ZodBoolean>;
 }, z.core.$strip>;
 export declare const ServerStreamEndSchema: z.ZodObject<{
     type: z.ZodLiteral<"stream_end">;
     messageId: z.ZodString;
     serverTs: z.ZodOptional<z.ZodNumber>;
+    thinking: z.ZodOptional<z.ZodBoolean>;
 }, z.core.$strip>;
 export declare const ServerMessageSchema: z.ZodObject<{
     type: z.ZodLiteral<"message">;
