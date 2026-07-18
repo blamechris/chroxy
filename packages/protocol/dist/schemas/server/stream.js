@@ -108,6 +108,38 @@ export const ServerToolInputDeltaSchema = z.object({
     toolUseId: z.string(),
     partialJson: z.string(),
 });
+/**
+ * #6769: end-of-turn context-window OCCUPANCY snapshot — how many tokens the
+ * conversation currently occupies in the model's context window.
+ *
+ * This is a DIFFERENT quantity from the sibling `usage` field: `usage` is the
+ * per-turn BILLING aggregate summed across every agent-loop round (a 5-round
+ * tool-use turn re-reads the history from cache 5×, so its `cache_read` is
+ * ≈5× the real window fill — see byok-session.js #4056). `contextUsage` is a
+ * snapshot of the window state after the turn, safe to meter against the
+ * window.
+ *
+ * Sources (`source`):
+ *   - 'context-usage-api'   — claude-sdk: the Agent SDK's `getContextUsage()`
+ *     control response (the same number Claude Code's own /context shows).
+ *     Carries `maxTokens` (raw window) and the real `autoCompactThreshold`
+ *     (in TOKENS) + `isAutoCompactEnabled`.
+ *   - 'final-round-prompt'  — byok: the FINAL agent-loop round's individual
+ *     `input_tokens + cache_read_input_tokens + cache_creation_input_tokens`,
+ *     which is that round's true prompt size (= conversation size). No
+ *     threshold — clients apply a documented presentation reserve.
+ *
+ * Providers with no occupancy signal (claude-cli, claude-tui, codex, gemini,
+ * ollama, …) omit the field entirely; clients render their unknown/dash state
+ * rather than a fabricated number.
+ */
+export const ServerContextUsageSnapshotSchema = z.object({
+    totalTokens: z.number().nonnegative(),
+    maxTokens: z.number().positive().nullable().optional(),
+    autoCompactThreshold: z.number().positive().nullable().optional(),
+    isAutoCompactEnabled: z.boolean().nullable().optional(),
+    source: z.enum(['context-usage-api', 'final-round-prompt']).optional(),
+});
 export const ServerResultSchema = z.object({
     type: z.literal('result'),
     // #5630: `null` means "cost unknown" (pricing/usage couldn't be computed) —
@@ -121,6 +153,9 @@ export const ServerResultSchema = z.object({
     // clients reconcile a stale "Queued" bubble on the turn boundary (self-heals a
     // dropped/late message_dequeued). Absent from older servers.
     queueLength: z.number().int().nonnegative().optional(),
+    // #6769: occupancy snapshot (see ServerContextUsageSnapshotSchema). Absent
+    // from older servers and from providers with no occupancy signal.
+    contextUsage: ServerContextUsageSnapshotSchema.nullable().optional(),
 });
 export const ServerModelChangedSchema = z.object({
     type: z.literal('model_changed'),

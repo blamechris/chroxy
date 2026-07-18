@@ -15,7 +15,7 @@
  * percentage / progress bar) instead of a fabricated fraction.
  */
 import { DEFAULT_CONTEXT_WINDOW } from './types'
-import type { ContextUsage, ModelInfo } from './types'
+import type { ContextOccupancy, ModelInfo } from './types'
 
 /**
  * Claude-backed docker provider ids — an EXPLICIT allowlist, not a `docker-*`
@@ -75,86 +75,53 @@ export function resolveContextWindow(
 }
 
 // ---------------------------------------------------------------------------
-// #6769 — cumulative context-window fill (occupancy).
+// #6769 — context-window fill from an OCCUPANCY SNAPSHOT, never from billing.
 //
-// SEMANTIC MODEL (chosen from the data source, not assumed):
+// SEMANTIC MODEL (verified against the drivers, PR #6816 review):
 //
-// On Claude's API every `result` event's `usage` object ALREADY reports the
-// full prompt that was sent for that turn, split across four fields:
-//   - input_tokens                — new, uncached prompt tokens this turn
-//   - cache_read_input_tokens     — the conversation history served FROM cache
-//   - cache_creation_input_tokens — history written INTO the cache this turn
-//   - output_tokens               — the assistant's reply
+// A `result.usage` object is a per-turn BILLING aggregate summed across every
+// agent-loop round of the turn — byok-session.js explicitly accumulates
+// `cache_read_input_tokens` per round (#4056), and the SDK/CLI forward the
+// driver's whole-turn aggregate (it sits beside `num_turns` / `total_cost_usd`
+// and folds in subagent usage). For a turn with N tool-call rounds the
+// conversation history is re-read from cache N times, so ANY total derived
+// from `result.usage` over-reads occupancy ≈N× — a typical 8-round coding
+// turn on a 100k history reads ≈850k "fill" on a 200k window. Billing usage
+// is therefore NEVER an input to the meter.
 //
-// Under prompt caching the bulk of a mid-conversation prompt lives in
-// `cache_read_input_tokens`, so the current window occupancy at the turn
-// boundary is:
+// The honest input is an end-of-turn occupancy SNAPSHOT
+// (`ContextOccupancy`, parsed from the result message's `contextUsage` wire
+// field), which only two providers can produce today:
 //
-//     input + cache_read + cache_creation + output
+//   - claude-sdk: the Agent SDK's `getContextUsage()` control API —
+//     `{ totalTokens, maxTokens, autoCompactThreshold (tokens),
+//     isAutoCompactEnabled }`, the same numbers Claude Code's own /context
+//     and status line show (the #6769 desktop-parity anchor).
+//   - byok: the FINAL agent-loop round's individual
+//     `input + cache_read + cache_creation` — that round's true prompt size,
+//     i.e. the conversation as last sent to the API.
 //
-// NOT `input + output` (which, with caching on, is just the new user message
-// plus the reply — it reads near-empty while the window is actually nearly
-// full: the exact bug #6769 fixes).
+// A snapshot naturally persists across turns (each result re-reports it) and
+// FOLLOWS A COMPACTION DOWN (the post-compaction snapshot is smaller) —
+// nothing to accumulate, nothing to clamp. (Compaction *markers* are #6768,
+// deliberately not implemented here.)
 //
-// This value is ALREADY cumulative: each turn re-reports the whole history via
-// `cache_read`, so reading the LATEST result's total is the conversation's
-// current fill — there is nothing to sum across turns. Summing would double-
-// count the history every turn (that is what the server's per-session
-// `cumulativeUsage` billing total does — see types/session.ts — and why it is
-// the wrong number for this meter).
-//
-// It also FOLLOWS A COMPACTION DOWN for free: after Claude auto-compacts, the
-// next turn's `cache_read` is smaller, so occupancy drops rather than clamping
-// to a per-session maximum. (Rendering an explicit compaction *marker* is
-// #6768 — a separate issue, deliberately not implemented here.)
-//
-// Providers that omit the cache fields degrade to `input + output`
-// automatically: `handleResultUsage` (handlers/stream.ts) defaults every
-// missing numeric field to 0, so the cache terms vanish with no special-casing.
-// Providers with no usage data at all (e.g. claude-tui) never populate
-// `contextUsage`, so callers keep showing the dash/unknown state — this helper
-// returns `null` for null usage and never fabricates a number.
+// Everything else — claude-cli (aggregate-only stream-json output, no control
+// channel), claude-tui (no usage at all), codex / gemini / ollama /
+// openai-compatible (aggregate-only) — has NO occupancy signal: the snapshot
+// stays null and every helper here returns null, so the meter renders its
+// honest unknown/dash state. Never fabricate a number from billing usage.
 // ---------------------------------------------------------------------------
 
 /**
- * Current context-window occupancy in tokens for the most recent turn.
+ * Fraction of the raw context window reserved as auto-compact headroom when
+ * the snapshot does NOT carry a real `autoCompactThreshold`.
  *
- * = `inputTokens + outputTokens + cacheRead + cacheCreation`.
- *
- * Returns `null` only when there is no usage at all (pre-first-turn). An
- * all-zero usage object returns `0` (an empty turn) so callers can still
- * distinguish "0 tokens" from "unknown".
- *
- * Each field is coerced to a finite number (missing / non-finite → 0), the
- * same defensive rule `handleResultUsage` (handlers/stream.ts) applies when it
- * builds `ContextUsage` — so a partial object (e.g. a provider or persisted
- * cache shape that predates the cache fields) degrades to `input + output`
- * rather than poisoning the whole total to NaN.
- */
-export function contextWindowTokens(
-  usage:
-    | Partial<Pick<ContextUsage, 'inputTokens' | 'outputTokens' | 'cacheRead' | 'cacheCreation'>>
-    | null
-    | undefined,
-): number | null {
-  if (!usage) return null
-  const finite = (v: number | undefined): number =>
-    typeof v === 'number' && Number.isFinite(v) ? v : 0
-  return (
-    finite(usage.inputTokens) +
-    finite(usage.outputTokens) +
-    finite(usage.cacheRead) +
-    finite(usage.cacheCreation)
-  )
-}
-
-/**
- * Fraction of the raw context window reserved as auto-compact headroom.
- *
- * Claude Code compacts BEFORE the hard window limit, so the meter should read
- * 100% (the "context left before auto-compact" gauge is exhausted) at the
- * compaction boundary, not at the raw ceiling. 0.08 mirrors Claude Code's
- * default ~92% auto-compact trigger.
+ * DOCUMENTED FALLBACK, applied only where occupancy EXISTS without a
+ * threshold (today: byok's final-round snapshot — byok trims history by turn
+ * count, not tokens, so there is no real compaction boundary to read).
+ * claude-sdk snapshots carry the SDK's real threshold and never touch this
+ * constant. 0.08 approximates Claude Code's default ~92% trigger.
  *
  * NOTE: this is a CLIENT-SIDE presentation reserve and is a different thing
  * from the server's `CONTEXT_WINDOW_HEADROOM` (utils/context-window-learn.js),
@@ -164,9 +131,11 @@ export function contextWindowTokens(
 export const CONTEXT_AUTO_COMPACT_RESERVE = 0.08
 
 /**
- * The effective ceiling to meter against: the raw window minus the auto-compact
- * reserve. `null` when the raw window is unknown / non-positive / non-finite,
- * so callers render the "unknown window" state instead of a fabricated total.
+ * The fallback effective ceiling: the raw window minus the documented
+ * auto-compact reserve. `null` when the raw window is unknown / non-positive /
+ * non-finite, so callers render the "unknown window" state instead of a
+ * fabricated total. Used only when the occupancy snapshot has no real
+ * `autoCompactThreshold` (see `contextFillPercent`).
  */
 export function effectiveContextWindow(
   contextWindow: number | null | undefined,
@@ -183,24 +152,67 @@ export function effectiveContextWindow(
 }
 
 /**
- * Percent of the effective (auto-compact-adjusted) context window the current
- * conversation fills. May exceed 100 once occupancy passes the compaction
- * boundary (the caller decides whether to clamp the visual width).
- *
- * Returns `null` when there is no usage yet, a zero-token conversation, or an
- * unknown window — the three cases where a percentage would be meaningless or
- * fabricated (callers fall back to the raw token-count / unknown-window state).
+ * Occupancy tokens from a snapshot, or `null` when there is no snapshot (the
+ * provider has no occupancy signal → callers render the dash state) or the
+ * snapshot is malformed. `0` is a valid answer (empty window).
  */
-export function contextFillPercent(
-  usage:
-    | Partial<Pick<ContextUsage, 'inputTokens' | 'outputTokens' | 'cacheRead' | 'cacheCreation'>>
+export function contextOccupancyTokens(
+  occupancy: Pick<ContextOccupancy, 'totalTokens'> | null | undefined,
+): number | null {
+  if (!occupancy) return null
+  const t = occupancy.totalTokens
+  return typeof t === 'number' && Number.isFinite(t) && t >= 0 ? t : null
+}
+
+/**
+ * The ceiling the meter reads 100% at, for a given occupancy snapshot.
+ *
+ * Precedence (get the real number when it exists, fall back honestly):
+ *   1. `autoCompactThreshold` (tokens) when present and auto-compact is not
+ *      known-disabled — the SDK's real compaction boundary.
+ *   2. The raw window when auto-compact is known-DISABLED — no compaction
+ *      will occur, so the hard window is the honest ceiling.
+ *   3. `effectiveContextWindow(raw window)` otherwise — the documented
+ *      reserve fallback (byok's no-threshold snapshot).
+ *
+ * The raw window is `occupancy.maxTokens` when the snapshot carries it (SDK),
+ * else the caller-resolved registry window (`resolveContextWindow`). Returns
+ * `null` when no window is known at all.
+ */
+export function contextMeterCeiling(
+  occupancy:
+    | Pick<ContextOccupancy, 'maxTokens' | 'autoCompactThreshold' | 'isAutoCompactEnabled'>
     | null
     | undefined,
-  contextWindow: number | null | undefined,
+  resolvedWindow?: number | null,
 ): number | null {
-  const tokens = contextWindowTokens(usage)
+  if (!occupancy) return null
+  const pos = (v: number | null | undefined): number | null =>
+    typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : null
+  const windowTokens = pos(occupancy.maxTokens) ?? pos(resolvedWindow)
+  const threshold = pos(occupancy.autoCompactThreshold)
+  if (threshold != null && occupancy.isAutoCompactEnabled !== false) return threshold
+  if (windowTokens == null) return null
+  if (occupancy.isAutoCompactEnabled === false) return windowTokens
+  return effectiveContextWindow(windowTokens)
+}
+
+/**
+ * Percent of the meter ceiling the conversation currently fills. May exceed
+ * 100 once occupancy passes the ceiling (the caller decides whether to clamp
+ * the visual width).
+ *
+ * Returns `null` when there is no occupancy snapshot (no-signal providers →
+ * dash), a zero-token snapshot, or no known ceiling — the cases where a
+ * percentage would be meaningless or fabricated.
+ */
+export function contextFillPercent(
+  occupancy: ContextOccupancy | null | undefined,
+  resolvedWindow?: number | null,
+): number | null {
+  const tokens = contextOccupancyTokens(occupancy)
   if (tokens == null || tokens <= 0) return null
-  const ceiling = effectiveContextWindow(contextWindow)
+  const ceiling = contextMeterCeiling(occupancy, resolvedWindow)
   if (ceiling == null) return null
   return (tokens / ceiling) * 100
 }

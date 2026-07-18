@@ -1300,6 +1300,139 @@ describe('SdkSession', () => {
     })
   })
 
+  // -- #6769: end-of-turn occupancy snapshot via getContextUsage() --
+
+  describe('context-usage occupancy snapshot (#6769)', () => {
+    function resultCapture(s) {
+      const results = []
+      s.on('result', (payload) => results.push(payload))
+      return results
+    }
+
+    function fakeQueryWithContextUsage(contextUsageResponse) {
+      const gen = (async function* () {
+        yield {
+          type: 'result',
+          session_id: 'occ-1',
+          total_cost_usd: 0.01,
+          duration_ms: 5,
+          // The BILLING aggregate — big cache_read from multi-round summing.
+          usage: { input_tokens: 3200, output_tokens: 7200, cache_read_input_tokens: 800_000, cache_creation_input_tokens: 6000 },
+        }
+      })()
+      if (contextUsageResponse !== undefined) {
+        gen.getContextUsage = async () => contextUsageResponse
+      }
+      return gen
+    }
+
+    it('queries getContextUsage() at turn end and emits the snapshot on result', async () => {
+      const s = createSession()
+      s._processReady = true
+      s._callQuery = () => fakeQueryWithContextUsage({
+        totalTokens: 110_000,
+        maxTokens: 200_000,
+        rawMaxTokens: 200_000,
+        percentage: 55,
+        autoCompactThreshold: 167_000,
+        isAutoCompactEnabled: true,
+        categories: [],
+      })
+      const results = resultCapture(s)
+      await s.sendMessage('go')
+      s.destroy()
+      assert.equal(results.length, 1)
+      // The snapshot is the SDK's occupancy number — NOT derived from the
+      // ≈816k billing aggregate sitting next to it on the same payload.
+      assert.deepEqual(results[0].contextUsage, {
+        totalTokens: 110_000,
+        maxTokens: 200_000,
+        autoCompactThreshold: 167_000,
+        isAutoCompactEnabled: true,
+        source: 'context-usage-api',
+      })
+      assert.equal(results[0].usage.cache_read_input_tokens, 800_000,
+        'billing aggregate stays untouched on usage')
+    })
+
+    it('omits contextUsage when the query lacks getContextUsage (older SDK)', async () => {
+      const s = createSession()
+      s._processReady = true
+      s._callQuery = () => fakeQueryWithContextUsage(undefined)
+      const results = resultCapture(s)
+      await s.sendMessage('go')
+      s.destroy()
+      assert.equal(results.length, 1)
+      assert.equal('contextUsage' in results[0], false)
+    })
+
+    it('omits contextUsage when getContextUsage rejects (CLI already shutting down)', async () => {
+      const s = createSession()
+      s._processReady = true
+      const gen = fakeQueryWithContextUsage(undefined)
+      gen.getContextUsage = async () => { throw new Error('control channel closed') }
+      s._callQuery = () => gen
+      const results = resultCapture(s)
+      await s.sendMessage('go')
+      s.destroy()
+      assert.equal(results.length, 1)
+      assert.equal('contextUsage' in results[0], false)
+    })
+
+    it('omits contextUsage when the response lacks a finite totalTokens', async () => {
+      const s = createSession()
+      s._processReady = true
+      s._callQuery = () => fakeQueryWithContextUsage({ totalTokens: NaN, maxTokens: 200_000 })
+      const results = resultCapture(s)
+      await s.sendMessage('go')
+      s.destroy()
+      assert.equal(results.length, 1)
+      assert.equal('contextUsage' in results[0], false)
+    })
+
+    it('coerces malformed optional fields to null without dropping the snapshot', async () => {
+      const s = createSession()
+      s._processReady = true
+      s._callQuery = () => fakeQueryWithContextUsage({
+        totalTokens: 50_000,
+        maxTokens: -1,
+        autoCompactThreshold: 'soon',
+        isAutoCompactEnabled: 'yes',
+      })
+      const results = resultCapture(s)
+      await s.sendMessage('go')
+      s.destroy()
+      assert.deepEqual(results[0].contextUsage, {
+        totalTokens: 50_000,
+        maxTokens: null,
+        autoCompactThreshold: null,
+        isAutoCompactEnabled: null,
+        source: 'context-usage-api',
+      })
+    })
+
+    it('times out a hung getContextUsage and emits result without the field', async () => {
+      const s = createSession()
+      s._processReady = true
+      // Shrink the cap so the test doesn't wait 2s.
+      const original = SdkSession.CONTEXT_USAGE_SNAPSHOT_TIMEOUT_MS
+      SdkSession.CONTEXT_USAGE_SNAPSHOT_TIMEOUT_MS = 30
+      try {
+        const gen = fakeQueryWithContextUsage(undefined)
+        // Never resolves — simulates a wedged control channel.
+        gen.getContextUsage = () => new Promise(() => {})
+        s._callQuery = () => gen
+        const results = resultCapture(s)
+        await s.sendMessage('go')
+        s.destroy()
+        assert.equal(results.length, 1, 'result still fires — the snapshot must never wedge the turn end')
+        assert.equal('contextUsage' in results[0], false)
+      } finally {
+        SdkSession.CONTEXT_USAGE_SNAPSHOT_TIMEOUT_MS = original
+      }
+    })
+  })
+
   // -- thinking keyword escalation (#4306) --
 
   describe('thinking keyword escalation (#4306)', () => {

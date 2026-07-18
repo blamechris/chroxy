@@ -10,7 +10,7 @@
  * ActiveTool entries. See ./index.ts for the stateless-handler contract.
  */
 
-import type { ActiveTool, ChatMessage, ContextUsage, ToolResultImage } from '../types'
+import type { ActiveTool, ChatMessage, ContextOccupancy, ContextUsage, ToolResultImage } from '../types'
 import { nextMessageId } from '../utils'
 import { isReplayDuplicate } from '../replay-dedup'
 import { resolveStreamId } from '../stream-id'
@@ -1287,6 +1287,14 @@ export interface ResultUsagePayload {
   sessionId: string | null
   /** Normalized usage counts, or null when the message had no `usage` object. */
   contextUsage: ContextUsage | null
+  /**
+   * #6769: occupancy snapshot parsed from the message's optional
+   * `contextUsage` wire field, or null when absent/malformed. Callers must
+   * treat null as "no new snapshot" (keep the previous per-session value),
+   * NOT as "clear the meter" — providers emit the field on every result, so
+   * a missing field means either an older server or a no-occupancy provider.
+   */
+  contextOccupancy: ContextOccupancy | null
   /** Numeric `cost` from the message, or null when missing/non-numeric. */
   lastResultCost: number | null
   /** Numeric `duration` from the message, or null when missing/non-numeric. */
@@ -1308,7 +1316,12 @@ export interface ResultUsagePayload {
  *   numeric field is coerced via `typeof === 'number' && Number.isFinite(...)`,
  *   defaulting to `0` for missing, non-number, or `NaN` inputs. Returns `null`
  *   when `usage` is missing or not a plain object (defensive: rejects strings,
- *   numbers, arrays, null).
+ *   numbers, arrays, null). This is the per-turn BILLING aggregate — never
+ *   feed it to the context meter (#6769).
+ * - `contextOccupancy` (#6769): parsed from `msg.contextUsage` (the wire
+ *   occupancy snapshot). Null when the field is absent or lacks a finite
+ *   `totalTokens` — callers keep the previous per-session snapshot in that
+ *   case rather than clearing the meter.
  * - `lastResultCost`: `typeof msg.cost === 'number' ? msg.cost : null`. The
  *   dashboard's Codex/Gemini fallback (`calculateCost(...)`) stays inline at
  *   the call site and overrides this when the helper returned null but usage
@@ -1336,6 +1349,34 @@ export function handleResultUsage(
         cacheRead: numField(usage.cache_read_input_tokens),
       }
     : null
+  // #6769: occupancy snapshot from the optional `contextUsage` wire field.
+  // Strict on `totalTokens` (a snapshot without a finite total is useless —
+  // reject the whole object rather than fabricate a 0-token meter); lenient
+  // per-field on the optional metadata. See ServerContextUsageSnapshotSchema
+  // in @chroxy/protocol for the wire contract and per-provider sources.
+  const rawOccupancy = msg.contextUsage
+  const occ =
+    rawOccupancy !== null &&
+    typeof rawOccupancy === 'object' &&
+    !Array.isArray(rawOccupancy)
+      ? (rawOccupancy as Record<string, unknown>)
+      : null
+  let contextOccupancy: ContextOccupancy | null = null
+  if (occ && typeof occ.totalTokens === 'number' && Number.isFinite(occ.totalTokens) && occ.totalTokens >= 0) {
+    const posOrNull = (v: unknown): number | null =>
+      typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : null
+    contextOccupancy = {
+      totalTokens: occ.totalTokens,
+      maxTokens: posOrNull(occ.maxTokens),
+      autoCompactThreshold: posOrNull(occ.autoCompactThreshold),
+      isAutoCompactEnabled:
+        typeof occ.isAutoCompactEnabled === 'boolean' ? occ.isAutoCompactEnabled : null,
+      source:
+        occ.source === 'context-usage-api' || occ.source === 'final-round-prompt'
+          ? occ.source
+          : null,
+    }
+  }
   const lastResultCost =
     typeof msg.cost === 'number' ? msg.cost : null
   const lastResultDuration =
@@ -1344,6 +1385,7 @@ export function handleResultUsage(
   return {
     sessionId: rawSessionId || activeSessionId,
     contextUsage,
+    contextOccupancy,
     lastResultCost,
     lastResultDuration,
   }

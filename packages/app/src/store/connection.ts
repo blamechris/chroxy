@@ -31,6 +31,8 @@ export type {
   ToolResultImage,
   ChatMessage,
   ContextUsage,
+  // #6769: occupancy snapshot type (the context meter's only honest input).
+  ContextOccupancy,
   ModelInfo,
   SessionInfo,
   // #4213: typed permission-mode shape (includes optional `description`).
@@ -81,6 +83,7 @@ import type {
   ConnectionContext,
   ConnectionState,
   ContextUsage,
+  ContextOccupancy,
   MessageAttachment,
   SavedConnection,
   SessionInfo,
@@ -347,6 +350,10 @@ export const selectPermissionMode = (s: ConnectionState): string | null =>
   activeSession(s)?.permissionMode ?? null;
 export const selectContextUsage = (s: ConnectionState): ContextUsage | null =>
   activeSession(s)?.contextUsage ?? null;
+// #6769: occupancy snapshot — the context meter's only input (billing
+// contextUsage above must never feed the meter).
+export const selectContextOccupancy = (s: ConnectionState): ContextOccupancy | null =>
+  activeSession(s)?.contextOccupancy ?? null;
 export const selectLastResultCost = (s: ConnectionState): number | null =>
   activeSession(s)?.lastResultCost ?? null;
 export const selectLastResultDuration = (s: ConnectionState): number | null =>

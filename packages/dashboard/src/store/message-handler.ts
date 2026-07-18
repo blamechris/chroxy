@@ -1008,6 +1008,7 @@ export function updateSession(sessionId: string, updater: (session: SessionState
     if ('activeModel' in patch) flatPatch.activeModel = patch.activeModel;
     if ('permissionMode' in patch) flatPatch.permissionMode = patch.permissionMode;
     if ('contextUsage' in patch) flatPatch.contextUsage = patch.contextUsage;
+    if ('contextOccupancy' in patch) flatPatch.contextOccupancy = patch.contextOccupancy;
     if ('lastResultCost' in patch) flatPatch.lastResultCost = patch.lastResultCost;
     if ('lastResultDuration' in patch) flatPatch.lastResultDuration = patch.lastResultDuration;
     if ('isIdle' in patch) flatPatch.isIdle = patch.isIdle;
@@ -1804,6 +1805,7 @@ function handleSessionSwitched(msg: Record<string, unknown>, get: MsgGet, set: M
       activeModel: ss.activeModel,
       permissionMode: ss.permissionMode,
       contextUsage: ss.contextUsage,
+      contextOccupancy: ss.contextOccupancy,
       lastResultCost: ss.lastResultCost,
       lastResultDuration: ss.lastResultDuration,
       isIdle: ss.isIdle,
@@ -3931,6 +3933,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
             patch.activeModel = ss.activeModel;
             patch.permissionMode = ss.permissionMode;
             patch.contextUsage = ss.contextUsage;
+            patch.contextOccupancy = ss.contextOccupancy;
             patch.lastResultCost = ss.lastResultCost;
             patch.lastResultDuration = ss.lastResultDuration;
             patch.isIdle = ss.isIdle;
@@ -3941,6 +3944,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
             patch.activeModel = null;
             patch.permissionMode = null;
             patch.contextUsage = null;
+            patch.contextOccupancy = null;
             patch.lastResultCost = null;
             patch.lastResultDuration = null;
             patch.isIdle = true;
@@ -4540,6 +4544,14 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       const resultPatch = {
         streamingMessageId: null as string | null,
         contextUsage: normalized.contextUsage,
+        // #6769: the occupancy snapshot PERSISTS across turns — only a result
+        // that carries a new snapshot moves it (including DOWN after a
+        // compaction). A result without one (older server, no-signal
+        // provider, transient getContextUsage failure) keeps the last value
+        // rather than blanking the meter.
+        ...(normalized.contextOccupancy
+          ? { contextOccupancy: normalized.contextOccupancy }
+          : {}),
         lastResultCost: resolvedCost,
         lastResultDuration: normalized.lastResultDuration,
       };
@@ -5171,6 +5183,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
             patch.activeModel = ss.activeModel;
             patch.permissionMode = ss.permissionMode;
             patch.contextUsage = ss.contextUsage;
+            patch.contextOccupancy = ss.contextOccupancy;
             patch.lastResultCost = ss.lastResultCost;
             patch.lastResultDuration = ss.lastResultDuration;
             patch.isIdle = ss.isIdle;
@@ -5182,6 +5195,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
             patch.activeModel = null;
             patch.permissionMode = null;
             patch.contextUsage = null;
+            patch.contextOccupancy = null;
             patch.lastResultCost = null;
             patch.lastResultDuration = null;
             patch.isIdle = true;

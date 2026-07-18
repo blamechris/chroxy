@@ -31,16 +31,16 @@ export interface FooterBarProps {
   cost?: number
   context?: string
   contextPercent?: number | null
-  /** #4205: raw (uncached) input tokens for the most-recent turn (tooltip breakdown). */
+  /** #4205: raw input tokens billed for the most-recent turn (tooltip breakdown). */
   inputTokens?: number
-  /** #4205: raw output tokens for the most-recent turn (drives the tooltip breakdown). */
+  /** #4205: raw output tokens billed for the most-recent turn (tooltip breakdown). */
   outputTokens?: number
   /**
-   * #6769: cached history tokens currently in the window (cache_read +
-   * cache_creation). Threaded to the tooltip so the hover breakdown explains
-   * that most of the cumulative fill is cached conversation history.
+   * #6769: true when the occupancy snapshot is byok's final-round estimate
+   * rather than the SDK's authoritative context-usage API — the tooltip
+   * flags it.
    */
-  cachedTokens?: number
+  contextEstimated?: boolean
   isBusy?: boolean
   agentCount?: number
   onShowQr?: () => void
@@ -115,7 +115,7 @@ export function FooterBar({
   contextPercent,
   inputTokens,
   outputTokens,
-  cachedTokens,
+  contextEstimated,
   isBusy,
   agentCount,
   onShowQr,
@@ -157,15 +157,14 @@ export function FooterBar({
   // #4204 Copilot review: compute each chip's tooltip once so the
   // `title` + `aria-label` mirror pair stays in lockstep.
   const costTip = costTooltip({ cost: cost ?? undefined, provider })
-  // #6769: thread the cumulative occupancy split (new input/output + cached
-  // history) through so the chip's tooltip explains cumulative window fill
-  // rather than the pre-#6769 per-turn input/output.
+  // #6769: occupancy-driven tooltip; the last-turn billing in/out counts ride
+  // along as a clearly-labelled secondary breakdown.
   const contextTip = contextTooltip({
     percent: contextPercent ?? null,
     contextSummary: context,
     inputTokens,
     outputTokens,
-    cachedTokens,
+    estimated: contextEstimated,
   })
   const modelTip = modelTooltip({ model, contextWindow })
   const agentTip = agentCountTooltip(agentCount)

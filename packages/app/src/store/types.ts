@@ -20,6 +20,8 @@ export type {
   ChatMessage,
   SavedConnection,
   ContextUsage,
+  // #6769: occupancy snapshot type (the context meter's only honest input).
+  ContextOccupancy,
   InputSettings,
   ModelInfo,
   SessionInfo,
@@ -65,6 +67,7 @@ import type {
   Checkpoint,
   ConnectedClient,
   ContextUsage,
+  ContextOccupancy,
   ConversationSummary,
   CustomAgent,
   DevPreview,

@@ -11,21 +11,26 @@ import {
   isClaudeBackedProvider,
   resolveContextWindow,
   CLAUDE_BACKED_DOCKER_IDS,
-  contextWindowTokens,
+  contextOccupancyTokens,
+  contextMeterCeiling,
   effectiveContextWindow,
   contextFillPercent,
   CONTEXT_AUTO_COMPACT_RESERVE,
 } from './context-window'
+import { handleResultUsage } from './handlers/stream'
+import type { ContextOccupancy } from './types'
 import { DEFAULT_CONTEXT_WINDOW } from './types'
 
-/** Shorthand for a ContextUsage-shaped object in these tests. */
-function usage(
-  inputTokens: number,
-  outputTokens: number,
-  cacheRead = 0,
-  cacheCreation = 0,
-) {
-  return { inputTokens, outputTokens, cacheRead, cacheCreation }
+/** Shorthand for a ContextOccupancy snapshot in these tests. */
+function snapshot(overrides: Partial<ContextOccupancy> = {}): ContextOccupancy {
+  return {
+    totalTokens: 0,
+    maxTokens: null,
+    autoCompactThreshold: null,
+    isAutoCompactEnabled: null,
+    source: null,
+    ...overrides,
+  }
 }
 
 describe('isClaudeBackedProvider (#5424)', () => {
@@ -112,64 +117,222 @@ describe('resolveContextWindow (#5424)', () => {
 })
 
 // ---------------------------------------------------------------------------
-// #6769 — cumulative context-window fill (occupancy).
+// #6769 — context-window fill from an OCCUPANCY SNAPSHOT, never from billing.
 //
-// The meter must read the current conversation size, which — under prompt
-// caching — is input + output + cache_read + cache_creation of the MOST RECENT
-// result, not input + output (which is just the new message + reply and reads
-// near-empty mid-conversation). See the module docblock for the full semantic
-// model and its evidence.
+// A result's `usage` is the per-turn billing aggregate summed across every
+// agent-loop round (byok-session.js #4056 accumulates cache_read per round;
+// the SDK/CLI forward the driver's whole-turn aggregate). The meter reads the
+// `contextUsage` snapshot instead. See the module docblock for the model.
 // ---------------------------------------------------------------------------
 
-describe('contextWindowTokens (#6769)', () => {
-  it('sums input + output + cache_read + cache_creation (cumulative fill)', () => {
-    // A mid-conversation Claude turn: tiny new input, big cache_read history.
-    expect(contextWindowTokens(usage(500, 2_000, 90_000, 3_000))).toBe(95_500)
+describe('multi-round turn: billing aggregate over-reads, snapshot does not (#6769)', () => {
+  // A realistic 8-round coding turn on a ~100k conversation. Each round
+  // re-reads the history from cache, so the BILLING aggregate's cache_read is
+  // ≈8× the real occupancy. This fixture pins the failure mode that sank the
+  // first cut of #6769 (which read the aggregate as occupancy).
+  const ROUNDS = 8
+  const HISTORY = 100_000
+  const WINDOW = 200_000
+  // What the wire `result.usage` actually carries after byok/sdk accumulation:
+  const billingAggregate = {
+    input_tokens: ROUNDS * 400,            // fresh tokens per round
+    output_tokens: ROUNDS * 900,           // reply + tool_use blocks per round
+    cache_read_input_tokens: ROUNDS * HISTORY, // history re-read EVERY round
+    cache_creation_input_tokens: 6_000,
+  }
+  // What the SDK's getContextUsage() reports after the same turn:
+  const occupancySnapshot = snapshot({
+    totalTokens: 110_000,
+    maxTokens: WINDOW,
+    autoCompactThreshold: 167_000,
+    isAutoCompactEnabled: true,
+    source: 'context-usage-api',
   })
 
-  it('degrades to input + output when cache fields are absent (0)', () => {
-    // Providers that omit cache tokens (handleResultUsage defaults them to 0)
-    // must fall back to input + output automatically — no special-casing.
-    expect(contextWindowTokens(usage(40_000, 8_000, 0, 0))).toBe(48_000)
+  it('the OLD model (sum the aggregate fields) reads several times the window — pinned as the bug', () => {
+    const aggregateTotal =
+      billingAggregate.input_tokens +
+      billingAggregate.output_tokens +
+      billingAggregate.cache_read_input_tokens +
+      billingAggregate.cache_creation_input_tokens
+    // ≈816k "occupancy" on a 200k window — the meter would clamp 100% red on
+    // essentially every real multi-tool turn.
+    expect(aggregateTotal).toBeGreaterThan(WINDOW * 4)
+    // The aggregate over-reads the true occupancy by ≈ the round count.
+    expect(aggregateTotal / occupancySnapshot.totalTokens).toBeGreaterThan(ROUNDS * 0.8)
   })
 
-  it('returns null when usage is null/undefined (pre-first-turn)', () => {
-    expect(contextWindowTokens(null)).toBe(null)
-    expect(contextWindowTokens(undefined)).toBe(null)
+  it('the NEW model (snapshot) reads the true occupancy and a sane percent', () => {
+    expect(contextOccupancyTokens(occupancySnapshot)).toBe(110_000)
+    const pct = contextFillPercent(occupancySnapshot)
+    // 110k / 167k threshold ≈ 66% — nowhere near the pinned-red 100%.
+    expect(pct).toBeCloseTo((110_000 / 167_000) * 100, 5)
+    expect(pct!).toBeLessThan(100)
   })
 
-  it('returns 0 for an all-zero usage object (empty turn)', () => {
-    expect(contextWindowTokens(usage(0, 0, 0, 0))).toBe(0)
+  it('handleResultUsage NEVER derives occupancy from the billing usage field', () => {
+    // A result carrying ONLY the billing aggregate (no contextUsage wire
+    // field) must yield contextOccupancy: null — the no-signal dash state,
+    // not a fabricated ≈816k meter.
+    const payload = handleResultUsage(
+      { type: 'result', usage: billingAggregate, sessionId: 's1' },
+      's1',
+    )
+    expect(payload.contextUsage).not.toBeNull() // billing still parsed for cost
+    expect(payload.contextOccupancy).toBeNull() // but occupancy is unknown
+  })
+})
+
+describe('handleResultUsage occupancy parsing (#6769)', () => {
+  it('parses a full SDK snapshot from the contextUsage wire field', () => {
+    const payload = handleResultUsage(
+      {
+        type: 'result',
+        usage: { input_tokens: 1, output_tokens: 1 },
+        contextUsage: {
+          totalTokens: 110_000,
+          maxTokens: 200_000,
+          autoCompactThreshold: 167_000,
+          isAutoCompactEnabled: true,
+          source: 'context-usage-api',
+        },
+        sessionId: 's1',
+      },
+      's1',
+    )
+    expect(payload.contextOccupancy).toEqual({
+      totalTokens: 110_000,
+      maxTokens: 200_000,
+      autoCompactThreshold: 167_000,
+      isAutoCompactEnabled: true,
+      source: 'context-usage-api',
+    })
   })
 
-  it('tolerates a partial object missing the cache fields (degrades to input+output)', () => {
-    // A provider / persisted-cache shape that predates the cache fields must
-    // NOT poison the total to NaN — it degrades to input + output.
-    expect(contextWindowTokens({ inputTokens: 12_000, outputTokens: 500 })).toBe(12_500)
+  it('parses a minimal byok final-round snapshot (total + source only)', () => {
+    const payload = handleResultUsage(
+      {
+        type: 'result',
+        contextUsage: { totalTokens: 42_000, source: 'final-round-prompt' },
+        sessionId: 's1',
+      },
+      's1',
+    )
+    expect(payload.contextOccupancy).toEqual({
+      totalTokens: 42_000,
+      maxTokens: null,
+      autoCompactThreshold: null,
+      isAutoCompactEnabled: null,
+      source: 'final-round-prompt',
+    })
   })
 
-  it('coerces a non-finite field to 0 rather than poisoning the whole total', () => {
-    expect(contextWindowTokens(usage(NaN, 500, 0, 0))).toBe(500)
-    expect(contextWindowTokens(usage(1_000, 500, Infinity, 0))).toBe(1_500)
+  it('rejects a snapshot without a finite non-negative totalTokens', () => {
+    for (const totalTokens of [NaN, Infinity, -1, '110000', undefined, null]) {
+      const payload = handleResultUsage(
+        { type: 'result', contextUsage: { totalTokens }, sessionId: 's1' },
+        's1',
+      )
+      expect(payload.contextOccupancy, `totalTokens=${String(totalTokens)}`).toBeNull()
+    }
   })
 
-  it('follows a compaction DOWN — a smaller latest turn yields a smaller total', () => {
-    // Pre-compaction: 150k of history in cache_read.
-    const before = contextWindowTokens(usage(500, 1_000, 150_000, 0))
-    // After Claude compacts, the next turn re-reports a much smaller history.
-    const after = contextWindowTokens(usage(500, 1_000, 20_000, 0))
-    expect(before).toBe(151_500)
-    expect(after).toBe(21_500)
-    // The meter reads the LATEST turn, so it drops rather than clamping to a
-    // per-session max (#6768 compaction markers are a separate concern).
+  it('coerces malformed optional metadata to null without rejecting the snapshot', () => {
+    const payload = handleResultUsage(
+      {
+        type: 'result',
+        contextUsage: {
+          totalTokens: 50_000,
+          maxTokens: -5,
+          autoCompactThreshold: 'soon',
+          isAutoCompactEnabled: 'yes',
+          source: 'made-up-source',
+        },
+        sessionId: 's1',
+      },
+      's1',
+    )
+    expect(payload.contextOccupancy).toEqual({
+      totalTokens: 50_000,
+      maxTokens: null,
+      autoCompactThreshold: null,
+      isAutoCompactEnabled: null,
+      source: null,
+    })
+  })
+
+  it('returns null occupancy when the wire field is absent or not an object', () => {
+    for (const contextUsage of [undefined, null, 'big', 42, ['x']]) {
+      const payload = handleResultUsage(
+        { type: 'result', usage: {}, contextUsage, sessionId: 's1' },
+        's1',
+      )
+      expect(payload.contextOccupancy).toBeNull()
+    }
+  })
+})
+
+describe('contextOccupancyTokens (#6769)', () => {
+  it('returns the snapshot total; null for no snapshot (dash state)', () => {
+    expect(contextOccupancyTokens(snapshot({ totalTokens: 95_500 }))).toBe(95_500)
+    expect(contextOccupancyTokens(null)).toBe(null)
+    expect(contextOccupancyTokens(undefined)).toBe(null)
+  })
+
+  it('returns 0 for an empty-window snapshot and null for a malformed one', () => {
+    expect(contextOccupancyTokens(snapshot({ totalTokens: 0 }))).toBe(0)
+    expect(contextOccupancyTokens(snapshot({ totalTokens: NaN }))).toBe(null)
+    expect(contextOccupancyTokens(snapshot({ totalTokens: -1 }))).toBe(null)
+  })
+
+  it('a later smaller snapshot simply reads smaller — compaction follows down', () => {
+    // The snapshot model needs no special compaction handling: the
+    // post-compaction snapshot IS smaller. (#6768 markers are separate.)
+    const before = contextOccupancyTokens(snapshot({ totalTokens: 151_000 }))
+    const after = contextOccupancyTokens(snapshot({ totalTokens: 21_500 }))
     expect(after!).toBeLessThan(before!)
   })
 })
 
-describe('effectiveContextWindow (#6769)', () => {
-  it('reserves the auto-compact headroom below the raw window', () => {
-    // Claude Code compacts BEFORE the hard window, so the meter reads 100% at
-    // the compaction boundary, not the raw ceiling.
+describe('contextMeterCeiling (#6769)', () => {
+  it('prefers the real autoCompactThreshold when present and enabled', () => {
+    const occ = snapshot({
+      totalTokens: 1, maxTokens: 200_000,
+      autoCompactThreshold: 167_000, isAutoCompactEnabled: true,
+    })
+    expect(contextMeterCeiling(occ)).toBe(167_000)
+    // The reserve fallback is NOT applied on top of the real threshold.
+    expect(contextMeterCeiling(occ)).not.toBe(effectiveContextWindow(167_000))
+  })
+
+  it('uses the RAW window when auto-compact is known-disabled', () => {
+    const occ = snapshot({
+      totalTokens: 1, maxTokens: 200_000,
+      autoCompactThreshold: 167_000, isAutoCompactEnabled: false,
+    })
+    // Threshold is ignored (no compaction will fire); hard window is honest.
+    expect(contextMeterCeiling(occ)).toBe(200_000)
+  })
+
+  it('falls back to the documented reserve when no threshold exists (byok)', () => {
+    const occ = snapshot({ totalTokens: 1, source: 'final-round-prompt' })
+    expect(contextMeterCeiling(occ, 200_000)).toBe(effectiveContextWindow(200_000))
+  })
+
+  it('prefers the snapshot maxTokens over the caller-resolved window', () => {
+    const occ = snapshot({ totalTokens: 1, maxTokens: 1_000_000 })
+    expect(contextMeterCeiling(occ, 200_000)).toBe(effectiveContextWindow(1_000_000))
+  })
+
+  it('returns null when no window is known at all', () => {
+    expect(contextMeterCeiling(snapshot({ totalTokens: 1 }))).toBe(null)
+    expect(contextMeterCeiling(snapshot({ totalTokens: 1 }), null)).toBe(null)
+    expect(contextMeterCeiling(null, 200_000)).toBe(null)
+  })
+})
+
+describe('effectiveContextWindow (#6769 fallback)', () => {
+  it('reserves the documented headroom below the raw window', () => {
     expect(effectiveContextWindow(200_000)).toBe(
       Math.round(200_000 * (1 - CONTEXT_AUTO_COMPACT_RESERVE)),
     )
@@ -192,34 +355,37 @@ describe('effectiveContextWindow (#6769)', () => {
 })
 
 describe('contextFillPercent (#6769)', () => {
-  it('meters cumulative occupancy against the effective (auto-compact) ceiling', () => {
-    // 92k of history + new tokens against a 200k window whose effective
-    // ceiling is 184k → ~50%.
-    const pct = contextFillPercent(usage(2_000, 1_000, 89_000, 0), 200_000)
+  it('meters an SDK snapshot against its real threshold', () => {
+    const occ = snapshot({
+      totalTokens: 110_000, maxTokens: 200_000,
+      autoCompactThreshold: 167_000, isAutoCompactEnabled: true,
+      source: 'context-usage-api',
+    })
+    expect(contextFillPercent(occ)).toBeCloseTo((110_000 / 167_000) * 100, 5)
+  })
+
+  it('meters a byok snapshot against the reserve-adjusted registry window', () => {
+    const occ = snapshot({ totalTokens: 92_000, source: 'final-round-prompt' })
     const ceiling = effectiveContextWindow(200_000)!
-    expect(pct).toBeCloseTo((92_000 / ceiling) * 100, 5)
+    expect(contextFillPercent(occ, 200_000)).toBeCloseTo((92_000 / ceiling) * 100, 5)
   })
 
-  it('includes cache tokens — a cached conversation is NOT near-empty', () => {
-    // The exact bug from #6769: input+output alone reads ~1% while the window
-    // is actually ~half full because the history lives in cache_read.
-    const naive = contextFillPercent(usage(1_000, 1_000, 0, 0), 200_000)
-    const real = contextFillPercent(usage(1_000, 1_000, 90_000, 0), 200_000)
-    expect(naive).toBeLessThan(2)
-    expect(real).toBeGreaterThan(40)
+  it('can exceed 100% once occupancy passes the ceiling', () => {
+    const occ = snapshot({
+      totalTokens: 180_000, maxTokens: 200_000,
+      autoCompactThreshold: 167_000, isAutoCompactEnabled: true,
+    })
+    expect(contextFillPercent(occ)!).toBeGreaterThan(100)
   })
 
-  it('can exceed 100% once occupancy passes the auto-compact ceiling', () => {
-    const pct = contextFillPercent(usage(0, 0, 195_000, 0), 200_000)
-    expect(pct).toBeGreaterThan(100)
+  it('returns null when no window/ceiling is known (no fabricated fraction)', () => {
+    expect(contextFillPercent(snapshot({ totalTokens: 50_000 }))).toBe(null)
+    expect(contextFillPercent(snapshot({ totalTokens: 50_000 }), null)).toBe(null)
   })
 
-  it('returns null when the window is unknown (no fabricated fraction)', () => {
-    expect(contextFillPercent(usage(50_000, 5_000, 0, 0), null)).toBe(null)
-  })
-
-  it('returns null for no usage or a zero-token conversation', () => {
+  it('returns null for no snapshot (dash state) or an empty snapshot', () => {
     expect(contextFillPercent(null, 200_000)).toBe(null)
-    expect(contextFillPercent(usage(0, 0, 0, 0), 200_000)).toBe(null)
+    expect(contextFillPercent(undefined, 200_000)).toBe(null)
+    expect(contextFillPercent(snapshot({ totalTokens: 0 }), 200_000)).toBe(null)
   })
 })

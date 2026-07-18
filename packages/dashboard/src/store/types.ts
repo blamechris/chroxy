@@ -34,6 +34,8 @@ export type {
   EvaluatorRewriteMeta,
   SavedConnection,
   ContextUsage,
+  // #6769: occupancy snapshot type (the context meter's only honest input).
+  ContextOccupancy,
   InputSettings,
   ModelInfo,
   SessionInfo,
@@ -94,6 +96,7 @@ import type {
   ConnectedClient,
   ConnectionPhase,
   ContextUsage,
+  ContextOccupancy,
   ConversationSummary,
   CustomAgent,
   DiffFile,
@@ -1103,6 +1106,8 @@ export interface ConnectionState {
   activeModel: string | null;
   permissionMode: string | null;
   contextUsage: ContextUsage | null;
+  // #6769: occupancy snapshot mirror for the active session (meter input).
+  contextOccupancy: ContextOccupancy | null;
   lastResultCost: number | null;
   lastResultDuration: number | null;
   isIdle: boolean;

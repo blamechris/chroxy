@@ -76,11 +76,13 @@ export interface AppHeaderProps {
   cost?: number
   context?: string
   contextPercent: number | null
-  // #6769: cumulative window occupancy (input + output + cache) — drives the
-  // header meter's `used / total` label so it matches the cache-aware percent.
+  // #6769: window occupancy in tokens from the provider's snapshot — drives
+  // the header meter's `used / total` label. Absent = no occupancy signal
+  // (the meter hides; honest dash state).
   contextTokens?: number
-  // #6769: cached history tokens (cache_read + cache_creation) for the tooltip.
-  cachedTokens?: number
+  // #6769: true when the snapshot is byok's final-round estimate rather than
+  // the SDK's authoritative context-usage API — the tooltip says so.
+  contextEstimated?: boolean
   inputTokens?: number
   outputTokens?: number
   contextWindow?: number
@@ -299,7 +301,7 @@ export function AppHeader(props: AppHeaderProps) {
           context={props.context}
           contextPercent={props.contextPercent}
           contextTokens={props.contextTokens}
-          cachedTokens={props.cachedTokens}
+          contextEstimated={props.contextEstimated}
           inputTokens={props.inputTokens}
           outputTokens={props.outputTokens}
           // #5065: surface the absolute `used / total` token meter in

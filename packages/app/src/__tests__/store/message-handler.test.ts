@@ -3480,6 +3480,72 @@ describe('result handler', () => {
     });
     expect(ss.lastResultCost).toBe(0.002);
     expect(ss.lastResultDuration).toBe(1500);
+    // #6769: no `contextUsage` wire field on this result → no occupancy
+    // snapshot (billing usage must never fabricate one).
+    expect(ss.contextOccupancy).toBeNull();
+  });
+
+  // #6769: the occupancy snapshot persists across turns — a result carrying
+  // one sets it, and a later result WITHOUT one keeps the previous snapshot
+  // instead of blanking the meter.
+  it('sets contextOccupancy from the wire snapshot and persists it across snapshot-less results (#6769)', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: { ...createEmptySessionState() } },
+      sessionNotifications: [],
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'result',
+      sessionId: 's1',
+      usage: { input_tokens: 100, output_tokens: 50 },
+      contextUsage: {
+        totalTokens: 110_000,
+        maxTokens: 200_000,
+        autoCompactThreshold: 167_000,
+        isAutoCompactEnabled: true,
+        source: 'context-usage-api',
+      },
+      cost: 0.002,
+      duration: 1500,
+    });
+    expect(store.getState().sessionStates.s1.contextOccupancy).toEqual({
+      totalTokens: 110_000,
+      maxTokens: 200_000,
+      autoCompactThreshold: 167_000,
+      isAutoCompactEnabled: true,
+      source: 'context-usage-api',
+    });
+
+    // A later result with billing usage but NO snapshot keeps the meter.
+    _testMessageHandler.handle({
+      type: 'result',
+      sessionId: 's1',
+      usage: { input_tokens: 40, output_tokens: 20 },
+      cost: 0.001,
+      duration: 900,
+    });
+    expect(store.getState().sessionStates.s1.contextOccupancy).toEqual({
+      totalTokens: 110_000,
+      maxTokens: 200_000,
+      autoCompactThreshold: 167_000,
+      isAutoCompactEnabled: true,
+      source: 'context-usage-api',
+    });
+
+    // A post-compaction snapshot steps the value DOWN.
+    _testMessageHandler.handle({
+      type: 'result',
+      sessionId: 's1',
+      usage: { input_tokens: 10, output_tokens: 5 },
+      contextUsage: { totalTokens: 40_000, maxTokens: 200_000, autoCompactThreshold: 167_000, isAutoCompactEnabled: true, source: 'context-usage-api' },
+      cost: 0.001,
+      duration: 800,
+    });
+    expect(store.getState().sessionStates.s1.contextOccupancy?.totalTokens).toBe(40_000);
   });
 });
 

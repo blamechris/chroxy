@@ -102,8 +102,9 @@ describe('SessionScreen component structure', () => {
     expect(src).toMatch(/export function formatTranscript/)
   })
 
-  test('shows context usage information', () => {
-    expect(src).toMatch(/contextUsage/)
+  test('shows context occupancy information (#6769)', () => {
+    // #6769: the meter reads the occupancy snapshot, not the billing usage.
+    expect(src).toMatch(/contextOccupancy/)
   })
 
   test('shows session cost tracking', () => {

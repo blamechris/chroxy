@@ -191,23 +191,13 @@ describe('tokenChipTooltip (#4205)', () => {
     expect(t).toContain('1.5k tokens')
   })
 
-  // #6769: under prompt caching the conversation history dominates, so the
-  // breakdown surfaces it as the leading "cached history" term and folds it
-  // into the total (the cumulative window occupancy).
-  it('surfaces cached history as the leading term when cachedTokens > 0 (#6769)', () => {
-    const t = tokenChipTooltip({ inputTokens: 500, outputTokens: 2000, cachedTokens: 90000 })
-    expect(t).toContain('90.0k cached history')
-    expect(t).toContain('500 new input')
-    expect(t).toContain('2.0k output')
-    // total = 90k + 500 + 2k = 92.5k
-    expect(t).toContain('92.5k tokens')
-  })
-
-  it('falls back to plain input + output when cachedTokens is 0 / absent (#6769)', () => {
-    const zero = tokenChipTooltip({ inputTokens: 1200, outputTokens: 8000, cachedTokens: 0 })
-    expect(zero).not.toMatch(/cached history/i)
-    expect(zero).toContain('1.2k input')
-    expect(zero).toContain('9.2k tokens')
+  // #6769: the breakdown is the last turn's BILLING counts (summed across the
+  // turn's agent-loop rounds) — labelled as billing so it can't be mistaken
+  // for window occupancy, which the contextTooltip lead covers separately.
+  it('labels the breakdown as last-turn billing, not window fill (#6769)', () => {
+    const t = tokenChipTooltip({ inputTokens: 1200, outputTokens: 8000 })
+    expect(t).toMatch(/last turn billed/i)
+    expect(t).not.toMatch(/cached history|occupan|window/i)
   })
 })
 
@@ -254,19 +244,27 @@ describe('contextTooltip + token breakdown (#4205)', () => {
     expect(t).toMatch(/no context usage yet|first turn/i)
   })
 
-  // #6769: when cachedTokens is threaded through, the appended breakdown must
-  // reflect the cumulative fill (cached history dominating), not just the
-  // tiny per-turn input/output.
-  it('appends a cache-aware breakdown when cachedTokens is present (#6769)', () => {
+  // #6769: byok's final-round snapshot is an estimate — the tooltip must say
+  // so; the SDK's authoritative snapshot must not carry the caveat.
+  it('flags a byok final-round snapshot as estimated (#6769)', () => {
     const t = contextTooltip({
       percent: 50,
-      contextSummary: '92k / 200k tokens',
-      inputTokens: 500,
-      outputTokens: 2000,
-      cachedTokens: 90000,
+      contextSummary: '92.0k tokens',
+      estimated: true,
     })
     expect(t).toContain('50%')
-    expect(t).toContain('90.0k cached history')
-    expect(t).toContain('92.5k tokens')
+    expect(t).toMatch(/estimated from the last api round/i)
+  })
+
+  it('omits the estimate caveat for the SDK snapshot (#6769)', () => {
+    const t = contextTooltip({ percent: 50, contextSummary: '110.0k tokens' })
+    expect(t).not.toMatch(/estimated/i)
+  })
+
+  it('describes occupancy that grows and steps down after compaction (#6769)', () => {
+    const t = contextTooltip({ percent: 66, contextSummary: '110.0k tokens' })
+    expect(t).toMatch(/occup/i)
+    expect(t).toMatch(/steps down after a compaction/i)
+    expect(t).not.toMatch(/per[- ]turn|resets each turn/i)
   })
 })

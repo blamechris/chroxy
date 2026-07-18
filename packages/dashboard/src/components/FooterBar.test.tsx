@@ -217,22 +217,20 @@ describe('FooterBar', () => {
       expect(title).not.toMatch(/input \+/)
     })
 
-    // #6769: when cachedTokens is wired through, the breakdown surfaces the
-    // cached conversation history as the dominant term (not the per-turn input).
-    it('surfaces cached history in the breakdown when cachedTokens is present (#6769)', () => {
+    // #6769: byok's final-round snapshot is an estimate — the chip tooltip
+    // says so; the SDK's authoritative snapshot carries no caveat.
+    it('flags the byok estimate in the context tooltip (#6769)', () => {
       const { container } = render(
         <FooterBar
           {...baseProps}
-          context="92k tokens"
+          context="92.0k tokens"
           contextPercent={50}
-          inputTokens={500}
-          outputTokens={2000}
-          cachedTokens={90000}
+          contextEstimated
         />,
       )
       const title = container.querySelector('.footer-context')!.getAttribute('title') ?? ''
-      expect(title).toContain('90.0k cached history')
-      expect(title).toContain('92.5k tokens')
+      expect(title).toContain('50%')
+      expect(title).toMatch(/estimated from the last api round/i)
     })
   })
 

@@ -74,6 +74,43 @@ export class ClaudeByokSession extends BaseSession {
     return 'Claude (API key — BYOK)'
   }
 
+  /**
+   * #6769: build the end-of-turn context-window OCCUPANCY snapshot from the
+   * FINAL agent-loop round's individual usage.
+   *
+   * That round's `input_tokens + cache_read_input_tokens +
+   * cache_creation_input_tokens` is exactly the prompt the API was last sent
+   * — i.e. the conversation's current size — so it is a true occupancy
+   * snapshot. The summed `turnUsage` billing aggregate is NOT (it re-counts
+   * the history once per round; a 5-round turn over-reads ≈5× — the #6816
+   * review finding). Output tokens are deliberately excluded (the coordinator
+   * contract pins the snapshot to the prompt side; the next turn's snapshot
+   * absorbs the reply), as is subagent usage (a child Task runs in its own
+   * separate window).
+   *
+   * Returns null when the turn produced no usable round usage (error before
+   * the first finalMessage(), or an endpoint that reports no usage — e.g. an
+   * anthropic-compatible server that omits the field). The result then emits
+   * WITHOUT `contextUsage` and clients keep their previous snapshot / dash.
+   *
+   * Static + pure so tests can pin the arithmetic without a live session;
+   * subclasses that reuse the agent loop (docker-byok, deepseek, ollama,
+   * anthropic-compatible) inherit it — wherever their endpoint reports real
+   * per-round usage, the snapshot is equally honest.
+   *
+   * @param {object|null} roundUsage — the final round's `final.usage`
+   * @returns {{totalTokens: number, source: 'final-round-prompt'}|null}
+   */
+  static _buildFinalRoundContextUsage(roundUsage) {
+    if (!roundUsage || typeof roundUsage !== 'object') return null
+    const totalTokens =
+      (Number(roundUsage.input_tokens) || 0) +
+      (Number(roundUsage.cache_read_input_tokens) || 0) +
+      (Number(roundUsage.cache_creation_input_tokens) || 0)
+    if (!Number.isFinite(totalTokens) || totalTokens <= 0) return null
+    return { totalTokens, source: 'final-round-prompt' }
+  }
+
   static get dataDir() {
     // BYOK does NOT depend on ~/.claude — no claude binary, no OAuth.
     // Returning null tells getProviderDataDirs() to skip this provider
@@ -537,6 +574,14 @@ export class ClaudeByokSession extends BaseSession {
     // dashboard shows "n/a" rather than a misleading $0.00 — distinct from a
     // genuine zero-cost turn.
     let turnCostKnown = false
+    // #6769: the FINAL round's individual usage — a true prompt-size SNAPSHOT
+    // (that round's input + cache_read + cache_creation is exactly the
+    // conversation as last sent to the API), unlike the summed `turnUsage`
+    // above which re-counts the history once per round and must never feed
+    // the context meter. Updated after every finalMessage() so whatever round
+    // ends the turn (normal break, abort break, summary round) leaves its
+    // snapshot here.
+    let lastRoundUsage = null
     const pricingModel = this.model || this._defaultModel
     const pricing = this._getPricing(pricingModel)
     if (!pricing && !this._pricingWarnedModels.has(pricingModel)) {
@@ -706,6 +751,9 @@ export class ClaudeByokSession extends BaseSession {
         this._streamingIndexToToolUseId.clear()
         lastStopReason = final.stop_reason
         const roundUsage = final.usage || {}
+        // #6769: keep the raw per-round usage — the LAST one standing at emit
+        // time is the turn's occupancy snapshot.
+        lastRoundUsage = roundUsage
         turnUsage.input_tokens += Number(roundUsage.input_tokens) || 0
         turnUsage.output_tokens += Number(roundUsage.output_tokens) || 0
         turnUsage.cache_read_input_tokens += Number(roundUsage.cache_read_input_tokens) || 0
@@ -857,6 +905,9 @@ export class ClaudeByokSession extends BaseSession {
           const summaryFinal = await summaryStream.finalMessage()
           lastStopReason = summaryFinal.stop_reason
           const sUsage = summaryFinal.usage || {}
+          // #6769: the summary round is the turn's final API round — its
+          // individual usage supersedes the previous round's snapshot.
+          lastRoundUsage = sUsage
           turnUsage.input_tokens += Number(sUsage.input_tokens) || 0
           turnUsage.output_tokens += Number(sUsage.output_tokens) || 0
           turnUsage.cache_read_input_tokens += Number(sUsage.cache_read_input_tokens) || 0
@@ -886,6 +937,15 @@ export class ClaudeByokSession extends BaseSession {
       turnCost += this._subagentCostThisTurn
       if (this._subagentCostThisTurn > 0) turnCostKnown = true
 
+      // #6769: occupancy snapshot from the FINAL round's individual usage.
+      // input + cache_read + cache_creation of that one API call = the
+      // conversation as last sent (the true prompt size). Deliberately NOT
+      // the summed turnUsage (over-reads ≈N× on an N-round turn) and
+      // deliberately excludes subagent usage (a child Task runs in its own
+      // window). Omitted when the turn produced no round usage — clients
+      // keep their previous snapshot.
+      const finalRoundContextUsage = ClaudeByokSession._buildFinalRoundContextUsage(lastRoundUsage)
+
       this.emit('stream_end', { messageId })
       this.emit('result', {
         sessionId: null,
@@ -893,6 +953,7 @@ export class ClaudeByokSession extends BaseSession {
         stopReason: lastStopReason,
         duration: Date.now() - turnStartedAt,
         usage: turnUsage,
+        ...(finalRoundContextUsage ? { contextUsage: finalRoundContextUsage } : {}),
         // #5630: emit null when no round produced a known cost so the UI
         // shows "n/a" instead of a misleading $0.00.
         cost: turnCostKnown ? turnCost : null,

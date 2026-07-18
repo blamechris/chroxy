@@ -1,10 +1,10 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, Platform, Animated, AccessibilityInfo, Alert, Modal, Pressable, ScrollView } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
-import { resolveContextWindow, contextWindowTokens, contextFillPercent } from '@chroxy/store-core';
+import { resolveContextWindow, contextOccupancyTokens, contextFillPercent } from '@chroxy/store-core';
 import type { CumulativeUsage, PendingPermissionConfirm, SessionIntervention } from '@chroxy/store-core';
 import { formatCostBadge } from '@chroxy/store-core';
-import type { ModelInfo, ContextUsage, AgentInfo, ConnectedClient, CustomAgent, SessionContext, McpServer, PermissionMode } from '../store/connection';
+import type { ModelInfo, ContextOccupancy, AgentInfo, ConnectedClient, CustomAgent, SessionContext, McpServer, PermissionMode } from '../store/connection';
 import { Icon } from './Icon';
 import { COLORS } from '../constants/colors';
 
@@ -57,7 +57,10 @@ export interface SettingsBarProps {
   // token breakdown.
   cumulativeUsage?: CumulativeUsage | null;
   costBudget?: number | null;
-  contextUsage: ContextUsage | null;
+  // #6769: occupancy snapshot — the meter's only input. Null = no occupancy
+  // signal (claude-cli / claude-tui / codex / gemini / ollama) -> no meter,
+  // the honest dash state. Never fed from the billing usage aggregate.
+  contextOccupancy: ContextOccupancy | null;
   sessionCwd: string | null;
   serverMode: 'cli' | null;
   isIdle: boolean;
@@ -192,7 +195,7 @@ export function SettingsBar({
   sessionCost,
   cumulativeUsage,
   costBudget,
-  contextUsage,
+  contextOccupancy,
   sessionCwd,
   serverMode,
   isIdle,
@@ -333,19 +336,20 @@ export function SettingsBar({
       summaryParts.push(`$${lastResultCost.toFixed(2)}`);
     }
   }
-  if (contextUsage) {
-    // #6769: cumulative window occupancy — input + output + cache_read +
-    // cache_creation of the latest turn. Under prompt caching the history
-    // lives in cache_read, so input+output alone read near-empty mid-chat.
-    const total = contextWindowTokens(contextUsage) ?? 0;
+  if (contextOccupancy) {
+    // #6769: the meter reads the provider's occupancy SNAPSHOT — never the
+    // billing usage aggregate (summed across agent-loop rounds; over-reads
+    // fill ≈N× on an N-round turn). No snapshot → no summary entry at all
+    // (the honest dash state for claude-cli / claude-tui / codex / gemini).
+    const total = contextOccupancyTokens(contextOccupancy) ?? 0;
     if (total > 0) {
       const mInfo = availableModels.find((m) => m.id === activeModel || m.fullId === activeModel);
-      const cw = resolveContextWindow(mInfo, provider);
-      // #6769: percent metered against the auto-compact-adjusted effective
-      // ceiling. #5424: when the window is genuinely unknown (e.g. ollama
-      // reports none), show the raw token count instead of a fabricated
-      // "% of 200k".
-      const pct = contextFillPercent(contextUsage, cw);
+      const cw = contextOccupancy.maxTokens ?? resolveContextWindow(mInfo, provider);
+      // Percent metered against the snapshot's real autoCompactThreshold
+      // when present, else the documented reserve below the window. #5424:
+      // when the window is genuinely unknown, show the raw token count
+      // instead of a fabricated "% of 200k".
+      const pct = contextFillPercent(contextOccupancy, cw);
       summaryParts.push(
         pct != null
           ? `${Math.min(Math.round(pct), 100)}%`
@@ -565,7 +569,7 @@ export function SettingsBar({
                   </Text>
                 );
               })()}
-              {(lastResultCost != null || sessionCost != null || contextUsage) && (
+              {(lastResultCost != null || sessionCost != null || contextOccupancy) && (
                 <View style={styles.contextRow}>
                   {sessionCost != null ? (
                     <Text style={styles.contextText}>
@@ -579,18 +583,19 @@ export function SettingsBar({
                       {lastResultDuration != null ? ` \u00B7 ${(lastResultDuration / 1000).toFixed(1)}s` : ''}
                     </Text>
                   ) : null}
-                  {contextUsage && (() => {
-                    // #6769: cumulative window occupancy (input + output +
-                    // cache_read + cache_creation of the latest turn) — the
-                    // history lives in cache_read under prompt caching, so
-                    // input+output alone read near-empty mid-conversation.
-                    const total = contextWindowTokens(contextUsage) ?? 0;
+                  {contextOccupancy && (() => {
+                    // #6769: occupancy SNAPSHOT only — never the billing
+                    // usage aggregate (summed across agent-loop rounds, so
+                    // it over-reads window fill ≈N× on an N-round turn).
+                    const total = contextOccupancyTokens(contextOccupancy) ?? 0;
                     if (total === 0) return null;
                     const modelInfo = availableModels.find((m) => m.id === activeModel || m.fullId === activeModel);
-                    const contextWindow = resolveContextWindow(modelInfo, provider);
-                    // #6769: percent metered against the auto-compact-adjusted
-                    // effective ceiling (desktop "context left" parity).
-                    const pct = contextFillPercent(contextUsage, contextWindow);
+                    const contextWindow =
+                      contextOccupancy.maxTokens ?? resolveContextWindow(modelInfo, provider);
+                    // Percent metered against the snapshot's real
+                    // autoCompactThreshold when present (desktop /context
+                    // parity), else the documented reserve below the window.
+                    const pct = contextFillPercent(contextOccupancy, contextWindow);
                     if (contextWindow == null || pct == null) {
                       // #5424: window genuinely unknown (e.g. ollama reports
                       // none — the real limit is the local model file's

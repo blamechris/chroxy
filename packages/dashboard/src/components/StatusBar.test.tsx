@@ -199,8 +199,7 @@ describe('StatusBar', () => {
       render(
         <StatusBar
           contextPercent={3}
-          inputTokens={25000}
-          outputTokens={5000}
+          contextTokens={30000}
           contextWindow={1_000_000}
         />,
       )
@@ -212,8 +211,7 @@ describe('StatusBar', () => {
       render(
         <StatusBar
           contextPercent={30}
-          inputTokens={60000}
-          outputTokens={0}
+          contextTokens={60000}
           contextWindow={200_000}
         />,
       )
@@ -228,8 +226,7 @@ describe('StatusBar', () => {
       const { container } = render(
         <StatusBar
           contextPercent={130}
-          inputTokens={1_300_000}
-          outputTokens={0}
+          contextTokens={1_300_000}
           contextWindow={1_000_000}
         />,
       )
@@ -245,8 +242,7 @@ describe('StatusBar', () => {
       const { container } = render(
         <StatusBar
           contextPercent={120}
-          inputTokens={1_200_000}
-          outputTokens={0}
+          contextTokens={1_200_000}
           contextWindow={1_000_000}
         />,
       )
@@ -258,8 +254,7 @@ describe('StatusBar', () => {
       const { container } = render(
         <StatusBar
           contextPercent={85}
-          inputTokens={850_000}
-          outputTokens={0}
+          contextTokens={850_000}
           contextWindow={1_000_000}
         />,
       )
@@ -272,8 +267,7 @@ describe('StatusBar', () => {
       const { container } = render(
         <StatusBar
           contextPercent={60}
-          inputTokens={600_000}
-          outputTokens={0}
+          contextTokens={600_000}
           contextWindow={1_000_000}
         />,
       )
@@ -323,37 +317,50 @@ describe('StatusBar', () => {
       expect(screen.queryByTestId('status-context-meter')).not.toBeInTheDocument()
     })
 
-    // #6769: the `used / total` label is driven by the cumulative occupancy
-    // (`contextTokens`), which includes cached history — NOT the tiny per-turn
-    // input+output. When contextTokens is supplied it wins over input+output.
-    it('uses contextTokens (cumulative occupancy incl. cache) for the used/total label (#6769)', () => {
+    // #6769: the `used / total` label is driven by the occupancy SNAPSHOT
+    // (`contextTokens`) — NOT by the billing input+output counts, which are
+    // summed across agent-loop rounds and over-read fill ≈N× per turn.
+    it('uses the occupancy snapshot (contextTokens) for the used/total label (#6769)', () => {
       render(
         <StatusBar
-          contextPercent={50}
-          contextTokens={92000}
-          cachedTokens={90000}
-          inputTokens={500}
-          outputTokens={2000}
+          contextPercent={66}
+          contextTokens={110_000}
+          inputTokens={3200}
+          outputTokens={7200}
           contextWindow={200_000}
         />,
       )
-      // Label reads the 92k occupancy, not the 2.5k per-turn input+output.
-      expect(screen.getByTestId('status-context-label')).toHaveTextContent('92.0k / 200.0k tokens')
-      // Tooltip surfaces the cached-history split.
-      const ctx = screen.getByTestId('status-context-meter')
-      expect(ctx.getAttribute('title')).toContain('90.0k cached history')
+      // Label reads the 110k snapshot, not the billing counts.
+      expect(screen.getByTestId('status-context-label')).toHaveTextContent('110.0k / 200.0k tokens')
     })
 
-    it('falls back to input+output for the label when contextTokens is absent (#6769 back-compat)', () => {
+    it('shows NO meter when there is no occupancy snapshot, even with billing counts (#6769)', () => {
+      // A provider with billing usage but no occupancy signal (claude-cli,
+      // codex, gemini…) must render the honest dash state — deriving a meter
+      // from the multi-round billing aggregate is the bug #6769 fixed.
       render(
         <StatusBar
-          contextPercent={3}
-          inputTokens={25000}
-          outputTokens={5000}
+          contextPercent={null}
+          inputTokens={3200}
+          outputTokens={7200}
           contextWindow={1_000_000}
         />,
       )
-      expect(screen.getByTestId('status-context-label')).toHaveTextContent('30.0k / 1M tokens')
+      expect(screen.queryByTestId('status-context-meter')).not.toBeInTheDocument()
+    })
+
+    it('flags the byok estimate in the meter tooltip (#6769)', () => {
+      render(
+        <StatusBar
+          context="92.0k tokens"
+          contextPercent={50}
+          contextTokens={92_000}
+          contextEstimated
+          contextWindow={200_000}
+        />,
+      )
+      const meter = screen.getByTestId('status-context-meter')
+      expect(meter.getAttribute('title')).toMatch(/estimated from the last api round/i)
     })
 
     // #5179 (C1): the fill bar sits BENEATH the `used / total tokens`
@@ -365,8 +372,7 @@ describe('StatusBar', () => {
         render(
           <StatusBar
             contextPercent={30}
-            inputTokens={60000}
-            outputTokens={0}
+            contextTokens={60000}
             contextWindow={200_000}
           />,
         )
@@ -378,8 +384,7 @@ describe('StatusBar', () => {
         render(
           <StatusBar
             contextPercent={30}
-            inputTokens={60000}
-            outputTokens={0}
+            contextTokens={60000}
             contextWindow={200_000}
           />,
         )
@@ -399,8 +404,7 @@ describe('StatusBar', () => {
         render(
           <StatusBar
             contextPercent={45}
-            inputTokens={90000}
-            outputTokens={0}
+            contextTokens={90000}
             contextWindow={200_000}
           />,
         )
@@ -413,6 +417,7 @@ describe('StatusBar', () => {
       render(
         <StatusBar
           contextPercent={30}
+          contextTokens={30000}
           inputTokens={25000}
           outputTokens={5000}
           contextWindow={1_000_000}

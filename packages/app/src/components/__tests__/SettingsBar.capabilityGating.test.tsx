@@ -34,7 +34,7 @@ function makeProps(overrides: Record<string, unknown> = {}) {
     sessionCost: null,
     cumulativeUsage: null,
     costBudget: null,
-    contextUsage: null,
+    contextOccupancy: null,
     sessionCwd: '/tmp',
     serverMode: 'cli' as const,
     isIdle: true,
