@@ -394,3 +394,38 @@ describe('handleResultQueueReconcile (#6627 — self-heal a stale queued bubble 
     expect(builder.sessionId).toBe('sess-x')
   })
 })
+
+describe('handleResultQueueReconcile — end-to-end wire contract (#6819)', () => {
+  it('activates from a ServerResultSchema-validated payload carrying a finite queueLength', async () => {
+    // #6819: the event-normalizer previously dropped `queueLength` off the wire
+    // `result` message (only cost/duration/usage/sessionId/contextOccupancy were
+    // forwarded), so this reconcile always no-op'd in production even though the
+    // unit tests above (fed hand-built objects) looked green. Round-trip through
+    // the REAL @chroxy/protocol schema — the actual wire contract — to prove the
+    // fix's shape is both schema-valid and activates the self-heal end-to-end.
+    const { ServerResultSchema } = await import('@chroxy/protocol')
+    const wireMsg = ServerResultSchema.parse({
+      type: 'result',
+      cost: 0.01,
+      duration: 1200,
+      usage: { input_tokens: 10 },
+      sessionId: 's1',
+      queueLength: 1,
+    })
+
+    const current = [confirmed('uin-1', 'a'), confirmed('uin-2', 'b')]
+    const builder = handleResultQueueReconcile(wireMsg as unknown as Record<string, unknown>, null)
+    expect(builder).not.toBeNull()
+    const next = builder!.applyTo(current).queuedMessages
+    expect(next.map((m) => m.clientMessageId)).toEqual(['uin-2'])
+  })
+
+  it('ServerResultSchema carries queueLength as optional — no protocol change needed for #6819', async () => {
+    const { ServerResultSchema } = await import('@chroxy/protocol')
+    // Absent queueLength (older server / providers with no stamp) must still parse.
+    expect(() => ServerResultSchema.parse({ type: 'result', sessionId: 's1' })).not.toThrow()
+    // A finite queueLength (including zero) must parse and round-trip untouched.
+    const parsed = ServerResultSchema.parse({ type: 'result', sessionId: 's1', queueLength: 0 })
+    expect(parsed.queueLength).toBe(0)
+  })
+})
