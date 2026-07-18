@@ -12,51 +12,35 @@
  * which opens the URL via `Linking.openURL` (OS browser) on tap.
  *
  * Renders one small chip per active preview: a link that opens the tunnel
- * URL in a new tab, a copy-URL button, and a dismiss control that calls
- * `closeDevPreview`. Renders nothing when there are no active previews, and
- * updates live as `devPreviews` changes (the caller feeds this from the
- * active session's store state, so a `dev_preview` / `dev_preview_stopped`
- * dispatch re-renders it automatically).
+ * URL in a new tab, a copy-URL button (the shared `CopyButton`, #6631 —
+ * clipboard write, failure toast, ✓ state, and the sr-only "Copied"
+ * announcement all come from it), and a dismiss control that calls
+ * `closeDevPreview`. Renders nothing when there are no active previews,
+ * and updates live as `devPreviews` changes (the caller feeds this from
+ * the active session's store state, so a `dev_preview` /
+ * `dev_preview_stopped` dispatch re-renders it automatically).
  *
  * Does NOT embed the preview — that's #6789's scope (an inline iframe /
  * webview pane). This is deliberately the minimal "so the URL is
  * discoverable" fix: the server already does the hard part (detection +
  * tunnel), the dashboard just needed to show it.
  */
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { writeText } from '../utils/clipboard'
-import { useConnectionStore } from '../store/connection'
+import { CopyButton } from './CopyButton'
 import type { DevPreview } from '../store/types'
 
 export interface DevPreviewChipProps {
-  previews: DevPreview[]
+  /**
+   * Active previews for the session. Optional because several App-level
+   * test fixtures mock `getActiveSessionState()` with partial shapes that
+   * predate this field (App.test.tsx), so the value can genuinely arrive
+   * `undefined` at runtime — treated the same as "no active previews".
+   */
+  previews?: DevPreview[]
   onClose: (port: number) => void
 }
 
 /** A single chip: open link + copy + dismiss for one active dev preview. */
 function DevPreviewChipItem({ preview, onClose }: { preview: DevPreview; onClose: (port: number) => void }) {
-  const [copied, setCopied] = useState(false)
-  const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const mounted = useRef(true)
-  useEffect(() => () => {
-    mounted.current = false
-    if (timer.current) clearTimeout(timer.current)
-  }, [])
-
-  const onCopy = useCallback(() => {
-    if (timer.current) { clearTimeout(timer.current); timer.current = null }
-    setCopied(false)
-    void writeText(preview.url).then((ok) => {
-      if (!mounted.current) return
-      if (!ok) {
-        useConnectionStore.getState().addServerError('Failed to copy dev preview URL. Please try again.', undefined, 'warning')
-        return
-      }
-      setCopied(true)
-      timer.current = setTimeout(() => { if (mounted.current) setCopied(false) }, 1500)
-    })
-  }, [preview.url])
-
   return (
     <span
       className="dev-preview-chip"
@@ -73,17 +57,12 @@ function DevPreviewChipItem({ preview, onClose }: { preview: DevPreview; onClose
         <span className="dev-preview-chip__icon" aria-hidden="true">{'\u{1F310}'}</span>
         <span className="dev-preview-chip__port">:{preview.port}</span>
       </a>
-      <button
-        type="button"
+      <CopyButton
+        content={preview.url}
+        label={`Copy dev preview URL: ${preview.url}`}
         className="dev-preview-chip__copy"
-        data-testid={`dev-preview-chip-copy-${preview.port}`}
-        data-copied={copied ? 'true' : undefined}
-        onClick={onCopy}
-        aria-label={copied ? 'Copied' : `Copy dev preview URL: ${preview.url}`}
-        title={copied ? 'Copied' : 'Copy URL'}
-      >
-        {copied ? '✓' : '⧉'}
-      </button>
+        testId={`dev-preview-chip-copy-${preview.port}`}
+      />
       <button
         type="button"
         className="dev-preview-chip__close"
@@ -99,10 +78,6 @@ function DevPreviewChipItem({ preview, onClose }: { preview: DevPreview; onClose
 }
 
 export function DevPreviewChip({ previews, onClose }: DevPreviewChipProps) {
-  // Defensive: several App-level test fixtures mock `getActiveSessionState()`
-  // with a partial shape that predates this field (App.test.tsx), so
-  // `previews` can arrive `undefined` at runtime despite the required prop
-  // type. Treat that the same as "no active previews" rather than crashing.
   if (!previews || previews.length === 0) return null
 
   return (

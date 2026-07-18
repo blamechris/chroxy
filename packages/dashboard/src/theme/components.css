@@ -537,7 +537,10 @@
 .dev-preview-chip__copy:hover,
 .dev-preview-chip__close:hover {
   color: var(--text-heading);
-  background: rgba(127, 127, 127, 0.15);
+  /* Same token-with-neutral-fallback idiom as .msg-copy-btn — the token is
+     theme-provided where defined; the fallback reads correctly in both
+     light and dark. */
+  background: var(--surface-raised, rgba(127, 127, 127, 0.15));
 }
 
 .dev-preview-chip__copy[data-copied='true'] {

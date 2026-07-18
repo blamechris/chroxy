@@ -4,8 +4,9 @@
  *
  * Covers: hidden when devPreviews is empty, renders a chip per active
  * preview with the port + a link to the tunnel URL, the close control
- * invokes onClose with the right port, and the copy control writes the
- * exact tunnel URL to the clipboard.
+ * invokes onClose with the right port (including selecting the right chip
+ * among several), and the copy control (the shared CopyButton, #6631)
+ * writes the exact tunnel URL to the clipboard.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/react'
@@ -42,15 +43,22 @@ describe('DevPreviewChip', () => {
     expect(link).toHaveAttribute('rel', expect.stringContaining('noopener'))
   })
 
-  it('renders one chip per active preview, deduped by port', () => {
+  it('renders one chip per active preview and dismissing one closes only that port', () => {
     const previews: DevPreview[] = [
       { port: 3000, url: 'https://foo.trycloudflare.com' },
       { port: 4000, url: 'https://bar.trycloudflare.com' },
     ]
-    render(<DevPreviewChip previews={previews} onClose={() => {}} />)
+    const onClose = vi.fn()
+    render(<DevPreviewChip previews={previews} onClose={onClose} />)
 
     expect(screen.getByTestId('dev-preview-chip-3000')).toBeInTheDocument()
     expect(screen.getByTestId('dev-preview-chip-4000')).toBeInTheDocument()
+
+    // Dismissing the SECOND chip must close its own port — not the first
+    // entry's — so the per-chip close binding is verified, not just render.
+    fireEvent.click(screen.getByTestId('dev-preview-chip-close-4000'))
+    expect(onClose).toHaveBeenCalledTimes(1)
+    expect(onClose).toHaveBeenCalledWith(4000)
   })
 
   it('calls onClose with the matching port when the dismiss control is clicked', () => {
