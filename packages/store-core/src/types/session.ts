@@ -24,11 +24,11 @@ export interface ContextUsage {
 /**
  * #6769: end-of-turn context-window OCCUPANCY snapshot — how many tokens the
  * conversation currently occupies in the model's window. Parsed from the
- * `result` message's optional `contextUsage` field (see
- * `ServerContextUsageSnapshotSchema` in @chroxy/protocol for the wire contract
- * and per-provider sources). This is the ONLY honest input for the context
- * meter; the billing `ContextUsage` above over-reads by the turn's agent-loop
- * round count.
+ * `result` message's optional `contextOccupancy` field (see
+ * `ServerContextOccupancySnapshotSchema` in @chroxy/protocol for the wire
+ * contract and per-provider sources). This is the ONLY honest input for the
+ * context meter; the billing `ContextUsage` above over-reads by the turn's
+ * agent-loop round count.
  */
 export interface ContextOccupancy {
   /** Tokens currently occupying the window (system prompt + tools + messages). */
@@ -367,7 +367,9 @@ export interface BaseSessionState {
   // Persists across turns (a result WITHOUT the field keeps the previous
   // snapshot) and only moves when a new snapshot lands — including DOWN
   // after a compaction. Null until the provider reports occupancy at all
-  // (claude-cli / claude-tui / codex / gemini / ollama stay null → dash).
+  // (claude-cli / claude-tui / codex / gemini stay null → dash; the byok
+  // agent-loop family — incl. ollama / deepseek / anthropic-compatible —
+  // reports a final-round snapshot whenever its endpoint returns usage).
   contextOccupancy: ContextOccupancy | null;
   lastResultCost: number | null;
   lastResultDuration: number | null;

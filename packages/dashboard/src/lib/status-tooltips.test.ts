@@ -253,7 +253,22 @@ describe('contextTooltip + token breakdown (#4205)', () => {
       estimated: true,
     })
     expect(t).toContain('50%')
+    expect(t).toMatch(/estimated/i)
     expect(t).toMatch(/estimated from the last api round/i)
+  })
+
+  // #6769 (review note 3): the auto-compact phrasing belongs ONLY to sources
+  // with a real threshold. Estimated sources (byok final-round family — the
+  // reserve-fallback ceiling has no compaction behind it) must phrase the
+  // value as plain context-window fill.
+  it('drops the auto-compact phrasing for estimated sources (#6769)', () => {
+    const t = contextTooltip({
+      percent: 50,
+      contextSummary: '92.0k tokens',
+      estimated: true,
+    })
+    expect(t).not.toMatch(/before auto-compact|steps down after a compaction/i)
+    expect(t).toMatch(/fills 50% of the model's context window \(estimated\)/i)
   })
 
   it('omits the estimate caveat for the SDK snapshot (#6769)', () => {

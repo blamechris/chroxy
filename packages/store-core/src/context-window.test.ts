@@ -122,7 +122,7 @@ describe('resolveContextWindow (#5424)', () => {
 // A result's `usage` is the per-turn billing aggregate summed across every
 // agent-loop round (byok-session.js #4056 accumulates cache_read per round;
 // the SDK/CLI forward the driver's whole-turn aggregate). The meter reads the
-// `contextUsage` snapshot instead. See the module docblock for the model.
+// `contextOccupancy` snapshot instead. See the module docblock for the model.
 // ---------------------------------------------------------------------------
 
 describe('multi-round turn: billing aggregate over-reads, snapshot does not (#6769)', () => {
@@ -171,7 +171,7 @@ describe('multi-round turn: billing aggregate over-reads, snapshot does not (#67
   })
 
   it('handleResultUsage NEVER derives occupancy from the billing usage field', () => {
-    // A result carrying ONLY the billing aggregate (no contextUsage wire
+    // A result carrying ONLY the billing aggregate (no contextOccupancy wire
     // field) must yield contextOccupancy: null — the no-signal dash state,
     // not a fabricated ≈816k meter.
     const payload = handleResultUsage(
@@ -184,12 +184,12 @@ describe('multi-round turn: billing aggregate over-reads, snapshot does not (#67
 })
 
 describe('handleResultUsage occupancy parsing (#6769)', () => {
-  it('parses a full SDK snapshot from the contextUsage wire field', () => {
+  it('parses a full SDK snapshot from the contextOccupancy wire field', () => {
     const payload = handleResultUsage(
       {
         type: 'result',
         usage: { input_tokens: 1, output_tokens: 1 },
-        contextUsage: {
+        contextOccupancy: {
           totalTokens: 110_000,
           maxTokens: 200_000,
           autoCompactThreshold: 167_000,
@@ -213,7 +213,7 @@ describe('handleResultUsage occupancy parsing (#6769)', () => {
     const payload = handleResultUsage(
       {
         type: 'result',
-        contextUsage: { totalTokens: 42_000, source: 'final-round-prompt' },
+        contextOccupancy: { totalTokens: 42_000, source: 'final-round-prompt' },
         sessionId: 's1',
       },
       's1',
@@ -230,7 +230,7 @@ describe('handleResultUsage occupancy parsing (#6769)', () => {
   it('rejects a snapshot without a finite non-negative totalTokens', () => {
     for (const totalTokens of [NaN, Infinity, -1, '110000', undefined, null]) {
       const payload = handleResultUsage(
-        { type: 'result', contextUsage: { totalTokens }, sessionId: 's1' },
+        { type: 'result', contextOccupancy: { totalTokens }, sessionId: 's1' },
         's1',
       )
       expect(payload.contextOccupancy, `totalTokens=${String(totalTokens)}`).toBeNull()
@@ -241,7 +241,7 @@ describe('handleResultUsage occupancy parsing (#6769)', () => {
     const payload = handleResultUsage(
       {
         type: 'result',
-        contextUsage: {
+        contextOccupancy: {
           totalTokens: 50_000,
           maxTokens: -5,
           autoCompactThreshold: 'soon',
@@ -262,9 +262,9 @@ describe('handleResultUsage occupancy parsing (#6769)', () => {
   })
 
   it('returns null occupancy when the wire field is absent or not an object', () => {
-    for (const contextUsage of [undefined, null, 'big', 42, ['x']]) {
+    for (const contextOccupancy of [undefined, null, 'big', 42, ['x']]) {
       const payload = handleResultUsage(
-        { type: 'result', usage: {}, contextUsage, sessionId: 's1' },
+        { type: 'result', usage: {}, contextOccupancy, sessionId: 's1' },
         's1',
       )
       expect(payload.contextOccupancy).toBeNull()

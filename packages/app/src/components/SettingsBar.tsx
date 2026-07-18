@@ -58,7 +58,8 @@ export interface SettingsBarProps {
   cumulativeUsage?: CumulativeUsage | null;
   costBudget?: number | null;
   // #6769: occupancy snapshot — the meter's only input. Null = no occupancy
-  // signal (claude-cli / claude-tui / codex / gemini / ollama) -> no meter,
+  // signal (claude-cli / claude-tui / codex / gemini — plus any byok-loop
+  // subclass, e.g. ollama, whose endpoint reports no usage) -> no meter,
   // the honest dash state. Never fed from the billing usage aggregate.
   contextOccupancy: ContextOccupancy | null;
   sessionCwd: string | null;
@@ -340,7 +341,8 @@ export function SettingsBar({
     // #6769: the meter reads the provider's occupancy SNAPSHOT — never the
     // billing usage aggregate (summed across agent-loop rounds; over-reads
     // fill ≈N× on an N-round turn). No snapshot → no summary entry at all
-    // (the honest dash state for claude-cli / claude-tui / codex / gemini).
+    // (the honest dash state for claude-cli / claude-tui / codex / gemini
+    // and any byok-loop subclass whose endpoint reports no usage).
     const total = contextOccupancyTokens(contextOccupancy) ?? 0;
     if (total > 0) {
       const mInfo = availableModels.find((m) => m.id === activeModel || m.fullId === activeModel);

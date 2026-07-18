@@ -59,8 +59,8 @@ describe('EventNormalizer', () => {
   // ---- EVENT_MAP: result contextUsage passthrough (#6769) ----
 
   describe('result event occupancy snapshot (#6769)', () => {
-    it('forwards contextUsage to the wire when the session emitted one', () => {
-      const contextUsage = {
+    it('forwards contextOccupancy to the wire when the session emitted one', () => {
+      const contextOccupancy = {
         totalTokens: 110_000,
         maxTokens: 200_000,
         autoCompactThreshold: 167_000,
@@ -69,21 +69,21 @@ describe('EventNormalizer', () => {
       }
       const result = normalizer.normalize(
         'result',
-        { cost: 0.01, duration: 5, usage: { input_tokens: 1 }, sessionId: 'sess-1', contextUsage },
+        { cost: 0.01, duration: 5, usage: { input_tokens: 1 }, sessionId: 'sess-1', contextOccupancy },
         makeCtx(),
       )
       const resultMsg = result.messages.find((m) => m.msg.type === 'result')
-      assert.deepEqual(resultMsg.msg.contextUsage, contextUsage)
+      assert.deepEqual(resultMsg.msg.contextOccupancy, contextOccupancy)
     })
 
-    it('omits contextUsage from the wire when the session did not emit one', () => {
+    it('omits contextOccupancy from the wire when the session did not emit one', () => {
       const result = normalizer.normalize(
         'result',
         { cost: 0.01, duration: 5, usage: { input_tokens: 1 }, sessionId: 'sess-1' },
         makeCtx(),
       )
       const resultMsg = result.messages.find((m) => m.msg.type === 'result')
-      assert.equal('contextUsage' in resultMsg.msg, false,
+      assert.equal('contextOccupancy' in resultMsg.msg, false,
         'no-signal providers keep the field off the wire (clients render dash)')
     })
   })

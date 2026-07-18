@@ -1289,7 +1289,7 @@ export interface ResultUsagePayload {
   contextUsage: ContextUsage | null
   /**
    * #6769: occupancy snapshot parsed from the message's optional
-   * `contextUsage` wire field, or null when absent/malformed. Callers must
+   * `contextOccupancy` wire field, or null when absent/malformed. Callers must
    * treat null as "no new snapshot" (keep the previous per-session value),
    * NOT as "clear the meter" — providers emit the field on every result, so
    * a missing field means either an older server or a no-occupancy provider.
@@ -1318,7 +1318,7 @@ export interface ResultUsagePayload {
  *   when `usage` is missing or not a plain object (defensive: rejects strings,
  *   numbers, arrays, null). This is the per-turn BILLING aggregate — never
  *   feed it to the context meter (#6769).
- * - `contextOccupancy` (#6769): parsed from `msg.contextUsage` (the wire
+ * - `contextOccupancy` (#6769): parsed from `msg.contextOccupancy` (the wire
  *   occupancy snapshot). Null when the field is absent or lacks a finite
  *   `totalTokens` — callers keep the previous per-session snapshot in that
  *   case rather than clearing the meter.
@@ -1349,12 +1349,14 @@ export function handleResultUsage(
         cacheRead: numField(usage.cache_read_input_tokens),
       }
     : null
-  // #6769: occupancy snapshot from the optional `contextUsage` wire field.
-  // Strict on `totalTokens` (a snapshot without a finite total is useless —
-  // reject the whole object rather than fabricate a 0-token meter); lenient
-  // per-field on the optional metadata. See ServerContextUsageSnapshotSchema
-  // in @chroxy/protocol for the wire contract and per-provider sources.
-  const rawOccupancy = msg.contextUsage
+  // #6769: occupancy snapshot from the optional `contextOccupancy` wire
+  // field (named distinctly from the billing `usage`/client `contextUsage`
+  // pair — the #6816 review's naming-trap note). Strict on `totalTokens` (a
+  // snapshot without a finite total is useless — reject the whole object
+  // rather than fabricate a 0-token meter); lenient per-field on the optional
+  // metadata. See ServerContextOccupancySnapshotSchema in @chroxy/protocol
+  // for the wire contract and per-provider sources.
+  const rawOccupancy = msg.contextOccupancy
   const occ =
     rawOccupancy !== null &&
     typeof rawOccupancy === 'object' &&

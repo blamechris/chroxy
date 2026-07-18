@@ -90,16 +90,20 @@ export function resolveContextWindow(
 // is therefore NEVER an input to the meter.
 //
 // The honest input is an end-of-turn occupancy SNAPSHOT
-// (`ContextOccupancy`, parsed from the result message's `contextUsage` wire
-// field), which only two providers can produce today:
+// (`ContextOccupancy`, parsed from the result message's `contextOccupancy`
+// wire field — deliberately NOT named `contextUsage`, which is the billing
+// aggregate's client-state name). Two snapshot families exist today:
 //
 //   - claude-sdk: the Agent SDK's `getContextUsage()` control API —
 //     `{ totalTokens, maxTokens, autoCompactThreshold (tokens),
 //     isAutoCompactEnabled }`, the same numbers Claude Code's own /context
 //     and status line show (the #6769 desktop-parity anchor).
-//   - byok: the FINAL agent-loop round's individual
-//     `input + cache_read + cache_creation` — that round's true prompt size,
-//     i.e. the conversation as last sent to the API.
+//   - the byok agent-loop family (byok / docker-byok, and the subclasses
+//     that reuse the loop: ollama, deepseek, anthropic-compatible): the
+//     FINAL round's individual `input + cache_read + cache_creation` — that
+//     round's true prompt size, i.e. the conversation as last sent to the
+//     API. Emitted only when the endpoint actually reports per-round usage;
+//     an endpoint that reports none produces no snapshot.
 //
 // A snapshot naturally persists across turns (each result re-reports it) and
 // FOLLOWS A COMPACTION DOWN (the post-compaction snapshot is smaller) —
@@ -107,10 +111,10 @@ export function resolveContextWindow(
 // deliberately not implemented here.)
 //
 // Everything else — claude-cli (aggregate-only stream-json output, no control
-// channel), claude-tui (no usage at all), codex / gemini / ollama /
-// openai-compatible (aggregate-only) — has NO occupancy signal: the snapshot
-// stays null and every helper here returns null, so the meter renders its
-// honest unknown/dash state. Never fabricate a number from billing usage.
+// channel), claude-tui (no usage at all), codex / gemini (aggregate-only) —
+// has NO occupancy signal: the snapshot stays null and every helper here
+// returns null, so the meter renders its honest unknown/dash state. Never
+// fabricate a number from billing usage.
 // ---------------------------------------------------------------------------
 
 /**

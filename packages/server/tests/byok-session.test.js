@@ -173,10 +173,10 @@ describe('ClaudeByokSession', () => {
   })
 
   // #6769: pure arithmetic of the final-round occupancy snapshot.
-  describe('_buildFinalRoundContextUsage (#6769)', () => {
+  describe('_buildFinalRoundOccupancy (#6769)', () => {
     it('sums input + cache_read + cache_creation, excluding output', () => {
       assert.deepEqual(
-        ClaudeByokSession._buildFinalRoundContextUsage({
+        ClaudeByokSession._buildFinalRoundOccupancy({
           input_tokens: 250,
           output_tokens: 700, // excluded by contract
           cache_read_input_tokens: 102_200,
@@ -188,17 +188,17 @@ describe('ClaudeByokSession', () => {
 
     it('tolerates missing cache fields (uncached first turn)', () => {
       assert.deepEqual(
-        ClaudeByokSession._buildFinalRoundContextUsage({ input_tokens: 1_500, output_tokens: 20 }),
+        ClaudeByokSession._buildFinalRoundOccupancy({ input_tokens: 1_500, output_tokens: 20 }),
         { totalTokens: 1_500, source: 'final-round-prompt' },
       )
     })
 
     it('returns null for no usage / empty usage / zero totals', () => {
-      assert.equal(ClaudeByokSession._buildFinalRoundContextUsage(null), null)
-      assert.equal(ClaudeByokSession._buildFinalRoundContextUsage(undefined), null)
-      assert.equal(ClaudeByokSession._buildFinalRoundContextUsage({}), null)
+      assert.equal(ClaudeByokSession._buildFinalRoundOccupancy(null), null)
+      assert.equal(ClaudeByokSession._buildFinalRoundOccupancy(undefined), null)
+      assert.equal(ClaudeByokSession._buildFinalRoundOccupancy({}), null)
       assert.equal(
-        ClaudeByokSession._buildFinalRoundContextUsage({ input_tokens: 0, output_tokens: 50 }),
+        ClaudeByokSession._buildFinalRoundOccupancy({ input_tokens: 0, output_tokens: 50 }),
         null,
         'output alone is not a prompt snapshot',
       )
@@ -206,7 +206,7 @@ describe('ClaudeByokSession', () => {
 
     it('coerces malformed fields to 0 rather than emitting NaN', () => {
       assert.deepEqual(
-        ClaudeByokSession._buildFinalRoundContextUsage({
+        ClaudeByokSession._buildFinalRoundOccupancy({
           input_tokens: 'many',
           cache_read_input_tokens: 90_000,
           cache_creation_input_tokens: NaN,
@@ -638,12 +638,12 @@ describe('ClaudeByokSession', () => {
       await session.destroy()
     })
 
-    // #6769: the result's `contextUsage` occupancy snapshot must be the FINAL
+    // #6769: the result's `contextOccupancy` snapshot must be the FINAL
     // round's individual prompt size (input + cache_read + cache_creation of
     // that one API call = the conversation as last sent), NEVER the summed
     // turnUsage — the sum re-counts the history once per round and over-reads
     // occupancy ≈N× on an N-round turn (the PR #6816 review finding).
-    it('emits contextUsage as the FINAL round prompt snapshot, not the summed billing aggregate (#6769)', async () => {
+    it('emits contextOccupancy as the FINAL round prompt snapshot, not the summed billing aggregate (#6769)', async () => {
       const session = new ClaudeByokSession({ cwd: '/tmp' })
       session.setPermissionMode('auto')
       session._executeToolBlock = async function ({ block }) {
@@ -679,7 +679,7 @@ describe('ClaudeByokSession', () => {
       assert.ok(result, 'result must fire')
       // Snapshot = FINAL round's input + cache_read + cache_creation:
       //   250 + 102_200 + 1_100 = 103_550 (output excluded by contract).
-      assert.deepEqual(result.payload.contextUsage, {
+      assert.deepEqual(result.payload.contextOccupancy, {
         totalTokens: 103_550,
         source: 'final-round-prompt',
       })
@@ -691,13 +691,13 @@ describe('ClaudeByokSession', () => {
         result.payload.usage.cache_creation_input_tokens
       assert.equal(billingTotal, 400 + 300 + 250 + 100_000 + 101_000 + 102_200 + 1_000 + 1_200 + 1_100)
       assert.ok(
-        billingTotal > result.payload.contextUsage.totalTokens * 2.5,
+        billingTotal > result.payload.contextOccupancy.totalTokens * 2.5,
         'the billing aggregate over-reads the snapshot ≈round-count×',
       )
       await session.destroy()
     })
 
-    it('omits contextUsage when the endpoint reports no usable usage (#6769)', async () => {
+    it('omits contextOccupancy when the endpoint reports no usable usage (#6769)', async () => {
       const session = new ClaudeByokSession({ cwd: '/tmp' })
       session._client = {
         messages: {
@@ -715,7 +715,7 @@ describe('ClaudeByokSession', () => {
       await session.sendMessage('q')
       const result = captured.find((e) => e.name === 'result')
       assert.ok(result)
-      assert.equal('contextUsage' in result.payload, false,
+      assert.equal('contextOccupancy' in result.payload, false,
         'no fabricated snapshot — clients keep their dash state')
       await session.destroy()
     })

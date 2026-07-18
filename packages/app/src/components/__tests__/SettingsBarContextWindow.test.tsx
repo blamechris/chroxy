@@ -6,8 +6,10 @@
  * final-round prompt size. It is NEVER derived from the billing usage
  * aggregate (`result.usage`), which sums cache_read across agent-loop rounds
  * and over-reads window fill ≈N× on an N-round turn. Providers with no
- * snapshot (claude-cli / claude-tui / codex / gemini / ollama) render no
- * meter at all — the honest dash state.
+ * snapshot (claude-cli / claude-tui / codex / gemini) render no meter at
+ * all — the honest dash state. Ollama and the other byok-loop subclasses
+ * DO get a final-round snapshot whenever their endpoint reports usage —
+ * which is why the ollama fixtures below carry one.
  *
  * #5424 carries over inside the snapshot model: when occupancy exists but the
  * window is genuinely unknown (no snapshot maxTokens + no registry window),

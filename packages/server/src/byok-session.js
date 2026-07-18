@@ -91,7 +91,7 @@ export class ClaudeByokSession extends BaseSession {
    * Returns null when the turn produced no usable round usage (error before
    * the first finalMessage(), or an endpoint that reports no usage — e.g. an
    * anthropic-compatible server that omits the field). The result then emits
-   * WITHOUT `contextUsage` and clients keep their previous snapshot / dash.
+   * WITHOUT `contextOccupancy` and clients keep their previous snapshot / dash.
    *
    * Static + pure so tests can pin the arithmetic without a live session;
    * subclasses that reuse the agent loop (docker-byok, deepseek, ollama,
@@ -101,7 +101,7 @@ export class ClaudeByokSession extends BaseSession {
    * @param {object|null} roundUsage — the final round's `final.usage`
    * @returns {{totalTokens: number, source: 'final-round-prompt'}|null}
    */
-  static _buildFinalRoundContextUsage(roundUsage) {
+  static _buildFinalRoundOccupancy(roundUsage) {
     if (!roundUsage || typeof roundUsage !== 'object') return null
     const totalTokens =
       (Number(roundUsage.input_tokens) || 0) +
@@ -944,7 +944,7 @@ export class ClaudeByokSession extends BaseSession {
       // deliberately excludes subagent usage (a child Task runs in its own
       // window). Omitted when the turn produced no round usage — clients
       // keep their previous snapshot.
-      const finalRoundContextUsage = ClaudeByokSession._buildFinalRoundContextUsage(lastRoundUsage)
+      const finalRoundOccupancy = ClaudeByokSession._buildFinalRoundOccupancy(lastRoundUsage)
 
       this.emit('stream_end', { messageId })
       this.emit('result', {
@@ -953,7 +953,7 @@ export class ClaudeByokSession extends BaseSession {
         stopReason: lastStopReason,
         duration: Date.now() - turnStartedAt,
         usage: turnUsage,
-        ...(finalRoundContextUsage ? { contextUsage: finalRoundContextUsage } : {}),
+        ...(finalRoundOccupancy ? { contextOccupancy: finalRoundOccupancy } : {}),
         // #5630: emit null when no round produced a known cost so the UI
         // shows "n/a" instead of a misleading $0.00.
         cost: turnCostKnown ? turnCost : null,

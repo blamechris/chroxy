@@ -87,24 +87,32 @@ export function contextTooltip({
   if (percent == null && !contextSummary && inputTokens == null && outputTokens == null) {
     return 'No context usage yet — meter fills after the first turn completes.'
   }
-  // #6769: this is window OCCUPANCY from the provider's end-of-turn snapshot
-  // — it grows as the conversation grows and steps down after a compaction.
+  // #6769: this is window OCCUPANCY from the provider's end-of-turn snapshot.
+  // The auto-compact phrasing ("usable space before auto-compact" / "steps
+  // down after a compaction") applies ONLY to sources with a REAL threshold
+  // (the SDK snapshot). Estimated sources (the byok final-round family —
+  // there's no compaction boundary behind their reserve-fallback ceiling)
+  // phrase it as plain context-window fill, flagged as estimated.
   // Percent rounds to 1 decimal — App.tsx computes it as a float
   // (occupancy / ceiling * 100) so without rounding we'd get
   // "12.3456789%" in the tooltip.
   const lead = percent != null
-    ? `Conversation occupies ${roundPercent(percent)}% of the context window's usable space (before auto-compact).`
-    : 'Context-window occupancy.'
+    ? estimated
+      ? `Conversation fills ${roundPercent(percent)}% of the model's context window (estimated).`
+      : `Conversation occupies ${roundPercent(percent)}% of the context window's usable space (before auto-compact).`
+    : estimated
+      ? 'Context-window fill (estimated).'
+      : 'Context-window occupancy.'
   const detail = contextSummary ? ` (${contextSummary})` : ''
-  const estimateNote = estimated
-    ? ' Estimated from the last API round.'
-    : ''
+  const behaviour = estimated
+    ? ' Estimated from the last API round — grows with the conversation.'
+    : ' Grows with the conversation and steps down after a compaction.'
   // #4205: the last-turn billing line stays available on hover, clearly
   // labelled so it can't be read as window fill (#6769).
   const breakdown = (inputTokens != null && outputTokens != null)
     ? ' ' + tokenChipTooltip({ inputTokens, outputTokens })
     : ''
-  return `${lead}${detail} Grows with the conversation and steps down after a compaction.${estimateNote}${breakdown}`
+  return `${lead}${detail}${behaviour}${breakdown}`
 }
 
 export interface TokenChipTooltipArgs {

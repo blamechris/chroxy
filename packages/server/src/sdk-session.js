@@ -1038,7 +1038,9 @@ export class SdkSession extends BaseSession {
               apiDurationMs: Number.isFinite(msg.duration_api_ms) ? msg.duration_api_ms : null,
               modelUsage: normalizeSdkModelUsage(msg.modelUsage),
               // #6769: occupancy snapshot (or absent when unavailable).
-              ...(contextUsageSnapshot ? { contextUsage: contextUsageSnapshot } : {}),
+              // Wire field is contextOccupancy — NOT contextUsage — so it can
+              // never be confused with the billing `usage` aggregate above.
+              ...(contextUsageSnapshot ? { contextOccupancy: contextUsageSnapshot } : {}),
             }, 'turn_ended_with_orphan_tool_start')
 
             this._clearMessageState()

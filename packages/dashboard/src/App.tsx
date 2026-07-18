@@ -1929,7 +1929,8 @@ export function App() {
   // and over-reads window fill ≈N× on an N-round turn — the #6816 review
   // finding). The snapshot persists across turns and steps DOWN after a
   // compaction; providers with no snapshot (claude-cli / claude-tui / codex /
-  // gemini / ollama) yield null → the chips render their honest dash state.
+  // gemini — plus any byok-loop subclass, e.g. ollama, whose endpoint
+  // reports no usage) yield null → the chips render their honest dash state.
   // (Compaction *markers* are #6768, a separate issue.)
   const contextTokens = useMemo(
     () => contextOccupancyTokens(contextOccupancy),

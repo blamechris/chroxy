@@ -1344,7 +1344,7 @@ describe('SdkSession', () => {
       assert.equal(results.length, 1)
       // The snapshot is the SDK's occupancy number — NOT derived from the
       // ≈816k billing aggregate sitting next to it on the same payload.
-      assert.deepEqual(results[0].contextUsage, {
+      assert.deepEqual(results[0].contextOccupancy, {
         totalTokens: 110_000,
         maxTokens: 200_000,
         autoCompactThreshold: 167_000,
@@ -1355,7 +1355,7 @@ describe('SdkSession', () => {
         'billing aggregate stays untouched on usage')
     })
 
-    it('omits contextUsage when the query lacks getContextUsage (older SDK)', async () => {
+    it('omits contextOccupancy when the query lacks getContextUsage (older SDK)', async () => {
       const s = createSession()
       s._processReady = true
       s._callQuery = () => fakeQueryWithContextUsage(undefined)
@@ -1363,10 +1363,10 @@ describe('SdkSession', () => {
       await s.sendMessage('go')
       s.destroy()
       assert.equal(results.length, 1)
-      assert.equal('contextUsage' in results[0], false)
+      assert.equal('contextOccupancy' in results[0], false)
     })
 
-    it('omits contextUsage when getContextUsage rejects (CLI already shutting down)', async () => {
+    it('omits contextOccupancy when getContextUsage rejects (CLI already shutting down)', async () => {
       const s = createSession()
       s._processReady = true
       const gen = fakeQueryWithContextUsage(undefined)
@@ -1376,10 +1376,10 @@ describe('SdkSession', () => {
       await s.sendMessage('go')
       s.destroy()
       assert.equal(results.length, 1)
-      assert.equal('contextUsage' in results[0], false)
+      assert.equal('contextOccupancy' in results[0], false)
     })
 
-    it('omits contextUsage when the response lacks a finite totalTokens', async () => {
+    it('omits contextOccupancy when the response lacks a finite totalTokens', async () => {
       const s = createSession()
       s._processReady = true
       s._callQuery = () => fakeQueryWithContextUsage({ totalTokens: NaN, maxTokens: 200_000 })
@@ -1387,7 +1387,7 @@ describe('SdkSession', () => {
       await s.sendMessage('go')
       s.destroy()
       assert.equal(results.length, 1)
-      assert.equal('contextUsage' in results[0], false)
+      assert.equal('contextOccupancy' in results[0], false)
     })
 
     it('coerces malformed optional fields to null without dropping the snapshot', async () => {
@@ -1402,7 +1402,7 @@ describe('SdkSession', () => {
       const results = resultCapture(s)
       await s.sendMessage('go')
       s.destroy()
-      assert.deepEqual(results[0].contextUsage, {
+      assert.deepEqual(results[0].contextOccupancy, {
         totalTokens: 50_000,
         maxTokens: null,
         autoCompactThreshold: null,
@@ -1426,7 +1426,7 @@ describe('SdkSession', () => {
         await s.sendMessage('go')
         s.destroy()
         assert.equal(results.length, 1, 'result still fires — the snapshot must never wedge the turn end')
-        assert.equal('contextUsage' in results[0], false)
+        assert.equal('contextOccupancy' in results[0], false)
       } finally {
         SdkSession.CONTEXT_USAGE_SNAPSHOT_TIMEOUT_MS = original
       }

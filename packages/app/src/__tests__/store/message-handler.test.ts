@@ -3480,7 +3480,7 @@ describe('result handler', () => {
     });
     expect(ss.lastResultCost).toBe(0.002);
     expect(ss.lastResultDuration).toBe(1500);
-    // #6769: no `contextUsage` wire field on this result → no occupancy
+    // #6769: no `contextOccupancy` wire field on this result → no occupancy
     // snapshot (billing usage must never fabricate one).
     expect(ss.contextOccupancy).toBeNull();
   });
@@ -3502,7 +3502,7 @@ describe('result handler', () => {
       type: 'result',
       sessionId: 's1',
       usage: { input_tokens: 100, output_tokens: 50 },
-      contextUsage: {
+      contextOccupancy: {
         totalTokens: 110_000,
         maxTokens: 200_000,
         autoCompactThreshold: 167_000,
@@ -3541,7 +3541,7 @@ describe('result handler', () => {
       type: 'result',
       sessionId: 's1',
       usage: { input_tokens: 10, output_tokens: 5 },
-      contextUsage: { totalTokens: 40_000, maxTokens: 200_000, autoCompactThreshold: 167_000, isAutoCompactEnabled: true, source: 'context-usage-api' },
+      contextOccupancy: { totalTokens: 40_000, maxTokens: 200_000, autoCompactThreshold: 167_000, isAutoCompactEnabled: true, source: 'context-usage-api' },
       cost: 0.001,
       duration: 800,
     });
