@@ -14,6 +14,16 @@ import {
   type SearchableRow,
 } from '../lib/transcriptSearch'
 
+/**
+ * #6811 review — stable empty references returned whenever the query is blank
+ * or nothing matches. The match memo recomputes on every `rows` change (every
+ * streaming flush once search has been opened); handing downstream
+ * identity-based memos the SAME frozen array / set in the no-match case keeps
+ * them from churning on fresh `[]` / `new Set()` allocations per render.
+ */
+const EMPTY_MATCHES: readonly string[] = Object.freeze([])
+const EMPTY_MATCH_SET: ReadonlySet<string> = new Set()
+
 export interface UseTranscriptSearchResult {
   /** Whether the find bar is showing. */
   open: boolean
@@ -22,7 +32,7 @@ export interface UseTranscriptSearchResult {
   /** Update the query (resets the active match to the first hit). */
   setQuery: (q: string) => void
   /** Ordered ids of matching rows. */
-  matchIds: string[]
+  matchIds: readonly string[]
   /** Set form of `matchIds` for O(1) per-row highlight checks. */
   matchIdSet: ReadonlySet<string>
   /** Number of matches for the "N/M" counter. */
@@ -48,11 +58,20 @@ export function useTranscriptSearch(
   const [query, setQuery] = useState('')
   const [currentIndex, setCurrentIndex] = useState(0)
 
-  const matchIds = useMemo(
-    () => computeTranscriptMatches(rows, query),
-    [rows, query],
+  // #6811 review — return the module-level stable empties when the query is
+  // blank or nothing matches, so a rows change (every streaming flush once
+  // search has been opened) hands downstream identity-based memos the SAME
+  // references instead of fresh [] / new Set() allocations. With `matchIds`
+  // identity-stable in the no-match case, the `matchIdSet` memo doesn't even
+  // recompute across rows churn.
+  const matchIds = useMemo<readonly string[]>(() => {
+    const ids = computeTranscriptMatches(rows, query)
+    return ids.length === 0 ? EMPTY_MATCHES : ids
+  }, [rows, query])
+  const matchIdSet = useMemo<ReadonlySet<string>>(
+    () => (matchIds.length === 0 ? EMPTY_MATCH_SET : new Set(matchIds)),
+    [matchIds],
   )
-  const matchIdSet = useMemo(() => new Set(matchIds), [matchIds])
 
   // Reset the active match to the first hit whenever the query changes.
   // Keyed on the query string (not the match count) so an equal-count query

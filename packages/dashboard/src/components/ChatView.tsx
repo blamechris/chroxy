@@ -991,9 +991,14 @@ function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, inFlig
 
       {/* #6788 — in-session find bar, overlaid on the (non-scrolling) .chat-view
           parent so it stays pinned while the .chat-messages list scrolls under
-          it. Mounted only while open; its own mount effect grabs focus. */}
+          it. Mounted only while open; its own mount effect grabs focus.
+          Keyed by the summon nonce (#6811 review): a repeat Cmd+F while the bar
+          is already open remounts it, re-running the mount focus+select so
+          every summon lands the caret in the field with the query selected —
+          the query itself lives in the hook, so the text survives the remount. */}
       {searchOpen && (
         <TranscriptSearchBar
+          key={openSearchSignal}
           query={search.query}
           currentIndex={search.currentIndex}
           matchCount={search.matchCount}

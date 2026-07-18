@@ -158,6 +158,27 @@ describe('ChatView in-session find (#6788)', () => {
     expect(screen.queryByTestId('transcript-search-bar')).not.toBeInTheDocument()
   })
 
+  it('re-summoning while already open refocuses the input and preserves + selects the query (#6811 review)', () => {
+    render(<Harness messages={makeMessages(5)} />)
+    summon()
+    type('Message 3')
+    const before = screen.getByTestId('transcript-search-input') as HTMLInputElement
+    // Simulate focus wandering off to the transcript / app chrome.
+    act(() => before.blur())
+    expect(document.activeElement).not.toBe(before)
+
+    // Cmd+F again (the parent bumps the nonce) — the bar must refocus with the
+    // existing query preserved and selected, ready to be retyped or reused.
+    summon()
+    const after = screen.getByTestId('transcript-search-input') as HTMLInputElement
+    expect(document.activeElement).toBe(after)
+    expect(after).toHaveValue('Message 3')
+    expect(after.selectionStart).toBe(0)
+    expect(after.selectionEnd).toBe('Message 3'.length)
+    // Match state carried through untouched.
+    expect(screen.getByTestId('transcript-search-count').textContent).toBe('1/1')
+  })
+
   it('does not run the searchable-text extractor until first summoned (#6811 review minor)', () => {
     const getSearchText = vi.fn((m: ChatViewMessage) => m.content)
     render(<Harness messages={makeMessages(5)} getSearchText={getSearchText} />)
