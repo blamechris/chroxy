@@ -2983,6 +2983,96 @@ button.sidebar-token-view-session-row:hover {
   border-color: var(--accent-blue);
 }
 
+/* ---- #6788 in-session transcript find ---- */
+/* Overlaid on the non-scrolling .chat-view parent so it stays pinned while the
+   .chat-messages list scrolls under it. z-index sits above the presence rail (2)
+   and the scroll-to-bottom FAB (10). */
+.transcript-search {
+  position: absolute;
+  top: 8px;
+  right: 16px;
+  z-index: 12;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-md, 10px);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3);
+}
+
+.transcript-search-input {
+  width: 180px;
+  padding: 4px 8px;
+  font-size: 13px;
+  color: var(--text-primary);
+  background: var(--bg-input, var(--bg-secondary));
+  border: 1px solid var(--border-subtle, var(--border-primary));
+  border-radius: var(--radius-sm, 6px);
+  outline: none;
+}
+
+.transcript-search-input:focus {
+  border-color: var(--accent-blue);
+}
+
+.transcript-search-count {
+  min-width: 44px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.transcript-search-nav {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.transcript-search-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  font-size: 13px;
+  line-height: 1;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm, 6px);
+  cursor: pointer;
+}
+
+.transcript-search-btn:hover:not(:disabled) {
+  background: var(--surface-raised, rgba(127, 127, 127, 0.12));
+  color: var(--text-primary);
+}
+
+.transcript-search-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* Message-row-level find highlight — keyed on the data attributes MeasuredRow
+   stamps (#6788). Scoped to the scroll container so they never leak into other
+   lists. `data-search-match` tints every hit; `data-search-active` is the one
+   the list is scrolled to. */
+.chat-messages [data-search-match] {
+  background: var(--search-match-bg, rgba(250, 204, 21, 0.14));
+  border-radius: var(--radius-sm, 6px);
+}
+
+.chat-messages [data-search-active] {
+  background: var(--search-active-bg, rgba(250, 204, 21, 0.30));
+  box-shadow: 0 0 0 1px var(--accent-orange, rgba(250, 204, 21, 0.6));
+  border-radius: var(--radius-sm, 6px);
+}
+
 /* ---- Markdown in messages ---- */
 /* #6631 — subtle per-response copy control. Hidden until the bubble is hovered
    or focused (keyboard), so it doesn't clutter the transcript. */

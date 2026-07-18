@@ -80,6 +80,21 @@ export const DEFAULT_SHORTCUTS: ShortcutDef[] = [
     scope: 'global',
   },
   {
+    // #6788 — Cmd/Ctrl+F in-conversation find. `disabledInTextInput` keeps the
+    // browser's native find working whenever focus is in a text input (the
+    // composer, another search field): we only intercept Cmd+F when focus is on
+    // the transcript / app chrome, and only when a chat pane is actually on
+    // screen (gated in useShortcutDispatch). The dashboard chat list is
+    // virtualized (#5561) so native find can't reach off-screen rows — this
+    // find bar can. Joins Shift+Tab / `?` as a text-input-gated shortcut.
+    id: 'transcript.search',
+    defaultBinding: 'cmd+f',
+    description: 'Find in conversation',
+    category: 'navigation',
+    scope: 'global',
+    disabledInTextInput: true,
+  },
+  {
     id: 'sidebar.toggle',
     defaultBinding: 'cmd+b',
     description: 'Toggle sidebar',

@@ -26,6 +26,9 @@ import { isRenderableImageUri } from '../utils/attachment-preview'
 import { MessageRowShell } from './MeasuredRow'
 import { ChatExpandContext, type ChatExpandRegistry } from './chatExpandRegistry'
 import { useWindowedRange } from './useWindowedRange'
+import { TranscriptSearchBar } from './TranscriptSearchBar'
+import { useTranscriptSearch } from '../hooks/useTranscriptSearch'
+import type { SearchableRow } from '../lib/transcriptSearch'
 
 /* ---- Sender Icons ---- */
 
@@ -183,6 +186,22 @@ export interface ChatViewProps {
    * ("Claude is working…"). A stable string so it doesn't churn per token.
    */
   workingLabel?: string
+  /**
+   * #6788 — monotonically-increasing nonce the parent bumps to summon the
+   * in-session find bar (Cmd/Ctrl+F). A nonce (rather than a boolean) keeps
+   * ChatView's memo wrapper intact and re-opens the bar reliably even if it
+   * was already open. The initial value is ignored; only changes open it.
+   * Undefined → the find affordance is never summoned (e.g. the System tab).
+   */
+  openSearchSignal?: number
+  /**
+   * #6788 — optional per-row searchable-text extractor for in-session find.
+   * The parent supplies it so collapsed `tool_group` rows (whose ChatViewMessage
+   * `content` is empty) still match on their inner tool summaries + results.
+   * When omitted, find matches against each row's `content`. Must be stable
+   * (memoized) — it feeds a memoized searchable-row list.
+   */
+  getSearchText?: (msg: ChatViewMessage) => string
 }
 
 const TYPE_CLASS: Record<string, string> = {
@@ -202,6 +221,20 @@ const TYPE_CLASS: Record<string, string> = {
  * very bottom still counts as "following the conversation").
  */
 const SCROLL_THRESHOLD = 100
+
+/**
+ * #6788 — headroom (px) left above a search match when the list scrolls to it,
+ * so the matched row lands just below the top edge rather than flush against it
+ * (mirrors the mobile `y - 80` headroom / `viewPosition: 0` landing).
+ */
+const SEARCH_SCROLL_HEADROOM = 80
+
+/**
+ * #6788 — stable empty searchable-row list handed to the search hook until the
+ * find bar is first summoned, so the per-row text extraction never runs (and
+ * never churns memo identity) for sessions that never open find.
+ */
+const NO_SEARCH_ROWS: SearchableRow[] = []
 
 /**
  * #5561 — fallback `gap` between rows in `.chat-messages` (theme/components.css).
@@ -399,7 +432,7 @@ const DefaultMessageRow = memo(function DefaultMessageRow({
   )
 })
 
-function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, inFlightToolColor, renderMessage, scrollToBottomSignal, queuedIds, onCancelQueued, workingLabel }: ChatViewProps) {
+function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, inFlightToolColor, renderMessage, scrollToBottomSignal, queuedIds, onCancelQueued, workingLabel, openSearchSignal, getSearchText }: ChatViewProps) {
   const containerRef = useRef<HTMLDivElement>(null)
 
   // #6392 — 1-based send position for each queued follow-up, derived from the
@@ -496,6 +529,40 @@ function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, inFlig
     rowGap,
     keyAt,
   })
+
+  // #6788 — in-session find. Build the searchable-row list from the deduped
+  // messages (the same rows the windowed list renders, so a match maps 1:1 to a
+  // scroll target). `getSearchText` lets the parent surface collapsed tool-group
+  // text; otherwise we match on the row's own `content`.
+  //
+  // Gated behind the bar having been summoned at least once (#6811 review):
+  // the map is O(N) and invokes `getSearchText` per row on every
+  // dedupedMessages change — i.e. every streaming flush — which is avoidable
+  // work on multi-thousand-message sessions that never open find. Until the
+  // first summon we hand the hook a stable empty list (query is '' anyway, so
+  // no matches are lost); after that it stays live so close → reopen is instant.
+  const [searchEverOpened, setSearchEverOpened] = useState(false)
+  const searchRows = useMemo<SearchableRow[]>(
+    () => {
+      if (!searchEverOpened) return NO_SEARCH_ROWS
+      return dedupedMessages.map((m) => ({
+        id: m.id,
+        type: m.type,
+        text: getSearchText ? getSearchText(m) : m.content,
+      }))
+    },
+    [dedupedMessages, getSearchText, searchEverOpened],
+  )
+  const search = useTranscriptSearch(searchRows)
+  const { open: searchOpen, currentMatchId: searchMatchId, matchIdSet: searchMatchIdSet, openSearch, closeSearch } = search
+
+  // Latest windowed range + deduped list read imperatively by the scroll-to-match
+  // effect (both change identity across renders; a ref keeps the effect keyed on
+  // just the active match id rather than re-firing on every windowing recompute).
+  const rangeRef = useRef(range)
+  rangeRef.current = range
+  const dedupRef = useRef(dedupedMessages)
+  dedupRef.current = dedupedMessages
 
   const syncGeometry = useCallback(() => {
     const el = containerRef.current
@@ -750,6 +817,74 @@ function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, inFlig
     return () => cancelAnimationFrame(rafId)
   }, [isStreaming, userScrolledUp, scrollToBottomNow])
 
+  // #6788 — summon the find bar when the parent bumps the nonce. Seeded with the
+  // initial value so mount is a no-op; only a genuine bump opens (mirrors the
+  // scrollToBottomSignal pattern). Undefined nonce → never fires (System tab).
+  const lastOpenSearchSignalRef = useRef(openSearchSignal)
+  useEffect(() => {
+    if (openSearchSignal === lastOpenSearchSignalRef.current) return
+    lastOpenSearchSignalRef.current = openSearchSignal
+    // First summon unlocks the searchable-row scan (see the searchRows gate).
+    setSearchEverOpened(true)
+    openSearch()
+  }, [openSearchSignal, openSearch])
+
+  // #6788 — scroll the (virtualized) list to a row by index. Uses the windowing
+  // hook's `offsetAt` to compute the row's content-space top edge — which works
+  // for rows currently WINDOWED OUT (off-screen), the case the issue calls out:
+  // native browser find can't reach an unmounted row, but `offsetAt` sums the
+  // cached/estimated heights above it, so we can jump straight there without the
+  // user scrolling first. Writing `scrollTop` (and re-seeding the windowing
+  // state) mounts the target row in the same commit. Flagged programmatic so the
+  // resulting scroll event isn't misread as a user scroll-up.
+  // #6811 review — the programmatic-flag-clear RAF is tracked in a ref so a
+  // superseding jump (fast typing / rapid next-next) cancels the stale clear
+  // before scheduling its own, and the scroll-to-match effect's cleanup can
+  // cancel + flush it on unmount/match-change instead of leaking it.
+  const searchFlagClearRafRef = useRef<number | null>(null)
+  const scrollToRowIndex = useCallback((index: number) => {
+    const el = containerRef.current
+    if (!el || index < 0) return
+    const target = Math.max(0, rangeRef.current.offsetAt(index) - SEARCH_SCROLL_HEADROOM)
+    programmaticScrollRef.current = true
+    el.scrollTop = target
+    setScrollTop(target)
+    setViewportHeight(el.clientHeight)
+    if (searchFlagClearRafRef.current !== null) cancelAnimationFrame(searchFlagClearRafRef.current)
+    searchFlagClearRafRef.current = requestAnimationFrame(() => {
+      searchFlagClearRafRef.current = null
+      programmaticScrollRef.current = false
+    })
+  }, [])
+
+  // #6788 — keep the active find match in view. On each match change: mark the
+  // reader as scrolled-up (so the streaming/count auto-follow doesn't yank them
+  // off the match), jump to the match's estimated offset (mounting it if it was
+  // windowed out), then re-run on the next frame once the row + its neighbours
+  // have measured so the landing is corrected from estimates to real heights.
+  useEffect(() => {
+    if (!searchMatchId) return
+    if (!containerRef.current) return
+    setUserScrolledUp(true)
+    const index = dedupRef.current.findIndex((m) => m.id === searchMatchId)
+    if (index < 0) return
+    scrollToRowIndex(index)
+    const raf = requestAnimationFrame(() => {
+      const idx2 = dedupRef.current.findIndex((m) => m.id === searchMatchId)
+      if (idx2 >= 0) scrollToRowIndex(idx2)
+    })
+    return () => {
+      cancelAnimationFrame(raf)
+      // Cancel + flush any pending flag-clear so the programmatic-scroll flag
+      // can't be left stuck true past this effect's lifetime (#6811 review).
+      if (searchFlagClearRafRef.current !== null) {
+        cancelAnimationFrame(searchFlagClearRafRef.current)
+        searchFlagClearRafRef.current = null
+        programmaticScrollRef.current = false
+      }
+    }
+  }, [searchMatchId, scrollToRowIndex])
+
   // #5561 — the windowed slice. Only rows in [startIndex, endIndex) mount; the
   // top/bottom spacers reserve the height of the skipped rows so the scrollbar
   // geometry (and therefore scroll position when content appends above the
@@ -797,6 +932,11 @@ function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, inFlig
             const icon = senderIconFor(msg.type)
             const rowClass = rowClassFor(msg.type, icon !== null)
             const custom = renderMessage?.(msg)
+            // #6788 — per-row find highlight. `searchMatch` tints every hit;
+            // `searchActive` marks the one the list is scrolled to. Passing
+            // primitives keeps the row memo skipping unaffected rows.
+            const searchMatch = searchMatchIdSet.has(msg.id)
+            const searchActive = searchMatchId === msg.id
             if (custom !== undefined && custom !== null) {
               return (
                 <MessageRowShell
@@ -805,6 +945,8 @@ function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, inFlig
                   measureRow={range.measureRow}
                   className={rowClass}
                   testId={`msg-${msg.id}`}
+                  searchMatch={searchMatch}
+                  searchActive={searchActive}
                 >
                   {msg.type !== 'user_input' && icon}
                   <div style={{ display: 'contents' }}>{custom}</div>
@@ -819,6 +961,8 @@ function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, inFlig
                 measureRow={range.measureRow}
                 className={rowClass}
                 testId={`msg-${msg.id}`}
+                searchMatch={searchMatch}
+                searchActive={searchActive}
               >
                 <DefaultMessageRow
                   id={msg.id}
@@ -845,6 +989,26 @@ function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, inFlig
           {(isStreaming || isBusy) && <WorkingIndicator label={workingLabel} />}
         </div>
       </ChatExpandContext.Provider>
+
+      {/* #6788 — in-session find bar, overlaid on the (non-scrolling) .chat-view
+          parent so it stays pinned while the .chat-messages list scrolls under
+          it. Mounted only while open; its own mount effect grabs focus.
+          Keyed by the summon nonce (#6811 review): a repeat Cmd+F while the bar
+          is already open remounts it, re-running the mount focus+select so
+          every summon lands the caret in the field with the query selected —
+          the query itself lives in the hook, so the text survives the remount. */}
+      {searchOpen && (
+        <TranscriptSearchBar
+          key={openSearchSignal}
+          query={search.query}
+          currentIndex={search.currentIndex}
+          matchCount={search.matchCount}
+          onQueryChange={search.setQuery}
+          onNext={search.next}
+          onPrev={search.prev}
+          onClose={closeSearch}
+        />
+      )}
 
       {userScrolledUp && (
         <button

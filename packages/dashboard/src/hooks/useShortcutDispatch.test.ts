@@ -50,6 +50,7 @@ const TEST_DEFS: ShortcutDef[] = [
   { id: 'help.toggle', defaultBinding: '?', description: 'Help', category: 'other', scope: 'global' },
   { id: 'palette.toggle.vscode', defaultBinding: 'cmd+shift+p', description: 'Palette (VS Code)', category: 'navigation', scope: 'global' },
   { id: 'device.pairQr', defaultBinding: 'cmd+shift+l', description: 'Pair a device', category: 'navigation', scope: 'global' },
+  { id: 'transcript.search', defaultBinding: 'cmd+f', description: 'Find in conversation', category: 'navigation', scope: 'global', disabledInTextInput: true },
 ]
 
 function fireKey(opts: Partial<KeyboardEvent> & { key: string }): KeyboardEvent {
@@ -327,5 +328,39 @@ describe('useShortcutDispatch', () => {
     renderHook(() => useShortcutDispatch(props))
     fireKey({ key: 'p', metaKey: true, shiftKey: true })
     expect(props.setPaletteOpen).toHaveBeenCalledOnce()
+  })
+
+  it('transcript.search (Cmd+F) opens the find bar + preventDefaults when a chat transcript is visible', () => {
+    const openTranscriptSearch = vi.fn()
+    const props = makeProps({ chatTranscriptVisible: true, openTranscriptSearch })
+    renderHook(() => useShortcutDispatch(props))
+    const event = fireKey({ key: 'f', metaKey: true })
+    expect(openTranscriptSearch).toHaveBeenCalledOnce()
+    expect(event.defaultPrevented).toBe(true)
+  })
+
+  it('transcript.search (Cmd+F) falls through to native find when no chat transcript is visible', () => {
+    const openTranscriptSearch = vi.fn()
+    // e.g. the Files / System / Control Room tab — no transcript to search.
+    const props = makeProps({ chatTranscriptVisible: false, openTranscriptSearch })
+    renderHook(() => useShortcutDispatch(props))
+    const event = fireKey({ key: 'f', metaKey: true })
+    expect(openTranscriptSearch).not.toHaveBeenCalled()
+    // Not swallowed — the browser's native Cmd+F still runs on non-chat surfaces.
+    expect(event.defaultPrevented).toBe(false)
+  })
+
+  it('transcript.search (Cmd+F) does NOT fire inside a text input (native find keeps working)', () => {
+    const openTranscriptSearch = vi.fn()
+    const props = makeProps({ chatTranscriptVisible: true, openTranscriptSearch })
+    renderHook(() => useShortcutDispatch(props))
+    const input = document.createElement('input')
+    document.body.appendChild(input)
+    input.focus()
+    const event = new KeyboardEvent('keydown', { key: 'f', metaKey: true, bubbles: true, cancelable: true })
+    input.dispatchEvent(event)
+    expect(openTranscriptSearch).not.toHaveBeenCalled()
+    expect(event.defaultPrevented).toBe(false)
+    document.body.removeChild(input)
   })
 })

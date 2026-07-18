@@ -26,10 +26,21 @@ export interface MessageRowShellProps {
   className: string
   /** Test id for the row container (kept identical to the pre-#5561 `msg-<id>`). */
   testId: string
+  /**
+   * #6788 — this row matches the active in-session find query. Stamped as a
+   * `data-search-match` attribute so the transcript can tint every hit. A
+   * plain boolean so the row memo still skips unaffected rows.
+   */
+  searchMatch?: boolean
+  /**
+   * #6788 — this row is the CURRENT (focused) find match — the one the list is
+   * scrolled to. Stamped as `data-search-active` for a stronger highlight.
+   */
+  searchActive?: boolean
   children: ReactNode
 }
 
-function MessageRowShellImpl({ rowKey, measureRow, className, testId, children }: MessageRowShellProps) {
+function MessageRowShellImpl({ rowKey, measureRow, className, testId, searchMatch, searchActive, children }: MessageRowShellProps) {
   const ref = useRef<HTMLDivElement>(null)
 
   const report = useCallback(() => {
@@ -51,7 +62,14 @@ function MessageRowShellImpl({ rowKey, measureRow, className, testId, children }
   }, [report])
 
   return (
-    <div ref={ref} className={className || undefined} data-testid={testId} data-row-key={rowKey}>
+    <div
+      ref={ref}
+      className={className || undefined}
+      data-testid={testId}
+      data-row-key={rowKey}
+      data-search-match={searchMatch ? '' : undefined}
+      data-search-active={searchActive ? '' : undefined}
+    >
       {children}
     </div>
   )

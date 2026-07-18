@@ -80,6 +80,18 @@ export interface ShortcutDispatchProps {
   // disconnected (the caller gates on `isConnected`), so the shortcut no-ops
   // rather than opening an empty modal with no server to pair against.
   showQr?: () => void
+  /**
+   * #6788 — true when a chat transcript is on screen (chat view active, or a
+   * split with a chat pane). Cmd+F only intercepts the browser's native find
+   * when this holds; on non-chat surfaces the event falls through so the
+   * browser's find still works (there's no transcript for our find bar to reach).
+   */
+  chatTranscriptVisible?: boolean
+  /**
+   * #6788 — summon the in-session find bar (bumps the ChatView open nonce).
+   * Only called when `chatTranscriptVisible` is true.
+   */
+  openTranscriptSearch?: () => void
 }
 
 export function useShortcutDispatch(props: ShortcutDispatchProps): void {
@@ -107,6 +119,8 @@ export function useShortcutDispatch(props: ShortcutDispatchProps): void {
     openSymbolSearch,
     openCodeSearch,
     showQr,
+    chatTranscriptVisible,
+    openTranscriptSearch,
   } = props
 
   useEffect(() => {
@@ -207,6 +221,20 @@ export function useShortcutDispatch(props: ShortcutDispatchProps): void {
           if (overlays.length === 0 || onlyShortcutHelp) {
             e.preventDefault()
             setShortcutHelpOpen(prev => !prev)
+          }
+          return
+        }
+        // #6788 — Cmd/Ctrl+F in-conversation find. Only intercept (and suppress
+        // the browser's native find) when a chat transcript is actually on
+        // screen; otherwise let the event through so native find still works on
+        // non-chat surfaces. Handled BEFORE the generic preventDefault so a
+        // non-chat Cmd+F is never swallowed. The registry's `disabledInTextInput`
+        // already lets native find run while a text input (composer / other
+        // search field) has focus.
+        if (matchedId === 'transcript.search') {
+          if (chatTranscriptVisible && openTranscriptSearch) {
+            e.preventDefault()
+            openTranscriptSearch()
           }
           return
         }
@@ -323,5 +351,7 @@ export function useShortcutDispatch(props: ShortcutDispatchProps): void {
     openSettings,
     setShowCreateSession,
     setShortcutHelpOpen,
+    chatTranscriptVisible,
+    openTranscriptSearch,
   ])
 }

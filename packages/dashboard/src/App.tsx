@@ -26,7 +26,7 @@ import { resolveActivePrimaryClientId } from './components/ViewersIndicator'
 import { type ContextMenuItem } from './components/SessionContextMenu'
 import { buildSidebarContextMenuItems } from './sidebarContextMenuItems'
 import { useCommands, recordMruCommand, getMruCommands } from './store/commands'
-import { ChatView } from './components/ChatView'
+import { ChatView, type ChatViewMessage } from './components/ChatView'
 import { MultiTerminalView } from './components/MultiTerminalView'
 import { InputBar, type FileAttachment, type ImageAttachment } from './components/InputBar'
 import { useVoiceInput } from './hooks/useVoiceInput'
@@ -37,6 +37,7 @@ import { processImageFiles, filterImageFiles } from './utils/image-utils'
 import { getAuthToken } from './utils/auth'
 import { SessionBar, type SessionTabData, type SessionStatus } from './components/SessionBar'
 import { formatTranscript } from './lib/transcript'
+import { extractRowSearchText } from './lib/transcriptSearch'
 import { ActivityIndicator, findInFlightToolUse } from './components/ActivityIndicator'
 import { CheckInChip } from './components/CheckInChip'
 import { EvaluatorClarifyPrompt } from './components/EvaluatorPrompts'
@@ -508,6 +509,10 @@ export function App() {
   // bottom even when the user had scrolled up to read history — see ChatView's
   // scrollToBottomSignal effect.
   const [scrollToBottomSignal, setScrollToBottomSignal] = useState(0)
+  // #6788 — nonce bumped by the Cmd/Ctrl+F shortcut to summon the ChatView's
+  // in-session find bar. A nonce (not a boolean) re-opens it reliably and keeps
+  // ChatView's memo wrapper intact. Only passed to the primary chat panes.
+  const [openSearchSignal, setOpenSearchSignal] = useState(0)
   const evaluateDraft = useConnectionStore(s => s.evaluateDraft)
   const sendPermissionResponse = useConnectionStore(s => s.sendPermissionResponse)
   const switchSession = useConnectionStore(s => s.switchSession)
@@ -1017,6 +1022,11 @@ export function App() {
     // handleShowQr/isConnected are declared below; the ref no-ops when null
     // (disconnected), so the shortcut only opens the modal when there's a server.
     showQr: () => showQrRef.current?.(),
+    // #6788 — Cmd/Ctrl+F summons the in-session find bar. Only intercept the
+    // browser's native find when a chat transcript is on screen (chat view, or a
+    // split whose first pane is chat); elsewhere the event falls through.
+    chatTranscriptVisible: viewMode === 'chat' || splitMode !== null,
+    openTranscriptSearch: () => setOpenSearchSignal(n => n + 1),
   })
 
   const trackedCommands = useMemo(
@@ -1131,6 +1141,21 @@ export function App() {
     storeMessages,
     streamingMessageId,
   })
+
+  // #6788 — searchable-text extractor for the ChatView in-session find bar.
+  // Delegates to the pure `extractRowSearchText` helper (unit-tested in
+  // lib/transcriptSearch.test.ts): collapsed `tool_group` rows join their inner
+  // tool summaries + results from the group payload, and a SINGLETON `tool_use`
+  // row appends the store message's `toolResult` (#6811 review — a lone tool's
+  // stdout lives on the store message, not in the row's `content`, and must be
+  // just as findable as the same output inside a 2+ group; mobile searches
+  // content || toolResult on every row). Memoized on the two lookup maps so
+  // ChatView's memoized searchable-row list stays stable.
+  const chatSearchText = useCallback(
+    (msg: ChatViewMessage): string =>
+      extractRowSearchText(msg, chatToolGroupPayloads, storeMsgMap),
+    [chatToolGroupPayloads, storeMsgMap],
+  )
 
   // System events for the System tab — uses the same toChatViewMessage
   // mapping the chat pipeline does so both surfaces present rows in the
@@ -2310,6 +2335,8 @@ export function App() {
                         onCancelQueued={onCancelQueued}
                         workingLabel={workingLabel}
                         inFlightToolColor={inFlightToolColor}
+                        openSearchSignal={openSearchSignal}
+                        getSearchText={chatSearchText}
                       />
                     }
                     second={
@@ -2357,6 +2384,8 @@ export function App() {
                         onCancelQueued={onCancelQueued}
                         workingLabel={workingLabel}
                         inFlightToolColor={inFlightToolColor}
+                        openSearchSignal={openSearchSignal}
+                        getSearchText={chatSearchText}
                       />
                     </div>
                     <div
