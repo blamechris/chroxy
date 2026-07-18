@@ -11,7 +11,7 @@
  */
 import React from 'react';
 import renderer, { act, ReactTestInstance } from 'react-test-renderer';
-import { StyleSheet } from 'react-native';
+import { Alert, StyleSheet } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { FormattedResponse } from '../MarkdownRenderer';
 import { flushMicrotasks } from '../../test-utils/test-helpers';
@@ -176,9 +176,10 @@ describe('MarkdownRenderer per-code-block copy button (#6793)', () => {
     }
   });
 
-  it('does not show "Copied" when the clipboard write rejects', async () => {
+  it('surfaces an Alert (not just console.error) and does not show "Copied" when the clipboard write rejects', async () => {
     mockSetStringAsync.mockRejectedValueOnce(new Error('clipboard unavailable'));
     const consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
     const tree = renderResponse('```\nconst x = 1\n```');
     const button = copyButtons(tree.root)[0]!;
 
@@ -189,6 +190,26 @@ describe('MarkdownRenderer per-code-block copy button (#6793)', () => {
 
     expect(copyButtons(tree.root)[0]!.props.accessibilityLabel).toBe('Copy code');
     expect(consoleErrorSpy).toHaveBeenCalled();
+    // #6813 review: the failure must be USER-visible, matching the app's other
+    // copy flow (SessionScreen.handleCopy) — a silent console.error leaves the
+    // user with an empty clipboard and no idea why.
+    expect(alertSpy).toHaveBeenCalledTimes(1);
+    expect(alertSpy).toHaveBeenCalledWith('Copy failed', expect.stringContaining('Unable to copy code'));
     consoleErrorSpy.mockRestore();
+    alertSpy.mockRestore();
+  });
+
+  it('does not alert on a successful copy', async () => {
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    const tree = renderResponse('```\nconst x = 1\n```');
+
+    await act(async () => {
+      copyButtons(tree.root)[0]!.props.onPress();
+      await flushMicrotasks();
+    });
+
+    expect(mockSetStringAsync).toHaveBeenCalledTimes(1);
+    expect(alertSpy).not.toHaveBeenCalled();
+    alertSpy.mockRestore();
   });
 });

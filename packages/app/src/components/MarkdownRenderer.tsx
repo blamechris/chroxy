@@ -640,6 +640,10 @@ const CodeCopyButton = React.memo(({ code }: { code: string }) => {
       })
       .catch((error) => {
         console.error('Failed to copy code block to clipboard', error);
+        // #6813 review: surface the failure the same way the app's other copy
+        // flow does (SessionScreen.handleCopy) — a silent console.error leaves
+        // the user with no feedback and an empty clipboard.
+        Alert.alert('Copy failed', 'Unable to copy code to clipboard. Please try again.');
       });
   }, [code]);
 

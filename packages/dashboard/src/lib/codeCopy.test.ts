@@ -125,18 +125,31 @@ describe('handleMarkdownBodyClick (#6793)', () => {
   })
 
   it('handles a code-copy-button click without falling through to link handling', () => {
+    // #6813 review: only handleMarkdownLinkClick calls preventDefault (its
+    // open AND suppress branches both do) — the copy path must short-circuit
+    // before the link handler runs. To make the not-called assertion actually
+    // falsifiable, wrap the code block in an anchor: if the copy click ever
+    // fell through, `closest('a[href]')` would find this ancestor and the
+    // suppress branch would fire preventDefault, failing the test. The test
+    // below is the positive control: the identical click shape on a bare
+    // anchor DOES preventDefault.
     const { container, button } = codeBlock('some code')
     const anchor = document.createElement('a')
-    anchor.href = 'https://example.com'
+    anchor.setAttribute('href', 'https://example.com')
+    const block = container.firstElementChild!
+    anchor.appendChild(block)
     container.appendChild(anchor)
-    const open = vi.fn()
-    // handleMarkdownBodyClick only takes the event; we can't inject `open`
-    // directly, so just assert it doesn't throw and the click is treated as
-    // handled (no navigation side effect possible since target is the button).
-    expect(() =>
-      handleMarkdownBodyClick({ target: button, stopPropagation: vi.fn(), metaKey: true, ctrlKey: false, detail: 1, preventDefault: vi.fn() }),
-    ).not.toThrow()
-    expect(open).not.toHaveBeenCalled()
+    // This test exercises the REAL writeText default (handleMarkdownBodyClick
+    // has no injection point); jsdom has no clipboard, so the write resolves
+    // false and would push a warning into the real store — silence it.
+    const addServerError = vi.spyOn(useConnectionStore.getState(), 'addServerError').mockImplementation(() => {})
+    const preventDefault = vi.fn()
+    const stopPropagation = vi.fn()
+    handleMarkdownBodyClick({ target: button, stopPropagation, metaKey: false, ctrlKey: false, detail: 1, preventDefault })
+    expect(preventDefault).not.toHaveBeenCalled()
+    // …and the copy path DID claim the event (stopPropagation is its marker).
+    expect(stopPropagation).toHaveBeenCalledOnce()
+    addServerError.mockRestore()
   })
 
   it('falls through to link handling when the click is not on a copy button', () => {
@@ -146,7 +159,8 @@ describe('handleMarkdownBodyClick (#6793)', () => {
     const preventDefault = vi.fn()
     // A plain mouse click on a link (detail >= 1, no modifier) is suppressed
     // by handleMarkdownLinkClick — preventDefault fires, proving the click
-    // fell through past the (non-matching) copy-button check.
+    // fell through past the (non-matching) copy-button check. Positive control
+    // for the preventDefault-NOT-called assertion above.
     handleMarkdownBodyClick({ target: anchor, stopPropagation: vi.fn(), metaKey: false, ctrlKey: false, detail: 1, preventDefault })
     expect(preventDefault).toHaveBeenCalledOnce()
   })
