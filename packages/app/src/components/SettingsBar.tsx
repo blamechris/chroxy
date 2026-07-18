@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, Platform, Animated, AccessibilityInfo, Alert, Modal, Pressable, ScrollView, Switch } from 'react-native';
+import { View, Text, TouchableOpacity, StyleSheet, Platform, Animated, AccessibilityInfo, Alert, Modal, Pressable, ScrollView, Switch, TextInput, Linking } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { resolveContextWindow, contextOccupancyTokens, contextFillPercent } from '@chroxy/store-core';
 import type { CumulativeUsage, PendingPermissionConfirm, SessionIntervention } from '@chroxy/store-core';
@@ -79,6 +79,9 @@ export interface SettingsBarProps {
   // for servers that report `canToggle` (the BYOK lane). Absent → the MCP list
   // stays read-only (matches sdk/cli/tui providers).
   onToggleMcpServer?: (server: string, enabled: boolean) => void;
+  // #6822 — submit a pasted OAuth authorization code for a remote MCP server that
+  // reported `oauth-required`. Absent → the paste-code affordance stays hidden.
+  onSubmitMcpAuthCode?: (server: string, code: string) => void;
   setModel: (model: string) => void;
   setPermissionMode: (mode: string) => void;
   pendingPermissionConfirm?: PendingPermissionConfirm | null;
@@ -211,6 +214,7 @@ export function SettingsBar({
   mcpServers,
   onInvokeAgent,
   onToggleMcpServer,
+  onSubmitMcpAuthCode,
   setModel,
   setPermissionMode,
   pendingPermissionConfirm,
@@ -702,35 +706,14 @@ export function SettingsBar({
               <Text style={styles.deviceSectionTitle}>
                 MCP Servers ({mcpServers.length})
               </Text>
-              {mcpServers.map((server) => {
-                // #6824: a server is "on" unless parked. Prefer the explicit
-                // `enabled` flag (BYOK emits it); fall back to status so a
-                // pre-#6824 payload still reads sensibly. The Switch renders
-                // only when the server reports `canToggle` (BYOK lane) and the
-                // parent wired an onToggle handler — otherwise read-only.
-                const enabled = typeof server.enabled === 'boolean' ? server.enabled : server.status !== 'disabled';
-                const canToggle = !!server.canToggle && !!onToggleMcpServer;
-                return (
-                  <View key={server.name} style={styles.agentEntry}>
-                    <View style={[styles.statusDot, { backgroundColor: server.status === 'connected' ? COLORS.accentGreen : COLORS.textMuted }]} />
-                    <Text style={styles.agentDescription} numberOfLines={1}>
-                      {server.name}
-                    </Text>
-                    {canToggle ? (
-                      <Switch
-                        testID={`mcp-server-toggle-${server.name}`}
-                        value={enabled}
-                        onValueChange={(next) => onToggleMcpServer?.(server.name, next)}
-                        accessibilityLabel={`${enabled ? 'Disable' : 'Enable'} MCP server ${server.name}`}
-                      />
-                    ) : (
-                      <Text style={styles.agentElapsed}>
-                        {server.status}
-                      </Text>
-                    )}
-                  </View>
-                );
-              })}
+              {mcpServers.map((server) => (
+                <McpServerRow
+                  key={server.name}
+                  server={server}
+                  onToggleMcpServer={onToggleMcpServer}
+                  onSubmitMcpAuthCode={onSubmitMcpAuthCode}
+                />
+              ))}
             </View>
           )}
           {customAgents.length > 0 && (
@@ -881,6 +864,99 @@ export function SettingsBar({
             </Pressable>
           </Pressable>
         </Modal>
+      )}
+    </View>
+  );
+}
+
+/**
+ * One row in the SettingsBar "MCP Servers" list. Extracted so an oauth-required
+ * server (#6822) can hold its own paste-code input state. Renders:
+ *   - the status dot + name (always);
+ *   - a Switch when the server reports `canToggle` (BYOK lane) and a toggle
+ *     handler is wired (#6824), else read-only status text;
+ *   - an "Authorize" button (opens the browser authorization URL on the user's
+ *     device) + a paste-code input (the universal fallback) when the server
+ *     reports `status: 'oauth-required'` and a submit handler is wired (#6822).
+ */
+function McpServerRow({
+  server,
+  onToggleMcpServer,
+  onSubmitMcpAuthCode,
+}: {
+  server: McpServer;
+  onToggleMcpServer?: (server: string, enabled: boolean) => void;
+  onSubmitMcpAuthCode?: (server: string, code: string) => void;
+}) {
+  const [code, setCode] = useState('');
+  // #6824: a server is "on" unless parked. Prefer the explicit `enabled` flag
+  // (BYOK emits it); fall back to status so a pre-#6824 payload still reads.
+  const enabled = typeof server.enabled === 'boolean' ? server.enabled : server.status !== 'disabled';
+  const canToggle = !!server.canToggle && !!onToggleMcpServer;
+  const needsAuth = server.status === 'oauth-required';
+
+  return (
+    <View style={styles.mcpServerRow}>
+      <View style={styles.agentEntry}>
+        <View style={[styles.statusDot, { backgroundColor: server.status === 'connected' ? COLORS.accentGreen : COLORS.textMuted }]} />
+        <Text style={styles.agentDescription} numberOfLines={1}>
+          {server.name}
+        </Text>
+        {canToggle ? (
+          <Switch
+            testID={`mcp-server-toggle-${server.name}`}
+            value={enabled}
+            onValueChange={(next) => onToggleMcpServer?.(server.name, next)}
+            accessibilityLabel={`${enabled ? 'Disable' : 'Enable'} MCP server ${server.name}`}
+          />
+        ) : (
+          <Text style={styles.agentElapsed}>
+            {server.status}
+          </Text>
+        )}
+      </View>
+      {needsAuth && !!onSubmitMcpAuthCode && (
+        <View style={styles.mcpAuthContainer} testID={`mcp-server-auth-${server.name}`}>
+          {!!server.authUrl && (
+            <TouchableOpacity
+              style={styles.mcpAuthorizeButton}
+              testID={`mcp-server-authorize-${server.name}`}
+              accessibilityRole="button"
+              accessibilityLabel={`Authorize MCP server ${server.name}`}
+              onPress={() => { if (server.authUrl) Linking.openURL(server.authUrl).catch(() => {}); }}
+            >
+              <Text style={styles.mcpAuthorizeButtonText}>Authorize in browser</Text>
+            </TouchableOpacity>
+          )}
+          <View style={styles.mcpAuthPasteRow}>
+            <TextInput
+              style={styles.mcpAuthInput}
+              testID={`mcp-server-auth-input-${server.name}`}
+              placeholder="Paste code"
+              placeholderTextColor={COLORS.textMuted}
+              value={code}
+              onChangeText={setCode}
+              autoCapitalize="none"
+              autoCorrect={false}
+              accessibilityLabel={`Authorization code for MCP server ${server.name}`}
+            />
+            <TouchableOpacity
+              style={[styles.mcpAuthSubmit, !code.trim() && styles.mcpAuthSubmitDisabled]}
+              testID={`mcp-server-auth-submit-${server.name}`}
+              disabled={!code.trim()}
+              accessibilityRole="button"
+              accessibilityLabel={`Submit authorization code for MCP server ${server.name}`}
+              onPress={() => {
+                const trimmed = code.trim();
+                if (!trimmed) return;
+                onSubmitMcpAuthCode?.(server.name, trimmed);
+                setCode('');
+              }}
+            >
+              <Text style={styles.mcpAuthSubmitText}>Submit</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
       )}
     </View>
   );
@@ -1117,6 +1193,62 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
+  },
+  // #6822 — oauth-required MCP server: the row stacks the status line above the
+  // authorize + paste-code affordance.
+  mcpServerRow: {
+    flexDirection: 'column',
+    gap: 6,
+  },
+  mcpAuthContainer: {
+    flexDirection: 'column',
+    gap: 6,
+    paddingLeft: 12,
+  },
+  mcpAuthorizeButton: {
+    alignSelf: 'flex-start',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: COLORS.accentBlue,
+  },
+  mcpAuthorizeButtonText: {
+    color: COLORS.accentBlue,
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  mcpAuthPasteRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  mcpAuthInput: {
+    flex: 1,
+    minWidth: 0,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: COLORS.borderPrimary,
+    color: COLORS.textPrimary,
+    fontSize: 11,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  mcpAuthSubmit: {
+    paddingHorizontal: 12,
+    paddingVertical: 5,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: COLORS.accentBlue,
+  },
+  mcpAuthSubmitDisabled: {
+    opacity: 0.5,
+  },
+  mcpAuthSubmitText: {
+    color: COLORS.accentBlue,
+    fontSize: 11,
+    fontWeight: '600',
   },
   agentDot: {
     width: 6,

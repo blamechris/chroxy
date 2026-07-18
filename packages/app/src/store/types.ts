@@ -578,6 +578,12 @@ export interface ModelsAndPermissionsActions {
   // broadcast (no optimistic mutation to roll back). The toggle is gated on the
   // server's `canToggle` flag so this only reaches a provider that supports it.
   setMcpServerEnabled: (server: string, enabled: boolean) => void;
+  // #6822 — submit a pasted OAuth authorization code for a remote MCP server that
+  // reported `oauth-required` (BYOK lane). Sends `submit_mcp_auth_code`; the
+  // server redeems the code, persists the tokens encrypted at rest, and reconnects
+  // authenticated, then re-emits `mcp_servers` with the new status. No-op for an
+  // empty code. The code is a one-time authorization code, never stored client-side.
+  submitMcpAuthCode: (server: string, code: string) => void;
 }
 
 /**

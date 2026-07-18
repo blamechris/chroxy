@@ -1458,9 +1458,17 @@ button.sidebar-token-view-session-row:hover {
 
 .sidebar-mcp-view-row {
   display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+}
+
+/* The name/status/toggle line — the row's primary content. The oauth-required
+   authorize affordance (#6822) stacks beneath it. */
+.sidebar-mcp-view-row-main {
+  display: flex;
   align-items: baseline;
   gap: 8px;
-  font-size: 12px;
 }
 
 .sidebar-mcp-view-dot {
@@ -1520,6 +1528,65 @@ button.sidebar-token-view-session-row:hover {
 
 .sidebar-mcp-view-toggle:hover {
   filter: brightness(1.15);
+}
+
+/* #6822 — OAuth authorize affordance for an oauth-required remote MCP server.
+   The "Authorize" link opens the browser authorization URL (on the user's own
+   device); the paste-code form is the universal fallback for a remote/tunneled
+   daemon whose loopback callback the browser can't reach. */
+.sidebar-mcp-view-auth {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-left: 16px;
+}
+
+.sidebar-mcp-view-authorize {
+  align-self: flex-start;
+  padding: 2px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--accent, #3b82f6);
+  color: var(--accent, #3b82f6);
+  font-size: 11px;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.sidebar-mcp-view-authorize:hover {
+  filter: brightness(1.15);
+}
+
+.sidebar-mcp-view-auth-form {
+  display: flex;
+  gap: 6px;
+}
+
+.sidebar-mcp-view-auth-input {
+  flex: 1;
+  min-width: 0;
+  padding: 3px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--border-subtle, var(--text-muted));
+  background: var(--surface-1, transparent);
+  color: var(--text-primary);
+  font-size: 11px;
+}
+
+.sidebar-mcp-view-auth-submit {
+  flex-shrink: 0;
+  padding: 3px 10px;
+  border-radius: 4px;
+  border: 1px solid var(--accent, #3b82f6);
+  background: transparent;
+  color: var(--accent, #3b82f6);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.sidebar-mcp-view-auth-submit:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 /* #5163 (epic #5159) — Control Room panel: live read-only activity tree. */

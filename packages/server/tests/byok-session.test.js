@@ -520,6 +520,57 @@ describe('ClaudeByokSession', () => {
         assert.equal(emittedBefore.length, 0, 'no re-emit for an unknown server')
         await session.destroy()
       })
+
+      // #6822 — submitMcpAuthCode delegates to the fleet and re-emits mcp_servers.
+      it('submitMcpAuthCode delegates to the fleet and re-emits mcp_servers on success', async () => {
+        preTrustStub()
+        const configPath = writeStubConfig()
+        const session = new ClaudeByokSession({ cwd: '/tmp', mcpConfigPath: configPath })
+        session._client = { messages: { stream: () => fakeStream([]) } }
+        await session.start()
+        // Swap in a fake fleet that records the code and reports success.
+        let received = null
+        session._mcpFleet = {
+          submitAuthCode: async (name, code) => { received = { name, code }; return { found: true, ok: true, status: 'connected' } },
+          getServerStatuses: () => [{ name: 'stub', status: 'connected', enabled: true, canToggle: true }],
+        }
+        const emitted = []
+        session.on('mcp_servers', (d) => emitted.push(d))
+        const res = await session.submitMcpAuthCode('stub', 'the-code')
+        assert.deepEqual(res, { found: true, ok: true, status: 'connected' })
+        assert.deepEqual(received, { name: 'stub', code: 'the-code' })
+        assert.equal(emitted.length, 1, 're-emits mcp_servers on a successful redemption')
+        await session.destroy()
+      })
+
+      it('submitMcpAuthCode returns found:false for an unknown server (no emit)', async () => {
+        preTrustStub()
+        const configPath = writeStubConfig()
+        const session = new ClaudeByokSession({ cwd: '/tmp', mcpConfigPath: configPath })
+        session._client = { messages: { stream: () => fakeStream([]) } }
+        await session.start()
+        const emitted = []
+        session.on('mcp_servers', (d) => emitted.push(d))
+        const res = await session.submitMcpAuthCode('ghost', 'x')
+        assert.deepEqual(res, { found: false })
+        assert.equal(emitted.length, 0)
+        await session.destroy()
+      })
+
+      it('submitMcpAuthCode does not re-emit when redemption fails (ok:false)', async () => {
+        preTrustStub()
+        const configPath = writeStubConfig()
+        const session = new ClaudeByokSession({ cwd: '/tmp', mcpConfigPath: configPath })
+        session._client = { messages: { stream: () => fakeStream([]) } }
+        await session.start()
+        session._mcpFleet = { submitAuthCode: async () => ({ found: true, ok: false, error: 'bad code' }) }
+        const emitted = []
+        session.on('mcp_servers', (d) => emitted.push(d))
+        const res = await session.submitMcpAuthCode('stub', 'x')
+        assert.equal(res.ok, false)
+        assert.equal(emitted.length, 0, 'no re-emit on a failed redemption')
+        await session.destroy()
+      })
     })
 
     it('#4457: untrusted MCP server fires a permission_request prompt; deny → DEAD without spawn', async () => {

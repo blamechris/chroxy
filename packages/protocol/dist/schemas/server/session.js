@@ -84,6 +84,14 @@ export const ServerMcpServersSchema = z.object({
         // Both optional so pre-#6824 emitters (and other providers) round-trip.
         enabled: z.boolean().optional(),
         canToggle: z.boolean().optional(),
+        // #6822: when a remote MCP server answered a connect with 401, the daemon
+        // surfaces the browser authorization URL here alongside `status:
+        // 'oauth-required'`. The client opens it (new-tab / Linking.openURL) and,
+        // for a remote/tunneled daemon whose loopback callback the browser can't
+        // reach, submits the pasted code back via `submit_mcp_auth_code`. Carries
+        // ONLY the public authorization URL — never a token/verifier/secret.
+        // Optional (present only on the oauth-required entry).
+        authUrl: z.string().optional(),
     })),
 });
 export const ServerPlanStartedSchema = z.object({

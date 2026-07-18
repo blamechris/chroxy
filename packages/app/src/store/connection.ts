@@ -2179,6 +2179,25 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     sendIfOpen(payload);
   },
 
+  // #6822 — submit a pasted OAuth authorization code for a remote MCP server that
+  // reported `oauth-required` (BYOK lane). Broadcast-driven: the server redeems
+  // the code, reconnects the server authenticated, and re-emits `mcp_servers`
+  // with the new status. No-op for an empty code. The code is a one-time
+  // authorization code and is never stored client-side.
+  submitMcpAuthCode: (server: string, code: string) => {
+    const trimmed = typeof code === 'string' ? code.trim() : '';
+    if (!trimmed) return;
+    const { activeSessionId } = get();
+    const payload: Record<string, unknown> = {
+      type: 'submit_mcp_auth_code',
+      server,
+      code: trimmed,
+      requestId: `mcp-auth-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    };
+    if (activeSessionId) payload.sessionId = activeSessionId;
+    sendIfOpen(payload);
+  },
+
   confirmPermissionMode: (mode: string) => {
     const { socket, activeSessionId, sessionStates } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {

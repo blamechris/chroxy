@@ -187,9 +187,40 @@ export class MCPFleet {
         return { name: cfg.name, status: 'disabled', enabled: false, canToggle: true }
       }
       const client = this._clients.find((c) => c.name === cfg.name)
+      // #6822: a remote server awaiting OAuth reports `oauth-required` + the
+      // browser authorization URL (never a token/secret), so the client can
+      // render an "Authorize" affordance instead of a bare failure.
+      if (client && client.needsAuthorization) {
+        const entry = { name: cfg.name, status: 'oauth-required', enabled: true, canToggle: true }
+        if (client.authorizationUrl) entry.authUrl = client.authorizationUrl
+        return entry
+      }
       const status = client ? mcpStateToStatus(client.state) : 'connecting'
       return { name: cfg.name, status, enabled: true, canToggle: true }
     })
+  }
+
+  /**
+   * #6822: submit a pasted OAuth authorization code for a configured remote MCP
+   * server, redeeming it at the daemon and reconnecting authenticated. Returns
+   * `{ found, ok?, status?, error? }` — `found: false` when `name` is not a
+   * configured server; `ok: false` with a value-free `error` on a redemption
+   * failure. On success the fleet re-emits nothing itself (byok-session re-emits
+   * `mcp_servers` after the call so all clients converge).
+   */
+  async submitAuthCode(name, code) {
+    const client = this._clients.find((c) => c.name === name)
+    if (!client) return { found: false }
+    if (typeof client.completeAuthorization !== 'function') {
+      return { found: true, ok: false, error: 'This MCP server does not use OAuth authorization.' }
+    }
+    try {
+      await client.completeAuthorization(code)
+      const status = client.needsAuthorization ? 'oauth-required' : mcpStateToStatus(client.state)
+      return { found: true, ok: true, status }
+    } catch (err) {
+      return { found: true, ok: false, error: err?.message || String(err) }
+    }
   }
 
   /**

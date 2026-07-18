@@ -8,7 +8,7 @@
  */
 import React from 'react';
 import renderer, { act, ReactTestInstance } from 'react-test-renderer';
-import { Switch } from 'react-native';
+import { Switch, TextInput, TouchableOpacity, Linking } from 'react-native';
 import { SettingsBar } from '../SettingsBar';
 import type { McpServer } from '@chroxy/store-core';
 
@@ -87,5 +87,55 @@ describe('SettingsBar MCP enable/disable toggle (#6824)', () => {
       tree = renderer.create(<SettingsBar {...makeProps({ mcpServers: servers })} />);
     });
     expect(findSwitchByTestId(tree.root, 'mcp-server-toggle-filesystem')).toBeNull();
+  });
+});
+
+function findByTestId(root: ReactTestInstance, type: React.ComponentType, testID: string): ReactTestInstance | null {
+  return root.findAllByType(type as never).find((n) => n.props.testID === testID) ?? null;
+}
+
+describe('SettingsBar MCP OAuth affordance (#6822)', () => {
+  const oauthSrv: McpServer = { name: 'remote', status: 'oauth-required', enabled: true, canToggle: true, authUrl: 'https://as.example/authorize?x=1' };
+
+  it('renders an Authorize button + paste input for an oauth-required server', () => {
+    let tree!: renderer.ReactTestRenderer;
+    act(() => {
+      tree = renderer.create(<SettingsBar {...makeProps({ mcpServers: [oauthSrv], onSubmitMcpAuthCode: () => {} })} />);
+    });
+    expect(findByTestId(tree.root, TouchableOpacity, 'mcp-server-authorize-remote')).not.toBeNull();
+    expect(findByTestId(tree.root, TextInput, 'mcp-server-auth-input-remote')).not.toBeNull();
+  });
+
+  it('opens the authUrl via Linking on Authorize press', () => {
+    const openSpy = jest.spyOn(Linking, 'openURL').mockResolvedValue(true as never);
+    let tree!: renderer.ReactTestRenderer;
+    act(() => {
+      tree = renderer.create(<SettingsBar {...makeProps({ mcpServers: [oauthSrv], onSubmitMcpAuthCode: () => {} })} />);
+    });
+    const btn = findByTestId(tree.root, TouchableOpacity, 'mcp-server-authorize-remote')!;
+    act(() => { btn.props.onPress(); });
+    expect(openSpy).toHaveBeenCalledWith('https://as.example/authorize?x=1');
+    openSpy.mockRestore();
+  });
+
+  it('submits the pasted code (trimmed) via onSubmitMcpAuthCode and clears the input', () => {
+    const onSubmit = jest.fn();
+    let tree!: renderer.ReactTestRenderer;
+    act(() => {
+      tree = renderer.create(<SettingsBar {...makeProps({ mcpServers: [oauthSrv], onSubmitMcpAuthCode: onSubmit })} />);
+    });
+    const input = findByTestId(tree.root, TextInput, 'mcp-server-auth-input-remote')!;
+    act(() => { input.props.onChangeText('  paste-code  '); });
+    const submit = findByTestId(tree.root, TouchableOpacity, 'mcp-server-auth-submit-remote')!;
+    act(() => { submit.props.onPress(); });
+    expect(onSubmit).toHaveBeenCalledWith('remote', 'paste-code');
+  });
+
+  it('does NOT render the affordance for a connected server', () => {
+    let tree!: renderer.ReactTestRenderer;
+    act(() => {
+      tree = renderer.create(<SettingsBar {...makeProps({ mcpServers: [{ name: 'fs', status: 'connected', canToggle: true }], onSubmitMcpAuthCode: () => {} })} />);
+    });
+    expect(findByTestId(tree.root, TextInput, 'mcp-server-auth-input-fs')).toBeNull();
   });
 });

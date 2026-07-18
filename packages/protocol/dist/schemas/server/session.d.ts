@@ -32,6 +32,7 @@ export declare const ServerMcpServersSchema: z.ZodObject<{
         status: z.ZodString;
         enabled: z.ZodOptional<z.ZodBoolean>;
         canToggle: z.ZodOptional<z.ZodBoolean>;
+        authUrl: z.ZodOptional<z.ZodString>;
     }, z.core.$strip>>;
 }, z.core.$strip>;
 export declare const ServerPlanStartedSchema: z.ZodObject<{

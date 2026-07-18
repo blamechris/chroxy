@@ -597,6 +597,26 @@ export class ClaudeByokSession extends BaseSession {
   }
 
   /**
+   * #6822: submit a pasted OAuth authorization code for a remote MCP server that
+   * reported `oauth-required`. Delegates redemption + authenticated reconnect to
+   * the fleet, then re-emits `mcp_servers` so every client converges on the new
+   * status. Returns `{ found, ok?, status?, error? }`; `found: false` when the
+   * server isn't configured (or the fleet never started), so the WS handler can
+   * surface a clean error. The code + tokens never touch a log or the wire.
+   */
+  async submitMcpAuthCode(name, code) {
+    if (typeof name !== 'string' || !this._mcpServerConfigs.some((c) => c.name === name)) {
+      return { found: false }
+    }
+    if (!this._mcpFleet) {
+      return { found: false }
+    }
+    const result = await this._mcpFleet.submitAuthCode(name, code)
+    if (result?.ok) this._emitMcpServers()
+    return result
+  }
+
+  /**
    * #6824: the parked (disabled) server names, sorted, for persistence into
    * session-state.json. Session-manager reads this in `_serializeSessionEntry`
    * and forwards it back as `disabledMcpServers` on restore.

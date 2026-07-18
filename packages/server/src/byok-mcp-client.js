@@ -33,6 +33,8 @@ import { createLogger } from './logger.js'
 import { isBlockedMetadataHost } from './byok-mcp-config.js'
 import { CHROXY_SECRET_DENYLIST } from './utils/spawn-env.js'
 import { prepareSpawn } from './utils/win-spawn.js'
+import * as realOAuthFlow from './byok-mcp-oauth.js'
+import * as realOAuthStore from './byok-mcp-oauth-store.js'
 
 // #4453: exponential restart backoff. The first restart still fires at ~1s
 // after the death (no regression on the existing acceptance test); the
@@ -582,9 +584,31 @@ export class MCPRemoteClient extends EventEmitter {
     this._nextId = 1
     this._sessionId = null
     this._negotiatedProtocolVersion = null
-    // 'oauth-required' after a 401/407 (needs the OAuth flow from #6822), else
-    // null. Read for status surfacing — never carries any header/token value.
+    // 'oauth-required' after a 401/407 that the OAuth flow (#6822) could not
+    // silently satisfy — the client surfaces `authorizationUrl` for the user to
+    // open. null otherwise. Never carries any header/token value.
     this._statusReason = null
+    // #6822 OAuth 2.1 + PKCE for a remote server that answers 401. Injectable
+    // seams (default the real modules) keep the flow testable against an
+    // in-process mock AS/RS with no real network + no real keychain.
+    this._oauthEnabled = opts.oauthEnabled !== false
+    this._oauthFlow = opts.oauthFlow || realOAuthFlow
+    this._oauthStore = opts.oauthStore || realOAuthStore
+    // The redirect_uri the daemon registers + surfaces. Defaults to the
+    // configured daemon callback (loopback/tunnel); tests pass a fixed value.
+    this._oauthRedirectUri = opts.oauthRedirectUri || null
+    // Bearer access token (from a stored record or a completed authorization).
+    // Merged into every request's headers via `_authHeader()` — OAuth wins over
+    // any static Authorization header the config carried.
+    this._accessToken = null
+    // The browser authorization URL surfaced to clients while `oauth-required`.
+    this._authorizationUrl = null
+    // Server-side PKCE/state/token-endpoint bag from beginAuthorization, consumed
+    // by completeAuthorization. Holds secret material — never logged/surfaced.
+    this._authPending = null
+    // Guards a single proactive/reactive refresh attempt per start() so a broken
+    // refresh token can't spin the connect loop.
+    this._refreshAttempted = false
     this._destroyed = false
     // In-flight AbortControllers, aborted on destroy() so a hung request or a
     // persistent SSE stream cannot keep the process alive after teardown.
@@ -603,6 +627,10 @@ export class MCPRemoteClient extends EventEmitter {
   get prompts() { return this._prompts }
   get resources() { return this._resources }
   get statusReason() { return this._statusReason }
+  /** #6822: the browser authorization URL to open while `oauth-required`, else null. */
+  get authorizationUrl() { return this._authorizationUrl }
+  /** #6822: true when this server is waiting for the user to complete OAuth. */
+  get needsAuthorization() { return this._statusReason === 'oauth-required' }
 
   async start() {
     if (this._destroyed) throw new Error('MCPRemoteClient destroyed')
@@ -633,24 +661,199 @@ export class MCPRemoteClient extends EventEmitter {
         return
       }
     }
+    // #6822: prime a stored access token (refreshing it up front if expired) so a
+    // previously-authorized server reconnects with no user prompt.
+    await this._prepareStoredToken()
     this._setState(MCP_STATES.STARTING)
     try {
-      if (this._transportType === 'sse') await this._connectLegacySse()
-      else await this._handshakeStreamableHttp()
+      await this._attemptConnect()
       if (this._destroyed) { this._setState(MCP_STATES.DESTROYED); return }
       this._setState(MCP_STATES.READY)
       this.emit('ready', this._tools)
     } catch (err) {
       if (this._destroyed) { this._setState(MCP_STATES.DESTROYED); return }
       if (err && err._oauthRequired) {
-        // Deferred to #6822 — surface a clear status instead of crashing.
-        this._statusReason = 'oauth-required'
-        this._log.warn(`MCP server ${this.name}: requires OAuth — not yet supported (#6822)`)
-      } else {
-        this._log.warn(`MCP server ${this.name}: connect failed: ${err?.message || err}`)
+        await this._onOAuthRequired(err)
+        return
       }
+      this._log.warn(`MCP server ${this.name}: connect failed: ${err?.message || err}`)
       this._toDead()
     }
+  }
+
+  /** Run the transport handshake once (fresh transport counters each attempt). */
+  async _attemptConnect() {
+    this._resetTransportState()
+    if (this._transportType === 'sse') await this._connectLegacySse()
+    else await this._handshakeStreamableHttp()
+  }
+
+  /** Reset per-connection transport state so a re-attempt starts clean (#6822). */
+  _resetTransportState() {
+    this._sessionId = null
+    this._negotiatedProtocolVersion = null
+    this._nextId = 1
+    this._endpointUrl = null
+    this._rejectAllPending(new Error('reconnecting'))
+  }
+
+  /**
+   * #6822: a connect answered 401/407. Try, in order:
+   *   1. a silent refresh (an existing-but-expired token whose refresh works) →
+   *      reconnect authenticated;
+   *   2. begin a browser authorization — discover the AS, register a client, and
+   *      surface the authorization URL (status `oauth-required`).
+   * Any failure falls through to a value-free `oauth-required` DEAD state.
+   */
+  async _onOAuthRequired(err) {
+    // (1) silent refresh of an existing token.
+    if (this._oauthEnabled && this._accessToken && !this._refreshAttempted) {
+      this._refreshAttempted = true
+      const refreshed = await this._tryRefresh()
+      if (refreshed && !this._destroyed) {
+        try {
+          await this._attemptConnect()
+          if (this._destroyed) { this._setState(MCP_STATES.DESTROYED); return }
+          this._setState(MCP_STATES.READY)
+          this.emit('ready', this._tools)
+          return
+        } catch (retryErr) {
+          if (this._destroyed) { this._setState(MCP_STATES.DESTROYED); return }
+          if (!(retryErr && retryErr._oauthRequired)) {
+            this._log.warn(`MCP server ${this.name}: reconnect after refresh failed: ${retryErr?.message || retryErr}`)
+            this._toDead()
+            return
+          }
+          // Refresh succeeded but the server still rejects — fall through to a
+          // fresh browser authorization below.
+          err = retryErr
+        }
+      }
+    }
+    // (2) begin browser authorization.
+    await this._beginBrowserAuthorization(err)
+  }
+
+  /**
+   * Attempt to refresh the stored token in place. Returns true on success (with
+   * `_accessToken` updated + the record persisted), false otherwise. The stored
+   * record is left intact on failure so a subsequent full re-auth can replace it.
+   */
+  async _tryRefresh() {
+    let record
+    try { record = this._oauthStore.getStoredToken(this._url) } catch { record = null }
+    if (!record || !record.refreshToken || !record.tokenEndpoint) return false
+    try {
+      const tokens = await this._oauthFlow.refreshAccessToken({
+        tokenEndpoint: record.tokenEndpoint,
+        clientId: record.clientId,
+        clientSecret: record.clientSecret,
+        refreshToken: record.refreshToken,
+        scope: record.scope,
+        resource: record.resource,
+        fetchImpl: this._fetchImpl,
+      })
+      const next = { ...record, ...tokens }
+      this._oauthStore.setStoredToken(this._url, next)
+      this._accessToken = next.accessToken
+      return true
+    } catch (refreshErr) {
+      this._log.debug(`MCP server ${this.name}: token refresh failed: ${refreshErr?.message || refreshErr}`)
+      return false
+    }
+  }
+
+  /**
+   * Discover + register + build the authorization URL, surfacing it as
+   * `oauth-required`. Registers a callback keyed by the flow's `state` so the
+   * daemon's loopback/tunnel callback can auto-complete; the paste-code path
+   * (completeAuthorization) is the universal fallback. Never throws.
+   */
+  async _beginBrowserAuthorization(err) {
+    const redirectUri = this._oauthRedirectUri || this._oauthFlow.mcpOAuthRedirectUri?.()
+    if (!this._oauthEnabled || !redirectUri) {
+      this._statusReason = 'oauth-required'
+      this._log.warn(`MCP server ${this.name}: requires OAuth but the flow is disabled or no redirect URI is configured`)
+      this._toDead()
+      return
+    }
+    try {
+      const { authorizationUrl, pending } = await this._oauthFlow.beginAuthorization({
+        serverUrl: this._url,
+        wwwAuthenticate: err?._wwwAuthenticate || null,
+        redirectUri,
+        fetchImpl: this._fetchImpl,
+        log: this._log,
+      })
+      if (this._destroyed) { this._setState(MCP_STATES.DESTROYED); return }
+      this._authPending = pending
+      this._authorizationUrl = authorizationUrl
+      this._statusReason = 'oauth-required'
+      // Register the loopback/tunnel auto-complete handler. The paste-code path
+      // shares completeAuthorization, so both redemption routes are equivalent.
+      try {
+        this._oauthFlow.registerOAuthCallback?.(pending.state, (code) => this.completeAuthorization(code))
+      } catch { /* registry is best-effort — paste-code still works */ }
+      this._log.info(`MCP server ${this.name}: OAuth authorization required — surfaced an authorization URL`)
+    } catch (authErr) {
+      this._statusReason = 'oauth-required'
+      this._log.warn(`MCP server ${this.name}: could not begin OAuth authorization: ${authErr?.message || authErr}`)
+    }
+    // Not ready — DEAD until a code is submitted (contributes zero tools). The
+    // oauth-required fields survive _toDead so the fleet can surface them.
+    this._toDead()
+  }
+
+  /**
+   * #6822: complete an authorization by redeeming `code` against the pending
+   * PKCE/state bag, persisting the tokens, and reconnecting authenticated. Shared
+   * by the loopback callback and the paste-code wire path. Throws (value-free) on
+   * redemption failure; resolves once the reconnect settles.
+   *
+   * @param {string} code
+   * @returns {Promise<{ ok: true }>}
+   */
+  async completeAuthorization(code) {
+    if (this._destroyed) throw new Error('MCPRemoteClient destroyed')
+    if (!this._authPending) throw new Error(`MCP server ${this.name}: no pending authorization`)
+    if (typeof code !== 'string' || !code.trim()) throw new Error('an authorization code is required')
+    const pending = this._authPending
+    const record = await this._oauthFlow.completeAuthorization({
+      pending,
+      code: code.trim(),
+      fetchImpl: this._fetchImpl,
+    })
+    this._oauthStore.setStoredToken(this._url, record)
+    this._accessToken = record.accessToken
+    // Clear the pending-auth surface and reconnect.
+    try { this._oauthFlow.unregisterOAuthCallback?.(pending.state) } catch { /* best-effort */ }
+    this._authPending = null
+    this._authorizationUrl = null
+    this._statusReason = null
+    this._refreshAttempted = false
+    this._state = MCP_STATES.IDLE
+    await this.start()
+    return { ok: true }
+  }
+
+  /**
+   * Load a stored token for this server, refreshing it up front when expired.
+   * Sets `_accessToken` when a usable token is available. Read/refresh failures
+   * degrade to unauthenticated (the connect then 401s and re-authorizes).
+   */
+  async _prepareStoredToken() {
+    this._refreshAttempted = false
+    if (!this._oauthEnabled) return
+    let record
+    try { record = this._oauthStore.getStoredToken(this._url) } catch { record = null }
+    if (!record) return
+    if (this._oauthStore.isTokenExpired(record)) {
+      this._refreshAttempted = true
+      const refreshed = await this._tryRefresh()
+      if (!refreshed) this._accessToken = null
+      return
+    }
+    this._accessToken = record.accessToken
   }
 
   /**
@@ -712,6 +915,11 @@ export class MCPRemoteClient extends EventEmitter {
     if (this._destroyed) return
     this._destroyed = true
     if (this._endpointTimer) { clearTimeout(this._endpointTimer); this._endpointTimer = null }
+    // #6822: drop any pending-auth callback so a torn-down client can't be
+    // completed via the loopback registry after destroy.
+    if (this._authPending?.state) {
+      try { this._oauthFlow.unregisterOAuthCallback?.(this._authPending.state) } catch { /* best-effort */ }
+    }
     this._rejectAllPending(new Error('MCP remote client destroyed'))
     for (const c of this._controllers) { try { c.abort() } catch { /* already settled */ } }
     this._controllers.clear()
@@ -823,9 +1031,7 @@ export class MCPRemoteClient extends EventEmitter {
         return // initialize already succeeded; a lost `initialized` is non-fatal
       }
       if (res.status === 401 || res.status === 407) {
-        const err = new Error(`MCP server ${this.name} requires OAuth (HTTP ${res.status})`)
-        err._oauthRequired = true
-        throw err
+        throw this._oauthError(res, res.status)
       }
       await this._discardBody(res)
     } finally {
@@ -865,7 +1071,8 @@ export class MCPRemoteClient extends EventEmitter {
     try {
       res = await this._fetchImpl(this._url, {
         method: 'GET',
-        headers: { ...this._headers, Accept: 'text/event-stream' },
+        // #6822: include the OAuth bearer token (if any) on the SSE GET too.
+        headers: { ...this._headers, ...this._authHeader(), Accept: 'text/event-stream' },
         redirect: 'manual', // #6834: never follow a redirect off-origin
         signal: controller.signal,
       })
@@ -874,9 +1081,7 @@ export class MCPRemoteClient extends EventEmitter {
       throw err
     }
     if (res.status === 401 || res.status === 407) {
-      const err = new Error(`MCP server ${this.name} requires OAuth (HTTP ${res.status})`)
-      err._oauthRequired = true
-      throw err
+      throw this._oauthError(res, res.status)
     }
     if (res.status >= 300 && res.status < 400) {
       throw new Error(`MCP server ${this.name} HTTP ${res.status} redirect opening SSE stream — refused (redirects are not followed)`)
@@ -1111,15 +1316,34 @@ export class MCPRemoteClient extends EventEmitter {
     // on every post-initialize request per the 2025-03-26 / 2025-06-18 spec.
     if (this._sessionId) headers['Mcp-Session-Id'] = this._sessionId
     if (this._negotiatedProtocolVersion) headers['MCP-Protocol-Version'] = this._negotiatedProtocolVersion
+    // #6822: an OAuth access token (from a stored record or a completed flow)
+    // overrides any static Authorization header the config carried — it is the
+    // fresher credential. Set LAST so it wins the spread above.
+    Object.assign(headers, this._authHeader())
     return headers
+  }
+
+  /** #6822: the OAuth Authorization header, or an empty object when no token. */
+  _authHeader() {
+    return this._accessToken ? { Authorization: `Bearer ${this._accessToken}` } : {}
+  }
+
+  /**
+   * #6822: build the 401/407 error, capturing the `WWW-Authenticate` header so the
+   * OAuth flow can discover the resource metadata. The header names only public
+   * discovery URLs (never a token), so retaining it is safe.
+   */
+  _oauthError(res, status) {
+    const err = new Error(`MCP server ${this.name} requires OAuth (HTTP ${status})`)
+    err._oauthRequired = true
+    try { err._wwwAuthenticate = res?.headers?.get?.('www-authenticate') || null } catch { err._wwwAuthenticate = null }
+    return err
   }
 
   _checkStatus(res, method) {
     const status = res.status
     if (status === 401 || status === 407) {
-      const err = new Error(`MCP server ${this.name} requires OAuth (HTTP ${status})`)
-      err._oauthRequired = true
-      throw err
+      throw this._oauthError(res, status)
     }
     // #6834: with redirect:'manual' a 3xx surfaces here as-is. Refuse it
     // explicitly — following would replay our credentialed headers against

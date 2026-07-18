@@ -1,6 +1,7 @@
 import { describe, it, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
+import { createHash } from 'node:crypto'
 import {
   MCPRemoteClient,
   MCPClient,
@@ -9,6 +10,11 @@ import {
   MCP_PROTOCOL_VERSION,
   DEFAULT_HANDSHAKE_TIMEOUT_MS,
 } from '../src/byok-mcp-client.js'
+import {
+  registerOAuthCallback,
+  resolveOAuthCallback,
+  _clearOAuthCallbacksForTests,
+} from '../src/byok-mcp-oauth.js'
 
 function silentLog() {
   return { info: () => {}, warn: () => {}, debug: () => {}, error: () => {} }
@@ -173,17 +179,20 @@ describe('MCPRemoteClient — Streamable HTTP (#6821)', () => {
     await client.destroy()
   })
 
-  it('401 → DEAD with oauth-required status, no crash', async () => {
+  it('401 → DEAD with oauth-required status, no crash (flow disabled)', async () => {
+    // With the OAuth flow disabled, a 401 still classifies as oauth-required and
+    // fails closed to DEAD — the base detection the #6822 flow builds on. The
+    // full discover→authorize→reconnect path has its own suite below.
     srv = await startMockMcpServer({ status: 401 })
     const warns = []
     const log = { info: () => {}, warn: (m) => warns.push(m), debug: () => {}, error: () => {} }
-    const client = new MCPRemoteClient({ name: 'remote', type: 'http', url: srv.url, headers: {} }, { log })
+    const client = new MCPRemoteClient({ name: 'remote', type: 'http', url: srv.url, headers: {} }, { log, oauthEnabled: false })
     await client.start() // must resolve, not throw
     assert.equal(client.state, MCP_STATES.DEAD)
     assert.equal(client.statusReason, 'oauth-required')
     assert.equal(client.tools.length, 0)
-    assert.ok(warns.some((m) => /OAuth/i.test(m) && /#6822/.test(m)),
-      `expected an OAuth-required warn naming #6822, got: ${JSON.stringify(warns)}`)
+    assert.ok(warns.some((m) => /OAuth/i.test(m)),
+      `expected an OAuth-required warn, got: ${JSON.stringify(warns)}`)
     await client.destroy()
   })
 
@@ -348,7 +357,10 @@ describe('MCPRemoteClient — legacy HTTP+SSE (#6821)', () => {
     // `initialized`. It now shares _checkStatus semantics with every other
     // call site.
     srv = await startMockSseServer({ notifyStatus: 401 })
-    const client = new MCPRemoteClient({ name: 'legacy', type: 'sse', url: srv.url, headers: {} }, { log: silentLog() })
+    // oauthEnabled:false isolates the 401→oauth-required classification (this
+    // mock serves an SSE stream for every GET, so a discovery probe would just
+    // hang against it — the full flow has its own suite with a real mock AS).
+    const client = new MCPRemoteClient({ name: 'legacy', type: 'sse', url: srv.url, headers: {} }, { log: silentLog(), oauthEnabled: false })
     await client.start() // must resolve, not throw
     assert.equal(client.state, MCP_STATES.DEAD)
     assert.equal(client.statusReason, 'oauth-required')
@@ -472,5 +484,307 @@ describe('MCPRemoteClient — SSRF hardening (#6834 sharp edges)', () => {
     assert.equal(calls.length, 0, 'no request may ever be attempted against the metadata endpoint')
     assert.equal(gateConsulted, false, 'the user must not be prompted to trust an unconditionally-refused url')
     await client.destroy()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #6822 — OAuth authorization flow (401 → authorize → authenticated reconnect).
+// ---------------------------------------------------------------------------
+
+function base64url(buf) {
+  return Buffer.from(buf).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+
+/**
+ * An in-process MCP server that ALSO acts as its own OAuth authorization server:
+ *   - POST /mcp with no/invalid Bearer → 401 + WWW-Authenticate resource metadata
+ *   - POST /mcp with a valid Bearer → normal Streamable-HTTP MCP handshake
+ *   - the OAuth well-knowns + /register + /token (PKCE-verified) at the origin
+ * Exposes `issueCode(challenge, redirectUri)` to simulate browser consent and
+ * `addValidToken(t)` to pre-authorize a seeded token.
+ */
+function startOAuthMcpServer(opts = {}) {
+  const { tools = DEFAULT_TOOLS } = opts
+  const codes = new Map()
+  const refreshTokens = new Map()
+  const validTokens = new Set()
+  let seq = 0
+  const captured = { mcpAuthHeaders: [], token: [] }
+
+  const server = createServer((req, res) => {
+    const chunks = []
+    req.on('data', (c) => chunks.push(c))
+    req.on('end', () => {
+      const origin = `http://127.0.0.1:${server.address().port}`
+      const url = new URL(req.url, origin)
+      const bodyText = Buffer.concat(chunks).toString('utf8')
+
+      // OAuth discovery + endpoints.
+      if (req.method === 'GET' && url.pathname === '/.well-known/oauth-protected-resource') {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ resource: `${origin}/mcp`, authorization_servers: [origin], scopes_supported: ['mcp'] }))
+        return
+      }
+      if (req.method === 'GET' && url.pathname === '/.well-known/oauth-authorization-server') {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({
+          issuer: origin,
+          authorization_endpoint: `${origin}/authorize`,
+          token_endpoint: `${origin}/token`,
+          registration_endpoint: `${origin}/register`,
+        }))
+        return
+      }
+      if (req.method === 'POST' && url.pathname === '/register') {
+        seq += 1
+        res.writeHead(201, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ client_id: `client-${seq}` }))
+        return
+      }
+      if (req.method === 'POST' && url.pathname === '/token') {
+        const form = new URLSearchParams(bodyText)
+        captured.token.push(Object.fromEntries(form.entries()))
+        const grant = form.get('grant_type')
+        if (grant === 'authorization_code') {
+          const entry = codes.get(form.get('code'))
+          const computed = base64url(createHash('sha256').update(form.get('code_verifier') || '').digest())
+          if (!entry || computed !== entry.challenge) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_grant' })); return }
+          codes.delete(form.get('code'))
+          seq += 1
+          const access = `access-${seq}`
+          const refresh = `refresh-${seq}`
+          validTokens.add(access)
+          refreshTokens.set(refresh, true)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ access_token: access, refresh_token: refresh, token_type: 'Bearer', expires_in: 3600, scope: 'mcp' }))
+          return
+        }
+        if (grant === 'refresh_token') {
+          if (!refreshTokens.has(form.get('refresh_token'))) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_grant' })); return }
+          seq += 1
+          const access = `access-refreshed-${seq}`
+          validTokens.add(access)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ access_token: access, token_type: 'Bearer', expires_in: 3600 }))
+          return
+        }
+        res.writeHead(400).end()
+        return
+      }
+
+      // MCP endpoint — bearer-gated.
+      if (req.method === 'DELETE') { res.writeHead(200).end(); return }
+      const auth = req.headers['authorization'] || ''
+      captured.mcpAuthHeaders.push(auth)
+      const token = auth.replace(/^Bearer\s+/i, '')
+      if (!token || !validTokens.has(token)) {
+        res.writeHead(401, {
+          'content-type': 'application/json',
+          'www-authenticate': `Bearer resource_metadata="${origin}/.well-known/oauth-protected-resource"`,
+        })
+        res.end(JSON.stringify({ error: 'unauthorized' }))
+        return
+      }
+      let msg = null
+      try { msg = bodyText ? JSON.parse(bodyText) : null } catch { msg = null }
+      if (msg && msg.id == null) { res.writeHead(202).end(); return }
+      let result
+      if (msg?.method === 'initialize') result = { protocolVersion: MCP_PROTOCOL_VERSION, capabilities: {}, serverInfo: { name: 'mock', version: '1' } }
+      else if (msg?.method === 'tools/list') result = { tools }
+      else { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ jsonrpc: '2.0', id: msg?.id, error: { code: -32601, message: 'method not found' } })); return }
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result }))
+    })
+  })
+
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () => {
+      const { port } = server.address()
+      const origin = `http://127.0.0.1:${port}`
+      resolve({
+        origin,
+        url: `${origin}/mcp`,
+        captured,
+        issueCode: (challenge, redirectUri) => { const code = `code-${Math.random().toString(36).slice(2)}`; codes.set(code, { challenge, redirectUri }); return code },
+        addValidToken: (t) => validTokens.add(t),
+        close: () => new Promise((r) => server.close(r)),
+      })
+    })
+  })
+}
+
+// An in-memory token store injected into the client so the flow never touches
+// the real ~/.chroxy tokens file or the OS keychain.
+function makeMemStore(seed = {}) {
+  const map = new Map(Object.entries(seed))
+  return {
+    _map: map,
+    getStoredToken: (url) => map.get(url) || null,
+    setStoredToken: (url, rec) => { map.set(url, rec) },
+    deleteStoredToken: (url) => { map.delete(url) },
+    isTokenExpired: (rec) => (rec && rec.expiresAt > 0 ? Date.now() >= rec.expiresAt - 60_000 : false),
+  }
+}
+
+const REDIRECT = 'http://127.0.0.1:8765/mcp/oauth/callback'
+
+describe('MCPRemoteClient — OAuth flow (#6822)', () => {
+  afterEach(() => _clearOAuthCallbacksForTests())
+
+  it('401 → surfaces an authorization URL (oauth-required), no crash, no tools', async () => {
+    const srv = await startOAuthMcpServer()
+    const store = makeMemStore()
+    try {
+      const client = new MCPRemoteClient(
+        { name: 'oauth', type: 'http', url: srv.url, headers: {} },
+        { log: silentLog(), oauthStore: store, oauthRedirectUri: REDIRECT },
+      )
+      await client.start()
+      assert.equal(client.needsAuthorization, true)
+      assert.equal(client.statusReason, 'oauth-required')
+      assert.ok(client.authorizationUrl, 'an authorization URL must be surfaced')
+      const u = new URL(client.authorizationUrl)
+      assert.equal(u.searchParams.get('code_challenge_method'), 'S256')
+      assert.equal(u.searchParams.get('redirect_uri'), REDIRECT)
+      assert.deepEqual(client.tools, [])
+      await client.destroy()
+    } finally {
+      await srv.close()
+    }
+  })
+
+  it('submit code → redeems + persists tokens + reconnects authenticated (READY with tools)', async () => {
+    const srv = await startOAuthMcpServer()
+    const store = makeMemStore()
+    try {
+      const client = new MCPRemoteClient(
+        { name: 'oauth', type: 'http', url: srv.url, headers: {} },
+        { log: silentLog(), oauthStore: store, oauthRedirectUri: REDIRECT },
+      )
+      await client.start()
+      const challenge = new URL(client.authorizationUrl).searchParams.get('code_challenge')
+      const code = srv.issueCode(challenge, REDIRECT)
+
+      const out = await client.completeAuthorization(code)
+      assert.deepEqual(out, { ok: true })
+      assert.equal(client.state, MCP_STATES.READY)
+      assert.equal(client.needsAuthorization, false)
+      assert.equal(client.statusReason, null)
+      assert.deepEqual(client.tools.map((t) => t.name), ['echo'])
+      // The token was persisted to the store and used as a Bearer on reconnect.
+      const rec = store.getStoredToken(srv.url)
+      assert.match(rec.accessToken, /^access-\d+$/)
+      assert.ok(srv.captured.mcpAuthHeaders.some((h) => h === `Bearer ${rec.accessToken}`), 'the reconnect must carry the bearer token')
+      await client.destroy()
+    } finally {
+      await srv.close()
+    }
+  })
+
+  it('the daemon loopback callback auto-completes via the state registry', async () => {
+    const srv = await startOAuthMcpServer()
+    const store = makeMemStore()
+    try {
+      const client = new MCPRemoteClient(
+        { name: 'oauth', type: 'http', url: srv.url, headers: {} },
+        { log: silentLog(), oauthStore: store, oauthRedirectUri: REDIRECT },
+      )
+      await client.start()
+      const authUrl = new URL(client.authorizationUrl)
+      const challenge = authUrl.searchParams.get('code_challenge')
+      const state = authUrl.searchParams.get('state')
+      const code = srv.issueCode(challenge, REDIRECT)
+      // Drive the callback exactly as http-routes.js does.
+      const outcome = await resolveOAuthCallback(state, code)
+      assert.deepEqual(outcome, { found: true, ok: true })
+      assert.equal(client.state, MCP_STATES.READY)
+      await client.destroy()
+    } finally {
+      await srv.close()
+    }
+  })
+
+  it('a previously-authorized server reconnects with the stored token — no 401, no re-prompt', async () => {
+    const srv = await startOAuthMcpServer()
+    srv.addValidToken('seeded-access')
+    const store = makeMemStore({
+      [srv.url]: { accessToken: 'seeded-access', refreshToken: 'seeded-refresh', expiresAt: 0, clientId: 'c', tokenEndpoint: `${srv.origin}/token` },
+    })
+    try {
+      const client = new MCPRemoteClient(
+        { name: 'oauth', type: 'http', url: srv.url, headers: {} },
+        { log: silentLog(), oauthStore: store, oauthRedirectUri: REDIRECT },
+      )
+      await client.start()
+      assert.equal(client.state, MCP_STATES.READY, 'stored token should connect without a prompt')
+      assert.equal(client.needsAuthorization, false)
+      // Every MCP request carried the seeded bearer; none was a 401 re-auth.
+      assert.ok(srv.captured.mcpAuthHeaders.every((h) => h === 'Bearer seeded-access'))
+      await client.destroy()
+    } finally {
+      await srv.close()
+    }
+  })
+
+  it('refreshes an expired stored token up front and connects authenticated', async () => {
+    const srv = await startOAuthMcpServer()
+    // Register a refresh token the mock will honour (mimics a prior authorization).
+    const store = makeMemStore({
+      [srv.url]: { accessToken: 'stale-access', refreshToken: 'seeded-refresh', expiresAt: Date.now() - 1000, clientId: 'c', tokenEndpoint: `${srv.origin}/token` },
+    })
+    // Teach the mock this refresh token (its /token refresh grant checks the set).
+    const challenge = base64url(createHash('sha256').update('v').digest())
+    const code = srv.issueCode(challenge, REDIRECT)
+    await fetch(`${srv.origin}/token`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ grant_type: 'authorization_code', code, code_verifier: 'v', redirect_uri: REDIRECT, client_id: 'c' }).toString(),
+    }).then((r) => r.json()).then((j) => { store._map.get(srv.url).refreshToken = j.refresh_token })
+    try {
+      const client = new MCPRemoteClient(
+        { name: 'oauth', type: 'http', url: srv.url, headers: {} },
+        { log: silentLog(), oauthStore: store, oauthRedirectUri: REDIRECT },
+      )
+      await client.start()
+      assert.equal(client.state, MCP_STATES.READY)
+      // The stored record was refreshed to a new access token.
+      assert.match(store.getStoredToken(srv.url).accessToken, /^access-refreshed-\d+$/)
+      await client.destroy()
+    } finally {
+      await srv.close()
+    }
+  })
+
+  it('never logs a token or authorization code (redaction)', async () => {
+    const srv = await startOAuthMcpServer()
+    const store = makeMemStore()
+    const lines = []
+    const log = { info: (m) => lines.push(m), warn: (m) => lines.push(m), debug: (m) => lines.push(m), error: (m) => lines.push(m) }
+    try {
+      const client = new MCPRemoteClient(
+        { name: 'oauth', type: 'http', url: srv.url, headers: {} },
+        { log, oauthStore: store, oauthRedirectUri: REDIRECT },
+      )
+      await client.start()
+      const challenge = new URL(client.authorizationUrl).searchParams.get('code_challenge')
+      const code = srv.issueCode(challenge, REDIRECT)
+      await client.completeAuthorization(code)
+      const rec = store.getStoredToken(srv.url)
+      const blob = JSON.stringify(lines)
+      assert.ok(!blob.includes(rec.accessToken), 'access token must never be logged')
+      assert.ok(!blob.includes(rec.refreshToken), 'refresh token must never be logged')
+      assert.ok(!blob.includes(code), 'authorization code must never be logged')
+      await client.destroy()
+    } finally {
+      await srv.close()
+    }
+  })
+
+  it('registerOAuthCallback is a no-op for a malformed state/handler', () => {
+    // Defensive: bad inputs must not throw (the client wraps registration in try).
+    registerOAuthCallback('', () => {})
+    registerOAuthCallback('s', null)
+    // Nothing to assert beyond "did not throw"; the registry stays clean.
+    assert.ok(true)
   })
 })

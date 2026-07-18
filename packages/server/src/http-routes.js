@@ -15,6 +15,7 @@ import { isPoolEnabled } from './docker-byok-pool.js'
 import { getSharedPoolStats } from './docker-byok-pool-stats.js'
 import { isValidSlug, mimeForPath } from './pages-store.js'
 import { sendOversizeResponse } from './http-oversize.js'
+import { resolveOAuthCallback, MCP_OAUTH_CALLBACK_PATH } from './byok-mcp-oauth.js'
 
 /**
  * #5683 — read + JSON-parse a request body with a byte cap. Resolves to the
@@ -95,6 +96,13 @@ const PAGE_SECURITY_HEADERS = {
 }
 
 const log = createLogger('ws')
+
+/** Minimal HTML-escape for interpolating an untrusted value into a page body. */
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+  ))
+}
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -391,6 +399,73 @@ export function createHttpHandler(server) {
         gitBranch: server._gitInfo.branch,
         uptime: Math.round((Date.now() - server._startedAt) / 1000),
       }))
+      return
+    }
+
+    // #6822 — MCP OAuth redirect callback. The browser that completed consent
+    // (on the user's own device) is redirected here with `?code=...&state=...`.
+    // This route is intentionally UNAUTHENTICATED: the redirect carries no bearer
+    // token, and the high-entropy `state` value (bound server-side to a specific
+    // pending authorization) IS the capability. We hand the code to the matching
+    // pending client, which redeems it + persists tokens. When the daemon isn't
+    // reachable from the user's browser (remote/tunneled) this page never loads —
+    // the user copy-pastes the code back over the wire instead (the universal
+    // fallback). Never logs the code.
+    const oauthCbPath = (req.url ?? '').split('?')[0]
+    if (req.method === 'GET' && oauthCbPath === MCP_OAUTH_CALLBACK_PATH) {
+      let code = null
+      let state = null
+      let oauthError = null
+      try {
+        const parsed = new URL(req.url, 'http://localhost')
+        code = parsed.searchParams.get('code')
+        state = parsed.searchParams.get('state')
+        oauthError = parsed.searchParams.get('error')
+      } catch { /* malformed url — handled as missing params below */ }
+
+      const page = (title, body) =>
+        `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">` +
+        `<title>${title}</title><style>body{font-family:system-ui,-apple-system,sans-serif;max-width:32rem;margin:4rem auto;padding:0 1rem;color:#1a2332;line-height:1.5}` +
+        `code{background:#eef1f6;padding:.15rem .35rem;border-radius:.25rem;word-break:break-all}h1{font-size:1.25rem}</style></head><body>${body}</body></html>`
+
+      const sendPage = (status, title, body) => {
+        res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8', ...PAGE_SECURITY_HEADERS })
+        res.end(page(title, body))
+      }
+
+      if (oauthError) {
+        sendPage(400, 'Authorization failed',
+          `<h1>Authorization was not completed</h1><p>The authorization server reported an error. You can close this tab and try authorizing again from Chroxy.</p>`)
+        return
+      }
+      if (!code || !state) {
+        sendPage(400, 'Authorization callback',
+          `<h1>Missing authorization details</h1><p>This page expects a <code>code</code> and <code>state</code> from the authorization server. If you reached it manually, return to Chroxy and use the paste-code option.</p>`)
+        return
+      }
+
+      resolveOAuthCallback(state, code)
+        .then((outcome) => {
+          if (outcome.found && outcome.ok) {
+            sendPage(200, 'Authorized',
+              `<h1>MCP server authorized</h1><p>You can close this tab and return to Chroxy — the server is reconnecting now.</p>`)
+          } else if (outcome.found) {
+            // The daemon received the callback but redemption failed. Surface the
+            // code so the user can retry via paste (value shown only to the user
+            // whose browser holds the redirect; never logged server-side).
+            sendPage(200, 'Finish in Chroxy',
+              `<h1>Almost there</h1><p>Automatic completion didn't succeed. Copy this authorization code and paste it into Chroxy:</p><p><code>${escapeHtml(code)}</code></p>`)
+          } else {
+            // No pending authorization matched this state (expired, wrong daemon,
+            // or already completed). Offer the paste-code fallback.
+            sendPage(200, 'Finish in Chroxy',
+              `<h1>Finish in Chroxy</h1><p>Copy this authorization code and paste it into Chroxy to finish connecting:</p><p><code>${escapeHtml(code)}</code></p>`)
+          }
+        })
+        .catch(() => {
+          sendPage(200, 'Finish in Chroxy',
+            `<h1>Finish in Chroxy</h1><p>Copy this authorization code and paste it into Chroxy to finish connecting:</p><p><code>${escapeHtml(code)}</code></p>`)
+        })
       return
     }
 

@@ -457,4 +457,61 @@ describe('MCPFleet', () => {
       await fleet.destroy()
     })
   })
+
+  describe('OAuth surfacing (#6822)', () => {
+    // Build a fleet with a remote config, then swap in a fake client so we can
+    // exercise getServerStatuses / submitAuthCode without a live OAuth server
+    // (the client-level flow is covered in byok-mcp-remote-client.test.js).
+    function fleetWithFakeClient(fake) {
+      const fleet = new MCPFleet([{ name: 'remote', url: 'https://ex.example/mcp' }], { log: silentLog() })
+      fleet._clients = [fake]
+      return fleet
+    }
+
+    it('getServerStatuses reports oauth-required + authUrl for a client awaiting authorization', () => {
+      const fleet = fleetWithFakeClient({
+        name: 'remote', state: MCP_STATES.DEAD, needsAuthorization: true, authorizationUrl: 'https://as.example/authorize?x=1',
+      })
+      const [s] = fleet.getServerStatuses()
+      assert.equal(s.status, 'oauth-required')
+      assert.equal(s.authUrl, 'https://as.example/authorize?x=1')
+      assert.equal(s.enabled, true)
+      assert.equal(s.canToggle, true)
+    })
+
+    it('submitAuthCode delegates to the client and reports the reconnected status', async () => {
+      let received = null
+      const fleet = fleetWithFakeClient({
+        name: 'remote', state: MCP_STATES.READY, needsAuthorization: false,
+        completeAuthorization: async (code) => { received = code; return { ok: true } },
+      })
+      const res = await fleet.submitAuthCode('remote', 'the-code')
+      assert.deepEqual(res, { found: true, ok: true, status: 'connected' })
+      assert.equal(received, 'the-code')
+    })
+
+    it('submitAuthCode returns found:false for an unknown server', async () => {
+      const fleet = fleetWithFakeClient({ name: 'remote', state: MCP_STATES.READY })
+      assert.deepEqual(await fleet.submitAuthCode('ghost', 'x'), { found: false })
+    })
+
+    it('submitAuthCode surfaces a redemption failure as ok:false with a value-free reason', async () => {
+      const fleet = fleetWithFakeClient({
+        name: 'remote', state: MCP_STATES.DEAD, needsAuthorization: true,
+        completeAuthorization: async () => { throw new Error('token endpoint returned HTTP 400') },
+      })
+      const res = await fleet.submitAuthCode('remote', 'x')
+      assert.equal(res.found, true)
+      assert.equal(res.ok, false)
+      assert.match(res.error, /HTTP 400/)
+    })
+
+    it('submitAuthCode rejects a stdio client that has no completeAuthorization method', async () => {
+      const fleet = fleetWithFakeClient({ name: 'remote', state: MCP_STATES.READY })
+      const res = await fleet.submitAuthCode('remote', 'x')
+      assert.equal(res.found, true)
+      assert.equal(res.ok, false)
+      assert.match(res.error, /does not use OAuth/)
+    })
+  })
 })

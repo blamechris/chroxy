@@ -2130,6 +2130,51 @@ describe('resolvedPermissions + Allow for Session (#2833, #2834)', () => {
     expect(sent.find((m) => m.type === 'set_mcp_server_enabled')).toBeUndefined();
   });
 
+  // #6822 — submit a pasted OAuth authorization code.
+  it('submitMcpAuthCode sends submit_mcp_auth_code scoped to the active session, trimming the code', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const { createEmptySessionState } = await import('./utils');
+
+    const sent: Array<Record<string, unknown>> = [];
+    const mockSocket = { readyState: 1, send: (d: string) => { sent.push(JSON.parse(d)); } };
+    useConnectionStore.setState({
+      activeSessionId: 's1',
+      sessionStates: { s1: { ...createEmptySessionState() } },
+      socket: mockSocket as unknown as WebSocket,
+    });
+
+    useConnectionStore.getState().submitMcpAuthCode('remote', '  code-123  ');
+
+    const msg = sent.find((m) => m.type === 'submit_mcp_auth_code');
+    expect(msg).toBeDefined();
+    expect(msg!.sessionId).toBe('s1');
+    expect(msg!.server).toBe('remote');
+    expect(msg!.code).toBe('code-123');
+    expect(typeof msg!.requestId).toBe('string');
+  });
+
+  it('submitMcpAuthCode is a no-op for an empty code or a closed socket', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const { createEmptySessionState } = await import('./utils');
+
+    const sent: Array<Record<string, unknown>> = [];
+    const openSocket = { readyState: 1, send: (d: string) => { sent.push(JSON.parse(d)); } };
+    useConnectionStore.setState({
+      activeSessionId: 's1',
+      sessionStates: { s1: { ...createEmptySessionState() } },
+      socket: openSocket as unknown as WebSocket,
+    });
+    // Empty/whitespace code → nothing sent.
+    useConnectionStore.getState().submitMcpAuthCode('remote', '   ');
+    expect(sent.find((m) => m.type === 'submit_mcp_auth_code')).toBeUndefined();
+
+    // Closed socket → nothing sent.
+    const closedSocket = { readyState: 3, send: (d: string) => { sent.push(JSON.parse(d)); } };
+    useConnectionStore.setState({ socket: closedSocket as unknown as WebSocket });
+    useConnectionStore.getState().submitMcpAuthCode('remote', 'code');
+    expect(sent.find((m) => m.type === 'submit_mcp_auth_code')).toBeUndefined();
+  });
+
   it('queryPermissionAudit sets the loading flag and sends query_permission_audit scoped to the active session', async () => {
     const { useConnectionStore } = await import('./connection');
 

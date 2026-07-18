@@ -12,10 +12,12 @@ import { SidebarMcpView, mcpViewCollapsedMetric } from './SidebarMcpView'
 // `mock` so vitest allows it inside the hoisted factory. #6824 — the component
 // also selects `setMcpServerEnabled`, so the state carries a spy.
 const mockSetMcpServerEnabled = vi.fn()
+const mockSubmitMcpAuthCode = vi.fn()
 let mockStoreState: Record<string, unknown> = {
   activeSessionId: null,
   sessionStates: {},
   setMcpServerEnabled: mockSetMcpServerEnabled,
+  submitMcpAuthCode: mockSubmitMcpAuthCode,
 }
 vi.mock('../store/connection', () => ({
   useConnectionStore: (selector: (s: Record<string, unknown>) => unknown) => selector(mockStoreState),
@@ -24,7 +26,8 @@ vi.mock('../store/connection', () => ({
 afterEach(() => {
   cleanup()
   mockSetMcpServerEnabled.mockClear()
-  mockStoreState = { activeSessionId: null, sessionStates: {}, setMcpServerEnabled: mockSetMcpServerEnabled }
+  mockSubmitMcpAuthCode.mockClear()
+  mockStoreState = { activeSessionId: null, sessionStates: {}, setMcpServerEnabled: mockSetMcpServerEnabled, submitMcpAuthCode: mockSubmitMcpAuthCode }
 })
 
 function srv(name: string, status: string): McpServer {
@@ -109,6 +112,48 @@ describe('SidebarMcpView enable/disable toggle (#6824)', () => {
     render(<SidebarMcpView servers={[{ name: 'legacy', status: 'disabled', canToggle: true }]} />)
     const t = screen.getByTestId('sidebar-mcp-view-toggle-legacy')
     expect(t.getAttribute('aria-checked')).toBe('false')
+  })
+})
+
+describe('SidebarMcpView OAuth affordance (#6822)', () => {
+  const oauthSrv: McpServer = { name: 'remote', status: 'oauth-required', enabled: true, canToggle: true, authUrl: 'https://as.example/authorize?x=1' }
+
+  it('renders an Authorize link pointing at the authUrl for an oauth-required server', () => {
+    render(<SidebarMcpView servers={[oauthSrv]} />)
+    const link = screen.getByTestId('sidebar-mcp-view-authorize-remote') as HTMLAnchorElement
+    expect(link.getAttribute('href')).toBe('https://as.example/authorize?x=1')
+    expect(link.getAttribute('target')).toBe('_blank')
+    expect(screen.getByTestId('sidebar-mcp-view-auth-input-remote')).toBeTruthy()
+  })
+
+  it('does NOT render the auth affordance for a connected server', () => {
+    render(<SidebarMcpView servers={[{ name: 'fs', status: 'connected', canToggle: true }]} />)
+    expect(screen.queryByTestId('sidebar-mcp-view-auth-fs')).toBeNull()
+  })
+
+  it('submits the pasted code via submitMcpAuthCode(name, code)', () => {
+    render(<SidebarMcpView servers={[oauthSrv]} />)
+    const input = screen.getByTestId('sidebar-mcp-view-auth-input-remote') as HTMLInputElement
+    fireEvent.change(input, { target: { value: '  auth-code-123  ' } })
+    fireEvent.click(screen.getByTestId('sidebar-mcp-view-auth-submit-remote'))
+    expect(mockSubmitMcpAuthCode).toHaveBeenCalledTimes(1)
+    expect(mockSubmitMcpAuthCode).toHaveBeenCalledWith('remote', 'auth-code-123')
+    // The input clears after submit.
+    expect(input.value).toBe('')
+  })
+
+  it('does not submit an empty/whitespace code', () => {
+    render(<SidebarMcpView servers={[oauthSrv]} />)
+    const submit = screen.getByTestId('sidebar-mcp-view-auth-submit-remote') as HTMLButtonElement
+    expect(submit.disabled).toBe(true)
+    fireEvent.click(submit)
+    expect(mockSubmitMcpAuthCode).not.toHaveBeenCalled()
+  })
+
+  it('renders the paste input even when authUrl is absent (paste-only fallback)', () => {
+    render(<SidebarMcpView servers={[{ name: 'remote', status: 'oauth-required', canToggle: true }]} />)
+    expect(screen.queryByTestId('sidebar-mcp-view-authorize-remote')).toBeNull()
+    expect(screen.getByTestId('sidebar-mcp-view-auth-input-remote')).toBeTruthy()
   })
 })
 

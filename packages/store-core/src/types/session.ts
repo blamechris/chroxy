@@ -247,6 +247,10 @@ export interface McpServer {
   // read-only. Both optional so a message from a pre-#6824 emitter round-trips.
   enabled?: boolean;
   canToggle?: boolean;
+  // #6822: when `status === 'oauth-required'`, the browser authorization URL the
+  // user opens to authorize this remote MCP server. Carries only the public URL
+  // (never a token/secret). Absent for every other status.
+  authUrl?: string;
 }
 
 export interface DevPreview {

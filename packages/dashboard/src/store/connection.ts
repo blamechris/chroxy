@@ -3335,6 +3335,28 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     });
   },
 
+  // #6822 — submit a pasted OAuth authorization code for a remote MCP server that
+  // reported `oauth-required` (BYOK lane). Broadcast-driven: the server redeems
+  // the code, reconnects the server authenticated, and re-emits `mcp_servers`
+  // with the new status (which drives SidebarMcpView back to `connected` or, on
+  // failure, leaves it `oauth-required`). A `requestId` correlates a rejection
+  // in the server log. No-op when the socket is closed or there is no active
+  // session — mirrors setMcpServerEnabled's silent guard. The code is never
+  // stored client-side.
+  submitMcpAuthCode: (server: string, code: string) => {
+    const { socket, activeSessionId } = get();
+    if (!socket || socket.readyState !== WebSocket.OPEN || !activeSessionId) return;
+    if (!code || !code.trim()) return;
+    const requestId = `mcp-auth-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    wsSend(socket, {
+      type: 'submit_mcp_auth_code',
+      sessionId: activeSessionId,
+      server,
+      code: code.trim(),
+      requestId,
+    });
+  },
+
   // #6772 — pull the permission audit history for the active session. Sets the
   // loading flag; the reply (`permission_audit_result`) lands in `permissionAudit`
   // (handlePermissionAuditResult). The server filters by sessionId when provided.

@@ -6,6 +6,7 @@ import { existsSync, renameSync, mkdtempSync, mkdirSync, writeFileSync, rmSync }
 import { join } from 'node:path'
 import { homedir, tmpdir } from 'node:os'
 import { createHttpHandler, resolveRemoveImage, _resetSnapshotBackendCacheForTests } from '../src/http-routes.js'
+import { registerOAuthCallback, _clearOAuthCallbacksForTests } from '../src/byok-mcp-oauth.js'
 
 // The QR endpoint falls back to reading ~/.chroxy/connection.json from disk.
 // If a Chroxy server is running (or left a stale file), the test gets 200 instead of 503.
@@ -937,6 +938,50 @@ describe('http-routes', () => {
       assert.equal(res.status, 500)
       const body = await res.json()
       assert.ok(body.error)
+    })
+  })
+
+  // #6822 — MCP OAuth redirect callback. Unauthenticated (the redirect carries
+  // no bearer); the high-entropy state is the capability.
+  describe('MCP OAuth callback (#6822)', () => {
+    afterEach(() => _clearOAuthCallbacksForTests())
+
+    it('auto-completes a known state via the callback registry (no auth header needed)', async () => {
+      let received = null
+      registerOAuthCallback('state-abc', async (code) => { received = code })
+      const mock = createMockServer()
+      await startWith(mock)
+      const res = await globalThis.fetch(`http://127.0.0.1:${port}/mcp/oauth/callback?code=the-code&state=state-abc`)
+      assert.equal(res.status, 200)
+      const html = await res.text()
+      assert.match(html, /authorized/i)
+      assert.equal(received, 'the-code', 'the pending client received the code')
+    })
+
+    it('shows the code for a paste-fallback when no pending state matches', async () => {
+      const mock = createMockServer()
+      await startWith(mock)
+      const res = await globalThis.fetch(`http://127.0.0.1:${port}/mcp/oauth/callback?code=orphan-code&state=unknown`)
+      assert.equal(res.status, 200)
+      const html = await res.text()
+      assert.match(html, /Finish in Chroxy/i)
+      assert.match(html, /orphan-code/, 'the code is surfaced for the paste-code fallback')
+    })
+
+    it('returns 400 on a missing code/state', async () => {
+      const mock = createMockServer()
+      await startWith(mock)
+      const res = await globalThis.fetch(`http://127.0.0.1:${port}/mcp/oauth/callback?state=only-state`)
+      assert.equal(res.status, 400)
+    })
+
+    it('returns 400 when the authorization server reports an error', async () => {
+      const mock = createMockServer()
+      await startWith(mock)
+      const res = await globalThis.fetch(`http://127.0.0.1:${port}/mcp/oauth/callback?error=access_denied&state=s`)
+      assert.equal(res.status, 400)
+      const html = await res.text()
+      assert.match(html, /not completed/i)
     })
   })
 })
