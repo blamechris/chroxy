@@ -18,7 +18,10 @@ describe('splitContentBlocks', () => {
     const blocks = splitContentBlocks(input);
     expect(blocks).toHaveLength(3);
     expect(blocks[0]).toEqual({ kind: 'text', content: 'Before' });
-    expect(blocks[1]).toEqual({ kind: 'code', lang: 'js', content: 'const x = 1;' });
+    // #6813: `content` is the display text (trimmed); `copyText` carries the
+    // exact original bytes (incl. the newline ending the last code line) so
+    // the copy action matches the dashboard byte-for-byte.
+    expect(blocks[1]).toEqual({ kind: 'code', lang: 'js', content: 'const x = 1;', copyText: 'const x = 1;\n' });
     expect(blocks[2]).toEqual({ kind: 'text', content: 'After' });
   });
 
@@ -26,7 +29,14 @@ describe('splitContentBlocks', () => {
     const input = '```\nhello\n```';
     const blocks = splitContentBlocks(input);
     expect(blocks).toHaveLength(1);
-    expect(blocks[0]).toEqual({ kind: 'code', lang: '', content: 'hello' });
+    expect(blocks[0]).toEqual({ kind: 'code', lang: '', content: 'hello', copyText: 'hello\n' });
+  });
+
+  it('copyText preserves interior trailing blank lines that content trims for display (#6813)', () => {
+    const input = '```\nfoo  \n\n```';
+    const blocks = splitContentBlocks(input);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]).toEqual({ kind: 'code', lang: '', content: 'foo', copyText: 'foo  \n\n' });
   });
 
   it('normalizes CRLF to LF', () => {
@@ -40,8 +50,8 @@ describe('splitContentBlocks', () => {
     const input = '```js\na\n```\n```py\nb\n```';
     const blocks = splitContentBlocks(input);
     expect(blocks).toHaveLength(2);
-    expect(blocks[0]).toEqual({ kind: 'code', lang: 'js', content: 'a' });
-    expect(blocks[1]).toEqual({ kind: 'code', lang: 'py', content: 'b' });
+    expect(blocks[0]).toEqual({ kind: 'code', lang: 'js', content: 'a', copyText: 'a\n' });
+    expect(blocks[1]).toEqual({ kind: 'code', lang: 'py', content: 'b', copyText: 'b\n' });
   });
 
   it('does not treat inline backticks as fences', () => {

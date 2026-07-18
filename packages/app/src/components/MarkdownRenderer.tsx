@@ -38,7 +38,10 @@ const DEEP_NEST_BULLET = '\u25E6'; // White bullet ◦
 // -- Content Block Types --
 
 type ContentBlock =
-  | { kind: 'code'; lang: string; content: string }
+  /** `content` is display text (trailing whitespace trimmed so the code card
+   *  doesn't render dangling blank lines); `copyText` is the block's EXACT
+   *  original bytes for the #6793 copy action — see splitContentBlocks. */
+  | { kind: 'code'; lang: string; content: string; copyText: string }
   | { kind: 'text'; content: string };
 
 /** Split content into alternating text and fenced code blocks.
@@ -50,7 +53,9 @@ export function splitContentBlocks(rawContent: string): ContentBlock[] {
   const blocks: ContentBlock[] = [];
   // Require ``` at line start (or string start), followed by optional language + newline.
   // Closing fence uses lookahead so the \n isn't consumed -- allows consecutive code blocks.
-  const regex = /(?:^|\n)```(\w*)\n([\s\S]*?)(?:\n```(?=\s*\n|$)|$)/g;
+  // The closing fence is a CAPTURE group (match[3]) so copyText below can tell a closed
+  // fence apart from an unterminated one (the `|$` alternative captures '').
+  const regex = /(?:^|\n)```(\w*)\n([\s\S]*?)(\n```(?=\s*\n|$)|$)/g;
   let lastIndex = 0;
   let match;
 
@@ -61,8 +66,18 @@ export function splitContentBlocks(rawContent: string): ContentBlock[] {
       const text = content.slice(lastIndex, fenceStart).trim();
       if (text) blocks.push({ kind: 'text', content: text });
     }
+    // #6813 review: the copy action must place the SAME bytes on the clipboard
+    // as the dashboard, whose renderMarkdown captures everything between the
+    // opening fence's newline and the closing ``` — INCLUDING the newline that
+    // ends the last code line. Here that final newline is consumed by the
+    // closing-fence group (match[3]), and `trimEnd()` additionally drops any
+    // interior trailing blank lines/spaces. So: keep the trim for DISPLAY
+    // (`content` — no dangling blank lines in the code card), but build
+    // `copyText` from the untrimmed body + the consumed newline (when the
+    // fence was actually closed; an unterminated block has no such newline).
+    const copyText = match[3] ? `${match[2]}\n` : match[2];
     const code = match[2].trimEnd();
-    if (code) blocks.push({ kind: 'code', lang: match[1] || '', content: code });
+    if (code) blocks.push({ kind: 'code', lang: match[1] || '', content: code, copyText });
     lastIndex = match.index + match[0].length;
   }
 
@@ -632,7 +647,10 @@ const CodeCopyButton = React.memo(({ code }: { code: string }) => {
     <TouchableOpacity
       onPress={handlePress}
       style={md.codeCopyButton}
-      hitSlop={{ top: 8, right: 8, bottom: 8, left: 8 }}
+      // #6813 review: 14pt icon + 2×5 padding = 24pt visual; 2×11 hitSlop
+      // extends the effective touch target to 46pt — above the repo's 44pt
+      // accessibility minimum — without inflating the visual footprint.
+      hitSlop={{ top: 11, right: 11, bottom: 11, left: 11 }}
       accessibilityRole="button"
       accessibilityLabel={copied ? 'Copied' : 'Copy code'}
       testID="code-copy-button"
@@ -664,7 +682,7 @@ function FormattedResponseImpl({ content, messageTextStyle }: { content: string;
                   across every fenced block. */}
               <View style={md.codeBlockHeader}>
                 {block.lang ? <Text style={md.codeLang}>{block.lang}</Text> : <View />}
-                <CodeCopyButton code={block.content} />
+                <CodeCopyButton code={block.copyText} />
               </View>
               <HighlightedCode code={block.content} language={block.lang} />
             </View>
@@ -751,7 +769,9 @@ export const md = StyleSheet.create({
     textTransform: 'uppercase',
   },
   codeCopyButton: {
-    padding: 4,
+    // 5 (not 4) so visual size + hitSlop clears the 44pt touch-target
+    // minimum — see the hitSlop comment on the TouchableOpacity.
+    padding: 5,
     borderRadius: 4,
   },
   codeText: {

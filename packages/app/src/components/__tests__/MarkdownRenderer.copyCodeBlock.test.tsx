@@ -11,6 +11,7 @@
  */
 import React from 'react';
 import renderer, { act, ReactTestInstance } from 'react-test-renderer';
+import { StyleSheet } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { FormattedResponse } from '../MarkdownRenderer';
 import { flushMicrotasks } from '../../test-utils/test-helpers';
@@ -100,10 +101,10 @@ describe('MarkdownRenderer per-code-block copy button (#6793)', () => {
     });
 
     expect(mockSetStringAsync).toHaveBeenCalledTimes(1);
-    expect(mockSetStringAsync).toHaveBeenCalledWith('const second = 2');
+    expect(mockSetStringAsync).toHaveBeenCalledWith('const second = 2\n');
     // Never the whole markdown source, and never the OTHER block's text.
     expect(mockSetStringAsync).not.toHaveBeenCalledWith(content);
-    expect(mockSetStringAsync).not.toHaveBeenCalledWith('const first = 1');
+    expect(mockSetStringAsync).not.toHaveBeenCalledWith('const first = 1\n');
   });
 
   it('tapping the first block\'s button does not copy the second block\'s text', async () => {
@@ -116,8 +117,41 @@ describe('MarkdownRenderer per-code-block copy button (#6793)', () => {
       await flushMicrotasks();
     });
 
-    expect(mockSetStringAsync).toHaveBeenCalledWith('block one');
-    expect(mockSetStringAsync).not.toHaveBeenCalledWith('block two');
+    expect(mockSetStringAsync).toHaveBeenCalledWith('block one\n');
+    expect(mockSetStringAsync).not.toHaveBeenCalledWith('block two\n');
+  });
+
+  it('preserves the trailing newline in the copied text — byte parity with the dashboard (#6813 review)', async () => {
+    // The dashboard's renderMarkdown captures the newline that ends the last
+    // code line, so its copy button copies 'const x = 1\n'. The mobile fence
+    // regex consumes that newline into the closing-fence match and the display
+    // path additionally trimEnd()s — the copy action must reconstruct the
+    // exact original bytes, not the display text.
+    const tree = renderResponse('```js\nconst x = 1\n```');
+
+    await act(async () => {
+      copyButtons(tree.root)[0]!.props.onPress();
+      await flushMicrotasks();
+    });
+
+    expect(mockSetStringAsync).toHaveBeenCalledTimes(1);
+    const copied = mockSetStringAsync.mock.calls[0]![0] as string;
+    expect(copied).toBe('const x = 1\n');
+    expect(copied.endsWith('\n')).toBe(true);
+  });
+
+  it('exposes a ≥44pt effective touch target (icon + padding + hitSlop) (#6813 review)', () => {
+    const tree = renderResponse('```\nx\n```');
+    const button = copyButtons(tree.root)[0]!;
+    const style = StyleSheet.flatten(button.props.style) as { padding?: number };
+    const hitSlop = button.props.hitSlop as { top: number; right: number; bottom: number; left: number };
+    // The Icon renders at 14pt (see CodeCopyButton); visual size is icon +
+    // padding, and hitSlop extends the touchable area beyond the visual
+    // bounds. Both axes must clear the repo's 44pt accessibility minimum
+    // (same convention as DiffHunkView's ≥44pt toggle test).
+    const visual = 14 + 2 * (style.padding ?? 0);
+    expect(visual + hitSlop.top + hitSlop.bottom).toBeGreaterThanOrEqual(44);
+    expect(visual + hitSlop.left + hitSlop.right).toBeGreaterThanOrEqual(44);
   });
 
   it('shows a transient "Copied" accessibility state after a successful copy, then reverts', async () => {
