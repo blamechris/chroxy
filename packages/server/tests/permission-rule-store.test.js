@@ -261,6 +261,39 @@ describe('#6771 PermissionManager + durable rules', () => {
     }
   })
 
+  it('#6828: a PERSISTED apply_patch allow rule never overrides the floor for a protected changes[] member', async () => {
+    // Persist an allow-always for codex's apply_patch, then aim a fileChange at
+    // .git/ via the changes[] array (the flat file_path is the benign grantRoot).
+    // Without the #6805 array walk this would be durably auto-approved forever.
+    const store = makeStore()
+    store.addRule('/proj/a', { tool: 'apply_patch', decision: 'allow' })
+    const pm = new PermissionManager({ log: silentLog, cwd: '/proj/a', ruleStore: store })
+    try {
+      const events = []
+      pm.on('permission_request', (d) => events.push(d))
+
+      // All-benign members → auto-allowed by the persisted rule (no prompt).
+      const benign = await pm.handlePermission('apply_patch', {
+        file_path: '/proj/a',
+        changes: [{ path: 'src/a.js', kind: 'update', diff: 'd' }],
+      }, null, 'approve')
+      assert.equal(benign.behavior, 'allow')
+      assert.equal(events.length, 0, 'benign apply_patch auto-allowed by persisted rule')
+
+      // A protected member → floored to a prompt despite the persisted allow rule.
+      pm.handlePermission('apply_patch', {
+        file_path: '/proj/a',
+        changes: [
+          { path: 'src/a.js', kind: 'update', diff: 'd' },
+          { path: '.git/config', kind: 'update', diff: 'd' },
+        ],
+      }, null, 'approve')
+      assert.equal(events.length, 1, 'protected changes[] member still prompts (floor wins over persisted allow)')
+    } finally {
+      pm.destroy()
+    }
+  })
+
   it('a persistent DENY rule is honoured (deny still denies under the floor)', async () => {
     const store = makeStore()
     store.setRules('/proj/a', [{ tool: 'Read', decision: 'deny' }])

@@ -98,6 +98,32 @@ export function mergeEditedInput(originalInput, editedInput, toolName) {
 }
 
 /**
+ * #6794 — is a single path value protected, resolved against `base`?
+ * `resolve()` absorbs absolute paths, a leading `./`, and `..` traversal; the
+ * relative path is what we segment-match so cwd's own name can't false-match.
+ * Segments are lowercased first: on case-insensitive filesystems (macOS APFS,
+ * Windows) `.GIT/config` IS `.git/config`, so a case-sensitive match would let
+ * case variants evade the floor. Over-flooring a genuinely distinct `.GIT` on
+ * case-sensitive Linux is fine — the floor only forces a prompt, never denies.
+ * @param {string} target  a path value from a tool input
+ * @param {string} base    the resolution base (session cwd)
+ * @returns {boolean}
+ */
+function isProtectedPathValue(target, base) {
+  const rel = relative(base, resolve(base, target))
+  const segments = rel.split(sep)
+    .filter((s) => s.length > 0 && s !== '..')
+    .map((s) => s.toLowerCase())
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i]
+    if (PROTECTED_DIR_SEGMENTS.has(seg)) return true
+    if (seg === '.env' || seg.startsWith('.env.')) return true
+    if (seg === '.config' && segments[i + 1] === 'git') return true
+  }
+  return false
+}
+
+/**
  * #6794 — does this tool input target a protected path? Inspects EVERY present
  * {@link PROTECTED_PATH_INPUT_FIELDS} value (a benign `file_path` must not
  * shadow a protected `path`), resolves each against the session cwd (so
@@ -105,14 +131,25 @@ export function mergeEditedInput(originalInput, editedInput, toolName) {
  * tests the path RELATIVE to cwd segment-by-segment. ANY protected field
  * floors the input.
  *
+ * #6805/#6828 — codex `apply_patch` carries its per-file targets in an ARRAY:
+ * `input.changes` is `FileUpdateChange[] = { path, kind, diff }` (see
+ * codex-app-server-session.js `_describeApproval`), with the top-level
+ * `file_path` set to the approval's `grantRoot` — typically the benign repo
+ * root. Scanning only the flat fields therefore let a member edit under
+ * `.git/`/`.env*` escape the floor (and, with a persisted `{apply_patch,
+ * allow}` rule from #6771, be durably auto-approved). Every array entry's
+ * `path` is now checked with the same matcher — ANY protected member floors
+ * the WHOLE request. A string-shaped `changes` (codex's legacy unified-diff
+ * `item.patch` passthrough) carries no parseable paths and is skipped, same
+ * as any other non-array field.
+ *
  * Matching relative-to-cwd (not the raw absolute path) is deliberate: the
  * session's OWN location can never trigger a false positive — e.g. a git
  * worktree that itself lives under a real `.claude/` dir writing to
  * `packages/…` is NOT floored, because the `.claude` segment is above cwd.
  *
- * Segment rules (a match on ANY segment floors the write; segments are
- * lowercased first so `.GIT`/`.Env.local` can't evade the floor on the
- * case-insensitive filesystems where they alias the real paths):
+ * Segment rules (a match on ANY segment floors the write; see
+ * {@link isProtectedPathValue} for the lowercase rationale):
  *   - a segment in {@link PROTECTED_DIR_SEGMENTS} (`.git` / `.claude` / `.vscode`)
  *   - a `.config` segment immediately followed by `git` (the XDG git-config dir)
  *   - a segment that is `.env` or starts with `.env.` (`.env` / `.env.local` / …)
@@ -133,22 +170,13 @@ export function isProtectedPathTarget(input, cwd) {
   const base = (typeof cwd === 'string' && cwd.length > 0) ? cwd : process.cwd()
   for (const field of PROTECTED_PATH_INPUT_FIELDS) {
     if (typeof input[field] !== 'string' || input[field].length === 0) continue
-    // resolve() absorbs absolute paths, a leading `./`, and `..` traversal; the
-    // relative path is what we segment-match so cwd's own name can't false-match.
-    const rel = relative(base, resolve(base, input[field]))
-    // Lowercase every segment before matching: on case-insensitive filesystems
-    // (macOS APFS, Windows) `.GIT/config` IS `.git/config`, so a case-sensitive
-    // match would let case variants evade the floor. Over-flooring a genuinely
-    // distinct `.GIT` on case-sensitive Linux is fine — the floor only forces a
-    // prompt, never denies.
-    const segments = rel.split(sep)
-      .filter((s) => s.length > 0 && s !== '..')
-      .map((s) => s.toLowerCase())
-    for (let i = 0; i < segments.length; i++) {
-      const seg = segments[i]
-      if (PROTECTED_DIR_SEGMENTS.has(seg)) return true
-      if (seg === '.env' || seg.startsWith('.env.')) return true
-      if (seg === '.config' && segments[i + 1] === 'git') return true
+    if (isProtectedPathValue(input[field], base)) return true
+  }
+  // #6805/#6828 — walk the array-shaped per-file targets (codex apply_patch).
+  if (Array.isArray(input.changes)) {
+    for (const change of input.changes) {
+      if (!change || typeof change.path !== 'string' || change.path.length === 0) continue
+      if (isProtectedPathValue(change.path, base)) return true
     }
   }
   return false

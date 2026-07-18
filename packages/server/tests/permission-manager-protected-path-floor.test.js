@@ -289,4 +289,131 @@ describe('isProtectedPathTarget (#6794)', () => {
     // cwd = .../.claude/... ; a benign relative write stays unfloored.
     assert.equal(isProtectedPathTarget({ file_path: 'src/a.js' }, '/home/me/.claude/wt/agent'), false)
   })
+
+  // #6805/#6828 — codex apply_patch carries per-file targets in an ARRAY
+  // (input.changes = FileUpdateChange[] = { path, kind, diff }); the flat
+  // file_path is the approval's grantRoot (typically the benign repo root).
+  // ANY protected member must floor the whole request.
+  describe('array-shaped changes[] (codex apply_patch, #6805/#6828)', () => {
+    it('floors when a changes[] member targets .git/ even with a benign grantRoot file_path', () => {
+      assert.equal(isProtectedPathTarget({
+        file_path: cwd, // grantRoot — benign
+        changes: [
+          { path: 'src/ok.js', kind: 'update', diff: 'd' },
+          { path: '.git/config', kind: 'update', diff: 'd' },
+        ],
+      }, cwd), true)
+    })
+
+    it('floors on .env* / .claude / .config-git members too', () => {
+      for (const path of ['.env', '.env.local', '.claude/settings.local.json', '.config/git/config', 'sub/.git/HEAD']) {
+        assert.equal(isProtectedPathTarget({ file_path: cwd, changes: [{ path, kind: 'update', diff: 'd' }] }, cwd), true, path)
+      }
+    })
+
+    it('applies the same case-insensitive segment matching to members', () => {
+      assert.equal(isProtectedPathTarget({ changes: [{ path: '.GIT/config', kind: 'update', diff: 'd' }] }, cwd), true)
+    })
+
+    it('does NOT floor when every member is benign (negative control)', () => {
+      assert.equal(isProtectedPathTarget({
+        file_path: cwd,
+        changes: [
+          { path: 'src/a.js', kind: 'update', diff: 'd' },
+          { path: 'src/b.js', kind: 'add', diff: 'd' },
+        ],
+      }, cwd), false)
+    })
+
+    it('tolerates a string patch, path-less entries, and null members (no throw, no floor)', () => {
+      // #6638: item.changes ?? item.patch — patch can be a unified-diff STRING.
+      assert.equal(isProtectedPathTarget({ file_path: cwd, changes: 'a-unified-diff-string' }, cwd), false)
+      assert.equal(isProtectedPathTarget({ changes: [{ kind: 'update', diff: 'd' }, null, { path: '' }] }, cwd), false)
+      assert.equal(isProtectedPathTarget({ changes: [] }, cwd), false)
+    })
+  })
+})
+
+// #6805/#6828 — end-to-end: the lenient-settings short-circuits must not
+// auto-approve an apply_patch whose changes[] contains a protected member.
+describe('protected-path floor walks apply_patch changes[] (#6805/#6828)', () => {
+  let pm
+
+  beforeEach(() => {
+    pm = createManager()
+  })
+
+  afterEach(() => {
+    pm.destroy()
+  })
+
+  const protectedInput = () => ({
+    file_path: CWD, // grantRoot — benign on its own
+    changes: [
+      { path: 'src/ok.js', kind: 'update', diff: 'd' },
+      { path: '.git/config', kind: 'update', diff: 'd' },
+    ],
+  })
+
+  const benignInput = () => ({
+    file_path: CWD,
+    changes: [
+      { path: 'src/a.js', kind: 'update', diff: 'd' },
+      { path: 'src/b.js', kind: 'add', diff: 'd' },
+    ],
+  })
+
+  it('(a) allow apply_patch rule + a .git/ member falls through to the prompt', async () => {
+    const events = []
+    pm.on('permission_request', (d) => events.push(d))
+    pm.setRules([{ tool: 'apply_patch', decision: 'allow' }])
+
+    const promise = pm.handlePermission('apply_patch', protectedInput(), null, 'approve')
+    assert.equal(events.length, 1, 'protected member must emit a prompt, not auto-allow')
+
+    pm.respondToPermission(events[0].requestId, 'deny')
+    const result = await promise
+    assert.equal(result.behavior, 'deny')
+  })
+
+  it('acceptEdits + a .git/ member falls through to the prompt', async () => {
+    const events = []
+    pm.on('permission_request', (d) => events.push(d))
+
+    const promise = pm.handlePermission('apply_patch', protectedInput(), null, 'acceptEdits')
+    assert.equal(events.length, 1, 'protected member must prompt even in acceptEdits')
+
+    pm.respondToPermission(events[0].requestId, 'deny')
+    await promise
+  })
+
+  it('auto mode + a .git/ member falls through to the prompt', async () => {
+    const events = []
+    pm.on('permission_request', (d) => events.push(d))
+
+    const promise = pm.handlePermission('apply_patch', protectedInput(), null, 'auto')
+    assert.equal(events.length, 1, 'protected member must prompt even in auto/bypass mode')
+
+    pm.respondToPermission(events[0].requestId, 'deny')
+    await promise
+  })
+
+  it('(b) negative control: all-benign changes[] still short-circuits under an allow rule', async () => {
+    const events = []
+    pm.on('permission_request', (d) => events.push(d))
+    pm.setRules([{ tool: 'apply_patch', decision: 'allow' }])
+
+    const result = await pm.handlePermission('apply_patch', benignInput(), null, 'approve')
+    assert.equal(result.behavior, 'allow')
+    assert.equal(events.length, 0, 'benign apply_patch stays auto-approved (no over-flooring)')
+  })
+
+  it('negative control: all-benign changes[] still short-circuits under acceptEdits', async () => {
+    const events = []
+    pm.on('permission_request', (d) => events.push(d))
+
+    const result = await pm.handlePermission('apply_patch', benignInput(), null, 'acceptEdits')
+    assert.equal(result.behavior, 'allow')
+    assert.equal(events.length, 0)
+  })
 })
