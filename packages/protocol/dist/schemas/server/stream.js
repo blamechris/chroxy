@@ -307,19 +307,25 @@ export const ServerPermissionInputSchema = z.discriminatedUnion('found', [
 ]);
 /**
  * #6772 — one entry in the server's permission audit trail (permission-audit.js
- * ring buffer). Three heterogeneous shapes share a `type` discriminator; the
- * per-type fields are all optional so a single object covers every kind:
+ * ring buffer). Heterogeneous shapes share a `type` discriminator; the per-type
+ * fields are all optional so a single object covers every kind. Known kinds:
  *   - `mode_change`      — previousMode / newMode
  *   - `whitelist_change` — rules (the new session-rule set)
  *   - `decision`         — requestId / decision (allow|deny) / reason
- * The entry `type` uses `z.enum` (NOT `z.literal`) so the protocol type-coverage
- * lint — which greps `type: z.literal('…')` for server→client message types —
- * does not mistake an audit-entry kind for a wire message type. `.passthrough()`
- * tolerates future audit fields without a schema bump; consumers read defensively.
+ * The entry `type` is a PLAIN `z.string()` (PR #6836 review), for two reasons:
+ *   1. Forward compatibility — a closed enum would fail the WHOLE payload parse
+ *      the moment the server adds a new audit kind; clients render unknown kinds
+ *      generically instead. (NOT `z.enum(...).catch(...)` — the repo's #6436 rule:
+ *      `.catch` on a strict-reject field swallows ALL field errors.)
+ *   2. It is not `z.literal`, so the protocol type-coverage lint — which greps
+ *      `type: z.literal('…')` for server→client MESSAGE types — does not mistake
+ *      an audit-entry kind for a wire message type.
+ * `.passthrough()` tolerates future audit fields without a schema bump; consumers
+ * read defensively.
  */
 export const ServerPermissionAuditEntrySchema = z
     .object({
-    type: z.enum(['mode_change', 'whitelist_change', 'decision']),
+    type: z.string(),
     clientId: z.string().nullable().optional(),
     sessionId: z.string().nullable().optional(),
     timestamp: z.number(),

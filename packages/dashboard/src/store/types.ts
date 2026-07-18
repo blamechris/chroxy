@@ -292,13 +292,16 @@ export interface PermissionRule {
 
 /**
  * #6772 — one entry from the server's permission audit trail (permission-audit.js
- * ring buffer), returned by a `query_permission_audit` pull. Three heterogeneous
- * `type`s share this shape; per-type fields are optional (mirrors the wire
- * `ServerPermissionAuditEntrySchema`). Rendered read-only in the SettingsPanel
- * "Permission history" view.
+ * ring buffer), returned by a `query_permission_audit` pull. Heterogeneous `type`s
+ * share this shape; per-type fields are optional (mirrors the wire
+ * `ServerPermissionAuditEntrySchema`). Known kinds: 'mode_change' /
+ * 'whitelist_change' / 'decision' — but `type` is an OPEN string (PR #6836
+ * review): a future server-side audit kind must not fail the payload parse, and
+ * the view renders unknown kinds with a generic label. Rendered read-only in the
+ * SettingsPanel "Permission history" view.
  */
 export interface PermissionAuditEntry {
-  type: 'mode_change' | 'whitelist_change' | 'decision';
+  type: string;
   clientId?: string | null;
   sessionId?: string | null;
   timestamp: number;
@@ -1322,9 +1325,13 @@ export interface ConnectionState {
   // #6772 — permission audit history (query_permission_audit reply). `permissionAudit`
   // holds the entries from the latest pull (null until the first query this session);
   // `permissionAuditLoading` is true between dispatching the query and its reply.
-  // Scoped to the active session by the query action (the server filters by sessionId).
+  // `permissionAuditError` is true when the reply failed the wire-schema parse
+  // (PR #6836 review) — the view shows a generic load-failed hint and the button
+  // stays actionable instead of wedging on a stuck loading flag. Scoped to the
+  // active session by the query action (the server filters by sessionId).
   permissionAudit: PermissionAuditEntry[] | null;
   permissionAuditLoading: boolean;
+  permissionAuditError: boolean;
 
   // Custom agents from server
   customAgents: CustomAgent[];

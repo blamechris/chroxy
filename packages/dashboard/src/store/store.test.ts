@@ -2137,6 +2137,62 @@ describe('resolvedPermissions + Allow for Session (#2833, #2834)', () => {
     expect(state.permissionAudit).toHaveLength(2);
     expect(state.permissionAudit![0]!.type).toBe('decision');
     expect(state.permissionAudit![1]!.newMode).toBe('auto');
+    expect(state.permissionAuditError).toBe(false);
+
+    _testMessageHandler.clearContext();
+  });
+
+  it('a MALFORMED permission_audit_result clears the loading flag and raises the error state (no wedge)', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const { _testMessageHandler } = await import('./message-handler');
+
+    useConnectionStore.setState({ permissionAudit: null, permissionAuditLoading: true, permissionAuditError: false });
+    _testMessageHandler.setContext({
+      url: 'ws://localhost:3000',
+      token: 'test-token',
+      isReconnect: false,
+      silent: false,
+      socket: { send: () => {}, readyState: 1 } as unknown as WebSocket,
+    });
+
+    // entries must be an array — a scalar fails the schema parse.
+    _testMessageHandler.handle({ type: 'permission_audit_result', entries: 'not-an-array' });
+
+    const state = useConnectionStore.getState();
+    expect(state.permissionAuditLoading).toBe(false); // button unwedged
+    expect(state.permissionAuditError).toBe(true);    // generic load-failed state
+    expect(state.permissionAudit).toBeNull();         // no garbage stored
+
+    _testMessageHandler.clearContext();
+  });
+
+  it('an UNKNOWN audit entry type still parses (forward-compatible wire schema)', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const { _testMessageHandler } = await import('./message-handler');
+
+    useConnectionStore.setState({ permissionAudit: null, permissionAuditLoading: true, permissionAuditError: false });
+    _testMessageHandler.setContext({
+      url: 'ws://localhost:3000',
+      token: 'test-token',
+      isReconnect: false,
+      silent: false,
+      socket: { send: () => {}, readyState: 1 } as unknown as WebSocket,
+    });
+
+    // A future server-side audit kind must not fail the WHOLE payload (#6836 review).
+    _testMessageHandler.handle({
+      type: 'permission_audit_result',
+      entries: [
+        { type: 'rule_expired', sessionId: 's1', timestamp: 1 },
+        { type: 'decision', sessionId: 's1', decision: 'allow', timestamp: 2 },
+      ],
+    });
+
+    const state = useConnectionStore.getState();
+    expect(state.permissionAuditLoading).toBe(false);
+    expect(state.permissionAuditError).toBe(false);
+    expect(state.permissionAudit).toHaveLength(2);
+    expect(state.permissionAudit![0]!.type).toBe('rule_expired');
 
     _testMessageHandler.clearContext();
   });

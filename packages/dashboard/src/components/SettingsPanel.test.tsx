@@ -2864,6 +2864,25 @@ describe('SettingsPanel — permission rules + audit history (#6772/#6829)', () 
     expect(screen.getByTestId('permission-history-empty')).toBeInTheDocument()
   })
 
+  it('Permission history: parse-failure error state shows the load-failed hint and keeps the button actionable', () => {
+    setMockState(rulesState({ permissionAudit: null, permissionAuditLoading: false, permissionAuditError: true }))
+    render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+    expect(screen.getByTestId('permission-history-error')).toBeInTheDocument()
+    // The button is NOT wedged in a disabled loading state — retry stays possible.
+    expect(screen.getByTestId('permission-history-load')).not.toBeDisabled()
+  })
+
+  it('Permission history: an UNKNOWN audit kind renders with the generic fallback label', () => {
+    setMockState(
+      rulesState({
+        permissionAudit: [{ type: 'rule_expired', sessionId: 's1', timestamp: Date.now() }],
+        permissionAuditLoading: false,
+      }),
+    )
+    render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+    expect(screen.getByTestId('permission-history-list')).toHaveTextContent('Permission event')
+  })
+
   it('describePermissionAuditEntry labels each audit kind', () => {
     expect(describePermissionAuditEntry({ type: 'mode_change', previousMode: 'approve', newMode: 'auto', timestamp: 0 })).toBe(
       'Permission mode: approve → auto',
@@ -2875,5 +2894,7 @@ describe('SettingsPanel — permission rules + audit history (#6772/#6829)', () 
       'Denied (timeout)',
     )
     expect(describePermissionAuditEntry({ type: 'decision', decision: 'allow', reason: 'user', timestamp: 0 })).toBe('Allowed')
+    // Forward-compat (#6836 review): an unknown future kind gets the generic label.
+    expect(describePermissionAuditEntry({ type: 'rule_expired', timestamp: 0 })).toBe('Permission event')
   })
 })

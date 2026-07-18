@@ -691,6 +691,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   referencesLoading: false,
   permissionAudit: null,
   permissionAuditLoading: false,
+  permissionAuditError: false,
   customAgents: [],
   checkpoints: [],
   _directoryListingCallback: null,
@@ -2678,6 +2679,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   referencesLoading: false,
   permissionAudit: null,
   permissionAuditLoading: false,
+  permissionAuditError: false,
       customAgents: [],
       checkpoints: [],
       _directoryListingCallback: null,
@@ -3316,7 +3318,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   queryPermissionAudit: () => {
     const { socket, activeSessionId } = get();
     if (!socket || socket.readyState !== WebSocket.OPEN) return;
-    set({ permissionAuditLoading: true });
+    set({ permissionAuditLoading: true, permissionAuditError: false });
     const msg: Record<string, unknown> = { type: 'query_permission_audit' };
     if (activeSessionId) msg.sessionId = activeSessionId;
     wsSend(socket, msg);
@@ -4039,9 +4041,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // per-session pull (queryPermissionAudit scopes to the active session).
     // Clear it on every switch so the SettingsPanel "Permission history" view
     // never shows the PREVIOUS session's entries against the new session; the
-    // user re-pulls on demand. The loading flag resets too so an in-flight
-    // pull for the old session can't wedge the button.
-    set({ permissionAudit: null, permissionAuditLoading: false });
+    // user re-pulls on demand. The loading + error flags reset too so an
+    // in-flight pull for the old session can't wedge the button.
+    set({ permissionAudit: null, permissionAuditLoading: false, permissionAuditError: false });
 
     // Optimistically switch to cached state + mark notifications for target
     // session as read. #4890 — pre-widget we filtered the target session's

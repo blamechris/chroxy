@@ -2674,17 +2674,22 @@ function handleReferencesResult(msg: Record<string, unknown>, _get: MsgGet, set:
 
 /**
  * #6772 — reply to a `query_permission_audit` pull: REPLACE the stored audit
- * history with the returned entries and clear the loading flag. Zod-validated
- * (a malformed payload is dropped rather than crashing the view), and the
- * loading flag clears only on a successful parse — the same defensive
- * query-response pattern as code_search_results / references_result. Drives the
+ * history with the returned entries and clear the loading flag. Zod-validated —
+ * a malformed payload is dropped rather than crashing the view — but a parse
+ * failure STILL clears the loading flag and raises `permissionAuditError`
+ * (PR #6836 review): this is a request/reply pair, so an early return that left
+ * `permissionAuditLoading` latched would wedge the history button forever (no
+ * later broadcast re-clears it, unlike the snapshot-style handlers). Drives the
  * SettingsPanel "Permission history" view. Dashboard-only for v1 (the mobile
  * PermissionHistory screen derives its summary from the chat transcript).
  */
 function handlePermissionAuditResult(msg: Record<string, unknown>, _get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
   const parsed = ServerPermissionAuditResultSchema.safeParse(msg);
-  if (!parsed.success) return;
-  set({ permissionAudit: parsed.data.entries as PermissionAuditEntry[], permissionAuditLoading: false });
+  if (!parsed.success) {
+    set({ permissionAuditLoading: false, permissionAuditError: true });
+    return;
+  }
+  set({ permissionAudit: parsed.data.entries as PermissionAuditEntry[], permissionAuditLoading: false, permissionAuditError: false });
 }
 
 /**

@@ -57,10 +57,12 @@ const EMPTY_PERMISSION_RULES: PermissionRule[] = []
 
 /**
  * #6772 — human label for one permission audit entry. The server's audit log
- * (permission-audit.js) records three heterogeneous kinds; render each by its
- * distinguishing fields (a `decision` entry carries no tool name — the audit log
- * keys on requestId, not tool). Pure + exported-shape so the SettingsPanel test
- * can assert on the rendered text.
+ * (permission-audit.js) records heterogeneous kinds; render each known kind by
+ * its distinguishing fields (a `decision` entry carries no tool name — the audit
+ * log keys on requestId, not tool). `entry.type` is an OPEN string (PR #6836
+ * review — the wire schema is forward-compatible), so any UNKNOWN kind falls
+ * through to the generic label rather than breaking the list. Pure +
+ * exported-shape so the SettingsPanel test can assert on the rendered text.
  */
 export function describePermissionAuditEntry(entry: PermissionAuditEntry): string {
   switch (entry.type) {
@@ -803,6 +805,7 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
   const queryPermissionAudit = useConnectionStore(s => s.queryPermissionAudit)
   const permissionAudit = useConnectionStore(s => s.permissionAudit)
   const permissionAuditLoading = useConnectionStore(s => s.permissionAuditLoading)
+  const permissionAuditError = useConnectionStore(s => s.permissionAuditError)
   const themes = getAvailableThemes()
   const inTauri = isTauri()
   const [tunnelMode, setTunnelModeState] = useState<string>('none')
@@ -1659,6 +1662,13 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
               >
                 {permissionAuditLoading ? 'Loading…' : permissionAudit == null ? 'Load history' : 'Refresh'}
               </button>
+              {/* PR #6836 review — a malformed reply clears loading and lands here
+                  instead of wedging the button; retry via the same Load button. */}
+              {permissionAuditError && (
+                <p className="settings-hint" role="alert" data-testid="permission-history-error">
+                  Couldn't load permission history. Try again.
+                </p>
+              )}
               {permissionAudit != null && (
                 permissionAudit.length === 0 ? (
                   <p className="settings-hint" data-testid="permission-history-empty">
