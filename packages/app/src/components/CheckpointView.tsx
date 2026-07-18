@@ -205,7 +205,7 @@ export function CheckpointView({ visible, onClose }: CheckpointViewProps) {
       const cp = checkpoints.find((c) => c.id === id);
       Alert.alert(
         'Restore Checkpoint',
-        `Restore to "${cp?.name || 'checkpoint'}"? This will create a new session from this point.`,
+        `Restore files to "${cp?.name || 'checkpoint'}"? Your working files will be reverted to this checkpoint.`,
         [
           { text: 'Cancel', style: 'cancel' },
           {

@@ -639,6 +639,8 @@ export interface DispatchMessageMap {
   checkpoint_restored: {
     type: 'checkpoint_restored'
     newSessionId?: string
+    // #6766: true when only files were restored (conversation NOT branched).
+    filesOnly?: boolean
   }
   search_results: {
     type: 'search_results'

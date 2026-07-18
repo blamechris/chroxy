@@ -175,6 +175,107 @@ describe('checkpoint-handlers', () => {
       assert.equal(restored.newSessionId, 'restored-session-id')
     })
 
+    // #6766 — truthfulness: a fork-capable provider (the SDK) rewinds the
+    // conversation truncated to the checkpoint boundary; every other provider
+    // degrades to a files-only restore and says so. These tests mock the SDK
+    // fork at the session's `forkConversation` seam (the same instance-level
+    // injection the SdkSession suite uses for `_query`).
+    describe('conversation fork vs files-only degradation (#6766)', () => {
+      function makeForkCtx({ forkCapable = false, boundaryMessageId = null, forkReturns = 'forked-conv-id', forkThrows = false } = {}) {
+        const sessions = new Map()
+        const orig = createMockSession()
+        orig.isRunning = false
+        orig.resumeSessionId = 'conv-1'
+        if (forkCapable) {
+          orig.supportsConversationFork = true
+          orig.forkConversation = createSpy(async () => {
+            if (forkThrows) throw new Error('fork boom')
+            return forkReturns
+          })
+        }
+        sessions.set('s1', { session: orig, name: 'S', cwd: '/tmp' })
+        sessions.set('restored-session-id', { session: createMockSession(), name: 'Rewind: Checkpoint 1', cwd: '/tmp' })
+        const ctx = makeCtx(sessions)
+        ctx.sessions.sessionManager.createSession = createSpy(async () => 'restored-session-id')
+        const cp = { id: 'cp-1', name: 'Checkpoint 1', cwd: '/tmp', resumeSessionId: 'conv-1', boundaryMessageId }
+        ctx.services.checkpointManager.getCheckpoint = createSpy(() => cp)
+        ctx.services.checkpointManager.restoreCheckpoint = createSpy(async () => cp)
+        return { ctx, orig }
+      }
+
+      it('forks the conversation truncated to the boundary and reports filesOnly:false', async () => {
+        const { ctx, orig } = makeForkCtx({ forkCapable: true, boundaryMessageId: 'uuid-b1' })
+        const client = makeClient({ activeSessionId: 's1' })
+
+        await checkpointHandlers.restore_checkpoint(makeWs(), client, { checkpointId: 'cp-1' }, ctx)
+
+        assert.equal(orig.forkConversation.callCount, 1, 'must fork the conversation')
+        const [forkArgs] = orig.forkConversation.calls[0]
+        assert.equal(forkArgs.sessionId, 'conv-1')
+        assert.equal(forkArgs.upToMessageId, 'uuid-b1', 'forks truncated to the checkpoint boundary')
+        // The rewound session resumes the FORKED (truncated) id, not the raw one.
+        const [createArgs] = ctx.sessions.sessionManager.createSession.calls[0]
+        assert.equal(createArgs.resumeSessionId, 'forked-conv-id')
+        const restored = ctx._sent.find(m => m.type === 'checkpoint_restored')
+        assert.equal(restored.filesOnly, false, 'a real conversation branch is not files-only')
+      })
+
+      it('restoring the EARLIER of two checkpoints truncates to the earlier boundary', async () => {
+        // Two checkpoints in one session; restore the earlier one → fork must
+        // use the earlier boundary, so the rewound history stops there (not the
+        // later checkpoint / full transcript). This is the issue's core AC.
+        const { ctx, orig } = makeForkCtx({ forkCapable: true, boundaryMessageId: 'uuid-early' })
+        // Model "two checkpoints": the manager returns the EARLIER checkpoint's
+        // boundary for the id we restore.
+        const earlier = { id: 'cp-early', name: 'Checkpoint 1', cwd: '/tmp', resumeSessionId: 'conv-1', boundaryMessageId: 'uuid-early' }
+        ctx.services.checkpointManager.getCheckpoint = createSpy(() => earlier)
+        ctx.services.checkpointManager.restoreCheckpoint = createSpy(async () => earlier)
+        const client = makeClient({ activeSessionId: 's1' })
+
+        await checkpointHandlers.restore_checkpoint(makeWs(), client, { checkpointId: 'cp-early' }, ctx)
+
+        const [forkArgs] = orig.forkConversation.calls[0]
+        assert.equal(forkArgs.upToMessageId, 'uuid-early', 'truncates to the earlier checkpoint, not the latest state')
+      })
+
+      it('degrades to files-only (filesOnly:true, raw resume) for a non-fork provider', async () => {
+        const { ctx, orig } = makeForkCtx({ forkCapable: false, boundaryMessageId: 'uuid-b1' })
+        const client = makeClient({ activeSessionId: 's1' })
+
+        await checkpointHandlers.restore_checkpoint(makeWs(), client, { checkpointId: 'cp-1' }, ctx)
+
+        assert.equal(orig.forkConversation, undefined, 'non-fork provider has no fork method')
+        const [createArgs] = ctx.sessions.sessionManager.createSession.calls[0]
+        assert.equal(createArgs.resumeSessionId, 'conv-1', 'resumes the checkpoint id unchanged')
+        const restored = ctx._sent.find(m => m.type === 'checkpoint_restored')
+        assert.equal(restored.filesOnly, true, 'no conversation branch claimed')
+      })
+
+      it('degrades to files-only when a fork-capable provider has no boundary', async () => {
+        const { ctx, orig } = makeForkCtx({ forkCapable: true, boundaryMessageId: null })
+        const client = makeClient({ activeSessionId: 's1' })
+
+        await checkpointHandlers.restore_checkpoint(makeWs(), client, { checkpointId: 'cp-1' }, ctx)
+
+        assert.equal(orig.forkConversation.callCount, 0, 'no boundary → no fork attempted')
+        const restored = ctx._sent.find(m => m.type === 'checkpoint_restored')
+        assert.equal(restored.filesOnly, true)
+      })
+
+      it('degrades to files-only when the fork itself throws', async () => {
+        const { ctx, orig } = makeForkCtx({ forkCapable: true, boundaryMessageId: 'uuid-b1', forkThrows: true })
+        const client = makeClient({ activeSessionId: 's1' })
+
+        await checkpointHandlers.restore_checkpoint(makeWs(), client, { checkpointId: 'cp-1' }, ctx)
+
+        assert.equal(orig.forkConversation.callCount, 1)
+        const [createArgs] = ctx.sessions.sessionManager.createSession.calls[0]
+        assert.equal(createArgs.resumeSessionId, 'conv-1', 'falls back to the raw resume id on fork failure')
+        const restored = ctx._sent.find(m => m.type === 'checkpoint_restored')
+        assert.equal(restored.filesOnly, true)
+      })
+    })
+
     it('re-homes OTHER clients viewing the original session onto the rewound session (#5700)', async () => {
       const sessions = new Map()
       const orig = createMockSession()

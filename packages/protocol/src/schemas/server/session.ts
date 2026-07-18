@@ -577,14 +577,20 @@ export const ServerCheckpointListSchema = z.object({
   checkpoints: z.array(CheckpointSchema),
 })
 
-// NOTE: checkpoint_restored does NOT carry a `sessionId` — keys are exactly
-// { type, checkpointId, newSessionId, name }. `newSessionId` is the fresh
-// session the restore created; the client re-homes to it via switchSession.
+// NOTE: checkpoint_restored keys are exactly { type, checkpointId,
+// newSessionId, name, filesOnly? } — no `sessionId`. `newSessionId` is the
+// fresh session the restore created; the client re-homes to it via
+// switchSession. `filesOnly` (#6766) is true when only the working tree was
+// restored and the conversation was NOT branched (the provider can't fork /
+// truncate a resumed transcript); false when the conversation was forked and
+// truncated to the checkpoint. Optional for back-compat with older servers
+// that never branched — a missing value is treated as files-only.
 export const ServerCheckpointRestoredSchema = z.object({
   type: z.literal('checkpoint_restored'),
   checkpointId: z.string(),
   newSessionId: z.string(),
   name: z.string(),
+  filesOnly: z.boolean().optional(),
 })
 
 // #6332 (batch 2b of #6314): idle-timeout lifecycle. `session_warning` is the

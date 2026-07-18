@@ -61,6 +61,36 @@ describe('CheckpointManager', () => {
     assert.ok(cp.gitRef) // should have a git tag
   })
 
+  // #6766: the fork boundary must round-trip through create → restore so the
+  // restore handler can truncate the conversation to the checkpoint's point.
+  it('stores the boundaryMessageId and returns it on restore (#6766)', async () => {
+    const cp = await manager.createCheckpoint({
+      sessionId: 'sess-1',
+      resumeSessionId: 'sdk-abc',
+      cwd: gitDir,
+      name: 'Before query',
+      messageCount: 3,
+      boundaryMessageId: 'uuid-boundary-1',
+    })
+    assert.equal(cp.boundaryMessageId, 'uuid-boundary-1')
+
+    const restored = await manager.restoreCheckpoint('sess-1', cp.id)
+    assert.equal(restored.boundaryMessageId, 'uuid-boundary-1', 'restore returns the fork boundary')
+  })
+
+  // #6766: providers that can't supply a boundary (subprocess providers) must
+  // land as an explicit null so restore honestly degrades to files-only.
+  it('defaults boundaryMessageId to null when absent (#6766)', async () => {
+    const cp = await manager.createCheckpoint({
+      sessionId: 'sess-1',
+      resumeSessionId: 'sdk-abc',
+      cwd: gitDir,
+      name: 'No boundary',
+      messageCount: 1,
+    })
+    assert.equal(cp.boundaryMessageId, null)
+  })
+
   it('#5731 (T3): emits checkpoint_persist_failed when the disk write fails, but still returns the checkpoint', async () => {
     // Root bypasses DAC permission checks, so the read-only-dir trick can't force
     // a write failure when run as uid 0 (Docker/devcontainer) — skip there, mirroring

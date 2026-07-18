@@ -51,6 +51,9 @@ async function handleCreateCheckpoint(ws, client, msg, ctx) {
       name: typeof msg.name === 'string' ? msg.name.slice(0, 100) : undefined,
       description: typeof msg.description === 'string' ? msg.description.slice(0, 500) : undefined,
       messageCount: ctx.sessions.sessionManager.getHistoryCount(sid),
+      // #6766: capture the conversation fork boundary so a later restore can
+      // truncate the transcript to this point (SDK provider only; others → null).
+      boundaryMessageId: entry.session.lastMessageUuid,
     })
     ctx.transport.send(ws, {
       type: 'checkpoint_created',
@@ -130,8 +133,43 @@ async function handleRestoreCheckpoint(ws, client, msg, ctx) {
   }
   try {
     const checkpoint = await ctx.services.checkpointManager.restoreCheckpoint(sid, msg.checkpointId)
+
+    // #6766: decide whether this rewind can truly branch the conversation or is
+    // files-only. A real branch needs (a) a fork-capable provider on the ORIGINAL
+    // session and (b) a captured fork boundary. When both hold, fork the
+    // conversation truncated to the boundary so the rewound session resumes AT
+    // the checkpoint's point (not the full latest transcript); otherwise resume
+    // the checkpoint's conversation id unchanged and report the restore as
+    // files-only so the UI never claims a conversation rewind it didn't do.
+    const origSession = currentEntry?.session
+    const boundaryMessageId = checkpoint.boundaryMessageId
+    let resumeSessionId = checkpoint.resumeSessionId
+    let filesOnly = true
+    if (
+      origSession &&
+      origSession.supportsConversationFork === true &&
+      typeof origSession.forkConversation === 'function' &&
+      typeof boundaryMessageId === 'string' &&
+      boundaryMessageId.length > 0
+    ) {
+      try {
+        const forkedId = await origSession.forkConversation({
+          sessionId: checkpoint.resumeSessionId,
+          upToMessageId: boundaryMessageId,
+        })
+        if (forkedId) {
+          resumeSessionId = forkedId
+          filesOnly = false
+        } else {
+          log.warn('Checkpoint conversation fork returned no id — restoring files only')
+        }
+      } catch (err) {
+        log.warn(`Checkpoint conversation fork failed, restoring files only: ${err.message}`)
+      }
+    }
+
     const newSessionId = await ctx.sessions.sessionManager.createSession({
-      resumeSessionId: checkpoint.resumeSessionId,
+      resumeSessionId,
       cwd: checkpoint.cwd,
       name: `Rewind: ${checkpoint.name}`,
     })
@@ -144,6 +182,10 @@ async function handleRestoreCheckpoint(ws, client, msg, ctx) {
       checkpointId: checkpoint.id,
       newSessionId,
       name: newEntry?.name || `Rewind: ${checkpoint.name}`,
+      // #6766: true when only the working tree was restored (conversation NOT
+      // branched); false when the conversation was forked/truncated to the
+      // checkpoint. Lets clients describe what actually happened truthfully.
+      filesOnly,
     })
     // The initiator's active session moved to the rewound session above; announce
     // it to presence/Control-Room observers (the loop below does the same for the

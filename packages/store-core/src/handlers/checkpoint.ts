@@ -67,10 +67,19 @@ export function handleCheckpointList(
 /** Parsed payload from a `checkpoint_restored` message. */
 export interface CheckpointRestoredPayload {
   newSessionId: string
+  /**
+   * #6766: true when the restore reverted only the working tree and did NOT
+   * branch the conversation (the provider can't fork/truncate a resumed
+   * transcript); false when the conversation was forked/truncated to the
+   * checkpoint. Defaults to true when the server omits the field (older servers
+   * never branched), so callers never over-claim a conversation rewind.
+   */
+  filesOnly: boolean
 }
 
 /**
- * Extract and trim the new session ID from a `checkpoint_restored` message.
+ * Extract the new session ID (and the files-only flag) from a
+ * `checkpoint_restored` message.
  *
  * App-only handler today (the dashboard's `checkpoint_restored` is a no-op);
  * extracted here so dashboard can adopt the same handler later if/when it
@@ -87,5 +96,8 @@ export function handleCheckpointRestored(
   if (typeof raw !== 'string') return null
   const trimmed = raw.trim()
   if (trimmed.length === 0) return null
-  return { newSessionId: trimmed }
+  // #6766: default to files-only unless the server explicitly says otherwise, so
+  // a missing/legacy flag never lets a client claim a conversation rewind.
+  const filesOnly = typeof msg.filesOnly === 'boolean' ? msg.filesOnly : true
+  return { newSessionId: trimmed, filesOnly }
 }

@@ -1118,6 +1118,18 @@ describe('DockerSdkSession real import (capabilities only)', () => {
     assert.ok(Array.isArray(mod.FORWARDED_ENV_KEYS))
     assert.equal(typeof mod.DEFAULT_CONTAINER_CLI_PATH, 'string')
   })
+
+  // #6766: the SDK provider forks conversations, but a containerized session's
+  // transcript lives inside the container where the host-side fork can't reach
+  // it — so DockerSdkSession must opt out and let restore degrade to files-only.
+  it('DockerSdkSession.supportsConversationFork is false; SdkSession is true (#6766)', async () => {
+    const { DockerSdkSession } = await import('../src/docker-sdk-session.js')
+    const { SdkSession } = await import('../src/sdk-session.js')
+    const docker = Object.create(DockerSdkSession.prototype)
+    const sdk = Object.create(SdkSession.prototype)
+    assert.equal(docker.supportsConversationFork, false, 'container transcript is unreachable by host-side fork')
+    assert.equal(sdk.supportsConversationFork, true)
+  })
 })
 
 describe('DockerSdkSession._augmentQueryOptions hook in SdkSession', () => {

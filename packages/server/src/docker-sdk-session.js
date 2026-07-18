@@ -36,6 +36,16 @@ export class DockerSdkSession extends SdkSession {
   }
 
   /**
+   * #6766: the SDK transcript for a containerized session lives inside the
+   * container (`~/.claude/projects` in the container's filesystem), not on the
+   * host where the standalone `forkSession` reads. So a host-side conversation
+   * fork can't reach it — restore degrades to a files-only rewind here.
+   */
+  get supportsConversationFork() {
+    return false
+  }
+
+  /**
    * Preflight credentials block — overrides SdkSession's host-side spec (#4780).
    *
    * Mirror of DockerSession.preflight — see that class for the full rationale.

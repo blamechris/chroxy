@@ -1941,16 +1941,36 @@ describe('handleServerMode', () => {
 // handleCheckpointRestored
 // ---------------------------------------------------------------------------
 describe('handleCheckpointRestored', () => {
-  it('extracts trimmed newSessionId', () => {
+  it('extracts trimmed newSessionId (defaults filesOnly true)', () => {
     expect(handleCheckpointRestored({ newSessionId: 'sess-new' })).toEqual({
       newSessionId: 'sess-new',
+      filesOnly: true,
     })
   })
 
   it('trims whitespace from newSessionId', () => {
     expect(
       handleCheckpointRestored({ newSessionId: '  sess-trim  ' }),
-    ).toEqual({ newSessionId: 'sess-trim' })
+    ).toEqual({ newSessionId: 'sess-trim', filesOnly: true })
+  })
+
+  // #6766: the flag lets the client describe the restore truthfully.
+  it('carries filesOnly:false when the server branched the conversation', () => {
+    expect(
+      handleCheckpointRestored({ newSessionId: 'sess-new', filesOnly: false }),
+    ).toEqual({ newSessionId: 'sess-new', filesOnly: false })
+  })
+
+  it('carries filesOnly:true when the server reports a files-only restore', () => {
+    expect(
+      handleCheckpointRestored({ newSessionId: 'sess-new', filesOnly: true }),
+    ).toEqual({ newSessionId: 'sess-new', filesOnly: true })
+  })
+
+  it('defaults filesOnly to true when the field is a non-boolean', () => {
+    expect(
+      handleCheckpointRestored({ newSessionId: 'sess-new', filesOnly: 'yes' }),
+    ).toEqual({ newSessionId: 'sess-new', filesOnly: true })
   })
 
   it('returns null when newSessionId is missing', () => {

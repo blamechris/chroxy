@@ -323,6 +323,10 @@ async function handleInput(ws, client, msg, ctx) {
       cwd: entry.cwd,
       description: trimmed.slice(0, 100),
       messageCount: ctx.sessions.sessionManager.getHistoryCount(targetSessionId),
+      // #6766: capture the fork boundary (last assistant transcript UUID of the
+      // turn that just ended) so restoring this pre-turn checkpoint can truncate
+      // the conversation to here. Undefined on providers that don't track it.
+      boundaryMessageId: entry.session.lastMessageUuid,
     }).catch((err) => log.warn(`Auto-checkpoint failed: ${err.message}`))
   }
   // Adopt the sender's clientMessageId if present and well-formed; otherwise

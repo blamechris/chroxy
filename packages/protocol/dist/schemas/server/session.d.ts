@@ -431,6 +431,7 @@ export declare const ServerCheckpointRestoredSchema: z.ZodObject<{
     checkpointId: z.ZodString;
     newSessionId: z.ZodString;
     name: z.ZodString;
+    filesOnly: z.ZodOptional<z.ZodBoolean>;
 }, z.core.$strip>;
 export declare const ServerSessionWarningSchema: z.ZodObject<{
     type: z.ZodLiteral<"session_warning">;
