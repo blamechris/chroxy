@@ -286,6 +286,61 @@ describe('renderMarkdown', () => {
     })
   })
 
+  // Per-code-block copy button (#6793)
+  describe('per-code-block copy button (#6793)', () => {
+    it('wraps a fenced code block in a .code-block container with a .code-copy-btn', () => {
+      const html = renderMarkdown('```js\nconst x = 5\n```')
+      expect(html).toContain('class="code-block"')
+      expect(html).toMatch(/<div class="code-block"><button[^>]*class="code-copy-btn"[^>]*>.*?<\/button><pre>/)
+    })
+
+    it('gives the button an accessible label and testid, distinct from the whole-message copy button', () => {
+      const html = renderMarkdown('```\nx\n```')
+      expect(html).toContain('aria-label="Copy code"')
+      expect(html).toContain('data-testid="code-copy-button"')
+    })
+
+    it('renders one .code-block per fenced block, each scoped to its own snippet', () => {
+      const html = renderMarkdown('```js\nfirst\n```\n\ntext between\n\n```py\nsecond\n```')
+      expect((html.match(/class="code-block"/g) || []).length).toBe(2)
+      expect((html.match(/class="code-copy-btn"/g) || []).length).toBe(2)
+      // Each block's own <pre><code> immediately follows its own button — not
+      // one giant wrapper around both snippets.
+      const div = document.createElement('div')
+      div.innerHTML = html
+      const blocks = div.querySelectorAll('.code-block')
+      expect(blocks).toHaveLength(2)
+      expect(blocks[0]!.querySelector('pre code')!.textContent).toBe('first\n')
+      expect(blocks[1]!.querySelector('pre code')!.textContent).toBe('second\n')
+    })
+
+    it('does NOT add a copy button to inline code spans', () => {
+      const html = renderMarkdown('use `npm install` here')
+      expect(html).not.toContain('code-copy-btn')
+      expect(html).not.toContain('code-block')
+    })
+
+    it('the rendered <code> textContent reconstructs the exact original block, even with characters DOMPurify treats specially in attributes', () => {
+      // A `data-*`-attribute-based copy affordance would lose this content —
+      // DOMPurify's SAFE_FOR_XML guard strips an entire attribute whose value
+      // contains a `</script>`-shaped substring or a `-->`/`]>` closer. The
+      // textContent-based approach has no such failure mode.
+      const tricky = 'const s = "</script>"\n// comment --> end\nconst arr = []> // typo'
+      const html = renderMarkdown('```\n' + tricky + '\n```')
+      const div = document.createElement('div')
+      div.innerHTML = html
+      expect(div.querySelector('pre code')!.textContent).toBe(tricky + '\n')
+    })
+
+    it('reconstructs the exact block through the syntax-highlighted (language) path too', () => {
+      const code = 'const x = "<b>&amp;</b>" // & < >'
+      const html = renderMarkdown('```js\n' + code + '\n```')
+      const div = document.createElement('div')
+      div.innerHTML = html
+      expect(div.querySelector('pre code')!.textContent).toBe(code + '\n')
+    })
+  })
+
   it('sanitizes XSS payloads via DOMPurify defense-in-depth', () => {
     // Verify no raw <script> or event handler attributes survive in output.
     // Input is escaped by escapeHtml first; DOMPurify catches anything that

@@ -21,6 +21,7 @@ export const iconMap = {
   download: 'download-outline',
   export: 'share-outline',
   edit: 'create-outline',
+  copy: 'copy-outline',
 
   // Content & Files
   folder: 'folder-outline',
