@@ -111,7 +111,9 @@ export class CodexAppServerSession extends BaseSession {
     // bridge SdkSession uses. wirePermissionManager re-emits permission_request /
     // permission_resolved / user_question on THIS session and back-links
     // _pendingPermissions/_lastPermissionData for ws-permissions.js.
-    this._permissions = new PermissionManager({ log })
+    // #6794 — pass cwd so the protected-path floor can resolve relative tool
+    // targets (.git/.claude/.env…) against this session's working directory.
+    this._permissions = new PermissionManager({ log, cwd: this.cwd })
     wirePermissionManager(this, this._permissions, {
       onRequest: () => this._pauseResultTimeoutForPermission(),
       onResolved: () => this._resumeResultTimeoutForPermission(),

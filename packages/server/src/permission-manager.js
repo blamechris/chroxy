@@ -1,5 +1,6 @@
 import { EventEmitter } from 'events'
 import { randomUUID } from 'crypto'
+import { resolve, relative, sep } from 'node:path'
 import { createLogger } from './logger.js'
 // #6038: the SDK/TUI permission path broadcasts to clients too, so it must apply
 // the same redaction as the hook path. Shared sanitizer + value redactor live in
@@ -24,6 +25,25 @@ export const ELIGIBLE_TOOLS = new Set(['Read', 'Write', 'Edit', 'NotebookEdit', 
 // `mcp_elicitation` is a codex MCP connector eliciting the user (#6635, e.g. a
 // GitHub connector write approval) — a connector action must always prompt too.
 export const NEVER_AUTO_ALLOW = new Set(['Bash', 'Task', 'WebFetch', 'WebSearch', 'shell', 'request_permissions', 'mcp_elicitation'])
+
+// #6794 — hardcoded protected-path floor. Even under lenient settings (auto /
+// acceptEdits / a broad `allow` rule) Chroxy must not SILENTLY auto-approve a
+// path-carrying tool aimed at a repo-control / agent-config directory or a
+// secret file. This mirrors Claude Code's own "always ask" floor (desktop
+// parity): the target simply falls through to the interactive prompt instead
+// of short-circuiting — a floor, never a hard deny.
+//
+// Protected DIRECTORY segment names, matched at any depth relative to the
+// session cwd. `.config/git` (the XDG git-config dir) is a two-segment
+// sequence handled separately in isProtectedPathTarget, not a bare segment.
+const PROTECTED_DIR_SEGMENTS = new Set(['.git', '.claude', '.vscode'])
+
+// Tool-input fields that name a filesystem target. Presence of one is what
+// makes a tool "path-carrying" for the floor (Write/Edit → file_path,
+// NotebookEdit → notebook_path, Read/Glob/Grep → file_path/path). A tool with
+// none of these (Bash, Task, WebFetch, WebSearch) cannot be floored here —
+// command-shaped access is out of scope for a path floor.
+const PROTECTED_PATH_INPUT_FIELDS = ['file_path', 'path', 'notebook_path']
 
 // Default permission timeout (5 minutes)
 const DEFAULT_TIMEOUT_MS = 300_000
@@ -78,6 +98,63 @@ export function mergeEditedInput(originalInput, editedInput, toolName) {
 }
 
 /**
+ * #6794 — does this tool input target a protected path? Inspects EVERY present
+ * {@link PROTECTED_PATH_INPUT_FIELDS} value (a benign `file_path` must not
+ * shadow a protected `path`), resolves each against the session cwd (so
+ * absolute paths, a leading `./`, and `..` traversal all normalize), then
+ * tests the path RELATIVE to cwd segment-by-segment. ANY protected field
+ * floors the input.
+ *
+ * Matching relative-to-cwd (not the raw absolute path) is deliberate: the
+ * session's OWN location can never trigger a false positive — e.g. a git
+ * worktree that itself lives under a real `.claude/` dir writing to
+ * `packages/…` is NOT floored, because the `.claude` segment is above cwd.
+ *
+ * Segment rules (a match on ANY segment floors the write; segments are
+ * lowercased first so `.GIT`/`.Env.local` can't evade the floor on the
+ * case-insensitive filesystems where they alias the real paths):
+ *   - a segment in {@link PROTECTED_DIR_SEGMENTS} (`.git` / `.claude` / `.vscode`)
+ *   - a `.config` segment immediately followed by `git` (the XDG git-config dir)
+ *   - a segment that is `.env` or starts with `.env.` (`.env` / `.env.local` / …)
+ *
+ * A target ABOVE cwd yields leading `..` segments; those are dropped before the
+ * scan, so the real names beyond them are still checked (an out-of-cwd `.git`
+ * still floors — conservative, and the floor only forces a prompt). Returns
+ * false for any missing / non-string path field, so a command-shaped tool
+ * (Bash, WebFetch) is never floored. Pure + side-effect-free (string ops only —
+ * no regex, so the `.env.*` match can't be mangled by later edits).
+ *
+ * @param {object} input  the tool input
+ * @param {string} [cwd]  the session cwd (falls back to process.cwd())
+ * @returns {boolean}
+ */
+export function isProtectedPathTarget(input, cwd) {
+  if (!input || typeof input !== 'object') return false
+  const base = (typeof cwd === 'string' && cwd.length > 0) ? cwd : process.cwd()
+  for (const field of PROTECTED_PATH_INPUT_FIELDS) {
+    if (typeof input[field] !== 'string' || input[field].length === 0) continue
+    // resolve() absorbs absolute paths, a leading `./`, and `..` traversal; the
+    // relative path is what we segment-match so cwd's own name can't false-match.
+    const rel = relative(base, resolve(base, input[field]))
+    // Lowercase every segment before matching: on case-insensitive filesystems
+    // (macOS APFS, Windows) `.GIT/config` IS `.git/config`, so a case-sensitive
+    // match would let case variants evade the floor. Over-flooring a genuinely
+    // distinct `.GIT` on case-sensitive Linux is fine — the floor only forces a
+    // prompt, never denies.
+    const segments = rel.split(sep)
+      .filter((s) => s.length > 0 && s !== '..')
+      .map((s) => s.toLowerCase())
+    for (let i = 0; i < segments.length; i++) {
+      const seg = segments[i]
+      if (PROTECTED_DIR_SEGMENTS.has(seg)) return true
+      if (seg === '.env' || seg.startsWith('.env.')) return true
+      if (seg === '.config' && segments[i + 1] === 'git') return true
+    }
+  }
+  return false
+}
+
+/**
  * Manages in-process permission requests for SDK-style sessions.
  *
  * Handles the lifecycle of permission prompts:
@@ -93,13 +170,17 @@ export function mergeEditedInput(originalInput, editedInput, toolName) {
  *   user_question       { toolUseId, questions }
  */
 export class PermissionManager extends EventEmitter {
-  constructor({ timeoutMs, log, maxPendingPermissions } = {}) {
+  constructor({ timeoutMs, log, maxPendingPermissions, cwd } = {}) {
     super()
     this._timeoutMs = timeoutMs || DEFAULT_TIMEOUT_MS
     this._log = log || console
     // #6448 — bound on concurrent pending permissions; injectable so the cap is
     // testable without minting 1000 real requests.
     this._maxPendingPermissions = maxPendingPermissions || MAX_PENDING_PERMISSIONS
+    // #6794 — session cwd anchors the protected-path floor (see
+    // isProtectedPathTarget). Optional: when unset the floor resolves targets
+    // against process.cwd(), which still catches relative protected paths.
+    this._cwd = (typeof cwd === 'string' && cwd.length > 0) ? cwd : null
 
     this._pendingPermissions = new Map() // requestId -> { resolve, input }
     this._permissionTimers = new Map()   // requestId -> timer
@@ -214,20 +295,33 @@ export class PermissionManager extends EventEmitter {
       return this._handleAskUserQuestion(input, signal)
     }
 
+    // #6794 — protected-path floor. A path-carrying tool aimed at a protected
+    // path (.git/.claude/.vscode/.config/git/.env*) must NOT be silently
+    // auto-approved by auto mode, a broad `allow` rule, or acceptEdits — mirror
+    // Claude Code's "always ask" floor and let it fall through to the prompt.
+    // This is a FLOOR, not a hard deny: a lenient mode simply stops
+    // short-circuiting for these paths. A `deny` rule still denies (the floor
+    // never widens access), and if the prompt path then auto-denies on
+    // no-client/timeout, that is the existing fail-closed behavior.
+    const protectedTarget = isProtectedPathTarget(input, this._cwd)
+
     // 'auto' (= SDK bypassPermissions) short-circuit: approve every tool
     // call without consulting rules or emitting a prompt. SdkSession also
     // skips canUseTool registration when starting a turn in auto mode, but
     // a turn that started in another mode keeps its callback alive for the
     // whole turn — without this guard, flipping to auto mid-turn (#3729)
     // still emits prompts because session rules and the prompt path run
-    // before any mode check.
-    if (permissionMode === 'auto') {
+    // before any mode check. #6794: the floor takes precedence — a protected
+    // target still prompts even under auto.
+    if (permissionMode === 'auto' && !protectedTarget) {
       return Promise.resolve({ behavior: 'allow', updatedInput: input || {} })
     }
 
-    // Session rules: check before acceptEdits and the prompt path
+    // Session rules: check before acceptEdits and the prompt path. #6794: a
+    // protected target skips the `allow` branch (fall through to the prompt);
+    // a `deny` rule still denies.
     const ruleDecision = this._matchesRule(toolName)
-    if (ruleDecision !== null) {
+    if (ruleDecision !== null && !(protectedTarget && ruleDecision === 'allow')) {
       this._logInfo(`Permission rule matched for ${toolName}: ${ruleDecision}`)
       if (ruleDecision === 'allow') {
         return Promise.resolve({ behavior: 'allow', updatedInput: input || {} })
@@ -235,8 +329,9 @@ export class PermissionManager extends EventEmitter {
       return Promise.resolve({ behavior: 'deny', message: 'Denied by session rule' })
     }
 
-    // acceptEdits: auto-approve file operations, prompt for everything else
-    if (permissionMode === 'acceptEdits' && ACCEPT_EDITS_TOOLS.has(toolName)) {
+    // acceptEdits: auto-approve file operations, prompt for everything else.
+    // #6794: the floor takes precedence — a protected target still prompts.
+    if (permissionMode === 'acceptEdits' && ACCEPT_EDITS_TOOLS.has(toolName) && !protectedTarget) {
       return Promise.resolve({ behavior: 'allow', updatedInput: input || {} })
     }
 

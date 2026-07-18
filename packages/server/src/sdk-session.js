@@ -367,7 +367,9 @@ export class SdkSession extends BaseSession {
     // a pending prompt silently goes unresponsive after 5 min (#2831). The
     // pause uses a reference count so concurrent prompts keep the timer
     // suspended until the last one resolves. (Shared wiring extracted in P2-9.)
-    this._permissions = new PermissionManager({ log })
+    // #6794 — pass cwd so the protected-path floor can resolve relative tool
+    // targets (.git/.claude/.env…) against this session's working directory.
+    this._permissions = new PermissionManager({ log, cwd: this.cwd })
     wirePermissionManager(this, this._permissions, {
       onRequest: () => this._pauseResultTimeoutForPermission(),
       onResolved: () => this._resumeResultTimeoutForPermission(),
