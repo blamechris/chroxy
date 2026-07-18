@@ -4406,6 +4406,180 @@ describe('dashboard message-handler dispatch', () => {
     })
   })
 
+  // #6840 — the dashboard's `case 'result'` handler already imports and calls
+  // `handleResultQueueReconcile` (added by #6627/#6705, alongside the app's
+  // identical wiring) to self-heal a stale "Queued" bubble on the turn
+  // boundary — see the handler a few hundred lines up. That wiring went
+  // untested end-to-end: the only prior coverage was store-core's pure-function
+  // unit tests (outgoing-queue.test.ts), never a real `handleMessage({ type:
+  // 'result' })` round trip through THIS file's dispatch. #6839 was the piece
+  // that was actually missing (the server's event-normalizer dropped
+  // `queueLength` off the wire, so the reconcile always took its "older
+  // server" no-op branch in production) — now fixed. These tests pin the
+  // dashboard's reconcile behavior so a future regression in either file
+  // fails loudly, mirroring the FIFO-head-trim / status-aware semantics
+  // documented on `reconcileQueueLength` in
+  // packages/store-core/src/handlers/outgoing-queue.ts.
+  describe('result queue reconcile — #6627/#6839 self-heal (#6840)', () => {
+    function seedSession(queuedMessages: Array<{ clientMessageId?: string; text: string; queuedAt: number; status: 'pending' | 'confirmed' }> = []) {
+      store = createMockStore(baseState({
+        activeSessionId: 's1',
+        sessions: [{ sessionId: 's1', name: 'S1' } as any],
+        sessionStates: { s1: { ...createEmptySessionState(), queuedMessages } },
+      }))
+      setStore(store)
+    }
+
+    it('trims the oldest CONFIRMED orphans down to the result queueLength, preserving pending entries', () => {
+      seedSession([
+        { clientMessageId: 'c1', text: 'one', queuedAt: 1, status: 'confirmed' },
+        { clientMessageId: 'c2', text: 'two', queuedAt: 2, status: 'confirmed' },
+        { clientMessageId: 'c3', text: 'three', queuedAt: 3, status: 'confirmed' },
+        { clientMessageId: 'p1', text: 'pending one', queuedAt: 4, status: 'pending' },
+      ])
+      handleMessage(
+        { type: 'result', sessionId: 's1', usage: {}, cost: 0, duration: 0, queueLength: 1 },
+        ctx() as any,
+      )
+      const ss = (store.getState() as any).sessionStates.s1
+      // FIFO-head trim: c1/c2 dropped to bring the confirmed count down to 1;
+      // c3 (the newest confirmed) and the pending entry both survive.
+      expect(ss.queuedMessages.map((m: any) => m.clientMessageId)).toEqual(['c3', 'p1'])
+    })
+
+    it('queueLength: 0 clears every confirmed entry but never touches a pending one', () => {
+      seedSession([
+        { clientMessageId: 'c1', text: 'one', queuedAt: 1, status: 'confirmed' },
+        { clientMessageId: 'c2', text: 'two', queuedAt: 2, status: 'confirmed' },
+        { clientMessageId: 'p1', text: 'pending', queuedAt: 3, status: 'pending' },
+      ])
+      handleMessage(
+        { type: 'result', sessionId: 's1', usage: {}, cost: 0, duration: 0, queueLength: 0 },
+        ctx() as any,
+      )
+      const ss = (store.getState() as any).sessionStates.s1
+      expect(ss.queuedMessages.map((m: any) => m.clientMessageId)).toEqual(['p1'])
+    })
+
+    it('a result with no queueLength (older server) is a no-op', () => {
+      const queued = [
+        { clientMessageId: 'c1', text: 'one', queuedAt: 1, status: 'confirmed' as const },
+      ]
+      seedSession(queued)
+      handleMessage(
+        { type: 'result', sessionId: 's1', usage: {}, cost: 0, duration: 0 },
+        ctx() as any,
+      )
+      const ss = (store.getState() as any).sessionStates.s1
+      expect(ss.queuedMessages).toEqual(queued)
+    })
+
+    it('a result already in sync (confirmed count === queueLength) is a no-op', () => {
+      const queued = [
+        { clientMessageId: 'c1', text: 'one', queuedAt: 1, status: 'confirmed' as const },
+      ]
+      seedSession(queued)
+      handleMessage(
+        { type: 'result', sessionId: 's1', usage: {}, cost: 0, duration: 0, queueLength: 1 },
+        ctx() as any,
+      )
+      const ss = (store.getState() as any).sessionStates.s1
+      expect(ss.queuedMessages).toEqual(queued)
+    })
+
+    // Mirrors the #4491 activeTools replay guard a few tests down (same
+    // file, same `case 'result'` handler): a REPLAYED result on switch_session
+    // carries a stale queueLength from whenever the turn originally completed
+    // and must not trim the CURRENT queue.
+    it('a replayed result does not trim the queue', () => {
+      seedSession([
+        { clientMessageId: 'c1', text: 'one', queuedAt: 1, status: 'confirmed' },
+        { clientMessageId: 'c2', text: 'two', queuedAt: 2, status: 'confirmed' },
+      ])
+      handleMessage({ type: 'history_replay_start', sessionId: 's1' }, ctx() as any)
+      handleMessage(
+        { type: 'result', sessionId: 's1', usage: {}, cost: 0, duration: 0, queueLength: 0 },
+        ctx() as any,
+      )
+      const ss = (store.getState() as any).sessionStates.s1
+      expect(ss.queuedMessages).toHaveLength(2)
+    })
+
+    it('a live result after history_replay_end still trims (replay flag is not sticky)', () => {
+      seedSession([
+        { clientMessageId: 'c1', text: 'one', queuedAt: 1, status: 'confirmed' },
+        { clientMessageId: 'c2', text: 'two', queuedAt: 2, status: 'confirmed' },
+      ])
+      handleMessage({ type: 'history_replay_start', sessionId: 's1' }, ctx() as any)
+      handleMessage({ type: 'history_replay_end', sessionId: 's1' }, ctx() as any)
+      handleMessage(
+        { type: 'result', sessionId: 's1', usage: {}, cost: 0, duration: 0, queueLength: 0 },
+        ctx() as any,
+      )
+      const ss = (store.getState() as any).sessionStates.s1
+      expect(ss.queuedMessages).toHaveLength(0)
+    })
+  })
+
+  // #6840 — `message_queued` / `message_dequeued` are handled for BOTH clients
+  // by the SHARED dispatch table (createDispatchTable / dispatchQueuedMessages
+  // in packages/store-core/src/dispatch-table.ts), reached via `runDispatch`
+  // at the top of this file's `handleMessage`. There is no dashboard-specific
+  // gap here — but (like the result-boundary reconcile above) it had no
+  // dashboard-side integration coverage. These tests pin that the dashboard
+  // really does exercise the shared handler end-to-end, not just in store-core's
+  // own unit tests.
+  describe('message_queued / message_dequeued dispatch parity (#6840)', () => {
+    function seedSession(queuedMessages: Array<{ clientMessageId?: string; text: string; queuedAt: number; status: 'pending' | 'confirmed' }> = []) {
+      store = createMockStore(baseState({
+        activeSessionId: 's1',
+        sessions: [{ sessionId: 's1', name: 'S1' } as any],
+        sessionStates: { s1: { ...createEmptySessionState(), queuedMessages } },
+      }))
+      setStore(store)
+    }
+
+    it('message_queued flips a matching pending entry to confirmed', () => {
+      seedSession([
+        { clientMessageId: 'p1', text: 'hi', queuedAt: 1, status: 'pending' },
+      ])
+      handleMessage(
+        { type: 'message_queued', sessionId: 's1', clientMessageId: 'p1', text: 'hi', queueLength: 1 },
+        ctx() as any,
+      )
+      const ss = (store.getState() as any).sessionStates.s1
+      expect(ss.queuedMessages).toEqual([
+        { clientMessageId: 'p1', text: 'hi', queuedAt: 1, status: 'confirmed' },
+      ])
+    })
+
+    it('message_dequeued removes the entry by clientMessageId and reconciles against queueLength', () => {
+      seedSession([
+        { clientMessageId: 'c1', text: 'one', queuedAt: 1, status: 'confirmed' },
+        { clientMessageId: 'c2', text: 'two', queuedAt: 2, status: 'confirmed' },
+      ])
+      handleMessage(
+        { type: 'message_dequeued', sessionId: 's1', clientMessageId: 'c1', queueLength: 1, reason: 'flush' },
+        ctx() as any,
+      )
+      const ss = (store.getState() as any).sessionStates.s1
+      expect(ss.queuedMessages.map((m: any) => m.clientMessageId)).toEqual(['c2'])
+    })
+
+    it('message_dequeued with no id removes the FIFO head', () => {
+      seedSession([
+        { clientMessageId: 'c1', text: 'one', queuedAt: 1, status: 'confirmed' },
+        { clientMessageId: 'c2', text: 'two', queuedAt: 2, status: 'confirmed' },
+      ])
+      handleMessage(
+        { type: 'message_dequeued', sessionId: 's1', queueLength: 1, reason: 'interrupted' },
+        ctx() as any,
+      )
+      const ss = (store.getState() as any).sessionStates.s1
+      expect(ss.queuedMessages.map((m: any) => m.clientMessageId)).toEqual(['c2'])
+    })
+  })
+
   describe('credentials_status dispatch (#3855)', () => {
     it('stores the masked, value-free snapshot', () => {
       handleMessage(
