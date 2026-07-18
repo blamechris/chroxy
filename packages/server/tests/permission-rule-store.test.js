@@ -286,6 +286,33 @@ describe('#6771 PermissionManager + durable rules', () => {
     }
   })
 
+  // #6842 review (Copilot) — a session started with a `..`-laden / trailing-
+  // slash cwd must produce persisted-rule audit entries whose projectKey is
+  // EXACTLY the store's normalized key (the key in permission-rules.json),
+  // not the raw cwd — otherwise entry ↔ rule correlation is impossible.
+  it('sink-path projectKey matches the store\'s NORMALIZED key for a ..-laden session cwd', async () => {
+    const messyCwd = '/proj/a/sub/..'
+    const store = makeStore()
+    store.addRule(messyCwd, { tool: 'Write', decision: 'allow' })
+    const storeKeys = Object.keys(store.listProjects())
+    assert.deepEqual(storeKeys, ['/proj/a'], 'precondition: the store keyed the rule by the normalized cwd')
+
+    const auditLog = new PermissionAuditLog()
+    const pm = new PermissionManager({ log: silentLog, cwd: messyCwd, ruleStore: store })
+    try {
+      pm.setAuditSink((info) => auditLog.logPersistedRuleApproval({ sessionId: 's1', tool: info?.tool, projectKey: info?.projectKey ?? null }))
+      const result = await pm.handlePermission('Write', { file_path: 'src/x.js' }, null, 'approve')
+      assert.equal(result.behavior, 'allow', 'seeding via the messy cwd still matches the persisted rule')
+
+      const entries = auditLog.query({ type: 'decision' })
+      assert.equal(entries.length, 1)
+      assert.equal(entries[0].projectKey, storeKeys[0], 'audit projectKey === the persisted rule\'s store key, exactly')
+      assert.equal(entries[0].projectKey, normalizeProjectKey(messyCwd))
+    } finally {
+      pm.destroy()
+    }
+  })
+
   it('a different cwd does NOT inherit another project\'s persistent rules', async () => {
     const store = makeStore()
     store.addRule('/proj/a', { tool: 'Write', decision: 'allow' })

@@ -119,7 +119,10 @@ export class PermissionAuditLog {
    * @param {object} params
    * @param {string|null} params.sessionId - Session whose tool call was auto-approved
    * @param {string} params.tool - The auto-approved tool
-   * @param {string|null} [params.projectKey] - The project cwd the durable rule is scoped to
+   * @param {string|null} [params.projectKey] - The NORMALIZED project cwd the
+   *   durable rule is scoped to (permission-rule-store.js normalizeProjectKey —
+   *   callers normalize before logging so the entry correlates with the
+   *   persisted rule's key in permission-rules.json, #6842 review)
    */
   logPersistedRuleApproval({ sessionId, tool, projectKey = null }) {
     const idx = this._entries.findIndex((e) =>

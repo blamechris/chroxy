@@ -7,6 +7,14 @@ import { createLogger } from './logger.js'
 // redaction.js (a leaf module — no import cycle / HTTP-handler weight).
 import { sanitizeToolInput, redactValue } from './redaction.js'
 import { redactMcpUrl } from './byok-mcp-config.js'
+// #6842 review (Copilot) — audit entries must carry the store's NORMALIZED
+// project key, not the raw session cwd, or a relative / `..`-laden cwd
+// produces entries that never correlate with the persisted rule they audit.
+// Import is cycle-safe: permission-rule-store.js imports our ELIGIBLE_TOOLS /
+// NEVER_AUTO_ALLOW consts, but both modules only touch each other's exports
+// inside function bodies (call time), never at module evaluation, and
+// normalizeProjectKey is a hoisted function declaration.
+import { normalizeProjectKey } from './permission-rule-store.js'
 
 const _fallbackLog = createLogger('permission-manager')
 
@@ -382,6 +390,8 @@ export class PermissionManager extends EventEmitter {
    * #6830 (PR #6842 review) — install the direct audit callback for
    * persisted-rule auto-approves. Single-slot (last writer wins — one
    * WsServer audits at a time); pass null/non-function to detach.
+   * `projectKey` arrives pre-NORMALIZED (normalizeProjectKey — the
+   * PermissionRuleStore key), or null for an unkeyable cwd.
    * @param {null|((info: {tool: string, projectKey: string|null}) => void)} sink
    */
   setAuditSink(sink) {
@@ -410,7 +420,12 @@ export class PermissionManager extends EventEmitter {
   _auditPersistedRuleAutoApprove(toolName) {
     if (!this._auditSink) return
     try {
-      this._auditSink({ tool: toolName, projectKey: this._cwd })
+      // #6842 review (Copilot) — projectKey is the store's NORMALIZED key
+      // (normalizeProjectKey, the same helper every PermissionRuleStore
+      // read/write path uses), NOT the raw session cwd: a relative or
+      // `..`-laden cwd would otherwise stamp entries an auditor can never
+      // match against the persisted rule's key in permission-rules.json.
+      this._auditSink({ tool: toolName, projectKey: normalizeProjectKey(this._cwd) })
     } catch (err) {
       this._logWarn(`Permission audit sink threw: ${err?.message || err}`)
     }

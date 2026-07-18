@@ -22,6 +22,13 @@
 //   { kind: 'expired', sessionId }                          -> HTTP 410 / WS permission_expired
 //   { kind: 'not_found' }                                   -> HTTP 404 / WS permission_expired
 
+// #6842 review (Copilot) — audit `projectKey` must be the PermissionRuleStore's
+// NORMALIZED key (path.resolve semantics), not the raw session cwd, so an
+// auditor can correlate the entry with the persisted rule's key in
+// permission-rules.json even when the session was started with a relative or
+// `..`-laden cwd. Reused, not duplicated.
+import { normalizeProjectKey } from './permission-rule-store.js'
+
 /**
  * #6030: the single source of truth for the permission "dispatch origin"
  * session id — the mapped session if the request was registered, else the
@@ -145,7 +152,11 @@ export function createPermissionResolver({
             const persistentRules = entry.session.getPersistentPermissionRules()
             if (persistentRules.some((r) => r.tool === toolName && r.decision === 'allow')) {
               extra.persist = 'project'
-              if (typeof entry.session.cwd === 'string') extra.projectKey = entry.session.cwd
+              // #6842 review — normalize to the store's key (see header import
+              // note); null for an unkeyable cwd, in which case the field is
+              // simply omitted (same as the tool-unknown case).
+              const projectKey = normalizeProjectKey(entry.session.cwd)
+              if (projectKey) extra.projectKey = projectKey
             }
           }
           audit(clientId, originSessionId, requestId, decision, extra)

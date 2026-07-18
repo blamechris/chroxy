@@ -43,6 +43,7 @@ import assert from 'node:assert/strict'
  */
 
 import { createPermissionResolver } from '../src/permission-resolver.js'
+import { normalizeProjectKey } from '../src/permission-rule-store.js'
 
 const OWNER = 'sess-OWNER'
 const OTHER = 'sess-OTHER'
@@ -203,6 +204,25 @@ describe('permission-resolver — #6830 tool + persist enrichment', () => {
       persist: 'project',
       projectKey: '/abs/proj',
     })
+  })
+
+  it('allowAlways projectKey is the store\'s NORMALIZED key, not the raw ..-laden session cwd (#6842 review)', () => {
+    // A session started with a trailing-slash / `..`-laden cwd. The store keys
+    // rules by normalizeProjectKey(cwd) — the audit entry must carry that SAME
+    // key or an auditor can never correlate entry ↔ persisted rule.
+    const messyCwd = '/abs/proj/sub/../'
+    const lastPermissionData = new Map([['perm-norm', { tool: 'Write' }]])
+    const owner = makeSdkSession({
+      pending: ['perm-norm'],
+      lastPermissionData,
+      persistentRules: [{ tool: 'Write', decision: 'allow', persist: 'project' }],
+      cwd: messyCwd,
+    })
+    const { resolver, audited } = build({ map: [['perm-norm', OWNER]], ownerSession: owner })
+    resolver.resolve('perm-norm', 'allowAlways', null, { clientId: 'c1' })
+    assert.equal(audited.length, 1)
+    assert.equal(audited[0].projectKey, '/abs/proj', 'collapsed to the resolved absolute path')
+    assert.equal(audited[0].projectKey, normalizeProjectKey(messyCwd), 'exactly the store\'s key for this cwd')
   })
 
   it('allowAlways on a tool that degraded to a one-shot allow (nothing durable) carries tool but no persist marker', () => {
