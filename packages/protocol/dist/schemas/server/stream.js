@@ -306,6 +306,47 @@ export const ServerPermissionInputSchema = z.discriminatedUnion('found', [
     }),
 ]);
 /**
+ * #6772 — one entry in the server's permission audit trail (permission-audit.js
+ * ring buffer). Three heterogeneous shapes share a `type` discriminator; the
+ * per-type fields are all optional so a single object covers every kind:
+ *   - `mode_change`      — previousMode / newMode
+ *   - `whitelist_change` — rules (the new session-rule set)
+ *   - `decision`         — requestId / decision (allow|deny) / reason
+ * The entry `type` uses `z.enum` (NOT `z.literal`) so the protocol type-coverage
+ * lint — which greps `type: z.literal('…')` for server→client message types —
+ * does not mistake an audit-entry kind for a wire message type. `.passthrough()`
+ * tolerates future audit fields without a schema bump; consumers read defensively.
+ */
+export const ServerPermissionAuditEntrySchema = z
+    .object({
+    type: z.enum(['mode_change', 'whitelist_change', 'decision']),
+    clientId: z.string().nullable().optional(),
+    sessionId: z.string().nullable().optional(),
+    timestamp: z.number(),
+    // mode_change
+    previousMode: z.string().optional(),
+    newMode: z.string().optional(),
+    // whitelist_change
+    rules: z.array(z.object({ tool: z.string(), decision: z.string() }).passthrough()).optional(),
+    // decision
+    requestId: z.string().optional(),
+    decision: z.string().optional(),
+    reason: z.string().optional(),
+})
+    .passthrough();
+/**
+ * #6772 — reply to a `query_permission_audit` pull: the recent permission audit
+ * entries (mode changes, session-rule changes, allow/deny decisions) matching
+ * the query's optional sessionId / auditType / since / limit filters. First
+ * client caller is the dashboard's per-session "Permission history" view;
+ * dashboard-only for v1 (the mobile app's PermissionHistory screen derives its
+ * summary from the live chat transcript, not this wire query).
+ */
+export const ServerPermissionAuditResultSchema = z.object({
+    type: z.literal('permission_audit_result'),
+    entries: z.array(ServerPermissionAuditEntrySchema),
+});
+/**
  * Single validated builder for the `permission_request` wire message (#6031).
  *
  * `permission_request` is the most security-relevant message on the wire — a

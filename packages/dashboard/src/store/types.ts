@@ -291,6 +291,29 @@ export interface PermissionRule {
 }
 
 /**
+ * #6772 — one entry from the server's permission audit trail (permission-audit.js
+ * ring buffer), returned by a `query_permission_audit` pull. Three heterogeneous
+ * `type`s share this shape; per-type fields are optional (mirrors the wire
+ * `ServerPermissionAuditEntrySchema`). Rendered read-only in the SettingsPanel
+ * "Permission history" view.
+ */
+export interface PermissionAuditEntry {
+  type: 'mode_change' | 'whitelist_change' | 'decision';
+  clientId?: string | null;
+  sessionId?: string | null;
+  timestamp: number;
+  // mode_change
+  previousMode?: string;
+  newMode?: string;
+  // whitelist_change
+  rules?: { tool: string; decision: string }[];
+  // decision
+  requestId?: string;
+  decision?: string;
+  reason?: string;
+}
+
+/**
  * Decision stored when the user resolves a permission prompt. Persists
  * across tab switches (fixes #2833) so the prompt component does not
  * re-render with Allow/Deny buttons after the user already answered.
@@ -1296,6 +1319,12 @@ export interface ConnectionState {
   referencesSymbol: string;
   referencesOpen: boolean;
   referencesLoading: boolean;
+  // #6772 — permission audit history (query_permission_audit reply). `permissionAudit`
+  // holds the entries from the latest pull (null until the first query this session);
+  // `permissionAuditLoading` is true between dispatching the query and its reply.
+  // Scoped to the active session by the query action (the server filters by sessionId).
+  permissionAudit: PermissionAuditEntry[] | null;
+  permissionAuditLoading: boolean;
 
   // Custom agents from server
   customAgents: CustomAgent[];
@@ -1419,6 +1448,27 @@ export interface ConnectionState {
    * state across remounts (#2833). Safe to call for an already-resolved
    * requestId — last write wins. */
   markPermissionResolved: (requestId: string, decision: PermissionDecision) => void;
+  /**
+   * #6772/#6829 — replace the active session's session-scoped permission rules
+   * (the SettingsPanel "Session Rules" viewer's remove / clear-all affordance).
+   * Sends `set_permission_rules` with the given list for the active session.
+   * Mirrors the mobile SettingsScreen `setPermissionRules`.
+   */
+  setPermissionRules: (rules: PermissionRule[]) => void;
+  /**
+   * #6772/#6829 — replace the active session's DURABLE per-project ("always allow")
+   * rule set. Used to remove a persistent rule (send the reduced list) or clear all.
+   * Re-sends the current session rules alongside so the server's single
+   * `set_permission_rules` handler doesn't clobber them. Mirrors the mobile
+   * SettingsScreen `setProjectPermissionRules`.
+   */
+  setProjectPermissionRules: (projectRules: PermissionRule[]) => void;
+  /**
+   * #6772 — pull the permission audit history for the active session
+   * (`query_permission_audit`). Sets `permissionAuditLoading`; the reply lands in
+   * `permissionAudit`. No-op when disconnected.
+   */
+  queryPermissionAudit: () => void;
   /**
    * #4604 Chunk B / #4621 / #4651 / #4735 — answer may be one of three shapes:
    * - `string`: legacy single-question / free-text path (back-compat).

@@ -140,7 +140,7 @@ import {
   applyRunDelta,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
-import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerByokPoolStatusSnapshotSchema, ServerByokPoolActionAckSchema, ServerHostPruneStatusSnapshotSchema, ServerHostPruneActionAckSchema, ServerSimulatorStatusSnapshotSchema, ServerSimulatorActionAckSchema, ServerEmulatorStatusSnapshotSchema, ServerEmulatorActionAckSchema, ServerWslStatusSnapshotSchema, ServerWslActionAckSchema, ServerIntegrationStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerExternalSessionsSnapshotSchema, ServerRepoEventsSnapshotSchema, ServerRepoEventsDeltaSchema, ServerPermissionInputSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerSessionPresetSnapshotSchema, ServerPairPendingSchema, ServerPairResolvedSchema, ServerBillingCanarySchema, BillingCanarySnapshotSchema, ServerSymbolsSnapshotSchema, ServerSymbolLocationSchema, ServerSearchResultsSchema, ServerReferencesResultSchema, ServerOrchestrationRunsSnapshotSchema, ServerOrchestrationRunSnapshotSchema, ServerOrchestrationRunDeltaSchema, ServerOrchestrationActionAckSchema } from '@chroxy/protocol/schemas'
+import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerByokPoolStatusSnapshotSchema, ServerByokPoolActionAckSchema, ServerHostPruneStatusSnapshotSchema, ServerHostPruneActionAckSchema, ServerSimulatorStatusSnapshotSchema, ServerSimulatorActionAckSchema, ServerEmulatorStatusSnapshotSchema, ServerEmulatorActionAckSchema, ServerWslStatusSnapshotSchema, ServerWslActionAckSchema, ServerIntegrationStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerExternalSessionsSnapshotSchema, ServerRepoEventsSnapshotSchema, ServerRepoEventsDeltaSchema, ServerPermissionInputSchema, ServerPermissionAuditResultSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerSessionPresetSnapshotSchema, ServerPairPendingSchema, ServerPairResolvedSchema, ServerBillingCanarySchema, BillingCanarySnapshotSchema, ServerSymbolsSnapshotSchema, ServerSymbolLocationSchema, ServerSearchResultsSchema, ServerReferencesResultSchema, ServerOrchestrationRunsSnapshotSchema, ServerOrchestrationRunSnapshotSchema, ServerOrchestrationRunDeltaSchema, ServerOrchestrationActionAckSchema } from '@chroxy/protocol/schemas'
 import { resolveSummarizeRequest, rejectSummarizeRequest } from './summarizeRequests'
 import {
   createKeyPair,
@@ -165,6 +165,7 @@ import type {
   FileEntry,
   PendingCommunitySkill,
   PendingEvaluatorClarify,
+  PermissionAuditEntry,
   QueuedMessage,
   SessionInfo,
   SessionNotification,
@@ -2672,6 +2673,21 @@ function handleReferencesResult(msg: Record<string, unknown>, _get: MsgGet, set:
 }
 
 /**
+ * #6772 — reply to a `query_permission_audit` pull: REPLACE the stored audit
+ * history with the returned entries and clear the loading flag. Zod-validated
+ * (a malformed payload is dropped rather than crashing the view), and the
+ * loading flag clears only on a successful parse — the same defensive
+ * query-response pattern as code_search_results / references_result. Drives the
+ * SettingsPanel "Permission history" view. Dashboard-only for v1 (the mobile
+ * PermissionHistory screen derives its summary from the chat transcript).
+ */
+function handlePermissionAuditResult(msg: Record<string, unknown>, _get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const parsed = ServerPermissionAuditResultSchema.safeParse(msg);
+  if (!parsed.success) return;
+  set({ permissionAudit: parsed.data.entries as PermissionAuditEntry[], permissionAuditLoading: false });
+}
+
+/**
  * Mailbox (#5914 follow-up) — Control Room "Mailbox" tab `mailbox_status_snapshot`:
  * REPLACE the stored snapshot with the carried one and clear the in-flight
  * loading flag. Same defensive pattern as the host/runner snapshots — the wire
@@ -3476,6 +3492,8 @@ const HANDLERS: Record<string, Handler> = {
   orchestration_action_ack: handleOrchestrationActionAck,
   // #6543 (IDE P3 feature B): pulled full redacted tool input for a pre-write diff.
   permission_input: handlePermissionInput,
+  // #6772: reply to query_permission_audit — the SettingsPanel "Permission history" view.
+  permission_audit_result: handlePermissionAuditResult,
   session_preset_snapshot: handleSessionPresetSnapshot,
   // #5253: self-hosted runner Control Room survey snapshot.
   runner_status_snapshot: handleRunnerStatusSnapshot,

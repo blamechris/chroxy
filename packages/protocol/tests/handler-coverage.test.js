@@ -159,6 +159,7 @@ const PLATFORM_SPECIFIC = {
   // fast-follow per epic #5159), so they are BOTH-CLIENTS and the coverage test
   // passes because each handler has a `case 'activity_snapshot'/'activity_delta':`.
   'host_status_snapshot': 'dashboard', // Control Room Host/Repo Status survey reply (#5171 schema / #5174 server emitter / #5175 dashboard section) — dashboard-only for v1; mobile parity is a Phase-2 fast-follow per epic #5170
+  'permission_audit_result': 'dashboard', // #6772 reply to query_permission_audit — the dashboard SettingsPanel "Permission history" view is the first (and only, for v1) client caller; the mobile PermissionHistory screen derives its summary from the live chat transcript, not this wire query, so mobile parity is a fast-follow
   // 'permission_input' removed from PLATFORM_SPECIFIC — the mobile app now
   // handles it too (#6543 PR-4, the pre-write-diff mobile parity fast-follow),
   // so it is BOTH-CLIENTS. Coverage passes because the dashboard has a

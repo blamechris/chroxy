@@ -208,6 +208,67 @@ export declare const ServerPermissionInputSchema: z.ZodDiscriminatedUnion<[z.Zod
     }, z.core.$strip>;
 }, z.core.$strip>], "found">;
 /**
+ * #6772 — one entry in the server's permission audit trail (permission-audit.js
+ * ring buffer). Three heterogeneous shapes share a `type` discriminator; the
+ * per-type fields are all optional so a single object covers every kind:
+ *   - `mode_change`      — previousMode / newMode
+ *   - `whitelist_change` — rules (the new session-rule set)
+ *   - `decision`         — requestId / decision (allow|deny) / reason
+ * The entry `type` uses `z.enum` (NOT `z.literal`) so the protocol type-coverage
+ * lint — which greps `type: z.literal('…')` for server→client message types —
+ * does not mistake an audit-entry kind for a wire message type. `.passthrough()`
+ * tolerates future audit fields without a schema bump; consumers read defensively.
+ */
+export declare const ServerPermissionAuditEntrySchema: z.ZodObject<{
+    type: z.ZodEnum<{
+        decision: "decision";
+        mode_change: "mode_change";
+        whitelist_change: "whitelist_change";
+    }>;
+    clientId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    sessionId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    timestamp: z.ZodNumber;
+    previousMode: z.ZodOptional<z.ZodString>;
+    newMode: z.ZodOptional<z.ZodString>;
+    rules: z.ZodOptional<z.ZodArray<z.ZodObject<{
+        tool: z.ZodString;
+        decision: z.ZodString;
+    }, z.core.$loose>>>;
+    requestId: z.ZodOptional<z.ZodString>;
+    decision: z.ZodOptional<z.ZodString>;
+    reason: z.ZodOptional<z.ZodString>;
+}, z.core.$loose>;
+/**
+ * #6772 — reply to a `query_permission_audit` pull: the recent permission audit
+ * entries (mode changes, session-rule changes, allow/deny decisions) matching
+ * the query's optional sessionId / auditType / since / limit filters. First
+ * client caller is the dashboard's per-session "Permission history" view;
+ * dashboard-only for v1 (the mobile app's PermissionHistory screen derives its
+ * summary from the live chat transcript, not this wire query).
+ */
+export declare const ServerPermissionAuditResultSchema: z.ZodObject<{
+    type: z.ZodLiteral<"permission_audit_result">;
+    entries: z.ZodArray<z.ZodObject<{
+        type: z.ZodEnum<{
+            decision: "decision";
+            mode_change: "mode_change";
+            whitelist_change: "whitelist_change";
+        }>;
+        clientId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+        sessionId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+        timestamp: z.ZodNumber;
+        previousMode: z.ZodOptional<z.ZodString>;
+        newMode: z.ZodOptional<z.ZodString>;
+        rules: z.ZodOptional<z.ZodArray<z.ZodObject<{
+            tool: z.ZodString;
+            decision: z.ZodString;
+        }, z.core.$loose>>>;
+        requestId: z.ZodOptional<z.ZodString>;
+        decision: z.ZodOptional<z.ZodString>;
+        reason: z.ZodOptional<z.ZodString>;
+    }, z.core.$loose>>;
+}, z.core.$strip>;
+/**
  * Single validated builder for the `permission_request` wire message (#6031).
  *
  * `permission_request` is the most security-relevant message on the wire — a

@@ -65,6 +65,7 @@ import type {
   InputSettings,
   RestoreCheckpointMode,
   PermissionDecision,
+  PermissionRule,
   ServerEntry,
   SessionInfo,
   SessionState,
@@ -688,6 +689,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   referencesSymbol: '',
   referencesOpen: false,
   referencesLoading: false,
+  permissionAudit: null,
+  permissionAuditLoading: false,
   customAgents: [],
   checkpoints: [],
   _directoryListingCallback: null,
@@ -2673,6 +2676,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   referencesSymbol: '',
   referencesOpen: false,
   referencesLoading: false,
+  permissionAudit: null,
+  permissionAuditLoading: false,
       customAgents: [],
       checkpoints: [],
       _directoryListingCallback: null,
@@ -3274,6 +3279,47 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // #2838: cap map size to prevent unbounded growth across long sessions.
       resolvedPermissions: capResolvedPermissions(state.resolvedPermissions, requestId, decision),
     }));
+  },
+
+  // #6772/#6829 — replace the active session's session-scoped rule set (the
+  // SettingsPanel "Session Rules" viewer's remove / clear-all). Strips the
+  // client-only `persist` marker — the server's PermissionRuleSchema accepts only
+  // { tool, decision }. Mirrors the mobile SettingsScreen action.
+  setPermissionRules: (rules: PermissionRule[]) => {
+    const { socket, activeSessionId } = get();
+    if (!socket || socket.readyState !== WebSocket.OPEN || !activeSessionId) return;
+    const bare = rules.map((r) => ({ tool: r.tool, decision: r.decision }));
+    wsSend(socket, { type: 'set_permission_rules', sessionId: activeSessionId, rules: bare });
+  },
+
+  // #6772/#6829 — replace the active session's DURABLE per-project rule set
+  // (remove a persistent rule by sending the reduced list, or clear all with []).
+  // Session rules are left untouched: we re-send the current sessionRules so the
+  // server's single set_permission_rules handler doesn't clobber them. Mirrors the
+  // mobile SettingsScreen action.
+  setProjectPermissionRules: (projectRules: PermissionRule[]) => {
+    const { socket, activeSessionId, sessionStates } = get();
+    if (!socket || socket.readyState !== WebSocket.OPEN || !activeSessionId) return;
+    const ss = sessionStates[activeSessionId];
+    const bare = (rs?: PermissionRule[]) => (rs ?? []).map((r) => ({ tool: r.tool, decision: r.decision }));
+    wsSend(socket, {
+      type: 'set_permission_rules',
+      sessionId: activeSessionId,
+      rules: bare(ss?.sessionRules),
+      projectRules: bare(projectRules),
+    });
+  },
+
+  // #6772 — pull the permission audit history for the active session. Sets the
+  // loading flag; the reply (`permission_audit_result`) lands in `permissionAudit`
+  // (handlePermissionAuditResult). The server filters by sessionId when provided.
+  queryPermissionAudit: () => {
+    const { socket, activeSessionId } = get();
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+    set({ permissionAuditLoading: true });
+    const msg: Record<string, unknown> = { type: 'query_permission_audit' };
+    if (activeSessionId) msg.sessionId = activeSessionId;
+    wsSend(socket, msg);
   },
 
   sendUserQuestionResponse: (

@@ -192,6 +192,7 @@ const DASHBOARD_ONLY = new Set<string>([
   'evaluator_clarify',          // auto-evaluator clarify banner (#3188) — dashboard-only
   'evaluator_rewrite',          // auto-evaluator rewrite banner (#3188) — dashboard-only
   'host_status_snapshot',       // Control Room Host/Repo Status (#5170) — dashboard-only for v1
+  'permission_audit_result',    // #6772 query_permission_audit reply — dashboard SettingsPanel "Permission history"; first client caller, dashboard-only for v1 (mobile PermissionHistory reads the chat transcript, not this wire query)
   // permission_input removed — the mobile app now handles it too (#6543 PR-4,
   // the pre-write-diff mobile parity fast-follow), so it is no longer
   // dashboard-only. Both clients dispatch it into `permissionInputs[requestId]`.

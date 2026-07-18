@@ -4,6 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { settingsHandlers } from '../../src/handlers/settings-handlers.js'
+import { PermissionAuditLog } from '../../src/permission-audit.js'
 import { registerProvider } from '../../src/providers.js'
 import { addLogListener, removeLogListener } from '../../src/logger.js'
 import { createSpy, createMockSession, nsCtx } from '../test-helpers.js'
@@ -528,6 +529,26 @@ describe('settings-handlers', () => {
 
       assert.equal(ctx._sent[0].type, 'permission_audit_result')
       assert.equal(ctx._sent[0].entries.length, 1)
+    })
+
+    // #6772 — the dashboard "Permission history" view queries this API scoped to
+    // the active session. Prove the existing API genuinely serves a per-session
+    // query end-to-end through the handler with a REAL audit log (no server change
+    // was needed — the ring buffer already filters by sessionId).
+    it('filters entries by sessionId with a real PermissionAuditLog', () => {
+      const audit = new PermissionAuditLog()
+      audit.logDecision({ clientId: 'c', sessionId: 's1', requestId: 'r1', decision: 'allow' })
+      audit.logModeChange({ clientId: 'c', sessionId: 's2', previousMode: 'approve', newMode: 'auto' })
+      audit.logDecision({ clientId: 'c', sessionId: 's1', requestId: 'r2', decision: 'deny', reason: 'timeout' })
+      const ctx = makeCtx()
+      ctx.permissions.permissionAudit = audit
+
+      settingsHandlers.query_permission_audit(makeWs(), makeClient(), { sessionId: 's1' }, ctx)
+
+      assert.equal(ctx._sent[0].type, 'permission_audit_result')
+      assert.equal(ctx._sent[0].entries.length, 2)
+      assert.ok(ctx._sent[0].entries.every((e) => e.sessionId === 's1'))
+      assert.deepEqual(ctx._sent[0].entries.map((e) => e.decision), ['allow', 'deny'])
     })
   })
 
