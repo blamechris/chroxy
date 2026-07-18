@@ -39,24 +39,57 @@ export interface DevPreviewChipProps {
   onClose: (port: number) => void
 }
 
+/**
+ * Defensive scheme guard (#6812 review): only URLs that parse with an
+ * http: or https: scheme may become a clickable anchor. The server only
+ * ever emits Cloudflare tunnel https URLs here, but the value crosses the
+ * wire — a malicious/compromised sender must not be able to smuggle a
+ * `javascript:` (or other active-scheme) href into the header.
+ */
+function isHttpUrl(url: string): boolean {
+  try {
+    const protocol = new URL(url).protocol
+    return protocol === 'http:' || protocol === 'https:'
+  } catch {
+    return false
+  }
+}
+
 /** A single chip: open link + copy + dismiss for one active dev preview. */
 function DevPreviewChipItem({ preview, onClose }: { preview: DevPreview; onClose: (port: number) => void }) {
+  const label = (
+    <>
+      <span className="dev-preview-chip__icon" aria-hidden="true">{'\u{1F310}'}</span>
+      <span className="dev-preview-chip__port">:{preview.port}</span>
+    </>
+  )
   return (
     <span
       className="dev-preview-chip"
       data-testid={`dev-preview-chip-${preview.port}`}
       title={preview.url}
     >
-      <a
-        className="dev-preview-chip__link"
-        href={preview.url}
-        target="_blank"
-        rel="noopener noreferrer"
-        aria-label={`Open dev preview on port ${preview.port}: ${preview.url}`}
-      >
-        <span className="dev-preview-chip__icon" aria-hidden="true">{'\u{1F310}'}</span>
-        <span className="dev-preview-chip__port">:{preview.port}</span>
-      </a>
+      {isHttpUrl(preview.url) ? (
+        <a
+          className="dev-preview-chip__link"
+          href={preview.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label={`Open dev preview on port ${preview.port}: ${preview.url}`}
+        >
+          {label}
+        </a>
+      ) : (
+        // Non-http(s) scheme: render the same label as plain text — the
+        // chip (and its dismiss control) stays visible, but nothing is
+        // navigable.
+        <span
+          className="dev-preview-chip__link"
+          aria-label={`Dev preview on port ${preview.port}`}
+        >
+          {label}
+        </span>
+      )}
       <CopyButton
         content={preview.url}
         label={`Copy dev preview URL: ${preview.url}`}

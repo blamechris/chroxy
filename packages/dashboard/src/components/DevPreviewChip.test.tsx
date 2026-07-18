@@ -83,6 +83,30 @@ describe('DevPreviewChip', () => {
     )
   })
 
+  it('renders a clickable anchor for an https:// tunnel URL (scheme guard positive case)', () => {
+    const previews: DevPreview[] = [{ port: 3000, url: 'https://ok.trycloudflare.com' }]
+    render(<DevPreviewChip previews={previews} onClose={() => {}} />)
+
+    const link = screen.getByRole('link', { name: /open dev preview on port 3000/i })
+    expect(link.tagName).toBe('A')
+    expect(link).toHaveAttribute('href', 'https://ok.trycloudflare.com')
+  })
+
+  it('renders NO anchor (and no href anywhere) for a javascript: URL, keeping the chip + dismiss', () => {
+    const previews: DevPreview[] = [{ port: 3000, url: 'javascript:alert(1)' }]
+    const { container } = render(<DevPreviewChip previews={previews} onClose={() => {}} />)
+
+    // Chip still renders, with the port label and its dismiss control...
+    expect(screen.getByTestId('dev-preview-chip-3000')).toBeInTheDocument()
+    expect(screen.getByText(':3000')).toBeInTheDocument()
+    expect(screen.getByTestId('dev-preview-chip-close-3000')).toBeInTheDocument()
+
+    // ...but nothing is navigable: no anchor, no href attribute anywhere.
+    expect(screen.queryByRole('link')).toBeNull()
+    expect(container.querySelector('a')).toBeNull()
+    expect(container.querySelector('[href]')).toBeNull()
+  })
+
   it('surfaces a warning toast and does not show copied when the clipboard write fails', async () => {
     mockWriteText.mockResolvedValue(false)
     const previews: DevPreview[] = [{ port: 9000, url: 'https://fail.trycloudflare.com' }]

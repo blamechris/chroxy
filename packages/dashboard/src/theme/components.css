@@ -506,8 +506,11 @@
   font-family: var(--font-mono);
 }
 
-.dev-preview-chip__link:hover,
-.dev-preview-chip__link:focus-visible {
+/* Underline is an anchor-only affordance — the scheme-guard fallback renders
+   the same class on a plain (non-navigable) span, which must not imply
+   clickability on hover. */
+a.dev-preview-chip__link:hover,
+a.dev-preview-chip__link:focus-visible {
   text-decoration: underline;
 }
 
