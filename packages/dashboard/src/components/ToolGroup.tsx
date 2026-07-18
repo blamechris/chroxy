@@ -19,6 +19,7 @@ import {
   shouldSuppressRawToolInput,
 } from '@chroxy/store-core'
 import { ChildAgentEventList } from './ChildAgentEventList'
+import { ImageLightbox } from './ImageLightbox'
 import { ChatExpandContext, useInitialExpanded } from './chatExpandRegistry'
 
 export interface ToolGroupProps {
@@ -153,6 +154,26 @@ function ToolGroupEntry({
   // Distinguish "tool finished with empty output" from "tool still running".
   // hasResult covers both toolResult presence and image results.
   const resultPlaceholder = hasResult ? '(no result)' : '(no result yet)'
+  // #6755 — images-only tool results (computer-use screenshots, browser
+  // tools returning base64 PNGs) previously rendered "Result: (no result)"
+  // in this panel because `resultDetail` was empty and there was nowhere
+  // else for the image data to go. `hasImages` drives a dedicated Images
+  // section below; `showResultText` suppresses the now-redundant "(no
+  // result)" placeholder specifically for the images-only case (pending
+  // and text-bearing results still show the Result section as before).
+  const hasImages = (message.toolResultImages?.length ?? 0) > 0
+  const hasTextResult = message.toolResult !== undefined && message.toolResult !== ''
+  const showResultText = !hasResult || hasTextResult || !hasImages
+  // #6755 — full-resolution click-to-zoom, same pattern as ToolBubble:
+  // store the INDEX (not the data URI) so the lightbox label can read
+  // "Image N of M".
+  const [lightboxIndex, setLightboxIndex] = useState<number | null>(null)
+  const lightboxImage = lightboxIndex != null ? message.toolResultImages?.[lightboxIndex] : undefined
+  const lightboxUri = lightboxImage ? `data:${lightboxImage.mediaType};base64,${lightboxImage.data}` : null
+  const lightboxLabel =
+    message.toolResultImages && message.toolResultImages.length > 1 && lightboxIndex != null
+      ? `Image ${lightboxIndex + 1} of ${message.toolResultImages.length}`
+      : 'Image'
 
   return (
     <div
@@ -211,12 +232,51 @@ function ToolGroupEntry({
               {inputDetail || '(no input)'}
             </pre>
           </div>
-          <div className="tool-group-entry-detail-section">
-            <div className="tool-group-entry-detail-label">Result</div>
-            <pre className="tool-group-entry-detail-content">
-              {resultDetail || resultPlaceholder}
-            </pre>
-          </div>
+          {showResultText && (
+            <div className="tool-group-entry-detail-section">
+              <div className="tool-group-entry-detail-label">Result</div>
+              <pre className="tool-group-entry-detail-content">
+                {resultDetail || resultPlaceholder}
+              </pre>
+            </div>
+          )}
+          {/* #6755 — images-only tool results (computer-use screenshots,
+              browser tools returning base64 PNGs) render a thumbnail grid
+              here instead of the "Result: (no result)" placeholder above
+              (suppressed via `showResultText`). Click a thumbnail to open
+              the full-resolution lightbox. */}
+          {hasImages && (
+            <div className="tool-group-entry-detail-section">
+              <div className="tool-group-entry-detail-label">
+                {message.toolResultImages!.length === 1 ? 'Image' : `Images (${message.toolResultImages!.length})`}
+              </div>
+              <div className="tool-result-images" data-testid={`tool-group-entry-images-${message.id}`}>
+                {message.toolResultImages!.map((img, i) => (
+                  <button
+                    key={i}
+                    type="button"
+                    className="tool-result-image-btn"
+                    data-testid={`tool-group-entry-image-${message.id}-${i}`}
+                    onClick={() => setLightboxIndex(i)}
+                    aria-haspopup="dialog"
+                    aria-label={
+                      message.toolResultImages!.length > 1
+                        ? `View image ${i + 1} of ${message.toolResultImages!.length}`
+                        : 'View image'
+                    }
+                  >
+                    <img
+                      src={`data:${img.mediaType};base64,${img.data}`}
+                      alt=""
+                      className="tool-result-image-thumb"
+                      loading="lazy"
+                      decoding="async"
+                    />
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
           {/* #5016 — Task subagent nested progress in grouped-entry view.
               When this entry is a Task tool_use whose subagent emitted
               intermediate events, surface them here so the user sees the
@@ -232,6 +292,7 @@ function ToolGroupEntry({
           )}
         </div>
       )}
+      <ImageLightbox uri={lightboxUri} onClose={() => setLightboxIndex(null)} label={lightboxLabel} />
     </div>
   )
 }

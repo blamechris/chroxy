@@ -3158,6 +3158,74 @@ button.sidebar-token-view-session-row:hover {
   display: block;
 }
 
+/* #6755 — tool-result image thumbnails (computer-use screenshots, browser
+   PNGs). Mirrors `.msg-attachments`/`.msg-attachment-image` (#6632) so
+   image previews read consistently whether they came from a user
+   attachment or a tool result. Shared by ToolBubble's expanded body and
+   ToolGroup's per-entry detail panel. */
+.tool-result-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.tool-result-image-btn {
+  display: block;
+  padding: 0;
+  border: 1px solid var(--border-subtle, rgba(127, 127, 127, 0.22));
+  border-radius: var(--radius-sm, 6px);
+  background: none;
+  cursor: pointer;
+  overflow: hidden;
+  line-height: 0;
+}
+
+.tool-result-image-btn:hover,
+.tool-result-image-btn:focus-visible {
+  border-color: var(--accent-blue);
+}
+
+.tool-result-image-btn:focus-visible {
+  outline: 2px solid var(--accent-blue);
+  outline-offset: 1px;
+}
+
+.tool-result-image-thumb {
+  display: block;
+  width: 140px;
+  height: 100px;
+  object-fit: cover;
+  background: var(--bg-elevated, var(--bg-input));
+}
+
+/* #6755 — ImageLightbox: the full-resolution click-to-zoom overlay,
+   composed from the generic `.modal-overlay`/`.modal-content` (above). */
+.image-lightbox-close {
+  position: absolute;
+  top: 8px;
+  right: 12px;
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 20px;
+  cursor: pointer;
+  padding: 4px 8px;
+  line-height: 1;
+}
+
+.image-lightbox-close:hover {
+  color: var(--text-primary);
+}
+
+.image-lightbox-img {
+  display: block;
+  max-width: 100%;
+  max-height: 80vh;
+  margin: 0 auto;
+  border-radius: 8px;
+}
+
 /* ---- Tool Group (#3747) ----
  *
  * Wraps a contiguous run of tool calls under a single collapsible block.
