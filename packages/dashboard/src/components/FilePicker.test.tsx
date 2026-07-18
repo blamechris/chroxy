@@ -219,4 +219,108 @@ describe('FilePicker', () => {
     )
     expect(screen.getByText('2.0 KB')).toBeInTheDocument()
   })
+
+  // #6823 — MCP resources in the @-picker.
+  describe('MCP resources', () => {
+    const resources = [
+      { uri: 'file:///notes.md', name: 'Notes', server: 'stub' },
+      { uri: 'db://users', name: 'Users', server: 'stub' },
+    ]
+
+    it('renders a "MCP Resources" section with resource rows', () => {
+      render(
+        <FilePicker
+          files={mockFiles}
+          resources={resources}
+          filter=""
+          onSelect={vi.fn()}
+          onSelectResource={vi.fn()}
+          onClose={vi.fn()}
+          selectedIndex={0}
+        />
+      )
+      expect(screen.getByTestId('file-picker-resources-group')).toBeInTheDocument()
+      expect(screen.getByText('Notes')).toBeInTheDocument()
+      expect(screen.getByText('Users')).toBeInTheDocument()
+    })
+
+    it('clicking a resource fires onSelectResource with its uri', () => {
+      const onSelectResource = vi.fn()
+      render(
+        <FilePicker
+          files={[]}
+          resources={resources}
+          filter=""
+          onSelect={vi.fn()}
+          onSelectResource={onSelectResource}
+          onClose={vi.fn()}
+          selectedIndex={0}
+        />
+      )
+      fireEvent.click(screen.getByText('Users'))
+      expect(onSelectResource).toHaveBeenCalledWith('db://users')
+    })
+
+    it('filters resources by uri or name', () => {
+      render(
+        <FilePicker
+          files={[]}
+          resources={resources}
+          filter="notes"
+          onSelect={vi.fn()}
+          onSelectResource={vi.fn()}
+          onClose={vi.fn()}
+          selectedIndex={0}
+        />
+      )
+      expect(screen.getByText('Notes')).toBeInTheDocument()
+      expect(screen.queryByText('Users')).not.toBeInTheDocument()
+    })
+
+    it('the resource highlight index continues after the files (flat nav)', () => {
+      // 4 files (indices 0-3) then the first resource at index 4.
+      render(
+        <FilePicker
+          files={mockFiles}
+          resources={resources}
+          filter=""
+          onSelect={vi.fn()}
+          onSelectResource={vi.fn()}
+          onClose={vi.fn()}
+          selectedIndex={4}
+        />
+      )
+      const rows = screen.getAllByTestId('file-picker-resource')
+      expect(rows[0]!.className).toContain('selected')
+    })
+
+    it('with >200 files the resource index continues after the CAPPED rows, not the full list (#6844 review)', () => {
+      // 250 files → the DOM renders only 200 file rows (display cap) + the
+      // overflow hint, then the resource section. Arrow-down past the last
+      // rendered file row lands on the first resource at flat index 200 —
+      // NOT at 250 (the uncapped length, which desynced highlight/scroll).
+      const manyFiles: FilePickerItem[] = Array.from({ length: 250 }, (_, i) => ({
+        path: `src/file-${String(i).padStart(3, '0')}.ts`,
+        type: 'file',
+        size: 1,
+      }))
+      render(
+        <FilePicker
+          files={manyFiles}
+          resources={resources}
+          filter=""
+          onSelect={vi.fn()}
+          onSelectResource={vi.fn()}
+          onClose={vi.fn()}
+          selectedIndex={200}
+        />
+      )
+      const resourceRows = screen.getAllByTestId('file-picker-resource')
+      expect(resourceRows[0]!.className).toContain('selected')
+      expect(resourceRows[0]!.getAttribute('aria-selected')).toBe('true')
+      // Exactly one option is highlighted — no file row shares index 200.
+      const selected = document.querySelectorAll('[role="option"][aria-selected="true"]')
+      expect(selected.length).toBe(1)
+    })
+  })
 })

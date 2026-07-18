@@ -731,7 +731,12 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     // + agents) so a new client never sends its 3-request list_* round trip.
     // Fire-and-forget — the slash/agent compute is async (disk scans) and the
     // synchronous post-auth burst above must not block on it.
-    sendAuthBootstrap(ctx, ws, { cwd: entry?.cwd || null, provider: activeProvider, sessionId: activeId })
+    // #6823: include the active BYOK session's MCP prompts so the connect-time
+    // burst's slash_commands match the on-demand list_slash_commands response.
+    const bootMcpPrompts = typeof entry?.session?.getMcpPromptCommands === 'function'
+      ? entry.session.getMcpPromptCommands()
+      : []
+    sendAuthBootstrap(ctx, ws, { cwd: entry?.cwd || null, provider: activeProvider, sessionId: activeId, mcpPrompts: bootMcpPrompts })
     return
   }
 
@@ -805,6 +810,9 @@ function sendAuthBootstrap(ctx, ws, info = {}) {
   const fileOps = ctx.fileOps || services?.fileOps || null
   const cwd = info.cwd || null
   const provider = info.provider || null
+  // #6823: MCP prompts to fold into the bootstrap slash-command list (empty for
+  // non-BYOK / legacy sessions).
+  const mcpPrompts = Array.isArray(info.mcpPrompts) ? info.mcpPrompts : []
 
   // providers is a cheap synchronous read off the registry — same source as
   // the list_providers handler.
@@ -819,7 +827,7 @@ function sendAuthBootstrap(ctx, ws, info = {}) {
   // slash commands + agents are async disk scans; compute in parallel and
   // tolerate either failing on its own.
   const slashP = fileOps && typeof fileOps.computeSlashCommands === 'function'
-    ? fileOps.computeSlashCommands(cwd, provider).catch(err => {
+    ? fileOps.computeSlashCommands(cwd, provider, mcpPrompts).catch(err => {
         log.warn(`auth_bootstrap: computeSlashCommands failed: ${err.message}`)
         return []
       })

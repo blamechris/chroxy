@@ -6,11 +6,11 @@
  * image paste/drag-drop (#1288), and image preview thumbnails (#1289).
  */
 import { useState, useEffect, useMemo, useId, useRef, useCallback, type KeyboardEvent, type ChangeEvent, type ClipboardEvent, type DragEvent, type UIEvent } from 'react'
-import { FilePicker, type FilePickerItem } from './FilePicker'
+import { FilePicker, FILE_PICKER_DISPLAY_CAP, type FilePickerItem } from './FilePicker'
 import { AttachmentChip } from './AttachmentChip'
 import { SlashCommandPicker } from './SlashCommandPicker'
 import { ImageThumbnail } from './ImageThumbnail'
-import type { SlashCommand, EvaluatorResultPayload } from '../store/types'
+import type { SlashCommand, EvaluatorResultPayload, MCPResourceItem } from '../store/types'
 import { filterImageFiles } from '../utils/image-utils'
 import { shouldCollapsePaste, findActiveMarkerIds } from '@chroxy/store-core'
 import { PastedTextChip } from './PastedTextChip'
@@ -71,6 +71,8 @@ export interface InputBarProps {
   chatActivityState?: string
   placeholder?: string
   filePickerFiles?: FilePickerItem[] | null
+  /** #6823 — MCP-server resources surfaced in the `@`-picker (BYOK sessions). */
+  mcpResources?: MCPResourceItem[] | null
   onFileTrigger?: () => void
   attachments?: FileAttachment[]
   onRemoveAttachment?: (path: string) => void
@@ -181,7 +183,7 @@ function isEditableElement(el: Element | null): boolean {
   return (el as HTMLElement).isContentEditable === true
 }
 
-export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, chatActivityState, placeholder, filePickerFiles, onFileTrigger, attachments, onRemoveAttachment, slashCommands, onSlashTrigger, onImagePaste, onImageDrop, imageAttachments, onRemoveImage, onFileAttach, controlledValue, onValueChange, sendOnEnter, voiceInput, onEvaluate, onLargePaste, pastedTextBlocks, onInspectPastedText, onRemovePastedText, userMessageHistory, highlightThinkingKeywords }: InputBarProps) {
+export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, chatActivityState, placeholder, filePickerFiles, mcpResources, onFileTrigger, attachments, onRemoveAttachment, slashCommands, onSlashTrigger, onImagePaste, onImageDrop, imageAttachments, onRemoveImage, onFileAttach, controlledValue, onValueChange, sendOnEnter, voiceInput, onEvaluate, onLargePaste, pastedTextBlocks, onInspectPastedText, onRemovePastedText, userMessageHistory, highlightThinkingKeywords }: InputBarProps) {
   const [internalValue, setInternalValue] = useState('')
   const value = controlledValue !== undefined ? controlledValue : internalValue
   const setValue = onValueChange || setInternalValue
@@ -301,18 +303,59 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, c
     return filePickerFiles.filter(f => f.path.toLowerCase().includes(lower))
   }, [filePickerFiles, fileFilter])
 
-  const selectFile = useCallback((path: string) => {
+  // #6823 — MCP resources filtered by the same @-filter (uri OR name). The flat
+  // keyboard-nav index runs files first, then resources (so a resource sits at
+  // `filteredFiles.length + i`), matching FilePicker's render order.
+  const filteredResources = useMemo(() => {
+    const list = Array.isArray(mcpResources) ? mcpResources : []
+    if (!fileFilter) return list
+    const lower = fileFilter.toLowerCase()
+    return list.filter(r => r.uri.toLowerCase().includes(lower) || r.name.toLowerCase().includes(lower))
+  }, [mcpResources, fileFilter])
+
+  // #6844 review: keyboard nav must span the rows the DOM actually renders.
+  // FilePicker caps file rows at FILE_PICKER_DISPLAY_CAP (then shows an
+  // overflow hint), so the navigable file count — and the offset where the
+  // resource rows start — is the CAPPED count, not filteredFiles.length.
+  const visibleFileCount = Math.min(filteredFiles.length, FILE_PICKER_DISPLAY_CAP)
+  const pickerItemCount = visibleFileCount + filteredResources.length
+
+  const insertAtTrigger = useCallback((text: string) => {
     if (triggerAtIdx >= 0) {
       const before = value.slice(0, triggerAtIdx)
       const afterAt = value.slice(triggerAtIdx + 1)
       const nextWs = afterAt.search(/\s/)
       const suffix = nextWs === -1 ? '' : afterAt.slice(nextWs)
-      setValue(before + path + (suffix || ' '))
+      setValue(before + text + (suffix || ' '))
     }
+  }, [value, triggerAtIdx, setValue])
+
+  const selectFile = useCallback((path: string) => {
+    insertAtTrigger(path)
     onFileAttach?.(path)
     setFilePickerOpen(false)
     setFileSelectedIndex(0)
-  }, [value, triggerAtIdx, onFileAttach])
+  }, [insertAtTrigger, onFileAttach])
+
+  // #6823 — selecting an MCP resource inserts its URI as an @-reference. Content
+  // retrieval (resources/read) is a separate slice; this is listing + insert.
+  const selectResource = useCallback((uri: string) => {
+    insertAtTrigger(uri)
+    setFilePickerOpen(false)
+    setFileSelectedIndex(0)
+  }, [insertAtTrigger])
+
+  // Flat-index selection over the RENDERED rows: capped files [0..C), then
+  // resources [C..C+M) — C = visibleFileCount (#6844 review).
+  const selectPickerIndex = useCallback((idx: number) => {
+    if (idx < visibleFileCount) {
+      const f = filteredFiles[idx]
+      if (f) selectFile(f.path)
+      return
+    }
+    const r = filteredResources[idx - visibleFileCount]
+    if (r) selectResource(r.uri)
+  }, [filteredFiles, visibleFileCount, filteredResources, selectFile, selectResource])
 
   // Derive slash filter from current value (text after "/")
   const slashFilter = pickerOpen && value.startsWith('/') ? value.slice(1) : ''
@@ -705,7 +748,8 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, c
     if (filePickerOpen) {
       if (e.key === 'ArrowDown') {
         e.preventDefault()
-        setFileSelectedIndex(i => filteredFiles.length === 0 ? 0 : Math.min(i + 1, filteredFiles.length - 1))
+        // #6823: bound spans files + MCP resources.
+        setFileSelectedIndex(i => pickerItemCount === 0 ? 0 : Math.min(i + 1, pickerItemCount - 1))
         return
       }
       if (e.key === 'ArrowUp') {
@@ -715,8 +759,8 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, c
       }
       if (e.key === 'Enter') {
         e.preventDefault()
-        if (filteredFiles.length > 0) {
-          selectFile(filteredFiles[fileSelectedIndex]!.path)
+        if (pickerItemCount > 0) {
+          selectPickerIndex(fileSelectedIndex)
         }
         return
       }
@@ -1035,8 +1079,10 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, c
       {filePickerOpen && filePickerFiles !== undefined && (
         <FilePicker
           files={filePickerFiles}
+          resources={mcpResources}
           filter={fileFilter}
           onSelect={selectFile}
+          onSelectResource={selectResource}
           onClose={() => { setFilePickerOpen(false); setFileSelectedIndex(0) }}
           selectedIndex={fileSelectedIndex}
         />

@@ -58,7 +58,12 @@ function handleBrowseFiles(ws, client, msg, ctx) {
 function handleListFiles(ws, client, msg, ctx) {
   const sid = msg.sessionId || client.activeSessionId
   const entry = resolveSession(ctx, msg, client)
-  ctx.services.fileOps.listFiles(ws, entry?.cwd || null, msg.query || null, sid)
+  // #6823: BYOK sessions surface their connected MCP servers' resources in the
+  // same `@`-picker data source. Other providers return no resources here.
+  const mcpResources = typeof entry?.session?.getMcpResources === 'function'
+    ? entry.session.getMcpResources()
+    : []
+  ctx.services.fileOps.listFiles(ws, entry?.cwd || null, msg.query || null, sid, mcpResources)
 }
 
 function handleReadFile(ws, client, msg, ctx) {
@@ -115,7 +120,13 @@ function handleListSlashCommands(ws, client, msg, ctx) {
   // Falls back to null in legacy single-cliSession mode — built-ins simply
   // don't surface there (safe default; project/user .md skills still work).
   const provider = entry?.provider || null
-  ctx.services.fileOps.listSlashCommands(ws, entry?.cwd || null, sid, provider)
+  // #6823: merge the session's MCP-server prompts (`/mcp__<server>__<prompt>`)
+  // into the slash-command surface. Only BYOK sessions expose the accessor;
+  // other providers fall back to an empty list.
+  const mcpPrompts = typeof entry?.session?.getMcpPromptCommands === 'function'
+    ? entry.session.getMcpPromptCommands()
+    : []
+  ctx.services.fileOps.listSlashCommands(ws, entry?.cwd || null, sid, provider, mcpPrompts)
 }
 
 function handleListAgents(ws, client, msg, ctx) {

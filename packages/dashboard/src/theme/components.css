@@ -5099,6 +5099,14 @@ button.sidebar-token-view-session-row:hover {
   background: transparent;
 }
 
+/* #6823 — MCP-server prompt badge: tinted so it reads as "sourced from a
+   connected MCP server" distinct from provider built-ins and local skills. */
+.slash-picker-badge-mcp {
+  color: var(--accent-green, var(--text-link, #3fb950));
+  border: 1px solid currentColor;
+  background: transparent;
+}
+
 .slash-picker-empty {
   padding: 12px;
   text-align: center;
@@ -5189,6 +5197,25 @@ button.sidebar-token-view-session-row:hover {
   text-align: center;
   color: var(--text-muted);
   font-size: var(--text-sm);
+}
+
+/* #6823 — section header + per-server label for MCP resources surfaced in the
+   @-picker below the project files. Mirrors .slash-picker-group. */
+.file-picker-group {
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+  padding: 6px 12px 2px;
+  user-select: none;
+  border-top: 1px solid var(--banner-border-subtle);
+}
+
+.file-picker-resource-meta {
+  margin-left: 12px;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  white-space: nowrap;
 }
 
 .file-picker-overflow {

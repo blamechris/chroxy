@@ -6661,4 +6661,54 @@ describe("checkpoint_restored (mode 'files') confirmation (#6827)", () => {
       content: 'Files restored to checkpoint "Before refactor"',
     })
   })
+
+  // #6823 — file_list populates the @-picker (files) and mcpResources.
+  describe('file_list dispatch', () => {
+    it('populates filePickerFiles and mcpResources', () => {
+      handleMessage(
+        {
+          type: 'file_list',
+          files: [{ path: 'src/index.ts', type: 'file', size: 10 }],
+          resources: [{ uri: 'file:///notes.md', name: 'Notes', server: 'stub', mimeType: 'text/markdown' }],
+          error: null,
+        } as any,
+        ctx() as any,
+      )
+      const state = store.getState() as any
+      expect(state.filePickerFiles).toEqual([{ path: 'src/index.ts', type: 'file', size: 10 }])
+      expect(state.mcpResources).toEqual([
+        { uri: 'file:///notes.md', name: 'Notes', description: undefined, mimeType: 'text/markdown', server: 'stub' },
+      ])
+    })
+
+    it('defaults mcpResources to [] when the server omits resources', () => {
+      handleMessage(
+        { type: 'file_list', files: [], error: null } as any,
+        ctx() as any,
+      )
+      const state = store.getState() as any
+      expect(state.filePickerFiles).toEqual([])
+      expect(state.mcpResources).toEqual([])
+    })
+
+    it('falls back a resource name to its uri when name is missing', () => {
+      handleMessage(
+        { type: 'file_list', files: [], resources: [{ uri: 'db://users', server: 'stub' }], error: null } as any,
+        ctx() as any,
+      )
+      const state = store.getState() as any
+      expect(state.mcpResources[0].name).toBe('db://users')
+    })
+
+    it('surfaces a server-reported error via addServerError (and still applies the arrays)', () => {
+      handleMessage(
+        { type: 'file_list', files: [], error: 'Permission denied' } as any,
+        ctx() as any,
+      )
+      const state = store.getState() as any
+      expect(state.serverErrors).toContain('File list failed: Permission denied')
+      expect(state.filePickerFiles).toEqual([])
+      expect(state.mcpResources).toEqual([])
+    })
+  })
 })

@@ -250,9 +250,23 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
    * List files recursively from session CWD with gitignore filtering.
    * Max depth defaults to 3. Optional query for substring filtering.
    */
-  async function listFiles(ws, sessionCwd, query, sessionId) {
+  async function listFiles(ws, sessionCwd, query, sessionId, mcpResources = []) {
+    // #6823: MCP resources ride alongside the project file listing so the
+    // dashboard `@`-picker can surface them. They are cwd-independent (a BYOK
+    // session with no project cwd can still expose resources), applied the same
+    // substring `query` filter as files, and included in EVERY response branch.
+    const filterResources = (list, q) => {
+      const arr = Array.isArray(list) ? list.filter((r) => r && typeof r.uri === 'string' && r.uri) : []
+      if (!q || typeof q !== 'string' || !q.trim()) return arr
+      const lower = q.toLowerCase()
+      return arr.filter((r) =>
+        r.uri.toLowerCase().includes(lower) ||
+        (typeof r.name === 'string' && r.name.toLowerCase().includes(lower)))
+    }
+    const resources = filterResources(mcpResources, query)
+
     if (!sessionCwd) {
-      const response = { type: 'file_list', files: [], error: 'File listing is not available in this mode' }
+      const response = { type: 'file_list', files: [], resources, error: 'File listing is not available in this mode' }
       if (sessionId) response.sessionId = sessionId
       sendFn(ws, response)
       return
@@ -357,7 +371,7 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
         result = files.filter(f => f.path.toLowerCase().includes(lower))
       }
 
-      const response = { type: 'file_list', files: result, error: null }
+      const response = { type: 'file_list', files: result, resources, error: null }
       if (sessionId) response.sessionId = sessionId
       sendFn(ws, response)
     } catch (err) {
@@ -367,7 +381,7 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
       } else if (err && typeof err === 'object' && err.code === 'EACCES') {
         message = 'Permission denied'
       }
-      const response = { type: 'file_list', files: [], error: message }
+      const response = { type: 'file_list', files: [], resources, error: message }
       if (sessionId) response.sessionId = sessionId
       sendFn(ws, response)
     }
@@ -404,7 +418,7 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
    * path (`listSlashCommands`) and the connect-time `auth_bootstrap` burst
    * (#5555) so both produce an identical `commands` array.
    */
-  async function computeSlashCommands(cwd, providerName = null) {
+  async function computeSlashCommands(cwd, providerName = null, mcpPrompts = []) {
     const commands = []
     const seen = new Set()
 
@@ -463,10 +477,27 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
     }
     await scanDir(join(homedir(), '.claude', 'commands'), 'user')
 
-    // Stable order: built-ins (alphabetical) first, then project/user
-    // (alphabetical) — using `source` as the primary key. `builtin` sorts
-    // before `project` and `user` lexically.
-    const sourceRank = (s) => (s === 'builtin' ? 0 : s === 'project' ? 1 : 2)
+    // #6823: MCP-server prompts merged as `source: 'mcp'` slash commands
+    // (`/mcp__<server>__<prompt>`). Added last so a same-named built-in / .md
+    // skill still wins the collision (built-in > project > user > mcp), and the
+    // namespaced `mcp__` names practically never collide anyway. Element shape
+    // matches the others (`{ name, description, source }`).
+    if (Array.isArray(mcpPrompts)) {
+      for (const p of mcpPrompts) {
+        if (!p || typeof p.name !== 'string' || !p.name) continue
+        if (seen.has(p.name)) continue
+        seen.add(p.name)
+        commands.push({
+          name: p.name,
+          description: typeof p.description === 'string' ? p.description : '',
+          source: 'mcp',
+        })
+      }
+    }
+
+    // Stable order: built-ins (alphabetical) first, then project/user, then
+    // MCP prompts (each alphabetical) — using `source` as the primary key.
+    const sourceRank = (s) => (s === 'builtin' ? 0 : s === 'project' ? 1 : s === 'user' ? 2 : 3)
     commands.sort((a, b) => {
       const rankDiff = sourceRank(a.source) - sourceRank(b.source)
       if (rankDiff !== 0) return rankDiff
@@ -476,8 +507,8 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
     return commands
   }
 
-  async function listSlashCommands(ws, cwd, sessionId, providerName = null) {
-    const commands = await computeSlashCommands(cwd, providerName)
+  async function listSlashCommands(ws, cwd, sessionId, providerName = null, mcpPrompts = []) {
+    const commands = await computeSlashCommands(cwd, providerName, mcpPrompts)
     const response = { type: 'slash_commands', commands }
     if (sessionId) response.sessionId = sessionId
     sendFn(ws, response)

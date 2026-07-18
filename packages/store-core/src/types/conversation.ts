@@ -35,8 +35,10 @@ export interface SlashCommand {
    *   and pinned above project/user entries in the picker (#3856).
    * - `project`: markdown file in `<cwd>/.claude/commands/`.
    * - `user`: markdown file in `~/.claude/commands/`.
+   * - `mcp`: a prompt advertised by a connected MCP server, invoked as
+   *   `/mcp__<server>__<prompt>` (#6823). BYOK sessions only.
    */
-  source: 'builtin' | 'project' | 'user';
+  source: 'builtin' | 'project' | 'user' | 'mcp';
 }
 
 export interface CustomAgent {
