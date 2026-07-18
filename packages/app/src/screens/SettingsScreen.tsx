@@ -72,6 +72,7 @@ export function SettingsScreen() {
     clearSavedConnection,
     requestFullHistory,
     setPermissionRules,
+    setProjectPermissionRules,
   } = useConnectionStore();
 
   const activeSessionId = useConnectionStore((s) => s.activeSessionId);
@@ -79,6 +80,12 @@ export function SettingsScreen() {
     const id = s.activeSessionId;
     if (!id || !s.sessionStates[id]) return EMPTY_RULES;
     return s.sessionStates[id].sessionRules ?? EMPTY_RULES;
+  });
+  // #6771 — durable per-project ("always allow") rules for the active session.
+  const persistentRules = useConnectionStore((s) => {
+    const id = s.activeSessionId;
+    if (!id || !s.sessionStates[id]) return EMPTY_RULES;
+    return s.sessionStates[id].persistentRules ?? EMPTY_RULES;
   });
 
   // Use the connection store as source of truth — same store SessionScreen and
@@ -376,6 +383,56 @@ export function SettingsScreen() {
                 </TouchableOpacity>
               </>
             )}
+          </View>
+        </>
+      )}
+
+      {/* PROJECT RULES (#6771) — durable "always allow" grants that survive a
+          daemon restart. Removing one sends the reduced set as projectRules. */}
+      {activeSessionId != null && persistentRules.length > 0 && (
+        <>
+          <Text style={styles.sectionHeader} testID="project-rules-header">PROJECT RULES (ALWAYS ALLOW)</Text>
+          <View style={styles.section}>
+            <View style={styles.rulesContainer}>
+              {persistentRules.map((rule: PermissionRule, index: number) => (
+                <TouchableOpacity
+                  key={`persist-${rule.tool}-${rule.decision}-${index}`}
+                  testID={`project-rule-${rule.tool}`}
+                  style={[
+                    styles.ruleChip,
+                    rule.decision === 'allow' ? styles.ruleChipAllow : styles.ruleChipDeny,
+                  ]}
+                  onPress={() => {
+                    const updated = persistentRules.filter((_: PermissionRule, i: number) => i !== index);
+                    setProjectPermissionRules(updated);
+                  }}
+                >
+                  <Text
+                    style={[
+                      styles.ruleChipText,
+                      rule.decision === 'allow' ? styles.ruleChipTextAllow : styles.ruleChipTextDeny,
+                    ]}
+                  >
+                    {rule.tool} — {rule.decision === 'allow' ? 'always allow' : 'always deny'}
+                  </Text>
+                  <Text
+                    style={[
+                      styles.ruleChipRemove,
+                      rule.decision === 'allow' ? styles.ruleChipTextAllow : styles.ruleChipTextDeny,
+                    ]}
+                  >
+                    {' ×'}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+            <View style={styles.separator} />
+            <TouchableOpacity
+              style={styles.row}
+              onPress={() => setProjectPermissionRules([])}
+            >
+              <Text style={styles.destructiveText}>Clear All Project Rules</Text>
+            </TouchableOpacity>
           </View>
         </>
       )}

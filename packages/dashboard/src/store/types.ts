@@ -275,6 +275,9 @@ export interface PermissionRule {
   tool: string;
   decision: 'allow' | 'deny';
   pattern?: string;
+  // #6771: set to 'project' on a DURABLE rule (backed by the daemon's per-project
+  // rule store — survives restarts). Absent on a session-scoped rule.
+  persist?: 'project';
 }
 
 /**
@@ -285,8 +288,12 @@ export interface PermissionRule {
  * `'allowSession'` means the user clicked "Allow for Session" — the wire
  * decision sent to the server is `'allow'`, and a follow-up
  * `set_permission_rules` message registers a rule for the tool.
+ *
+ * #6771: `'allowAlways'` means the user clicked "Always allow (this project)".
+ * Unlike `allowSession`, the wire decision `'allowAlways'` is sent VERBATIM —
+ * the server persists a durable per-project rule (no follow-up needed).
  */
-export type PermissionDecision = 'allow' | 'deny' | 'allowSession';
+export type PermissionDecision = 'allow' | 'deny' | 'allowSession' | 'allowAlways';
 
 // #3188: auto-evaluator clarify-pending state. Populated by the
 // `evaluator_clarify` handler when the auto-evaluator hook (#3186) lands
@@ -494,6 +501,11 @@ export interface SessionState extends BaseSessionState {
   // append new rules without losing existing ones. Optional: undefined until
   // the server confirms rules for this session.
   sessionRules?: PermissionRule[];
+  // #6771: durable per-project rules ("always allow / deny"), each tagged
+  // `persist:'project'`. Written by permission_rules_updated (persistentRules
+  // field). Distinct from sessionRules so standing project grants aren't
+  // conflated with the session-scoped set. Optional until the server reports.
+  persistentRules?: PermissionRule[];
   // #3209: cached skills list for the active session. Populated by
   // list_skills response, mutated in-place by skill_activated /
   // skill_deactivated broadcasts. Optional — undefined until the

@@ -284,7 +284,8 @@ export class ClaudeByokSession extends BaseSession {
     // providers. ByokSession passes no pause/resume hooks (no result-timeout).
     // #6794 — pass cwd so the protected-path floor can resolve relative tool
     // targets (.git/.claude/.env…) against this session's working directory.
-    this._permissions = new PermissionManager({ log, cwd: this.cwd })
+    // #6771 — pass the durable rule store (persistent per-project allow-always).
+    this._permissions = new PermissionManager({ log, cwd: this.cwd, ruleStore: this._permissionRuleStore })
     wirePermissionManager(this, this._permissions)
 
     // Realpath cache used by the tool executor's path-safety check. One
@@ -1880,6 +1881,33 @@ export class ClaudeByokSession extends BaseSession {
   setPermissionRules(rules) {
     if (typeof this._permissions.setRules === 'function') {
       this._permissions.setRules(rules)
+    }
+  }
+
+  /** Current session-scoped permission rules (#3072 parity with SdkSession). */
+  getPermissionRules() {
+    if (typeof this._permissions.getRules === 'function') {
+      return this._permissions.getRules()
+    }
+    return []
+  }
+
+  /**
+   * #6771 — durable (project-scoped) permission rules applied to this session.
+   */
+  getPersistentPermissionRules() {
+    if (typeof this._permissions.getPersistentRules === 'function') {
+      return this._permissions.getPersistentRules()
+    }
+    return []
+  }
+
+  /**
+   * #6771 — re-seed this session's in-memory durable rule set (no persist).
+   */
+  setPersistentPermissionRules(rules) {
+    if (typeof this._permissions.setPersistentRules === 'function') {
+      this._permissions.setPersistentRules(rules)
     }
   }
 

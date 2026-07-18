@@ -38,6 +38,13 @@ export interface PermissionRule {
   tool: string
   decision: 'allow' | 'deny'
   pattern?: string
+  /**
+   * #6771: present + set to `'project'` on a DURABLE (persistent) rule — one
+   * backed by the daemon's per-project rule store that survives a restart, as
+   * opposed to a session-scoped rule (marker absent). Clients use it to badge
+   * the rule and route its removal through the project-rule path.
+   */
+  persist?: 'project'
 }
 
 /**
@@ -188,6 +195,13 @@ export function handlePermissionTimeout(msg: Record<string, unknown>): {
 export interface PermissionRulesUpdatedPayload {
   sessionId: string | null
   rules: PermissionRule[]
+  /**
+   * #6771: durable per-project rules ("always allow / deny"), each tagged
+   * `persist:'project'` by the server. Empty array when the message omits the
+   * field (older server) or carries no persistent rules. Kept SEPARATE from
+   * `rules` so the session-rule round-trip (set_permission_rules) is unchanged.
+   */
+  persistentRules: PermissionRule[]
 }
 
 export function handlePermissionRulesUpdated(
@@ -195,7 +209,8 @@ export function handlePermissionRulesUpdated(
 ): PermissionRulesUpdatedPayload {
   const sessionId = parseRawStringField(msg, 'sessionId')
   const rules = parseUnknownArrayField(msg, 'rules') as PermissionRule[]
-  return { sessionId, rules }
+  const persistentRules = parseUnknownArrayField(msg, 'persistentRules') as PermissionRule[]
+  return { sessionId, rules, persistentRules }
 }
 
 // ---------------------------------------------------------------------------

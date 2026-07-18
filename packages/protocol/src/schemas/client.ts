@@ -288,6 +288,11 @@ export const TestCredentialSchema = z.object({
 export const SetPermissionRulesSchema = z.object({
   type: z.literal('set_permission_rules'),
   rules: z.array(PermissionRuleSchema).max(1000),
+  // #6771: optional durable per-project rule set. When present it FULLY REPLACES
+  // the persisted "always allow / deny" rules for the target session's project
+  // cwd (the client "manage / remove persistent rule" path — send the reduced
+  // list to drop one). Absent → session rules only, unchanged behaviour.
+  projectRules: z.array(PermissionRuleSchema).max(1000).optional(),
   sessionId: z.string().max(256).optional(),
 })
 

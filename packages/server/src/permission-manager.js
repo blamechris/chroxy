@@ -170,7 +170,7 @@ export function isProtectedPathTarget(input, cwd) {
  *   user_question       { toolUseId, questions }
  */
 export class PermissionManager extends EventEmitter {
-  constructor({ timeoutMs, log, maxPendingPermissions, cwd } = {}) {
+  constructor({ timeoutMs, log, maxPendingPermissions, cwd, ruleStore } = {}) {
     super()
     this._timeoutMs = timeoutMs || DEFAULT_TIMEOUT_MS
     this._log = log || console
@@ -181,6 +181,12 @@ export class PermissionManager extends EventEmitter {
     // isProtectedPathTarget). Optional: when unset the floor resolves targets
     // against process.cwd(), which still catches relative protected paths.
     this._cwd = (typeof cwd === 'string' && cwd.length > 0) ? cwd : null
+    // #6771 — durable per-project rule store (PermissionRuleStore). Optional:
+    // when present, an `allowAlways` decision persists a rule keyed by this
+    // session's cwd, and this session seeds its persistent rules from the store
+    // on construction (below) so a prior grant takes effect without re-prompting
+    // after a daemon restart.
+    this._ruleStore = ruleStore || null
 
     this._pendingPermissions = new Map() // requestId -> { resolve, input }
     this._permissionTimers = new Map()   // requestId -> timer
@@ -200,6 +206,15 @@ export class PermissionManager extends EventEmitter {
 
     // Session-scoped permission rules
     this._sessionRules = [] // [{ tool, decision }]
+
+    // #6771 — durable per-project rules seeded from the store for THIS
+    // session's cwd. Kept SEPARATE from `_sessionRules` so `setRules`/
+    // `clearRules` (the session-scoped `set_permission_rules` path, and the
+    // clearRules() on a permission-mode switch) never wipe a project-level
+    // "always allow", and vice-versa. `_matchesRule` consults both.
+    this._persistentRules = (this._ruleStore && this._cwd)
+      ? this._ruleStore.getRules(this._cwd)
+      : []
 
     // AskUserQuestion handling
     this._pendingUserAnswer = null // { resolve, input, toolUseId } when waiting for user answer
@@ -250,20 +265,55 @@ export class PermissionManager extends EventEmitter {
   }
 
   /**
-   * Clear all session-scoped permission rules.
+   * Clear all session-scoped permission rules. Persistent (project-scoped)
+   * rules are UNTOUCHED — a mode switch or a `set_permission_rules []` must not
+   * silently revoke a durable "always allow" (#6771).
    */
   clearRules() {
     this._sessionRules = []
   }
 
   /**
-   * Check whether a toolName matches a session rule.
+   * Return a copy of the durable (project-scoped) rules currently applied to
+   * this session, each tagged `persist: 'project'` so a client can render them
+   * distinctly from session rules (#6771).
+   *
+   * @returns {Array<{tool: string, decision: string, persist: 'project'}>}
+   */
+  getPersistentRules() {
+    return this._persistentRules.map((r) => ({ tool: r.tool, decision: r.decision, persist: 'project' }))
+  }
+
+  /**
+   * Replace this session's durable rule set in memory (does NOT persist —
+   * callers that own the store persist separately). Used to re-seed after the
+   * store changes out-of-band (e.g. a client edited the project's rules).
+   *
+   * @param {Array<{tool: string, decision: string}>} rules
+   */
+  setPersistentRules(rules) {
+    this._persistentRules = Array.isArray(rules)
+      ? rules
+        .filter((r) => r && typeof r.tool === 'string' && (r.decision === 'allow' || r.decision === 'deny'))
+        .map((r) => ({ tool: r.tool, decision: r.decision }))
+      : []
+  }
+
+  /**
+   * Check whether a toolName matches a session or persistent rule. Session
+   * rules are consulted FIRST (a live, intentional session decision wins over a
+   * standing project grant), then the durable project rules (#6771).
    *
    * @param {string} toolName
    * @returns {'allow'|'deny'|null} null if no rule matches
    */
   _matchesRule(toolName) {
     for (const rule of this._sessionRules) {
+      if (rule.tool === toolName) {
+        return rule.decision
+      }
+    }
+    for (const rule of this._persistentRules) {
       if (rule.tool === toolName) {
         return rule.decision
       }
@@ -529,6 +579,23 @@ export class PermissionManager extends EventEmitter {
       }
       if (pending.suggestions && pending.suggestions.length > 0) {
         result.updatedPermissions = pending.suggestions
+      }
+      // #6771 — persist a DURABLE project-scoped rule so this grant survives a
+      // daemon restart (the SDK `updatedPermissions` above only persists within
+      // the SDK's own session). Only for rule-eligible tools: the store rejects
+      // NEVER_AUTO_ALLOW / non-ELIGIBLE tools, so an `allowAlways` on Bash (or a
+      // codex `shell`) degrades to a one-shot allow and is NEVER durably
+      // whitelisted. Seed the in-memory persistent set too so the very next tool
+      // call in THIS session auto-allows without re-prompting.
+      if (toolName && this._ruleStore && this._cwd) {
+        const persisted = this._ruleStore.addRule(this._cwd, { tool: toolName, decision: 'allow' })
+        if (persisted) {
+          // Re-seed the in-memory set so the very next tool call in THIS session
+          // auto-allows. The client-facing `permission_rules_updated` broadcast
+          // is emitted by the WS response handler (settings-handlers.js) after
+          // this resolves — getPersistentRules() reflects the update synchronously.
+          this.setPersistentRules(this._ruleStore.getRules(this._cwd))
+        }
       }
       pending.resolve(result)
     } else {

@@ -1847,6 +1847,8 @@ describe('buildBaseSessionOpts (#5367)', () => {
 describe('subclass opt forwarding — no opt dropped (#5367)', () => {
   let tmpDir
   let trustStore
+  // #6771 — an opaque runtime handle checked by identity (no file I/O needed).
+  const sentinelRuleStore = { addRule() { return false }, getRules() { return [] } }
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), 'chroxy-opt-fwd-'))
     trustStore = new SkillsTrustStore({ filePath: join(tmpDir, 'trust.json'), mode: 'warn' })
@@ -1883,6 +1885,9 @@ describe('subclass opt forwarding — no opt dropped (#5367)', () => {
       hardTimeoutMs: 33 * 60 * 1000,
       streamStallTimeoutMs: 7 * 60 * 1000,
       backgroundShellHardQuiesceMs: 0, // explicit 0 — the falsy-preservation case
+      // #6771 — durable per-project rule store (runtime handle). A truthy
+      // sentinel object survives BaseSession's `|| null`, so it lands verbatim.
+      permissionRuleStore: sentinelRuleStore,
     }
   }
 
@@ -1915,6 +1920,8 @@ describe('subclass opt forwarding — no opt dropped (#5367)', () => {
     hardTimeoutMs: (s, o) => assert.equal(s._hardTimeoutMs, o.hardTimeoutMs),
     streamStallTimeoutMs: (s, o) => assert.equal(s._streamStallTimeoutMs, o.streamStallTimeoutMs),
     backgroundShellHardQuiesceMs: (s) => assert.equal(s._backgroundShellHardQuiesceMs, 0),
+    // #6771 — the durable rule store handle lands on _permissionRuleStore.
+    permissionRuleStore: (s) => assert.equal(s._permissionRuleStore, sentinelRuleStore),
   }
 
   // Guard: the assertion table must cover exactly the canonical opt set, so a
