@@ -123,6 +123,17 @@ export class MCPClient extends EventEmitter {
       DEFAULT_HANDSHAKE_TIMEOUT_MS
     this._state = MCP_STATES.IDLE
     this._tools = []
+    // #6823: MCP prompts + resources, populated after tools/list during the
+    // handshake but ONLY when the server advertises the matching capability on
+    // initialize (`capabilities.prompts` / `capabilities.resources`). Servers
+    // that don't implement them never get a `prompts/list` / `resources/list`
+    // request, so a tools-only server degrades cleanly with no method-not-found
+    // spam. Cleared on child exit alongside `_tools`.
+    this._prompts = []
+    this._resources = []
+    // The `capabilities` object the server returned on initialize. Read to
+    // gate the prompts/resources list calls; null until a successful handshake.
+    this._serverCapabilities = null
     this._child = null
     this._stdoutBuf = ''
     this._nextId = 1
@@ -134,6 +145,8 @@ export class MCPClient extends EventEmitter {
 
   get state() { return this._state }
   get tools() { return this._tools }
+  get prompts() { return this._prompts }
+  get resources() { return this._resources }
 
   async start() {
     if (this._destroyed) throw new Error('MCPClient destroyed')
@@ -246,13 +259,76 @@ export class MCPClient extends EventEmitter {
     if (typeof serverVersion === 'string' && serverVersion !== MCP_PROTOCOL_VERSION) {
       this._log.warn(`MCP server ${this.name}: protocolVersion mismatch — requested=${MCP_PROTOCOL_VERSION} server=${serverVersion} (negotiating to server value)`)
     }
+    // #6823: remember the server's advertised capabilities so the
+    // prompts/resources list calls below are only made when the server
+    // actually implements them.
+    this._serverCapabilities =
+      initResult.capabilities && typeof initResult.capabilities === 'object'
+        ? initResult.capabilities
+        : {}
     this._notify('notifications/initialized')
     const toolsResult = await this._request('tools/list', {}, this._handshakeTimeoutMs)
     const tools = Array.isArray(toolsResult?.tools) ? toolsResult.tools : []
     this._tools = Object.freeze(tools.map((t) => Object.freeze({ ...t })))
+    // #6823: capability-gated prompts/list + resources/list. A failure here is
+    // NON-fatal — the server is otherwise usable for tools, so we log at debug
+    // and leave the list empty rather than failing the handshake into a restart
+    // loop (see _loadListing).
+    if (this._serverCapabilities.prompts) {
+      this._prompts = await this._loadListing('prompts/list', 'prompts')
+    }
+    if (this._serverCapabilities.resources) {
+      this._resources = await this._loadListing('resources/list', 'resources')
+    }
     this._restartAttempts = 0
     this._setState(MCP_STATES.READY)
     this.emit('ready', this._tools)
+  }
+
+  /**
+   * #6823: fetch a capability-gated list (prompts/list or resources/list),
+   * returning a frozen array. Errors (timeout, method-not-found from a server
+   * that advertised the capability but doesn't honour the request, malformed
+   * result) degrade to an empty list with a debug log — never a throw, so the
+   * handshake still reaches READY on the strength of tools alone.
+   */
+  async _loadListing(method, field) {
+    try {
+      const result = await this._request(method, {}, this._handshakeTimeoutMs)
+      const list = Array.isArray(result?.[field]) ? result[field] : []
+      return Object.freeze(list.map((item) => Object.freeze({ ...item })))
+    } catch (err) {
+      this._log.debug(`MCP server ${this.name}: ${method} failed: ${err?.message || err}`)
+      return []
+    }
+  }
+
+  /**
+   * #6823: fetch one prompt's messages (MCP `prompts/get`). `args` is the
+   * caller-supplied argument map; omitted from the request when empty so
+   * no-argument prompts stay first-class. Throws when the server is not READY
+   * or the JSON-RPC call errors (a missing required argument surfaces here).
+   */
+  async getPrompt(name, args, timeoutMs = DEFAULT_TOOL_CALL_TIMEOUT_MS) {
+    if (this._state !== MCP_STATES.READY) {
+      throw new Error(`MCP server ${this.name} not ready (state=${this._state})`)
+    }
+    const params = { name }
+    if (args && typeof args === 'object' && Object.keys(args).length > 0) {
+      params.arguments = args
+    }
+    return this._request('prompts/get', params, timeoutMs)
+  }
+
+  /**
+   * #6823: read one resource's contents (MCP `resources/read`). Throws when the
+   * server is not READY or the JSON-RPC call errors.
+   */
+  async readResource(uri, timeoutMs = DEFAULT_TOOL_CALL_TIMEOUT_MS) {
+    if (this._state !== MCP_STATES.READY) {
+      throw new Error(`MCP server ${this.name} not ready (state=${this._state})`)
+    }
+    return this._request('resources/read', { uri }, timeoutMs)
   }
 
   async callTool(toolName, args, timeoutMs = DEFAULT_TOOL_CALL_TIMEOUT_MS) {
@@ -342,6 +418,11 @@ export class MCPClient extends EventEmitter {
     if (!wasStartingOrReady) return
 
     this._tools = []
+    // #6823: a dead server contributes zero prompts/resources too, mirroring
+    // the tools reset so a crashed-then-restart-exhausted server cleanly
+    // disappears from the next turn's slash-command + resource surfaces.
+    this._prompts = []
+    this._resources = []
     this._restartAttempts += 1
     // #4453: gate on `>` (not `>=`) so the FULL RESTART_BACKOFF_MS schedule
     // is consumed before declaring DEAD. Pre-#4453 the gate fired on `>=`
@@ -492,6 +573,12 @@ export class MCPRemoteClient extends EventEmitter {
     this._headers = config.headers || {}
     this._state = MCP_STATES.IDLE
     this._tools = []
+    // #6823: MCP prompts + resources — same capability-gated lifecycle as the
+    // stdio client. Populated after tools/list, only when the server advertises
+    // the capability on initialize; cleared on death.
+    this._prompts = []
+    this._resources = []
+    this._serverCapabilities = null
     this._nextId = 1
     this._sessionId = null
     this._negotiatedProtocolVersion = null
@@ -513,6 +600,8 @@ export class MCPRemoteClient extends EventEmitter {
 
   get state() { return this._state }
   get tools() { return this._tools }
+  get prompts() { return this._prompts }
+  get resources() { return this._resources }
   get statusReason() { return this._statusReason }
 
   async start() {
@@ -564,14 +653,59 @@ export class MCPRemoteClient extends EventEmitter {
     }
   }
 
+  /**
+   * Dispatch a single JSON-RPC request over whichever transport this client
+   * negotiated (legacy SSE endpoint vs Streamable HTTP POST). Shared by
+   * callTool / getPrompt / readResource so the transport branch lives in one
+   * place (#6823).
+   */
+  _rpc(method, params, timeoutMs) {
+    return this._transportType === 'sse'
+      ? this._rpcViaEndpoint(method, params, timeoutMs)
+      : this._rpcPost(method, params, timeoutMs)
+  }
+
   async callTool(toolName, args, timeoutMs = DEFAULT_TOOL_CALL_TIMEOUT_MS) {
     if (this._state !== MCP_STATES.READY) {
       throw new Error(`MCP server ${this.name} not ready (state=${this._state})`)
     }
-    const params = { name: toolName, arguments: args || {} }
-    return this._transportType === 'sse'
-      ? this._rpcViaEndpoint('tools/call', params, timeoutMs)
-      : this._rpcPost('tools/call', params, timeoutMs)
+    return this._rpc('tools/call', { name: toolName, arguments: args || {} }, timeoutMs)
+  }
+
+  /** #6823: MCP `prompts/get` — parity with the stdio client's getPrompt. */
+  async getPrompt(name, args, timeoutMs = DEFAULT_TOOL_CALL_TIMEOUT_MS) {
+    if (this._state !== MCP_STATES.READY) {
+      throw new Error(`MCP server ${this.name} not ready (state=${this._state})`)
+    }
+    const params = { name }
+    if (args && typeof args === 'object' && Object.keys(args).length > 0) {
+      params.arguments = args
+    }
+    return this._rpc('prompts/get', params, timeoutMs)
+  }
+
+  /** #6823: MCP `resources/read` — parity with the stdio client's readResource. */
+  async readResource(uri, timeoutMs = DEFAULT_TOOL_CALL_TIMEOUT_MS) {
+    if (this._state !== MCP_STATES.READY) {
+      throw new Error(`MCP server ${this.name} not ready (state=${this._state})`)
+    }
+    return this._rpc('resources/read', { uri }, timeoutMs)
+  }
+
+  /**
+   * #6823: fetch a capability-gated list (prompts/list or resources/list) over
+   * the negotiated transport, degrading to an empty frozen array on any error —
+   * same non-fatal contract as the stdio client's _loadListing.
+   */
+  async _loadListing(method, field) {
+    try {
+      const result = await this._rpc(method, {}, this._handshakeTimeoutMs)
+      const list = Array.isArray(result?.[field]) ? result[field] : []
+      return Object.freeze(list.map((item) => Object.freeze({ ...item })))
+    } catch (err) {
+      this._log.debug(`MCP server ${this.name}: ${method} failed: ${err?.message || err}`)
+      return []
+    }
   }
 
   async destroy() {
@@ -614,6 +748,7 @@ export class MCPRemoteClient extends EventEmitter {
     await this._notifyPost('notifications/initialized')
     const toolsResult = await this._rpcPost('tools/list', {}, this._handshakeTimeoutMs)
     this._setTools(toolsResult)
+    await this._loadPromptsAndResources()
   }
 
   /** POST one JSON-RPC request; resolve its result from a JSON or SSE-upgraded response. */
@@ -773,6 +908,7 @@ export class MCPRemoteClient extends EventEmitter {
     await this._notifyViaEndpoint('notifications/initialized')
     const toolsResult = await this._rpcViaEndpoint('tools/list', {}, this._handshakeTimeoutMs)
     this._setTools(toolsResult)
+    await this._loadPromptsAndResources()
   }
 
   async _runSseDispatchLoop(body) {
@@ -936,6 +1072,11 @@ export class MCPRemoteClient extends EventEmitter {
     if (!initResult || typeof initResult !== 'object') {
       throw new Error('initialize returned non-object result')
     }
+    // #6823: capture advertised capabilities to gate prompts/resources fetches.
+    this._serverCapabilities =
+      initResult.capabilities && typeof initResult.capabilities === 'object'
+        ? initResult.capabilities
+        : {}
     const serverVersion = initResult.protocolVersion
     if (typeof serverVersion === 'string') {
       this._negotiatedProtocolVersion = serverVersion
@@ -948,6 +1089,18 @@ export class MCPRemoteClient extends EventEmitter {
   _setTools(toolsResult) {
     const tools = Array.isArray(toolsResult?.tools) ? toolsResult.tools : []
     this._tools = Object.freeze(tools.map((t) => Object.freeze({ ...t })))
+  }
+
+  /**
+   * #6823: capability-gated prompts/list + resources/list, run after tools/list
+   * in both remote handshakes. Uses the shared `_serverCapabilities` gate and
+   * the non-fatal `_loadListing` so a prompt/resource fetch failure never fails
+   * the connect.
+   */
+  async _loadPromptsAndResources() {
+    const caps = this._serverCapabilities || {}
+    if (caps.prompts) this._prompts = await this._loadListing('prompts/list', 'prompts')
+    if (caps.resources) this._resources = await this._loadListing('resources/list', 'resources')
   }
 
   _buildHeaders({ json = false, acceptStream = false } = {}) {
@@ -1000,6 +1153,10 @@ export class MCPRemoteClient extends EventEmitter {
 
   _toDead() {
     this._tools = []
+    // #6823: parity with the stdio client — a dead remote server contributes
+    // zero prompts/resources.
+    this._prompts = []
+    this._resources = []
     this._rejectAllPending(new Error('MCP remote client dead'))
     this._setState(MCP_STATES.DEAD)
     this.emit('dead')

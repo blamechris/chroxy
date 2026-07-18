@@ -251,4 +251,30 @@ describe('SlashCommandPicker', () => {
       expect(screen.queryByText('/learn')).not.toBeInTheDocument()
     })
   })
+
+  // #6823 — MCP-server prompts render with an "mcp" badge + "MCP" group header.
+  describe('MCP prompts', () => {
+    const withMcp = [
+      { name: 'commit', description: 'Create a git commit', source: 'project' as const },
+      { name: 'mcp__stub__greet', description: 'Greet someone', source: 'mcp' as const },
+    ]
+
+    it('renders MCP prompt rows with the mcp badge and MCP group header', () => {
+      render(
+        <SlashCommandPicker commands={withMcp} filter="" onSelect={vi.fn()} onClose={vi.fn()} />
+      )
+      expect(screen.getByText('/mcp__stub__greet')).toBeInTheDocument()
+      expect(screen.getByText('mcp')).toBeInTheDocument()
+      expect(screen.getByText('MCP')).toBeInTheDocument()
+    })
+
+    it('selecting an MCP prompt fires onSelect with its full namespaced name', () => {
+      const onSelect = vi.fn()
+      render(
+        <SlashCommandPicker commands={withMcp} filter="" onSelect={onSelect} onClose={vi.fn()} />
+      )
+      fireEvent.click(screen.getByText('/mcp__stub__greet'))
+      expect(onSelect).toHaveBeenCalledWith('mcp__stub__greet')
+    })
+  })
 })

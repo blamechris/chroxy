@@ -171,6 +171,7 @@ import type {
   SessionNotification,
   SessionState,
   FilePickerItem,
+  MCPResourceItem,
 } from './types';
 import { createEmptySessionState } from './utils';
 import { clearPersistedSession } from './persistence';
@@ -1397,6 +1398,36 @@ function applyRotatedTunnelUrlDashboard(
  */
 function handlePairingRefreshed(_msg: Record<string, unknown>, _get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
   set(state => ({ pairingRefreshedCount: (state.pairingRefreshedCount ?? 0) + 1 }));
+}
+
+/**
+ * `file_list` (#6823) — the `@`-picker data source. Populates `filePickerFiles`
+ * (project files) and `mcpResources` (resources from a BYOK session's connected
+ * MCP servers). The shared `handleFileList` parser returns both arrays; element
+ * shape is defensively re-mapped here to the concrete store types (older servers
+ * omit `resources`, which parses to an empty array).
+ */
+function handleFileList(msg: Record<string, unknown>, _get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const { files, resources } = sharedFileList(msg);
+  const filePickerFiles: FilePickerItem[] = files
+    .map((f) => f as Record<string, unknown>)
+    .filter((f) => typeof f.path === 'string')
+    .map((f) => ({
+      path: f.path as string,
+      type: 'file',
+      size: typeof f.size === 'number' ? f.size : null,
+    }));
+  const mcpResources: MCPResourceItem[] = resources
+    .map((r) => r as Record<string, unknown>)
+    .filter((r) => typeof r.uri === 'string' && (r.uri as string).length > 0)
+    .map((r) => ({
+      uri: r.uri as string,
+      name: typeof r.name === 'string' && r.name ? (r.name as string) : (r.uri as string),
+      description: typeof r.description === 'string' ? (r.description as string) : undefined,
+      mimeType: typeof r.mimeType === 'string' ? (r.mimeType as string) : undefined,
+      server: typeof r.server === 'string' ? (r.server as string) : '',
+    }));
+  set({ filePickerFiles, mcpResources });
 }
 
 // web_feature_status + web_task_list migrated to the shared dispatch table
@@ -3422,6 +3453,9 @@ const HANDLERS: Record<string, Handler> = {
   // raw / raw_background / terminal_output — migrated to the shared dispatch
   // table (#6449 slice 1; runDispatch handles them before this HANDLERS map).
   terminal_size: handleTerminalSize,
+  // #6823: `@`-picker data source (files + MCP resources). Not in the shared
+  // store-core dispatch table, so it's handled here in the dashboard's map.
+  file_list: handleFileList,
   token_rotated: handleTokenRotated,
   pairing_refreshed: handlePairingRefreshed,
   // checkpoint_restored — migrated to the shared dispatch table (#5618; runDispatch).

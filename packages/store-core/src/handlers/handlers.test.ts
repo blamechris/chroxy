@@ -3862,26 +3862,39 @@ describe('handleWriteFileResult', () => {
 describe('handleFileList', () => {
   it('returns files array when valid', () => {
     const files = [{ path: 'a.ts' }, { path: 'b.ts' }]
-    expect(handleFileList({ files })).toEqual({ files })
+    expect(handleFileList({ files })).toEqual({ files, resources: [] })
   })
 
   it('returns empty files array verbatim', () => {
-    expect(handleFileList({ files: [] })).toEqual({ files: [] })
+    expect(handleFileList({ files: [] })).toEqual({ files: [], resources: [] })
   })
 
   it('returns empty array when files is missing (matches dashboard default)', () => {
-    expect(handleFileList({})).toEqual({ files: [] })
+    expect(handleFileList({})).toEqual({ files: [], resources: [] })
   })
 
   it('returns empty array when files is non-array (matches dashboard default)', () => {
-    expect(handleFileList({ files: 'oops' })).toEqual({ files: [] })
-    expect(handleFileList({ files: { x: 1 } })).toEqual({ files: [] })
-    expect(handleFileList({ files: null })).toEqual({ files: [] })
+    expect(handleFileList({ files: 'oops' })).toEqual({ files: [], resources: [] })
+    expect(handleFileList({ files: { x: 1 } })).toEqual({ files: [], resources: [] })
+    expect(handleFileList({ files: null })).toEqual({ files: [], resources: [] })
   })
 
   it('ignores session id on message (no guard)', () => {
     const files = [{ path: 'a.ts' }]
-    expect(handleFileList({ sessionId: 'whatever', files })).toEqual({ files })
+    expect(handleFileList({ sessionId: 'whatever', files })).toEqual({ files, resources: [] })
+  })
+
+  // #6823 — MCP resources ride alongside files in the file_list response.
+  it('extracts the resources array when present', () => {
+    const files = [{ path: 'a.ts' }]
+    const resources = [{ uri: 'file:///notes.md', name: 'Notes', server: 'stub' }]
+    expect(handleFileList({ files, resources })).toEqual({ files, resources })
+  })
+
+  it('defaults resources to [] when missing or non-array (older servers)', () => {
+    expect(handleFileList({ files: [] })).toEqual({ files: [], resources: [] })
+    expect(handleFileList({ files: [], resources: 'oops' })).toEqual({ files: [], resources: [] })
+    expect(handleFileList({ files: [], resources: null })).toEqual({ files: [], resources: [] })
   })
 })
 

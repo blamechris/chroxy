@@ -34,7 +34,7 @@ import { translateSdkEvent } from './byok-event-translator.js'
 import { BUILTIN_TOOLS, TASK_PERMISSION_MODE_LIST, TASK_PERMISSION_MODE_RANK } from './byok-tools.js'
 import { executeBuiltinTool } from './byok-tool-executor.js'
 import { loadClaudeMcpConfig, toMcpServerMetadata } from './byok-mcp-config.js'
-import { MCPFleet, MCP_TOOL_PREFIX } from './byok-mcp-fleet.js'
+import { MCPFleet, MCP_TOOL_PREFIX, parseMcpToolName } from './byok-mcp-fleet.js'
 import { getSubagentProfile, SUBAGENT_PROFILE_NAMES } from './byok-subagent-profiles.js'
 
 const log = createLogger('byok-session')
@@ -517,7 +517,30 @@ export class ClaudeByokSession extends BaseSession {
       return
     }
 
+    // Claim busy up front so the async MCP-prompt resolution below can't race a
+    // second concurrent send (isRunning stays true across the await window).
     this._isBusy = true
+
+    // #6823: MCP prompt-as-slash-command interception. A leading
+    // `/mcp__<server>__<prompt>` that matches a connected MCP server's prompt
+    // is expanded via `prompts/get` and the returned messages become the user
+    // turn. On a resolution failure (bad args, dead server) we release busy and
+    // surface an error WITHOUT starting a turn. Plain text and non-MCP slash
+    // commands (`/clear`, etc.) pass through untouched.
+    let promptText = typeof prompt === 'string' ? prompt : String(prompt ?? '')
+    const mcpPromptMatch = this._matchMcpPromptCommand(promptText)
+    if (mcpPromptMatch) {
+      try {
+        promptText = await this._resolveMcpPromptToText(mcpPromptMatch)
+      } catch (err) {
+        this._isBusy = false
+        this.emit('error', {
+          message: `MCP prompt /${mcpPromptMatch.prefixedName} failed: ${err?.message || String(err)}`,
+        })
+        return
+      }
+    }
+
     this._messageCounter += 1
     const messageId = `${this._messageIdPrefix}-${this._messageCounter}`
     this._currentMessageId = messageId
@@ -536,8 +559,10 @@ export class ClaudeByokSession extends BaseSession {
     // Build the user message. On the very first turn, prepend any skills
     // text from BaseSession._buildPrependPrompt(). Subsequent turns are
     // plain prompt text — skills that targeted `system` ride on the
-    // rebuilt systemPrompt instead.
-    let userText = typeof prompt === 'string' ? prompt : String(prompt ?? '')
+    // rebuilt systemPrompt instead. #6823: `promptText` is the MCP-prompt-
+    // expanded text when the input was a `/mcp__server__prompt` command, else
+    // the raw prompt.
+    let userText = promptText
     if (this._history.length === 0) {
       const prepend = typeof this._buildPrependPrompt === 'function'
         ? this._buildPrependPrompt()
@@ -1836,6 +1861,121 @@ export class ClaudeByokSession extends BaseSession {
     } catch (err) {
       return { content: `MCP ${toolName} failed: ${err?.message || String(err)}`, isError: true }
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // #6823: MCP prompts (as slash commands) + resources (in the @-picker).
+  // -------------------------------------------------------------------------
+
+  /**
+   * Slash-command entries for every connected MCP server's prompts, namespaced
+   * `mcp__<server>__<prompt>`. Merged into the session's slash-command surface
+   * by the `list_slash_commands` handler + the connect-time auth_bootstrap
+   * burst, so they render in SlashCommandPicker beside built-ins and markdown
+   * skills. `source: 'mcp'` lets the picker badge/group them.
+   */
+  getMcpPromptCommands() {
+    if (!this._mcpFleet) return []
+    return this._mcpFleet.prompts.map((p) => ({
+      name: p.name,
+      description: typeof p.description === 'string' ? p.description : '',
+      source: 'mcp',
+    }))
+  }
+
+  /**
+   * Read-only listing of every connected MCP server's resources for the
+   * dashboard `@`-mention picker. Each entry carries the owning `server` so a
+   * later read (`readMcpResource`) can route back by (server, uri).
+   */
+  getMcpResources() {
+    if (!this._mcpFleet) return []
+    return this._mcpFleet.resources
+      .map((r) => ({
+        uri: typeof r.uri === 'string' ? r.uri : '',
+        name: typeof r.name === 'string' && r.name ? r.name : (typeof r.uri === 'string' ? r.uri : ''),
+        description: typeof r.description === 'string' ? r.description : undefined,
+        mimeType: typeof r.mimeType === 'string' ? r.mimeType : undefined,
+        server: r._mcpServer,
+      }))
+      .filter((r) => r.uri)
+  }
+
+  /**
+   * Read one MCP resource's contents (`resources/read`) routed by (server, uri).
+   * Passthrough to the fleet; throws when no fleet exists or the read fails.
+   */
+  async readMcpResource(serverName, uri) {
+    if (!this._mcpFleet) throw new Error('No MCP servers configured for this session')
+    return this._mcpFleet.readResource(serverName, uri, this._mcpToolCallTimeoutMs ?? undefined)
+  }
+
+  /**
+   * Parse a user input as an MCP prompt slash command. Returns a match
+   * descriptor when the input is a leading `/mcp__<server>__<prompt>` that a
+   * connected server actually advertises, else null (so plain text and non-MCP
+   * slash commands like `/clear` pass through unchanged).
+   */
+  _matchMcpPromptCommand(text) {
+    if (!this._mcpFleet || typeof text !== 'string') return null
+    if (!text.startsWith('/')) return null
+    const body = text.slice(1)
+    const wsIdx = body.search(/\s/)
+    const name = wsIdx === -1 ? body : body.slice(0, wsIdx)
+    const rest = wsIdx === -1 ? '' : body.slice(wsIdx + 1).trim()
+    // Must parse as an mcp__server__name AND match a live prompt — otherwise a
+    // stray `/mcp__whatever` typed by the user stays literal input.
+    if (!parseMcpToolName(name)) return null
+    const promptDef = this._mcpFleet.prompts.find((p) => p.name === name)
+    if (!promptDef) return null
+    return { prefixedName: name, rest, promptDef }
+  }
+
+  /**
+   * Resolve an MCP prompt command to the text injected as the user turn. Calls
+   * `prompts/get` (with best-effort argument mapping) and flattens the returned
+   * messages into text. No-argument prompts are first-class; when the prompt
+   * declares arguments and the user supplied trailing text, that raw text maps
+   * to the FIRST declared argument (a documented single-arg convenience — see
+   * PR #6823). Throws (surfaced to the user) when the server errors or the
+   * prompt yields no injectable text.
+   */
+  async _resolveMcpPromptToText(match) {
+    const declared = Array.isArray(match.promptDef?.arguments) ? match.promptDef.arguments : []
+    let args
+    if (declared.length > 0 && match.rest && typeof declared[0]?.name === 'string') {
+      args = { [declared[0].name]: match.rest }
+    }
+    const result = await this._mcpFleet.getPrompt(
+      match.prefixedName,
+      args,
+      this._mcpToolCallTimeoutMs ?? undefined,
+    )
+    const text = this._extractPromptMessagesText(result)
+    if (!text) throw new Error('prompt returned no injectable text content')
+    return text
+  }
+
+  /**
+   * Flatten an MCP `prompts/get` result's `messages[]` into a single string.
+   * Handles the spec's `content` shapes: a bare string, a single
+   * `{ type:'text', text }` object, or an array of content blocks. Non-text
+   * blocks (image/resource) are skipped — chroxy injects prompts as a text
+   * user turn.
+   */
+  _extractPromptMessagesText(result) {
+    const messages = Array.isArray(result?.messages) ? result.messages : []
+    const parts = []
+    for (const m of messages) {
+      const c = m?.content
+      if (typeof c === 'string') { parts.push(c); continue }
+      if (Array.isArray(c)) {
+        for (const block of c) if (typeof block?.text === 'string') parts.push(block.text)
+        continue
+      }
+      if (c && typeof c === 'object' && typeof c.text === 'string') parts.push(c.text)
+    }
+    return parts.join('\n\n').trim()
   }
 
   /**

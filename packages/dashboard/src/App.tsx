@@ -225,6 +225,7 @@ export function App() {
   const restartEtaMs = useConnectionStore(s => s.restartEtaMs)
   const restartingSince = useConnectionStore(s => s.restartingSince)
   const filePickerFiles = useConnectionStore(s => s.filePickerFiles)
+  const mcpResources = useConnectionStore(s => s.mcpResources)
   const sessionNotifications = useConnectionStore(s => s.sessionNotifications)
   // #5510 (epic #5509): pairing-approval primitive — host-surface pending queue.
   const pendingPairRequests = useConnectionStore(s => s.pendingPairRequests)
@@ -498,7 +499,9 @@ export function App() {
   // reads this same ordering, so selection stays coherent across the grouped
   // display.
   const orderedSlashCommands = useMemo(() => {
-    const rank = (s: string) => (s === 'builtin' ? 0 : s === 'project' ? 1 : 2)
+    // #6823: MCP-server prompts (source 'mcp') sort last, after user skills —
+    // matches the server's computeSlashCommands ordering.
+    const rank = (s: string) => (s === 'builtin' ? 0 : s === 'project' ? 1 : s === 'user' ? 2 : 3)
     return [...slashCommands].sort((a, b) => rank(a.source) - rank(b.source))
   }, [slashCommands])
 
@@ -2544,6 +2547,7 @@ export function App() {
               controlledValue={inputDraftValue}
               onValueChange={handleDraftChange}
               filePickerFiles={filePickerFiles}
+              mcpResources={mcpResources}
               onFileTrigger={fetchFileList}
               attachments={fileAttachments}
               onRemoveAttachment={handleRemoveAttachment}

@@ -45,6 +45,12 @@ function mcpToolName(serverName, toolName) {
   return `${MCP_TOOL_PREFIX}${serverName}__${toolName}`
 }
 
+// #6823: prompts share the tools' `mcp__<server>__<name>` namespace so the
+// slash-command surface (`/mcp__server__prompt`) and the tool router use one
+// parser (parseMcpToolName). Same shape, distinct call — keep a named alias so
+// the intent reads clearly at the call site.
+const mcpPromptName = mcpToolName
+
 export class MCPFleet {
   constructor(configs, opts = {}) {
     // #4457: build a per-client trust gate when a PermissionManager is
@@ -164,6 +170,82 @@ export class MCPFleet {
       }
     }
     return out
+  }
+
+  /**
+   * #6823: aggregate MCP prompts across READY servers, namespaced
+   * `mcp__<server>__<prompt>` so they slot into the slash-command surface next
+   * to built-ins. Dead servers contribute zero (state gate), matching `tools`.
+   * Each entry keeps the server's `description` + `arguments` (for prompts/get
+   * argument mapping) plus the internal `_mcpServer` / `_mcpOriginalName`
+   * routing markers.
+   */
+  get prompts() {
+    const out = []
+    for (const client of this._clients) {
+      if (client.state !== MCP_STATES.READY) continue
+      for (const prompt of client.prompts) {
+        out.push({
+          ...prompt,
+          name: mcpPromptName(client.name, prompt.name),
+          _mcpServer: client.name,
+          _mcpOriginalName: prompt.name,
+        })
+      }
+    }
+    return out
+  }
+
+  /**
+   * #6823: aggregate MCP resources across READY servers. Resources are
+   * identified by `uri` (not name), so routing a read back to the owning server
+   * needs the `_mcpServer` marker rather than a namespaced name. Kept flat +
+   * read-only for the dashboard `@`-picker.
+   */
+  get resources() {
+    const out = []
+    for (const client of this._clients) {
+      if (client.state !== MCP_STATES.READY) continue
+      for (const resource of client.resources) {
+        out.push({
+          ...resource,
+          _mcpServer: client.name,
+        })
+      }
+    }
+    return out
+  }
+
+  /**
+   * #6823: fetch one prompt's messages by its namespaced `mcp__<server>__<name>`
+   * name. Parses + routes exactly like callTool. Throws on a malformed name, an
+   * unknown server, or a non-READY client; JSON-RPC errors (e.g. a missing
+   * required argument) propagate from the client.
+   */
+  async getPrompt(prefixedName, args, timeoutMs = DEFAULT_TOOL_CALL_TIMEOUT_MS) {
+    const parsed = parseMcpToolName(prefixedName)
+    if (!parsed) throw new Error(`malformed MCP prompt name: ${prefixedName}`)
+    const client = this._clients.find((c) => c.name === parsed.serverName)
+    if (!client) throw new Error(`MCP server not found: ${parsed.serverName}`)
+    if (client.state !== MCP_STATES.READY) {
+      throw new Error(`MCP server ${parsed.serverName} not ready (state=${client.state})`)
+    }
+    // parseMcpToolName names the second segment `toolName`; here it's the prompt.
+    return client.getPrompt(parsed.toolName, args, timeoutMs)
+  }
+
+  /**
+   * #6823: read one resource's contents. Routed by (server, uri) — the server
+   * comes from the aggregated resource entry's `_mcpServer` marker, the uri is
+   * the server's own identifier.
+   */
+  async readResource(serverName, uri, timeoutMs = DEFAULT_TOOL_CALL_TIMEOUT_MS) {
+    const client = this._clients.find((c) => c.name === serverName)
+    if (!client) throw new Error(`MCP server not found: ${serverName}`)
+    if (client.state !== MCP_STATES.READY) {
+      throw new Error(`MCP server ${serverName} not ready (state=${client.state})`)
+    }
+    return client.readResource(uri, timeoutMs)
   }
 
   /**

@@ -454,6 +454,19 @@ export interface FilePickerItem {
   size: number | null;
 }
 
+/**
+ * #6823 — an MCP-server resource surfaced in the `@`-picker for BYOK sessions.
+ * `server` routes a later read back to the owning MCP server; `uri` is that
+ * server's own identifier for the resource.
+ */
+export interface MCPResourceItem {
+  uri: string;
+  name: string;
+  description?: string;
+  mimeType?: string;
+  server: string;
+}
+
 /** A registered remote Chroxy server */
 export interface ServerEntry {
   /** Unique ID for this server (stable across renames) */
@@ -1312,6 +1325,10 @@ export interface ConnectionState {
 
   // File picker items from list_files
   filePickerFiles: FilePickerItem[] | null;
+  // #6823 — MCP-server resources from the same list_files/file_list response,
+  // surfaced in the `@`-picker for BYOK sessions. Null until the first
+  // file_list arrives; empty array for non-BYOK sessions.
+  mcpResources: MCPResourceItem[] | null;
   // #6473 — a Cmd+P quick-open request the FileBrowserPanel watches: open this
   // path in the viewer. The nonce lets repeated opens of the same path re-fire.
   fileBrowserPendingOpen: { path: string; line?: number; nonce: number } | null;

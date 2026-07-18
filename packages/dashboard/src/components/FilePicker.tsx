@@ -1,10 +1,12 @@
 /**
  * FilePicker — dropdown for selecting files from the project tree.
  *
- * Triggered by `@` in InputBar. Displays files from `list_files` WS response.
+ * Triggered by `@` in InputBar. Displays files from `list_files` WS response,
+ * plus (#6823) any MCP-server resources the session exposes as a distinct
+ * "MCP Resources" section — selecting a resource inserts its URI.
  */
 import { useMemo, useRef, useEffect } from 'react'
-import type { FilePickerItem } from '../store/types'
+import type { FilePickerItem, MCPResourceItem } from '../store/types'
 
 export type { FilePickerItem }
 
@@ -14,6 +16,10 @@ export interface FilePickerProps {
   onSelect: (path: string) => void
   onClose: () => void
   selectedIndex?: number
+  /** #6823 — MCP-server resources surfaced alongside project files. */
+  resources?: MCPResourceItem[] | null
+  /** #6823 — called with the resource URI when a resource row is chosen. */
+  onSelectResource?: (uri: string) => void
 }
 
 function formatSize(bytes: number | null): string {
@@ -24,7 +30,7 @@ function formatSize(bytes: number | null): string {
 }
 
 export function FilePicker({
-  files, filter, onSelect, onClose, selectedIndex = 0,
+  files, filter, onSelect, onClose, selectedIndex = 0, resources, onSelectResource,
 }: FilePickerProps) {
   const ref = useRef<HTMLDivElement>(null)
 
@@ -53,7 +59,15 @@ export function FilePicker({
     return files.filter(f => f.path.toLowerCase().includes(lower))
   }, [files, filter])
 
-  if (filtered === null) {
+  // #6823 — resources filtered by the same substring on uri OR name.
+  const filteredResources = useMemo(() => {
+    const list = Array.isArray(resources) ? resources : []
+    if (!filter) return list
+    const lower = filter.toLowerCase()
+    return list.filter(r => r.uri.toLowerCase().includes(lower) || r.name.toLowerCase().includes(lower))
+  }, [resources, filter])
+
+  if (filtered === null && filteredResources.length === 0) {
     return (
       <div ref={ref} className="file-picker" data-testid="file-picker">
         <div className="file-picker-empty">Loading files...</div>
@@ -61,11 +75,15 @@ export function FilePicker({
     )
   }
 
+  const filesList = filtered ?? []
   const DISPLAY_CAP = 200
-  const overflow = filtered.length > DISPLAY_CAP ? filtered.length - DISPLAY_CAP : 0
-  const display = overflow > 0 ? filtered.slice(0, DISPLAY_CAP) : filtered
+  const overflow = filesList.length > DISPLAY_CAP ? filesList.length - DISPLAY_CAP : 0
+  const display = overflow > 0 ? filesList.slice(0, DISPLAY_CAP) : filesList
+  // Resource rows continue the flat keyboard-nav index after ALL files (the
+  // uncapped count), matching InputBar's index math so the highlight lines up.
+  const resourceBase = filesList.length
 
-  if (filtered.length === 0) {
+  if (filesList.length === 0 && filteredResources.length === 0) {
     return (
       <div ref={ref} className="file-picker" data-testid="file-picker">
         <div className="file-picker-empty">No files found</div>
@@ -90,10 +108,31 @@ export function FilePicker({
             )}
           </div>
         ))}
+        {overflow > 0 && (
+          <div className="file-picker-overflow">{overflow} more files...</div>
+        )}
+        {filteredResources.length > 0 && (
+          <div className="file-picker-group" role="presentation" data-testid="file-picker-resources-group">
+            MCP Resources
+          </div>
+        )}
+        {filteredResources.map((res, ri) => {
+          const idx = resourceBase + ri
+          return (
+            <div
+              key={`mcp-resource:${res.server}:${res.uri}`}
+              role="option"
+              aria-selected={idx === selectedIndex}
+              className={`file-picker-item${idx === selectedIndex ? ' selected' : ''}`}
+              data-testid="file-picker-resource"
+              onClick={() => onSelectResource?.(res.uri)}
+            >
+              <span className="file-picker-path">{res.name}</span>
+              <span className="file-picker-resource-meta">{res.server}</span>
+            </div>
+          )
+        })}
       </div>
-      {overflow > 0 && (
-        <div className="file-picker-overflow">{overflow} more files...</div>
-      )}
     </div>
   )
 }

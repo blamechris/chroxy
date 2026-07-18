@@ -13,6 +13,8 @@ const SLASH_GROUP_LABEL: Record<string, string> = {
   builtin: 'Built-in',
   project: 'Project',
   user: 'User',
+  // #6823: prompts from connected MCP servers (`/mcp__server__prompt`).
+  mcp: 'MCP',
 }
 
 export interface SlashCommandPickerProps {
@@ -97,6 +99,12 @@ export function SlashCommandPicker({
                 )}
                 {cmd.source === 'user' && (
                   <span className="slash-picker-badge">user</span>
+                )}
+                {/* #6823: MCP-server prompt — badge it so users can tell a
+                    prompt sourced from a connected MCP server apart from a
+                    provider built-in or a local markdown skill. */}
+                {cmd.source === 'mcp' && (
+                  <span className="slash-picker-badge slash-picker-badge-mcp">mcp</span>
                 )}
               </div>
             </Fragment>

@@ -3,6 +3,13 @@ import { createInterface } from 'node:readline'
 
 const tools = JSON.parse(process.env.MCP_STUB_TOOLS || '[{"name":"echo","description":"echo input","inputSchema":{"type":"object"}}]')
 
+// #6823: prompts/resources are OPT-IN. When MCP_STUB_PROMPTS / MCP_STUB_RESOURCES
+// are set, the stub advertises the matching capability on initialize and serves
+// the list/get/read methods. Unset → the capability is absent, so a spec-
+// compliant client never calls prompts/list or resources/list (graceful skip).
+const prompts = process.env.MCP_STUB_PROMPTS ? JSON.parse(process.env.MCP_STUB_PROMPTS) : null
+const resources = process.env.MCP_STUB_RESOURCES ? JSON.parse(process.env.MCP_STUB_RESOURCES) : null
+
 function reply(id, result) {
   process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, result }) + '\n')
 }
@@ -28,7 +35,11 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     // #4452: allow the stub to advertise a different protocolVersion than
     // the client requested, so tests can exercise the negotiation-warn branch.
     const serverProtocolVersion = process.env.MCP_STUB_PROTOCOL_VERSION || '2024-11-05'
-    reply(msg.id, { protocolVersion: serverProtocolVersion, capabilities: { tools: {} }, serverInfo: { name: 'mcp-stub', version: '0.1.0' } })
+    // #6823: advertise prompts/resources capabilities only when configured.
+    const capabilities = { tools: {} }
+    if (prompts) capabilities.prompts = {}
+    if (resources) capabilities.resources = {}
+    reply(msg.id, { protocolVersion: serverProtocolVersion, capabilities, serverInfo: { name: 'mcp-stub', version: '0.1.0' } })
     // #4455: optionally emit an orphan response (id the client never sent)
     // alongside the real initialize reply. The client should silently log
     // and drop it.
@@ -71,6 +82,35 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       return
     }
     reply(msg.id, { content: [{ type: 'text', text: JSON.stringify(args) }] })
+  } else if (msg.method === 'prompts/list') {
+    // #6823: a server that advertised the prompts capability but errors on
+    // list (or hangs) — the client must degrade to an empty list, not crash.
+    if (process.env.MCP_STUB_PROMPTS_LIST_HANG === '1') return
+    if (process.env.MCP_STUB_PROMPTS_LIST_ERROR === '1') {
+      replyError(msg.id, -32601, 'stub: prompts/list not supported')
+      return
+    }
+    reply(msg.id, { prompts: prompts || [] })
+  } else if (msg.method === 'prompts/get') {
+    // Echo the requested name + arguments so tests can assert prompts/get
+    // round-trips the argument map. A single text message is the injected turn.
+    const name = msg.params?.name
+    const promptArgs = msg.params?.arguments ?? {}
+    reply(msg.id, {
+      description: `stub prompt ${name}`,
+      messages: [
+        { role: 'user', content: { type: 'text', text: `PROMPT:${name} ARGS:${JSON.stringify(promptArgs)}` } },
+      ],
+    })
+  } else if (msg.method === 'resources/list') {
+    if (process.env.MCP_STUB_RESOURCES_LIST_ERROR === '1') {
+      replyError(msg.id, -32601, 'stub: resources/list not supported')
+      return
+    }
+    reply(msg.id, { resources: resources || [] })
+  } else if (msg.method === 'resources/read') {
+    const uri = msg.params?.uri
+    reply(msg.id, { contents: [{ uri, mimeType: 'text/plain', text: `CONTENT:${uri}` }] })
   }
 })
 

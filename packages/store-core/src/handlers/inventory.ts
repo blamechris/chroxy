@@ -116,15 +116,17 @@ export function handleProviderList(
 }
 
 /**
- * Parse a `file_list` message into the replacement array.
+ * Parse a `file_list` message into the replacement arrays.
  *
  * Dashboard-only consumer today. No session-id guard. Always returns the
- * `{ files }` shape — defaulting to `[]` when the field is missing or
- * non-array (matches the dashboard's prior inline `Array.isArray(...) ? ... : []`).
+ * `{ files, resources }` shape — each defaulting to `[]` when the field is
+ * missing or non-array. `resources` (#6823) carries MCP-server resources for
+ * the `@`-picker; empty for non-BYOK sessions and older servers.
  */
-export function handleFileList(msg: Record<string, unknown>): { files: unknown[] } {
+export function handleFileList(msg: Record<string, unknown>): { files: unknown[]; resources: unknown[] } {
   const files = parseUnknownArrayField(msg, 'files')
-  return { files }
+  const resources = parseUnknownArrayField(msg, 'resources')
+  return { files, resources }
 }
 
 // ---------------------------------------------------------------------------
