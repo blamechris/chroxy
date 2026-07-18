@@ -338,6 +338,7 @@ export function ToolBubble({ toolName, toolUseId, input, inputPartial, result, s
                   className="tool-result-image-btn"
                   data-testid={`tool-result-image-${toolUseId}-${i}`}
                   onClick={() => setLightboxIndex(i)}
+                  aria-haspopup="dialog"
                   aria-label={
                     resultImages!.length > 1
                       ? `View image ${i + 1} of ${resultImages!.length}`

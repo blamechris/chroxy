@@ -258,6 +258,7 @@ function ToolGroupEntry({
                     className="tool-result-image-btn"
                     data-testid={`tool-group-entry-image-${message.id}-${i}`}
                     onClick={() => setLightboxIndex(i)}
+                    aria-haspopup="dialog"
                     aria-label={
                       message.toolResultImages!.length > 1
                         ? `View image ${i + 1} of ${message.toolResultImages!.length}`

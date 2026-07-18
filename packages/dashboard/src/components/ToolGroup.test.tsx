@@ -559,6 +559,9 @@ describe('ToolGroup', () => {
         'src',
         `data:${images[0].mediaType};base64,${images[0].data}`,
       )
+      // The thumbnail opens the ImageLightbox modal — announce that to AT
+      // (matches the dashboard's modal-trigger pattern).
+      expect(thumbBtn).toHaveAttribute('aria-haspopup', 'dialog')
     })
 
     it('renders one thumbnail per image for a multi-image result', () => {
@@ -567,6 +570,9 @@ describe('ToolGroup', () => {
       fireEvent.click(screen.getByTestId('tool-group-entry-row-1'))
       expect(screen.getByTestId('tool-group-entry-image-1-0')).toBeInTheDocument()
       expect(screen.getByTestId('tool-group-entry-image-1-1')).toBeInTheDocument()
+      // Every thumbnail in the grid is a modal trigger.
+      expect(screen.getByTestId('tool-group-entry-image-1-0')).toHaveAttribute('aria-haspopup', 'dialog')
+      expect(screen.getByTestId('tool-group-entry-image-1-1')).toHaveAttribute('aria-haspopup', 'dialog')
     })
 
     it('still shows the Result text section when a tool has both text and images', () => {

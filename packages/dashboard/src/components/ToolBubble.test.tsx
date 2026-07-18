@@ -422,6 +422,9 @@ describe('ToolBubble', () => {
       const thumbBtn = screen.getByTestId('tool-result-image-tu-img-1-0')
       const img = thumbBtn.querySelector('img')
       expect(img).toHaveAttribute('src', `data:${images[0].mediaType};base64,${images[0].data}`)
+      // The thumbnail opens the ImageLightbox modal — announce that to AT
+      // (matches the dashboard's modal-trigger pattern).
+      expect(thumbBtn).toHaveAttribute('aria-haspopup', 'dialog')
     })
 
     it('renders one thumbnail per image for a multi-image result (grid)', () => {
@@ -435,6 +438,9 @@ describe('ToolBubble', () => {
       fireEvent.click(screen.getByRole('button'))
       expect(screen.getByTestId('tool-result-image-tu-img-2-0')).toBeInTheDocument()
       expect(screen.getByTestId('tool-result-image-tu-img-2-1')).toBeInTheDocument()
+      // Every thumbnail in the grid is a modal trigger.
+      expect(screen.getByTestId('tool-result-image-tu-img-2-0')).toHaveAttribute('aria-haspopup', 'dialog')
+      expect(screen.getByTestId('tool-result-image-tu-img-2-1')).toHaveAttribute('aria-haspopup', 'dialog')
     })
 
     it('does not render an image grid when resultImages is absent', () => {
