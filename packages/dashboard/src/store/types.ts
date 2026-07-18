@@ -299,6 +299,17 @@ export interface PermissionRule {
  * review): a future server-side audit kind must not fail the payload parse, and
  * the view renders unknown kinds with a generic label. Rendered read-only in the
  * SettingsPanel "Permission history" view.
+ *
+ * #6830 — `decision` entries are enriched with `tool` (the tool the decision
+ * applied to) and, for a durable grant, `persist:'project'` + `projectKey` (the
+ * project cwd the rule is scoped to). Set on an `allowAlways` that actually
+ * persisted a project rule, and on a `reason:'persisted_rule'` entry — a
+ * durable rule silently auto-approving a tool call with NO prompt ever shown
+ * (clientId is null, no requestId). Persisted-rule entries are COALESCED
+ * server-side per (sessionId, tool, projectKey): `count` is how many
+ * approvals folded into the entry, `firstAt` the first one's time,
+ * `timestamp` the latest (PR #6842 review — keeps the audit ring from being
+ * flooded at tool-call speed).
  */
 export interface PermissionAuditEntry {
   type: string;
@@ -314,6 +325,11 @@ export interface PermissionAuditEntry {
   requestId?: string;
   decision?: string;
   reason?: string;
+  tool?: string | null;
+  persist?: string | null;
+  projectKey?: string | null;
+  count?: number;
+  firstAt?: number;
 }
 
 /**

@@ -7,6 +7,14 @@ import { createLogger } from './logger.js'
 // redaction.js (a leaf module — no import cycle / HTTP-handler weight).
 import { sanitizeToolInput, redactValue } from './redaction.js'
 import { redactMcpUrl } from './byok-mcp-config.js'
+// #6842 review (Copilot) — audit entries must carry the store's NORMALIZED
+// project key, not the raw session cwd, or a relative / `..`-laden cwd
+// produces entries that never correlate with the persisted rule they audit.
+// Import is cycle-safe: permission-rule-store.js imports our ELIGIBLE_TOOLS /
+// NEVER_AUTO_ALLOW consts, but both modules only touch each other's exports
+// inside function bodies (call time), never at module evaluation, and
+// normalizeProjectKey is a hoisted function declaration.
+import { normalizeProjectKey } from './permission-rule-store.js'
 
 const _fallbackLog = createLogger('permission-manager')
 
@@ -216,6 +224,15 @@ export class PermissionManager extends EventEmitter {
     // on construction (below) so a prior grant takes effect without re-prompting
     // after a daemon restart.
     this._ruleStore = ruleStore || null
+    // #6830 (PR #6842 review) — direct audit callback for persisted-rule
+    // auto-approves. Deliberately NOT an EventEmitter event: emitting
+    // `permission_resolved` here would ride wirePermissionManager →
+    // SessionManager → ws-forwarding → broadcastToSession, spamming every
+    // subscribed client with a wire message per rule-matched tool call. The
+    // sink is a plain function the WsServer wires straight into its
+    // PermissionAuditLog (see ws-server.js _attachPermissionAuditSink), so
+    // the signal stays in the audit lane only. Null until wired.
+    this._auditSink = null
 
     this._pendingPermissions = new Map() // requestId -> { resolve, input }
     this._permissionTimers = new Map()   // requestId -> timer
@@ -351,6 +368,70 @@ export class PermissionManager extends EventEmitter {
   }
 
   /**
+   * #6830 — was the 'allow' decision _matchesRule just returned for `toolName`
+   * SOURCED from a durable project-scoped rule (as opposed to a session rule)?
+   * Mirrors _matchesRule's own precedence (session rules are checked first and
+   * shadow a persistent rule for the same tool) WITHOUT changing _matchesRule's
+   * tested return contract (a plain 'allow'|'deny'|null string, asserted
+   * directly in permission-manager.test.js). Used only to decide whether a
+   * silent auto-approve needs an audit-only signal (see
+   * _auditPersistedRuleAutoApprove) — a session-rule-sourced allow is an
+   * explicit, non-durable decision the user already made this session and
+   * needs no extra trail beyond what's already logged for it.
+   * @param {string} toolName
+   * @returns {boolean}
+   */
+  _persistentRuleSourced(toolName) {
+    if (this._sessionRules.some((r) => r.tool === toolName)) return false
+    return this._persistentRules.some((r) => r.tool === toolName && r.decision === 'allow')
+  }
+
+  /**
+   * #6830 (PR #6842 review) — install the direct audit callback for
+   * persisted-rule auto-approves. Single-slot (last writer wins — one
+   * WsServer audits at a time); pass null/non-function to detach.
+   * `projectKey` arrives pre-NORMALIZED (normalizeProjectKey — the
+   * PermissionRuleStore key), or null for an unkeyable cwd.
+   * @param {null|((info: {tool: string, projectKey: string|null}) => void)} sink
+   */
+  setAuditSink(sink) {
+    this._auditSink = typeof sink === 'function' ? sink : null
+  }
+
+  /**
+   * #6830 — audit-only signal for a persisted (project-scoped) rule silently
+   * auto-approving `toolName` with NO visible prompt: handlePermission
+   * short-circuits BEFORE minting a requestId or emitting permission_request,
+   * so without this the audit log has ZERO trace of the tool call — an
+   * auditor querying permission history can't answer "why did tool X
+   * auto-approve after a restart?" from the log alone.
+   *
+   * PR #6842 review — this must NOT emit `permission_resolved` (or any other
+   * session event): permission_resolved is a broadcast-lane event
+   * (session-manager.js builtinTransient → ws-forwarding →
+   * broadcastToSession), so an emission here would send a wire message to
+   * every subscribed client on EVERY rule-matched tool call, at machine
+   * speed. Instead it calls the WsServer-wired `_auditSink` directly — the
+   * audit lane only, coalesced ring-side by
+   * PermissionAuditLog.logPersistedRuleApproval. Guarded so a sink bug can
+   * never break tool approval; a no-op when no server has wired a sink.
+   * @param {string} toolName
+   */
+  _auditPersistedRuleAutoApprove(toolName) {
+    if (!this._auditSink) return
+    try {
+      // #6842 review (Copilot) — projectKey is the store's NORMALIZED key
+      // (normalizeProjectKey, the same helper every PermissionRuleStore
+      // read/write path uses), NOT the raw session cwd: a relative or
+      // `..`-laden cwd would otherwise stamp entries an auditor can never
+      // match against the persisted rule's key in permission-rules.json.
+      this._auditSink({ tool: toolName, projectKey: normalizeProjectKey(this._cwd) })
+    } catch (err) {
+      this._logWarn(`Permission audit sink threw: ${err?.message || err}`)
+    }
+  }
+
+  /**
    * Handle a permission check from the SDK canUseTool callback.
    *
    * For AskUserQuestion: emits user_question and waits for respondToQuestion().
@@ -403,6 +484,13 @@ export class PermissionManager extends EventEmitter {
     if (ruleDecision !== null && !(protectedTarget && ruleDecision === 'allow')) {
       this._logInfo(`Permission rule matched for ${toolName}: ${ruleDecision}`)
       if (ruleDecision === 'allow') {
+        // #6830 — a durable project rule (not a session rule) just silently
+        // auto-approved this tool call. Record it via the direct audit sink
+        // (NOT an event — see _auditPersistedRuleAutoApprove) so the
+        // permission audit log has a trace even though no prompt was shown.
+        if (this._persistentRuleSourced(toolName)) {
+          this._auditPersistedRuleAutoApprove(toolName)
+        }
         return Promise.resolve({ behavior: 'allow', updatedInput: input || {} })
       }
       return Promise.resolve({ behavior: 'deny', message: 'Denied by session rule' })
@@ -1036,4 +1124,9 @@ export function wirePermissionManager(session, permissions, { onRequest, onResol
   // Backward-compatible accessors used by ws-permissions.js + settings-handlers.js.
   session._pendingPermissions = permissions._pendingPermissions
   session._lastPermissionData = permissions._lastPermissionData
+  // #6830 (PR #6842 review) — public delegate so the WsServer can wire its
+  // PermissionAuditLog straight into this manager's persisted-rule audit path
+  // (ws-server.js _attachPermissionAuditSink) without reaching into privates.
+  // Installed for every wirePermissionManager provider (sdk / byok / codex).
+  session.setPermissionAuditSink = (sink) => permissions.setAuditSink(sink)
 }

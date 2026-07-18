@@ -22,6 +22,13 @@
 //   { kind: 'expired', sessionId }                          -> HTTP 410 / WS permission_expired
 //   { kind: 'not_found' }                                   -> HTTP 404 / WS permission_expired
 
+// #6842 review (Copilot) — audit `projectKey` must be the PermissionRuleStore's
+// NORMALIZED key (path.resolve semantics), not the raw session cwd, so an
+// auditor can correlate the entry with the persisted rule's key in
+// permission-rules.json even when the session was started with a relative or
+// `..`-laden cwd. Reused, not duplicated.
+import { normalizeProjectKey } from './permission-rule-store.js'
+
 /**
  * #6030: the single source of truth for the permission "dispatch origin"
  * session id — the mapped session if the request was registered, else the
@@ -71,11 +78,15 @@ export function createPermissionResolver({
     if (typeof onRouteTeardown === 'function') onRouteTeardown(requestId)
     else permissionSessionMap.delete(requestId)
   }
-  function audit(clientId, sessionId, requestId, decision) {
+  function audit(clientId, sessionId, requestId, decision, extra = {}) {
     // #3059: only user-initiated resolutions reach here (auto-deny is audited by
     // the unified pipeline), hence reason:'user'.
+    // #6830 — `extra` carries tool/persist/projectKey when known (see the two
+    // call sites below). Keys are OMITTED entirely (not passed as null) when
+    // unknown, so a caller/fixture with no tool info produces the exact same
+    // 5-field call shape audit consumers already assert on.
     const a = getPermissionAudit?.()
-    if (a) a.logDecision({ clientId, sessionId, requestId, decision, reason: 'user' })
+    if (a) a.logDecision({ clientId, sessionId, requestId, decision, reason: 'user', ...extra })
   }
 
   /**
@@ -117,12 +128,38 @@ export function createPermissionResolver({
     if (originSessionId && sm) {
       const entry = sm.getSession(originSessionId)
       if (entry && typeof entry.session.respondToPermission === 'function') {
+        // #6830 — read the tool name BEFORE respondToPermission runs: it deletes
+        // the _lastPermissionData entry as part of resolving (permission-manager.js
+        // stashes it there precisely so the editedInput whitelist can read it
+        // pre-delete; the audit trail needs the same pre-delete read). Back-compat
+        // accessor — absent on a fixture/provider with no PermissionManager wiring,
+        // in which case toolName stays undefined and is simply omitted below.
+        const toolName = entry.session._lastPermissionData?.get(requestId)?.tool
         // #6543 (feature B): editedInput flows ONLY to the in-process (SDK/BYOK)
         // path — the legacy HTTP path below ignores it (CLI tool executes as-is).
         const resolved = entry.session.respondToPermission(requestId, decision, editedInput)
         consumeRoute(requestId)
         if (resolved) {
-          audit(clientId, originSessionId, requestId, decision)
+          const extra = {}
+          if (toolName) extra.tool = toolName
+          // #6830 — an `allowAlways` that persisted a DURABLE project rule
+          // (permission-manager.js respondToPermission) is reflected
+          // synchronously in getPersistentPermissionRules() by the time we get
+          // here. A tool that degrades to a one-shot allow (NEVER_AUTO_ALLOW /
+          // non-ELIGIBLE, e.g. Bash) never appears there, so persist stays
+          // unset — exactly the "not actually durable" signal an auditor needs.
+          if (decision === 'allowAlways' && toolName && typeof entry.session.getPersistentPermissionRules === 'function') {
+            const persistentRules = entry.session.getPersistentPermissionRules()
+            if (persistentRules.some((r) => r.tool === toolName && r.decision === 'allow')) {
+              extra.persist = 'project'
+              // #6842 review — normalize to the store's key (see header import
+              // note); null for an unkeyable cwd, in which case the field is
+              // simply omitted (same as the tool-unknown case).
+              const projectKey = normalizeProjectKey(entry.session.cwd)
+              if (projectKey) extra.projectKey = projectKey
+            }
+          }
+          audit(clientId, originSessionId, requestId, decision, extra)
           return { kind: 'resolved', via: 'sdk', sessionId: originSessionId }
         }
         return { kind: 'expired', sessionId: originSessionId }
@@ -131,9 +168,15 @@ export function createPermissionResolver({
 
     // Legacy HTTP-held / pendingPermissions store.
     if (pendingPermissions.has(requestId)) {
+      // #6830 — capture tool BEFORE resolveLegacyPermission runs: it synchronously
+      // deletes the pendingPermissions entry (ws-permissions.js resolvePermission
+      // -> pending.resolve -> cleanup()), so the `.data.tool` read must happen first.
+      const toolName = pendingPermissions.get(requestId)?.data?.tool
       consumeRoute(requestId)
       resolveLegacyPermission(requestId, decision)
-      audit(clientId, originSessionId ?? null, requestId, decision)
+      // Legacy (non-SDK) sessions have no PermissionManager/rule store, so
+      // 'allowAlways' here is never durable — tool is the only enrichment.
+      audit(clientId, originSessionId ?? null, requestId, decision, toolName ? { tool: toolName } : {})
       return { kind: 'resolved', via: 'legacy', sessionId: originSessionId ?? null }
     }
 

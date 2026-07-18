@@ -5,6 +5,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { PermissionRuleStore, normalizeProjectKey, isPersistableTool } from '../src/permission-rule-store.js'
 import { PermissionManager } from '../src/permission-manager.js'
+import { PermissionAuditLog } from '../src/permission-audit.js'
 
 /**
  * #6771 — durable "always allow" permission rules.
@@ -242,6 +243,71 @@ describe('#6771 PermissionManager + durable rules', () => {
       assert.equal(result.behavior, 'allow')
       assert.equal(prompted, false, 'seeded persistent rule auto-allows without a prompt')
       assert.deepEqual(pm.getPersistentRules(), [{ tool: 'Write', decision: 'allow', persist: 'project' }])
+    } finally {
+      pm.destroy()
+    }
+  })
+
+  // #6830 (PR #6842 review) — end-to-end with a real PermissionRuleStore AND a
+  // real PermissionAuditLog wired the way ws-server's
+  // _attachPermissionAuditSink does it: a rule seeded from disk silently
+  // auto-approving N=50 tool calls must (a) put ZERO events on the wire lane
+  // (no permission_resolved, no permission_request — those broadcast to every
+  // client) and (b) land as ONE coalesced audit entry, not 50 ring slots.
+  it('a store-seeded persistent rule auto-approve is audited via the sink — one coalesced entry, zero wire events', async () => {
+    const store = makeStore()
+    store.addRule('/proj/a', { tool: 'Write', decision: 'allow' })
+
+    const auditLog = new PermissionAuditLog()
+    const pm = new PermissionManager({ log: silentLog, cwd: '/proj/a', ruleStore: store })
+    try {
+      // Same wiring shape as ws-server.js _attachPermissionAuditSink.
+      pm.setAuditSink((info) => auditLog.logPersistedRuleApproval({ sessionId: 's1', tool: info?.tool, projectKey: info?.projectKey ?? null }))
+      const wireEvents = []
+      pm.on('permission_resolved', (d) => wireEvents.push(d))
+      pm.on('permission_request', (d) => wireEvents.push(d))
+
+      for (let i = 0; i < 50; i++) {
+        const result = await pm.handlePermission('Write', { file_path: `src/x${i}.js` }, null, 'approve')
+        assert.equal(result.behavior, 'allow')
+      }
+
+      assert.equal(wireEvents.length, 0, 'zero broadcast-lane emissions across 50 silent auto-approves')
+      const entries = auditLog.query({ type: 'decision' })
+      assert.equal(entries.length, 1, 'one coalesced entry — the ring is never flooded')
+      assert.equal(entries[0].count, 50)
+      assert.equal(entries[0].reason, 'persisted_rule')
+      assert.equal(entries[0].tool, 'Write')
+      assert.equal(entries[0].persist, 'project')
+      assert.equal(entries[0].projectKey, '/proj/a')
+      assert.equal(entries[0].sessionId, 's1')
+    } finally {
+      pm.destroy()
+    }
+  })
+
+  // #6842 review (Copilot) — a session started with a `..`-laden / trailing-
+  // slash cwd must produce persisted-rule audit entries whose projectKey is
+  // EXACTLY the store's normalized key (the key in permission-rules.json),
+  // not the raw cwd — otherwise entry ↔ rule correlation is impossible.
+  it('sink-path projectKey matches the store\'s NORMALIZED key for a ..-laden session cwd', async () => {
+    const messyCwd = '/proj/a/sub/..'
+    const store = makeStore()
+    store.addRule(messyCwd, { tool: 'Write', decision: 'allow' })
+    const storeKeys = Object.keys(store.listProjects())
+    assert.deepEqual(storeKeys, ['/proj/a'], 'precondition: the store keyed the rule by the normalized cwd')
+
+    const auditLog = new PermissionAuditLog()
+    const pm = new PermissionManager({ log: silentLog, cwd: messyCwd, ruleStore: store })
+    try {
+      pm.setAuditSink((info) => auditLog.logPersistedRuleApproval({ sessionId: 's1', tool: info?.tool, projectKey: info?.projectKey ?? null }))
+      const result = await pm.handlePermission('Write', { file_path: 'src/x.js' }, null, 'approve')
+      assert.equal(result.behavior, 'allow', 'seeding via the messy cwd still matches the persisted rule')
+
+      const entries = auditLog.query({ type: 'decision' })
+      assert.equal(entries.length, 1)
+      assert.equal(entries[0].projectKey, storeKeys[0], 'audit projectKey === the persisted rule\'s store key, exactly')
+      assert.equal(entries[0].projectKey, normalizeProjectKey(messyCwd))
     } finally {
       pm.destroy()
     }

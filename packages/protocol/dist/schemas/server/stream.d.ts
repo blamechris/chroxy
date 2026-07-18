@@ -213,7 +213,14 @@ export declare const ServerPermissionInputSchema: z.ZodDiscriminatedUnion<[z.Zod
  * fields are all optional so a single object covers every kind. Known kinds:
  *   - `mode_change`      — previousMode / newMode
  *   - `whitelist_change` — rules (the new session-rule set)
- *   - `decision`         — requestId / decision (allow|deny) / reason
+ *   - `decision`         — requestId / decision (allow|deny|allowAlways) / reason
+ *     (`reason:'persisted_rule'` — #6830 — is a decision entry with NO human
+ *     responder: a durable project rule auto-approved the tool with no prompt
+ *     ever shown; `clientId` is null and there is no requestId. These are
+ *     COALESCED server-side per (sessionId, tool, projectKey) — `count` is
+ *     the number of coalesced approvals, `firstAt` the first one's time,
+ *     `timestamp` the latest — so a rule matching at machine speed can never
+ *     flood the audit ring; see permission-audit.js logPersistedRuleApproval)
  * The entry `type` is a PLAIN `z.string()` (PR #6836 review), for two reasons:
  *   1. Forward compatibility — a closed enum would fail the WHOLE payload parse
  *      the moment the server adds a new audit kind; clients render unknown kinds
@@ -239,6 +246,11 @@ export declare const ServerPermissionAuditEntrySchema: z.ZodObject<{
     requestId: z.ZodOptional<z.ZodString>;
     decision: z.ZodOptional<z.ZodString>;
     reason: z.ZodOptional<z.ZodString>;
+    tool: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    persist: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    projectKey: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    count: z.ZodOptional<z.ZodNumber>;
+    firstAt: z.ZodOptional<z.ZodNumber>;
 }, z.core.$loose>;
 /**
  * #6772 — reply to a `query_permission_audit` pull: the recent permission audit
@@ -264,6 +276,11 @@ export declare const ServerPermissionAuditResultSchema: z.ZodObject<{
         requestId: z.ZodOptional<z.ZodString>;
         decision: z.ZodOptional<z.ZodString>;
         reason: z.ZodOptional<z.ZodString>;
+        tool: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+        persist: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+        projectKey: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+        count: z.ZodOptional<z.ZodNumber>;
+        firstAt: z.ZodOptional<z.ZodNumber>;
     }, z.core.$loose>>;
 }, z.core.$strip>;
 /**

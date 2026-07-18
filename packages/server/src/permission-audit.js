@@ -55,18 +55,34 @@ export class PermissionAuditLog {
    * @param {string|null} params.clientId - Identifies the responder. Three states:
    *   - WS-origin user response: the connection's synthetic id (e.g. an 8-char hex)
    *   - HTTP-origin user response: the literal string 'http' (#3059)
-   *   - Auto-deny paths (timeout / aborted / cleared): null (no responder)
+   *   - Auto-deny paths (timeout / aborted / cleared) and rule-driven
+   *     auto-approvals (#6830): null (no human responder)
    * @param {string|null} params.sessionId - Session the permission belongs to,
    *   or null for genuinely unmapped legacy HTTP requests (see ws-permissions.js
    *   legacy branch — pendingPermissions entry with no permissionSessionMap entry).
    * @param {string} params.requestId - The permission request ID
-   * @param {string} params.decision - 'allow' or 'deny'
+   * @param {string} params.decision - 'allow', 'deny', or 'allowAlways'
    * @param {string} [params.reason] - How the permission was resolved.
    *   Defaults to 'user' for backwards compatibility with the inline WS-path
    *   audit. Auto-deny paths pass 'timeout' | 'aborted' | 'cleared' so
    *   forensic queries can distinguish user denies from auto-denies (#3057).
+   *   (Persisted-rule auto-approves do NOT go through this method — they use
+   *   the coalescing {@link logPersistedRuleApproval}, #6830.)
+   * @param {string|null} [params.tool] - The tool the decision applied to
+   *   (#6830). Without this, `_lastPermissionData` (which carries the tool
+   *   name) is already deleted by the time an auditor queries the log, so a
+   *   `requestId -> tool` lookup is impossible from the audit trail alone.
+   *   Defaults to null so pre-#6830 callers keep working.
+   * @param {string|null} [params.persist] - `'project'` when this decision
+   *   resulted in (or matched) a DURABLE project-scoped rule (#6771/#6830) —
+   *   set on an `allowAlways` that the rule store actually persisted, and on
+   *   a `reason:'persisted_rule'` auto-approve. Null otherwise (a one-shot
+   *   allow/deny, or an `allowAlways` on a NEVER_AUTO_ALLOW / non-eligible
+   *   tool that degrades to a one-time allow with nothing persisted).
+   * @param {string|null} [params.projectKey] - The normalized project cwd the
+   *   persisted rule is scoped to (present only alongside `persist:'project'`).
    */
-  logDecision({ clientId, sessionId, requestId, decision, reason = 'user' }) {
+  logDecision({ clientId, sessionId, requestId, decision, reason = 'user', tool = null, persist = null, projectKey = null }) {
     this._append({
       type: 'decision',
       clientId,
@@ -74,6 +90,66 @@ export class PermissionAuditLog {
       requestId,
       decision,
       reason,
+      tool,
+      persist,
+      projectKey,
+      timestamp: Date.now(),
+    })
+  }
+
+  /**
+   * #6830 (PR #6842 review) — record a persisted (project-scoped) rule
+   * silently auto-approving a tool call, COALESCED per
+   * `(sessionId, tool, projectKey)`.
+   *
+   * Why coalesced: a convenience rule (always-allow Read / Write / Grep …)
+   * matches at machine speed in an agentic session — one raw entry per
+   * matched tool call would flood the 500-entry no-dedup ring and evict
+   * exactly the high-value entries (#6830's whole point: whitelist changes,
+   * user allow/deny decisions, mode changes) an auditor needs kept.
+   *
+   * Coalescing shape — "one live entry per key, with a running count":
+   * repeated approvals for the same key UPDATE the existing entry
+   * (`count`++, `timestamp` = now, `firstAt` preserved) and MOVE it to the
+   * ring tail so the query contract ("most recent entries = tail") stays
+   * true. Distinct sessions / tools / project keys keep distinct entries.
+   * There is deliberately no `requestId` and no `clientId` responder: no
+   * prompt was ever minted and no human answered — the rule did.
+   *
+   * @param {object} params
+   * @param {string|null} params.sessionId - Session whose tool call was auto-approved
+   * @param {string} params.tool - The auto-approved tool
+   * @param {string|null} [params.projectKey] - The NORMALIZED project cwd the
+   *   durable rule is scoped to (permission-rule-store.js normalizeProjectKey —
+   *   callers normalize before logging so the entry correlates with the
+   *   persisted rule's key in permission-rules.json, #6842 review)
+   */
+  logPersistedRuleApproval({ sessionId, tool, projectKey = null }) {
+    const idx = this._entries.findIndex((e) =>
+      e.type === 'decision'
+      && e.reason === 'persisted_rule'
+      && e.sessionId === sessionId
+      && e.tool === tool
+      && e.projectKey === projectKey,
+    )
+    if (idx >= 0) {
+      const [existing] = this._entries.splice(idx, 1)
+      existing.count = (existing.count || 1) + 1
+      existing.timestamp = Date.now()
+      this._entries.push(existing)
+      return
+    }
+    this._append({
+      type: 'decision',
+      clientId: null,
+      sessionId,
+      decision: 'allow',
+      reason: 'persisted_rule',
+      tool,
+      persist: 'project',
+      projectKey,
+      count: 1,
+      firstAt: Date.now(),
       timestamp: Date.now(),
     })
   }

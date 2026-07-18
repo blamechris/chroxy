@@ -1088,6 +1088,7 @@ export class WsServer {
       this._sessionCreatedHandler = ({ sessionId }) => {
         const entry = sessionManager.getSession(sessionId)
         this._registerSessionHookSecretIfMissing(sessionId, entry)
+        this._attachPermissionAuditSink(sessionId, entry)
       }
       this._sessionDestroyedHandler = ({ sessionId }) => {
         // Look up the stored secret — the session is already removed from the map
@@ -1175,7 +1176,12 @@ export class WsServer {
       if (sessionManager._sessions instanceof Map && typeof sessionManager.getSession === 'function') {
         for (const [sessionId, entry] of sessionManager._sessions) {
           if (entry?._destroying) continue
-          this._registerSessionHookSecretIfMissing(sessionId, sessionManager.getSession(sessionId))
+          const resolved = sessionManager.getSession(sessionId)
+          this._registerSessionHookSecretIfMissing(sessionId, resolved)
+          // #6830 — restored sessions predate this WsServer (restoreState runs
+          // before construction, same shape as the #3716 hook-secret gap), so
+          // their persisted-rule audit sinks must be wired retroactively too.
+          this._attachPermissionAuditSink(sessionId, resolved)
         }
       }
     }
@@ -1600,6 +1606,38 @@ export class WsServer {
     this.registerHookSecret(secret)
     this._sessionHookSecrets.set(sessionId, secret)
     log.debug(`Registered hook secret for session ${sessionId}`)
+  }
+
+  /**
+   * #6830 (PR #6842 review) — wire this server's PermissionAuditLog straight
+   * into a session's persisted-rule audit path. Called from the
+   * `session_created` handler AND the constructor's retroactive scan (same
+   * dual wiring as _registerSessionHookSecretIfMissing, for the same #3716
+   * restored-session reason).
+   *
+   * A persisted-rule auto-approve deliberately bypasses the whole
+   * session-event pipeline: emitting `permission_resolved` for it would ride
+   * ws-forwarding → broadcastToSession to every client on EVERY rule-matched
+   * tool call (the PR #6842 review finding). The sink is a plain callback
+   * into logPersistedRuleApproval, which also COALESCES repeats per
+   * (sessionId, tool, projectKey) so the 500-entry ring is never flooded.
+   *
+   * The closure captures ONLY the audit log + sessionId — never `this` — so
+   * a session outliving a retired WsServer pins a small ring buffer, not the
+   * whole server (the #3060 concern that motivated the removable
+   * session_event listeners). Single-slot on the manager side: a replacement
+   * WsServer's attach overwrites this one (last writer wins).
+   *
+   * @param {string} sessionId
+   * @param {object|null} entry - SessionManager entry ({ session, ... })
+   */
+  _attachPermissionAuditSink(sessionId, entry) {
+    const session = entry?.session
+    if (typeof session?.setPermissionAuditSink !== 'function') return
+    const audit = this._permissionAudit
+    session.setPermissionAuditSink((info) => {
+      audit.logPersistedRuleApproval({ sessionId, tool: info?.tool, projectKey: info?.projectKey ?? null })
+    })
   }
 
   /**

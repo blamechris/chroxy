@@ -56,13 +56,27 @@ const AUTO_PERMISSION_CONFIRM_MESSAGE =
 const EMPTY_PERMISSION_RULES: PermissionRule[] = []
 
 /**
- * #6772 — human label for one permission audit entry. The server's audit log
- * (permission-audit.js) records heterogeneous kinds; render each known kind by
- * its distinguishing fields (a `decision` entry carries no tool name — the audit
- * log keys on requestId, not tool). `entry.type` is an OPEN string (PR #6836
+ * #6772/#6830 — human label for one permission audit entry. The server's audit
+ * log (permission-audit.js) records heterogeneous kinds; render each known kind
+ * by its distinguishing fields. `entry.type` is an OPEN string (PR #6836
  * review — the wire schema is forward-compatible), so any UNKNOWN kind falls
  * through to the generic label rather than breaking the list. Pure +
  * exported-shape so the SettingsPanel test can assert on the rendered text.
+ *
+ * #6830 — a `decision` entry now MAY carry `tool` and, for a durable grant,
+ * `persist:'project'`:
+ *   - a plain `allow`/`deny` (`tool` present or absent — pre-#6830 entries in
+ *     an existing log have neither) renders as before, with the tool name
+ *     appended when known.
+ *   - an `allowAlways` renders as "Always-allowed" and calls out whether it
+ *     was actually saved as a durable project rule (a NEVER_AUTO_ALLOW /
+ *     non-eligible tool, e.g. Bash, degrades to a one-time allow — nothing
+ *     persisted, so no rule survives a restart).
+ *   - `reason:'persisted_rule'` is a rule silently auto-approving a tool call
+ *     with NO prompt ever shown (permission-manager.js
+ *     _auditPersistedRuleAutoApprove) — rendered distinctly ("Auto-allowed")
+ *     rather than folded into the generic allow/deny verb. These entries are
+ *     coalesced server-side (PR #6842 review): `count` > 1 renders as "×N".
  */
 export function describePermissionAuditEntry(entry: PermissionAuditEntry): string {
   switch (entry.type) {
@@ -71,9 +85,23 @@ export function describePermissionAuditEntry(entry: PermissionAuditEntry): strin
     case 'whitelist_change':
       return `Session rules changed (${entry.rules?.length ?? 0} rule${(entry.rules?.length ?? 0) === 1 ? '' : 's'})`
     case 'decision': {
-      const verb = entry.decision === 'deny' ? 'Denied' : 'Allowed'
+      const toolPart = entry.tool ? ` ${entry.tool}` : ''
+      if (entry.reason === 'persisted_rule') {
+        // A durable project rule auto-approved with no prompt shown — no
+        // human responder, so there's no "(user)"/reason suffix to add.
+        // Coalesced server-side: count > 1 means N approvals folded into
+        // this one entry (PR #6842 review).
+        const countPart = typeof entry.count === 'number' && entry.count > 1 ? ` ×${entry.count}` : ''
+        return `Auto-allowed${toolPart}${countPart} (persisted rule)`
+      }
+      const verb = entry.decision === 'deny' ? 'Denied' : entry.decision === 'allowAlways' ? 'Always-allowed' : 'Allowed'
+      const persistPart = entry.persist === 'project'
+        ? ' — saved as a project rule'
+        : entry.decision === 'allowAlways' && entry.tool
+          ? ' (not saved — one-time only)'
+          : ''
       const reason = entry.reason && entry.reason !== 'user' ? ` (${entry.reason})` : ''
-      return `${verb}${reason}`
+      return `${verb}${toolPart}${reason}${persistPart}`
     }
     default:
       return 'Permission event'

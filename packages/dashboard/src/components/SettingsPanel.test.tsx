@@ -2897,4 +2897,66 @@ describe('SettingsPanel — permission rules + audit history (#6772/#6829)', () 
     // Forward-compat (#6836 review): an unknown future kind gets the generic label.
     expect(describePermissionAuditEntry({ type: 'rule_expired', timestamp: 0 })).toBe('Permission event')
   })
+
+  // #6830 — the allowAlways audit entry now carries tool + a durable-rule
+  // marker, and a persisted-rule auto-approve (no prompt ever shown) gets its
+  // own distinct label. Pre-#6830 entries (no tool/persist fields at all)
+  // must keep rendering exactly as before — pinned above.
+  it('describePermissionAuditEntry renders #6830 tool + persist enrichment', () => {
+    // A plain allow/deny with a known tool appends the tool name.
+    expect(
+      describePermissionAuditEntry({ type: 'decision', decision: 'allow', reason: 'user', tool: 'Read', timestamp: 0 }),
+    ).toBe('Allowed Read')
+    expect(
+      describePermissionAuditEntry({ type: 'decision', decision: 'deny', reason: 'timeout', tool: 'Bash', timestamp: 0 }),
+    ).toBe('Denied Bash (timeout)')
+
+    // allowAlways that actually persisted a durable project rule.
+    expect(
+      describePermissionAuditEntry({
+        type: 'decision',
+        decision: 'allowAlways',
+        reason: 'user',
+        tool: 'Write',
+        persist: 'project',
+        projectKey: '/abs/proj',
+        timestamp: 0,
+      }),
+    ).toBe('Always-allowed Write — saved as a project rule')
+
+    // allowAlways on a NEVER_AUTO_ALLOW / non-eligible tool degrades to a
+    // one-shot allow — nothing persisted, so no durable-rule marker.
+    expect(
+      describePermissionAuditEntry({ type: 'decision', decision: 'allowAlways', reason: 'user', tool: 'Bash', timestamp: 0 }),
+    ).toBe('Always-allowed Bash (not saved — one-time only)')
+
+    // A persisted project rule silently auto-approving with NO prompt shown.
+    expect(
+      describePermissionAuditEntry({
+        type: 'decision',
+        decision: 'allow',
+        reason: 'persisted_rule',
+        tool: 'Write',
+        persist: 'project',
+        projectKey: '/abs/proj',
+        count: 1,
+        timestamp: 0,
+      }),
+    ).toBe('Auto-allowed Write (persisted rule)')
+
+    // PR #6842 review — persisted-rule entries are coalesced server-side;
+    // count > 1 renders as ×N so one row summarizes the whole run.
+    expect(
+      describePermissionAuditEntry({
+        type: 'decision',
+        decision: 'allow',
+        reason: 'persisted_rule',
+        tool: 'Write',
+        persist: 'project',
+        projectKey: '/abs/proj',
+        count: 50,
+        timestamp: 0,
+      }),
+    ).toBe('Auto-allowed Write ×50 (persisted rule)')
+  })
 })
