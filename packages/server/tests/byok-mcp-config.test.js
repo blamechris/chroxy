@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import {
   CLAUDE_CONFIG_MAX_BYTES,
   discoverConfiguredMcpServers,
+  isBlockedMetadataHost,
   loadClaudeMcpConfig,
   parseClaudeMcpConfig,
   redactMcpUrl,
@@ -212,6 +213,33 @@ describe('byok-mcp-config remote transport (#6821)', () => {
     assert.equal(redactMcpUrl('https://u:p@h.example/path?k=v#x'), 'https://h.example/path')
     assert.equal(redactMcpUrl('not a url'), '[unparseable url]')
     assert.equal(redactMcpUrl(''), '')
+  })
+
+  // #6834 sharp edge, folded pre-merge: cloud-metadata / link-local block.
+  it('rejects a cloud-metadata url at parse time (169.254.169.254), keeps siblings', () => {
+    const parsed = parseClaudeMcpConfig({
+      mcpServers: {
+        imds: { type: 'http', url: 'http://169.254.169.254/latest/meta-data' },
+        good: { type: 'http', url: 'https://good/mcp' },
+      },
+    })
+    assert.deepEqual(parsed.servers.map((s) => s.name), ['good'])
+    assert.ok(parsed.warnings.some((w) => /imds.*metadata|imds.*link-local/i.test(w)),
+      `expected a metadata-block warning for imds, got: ${JSON.stringify(parsed.warnings)}`)
+  })
+
+  it('isBlockedMetadataHost catches the metadata endpoint + host-encoding tricks, allows normal + loopback', () => {
+    // Blocked: link-local range incl. hex/decimal host tricks (URL parser canonicalizes) + IMDSv6.
+    for (const h of ['169.254.169.254', '169.254.1.2', '[fd00:ec2::254]', 'fd00:ec2::254', '[::ffff:169.254.169.254]']) {
+      assert.equal(isBlockedMetadataHost(h), true, `${h} must be blocked`)
+    }
+    for (const trick of ['http://0xa9fea9fe/', 'http://2852039166/']) {
+      assert.equal(isBlockedMetadataHost(new URL(trick).hostname), true, `${trick} must canonicalize to a blocked host`)
+    }
+    // Allowed: NOT blocked here — loopback + RFC1918 stay legitimate (that policy is #6834).
+    for (const h of ['127.0.0.1', 'localhost', '10.0.0.5', '192.168.1.10', 'mcp.example.com', '169.253.0.1', '170.254.0.1']) {
+      assert.equal(isBlockedMetadataHost(h), false, `${h} must NOT be blocked by the metadata rule`)
+    }
   })
 })
 

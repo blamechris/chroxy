@@ -274,14 +274,18 @@ describe('createMcpClient factory (#6821)', () => {
 })
 
 // Legacy HTTP+SSE two-endpoint transport (type: 'sse').
-function startMockSseServer(tools = DEFAULT_TOOLS) {
+// endpointOverride: literal absolute url to emit (SSRF tests, e.g. an attacker origin).
+// sameOriginAbsolute: emit this server's OWN absolute origin + /messages (regression guard).
+function startMockSseServer({ tools = DEFAULT_TOOLS, endpointOverride = null, sameOriginAbsolute = false } = {}) {
   let sseRes = null
+  let ownOrigin = null
   const server = createServer((req, res) => {
     if (req.method === 'GET') {
       res.writeHead(200, { 'content-type': 'text/event-stream' })
       sseRes = res
       // Announce the POST endpoint per the legacy transport handshake.
-      res.write('event: endpoint\ndata: /messages\n\n')
+      const endpoint = endpointOverride || (sameOriginAbsolute ? `${ownOrigin}/messages` : '/messages')
+      res.write(`event: endpoint\ndata: ${endpoint}\n\n`)
       return
     }
     // POST to /messages — respond over the persistent SSE stream, matched by id.
@@ -309,8 +313,9 @@ function startMockSseServer(tools = DEFAULT_TOOLS) {
   return new Promise((resolve) => {
     server.listen(0, '127.0.0.1', () => {
       const { port } = server.address()
+      ownOrigin = `http://127.0.0.1:${port}`
       resolve({
-        url: `http://127.0.0.1:${port}/sse`,
+        url: `${ownOrigin}/sse`,
         close: () => new Promise((r) => { try { sseRes?.end() } catch {} ; server.close(r) }),
       })
     })
@@ -329,6 +334,124 @@ describe('MCPRemoteClient — legacy HTTP+SSE (#6821)', () => {
     assert.deepEqual(client.tools.map((t) => t.name), ['echo'])
     const result = await client.callTool('echo', { z: 9 })
     assert.equal(result.content[0].text, JSON.stringify({ z: 9 }))
+    await client.destroy()
+  })
+})
+
+// --- SSRF hardening (#6834 sharp edges, folded pre-merge) -------------------
+
+/** Plain capture server standing in for an attacker origin: records every request, replies 200. */
+function startCaptureServer() {
+  const captured = []
+  const server = createServer((req, res) => {
+    captured.push({ method: req.method, url: req.url, headers: { ...req.headers } })
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end('{}')
+  })
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () => {
+      const { port } = server.address()
+      resolve({
+        origin: `http://127.0.0.1:${port}`,
+        captured,
+        close: () => new Promise((r) => server.close(r)),
+      })
+    })
+  })
+}
+
+/** Server that 302-redirects every request to `location`. */
+function startRedirectServer(location) {
+  const server = createServer((req, res) => {
+    res.writeHead(302, { Location: location })
+    res.end()
+  })
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () => {
+      const { port } = server.address()
+      resolve({
+        url: `http://127.0.0.1:${port}/mcp`,
+        close: () => new Promise((r) => server.close(r)),
+      })
+    })
+  })
+}
+
+describe('MCPRemoteClient — SSRF hardening (#6834 sharp edges)', () => {
+  it('refuses an HTTP redirect — DEAD, headers never reach the redirect target', async () => {
+    const attacker = await startCaptureServer()
+    const redirector = await startRedirectServer(`${attacker.origin}/mcp`)
+    try {
+      const client = new MCPRemoteClient(
+        { name: 'redir', type: 'http', url: redirector.url, headers: { Authorization: 'Bearer redirect-secret' } },
+        { log: silentLog() },
+      )
+      await client.start() // must resolve, not throw
+      assert.equal(client.state, MCP_STATES.DEAD)
+      assert.equal(client.statusReason, null, 'a refused redirect is not an oauth failure')
+      assert.equal(attacker.captured.length, 0,
+        'the redirect target must never receive a request (our credentialed headers must not follow)')
+      await client.destroy()
+    } finally {
+      await redirector.close()
+      await attacker.close()
+    }
+  })
+
+  it('refuses a cross-origin legacy SSE endpoint — DEAD, no credentialed POST leaves the origin', async () => {
+    const attacker = await startCaptureServer()
+    const srv = await startMockSseServer({ endpointOverride: `${attacker.origin}/messages` })
+    try {
+      const warns = []
+      const log = { info: () => {}, warn: (m) => warns.push(m), debug: () => {}, error: () => {} }
+      const client = new MCPRemoteClient(
+        { name: 'legacy', type: 'sse', url: srv.url, headers: { Authorization: 'Bearer sse-secret' } },
+        { log },
+      )
+      await client.start()
+      assert.equal(client.state, MCP_STATES.DEAD)
+      assert.equal(attacker.captured.length, 0,
+        'no request (initialize would carry auth headers) may reach the cross-origin endpoint')
+      assert.ok(warns.some((m) => /cross-origin/.test(m)),
+        `expected a cross-origin refusal warn, got: ${JSON.stringify(warns)}`)
+      assert.ok(!JSON.stringify(warns).includes('sse-secret'), 'the warn must not leak header values')
+      await client.destroy()
+    } finally {
+      await srv.close()
+      await attacker.close()
+    }
+  })
+
+  it('still accepts a SAME-origin absolute endpoint url', async () => {
+    // Regression guard: an absolute endpoint on the CONFIGURED origin is
+    // legitimate per the legacy transport and must not be refused.
+    const srv = await startMockSseServer({ sameOriginAbsolute: true })
+    try {
+      const client = new MCPRemoteClient({ name: 'legacy', type: 'sse', url: srv.url, headers: {} }, { log: silentLog() })
+      await client.start()
+      assert.equal(client.state, MCP_STATES.READY, 'a same-origin absolute endpoint must be accepted')
+      assert.deepEqual(client.tools.map((t) => t.name), ['echo'])
+      await client.destroy()
+    } finally {
+      await srv.close()
+    }
+  })
+
+  it('refuses a cloud-metadata url at request time even when parsing was bypassed', async () => {
+    const calls = []
+    let gateConsulted = false
+    const client = new MCPRemoteClient(
+      { name: 'imds', type: 'http', url: 'http://169.254.169.254/latest/api', headers: {} },
+      {
+        log: silentLog(),
+        fetchImpl: async (...a) => { calls.push(a); throw new Error('must not be called') },
+        trustGate: async () => { gateConsulted = true; return true },
+      },
+    )
+    await client.start() // must resolve, not throw
+    assert.equal(client.state, MCP_STATES.DEAD)
+    assert.equal(calls.length, 0, 'no request may ever be attempted against the metadata endpoint')
+    assert.equal(gateConsulted, false, 'the user must not be prompted to trust an unconditionally-refused url')
     await client.destroy()
   })
 })

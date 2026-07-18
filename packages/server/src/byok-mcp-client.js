@@ -24,11 +24,13 @@
  */
 
 import { spawn } from 'node:child_process'
+import { lookup } from 'node:dns/promises'
 import { EventEmitter } from 'node:events'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { createLogger } from './logger.js'
+import { isBlockedMetadataHost } from './byok-mcp-config.js'
 import { CHROXY_SECRET_DENYLIST } from './utils/spawn-env.js'
 import { prepareSpawn } from './utils/win-spawn.js'
 
@@ -516,6 +518,17 @@ export class MCPRemoteClient extends EventEmitter {
   async start() {
     if (this._destroyed) throw new Error('MCPRemoteClient destroyed')
     if (this._state === MCP_STATES.READY || this._state === MCP_STATES.DEAD) return
+    // #6834 sharp edge, folded in pre-merge: unconditionally refuse
+    // cloud-metadata / link-local targets at REQUEST time too (parse already
+    // rejects them; this guards configs constructed programmatically). Checked
+    // before the trust gate so the user is never prompted to trust a URL we
+    // will refuse regardless.
+    const refusal = await this._refuseMetadataTarget()
+    if (refusal) {
+      this._log.warn(`MCP server ${this.name}: ${refusal}`)
+      this._toDead()
+      return
+    }
     // #4457 parity: trust gate fires BEFORE any network request. Deny/throw →
     // permanent DEAD, fail-closed.
     if (this._trustGate) {
@@ -578,6 +591,7 @@ export class MCPRemoteClient extends EventEmitter {
         const res = await this._fetchImpl(this._url, {
           method: 'DELETE',
           headers: this._buildHeaders(),
+          redirect: 'manual', // #6834: never follow a redirect off-origin
           signal: controller.signal,
         })
         await this._discardBody(res)
@@ -617,6 +631,9 @@ export class MCPRemoteClient extends EventEmitter {
           method: 'POST',
           headers: this._buildHeaders({ json: true, acceptStream: true }),
           body: payload,
+          // #6834: never auto-follow — a redirect must not carry our
+          // credentialed headers to a different origin. 3xx → _checkStatus throws.
+          redirect: 'manual',
           signal: controller.signal,
         })
       } catch (err) {
@@ -664,6 +681,7 @@ export class MCPRemoteClient extends EventEmitter {
           method: 'POST',
           headers: this._buildHeaders({ json: true, acceptStream: true }),
           body: JSON.stringify({ jsonrpc: '2.0', method, params }),
+          redirect: 'manual', // #6834: never follow a redirect off-origin
           signal: controller.signal,
         })
       } catch {
@@ -713,6 +731,7 @@ export class MCPRemoteClient extends EventEmitter {
       res = await this._fetchImpl(this._url, {
         method: 'GET',
         headers: { ...this._headers, Accept: 'text/event-stream' },
+        redirect: 'manual', // #6834: never follow a redirect off-origin
         signal: controller.signal,
       })
     } catch (err) {
@@ -723,6 +742,9 @@ export class MCPRemoteClient extends EventEmitter {
       const err = new Error(`MCP server ${this.name} requires OAuth (HTTP ${res.status})`)
       err._oauthRequired = true
       throw err
+    }
+    if (res.status >= 300 && res.status < 400) {
+      throw new Error(`MCP server ${this.name} HTTP ${res.status} redirect opening SSE stream — refused (redirects are not followed)`)
     }
     if (res.status < 200 || res.status >= 300) {
       throw new Error(`MCP server ${this.name} HTTP ${res.status} opening SSE stream`)
@@ -778,11 +800,22 @@ export class MCPRemoteClient extends EventEmitter {
     if (event === 'endpoint') {
       if (!this._endpointResolve) return
       let endpoint = null
-      try { endpoint = new URL(data, this._url).toString() } catch { endpoint = null }
+      try { endpoint = new URL(data, this._url) } catch { endpoint = null }
       if (this._endpointTimer) { clearTimeout(this._endpointTimer); this._endpointTimer = null }
-      if (endpoint) {
-        this._endpointUrl = endpoint
+      // #6834 sharp edge: the endpoint event is SERVER-SUPPLIED — an absolute
+      // url here could pivot our credentialed POSTs (headers carry auth)
+      // anywhere. Enforce SAME-ORIGIN (scheme+host+port, via URL.origin)
+      // against the configured url; a cross-origin endpoint warns + rejects,
+      // which fails the connect → DEAD. Origins are creds/query-free, so
+      // logging them leaks nothing.
+      let configuredOrigin = null
+      try { configuredOrigin = new URL(this._url).origin } catch { /* refused below */ }
+      if (endpoint && configuredOrigin && endpoint.origin === configuredOrigin) {
+        this._endpointUrl = endpoint.toString()
         this._endpointResolve()
+      } else if (endpoint && configuredOrigin) {
+        this._log.warn(`MCP server ${this.name}: SSE endpoint origin ${endpoint.origin} != configured origin ${configuredOrigin} — refusing cross-origin endpoint`)
+        this._endpointReject?.(new Error(`MCP server ${this.name}: cross-origin SSE endpoint refused`))
       } else {
         this._endpointReject?.(new Error(`MCP server ${this.name}: invalid SSE endpoint event`))
       }
@@ -818,6 +851,7 @@ export class MCPRemoteClient extends EventEmitter {
         method: 'POST',
         headers: this._buildHeaders({ json: true }),
         body: JSON.stringify({ jsonrpc: '2.0', id, method, params }),
+        redirect: 'manual', // #6834: never follow a redirect off-origin
         signal: controller.signal,
       })
       this._checkStatus(res, method)
@@ -844,6 +878,7 @@ export class MCPRemoteClient extends EventEmitter {
         method: 'POST',
         headers: this._buildHeaders({ json: true }),
         body: JSON.stringify({ jsonrpc: '2.0', method, params }),
+        redirect: 'manual', // #6834: never follow a redirect off-origin
         signal: controller.signal,
       })
       await this._discardBody(res)
@@ -854,6 +889,38 @@ export class MCPRemoteClient extends EventEmitter {
   }
 
   // --- shared helpers ------------------------------------------------------
+
+  /**
+   * Return a refusal reason when the configured url targets the cloud
+   * metadata service / link-local range (#6834 sharp edge), else null.
+   * Literal hosts are checked directly (the URL parser already canonicalized
+   * hex/decimal tricks); DNS names get a best-effort lookup so a name
+   * resolving into the blocked range is refused too. Lookup ERRORS pass
+   * through — fetch will surface them as ordinary connect failures. Full
+   * resolution pinning / DNS-rebinding defence stays in #6834.
+   */
+  async _refuseMetadataTarget() {
+    let hostname
+    try {
+      hostname = new URL(this._url).hostname
+    } catch {
+      return null // fetch will surface the malformed url as a connect failure
+    }
+    if (isBlockedMetadataHost(hostname)) {
+      return 'refusing cloud-metadata / link-local endpoint (never a legitimate MCP server)'
+    }
+    const bare = hostname.startsWith('[') && hostname.endsWith(']') ? hostname.slice(1, -1) : hostname
+    const isLiteral = /^[\d.]+$/.test(bare) || bare.includes(':')
+    if (!isLiteral) {
+      try {
+        const addrs = await lookup(bare, { all: true })
+        if (addrs.some(({ address }) => isBlockedMetadataHost(address))) {
+          return 'refusing DNS name resolving to a cloud-metadata / link-local address'
+        }
+      } catch { /* resolution failures surface via fetch */ }
+    }
+    return null
+  }
 
   _applyInitResult(initResult) {
     if (!initResult || typeof initResult !== 'object') {
@@ -890,6 +957,12 @@ export class MCPRemoteClient extends EventEmitter {
       const err = new Error(`MCP server ${this.name} requires OAuth (HTTP ${status})`)
       err._oauthRequired = true
       throw err
+    }
+    // #6834: with redirect:'manual' a 3xx surfaces here as-is. Refuse it
+    // explicitly — following would replay our credentialed headers against
+    // whatever origin the Location header names.
+    if (status >= 300 && status < 400) {
+      throw new Error(`MCP server ${this.name} HTTP ${status} redirect on ${method} — refused (redirects are not followed)`)
     }
     if (status === 404) {
       // Session expired / endpoint gone — drop the session so a future connect
