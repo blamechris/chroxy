@@ -230,6 +230,13 @@ const SCROLL_THRESHOLD = 100
 const SEARCH_SCROLL_HEADROOM = 80
 
 /**
+ * #6788 — stable empty searchable-row list handed to the search hook until the
+ * find bar is first summoned, so the per-row text extraction never runs (and
+ * never churns memo identity) for sessions that never open find.
+ */
+const NO_SEARCH_ROWS: SearchableRow[] = []
+
+/**
  * #5561 — fallback `gap` between rows in `.chat-messages` (theme/components.css).
  * Folded into the windowing height math so the spacer heights match the real
  * scroll geometry. The live value is read from `getComputedStyle().rowGap` at
@@ -525,16 +532,25 @@ function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, inFlig
   // #6788 — in-session find. Build the searchable-row list from the deduped
   // messages (the same rows the windowed list renders, so a match maps 1:1 to a
   // scroll target). `getSearchText` lets the parent surface collapsed tool-group
-  // text; otherwise we match on the row's own `content`. Only recomputed when
-  // the messages or the extractor identity change.
+  // text; otherwise we match on the row's own `content`.
+  //
+  // Gated behind the bar having been summoned at least once (#6811 review):
+  // the map is O(N) and invokes `getSearchText` per row on every
+  // dedupedMessages change — i.e. every streaming flush — which is avoidable
+  // work on multi-thousand-message sessions that never open find. Until the
+  // first summon we hand the hook a stable empty list (query is '' anyway, so
+  // no matches are lost); after that it stays live so close → reopen is instant.
+  const [searchEverOpened, setSearchEverOpened] = useState(false)
   const searchRows = useMemo<SearchableRow[]>(
-    () =>
-      dedupedMessages.map((m) => ({
+    () => {
+      if (!searchEverOpened) return NO_SEARCH_ROWS
+      return dedupedMessages.map((m) => ({
         id: m.id,
         type: m.type,
         text: getSearchText ? getSearchText(m) : m.content,
-      })),
-    [dedupedMessages, getSearchText],
+      }))
+    },
+    [dedupedMessages, getSearchText, searchEverOpened],
   )
   const search = useTranscriptSearch(searchRows)
   const { open: searchOpen, currentMatchId: searchMatchId, matchIdSet: searchMatchIdSet, openSearch, closeSearch } = search
@@ -807,6 +823,8 @@ function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, inFlig
   useEffect(() => {
     if (openSearchSignal === lastOpenSearchSignalRef.current) return
     lastOpenSearchSignalRef.current = openSearchSignal
+    // First summon unlocks the searchable-row scan (see the searchRows gate).
+    setSearchEverOpened(true)
     openSearch()
   }, [openSearchSignal, openSearch])
 
@@ -818,6 +836,11 @@ function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, inFlig
   // user scrolling first. Writing `scrollTop` (and re-seeding the windowing
   // state) mounts the target row in the same commit. Flagged programmatic so the
   // resulting scroll event isn't misread as a user scroll-up.
+  // #6811 review — the programmatic-flag-clear RAF is tracked in a ref so a
+  // superseding jump (fast typing / rapid next-next) cancels the stale clear
+  // before scheduling its own, and the scroll-to-match effect's cleanup can
+  // cancel + flush it on unmount/match-change instead of leaking it.
+  const searchFlagClearRafRef = useRef<number | null>(null)
   const scrollToRowIndex = useCallback((index: number) => {
     const el = containerRef.current
     if (!el || index < 0) return
@@ -826,7 +849,11 @@ function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, inFlig
     el.scrollTop = target
     setScrollTop(target)
     setViewportHeight(el.clientHeight)
-    requestAnimationFrame(() => { programmaticScrollRef.current = false })
+    if (searchFlagClearRafRef.current !== null) cancelAnimationFrame(searchFlagClearRafRef.current)
+    searchFlagClearRafRef.current = requestAnimationFrame(() => {
+      searchFlagClearRafRef.current = null
+      programmaticScrollRef.current = false
+    })
   }, [])
 
   // #6788 — keep the active find match in view. On each match change: mark the
@@ -845,7 +872,16 @@ function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, inFlig
       const idx2 = dedupRef.current.findIndex((m) => m.id === searchMatchId)
       if (idx2 >= 0) scrollToRowIndex(idx2)
     })
-    return () => cancelAnimationFrame(raf)
+    return () => {
+      cancelAnimationFrame(raf)
+      // Cancel + flush any pending flag-clear so the programmatic-scroll flag
+      // can't be left stuck true past this effect's lifetime (#6811 review).
+      if (searchFlagClearRafRef.current !== null) {
+        cancelAnimationFrame(searchFlagClearRafRef.current)
+        searchFlagClearRafRef.current = null
+        programmaticScrollRef.current = false
+      }
+    }
   }, [searchMatchId, scrollToRowIndex])
 
   // #5561 — the windowed slice. Only rows in [startIndex, endIndex) mount; the

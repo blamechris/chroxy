@@ -30,14 +30,25 @@ function makeMessages(count: number): ChatViewMessage[] {
 }
 
 /** Render ChatView with a button that bumps the openSearchSignal nonce. */
-function Harness({ messages }: { messages: ChatViewMessage[] }) {
+function Harness({
+  messages,
+  getSearchText,
+}: {
+  messages: ChatViewMessage[]
+  getSearchText?: (msg: ChatViewMessage) => string
+}) {
   const [sig, setSig] = useState(0)
   return (
     <>
       <button data-testid="summon" onClick={() => setSig((n) => n + 1)}>
         summon
       </button>
-      <ChatView messages={messages} isStreaming={false} openSearchSignal={sig} />
+      <ChatView
+        messages={messages}
+        isStreaming={false}
+        openSearchSignal={sig}
+        getSearchText={getSearchText}
+      />
     </>
   )
 }
@@ -145,6 +156,18 @@ describe('ChatView in-session find (#6788)', () => {
     expect(screen.getByTestId('transcript-search-bar')).toBeInTheDocument()
     fireEvent.click(screen.getByTestId('transcript-search-close'))
     expect(screen.queryByTestId('transcript-search-bar')).not.toBeInTheDocument()
+  })
+
+  it('does not run the searchable-text extractor until first summoned (#6811 review minor)', () => {
+    const getSearchText = vi.fn((m: ChatViewMessage) => m.content)
+    render(<Harness messages={makeMessages(5)} getSearchText={getSearchText} />)
+    // No summon yet — the O(N) per-row extraction must not have run.
+    expect(getSearchText).not.toHaveBeenCalled()
+    summon()
+    // First summon unlocks the scan; matches still work.
+    expect(getSearchText).toHaveBeenCalled()
+    type('Message 2')
+    expect(screen.getByTestId('transcript-search-count').textContent).toBe('1/1')
   })
 
   it('jumps the virtualized list to an off-screen match and mounts it', async () => {

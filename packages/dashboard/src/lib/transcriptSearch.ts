@@ -51,3 +51,49 @@ export function stepMatchIndex(current: number, count: number, dir: 1 | -1): num
   if (count <= 0) return 0
   return (((current + dir) % count) + count) % count
 }
+
+/**
+ * Minimal structural view of a store ChatMessage for search-text extraction —
+ * only the fields the extractor reads, so this module stays dependency-free
+ * (`@chroxy/store-core`'s ChatMessage satisfies it structurally).
+ */
+export interface SearchTextSourceMessage {
+  content?: string
+  toolResult?: string
+}
+
+/**
+ * Build the searchable text for one chat-view row (#6788 review fix).
+ *
+ * Tool output does NOT live in `ChatViewMessage.content` — it lives on the
+ * store message's `toolResult`. Mobile searches `content || toolResult` on
+ * every row; the dashboard must do the same for BOTH tool shapes:
+ *
+ * - `tool_group` (2+ contiguous tools collapsed): `content` is empty — join
+ *   every inner tool's summary + result from the group payload.
+ * - singleton `tool_use` (the common case: assistant → one tool → assistant):
+ *   append the store message's `toolResult` so a lone tool's stdout / file
+ *   contents are just as findable as the same output inside a group.
+ * - everything else: the row's own rendered `content`.
+ */
+export function extractRowSearchText(
+  row: { id: string; type: string; content: string },
+  toolGroupPayloads: ReadonlyMap<string, { messages: readonly SearchTextSourceMessage[] }>,
+  storeMsgMap: ReadonlyMap<string, SearchTextSourceMessage>,
+): string {
+  if (row.type === 'tool_group') {
+    const payload = toolGroupPayloads.get(row.id)
+    if (!payload) return row.content
+    let text = ''
+    for (const m of payload.messages) {
+      if (m.content) text += m.content + ' '
+      if (m.toolResult) text += m.toolResult + ' '
+    }
+    return text
+  }
+  if (row.type === 'tool_use') {
+    const result = storeMsgMap.get(row.id)?.toolResult
+    return result ? `${row.content} ${result}` : row.content
+  }
+  return row.content
+}

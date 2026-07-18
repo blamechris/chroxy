@@ -37,6 +37,7 @@ import { processImageFiles, filterImageFiles } from './utils/image-utils'
 import { getAuthToken } from './utils/auth'
 import { SessionBar, type SessionTabData, type SessionStatus } from './components/SessionBar'
 import { formatTranscript } from './lib/transcript'
+import { extractRowSearchText } from './lib/transcriptSearch'
 import { ActivityIndicator, findInFlightToolUse } from './components/ActivityIndicator'
 import { CheckInChip } from './components/CheckInChip'
 import { EvaluatorClarifyPrompt } from './components/EvaluatorPrompts'
@@ -1137,24 +1138,19 @@ export function App() {
     streamingMessageId,
   })
 
-  // #6788 — searchable-text extractor for the ChatView in-session find bar. Most
-  // rows carry their visible text in `content`; a collapsed `tool_group` row
-  // (2+ contiguous tools) has empty `content`, so pull its inner tool summaries
-  // + results from the group payload the pipeline already built. Memoized on the
-  // payload map so ChatView's memoized searchable-row list stays stable.
+  // #6788 — searchable-text extractor for the ChatView in-session find bar.
+  // Delegates to the pure `extractRowSearchText` helper (unit-tested in
+  // lib/transcriptSearch.test.ts): collapsed `tool_group` rows join their inner
+  // tool summaries + results from the group payload, and a SINGLETON `tool_use`
+  // row appends the store message's `toolResult` (#6811 review — a lone tool's
+  // stdout lives on the store message, not in the row's `content`, and must be
+  // just as findable as the same output inside a 2+ group; mobile searches
+  // content || toolResult on every row). Memoized on the two lookup maps so
+  // ChatView's memoized searchable-row list stays stable.
   const chatSearchText = useCallback(
-    (msg: ChatViewMessage): string => {
-      if (msg.type !== 'tool_group') return msg.content
-      const payload = chatToolGroupPayloads.get(msg.id)
-      if (!payload) return msg.content
-      let text = ''
-      for (const m of payload.messages) {
-        if (m.content) text += m.content + ' '
-        if (m.toolResult) text += m.toolResult + ' '
-      }
-      return text
-    },
-    [chatToolGroupPayloads],
+    (msg: ChatViewMessage): string =>
+      extractRowSearchText(msg, chatToolGroupPayloads, storeMsgMap),
+    [chatToolGroupPayloads, storeMsgMap],
   )
 
   // System events for the System tab — uses the same toChatViewMessage

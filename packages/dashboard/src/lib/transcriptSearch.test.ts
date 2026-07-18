@@ -6,7 +6,13 @@
  * independent of React and the virtualized ChatView.
  */
 import { describe, it, expect } from 'vitest'
-import { computeTranscriptMatches, stepMatchIndex, type SearchableRow } from './transcriptSearch'
+import {
+  computeTranscriptMatches,
+  extractRowSearchText,
+  stepMatchIndex,
+  type SearchableRow,
+  type SearchTextSourceMessage,
+} from './transcriptSearch'
 
 const rows: SearchableRow[] = [
   { id: 'a', type: 'user_input', text: 'Please refactor the Auth module' },
@@ -50,6 +56,78 @@ describe('computeTranscriptMatches', () => {
 
   it('trims surrounding whitespace before matching', () => {
     expect(computeTranscriptMatches(rows, '  refactor  ')).toEqual(['a'])
+  })
+})
+
+describe('extractRowSearchText', () => {
+  const NO_GROUPS = new Map<string, { messages: SearchTextSourceMessage[] }>()
+  const NO_STORE = new Map<string, SearchTextSourceMessage>()
+
+  it('includes a singleton tool row result from the store message (#6811 review Major)', () => {
+    // The common shape: assistant → ONE tool → assistant. The tool's stdout
+    // lives on the store message's toolResult, NOT in the row's content.
+    const storeMsgMap = new Map<string, SearchTextSourceMessage>([
+      ['t1', { content: 'Bash: npm test', toolResult: '742 passing needle-in-stdout' }],
+    ])
+    const row = { id: 't1', type: 'tool_use', content: 'Bash: npm test' }
+
+    // Precondition the fix exists for: the needle is absent from content alone.
+    expect(row.content.includes('needle-in-stdout')).toBe(false)
+
+    const text = extractRowSearchText(row, NO_GROUPS, storeMsgMap)
+    expect(text).toContain('needle-in-stdout')
+    expect(text).toContain('Bash: npm test')
+
+    // End-to-end with the matcher: the singleton tool's result text matches…
+    const withResult: SearchableRow[] = [{ id: 't1', type: 'tool_use', text }]
+    expect(computeTranscriptMatches(withResult, 'needle-in-stdout')).toEqual(['t1'])
+    // …while matching content alone (the pre-fix behaviour) finds nothing.
+    const contentOnly: SearchableRow[] = [{ id: 't1', type: 'tool_use', text: row.content }]
+    expect(computeTranscriptMatches(contentOnly, 'needle-in-stdout')).toEqual([])
+  })
+
+  it('falls back to the row content when a singleton tool has no result yet', () => {
+    // In-flight tool (no toolResult), or a row missing from the store map.
+    const storeMsgMap = new Map<string, SearchTextSourceMessage>([
+      ['t1', { content: 'Bash: sleep 5' }],
+    ])
+    expect(
+      extractRowSearchText({ id: 't1', type: 'tool_use', content: 'Bash: sleep 5' }, NO_GROUPS, storeMsgMap),
+    ).toBe('Bash: sleep 5')
+    expect(
+      extractRowSearchText({ id: 'missing', type: 'tool_use', content: 'Read foo.ts' }, NO_GROUPS, NO_STORE),
+    ).toBe('Read foo.ts')
+  })
+
+  it('joins inner tool summaries + results for a collapsed tool_group', () => {
+    const groups = new Map<string, { messages: SearchTextSourceMessage[] }>([
+      ['activity-a', {
+        messages: [
+          { content: 'Read src/a.ts', toolResult: 'const alpha = 1' },
+          { content: 'Grep beta', toolResult: 'src/b.ts: beta-hit' },
+        ],
+      }],
+    ])
+    const text = extractRowSearchText(
+      { id: 'activity-a', type: 'tool_group', content: '' },
+      groups,
+      NO_STORE,
+    )
+    expect(text).toContain('Read src/a.ts')
+    expect(text).toContain('const alpha = 1')
+    expect(text).toContain('beta-hit')
+  })
+
+  it('falls back to row content for a tool_group with no payload', () => {
+    expect(
+      extractRowSearchText({ id: 'activity-x', type: 'tool_group', content: '' }, NO_GROUPS, NO_STORE),
+    ).toBe('')
+  })
+
+  it('returns plain content for non-tool rows', () => {
+    expect(
+      extractRowSearchText({ id: 'r1', type: 'response', content: 'hello world' }, NO_GROUPS, NO_STORE),
+    ).toBe('hello world')
   })
 })
 
