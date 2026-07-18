@@ -105,17 +105,23 @@ describe('handleSetMcpServerEnabled (#6824)', () => {
 
   it('bound token is REJECTED when it targets a different session (cross-session)', async () => {
     const session = makeSession()
+    const other = makeSession()
     // Two sessions exist; the client is bound to sess-1 but targets sess-2.
-    const ctx = makeCtx({ 'sess-1': { session }, 'sess-2': { session: makeSession() } })
+    const ctx = makeCtx({ 'sess-1': { session }, 'sess-2': { session: other } })
     const client = { id: 'c1', activeSessionId: 'sess-1', boundSessionId: 'sess-1' }
 
-    await handler(WS, client, { type: 'set_mcp_server_enabled', sessionId: 'sess-2', server: 'stub', enabled: false }, ctx)
+    await handler(WS, client, { type: 'set_mcp_server_enabled', sessionId: 'sess-2', server: 'stub', enabled: false, requestId: 'r-x' }, ctx)
 
-    // resolveSessionOrError rejects the cross-session resolve → session_error,
-    // and the target session's toggle is never invoked.
+    // resolveSession's binding check rejects the cross-session resolve; NEITHER
+    // session's toggle is invoked, and the rejection carries the stable code +
+    // requestId echo — same discipline as every other rejection path (the
+    // set_thinking_level NOT_APPLIED convention).
     assert.equal(session.setMcpServerEnabled.mock.callCount(), 0, 'cross-session toggle blocked')
+    assert.equal(other.setMcpServerEnabled.mock.callCount(), 0, 'target session untouched')
     const err = lastErr(ctx)
-    assert.equal(err?.type, 'session_error')
+    assert.equal(err?.type, 'error')
+    assert.equal(err?.code, 'MCP_SERVER_NOT_APPLIED')
+    assert.equal(err?.requestId, 'r-x', 'echoes requestId so the client can roll back its switch')
   })
 
   it('rejects a missing server name', async () => {

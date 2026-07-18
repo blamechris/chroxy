@@ -857,15 +857,18 @@ function handleSetPermissionRules(ws, client, msg, ctx) {
  * in-daemon MCP fleet that can be parked/unparked, so this rejects other
  * providers with a capability error the client uses to keep its toggle hidden.
  *
- * AUTH: routed through `resolveSessionOrError`, which enforces session-token
+ * AUTH: routed through `resolveSession`, which enforces session-token
  * binding — a pairing-bound client may only act on ITS OWN session; a bound
- * token naming a different session is rejected with "No active session". This
+ * token naming a different session resolves to no entry and is rejected. This
  * is the own-session gate, not the host-authority (unbound-only) gate that
  * `set_permission_rules` uses: enabling a server can never ADD an untrusted
  * one (the fleet re-runs the trust gate on unpark) and disabling only REDUCES
  * capability, so neither direction is the privilege escalation that rule-
- * setting is. Every rejection echoes `requestId` (when supplied) with a stable
- * code so an optimistic client toggle can roll back.
+ * setting is. Every rejection — validation, session resolution, capability,
+ * unknown server — echoes `requestId` (when supplied) with a stable code
+ * (MCP_SERVER_NOT_APPLIED / MCP_SERVER_TOGGLE_UNSUPPORTED /
+ * MCP_SERVER_NOT_FOUND), the same echo discipline as the set_model /
+ * set_permission_mode / set_thinking_level NOT_APPLIED family.
  *
  * On success the session re-emits `mcp_servers` (broadcast to every subscriber
  * → multi-device consistency), so this handler does not send its own ack — the
@@ -884,8 +887,16 @@ async function handleSetMcpServerEnabled(ws, client, msg, ctx) {
   }
 
   const sessionId = msg?.sessionId || client?.activeSessionId
-  const entry = resolveSessionOrError(ws, ctx, msg, client)
-  if (!entry) return
+  // Session resolution failures (no active session, or a bound token naming a
+  // DIFFERENT session — resolveSession enforces the binding) echo requestId +
+  // the stable NOT_APPLIED code, mirroring handleSetThinkingLevel, rather than
+  // resolveSessionOrError's code-less session_error, so the doc-block contract
+  // ("every rejection echoes requestId with a stable code") holds on ALL paths.
+  const entry = resolveSession(ctx, msg, client)
+  if (!entry) {
+    sendError(ws, requestId, 'MCP_SERVER_NOT_APPLIED', 'No active session', undefined, ctx)
+    return
+  }
 
   // Capability gate — only providers that expose `setMcpServerEnabled` (the
   // BYOK lane) can toggle. Others ride the claude binary's own MCP config.
