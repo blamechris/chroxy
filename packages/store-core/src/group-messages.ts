@@ -1,16 +1,26 @@
 /**
  * Shared message grouping selector (#3747).
  *
- * Groups consecutive tool_use and thinking messages into a single activity
- * group so chat surfaces can render them as one collapsible block instead
- * of a wall of individual bubbles. Pure structural grouping with no React
- * or platform dependencies — both the mobile app and the desktop dashboard
- * consume the same DisplayGroup output.
+ * Groups consecutive tool_use messages into a single activity group so chat
+ * surfaces can render them as one collapsible block instead of a wall of
+ * individual bubbles. Pure structural grouping with no React or platform
+ * dependencies — both the mobile app and the desktop dashboard consume the
+ * same DisplayGroup output.
  *
- * Boundary rule: any non-tool, non-thinking message (assistant text, user
- * input, prompts, errors, system events) ends the current group. Permission
- * prompts and question prompts are `type: 'prompt'`, so they break runs and
- * stay as standalone rows.
+ * Boundary rule: any non-tool message (assistant text, user input, prompts,
+ * errors, system events) ends the current group. Permission prompts and
+ * question prompts are `type: 'prompt'`, so they break runs and stay as
+ * standalone rows.
+ *
+ * #6756 — `thinking` bubbles are NOT absorbed into activity groups. Now that
+ * extended-thinking carries real reasoning content (not just the old empty
+ * placeholder), each thinking bubble renders as its own standalone
+ * `single` row so it reaches the content-capable disclosure (dashboard
+ * `ThinkingBody` / mobile MessageBubble) instead of collapsing into a bare
+ * "Thinking" label inside a tool group. This breaks a tool run: a thinking
+ * bubble between two tool_use bubbles yields three rows. `countToolUses` /
+ * `summarizeToolCounts` already excluded thinking, so tool counts are
+ * unaffected.
  */
 import type { ChatMessage } from './types'
 
@@ -18,8 +28,9 @@ export type DisplayGroup =
   | { type: 'single'; message: ChatMessage }
   | { type: 'activity'; messages: ChatMessage[]; isActive: boolean; key: string }
 
-/** Group consecutive tool_use and thinking messages into ActivityGroups.
- *  Pure structural grouping — does not depend on streaming state. */
+/** Group consecutive tool_use messages into ActivityGroups.
+ *  Pure structural grouping — does not depend on streaming state.
+ *  #6756 — thinking bubbles break a run and stay standalone (see file header). */
 export function groupMessages(messages: ChatMessage[]): DisplayGroup[] {
   const groups: DisplayGroup[] = []
   let activityBuf: ChatMessage[] = []
@@ -37,7 +48,7 @@ export function groupMessages(messages: ChatMessage[]): DisplayGroup[] {
   }
 
   for (const msg of messages) {
-    if (msg.type === 'tool_use' || msg.type === 'thinking') {
+    if (msg.type === 'tool_use') {
       activityBuf.push(msg)
     } else {
       flushActivity()

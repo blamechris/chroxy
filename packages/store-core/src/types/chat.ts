@@ -160,6 +160,26 @@ export interface ChatMessage {
    * only for backwards compatibility with rehydrated state.
    */
   toolInputPartialTruncated?: boolean;
+  /**
+   * #6756 — set on a `type: 'thinking'` bubble while its reasoning content is
+   * still streaming from the provider (extended-thinking `thinking_delta`
+   * chunks are arriving). Flipped to `false` on the thinking block's
+   * `stream_end`. Renderers show a "Thinking…" label while `true` and "Thought"
+   * once `false`. Distinct from the connection-wide `streamingMessageId` (which
+   * tracks the visible response text), so a thinking bubble finalises its label
+   * independently of the response stream. Undefined on non-thinking bubbles and
+   * on the ephemeral `'thinking'` placeholder.
+   */
+  thinkingStreaming?: boolean;
+  /**
+   * #6756 — set to `true` once a thinking bubble's accumulated reasoning
+   * content hits {@link MAX_THINKING_CONTENT_LEN} and subsequent
+   * `thinking_delta` chunks are dropped. Mirrors `toolInputPartialTruncated`;
+   * a defence-in-depth bound so a runaway/adversarial thinking stream can't
+   * balloon client `messages` state. Renderers MAY surface a "truncated"
+   * affordance.
+   */
+  thinkingTruncated?: boolean;
   answered?: string;
   /**
    * #4973 — structured per-question answers map recorded when the user

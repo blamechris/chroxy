@@ -111,6 +111,18 @@ export interface ChatViewMessage {
   timestamp: number
   isStreaming?: boolean
   /**
+   * #6756: on a `thinking` row, whether reasoning content is still streaming
+   * (drives ThinkingBody's "Thinking…" vs "Thought" label). Mirrored from the
+   * store ChatMessage; distinct from `isStreaming` (the response text stream).
+   */
+  thinkingStreaming?: boolean
+  /**
+   * #6756: on a `thinking` row, the accumulated reasoning hit the size cap and
+   * further deltas were dropped — ThinkingBody appends a "[thinking truncated]"
+   * marker so the cut is never silent.
+   */
+  thinkingTruncated?: boolean
+  /**
    * #4476: structured error code mirrored from the store ChatMessage.
    * Renderers may switch on this to surface a distinct variant for known
    * error categories (e.g. `'stream_stall'` → chip + retry). Undefined
@@ -300,7 +312,7 @@ function rowClassFor(type: string, hasIcon: boolean): string {
  * start/end the client doesn't carry yet.) The row's MeasuredRow ResizeObserver
  * re-measures on toggle, so the virtualized list stays correct.
  */
-function ThinkingBody({ content, streaming }: { content: string; streaming: boolean }) {
+function ThinkingBody({ content, streaming, truncated }: { content: string; streaming: boolean; truncated?: boolean }) {
   const [expanded, setExpanded] = useState(false)
   return (
     <div className="thinking-body">
@@ -316,7 +328,18 @@ function ThinkingBody({ content, streaming }: { content: string; streaming: bool
       >
         {expanded ? '▾' : '▸'} {streaming ? 'Thinking…' : 'Thought'}
       </button>
-      {expanded && <div className="thinking-full">{content}</div>}
+      {expanded && (
+        <div className="thinking-full">
+          {content}
+          {/* #6756 — the store bounded this bubble at MAX_THINKING_CONTENT_LEN
+              and dropped further deltas; say so instead of cutting silently. */}
+          {truncated && (
+            <div className="thinking-truncated" data-testid="thinking-truncated">
+              … [thinking truncated]
+            </div>
+          )}
+        </div>
+      )}
     </div>
   )
 }
@@ -327,6 +350,8 @@ const DefaultMessageRow = memo(function DefaultMessageRow({
   content,
   timestamp,
   isStreaming,
+  thinkingStreaming,
+  thinkingTruncated,
   attachments,
   queued,
   onCancelQueued,
@@ -337,6 +362,12 @@ const DefaultMessageRow = memo(function DefaultMessageRow({
   content: string
   timestamp: number
   isStreaming?: boolean
+  /** #6756: on a `thinking` row, whether reasoning content is still streaming
+   *  (drives the ThinkingBody "Thinking…" vs "Thought" label). */
+  thinkingStreaming?: boolean
+  /** #6756: on a `thinking` row, the reasoning content hit the size cap —
+   *  ThinkingBody appends a "[thinking truncated]" marker. */
+  thinkingTruncated?: boolean
   /** #6632: user-message attachments (images/documents) to preview. */
   attachments?: ChatViewMessage['attachments']
   /** #5939: this user_input is held in the server's outgoing queue. */
@@ -367,7 +398,7 @@ const DefaultMessageRow = memo(function DefaultMessageRow({
       // #6793: same container also owns the per-code-block copy button click.
       ? <div onClick={handleMarkdownBodyClick} dangerouslySetInnerHTML={{ __html: renderMarkdown(content) }} />
       : type === 'thinking'
-        ? <ThinkingBody content={content} streaming={!!isStreaming} />
+        ? <ThinkingBody content={content} streaming={!!thinkingStreaming} truncated={thinkingTruncated} />
         : content
 
   return (
@@ -970,6 +1001,8 @@ function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, inFlig
                   content={msg.content}
                   timestamp={msg.timestamp}
                   isStreaming={msg.isStreaming}
+                  thinkingStreaming={msg.thinkingStreaming}
+                  thinkingTruncated={msg.thinkingTruncated}
                   attachments={msg.attachments}
                   queued={queuedIds?.has(msg.id) ?? false}
                   queuePosition={queuePositions?.get(msg.id)}

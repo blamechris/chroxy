@@ -162,6 +162,47 @@ describe('ChatView', () => {
     expect(screen.getByText('deep-secret-reasoning')).toBeInTheDocument()
   })
 
+  // #6756 — real streamed reasoning content feeds ThinkingBody, with the
+  // "Thinking…" vs "Thought" label driven by the `thinkingStreaming` flag
+  // (distinct from the response `isStreaming`).
+  it('labels ThinkingBody "Thinking…" while thinkingStreaming and reveals real content (#6756)', () => {
+    const messages: ChatViewMessage[] = [
+      { id: 'msg-1-thinking-0', type: 'thinking', content: 'weighing the options', thinkingStreaming: true, timestamp: Date.now() },
+    ]
+    render(<ChatView messages={messages} isStreaming={false} />)
+    const toggle = screen.getByTestId('thinking-toggle')
+    expect(toggle).toHaveTextContent('Thinking…')
+    fireEvent.click(toggle)
+    expect(screen.getByText('weighing the options')).toBeInTheDocument()
+  })
+
+  it('flips ThinkingBody to "Thought" once thinkingStreaming is false (#6756)', () => {
+    const messages: ChatViewMessage[] = [
+      { id: 'msg-1-thinking-0', type: 'thinking', content: 'settled reasoning', thinkingStreaming: false, timestamp: Date.now() },
+    ]
+    render(<ChatView messages={messages} isStreaming={false} />)
+    expect(screen.getByTestId('thinking-toggle')).toHaveTextContent('Thought')
+  })
+
+  it('surfaces a "[thinking truncated]" marker when the content hit the size cap (#6756)', () => {
+    const messages: ChatViewMessage[] = [
+      { id: 'msg-1-thinking-0', type: 'thinking', content: 'capped reasoning', thinkingStreaming: false, thinkingTruncated: true, timestamp: Date.now() },
+    ]
+    render(<ChatView messages={messages} isStreaming={false} />)
+    fireEvent.click(screen.getByTestId('thinking-toggle'))
+    expect(screen.getByTestId('thinking-truncated')).toHaveTextContent('[thinking truncated]')
+    // …and no marker without the flag.
+    cleanup()
+    render(
+      <ChatView
+        messages={[{ id: 't2', type: 'thinking', content: 'full reasoning', thinkingStreaming: false, timestamp: Date.now() }]}
+        isStreaming={false}
+      />,
+    )
+    fireEvent.click(screen.getByTestId('thinking-toggle'))
+    expect(screen.queryByTestId('thinking-truncated')).not.toBeInTheDocument()
+  })
+
   it('renders empty state when no messages', () => {
     render(<ChatView messages={[]} isStreaming={false} />)
     expect(screen.getByTestId('chat-view')).toBeInTheDocument()

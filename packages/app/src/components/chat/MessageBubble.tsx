@@ -74,6 +74,48 @@ export function buildPromptSessionLabel(
   return provider ? `${name} · ${provider}` : name;
 }
 
+/**
+ * #6756 — content-capable thinking view. The mobile parity of the dashboard's
+ * `ThinkingBody`: a quiet collapsible disclosure ("▸ Thinking…" while streaming,
+ * "▸ Thought" once done) that reveals the model's reasoning text on tap. Used
+ * only when a thinking bubble actually carries reasoning content; an empty
+ * thinking bubble (the ephemeral placeholder) keeps the `ThinkingIndicator`
+ * animation.
+ */
+function ThinkingBubble({ content, streaming, truncated }: { content: string; streaming: boolean; truncated?: boolean }) {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <View style={styles.thinkingBubble} testID="thinking-bubble">
+      <TouchableOpacity
+        onPress={() => {
+          LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+          setExpanded((v) => !v);
+        }}
+        testID="thinking-toggle"
+        accessibilityRole="button"
+        accessibilityLabel={streaming ? 'Thinking' : 'Thought'}
+        // Small horizontal hitSlop for comfort past the text's visual bounds;
+        // the ≥44pt minimum on both axes is carried by the style's
+        // minHeight/minWidth (see thinkingToggleTouchable).
+        hitSlop={{ top: 0, right: 8, bottom: 0, left: 8 }}
+        style={styles.thinkingToggleTouchable}
+      >
+        <Text style={styles.thinkingToggle}>
+          {expanded ? '▾' : '▸'} {streaming ? 'Thinking…' : 'Thought'}
+        </Text>
+      </TouchableOpacity>
+      {expanded && (
+        <Text style={styles.thinkingContent} testID="thinking-content" selectable>
+          {content}
+          {/* #6756 — the store bounded this bubble at MAX_THINKING_CONTENT_LEN
+              and dropped further deltas; say so instead of cutting silently. */}
+          {truncated ? '\n… [thinking truncated]' : ''}
+        </Text>
+      )}
+    </View>
+  );
+}
+
 function MessageBubbleImpl({ message, queued, onCancelQueued, onSelectOption, onSubmitMultiQuestion, allowMultiQuestion, allowSingleMultiSelect, isSelected, isSelecting, onLongPress, onPress, onOpenDetail, onImagePress, onRetryStreamStall, getInitialExpanded, onExpandedChange }: {
   message: ChatMessage;
   /**
@@ -329,6 +371,19 @@ function MessageBubbleImpl({ message, queued, onCancelQueued, onSelectOption, on
   };
 
   if (isThinking) {
+    // #6756 — render the model's reasoning content as an expandable disclosure
+    // when present; fall back to the generic animation for the contentless
+    // placeholder (or a thinking block that hasn't streamed any text yet).
+    const thinkingContent = typeof message.content === 'string' ? message.content : '';
+    if (thinkingContent.trim().length > 0) {
+      return (
+        <ThinkingBubble
+          content={thinkingContent}
+          streaming={message.thinkingStreaming === true}
+          truncated={message.thinkingTruncated === true}
+        />
+      );
+    }
     return <ThinkingIndicator />;
   }
 
@@ -786,6 +841,35 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     marginBottom: 12,
     maxWidth: '85%',
+  },
+  // #6756 — content-capable thinking disclosure (mobile parity with the
+  // dashboard's ThinkingBody). Deliberately low-noise: a muted toggle line and,
+  // when expanded, the reasoning text. No card chrome.
+  thinkingBubble: {
+    marginBottom: 12,
+    maxWidth: '90%',
+  },
+  // ≥44pt effective touch target on BOTH axes (repo accessibility minimum —
+  // same convention as DiffHunkView's toggle row): the 13pt text line alone is
+  // far short of 44pt, so the touchable carries explicit min dimensions and
+  // centers the label vertically. alignSelf keeps the target hugging the label
+  // instead of stretching the full row width.
+  thinkingToggleTouchable: {
+    minHeight: 44,
+    minWidth: 44,
+    justifyContent: 'center',
+    alignSelf: 'flex-start',
+  },
+  thinkingToggle: {
+    color: COLORS.textMuted,
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  thinkingContent: {
+    marginTop: 6,
+    color: COLORS.textSecondary,
+    fontSize: 13,
+    lineHeight: 19,
   },
   // Chat redesign #6391 (mobile no-bubble): bare assistant response — no card,
   // flush, so a long turn reads like a document. User/prompt/tool keep cards.

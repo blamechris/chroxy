@@ -13,14 +13,15 @@
  *     -> filter(m => m.type !== 'system')   // System events render on
  *                                           //   the System tab.
  *     -> groupMessages                      // (#3747) collapse contiguous
- *                                           //   tool_use / thinking runs
- *                                           //   into ActivityGroups.
+ *                                           //   tool_use runs into
+ *                                           //   ActivityGroups (#6756:
+ *                                           //   thinking stays standalone).
  *     -> applyStreamingOverlay              // mark trailing activity group
  *                                           //   as active during streaming.
  *     -> ChatViewMessage[]                  // flatten to chat-view rows.
  *
  * Singleton activity groups (1 message) pass through as the original
- * `tool_use` / `thinking` row so the existing ToolBubble path stays
+ * `tool_use` row so the existing ToolBubble path stays
  * reachable. Runs of 2+ messages collapse to a synthetic `tool_group`
  * row whose `id` is the group key `activity-<firstId>`. The full payload
  * is exposed via `chatToolGroupPayloads: Map<groupId, { messages, isActive }>`
@@ -61,6 +62,20 @@ export interface ChatViewMessage {
   content: string
   timestamp: number
   isStreaming?: boolean
+  /**
+   * #6756 — mirrored from the store ChatMessage on `thinking` rows: `true`
+   * while reasoning content is still streaming (label "Thinking…"), `false`
+   * once the thinking block ended (label "Thought"). Distinct from
+   * `isStreaming` (which tracks the response text via `streamingMessageId`).
+   */
+  thinkingStreaming?: boolean
+  /**
+   * #6756 — mirrored from the store ChatMessage on `thinking` rows: the
+   * accumulated reasoning content hit MAX_THINKING_CONTENT_LEN and further
+   * deltas were dropped. Renderers append a small "[thinking truncated]"
+   * marker so the cut is never silent.
+   */
+  thinkingTruncated?: boolean
   /**
    * #4476 — structured error code mirrored from the store ChatMessage so
    * renderers can switch on it (e.g. `'stream_stall'` → chip + retry).
@@ -110,6 +125,17 @@ export function toChatViewMessage(msg: ChatMessage): ChatViewMessage {
     // renderMessage path can switch error bubbles into the
     // StreamStallChip variant.
     ...(msg.code ? { code: msg.code } : {}),
+    // #6756: carry the thinking streaming flag through on thinking rows so the
+    // ThinkingBody disclosure can label "Thinking…" vs "Thought". Gated to
+    // `thinking` to match the contract (the field lives only on thinking bubbles).
+    ...(msg.type === 'thinking' && msg.thinkingStreaming !== undefined
+      ? { thinkingStreaming: msg.thinkingStreaming }
+      : {}),
+    // #6756: surface a hit size cap — renderers append a "[thinking truncated]"
+    // marker so the cut is never silent. Same thinking-row gate as above.
+    ...(msg.type === 'thinking' && msg.thinkingTruncated
+      ? { thinkingTruncated: true }
+      : {}),
     // #6632: carry user-message attachments through so the transcript can
     // preview them (dropped previously → no thumbnail on the sent message).
     // Gated to `user_input` to match the contract (attachments live only on user
@@ -135,8 +161,9 @@ export function buildChatViewMessages(
   // Filter out `system` events — they belong on the System tab.
   const chatFilteredMessages = storeMessages.filter(m => m.type !== 'system')
 
-  // Group contiguous tool_use / thinking runs, then apply the streaming
-  // overlay so the trailing group flips to isActive while streaming.
+  // Group contiguous tool_use runs (#6756: thinking stays standalone), then
+  // apply the streaming overlay so the trailing group flips to isActive while
+  // streaming.
   const baseGroups = groupMessages(chatFilteredMessages)
   const displayGroups = applyStreamingOverlay(
     baseGroups,
@@ -146,8 +173,8 @@ export function buildChatViewMessages(
 
   // Map of synthetic group id -> original messages + isActive. Only
   // populated for runs of 2+ messages (#3794 review) — singleton activity
-  // groups render as the original `tool_use` / `thinking` row through
-  // ToolBubble, so they don't need a payload lookup.
+  // groups render as the original `tool_use` row through ToolBubble, so
+  // they don't need a payload lookup.
   const chatToolGroupPayloads = new Map<
     string,
     { messages: ChatMessage[]; isActive: boolean }
@@ -159,12 +186,12 @@ export function buildChatViewMessages(
   }
 
   // Flatten to ChatViewMessage[] — singleton activity groups (1 msg)
-  // pass through as `tool_use` / `thinking`; runs of 2+ collapse to a
-  // single synthetic `tool_group` row keyed by the group key.
+  // pass through as `tool_use`; runs of 2+ collapse to a single
+  // synthetic `tool_group` row keyed by the group key.
   const chatMessages: ChatViewMessage[] = displayGroups.map((g) => {
     if (g.type === 'single') return toChatViewMessage(g.message)
     if (g.messages.length < 2) {
-      // Singleton — emit as the original tool_use / thinking row.
+      // Singleton — emit as the original tool_use row.
       return toChatViewMessage(g.messages[0]!)
     }
     const last = g.messages[g.messages.length - 1]

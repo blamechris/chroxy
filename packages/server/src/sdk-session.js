@@ -625,6 +625,14 @@ export class SdkSession extends BaseSession {
     // false, but the turn may have streamed before the timeout landed).
     const streamState = { hasStreamStarted: false }
     let didStreamText = false
+    // #6756 — extended-thinking forwarding. Each thinking / redacted_thinking
+    // content block gets a DISTINCT thinking messageId (`<turnId>-thinking-<n>`)
+    // so its stream never collides with the response text stream. `thinkingBlocks`
+    // maps the SDK stream event `index` → that thinking id so the thinking_delta
+    // and content_block_stop events (which carry only the index) route correctly.
+    const thinkingBlocks = new Map()
+    let thinkingBlockCount = 0
+    let didStreamThinking = false
 
     const sdkPermMode = this._sdkPermissionMode()
     // Skills MVP (#2957) — append shared skills via SDK systemPrompt.append.
@@ -889,6 +897,31 @@ export class SdkSession extends BaseSession {
                   // #4628: defense-in-depth — track so _emitResult sweep
                   // catches any orphan if the API ever drops a tool_result.
                   this._trackToolStart(toolStartData.toolUseId, event.content_block.name)
+                } else if (blockType === 'thinking' || blockType === 'redacted_thinking') {
+                  // #6756 — extended-thinking block opened. Open a thinking
+                  // stream on a distinct id so reasoning content streams into a
+                  // `type: 'thinking'` bubble (not the response slot).
+                  // Copilot review on #6817: if a reordered thinking_delta for
+                  // this block index already lazily opened the stream, REUSE its
+                  // id and don't re-emit stream_start — one block must never
+                  // produce two streams.
+                  let thinkingId = thinkingBlocks.get(event.index)
+                  if (!thinkingId) {
+                    thinkingId = `${messageId}-thinking-${thinkingBlockCount++}`
+                    thinkingBlocks.set(event.index, thinkingId)
+                    this.emit('stream_start', { messageId: thinkingId, thinking: true })
+                  }
+                  didStreamThinking = true
+                  if (blockType === 'redacted_thinking') {
+                    // Redacted thinking carries encrypted `data`, never readable
+                    // text — forward a marker so the block is never silently
+                    // dropped (its content_block_stop still closes the stream).
+                    this.emit('stream_delta', {
+                      messageId: thinkingId,
+                      delta: '[redacted thinking]',
+                      thinking: true,
+                    })
+                  }
                 }
                 break
               }
@@ -908,6 +941,31 @@ export class SdkSession extends BaseSession {
                   // because both ends are this same process; it's a true
                   // elapsed duration, unlike the cross-machine serverTs field.
                   this.emit('stream_delta', { messageId, delta: delta.text, _emitMonoMs: Number(process.hrtime.bigint() / 1_000_000n) })
+                } else if (delta.type === 'thinking_delta' && typeof delta.thinking === 'string') {
+                  // #6756 — reasoning delta. Route to the thinking id opened on
+                  // this block's content_block_start; lazy-open if the start was
+                  // reordered/dropped so a delta is never lost. `signature_delta`
+                  // (the block's signature, not content) falls through untouched.
+                  let thinkingId = thinkingBlocks.get(event.index)
+                  if (!thinkingId) {
+                    thinkingId = `${messageId}-thinking-${thinkingBlockCount++}`
+                    thinkingBlocks.set(event.index, thinkingId)
+                    this.emit('stream_start', { messageId: thinkingId, thinking: true })
+                  }
+                  didStreamThinking = true
+                  this.emit('stream_delta', { messageId: thinkingId, delta: delta.thinking, thinking: true })
+                }
+                break
+              }
+
+              case 'content_block_stop': {
+                // #6756 — close the thinking stream for this block so the client
+                // finalises its "Thinking… → Thought" label. Only thinking
+                // blocks are tracked here; text/tool_use blocks are a no-op.
+                const thinkingId = thinkingBlocks.get(event.index)
+                if (thinkingId) {
+                  thinkingBlocks.delete(event.index)
+                  this.emit('stream_end', { messageId: thinkingId, thinking: true })
                 }
                 break
               }
@@ -933,6 +991,20 @@ export class SdkSession extends BaseSession {
                   content: block.text,
                   timestamp: Date.now(),
                 })
+              }
+
+              // #6756 — fallback for thinking delivered only on the full
+              // assistant message (partial-message streaming off, or a block the
+              // stream_event path never surfaced). Only fires when NOTHING was
+              // streamed this turn, so the streaming path is never double-emitted.
+              if ((block.type === 'thinking' || block.type === 'redacted_thinking') && !didStreamThinking) {
+                const thinkingId = `${messageId}-thinking-${thinkingBlockCount++}`
+                const text = block.type === 'redacted_thinking'
+                  ? '[redacted thinking]'
+                  : (typeof block.thinking === 'string' ? block.thinking : '')
+                this.emit('stream_start', { messageId: thinkingId, thinking: true })
+                if (text) this.emit('stream_delta', { messageId: thinkingId, delta: text, thinking: true })
+                this.emit('stream_end', { messageId: thinkingId, thinking: true })
               }
 
               if (block.type === 'tool_use') {

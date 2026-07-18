@@ -60,14 +60,20 @@ describe('groupMessages', () => {
     }
   })
 
-  it('groups tool_use and thinking together (both contribute to activity)', () => {
+  it('keeps thinking standalone, breaking a tool run (#6756)', () => {
+    // Thinking now carries real reasoning content, so each thinking bubble is
+    // its own `single` row (reaching the content-capable disclosure) instead of
+    // collapsing into the tool activity group.
     const t1 = msg('1', 'thinking')
     const u = msg('2', 'tool_use', { tool: 'Bash' })
     const t2 = msg('3', 'thinking')
     const groups = groupMessages([t1, u, t2])
-    expect(groups).toHaveLength(1)
-    if (groups[0].type === 'activity') {
-      expect(groups[0].messages).toHaveLength(3)
+    expect(groups).toHaveLength(3)
+    expect(groups[0].type).toBe('single')
+    expect(groups[1].type).toBe('activity')
+    expect(groups[2].type).toBe('single')
+    if (groups[1].type === 'activity') {
+      expect(groups[1].messages).toHaveLength(1)
     }
   })
 
@@ -170,7 +176,7 @@ describe('applyStreamingOverlay', () => {
       msg('1', 'tool_use', { tool: 'Bash' }),
       msg('2', 'response', { content: 'ok' }),
       msg('3', 'tool_use', { tool: 'Read' }),
-      msg('4', 'thinking'),
+      msg('4', 'tool_use', { tool: 'Grep' }),
     ]
     const base = groupMessages(messages)
     expect(base).toHaveLength(3)

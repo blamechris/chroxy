@@ -284,6 +284,13 @@ export class ClaudeByokSession extends BaseSession {
     // here.
     this._streamingIndexToToolUseId = new Map()
 
+    // #6756: per-stream index → thinking messageId, mirroring the toolUseId map
+    // above. The translated `thinking_delta` events carry only the block index;
+    // this maps each thinking block's index to the distinct thinking id we open
+    // on its first delta so subsequent deltas + the content_block_stop route
+    // correctly. Cleared alongside `_streamingIndexToToolUseId`.
+    this._streamingIndexToThinkingId = new Map()
+
     // #4080: toolUseIds whose permission_request is currently pending.
     // Populated when this session re-emits permission_request (line
     // ~165), drained on permission_resolved (line ~167). Consulted on
@@ -594,6 +601,22 @@ export class ClaudeByokSession extends BaseSession {
             case 'stream_delta':
               this.emit('stream_delta', { messageId, delta: t.text })
               break
+            case 'thinking_delta': {
+              // #6756 — extended-thinking (reasoning) delta. The translator
+              // already recognises `thinking_delta` (byok-event-translator.js);
+              // previously it hit `default: break` and was dropped. Route it to
+              // a distinct thinking id (opened lazily on the block's first
+              // delta) so it streams into a `type: 'thinking'` bubble.
+              const idx = typeof t.index === 'number' ? t.index : 0
+              let thinkingId = this._streamingIndexToThinkingId.get(idx)
+              if (!thinkingId) {
+                thinkingId = `${messageId}-thinking-${idx}`
+                this._streamingIndexToThinkingId.set(idx, thinkingId)
+                this.emit('stream_start', { messageId: thinkingId, thinking: true })
+              }
+              this.emit('stream_delta', { messageId: thinkingId, delta: t.text, thinking: true })
+              break
+            }
             case 'tool_start': {
               // Surface the tool_use opening to the dashboard so it can
               // render a tool-call bubble. Matches sdk-session.js /
@@ -674,10 +697,17 @@ export class ClaudeByokSession extends BaseSession {
               // #4080: free the per-index slot as soon as the block
               // finishes so a long turn's map doesn't grow unbounded.
               // Safe to delete even if index isn't in the map — that
-              // just means we never tracked this block (text /
-              // thinking) and the lookup is a no-op.
+              // just means we never tracked this block (text) and the
+              // lookup is a no-op.
               if (typeof t.index === 'number') {
                 this._streamingIndexToToolUseId.delete(t.index)
+                // #6756 — close the thinking stream for this block so the
+                // client finalises its "Thinking… → Thought" label.
+                const thinkingId = this._streamingIndexToThinkingId.get(t.index)
+                if (thinkingId) {
+                  this._streamingIndexToThinkingId.delete(t.index)
+                  this.emit('stream_end', { messageId: thinkingId, thinking: true })
+                }
               }
               break
             case 'message_delta':
@@ -704,6 +734,7 @@ export class ClaudeByokSession extends BaseSession {
         // toolUseId from the previous round. Clear here so each round
         // starts with an empty per-stream map.
         this._streamingIndexToToolUseId.clear()
+        this._streamingIndexToThinkingId.clear()
         lastStopReason = final.stop_reason
         const roundUsage = final.usage || {}
         turnUsage.input_tokens += Number(roundUsage.input_tokens) || 0
@@ -965,6 +996,7 @@ export class ClaudeByokSession extends BaseSession {
       // them on every exit path — success, error, abort, hard timeout.
       // Safe to call when already empty.
       this._streamingIndexToToolUseId.clear()
+      this._streamingIndexToThinkingId.clear()
       this._finishTurn()
     }
   }
@@ -1997,6 +2029,7 @@ export class ClaudeByokSession extends BaseSession {
     // active stream / outstanding permission count, but any external
     // reference (test capture, future export) would keep them alive.
     this._streamingIndexToToolUseId.clear()
+    this._streamingIndexToThinkingId.clear()
     this._pendingPermissionToolUseIds.clear()
     // #5056: drop any outstanding subagent permission-routing pointers so
     // the destroyed parent doesn't retain references to its children.

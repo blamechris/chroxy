@@ -140,6 +140,16 @@ Object.assign(EVENT_MAP, {
   },
 
   stream_start: (data, ctx) => {
+    // #6756 — a thinking stream_start opens a reasoning bubble on a distinct id.
+    // Tag the wire message so the client routes it to a `type: 'thinking'`
+    // bubble, and skip the agent_busy / session_list churn: the turn's busy
+    // state is already owned by the response stream / the client's 'pending'
+    // sentinel, so a per-thinking-block session_list refresh would be noise.
+    if (data.thinking) {
+      return {
+        messages: [{ msg: { type: 'stream_start', messageId: data.messageId, thinking: true } }],
+      }
+    }
     const messages = [
       { msg: { type: 'stream_start', messageId: data.messageId } },
       { msg: { type: 'agent_busy' } },
@@ -154,6 +164,17 @@ Object.assign(EVENT_MAP, {
   },
 
   stream_delta: (data, _ctx) => {
+    // #6756 — thinking deltas broadcast IMMEDIATELY (no coalescing). The delta
+    // buffer keys only on sessionId:messageId and reconstructs a bare
+    // {messageId, delta} on flush, so it can't carry the `thinking` flag; and a
+    // thinking bubble uses a distinct messageId anyway, so it never shares a
+    // buffer key with the response text. Returning no `buffer` flag sends it
+    // straight through with the flag intact.
+    if (data.thinking) {
+      return {
+        messages: [{ msg: { type: 'stream_delta', messageId: data.messageId, delta: data.delta, thinking: true } }],
+      }
+    }
     // Delta buffering is handled externally — normalizer returns the raw delta
     // and the caller decides whether to buffer or flush.
     return {
@@ -163,6 +184,14 @@ Object.assign(EVENT_MAP, {
   },
 
   stream_end: (data, ctx) => {
+    // #6756 — a thinking stream_end finalises the reasoning bubble's label. No
+    // flush_deltas: thinking deltas were never buffered, and flushing here would
+    // prematurely emit the response text buffer.
+    if (data.thinking) {
+      return {
+        messages: [{ msg: { type: 'stream_end', messageId: data.messageId, thinking: true } }],
+      }
+    }
     return {
       messages: [{ msg: { type: 'stream_end', messageId: data.messageId } }],
       sideEffects: [

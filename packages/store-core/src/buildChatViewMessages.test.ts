@@ -61,24 +61,26 @@ describe('buildChatViewMessages', () => {
     expect(out.chatToolGroupPayloads.size).toBe(0)
   })
 
-  it('collapses a run of 2+ tool_use/thinking into a single tool_group row', () => {
+  it('collapses a run of 2+ tool_use into a tool_group; thinking stays standalone (#6756)', () => {
     const messages = [
       msg({ id: 'u1', type: 'user_input', content: 'do many things' }),
-      msg({ id: 't1', type: 'tool_use', content: '', tool: 'Bash' }),
       msg({ id: 'th1', type: 'thinking', content: 'planning' }),
+      msg({ id: 't1', type: 'tool_use', content: '', tool: 'Bash' }),
       msg({ id: 't2', type: 'tool_use', content: '', tool: 'Read' }),
       msg({ id: 'r1', type: 'response', content: 'done' }),
     ]
     const out = buildChatViewMessages(messages, null)
     const types = out.chatMessages.map(m => m.type)
-    expect(types).toEqual(['user_input', 'tool_group', 'response'])
+    // #6756 — the thinking bubble renders as its own row (reaching ThinkingBody),
+    // and only the two contiguous tool_use bubbles collapse into a tool_group.
+    expect(types).toEqual(['user_input', 'thinking', 'tool_group', 'response'])
 
     const groupRow = out.chatMessages.find(m => m.type === 'tool_group')!
     expect(groupRow.id).toBe('activity-t1')
 
     const payload = out.chatToolGroupPayloads.get('activity-t1')
     expect(payload).toBeDefined()
-    expect(payload!.messages.map(m => m.id)).toEqual(['t1', 'th1', 't2'])
+    expect(payload!.messages.map(m => m.id)).toEqual(['t1', 't2'])
     expect(payload!.isActive).toBe(false)
   })
 

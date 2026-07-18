@@ -261,6 +261,16 @@ describe('EventNormalizer', () => {
       assert.ok(result.sideEffects.some(se => se.type === 'session_list'))
       assert.ok(result.sideEffects.some(se => se.type === 'log'))
     })
+
+    // #6756 — a thinking stream_start carries the flag and skips the
+    // agent_busy / session_list churn.
+    it('tags thinking:true and omits agent_busy / session_list', () => {
+      const result = normalizer.normalize('stream_start', { messageId: 'msg-1-thinking-0', thinking: true }, makeCtx())
+      assert.equal(result.messages.length, 1)
+      assert.equal(result.messages[0].msg.type, 'stream_start')
+      assert.equal(result.messages[0].msg.thinking, true)
+      assert.ok(!result.sideEffects, 'no session_list churn per thinking block')
+    })
   })
 
   // ---- EVENT_MAP: stream_delta ----
@@ -270,6 +280,16 @@ describe('EventNormalizer', () => {
       const result = normalizer.normalize('stream_delta', { messageId: 'msg-1', delta: 'hello' }, makeCtx())
       assert.equal(result.buffer, true)
       assert.equal(result.messages[0].msg.delta, 'hello')
+    })
+
+    // #6756 — thinking deltas broadcast immediately (no buffering) with the flag
+    // intact; the coalescing buffer can't carry the flag.
+    it('thinking delta is NOT buffered and carries thinking:true', () => {
+      const result = normalizer.normalize('stream_delta', { messageId: 'msg-1-thinking-0', delta: 'reason', thinking: true }, makeCtx())
+      assert.ok(!result.buffer, 'thinking deltas bypass the coalescing buffer')
+      assert.equal(result.messages[0].msg.type, 'stream_delta')
+      assert.equal(result.messages[0].msg.delta, 'reason')
+      assert.equal(result.messages[0].msg.thinking, true)
     })
   })
 
@@ -281,6 +301,15 @@ describe('EventNormalizer', () => {
       assert.equal(result.messages[0].msg.type, 'stream_end')
       assert.equal(result.messages[0].msg.messageId, 'msg-1')
       assert.ok(result.sideEffects.some(se => se.type === 'flush_deltas'))
+    })
+
+    // #6756 — a thinking stream_end carries the flag and does NOT flush the
+    // response-text buffer.
+    it('tags thinking:true and omits flush_deltas', () => {
+      const result = normalizer.normalize('stream_end', { messageId: 'msg-1-thinking-0', thinking: true }, makeCtx())
+      assert.equal(result.messages[0].msg.type, 'stream_end')
+      assert.equal(result.messages[0].msg.thinking, true)
+      assert.ok(!result.sideEffects, 'thinking end does not flush the text buffer')
     })
   })
 
