@@ -394,7 +394,7 @@ function _isSecureRequest(req) {
  *   { type: 'client_focus_changed', clientId, sessionId, timestamp } — another client changed session focus
  *   { type: 'checkpoint_created', sessionId, checkpoint } — checkpoint created (auto or manual)
  *   { type: 'checkpoint_list', sessionId, checkpoints }   — list of checkpoints
- *   { type: 'checkpoint_restored', checkpointId, newSessionId, name } — checkpoint restored (new session created)
+ *   { type: 'checkpoint_restored', checkpointId, newSessionId, name, filesOnly? } — checkpoint restored (new session created; filesOnly true = working tree only, conversation NOT branched — #6766)
  *   { type: 'primary_changed', sessionId, clientId } — last-writer-wins primary changed (null on disconnect)
  *   { type: 'session_role', sessionId, primaryClientId } — #5589/#5281: explicit primary-ownership; client derives its role (primary iff primaryClientId === own clientId, observer if another holds it, null = unclaimed)
  *   { type: 'pong' }                                    — heartbeat response

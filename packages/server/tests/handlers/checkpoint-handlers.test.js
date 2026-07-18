@@ -1,6 +1,10 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 import { checkpointHandlers } from '../../src/handlers/checkpoint-handlers.js'
+import { CheckpointManager } from '../../src/checkpoint-manager.js'
 import { createSpy, createMockSession, makeSessionIndexCtx, nsCtx } from '../test-helpers.js'
 
 function makeCtx(sessions = new Map(), overrides = {}) {
@@ -220,22 +224,63 @@ describe('checkpoint-handlers', () => {
         assert.equal(restored.filesOnly, false, 'a real conversation branch is not files-only')
       })
 
-      it('restoring the EARLIER of two checkpoints truncates to the earlier boundary', async () => {
-        // Two checkpoints in one session; restore the earlier one → fork must
-        // use the earlier boundary, so the rewound history stops there (not the
-        // later checkpoint / full transcript). This is the issue's core AC.
-        const { ctx, orig } = makeForkCtx({ forkCapable: true, boundaryMessageId: 'uuid-early' })
-        // Model "two checkpoints": the manager returns the EARLIER checkpoint's
-        // boundary for the id we restore.
-        const earlier = { id: 'cp-early', name: 'Checkpoint 1', cwd: '/tmp', resumeSessionId: 'conv-1', boundaryMessageId: 'uuid-early' }
-        ctx.services.checkpointManager.getCheckpoint = createSpy(() => earlier)
-        ctx.services.checkpointManager.restoreCheckpoint = createSpy(async () => earlier)
-        const client = makeClient({ activeSessionId: 's1' })
+      it('restoring the EARLIER of two REAL checkpoints truncates to the earlier boundary', async () => {
+        // The issue's core AC, end-to-end through a REAL CheckpointManager (no
+        // mocked boundary lookup): two checkpoints created in one session with
+        // DISTINCT fork boundaries, restore the earlier by its real id → the
+        // fork must receive the EARLIER checkpoint's upToMessageId, so the
+        // rewound history stops at that checkpoint, not the later one / the
+        // full latest transcript. Temp checkpointsDir + non-git cwd (#4633; a
+        // non-git dir skips the snapshot machinery, which is irrelevant here).
+        const checkpointsDir = mkdtempSync(join(tmpdir(), 'chroxy-cp-handler-state-'))
+        const workDir = mkdtempSync(join(tmpdir(), 'chroxy-cp-handler-cwd-'))
+        try {
+          const manager = new CheckpointManager({ checkpointsDir })
+          const early = await manager.createCheckpoint({
+            sessionId: 's1',
+            resumeSessionId: 'conv-1',
+            cwd: workDir,
+            name: 'Early',
+            messageCount: 2,
+            boundaryMessageId: 'uuid-early',
+          })
+          const late = await manager.createCheckpoint({
+            sessionId: 's1',
+            resumeSessionId: 'conv-1',
+            cwd: workDir,
+            name: 'Late',
+            messageCount: 6,
+            boundaryMessageId: 'uuid-late',
+          })
+          assert.notEqual(early.boundaryMessageId, late.boundaryMessageId, 'precondition: distinct boundaries')
 
-        await checkpointHandlers.restore_checkpoint(makeWs(), client, { checkpointId: 'cp-early' }, ctx)
+          const sessions = new Map()
+          const orig = createMockSession()
+          orig.isRunning = false
+          orig.resumeSessionId = 'conv-1'
+          orig.supportsConversationFork = true
+          orig.forkConversation = createSpy(async () => 'forked-early-id')
+          sessions.set('s1', { session: orig, name: 'S', cwd: workDir })
+          sessions.set('restored-session-id', { session: createMockSession(), name: 'Rewind: Early', cwd: workDir })
+          const ctx = makeCtx(sessions)
+          ctx.services.checkpointManager = manager // the REAL manager, not the default mock
+          ctx.sessions.sessionManager.createSession = createSpy(async () => 'restored-session-id')
+          const client = makeClient({ activeSessionId: 's1' })
 
-        const [forkArgs] = orig.forkConversation.calls[0]
-        assert.equal(forkArgs.upToMessageId, 'uuid-early', 'truncates to the earlier checkpoint, not the latest state')
+          await checkpointHandlers.restore_checkpoint(makeWs(), client, { checkpointId: early.id }, ctx)
+
+          assert.equal(orig.forkConversation.callCount, 1, 'must fork exactly once')
+          const [forkArgs] = orig.forkConversation.calls[0]
+          assert.equal(forkArgs.upToMessageId, 'uuid-early', 'forks at the EARLIER checkpoint boundary, not uuid-late / latest state')
+          assert.equal(forkArgs.sessionId, 'conv-1')
+          const [createArgs] = ctx.sessions.sessionManager.createSession.calls[0]
+          assert.equal(createArgs.resumeSessionId, 'forked-early-id', 'rewound session resumes the truncated fork')
+          const restored = ctx._sent.find(m => m.type === 'checkpoint_restored')
+          assert.equal(restored.filesOnly, false)
+        } finally {
+          rmSync(checkpointsDir, { recursive: true, force: true })
+          rmSync(workDir, { recursive: true, force: true })
+        }
       })
 
       it('degrades to files-only (filesOnly:true, raw resume) for a non-fork provider', async () => {
