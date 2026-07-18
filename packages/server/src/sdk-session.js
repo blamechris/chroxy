@@ -901,9 +901,16 @@ export class SdkSession extends BaseSession {
                   // #6756 — extended-thinking block opened. Open a thinking
                   // stream on a distinct id so reasoning content streams into a
                   // `type: 'thinking'` bubble (not the response slot).
-                  const thinkingId = `${messageId}-thinking-${thinkingBlockCount++}`
-                  thinkingBlocks.set(event.index, thinkingId)
-                  this.emit('stream_start', { messageId: thinkingId, thinking: true })
+                  // Copilot review on #6817: if a reordered thinking_delta for
+                  // this block index already lazily opened the stream, REUSE its
+                  // id and don't re-emit stream_start — one block must never
+                  // produce two streams.
+                  let thinkingId = thinkingBlocks.get(event.index)
+                  if (!thinkingId) {
+                    thinkingId = `${messageId}-thinking-${thinkingBlockCount++}`
+                    thinkingBlocks.set(event.index, thinkingId)
+                    this.emit('stream_start', { messageId: thinkingId, thinking: true })
+                  }
                   didStreamThinking = true
                   if (blockType === 'redacted_thinking') {
                     // Redacted thinking carries encrypted `data`, never readable

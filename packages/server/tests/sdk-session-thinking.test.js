@@ -112,6 +112,35 @@ describe('SdkSession — thinking content forwarding (#6756)', () => {
     assert.ok(events.some((e) => e.name === 'stream_end' && e.thinking === true))
   })
 
+  it('delta-before-start ordering produces exactly ONE thinking stream (Copilot review on #6817)', async () => {
+    // A reordered/missed content_block_start: the first thinking_delta lazily
+    // opens the stream; the late content_block_start for the SAME block index
+    // must reuse that id and must NOT emit a second stream_start.
+    session._callQuery = () => asyncStream([
+      initMsg,
+      { type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'early ' } } },
+      { type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'thinking' } } },
+      { type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'late' } } },
+      { type: 'stream_event', event: { type: 'content_block_stop', index: 0 } },
+      { type: 'assistant', message: { content: [{ type: 'thinking', thinking: 'early late' }] } },
+      resultMsg,
+    ])
+    const events = capture(session)
+    await session.sendMessage('hi')
+
+    const thinkingStarts = events.filter((e) => e.name === 'stream_start' && e.thinking === true)
+    assert.equal(thinkingStarts.length, 1, 'exactly one thinking stream_start for the block')
+    const thinkingId = thinkingStarts[0].messageId
+
+    const thinkingDeltas = events.filter((e) => e.name === 'stream_delta' && e.thinking === true)
+    assert.deepEqual(thinkingDeltas.map((e) => e.delta), ['early ', 'late'])
+    assert.ok(thinkingDeltas.every((e) => e.messageId === thinkingId), 'both deltas ride the lazily-opened id')
+
+    const thinkingEnds = events.filter((e) => e.name === 'stream_end' && e.thinking === true)
+    assert.equal(thinkingEnds.length, 1)
+    assert.equal(thinkingEnds[0].messageId, thinkingId)
+  })
+
   it('falls back to the full assistant message when the thinking block never streamed', async () => {
     // No thinking stream_event partials — only the final assistant message
     // carries the thinking block (partial streaming off / block not surfaced).
