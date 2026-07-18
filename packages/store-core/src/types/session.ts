@@ -240,6 +240,13 @@ export interface SessionContext {
 export interface McpServer {
   name: string;
   status: string;
+  // #6824: per-server enable/disable state. `enabled` is the toggle's on/off
+  // value (false = operator-parked; a distinct signal from a 'dead' status the
+  // operator never touched). `canToggle` gates whether the UI renders a toggle
+  // — only the BYOK lane (in-daemon MCP fleet) sets it; sdk/cli/tui stay
+  // read-only. Both optional so a message from a pre-#6824 emitter round-trips.
+  enabled?: boolean;
+  canToggle?: boolean;
 }
 
 export interface DevPreview {

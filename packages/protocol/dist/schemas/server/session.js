@@ -66,9 +66,23 @@ export const ServerMultiQuestionInterventionSchema = z.object({
 });
 export const ServerMcpServersSchema = z.object({
     type: z.literal('mcp_servers'),
+    // #6832: sessionId is injected by the multi-session broadcast path so a
+    // client can route the list to the right session; omitted on the legacy-cli
+    // path. Optional here — the field is documented for completeness (server →
+    // client messages are not strict-parsed on send, but a client that DOES
+    // validate must not have it stripped).
+    sessionId: z.string().optional(),
     servers: z.array(z.object({
         name: z.string(),
         status: z.string(),
+        // #6824: per-server enable/disable. `enabled` is the toggle's on/off
+        // state (false = the operator parked this server; distinct from a live
+        // 'dead' status the operator never touched). `canToggle` gates whether a
+        // client renders the toggle at all — only the BYOK lane (which runs an
+        // in-daemon MCP fleet) sets it true; sdk/cli/tui emit a read-only list.
+        // Both optional so pre-#6824 emitters (and other providers) round-trip.
+        enabled: z.boolean().optional(),
+        canToggle: z.boolean().optional(),
     })),
 });
 export const ServerPlanStartedSchema = z.object({

@@ -51,6 +51,24 @@ function mcpToolName(serverName, toolName) {
 // the intent reads clearly at the call site.
 const mcpPromptName = mcpToolName
 
+// #6824: map an MCPClient's internal lifecycle state to the wire `status`
+// string the `mcp_servers` broadcast carries. Kept aligned with the sdk/cli
+// convention (dashboard/mobile only treat `connected` as the live/green dot;
+// everything else renders muted). A parked (disabled) server has NO client, so
+// this is only ever called for enabled ones — the disabled status is applied
+// by `getServerStatuses()` directly.
+export function mcpStateToStatus(state) {
+  switch (state) {
+    case MCP_STATES.READY:
+      return 'connected'
+    case MCP_STATES.DEAD:
+      return 'failed'
+    default:
+      // IDLE / STARTING / RESTARTING — spawned but not yet handshaken.
+      return 'connecting'
+  }
+}
+
 export class MCPFleet {
   constructor(configs, opts = {}) {
     // #4457: build a per-client trust gate when a PermissionManager is
@@ -80,39 +98,154 @@ export class MCPFleet {
       Number.isFinite(opts.startCapMs) && opts.startCapMs > 0
         ? opts.startCapMs
         : DEFAULT_FLEET_START_CAP_MS
-    this._clients = configs.map((cfg) => {
-      const clientOpts = { ...opts }
-      if (permissionManager) {
-        clientOpts.trustGate = async () => {
-          // #4460: serialise the load→prompt→recordTrust sequence across
-          // all fleet clients that share this trust-store path. Without
-          // the lock, two concurrent gates can both observe an empty
-          // store, both prompt, both call recordTrust — and the last
-          // writer's snapshot (read at step 1, missing the other's
-          // entry) clobbers the first allow. The lock also surfaces
-          // prompts one at a time, which the dashboard / mobile UI
-          // already assumes (one modal at a time).
-          return withTrustStoreLock(resolvedTrustPath, async () => {
-            const store = loadTrustStore(resolvedTrustPath, { log: opts.log })
-            if (isTrusted(store, cfg)) return true
-            // #6821: a remote server has no command/args — prompt on
-            // (name, url) + header KEY names. Header VALUES (tokens) never
-            // reach the permission payload, the trust store, or any log.
-            const isRemote = typeof cfg.url === 'string' && cfg.url.length > 0
-            const trustReq = isRemote
-              ? { name: cfg.name, url: cfg.url, headerKeys: Object.keys(cfg.headers || {}).sort() }
-              : { name: cfg.name, command: cfg.command, args: cfg.args, envKeys: Object.keys(cfg.env || {}).sort() }
-            const allowed = await permissionManager.requestMcpTrust(trustReq)
-            if (allowed) recordTrust(cfg, resolvedTrustPath)
-            return allowed
-          })
-        }
+    // #6824: retain the raw config list + the wiring inputs so a re-enable can
+    // rebuild a client from scratch (a destroyed MCPClient can't be revived —
+    // start() throws once `_destroyed`). `getServerStatuses()` also iterates
+    // `_configs` so it can report parked servers the live `_clients` array no
+    // longer holds.
+    this._configs = configs
+    this._opts = opts
+    this._permissionManager = permissionManager
+    this._resolvedTrustPath = resolvedTrustPath
+    // #6824: per-session parked (disabled) server names. Seeded from the
+    // caller's persisted set (byok-session forwards the restored
+    // `disabledMcpServers`), filtered to names that are actually configured so
+    // a stale entry for a removed server can't wedge. Parked servers get NO
+    // client on construction — they contribute zero tools and report status
+    // 'disabled' until re-enabled.
+    const configuredNames = new Set(configs.map((c) => c.name))
+    this._disabled = new Set(
+      (Array.isArray(opts.disabledServers) ? opts.disabledServers : [])
+        .filter((name) => configuredNames.has(name)),
+    )
+    this._clients = configs
+      .filter((cfg) => !this._disabled.has(cfg.name))
+      .map((cfg) => this._makeClient(cfg))
+  }
+
+  /**
+   * #6824: build one MCPClient for a config, wiring the trust gate exactly as
+   * the constructor did inline pre-#6824. Extracted so the re-enable path
+   * (`setEnabled(name, true)`) rebuilds a client with an IDENTICAL gate — an
+   * already-trusted (name, command, args[0]) tuple reconnects silently; an
+   * untrusted one still prompts, so re-enabling can never bypass trust.
+   */
+  _makeClient(cfg) {
+    const clientOpts = { ...this._opts }
+    if (this._permissionManager) {
+      clientOpts.trustGate = async () => {
+        // #4460: serialise the load→prompt→recordTrust sequence across
+        // all fleet clients that share this trust-store path. Without
+        // the lock, two concurrent gates can both observe an empty
+        // store, both prompt, both call recordTrust — and the last
+        // writer's snapshot (read at step 1, missing the other's
+        // entry) clobbers the first allow. The lock also surfaces
+        // prompts one at a time, which the dashboard / mobile UI
+        // already assumes (one modal at a time).
+        return withTrustStoreLock(this._resolvedTrustPath, async () => {
+          const store = loadTrustStore(this._resolvedTrustPath, { log: this._opts.log })
+          if (isTrusted(store, cfg)) return true
+          // #6821: a remote server has no command/args — prompt on
+          // (name, url) + header KEY names. Header VALUES (tokens) never
+          // reach the permission payload, the trust store, or any log.
+          const isRemote = typeof cfg.url === 'string' && cfg.url.length > 0
+          const trustReq = isRemote
+            ? { name: cfg.name, url: cfg.url, headerKeys: Object.keys(cfg.headers || {}).sort() }
+            : { name: cfg.name, command: cfg.command, args: cfg.args, envKeys: Object.keys(cfg.env || {}).sort() }
+          const allowed = await this._permissionManager.requestMcpTrust(trustReq)
+          if (allowed) recordTrust(cfg, this._resolvedTrustPath)
+          return allowed
+        })
       }
-      return createMcpClient(cfg, clientOpts)
-    })
+    }
+    return createMcpClient(cfg, clientOpts)
   }
 
   get clients() { return this._clients }
+
+  /**
+   * #6824: read-only view of the parked (disabled) server names. Byok-session
+   * reads this to persist the set into session state so a respawn honours it.
+   */
+  get disabledServers() { return [...this._disabled].sort() }
+
+  /**
+   * #6824: status snapshot for EVERY configured server — the payload the
+   * `mcp_servers` broadcast carries. Parked servers report status 'disabled'
+   * with `enabled: false`; live ones map their MCPClient state. `canToggle`
+   * is true for all (the whole BYOK fleet is toggleable) so the client can
+   * gate its per-row switch on a single field.
+   */
+  getServerStatuses() {
+    return this._configs.map((cfg) => {
+      if (this._disabled.has(cfg.name)) {
+        return { name: cfg.name, status: 'disabled', enabled: false, canToggle: true }
+      }
+      const client = this._clients.find((c) => c.name === cfg.name)
+      const status = client ? mcpStateToStatus(client.state) : 'connecting'
+      return { name: cfg.name, status, enabled: true, canToggle: true }
+    })
+  }
+
+  /**
+   * #6824: park or unpark a single configured server without tearing down the
+   * rest of the fleet.
+   *
+   *   - disable: destroy the server's MCPClient (SIGTERM→SIGKILL grace) and
+   *     add it to `_disabled`. Its tools/prompts/resources drop from the next
+   *     turn's aggregates immediately; it never respawns while parked.
+   *   - enable: remove it from `_disabled`, rebuild a fresh client through the
+   *     SAME trust gate, and start it (bounded by the client's own
+   *     restart budget). Already-trusted servers reconnect with no prompt.
+   *
+   * Idempotent: toggling to the current state is a no-op (`changed: false`).
+   * Returns `{ found, changed, status }` — `found: false` when `name` is not a
+   * configured server (caller surfaces a clean error rather than silently
+   * creating a phantom entry).
+   */
+  async setEnabled(name, enabled) {
+    const cfg = this._configs.find((c) => c.name === name)
+    if (!cfg) return { found: false, changed: false, status: null }
+
+    const currentlyDisabled = this._disabled.has(name)
+    // Target state already holds → no-op.
+    if (enabled && !currentlyDisabled) {
+      const client = this._clients.find((c) => c.name === name)
+      return { found: true, changed: false, status: client ? mcpStateToStatus(client.state) : 'connecting' }
+    }
+    if (!enabled && currentlyDisabled) {
+      return { found: true, changed: false, status: 'disabled' }
+    }
+
+    if (!enabled) {
+      // Disable: destroy the live client, mark parked.
+      this._disabled.add(name)
+      const idx = this._clients.findIndex((c) => c.name === name)
+      if (idx !== -1) {
+        const [client] = this._clients.splice(idx, 1)
+        try {
+          await client.destroy()
+        } catch (err) {
+          ;(this._opts.log || console).warn?.(`MCP fleet: destroy of ${name} on disable threw: ${err?.message || err}`)
+        }
+      }
+      return { found: true, changed: true, status: 'disabled' }
+    }
+
+    // Enable: unpark + rebuild + start through the same trust gate.
+    this._disabled.delete(name)
+    const client = this._makeClient(cfg)
+    this._clients.push(client)
+    try {
+      await client.start()
+    } catch (err) {
+      // A failed start leaves the client in DEAD (contributes zero tools) —
+      // mirror fleet.start()'s non-fatal handling. Keep it in `_clients` so its
+      // 'failed' status still surfaces on the next snapshot.
+      ;(this._opts.log || console).warn?.(`MCP fleet: start of ${name} on enable threw: ${err?.message || err}`)
+    }
+    return { found: true, changed: true, status: mcpStateToStatus(client.state) }
+  }
 
   /**
    * Spawn every client and resolve when either (a) every client has reached

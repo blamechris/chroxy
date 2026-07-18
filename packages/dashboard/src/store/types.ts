@@ -1504,6 +1504,16 @@ export interface ConnectionState {
    */
   setProjectPermissionRules: (projectRules: PermissionRule[]) => void;
   /**
+   * #6824 — enable or disable an already-configured MCP server for the active
+   * session (BYOK lane). Sends `set_mcp_server_enabled`; the server re-emits
+   * `mcp_servers` on success so the list converges across every device. The
+   * caller (SidebarMcpView) applies an optimistic status flip so the toggle is
+   * responsive; a rejection (`MCP_SERVER_*` error) rolls it back. Returns
+   * `false` when the socket is closed / no active session so the caller can
+   * surface an inline error instead of a silent drop.
+   */
+  setMcpServerEnabled: (server: string, enabled: boolean) => boolean;
+  /**
    * #6772 — pull the permission audit history for the active session
    * (`query_permission_audit`). Sets `permissionAuditLoading`; the reply lands in
    * `permissionAudit`. No-op when disconnected.

@@ -235,6 +235,13 @@ export declare const SetPermissionRulesSchema: z.ZodObject<{
     }, z.core.$strip>>>;
     sessionId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
+export declare const SetMcpServerEnabledSchema: z.ZodObject<{
+    type: z.ZodLiteral<"set_mcp_server_enabled">;
+    server: z.ZodString;
+    enabled: z.ZodBoolean;
+    sessionId: z.ZodOptional<z.ZodString>;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
 export declare const SetPromptEvaluatorSchema: z.ZodObject<{
     type: z.ZodLiteral<"set_prompt_evaluator">;
     value: z.ZodBoolean;
@@ -981,6 +988,12 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     }, z.core.$strip>>>;
     sessionId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"set_mcp_server_enabled">;
+    server: z.ZodString;
+    enabled: z.ZodBoolean;
+    sessionId: z.ZodOptional<z.ZodString>;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"set_prompt_evaluator">;
     value: z.ZodBoolean;
     sessionId: z.ZodOptional<z.ZodString>;
@@ -1529,6 +1542,7 @@ export type CancelQueuedMessage = z.infer<typeof CancelQueuedSchema>;
 export type SetModelMessage = z.infer<typeof SetModelSchema>;
 export type SetPermissionModeMessage = z.infer<typeof SetPermissionModeSchema>;
 export type SetPermissionRulesMessage = z.infer<typeof SetPermissionRulesSchema>;
+export type SetMcpServerEnabledMessage = z.infer<typeof SetMcpServerEnabledSchema>;
 export type PermissionResponseMessage = z.infer<typeof PermissionResponseSchema>;
 export type GetPermissionInputMessage = z.infer<typeof GetPermissionInputSchema>;
 export type ExtensionMessage = z.infer<typeof ExtensionMessageSchema>;

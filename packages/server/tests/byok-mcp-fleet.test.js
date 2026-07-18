@@ -325,4 +325,112 @@ describe('MCPFleet', () => {
       await fleet.destroy()
     })
   })
+
+  describe('enable/disable (#6824)', () => {
+    it('disable parks the client — its tools disappear and status becomes disabled', async () => {
+      const fleet = new MCPFleet([cfg('alpha'), cfg('beta')], { log: silentLog() })
+      await fleet.start()
+      assert.deepEqual(fleet.tools.map((t) => t.name).sort(), ['mcp__alpha__echo', 'mcp__beta__echo'])
+
+      const res = await fleet.setEnabled('beta', false)
+      assert.deepEqual(res, { found: true, changed: true, status: 'disabled' })
+      // beta's tools are gone; alpha remains.
+      assert.deepEqual(fleet.tools.map((t) => t.name), ['mcp__alpha__echo'])
+      // beta has no live client anymore.
+      assert.equal(fleet.clients.find((c) => c.name === 'beta'), undefined)
+      // status snapshot reports beta parked.
+      const statuses = fleet.getServerStatuses()
+      const beta = statuses.find((s) => s.name === 'beta')
+      assert.deepEqual(beta, { name: 'beta', status: 'disabled', enabled: false, canToggle: true })
+      assert.deepEqual(fleet.disabledServers, ['beta'])
+      await fleet.destroy()
+    })
+
+    it('re-enable rebuilds + restarts the client — its tools reappear', async () => {
+      const fleet = new MCPFleet([cfg('alpha'), cfg('beta')], { log: silentLog() })
+      await fleet.start()
+      await fleet.setEnabled('beta', false)
+      assert.deepEqual(fleet.tools.map((t) => t.name), ['mcp__alpha__echo'])
+
+      const res = await fleet.setEnabled('beta', true)
+      assert.equal(res.found, true)
+      assert.equal(res.changed, true)
+      assert.equal(res.status, 'connected')
+      assert.deepEqual(fleet.tools.map((t) => t.name).sort(), ['mcp__alpha__echo', 'mcp__beta__echo'])
+      assert.deepEqual(fleet.disabledServers, [])
+      await fleet.destroy()
+    })
+
+    it('re-enabling an already-trusted server does NOT re-prompt for trust', async () => {
+      const tmpStorePath = `/tmp/chroxy-mcp-trust-test-${process.pid}-${Date.now()}-toggle.json`
+      const fs = await import('node:fs')
+      let prompts = 0
+      const fakePermissionManager = { requestMcpTrust: async () => { prompts += 1; return true } }
+      const fleet = new MCPFleet([cfg('alpha')], {
+        log: silentLog(),
+        permissionManager: fakePermissionManager,
+        trustStorePath: tmpStorePath,
+      })
+      await fleet.start()
+      assert.equal(prompts, 1, 'first spawn prompts once (untrusted → allowed + recorded)')
+
+      await fleet.setEnabled('alpha', false)
+      await fleet.setEnabled('alpha', true)
+      // The re-enable rebuilds the client, but the tuple is now in the trust
+      // store, so the gate short-circuits without a new prompt.
+      assert.equal(prompts, 1, 'already-trusted server reconnects silently on re-enable')
+      assert.equal(fleet.clients.find((c) => c.name === 'alpha')?.state, MCP_STATES.READY)
+      await fleet.destroy()
+      try { fs.rmSync(tmpStorePath) } catch {}
+    })
+
+    it('disabledServers seed: a parked server never spawns a client at start', async () => {
+      const fleet = new MCPFleet(
+        [cfg('alpha'), cfg('beta')],
+        { log: silentLog(), disabledServers: ['beta'] },
+      )
+      await fleet.start()
+      // Only alpha has a live client / tools.
+      assert.deepEqual(fleet.clients.map((c) => c.name), ['alpha'])
+      assert.deepEqual(fleet.tools.map((t) => t.name), ['mcp__alpha__echo'])
+      const statuses = fleet.getServerStatuses()
+      assert.deepEqual(statuses.find((s) => s.name === 'beta'), { name: 'beta', status: 'disabled', enabled: false, canToggle: true })
+      assert.deepEqual(fleet.disabledServers, ['beta'])
+      await fleet.destroy()
+    })
+
+    it('disabledServers seed filters out names that are not configured', async () => {
+      const fleet = new MCPFleet(
+        [cfg('alpha')],
+        { log: silentLog(), disabledServers: ['ghost', 'alpha'] },
+      )
+      // 'ghost' isn't configured → dropped; 'alpha' is parked.
+      assert.deepEqual(fleet.disabledServers, ['alpha'])
+      await fleet.start()
+      assert.deepEqual(fleet.tools.map((t) => t.name), [])
+      await fleet.destroy()
+    })
+
+    it('setEnabled on an unknown server returns found:false', async () => {
+      const fleet = new MCPFleet([cfg('alpha')], { log: silentLog() })
+      await fleet.start()
+      const res = await fleet.setEnabled('nope', false)
+      assert.deepEqual(res, { found: false, changed: false, status: null })
+      await fleet.destroy()
+    })
+
+    it('setEnabled is idempotent — toggling to the current state is a no-op', async () => {
+      const fleet = new MCPFleet([cfg('alpha')], { log: silentLog() })
+      await fleet.start()
+      // Already enabled → enabling again is a no-op.
+      const a = await fleet.setEnabled('alpha', true)
+      assert.equal(a.changed, false)
+      await fleet.setEnabled('alpha', false)
+      // Already disabled → disabling again is a no-op.
+      const b = await fleet.setEnabled('alpha', false)
+      assert.equal(b.changed, false)
+      assert.equal(b.status, 'disabled')
+      await fleet.destroy()
+    })
+  })
 })

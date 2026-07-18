@@ -2161,6 +2161,24 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     sendIfOpen(payload);
   },
 
+  // #6824 — enable/disable an already-configured MCP server for the active
+  // session (BYOK lane). Broadcast-driven: the server re-emits `mcp_servers`
+  // with the new per-server status on success, which the SettingsBar switch
+  // reflects — no optimistic mutation, so a rejection just never moves the
+  // switch. A `requestId` correlates a rejection in the server log. Gated on
+  // the server's `canToggle` flag at the call site (only BYOK sets it).
+  setMcpServerEnabled: (server: string, enabled: boolean) => {
+    const { activeSessionId } = get();
+    const payload: Record<string, unknown> = {
+      type: 'set_mcp_server_enabled',
+      server,
+      enabled,
+      requestId: `set-mcp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    };
+    if (activeSessionId) payload.sessionId = activeSessionId;
+    sendIfOpen(payload);
+  },
+
   confirmPermissionMode: (mode: string) => {
     const { socket, activeSessionId, sessionStates } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {

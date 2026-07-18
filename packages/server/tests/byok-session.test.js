@@ -421,6 +421,107 @@ describe('ClaudeByokSession', () => {
       await session.destroy()
     })
 
+    // #6824: per-server enable/disable (BYOK lane authoritative).
+    describe('MCP enable/disable (#6824)', () => {
+      function writeStubConfig() {
+        const configPath = join(tmpHome, '.claude.json')
+        writeFileSync(configPath, JSON.stringify({
+          mcpServers: { stub: { command: process.execPath, args: [MCP_STUB], env: {} } },
+        }))
+        return configPath
+      }
+
+      it('emits mcp_servers on start with per-server enabled + canToggle', async () => {
+        preTrustStub()
+        const configPath = writeStubConfig()
+        const session = new ClaudeByokSession({ cwd: '/tmp', mcpConfigPath: configPath })
+        session._client = { messages: { stream: () => fakeStream([]) } }
+        const emitted = []
+        session.on('mcp_servers', (d) => emitted.push(d))
+        await session.start()
+        assert.equal(emitted.length, 1, 'exactly one mcp_servers emit on start')
+        assert.deepEqual(emitted[0].servers, [
+          { name: 'stub', status: 'connected', enabled: true, canToggle: true },
+        ])
+        await session.destroy()
+      })
+
+      it('disable parks the server — tools drop, re-emits status disabled, persists the set', async () => {
+        preTrustStub()
+        const configPath = writeStubConfig()
+        const session = new ClaudeByokSession({ cwd: '/tmp', mcpConfigPath: configPath })
+        session._client = { messages: { stream: () => fakeStream([]) } }
+        const emitted = []
+        session.on('mcp_servers', (d) => emitted.push(d))
+        await session.start()
+        assert.ok(session._mcpFleet.tools.length >= 1, 'tools present while enabled')
+
+        const res = await session.setMcpServerEnabled('stub', false)
+        assert.deepEqual(res, { found: true, changed: true, status: 'disabled' })
+        assert.deepEqual(session._mcpFleet.tools, [], 'parked server contributes no tools')
+        assert.deepEqual(session.getDisabledMcpServers(), ['stub'])
+        // A fresh mcp_servers emit reflects the parked status.
+        const last = emitted[emitted.length - 1]
+        assert.deepEqual(last.servers, [
+          { name: 'stub', status: 'disabled', enabled: false, canToggle: true },
+        ])
+        await session.destroy()
+      })
+
+      it('re-enable restarts the server — tools reappear, set cleared', async () => {
+        preTrustStub()
+        const configPath = writeStubConfig()
+        const session = new ClaudeByokSession({ cwd: '/tmp', mcpConfigPath: configPath })
+        session._client = { messages: { stream: () => fakeStream([]) } }
+        await session.start()
+        await session.setMcpServerEnabled('stub', false)
+        assert.deepEqual(session._mcpFleet.tools, [])
+
+        const res = await session.setMcpServerEnabled('stub', true)
+        assert.equal(res.changed, true)
+        assert.equal(res.status, 'connected')
+        assert.ok(session._mcpFleet.tools.length >= 1, 'tools reappear after re-enable')
+        assert.deepEqual(session.getDisabledMcpServers(), [])
+        await session.destroy()
+      })
+
+      it('respawn honors the persisted disabled set — a seeded server never starts', async () => {
+        // No preTrustStub needed: a parked server is never spawned, so the
+        // trust gate is never consulted.
+        const configPath = writeStubConfig()
+        const session = new ClaudeByokSession({
+          cwd: '/tmp',
+          mcpConfigPath: configPath,
+          disabledMcpServers: ['stub'],
+        })
+        session._client = { messages: { stream: () => fakeStream([]) } }
+        const emitted = []
+        session.on('mcp_servers', (d) => emitted.push(d))
+        await session.start()
+        assert.equal(session._mcpFleet.clients.length, 0, 'seeded-disabled server has no client')
+        assert.deepEqual(session._mcpFleet.tools, [])
+        assert.deepEqual(session.getDisabledMcpServers(), ['stub'])
+        assert.deepEqual(emitted[emitted.length - 1].servers, [
+          { name: 'stub', status: 'disabled', enabled: false, canToggle: true },
+        ])
+        await session.destroy()
+      })
+
+      it('setMcpServerEnabled on an unknown server returns found:false and does not emit', async () => {
+        preTrustStub()
+        const configPath = writeStubConfig()
+        const session = new ClaudeByokSession({ cwd: '/tmp', mcpConfigPath: configPath })
+        session._client = { messages: { stream: () => fakeStream([]) } }
+        await session.start()
+        const emittedBefore = []
+        session.on('mcp_servers', (d) => emittedBefore.push(d))
+        const res = await session.setMcpServerEnabled('ghost', false)
+        assert.deepEqual(res, { found: false, changed: false, status: null })
+        assert.equal(emittedBefore.length, 0, 'no re-emit for an unknown server')
+        await session.destroy()
+      })
+    })
+
     it('#4457: untrusted MCP server fires a permission_request prompt; deny → DEAD without spawn', async () => {
       const configPath = join(tmpHome, '.claude.json')
       writeFileSync(configPath, JSON.stringify({

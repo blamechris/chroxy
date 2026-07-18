@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, Platform, Animated, AccessibilityInfo, Alert, Modal, Pressable, ScrollView } from 'react-native';
+import { View, Text, TouchableOpacity, StyleSheet, Platform, Animated, AccessibilityInfo, Alert, Modal, Pressable, ScrollView, Switch } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { resolveContextWindow, contextOccupancyTokens, contextFillPercent } from '@chroxy/store-core';
 import type { CumulativeUsage, PendingPermissionConfirm, SessionIntervention } from '@chroxy/store-core';
@@ -75,6 +75,10 @@ export interface SettingsBarProps {
   customAgents: CustomAgent[];
   mcpServers: McpServer[];
   onInvokeAgent?: (agentName: string) => void;
+  // #6824 — toggle an MCP server on/off for the active session. Only invoked
+  // for servers that report `canToggle` (the BYOK lane). Absent → the MCP list
+  // stays read-only (matches sdk/cli/tui providers).
+  onToggleMcpServer?: (server: string, enabled: boolean) => void;
   setModel: (model: string) => void;
   setPermissionMode: (mode: string) => void;
   pendingPermissionConfirm?: PendingPermissionConfirm | null;
@@ -206,6 +210,7 @@ export function SettingsBar({
   customAgents,
   mcpServers,
   onInvokeAgent,
+  onToggleMcpServer,
   setModel,
   setPermissionMode,
   pendingPermissionConfirm,
@@ -697,17 +702,35 @@ export function SettingsBar({
               <Text style={styles.deviceSectionTitle}>
                 MCP Servers ({mcpServers.length})
               </Text>
-              {mcpServers.map((server) => (
-                <View key={server.name} style={styles.agentEntry}>
-                  <View style={[styles.statusDot, { backgroundColor: server.status === 'connected' ? COLORS.accentGreen : COLORS.textMuted }]} />
-                  <Text style={styles.agentDescription} numberOfLines={1}>
-                    {server.name}
-                  </Text>
-                  <Text style={styles.agentElapsed}>
-                    {server.status}
-                  </Text>
-                </View>
-              ))}
+              {mcpServers.map((server) => {
+                // #6824: a server is "on" unless parked. Prefer the explicit
+                // `enabled` flag (BYOK emits it); fall back to status so a
+                // pre-#6824 payload still reads sensibly. The Switch renders
+                // only when the server reports `canToggle` (BYOK lane) and the
+                // parent wired an onToggle handler — otherwise read-only.
+                const enabled = typeof server.enabled === 'boolean' ? server.enabled : server.status !== 'disabled';
+                const canToggle = !!server.canToggle && !!onToggleMcpServer;
+                return (
+                  <View key={server.name} style={styles.agentEntry}>
+                    <View style={[styles.statusDot, { backgroundColor: server.status === 'connected' ? COLORS.accentGreen : COLORS.textMuted }]} />
+                    <Text style={styles.agentDescription} numberOfLines={1}>
+                      {server.name}
+                    </Text>
+                    {canToggle ? (
+                      <Switch
+                        testID={`mcp-server-toggle-${server.name}`}
+                        value={enabled}
+                        onValueChange={(next) => onToggleMcpServer?.(server.name, next)}
+                        accessibilityLabel={`${enabled ? 'Disable' : 'Enable'} MCP server ${server.name}`}
+                      />
+                    ) : (
+                      <Text style={styles.agentElapsed}>
+                        {server.status}
+                      </Text>
+                    )}
+                  </View>
+                );
+              })}
             </View>
           )}
           {customAgents.length > 0 && (
