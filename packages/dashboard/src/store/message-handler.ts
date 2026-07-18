@@ -35,6 +35,7 @@ import {
   handleThinkingStreamStart as sharedThinkingStart,
   handleThinkingDelta as sharedThinkingDelta,
   handleThinkingStreamEnd as sharedThinkingEnd,
+  finalizeThinkingStreams,
   handleAuthOk as sharedAuthOk,
   parseConnectedClients as sharedParseConnectedClients,
   handleAuthFail as sharedAuthFail,
@@ -2079,12 +2080,14 @@ function handleStreamEnd(msg: Record<string, unknown>, get: MsgGet, set: MsgSet,
   if (targetId && get().sessionStates[targetId]) {
     // Force a new messages array reference so selectors detect the change,
     // even when flushPendingDeltas() was a no-op (timer already flushed).
+    // #6756 — turn-boundary backstop: finalise any thinking bubble whose own
+    // thinking stream_end was dropped so it can't be stuck on "Thinking…".
     updateSession(targetId, (ss) => ({
       streamingMessageId: null,
-      messages: [...ss.messages],
+      messages: finalizeThinkingStreams([...ss.messages]),
     }));
   } else {
-    set((s) => ({ streamingMessageId: null, messages: [...s.messages] }));
+    set((s) => ({ streamingMessageId: null, messages: finalizeThinkingStreams([...s.messages]) }));
   }
 }
 
@@ -4632,7 +4635,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
               : currentQueue;
           const patch: Partial<SessionState> = {
             ...resultPatch,
-            messages: [...ss.messages],
+            // #6756 — `result` is the guaranteed turn boundary; finalise any
+            // thinking bubble whose own stream_end was dropped (mirrors the
+            // activeTools orphan sweep below).
+            messages: finalizeThinkingStreams([...ss.messages]),
             ...(reconciledQueue !== currentQueue ? { queuedMessages: reconciledQueue } : {}),
           };
           // #4493 — gate per target session id. A live `result` for
@@ -4641,7 +4647,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           return patch;
         });
       } else {
-        set((s) => ({ ...resultPatch, messages: [...s.messages] }));
+        set((s) => ({ ...resultPatch, messages: finalizeThinkingStreams([...s.messages]) }));
       }
       break;
     }

@@ -82,7 +82,7 @@ export function buildPromptSessionLabel(
  * thinking bubble (the ephemeral placeholder) keeps the `ThinkingIndicator`
  * animation.
  */
-function ThinkingBubble({ content, streaming }: { content: string; streaming: boolean }) {
+function ThinkingBubble({ content, streaming, truncated }: { content: string; streaming: boolean; truncated?: boolean }) {
   const [expanded, setExpanded] = useState(false);
   return (
     <View style={styles.thinkingBubble} testID="thinking-bubble">
@@ -94,6 +94,11 @@ function ThinkingBubble({ content, streaming }: { content: string; streaming: bo
         testID="thinking-toggle"
         accessibilityRole="button"
         accessibilityLabel={streaming ? 'Thinking' : 'Thought'}
+        // Small horizontal hitSlop for comfort past the text's visual bounds;
+        // the ≥44pt minimum on both axes is carried by the style's
+        // minHeight/minWidth (see thinkingToggleTouchable).
+        hitSlop={{ top: 0, right: 8, bottom: 0, left: 8 }}
+        style={styles.thinkingToggleTouchable}
       >
         <Text style={styles.thinkingToggle}>
           {expanded ? '▾' : '▸'} {streaming ? 'Thinking…' : 'Thought'}
@@ -102,6 +107,9 @@ function ThinkingBubble({ content, streaming }: { content: string; streaming: bo
       {expanded && (
         <Text style={styles.thinkingContent} testID="thinking-content" selectable>
           {content}
+          {/* #6756 — the store bounded this bubble at MAX_THINKING_CONTENT_LEN
+              and dropped further deltas; say so instead of cutting silently. */}
+          {truncated ? '\n… [thinking truncated]' : ''}
         </Text>
       )}
     </View>
@@ -369,7 +377,11 @@ function MessageBubbleImpl({ message, queued, onCancelQueued, onSelectOption, on
     const thinkingContent = typeof message.content === 'string' ? message.content : '';
     if (thinkingContent.trim().length > 0) {
       return (
-        <ThinkingBubble content={thinkingContent} streaming={message.thinkingStreaming === true} />
+        <ThinkingBubble
+          content={thinkingContent}
+          streaming={message.thinkingStreaming === true}
+          truncated={message.thinkingTruncated === true}
+        />
       );
     }
     return <ThinkingIndicator />;
@@ -836,6 +848,17 @@ const styles = StyleSheet.create({
   thinkingBubble: {
     marginBottom: 12,
     maxWidth: '90%',
+  },
+  // ≥44pt effective touch target on BOTH axes (repo accessibility minimum —
+  // same convention as DiffHunkView's toggle row): the 13pt text line alone is
+  // far short of 44pt, so the touchable carries explicit min dimensions and
+  // centers the label vertically. alignSelf keeps the target hugging the label
+  // instead of stretching the full row width.
+  thinkingToggleTouchable: {
+    minHeight: 44,
+    minWidth: 44,
+    justifyContent: 'center',
+    alignSelf: 'flex-start',
   },
   thinkingToggle: {
     color: COLORS.textMuted,

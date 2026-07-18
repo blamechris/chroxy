@@ -648,6 +648,7 @@ export {
   handleThinkingStreamStart,
   handleThinkingDelta,
   handleThinkingStreamEnd,
+  finalizeThinkingStreams,
   MAX_THINKING_CONTENT_LEN,
   handleResultUsage,
   // #5454 — remaining both-sides duplicates extracted into store-core

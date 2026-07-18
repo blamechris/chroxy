@@ -7,7 +7,7 @@
  * generic ThinkingIndicator animation.
  */
 import React from 'react';
-import { Text } from 'react-native';
+import { StyleSheet, Text } from 'react-native';
 import renderer, { act } from 'react-test-renderer';
 // The real ThinkingIndicator drives a native-driver Animated loop that crashes
 // react-test-renderer (findNodeHandle is undefined off-device). Stub it so the
@@ -71,7 +71,8 @@ describe('MessageBubble thinking content (#6756)', () => {
     // Expand.
     act(() => { tree.root.findByProps({ testID: 'thinking-toggle' }).props.onPress(); });
     const content = tree.root.findByProps({ testID: 'thinking-content' });
-    expect(content.props.children).toBe('weighing the trade-offs');
+    const text = (Array.isArray(content.props.children) ? content.props.children : [content.props.children]).join('');
+    expect(text).toBe('weighing the trade-offs');
   });
 
   it('labels "Thinking…" while thinkingStreaming is true', () => {
@@ -85,5 +86,32 @@ describe('MessageBubble thinking content (#6756)', () => {
     expect(tree.root.findAllByProps({ testID: 'thinking-bubble' })).toHaveLength(0);
     // …instead the generic (stubbed) thinking indicator.
     expect(tree.root.findAllByProps({ testID: 'thinking-indicator-stub' }).length).toBeGreaterThan(0);
+  });
+
+  it('appends a "[thinking truncated]" marker when the content hit the size cap (#6756 review)', () => {
+    const tree = render(makeThinking({ thinkingStreaming: false, thinkingTruncated: true }));
+    act(() => { tree.root.findByProps({ testID: 'thinking-toggle' }).props.onPress(); });
+    const content = tree.root.findByProps({ testID: 'thinking-content' });
+    const text = (Array.isArray(content.props.children) ? content.props.children : [content.props.children]).join('');
+    expect(text).toContain('weighing the trade-offs');
+    expect(text).toContain('[thinking truncated]');
+  });
+
+  it('omits the truncation marker when the flag is absent (#6756 review)', () => {
+    const tree = render(makeThinking({ thinkingStreaming: false }));
+    act(() => { tree.root.findByProps({ testID: 'thinking-toggle' }).props.onPress(); });
+    const content = tree.root.findByProps({ testID: 'thinking-content' });
+    const text = (Array.isArray(content.props.children) ? content.props.children : [content.props.children]).join('');
+    expect(text).not.toContain('[thinking truncated]');
+  });
+
+  it('exposes a ≥44pt effective touch target on the toggle, both axes (#6756 review)', () => {
+    // Same convention as DiffHunkView's ≥44pt toggle test / the MarkdownRenderer
+    // copy-button test: min dimensions carried by the style, both axes asserted.
+    const tree = render(makeThinking({ thinkingStreaming: false }));
+    const toggle = tree.root.findByProps({ testID: 'thinking-toggle' });
+    const style = StyleSheet.flatten(toggle.props.style) as { minHeight?: number; minWidth?: number };
+    expect(style.minHeight).toBeGreaterThanOrEqual(44);
+    expect(style.minWidth).toBeGreaterThanOrEqual(44);
   });
 });

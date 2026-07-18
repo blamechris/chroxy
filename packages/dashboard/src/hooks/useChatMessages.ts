@@ -11,8 +11,9 @@
  *     -> filter(m => m.type !== 'system')   // System events render on the
  *                                           //   System tab, not in chat.
  *     -> groupMessages                      // (#3747) collapse contiguous
- *                                           //   tool_use / thinking runs
- *                                           //   into ActivityGroups.
+ *                                           //   tool_use runs into
+ *                                           //   ActivityGroups (#6756:
+ *                                           //   thinking stays standalone).
  *     -> applyStreamingOverlay              // mark trailing activity group
  *                                           //   as active during streaming.
  *     -> ChatViewMessage[]                  // flatten to chat-view rows.

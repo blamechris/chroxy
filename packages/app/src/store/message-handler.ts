@@ -44,6 +44,7 @@ import {
   handleThinkingStreamStart as sharedThinkingStart,
   handleThinkingDelta as sharedThinkingDelta,
   handleThinkingStreamEnd as sharedThinkingEnd,
+  finalizeThinkingStreams,
   handleAuthOk as sharedAuthOk,
   parseConnectedClients as sharedParseConnectedClients,
   handleAuthFail as sharedAuthFail,
@@ -2747,12 +2748,18 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         if (targetId && get().sessionStates[targetId]) {
           // Force a new messages array reference so selectors detect the change,
           // even when flushPendingDeltas() was a no-op (timer already flushed).
+          // #6756 — turn-boundary backstop: finalise any thinking bubble whose
+          // own thinking stream_end was dropped so it can't be stuck on
+          // "Thinking…".
           updateSession(targetId, (ss) => ({
             streamingMessageId: null,
-            messages: [...ss.messages],
+            messages: finalizeThinkingStreams([...ss.messages]),
           }));
         } else {
-          updateActiveSession((ss) => ({ streamingMessageId: null, messages: [...ss.messages] }));
+          updateActiveSession((ss) => ({
+            streamingMessageId: null,
+            messages: finalizeThinkingStreams([...ss.messages]),
+          }));
         }
       }
       break;
@@ -2887,7 +2894,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
                 : currentQueue;
             return {
               ...resultPatch,
-              messages: [...ss.messages],
+              // #6756 — `result` is the guaranteed turn boundary; finalise any
+              // thinking bubble whose own stream_end was dropped.
+              messages: finalizeThinkingStreams([...ss.messages]),
               ...(reconciledQueue !== currentQueue ? { queuedMessages: reconciledQueue } : {}),
             };
           });

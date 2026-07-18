@@ -9,6 +9,7 @@ import {
   handleThinkingStreamStart,
   handleThinkingDelta,
   handleThinkingStreamEnd,
+  finalizeThinkingStreams,
   MAX_THINKING_CONTENT_LEN,
 } from './stream'
 import type { ChatMessage } from '../types'
@@ -46,6 +47,44 @@ describe('handleThinkingStreamStart (#6756)', () => {
     )
     expect(out.isNewMessage).toBe(false)
     expect(out.newMessage).toBeNull()
+  })
+
+  it('does NOT dedup against a non-thinking message occupying the id (type guard)', () => {
+    // Stream-ID discipline consistency with the sibling handlers: a tool_use
+    // (or any non-thinking) message on the same id must not swallow the start.
+    const collider: ChatMessage = { id: 'msg-1-thinking-0', type: 'tool_use', content: '', timestamp: 1 }
+    const out = handleThinkingStreamStart(
+      { type: 'stream_start', messageId: 'msg-1-thinking-0', thinking: true },
+      SESSION,
+      [collider],
+    )
+    expect(out.isNewMessage).toBe(true)
+    expect(out.newMessage).toMatchObject({ type: 'thinking', thinkingStreaming: true })
+  })
+})
+
+describe('finalizeThinkingStreams (#6756 orphan sweep)', () => {
+  it('flips every still-streaming thinking bubble to finalised', () => {
+    const messages: ChatMessage[] = [
+      { id: 't0', type: 'thinking', content: 'a', thinkingStreaming: true, timestamp: 0 },
+      { id: 'r1', type: 'response', content: 'x', timestamp: 1 },
+      { id: 't1', type: 'thinking', content: 'b', thinkingStreaming: true, timestamp: 2 },
+    ]
+    const next = finalizeThinkingStreams(messages)
+    expect(next).not.toBe(messages)
+    expect(next.filter((m) => m.type === 'thinking').map((m) => m.thinkingStreaming)).toEqual([false, false])
+    // Non-thinking rows keep identity (map only clones the flipped ones).
+    expect(next[1]).toBe(messages[1])
+  })
+
+  it('is a same-reference no-op when nothing is streaming', () => {
+    const messages: ChatMessage[] = [
+      { id: 't0', type: 'thinking', content: 'a', thinkingStreaming: false, timestamp: 0 },
+      { id: 'r1', type: 'response', content: 'x', timestamp: 1 },
+    ]
+    expect(finalizeThinkingStreams(messages)).toBe(messages)
+    const empty: ChatMessage[] = []
+    expect(finalizeThinkingStreams(empty)).toBe(empty)
   })
 })
 

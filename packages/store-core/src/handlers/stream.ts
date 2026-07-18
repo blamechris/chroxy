@@ -1333,7 +1333,12 @@ export function handleThinkingStreamStart(
       ? msg.messageId
       : nextMessageId('thinking')
   const sessionId = typeof msg.sessionId === 'string' ? msg.sessionId : activeSessionId
-  const existing = existingMessages.find((m) => m.id === thinkingMessageId)
+  // Type-guarded like the sibling handlers (handleThinkingDelta / -StreamEnd):
+  // only an existing THINKING bubble dedups; a non-thinking message that
+  // somehow occupies the id must not silently swallow the start.
+  const existing = existingMessages.find(
+    (m) => m.id === thinkingMessageId && m.type === 'thinking',
+  )
   if (existing) {
     return { sessionId, thinkingMessageId, isNewMessage: false, newMessage: null }
   }
@@ -1430,6 +1435,29 @@ export function handleThinkingDelta(
       return updated
     },
   }
+}
+
+/**
+ * #6756 — orphan sweep: finalise any thinking bubble still marked streaming.
+ *
+ * A thinking bubble normally finalises on its own `stream_end` (the block's
+ * `content_block_stop`), but if that message is dropped (server crash, missed
+ * broadcast) the bubble would be stuck on "Thinking…" forever. The turn
+ * boundary is a guaranteed backstop: callers run this on the RESPONSE stream's
+ * `stream_end` and on `result` — by then every thinking block of the turn is
+ * over. Returns the same array reference when nothing was streaming (no-op),
+ * so callers can compose it with their force-new-reference spread without an
+ * extra clone in the common case. Mirrors the #4308 activeTools orphan sweep.
+ */
+export function finalizeThinkingStreams(messages: ChatMessage[]): ChatMessage[] {
+  if (!messages.some((m) => m.type === 'thinking' && m.thinkingStreaming === true)) {
+    return messages
+  }
+  return messages.map((m) =>
+    m.type === 'thinking' && m.thinkingStreaming === true
+      ? { ...m, thinkingStreaming: false }
+      : m,
+  )
 }
 
 /** Result returned from {@link handleThinkingStreamEnd}. */
