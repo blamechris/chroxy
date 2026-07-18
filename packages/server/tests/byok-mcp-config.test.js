@@ -1,10 +1,11 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, rmSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   CLAUDE_CONFIG_MAX_BYTES,
+  discoverConfiguredMcpServers,
   loadClaudeMcpConfig,
   parseClaudeMcpConfig,
   toMcpServerMetadata,
@@ -124,5 +125,112 @@ describe('byok-mcp-config', () => {
       args: ['server.js'],
       envKeys: ['A_TOKEN', 'Z_TOKEN'],
     })
+  })
+})
+
+// #6820 — configured-server discovery used by the claude-tui provider for MCP
+// visibility parity. Merges the three sources Claude Code reads (global +
+// project-scoped block + project-local .mcp.json), deduped by name.
+describe('discoverConfiguredMcpServers (#6820)', () => {
+  let cfgDir
+  let cwd
+  let configPath
+
+  beforeEach(() => {
+    cfgDir = mkdtempSync(join(tmpdir(), 'chroxy-mcp-discover-cfg-'))
+    cwd = mkdtempSync(join(tmpdir(), 'chroxy-mcp-discover-cwd-'))
+    configPath = join(cfgDir, 'claude.json')
+  })
+
+  afterEach(() => {
+    rmSync(cfgDir, { recursive: true, force: true })
+    rmSync(cwd, { recursive: true, force: true })
+  })
+
+  it('returns empty (no warnings) when nothing is configured', () => {
+    const res = discoverConfiguredMcpServers(cwd, { configPath })
+    assert.deepEqual(res.servers, [])
+    assert.deepEqual(res.warnings, [])
+  })
+
+  it('reads global (user-scope) mcpServers from ~/.claude.json', () => {
+    writeFileSync(
+      configPath,
+      JSON.stringify({ mcpServers: { fs: { command: 'npx' }, gh: { command: 'node' } } }),
+    )
+    const res = discoverConfiguredMcpServers(cwd, { configPath })
+    assert.deepEqual(res.servers, [{ name: 'fs' }, { name: 'gh' }])
+    assert.deepEqual(res.warnings, [])
+  })
+
+  it('includes remote/HTTP servers declared with url/type instead of command', () => {
+    // parseClaudeMcpConfig would drop these (no command); visibility keeps them.
+    writeFileSync(
+      configPath,
+      JSON.stringify({ mcpServers: { remote: { type: 'http', url: 'https://example/mcp' } } }),
+    )
+    const res = discoverConfiguredMcpServers(cwd, { configPath })
+    assert.deepEqual(res.servers, [{ name: 'remote' }])
+    assert.deepEqual(res.warnings, [])
+  })
+
+  it('merges the project-scoped block (projects[realpath(cwd)].mcpServers)', () => {
+    const realCwd = realpathSync(cwd)
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        mcpServers: { global1: { command: 'npx' } },
+        projects: { [realCwd]: { mcpServers: { proj1: { command: 'node' } } } },
+      }),
+    )
+    const res = discoverConfiguredMcpServers(cwd, { configPath })
+    assert.deepEqual(res.servers, [{ name: 'global1' }, { name: 'proj1' }])
+  })
+
+  it('merges project-local .mcp.json under cwd', () => {
+    writeFileSync(
+      join(cwd, '.mcp.json'),
+      JSON.stringify({ mcpServers: { local1: { command: 'node' } } }),
+    )
+    const res = discoverConfiguredMcpServers(cwd, { configPath })
+    assert.deepEqual(res.servers, [{ name: 'local1' }])
+  })
+
+  it('dedupes by name across all sources (first source wins)', () => {
+    const realCwd = realpathSync(cwd)
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        mcpServers: { shared: { command: 'npx' } },
+        projects: {
+          [realCwd]: { mcpServers: { shared: { command: 'other' }, projonly: { command: 'node' } } },
+        },
+      }),
+    )
+    writeFileSync(
+      join(cwd, '.mcp.json'),
+      JSON.stringify({ mcpServers: { shared: { command: 'z' }, localonly: { command: 'y' } } }),
+    )
+    const res = discoverConfiguredMcpServers(cwd, { configPath })
+    assert.deepEqual(res.servers, [{ name: 'shared' }, { name: 'projonly' }, { name: 'localonly' }])
+  })
+
+  it('never throws on corrupt JSON — accumulates a warning, returns empty', () => {
+    writeFileSync(configPath, '{ not valid json')
+    const res = discoverConfiguredMcpServers(cwd, { configPath })
+    assert.deepEqual(res.servers, [])
+    assert.equal(res.warnings.length, 1)
+    assert.match(res.warnings[0], /failed to read/)
+  })
+
+  it('warns and skips a malformed entry but keeps the valid siblings', () => {
+    writeFileSync(
+      configPath,
+      JSON.stringify({ mcpServers: { good: { command: 'npx' }, bad: 'not-an-object' } }),
+    )
+    const res = discoverConfiguredMcpServers(cwd, { configPath })
+    assert.deepEqual(res.servers, [{ name: 'good' }])
+    assert.equal(res.warnings.length, 1)
+    assert.match(res.warnings[0], /bad/)
   })
 })

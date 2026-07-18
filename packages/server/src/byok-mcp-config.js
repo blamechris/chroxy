@@ -6,7 +6,7 @@
  * children or wire tools.
  */
 
-import { existsSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
@@ -156,4 +156,146 @@ export function toMcpServerMetadata(server) {
     args: Object.freeze([...server.args]),
     envKeys: Object.freeze(Object.keys(server.env).sort()),
   })
+}
+
+/**
+ * Collect the NAMES of every configured MCP server in an `mcpServers` block,
+ * without the exec-oriented validation `parseClaudeMcpConfig` applies.
+ *
+ * `parseClaudeMcpConfig` is built for the byok stdio exec path — it requires a
+ * `command` and drops any entry without one. For pure VISIBILITY (#6820) we
+ * want every declared server by name, including remote/HTTP transports (which
+ * carry `url`/`type` instead of `command`). So this is deliberately lenient:
+ * any key mapping to a non-null object counts. Malformed entries accumulate a
+ * warning rather than throwing.
+ *
+ * @param {unknown} mcpBlock — the `mcpServers` object from a config source
+ * @param {{ warnings: string[], source: string }} ctx
+ * @returns {string[]} declared server names (order preserved)
+ */
+function collectConfiguredNames(mcpBlock, { warnings, source }) {
+  const names = []
+  if (mcpBlock == null) return names
+  if (typeof mcpBlock !== 'object' || Array.isArray(mcpBlock)) {
+    warnings.push(`${source}: mcpServers must be an object`)
+    return names
+  }
+  for (const [name, entry] of Object.entries(mcpBlock)) {
+    if (!name) {
+      warnings.push(`${source}: skipping MCP server with empty name`)
+      continue
+    }
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      warnings.push(`${source}: skipping MCP server ${name} (entry must be an object)`)
+      continue
+    }
+    names.push(name)
+  }
+  return names
+}
+
+/**
+ * Resolve the project-scoped config block Claude Code stores under
+ * `projects[<realpath(cwd)>]` in `~/.claude.json`. Claude keys these by the
+ * realpath, so try that first and fall back to the literal `cwd` (a cwd that no
+ * longer resolves — e.g. a removed test tmp dir — still matches a literal key).
+ *
+ * @param {unknown} raw — parsed `~/.claude.json`
+ * @param {string} cwd
+ * @returns {object|null}
+ */
+function resolveProjectBlock(raw, cwd) {
+  if (!cwd) return null
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const projects = raw.projects
+  if (!projects || typeof projects !== 'object' || Array.isArray(projects)) return null
+  let realCwd = cwd
+  try {
+    realCwd = realpathSync(cwd)
+  } catch {
+    // cwd may not exist (tests / stale dir) — fall through to the literal key.
+  }
+  if (Object.prototype.hasOwnProperty.call(projects, realCwd)) return projects[realCwd]
+  if (Object.prototype.hasOwnProperty.call(projects, cwd)) return projects[cwd]
+  return null
+}
+
+/**
+ * Discover the CONFIGURED (not live-connected) MCP servers a Claude Code
+ * session running in `cwd` would load. This is the honest fallback the
+ * claude-tui provider uses (#6820): the interactive TUI communicates over a
+ * PTY + hook payloads and exposes NO runtime MCP status, unlike the SDK/CLI
+ * stream-json `system/init` event that carries live `mcp_servers` with real
+ * connection status. So the TUI path can only report what the config DECLARES.
+ *
+ * Merges the three sources Claude Code itself reads, deduped by name (first
+ * source wins on a name collision, matching read precedence):
+ *   1. user/global scope  — `mcpServers` at the root of `~/.claude.json`
+ *   2. project scope      — `projects[<realpath(cwd)>].mcpServers` in `~/.claude.json`
+ *   3. project-local      — `mcpServers` in `<cwd>/.mcp.json`
+ *
+ * Never throws: each read is guarded and failures accumulate as warnings, so a
+ * corrupt config can't take down session start.
+ *
+ * @param {string} cwd — the session's working directory
+ * @param {{ configPath?: string }} [opts]
+ * @returns {{ servers: Array<{ name: string }>, warnings: string[] }}
+ */
+export function discoverConfiguredMcpServers(cwd, { configPath = defaultClaudeConfigPath() } = {}) {
+  const warnings = []
+  const byName = new Map()
+  const add = (names) => {
+    for (const name of names) {
+      if (!byName.has(name)) byName.set(name, { name })
+    }
+  }
+
+  const readJson = (filePath, source) => {
+    try {
+      // statSync before readFileSync so a pathologically large file (see
+      // CLAUDE_CONFIG_MAX_BYTES) doesn't block session start.
+      const stat = statSync(filePath)
+      if (stat.size > CLAUDE_CONFIG_MAX_BYTES) {
+        warnings.push(
+          `MCP config ${filePath} exceeds size cap (${stat.size} bytes > ${CLAUDE_CONFIG_MAX_BYTES} bytes); skipping load`,
+        )
+        return null
+      }
+      return JSON.parse(readFileSync(filePath, 'utf8'))
+    } catch (err) {
+      warnings.push(`${source}: failed to read ${filePath}: ${err?.message || String(err)}`)
+      return null
+    }
+  }
+
+  // 1 + 2 — ~/.claude.json global root + project-scoped block.
+  if (configPath && existsSync(configPath)) {
+    const raw = readJson(configPath, 'user config')
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+      add(collectConfiguredNames(raw.mcpServers, { warnings, source: 'user config mcpServers' }))
+      const projectBlock = resolveProjectBlock(raw, cwd)
+      if (projectBlock && typeof projectBlock === 'object' && !Array.isArray(projectBlock)) {
+        add(collectConfiguredNames(projectBlock.mcpServers, {
+          warnings,
+          source: 'project config mcpServers',
+        }))
+      }
+    }
+  }
+
+  // 3 — <cwd>/.mcp.json project-local.
+  if (cwd) {
+    const mcpJsonPath = join(cwd, '.mcp.json')
+    if (existsSync(mcpJsonPath)) {
+      const raw = readJson(mcpJsonPath, 'project .mcp.json')
+      if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+        add(collectConfiguredNames(raw.mcpServers, {
+          warnings,
+          source: 'project .mcp.json mcpServers',
+        }))
+      }
+    }
+  }
+
+  return { servers: [...byName.values()], warnings }
 }
