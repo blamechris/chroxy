@@ -400,6 +400,22 @@ export class BaseSession extends EventEmitter {
       emit: (event, payload) => this.emit(event, payload),
     })
     this._setupActivityRegistry()
+    // #6832: `mcp_servers` is a transient event (sdk/cli parse it off the live
+    // stream-json `system/init`; claude-tui re-derives the CONFIGURED list on
+    // warmup/respawn — see claude-tui-session.js `_emitConfiguredMcpServers`,
+    // #6820/#6831) — forwarded to currently-connected clients but never
+    // recorded in history. A client that subscribes to an already-warmed
+    // session (dashboard reconnect, second client joining a shared session)
+    // never received the list until the NEXT emission. Cache the last payload
+    // here — self-listening on the session's own emit, so every provider that
+    // emits `mcp_servers` through `this.emit(...)` feeds this for free, same
+    // as `_setupActivityRegistry` above — and expose it via
+    // `getMcpServersSnapshot()` so `ws-history.sendSessionInfo`'s snapshot-on-
+    // subscribe can replay it, mirroring the `activity_snapshot` /
+    // `permission_rules_updated` late-join pattern. Cleared on full teardown
+    // (see `removeAllListeners` below).
+    this._lastMcpServers = null
+    this.on('mcp_servers', (data) => { this._lastMcpServers = data })
     this._messageCounter = 0
     // Boot-unique prefix mixed into every emitted messageId (#3700).
     // The dashboard caches up to 100 messages per session in localStorage
@@ -850,6 +866,11 @@ export class BaseSession extends EventEmitter {
     // shape with the right argument count.
     if (eventName === undefined) {
       this._activity.clear()
+      // #6832: clear the cached mcp_servers snapshot on full teardown too —
+      // a destroyed session must not replay a stale server list to a client
+      // that later subscribes to a NEW session that happens to reuse the id
+      // (or to any lingering reference to this now-dead session object).
+      this._lastMcpServers = null
       // #5177: stop the background-shell sweep on full teardown too. Most
       // providers (cli/jsonl/gemini/codex) destroy via removeAllListeners()
       // and never call _destroyPendingBackgroundShells, so this is the
@@ -877,6 +898,21 @@ export class BaseSession extends EventEmitter {
    */
   getActivitySnapshot() {
     return this._activity.getSnapshotMessage()
+  }
+
+  /**
+   * #6832: last-known `mcp_servers` payload, wrapped as the wire message
+   * shape (`{ type: 'mcp_servers', servers }`). Served to a fresh subscriber
+   * (snapshot-on-subscribe, via `ws-history.sendSessionInfo`) so a client
+   * that joins an already-warmed session sees the current list without
+   * waiting on the next emission — mirroring `getActivitySnapshot()` above.
+   * Returns `null` when this session has never emitted `mcp_servers` (no
+   * snapshot to replay; nothing to send).
+   * @returns {{type: 'mcp_servers', servers: object[]} | null}
+   */
+  getMcpServersSnapshot() {
+    if (!this._lastMcpServers) return null
+    return { type: 'mcp_servers', servers: this._lastMcpServers.servers }
   }
 
   /**

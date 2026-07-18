@@ -2916,6 +2916,12 @@ export class SessionManager extends EventEmitter {
     // activity tree (ActivityRegistry on BaseSession). Transient — not
     // replayed from history; a reconnecting client gets the full tree from
     // the snapshot-on-subscribe in ws-history.sendSessionInfo.
+    // #6832: `mcp_servers` (sdk/cli parse it off the live stream-json
+    // `system/init`; claude-tui re-derives the CONFIGURED list on warmup /
+    // respawn, #6820/#6831) is likewise transient — not recorded in history —
+    // but a reconnecting/late-joining client still gets the current server
+    // list via BaseSession's cached last payload, replayed in
+    // ws-history.sendSessionInfo's snapshot-on-subscribe (getMcpServersSnapshot).
     // #5936: message_queued / message_dequeued mirror the server-authoritative
     // outgoing-message queue (BaseSession `_outgoingQueue`). Transient (like
     // activity_delta) — they are delta events, NOT replayed from history. This
