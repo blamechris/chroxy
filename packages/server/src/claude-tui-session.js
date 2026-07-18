@@ -1417,7 +1417,8 @@ export class ClaudeTuiSession extends BaseSession {
    * emitted with status `configured` (never `connected`) so the client renders
    * a neutral, not-live indicator. Emits even an empty list so a stale list
    * clears on respawn — mirroring sdk/cli-session's "including empty list to
-   * clear stale state" behaviour. Best-effort: a discovery failure logs a warn
+   * clear stale state" behaviour. Best-effort: a discovery failure logs a warn,
+   * still emits the EMPTY list (so clients don't keep rendering stale servers),
    * and never blocks the ready path.
    */
   _emitConfiguredMcpServers() {
@@ -1437,6 +1438,15 @@ export class ClaudeTuiSession extends BaseSession {
       ;(this._log || log).warn(
         `MCP configured-server discovery failed: ${err?.message || String(err)}`,
       )
+      // Documented contract: even on failure, emit the empty list so a client
+      // holding a previous session's servers clears instead of rendering stale
+      // state forever. Guarded — a throwing listener must not escape the ready
+      // path this method is called from.
+      try {
+        this.emit('mcp_servers', { servers: [] })
+      } catch {
+        // Swallow: nothing more to do if even the emit fails.
+      }
     }
   }
 

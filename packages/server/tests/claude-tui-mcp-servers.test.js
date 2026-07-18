@@ -104,4 +104,23 @@ describe('ClaudeTuiSession — configured mcp_servers emission (#6820)', () => {
     assert.doesNotThrow(() => session._emitConfiguredMcpServers())
     assert.deepEqual(events, [{ servers: [] }])
   })
+
+  it('emits an empty list even when discovery itself THROWS (clears stale client state)', () => {
+    // discoverConfiguredMcpServers is designed never to throw, but the catch
+    // block's documented contract must hold if it ever does: clients holding a
+    // previous list must still get the clearing empty-list emission. Force the
+    // throw deterministically by making the `cwd` read (the discovery
+    // argument, evaluated inside the try) blow up.
+    const session = new ClaudeTuiSession({ cwd, skillsDir, repoSkillsDir: null })
+    Object.defineProperty(session, 'cwd', {
+      get() {
+        throw new Error('boom: forced discovery failure')
+      },
+    })
+    const events = []
+    session.on('mcp_servers', (data) => events.push(data))
+
+    assert.doesNotThrow(() => session._emitConfiguredMcpServers())
+    assert.deepEqual(events, [{ servers: [] }])
+  })
 })
