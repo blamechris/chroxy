@@ -3,25 +3,36 @@
  * panel slot, the desktop analogue of the mobile SettingsBar section.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest'
-import { render, cleanup, screen } from '@testing-library/react'
+import { render, cleanup, screen, fireEvent } from '@testing-library/react'
 import type { McpServer } from '@chroxy/store-core'
 import { SidebarMcpView, mcpViewCollapsedMetric } from './SidebarMcpView'
 
 // Mock the store so the fallback path (no `servers` prop) is deterministic.
 // Tests that pass `servers` directly never touch it. The variable is prefixed
-// `mock` so vitest allows it inside the hoisted factory.
-let mockStoreState: Record<string, unknown> = { activeSessionId: null, sessionStates: {} }
+// `mock` so vitest allows it inside the hoisted factory. #6824 — the component
+// also selects `setMcpServerEnabled`, so the state carries a spy.
+const mockSetMcpServerEnabled = vi.fn()
+let mockStoreState: Record<string, unknown> = {
+  activeSessionId: null,
+  sessionStates: {},
+  setMcpServerEnabled: mockSetMcpServerEnabled,
+}
 vi.mock('../store/connection', () => ({
   useConnectionStore: (selector: (s: Record<string, unknown>) => unknown) => selector(mockStoreState),
 }))
 
 afterEach(() => {
   cleanup()
-  mockStoreState = { activeSessionId: null, sessionStates: {} }
+  mockSetMcpServerEnabled.mockClear()
+  mockStoreState = { activeSessionId: null, sessionStates: {}, setMcpServerEnabled: mockSetMcpServerEnabled }
 })
 
 function srv(name: string, status: string): McpServer {
   return { name, status }
+}
+
+function toggleSrv(name: string, status: string, enabled: boolean): McpServer {
+  return { name, status, enabled, canToggle: true }
 }
 
 describe('SidebarMcpView (#6820)', () => {
@@ -61,6 +72,43 @@ describe('SidebarMcpView (#6820)', () => {
   it('renders empty when the store has no active session', () => {
     render(<SidebarMcpView />)
     expect(screen.getByTestId('sidebar-mcp-view-empty')).toBeTruthy()
+  })
+})
+
+describe('SidebarMcpView enable/disable toggle (#6824)', () => {
+  it('does NOT render a toggle for a read-only (non-canToggle) server', () => {
+    render(<SidebarMcpView servers={[srv('filesystem', 'connected')]} />)
+    expect(screen.queryByTestId('sidebar-mcp-view-toggle-filesystem')).toBeNull()
+  })
+
+  it('renders a toggle reflecting enabled state when the server reports canToggle', () => {
+    render(<SidebarMcpView servers={[toggleSrv('fs', 'connected', true), toggleSrv('gh', 'disabled', false)]} />)
+    const on = screen.getByTestId('sidebar-mcp-view-toggle-fs')
+    const off = screen.getByTestId('sidebar-mcp-view-toggle-gh')
+    expect(on.getAttribute('aria-checked')).toBe('true')
+    expect(on.textContent).toBe('On')
+    expect(off.getAttribute('aria-checked')).toBe('false')
+    expect(off.textContent).toBe('Off')
+  })
+
+  it('clicking an enabled toggle calls setMcpServerEnabled(name, false)', () => {
+    render(<SidebarMcpView servers={[toggleSrv('fs', 'connected', true)]} />)
+    fireEvent.click(screen.getByTestId('sidebar-mcp-view-toggle-fs'))
+    expect(mockSetMcpServerEnabled).toHaveBeenCalledTimes(1)
+    expect(mockSetMcpServerEnabled).toHaveBeenCalledWith('fs', false)
+  })
+
+  it('clicking a disabled toggle calls setMcpServerEnabled(name, true)', () => {
+    render(<SidebarMcpView servers={[toggleSrv('gh', 'disabled', false)]} />)
+    fireEvent.click(screen.getByTestId('sidebar-mcp-view-toggle-gh'))
+    expect(mockSetMcpServerEnabled).toHaveBeenCalledWith('gh', true)
+  })
+
+  it('falls back to status when `enabled` is absent (pre-#6824 payload with canToggle)', () => {
+    // canToggle but no explicit `enabled` → derive from status.
+    render(<SidebarMcpView servers={[{ name: 'legacy', status: 'disabled', canToggle: true }]} />)
+    const t = screen.getByTestId('sidebar-mcp-view-toggle-legacy')
+    expect(t.getAttribute('aria-checked')).toBe('false')
   })
 })
 

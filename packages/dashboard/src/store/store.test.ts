@@ -2091,6 +2091,45 @@ describe('resolvedPermissions + Allow for Session (#2833, #2834)', () => {
     expect(msg!.projectRules).toEqual([{ tool: 'Edit', decision: 'allow' }]);
   });
 
+  // #6824 — per-server MCP enable/disable action.
+  it('setMcpServerEnabled sends set_mcp_server_enabled scoped to the active session', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const { createEmptySessionState } = await import('./utils');
+
+    const sent: Array<Record<string, unknown>> = [];
+    const mockSocket = { readyState: 1, send: (d: string) => { sent.push(JSON.parse(d)); } };
+    useConnectionStore.setState({
+      activeSessionId: 's1',
+      sessionStates: { s1: { ...createEmptySessionState() } },
+      socket: mockSocket as unknown as WebSocket,
+    });
+
+    useConnectionStore.getState().setMcpServerEnabled('filesystem', false);
+
+    const msg = sent.find((m) => m.type === 'set_mcp_server_enabled');
+    expect(msg).toBeDefined();
+    expect(msg!.sessionId).toBe('s1');
+    expect(msg!.server).toBe('filesystem');
+    expect(msg!.enabled).toBe(false);
+    expect(typeof msg!.requestId).toBe('string');
+  });
+
+  it('setMcpServerEnabled sends nothing when the socket is closed (silent no-op, mirrors setPermissionRules)', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const { createEmptySessionState } = await import('./utils');
+
+    const sent: Array<Record<string, unknown>> = [];
+    const mockSocket = { readyState: 3, send: (d: string) => { sent.push(JSON.parse(d)); } };
+    useConnectionStore.setState({
+      activeSessionId: 's1',
+      sessionStates: { s1: { ...createEmptySessionState() } },
+      socket: mockSocket as unknown as WebSocket,
+    });
+
+    useConnectionStore.getState().setMcpServerEnabled('filesystem', true);
+    expect(sent.find((m) => m.type === 'set_mcp_server_enabled')).toBeUndefined();
+  });
+
   it('queryPermissionAudit sets the loading flag and sends query_permission_audit scoped to the active session', async () => {
     const { useConnectionStore } = await import('./connection');
 

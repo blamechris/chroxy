@@ -259,6 +259,24 @@ export const SetPermissionRulesSchema = z.object({
     projectRules: z.array(PermissionRuleSchema).max(1000).optional(),
     sessionId: z.string().max(256).optional(),
 });
+// #6824: per-server MCP enable/disable. Runtime, per-session toggle of an
+// ALREADY-CONFIGURED MCP server (not add/remove — that mutates ~/.claude.json
+// and is a separate follow-up). `enabled: false` parks the server's fleet
+// client (its tools/prompts/resources vanish from the next turn and it stops
+// respawning); `enabled: true` restarts it through the same trust gate
+// (already-trusted servers reconnect silently). Only BYOK-lane providers run
+// an in-daemon MCP fleet, so the server rejects this on other providers with
+// an `MCP_SERVER_TOGGLE_UNSUPPORTED` capability error. `requestId` (optional)
+// echoes back on rejection so a client can roll back its optimistic toggle.
+// `sessionId` is optional; the handler falls back to the client's bound
+// active session — and a pairing-bound token may only target its own session.
+export const SetMcpServerEnabledSchema = z.object({
+    type: z.literal('set_mcp_server_enabled'),
+    server: z.string().min(1).max(256),
+    enabled: z.boolean(),
+    sessionId: z.string().max(256).optional(),
+    requestId: z.string().max(256).optional(),
+});
 // #3185: per-session promptEvaluator toggle. Strict boolean — the server
 // rejects anything else with a `session_error`. `sessionId` is optional;
 // the handler falls back to the client's bound active session.
@@ -1347,6 +1365,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     SetPermissionModeSchema,
     SetThinkingLevelSchema,
     SetPermissionRulesSchema,
+    SetMcpServerEnabledSchema,
     SetPromptEvaluatorSchema,
     SetPromptEvaluatorSkipPatternSchema,
     SetChroxyContextHintSchema,

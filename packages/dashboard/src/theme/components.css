@@ -1493,6 +1493,35 @@ button.sidebar-token-view-session-row:hover {
   font-size: 11px;
 }
 
+/* #6824 — per-server enable/disable toggle (BYOK lane only). A compact pill
+   switch; "On" reads accent, "Off" reads muted. Broadcast-driven, so it
+   reflects the server's actual state after a round-trip. */
+.sidebar-mcp-view-toggle {
+  flex-shrink: 0;
+  align-self: center;
+  min-width: 34px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border-subtle, var(--text-muted));
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.4;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  cursor: pointer;
+}
+
+.sidebar-mcp-view-toggle.enabled {
+  border-color: var(--accent-green, #22c55e);
+  color: var(--accent-green, #22c55e);
+}
+
+.sidebar-mcp-view-toggle:hover {
+  filter: brightness(1.15);
+}
+
 /* #5163 (epic #5159) — Control Room panel: live read-only activity tree. */
 .control-room-panel {
   display: flex;

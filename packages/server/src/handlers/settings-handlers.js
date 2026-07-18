@@ -851,6 +851,85 @@ function handleSetPermissionRules(ws, client, msg, ctx) {
   loggerForSession('ws', sessionId).info(`Permission rules updated by ${client.id} on session ${sessionId}: ${rules.length} session rule(s)${projectRules !== undefined ? `, ${projectRules.length} project rule(s)` : ''}`)
 }
 
+/**
+ * #6824 — enable/disable an already-configured MCP server for the active
+ * session (runtime toggle, not add/remove). Only the BYOK lane runs an
+ * in-daemon MCP fleet that can be parked/unparked, so this rejects other
+ * providers with a capability error the client uses to keep its toggle hidden.
+ *
+ * AUTH: routed through `resolveSession`, which enforces session-token
+ * binding — a pairing-bound client may only act on ITS OWN session; a bound
+ * token naming a different session resolves to no entry and is rejected. This
+ * is the own-session gate, not the host-authority (unbound-only) gate that
+ * `set_permission_rules` uses: enabling a server can never ADD an untrusted
+ * one (the fleet re-runs the trust gate on unpark) and disabling only REDUCES
+ * capability, so neither direction is the privilege escalation that rule-
+ * setting is. Every rejection — validation, session resolution, capability,
+ * unknown server — echoes `requestId` (when supplied) with a stable code
+ * (MCP_SERVER_NOT_APPLIED / MCP_SERVER_TOGGLE_UNSUPPORTED /
+ * MCP_SERVER_NOT_FOUND), the same echo discipline as the set_model /
+ * set_permission_mode / set_thinking_level NOT_APPLIED family.
+ *
+ * On success the session re-emits `mcp_servers` (broadcast to every subscriber
+ * → multi-device consistency), so this handler does not send its own ack — the
+ * updated list IS the confirmation.
+ */
+async function handleSetMcpServerEnabled(ws, client, msg, ctx) {
+  const requestId = msg?.requestId
+  const server = typeof msg?.server === 'string' ? msg.server.trim() : ''
+  if (!server) {
+    sendError(ws, requestId, 'MCP_SERVER_NOT_APPLIED', 'set_mcp_server_enabled requires a non-empty `server` name', undefined, ctx)
+    return
+  }
+  if (typeof msg?.enabled !== 'boolean') {
+    sendError(ws, requestId, 'MCP_SERVER_NOT_APPLIED', 'set_mcp_server_enabled requires a boolean `enabled`', undefined, ctx)
+    return
+  }
+
+  const sessionId = msg?.sessionId || client?.activeSessionId
+  // Session resolution failures (no active session, or a bound token naming a
+  // DIFFERENT session — resolveSession enforces the binding) echo requestId +
+  // the stable NOT_APPLIED code, mirroring handleSetThinkingLevel, rather than
+  // resolveSessionOrError's code-less session_error, so the doc-block contract
+  // ("every rejection echoes requestId with a stable code") holds on ALL paths.
+  const entry = resolveSession(ctx, msg, client)
+  if (!entry) {
+    sendError(ws, requestId, 'MCP_SERVER_NOT_APPLIED', 'No active session', undefined, ctx)
+    return
+  }
+
+  // Capability gate — only providers that expose `setMcpServerEnabled` (the
+  // BYOK lane) can toggle. Others ride the claude binary's own MCP config.
+  if (!entry.session || typeof entry.session.setMcpServerEnabled !== 'function') {
+    sendError(ws, requestId, 'MCP_SERVER_TOGGLE_UNSUPPORTED',
+      'This provider does not support enabling/disabling MCP servers (its MCP config is managed by the underlying CLI).',
+      undefined, ctx)
+    return
+  }
+
+  try {
+    const result = await entry.session.setMcpServerEnabled(server, msg.enabled)
+    if (!result || result.found === false) {
+      sendError(ws, requestId, 'MCP_SERVER_NOT_FOUND', `No configured MCP server named '${server}' for this session.`, undefined, ctx)
+      return
+    }
+    // The session re-emits `mcp_servers` on a real change (forwarded to all
+    // subscribers). Persist immediately so a crash inside the debounce window
+    // can't lose the parked-set change — same discipline as the permission-rule
+    // and per-session-setting handlers.
+    if (result.changed) {
+      try {
+        ctx.sessions.sessionManager?.serializeState?.()
+      } catch (err) {
+        loggerForSession('ws', sessionId).warn(`Failed to persist disabledMcpServers for ${sessionId}: ${err?.message || err}`)
+      }
+    }
+    loggerForSession('ws', sessionId).info(`MCP server '${server}' ${msg.enabled ? 'enabled' : 'disabled'} by ${client.id} on session ${sessionId} (changed=${result.changed})`)
+  } catch (err) {
+    sendError(ws, requestId, 'MCP_SERVER_NOT_APPLIED', `Failed to ${msg.enabled ? 'enable' : 'disable'} MCP server '${server}': ${err?.message || String(err)}`, undefined, ctx)
+  }
+}
+
 // #4664: assemble the per-session-setting WS handlers from the registry.
 // Each setting's `requestType` (e.g. `'set_prompt_evaluator'`) is the
 // message-type key the dispatcher looks up; the factory-built handler
@@ -924,6 +1003,8 @@ export const settingsHandlers = {
   list_providers: handleListProviders,
   set_thinking_level: handleSetThinkingLevel,
   set_permission_rules: handleSetPermissionRules,
+  // #6824: per-server MCP enable/disable (BYOK lane; capability-gated).
+  set_mcp_server_enabled: handleSetMcpServerEnabled,
   // promptEvaluatorSkipPattern keeps its bespoke handler because the
   // payload shape (string-or-null + pre-validation regex compile to
   // surface a distinct error code) doesn't fit the boolean/string

@@ -26,9 +26,12 @@ export declare const ServerMultiQuestionInterventionSchema: z.ZodObject<{
 }, z.core.$strip>;
 export declare const ServerMcpServersSchema: z.ZodObject<{
     type: z.ZodLiteral<"mcp_servers">;
+    sessionId: z.ZodOptional<z.ZodString>;
     servers: z.ZodArray<z.ZodObject<{
         name: z.ZodString;
         status: z.ZodString;
+        enabled: z.ZodOptional<z.ZodBoolean>;
+        canToggle: z.ZodOptional<z.ZodBoolean>;
     }, z.core.$strip>>;
 }, z.core.$strip>;
 export declare const ServerPlanStartedSchema: z.ZodObject<{

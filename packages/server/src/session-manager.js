@@ -1134,7 +1134,7 @@ export class SessionManager extends EventEmitter {
    *   it (#6743).
    * @returns {string} sessionId
    */
-  createSession({ name, cwd, model, permissionMode, resumeSessionId, provider, worktree, restoreWorktreePath, restoreWorktreeRepoDir, sandbox, codexSandbox, containerId, containerUser, containerCliPath, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, stdinForwardingDisabled, bootedModel, messageCounter, skipPermissions, agentCommId, metadata = null, skipPersist = false, preserveId, isRestore = false } = {}) {
+  createSession({ name, cwd, model, permissionMode, resumeSessionId, provider, worktree, restoreWorktreePath, restoreWorktreeRepoDir, sandbox, codexSandbox, containerId, containerUser, containerCliPath, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, stdinForwardingDisabled, disabledMcpServers, bootedModel, messageCounter, skipPermissions, agentCommId, metadata = null, skipPersist = false, preserveId, isRestore = false } = {}) {
     // #6036 — front-half SRP extraction: preflight + isolation + provider/preset
     // resolution (incl. the limit guard, cwd check, id/name, #2962 preflight,
     // #5985 user-shell gate, #3403 model fallback, worktree create/restore, and
@@ -1263,6 +1263,15 @@ export class SessionManager extends EventEmitter {
     // signal only originates from SidecarProcess paths).
     if (stdinForwardingDisabled === true) {
       providerOpts.stdinForwardingDisabled = true
+    }
+    // #6824: per-session parked (disabled) MCP server names. Byok-local opt —
+    // forwarded only when it's a non-empty array of strings so non-BYOK
+    // providers (which ignore the unknown key via the opt picker) never see a
+    // meaningless value, and older state files (no field) restore cleanly. The
+    // BYOK session filters this against its own config, so a stale name is a
+    // harmless no-op.
+    if (Array.isArray(disabledMcpServers) && disabledMcpServers.length > 0) {
+      providerOpts.disabledMcpServers = disabledMcpServers.filter((n) => typeof n === 'string')
     }
     // #4208 / #4209: per-session skipPermissions, with the server-wide
     // default as fallback. Only forwarded when truthy so non-TUI providers
@@ -2160,6 +2169,15 @@ export class SessionManager extends EventEmitter {
         // was not replayed. Strict-boolean coerce so non-Sdk providers
         // (which never set this field) round-trip as `false`.
         stdinForwardingDisabled: !!entry.session._stdinForwardingDisabled,
+        // #6824: persist the per-session parked (disabled) MCP server set so a
+        // respawn skips starting those servers. Only the BYOK lane exposes the
+        // getter; other providers round-trip as [] (their MCP config is owned
+        // by the claude binary, not toggleable here). Older state files (no
+        // field) restore as [] → nothing parked.
+        disabledMcpServers:
+          typeof entry.session.getDisabledMcpServers === 'function'
+            ? entry.session.getDisabledMcpServers()
+            : [],
         // #4089: persist cumulativeUsage so the dashboard sidebar badge
         // (#4073) and mobile session-header badge (#4074) survive a
         // server restart. Without this, the badge resets to $0 on
@@ -2271,6 +2289,13 @@ export class SessionManager extends EventEmitter {
           // ensures no warn/error is re-emitted on restore — clients
           // observe the disabled state via session_list metadata.
           stdinForwardingDisabled: saved.stdinForwardingDisabled === true ? true : undefined,
+          // #6824: forward the persisted parked MCP server set so the respawned
+          // BYOK fleet skips starting them. Non-array / empty values are
+          // dropped (createSession only forwards a non-empty string array), so
+          // older state files restore with nothing parked.
+          disabledMcpServers: Array.isArray(saved.disabledMcpServers) && saved.disabledMcpServers.length > 0
+            ? saved.disabledMcpServers.filter((n) => typeof n === 'string')
+            : undefined,
           // Restore the previously-booted model (#3700b) so the dashboard
           // dropdown shows the real model on reconnect, not the registry
           // fallback. createSession() ignores non-string / empty values so

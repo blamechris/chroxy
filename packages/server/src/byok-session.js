@@ -402,6 +402,18 @@ export class ClaudeByokSession extends BaseSession {
     }
     this._mcpServerConfigs = mcpConfig.servers
     this.mcpServers = Object.freeze(mcpConfig.servers.map(toMcpServerMetadata))
+    // #6824: per-session set of parked (disabled) MCP server names. Seeded from
+    // the persisted `disabledMcpServers` opt (session-manager forwards the
+    // restored set), filtered to names actually present in this session's
+    // config so a stale entry can't wedge. Threaded into the MCPFleet at
+    // start() (parked servers get no client) and round-tripped back to session
+    // state via `getDisabledMcpServers()`. Byok-local opt — read straight off
+    // `opts`, not a BaseSession key.
+    const configuredMcpNames = new Set(mcpConfig.servers.map((s) => s.name))
+    this._disabledMcpServers = new Set(
+      (Array.isArray(opts.disabledMcpServers) ? opts.disabledMcpServers : [])
+        .filter((name) => typeof name === 'string' && configuredMcpNames.has(name)),
+    )
     // #4077: MCPFleet is lazy — created in start() only if servers exist.
     // Held here so destroy() can tear down even if start() never ran.
     this._mcpFleet = null
@@ -499,12 +511,98 @@ export class ClaudeByokSession extends BaseSession {
       // what we want when no override is in play.
       const fleetOpts = { log, permissionManager: this._permissions }
       if (this._mcpStartCapMs !== null) fleetOpts.startCapMs = this._mcpStartCapMs
+      // #6824: seed the fleet with the persisted parked set so a respawn skips
+      // starting servers the operator disabled before the restart.
+      fleetOpts.disabledServers = [...this._disabledMcpServers]
       this._mcpFleet = new MCPFleet(this._mcpServerConfigs, fleetOpts)
       await this._mcpFleet.start()
     }
 
     this._processReady = true
     this.emit('ready', { sessionId: null, model: this.model, tools: [] })
+    // #6824: BYOK is the authoritative MCP lane — publish the live server list
+    // (with per-server enabled/canToggle) so the dashboard/mobile MCP views can
+    // render the enable/disable toggle. sdk/cli parse their list off the live
+    // stream; the BYOK fleet is in-daemon, so we emit it here after start().
+    this._emitMcpServers()
+  }
+
+  /**
+   * #6824: build the `mcp_servers` broadcast payload — one entry per configured
+   * server with `{ name, status, enabled, canToggle: true }`. When the fleet
+   * exists (the normal post-start case) its `getServerStatuses()` is
+   * authoritative (live states + parked servers). Before start() / when the
+   * fleet never spun up, fall back to the static config list so the payload is
+   * still coherent (parked → 'disabled', otherwise 'configured').
+   */
+  _buildMcpServersPayload() {
+    if (this._mcpFleet) return this._mcpFleet.getServerStatuses()
+    return this._mcpServerConfigs.map((cfg) => {
+      const disabled = this._disabledMcpServers.has(cfg.name)
+      return {
+        name: cfg.name,
+        status: disabled ? 'disabled' : 'configured',
+        enabled: !disabled,
+        canToggle: true,
+      }
+    })
+  }
+
+  /**
+   * #6824: emit the current MCP server list to all subscribers. Best-effort —
+   * a throwing listener must not escape the ready / toggle paths this is called
+   * from (mirrors claude-tui-session `_emitConfiguredMcpServers`). No servers
+   * configured → nothing to publish.
+   */
+  _emitMcpServers() {
+    if (this._mcpServerConfigs.length === 0) return
+    try {
+      this.emit('mcp_servers', { servers: this._buildMcpServersPayload() })
+    } catch (err) {
+      log.warn(`BYOK MCP: mcp_servers emit failed: ${err?.message || err}`)
+    }
+  }
+
+  /**
+   * #6824: enable or disable a single configured MCP server for this session.
+   * Delegates the park/unpark to the fleet (destroy-and-forget vs
+   * rebuild-through-trust-gate), updates the persisted parked set, and
+   * re-emits `mcp_servers` so every connected client converges. Returns
+   * `{ found, changed, status }` — `found: false` when `name` is not a
+   * configured server so the WS handler can surface a clean error.
+   */
+  async setMcpServerEnabled(name, enabled) {
+    if (typeof name !== 'string' || !this._mcpServerConfigs.some((c) => c.name === name)) {
+      return { found: false, changed: false, status: null }
+    }
+    let result
+    if (this._mcpFleet) {
+      result = await this._mcpFleet.setEnabled(name, enabled)
+      // Sync the persisted set from the fleet's AUTHORITATIVE one rather than
+      // applying the requested state — the fleet's in-flight churn latch can
+      // legitimately ignore this toggle (changed:false while another park/
+      // unpark for the same server is awaiting), and blindly recording the
+      // request here would diverge what respawn honours from what actually ran.
+      this._disabledMcpServers = new Set(this._mcpFleet.disabledServers)
+    } else {
+      // Fleet not yet started (no servers spawned): just record intent so
+      // start() honours it. Treat as changed only if the set actually moves.
+      const was = this._disabledMcpServers.has(name)
+      result = { found: true, changed: was === enabled, status: enabled ? 'configured' : 'disabled' }
+      if (enabled) this._disabledMcpServers.delete(name)
+      else this._disabledMcpServers.add(name)
+    }
+    if (result.changed) this._emitMcpServers()
+    return result
+  }
+
+  /**
+   * #6824: the parked (disabled) server names, sorted, for persistence into
+   * session-state.json. Session-manager reads this in `_serializeSessionEntry`
+   * and forwards it back as `disabledMcpServers` on restore.
+   */
+  getDisabledMcpServers() {
+    return [...this._disabledMcpServers].sort()
   }
 
   async sendMessage(prompt, attachments, _options = {}) {

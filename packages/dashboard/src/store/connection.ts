@@ -3314,6 +3314,27 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     });
   },
 
+  // #6824 — enable/disable an already-configured MCP server for the active
+  // session (BYOK lane). Broadcast-driven: the server re-emits `mcp_servers`
+  // with the new per-server status on success, which drives the SidebarMcpView
+  // toggle to the truth (no optimistic store mutation → no stale state to roll
+  // back on a rejection). A `requestId` is attached so a rejection correlates
+  // in the server log; capability rejections never reach here because the
+  // toggle is gated on `server.canToggle`. No-op when the socket is closed or
+  // there is no active session — mirrors setPermissionRules' silent guard.
+  setMcpServerEnabled: (server: string, enabled: boolean) => {
+    const { socket, activeSessionId } = get();
+    if (!socket || socket.readyState !== WebSocket.OPEN || !activeSessionId) return;
+    const requestId = `set-mcp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    wsSend(socket, {
+      type: 'set_mcp_server_enabled',
+      sessionId: activeSessionId,
+      server,
+      enabled,
+      requestId,
+    });
+  },
+
   // #6772 — pull the permission audit history for the active session. Sets the
   // loading flag; the reply (`permission_audit_result`) lands in `permissionAudit`
   // (handlePermissionAuditResult). The server filters by sessionId when provided.

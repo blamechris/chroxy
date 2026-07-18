@@ -572,6 +572,12 @@ export interface ModelsAndPermissionsActions {
   // #6771 — replace the durable per-project ("always allow") rule set for the
   // active session's project cwd (SessionRules screen removal path).
   setProjectPermissionRules: (projectRules: PermissionRule[]) => void;
+  // #6824 — enable/disable an already-configured MCP server for the active
+  // session (BYOK lane). Sends `set_mcp_server_enabled`; the server re-emits
+  // `mcp_servers` on success so the SettingsBar switch converges from the
+  // broadcast (no optimistic mutation to roll back). The toggle is gated on the
+  // server's `canToggle` flag so this only reaches a provider that supports it.
+  setMcpServerEnabled: (server: string, enabled: boolean) => void;
 }
 
 /**

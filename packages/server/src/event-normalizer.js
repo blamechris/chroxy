@@ -355,11 +355,22 @@ Object.assign(EVENT_MAP, {
     }],
   }),
 
-  mcp_servers: (data) => ({
-    messages: [{
-      msg: { type: 'mcp_servers', servers: data.servers },
-    }],
-  }),
+  // #6847: stamp the canonical `ctx.sessionId` so the message routes to the
+  // RIGHT session on the client — without it, a client subscribed to sessions
+  // A+B with B active would patch A's toggle re-emit onto B (store-core's
+  // handleMcpServers falls back to activeSessionId when the field is absent).
+  // The field is OMITTED on the legacy-cli path where ctx.sessionId is null,
+  // matching the `stopped` builder's convention ("applies to the connected
+  // legacy CLI" rather than `sessionId: null`) — mcp_servers is in that path's
+  // FORWARDED_EVENTS list, unlike the always-multi-session siblings
+  // (message_queued / background_work_changed) that stamp unconditionally.
+  mcp_servers: (data, ctx) => {
+    const msg = { type: 'mcp_servers', servers: data.servers }
+    if (typeof ctx.sessionId === 'string' && ctx.sessionId.length > 0) {
+      msg.sessionId = ctx.sessionId
+    }
+    return { messages: [{ msg }] }
+  },
 
   // #5936 (epic #5935): outgoing-message queue mirror. The session emits these
   // when a send-while-busy follow-up enters (`message_queued`) or leaves

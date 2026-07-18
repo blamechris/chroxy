@@ -1,11 +1,10 @@
 /**
- * SidebarMcpView (#6820) — read-only MCP server list in the sidebar panel slot.
+ * SidebarMcpView (#6820) — MCP server list in the sidebar panel slot.
  *
  * The desktop analogue of the mobile app's `SettingsBar.tsx` "MCP Servers (N)"
  * section: it renders the active session's `mcpServers` store field (already
  * carried in `connection.ts`, written by the `mcp_servers` broadcast handler)
- * as a status dot + name + status text per server. Purely informational — no
- * enable/disable affordance (that's #6824).
+ * as a status dot + name + status text per server.
  *
  * Status semantics mirror the mobile pattern: the dot is green only when a
  * server reports `connected` (a live status from an sdk/cli-mode session),
@@ -13,6 +12,13 @@
  * declares the server but the PTY exposes no live connection status), which
  * renders muted — honest about the difference between "connected" and
  * "declared in config".
+ *
+ * #6824 — per-server enable/disable toggle. Rendered ONLY when the server
+ * reports `canToggle` (the BYOK lane, which runs an in-daemon MCP fleet);
+ * sdk/cli/tui servers stay read-only. Toggling sends `set_mcp_server_enabled`;
+ * the switch is broadcast-driven (it reflects the server's re-emitted
+ * `mcp_servers` state, not an optimistic guess), so a rejected toggle simply
+ * never moves rather than flashing a wrong state.
  */
 import { useConnectionStore } from '../store/connection'
 import type { McpServer } from '@chroxy/store-core'
@@ -20,6 +26,14 @@ import type { McpServer } from '@chroxy/store-core'
 // Module-level stable empty array so the store selector's fallback keeps a
 // referentially-stable identity (avoids needless re-renders / render loops).
 const EMPTY_MCP_SERVERS: McpServer[] = []
+
+// #6824: a server is "on" when it isn't parked. Prefer the explicit `enabled`
+// flag (BYOK emits it); fall back to the status so a pre-#6824 payload (no
+// `enabled`) still reads sensibly.
+function isServerEnabled(server: McpServer): boolean {
+  if (typeof server.enabled === 'boolean') return server.enabled
+  return server.status !== 'disabled'
+}
 
 export interface SidebarMcpViewProps {
   /**
@@ -36,6 +50,7 @@ export function SidebarMcpView({ servers: serversProp }: SidebarMcpViewProps = {
     const id = s.activeSessionId
     return id && s.sessionStates[id] ? s.sessionStates[id].mcpServers : EMPTY_MCP_SERVERS
   })
+  const setMcpServerEnabled = useConnectionStore((s) => s.setMcpServerEnabled)
   const servers = serversProp ?? storeServers
 
   return (
@@ -48,6 +63,7 @@ export function SidebarMcpView({ servers: serversProp }: SidebarMcpViewProps = {
         <ul className="sidebar-mcp-view-list" data-testid="sidebar-mcp-view-list">
           {servers.map((server) => {
             const connected = server.status === 'connected'
+            const enabled = isServerEnabled(server)
             return (
               <li
                 key={server.name}
@@ -66,6 +82,20 @@ export function SidebarMcpView({ servers: serversProp }: SidebarMcpViewProps = {
                 <span className="sidebar-mcp-view-status" data-testid={`sidebar-mcp-view-status-${server.name}`}>
                   {server.status}
                 </span>
+                {server.canToggle && (
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={enabled}
+                    className={`sidebar-mcp-view-toggle${enabled ? ' enabled' : ''}`}
+                    data-testid={`sidebar-mcp-view-toggle-${server.name}`}
+                    aria-label={`${enabled ? 'Disable' : 'Enable'} MCP server ${server.name}`}
+                    title={enabled ? 'Disable server' : 'Enable server'}
+                    onClick={() => setMcpServerEnabled(server.name, !enabled)}
+                  >
+                    {enabled ? 'On' : 'Off'}
+                  </button>
+                )}
               </li>
             )
           })}
