@@ -554,9 +554,12 @@ export const ServerCheckpointListSchema = z.object({
 // #6767: `mode` echoes the selective-restore mode the server ran ('files' |
 // 'conversation' | 'both'). `newSessionId`/`name` are now OPTIONAL: a 'files'
 // restore reverts only the working tree and keeps the CURRENT session (no new
-// session, no re-home), so it omits both — 'conversation' and 'both' still
-// create and re-home to a rewound session and carry them. Optional so older
-// servers (which always created a new session) round-trip unchanged.
+// session, no re-home), so it omits `newSessionId` — but carries `name` as the
+// CHECKPOINT's name so the client can render a visible "files restored"
+// confirmation (#6827). 'conversation' and 'both' still create and re-home to
+// a rewound session and carry both (`name` = the new session's name there).
+// Optional so older servers (which always created a new session) round-trip
+// unchanged.
 export const ServerCheckpointRestoredSchema = z.object({
     type: z.literal('checkpoint_restored'),
     checkpointId: z.string(),

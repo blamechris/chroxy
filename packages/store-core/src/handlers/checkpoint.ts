@@ -7,7 +7,8 @@
  * ./index.ts for the stateless-handler contract.
  */
 
-import type { Checkpoint } from '../types'
+import type { ChatMessage, Checkpoint } from '../types'
+import { nextMessageId } from '../utils'
 import { resolveSessionId } from './_shared'
 
 // ---------------------------------------------------------------------------
@@ -117,4 +118,35 @@ export function handleCheckpointRestored(
       ? (msg.mode as RestoreMode)
       : undefined
   return { newSessionId: trimmed, filesOnly, ...(mode ? { mode } : {}) }
+}
+
+// ---------------------------------------------------------------------------
+// checkpoint_restored — 'files'-mode confirmation (#6767 / #6827)
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the transcript confirmation for a 'files'-mode `checkpoint_restored`.
+ *
+ * #6827: a files-only restore keeps the current session — the payload carries
+ * no `newSessionId`, so {@link handleCheckpointRestored} returns null and
+ * nothing re-homes. Without this the revert would be invisible client-side.
+ * Returns a `system` ChatMessage for the active session's transcript (the
+ * `budget_resumed` pattern — rendered identically by both clients), naming the
+ * checkpoint when the server supplied `name` (the CHECKPOINT's name here; in
+ * the session-creating modes `name` is the new session's name instead).
+ * Returns null for any non-'files' payload — the re-home path owns those.
+ */
+export function handleCheckpointFilesRestored(
+  msg: Record<string, unknown>,
+): { systemMessage: ChatMessage } | null {
+  if (msg.mode !== 'files') return null
+  const name = typeof msg.name === 'string' && msg.name.trim().length > 0 ? msg.name.trim() : null
+  return {
+    systemMessage: {
+      id: nextMessageId('system'),
+      type: 'system',
+      content: name ? `Files restored to checkpoint "${name}"` : 'Files restored to checkpoint',
+      timestamp: Date.now(),
+    },
+  }
 }

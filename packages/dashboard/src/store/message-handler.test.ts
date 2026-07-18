@@ -6435,3 +6435,56 @@ describe('dashboard message-handler dispatch', () => {
     })
   })
 })
+
+// #6767/#6827 — a 'files'-mode checkpoint restore keeps the CURRENT session, so
+// the dispatch renders a visible system confirmation in the active session's
+// transcript instead of re-homing (a silent files-only rewind looked like
+// nothing happened client-side).
+describe("checkpoint_restored (mode 'files') confirmation (#6827)", () => {
+  let store: ReturnType<typeof createMockStore>
+  let mockSocket: WebSocket
+  const ctx = () => ({
+    url: 'wss://t',
+    token: 'tok',
+    socket: mockSocket,
+    isReconnect: false,
+    silent: false,
+  })
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockSocket = createMockSocket()
+  })
+
+  it('appends a files-restored system message to the active session and does not switch', () => {
+    const switchSession = vi.fn()
+    store = createMockStore(
+      baseState({
+        activeSessionId: 's1',
+        sessions: [{ sessionId: 's1', name: 'S1' } as any],
+        sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+        switchSession,
+      } as any),
+    )
+    setStore(store)
+
+    handleMessage(
+      {
+        type: 'checkpoint_restored',
+        checkpointId: 'cp-1',
+        mode: 'files',
+        filesOnly: true,
+        name: 'Before refactor',
+      } as any,
+      ctx() as any,
+    )
+
+    expect(switchSession).not.toHaveBeenCalled()
+    const ss = (store.getState() as any).sessionStates.s1
+    expect(ss.messages).toHaveLength(1)
+    expect(ss.messages[0]).toMatchObject({
+      type: 'system',
+      content: 'Files restored to checkpoint "Before refactor"',
+    })
+  })
+})

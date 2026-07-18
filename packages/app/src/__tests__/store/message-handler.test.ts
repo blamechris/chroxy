@@ -896,6 +896,39 @@ describe('checkpoint_restored handler', () => {
 
     expect(switchSession).not.toHaveBeenCalled();
   });
+
+  // #6767/#6827 — a 'files'-mode restore keeps the current session, so instead
+  // of re-homing the client renders a visible system confirmation in the active
+  // session's transcript (a silent files-only rewind looked like nothing happened).
+  it("appends a files-restored system message (and does not switch) for a 'files'-mode restore", () => {
+    const switchSession = jest.fn();
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+
+      switchSession,
+    } as any);
+
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'checkpoint_restored',
+      checkpointId: 'cp-1',
+      mode: 'files',
+      filesOnly: true,
+      name: 'Before refactor',
+    });
+
+    expect(switchSession).not.toHaveBeenCalled();
+    const messages = store.getState().sessionStates.s1.messages;
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({
+      type: 'system',
+      content: 'Files restored to checkpoint "Before refactor"',
+    });
+  });
 });
 
 describe('session_updated handler (#1381)', () => {

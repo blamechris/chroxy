@@ -220,7 +220,10 @@ async function handleRestoreCheckpoint(ws, client, msg, ctx) {
       ctx.transport.send(ws, {
         type: 'checkpoint_restored',
         checkpointId: checkpoint.id,
-        // No newSessionId/name: the client stays on the current session.
+        // No newSessionId: the client stays on the current session. `name` here
+        // is the CHECKPOINT's name (there is no new session to name) so clients
+        // can confirm "Files restored to checkpoint <name>" visibly (#6827).
+        name: checkpoint.name,
         filesOnly: true,
         mode,
       })

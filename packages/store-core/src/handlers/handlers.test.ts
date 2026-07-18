@@ -31,6 +31,7 @@ import {
   handleCheckpointCreated,
   handleCheckpointList,
   handleCheckpointRestored,
+  handleCheckpointFilesRestored,
   handleError,
   handleSessionError,
   handleSessionStopped,
@@ -2008,6 +2009,47 @@ describe('handleCheckpointRestored', () => {
       newSessionId: 'sess-new',
       filesOnly: true,
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleCheckpointFilesRestored (#6767 / #6827)
+// ---------------------------------------------------------------------------
+describe('handleCheckpointFilesRestored', () => {
+  it('builds a system confirmation naming the checkpoint for a files-mode payload', () => {
+    const result = handleCheckpointFilesRestored({
+      type: 'checkpoint_restored',
+      checkpointId: 'cp-1',
+      mode: 'files',
+      filesOnly: true,
+      name: 'Before refactor',
+    })
+    expect(result).not.toBeNull()
+    expect(result!.systemMessage).toMatchObject({
+      type: 'system',
+      content: 'Files restored to checkpoint "Before refactor"',
+    })
+    expect(typeof result!.systemMessage.id).toBe('string')
+    expect(typeof result!.systemMessage.timestamp).toBe('number')
+  })
+
+  it('falls back to a generic confirmation when name is absent or blank', () => {
+    expect(
+      handleCheckpointFilesRestored({ mode: 'files', checkpointId: 'cp-1' })!.systemMessage.content,
+    ).toBe('Files restored to checkpoint')
+    expect(
+      handleCheckpointFilesRestored({ mode: 'files', name: '   ' })!.systemMessage.content,
+    ).toBe('Files restored to checkpoint')
+    expect(
+      handleCheckpointFilesRestored({ mode: 'files', name: 42 })!.systemMessage.content,
+    ).toBe('Files restored to checkpoint')
+  })
+
+  it('returns null for non-files modes and legacy payloads (the re-home path owns those)', () => {
+    expect(handleCheckpointFilesRestored({ mode: 'both', newSessionId: 's2' })).toBeNull()
+    expect(handleCheckpointFilesRestored({ mode: 'conversation', newSessionId: 's2' })).toBeNull()
+    expect(handleCheckpointFilesRestored({ newSessionId: 's2' })).toBeNull()
+    expect(handleCheckpointFilesRestored({})).toBeNull()
   })
 })
 

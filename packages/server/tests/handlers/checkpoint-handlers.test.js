@@ -362,6 +362,9 @@ describe('checkpoint-handlers', () => {
         assert.equal(restored.mode, 'files')
         assert.equal(restored.filesOnly, true)
         assert.equal(restored.newSessionId, undefined, 'no newSessionId in files mode')
+        // #6827: the CHECKPOINT's name rides along so clients can render the
+        // visible "Files restored to checkpoint <name>" confirmation.
+        assert.equal(restored.name, 'Checkpoint 1', 'files mode carries the checkpoint name')
       })
 
       it("'files' works on a non-fork provider (no fork attempted, current session kept)", async () => {

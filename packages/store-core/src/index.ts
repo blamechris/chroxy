@@ -575,6 +575,7 @@ export {
   handleCheckpointCreated,
   handleCheckpointList,
   handleCheckpointRestored,
+  handleCheckpointFilesRestored,
   handleError,
   handleSessionError,
   // #4879: quiet "user-initiated Stop" confirmation handler — flips
