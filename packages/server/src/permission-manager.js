@@ -108,7 +108,9 @@ export function mergeEditedInput(originalInput, editedInput, toolName) {
  * worktree that itself lives under a real `.claude/` dir writing to
  * `packages/…` is NOT floored, because the `.claude` segment is above cwd.
  *
- * Segment rules (a match on ANY segment floors the write):
+ * Segment rules (a match on ANY segment floors the write; segments are
+ * lowercased first so `.GIT`/`.Env.local` can't evade the floor on the
+ * case-insensitive filesystems where they alias the real paths):
  *   - a segment in {@link PROTECTED_DIR_SEGMENTS} (`.git` / `.claude` / `.vscode`)
  *   - a `.config` segment immediately followed by `git` (the XDG git-config dir)
  *   - a segment that is `.env` or starts with `.env.` (`.env` / `.env.local` / …)
@@ -138,7 +140,14 @@ export function isProtectedPathTarget(input, cwd) {
   // resolve() absorbs absolute paths, a leading `./`, and `..` traversal; the
   // relative path is what we segment-match so cwd's own name can't false-match.
   const rel = relative(base, resolve(base, target))
-  const segments = rel.split(sep).filter((s) => s.length > 0 && s !== '..')
+  // Lowercase every segment before matching: on case-insensitive filesystems
+  // (macOS APFS, Windows) `.GIT/config` IS `.git/config`, so a case-sensitive
+  // match would let case variants evade the floor. Over-flooring a genuinely
+  // distinct `.GIT` on case-sensitive Linux is fine — the floor only forces a
+  // prompt, never denies.
+  const segments = rel.split(sep)
+    .filter((s) => s.length > 0 && s !== '..')
+    .map((s) => s.toLowerCase())
   for (let i = 0; i < segments.length; i++) {
     const seg = segments[i]
     if (PROTECTED_DIR_SEGMENTS.has(seg)) return true

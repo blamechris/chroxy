@@ -236,6 +236,16 @@ describe('isProtectedPathTarget (#6794)', () => {
     { notebook_path: '.git/x.ipynb' },
     { path: '.claude/foo' },
     { file_path: `${cwd}/.git/HEAD` },
+    // Case variants — on case-insensitive filesystems (macOS APFS, Windows)
+    // these resolve to the SAME protected paths, so matching must be
+    // case-insensitive. Over-flooring a genuinely-distinct `.GIT` on
+    // case-sensitive Linux is acceptable: the floor only forces a prompt.
+    { file_path: '.GIT/config' },
+    { file_path: '.CLAUDE/x' },
+    { file_path: '.VSCode/x' },
+    { file_path: '.ENV' },
+    { file_path: '.Env.local' },
+    { file_path: '.Config/Git/config' },
   ]
   for (const input of floored) {
     it(`floors ${JSON.stringify(input)}`, () => {
