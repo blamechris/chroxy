@@ -249,6 +249,7 @@ export function SessionScreen() {
   const setModel = useConnectionStore((s) => s.setModel);
   const setPermissionMode = useConnectionStore((s) => s.setPermissionMode);
   const setMcpServerEnabled = useConnectionStore((s) => s.setMcpServerEnabled);
+  const submitMcpAuthCode = useConnectionStore((s) => s.submitMcpAuthCode);
   const confirmPermissionMode = useConnectionStore((s) => s.confirmPermissionMode);
   const cancelPermissionConfirm = useConnectionStore((s) => s.cancelPermissionConfirm);
   const sendPermissionResponse = useConnectionStore((s) => s.sendPermissionResponse);
@@ -1298,6 +1299,7 @@ export function SessionScreen() {
           mcpServers={mcpServers}
           onInvokeAgent={handleInvokeAgent}
           onToggleMcpServer={setMcpServerEnabled}
+          onSubmitMcpAuthCode={submitMcpAuthCode}
           setModel={setModel}
           setPermissionMode={setPermissionMode}
           pendingPermissionConfirm={pendingPermissionConfirm}

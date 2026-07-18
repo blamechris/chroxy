@@ -1515,6 +1515,16 @@ export interface ConnectionState {
    */
   setMcpServerEnabled: (server: string, enabled: boolean) => void;
   /**
+   * #6822 — submit a pasted OAuth authorization code for a remote MCP server that
+   * reported `status: 'oauth-required'` (BYOK lane). Sends `submit_mcp_auth_code`;
+   * the daemon redeems the code, persists the tokens encrypted at rest, and
+   * reconnects the server authenticated, then re-emits `mcp_servers` with the new
+   * status (converging every device). No-op when the socket is closed or there is
+   * no active session. `code` is a one-time authorization code — never persisted
+   * client-side.
+   */
+  submitMcpAuthCode: (server: string, code: string) => void;
+  /**
    * #6772 — pull the permission audit history for the active session
    * (`query_permission_audit`). Sets `permissionAuditLoading`; the reply lands in
    * `permissionAudit`. No-op when disconnected.

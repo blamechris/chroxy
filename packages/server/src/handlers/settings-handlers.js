@@ -930,6 +930,68 @@ async function handleSetMcpServerEnabled(ws, client, msg, ctx) {
   }
 }
 
+/**
+ * #6822 — submit a pasted OAuth authorization code for a remote MCP server that
+ * reported `oauth-required`. The daemon redeems the code (holding the PKCE
+ * verifier + state server-side), persists the tokens encrypted at rest, and
+ * reconnects the server authenticated. Only the BYOK lane runs an in-daemon MCP
+ * fleet, so this rejects other providers with a capability error.
+ *
+ * AUTH: identical own-session gate as `set_mcp_server_enabled` (routed through
+ * `resolveSession`, which enforces session-token binding). Redeeming a code can
+ * only authorize the server the user is already trying to connect — it never
+ * escalates. Every rejection echoes `requestId` (when supplied) with a stable
+ * code (MCP_AUTH_NOT_APPLIED / MCP_AUTH_UNSUPPORTED / MCP_AUTH_NOT_FOUND /
+ * MCP_AUTH_FAILED). On success the session re-emits `mcp_servers` (the new
+ * status IS the confirmation) — no separate ack. The `code` and any token are
+ * NEVER logged.
+ */
+async function handleSubmitMcpAuthCode(ws, client, msg, ctx) {
+  const requestId = msg?.requestId
+  const server = typeof msg?.server === 'string' ? msg.server.trim() : ''
+  const code = typeof msg?.code === 'string' ? msg.code.trim() : ''
+  if (!server) {
+    sendError(ws, requestId, 'MCP_AUTH_NOT_APPLIED', 'submit_mcp_auth_code requires a non-empty `server` name', undefined, ctx)
+    return
+  }
+  if (!code) {
+    sendError(ws, requestId, 'MCP_AUTH_NOT_APPLIED', 'submit_mcp_auth_code requires a non-empty `code`', undefined, ctx)
+    return
+  }
+
+  const sessionId = msg?.sessionId || client?.activeSessionId
+  const entry = resolveSession(ctx, msg, client)
+  if (!entry) {
+    sendError(ws, requestId, 'MCP_AUTH_NOT_APPLIED', 'No active session', undefined, ctx)
+    return
+  }
+
+  if (!entry.session || typeof entry.session.submitMcpAuthCode !== 'function') {
+    sendError(ws, requestId, 'MCP_AUTH_UNSUPPORTED',
+      'This provider does not support MCP OAuth authorization (its MCP config is managed by the underlying CLI).',
+      undefined, ctx)
+    return
+  }
+
+  try {
+    const result = await entry.session.submitMcpAuthCode(server, code)
+    if (!result || result.found === false) {
+      sendError(ws, requestId, 'MCP_AUTH_NOT_FOUND', `No configured MCP server named '${server}' awaiting authorization for this session.`, undefined, ctx)
+      return
+    }
+    if (result.ok === false) {
+      // Value-free reason — redemption failed (wrong/expired code, AS error).
+      sendError(ws, requestId, 'MCP_AUTH_FAILED', result.error || `Authorization for MCP server '${server}' failed.`, undefined, ctx)
+      return
+    }
+    // Success: the session re-emitted `mcp_servers` (status now connected or,
+    // if the server still rejects, oauth-required again). Never log the code.
+    loggerForSession('ws', sessionId).info(`MCP server '${server}' authorization completed by ${client.id} on session ${sessionId} (status=${result.status || 'unknown'})`)
+  } catch (err) {
+    sendError(ws, requestId, 'MCP_AUTH_FAILED', `Authorization for MCP server '${server}' failed: ${err?.message || String(err)}`, undefined, ctx)
+  }
+}
+
 // #4664: assemble the per-session-setting WS handlers from the registry.
 // Each setting's `requestType` (e.g. `'set_prompt_evaluator'`) is the
 // message-type key the dispatcher looks up; the factory-built handler
@@ -1005,6 +1067,8 @@ export const settingsHandlers = {
   set_permission_rules: handleSetPermissionRules,
   // #6824: per-server MCP enable/disable (BYOK lane; capability-gated).
   set_mcp_server_enabled: handleSetMcpServerEnabled,
+  // #6822: submit a pasted OAuth authorization code (BYOK lane; capability-gated).
+  submit_mcp_auth_code: handleSubmitMcpAuthCode,
   // promptEvaluatorSkipPattern keeps its bespoke handler because the
   // payload shape (string-or-null + pre-validation regex compile to
   // surface a distinct error code) doesn't fit the boolean/string

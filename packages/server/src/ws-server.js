@@ -24,6 +24,7 @@ import { sendPostAuthInfo, replayHistory, flushPostAuthQueue, sendSessionInfo } 
 import { createDevicePreferences } from './device-preferences.js'
 import { isUserShellEnabled, isIdeFeatureEnabled, isOrchestrationEnabled } from './config.js'
 import { createHttpHandler } from './http-routes.js'
+import { setMcpOAuthCallbackBase } from './byok-mcp-oauth.js'
 import { CheckpointManager } from './checkpoint-manager.js'
 import { DevPreviewManager } from './dev-preview.js'
 import { WebTaskManager } from './web-task-manager.js'
@@ -345,7 +346,7 @@ function _isSecureRequest(req) {
  *   { type: 'tool_start',   messageId, toolUseId, tool, input, serverName? } — tool invocation (serverName present for MCP tools)
  *   { type: 'tool_input_delta', messageId, toolUseId, partialJson } — #4080/#4081: incremental partial JSON for the streaming tool_use `input`; concatenate per-toolUseId for the live bubble preview
  *   { type: 'tool_result',  toolUseId, result, truncated, images?, isError? }  — tool result (images: [{mediaType, data}]; #6712 isError flags a failed tool for the error affordance)
- *   { type: 'mcp_servers',  servers: [{ name, status, enabled?, canToggle? }] } — configured MCP servers (#6824: enabled + canToggle per-server; BYOK lane sets canToggle:true so clients render the enable/disable toggle; status 'disabled' = parked)
+ *   { type: 'mcp_servers',  servers: [{ name, status, enabled?, canToggle?, authUrl? }] } — configured MCP servers (#6824: enabled + canToggle per-server; BYOK lane sets canToggle:true so clients render the enable/disable toggle; status 'disabled' = parked; #6822: status 'oauth-required' + authUrl surfaces the browser authorization URL a remote server needs)
  *   { type: 'result',       ... }                     — query stats
  *   { type: 'status',       connected: true }         — connection status
  *   { type: 'claude_ready' }                          — Claude Code ready for input
@@ -2160,6 +2161,11 @@ export class WsServer {
     }, 60_000)
 
     log.info(`Server listening on ${host || '0.0.0.0'}:${this.port} (${this.serverMode} mode)`)
+    // #6822: point the MCP OAuth redirect at this daemon's loopback callback so a
+    // desktop-local browser auto-completes the flow; remote/tunneled browsers
+    // that can't reach loopback fall back to the paste-code path. An operator
+    // override (CHROXY_MCP_OAUTH_REDIRECT_URI) still wins inside the module.
+    try { setMcpOAuthCallbackBase(`http://127.0.0.1:${this.port}`) } catch { /* best-effort */ }
   }
 
   /**

@@ -277,6 +277,26 @@ export const SetMcpServerEnabledSchema = z.object({
     sessionId: z.string().max(256).optional(),
     requestId: z.string().max(256).optional(),
 });
+// #6822: submit a pasted OAuth authorization code for a remote MCP server that
+// reported `status: 'oauth-required'`. The daemon holds the PKCE verifier +
+// state server-side; the user completed consent in a browser on THEIR device
+// and pastes back the code (the universal fallback when the daemon's loopback
+// callback isn't reachable from a remote/tunneled browser). The daemon redeems
+// the code, persists the tokens encrypted at rest, and reconnects the server
+// authenticated — then re-emits `mcp_servers` so all clients converge. Only the
+// BYOK lane runs an in-daemon MCP fleet, so other providers reject this with an
+// `MCP_AUTH_UNSUPPORTED` capability error. `requestId` (optional) echoes back on
+// rejection. `sessionId` is optional; the handler falls back to the client's
+// bound active session — and a pairing-bound token may only target its own
+// session (the same own-session gate as `set_mcp_server_enabled`). The `code`
+// is a short-lived one-time authorization code, never logged.
+export const SubmitMcpAuthCodeSchema = z.object({
+    type: z.literal('submit_mcp_auth_code'),
+    server: z.string().min(1).max(256),
+    code: z.string().min(1).max(4096),
+    sessionId: z.string().max(256).optional(),
+    requestId: z.string().max(256).optional(),
+});
 // #3185: per-session promptEvaluator toggle. Strict boolean — the server
 // rejects anything else with a `session_error`. `sessionId` is optional;
 // the handler falls back to the client's bound active session.
@@ -1366,6 +1386,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     SetThinkingLevelSchema,
     SetPermissionRulesSchema,
     SetMcpServerEnabledSchema,
+    SubmitMcpAuthCodeSchema,
     SetPromptEvaluatorSchema,
     SetPromptEvaluatorSkipPatternSchema,
     SetChroxyContextHintSchema,

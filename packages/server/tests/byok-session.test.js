@@ -520,6 +520,57 @@ describe('ClaudeByokSession', () => {
         assert.equal(emittedBefore.length, 0, 'no re-emit for an unknown server')
         await session.destroy()
       })
+
+      // #6822 — submitMcpAuthCode delegates to the fleet and re-emits mcp_servers.
+      // These use a FAKE fleet injected without start() — a real fleet would
+      // spawn an MCP stub child, and swapping `_mcpFleet` after start() would
+      // orphan that child (a leaked handle that hangs `node --test` with no
+      // --test-force-exit; see the CI-hang investigation for #6822).
+      function fakeFleetSession(fleet) {
+        const session = new ClaudeByokSession({ cwd: '/tmp' })
+        session._mcpServerConfigs = [{ name: 'stub', url: 'https://ex.example/mcp' }]
+        session._mcpFleet = { destroy: async () => {}, ...fleet }
+        return session
+      }
+
+      it('submitMcpAuthCode delegates to the fleet and re-emits mcp_servers on success', async () => {
+        let received = null
+        const session = fakeFleetSession({
+          submitAuthCode: async (name, code) => { received = { name, code }; return { found: true, ok: true, status: 'connected' } },
+          getServerStatuses: () => [{ name: 'stub', status: 'connected', enabled: true, canToggle: true }],
+        })
+        const emitted = []
+        session.on('mcp_servers', (d) => emitted.push(d))
+        const res = await session.submitMcpAuthCode('stub', 'the-code')
+        assert.deepEqual(res, { found: true, ok: true, status: 'connected' })
+        assert.deepEqual(received, { name: 'stub', code: 'the-code' })
+        assert.equal(emitted.length, 1, 're-emits mcp_servers on a successful redemption')
+        await session.destroy()
+      })
+
+      it('submitMcpAuthCode returns found:false for an unknown server (no emit)', async () => {
+        const session = fakeFleetSession({
+          submitAuthCode: async () => { throw new Error('must not be called for an unknown server') },
+        })
+        const emitted = []
+        session.on('mcp_servers', (d) => emitted.push(d))
+        const res = await session.submitMcpAuthCode('ghost', 'x')
+        assert.deepEqual(res, { found: false })
+        assert.equal(emitted.length, 0)
+        await session.destroy()
+      })
+
+      it('submitMcpAuthCode does not re-emit when redemption fails (ok:false)', async () => {
+        const session = fakeFleetSession({
+          submitAuthCode: async () => ({ found: true, ok: false, error: 'bad code' }),
+        })
+        const emitted = []
+        session.on('mcp_servers', (d) => emitted.push(d))
+        const res = await session.submitMcpAuthCode('stub', 'x')
+        assert.equal(res.ok, false)
+        assert.equal(emitted.length, 0, 'no re-emit on a failed redemption')
+        await session.destroy()
+      })
     })
 
     it('#4457: untrusted MCP server fires a permission_request prompt; deny → DEAD without spawn', async () => {

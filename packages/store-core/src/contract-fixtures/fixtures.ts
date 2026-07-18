@@ -901,6 +901,21 @@ export const DISPATCH_FIXTURES: ContractFixture[] = [
     expect: { sessions: { s1: { mcpServers: [{ name: 'fs', status: 'connected' }] } } },
   },
 
+  // 14b. mcp_servers — #6822 oauth-required entry carries the browser authUrl
+  {
+    name: 'mcp_servers carries the oauth-required authUrl for a remote server',
+    type: 'mcp_servers',
+    init: { sessions: { s1: { mcpServers: [] } } },
+    message: {
+      type: 'mcp_servers',
+      sessionId: 's1',
+      servers: [{ name: 'remote', status: 'oauth-required', enabled: true, canToggle: true, authUrl: 'https://as.example/authorize?x=1' }],
+    },
+    expect: {
+      sessions: { s1: { mcpServers: [{ name: 'remote', status: 'oauth-required', enabled: true, canToggle: true, authUrl: 'https://as.example/authorize?x=1' }] } },
+    },
+  },
+
   // 15. session_usage — store cumulative usage
   {
     name: 'session_usage stores the session cumulative usage',
