@@ -1,7 +1,12 @@
 /* SetupWizard — desktop first-run setup panel (#6787).
    Overlay/content/title chrome comes from the shared Modal component
    (.modal-overlay / .modal-content / .modal-title in theme/components.css);
-   only the wizard-internal styles live here. */
+   only the wizard-internal styles live here.
+
+   Tokens-only (lint-no-raw-color-literals): every color is a bare
+   var(--token) from the generated theme.css — no hex literals, no
+   fallbacks (the lint flags hex anywhere outside comments, including
+   inside var() fallbacks). */
 
 .setup-wizard {
   max-height: 75vh;
@@ -9,7 +14,7 @@
 }
 
 .setup-wizard-subtitle {
-  color: var(--text-secondary, #cccccc);
+  color: var(--text-secondary);
   font-size: 0.9rem;
   margin: 0 0 20px;
 }
@@ -19,7 +24,7 @@
 }
 
 .setup-wizard-section h3 {
-  color: var(--text-primary, #ffffff);
+  color: var(--text-primary);
   font-size: 1rem;
   margin: 0 0 10px;
 }
@@ -37,16 +42,16 @@
 
 .setup-wizard-recheck-btn {
   background: transparent;
-  color: var(--accent-blue, #4a9eff);
-  border: 1px solid var(--accent-blue-border, #4a9eff44);
-  border-radius: 6px;
+  color: var(--accent-blue);
+  border: 1px solid var(--accent-blue-border);
+  border-radius: var(--radius-sm);
   padding: 4px 10px;
   font-size: 0.8rem;
   cursor: pointer;
 }
 
 .setup-wizard-recheck-btn:hover:not(:disabled) {
-  background: var(--accent-blue-subtle, #4a9eff33);
+  background: var(--accent-blue-subtle);
 }
 
 .setup-wizard-recheck-btn:disabled {
@@ -69,8 +74,10 @@
   align-items: center;
   gap: 8px;
   padding: 6px 10px;
-  border-radius: 6px;
-  background: var(--bg-secondary, rgba(255, 255, 255, 0.04));
+  border-radius: var(--radius-sm);
+  /* --bg-card, not --bg-secondary: the latter equals --bg-modal, which
+     would make the rows invisible against the modal surface. */
+  background: var(--bg-card);
   font-size: 0.9rem;
 }
 
@@ -83,33 +90,33 @@
 }
 
 .setup-wizard-dep-row--pass .setup-wizard-dep-icon {
-  color: var(--status-connected, #22c55e);
+  color: var(--status-connected);
 }
 
 .setup-wizard-dep-row--fail .setup-wizard-dep-icon {
-  color: var(--error, #e74c3c);
+  color: var(--accent-red);
 }
 
 .setup-wizard-dep-row--unknown .setup-wizard-dep-icon,
 .setup-wizard-dep-row--checking .setup-wizard-dep-icon {
-  color: var(--warning-fg, #fbbf24);
+  color: var(--warning-fg);
 }
 
 .setup-wizard-dep-label {
-  color: var(--text-primary, #ffffff);
+  color: var(--text-primary);
   flex: 1;
 }
 
 .setup-wizard-dep-detail {
-  color: var(--text-muted, #888888);
+  color: var(--text-muted);
   font-size: 0.85em;
 }
 
 .setup-wizard-dep-hint {
   flex-basis: 100%;
-  color: var(--text-muted, #888888);
+  color: var(--text-muted);
   font-size: 0.8rem;
-  font-family: var(--font-mono, monospace);
+  font-family: var(--font-mono);
 }
 
 .setup-wizard-field {
@@ -117,16 +124,16 @@
   flex-direction: column;
   gap: 4px;
   margin-bottom: 12px;
-  color: var(--text-secondary, #cccccc);
+  color: var(--text-secondary);
   font-size: 0.85rem;
 }
 
 .setup-wizard-field input,
 .setup-wizard-field select {
-  background: var(--bg-session-bar, #14142a);
-  color: var(--text-primary, #ffffff);
-  border: 1px solid var(--scrollbar-thumb, #333355);
-  border-radius: 6px;
+  background: var(--bg-session-bar);
+  color: var(--text-primary);
+  border: 1px solid var(--scrollbar-thumb);
+  border-radius: var(--radius-sm);
   padding: 8px 10px;
   font-size: 0.9rem;
 }
@@ -134,13 +141,13 @@
 .setup-wizard-field input:focus,
 .setup-wizard-field select:focus {
   outline: none;
-  border-color: var(--accent-blue, #4a9eff);
+  border-color: var(--accent-blue);
 }
 
 .setup-wizard-error {
-  color: var(--error, #e74c3c);
-  background: var(--warning-bg-subtle, #fbbf2422);
-  border-radius: 6px;
+  color: var(--text-error);
+  background: var(--accent-red-light);
+  border-radius: var(--radius-sm);
   padding: 8px 10px;
   font-size: 0.85rem;
   margin-bottom: 16px;
@@ -152,10 +159,10 @@
 }
 
 .setup-wizard-finish-btn {
-  background: var(--accent-blue, #4a9eff);
-  color: #ffffff;
+  background: var(--accent-blue);
+  color: var(--text-primary);
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   padding: 10px 20px;
   font-size: 0.9rem;
   font-weight: 600;
