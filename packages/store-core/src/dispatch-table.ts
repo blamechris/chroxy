@@ -137,6 +137,7 @@ import {
   // --- checkpoint cases (#5618 Batch 6) ---
   handleCheckpointCreated,
   handleCheckpointRestored,
+  handleCheckpointFilesRestored,
   handleConversationsList,
   handleSearchResults,
   handleCheckpointList,
@@ -646,6 +647,12 @@ export interface DispatchMessageMap {
     newSessionId?: string
     // #6766: true when only files were restored (conversation NOT branched).
     filesOnly?: boolean
+    // #6767: selective-restore mode the server ran. 'files' omits newSessionId
+    // (current session kept — no switch); 'conversation'/'both' carry it.
+    mode?: 'files' | 'conversation' | 'both'
+    // #6827: the rewound session's name ('conversation'/'both') or the
+    // CHECKPOINT's name ('files' — used in the files-restored confirmation).
+    name?: string
   }
   search_results: {
     type: 'search_results'
@@ -1187,6 +1194,12 @@ function dispatchConversationsList<S extends DispatchSessionBase>(
  * checkpoint and re-homed this client onto it; auto-switch to it. Both clients
  * switch via the required {@link ClientStoreAdapter.switchToRestoredSession} hook
  * (the app passes its no-notify/no-haptic options, the dashboard plain).
+ *
+ * #6767/#6827: a 'files'-mode restore keeps the CURRENT session — no
+ * `newSessionId`, so the re-home path is a no-op. Confirm the revert visibly
+ * instead with a `system` message on the active session's transcript (the
+ * `budget_resumed` pattern; byte-identical across both clients) so a files-only
+ * rewind is never silent.
  */
 function dispatchCheckpointRestored<S extends DispatchSessionBase>(
   msg: DispatchMessageMap['checkpoint_restored'],
@@ -1195,6 +1208,18 @@ function dispatchCheckpointRestored<S extends DispatchSessionBase>(
   const restored = handleCheckpointRestored(msg as Record<string, unknown>)
   if (restored) {
     adapter.switchToRestoredSession(restored.newSessionId)
+    return
+  }
+  const filesRestored = handleCheckpointFilesRestored(msg as Record<string, unknown>)
+  if (!filesRestored) return
+  const activeId = adapter.getActiveSessionId()
+  if (activeId && adapter.hasSession(activeId)) {
+    adapter.updateSession(
+      activeId,
+      (ss) => ({ messages: [...ss.messages, filesRestored.systemMessage] } as Partial<S>),
+    )
+  } else {
+    adapter.addMessage(filesRestored.systemMessage)
   }
 }
 

@@ -70,6 +70,13 @@ async function acquireCwdLock(cwd) {
  * rewound session's transcript stops at the checkpoint. For providers that
  * cannot truncate a resumed transcript the restore is files-only. The
  * `boundaryMessageId` captured here is what makes that truncation possible.
+ *
+ * #6767: selective restore (files / conversation / both) is orchestrated by the
+ * WS handler, not this manager. `restoreCheckpoint` always performs the git
+ * restore (used for the 'files' and 'both' modes); the 'conversation'-only mode
+ * reads the checkpoint via `getCheckpoint` instead so the working tree is left
+ * untouched. Either way the returned record carries `resumeSessionId` +
+ * `boundaryMessageId` for the handler's fork decision.
  */
 export class CheckpointManager extends EventEmitter {
   /**

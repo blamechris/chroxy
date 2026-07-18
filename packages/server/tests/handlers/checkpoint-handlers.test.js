@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { checkpointHandlers } from '../../src/handlers/checkpoint-handlers.js'
@@ -318,6 +319,271 @@ describe('checkpoint-handlers', () => {
         assert.equal(createArgs.resumeSessionId, 'conv-1', 'falls back to the raw resume id on fork failure')
         const restored = ctx._sent.find(m => m.type === 'checkpoint_restored')
         assert.equal(restored.filesOnly, true)
+      })
+    })
+
+    // #6767 — selective restore: 'files' (git only, no fork, no new session),
+    // 'conversation' (fork only, working tree untouched, fork-capable providers),
+    // 'both' (the pre-#6767 default). The matrix below covers mode × capability
+    // including the two rejection paths; two real-git tests assert the working
+    // tree is untouched (conversation) / reverted (files) end-to-end.
+    describe('selective restore modes (#6767)', () => {
+      function makeModeCtx({ forkCapable = false, boundaryMessageId = 'uuid-b1' } = {}) {
+        const sessions = new Map()
+        const orig = createMockSession()
+        orig.isRunning = false
+        orig.resumeSessionId = 'conv-1'
+        if (forkCapable) {
+          orig.supportsConversationFork = true
+          orig.forkConversation = createSpy(async () => 'forked-conv-id')
+        }
+        sessions.set('s1', { session: orig, name: 'S', cwd: '/tmp' })
+        sessions.set('restored-session-id', { session: createMockSession(), name: 'Rewind: Checkpoint 1', cwd: '/tmp' })
+        const ctx = makeCtx(sessions)
+        ctx.sessions.sessionManager.createSession = createSpy(async () => 'restored-session-id')
+        const cp = { id: 'cp-1', name: 'Checkpoint 1', cwd: '/tmp', resumeSessionId: 'conv-1', boundaryMessageId }
+        ctx.services.checkpointManager.getCheckpoint = createSpy(() => cp)
+        ctx.services.checkpointManager.restoreCheckpoint = createSpy(async () => cp)
+        return { ctx, orig }
+      }
+
+      it("'files' restores the git snapshot but does NOT fork or create a new session", async () => {
+        const { ctx, orig } = makeModeCtx({ forkCapable: true, boundaryMessageId: 'uuid-b1' })
+        const client = makeClient({ activeSessionId: 's1' })
+
+        await checkpointHandlers.restore_checkpoint(makeWs(), client, { checkpointId: 'cp-1', mode: 'files' }, ctx)
+
+        assert.equal(ctx.services.checkpointManager.restoreCheckpoint.callCount, 1, 'files mode restores the git snapshot')
+        assert.equal(orig.forkConversation.callCount, 0, 'files mode never forks the conversation')
+        assert.equal(ctx.sessions.sessionManager.createSession.callCount, 0, 'files mode keeps the current session (no new session)')
+        assert.equal(client.activeSessionId, 's1', 'files mode leaves the client on the current session')
+        const restored = ctx._sent.find(m => m.type === 'checkpoint_restored')
+        assert.ok(restored, 'checkpoint_restored sent')
+        assert.equal(restored.mode, 'files')
+        assert.equal(restored.filesOnly, true)
+        assert.equal(restored.newSessionId, undefined, 'no newSessionId in files mode')
+        // #6827: the CHECKPOINT's name rides along so clients can render the
+        // visible "Files restored to checkpoint <name>" confirmation.
+        assert.equal(restored.name, 'Checkpoint 1', 'files mode carries the checkpoint name')
+      })
+
+      it("'files' works on a non-fork provider (no fork attempted, current session kept)", async () => {
+        const { ctx } = makeModeCtx({ forkCapable: false })
+        const client = makeClient({ activeSessionId: 's1' })
+
+        await checkpointHandlers.restore_checkpoint(makeWs(), client, { checkpointId: 'cp-1', mode: 'files' }, ctx)
+
+        assert.equal(ctx.services.checkpointManager.restoreCheckpoint.callCount, 1)
+        assert.equal(ctx.sessions.sessionManager.createSession.callCount, 0)
+        const restored = ctx._sent.find(m => m.type === 'checkpoint_restored')
+        assert.equal(restored.mode, 'files')
+        assert.equal(restored.filesOnly, true)
+      })
+
+      it("'conversation' forks WITHOUT restoring files and re-homes to the rewound session", async () => {
+        const { ctx, orig } = makeModeCtx({ forkCapable: true, boundaryMessageId: 'uuid-b1' })
+        const client = makeClient({ activeSessionId: 's1' })
+
+        await checkpointHandlers.restore_checkpoint(makeWs(), client, { checkpointId: 'cp-1', mode: 'conversation' }, ctx)
+
+        assert.equal(ctx.services.checkpointManager.restoreCheckpoint.callCount, 0, 'conversation mode never runs the git restore')
+        assert.ok(ctx.services.checkpointManager.getCheckpoint.callCount >= 1, 'conversation mode reads the checkpoint without restoring files')
+        assert.equal(orig.forkConversation.callCount, 1, 'conversation mode forks the transcript')
+        const [forkArgs] = orig.forkConversation.calls[0]
+        assert.equal(forkArgs.upToMessageId, 'uuid-b1')
+        const [createArgs] = ctx.sessions.sessionManager.createSession.calls[0]
+        assert.equal(createArgs.resumeSessionId, 'forked-conv-id', 'rewound session resumes the truncated fork')
+        const restored = ctx._sent.find(m => m.type === 'checkpoint_restored')
+        assert.equal(restored.mode, 'conversation')
+        assert.equal(restored.filesOnly, false)
+        assert.equal(restored.newSessionId, 'restored-session-id')
+      })
+
+      it("'conversation' is REJECTED on a non-fork provider (no restore, no new session)", async () => {
+        const { ctx } = makeModeCtx({ forkCapable: false })
+        const client = makeClient({ activeSessionId: 's1' })
+
+        await checkpointHandlers.restore_checkpoint(makeWs(), client, { checkpointId: 'cp-1', mode: 'conversation' }, ctx)
+
+        const err = ctx._sent.find(m => m.type === 'session_error')
+        assert.ok(err, 'must reject conversation mode on a non-fork provider')
+        assert.match(err.message, /can't restore the conversation only/i)
+        assert.equal(ctx.services.checkpointManager.restoreCheckpoint.callCount, 0, 'must not touch the working tree')
+        assert.equal(ctx.sessions.sessionManager.createSession.callCount, 0, 'must not create a session')
+        assert.equal(ctx._sent.find(m => m.type === 'checkpoint_restored'), undefined)
+      })
+
+      it("'conversation' is REJECTED when the checkpoint has no fork boundary", async () => {
+        const { ctx, orig } = makeModeCtx({ forkCapable: true, boundaryMessageId: null })
+        const client = makeClient({ activeSessionId: 's1' })
+
+        await checkpointHandlers.restore_checkpoint(makeWs(), client, { checkpointId: 'cp-1', mode: 'conversation' }, ctx)
+
+        const err = ctx._sent.find(m => m.type === 'session_error')
+        assert.ok(err, 'must reject when there is no branch point')
+        assert.match(err.message, /no conversation branch point/i)
+        assert.equal(orig.forkConversation.callCount, 0)
+        assert.equal(ctx.sessions.sessionManager.createSession.callCount, 0)
+      })
+
+      it("'conversation' surfaces a fork failure instead of a misleading full-transcript session", async () => {
+        const { ctx, orig } = makeModeCtx({ forkCapable: true, boundaryMessageId: 'uuid-b1' })
+        orig.forkConversation = createSpy(async () => { throw new Error('fork boom') })
+        const client = makeClient({ activeSessionId: 's1' })
+
+        await checkpointHandlers.restore_checkpoint(makeWs(), client, { checkpointId: 'cp-1', mode: 'conversation' }, ctx)
+
+        const err = ctx._sent.find(m => m.type === 'session_error')
+        assert.ok(err, 'a failed conversation-only fork must surface an error')
+        assert.match(err.message, /Failed to branch the conversation/)
+        assert.equal(ctx.sessions.sessionManager.createSession.callCount, 0, 'no misleading session created')
+      })
+
+      it("'both' restores files AND forks the conversation (filesOnly:false)", async () => {
+        const { ctx, orig } = makeModeCtx({ forkCapable: true, boundaryMessageId: 'uuid-b1' })
+        const client = makeClient({ activeSessionId: 's1' })
+
+        await checkpointHandlers.restore_checkpoint(makeWs(), client, { checkpointId: 'cp-1', mode: 'both' }, ctx)
+
+        assert.equal(ctx.services.checkpointManager.restoreCheckpoint.callCount, 1, 'both mode restores files')
+        assert.equal(orig.forkConversation.callCount, 1, 'both mode forks the conversation')
+        const [createArgs] = ctx.sessions.sessionManager.createSession.calls[0]
+        assert.equal(createArgs.resumeSessionId, 'forked-conv-id')
+        const restored = ctx._sent.find(m => m.type === 'checkpoint_restored')
+        assert.equal(restored.mode, 'both')
+        assert.equal(restored.filesOnly, false)
+        assert.equal(restored.newSessionId, 'restored-session-id')
+      })
+
+      it("'both' on a non-fork provider restores files + new session, degrades to filesOnly:true", async () => {
+        const { ctx } = makeModeCtx({ forkCapable: false })
+        const client = makeClient({ activeSessionId: 's1' })
+
+        await checkpointHandlers.restore_checkpoint(makeWs(), client, { checkpointId: 'cp-1', mode: 'both' }, ctx)
+
+        assert.equal(ctx.services.checkpointManager.restoreCheckpoint.callCount, 1)
+        const [createArgs] = ctx.sessions.sessionManager.createSession.calls[0]
+        assert.equal(createArgs.resumeSessionId, 'conv-1', 'resumes the raw id when it cannot fork')
+        const restored = ctx._sent.find(m => m.type === 'checkpoint_restored')
+        assert.equal(restored.mode, 'both')
+        assert.equal(restored.filesOnly, true)
+      })
+
+      it("defaults to 'both' when mode is omitted (pre-#6767 behaviour)", async () => {
+        const { ctx, orig } = makeModeCtx({ forkCapable: true, boundaryMessageId: 'uuid-b1' })
+        const client = makeClient({ activeSessionId: 's1' })
+
+        await checkpointHandlers.restore_checkpoint(makeWs(), client, { checkpointId: 'cp-1' }, ctx)
+
+        assert.equal(ctx.services.checkpointManager.restoreCheckpoint.callCount, 1, 'default restores files')
+        assert.equal(orig.forkConversation.callCount, 1, 'default forks the conversation')
+        const restored = ctx._sent.find(m => m.type === 'checkpoint_restored')
+        assert.equal(restored.mode, 'both')
+        assert.equal(restored.newSessionId, 'restored-session-id')
+      })
+
+      it("an unknown mode falls back to 'both'", async () => {
+        const { ctx } = makeModeCtx({ forkCapable: false })
+        const client = makeClient({ activeSessionId: 's1' })
+
+        await checkpointHandlers.restore_checkpoint(makeWs(), client, { checkpointId: 'cp-1', mode: 'bogus' }, ctx)
+
+        assert.equal(ctx.services.checkpointManager.restoreCheckpoint.callCount, 1)
+        const restored = ctx._sent.find(m => m.type === 'checkpoint_restored')
+        assert.equal(restored.mode, 'both')
+      })
+
+      it("'conversation' leaves the REAL working tree untouched (git status unchanged)", async () => {
+        // Real git repo + real CheckpointManager: checkpoint at state A, change
+        // the file to state B (dirty), restore in 'conversation' mode → the tree
+        // must STILL be at state B. Conversation mode never reverts files.
+        const checkpointsDir = mkdtempSync(join(tmpdir(), 'chroxy-cp-conv-state-'))
+        const repo = mkdtempSync(join(tmpdir(), 'chroxy-cp-conv-repo-'))
+        try {
+          const git = (...args) => execFileSync('git', args, { cwd: repo, stdio: 'pipe' })
+          git('init', '-q')
+          git('config', 'user.email', 'test@example.com')
+          git('config', 'user.name', 'Test')
+          writeFileSync(join(repo, 'file.txt'), 'state-A\n')
+          git('add', '-A')
+          git('commit', '-q', '-m', 'init')
+
+          const manager = new CheckpointManager({ checkpointsDir })
+          await manager.createCheckpoint({ sessionId: 's1', resumeSessionId: 'conv-1', cwd: repo, name: 'A', boundaryMessageId: 'uuid-a' })
+
+          // Dirty the working tree to state B (uncommitted).
+          writeFileSync(join(repo, 'file.txt'), 'state-B\n')
+          const statusBefore = execFileSync('git', ['status', '--porcelain'], { cwd: repo }).toString()
+
+          const sessions = new Map()
+          const orig = createMockSession()
+          orig.isRunning = false
+          orig.resumeSessionId = 'conv-1'
+          orig.supportsConversationFork = true
+          orig.forkConversation = createSpy(async () => 'forked-conv-id')
+          sessions.set('s1', { session: orig, name: 'S', cwd: repo })
+          sessions.set('restored-session-id', { session: createMockSession(), name: 'Rewind: A', cwd: repo })
+          const ctx = makeCtx(sessions)
+          ctx.services.checkpointManager = manager
+          ctx.sessions.sessionManager.createSession = createSpy(async () => 'restored-session-id')
+          const client = makeClient({ activeSessionId: 's1' })
+          const [cpMeta] = manager.listCheckpoints('s1')
+
+          await checkpointHandlers.restore_checkpoint(makeWs(), client, { checkpointId: cpMeta.id, mode: 'conversation' }, ctx)
+
+          assert.equal(readFileSync(join(repo, 'file.txt'), 'utf8'), 'state-B\n', 'conversation mode must not revert the file')
+          const statusAfter = execFileSync('git', ['status', '--porcelain'], { cwd: repo }).toString()
+          assert.equal(statusAfter, statusBefore, 'conversation mode leaves git status unchanged')
+          assert.equal(orig.forkConversation.callCount, 1, 'the conversation WAS forked')
+        } finally {
+          rmSync(checkpointsDir, { recursive: true, force: true })
+          rmSync(repo, { recursive: true, force: true })
+        }
+      })
+
+      it("'files' reverts the REAL working tree and keeps the current session", async () => {
+        // Mirror of the conversation test: checkpoint at state A, change to state
+        // B, restore in 'files' mode → the tree must be back at state A, with NO
+        // new session created (the conversation continues).
+        const checkpointsDir = mkdtempSync(join(tmpdir(), 'chroxy-cp-files-state-'))
+        const repo = mkdtempSync(join(tmpdir(), 'chroxy-cp-files-repo-'))
+        try {
+          const git = (...args) => execFileSync('git', args, { cwd: repo, stdio: 'pipe' })
+          git('init', '-q')
+          git('config', 'user.email', 'test@example.com')
+          git('config', 'user.name', 'Test')
+          writeFileSync(join(repo, 'file.txt'), 'state-A\n')
+          git('add', '-A')
+          git('commit', '-q', '-m', 'init')
+
+          const manager = new CheckpointManager({ checkpointsDir })
+          await manager.createCheckpoint({ sessionId: 's1', resumeSessionId: 'conv-1', cwd: repo, name: 'A', boundaryMessageId: 'uuid-a' })
+
+          writeFileSync(join(repo, 'file.txt'), 'state-B\n')
+
+          const sessions = new Map()
+          const orig = createMockSession()
+          orig.isRunning = false
+          orig.resumeSessionId = 'conv-1'
+          orig.supportsConversationFork = true
+          orig.forkConversation = createSpy(async () => 'forked-conv-id')
+          sessions.set('s1', { session: orig, name: 'S', cwd: repo })
+          const ctx = makeCtx(sessions)
+          ctx.services.checkpointManager = manager
+          ctx.sessions.sessionManager.createSession = createSpy(async () => 'restored-session-id')
+          const client = makeClient({ activeSessionId: 's1' })
+          const [cpMeta] = manager.listCheckpoints('s1')
+
+          await checkpointHandlers.restore_checkpoint(makeWs(), client, { checkpointId: cpMeta.id, mode: 'files' }, ctx)
+
+          assert.equal(readFileSync(join(repo, 'file.txt'), 'utf8'), 'state-A\n', 'files mode reverts the working tree to the checkpoint')
+          assert.equal(orig.forkConversation.callCount, 0, 'files mode does not fork')
+          assert.equal(ctx.sessions.sessionManager.createSession.callCount, 0, 'files mode keeps the current session')
+          assert.equal(client.activeSessionId, 's1')
+        } finally {
+          rmSync(checkpointsDir, { recursive: true, force: true })
+          rmSync(repo, { recursive: true, force: true })
+        }
       })
     })
 

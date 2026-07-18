@@ -31,6 +31,7 @@ import {
   handleCheckpointCreated,
   handleCheckpointList,
   handleCheckpointRestored,
+  handleCheckpointFilesRestored,
   handleError,
   handleSessionError,
   handleSessionStopped,
@@ -1987,6 +1988,68 @@ describe('handleCheckpointRestored', () => {
 
   it('returns null when newSessionId is whitespace only', () => {
     expect(handleCheckpointRestored({ newSessionId: '   ' })).toBeNull()
+  })
+
+  // #6767: selective-restore mode echo. 'conversation'/'both' carry a
+  // newSessionId (session-creating), 'files' never reaches here (no newSessionId).
+  it('carries mode when the server echoes a valid selective-restore mode', () => {
+    expect(
+      handleCheckpointRestored({ newSessionId: 'sess-new', filesOnly: false, mode: 'conversation' }),
+    ).toEqual({ newSessionId: 'sess-new', filesOnly: false, mode: 'conversation' })
+    expect(
+      handleCheckpointRestored({ newSessionId: 'sess-new', filesOnly: false, mode: 'both' }),
+    ).toEqual({ newSessionId: 'sess-new', filesOnly: false, mode: 'both' })
+  })
+
+  it('omits mode when the server sends an unknown/absent mode (pre-#6767 shape)', () => {
+    expect(
+      handleCheckpointRestored({ newSessionId: 'sess-new', mode: 'bogus' }),
+    ).toEqual({ newSessionId: 'sess-new', filesOnly: true })
+    expect(handleCheckpointRestored({ newSessionId: 'sess-new' })).toEqual({
+      newSessionId: 'sess-new',
+      filesOnly: true,
+    })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleCheckpointFilesRestored (#6767 / #6827)
+// ---------------------------------------------------------------------------
+describe('handleCheckpointFilesRestored', () => {
+  it('builds a system confirmation naming the checkpoint for a files-mode payload', () => {
+    const result = handleCheckpointFilesRestored({
+      type: 'checkpoint_restored',
+      checkpointId: 'cp-1',
+      mode: 'files',
+      filesOnly: true,
+      name: 'Before refactor',
+    })
+    expect(result).not.toBeNull()
+    expect(result!.systemMessage).toMatchObject({
+      type: 'system',
+      content: 'Files restored to checkpoint "Before refactor"',
+    })
+    expect(typeof result!.systemMessage.id).toBe('string')
+    expect(typeof result!.systemMessage.timestamp).toBe('number')
+  })
+
+  it('falls back to a generic confirmation when name is absent or blank', () => {
+    expect(
+      handleCheckpointFilesRestored({ mode: 'files', checkpointId: 'cp-1' })!.systemMessage.content,
+    ).toBe('Files restored to checkpoint')
+    expect(
+      handleCheckpointFilesRestored({ mode: 'files', name: '   ' })!.systemMessage.content,
+    ).toBe('Files restored to checkpoint')
+    expect(
+      handleCheckpointFilesRestored({ mode: 'files', name: 42 })!.systemMessage.content,
+    ).toBe('Files restored to checkpoint')
+  })
+
+  it('returns null for non-files modes and legacy payloads (the re-home path owns those)', () => {
+    expect(handleCheckpointFilesRestored({ mode: 'both', newSessionId: 's2' })).toBeNull()
+    expect(handleCheckpointFilesRestored({ mode: 'conversation', newSessionId: 's2' })).toBeNull()
+    expect(handleCheckpointFilesRestored({ newSessionId: 's2' })).toBeNull()
+    expect(handleCheckpointFilesRestored({})).toBeNull()
   })
 })
 

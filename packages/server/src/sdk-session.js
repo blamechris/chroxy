@@ -146,6 +146,14 @@ export class SdkSession extends BaseSession {
       // user message. Subprocess providers don't get this for free —
       // they snapshot the skills text at session start.
       skillToggle: true,
+      // #6767: the SDK can fork/truncate a resumed conversation to a message
+      // boundary (`forkSession({ upToMessageId })`), so a checkpoint restore
+      // can branch the conversation ('conversation' / 'both' modes), not just
+      // the files. Advertised so the checkpoint UI enables the "Conversation"
+      // restore-mode option only where the server can actually honor it.
+      // DockerSdkSession overrides this to false — see the instance-level
+      // `supportsConversationFork` getter (transcript lives in-container).
+      conversationFork: true,
     }
   }
 

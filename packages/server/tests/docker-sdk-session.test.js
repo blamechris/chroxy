@@ -1107,10 +1107,24 @@ describe('DockerSdkSession real import (capabilities only)', () => {
     const { SdkSession } = await import('../src/sdk-session.js')
     const dockerCaps = DockerSdkSession.capabilities
     const sdkCaps = SdkSession.capabilities
+    // #6767: conversationFork is DELIBERATELY overridden false on Docker (the
+    // in-container transcript is unreachable by the host-side fork), so it is
+    // excluded from the "matches SdkSession" spread check and asserted below.
     for (const [key, value] of Object.entries(sdkCaps)) {
+      if (key === 'conversationFork') continue
       assert.equal(dockerCaps[key], value, `capability ${key} should match SdkSession`)
     }
     assert.equal(dockerCaps.containerized, true, 'should also have containerized')
+  })
+
+  // #6767: the checkpoint restore-mode picker gates the "Conversation" option on
+  // this advertised capability. SdkSession can fork; DockerSdkSession can't (the
+  // transcript lives in-container) — so it overrides the inherited value to false.
+  it('DockerSdkSession.capabilities.conversationFork is false; SdkSession is true (#6767)', async () => {
+    const { DockerSdkSession } = await import('../src/docker-sdk-session.js')
+    const { SdkSession } = await import('../src/sdk-session.js')
+    assert.equal(SdkSession.capabilities.conversationFork, true)
+    assert.equal(DockerSdkSession.capabilities.conversationFork, false)
   })
 
   it('exports FORWARDED_ENV_KEYS and DEFAULT_CONTAINER_CLI_PATH', async () => {

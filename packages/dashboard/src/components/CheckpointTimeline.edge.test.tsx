@@ -28,6 +28,10 @@ vi.mock('../store/connection', () => ({
       restoreCheckpoint: mockRestoreCheckpoint,
       deleteCheckpoint: mockDeleteCheckpoint,
       connectionPhase: storeState.connectionPhase ?? 'connected',
+      // #6767: restore-mode picker capability lookup.
+      activeSessionId: storeState.activeSessionId ?? null,
+      sessions: storeState.sessions ?? [],
+      availableProviders: storeState.availableProviders ?? [],
     }
     return selector(store)
   },

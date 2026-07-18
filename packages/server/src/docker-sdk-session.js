@@ -32,7 +32,12 @@ const log = createLogger('docker-sdk')
  */
 export class DockerSdkSession extends SdkSession {
   static get capabilities() {
-    return { ...SdkSession.capabilities, containerized: true }
+    // #6767: the transcript for a containerized session lives inside the
+    // container, so the host-side conversation fork can't reach it — restore
+    // degrades to files-only here (mirrors the instance-level
+    // `supportsConversationFork` getter below). Advertise conversationFork:false
+    // so the checkpoint UI disables the "Conversation" restore-mode option.
+    return { ...SdkSession.capabilities, containerized: true, conversationFork: false }
   }
 
   /**

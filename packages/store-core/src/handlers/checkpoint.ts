@@ -7,7 +7,8 @@
  * ./index.ts for the stateless-handler contract.
  */
 
-import type { Checkpoint } from '../types'
+import type { ChatMessage, Checkpoint } from '../types'
+import { nextMessageId } from '../utils'
 import { resolveSessionId } from './_shared'
 
 // ---------------------------------------------------------------------------
@@ -64,6 +65,9 @@ export function handleCheckpointList(
 // checkpoint_restored
 // ---------------------------------------------------------------------------
 
+/** #6767: which parts a checkpoint restore reverted. */
+export type RestoreMode = 'files' | 'conversation' | 'both'
+
 /** Parsed payload from a `checkpoint_restored` message. */
 export interface CheckpointRestoredPayload {
   newSessionId: string
@@ -75,6 +79,14 @@ export interface CheckpointRestoredPayload {
    * never branched), so callers never over-claim a conversation rewind.
    */
   filesOnly: boolean
+  /**
+   * #6767: the selective-restore mode the server ran. 'conversation'/'both'
+   * create + re-home to a new session (so this payload carries a newSessionId);
+   * 'files' keeps the current session and omits newSessionId, so this handler
+   * returns null for it (no switch) and `mode` is only ever present here for the
+   * session-creating modes. Absent when talking to a pre-#6767 server.
+   */
+  mode?: RestoreMode
 }
 
 /**
@@ -99,5 +111,42 @@ export function handleCheckpointRestored(
   // #6766: default to files-only unless the server explicitly says otherwise, so
   // a missing/legacy flag never lets a client claim a conversation rewind.
   const filesOnly = typeof msg.filesOnly === 'boolean' ? msg.filesOnly : true
-  return { newSessionId: trimmed, filesOnly }
+  // #6767: echo the restore mode when the server supplied a valid one (a 'files'
+  // restore never reaches here — it carries no newSessionId and returns null above).
+  const mode =
+    msg.mode === 'files' || msg.mode === 'conversation' || msg.mode === 'both'
+      ? (msg.mode as RestoreMode)
+      : undefined
+  return { newSessionId: trimmed, filesOnly, ...(mode ? { mode } : {}) }
+}
+
+// ---------------------------------------------------------------------------
+// checkpoint_restored — 'files'-mode confirmation (#6767 / #6827)
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the transcript confirmation for a 'files'-mode `checkpoint_restored`.
+ *
+ * #6827: a files-only restore keeps the current session — the payload carries
+ * no `newSessionId`, so {@link handleCheckpointRestored} returns null and
+ * nothing re-homes. Without this the revert would be invisible client-side.
+ * Returns a `system` ChatMessage for the active session's transcript (the
+ * `budget_resumed` pattern — rendered identically by both clients), naming the
+ * checkpoint when the server supplied `name` (the CHECKPOINT's name here; in
+ * the session-creating modes `name` is the new session's name instead).
+ * Returns null for any non-'files' payload — the re-home path owns those.
+ */
+export function handleCheckpointFilesRestored(
+  msg: Record<string, unknown>,
+): { systemMessage: ChatMessage } | null {
+  if (msg.mode !== 'files') return null
+  const name = typeof msg.name === 'string' && msg.name.trim().length > 0 ? msg.name.trim() : null
+  return {
+    systemMessage: {
+      id: nextMessageId('system'),
+      type: 'system',
+      content: name ? `Files restored to checkpoint "${name}"` : 'Files restored to checkpoint',
+      timestamp: Date.now(),
+    },
+  }
 }

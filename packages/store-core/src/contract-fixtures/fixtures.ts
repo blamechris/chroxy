@@ -1430,6 +1430,24 @@ export const DISPATCH_FIXTURES: ContractFixture[] = [
     expect: { flat: { activeSessionId: 'cp-new-sid' } },
   },
   {
+    // #6767/#6827 — a 'files'-mode restore keeps the CURRENT session (no
+    // newSessionId, nothing to re-home), so both clients confirm the revert with
+    // a system message on the active session's transcript instead — a files-only
+    // rewind must never be silent. `name` here is the CHECKPOINT's name.
+    name: "checkpoint_restored (mode 'files') appends a files-restored confirmation without re-homing (both clients)",
+    type: 'checkpoint_restored',
+    init: { activeSessionId: 's1', sessions: { s1: {} } },
+    message: { type: 'checkpoint_restored', checkpointId: 'cp-1', mode: 'files', filesOnly: true, name: 'Before refactor' },
+    // No flat.activeSessionId assert here: the model adapter records WRITES, and
+    // files mode's whole point is that nothing re-homes (no write happens). The
+    // per-client no-switch asserts live in each client's message-handler tests.
+    expect: {
+      sessions: {
+        s1: { messages: [{ type: 'system', content: 'Files restored to checkpoint "Before refactor"' }] },
+      },
+    },
+  },
+  {
     // #5618 — conversations_list migrated SWITCH→DISPATCH. Both clients write the flat
     // conversationHistory from the parsed array (the app's error-clear + secondary-store
     // mirror ride the optional applyConversationsListExtras hook, not asserted here).

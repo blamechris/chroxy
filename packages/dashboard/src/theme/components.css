@@ -2494,6 +2494,40 @@ button.sidebar-token-view-session-row:hover {
 
 .cp-create-btn:hover { background: #2563eb; }
 
+/* #6767: selective-restore mode picker */
+.cp-mode-picker {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.cp-mode-label {
+  font-size: var(--text-sm);
+  color: var(--text-dim);
+  margin-right: 2px;
+}
+
+.cp-mode-btn {
+  padding: 3px 9px;
+}
+
+.cp-mode-active {
+  background: var(--accent-blue);
+  color: #fff;
+  border-color: var(--accent-blue);
+}
+
+.cp-mode-active:hover { background: #2563eb; }
+
+.cp-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.cp-btn:disabled:hover { background: var(--bg-primary); }
+
 .cp-empty {
   text-align: center;
   color: var(--text-dim);

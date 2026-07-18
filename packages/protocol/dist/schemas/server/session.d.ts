@@ -429,9 +429,14 @@ export declare const ServerCheckpointListSchema: z.ZodObject<{
 export declare const ServerCheckpointRestoredSchema: z.ZodObject<{
     type: z.ZodLiteral<"checkpoint_restored">;
     checkpointId: z.ZodString;
-    newSessionId: z.ZodString;
-    name: z.ZodString;
+    newSessionId: z.ZodOptional<z.ZodString>;
+    name: z.ZodOptional<z.ZodString>;
     filesOnly: z.ZodOptional<z.ZodBoolean>;
+    mode: z.ZodOptional<z.ZodEnum<{
+        files: "files";
+        conversation: "conversation";
+        both: "both";
+    }>>;
 }, z.core.$strip>;
 export declare const ServerSessionWarningSchema: z.ZodObject<{
     type: z.ZodLiteral<"session_warning">;

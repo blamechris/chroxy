@@ -92,11 +92,34 @@ async function handleRestoreCheckpoint(ws, client, msg, ctx) {
     sendSessionError(ws, ctx, 'Missing checkpointId')
     return
   }
+  // #6767: selective restore mode. 'files' reverts only the working tree and
+  // keeps the CURRENT session/conversation (no fork, no new session); 'conversation'
+  // branches the conversation at the checkpoint and leaves the working tree
+  // untouched (fork-capable providers only); 'both' (the default and the pre-#6767
+  // behaviour) does both. Any unknown value falls back to 'both'.
+  const mode = msg.mode === 'files' || msg.mode === 'conversation' || msg.mode === 'both' ? msg.mode : 'both'
   const currentEntry = ctx.sessions.sessionManager.getSession(sid)
   if (currentEntry?.session?.isRunning) {
     sendSessionError(ws, ctx, 'Cannot restore checkpoint while session is busy. Wait for the current task to finish or interrupt first.')
     return
   }
+  // #6767: whether the ORIGINAL session's provider can branch the conversation.
+  const origSession = currentEntry?.session
+  const forkCapable = !!(
+    origSession &&
+    origSession.supportsConversationFork === true &&
+    typeof origSession.forkConversation === 'function'
+  )
+  // #6767: 'conversation' mode is meaningless on a provider that can't fork a
+  // resumed transcript — reject clearly rather than silently doing nothing (or
+  // a misleading full-transcript resume). 'files'/'both' still work everywhere.
+  if (mode === 'conversation' && !forkCapable) {
+    sendSessionError(ws, ctx, "This session's provider can't restore the conversation only — it can't branch a resumed transcript. Use \"Files\" or \"Both\" instead.")
+    return
+  }
+  // #6767: only 'files'/'both' hard-reset the working tree. 'conversation' leaves
+  // it untouched, so it neither needs the shared-cwd guard below nor the git restore.
+  const restoreFiles = mode !== 'conversation'
   // #5731 T8 (confirms deferred #5700): restoring hard-resets the working tree
   // at the checkpoint's cwd. If ANOTHER non-destroying session shares that cwd
   // (the default for non-worktree sessions) and is mid-turn, the reset yanks
@@ -110,48 +133,63 @@ async function handleRestoreCheckpoint(ws, client, msg, ctx) {
   // and the whole scan is wrapped so an unexpected accessor failure (throw or a
   // non-array return) fails OPEN — the guard is defense-in-depth, so on its own
   // error we fall through to the normal restore (the pre-#5731 behaviour) rather
-  // than crashing the WS message handler.
-  try {
-    const checkpointMgr = ctx.services.checkpointManager
-    const sessionMgr = ctx.sessions.sessionManager
-    if (typeof checkpointMgr.getCheckpoint === 'function' && typeof sessionMgr.listSessions === 'function') {
-      const cp = checkpointMgr.getCheckpoint(sid, msg.checkpointId)
-      const liveSessions = sessionMgr.listSessions()
-      if (cp?.cwd && Array.isArray(liveSessions)) {
-        const targetCwd = normalizeCwd(cp.cwd)
-        const busyShare = liveSessions.find(
-          (s) => s && s.sessionId !== sid && s.isBusy && normalizeCwd(s.cwd) === targetCwd,
-        )
-        if (busyShare) {
-          sendSessionError(ws, ctx, `Cannot restore checkpoint: another session ("${busyShare.name}") is busy in the same working directory and would lose its in-progress changes. Wait for it to finish or interrupt it first.`)
-          return
+  // than crashing the WS message handler. Skipped entirely for 'conversation'
+  // mode (#6767), which never touches the working tree.
+  if (restoreFiles) {
+    try {
+      const checkpointMgr = ctx.services.checkpointManager
+      const sessionMgr = ctx.sessions.sessionManager
+      if (typeof checkpointMgr.getCheckpoint === 'function' && typeof sessionMgr.listSessions === 'function') {
+        const cp = checkpointMgr.getCheckpoint(sid, msg.checkpointId)
+        const liveSessions = sessionMgr.listSessions()
+        if (cp?.cwd && Array.isArray(liveSessions)) {
+          const targetCwd = normalizeCwd(cp.cwd)
+          const busyShare = liveSessions.find(
+            (s) => s && s.sessionId !== sid && s.isBusy && normalizeCwd(s.cwd) === targetCwd,
+          )
+          if (busyShare) {
+            sendSessionError(ws, ctx, `Cannot restore checkpoint: another session ("${busyShare.name}") is busy in the same working directory and would lose its in-progress changes. Wait for it to finish or interrupt it first.`)
+            return
+          }
         }
       }
+    } catch (err) {
+      log.warn(`Shared-cwd restore guard skipped (accessor error, failing open): ${err?.message || err}`)
     }
-  } catch (err) {
-    log.warn(`Shared-cwd restore guard skipped (accessor error, failing open): ${err?.message || err}`)
   }
   try {
-    const checkpoint = await ctx.services.checkpointManager.restoreCheckpoint(sid, msg.checkpointId)
+    // #6767: 'files'/'both' restore the git snapshot; 'conversation' reads the
+    // checkpoint WITHOUT touching the working tree.
+    let checkpoint
+    if (restoreFiles) {
+      checkpoint = await ctx.services.checkpointManager.restoreCheckpoint(sid, msg.checkpointId)
+    } else {
+      checkpoint = ctx.services.checkpointManager.getCheckpoint(sid, msg.checkpointId)
+      if (!checkpoint) throw new Error(`Checkpoint not found: ${msg.checkpointId}`)
+    }
 
-    // #6766: decide whether this rewind can truly branch the conversation or is
-    // files-only. A real branch needs (a) a fork-capable provider on the ORIGINAL
-    // session and (b) a captured fork boundary. When both hold, fork the
+    // #6766/#6767: decide whether this rewind branches the conversation. A real
+    // branch needs (a) a fork-capable provider on the ORIGINAL session, (b) a
+    // captured fork boundary, and (c) a mode that includes the conversation
+    // ('conversation'/'both'; 'files' never forks). When they hold, fork the
     // conversation truncated to the boundary so the rewound session resumes AT
     // the checkpoint's point (not the full latest transcript); otherwise resume
     // the checkpoint's conversation id unchanged and report the restore as
     // files-only so the UI never claims a conversation rewind it didn't do.
-    const origSession = currentEntry?.session
     const boundaryMessageId = checkpoint.boundaryMessageId
+    const hasBoundary = typeof boundaryMessageId === 'string' && boundaryMessageId.length > 0
+    // #6767: a 'conversation'-only rewind has no file restore to fall back on, so
+    // a checkpoint with no branch point (created before fork support) can't be
+    // honored — reject instead of resuming the full latest transcript with no
+    // change. 'both' still degrades to files-only in that case (below).
+    if (mode === 'conversation' && !hasBoundary) {
+      sendSessionError(ws, ctx, 'This checkpoint has no conversation branch point (it predates conversation-fork support). Use "Files" or "Both" instead.')
+      return
+    }
+    const branchConversation = mode !== 'files'
     let resumeSessionId = checkpoint.resumeSessionId
     let filesOnly = true
-    if (
-      origSession &&
-      origSession.supportsConversationFork === true &&
-      typeof origSession.forkConversation === 'function' &&
-      typeof boundaryMessageId === 'string' &&
-      boundaryMessageId.length > 0
-    ) {
+    if (branchConversation && forkCapable && hasBoundary) {
       try {
         const forkedId = await origSession.forkConversation({
           sessionId: checkpoint.resumeSessionId,
@@ -166,6 +204,30 @@ async function handleRestoreCheckpoint(ws, client, msg, ctx) {
       } catch (err) {
         log.warn(`Checkpoint conversation fork failed, restoring files only: ${err.message}`)
       }
+    }
+    // #6767: a 'conversation'-only rewind that failed to branch would create a
+    // misleading full-transcript session with no file change — surface the
+    // failure instead. (Verified fork-capable + boundary above, so this only
+    // fires when forkConversation itself throws or returns no id.)
+    if (mode === 'conversation' && filesOnly) {
+      sendSessionError(ws, ctx, 'Failed to branch the conversation for this checkpoint. The working tree was left unchanged.')
+      return
+    }
+
+    // #6767: 'files' mode reverts only the working tree — the current session and
+    // conversation continue, so there is no new session and nothing to re-home.
+    if (mode === 'files') {
+      ctx.transport.send(ws, {
+        type: 'checkpoint_restored',
+        checkpointId: checkpoint.id,
+        // No newSessionId: the client stays on the current session. `name` here
+        // is the CHECKPOINT's name (there is no new session to name) so clients
+        // can confirm "Files restored to checkpoint <name>" visibly (#6827).
+        name: checkpoint.name,
+        filesOnly: true,
+        mode,
+      })
+      return
     }
 
     const newSessionId = await ctx.sessions.sessionManager.createSession({
@@ -186,6 +248,9 @@ async function handleRestoreCheckpoint(ws, client, msg, ctx) {
       // branched); false when the conversation was forked/truncated to the
       // checkpoint. Lets clients describe what actually happened truthfully.
       filesOnly,
+      // #6767: echo the selective-restore mode ('conversation' | 'both') so the
+      // client can word the outcome precisely.
+      mode,
     })
     // The initiator's active session moved to the rewound session above; announce
     // it to presence/Control-Room observers (the loop below does the same for the

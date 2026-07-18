@@ -11,13 +11,43 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import { useConnectionStore } from '../store/connection';
-import type { Checkpoint } from '../store/types';
+import type { Checkpoint, RestoreCheckpointMode } from '../store/types';
 import { COLORS } from '../constants/colors';
 import { Icon } from './Icon';
 
 interface CheckpointViewProps {
   visible: boolean;
   onClose: () => void;
+}
+
+// #6767: selective restore-mode picker (default first).
+const RESTORE_MODES: RestoreCheckpointMode[] = ['both', 'files', 'conversation'];
+const RESTORE_MODE_LABEL: Record<RestoreCheckpointMode, string> = {
+  both: 'Both',
+  files: 'Files',
+  conversation: 'Conversation',
+};
+
+// Honest per-mode confirm copy — only 'files' keeps the current session.
+function restoreConfirmCopy(mode: RestoreCheckpointMode, name?: string): { title: string; message: string } {
+  const cp = name || 'checkpoint';
+  switch (mode) {
+    case 'files':
+      return {
+        title: 'Restore Files',
+        message: `Revert your working files to "${cp}"? Your conversation and session stay as they are.`,
+      };
+    case 'conversation':
+      return {
+        title: 'Restore Conversation',
+        message: `Branch the conversation from "${cp}" into a new session? Your working files stay as they are.`,
+      };
+    default:
+      return {
+        title: 'Restore Checkpoint',
+        message: `Revert your working files to "${cp}" and branch the conversation into a new session?`,
+      };
+  }
 }
 
 /** Format a timestamp into a readable date/time string */
@@ -117,7 +147,13 @@ export function CheckpointView({ visible, onClose }: CheckpointViewProps) {
   const listCheckpoints = useConnectionStore((s) => s.listCheckpoints);
   const deleteCheckpoint = useConnectionStore((s) => s.deleteCheckpoint);
   const restoreCheckpoint = useConnectionStore((s) => s.restoreCheckpoint);
+  // #6767: gate the "Conversation" restore-mode option on the active session's
+  // provider being able to fork/branch a resumed transcript.
+  const activeSessionId = useConnectionStore((s) => s.activeSessionId);
+  const sessions = useConnectionStore((s) => s.sessions);
+  const availableProviders = useConnectionStore((s) => s.availableProviders);
 
+  const [restoreMode, setRestoreMode] = useState<RestoreCheckpointMode>('both');
   const [showCreateInput, setShowCreateInput] = useState(false);
   const [newCheckpointName, setNewCheckpointName] = useState('');
   const [isCreating, setIsCreating] = useState(false);
@@ -163,6 +199,18 @@ export function CheckpointView({ visible, onClose }: CheckpointViewProps) {
     }
   }, [visible, listCheckpoints]);
 
+  const canForkConversation = React.useMemo(() => {
+    const active = activeSessionId ? sessions.find((s) => s.sessionId === activeSessionId) : undefined;
+    const provider = active?.provider ?? null;
+    return availableProviders.find((p) => p.name === provider)?.capabilities?.conversationFork === true;
+  }, [activeSessionId, sessions, availableProviders]);
+
+  // #6767: if the picker is on 'conversation' but the active session can't fork
+  // (session switch, provider changed), fall back to the always-available 'both'.
+  useEffect(() => {
+    if (!canForkConversation && restoreMode === 'conversation') setRestoreMode('both');
+  }, [canForkConversation, restoreMode]);
+
   // Sort checkpoints in reverse chronological order
   const sortedCheckpoints = React.useMemo(
     () => [...checkpoints].sort((a, b) => b.createdAt - a.createdAt),
@@ -203,22 +251,19 @@ export function CheckpointView({ visible, onClose }: CheckpointViewProps) {
   const handleRestore = useCallback(
     (id: string) => {
       const cp = checkpoints.find((c) => c.id === id);
-      Alert.alert(
-        'Restore Checkpoint',
-        `Restore files to "${cp?.name || 'checkpoint'}"? Your working files will be reverted to this checkpoint and a new session will open.`,
-        [
-          { text: 'Cancel', style: 'cancel' },
-          {
-            text: 'Restore',
-            onPress: () => {
-              restoreCheckpoint(id);
-              onClose();
-            },
+      const { title, message } = restoreConfirmCopy(restoreMode, cp?.name);
+      Alert.alert(title, message, [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Restore',
+          onPress: () => {
+            restoreCheckpoint(id, restoreMode);
+            onClose();
           },
-        ],
-      );
+        },
+      ]);
     },
-    [checkpoints, restoreCheckpoint, onClose],
+    [checkpoints, restoreCheckpoint, restoreMode, onClose],
   );
 
   const renderItem = useCallback(
@@ -249,6 +294,43 @@ export function CheckpointView({ visible, onClose }: CheckpointViewProps) {
             >
               <Icon name="close" size={20} color={COLORS.textSecondary} />
             </TouchableOpacity>
+          </View>
+
+          {/* #6767: restore-mode picker — applies to the next Restore tap.
+              "Conversation" is disabled when the active session's provider can't
+              branch a resumed transcript. */}
+          <View style={styles.modePicker} testID="checkpoint-restore-mode">
+            <Text style={styles.modeLabel}>Restore:</Text>
+            {RESTORE_MODES.map((m) => {
+              const disabled = m === 'conversation' && !canForkConversation;
+              const active = restoreMode === m;
+              return (
+                <TouchableOpacity
+                  key={m}
+                  style={[
+                    styles.modeButton,
+                    active && styles.modeButtonActive,
+                    disabled && styles.modeButtonDisabled,
+                  ]}
+                  onPress={() => setRestoreMode(m)}
+                  disabled={disabled}
+                  accessibilityRole="button"
+                  accessibilityState={{ selected: active, disabled }}
+                  accessibilityLabel={`Restore mode ${RESTORE_MODE_LABEL[m]}`}
+                  testID={`checkpoint-mode-${m}`}
+                >
+                  <Text
+                    style={[
+                      styles.modeButtonText,
+                      active && styles.modeButtonTextActive,
+                      disabled && styles.modeButtonTextDisabled,
+                    ]}
+                  >
+                    {RESTORE_MODE_LABEL[m]}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
           </View>
 
           {/* Create checkpoint area */}
@@ -360,6 +442,54 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: '600',
     color: COLORS.textPrimary,
+  },
+  // #6767: selective-restore mode picker
+  modePicker: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: 6,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.borderPrimary,
+  },
+  modeLabel: {
+    fontSize: 13,
+    color: COLORS.textDim,
+    marginRight: 2,
+  },
+  modeButton: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: COLORS.borderPrimary,
+    backgroundColor: COLORS.backgroundCard,
+    // 44pt minimum touch target on both axes — matches the component's other
+    // controls (closeButton / deleteButton / createConfirmButton).
+    minWidth: 44,
+    minHeight: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  modeButtonActive: {
+    backgroundColor: COLORS.accentBlueLight,
+    borderColor: COLORS.accentBlueBorder,
+  },
+  modeButtonDisabled: {
+    opacity: 0.4,
+  },
+  modeButtonText: {
+    fontSize: 13,
+    color: COLORS.textSecondary,
+    fontWeight: '500',
+  },
+  modeButtonTextActive: {
+    color: COLORS.accentBlue,
+  },
+  modeButtonTextDisabled: {
+    color: COLORS.textDim,
   },
   closeButton: {
     padding: 8,

@@ -205,7 +205,16 @@ export interface ProviderCapabilities {
   // Gates the multi-select checkbox affordance so the client doesn't offer a
   // form the server refuses.
   multiSelectReinject?: boolean;
+  // #6767: true when the provider can fork/branch a resumed conversation at a
+  // message boundary (SDK provider). Gates the checkpoint restore-mode picker's
+  // "Conversation" option — providers that can't fork omit it / report false.
+  conversationFork?: boolean;
 }
+
+// #6767: selective checkpoint-restore mode. 'files' reverts only the working
+// tree (current session/conversation continue), 'conversation' branches the
+// conversation at the checkpoint (working tree kept), 'both' does both (default).
+export type RestoreCheckpointMode = 'files' | 'conversation' | 'both';
 
 // #3404 audit (F1+F5): per-provider auth state for grey-out + billing detail.
 export interface ProviderAuth {
@@ -591,7 +600,10 @@ export interface DiscoveryActions {
 export interface CheckpointAndPlanActions {
   createCheckpoint: (name?: string) => void;
   listCheckpoints: () => void;
-  restoreCheckpoint: (checkpointId: string) => void;
+  // #6767: selective restore — 'files' reverts only the working tree (current
+  // session continues), 'conversation' branches the conversation (files kept),
+  // 'both' (default) does both. Omitted → server default 'both'.
+  restoreCheckpoint: (checkpointId: string, mode?: RestoreCheckpointMode) => void;
   deleteCheckpoint: (checkpointId: string) => void;
   clearPlanState: () => void;
   sendPlanResponse: (sessionId: string, approve: boolean) => void;

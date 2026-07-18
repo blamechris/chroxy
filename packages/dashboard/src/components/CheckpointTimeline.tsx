@@ -9,7 +9,26 @@
  */
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import { useConnectionStore } from '../store/connection'
-import type { Checkpoint } from '../store/types'
+import type { Checkpoint, RestoreCheckpointMode } from '../store/types'
+
+// #6767: selective restore-mode picker. Order = display order (default first).
+const RESTORE_MODES: RestoreCheckpointMode[] = ['both', 'files', 'conversation']
+const RESTORE_MODE_LABEL: Record<RestoreCheckpointMode, string> = {
+  both: 'Both',
+  files: 'Files',
+  conversation: 'Conversation',
+}
+const RESTORE_MODE_TITLE: Record<RestoreCheckpointMode, string> = {
+  both: 'Revert the working files and branch the conversation into a new session',
+  files: 'Revert only the working files — this conversation and session continue',
+  conversation: 'Branch the conversation into a new session — the working files are left as they are',
+}
+// Honest per-mode Restore-button tooltip (only 'files' keeps the current session).
+const RESTORE_BUTTON_TITLE: Record<RestoreCheckpointMode, string> = {
+  both: 'Restore files and branch the conversation (opens a new session)',
+  files: 'Restore files only (keeps this conversation and session)',
+  conversation: 'Branch the conversation to this checkpoint (opens a new session)',
+}
 
 function formatTimestamp(ms: number): string {
   const d = new Date(ms)
@@ -47,10 +66,12 @@ interface CheckpointNodeProps {
   onDelete: (id: string) => void
   confirmingDelete: string | null
   setConfirmingDelete: (id: string | null) => void
+  // #6767: tooltip reflecting the currently-selected restore mode.
+  restoreButtonTitle: string
 }
 
 function CheckpointNode({
-  checkpoint, isLatest, onRestore, onDelete, confirmingDelete, setConfirmingDelete,
+  checkpoint, isLatest, onRestore, onDelete, confirmingDelete, setConfirmingDelete, restoreButtonTitle,
 }: CheckpointNodeProps) {
   const isConfirming = confirmingDelete === checkpoint.id
   // #3484: trim guard on the name fallback. A whitespace-only
@@ -102,7 +123,7 @@ function CheckpointNode({
             type="button"
             className="cp-btn cp-restore"
             onClick={() => onRestore(checkpoint.id)}
-            title="Restore files to this checkpoint (opens a new session)"
+            title={restoreButtonTitle}
           >
             Restore
           </button>
@@ -146,10 +167,30 @@ export function CheckpointTimeline() {
   const restoreCheckpoint = useConnectionStore(s => s.restoreCheckpoint)
   const deleteCheckpoint = useConnectionStore(s => s.deleteCheckpoint)
   const connectionPhase = useConnectionStore(s => s.connectionPhase)
+  // #6767: gate the "Conversation" restore-mode option on the active session's
+  // provider being able to fork/branch a resumed transcript. Mirrors the
+  // sessionRules / auto-mode-confirm capability lookups elsewhere in the store.
+  const activeSessionId = useConnectionStore(s => s.activeSessionId)
+  const sessions = useConnectionStore(s => s.sessions)
+  const availableProviders = useConnectionStore(s => s.availableProviders)
 
   const [newName, setNewName] = useState('')
   const [creating, setCreating] = useState(false)
   const [confirmingDelete, setConfirmingDelete] = useState<string | null>(null)
+  const [restoreMode, setRestoreMode] = useState<RestoreCheckpointMode>('both')
+
+  const canForkConversation = useMemo(() => {
+    const active = activeSessionId ? sessions.find(s => s.sessionId === activeSessionId) : undefined
+    const provider = active?.provider ?? null
+    return availableProviders.find(p => p.name === provider)?.capabilities?.conversationFork === true
+  }, [activeSessionId, sessions, availableProviders])
+
+  // #6767: if the picker lands on 'conversation' but the active session can't
+  // fork (session switch, or a fork-capable provider that just went away), fall
+  // back to the always-available 'both'.
+  useEffect(() => {
+    if (!canForkConversation && restoreMode === 'conversation') setRestoreMode('both')
+  }, [canForkConversation, restoreMode])
 
   // Load checkpoints on mount
   useEffect(() => {
@@ -172,8 +213,8 @@ export function CheckpointTimeline() {
   }, [newName, createCheckpoint])
 
   const handleRestore = useCallback((id: string) => {
-    restoreCheckpoint(id)
-  }, [restoreCheckpoint])
+    restoreCheckpoint(id, restoreMode)
+  }, [restoreCheckpoint, restoreMode])
 
   const handleDelete = useCallback((id: string) => {
     deleteCheckpoint(id)
@@ -181,6 +222,32 @@ export function CheckpointTimeline() {
 
   return (
     <div className="checkpoint-timeline" data-testid="checkpoint-timeline">
+      {/* #6767: restore-mode picker — applied to whichever checkpoint's Restore
+          button is clicked. 'Conversation' is disabled when the active session's
+          provider can't branch a resumed transcript. */}
+      <div className="cp-mode-picker" data-testid="checkpoint-restore-mode" role="group" aria-label="Restore mode">
+        <span className="cp-mode-label">Restore:</span>
+        {RESTORE_MODES.map((m) => {
+          const disabled = m === 'conversation' && !canForkConversation
+          return (
+            <button
+              key={m}
+              type="button"
+              className={`cp-btn cp-mode-btn${restoreMode === m ? ' cp-mode-active' : ''}`}
+              data-testid={`checkpoint-mode-${m}`}
+              aria-pressed={restoreMode === m}
+              disabled={disabled}
+              title={disabled
+                ? "This session's provider can't branch the conversation — use Files or Both"
+                : RESTORE_MODE_TITLE[m]}
+              onClick={() => setRestoreMode(m)}
+            >
+              {RESTORE_MODE_LABEL[m]}
+            </button>
+          )
+        })}
+      </div>
+
       {/* Create checkpoint */}
       <div className="cp-create-section">
         {creating ? (
@@ -228,6 +295,7 @@ export function CheckpointTimeline() {
               onDelete={handleDelete}
               confirmingDelete={confirmingDelete}
               setConfirmingDelete={setConfirmingDelete}
+              restoreButtonTitle={RESTORE_BUTTON_TITLE[restoreMode]}
             />
           ))}
         </div>
