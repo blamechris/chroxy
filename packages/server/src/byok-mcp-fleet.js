@@ -118,6 +118,11 @@ export class MCPFleet {
       (Array.isArray(opts.disabledServers) ? opts.disabledServers : [])
         .filter((name) => configuredNames.has(name)),
     )
+    // #6824: per-server in-flight toggle latch — names whose park/unpark is
+    // currently awaiting (destroy grace / restart handshake). A second toggle
+    // for the same server arriving mid-flight is churn and is ignored (see
+    // setEnabled) rather than interleaving destroy/start on one client.
+    this._toggling = new Set()
     this._clients = configs
       .filter((cfg) => !this._disabled.has(cfg.name))
       .map((cfg) => this._makeClient(cfg))
@@ -207,6 +212,19 @@ export class MCPFleet {
     const cfg = this._configs.find((c) => c.name === name)
     if (!cfg) return { found: false, changed: false, status: null }
 
+    // #6824 review follow-up: churn guard. If a park/unpark for THIS server is
+    // already awaiting, ignore the new toggle (changed: false) — interleaving a
+    // start into an in-flight destroy (or vice versa) on one client is the only
+    // way this API can corrupt fleet state. The in-flight op's completion
+    // re-emit is the authoritative state the client converges to.
+    if (this._toggling.has(name)) {
+      const client = this._clients.find((c) => c.name === name)
+      const status = this._disabled.has(name)
+        ? 'disabled'
+        : (client ? mcpStateToStatus(client.state) : 'connecting')
+      return { found: true, changed: false, status }
+    }
+
     const currentlyDisabled = this._disabled.has(name)
     // Target state already holds → no-op.
     if (enabled && !currentlyDisabled) {
@@ -217,34 +235,39 @@ export class MCPFleet {
       return { found: true, changed: false, status: 'disabled' }
     }
 
-    if (!enabled) {
-      // Disable: destroy the live client, mark parked.
-      this._disabled.add(name)
-      const idx = this._clients.findIndex((c) => c.name === name)
-      if (idx !== -1) {
-        const [client] = this._clients.splice(idx, 1)
-        try {
-          await client.destroy()
-        } catch (err) {
-          ;(this._opts.log || console).warn?.(`MCP fleet: destroy of ${name} on disable threw: ${err?.message || err}`)
-        }
-      }
-      return { found: true, changed: true, status: 'disabled' }
-    }
-
-    // Enable: unpark + rebuild + start through the same trust gate.
-    this._disabled.delete(name)
-    const client = this._makeClient(cfg)
-    this._clients.push(client)
+    this._toggling.add(name)
     try {
-      await client.start()
-    } catch (err) {
-      // A failed start leaves the client in DEAD (contributes zero tools) —
-      // mirror fleet.start()'s non-fatal handling. Keep it in `_clients` so its
-      // 'failed' status still surfaces on the next snapshot.
-      ;(this._opts.log || console).warn?.(`MCP fleet: start of ${name} on enable threw: ${err?.message || err}`)
+      if (!enabled) {
+        // Disable: destroy the live client, mark parked.
+        this._disabled.add(name)
+        const idx = this._clients.findIndex((c) => c.name === name)
+        if (idx !== -1) {
+          const [client] = this._clients.splice(idx, 1)
+          try {
+            await client.destroy()
+          } catch (err) {
+            ;(this._opts.log || console).warn?.(`MCP fleet: destroy of ${name} on disable threw: ${err?.message || err}`)
+          }
+        }
+        return { found: true, changed: true, status: 'disabled' }
+      }
+
+      // Enable: unpark + rebuild + start through the same trust gate.
+      this._disabled.delete(name)
+      const client = this._makeClient(cfg)
+      this._clients.push(client)
+      try {
+        await client.start()
+      } catch (err) {
+        // A failed start leaves the client in DEAD (contributes zero tools) —
+        // mirror fleet.start()'s non-fatal handling. Keep it in `_clients` so its
+        // 'failed' status still surfaces on the next snapshot.
+        ;(this._opts.log || console).warn?.(`MCP fleet: start of ${name} on enable threw: ${err?.message || err}`)
+      }
+      return { found: true, changed: true, status: mcpStateToStatus(client.state) }
+    } finally {
+      this._toggling.delete(name)
     }
-    return { found: true, changed: true, status: mcpStateToStatus(client.state) }
   }
 
   /**

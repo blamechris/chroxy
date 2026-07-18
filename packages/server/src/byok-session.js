@@ -578,13 +578,17 @@ export class ClaudeByokSession extends BaseSession {
     let result
     if (this._mcpFleet) {
       result = await this._mcpFleet.setEnabled(name, enabled)
+      // Sync the persisted set from the fleet's AUTHORITATIVE one rather than
+      // applying the requested state — the fleet's in-flight churn latch can
+      // legitimately ignore this toggle (changed:false while another park/
+      // unpark for the same server is awaiting), and blindly recording the
+      // request here would diverge what respawn honours from what actually ran.
+      this._disabledMcpServers = new Set(this._mcpFleet.disabledServers)
     } else {
       // Fleet not yet started (no servers spawned): just record intent so
       // start() honours it. Treat as changed only if the set actually moves.
       const was = this._disabledMcpServers.has(name)
       result = { found: true, changed: was === enabled, status: enabled ? 'configured' : 'disabled' }
-    }
-    if (result.found) {
       if (enabled) this._disabledMcpServers.delete(name)
       else this._disabledMcpServers.add(name)
     }

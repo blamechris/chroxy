@@ -440,6 +440,23 @@ describe('EventNormalizer', () => {
       assert.equal(msg.servers.length, 2)
       assert.equal(msg.servers[0].name, 'filesystem')
     })
+
+    // #6847: the live re-emit must carry the canonical session id — without it,
+    // a client subscribed to sessions A+B with B active patches A's toggle
+    // re-emit onto B (handleMcpServers falls back to activeSessionId).
+    it('stamps ctx.sessionId on the multi-session path (#6847)', () => {
+      const data = { servers: [{ name: 'filesystem', status: 'disabled', enabled: false, canToggle: true }] }
+      const result = normalizer.normalize('mcp_servers', data, makeCtx({ sessionId: 'sess-A' }))
+      assert.equal(result.messages[0].msg.sessionId, 'sess-A')
+    })
+
+    it('omits sessionId on the legacy-cli path (ctx.sessionId null) — matches the stopped convention', () => {
+      const data = { servers: [{ name: 'filesystem', status: 'connected' }] }
+      const result = normalizer.normalize('mcp_servers', data, makeCtx({ sessionId: null, mode: 'legacy-cli' }))
+      const msg = result.messages[0].msg
+      assert.equal(Object.prototype.hasOwnProperty.call(msg, 'sessionId'), false,
+        'legacy path must omit the field entirely, not emit sessionId: null')
+    })
   })
 
   describe('tool_result event', () => {

@@ -1350,6 +1350,32 @@ describe('shared dispatch table', () => {
       dispatch(env, { type: 'mcp_servers', servers: [] })
       expect(env.sessions.active.mcpServers).toEqual([])
     })
+
+    // #6847: two-subscription routing. A client viewing sessions A+B with B
+    // active must patch a session-A toggle re-emit onto A — not onto the
+    // active session B. Pre-#6847 the server's live re-emit omitted sessionId,
+    // so the active-session fallback misrouted it; this pins the post-fix
+    // behaviour (explicit sessionId wins over the active fallback).
+    it('routes to the NAMED session, not the active one, when both are subscribed (#6847)', () => {
+      const env = makeAdapter({
+        activeSessionId: 'sess-B',
+        sessions: {
+          'sess-A': { sessionId: 'sess-A', messages: [], mcpServers: [{ name: 'fs', status: 'connected' }] },
+          'sess-B': { sessionId: 'sess-B', messages: [], mcpServers: [{ name: 'gh', status: 'connected' }] },
+        },
+      })
+      dispatch(env, {
+        type: 'mcp_servers',
+        sessionId: 'sess-A',
+        servers: [{ name: 'fs', status: 'disabled', enabled: false, canToggle: true }],
+      })
+      // Target session updated…
+      expect(env.sessions['sess-A'].mcpServers).toEqual([
+        { name: 'fs', status: 'disabled', enabled: false, canToggle: true },
+      ])
+      // …and the ACTIVE session's list is untouched.
+      expect(env.sessions['sess-B'].mcpServers).toEqual([{ name: 'gh', status: 'connected' }])
+    })
   })
 
   describe('session_usage', () => {

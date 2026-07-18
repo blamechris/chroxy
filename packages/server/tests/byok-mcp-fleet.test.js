@@ -432,5 +432,29 @@ describe('MCPFleet', () => {
       assert.equal(b.status, 'disabled')
       await fleet.destroy()
     })
+
+    it('ignores a churn toggle while the same server\'s park/unpark is in flight', async () => {
+      const fleet = new MCPFleet([cfg('alpha')], { log: silentLog() })
+      await fleet.start()
+      // Fire a disable (enters the latch, awaits the client's destroy grace)
+      // and, before awaiting it, a flip-back enable for the SAME server. The
+      // second call must be ignored (changed:false) rather than interleaving a
+      // start into the in-flight destroy.
+      const p1 = fleet.setEnabled('alpha', false)
+      const p2 = fleet.setEnabled('alpha', true)
+      const [r1, r2] = await Promise.all([p1, p2])
+      assert.equal(r1.changed, true, 'first toggle proceeds')
+      assert.equal(r1.status, 'disabled')
+      assert.equal(r2.found, true)
+      assert.equal(r2.changed, false, 'in-flight churn is ignored')
+      // The first (in-flight) op is authoritative: server ends parked.
+      assert.deepEqual(fleet.disabledServers, ['alpha'])
+      assert.deepEqual(fleet.tools, [])
+      // The latch releases after settle — a later toggle works normally.
+      const r3 = await fleet.setEnabled('alpha', true)
+      assert.equal(r3.changed, true, 'latch released after the in-flight op settled')
+      assert.equal(r3.status, 'connected')
+      await fleet.destroy()
+    })
   })
 })

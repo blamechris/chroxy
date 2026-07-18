@@ -72,11 +72,12 @@ export const ServerMultiQuestionInterventionSchema = z.object({
 
 export const ServerMcpServersSchema = z.object({
   type: z.literal('mcp_servers'),
-  // #6832: sessionId is injected by the multi-session broadcast path so a
-  // client can route the list to the right session; omitted on the legacy-cli
-  // path. Optional here — the field is documented for completeness (server →
-  // client messages are not strict-parsed on send, but a client that DOES
-  // validate must not have it stripped).
+  // #6847: stamped by the event-normalizer on the multi-session path (live
+  // emits + toggle re-emits) and by ws-history's snapshot-on-subscribe replay,
+  // so a client subscribed to several sessions routes the list to the RIGHT
+  // one instead of falling back to its active session. Omitted on the
+  // legacy-cli path (single implicit session). Optional here — a validating
+  // client must not have it stripped.
   sessionId: z.string().optional(),
   servers: z.array(z.object({
     name: z.string(),

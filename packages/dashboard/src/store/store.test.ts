@@ -2104,8 +2104,7 @@ describe('resolvedPermissions + Allow for Session (#2833, #2834)', () => {
       socket: mockSocket as unknown as WebSocket,
     });
 
-    const ok = useConnectionStore.getState().setMcpServerEnabled('filesystem', false);
-    expect(ok).toBe(true);
+    useConnectionStore.getState().setMcpServerEnabled('filesystem', false);
 
     const msg = sent.find((m) => m.type === 'set_mcp_server_enabled');
     expect(msg).toBeDefined();
@@ -2115,7 +2114,7 @@ describe('resolvedPermissions + Allow for Session (#2833, #2834)', () => {
     expect(typeof msg!.requestId).toBe('string');
   });
 
-  it('setMcpServerEnabled returns false and sends nothing when the socket is closed', async () => {
+  it('setMcpServerEnabled sends nothing when the socket is closed (silent no-op, mirrors setPermissionRules)', async () => {
     const { useConnectionStore } = await import('./connection');
     const { createEmptySessionState } = await import('./utils');
 
@@ -2127,8 +2126,7 @@ describe('resolvedPermissions + Allow for Session (#2833, #2834)', () => {
       socket: mockSocket as unknown as WebSocket,
     });
 
-    const ok = useConnectionStore.getState().setMcpServerEnabled('filesystem', true);
-    expect(ok).toBe(false);
+    useConnectionStore.getState().setMcpServerEnabled('filesystem', true);
     expect(sent.find((m) => m.type === 'set_mcp_server_enabled')).toBeUndefined();
   });
 
