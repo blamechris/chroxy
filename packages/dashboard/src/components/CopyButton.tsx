@@ -9,8 +9,24 @@ import { useConnectionStore } from '../store/connection'
  * brief ✓ confirmation. A failed write surfaces a non-destructive `warning`
  * toast, mirroring App.tsx's `copyToClipboard`. The layout leaves room for
  * future per-response actions alongside it.
+ *
+ * #6790 — `className` / `testId` are overridable so non-bubble hosts (the
+ * dev-preview chip) can reuse the full copy behaviour (clipboard write,
+ * failure toast, ✓ state, sr-only announcement) without inheriting
+ * `.msg-copy-btn`'s bubble-specific CSS (absolute top-right positioning,
+ * hidden until `.msg:hover`). Defaults preserve the original bubble usage.
  */
-export function CopyButton({ content, label = 'Copy response' }: { content: string; label?: string }) {
+export function CopyButton({
+  content,
+  label = 'Copy response',
+  className = 'msg-copy-btn',
+  testId = 'msg-copy-button',
+}: {
+  content: string
+  label?: string
+  className?: string
+  testId?: string
+}) {
   const [copied, setCopied] = useState(false)
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const mounted = useRef(true)
@@ -46,10 +62,10 @@ export function CopyButton({ content, label = 'Copy response' }: { content: stri
     <>
       <button
         type="button"
-        className="msg-copy-btn"
+        className={className}
         aria-label={copied ? 'Copied' : label}
         title={copied ? 'Copied' : label}
-        data-testid="msg-copy-button"
+        data-testid={testId}
         data-copied={copied ? 'true' : undefined}
         onClick={onCopy}
       >

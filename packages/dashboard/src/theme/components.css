@@ -475,6 +475,81 @@
   flex-shrink: 0;
 }
 
+/* #6790 — active dev-server preview tunnel chip(s). One chip per entry in
+   the active session's `devPreviews`; renders nothing when the array is
+   empty (DevPreviewChip self-gates). */
+.dev-preview-chips {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.dev-preview-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  background: var(--accent-green-light);
+  border: 1px solid var(--accent-green-border);
+  border-radius: var(--radius-sm);
+  padding: 2px 4px 2px 8px;
+  font-size: 11px;
+  color: var(--accent-green);
+}
+
+.dev-preview-chip__link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: inherit;
+  text-decoration: none;
+  font-weight: 600;
+  font-family: var(--font-mono);
+}
+
+/* Underline is an anchor-only affordance — the scheme-guard fallback renders
+   the same class on a plain (non-navigable) span, which must not imply
+   clickability on hover. */
+a.dev-preview-chip__link:hover,
+a.dev-preview-chip__link:focus-visible {
+  text-decoration: underline;
+}
+
+.dev-preview-chip__icon {
+  font-size: 12px;
+  line-height: 1;
+}
+
+.dev-preview-chip__copy,
+.dev-preview-chip__close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  margin-left: 2px;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1;
+}
+
+.dev-preview-chip__copy:hover,
+.dev-preview-chip__close:hover {
+  color: var(--text-heading);
+  /* Same token-with-neutral-fallback idiom as .msg-copy-btn — the token is
+     theme-provided where defined; the fallback reads correctly in both
+     light and dark. */
+  background: var(--surface-raised, rgba(127, 127, 127, 0.15));
+}
+
+.dev-preview-chip__copy[data-copied='true'] {
+  color: var(--accent-green);
+}
+
 /* #5200/#5203: the status bar lives on its own row (.header-meta) and spans
    the FULL header width, space-betweening two groups — identity (type badge +
    model) on the left, metrics (configurable cost badge + token meter) on the

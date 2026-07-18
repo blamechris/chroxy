@@ -68,4 +68,12 @@ describe('CopyButton (#6631)', () => {
     fireEvent.click(screen.getByTestId('msg-copy-button'))
     expect(parentClick).not.toHaveBeenCalled()
   })
+
+  it('honours className/testId overrides for non-bubble hosts (#6790)', () => {
+    render(<CopyButton content="x" className="dev-preview-chip__copy" testId="custom-copy" />)
+    const btn = screen.getByTestId('custom-copy')
+    expect(btn).toHaveClass('dev-preview-chip__copy')
+    expect(btn).not.toHaveClass('msg-copy-btn')
+    expect(screen.queryByTestId('msg-copy-button')).toBeNull()
+  })
 })
