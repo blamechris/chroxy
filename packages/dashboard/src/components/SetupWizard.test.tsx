@@ -91,6 +91,11 @@ describe('SetupWizard', () => {
       expect(screen.getByTestId('setup-wizard-dep-cloudflared')).toHaveClass('setup-wizard-dep-row--fail')
       expect(screen.getByTestId('setup-wizard-dep-claude')).toHaveClass('setup-wizard-dep-row--fail')
     })
+    // #6814 review — the fail state is conveyed by color + glyph visually,
+    // so each row must also carry the state as (visually-hidden) text.
+    expect(screen.getByTestId('setup-wizard-dep-node')).toHaveTextContent('Node 22: missing')
+    expect(screen.getByTestId('setup-wizard-dep-cloudflared')).toHaveTextContent('cloudflared: missing')
+    expect(screen.getByTestId('setup-wizard-dep-claude')).toHaveTextContent('Claude CLI: missing')
   })
 
   it('shows passing dependency rows when all tools are found', async () => {
@@ -108,6 +113,27 @@ describe('SetupWizard', () => {
       expect(screen.getByTestId('setup-wizard-dep-claude')).toHaveClass('setup-wizard-dep-row--pass')
     })
     expect(screen.getByText(/v22\.1\.0/)).toBeInTheDocument()
+    // #6814 review — accessible state text for the pass state.
+    expect(screen.getByTestId('setup-wizard-dep-node')).toHaveTextContent('Node 22: found')
+    expect(screen.getByTestId('setup-wizard-dep-cloudflared')).toHaveTextContent('cloudflared: found')
+    expect(screen.getByTestId('setup-wizard-dep-claude')).toHaveTextContent('Claude CLI: found')
+  })
+
+  it('moves focus into the dialog when the wizard appears (#6814 review)', async () => {
+    setupTauriMock({
+      setupState: { isFirstRun: true, port: 8765, tunnelMode: 'none', isRunning: false },
+      dependencies: PASSING_DEPS,
+    })
+    render(<SetupWizard />)
+
+    await screen.findByTestId('setup-wizard')
+
+    // The shared Modal focuses the first focusable control on open and traps
+    // Tab inside; assert focus actually landed within the dialog.
+    const dialog = screen.getByRole('dialog')
+    await waitFor(() => {
+      expect(dialog).toContainElement(document.activeElement as HTMLElement)
+    })
   })
 
   it('re-check button re-invokes check_dependencies', async () => {

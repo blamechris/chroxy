@@ -1,31 +1,11 @@
-/* SetupWizard — desktop first-run setup panel (#6787). */
+/* SetupWizard — desktop first-run setup panel (#6787).
+   Overlay/content/title chrome comes from the shared Modal component
+   (.modal-overlay / .modal-content / .modal-title in theme/components.css);
+   only the wizard-internal styles live here. */
 
-.setup-wizard-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.7);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 2000;
-}
-
-.setup-wizard-content {
-  position: relative;
-  background: var(--bg-modal, #1a1a2e);
-  border: 1px solid var(--scrollbar-thumb, #333355);
-  border-radius: 12px;
-  padding: 28px;
-  width: 100%;
-  max-width: 480px;
-  max-height: 85vh;
+.setup-wizard {
+  max-height: 75vh;
   overflow-y: auto;
-}
-
-.setup-wizard-title {
-  color: var(--text-primary, #ffffff);
-  font-size: 1.3rem;
-  margin: 0 0 4px;
 }
 
 .setup-wizard-subtitle {

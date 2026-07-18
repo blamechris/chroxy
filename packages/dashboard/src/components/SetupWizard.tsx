@@ -10,12 +10,20 @@
  * `IS_FIRST_RUN` flag so the panel never shows again) and starts the
  * embedded server, same as the existing "Start Server" affordance.
  *
+ * Composes the shared <Modal> so focus management matches every other
+ * dashboard dialog (#6814 review): focus moves into the dialog on open,
+ * Tab is trapped inside while visible, and focus is restored on close. The
+ * wizard is non-dismissible — `onClose` is a no-op (Escape does nothing)
+ * and backdrop clicks are disabled — because a first run has nothing
+ * useful behind the dialog until setup completes.
+ *
  * Entirely self-contained: renders `null` outside Tauri (zero behavior
  * change for the plain web dashboard) and `null` once setup is complete, so
  * it can be mounted unconditionally at the top of <App/>.
  */
 import { useCallback, useEffect, useState } from 'react'
 import { isTauri } from '../utils/tauri'
+import { Modal } from './Modal'
 import {
   checkDependencies,
   getSetupState,
@@ -32,6 +40,18 @@ const TUNNEL_MODE_OPTIONS: { value: string; label: string }[] = [
 ]
 
 type DepStatus = 'checking' | 'unknown' | 'pass' | 'fail'
+
+/**
+ * Spoken state for a dependency row (#6814 review). The visual pass/fail
+ * state is conveyed by color + glyph only, so the same information is
+ * appended as visually-hidden (`.sr-only`) text for screen readers.
+ */
+const DEP_STATUS_TEXT: Record<DepStatus, string> = {
+  checking: 'checking',
+  unknown: 'not checked',
+  pass: 'found',
+  fail: 'missing',
+}
 
 interface DependencyRowProps {
   testId: string
@@ -56,6 +76,7 @@ function DependencyRow({ testId, label, found, detail, hint, checking }: Depende
       <span className="setup-wizard-dep-icon" aria-hidden="true">{icon}</span>
       <span className="setup-wizard-dep-label">
         {label}
+        <span className="sr-only">{`: ${DEP_STATUS_TEXT[status]}`}</span>
         {detail ? <span className="setup-wizard-dep-detail"> ({detail})</span> : null}
       </span>
       {(status === 'fail' || status === 'unknown') && (
@@ -66,9 +87,6 @@ function DependencyRow({ testId, label, found, detail, hint, checking }: Depende
 }
 
 export function SetupWizard() {
-  // Whether we've resolved get_setup_state yet — avoids a flash of the
-  // panel (or of nothing) before we know if this is actually a first run.
-  const [resolved, setResolved] = useState(false)
   const [visible, setVisible] = useState(false)
   const [port, setPort] = useState(8765)
   const [tunnelMode, setTunnelMode] = useState('none')
@@ -85,14 +103,10 @@ export function SetupWizard() {
   }, [])
 
   useEffect(() => {
-    if (!isTauri()) {
-      setResolved(true)
-      return
-    }
+    if (!isTauri()) return
     let cancelled = false
     getSetupState().then((state) => {
       if (cancelled) return
-      setResolved(true)
       if (state?.isFirstRun) {
         setVisible(true)
         setPort(state.port || 8765)
@@ -123,17 +137,22 @@ export function SetupWizard() {
       .finally(() => setSaving(false))
   }, [port, tunnelMode, saving])
 
-  if (!isTauri() || !resolved || !visible) return null
+  // The wizard is non-dismissible: setup either completes (handleFinish
+  // hides it and clears the Rust-side first-run flag) or stays up. Escape
+  // and backdrop clicks are intentionally inert.
+  const handleClose = useCallback(() => {}, [])
+
+  if (!isTauri() || !visible) return null
 
   return (
-    <div className="setup-wizard-overlay" data-testid="setup-wizard">
-      <div
-        className="setup-wizard-content"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="setup-wizard-title"
-      >
-        <h2 id="setup-wizard-title" className="setup-wizard-title">Welcome to Chroxy</h2>
+    <Modal
+      open
+      onClose={handleClose}
+      title="Welcome to Chroxy"
+      maxWidth="480px"
+      closeOnBackdrop={false}
+    >
+      <div className="setup-wizard" data-testid="setup-wizard">
         <p className="setup-wizard-subtitle">
           Let&apos;s check your setup before the daemon starts.
         </p>
@@ -223,6 +242,6 @@ export function SetupWizard() {
           </button>
         </div>
       </div>
-    </div>
+    </Modal>
   )
 }
