@@ -26,7 +26,7 @@ import { resolveActivePrimaryClientId } from './components/ViewersIndicator'
 import { type ContextMenuItem } from './components/SessionContextMenu'
 import { buildSidebarContextMenuItems } from './sidebarContextMenuItems'
 import { useCommands, recordMruCommand, getMruCommands } from './store/commands'
-import { ChatView } from './components/ChatView'
+import { ChatView, type ChatViewMessage } from './components/ChatView'
 import { MultiTerminalView } from './components/MultiTerminalView'
 import { InputBar, type FileAttachment, type ImageAttachment } from './components/InputBar'
 import { useVoiceInput } from './hooks/useVoiceInput'
@@ -506,6 +506,10 @@ export function App() {
   // bottom even when the user had scrolled up to read history — see ChatView's
   // scrollToBottomSignal effect.
   const [scrollToBottomSignal, setScrollToBottomSignal] = useState(0)
+  // #6788 — nonce bumped by the Cmd/Ctrl+F shortcut to summon the ChatView's
+  // in-session find bar. A nonce (not a boolean) re-opens it reliably and keeps
+  // ChatView's memo wrapper intact. Only passed to the primary chat panes.
+  const [openSearchSignal, setOpenSearchSignal] = useState(0)
   const evaluateDraft = useConnectionStore(s => s.evaluateDraft)
   const sendPermissionResponse = useConnectionStore(s => s.sendPermissionResponse)
   const switchSession = useConnectionStore(s => s.switchSession)
@@ -1013,6 +1017,11 @@ export function App() {
     // handleShowQr/isConnected are declared below; the ref no-ops when null
     // (disconnected), so the shortcut only opens the modal when there's a server.
     showQr: () => showQrRef.current?.(),
+    // #6788 — Cmd/Ctrl+F summons the in-session find bar. Only intercept the
+    // browser's native find when a chat transcript is on screen (chat view, or a
+    // split whose first pane is chat); elsewhere the event falls through.
+    chatTranscriptVisible: viewMode === 'chat' || splitMode !== null,
+    openTranscriptSearch: () => setOpenSearchSignal(n => n + 1),
   })
 
   const trackedCommands = useMemo(
@@ -1127,6 +1136,26 @@ export function App() {
     storeMessages,
     streamingMessageId,
   })
+
+  // #6788 — searchable-text extractor for the ChatView in-session find bar. Most
+  // rows carry their visible text in `content`; a collapsed `tool_group` row
+  // (2+ contiguous tools) has empty `content`, so pull its inner tool summaries
+  // + results from the group payload the pipeline already built. Memoized on the
+  // payload map so ChatView's memoized searchable-row list stays stable.
+  const chatSearchText = useCallback(
+    (msg: ChatViewMessage): string => {
+      if (msg.type !== 'tool_group') return msg.content
+      const payload = chatToolGroupPayloads.get(msg.id)
+      if (!payload) return msg.content
+      let text = ''
+      for (const m of payload.messages) {
+        if (m.content) text += m.content + ' '
+        if (m.toolResult) text += m.toolResult + ' '
+      }
+      return text
+    },
+    [chatToolGroupPayloads],
+  )
 
   // System events for the System tab — uses the same toChatViewMessage
   // mapping the chat pipeline does so both surfaces present rows in the
@@ -2304,6 +2333,8 @@ export function App() {
                         onCancelQueued={onCancelQueued}
                         workingLabel={workingLabel}
                         inFlightToolColor={inFlightToolColor}
+                        openSearchSignal={openSearchSignal}
+                        getSearchText={chatSearchText}
                       />
                     }
                     second={
@@ -2351,6 +2382,8 @@ export function App() {
                         onCancelQueued={onCancelQueued}
                         workingLabel={workingLabel}
                         inFlightToolColor={inFlightToolColor}
+                        openSearchSignal={openSearchSignal}
+                        getSearchText={chatSearchText}
                       />
                     </div>
                     <div
