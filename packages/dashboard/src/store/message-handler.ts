@@ -1407,8 +1407,12 @@ function handlePairingRefreshed(_msg: Record<string, unknown>, _get: MsgGet, set
  * shape is defensively re-mapped here to the concrete store types (older servers
  * omit `resources`, which parses to an empty array).
  */
-function handleFileList(msg: Record<string, unknown>, _get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+function handleFileList(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
   const { files, resources } = sharedFileList(msg);
+  // Surface a server-reported listing failure via the standard error toast
+  // instead of silently rendering an empty picker (#6844 review note). The
+  // (possibly empty) arrays still apply below so stale entries clear.
+  if (typeof msg.error === 'string' && msg.error) get().addServerError(`File list failed: ${msg.error}`);
   const filePickerFiles: FilePickerItem[] = files
     .map((f) => f as Record<string, unknown>)
     .filter((f) => typeof f.path === 'string')

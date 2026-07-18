@@ -201,6 +201,112 @@ describe('MCPRemoteClient prompts/resources (#6823)', () => {
 })
 
 // ---------------------------------------------------------------------------
+// remote MCPRemoteClient (legacy HTTP+SSE, type: 'sse')
+// ---------------------------------------------------------------------------
+
+/**
+ * Legacy two-endpoint SSE MCP server (mirrors the #6833 harness in
+ * byok-mcp-remote-client.test.js) extended with prompts/resources: GET opens
+ * the persistent event stream + announces the POST endpoint; every POST is
+ * 202-acked and answered over the stream, matched by id. Capabilities are
+ * advertised on initialize only when prompts/resources are configured.
+ */
+function startSseMcpServer({ prompts = PROMPTS, resources = RESOURCES } = {}) {
+  let sseRes = null
+  const server = createServer((req, res) => {
+    if (req.method === 'GET') {
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      sseRes = res
+      res.write('event: endpoint\ndata: /messages\n\n')
+      return
+    }
+    const chunks = []
+    req.on('data', (c) => chunks.push(c))
+    req.on('end', () => {
+      let msg = null
+      try { msg = JSON.parse(Buffer.concat(chunks).toString('utf8')) } catch { msg = null }
+      res.writeHead(202).end()
+      if (!msg || msg.id == null || !sseRes) return
+      let result
+      if (msg.method === 'initialize') {
+        const capabilities = { tools: {} }
+        if (prompts) capabilities.prompts = {}
+        if (resources) capabilities.resources = {}
+        result = { protocolVersion: MCP_PROTOCOL_VERSION, capabilities, serverInfo: { name: 'sse-mcp', version: '0.1.0' } }
+      } else if (msg.method === 'tools/list') {
+        result = { tools: [{ name: 'echo', description: 'echo', inputSchema: { type: 'object' } }] }
+      } else if (msg.method === 'prompts/list') {
+        result = { prompts: prompts || [] }
+      } else if (msg.method === 'prompts/get') {
+        result = { description: 'x', messages: [{ role: 'user', content: { type: 'text', text: `PROMPT:${msg.params?.name} ARGS:${JSON.stringify(msg.params?.arguments ?? {})}` } }] }
+      } else if (msg.method === 'resources/list') {
+        result = { resources: resources || [] }
+      } else if (msg.method === 'resources/read') {
+        result = { contents: [{ uri: msg.params?.uri, mimeType: 'text/plain', text: `CONTENT:${msg.params?.uri}` }] }
+      } else {
+        sseRes.write(`event: message\ndata: ${JSON.stringify({ jsonrpc: '2.0', id: msg.id, error: { code: -32601, message: 'method not found' } })}\n\n`)
+        return
+      }
+      sseRes.write(`event: message\ndata: ${JSON.stringify({ jsonrpc: '2.0', id: msg.id, result })}\n\n`)
+    })
+  })
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () => {
+      const { port } = server.address()
+      resolve({
+        url: `http://127.0.0.1:${port}/sse`,
+        close: () => new Promise((r) => { try { sseRes?.end() } catch { /* already closed */ } server.close(r) }),
+      })
+    })
+  })
+}
+
+describe('MCPRemoteClient legacy-SSE prompts/resources (#6823)', () => {
+  let mock
+  afterEach(async () => { if (mock) { await mock.close(); mock = null } })
+
+  it('fetches prompts + resources over legacy SSE (prompts/list + resources/list pinned on the SSE branch)', async () => {
+    mock = await startSseMcpServer()
+    const client = new MCPRemoteClient({ name: 'sse', type: 'sse', url: mock.url, headers: {} }, { log: silentLog() })
+    await client.start()
+    assert.equal(client.state, MCP_STATES.READY)
+    assert.deepEqual(client.prompts.map((p) => p.name), ['greet', 'summarize'])
+    assert.deepEqual(client.resources.map((r) => r.uri), ['file:///notes.md', 'db://table/users'])
+    await client.destroy()
+  })
+
+  it('getPrompt round-trips arguments over the SSE endpoint transport', async () => {
+    mock = await startSseMcpServer()
+    const client = new MCPRemoteClient({ name: 'sse', type: 'sse', url: mock.url, headers: {} }, { log: silentLog() })
+    await client.start()
+    const got = await client.getPrompt('greet', { who: 'Ada' })
+    assert.match(got.messages[0].content.text, /PROMPT:greet/)
+    assert.match(got.messages[0].content.text, /"who":"Ada"/)
+    await client.destroy()
+  })
+
+  it('readResource returns contents over the SSE endpoint transport', async () => {
+    mock = await startSseMcpServer()
+    const client = new MCPRemoteClient({ name: 'sse', type: 'sse', url: mock.url, headers: {} }, { log: silentLog() })
+    await client.start()
+    const read = await client.readResource('db://table/users')
+    assert.equal(read.contents[0].text, 'CONTENT:db://table/users')
+    await client.destroy()
+  })
+
+  it('capability-absent SSE server skips both lists cleanly (tools still work)', async () => {
+    mock = await startSseMcpServer({ prompts: null, resources: null })
+    const client = new MCPRemoteClient({ name: 'sse', type: 'sse', url: mock.url, headers: {} }, { log: silentLog() })
+    await client.start()
+    assert.equal(client.state, MCP_STATES.READY)
+    assert.deepEqual(client.prompts, [])
+    assert.deepEqual(client.resources, [])
+    assert.deepEqual(client.tools.map((t) => t.name), ['echo'])
+    await client.destroy()
+  })
+})
+
+// ---------------------------------------------------------------------------
 // MCPFleet aggregation + routing
 // ---------------------------------------------------------------------------
 

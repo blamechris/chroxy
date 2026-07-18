@@ -6525,5 +6525,16 @@ describe("checkpoint_restored (mode 'files') confirmation (#6827)", () => {
       const state = store.getState() as any
       expect(state.mcpResources[0].name).toBe('db://users')
     })
+
+    it('surfaces a server-reported error via addServerError (and still applies the arrays)', () => {
+      handleMessage(
+        { type: 'file_list', files: [], error: 'Permission denied' } as any,
+        ctx() as any,
+      )
+      const state = store.getState() as any
+      expect(state.serverErrors).toContain('File list failed: Permission denied')
+      expect(state.filePickerFiles).toEqual([])
+      expect(state.mcpResources).toEqual([])
+    })
   })
 })
