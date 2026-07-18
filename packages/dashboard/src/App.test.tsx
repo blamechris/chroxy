@@ -2599,7 +2599,9 @@ describe('#6301 create-session spinner reset (#6285 App-layer branches)', () => 
 // back to the raw token-count chip instead of rendering a fabricated
 // "% of 200k". Claude-backed providers keep the 200k default — it's real.
 describe('context meter with unknown context window (#5424)', () => {
-  const contextUsage = { inputTokens: 12_000, outputTokens: 500 }
+  // #6769: a realistic no-cache turn — the meter total is the cumulative
+  // occupancy (input + output + cache_read + cache_creation), here 12.5k.
+  const contextUsage = { inputTokens: 12_000, outputTokens: 500, cacheRead: 0, cacheCreation: 0 }
 
   function sessionState(activeModel: string) {
     return {
@@ -2684,6 +2686,49 @@ describe('context meter with unknown context window (#5424)', () => {
     const label = screen.getByTestId('status-context-label')
     expect(label.textContent).toContain('12.5k')
     expect(label.textContent).toContain('32.0k')
+  })
+
+  // #6769: a mid-conversation cached turn — tiny new input/output but a large
+  // cache_read history. The meter must read the CUMULATIVE occupancy (history
+  // included), not the near-empty per-turn input+output.
+  it('includes cache_read history in the meter total (#6769)', () => {
+    const cachedUsage = {
+      inputTokens: 500,
+      outputTokens: 1_500,
+      cacheRead: 150_000,
+      cacheCreation: 0,
+    }
+    stateOverrides = {
+      connectionPhase: 'connected',
+      sessions: [session('claude-sdk')],
+      activeSessionId: 's1',
+      availableModels: [
+        { id: 'sonnet', label: 'Sonnet 4.6', fullId: 'claude-sonnet-4-6', contextWindow: 200_000 },
+      ],
+      getActiveSessionState: () => ({
+        messages: [],
+        streamingMessageId: null,
+        activeModel: 'sonnet',
+        permissionMode: null,
+        contextUsage: cachedUsage,
+        sessionCost: null,
+        isIdle: true,
+        activeAgents: [],
+        isPlanPending: false,
+      }),
+    }
+    render(<App />)
+    const label = screen.getByTestId('status-context-label')
+    // Occupancy is 152k (500 + 1.5k + 150k), NOT the 2k per-turn input+output.
+    expect(label.textContent).toContain('152.0k')
+    expect(label.textContent).toContain('200.0k')
+    // Metered against the auto-compact ceiling (184k), 152k reads well past 80%
+    // on both the header and footer bars.
+    const bars = screen.getAllByRole('progressbar', { name: /context window usage/i })
+    expect(bars.length).toBeGreaterThan(0)
+    for (const bar of bars) {
+      expect(Number(bar.getAttribute('aria-valuenow'))).toBeGreaterThanOrEqual(80)
+    }
   })
 })
 

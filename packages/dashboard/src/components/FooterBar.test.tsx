@@ -151,10 +151,11 @@ describe('FooterBar', () => {
       expect(cost!.getAttribute('title')).toMatch(/estimated client-side/i)
     })
 
-    it('context chip tooltip explicitly says per-turn', () => {
+    it('context chip tooltip describes cumulative fill (not per-turn) (#6769)', () => {
       const { container } = render(<FooterBar {...baseProps} context="90k tokens" contextPercent={45} />)
       const ctx = container.querySelector('.footer-context')
-      expect(ctx!.getAttribute('title')).toMatch(/per[- ]turn|this turn|most recent turn/i)
+      expect(ctx!.getAttribute('title')).toMatch(/whole conversation|before auto-compact/i)
+      expect(ctx!.getAttribute('title')).not.toMatch(/per[- ]turn|resets each turn/i)
       expect(ctx!.getAttribute('title')).toContain('45%')
     })
 
@@ -214,6 +215,24 @@ describe('FooterBar', () => {
       const title = ctx!.getAttribute('title') ?? ''
       expect(title).toContain('45%')
       expect(title).not.toMatch(/input \+/)
+    })
+
+    // #6769: when cachedTokens is wired through, the breakdown surfaces the
+    // cached conversation history as the dominant term (not the per-turn input).
+    it('surfaces cached history in the breakdown when cachedTokens is present (#6769)', () => {
+      const { container } = render(
+        <FooterBar
+          {...baseProps}
+          context="92k tokens"
+          contextPercent={50}
+          inputTokens={500}
+          outputTokens={2000}
+          cachedTokens={90000}
+        />,
+      )
+      const title = container.querySelector('.footer-context')!.getAttribute('title') ?? ''
+      expect(title).toContain('90.0k cached history')
+      expect(title).toContain('92.5k tokens')
     })
   })
 

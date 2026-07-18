@@ -13,17 +13,30 @@ import { SidebarCostBadge, type CostBadgeMode } from './SidebarCostBadge'
 export interface StatusBarProps {
   cost?: number
   context?: string
-  /** #3858: percent of model window the last turn used (drives contextTooltip). */
+  /** #6769: percent of the window the conversation fills (drives contextTooltip + meter). */
   contextPercent?: number | null
-  /** #4205: raw input tokens for the most-recent turn (drives the tooltip breakdown). */
+  /**
+   * #6769: cumulative window occupancy in tokens (input + output + cache_read +
+   * cache_creation). Drives the `used / total` meter label so it matches the
+   * cache-aware percent. Falls back to `inputTokens + outputTokens` when not
+   * supplied (older callers / providers with no cache fields).
+   */
+  contextTokens?: number
+  /**
+   * #6769: cached history tokens currently in the window (cache_read +
+   * cache_creation). Threaded to the tooltip so the hover breakdown can
+   * explain that most of the fill is cached conversation history.
+   */
+  cachedTokens?: number
+  /** #4205: raw (uncached) input tokens for the most-recent turn (tooltip breakdown). */
   inputTokens?: number
   /** #4205: raw output tokens for the most-recent turn (drives the tooltip breakdown). */
   outputTokens?: number
   /**
-   * #5065: model context window in tokens. Combined with `inputTokens +
-   * outputTokens` to render the `used / total tokens` meter alongside the
-   * percent text. Hidden entirely when missing so the meter doesn't show
-   * an empty bar when no session/model is active.
+   * #5065: model context window in tokens. Combined with the cumulative
+   * occupancy (`contextTokens`) to render the `used / total tokens` meter
+   * alongside the percent text. Hidden entirely when missing so the meter
+   * doesn't show an empty bar when no session/model is active.
    */
   contextWindow?: number
   isBusy?: boolean
@@ -62,7 +75,8 @@ export const STATUS_COMPACT_SUGGEST_THRESHOLD = 80
 export const STATUS_OVER_BUDGET_THRESHOLD = 100
 
 export function StatusBar({
-  cost, context, contextPercent, inputTokens, outputTokens, contextWindow,
+  cost, context, contextPercent, contextTokens, cachedTokens,
+  inputTokens, outputTokens, contextWindow,
   isBusy, agentCount, provider, model, costBadgeMode,
 }: StatusBarProps) {
   const prov = provider ? getProviderInfo(provider) : null
@@ -70,23 +84,27 @@ export function StatusBar({
   // `title` + `aria-label` mirror pair can't drift if the formatter
   // ever takes a code path with side effects.
   const costTip = costTooltip({ cost, provider })
-  // #4205: pass through input/output tokens so the context chip's
-  // tooltip carries the in/out/total breakdown alongside the percent.
+  // #6769: pass the cumulative occupancy + cached-history split so the context
+  // chip's tooltip explains cumulative fill (not the pre-#6769 per-turn
+  // input/output that read near-empty under prompt caching).
   const contextTip = contextTooltip({
     percent: contextPercent ?? null,
     contextSummary: context,
     inputTokens,
     outputTokens,
+    cachedTokens,
   })
   const agentTip = agentCountTooltip(agentCount)
 
-  // #5065: compute the `used / total tokens` label + bar when we have
-  // BOTH the raw token counts AND the model's context window. Without
-  // the window we'd be guessing, and the existing context chip text
-  // already covers the no-window case (it falls back to the raw count
-  // without a meter). Render is gated on `usedTokens > 0` so an idle
-  // session — no turns yet — doesn't show an empty `0 / 1M` bar.
-  const usedTokens = (inputTokens ?? 0) + (outputTokens ?? 0)
+  // #5065/#6769: compute the `used / total tokens` label + bar when we have
+  // BOTH the token counts AND the model's context window. `usedTokens` is the
+  // cumulative window occupancy (`contextTokens`); it falls back to
+  // input + output for older callers / providers with no cache fields. Without
+  // the window we'd be guessing, and the existing context chip text already
+  // covers the no-window case (it falls back to the raw count without a meter).
+  // Render is gated on `usedTokens > 0` so an idle session — no turns yet —
+  // doesn't show an empty `0 / 1M` bar.
+  const usedTokens = contextTokens ?? ((inputTokens ?? 0) + (outputTokens ?? 0))
   const showMeter = usedTokens > 0
     && contextWindow != null
     && contextWindow > 0

@@ -12,6 +12,8 @@ import {
   formatTokensCompact,
   expandPasteMarkers,
   resolveContextWindow,
+  contextWindowTokens,
+  contextFillPercent,
   providerSupportsMultiQuestion,
   formatToolName,
   getToolPresentation,
@@ -19,7 +21,7 @@ import {
   type SessionInfo,
 } from '@chroxy/store-core'
 import { useConnectionStore } from './store/connection'
-import type { BaseSessionState } from '@chroxy/store-core'
+import type { BaseSessionState, ContextUsage } from '@chroxy/store-core'
 
 import { Sidebar, type RepoNode, type ContextMenuTarget } from './components/Sidebar'
 import { resolveActivePrimaryClientId } from './components/ViewersIndicator'
@@ -121,16 +123,20 @@ export function getChroxyConfig(): ChroxyConfig | undefined {
 /**
  * Format context usage as a compact `<n> tokens` chip label.
  *
+ * #6769: the total is the cumulative window occupancy
+ * (`contextWindowTokens` = input + output + cache_read + cache_creation), NOT
+ * input + output — under prompt caching the conversation history lives in
+ * `cache_read`, so input+output alone reads near-empty mid-conversation.
+ *
  * Delegates the number formatting to the canonical `formatTokensCompact`
  * helper in `@chroxy/store-core` (#5094) so the chip label, the header
  * meter, and the status-tooltip breakdown all share one casing/decimal
  * rule and one (correct) 1M rollover. Keeps only the ` tokens` suffix and
  * the "hide when empty" behaviour here.
  */
-function formatContext(usage: { inputTokens: number; outputTokens: number } | null): string | undefined {
-  if (!usage) return undefined
-  const total = usage.inputTokens + usage.outputTokens
-  if (total === 0) return undefined
+function formatContext(usage: ContextUsage | null): string | undefined {
+  const total = contextWindowTokens(usage)
+  if (total == null || total === 0) return undefined
   return `${formatTokensCompact(total)} tokens`
 }
 
@@ -1915,16 +1921,37 @@ export function App() {
     return resolveContextWindow(modelInfo, activeSessionProvider)
   }, [availableModels, activeModel, activeSessionProvider])
 
+  // #6769: cumulative context-window fill. `contextWindowTokens` reads the
+  // latest turn's occupancy — input + output + cache_read + cache_creation —
+  // so the meter tracks how full the window is now, not just the last turn's
+  // (uncached) prompt. Under prompt caching the conversation history lives in
+  // cache_read, so the pre-#6769 input+output total read near-empty while the
+  // window was actually nearly full. Because each turn re-reports the whole
+  // history via cache_read, this naturally persists across turns and drops
+  // after a compaction — nothing to accumulate or clamp. (Compaction *markers*
+  // are #6768, a separate issue.)
+  const contextTokens = useMemo(
+    () => contextWindowTokens(contextUsage),
+    [contextUsage],
+  )
+  // Cached history tokens currently in the window (cache_read + cache_creation)
+  // — threaded to the tooltip so the hover breakdown explains where the fill
+  // came from once caching is in play.
+  const cachedTokens = useMemo(() => {
+    if (!contextUsage) return undefined
+    return contextUsage.cacheRead + contextUsage.cacheCreation
+  }, [contextUsage])
+
   // Compute context window usage percentage from active model metadata.
   // Null when the window is unknown (#5424) — the chips then fall back to
   // the raw token-count text instead of a percentage/progress bar.
-  const contextPercent = useMemo(() => {
-    if (!contextUsage) return null
-    if (activeContextWindow == null) return null
-    const total = contextUsage.inputTokens + contextUsage.outputTokens
-    if (total === 0) return null
-    return (total / activeContextWindow) * 100
-  }, [contextUsage, activeContextWindow])
+  // #6769: metered against the auto-compact-adjusted effective ceiling so the
+  // bar reads 100% at the compaction boundary (desktop "context left" parity),
+  // not at the raw window.
+  const contextPercent = useMemo(
+    () => contextFillPercent(contextUsage, activeContextWindow),
+    [contextUsage, activeContextWindow],
+  )
 
   // #5184: human-readable model label for the `provider-model` cost-badge
   // mode. Prefer the server-supplied `label`; fall back to the raw model id
@@ -2089,6 +2116,8 @@ export function App() {
         cost={sessionCost ?? undefined}
         context={formatContext(contextUsage)}
         contextPercent={contextPercent}
+        contextTokens={contextTokens ?? undefined}
+        cachedTokens={cachedTokens}
         inputTokens={contextUsage?.inputTokens}
         outputTokens={contextUsage?.outputTokens}
         contextWindow={activeModel ? activeContextWindow ?? undefined : undefined}
@@ -2555,6 +2584,7 @@ export function App() {
         cost={sessionCost ?? undefined}
         context={formatContext(contextUsage)}
         contextPercent={contextPercent}
+        cachedTokens={cachedTokens}
         inputTokens={contextUsage?.inputTokens}
         outputTokens={contextUsage?.outputTokens}
         isBusy={!isIdle}

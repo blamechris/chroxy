@@ -76,6 +76,11 @@ export interface AppHeaderProps {
   cost?: number
   context?: string
   contextPercent: number | null
+  // #6769: cumulative window occupancy (input + output + cache) — drives the
+  // header meter's `used / total` label so it matches the cache-aware percent.
+  contextTokens?: number
+  // #6769: cached history tokens (cache_read + cache_creation) for the tooltip.
+  cachedTokens?: number
   inputTokens?: number
   outputTokens?: number
   contextWindow?: number
@@ -293,6 +298,8 @@ export function AppHeader(props: AppHeaderProps) {
           cost={props.cost}
           context={props.context}
           contextPercent={props.contextPercent}
+          contextTokens={props.contextTokens}
+          cachedTokens={props.cachedTokens}
           inputTokens={props.inputTokens}
           outputTokens={props.outputTokens}
           // #5065: surface the absolute `used / total` token meter in

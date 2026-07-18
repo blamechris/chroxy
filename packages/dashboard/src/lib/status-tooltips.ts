@@ -2,11 +2,17 @@
  * Status-chip tooltips (#3858).
  *
  * Both StatusBar (top header) and FooterBar (bottom) render the same
- * read-only status chips — cost, context %, model, agent count, per-turn
- * token chip. Each one looks interactable but isn't, and the values are
- * easy to misread (especially context %, which shows the LAST TURN's
- * prompt size as a fraction of the model window, NOT a cumulative session
- * total — 100% red looks alarming but is purely per-turn).
+ * read-only status chips — cost, context %, model, agent count, token
+ * chip. Each one looks interactable but isn't, and the values are easy to
+ * misread.
+ *
+ * #6769: the context % is now CUMULATIVE context-window fill — how full the
+ * whole conversation currently makes the model's window (input + output +
+ * cache_read + cache_creation of the latest turn, since the history lives in
+ * cache_read), metered against the auto-compact-adjusted effective ceiling.
+ * It grows as the conversation grows and steps DOWN after a compaction; it is
+ * NOT the pre-#6769 per-turn prompt size that reset each turn. The tooltip
+ * copy below reflects that cumulative meaning.
  *
  * This module returns the `title=` strings each chip surfaces on hover.
  * Native `title=` is enough (matches the existing QR / Share / cwd
@@ -45,21 +51,29 @@ export function costTooltip({ cost, provider }: CostTooltipArgs): string {
 }
 
 export interface ContextTooltipArgs {
-  /** Percent of model window the most-recent turn consumed (may exceed 100). */
+  /**
+   * #6769: percent of the model's context window the whole conversation
+   * currently fills (may exceed 100 once past the auto-compact ceiling).
+   */
   percent: number | null
   /** Formatted summary string ("90k / 200k tokens"). */
   contextSummary?: string
   /**
-   * #4205: raw input/output token counts for the most-recent turn. When
-   * both are present, the tooltip appends an
-   * `${in}k input + ${out}k output = ${total}k tokens` breakdown so the
-   * chip explains where the percent came from (#3858's original
-   * acceptance criterion — the helper was implemented + tested in #4204
-   * but left unwired pending this issue). Either undefined skips the
-   * breakdown so pre-first-turn renders stay clean.
+   * #4205/#6769: raw input/output token counts for the most-recent turn.
+   * When both are present the tooltip appends a `… = ${total}k tokens`
+   * breakdown so the chip explains what fills the window. Either undefined
+   * skips the breakdown so pre-first-turn renders stay clean.
    */
   inputTokens?: number
   outputTokens?: number
+  /**
+   * #6769: cached conversation history in the window (cache_read +
+   * cache_creation). When > 0, the breakdown surfaces it as the dominant
+   * term (`Nk cached history + …`) — under prompt caching the bulk of the
+   * fill is history, not the new turn. Absent / 0 falls back to the plain
+   * `input + output` breakdown (providers with no cache fields).
+   */
+  cachedTokens?: number
 }
 
 export function contextTooltip({
@@ -67,52 +81,62 @@ export function contextTooltip({
   contextSummary,
   inputTokens,
   outputTokens,
+  cachedTokens,
 }: ContextTooltipArgs): string {
   if (percent == null && !contextSummary && inputTokens == null && outputTokens == null) {
     return 'No context usage yet — meter fills after the first turn completes.'
   }
-  // KEY: clarify per-turn vs cumulative. The #3858 issue calls this out
-  // as the most confusing one because 100% red looks alarming but the
-  // value is the LAST TURN's prompt size, not a cumulative spend.
-  // Percent rounds to 1 decimal — App.tsx computes it as a float
-  // ((total/contextWindow)*100) so without rounding we'd get
-  // "12.3456789%" in the tooltip (Copilot review on #4204).
+  // #6769: this is CUMULATIVE window fill — the whole conversation, not the
+  // last turn's prompt. It grows as you chat and steps down after a
+  // compaction. Percent rounds to 1 decimal — App.tsx computes it as a float
+  // (occupancy / effectiveWindow * 100) so without rounding we'd get
+  // "12.3456789%" in the tooltip.
   const lead = percent != null
-    ? `Most recent turn used ${roundPercent(percent)}% of the model's context window.`
-    : 'Most recent turn context usage.'
+    ? `Conversation fills ${roundPercent(percent)}% of the model's context window (before auto-compact).`
+    : 'Cumulative context-window fill.'
   const detail = contextSummary ? ` (${contextSummary})` : ''
-  // #4205: when both input/output are known, append the breakdown so the
-  // single chip carries both the percent ("how full?") and the in/out
-  // split ("what filled it?"). Composed rather than added as a separate
-  // chip — the issue's "out of scope" pins this to enriching the
-  // existing context chip.
+  // #6769: append the cache-aware breakdown so the single chip carries both
+  // the percent ("how full?") and the split ("what filled it?").
   const breakdown = (inputTokens != null && outputTokens != null)
-    ? ' ' + tokenChipTooltip({ inputTokens, outputTokens })
+    ? ' ' + tokenChipTooltip({ inputTokens, outputTokens, cachedTokens })
     : ''
-  return `${lead}${detail} This is per-turn — resets each turn and the visible width caps at 100%.${breakdown}`
+  return `${lead}${detail} This tracks the whole conversation — it grows as you chat and steps down after a compaction.${breakdown}`
 }
 
 export interface TokenChipTooltipArgs {
-  /** Input tokens the most-recent turn sent (prompt + context). */
+  /** New (uncached) input tokens the most-recent turn sent. */
   inputTokens: number
   /** Output tokens the most-recent turn produced (assistant reply). */
   outputTokens: number
+  /**
+   * #6769: cached conversation history in the window (cache_read +
+   * cache_creation). When > 0 it's surfaced as the leading term and folded
+   * into the total; absent / 0 gives the plain `input + output` breakdown.
+   */
+  cachedTokens?: number
 }
 
 /**
- * #4205 (re-introduced from #4204): "1.2k input + 0.3k output = 1.5k
- * tokens" breakdown for the context chip's hover. Composed into
- * `contextTooltip` rather than rendered as its own chip — the issue's
- * "out of scope" section pins this to enriching the existing chip.
+ * #4205/#6769: token breakdown for the context chip's hover.
+ *
+ * Under prompt caching the conversation history dominates (cache_read), so
+ * when `cachedTokens > 0` the breakdown reads
+ * "Nk cached history + Ik new input + Ok output = Tk tokens" — the total is
+ * the cumulative window occupancy. Providers with no cache fields (cachedTokens
+ * absent / 0) fall back to the plain "Ik input + Ok output = Tk tokens".
  *
  * Token counts under 1000 render in raw form ("450 tokens"); 1000+
  * abbreviate as kilo ("1.5k") via the canonical `formatTokensCompact`,
  * matching the header meter + `formatContext` chip in App.tsx so the chip
  * text + tooltip stay visually consistent (#5094).
  */
-export function tokenChipTooltip({ inputTokens, outputTokens }: TokenChipTooltipArgs): string {
-  const total = inputTokens + outputTokens
-  return `Breakdown: ${formatTokensCompact(inputTokens)} input + ${formatTokensCompact(outputTokens)} output = ${formatTokensCompact(total)} tokens.`
+export function tokenChipTooltip({ inputTokens, outputTokens, cachedTokens }: TokenChipTooltipArgs): string {
+  const cached = cachedTokens != null && cachedTokens > 0 ? cachedTokens : 0
+  const total = cached + inputTokens + outputTokens
+  const parts = cached > 0
+    ? `${formatTokensCompact(cached)} cached history + ${formatTokensCompact(inputTokens)} new input + ${formatTokensCompact(outputTokens)} output`
+    : `${formatTokensCompact(inputTokens)} input + ${formatTokensCompact(outputTokens)} output`
+  return `Breakdown: ${parts} = ${formatTokensCompact(total)} tokens.`
 }
 
 function roundPercent(n: number): string {

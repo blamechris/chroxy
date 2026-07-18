@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, Platform, Animated, AccessibilityInfo, Alert, Modal, Pressable, ScrollView } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
-import { resolveContextWindow } from '@chroxy/store-core';
+import { resolveContextWindow, contextWindowTokens, contextFillPercent } from '@chroxy/store-core';
 import type { CumulativeUsage, PendingPermissionConfirm, SessionIntervention } from '@chroxy/store-core';
 import { formatCostBadge } from '@chroxy/store-core';
 import type { ModelInfo, ContextUsage, AgentInfo, ConnectedClient, CustomAgent, SessionContext, McpServer, PermissionMode } from '../store/connection';
@@ -334,15 +334,21 @@ export function SettingsBar({
     }
   }
   if (contextUsage) {
-    const total = contextUsage.inputTokens + contextUsage.outputTokens;
+    // #6769: cumulative window occupancy — input + output + cache_read +
+    // cache_creation of the latest turn. Under prompt caching the history
+    // lives in cache_read, so input+output alone read near-empty mid-chat.
+    const total = contextWindowTokens(contextUsage) ?? 0;
     if (total > 0) {
       const mInfo = availableModels.find((m) => m.id === activeModel || m.fullId === activeModel);
       const cw = resolveContextWindow(mInfo, provider);
-      // #5424: when the window is genuinely unknown (e.g. ollama reports
-      // none), show the raw token count instead of a fabricated "% of 200k".
+      // #6769: percent metered against the auto-compact-adjusted effective
+      // ceiling. #5424: when the window is genuinely unknown (e.g. ollama
+      // reports none), show the raw token count instead of a fabricated
+      // "% of 200k".
+      const pct = contextFillPercent(contextUsage, cw);
       summaryParts.push(
-        cw != null
-          ? `${Math.min(Math.round((total / cw) * 100), 100)}%`
+        pct != null
+          ? `${Math.min(Math.round(pct), 100)}%`
           : formatTokenCount(total),
       );
     }
@@ -574,11 +580,18 @@ export function SettingsBar({
                     </Text>
                   ) : null}
                   {contextUsage && (() => {
-                    const total = contextUsage.inputTokens + contextUsage.outputTokens;
+                    // #6769: cumulative window occupancy (input + output +
+                    // cache_read + cache_creation of the latest turn) — the
+                    // history lives in cache_read under prompt caching, so
+                    // input+output alone read near-empty mid-conversation.
+                    const total = contextWindowTokens(contextUsage) ?? 0;
                     if (total === 0) return null;
                     const modelInfo = availableModels.find((m) => m.id === activeModel || m.fullId === activeModel);
                     const contextWindow = resolveContextWindow(modelInfo, provider);
-                    if (contextWindow == null) {
+                    // #6769: percent metered against the auto-compact-adjusted
+                    // effective ceiling (desktop "context left" parity).
+                    const pct = contextFillPercent(contextUsage, contextWindow);
+                    if (contextWindow == null || pct == null) {
                       // #5424: window genuinely unknown (e.g. ollama reports
                       // none — the real limit is the local model file's
                       // num_ctx). Show the raw token count, no percentage or
@@ -590,7 +603,6 @@ export function SettingsBar({
                         </Text>
                       );
                     }
-                    const pct = (total / contextWindow) * 100;
                     const barColor = pct >= 80 ? COLORS.accentRed : pct >= 50 ? COLORS.accentOrange : COLORS.accentGreen;
                     return (
                       <>

@@ -42,12 +42,13 @@ describe('costTooltip (#3858)', () => {
   })
 })
 
-describe('contextTooltip (#3858)', () => {
-  it('explicitly calls out the per-turn nature (not cumulative)', () => {
+describe('contextTooltip (#3858 / #6769)', () => {
+  it('describes cumulative context-window fill, NOT per-turn (#6769)', () => {
     const t = contextTooltip({ percent: 45, contextSummary: '90k / 200k tokens' })
-    // The issue's key requirement: disambiguate per-turn vs cumulative.
-    expect(t).toMatch(/per[- ]turn|this turn|last turn|most recent turn/i)
-    expect(t).not.toMatch(/cumulative|session total/i)
+    // #6769 reversed #3858's per-turn framing: the meter now tracks the whole
+    // conversation's fill, so the tooltip must NOT claim it resets each turn.
+    expect(t).toMatch(/whole conversation|fills 45% of the model's context window|before auto-compact/i)
+    expect(t).not.toMatch(/per[- ]turn|resets each turn|most recent turn used/i)
   })
 
   it('includes the percent and the summary string when both are present', () => {
@@ -189,6 +190,25 @@ describe('tokenChipTooltip (#4205)', () => {
     expect(t).toContain('0 output')
     expect(t).toContain('1.5k tokens')
   })
+
+  // #6769: under prompt caching the conversation history dominates, so the
+  // breakdown surfaces it as the leading "cached history" term and folds it
+  // into the total (the cumulative window occupancy).
+  it('surfaces cached history as the leading term when cachedTokens > 0 (#6769)', () => {
+    const t = tokenChipTooltip({ inputTokens: 500, outputTokens: 2000, cachedTokens: 90000 })
+    expect(t).toContain('90.0k cached history')
+    expect(t).toContain('500 new input')
+    expect(t).toContain('2.0k output')
+    // total = 90k + 500 + 2k = 92.5k
+    expect(t).toContain('92.5k tokens')
+  })
+
+  it('falls back to plain input + output when cachedTokens is 0 / absent (#6769)', () => {
+    const zero = tokenChipTooltip({ inputTokens: 1200, outputTokens: 8000, cachedTokens: 0 })
+    expect(zero).not.toMatch(/cached history/i)
+    expect(zero).toContain('1.2k input')
+    expect(zero).toContain('9.2k tokens')
+  })
 })
 
 describe('contextTooltip + token breakdown (#4205)', () => {
@@ -232,5 +252,21 @@ describe('contextTooltip + token breakdown (#4205)', () => {
   it('still returns the "no usage yet" fallback when ALL inputs are absent', () => {
     const t = contextTooltip({ percent: null })
     expect(t).toMatch(/no context usage yet|first turn/i)
+  })
+
+  // #6769: when cachedTokens is threaded through, the appended breakdown must
+  // reflect the cumulative fill (cached history dominating), not just the
+  // tiny per-turn input/output.
+  it('appends a cache-aware breakdown when cachedTokens is present (#6769)', () => {
+    const t = contextTooltip({
+      percent: 50,
+      contextSummary: '92k / 200k tokens',
+      inputTokens: 500,
+      outputTokens: 2000,
+      cachedTokens: 90000,
+    })
+    expect(t).toContain('50%')
+    expect(t).toContain('90.0k cached history')
+    expect(t).toContain('92.5k tokens')
   })
 })

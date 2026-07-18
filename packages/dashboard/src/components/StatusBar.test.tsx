@@ -143,10 +143,11 @@ describe('StatusBar', () => {
         .toMatch(/estimated client-side/i)
     })
 
-    it('context chip tooltip explicitly says per-turn and includes the percent', () => {
+    it('context chip tooltip describes cumulative fill (not per-turn) and includes the percent (#6769)', () => {
       const { container } = render(<StatusBar context="90k tokens" contextPercent={45} />)
       const ctx = container.querySelector('.status-context')
-      expect(ctx!.getAttribute('title')).toMatch(/per[- ]turn|most recent turn/i)
+      expect(ctx!.getAttribute('title')).toMatch(/whole conversation|before auto-compact/i)
+      expect(ctx!.getAttribute('title')).not.toMatch(/per[- ]turn|resets each turn/i)
       expect(ctx!.getAttribute('title')).toContain('45%')
     })
 
@@ -320,6 +321,39 @@ describe('StatusBar', () => {
         />,
       )
       expect(screen.queryByTestId('status-context-meter')).not.toBeInTheDocument()
+    })
+
+    // #6769: the `used / total` label is driven by the cumulative occupancy
+    // (`contextTokens`), which includes cached history — NOT the tiny per-turn
+    // input+output. When contextTokens is supplied it wins over input+output.
+    it('uses contextTokens (cumulative occupancy incl. cache) for the used/total label (#6769)', () => {
+      render(
+        <StatusBar
+          contextPercent={50}
+          contextTokens={92000}
+          cachedTokens={90000}
+          inputTokens={500}
+          outputTokens={2000}
+          contextWindow={200_000}
+        />,
+      )
+      // Label reads the 92k occupancy, not the 2.5k per-turn input+output.
+      expect(screen.getByTestId('status-context-label')).toHaveTextContent('92.0k / 200.0k tokens')
+      // Tooltip surfaces the cached-history split.
+      const ctx = screen.getByTestId('status-context-meter')
+      expect(ctx.getAttribute('title')).toContain('90.0k cached history')
+    })
+
+    it('falls back to input+output for the label when contextTokens is absent (#6769 back-compat)', () => {
+      render(
+        <StatusBar
+          contextPercent={3}
+          inputTokens={25000}
+          outputTokens={5000}
+          contextWindow={1_000_000}
+        />,
+      )
+      expect(screen.getByTestId('status-context-label')).toHaveTextContent('30.0k / 1M tokens')
     })
 
     // #5179 (C1): the fill bar sits BENEATH the `used / total tokens`

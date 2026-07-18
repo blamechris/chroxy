@@ -15,10 +15,19 @@ export { DEFAULT_CONTEXT_WINDOW } from './types'
 // default — for providers that legitimately report no window (ollama sends
 // `contextWindow: null` on purpose) `resolveContextWindow` returns null and
 // clients render an "unknown window" state instead of a % against 200k.
+// #6769: cumulative context-window fill. `contextWindowTokens` reads the
+// latest turn's occupancy (input + output + cache_read + cache_creation — the
+// history lives in cache_read), and `contextFillPercent` meters it against the
+// auto-compact-adjusted `effectiveContextWindow`. See context-window.ts for the
+// full semantic model.
 export {
   isClaudeBackedProvider,
   resolveContextWindow,
   CLAUDE_BACKED_DOCKER_IDS,
+  contextWindowTokens,
+  effectiveContextWindow,
+  contextFillPercent,
+  CONTEXT_AUTO_COMPACT_RESERVE,
 } from './context-window'
 
 // #4853: runtime type-guard for `VoiceInputMode` — keyed off an
