@@ -98,6 +98,32 @@ export function mergeEditedInput(originalInput, editedInput, toolName) {
 }
 
 /**
+ * #6794 — is a single path value protected, resolved against `base`?
+ * `resolve()` absorbs absolute paths, a leading `./`, and `..` traversal; the
+ * relative path is what we segment-match so cwd's own name can't false-match.
+ * Segments are lowercased first: on case-insensitive filesystems (macOS APFS,
+ * Windows) `.GIT/config` IS `.git/config`, so a case-sensitive match would let
+ * case variants evade the floor. Over-flooring a genuinely distinct `.GIT` on
+ * case-sensitive Linux is fine — the floor only forces a prompt, never denies.
+ * @param {string} target  a path value from a tool input
+ * @param {string} base    the resolution base (session cwd)
+ * @returns {boolean}
+ */
+function isProtectedPathValue(target, base) {
+  const rel = relative(base, resolve(base, target))
+  const segments = rel.split(sep)
+    .filter((s) => s.length > 0 && s !== '..')
+    .map((s) => s.toLowerCase())
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i]
+    if (PROTECTED_DIR_SEGMENTS.has(seg)) return true
+    if (seg === '.env' || seg.startsWith('.env.')) return true
+    if (seg === '.config' && segments[i + 1] === 'git') return true
+  }
+  return false
+}
+
+/**
  * #6794 — does this tool input target a protected path? Inspects EVERY present
  * {@link PROTECTED_PATH_INPUT_FIELDS} value (a benign `file_path` must not
  * shadow a protected `path`), resolves each against the session cwd (so
@@ -105,14 +131,25 @@ export function mergeEditedInput(originalInput, editedInput, toolName) {
  * tests the path RELATIVE to cwd segment-by-segment. ANY protected field
  * floors the input.
  *
+ * #6805/#6828 — codex `apply_patch` carries its per-file targets in an ARRAY:
+ * `input.changes` is `FileUpdateChange[] = { path, kind, diff }` (see
+ * codex-app-server-session.js `_describeApproval`), with the top-level
+ * `file_path` set to the approval's `grantRoot` — typically the benign repo
+ * root. Scanning only the flat fields therefore let a member edit under
+ * `.git/`/`.env*` escape the floor (and, with a persisted `{apply_patch,
+ * allow}` rule from #6771, be durably auto-approved). Every array entry's
+ * `path` is now checked with the same matcher — ANY protected member floors
+ * the WHOLE request. A string-shaped `changes` (codex's legacy unified-diff
+ * `item.patch` passthrough) carries no parseable paths and is skipped, same
+ * as any other non-array field.
+ *
  * Matching relative-to-cwd (not the raw absolute path) is deliberate: the
  * session's OWN location can never trigger a false positive — e.g. a git
  * worktree that itself lives under a real `.claude/` dir writing to
  * `packages/…` is NOT floored, because the `.claude` segment is above cwd.
  *
- * Segment rules (a match on ANY segment floors the write; segments are
- * lowercased first so `.GIT`/`.Env.local` can't evade the floor on the
- * case-insensitive filesystems where they alias the real paths):
+ * Segment rules (a match on ANY segment floors the write; see
+ * {@link isProtectedPathValue} for the lowercase rationale):
  *   - a segment in {@link PROTECTED_DIR_SEGMENTS} (`.git` / `.claude` / `.vscode`)
  *   - a `.config` segment immediately followed by `git` (the XDG git-config dir)
  *   - a segment that is `.env` or starts with `.env.` (`.env` / `.env.local` / …)
@@ -133,22 +170,13 @@ export function isProtectedPathTarget(input, cwd) {
   const base = (typeof cwd === 'string' && cwd.length > 0) ? cwd : process.cwd()
   for (const field of PROTECTED_PATH_INPUT_FIELDS) {
     if (typeof input[field] !== 'string' || input[field].length === 0) continue
-    // resolve() absorbs absolute paths, a leading `./`, and `..` traversal; the
-    // relative path is what we segment-match so cwd's own name can't false-match.
-    const rel = relative(base, resolve(base, input[field]))
-    // Lowercase every segment before matching: on case-insensitive filesystems
-    // (macOS APFS, Windows) `.GIT/config` IS `.git/config`, so a case-sensitive
-    // match would let case variants evade the floor. Over-flooring a genuinely
-    // distinct `.GIT` on case-sensitive Linux is fine — the floor only forces a
-    // prompt, never denies.
-    const segments = rel.split(sep)
-      .filter((s) => s.length > 0 && s !== '..')
-      .map((s) => s.toLowerCase())
-    for (let i = 0; i < segments.length; i++) {
-      const seg = segments[i]
-      if (PROTECTED_DIR_SEGMENTS.has(seg)) return true
-      if (seg === '.env' || seg.startsWith('.env.')) return true
-      if (seg === '.config' && segments[i + 1] === 'git') return true
+    if (isProtectedPathValue(input[field], base)) return true
+  }
+  // #6805/#6828 — walk the array-shaped per-file targets (codex apply_patch).
+  if (Array.isArray(input.changes)) {
+    for (const change of input.changes) {
+      if (!change || typeof change.path !== 'string' || change.path.length === 0) continue
+      if (isProtectedPathValue(change.path, base)) return true
     }
   }
   return false
@@ -170,7 +198,7 @@ export function isProtectedPathTarget(input, cwd) {
  *   user_question       { toolUseId, questions }
  */
 export class PermissionManager extends EventEmitter {
-  constructor({ timeoutMs, log, maxPendingPermissions, cwd } = {}) {
+  constructor({ timeoutMs, log, maxPendingPermissions, cwd, ruleStore } = {}) {
     super()
     this._timeoutMs = timeoutMs || DEFAULT_TIMEOUT_MS
     this._log = log || console
@@ -181,6 +209,12 @@ export class PermissionManager extends EventEmitter {
     // isProtectedPathTarget). Optional: when unset the floor resolves targets
     // against process.cwd(), which still catches relative protected paths.
     this._cwd = (typeof cwd === 'string' && cwd.length > 0) ? cwd : null
+    // #6771 — durable per-project rule store (PermissionRuleStore). Optional:
+    // when present, an `allowAlways` decision persists a rule keyed by this
+    // session's cwd, and this session seeds its persistent rules from the store
+    // on construction (below) so a prior grant takes effect without re-prompting
+    // after a daemon restart.
+    this._ruleStore = ruleStore || null
 
     this._pendingPermissions = new Map() // requestId -> { resolve, input }
     this._permissionTimers = new Map()   // requestId -> timer
@@ -200,6 +234,15 @@ export class PermissionManager extends EventEmitter {
 
     // Session-scoped permission rules
     this._sessionRules = [] // [{ tool, decision }]
+
+    // #6771 — durable per-project rules seeded from the store for THIS
+    // session's cwd. Kept SEPARATE from `_sessionRules` so `setRules`/
+    // `clearRules` (the session-scoped `set_permission_rules` path, and the
+    // clearRules() on a permission-mode switch) never wipe a project-level
+    // "always allow", and vice-versa. `_matchesRule` consults both.
+    this._persistentRules = (this._ruleStore && this._cwd)
+      ? this._ruleStore.getRules(this._cwd)
+      : []
 
     // AskUserQuestion handling
     this._pendingUserAnswer = null // { resolve, input, toolUseId } when waiting for user answer
@@ -250,20 +293,55 @@ export class PermissionManager extends EventEmitter {
   }
 
   /**
-   * Clear all session-scoped permission rules.
+   * Clear all session-scoped permission rules. Persistent (project-scoped)
+   * rules are UNTOUCHED — a mode switch or a `set_permission_rules []` must not
+   * silently revoke a durable "always allow" (#6771).
    */
   clearRules() {
     this._sessionRules = []
   }
 
   /**
-   * Check whether a toolName matches a session rule.
+   * Return a copy of the durable (project-scoped) rules currently applied to
+   * this session, each tagged `persist: 'project'` so a client can render them
+   * distinctly from session rules (#6771).
+   *
+   * @returns {Array<{tool: string, decision: string, persist: 'project'}>}
+   */
+  getPersistentRules() {
+    return this._persistentRules.map((r) => ({ tool: r.tool, decision: r.decision, persist: 'project' }))
+  }
+
+  /**
+   * Replace this session's durable rule set in memory (does NOT persist —
+   * callers that own the store persist separately). Used to re-seed after the
+   * store changes out-of-band (e.g. a client edited the project's rules).
+   *
+   * @param {Array<{tool: string, decision: string}>} rules
+   */
+  setPersistentRules(rules) {
+    this._persistentRules = Array.isArray(rules)
+      ? rules
+        .filter((r) => r && typeof r.tool === 'string' && (r.decision === 'allow' || r.decision === 'deny'))
+        .map((r) => ({ tool: r.tool, decision: r.decision }))
+      : []
+  }
+
+  /**
+   * Check whether a toolName matches a session or persistent rule. Session
+   * rules are consulted FIRST (a live, intentional session decision wins over a
+   * standing project grant), then the durable project rules (#6771).
    *
    * @param {string} toolName
    * @returns {'allow'|'deny'|null} null if no rule matches
    */
   _matchesRule(toolName) {
     for (const rule of this._sessionRules) {
+      if (rule.tool === toolName) {
+        return rule.decision
+      }
+    }
+    for (const rule of this._persistentRules) {
       if (rule.tool === toolName) {
         return rule.decision
       }
@@ -529,6 +607,23 @@ export class PermissionManager extends EventEmitter {
       }
       if (pending.suggestions && pending.suggestions.length > 0) {
         result.updatedPermissions = pending.suggestions
+      }
+      // #6771 — persist a DURABLE project-scoped rule so this grant survives a
+      // daemon restart (the SDK `updatedPermissions` above only persists within
+      // the SDK's own session). Only for rule-eligible tools: the store rejects
+      // NEVER_AUTO_ALLOW / non-ELIGIBLE tools, so an `allowAlways` on Bash (or a
+      // codex `shell`) degrades to a one-shot allow and is NEVER durably
+      // whitelisted. Seed the in-memory persistent set too so the very next tool
+      // call in THIS session auto-allows without re-prompting.
+      if (toolName && this._ruleStore && this._cwd) {
+        const persisted = this._ruleStore.addRule(this._cwd, { tool: toolName, decision: 'allow' })
+        if (persisted) {
+          // Re-seed the in-memory set so the very next tool call in THIS session
+          // auto-allows. The client-facing `permission_rules_updated` broadcast
+          // is emitted by the WS response handler (settings-handlers.js) after
+          // this resolves — getPersistentRules() reflects the update synchronously.
+          this.setPersistentRules(this._ruleStore.getRules(this._cwd))
+        }
       }
       pending.resolve(result)
     } else {

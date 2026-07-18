@@ -971,11 +971,17 @@ export function sendSessionInfo(ctx, ws, sessionId, opts = {}) {
       sessionId,
     })
   }
-  // Replay permission rules so reconnecting clients have current whitelist
+  // Replay permission rules so reconnecting clients have current whitelist.
+  // #6771 — also replay durable per-project rules (persistentRules) so the
+  // rules surfaces show standing "always allow" grants on session load, not
+  // only after a fresh allowAlways in the current session.
   if (typeof session.getPermissionRules === 'function') {
     const rules = session.getPermissionRules()
-    if (rules.length > 0) {
-      send(ws, { type: 'permission_rules_updated', rules, sessionId })
+    const persistentRules = typeof session.getPersistentPermissionRules === 'function'
+      ? session.getPersistentPermissionRules()
+      : []
+    if (rules.length > 0 || persistentRules.length > 0) {
+      send(ws, { type: 'permission_rules_updated', rules, persistentRules, sessionId })
     }
   }
 

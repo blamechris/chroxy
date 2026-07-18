@@ -226,6 +226,13 @@ export declare const SetPermissionRulesSchema: z.ZodObject<{
             deny: "deny";
         }>;
     }, z.core.$strip>>;
+    projectRules: z.ZodOptional<z.ZodArray<z.ZodObject<{
+        tool: z.ZodString;
+        decision: z.ZodEnum<{
+            allow: "allow";
+            deny: "deny";
+        }>;
+    }, z.core.$strip>>>;
     sessionId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
 export declare const SetPromptEvaluatorSchema: z.ZodObject<{
@@ -965,6 +972,13 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
             deny: "deny";
         }>;
     }, z.core.$strip>>;
+    projectRules: z.ZodOptional<z.ZodArray<z.ZodObject<{
+        tool: z.ZodString;
+        decision: z.ZodEnum<{
+            allow: "allow";
+            deny: "deny";
+        }>;
+    }, z.core.$strip>>>;
     sessionId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"set_prompt_evaluator">;

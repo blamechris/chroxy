@@ -532,6 +532,25 @@ function handlePermissionResponse(ws, client, msg, ctx) {
     // subscriber without excluding the origin client.
     ctx.transport.broadcast({ type: 'permission_resolved', requestId, decision })
   }
+
+  // #6771 — an `allowAlways` that resolved on an in-process session just
+  // persisted a durable project rule (permission-manager.js). Broadcast the
+  // updated rule sets so every client's rules surface (mobile SessionRules,
+  // etc.) reflects the new standing grant without a reconnect. The manager
+  // updated its in-memory persistent set synchronously during respondToPermission,
+  // so getPersistentPermissionRules() already includes it.
+  if (decision === 'allowAlways' && result.sessionId) {
+    const rulesEntry = ctx.sessions.sessionManager?.getSession?.(result.sessionId)
+    const rulesSession = rulesEntry?.session
+    if (rulesSession && typeof rulesSession.getPersistentPermissionRules === 'function') {
+      ctx.transport.broadcastToSession(result.sessionId, {
+        type: 'permission_rules_updated',
+        sessionId: result.sessionId,
+        rules: typeof rulesSession.getPermissionRules === 'function' ? rulesSession.getPermissionRules() : [],
+        persistentRules: rulesSession.getPersistentPermissionRules(),
+      })
+    }
+  }
 }
 
 function handleQueryPermissionAudit(ws, client, msg, ctx) {
@@ -713,6 +732,41 @@ function handleSetPermissionRules(ws, client, msg, ctx) {
     }
   }
 
+  // #6771 — optional durable (project-scoped) rule set. When present, it FULLY
+  // REPLACES the persisted rules for this session's project cwd — the client
+  // "manage / remove persistent rule" path (send the reduced list to drop one).
+  // Validated with the same eligibility floor as session rules.
+  const projectRules = msg.projectRules
+  if (projectRules !== undefined) {
+    if (!Array.isArray(projectRules)) {
+      sendSessionError(ws, ctx, 'projectRules must be an array')
+      return
+    }
+    for (let i = 0; i < projectRules.length; i++) {
+      const rule = projectRules[i]
+      if (!rule || typeof rule !== 'object') {
+        sendSessionError(ws, ctx, `projectRules[${i}]: not an object`)
+        return
+      }
+      if (typeof rule.tool !== 'string' || !rule.tool.trim()) {
+        sendSessionError(ws, ctx, `projectRules[${i}]: missing tool name`)
+        return
+      }
+      if (rule.decision !== 'allow' && rule.decision !== 'deny') {
+        sendSessionError(ws, ctx, `projectRules[${i}]: decision must be 'allow' or 'deny'`)
+        return
+      }
+      if (rule.decision === 'allow' && NEVER_AUTO_ALLOW.has(rule.tool)) {
+        sendSessionError(ws, ctx, `projectRules[${i}]: tool '${rule.tool}' cannot be auto-allowed`)
+        return
+      }
+      if (rule.decision === 'allow' && !ELIGIBLE_TOOLS.has(rule.tool)) {
+        sendSessionError(ws, ctx, `projectRules[${i}]: tool '${rule.tool}' is not eligible for permission rules`)
+        return
+      }
+    }
+  }
+
   const sessionId = msg.sessionId || client.activeSessionId
   const entry = resolveSessionOrError(ws, ctx, msg, client)
   if (!entry) return
@@ -723,6 +777,17 @@ function handleSetPermissionRules(ws, client, msg, ctx) {
 
   entry.session.setPermissionRules(rules)
 
+  // #6771 — apply the durable project-rule replacement (if any) to the store,
+  // then re-seed THIS session's in-memory persistent set so it takes effect
+  // immediately. The store is keyed by the session's cwd.
+  const ruleStore = ctx.sessions.sessionManager?.permissionRuleStore
+  if (projectRules !== undefined && ruleStore && typeof ruleStore.setRules === 'function') {
+    const stored = ruleStore.setRules(entry.session.cwd, projectRules)
+    if (typeof entry.session.setPersistentPermissionRules === 'function') {
+      entry.session.setPersistentPermissionRules(stored)
+    }
+  }
+
   // Audit the whitelist change
   if (ctx.permissions.permissionAudit) {
     ctx.permissions.permissionAudit.logWhitelistChange({
@@ -732,11 +797,15 @@ function handleSetPermissionRules(ws, client, msg, ctx) {
     })
   }
 
-  // Broadcast updated rules to all session clients
+  // Broadcast updated rules to all session clients. #6771 — include the durable
+  // persistentRules so the rules surfaces show session AND project grants.
   const currentRules = entry.session.getPermissionRules ? entry.session.getPermissionRules() : rules
-  ctx.transport.broadcastToSession(sessionId, { type: 'permission_rules_updated', rules: currentRules, sessionId })
+  const persistentRules = typeof entry.session.getPersistentPermissionRules === 'function'
+    ? entry.session.getPersistentPermissionRules()
+    : []
+  ctx.transport.broadcastToSession(sessionId, { type: 'permission_rules_updated', rules: currentRules, persistentRules, sessionId })
   // #4828: session-scoped.
-  loggerForSession('ws', sessionId).info(`Permission rules updated by ${client.id} on session ${sessionId}: ${rules.length} rule(s)`)
+  loggerForSession('ws', sessionId).info(`Permission rules updated by ${client.id} on session ${sessionId}: ${rules.length} session rule(s)${projectRules !== undefined ? `, ${projectRules.length} project rule(s)` : ''}`)
 }
 
 // #4664: assemble the per-session-setting WS handlers from the registry.

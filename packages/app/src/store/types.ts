@@ -171,6 +171,9 @@ export interface PermissionRule {
   tool: string;
   decision: 'allow' | 'deny';
   pattern?: string;
+  // #6771: set to 'project' on a DURABLE rule (backed by the daemon's per-project
+  // rule store — survives restarts). Absent on a session-scoped rule.
+  persist?: 'project';
 }
 
 export interface ProviderCapabilities {
@@ -236,6 +239,10 @@ export interface ProviderInfo {
 export interface SessionState extends BaseSessionState {
   activityState: SessionActivity;
   sessionRules?: PermissionRule[];
+  // #6771: durable per-project rules ("always allow / deny"), tagged
+  // `persist:'project'`. Written by permission_rules_updated (persistentRules
+  // field via the shared dispatch table). Surfaced in the SessionRules screen.
+  persistentRules?: PermissionRule[];
 }
 
 export interface SessionNotification {
@@ -562,6 +569,9 @@ export interface ModelsAndPermissionsActions {
   confirmPermissionMode: (mode: string) => void;
   cancelPermissionConfirm: () => void;
   setPermissionRules: (rules: PermissionRule[]) => void;
+  // #6771 — replace the durable per-project ("always allow") rule set for the
+  // active session's project cwd (SessionRules screen removal path).
+  setProjectPermissionRules: (projectRules: PermissionRule[]) => void;
 }
 
 /**

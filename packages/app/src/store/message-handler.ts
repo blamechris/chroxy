@@ -3030,6 +3030,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         { label: 'Allow', value: 'allow' },
         { label: 'Deny', value: 'deny' },
         ...(providerSupportsRules ? [{ label: 'Allow for Session', value: 'allowSession' }] : []),
+        // #6771 — "Always allow (project)" persists a durable per-project rule
+        // (server-side), gated on the same session-rule provider support.
+        ...(providerSupportsRules ? [{ label: 'Always allow (project)', value: 'allowAlways' }] : []),
       ];
       const newExpiresAt = permPayload.remainingMs !== null ? Date.now() + permPayload.remainingMs : undefined;
 

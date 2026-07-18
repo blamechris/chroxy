@@ -3759,8 +3759,9 @@ describe('permission_request message handler', () => {
     expect(msgs).toHaveLength(1);
     expect(msgs[0].type).toBe('prompt');
     expect(msgs[0].requestId).toBe('perm-1');
-    expect(msgs[0].options).toHaveLength(3);
-    expect(msgs[0].options!.map((o: any) => o.value)).toEqual(['allow', 'deny', 'allowSession']);
+    // #6771: a rule-supporting provider also gets the "Always allow (project)" option.
+    expect(msgs[0].options).toHaveLength(4);
+    expect(msgs[0].options!.map((o: any) => o.value)).toEqual(['allow', 'deny', 'allowSession', 'allowAlways']);
   });
 
   // #3072: when the active session's provider does not declare the

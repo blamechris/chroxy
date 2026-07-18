@@ -64,6 +64,7 @@ import type {
   ConnectionState,
   InputSettings,
   RestoreCheckpointMode,
+  PermissionDecision,
   ServerEntry,
   SessionInfo,
   SessionState,
@@ -3181,7 +3182,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     });
   },
 
-  sendPermissionResponse: (requestId: string, decision: 'allow' | 'deny' | 'allowSession', editedInput?: Record<string, string> | null) => {
+  sendPermissionResponse: (requestId: string, decision: PermissionDecision, editedInput?: Record<string, string> | null) => {
     const { socket } = get();
     // #5699 — refuse to answer a permission prompt while disconnected. A
     // permission request is NOT safely queueable: the server expires the pending
@@ -3198,8 +3199,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       return false;
     }
     // allowSession: wire decision is still 'allow' — session-scoped behaviour
-    // is implemented client-side via a follow-up set_permission_rules message
-    // (the schema only accepts 'allow' | 'allowAlways' | 'deny').
+    // is implemented client-side via a follow-up set_permission_rules message.
+    // #6771 allowAlways: sent VERBATIM — the server persists a durable
+    // per-project rule (permission-manager.js), no follow-up needed. (The schema
+    // accepts 'allow' | 'allowAlways' | 'deny'.)
     const wireDecision = decision === 'allowSession' ? 'allow' : decision;
     // #6543 (feature B): the operator's per-hunk edits ride along on an approve.
     // Only sent when present (a plain Allow omits it); the server whitelists
@@ -3266,7 +3269,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     return result;
   },
 
-  markPermissionResolved: (requestId: string, decision: 'allow' | 'deny' | 'allowSession') => {
+  markPermissionResolved: (requestId: string, decision: PermissionDecision) => {
     set((state) => ({
       // #2838: cap map size to prevent unbounded growth across long sessions.
       resolvedPermissions: capResolvedPermissions(state.resolvedPermissions, requestId, decision),

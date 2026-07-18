@@ -10,12 +10,16 @@
  * - Provider without setPermissionRules returns session_error
  * - Reconnect replay via sendSessionInfo
  */
-import { describe, it, beforeEach, mock } from 'node:test'
+import { describe, it, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync } from 'fs'
+import { tmpdir } from 'os'
+import { join } from 'path'
 import { settingsHandlers, ELIGIBLE_TOOLS, NEVER_AUTO_ALLOW } from '../src/handlers/settings-handlers.js'
 import { ELIGIBLE_TOOLS as PM_ELIGIBLE_TOOLS, NEVER_AUTO_ALLOW as PM_NEVER_AUTO_ALLOW } from '../src/permission-manager.js'
 import { sendSessionInfo } from '../src/ws-history.js'
 import { PermissionAuditLog } from '../src/permission-audit.js'
+import { PermissionRuleStore } from '../src/permission-rule-store.js'
 import { nsCtx } from './test-helpers.js'
 
 // ---- Fixtures ----
@@ -130,6 +134,72 @@ describe('handleSetPermissionRules — valid rules', () => {
     // Should not throw
     handler(WS, client, { type: 'set_permission_rules', rules }, ctx)
     assert.equal(ctx.transport.broadcastToSession.mock.callCount(), 1)
+  })
+})
+
+// #6771 — durable per-project ("always allow") rules via the projectRules field
+// on set_permission_rules (the client "manage / remove persistent rule" path).
+describe('handleSetPermissionRules — projectRules (#6771)', () => {
+  let ctx, client, session, store, dir
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'chroxy-sh-rules-'))
+    store = new PermissionRuleStore({ filePath: join(dir, 'permission-rules.json'), logger: { info() {}, warn() {}, error() {} } })
+    let _persistent = []
+    session = makeSession({
+      cwd: '/proj/a',
+      setPersistentPermissionRules: mock.fn((r) => { _persistent = r.slice() }),
+      getPersistentPermissionRules: mock.fn(() => _persistent.map((r) => ({ ...r, persist: 'project' }))),
+    })
+    const entry = { session, cwd: '/proj/a', name: 'test' }
+    ctx = makeCtx(entry, {
+      sessionManager: {
+        getSession: (id) => (id === 'sess-1' ? entry : null),
+        permissionRuleStore: store,
+      },
+    })
+    client = makeClient()
+  })
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('persists projectRules to the store keyed by the session cwd and re-seeds the session', () => {
+    const projectRules = [{ tool: 'Write', decision: 'allow' }]
+    handler(WS, client, { type: 'set_permission_rules', rules: [], projectRules }, ctx)
+
+    assert.deepEqual(store.getRules('/proj/a'), [{ tool: 'Write', decision: 'allow' }])
+    assert.equal(session.setPersistentPermissionRules.mock.callCount(), 1)
+    assert.deepEqual(session.setPersistentPermissionRules.mock.calls[0].arguments[0], [{ tool: 'Write', decision: 'allow' }])
+  })
+
+  it('broadcasts permission_rules_updated including persistentRules', () => {
+    handler(WS, client, { type: 'set_permission_rules', rules: [], projectRules: [{ tool: 'Read', decision: 'allow' }] }, ctx)
+
+    const [, msg] = ctx.transport.broadcastToSession.mock.calls[0].arguments
+    assert.equal(msg.type, 'permission_rules_updated')
+    assert.deepEqual(msg.persistentRules, [{ tool: 'Read', decision: 'allow', persist: 'project' }])
+  })
+
+  it('removes a rule when the reduced projectRules list is sent', () => {
+    store.setRules('/proj/a', [{ tool: 'Write', decision: 'allow' }, { tool: 'Read', decision: 'allow' }])
+    handler(WS, client, { type: 'set_permission_rules', rules: [], projectRules: [{ tool: 'Read', decision: 'allow' }] }, ctx)
+    assert.deepEqual(store.getRules('/proj/a'), [{ tool: 'Read', decision: 'allow' }])
+  })
+
+  it('rejects a projectRules allow for a NEVER_AUTO_ALLOW tool without persisting', () => {
+    handler(WS, client, { type: 'set_permission_rules', rules: [], projectRules: [{ tool: 'Bash', decision: 'allow' }] }, ctx)
+    const errMsg = ctx.transport.send.mock.calls[0]?.arguments[1]
+    assert.equal(errMsg?.type, 'session_error')
+    assert.deepEqual(store.getRules('/proj/a'), [])
+  })
+
+  it('leaves persistent rules untouched when projectRules is absent (session-only edit)', () => {
+    store.setRules('/proj/a', [{ tool: 'Write', decision: 'allow' }])
+    handler(WS, client, { type: 'set_permission_rules', rules: [{ tool: 'Read', decision: 'allow' }] }, ctx)
+    assert.deepEqual(store.getRules('/proj/a'), [{ tool: 'Write', decision: 'allow' }], 'store unchanged')
+    assert.equal(session.setPersistentPermissionRules.mock.callCount(), 0)
   })
 })
 
@@ -439,6 +509,29 @@ describe('SdkSession permission rules delegation', () => {
     const result = session.getPermissionRules()
     assert.deepEqual(result, [])
     session.destroy()
+  })
+
+  // #6771 — the durable rule store threads through BASE_SESSION_OPT_KEYS to the
+  // session's PermissionManager, which seeds persistent rules for its cwd.
+  it('seeds persistent rules from the injected rule store for its cwd', async () => {
+    const { SdkSession } = await import('../src/sdk-session.js')
+    const dir = mkdtempSync(join(tmpdir(), 'chroxy-sdk-seed-'))
+    try {
+      const store = new PermissionRuleStore({ filePath: join(dir, 'permission-rules.json'), logger: { info() {}, warn() {}, error() {} } })
+      store.addRule('/proj/seed', { tool: 'Write', decision: 'allow' })
+
+      const session = new SdkSession({ cwd: '/proj/seed', permissionRuleStore: store })
+      assert.deepEqual(session.getPersistentPermissionRules(), [{ tool: 'Write', decision: 'allow', persist: 'project' }])
+
+      // A session in a DIFFERENT cwd does not inherit the rule.
+      const other = new SdkSession({ cwd: '/proj/other', permissionRuleStore: store })
+      assert.deepEqual(other.getPersistentPermissionRules(), [])
+
+      session.destroy()
+      other.destroy()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })
 

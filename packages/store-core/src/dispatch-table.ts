@@ -192,6 +192,11 @@ export interface DispatchSessionBase {
   pendingClientMessageId?: string | null
   conversationId?: string | null
   sessionRules?: PermissionRule[]
+  // #6771: durable per-project rules ("always allow / deny") applied to this
+  // session, tagged `persist:'project'`. Distinct from `sessionRules` so a
+  // client can render standing project grants without conflating them with the
+  // session-scoped set. Both clients' real `SessionState` carry it.
+  persistentRules?: PermissionRule[]
   isIdle?: boolean
   // --- slice 2 reads (epic #5556) ---
   // `activeAgents` — read+rewritten by agent_spawned / agent_completed
@@ -673,6 +678,8 @@ export interface DispatchMessageMap {
     type: 'permission_rules_updated'
     sessionId?: string
     rules?: unknown[]
+    // #6771: durable per-project rules ("always allow / deny").
+    persistentRules?: unknown[]
   }
   confirm_permission_mode: {
     type: 'confirm_permission_mode'
@@ -1277,14 +1284,16 @@ function dispatchPermissionRulesUpdated<S extends DispatchSessionBase>(
   msg: DispatchMessageMap['permission_rules_updated'],
   adapter: ClientStoreAdapter<S>,
 ): void {
-  const { sessionId: explicitId, rules } = handlePermissionRulesUpdated(
+  const { sessionId: explicitId, rules, persistentRules } = handlePermissionRulesUpdated(
     msg as Record<string, unknown>,
   )
   const rulesSessionId = explicitId || adapter.getActiveSessionId()
   if (rulesSessionId && adapter.hasSession(rulesSessionId)) {
     adapter.updateSession(
       rulesSessionId,
-      () => ({ sessionRules: rules } as Partial<S>),
+      // #6771: persistentRules is a distinct field so a client can render
+      // durable project grants alongside session rules without conflating them.
+      () => ({ sessionRules: rules, persistentRules } as Partial<S>),
     )
   }
 }

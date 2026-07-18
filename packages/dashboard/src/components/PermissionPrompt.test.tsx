@@ -660,6 +660,84 @@ describe('PermissionPrompt — Allow for Session button (#2834)', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Always allow (this project) — durable rule button (#6771)
+// ---------------------------------------------------------------------------
+describe('PermissionPrompt — Always allow (project) button (#6771)', () => {
+  beforeEach(() => {
+    resetMockStore()
+  })
+
+  it('renders the Always allow button for a rule-eligible tool + supporting provider', () => {
+    render(
+      <PermissionPrompt
+        requestId="req-1"
+        tool="Write"
+        description="Write file"
+        remainingMs={60000}
+        onRespond={vi.fn()}
+      />
+    )
+    expect(screen.getByTestId('btn-allow-always')).toHaveTextContent('Always allow')
+  })
+
+  it('calls onRespond with allowAlways when clicked', () => {
+    const onRespond = vi.fn()
+    render(
+      <PermissionPrompt
+        requestId="req-1"
+        tool="Write"
+        description="Write file"
+        remainingMs={60000}
+        onRespond={onRespond}
+      />
+    )
+    fireEvent.click(screen.getByTestId('btn-allow-always'))
+    expect(onRespond).toHaveBeenCalledWith('req-1', 'allowAlways', null)
+  })
+
+  it('does NOT render for a non-rule-eligible tool (Bash)', () => {
+    render(
+      <PermissionPrompt
+        requestId="req-1"
+        tool="Bash"
+        description="rm -rf"
+        remainingMs={60000}
+        onRespond={vi.fn()}
+      />
+    )
+    expect(screen.queryByTestId('btn-allow-always')).not.toBeInTheDocument()
+  })
+
+  it('does NOT render when the provider lacks the sessionRules capability', () => {
+    mockStoreState.availableProviders = [{ name: 'claude-sdk', capabilities: { sessionRules: false } }]
+    render(
+      <PermissionPrompt
+        requestId="req-1"
+        tool="Write"
+        description="Write file"
+        remainingMs={60000}
+        onRespond={vi.fn()}
+      />
+    )
+    expect(screen.queryByTestId('btn-allow-always')).not.toBeInTheDocument()
+  })
+
+  it('shows "Always allowed (project)" once the store records allowAlways', () => {
+    mockStoreState.resolvedPermissions = { 'req-1': 'allowAlways' }
+    render(
+      <PermissionPrompt
+        requestId="req-1"
+        tool="Write"
+        description="Write file"
+        remainingMs={60000}
+        onRespond={vi.fn()}
+      />
+    )
+    expect(screen.getByTestId('perm-answer')).toHaveTextContent('Always allowed (project)')
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Allow for Session — provider capability gate (#3072)
 // ---------------------------------------------------------------------------
 describe('PermissionPrompt — provider capability gate (#3072)', () => {

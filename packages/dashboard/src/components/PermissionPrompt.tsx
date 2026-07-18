@@ -152,15 +152,14 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
     if (submittingRef.current || answered || remaining <= 0 || !connected) return
     submittingRef.current = true
     setSubmitting(true)
-    // 'allowSession' is only meaningful when both the tool is rule-eligible
-    // (#2834) AND the active provider supports session rules (#3072). Either
-    // gate failing means the server would reject the follow-up
-    // set_permission_rules; silently coerce to a plain 'allow' so keyboard
-    // shortcut users on an ineligible prompt still get an Allow-equivalent
-    // decision.
-    const allowSessionOk = isRuleEligibleTool(tool) && providerSupportsRules
+    // 'allowSession' / 'allowAlways' (#6771) are only meaningful when both the
+    // tool is rule-eligible (#2834) AND the active provider supports session
+    // rules (#3072). Either gate failing means the server would reject the rule;
+    // silently coerce to a plain 'allow' so keyboard shortcut users on an
+    // ineligible prompt still get an Allow-equivalent decision.
+    const ruleOk = isRuleEligibleTool(tool) && providerSupportsRules
     const effective: PermissionDecision =
-      decision === 'allowSession' && !allowSessionOk ? 'allow' : decision
+      (decision === 'allowSession' || decision === 'allowAlways') && !ruleOk ? 'allow' : decision
     if (intervalRef.current) clearInterval(intervalRef.current)
     // #6543: carry the per-hunk edits on an approve only (never on deny).
     onRespond(requestId, effective, effective === 'deny' ? null : editedInput)
@@ -178,6 +177,9 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
   const isUrgent = remaining > 0 && remaining <= 30000
   const showButtons = !answered && !isExpired
   const showAllowSession = showButtons && isRuleEligibleTool(tool) && providerSupportsRules
+  // #6771 — "Always allow (this project)" shares the same eligibility gate as
+  // "Allow for Session" (rule-eligible tool + provider that supports rules).
+  const showAllowAlways = showAllowSession
   const [dismissed, setDismissed] = useState(false)
 
   // #2840: keyboard hint labels near the Allow / Allow-for-Session buttons
@@ -266,6 +268,19 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
                 Allow for Session
               </button>
             )}
+            {showAllowAlways && (
+              <button
+                className="btn-allow-always"
+                onClick={() => respond('allowAlways')}
+                type="button"
+                aria-label={`Always allow ${tool} for this project`}
+                data-testid="btn-allow-always"
+                title="Always allow this tool for this project (persists across restarts)"
+                disabled={submitting || !connected}
+              >
+                Always allow
+              </button>
+            )}
             <button
               className="btn-deny"
               onClick={() => respond('deny')}
@@ -309,7 +324,13 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
 
       {answered && (
         <div className="perm-answer" data-testid="perm-answer">
-          {answered === 'deny' ? 'Denied' : answered === 'allowSession' ? 'Allowed for session' : 'Allowed'}
+          {answered === 'deny'
+            ? 'Denied'
+            : answered === 'allowSession'
+              ? 'Allowed for session'
+              : answered === 'allowAlways'
+                ? 'Always allowed (project)'
+                : 'Allowed'}
         </div>
       )}
     </div>

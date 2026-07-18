@@ -86,6 +86,7 @@ import type {
   ContextOccupancy,
   MessageAttachment,
   RestoreCheckpointMode,
+  PermissionRule,
   SavedConnection,
   SessionInfo,
   SessionState,
@@ -2135,6 +2136,27 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   setPermissionRules: (rules) => {
     const { activeSessionId } = get();
     const payload: Record<string, unknown> = { type: 'set_permission_rules', rules };
+    if (activeSessionId) payload.sessionId = activeSessionId;
+    sendIfOpen(payload);
+  },
+
+  // #6771 — replace the durable per-project ("always allow") rule set for the
+  // active session's project cwd. Used by the SessionRules screen to REMOVE a
+  // persistent rule (send the reduced list). Session rules are left untouched:
+  // we resend the current sessionRules alongside so the server's single
+  // set_permission_rules handler doesn't clobber them.
+  setProjectPermissionRules: (projectRules) => {
+    const { activeSessionId, sessionStates } = get();
+    const ss = activeSessionId ? sessionStates[activeSessionId] : null;
+    // Strip the client-only `persist` marker before echoing rules back — the
+    // server's schema (PermissionRuleSchema) accepts only { tool, decision }.
+    const bare = (rs?: PermissionRule[]) =>
+      (rs ?? []).map((r) => ({ tool: r.tool, decision: r.decision }));
+    const payload: Record<string, unknown> = {
+      type: 'set_permission_rules',
+      rules: bare(ss?.sessionRules),
+      projectRules: bare(projectRules),
+    };
     if (activeSessionId) payload.sessionId = activeSessionId;
     sendIfOpen(payload);
   },

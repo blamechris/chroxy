@@ -395,7 +395,9 @@ export class SdkSession extends BaseSession {
     // suspended until the last one resolves. (Shared wiring extracted in P2-9.)
     // #6794 — pass cwd so the protected-path floor can resolve relative tool
     // targets (.git/.claude/.env…) against this session's working directory.
-    this._permissions = new PermissionManager({ log, cwd: this.cwd })
+    // #6771 — pass the durable rule store so an `allowAlways` decision persists
+    // a project-scoped rule and this session seeds from prior grants for its cwd.
+    this._permissions = new PermissionManager({ log, cwd: this.cwd, ruleStore: this._permissionRuleStore })
     wirePermissionManager(this, this._permissions, {
       onRequest: () => this._pauseResultTimeoutForPermission(),
       onResolved: () => this._resumeResultTimeoutForPermission(),
@@ -1602,6 +1604,29 @@ export class SdkSession extends BaseSession {
   clearPermissionRules() {
     if (typeof this._permissions.clearRules === 'function') {
       this._permissions.clearRules()
+    }
+  }
+
+  /**
+   * #6771 — durable (project-scoped) permission rules currently applied to this
+   * session, tagged `persist:'project'`. Delegates to PermissionManager.
+   * @returns {Array<{tool: string, decision: string, persist: 'project'}>}
+   */
+  getPersistentPermissionRules() {
+    if (typeof this._permissions.getPersistentRules === 'function') {
+      return this._permissions.getPersistentRules()
+    }
+    return []
+  }
+
+  /**
+   * #6771 — re-seed this session's in-memory durable rule set (does NOT persist;
+   * the caller owns the store write). Delegates to PermissionManager.
+   * @param {Array<{tool: string, decision: string}>} rules
+   */
+  setPersistentPermissionRules(rules) {
+    if (typeof this._permissions.setPersistentRules === 'function') {
+      this._permissions.setPersistentRules(rules)
     }
   }
 
