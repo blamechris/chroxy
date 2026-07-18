@@ -22,6 +22,7 @@ import { SessionMessageHistory } from './session-message-history.js'
 import { SkillsUsageRecorder } from './skills-usage.js'
 import { resolveSessionPreset, foldPreamble } from './session-preset.js'
 import { SessionPresetTrustStore } from './session-preset-trust.js'
+import { PermissionRuleStore } from './permission-rule-store.js'
 import { createLogger } from './logger.js'
 import { ExternalSessionRegistry } from './external-session-registry.js'
 import { metrics } from './metrics.js'
@@ -327,6 +328,11 @@ export class SessionManager extends EventEmitter {
     // #5553: config path for the daemon-side preset override map. Tests point
     // this at a temp config.json; production uses the default ~/.chroxy/config.json.
     presetConfigPath,
+    // #6771: durable per-project permission rule store (persistent "always
+    // allow / deny"). Tests pass their own temp-pathed store; production wires a
+    // default whose file (permission-rules.json) sits next to the session-state
+    // file so a temp stateFilePath keeps it out of the real ~/.chroxy.
+    permissionRuleStore,
 
     // Message history
     maxMessages,
@@ -510,6 +516,18 @@ export class SessionManager extends EventEmitter {
     // Config path the preset resolver reads the daemon override map from.
     // Defaults to undefined → resolveSessionPreset uses its own DEFAULT_CONFIG_PATH.
     this.presetConfigPath = typeof presetConfigPath === 'string' ? presetConfigPath : null
+    // #6771: durable per-project permission rule store. Same temp-redirect logic
+    // as the sidecars above — the default file sits next to the session-state
+    // file so a test's temp stateFilePath keeps the rules out of the real home.
+    // Only the DEFAULT store is loaded here (so restored + newly-created sessions
+    // in a known cwd seed their persistent rules from prior grants); a
+    // caller-supplied store owns its own load() lifecycle.
+    if (permissionRuleStore) {
+      this.permissionRuleStore = permissionRuleStore
+    } else {
+      this.permissionRuleStore = new PermissionRuleStore({ filePath: join(dirname(this._stateFilePath), 'permission-rules.json') })
+      this.permissionRuleStore.load()
+    }
     Object.defineProperty(this, '_persistTimer', {
       get: () => this._persistence._persistTimer,
       set: (v) => { this._persistence._persistTimer = v },
@@ -1263,6 +1281,11 @@ export class SessionManager extends EventEmitter {
     if (containerId) providerOpts.containerId = containerId
     if (containerUser) providerOpts.containerUser = containerUser
     if (containerCliPath) providerOpts.containerCliPath = containerCliPath
+    // #6771: hand the durable per-project permission rule store to the session so
+    // its PermissionManager (SDK / BYOK / codex-app-server) can seed persistent
+    // rules for this cwd and persist an `allowAlways` decision. A runtime handle,
+    // forwarded via BASE_SESSION_OPT_KEYS.
+    providerOpts.permissionRuleStore = this.permissionRuleStore
     const session = new ProviderClass(providerOpts)
     // Pre-seed `bootedModel` from a restored snapshot so the dashboard can
     // surface the session's actual model immediately on reconnect, without

@@ -350,6 +350,8 @@ describe('message-handler', () => {
         { label: 'Allow', value: 'allow' },
         { label: 'Deny', value: 'deny' },
         { label: 'Allow for Session', value: 'allowSession' },
+        // #6771: a rule-supporting provider also gets "Always allow (project)".
+        { label: 'Always allow (project)', value: 'allowAlways' },
       ]);
     });
 

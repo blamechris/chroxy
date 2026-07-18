@@ -919,6 +919,25 @@ describe('shared dispatch table', () => {
       dispatch(env, { type: 'permission_rules_updated', sessionId: 's1' })
       expect(env.sessions.s1.sessionRules).toEqual([])
     })
+
+    // #6771 — durable per-project rules ride on a distinct `persistentRules` field.
+    it('writes persistentRules alongside session rules', () => {
+      const persistentRules = [{ tool: 'Write', decision: 'allow', persist: 'project' }]
+      const env = makeAdapter({
+        sessions: { s1: { sessionId: 's1', messages: [], sessionRules: [], persistentRules: [] } },
+      })
+      dispatch(env, { type: 'permission_rules_updated', sessionId: 's1', rules: [], persistentRules })
+      expect(env.sessions.s1.persistentRules).toEqual(persistentRules)
+      expect(env.sessions.s1.sessionRules).toEqual([])
+    })
+
+    it('defaults persistentRules to an empty array when the field is absent (older server)', () => {
+      const env = makeAdapter({
+        sessions: { s1: { sessionId: 's1', messages: [], sessionRules: [], persistentRules: [{ tool: 'Read', decision: 'allow' }] } },
+      })
+      dispatch(env, { type: 'permission_rules_updated', sessionId: 's1', rules: [{ tool: 'Edit', decision: 'allow' }] })
+      expect(env.sessions.s1.persistentRules).toEqual([])
+    })
   })
 
   describe('confirm_permission_mode', () => {

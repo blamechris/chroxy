@@ -113,7 +113,8 @@ export class CodexAppServerSession extends BaseSession {
     // _pendingPermissions/_lastPermissionData for ws-permissions.js.
     // #6794 — pass cwd so the protected-path floor can resolve relative tool
     // targets (.git/.claude/.env…) against this session's working directory.
-    this._permissions = new PermissionManager({ log, cwd: this.cwd })
+    // #6771 — pass the durable rule store (persistent per-project allow-always).
+    this._permissions = new PermissionManager({ log, cwd: this.cwd, ruleStore: this._permissionRuleStore })
     wirePermissionManager(this, this._permissions, {
       onRequest: () => this._pauseResultTimeoutForPermission(),
       onResolved: () => this._resumeResultTimeoutForPermission(),

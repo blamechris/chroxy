@@ -3788,6 +3788,20 @@ button.sidebar-token-view-session-row:hover {
   background: #16a34a;
 }
 
+/* Always allow for this project (#6771) — the widest-scope allow (persists
+   across daemon restarts), so it reads as the most deliberate of the three
+   allow actions: outlined rather than solid-filled. */
+.btn-allow-always {
+  background: transparent;
+  color: var(--accent-green);
+  border: 1px solid var(--accent-green);
+}
+
+.btn-allow-always:hover {
+  background: var(--accent-green);
+  color: #fff;
+}
+
 .btn-deny {
   background: var(--accent-red);
   color: #fff;
@@ -3797,6 +3811,7 @@ button.sidebar-token-view-session-row:hover {
 
 .btn-allow:focus-visible,
 .btn-allow-session:focus-visible,
+.btn-allow-always:focus-visible,
 .btn-deny:focus-visible {
   outline: 2px solid #fff;
   outline-offset: 2px;

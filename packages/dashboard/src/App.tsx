@@ -390,12 +390,13 @@ export function App() {
       if (!m.requestId) continue
       if (m.tool !== 'AskUserQuestion') continue
       // Per-message `answered` is set by `handlePermissionResolved` on
-      // BOTH allow and deny — gate only flips off for allow variants.
-      if (m.answered === 'allow' || m.answered === 'allowSession') continue
+      // BOTH allow and deny — gate only flips off for allow variants
+      // (#6771: allowAlways is an allow variant too).
+      if (m.answered === 'allow' || m.answered === 'allowSession' || m.answered === 'allowAlways') continue
       // Cross-client decision via `resolvedPermissions[requestId]` —
       // same allow-only rule.
       const decision = resolvedPermissions?.[m.requestId]
-      if (decision === 'allow' || decision === 'allowSession') continue
+      if (decision === 'allow' || decision === 'allowSession' || decision === 'allowAlways') continue
       return true
     }
     return false

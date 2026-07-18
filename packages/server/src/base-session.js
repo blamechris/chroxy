@@ -134,6 +134,7 @@ export const BASE_SESSION_OPT_KEYS = [
   'hardTimeoutMs',
   'streamStallTimeoutMs',
   'backgroundShellHardQuiesceMs',
+  'permissionRuleStore',
 ]
 
 // #5367: pick the BaseSession opts out of a subclass's full opts bag and merge
@@ -287,9 +288,19 @@ export class BaseSession extends EventEmitter {
     // BACKGROUND_SHELL_HARD_QUIESCE_MS (4h); 0 disables hard-reaping (revert
     // to #5247 advisory-only). Forwarded from config via SessionManager.
     backgroundShellHardQuiesceMs,
+    // #6771 — the daemon-wide durable PermissionRuleStore (persistent per-project
+    // "always allow / deny"). A runtime handle (not serialized), forwarded from
+    // SessionManager; the in-process permission providers (SDK / BYOK / codex)
+    // hand it to their PermissionManager so an `allowAlways` decision persists a
+    // project-scoped rule and new sessions in the same cwd seed from it.
+    permissionRuleStore,
   } = {}) {
     super()
     this.cwd = cwd || process.cwd()
+    // #6771 — durable per-project permission rule store (see the opt doc above).
+    // Read by the in-process permission providers when they build their
+    // PermissionManager; null on providers/tests that don't wire it.
+    this._permissionRuleStore = permissionRuleStore || null
     this.model = model || null
     // Actual model the underlying CLI/SDK reports at init time. May differ
     // from `this.model` (the user's requested override) when no override

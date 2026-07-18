@@ -453,6 +453,21 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
               ...(result.sessionId ? { sessionId: result.sessionId } : {}),
             })
           }
+          // #6771 — an allowAlways over the HTTP fallback (iOS notification
+          // action) just persisted a durable project rule on the in-process
+          // session. Broadcast the updated rule sets so clients' rules surfaces
+          // refresh, mirroring the WS handler (settings-handlers.js).
+          if (decision === 'allowAlways' && result.via === 'sdk' && result.sessionId) {
+            const rulesSession = getSessionManager()?.getSession?.(result.sessionId)?.session
+            if (rulesSession && typeof rulesSession.getPersistentPermissionRules === 'function') {
+              broadcastFn({
+                type: 'permission_rules_updated',
+                sessionId: result.sessionId,
+                rules: typeof rulesSession.getPermissionRules === 'function' ? rulesSession.getPermissionRules() : [],
+                persistentRules: rulesSession.getPersistentPermissionRules(),
+              })
+            }
+          }
           log.info(`Permission ${requestId} resolved via HTTP: ${decision} (${result.via})`)
           sendJson(res, 200, { ok: true })
           return
