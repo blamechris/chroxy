@@ -60,6 +60,23 @@ const CLIENT_NAME = 'Chroxy'
  * @param {string} url
  * @returns {Promise<string|null>}
  */
+/**
+ * True only for an http(s) URL. Every endpoint the daemon takes from discovered
+ * OAuth metadata (authorization / token / registration) must be http(s) — a
+ * `javascript:` / `file:` / `data:` endpoint from a malicious AS metadata doc
+ * must never be fetched or handed to a client to open. Mirrors the transport's
+ * parseRemoteEntry protocol check.
+ */
+function isHttpUrl(value) {
+  if (typeof value !== 'string' || !value) return false
+  try {
+    const p = new URL(value).protocol
+    return p === 'http:' || p === 'https:'
+  } catch {
+    return false
+  }
+}
+
 async function refuseUnsafeMetadataUrl(url) {
   let hostname
   try {
@@ -214,6 +231,12 @@ export async function discoverAuthorizationServer({ issuer, fetchImpl, timeoutMs
       // (resource metadata's authorization_servers) — SSRF-guarded.
       const { status, json } = await guardedFetchJson(fetchImpl, url, { method: 'GET', headers: { Accept: 'application/json' } }, timeoutMs)
       if (status >= 200 && status < 300 && json && typeof json.authorization_endpoint === 'string' && typeof json.token_endpoint === 'string') {
+        // Every endpoint the daemon will fetch (or hand to a client to open)
+        // MUST be http(s) — reject a javascript:/file:/data: endpoint smuggled
+        // into the metadata rather than trusting it. registration_endpoint is
+        // optional (no DCR) but validated when present.
+        if (!isHttpUrl(json.authorization_endpoint) || !isHttpUrl(json.token_endpoint)) continue
+        if (json.registration_endpoint != null && !isHttpUrl(json.registration_endpoint)) continue
         // RFC 8414 §3.3: the metadata `issuer` MUST exactly match the issuer
         // that was used to build the well-known URL. A mismatch is a mix-up /
         // spoofing signal — reject it rather than trusting the endpoints.

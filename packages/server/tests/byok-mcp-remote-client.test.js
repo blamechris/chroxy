@@ -787,4 +787,27 @@ describe('MCPRemoteClient — OAuth flow (#6822)', () => {
     // Nothing to assert beyond "did not throw"; the registry stays clean.
     assert.ok(true)
   })
+
+  it('dedupes the auth header: a config lowercase `authorization` + OAuth token → one Authorization, OAuth wins', () => {
+    const client = new MCPRemoteClient(
+      { name: 'oauth', type: 'http', url: 'http://127.0.0.1:1/mcp', headers: { authorization: 'Bearer STATIC' } },
+      { log: silentLog() },
+    )
+    client._accessToken = 'OAUTH-TOKEN'
+    const headers = client._buildHeaders({ json: true })
+    const authKeys = Object.keys(headers).filter((k) => k.toLowerCase() === 'authorization')
+    assert.deepEqual(authKeys, ['Authorization'], 'exactly one authorization header, canonical case')
+    assert.equal(headers.Authorization, 'Bearer OAUTH-TOKEN', 'the OAuth token wins over the static header')
+  })
+
+  it('leaves a config authorization header untouched when there is no OAuth token', () => {
+    const client = new MCPRemoteClient(
+      { name: 'noauth', type: 'http', url: 'http://127.0.0.1:1/mcp', headers: { authorization: 'Bearer STATIC' } },
+      { log: silentLog() },
+    )
+    const headers = client._buildHeaders()
+    // No token → the config's own header (whatever its case) passes through.
+    assert.equal(headers.authorization, 'Bearer STATIC')
+    assert.equal(headers.Authorization, undefined)
+  })
 })

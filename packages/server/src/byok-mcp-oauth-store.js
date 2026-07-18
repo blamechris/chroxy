@@ -36,6 +36,43 @@ import {
   getOrCreateMasterKey,
 } from './credential-cipher.js'
 
+// #6822 review: on Windows an antivirus / Search-indexer held handle on the
+// destination can make an otherwise-atomic renameSync fail transiently with one
+// of these codes. Mirrors session-state-persistence.WINDOWS_LOCK_CODES /
+// credential-store.CRED_WINDOWS_LOCK_CODES; renameWithRetry backs off and retries.
+const WINDOWS_LOCK_CODES = new Set(['EPERM', 'EACCES', 'EBUSY', 'EEXIST'])
+
+/** Synchronous millisecond sleep (Atomics.wait on a throwaway SharedArrayBuffer). */
+function sleepSync(ms) {
+  try {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+  } catch {
+    // Atomics/SharedArrayBuffer unavailable — skip the backoff; the syscall
+    // overhead of the retry still spaces attempts.
+  }
+}
+
+/**
+ * renameSync with a small retry-with-backoff on Windows held-handle locks. On
+ * POSIX (or any non-lock error) the first failure throws unchanged. On Windows
+ * a transient EPERM/EACCES/EBUSY/EEXIST is retried a few times before giving up.
+ */
+function renameWithRetry(tmp, target) {
+  const maxAttempts = process.platform === 'win32' ? 5 : 1
+  let lastErr
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      renameSync(tmp, target)
+      return
+    } catch (err) {
+      lastErr = err
+      if (process.platform !== 'win32' || !err || !WINDOWS_LOCK_CODES.has(err.code)) throw err
+      if (attempt < maxAttempts - 1) sleepSync(20 * (attempt + 1)) // 20/40/60/80ms
+    }
+  }
+  throw lastErr
+}
+
 // One-time breadcrumb when an intact encrypted token record exists on disk but
 // its keychain data key is currently unavailable (locked keychain / transient
 // probe failure) — matches credential-store's warnKeychainUnavailableOnce so a
@@ -174,7 +211,7 @@ function writeStoreAtomically(nextObj) {
   try {
     writeFileSync(tmp, JSON.stringify(payload, null, 2), { mode: 0o600 })
     if (process.platform !== 'win32') chmodSync(tmp, 0o600)
-    renameSync(tmp, target)
+    renameWithRetry(tmp, target)
     renamed = true
     // Post-rename mode re-check (POSIX), matching credential-store: if the file
     // landed with anything other than 0600, remove it and fail rather than

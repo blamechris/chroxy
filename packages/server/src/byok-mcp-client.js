@@ -1071,8 +1071,10 @@ export class MCPRemoteClient extends EventEmitter {
     try {
       res = await this._fetchImpl(this._url, {
         method: 'GET',
-        // #6822: include the OAuth bearer token (if any) on the SSE GET too.
-        headers: { ...this._headers, ...this._authHeader(), Accept: 'text/event-stream' },
+        // #6822: include the OAuth bearer token (if any) on the SSE GET too, via
+        // _applyOAuthHeader so a config-supplied `authorization` doesn't collide
+        // with a fresh `Authorization` (two auth headers).
+        headers: this._applyOAuthHeader({ ...this._headers, Accept: 'text/event-stream' }),
         redirect: 'manual', // #6834: never follow a redirect off-origin
         signal: controller.signal,
       })
@@ -1316,16 +1318,24 @@ export class MCPRemoteClient extends EventEmitter {
     // on every post-initialize request per the 2025-03-26 / 2025-06-18 spec.
     if (this._sessionId) headers['Mcp-Session-Id'] = this._sessionId
     if (this._negotiatedProtocolVersion) headers['MCP-Protocol-Version'] = this._negotiatedProtocolVersion
-    // #6822: an OAuth access token (from a stored record or a completed flow)
-    // overrides any static Authorization header the config carried — it is the
-    // fresher credential. Set LAST so it wins the spread above.
-    Object.assign(headers, this._authHeader())
-    return headers
+    return this._applyOAuthHeader(headers)
   }
 
-  /** #6822: the OAuth Authorization header, or an empty object when no token. */
-  _authHeader() {
-    return this._accessToken ? { Authorization: `Bearer ${this._accessToken}` } : {}
+  /**
+   * #6822: when an OAuth access token exists, replace ANY authorization header
+   * the config carried (case-insensitively — a config `authorization` collides
+   * with a fresh `Authorization`, sending TWO auth headers) with the OAuth
+   * bearer, which is the fresher credential. Mutates + returns `headers`. When
+   * there is no token, the config's own header (whatever its case) passes
+   * through untouched.
+   */
+  _applyOAuthHeader(headers) {
+    if (!this._accessToken) return headers
+    for (const key of Object.keys(headers)) {
+      if (key.toLowerCase() === 'authorization') delete headers[key]
+    }
+    headers.Authorization = `Bearer ${this._accessToken}`
+    return headers
   }
 
   /**

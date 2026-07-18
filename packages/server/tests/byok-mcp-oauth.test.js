@@ -441,3 +441,46 @@ describe('AS metadata issuer validation (RFC 8414, #6822)', () => {
     assert.ok(as && as.token_endpoint === 'http://127.0.0.1:9999/token')
   })
 })
+
+describe('AS metadata endpoint scheme validation (#6822)', () => {
+  it('rejects metadata with a non-http(s) token_endpoint (javascript:)', async () => {
+    const fetchImpl = async () => fakeRes(200, {
+      issuer: 'http://127.0.0.1:9999/as',
+      authorization_endpoint: 'http://127.0.0.1:9999/authorize',
+      token_endpoint: 'javascript:alert(1)',
+    })
+    const as = await discoverAuthorizationServer({ issuer: 'http://127.0.0.1:9999/as', fetchImpl })
+    assert.equal(as, null, 'a javascript: token_endpoint must be rejected')
+  })
+
+  it('rejects metadata with a non-http(s) authorization_endpoint (file:)', async () => {
+    const fetchImpl = async () => fakeRes(200, {
+      issuer: 'http://127.0.0.1:9999/as',
+      authorization_endpoint: 'file:///etc/passwd',
+      token_endpoint: 'http://127.0.0.1:9999/token',
+    })
+    const as = await discoverAuthorizationServer({ issuer: 'http://127.0.0.1:9999/as', fetchImpl })
+    assert.equal(as, null, 'a file: authorization_endpoint must be rejected')
+  })
+
+  it('rejects metadata with a non-http(s) registration_endpoint (data:) when present', async () => {
+    const fetchImpl = async () => fakeRes(200, {
+      issuer: 'http://127.0.0.1:9999/as',
+      authorization_endpoint: 'http://127.0.0.1:9999/authorize',
+      token_endpoint: 'http://127.0.0.1:9999/token',
+      registration_endpoint: 'data:text/plain,evil',
+    })
+    const as = await discoverAuthorizationServer({ issuer: 'http://127.0.0.1:9999/as', fetchImpl })
+    assert.equal(as, null, 'a data: registration_endpoint must be rejected')
+  })
+
+  it('accepts https endpoints (scheme check does not reject legitimate metadata)', async () => {
+    const fetchImpl = async () => fakeRes(200, {
+      issuer: 'http://127.0.0.1:9999/as',
+      authorization_endpoint: 'https://127.0.0.1:9999/authorize',
+      token_endpoint: 'https://127.0.0.1:9999/token',
+    })
+    const as = await discoverAuthorizationServer({ issuer: 'http://127.0.0.1:9999/as', fetchImpl })
+    assert.ok(as && as.token_endpoint === 'https://127.0.0.1:9999/token')
+  })
+})

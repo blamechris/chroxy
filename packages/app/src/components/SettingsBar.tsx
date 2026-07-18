@@ -35,6 +35,17 @@ export const HEADER_BADGE_HIT_SLOP = {
   right: 14,
 } as const;
 
+// #6822 — the MCP OAuth "Authorize" + "Submit" buttons use a compact look; this
+// hitSlop (paired with minHeight: 44 on the button styles) brings the effective
+// touch target above Apple HIG's 44 × 44pt on both axes even for the narrowest
+// plausible label.
+export const MCP_AUTH_HIT_SLOP = {
+  top: 12,
+  bottom: 12,
+  left: 12,
+  right: 12,
+} as const;
+
 // -- Props --
 
 export interface SettingsBarProps {
@@ -921,6 +932,7 @@ function McpServerRow({
             <TouchableOpacity
               style={styles.mcpAuthorizeButton}
               testID={`mcp-server-authorize-${server.name}`}
+              hitSlop={MCP_AUTH_HIT_SLOP}
               accessibilityRole="button"
               accessibilityLabel={`Authorize MCP server ${server.name}`}
               onPress={() => { if (server.authUrl) Linking.openURL(server.authUrl).catch(() => {}); }}
@@ -943,6 +955,7 @@ function McpServerRow({
             <TouchableOpacity
               style={[styles.mcpAuthSubmit, !code.trim() && styles.mcpAuthSubmitDisabled]}
               testID={`mcp-server-auth-submit-${server.name}`}
+              hitSlop={MCP_AUTH_HIT_SLOP}
               disabled={!code.trim()}
               accessibilityRole="button"
               accessibilityLabel={`Submit authorization code for MCP server ${server.name}`}
@@ -1209,6 +1222,9 @@ const styles = StyleSheet.create({
     alignSelf: 'flex-start',
     paddingHorizontal: 10,
     paddingVertical: 4,
+    minHeight: 44,
+    justifyContent: 'center',
+    alignItems: 'center',
     borderRadius: 6,
     borderWidth: 1,
     borderColor: COLORS.accentBlue,
@@ -1238,6 +1254,9 @@ const styles = StyleSheet.create({
   mcpAuthSubmit: {
     paddingHorizontal: 12,
     paddingVertical: 5,
+    minHeight: 44,
+    justifyContent: 'center',
+    alignItems: 'center',
     borderRadius: 6,
     borderWidth: 1,
     borderColor: COLORS.accentBlue,
