@@ -1,6 +1,6 @@
 import React from 'react';
 import renderer, { act, ReactTestInstance } from 'react-test-renderer';
-import { Alert, Text } from 'react-native';
+import { Alert, StyleSheet, Text } from 'react-native';
 import { CheckpointView } from '../CheckpointView';
 import { useConnectionStore } from '../../store/connection';
 
@@ -261,6 +261,23 @@ describe('CheckpointView', () => {
       const conv = findByTestID(root!.root, 'checkpoint-mode-conversation');
       expect(conv.props.disabled).toBe(true);
       expect(conv.props.accessibilityState?.disabled).toBe(true);
+    });
+
+    // Copilot review on #6825: the picker buttons must meet the 44pt minimum
+    // touch target on BOTH axes, like the component's other controls
+    // (DiffHunkView convention: assert the flattened style's floor).
+    it('exposes ≥44pt touch targets on all mode buttons (accessibility min size)', () => {
+      setupStore(sampleCheckpoints, { canFork: true });
+      let root: renderer.ReactTestRenderer;
+      act(() => {
+        root = renderer.create(<CheckpointView visible={true} onClose={onClose} />);
+      });
+      for (const m of ['both', 'files', 'conversation']) {
+        const btn = findByTestID(root!.root, `checkpoint-mode-${m}`);
+        const flat = StyleSheet.flatten(btn.props.style);
+        expect(flat.minWidth).toBeGreaterThanOrEqual(44);
+        expect(flat.minHeight).toBeGreaterThanOrEqual(44);
+      }
     });
 
     it('enables Conversation and restores with it when the provider can fork', () => {

@@ -466,6 +466,12 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: COLORS.borderPrimary,
     backgroundColor: COLORS.backgroundCard,
+    // 44pt minimum touch target on both axes — matches the component's other
+    // controls (closeButton / deleteButton / createConfirmButton).
+    minWidth: 44,
+    minHeight: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   modeButtonActive: {
     backgroundColor: COLORS.accentBlueLight,
