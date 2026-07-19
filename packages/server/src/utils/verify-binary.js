@@ -197,3 +197,46 @@ export function describeBinaryHealth(health, { binary, installHint } = {}) {
     }
   }
 }
+
+/**
+ * Spawn-time backstop: given a spawn failure, produce a labeled message naming a
+ * quarantine / not-found root cause + fix when the provider binary changed out
+ * from under a running daemon — the between-preflight-and-spawn / mid-session-
+ * respawn window that motivated #6708 (XProtect removed the binary while the
+ * daemon was live). Returns `null` when the binary still looks healthy, so the
+ * caller keeps its own error text (the failure was something else).
+ *
+ * Shared by every provider spawn site so the labeling lives in one place:
+ * jsonl-subprocess (codex-exec + gemini), cli-session (claude), claude-tui, and
+ * codex-app-server.
+ *
+ * `resolvedBinary` accepts a string OR a getter function — the provider
+ * `resolvedBinary` static re-resolves fresh and can throw on a misconfigured
+ * subclass, both of which are handled (a throw yields `null`, no crash).
+ *
+ * @param {object} opts
+ * @param {string|(()=>string)} opts.resolvedBinary - spawn path, or a getter for it
+ * @param {string} opts.binary   - provider/binary name for labeling (e.g. 'codex')
+ * @param {string} [opts.prefix] - message prefix (default `Failed to spawn <binary>`)
+ * @param {Function} [opts.verify=verifyBinary] - integrity checker (injected in tests)
+ * @returns {string|null} labeled message, or null when the binary looks healthy
+ */
+export function labelBinarySpawnFailure({ resolvedBinary, binary, prefix, verify = verifyBinary } = {}) {
+  let resolved
+  try {
+    resolved = typeof resolvedBinary === 'function' ? resolvedBinary() : resolvedBinary
+  } catch {
+    return null // resolvedBinary getter threw (misconfigured subclass) — no label
+  }
+  let health
+  try {
+    health = verify(resolved)
+  } catch {
+    return null
+  }
+  if (health && (health.status === BINARY_STATUS.QUARANTINED || health.status === BINARY_STATUS.NOT_FOUND)) {
+    const desc = describeBinaryHealth(health, { binary })
+    return `${prefix || `Failed to spawn ${binary}`}: ${desc.message}`
+  }
+  return null
+}

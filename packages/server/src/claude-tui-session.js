@@ -22,6 +22,7 @@ import { discoverConfiguredMcpServers } from './byok-mcp-config.js'
 import { ALLOWED_MODEL_IDS } from './models.js'
 import { CLAUDE_FALLBACK_MODELS, claudeModelMetadata } from './claude-model-catalog.js'
 import { RespawnRateLimiter } from './utils/respawn-rate-limiter.js'
+import { labelBinarySpawnFailure } from './utils/verify-binary.js'
 import { CHROXY_SECRET_DENYLIST } from './utils/spawn-env.js'
 import { createLogger, loggerForSession, redactSensitive, redactSensitivePreservingEscapes } from './logger.js'
 import { formatIdleDuration } from './session-timeout-manager.js'
@@ -1952,7 +1953,16 @@ export class ClaudeTuiSession extends BaseSession {
         env,
       })
     } catch (err) {
-      this.emit('error', { message: `Failed to spawn claude under PTY: ${err.message}` })
+      // #6708 — node-pty throws synchronously when the binary is missing/
+      // unspawnable. If it was quarantined/moved/removed out from under the
+      // running daemon (also the respawn path), name the cause + fix rather than
+      // a bare error. Falls back to the raw message when the binary looks healthy.
+      const labeled = labelBinarySpawnFailure({
+        resolvedBinary: resolveClaudeBinary,
+        binary: 'claude',
+        prefix: 'Failed to spawn claude under PTY',
+      })
+      this.emit('error', { message: labeled || `Failed to spawn claude under PTY: ${err.message}` })
       return
     }
 

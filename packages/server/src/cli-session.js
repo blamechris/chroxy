@@ -15,6 +15,7 @@ import { MessageTransformPipeline } from './message-transform.js'
 import { emitToolResults } from './tool-result.js'
 import { buildToolStartData, extractToolInputSemantics } from './claude-stream-parser.js'
 import { resolveBinary } from './utils/resolve-binary.js'
+import { labelBinarySpawnFailure } from './utils/verify-binary.js'
 import { prepareSpawn } from './utils/win-spawn.js'
 import { buildSpawnEnv } from './utils/spawn-env.js'
 import { RespawnRateLimiter } from './utils/respawn-rate-limiter.js'
@@ -592,7 +593,12 @@ export class CliSession extends BaseSession {
       this._cleanupReadlines()
       this._processReady = false
       this._child = null
-      this.emit('error', { message: `Failed to spawn claude: ${err.message}` })
+      // #6708 — a spawn error (ENOENT/EACCES) can mean the binary was quarantined
+      // /moved/removed out from under the running daemon (this is the respawn
+      // path too, so it fires mid-session). Re-verify and label the cause + fix
+      // instead of surfacing a bare ENOENT. Falls back to the raw message.
+      const labeled = labelBinarySpawnFailure({ resolvedBinary: resolveClaudeBinary, binary: 'claude' })
+      this.emit('error', { message: labeled || `Failed to spawn claude: ${err.message}` })
       this._scheduleRespawn()
     })
 

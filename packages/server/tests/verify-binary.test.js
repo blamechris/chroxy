@@ -4,6 +4,7 @@ import {
   verifyBinary,
   isBlockingQuarantine,
   describeBinaryHealth,
+  labelBinarySpawnFailure,
   BINARY_STATUS,
 } from '../src/utils/verify-binary.js'
 
@@ -134,6 +135,74 @@ describe('isBlockingQuarantine', () => {
 
   it('returns true for an unparseable flags field', () => {
     assert.equal(isBlockingQuarantine('zzzz;t;a;u'), true)
+  })
+})
+
+describe('labelBinarySpawnFailure — shared spawn-time backstop (#6708)', () => {
+  it('labels a quarantined-at-spawn binary with the xattr fix (not a raw error)', () => {
+    const quarantined = (path) => ({ ok: false, status: BINARY_STATUS.QUARANTINED, path, quarantine: '0081;a;b;c' })
+    const msg = labelBinarySpawnFailure({
+      resolvedBinary: '/opt/homebrew/bin/codex',
+      binary: 'codex',
+      verify: quarantined,
+    })
+    assert.ok(msg, 'expected a labeled message')
+    assert.match(msg, /^Failed to spawn codex:/)
+    assert.match(msg, /Gatekeeper/)
+    assert.match(msg, /xattr -d com\.apple\.quarantine \/opt\/homebrew\/bin\/codex/)
+  })
+
+  it('labels a vanished-at-spawn binary as not found', () => {
+    const gone = (path) => ({ ok: false, status: BINARY_STATUS.NOT_FOUND, path, quarantine: null })
+    const msg = labelBinarySpawnFailure({ resolvedBinary: 'codex', binary: 'codex', verify: gone })
+    assert.match(msg, /Failed to spawn codex:.*not found/)
+  })
+
+  it('honors a custom prefix (PTY / app-server call sites)', () => {
+    const gone = (path) => ({ ok: false, status: BINARY_STATUS.NOT_FOUND, path, quarantine: null })
+    const msg = labelBinarySpawnFailure({
+      resolvedBinary: 'claude',
+      binary: 'claude',
+      prefix: 'Failed to spawn claude under PTY',
+      verify: gone,
+    })
+    assert.match(msg, /^Failed to spawn claude under PTY:/)
+  })
+
+  it('returns null when the binary is healthy (caller keeps its own error)', () => {
+    const ok = (path) => ({ ok: true, status: BINARY_STATUS.OK, path, quarantine: null })
+    assert.equal(labelBinarySpawnFailure({ resolvedBinary: '/bin/x', binary: 'x', verify: ok }), null)
+  })
+
+  it('accepts a getter for resolvedBinary and calls it', () => {
+    let called = false
+    const quarantined = (path) => ({ ok: false, status: BINARY_STATUS.QUARANTINED, path, quarantine: '0081' })
+    const msg = labelBinarySpawnFailure({
+      resolvedBinary: () => { called = true; return '/opt/homebrew/bin/gemini' },
+      binary: 'gemini',
+      verify: quarantined,
+    })
+    assert.equal(called, true)
+    assert.match(msg, /gemini/)
+  })
+
+  it('returns null (no crash) when the resolvedBinary getter throws', () => {
+    const quarantined = () => ({ ok: false, status: BINARY_STATUS.QUARANTINED, path: 'x', quarantine: '0081' })
+    const msg = labelBinarySpawnFailure({
+      resolvedBinary: () => { throw new Error('resolvedBinary must be overridden') },
+      binary: 'codex',
+      verify: quarantined,
+    })
+    assert.equal(msg, null)
+  })
+
+  it('returns null (no crash) when verify itself throws', () => {
+    const msg = labelBinarySpawnFailure({
+      resolvedBinary: '/bin/x',
+      binary: 'x',
+      verify: () => { throw new Error('boom') },
+    })
+    assert.equal(msg, null)
   })
 })
 
