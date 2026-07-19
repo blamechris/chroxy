@@ -9,6 +9,7 @@ jest.mock('expo-notifications', () => ({
   setNotificationHandler: jest.fn(),
   setNotificationCategoryAsync: jest.fn(),
   addNotificationResponseReceivedListener: jest.fn(),
+  getLastNotificationResponse: jest.fn(() => null),
   getPermissionsAsync: jest.fn(() =>
     Promise.resolve({ status: 'granted' }),
   ),
@@ -47,6 +48,7 @@ const mockSocket = {
 };
 
 const mockMarkPromptAnsweredByRequestId = jest.fn();
+const mockSwitchSession = jest.fn();
 
 jest.mock('../store/connection', () => ({
   useConnectionStore: {
@@ -55,6 +57,7 @@ jest.mock('../store/connection', () => ({
       apiToken: 'test-token',
       socket: mockSocket,
       markPromptAnsweredByRequestId: mockMarkPromptAnsweredByRequestId,
+      switchSession: mockSwitchSession,
     })),
   },
   loadConnection: jest.fn(() =>
@@ -63,16 +66,19 @@ jest.mock('../store/connection', () => ({
 }));
 
 // Import after mocks
-import { setupNotificationResponseListener } from '../notifications';
+import { setupNotificationResponseListener, handleColdStartNotificationResponse } from '../notifications';
 
 const mockAddListener =
   Notifications.addNotificationResponseReceivedListener as jest.Mock;
+const mockGetLastNotificationResponse =
+  Notifications.getLastNotificationResponse as jest.Mock;
 
 const originalFetch = global.fetch;
 
 beforeEach(() => {
   jest.clearAllMocks();
   mockSocket.readyState = 1; // WebSocket.OPEN
+  mockGetLastNotificationResponse.mockReturnValue(null);
   // Reset getState mock to default
   const { useConnectionStore } = require('../store/connection');
   useConnectionStore.getState.mockReturnValue({
@@ -80,6 +86,7 @@ beforeEach(() => {
     apiToken: 'test-token',
     socket: mockSocket,
     markPromptAnsweredByRequestId: mockMarkPromptAnsweredByRequestId,
+    switchSession: mockSwitchSession,
   });
 });
 
@@ -161,6 +168,113 @@ describe('setupNotificationResponseListener', () => {
 
     expect(mockSocket.send).not.toHaveBeenCalled();
     expect(mockMarkPromptAnsweredByRequestId).not.toHaveBeenCalled();
+  });
+
+  // #6792 — a notification tap must route to the session that triggered it.
+  describe('routes to the triggering session (#6792)', () => {
+    it('default tap with a sessionId switches session and sends no WS/HTTP', async () => {
+      setupNotificationResponseListener();
+      const handler = mockAddListener.mock.calls[0][0];
+
+      await handler({
+        actionIdentifier: 'expo.modules.notifications.actions.DEFAULT',
+        notification: {
+          request: {
+            identifier: 'notif-default-tap-1',
+            content: {
+              data: { category: 'permission', requestId: 'perm-route-1', sessionId: 'sess-abc' },
+            },
+          },
+        },
+      });
+
+      expect(mockSwitchSession).toHaveBeenCalledWith('sess-abc');
+      expect(mockSocket.send).not.toHaveBeenCalled();
+      expect(mockMarkPromptAnsweredByRequestId).not.toHaveBeenCalled();
+    });
+
+    it('default tap on a non-permission category (idle/waiting) still switches session', async () => {
+      setupNotificationResponseListener();
+      const handler = mockAddListener.mock.calls[0][0];
+
+      await handler({
+        actionIdentifier: 'expo.modules.notifications.actions.DEFAULT',
+        notification: {
+          request: {
+            identifier: 'notif-default-tap-2',
+            content: {
+              data: { category: 'activity_waiting', sessionId: 'sess-waiting' },
+            },
+          },
+        },
+      });
+
+      expect(mockSwitchSession).toHaveBeenCalledWith('sess-waiting');
+      expect(mockSocket.send).not.toHaveBeenCalled();
+    });
+
+    it('approve action switches session AND sends the WS decision', async () => {
+      setupNotificationResponseListener();
+      const handler = mockAddListener.mock.calls[0][0];
+
+      await handler({
+        actionIdentifier: 'approve',
+        notification: {
+          request: {
+            identifier: 'notif-approve-route-1',
+            content: {
+              data: { category: 'permission', requestId: 'perm-route-2', sessionId: 'sess-def' },
+            },
+          },
+        },
+      });
+
+      expect(mockSwitchSession).toHaveBeenCalledWith('sess-def');
+      expect(mockSocket.send).toHaveBeenCalledWith(
+        JSON.stringify({ type: 'permission_response', requestId: 'perm-route-2', decision: 'allow' }),
+      );
+    });
+
+    it('does not switch session when the payload has no sessionId', async () => {
+      setupNotificationResponseListener();
+      const handler = mockAddListener.mock.calls[0][0];
+
+      await handler({
+        actionIdentifier: 'expo.modules.notifications.actions.DEFAULT',
+        notification: {
+          request: {
+            identifier: 'notif-no-session-1',
+            content: {
+              data: { category: 'permission', requestId: 'perm-no-session' },
+            },
+          },
+        },
+      });
+
+      expect(mockSwitchSession).not.toHaveBeenCalled();
+    });
+
+    it('dedupes the same notification delivered twice — no duplicate WS send', async () => {
+      setupNotificationResponseListener();
+      const handler = mockAddListener.mock.calls[0][0];
+      const response = {
+        actionIdentifier: 'approve',
+        notification: {
+          request: {
+            identifier: 'notif-dedupe-1',
+            content: {
+              data: { category: 'permission', requestId: 'perm-dedupe-1', sessionId: 'sess-dedupe' },
+            },
+          },
+        },
+      };
+
+      await handler(response);
+      await handler(response);
+
+      expect(mockSwitchSession).toHaveBeenCalledTimes(1);
+      expect(mockSocket.send).toHaveBeenCalledTimes(1);
+    });
   });
 
   it('ignores unknown action identifiers', async () => {
@@ -556,5 +670,73 @@ describe('setupNotificationResponseListener', () => {
     } finally {
       jest.useRealTimers();
     }
+  });
+});
+
+// #6792 — cold start: the app was launched by tapping a notification, so
+// addNotificationResponseReceivedListener never fires for it (it only sees
+// responses delivered after a listener attaches). getLastNotificationResponse()
+// replays it instead.
+describe('handleColdStartNotificationResponse', () => {
+  it('does nothing when there is no last notification response', async () => {
+    mockGetLastNotificationResponse.mockReturnValue(null);
+
+    await handleColdStartNotificationResponse();
+
+    expect(mockSwitchSession).not.toHaveBeenCalled();
+  });
+
+  it('switches to the session named by the launching notification (default tap)', async () => {
+    mockGetLastNotificationResponse.mockReturnValue({
+      actionIdentifier: 'expo.modules.notifications.actions.DEFAULT',
+      notification: {
+        request: {
+          identifier: 'notif-cold-start-1',
+          content: {
+            data: { category: 'activity_update', sessionId: 'sess-cold-start' },
+          },
+        },
+      },
+    });
+
+    await handleColdStartNotificationResponse();
+
+    expect(mockSwitchSession).toHaveBeenCalledWith('sess-cold-start');
+    expect(mockSocket.send).not.toHaveBeenCalled();
+  });
+
+  it('does not double-deliver a WS decision if the live listener also replays the same response', async () => {
+    const response = {
+      actionIdentifier: 'approve',
+      notification: {
+        request: {
+          identifier: 'notif-cold-start-2',
+          content: {
+            data: { category: 'permission', requestId: 'perm-cold-2', sessionId: 'sess-cold-2' },
+          },
+        },
+      },
+    };
+    mockGetLastNotificationResponse.mockReturnValue(response);
+
+    // Cold-start replay handles it first...
+    await handleColdStartNotificationResponse();
+    // ...then the live listener (registered in the same mount effect) sees
+    // the SAME response replayed natively.
+    setupNotificationResponseListener();
+    const handler = mockAddListener.mock.calls[0][0];
+    await handler(response);
+
+    expect(mockSwitchSession).toHaveBeenCalledTimes(1);
+    expect(mockSocket.send).toHaveBeenCalledTimes(1);
+  });
+
+  it('degrades gracefully when getLastNotificationResponse throws (unavailable on this platform)', async () => {
+    mockGetLastNotificationResponse.mockImplementation(() => {
+      throw new Error('UnavailabilityError');
+    });
+
+    await expect(handleColdStartNotificationResponse()).resolves.toBeUndefined();
+    expect(mockSwitchSession).not.toHaveBeenCalled();
   });
 });

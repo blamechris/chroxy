@@ -73,20 +73,36 @@ function stateToSubtitle(
   }
 }
 
-/** Chroxy Live Activity widget config — dark theme matching the app. */
-const WIDGET_CONFIG = {
+/** Chroxy Live Activity widget config (minus the session-scoped deep link) — dark theme matching the app. */
+const WIDGET_CONFIG_BASE = {
   backgroundColor: '#0f0f1a',
   titleColor: '#ffffff',
   subtitleColor: '#a0a0b0',
-  deepLinkUrl: 'chroxy://',
 } as const;
+
+/**
+ * Build the widget config for a Live Activity, scoping `deepLinkUrl` to the
+ * originating session (#6792) so tapping the Live Activity on the Lock
+ * Screen / Dynamic Island routes straight to that session instead of the
+ * app's default screen. `App.tsx`'s Linking handler parses the `session`
+ * query param back out. Falls back to a bare `chroxy://` (pre-#6792
+ * behavior — opens the app, no routing) when no sessionId is available yet.
+ */
+function buildWidgetConfig(sessionId?: string) {
+  return {
+    ...WIDGET_CONFIG_BASE,
+    deepLinkUrl: sessionId
+      ? `chroxy://open?session=${encodeURIComponent(sessionId)}`
+      : 'chroxy://open',
+  };
+}
 
 /**
  * Request a new Live Activity. Returns the activity ID, or null if
  * the native module is unavailable or the request fails.
  */
 export async function startLiveActivity(
-  _attributes: LiveActivityAttributes,
+  attributes: LiveActivityAttributes,
   initialState: LiveActivityContentState,
 ): Promise<string | null> {
   const mod = getNativeModule();
@@ -98,7 +114,7 @@ export async function startLiveActivity(
         title: 'Chroxy',
         subtitle: stateToSubtitle(initialState.state, initialState.detail, initialState.elapsedSeconds),
       },
-      WIDGET_CONFIG,
+      buildWidgetConfig(attributes.sessionId),
     );
     return id ?? null;
   } catch {

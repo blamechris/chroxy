@@ -95,6 +95,16 @@ describe('LiveActivityManager', () => {
       expect(manager.isActive).toBe(false);
       expect(manager.activityId).toBeNull();
     });
+
+    it('#6792: forwards a sessionId to the bridge when provided', async () => {
+      manager = createManager();
+      await manager.start('My Session', 'sess-live-manager-1');
+
+      expect(mockStart).toHaveBeenCalledWith(
+        { sessionName: 'My Session', sessionId: 'sess-live-manager-1' },
+        { state: 'active', elapsedSeconds: 0 },
+      );
+    });
   });
 
   describe('update', () => {

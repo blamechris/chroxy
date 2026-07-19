@@ -68,14 +68,14 @@ export class LiveActivityManager {
    * Start a new Live Activity for the given session.
    * No-ops if unsupported or if one is already active.
    */
-  async start(sessionName: string): Promise<void> {
+  async start(sessionName: string, sessionId?: string): Promise<void> {
     if (!this._supported) return;
     if (this._activityId !== null) return;
 
     this._startedAt = Date.now();
 
     const id = await startLiveActivity(
-      { sessionName },
+      { sessionName, sessionId },
       { state: 'active', elapsedSeconds: 0 },
     );
 

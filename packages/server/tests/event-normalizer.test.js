@@ -688,6 +688,15 @@ describe('EventNormalizer', () => {
       assert.equal(pushEffect.category, 'permission')
       assert.ok(pushEffect.body.includes('Bash'))
     })
+
+    it('includes ctx.sessionId in the push data so a notification tap can route to it (#6792)', () => {
+      const data = { requestId: 'req-1', tool: 'Bash', description: 'run ls', input: 'ls', remainingMs: 60000 }
+      const result = normalizer.normalize('permission_request', data, makeCtx({ sessionId: 'sess-push' }))
+      const pushEffect = result.sideEffects.find(se => se.type === 'push')
+      assert.equal(pushEffect.data.sessionId, 'sess-push')
+      assert.equal(pushEffect.data.requestId, 'req-1')
+      assert.equal(pushEffect.data.tool, 'Bash')
+    })
   })
 
   // ---- EVENT_MAP: permission_resolved (#3048) ----

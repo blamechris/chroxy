@@ -111,9 +111,24 @@ describe('ios-live-activity', () => {
         { state: 'thinking', elapsedSeconds: 0 }
       )
       expect(result).toBe('native-activity-1')
+      // #6792: no sessionId provided → the bare (non-routable) deep link,
+      // matching pre-#6792 behavior for this edge case.
       expect(mockStartActivity).toHaveBeenCalledWith(
         { title: 'Chroxy', subtitle: 'Thinking...' },
-        expect.objectContaining({ backgroundColor: '#0f0f1a', deepLinkUrl: 'chroxy://' }),
+        expect.objectContaining({ backgroundColor: '#0f0f1a', deepLinkUrl: 'chroxy://open' }),
+      )
+    })
+
+    it('#6792: scopes deepLinkUrl to the session id when provided', async () => {
+      mockPlatform('ios', '17.0')
+      const { startLiveActivity } = requireBridge()
+      await startLiveActivity(
+        { sessionName: 'My Session', sessionId: 'sess-live-1' },
+        { state: 'thinking', elapsedSeconds: 0 }
+      )
+      expect(mockStartActivity).toHaveBeenCalledWith(
+        { title: 'Chroxy', subtitle: 'Thinking...' },
+        expect.objectContaining({ deepLinkUrl: 'chroxy://open?session=sess-live-1' }),
       )
     })
 

@@ -251,8 +251,16 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
         // #5702 (8d): settle the fire-and-forget send so a failed phone
         // notification is logged (named), not silently dropped while the
         // dashboard card still appears.
+        // #6792: carry the owning sessionId in the push data payload (data-only,
+        // doesn't change the visible notification) so the app can route a
+        // notification tap straight to the session that asked, instead of the
+        // OS just opening the app to its default screen. Mirrors the
+        // sessionId already included in the broadcastFn call above (#5667)
+        // and in the activity_update/activity_waiting/inactivity_warning
+        // pushes (push-notification-handler.js). Omitted (not null) when the
+        // request maps to no chroxy session, matching the broadcast's convention.
         settlePush(
-          pushManager.send('permission', 'Permission needed', `Claude wants to use: ${tool}`, { requestId, tool }, 'permission'),
+          pushManager.send('permission', 'Permission needed', `Claude wants to use: ${tool}`, { requestId, tool, sessionId: ownerSessionId || undefined }, 'permission'),
           `permission requested: ${tool}`,
           log,
         )

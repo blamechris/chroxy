@@ -1,0 +1,26 @@
+/**
+ * Parse a Chroxy deep link for a session id (#6792).
+ *
+ * Handles the `chroxy://open?session=<id>` shape used by the iOS Live
+ * Activity's `deepLinkUrl` (ios-live-activity/live-activity-bridge.ts) —
+ * tapping the Live Activity on the Lock Screen / Dynamic Island now opens
+ * this URL instead of a bare `chroxy://`, so App.tsx's Linking listener can
+ * route straight back to the originating session.
+ *
+ * Returns null for anything that isn't the chroxy scheme, or that doesn't
+ * carry a `session` query param — including the pairing flow's
+ * `chroxy://host?pair=...` / `chroxy://host?token=...` URLs, which
+ * ConnectScreen's QR-scan/manual-entry paths already handle via
+ * `parseChroxyUrl` and never reach the OS-level Linking listener today.
+ */
+export function extractSessionIdFromDeepLink(url: string | null | undefined): string | null {
+  if (!url) return null;
+  const trimmed = url.trim();
+  if (!trimmed.startsWith('chroxy://')) return null;
+  try {
+    const parsed = new URL(trimmed.replace('chroxy://', 'https://'));
+    return parsed.searchParams.get('session');
+  } catch {
+    return null;
+  }
+}
