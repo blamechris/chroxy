@@ -4,6 +4,7 @@ import { dirname, resolve } from 'path'
 import { writeFileRestricted } from './platform.js'
 import { createLogger } from './logger.js'
 import { computeNextRun, parseCron, MIN_INTERVAL_MS } from './schedule-parser.js'
+import { ALLOWED_PERMISSION_MODE_IDS } from './handler-utils.js'
 
 const log = createLogger('scheduled-task-store')
 
@@ -46,18 +47,38 @@ function optionalString(value, field) {
 }
 
 /**
+ * True only for a plain `{}` object — rejects arrays, class instances, and
+ * primitives. `typeof [] === 'object'` alone would let an array masquerade as a
+ * valid target, so callers that want a `{ provider, ... }` bag must use this.
+ */
+function isPlainObject(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const proto = Object.getPrototypeOf(value)
+  return proto === Object.prototype || proto === null
+}
+
+/**
  * Normalize + validate a target session config `{ provider, model, cwd,
- * permissionMode }`. All fields optional; unknown keys are dropped. Returns a
- * plain object (possibly empty).
+ * permissionMode }`. All fields optional; unknown keys are dropped. `target`
+ * must be a plain object (an array or other non-plain value is rejected, since
+ * `typeof [] === 'object'`), and `permissionMode`, when present, must be one of
+ * the server's supported mode IDs ({@link ALLOWED_PERMISSION_MODE_IDS}). Returns
+ * a plain object (possibly empty).
  */
 function normalizeTarget(target) {
   if (target === undefined || target === null) return {}
-  if (typeof target !== 'object') throw new ScheduledTaskValidationError('target must be an object', 'target')
+  if (!isPlainObject(target)) throw new ScheduledTaskValidationError('target must be a plain object', 'target')
   const out = {}
   const provider = optionalString(target.provider, 'target.provider')
   const model = optionalString(target.model, 'target.model')
   const cwd = optionalString(target.cwd, 'target.cwd')
   const permissionMode = optionalString(target.permissionMode, 'target.permissionMode')
+  if (permissionMode !== undefined && !ALLOWED_PERMISSION_MODE_IDS.has(permissionMode)) {
+    throw new ScheduledTaskValidationError(
+      `target.permissionMode must be one of ${[...ALLOWED_PERMISSION_MODE_IDS].join(', ')}`,
+      'target.permissionMode',
+    )
+  }
   if (provider !== undefined) out.provider = provider
   if (model !== undefined) out.model = model
   if (cwd !== undefined) out.cwd = cwd

@@ -66,10 +66,56 @@ describe('#6862 ScheduledTaskStore', () => {
     const store = newStore()
     assert.throws(() => store.add({ cadence: { kind: 'interval', everyMs: HOUR } }), ScheduledTaskValidationError) // no prompt
     assert.throws(() => store.add({ prompt: 'x' }), ScheduledTaskValidationError) // no cadence
-    assert.throws(() => store.add({ prompt: 'x', cadence: { kind: 'interval', everyMs: 10 } }), ScheduledTaskValidationError) // sub-min interval
+    assert.throws(() => store.add({ prompt: 'x', cadence: { kind: 'interval', everyMs: 10 } }), ScheduledTaskValidationError) // everyMs below the MIN_INTERVAL_MS floor (1000ms)
     assert.throws(() => store.add({ prompt: 'x', cadence: { kind: 'cron', expression: 'bad cron' } }), ScheduledTaskValidationError) // bad cron
     assert.throws(() => store.add({ prompt: 'x', cadence: { kind: 'once' } }), ScheduledTaskValidationError) // once without `at`
     assert.throws(() => store.add({ prompt: 'x', cadence: { kind: 'weekly' } }), ScheduledTaskValidationError) // unknown kind
+  })
+
+  it('normalizeTarget rejects a non-plain-object target (array, etc.)', () => {
+    const store = newStore()
+    // `typeof [] === 'object'` must NOT slip an array through as a valid target.
+    assert.throws(
+      () => store.add({ prompt: 'p', cadence: { kind: 'once', at: 1 }, target: ['claude'] }),
+      ScheduledTaskValidationError,
+    )
+    // update() path is equally strict.
+    const t = store.add({ prompt: 'p', cadence: { kind: 'once', at: 1 } })
+    assert.throws(() => store.update(t.id, { target: [] }), ScheduledTaskValidationError)
+  })
+
+  it('normalizeTarget rejects an unknown permissionMode', () => {
+    const store = newStore()
+    assert.throws(
+      () => store.add({ prompt: 'p', cadence: { kind: 'once', at: 1 }, target: { permissionMode: 'yolo' } }),
+      ScheduledTaskValidationError,
+    )
+    const t = store.add({ prompt: 'p', cadence: { kind: 'once', at: 1 } })
+    assert.throws(
+      () => store.update(t.id, { target: { permissionMode: 'not-a-mode' } }),
+      ScheduledTaskValidationError,
+    )
+  })
+
+  it('normalizeTarget accepts every supported permissionMode', () => {
+    const store = newStore()
+    for (const mode of ['approve', 'acceptEdits', 'auto', 'plan']) {
+      const t = store.add({ prompt: 'p', cadence: { kind: 'once', at: 1 }, target: { permissionMode: mode } })
+      assert.equal(t.target.permissionMode, mode, `permissionMode ${mode} accepted`)
+    }
+  })
+
+  it('load() drops a task with an invalid target permissionMode but keeps valid siblings', () => {
+    writeFileSync(filePath, JSON.stringify({
+      version: 1,
+      tasks: [
+        { id: 'ok', prompt: 'p', cadence: { kind: 'once', at: 1 }, target: { permissionMode: 'plan' }, createdAt: 0, updatedAt: 0 },
+        { id: 'bad-mode', prompt: 'p', cadence: { kind: 'once', at: 1 }, target: { permissionMode: 'bogus' }, createdAt: 0, updatedAt: 0 },
+        { id: 'bad-target', prompt: 'p', cadence: { kind: 'once', at: 1 }, target: ['nope'], createdAt: 0, updatedAt: 0 },
+      ],
+    }))
+    const store = new ScheduledTaskStore({ filePath, logger: silentLog }).load()
+    assert.deepEqual(store.list().map((t) => t.id), ['ok'], 'only the valid task survives')
   })
 
   it('get()/list() return copies that cannot mutate stored state', () => {
