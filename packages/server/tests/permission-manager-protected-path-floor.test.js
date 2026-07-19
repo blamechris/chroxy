@@ -290,6 +290,57 @@ describe('isProtectedPathTarget (#6794)', () => {
     assert.equal(isProtectedPathTarget({ file_path: 'src/a.js' }, '/home/me/.claude/wt/agent'), false)
   })
 
+  // #6806 — a session whose cwd is INSIDE a real `.claude/` (the agent-worktree
+  // topology …/.claude/worktrees/agent-*) traversing `..` back UP into that
+  // same `.claude` must be floored, even though the `.claude` segment lives in
+  // cwd's PREFIX (above cwd) rather than in the relative path.
+  describe('above-cwd `..` traversal into a protected dir in cwd\'s prefix (#6806)', () => {
+    const wtCwd = '/home/me/.claude/worktrees/agent-x'
+
+    it('floors the exact issue repro: ../../settings.local.json → the real .claude config', () => {
+      // resolve → /home/me/.claude/settings.local.json (the REAL agent config)
+      assert.equal(isProtectedPathTarget({ file_path: '../../settings.local.json' }, wtCwd), true)
+    })
+
+    it('floors a traversal that lands directly in the containing .claude dir', () => {
+      assert.equal(isProtectedPathTarget({ file_path: '../../hooks/pre.sh' }, wtCwd), true)
+    })
+
+    it('preserves the #6794 guard: a benign in-workspace write from the same cwd is NOT floored', () => {
+      assert.equal(isProtectedPathTarget({ file_path: 'packages/server/foo.js' }, wtCwd), false)
+      assert.equal(isProtectedPathTarget({ file_path: 'src/a.js' }, wtCwd), false)
+      // A deep in-workspace path that itself contains a benign nested dir stays fine.
+      assert.equal(isProtectedPathTarget({ file_path: 'a/b/c/d.js' }, wtCwd), false)
+    })
+
+    it('floors an above-cwd traversal that reaches a .git in the prefix', () => {
+      // cwd under a repo's .git-adjacent worktree; ../../.git/config escapes up.
+      assert.equal(isProtectedPathTarget({ file_path: '../../.git/config' }, '/repo/.git/wt/x'), true)
+    })
+
+    it('floors an above-cwd .git/.env even from a NORMAL (non-.claude) cwd', () => {
+      // The old relative-minus-`..` scan already caught this; keep it green.
+      assert.equal(isProtectedPathTarget({ file_path: '../sibling/.git/config' }, '/work/project'), true)
+      assert.equal(isProtectedPathTarget({ file_path: '../../.env.local' }, '/work/project'), true)
+    })
+
+    it('does NOT floor a benign above-cwd traversal from a normal cwd (no over-deny)', () => {
+      // Escaping the workspace to a plain sibling file is unusual but not a
+      // protected-config target — stays unfloored.
+      assert.equal(isProtectedPathTarget({ file_path: '../other/src/a.js' }, '/work/project'), false)
+    })
+
+    it('also floors the traversal when carried on a changes[] member (apply_patch)', () => {
+      assert.equal(isProtectedPathTarget({
+        file_path: wtCwd, // grantRoot — benign
+        changes: [
+          { path: 'src/ok.js', kind: 'update', diff: 'd' },
+          { path: '../../settings.local.json', kind: 'update', diff: 'd' },
+        ],
+      }, wtCwd), true)
+    })
+  })
+
   // #6805/#6828 — codex apply_patch carries per-file targets in an ARRAY
   // (input.changes = FileUpdateChange[] = { path, kind, diff }); the flat
   // file_path is the approval's grantRoot (typically the benign repo root).
@@ -415,5 +466,108 @@ describe('protected-path floor walks apply_patch changes[] (#6805/#6828)', () =>
     const result = await pm.handlePermission('apply_patch', benignInput(), null, 'acceptEdits')
     assert.equal(result.behavior, 'allow')
     assert.equal(events.length, 0)
+  })
+})
+
+// #6806 — end-to-end acceptance: a session whose cwd is INSIDE a real `.claude/`
+// (the agent-worktree topology) must be floored on a `..`-traversal back up into
+// that `.claude`, and must NOT be floored on its own in-workspace writes.
+describe('protected-path floor catches ../ traversal above an under-.claude cwd (#6806)', () => {
+  const WT_CWD = '/home/me/.claude/worktrees/agent-x'
+  let pm
+
+  beforeEach(() => {
+    pm = new PermissionManager({ log: silentLog, cwd: WT_CWD })
+  })
+
+  afterEach(() => {
+    pm.destroy()
+  })
+
+  it('(a) auto mode + ../../settings.local.json (the real .claude config) falls through to the prompt', async () => {
+    const events = []
+    pm.on('permission_request', (d) => events.push(d))
+
+    const promise = pm.handlePermission('Write', { file_path: '../../settings.local.json' }, null, 'auto')
+    assert.equal(events.length, 1, 'a ../ escape into the containing .claude must prompt, not auto-approve')
+
+    pm.respondToPermission(events[0].requestId, 'deny')
+    const result = await promise
+    assert.equal(result.behavior, 'deny')
+  })
+
+  it('(a) allow Write rule + ../../hooks/pre.sh in the containing .claude falls through to the prompt', async () => {
+    const events = []
+    pm.on('permission_request', (d) => events.push(d))
+    pm.setRules([{ tool: 'Write', decision: 'allow' }])
+
+    const promise = pm.handlePermission('Write', { file_path: '../../hooks/pre.sh' }, null, 'approve')
+    assert.equal(events.length, 1)
+
+    pm.respondToPermission(events[0].requestId, 'deny')
+    await promise
+  })
+
+  it('(b) the #6794 guard holds: a benign in-workspace write from the same cwd stays auto-approved', async () => {
+    const events = []
+    pm.on('permission_request', (d) => events.push(d))
+
+    const result = await pm.handlePermission('Write', { file_path: 'packages/server/foo.js' }, null, 'auto')
+    assert.equal(result.behavior, 'allow', 'cwd-internal .claude must not floor a benign in-workspace write')
+    assert.equal(events.length, 0)
+  })
+
+  // #6849 review — pin the three traversal edge cases the reviewer verified by
+  // hand. They already pass; these guard against a future refactor silently
+  // reopening the escape. All assert FLOORED through the real handlePermission
+  // path (WT_CWD = /home/me/.claude/worktrees/agent-x).
+  describe('pinned traversal edge cases (regression guard, #6849 review)', () => {
+    it('bare `..` resolving to a protected parent dir is floored', async () => {
+      // `..` → /home/me/.claude/worktrees (contains `.claude`). This is the
+      // exact edge the `rel !== '..'` clause in isProtectedPathValue exists for:
+      // drop it and underCwd flips true, the sole `..` segment is filtered, and
+      // the write silently stops being floored.
+      const events = []
+      pm.on('permission_request', (d) => events.push(d))
+
+      const promise = pm.handlePermission('Write', { file_path: '..' }, null, 'auto')
+      assert.equal(events.length, 1, 'bare `..` into a protected parent must prompt, not auto-approve')
+
+      pm.respondToPermission(events[0].requestId, 'deny')
+      const result = await promise
+      assert.equal(result.behavior, 'deny')
+    })
+
+    it('an absolute file_path landing on a protected config path is floored', async () => {
+      // Absolute input wins over cwd in resolve(); it lands outside cwd's
+      // subtree, so the absolute-path scan catches the `.claude` in the prefix.
+      const events = []
+      pm.on('permission_request', (d) => events.push(d))
+      pm.setRules([{ tool: 'Write', decision: 'allow' }])
+
+      const promise = pm.handlePermission(
+        'Write',
+        { file_path: '/home/me/.claude/settings.local.json' },
+        null,
+        'approve',
+      )
+      assert.equal(events.length, 1, 'an absolute protected target must prompt even under an allow rule')
+
+      pm.respondToPermission(events[0].requestId, 'deny')
+      await promise
+    })
+
+    it('mixed traversal `sub/../../.claude/x` from an under-.claude cwd is floored', async () => {
+      // Resolves to /home/me/.claude/worktrees/.claude/x — escapes cwd, so the
+      // absolute scan sees `.claude`.
+      const events = []
+      pm.on('permission_request', (d) => events.push(d))
+
+      const promise = pm.handlePermission('Write', { file_path: 'sub/../../.claude/x' }, null, 'acceptEdits')
+      assert.equal(events.length, 1, 'mixed traversal into .claude must prompt, not auto-approve')
+
+      pm.respondToPermission(events[0].requestId, 'deny')
+      await promise
+    })
   })
 })
