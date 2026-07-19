@@ -10,6 +10,7 @@ import {
   getJsonlMtime,
   readConversationHistory,
   readConversationHistoryAsync,
+  MAX_TRANSCRIPT_BYTES,
 } from '../src/jsonl-reader.js'
 
 describe('encodeProjectPath', () => {
@@ -545,6 +546,89 @@ describe('readConversationHistoryAsync', () => {
 
       const result = await readConversationHistoryAsync(filePath)
       assert.equal(result.length, 2)
+    } finally {
+      teardown()
+    }
+  })
+})
+
+// #6860 — DoS guard: a transcript larger than the byte ceiling is read from the
+// TAIL only (bounded), never fully buffered. The maxBytes override lets these
+// tests exercise the cap without writing a real 25MB file.
+describe('transcript byte ceiling', () => {
+  let tempDir
+
+  function writeJsonl(filename, entries) {
+    const filePath = join(tempDir, filename)
+    const content = entries.map(e => JSON.stringify(e)).join('\n')
+    writeFileSync(filePath, content)
+    return filePath
+  }
+
+  function setup() {
+    tempDir = mkdtempSync(join(tmpdir(), 'chroxy-jsonl-ceiling-'))
+  }
+
+  function teardown() {
+    rmSync(tempDir, { recursive: true, force: true })
+  }
+
+  function manyEntries(n) {
+    const entries = []
+    for (let i = 0; i < n; i++) {
+      entries.push({ type: 'user', uuid: `u-${i}`, message: { content: [{ type: 'text', text: `message-${i}` }] } })
+    }
+    return entries
+  }
+
+  it('exposes a sane default ceiling', () => {
+    assert.equal(typeof MAX_TRANSCRIPT_BYTES, 'number')
+    assert.ok(MAX_TRANSCRIPT_BYTES >= 10 * 1024 * 1024 && MAX_TRANSCRIPT_BYTES <= 50 * 1024 * 1024,
+      'ceiling should sit in the 10-50MB band')
+  })
+
+  it('async: caps an oversized transcript to a tail window instead of buffering the whole file', async () => {
+    setup()
+    try {
+      const filePath = writeJsonl('big.jsonl', manyEntries(50))
+      // Default (huge) ceiling returns everything.
+      const full = await readConversationHistoryAsync(filePath)
+      assert.equal(full.length, 50)
+      // Tiny override forces a tail read — earliest messages are dropped.
+      const capped = await readConversationHistoryAsync(filePath, 200)
+      assert.ok(capped.length > 0 && capped.length < 50,
+        'must return a truncated subset (tail), not the whole file')
+      assert.equal(capped[capped.length - 1].content, 'message-49',
+        'the most-recent message must be retained')
+      assert.ok(!capped.some(m => m.content === 'message-0'),
+        'the earliest message must be dropped by the tail cap')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('sync: caps an oversized transcript to a tail window', () => {
+    setup()
+    try {
+      const filePath = writeJsonl('big.jsonl', manyEntries(50))
+      const full = readConversationHistory(filePath)
+      assert.equal(full.length, 50)
+      const capped = readConversationHistory(filePath, 200)
+      assert.ok(capped.length > 0 && capped.length < 50)
+      assert.equal(capped[capped.length - 1].content, 'message-49')
+      assert.ok(!capped.some(m => m.content === 'message-0'))
+    } finally {
+      teardown()
+    }
+  })
+
+  it('reads the whole file untruncated when under the ceiling', async () => {
+    setup()
+    try {
+      const filePath = writeJsonl('small.jsonl', manyEntries(5))
+      const result = await readConversationHistoryAsync(filePath, 10 * 1024 * 1024)
+      assert.equal(result.length, 5)
+      assert.equal(result[0].content, 'message-0')
     } finally {
       teardown()
     }

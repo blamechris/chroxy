@@ -942,6 +942,38 @@ export const SearchConversationsSchema = z.object({
   maxResults: z.number().int().min(1).max(100).optional(),
 })
 
+// conversationId shape — MUST stay byte-for-byte in sync with the server's
+// `CONVERSATION_ID_RE` gate (packages/server/src/handlers/conversation-handlers.js),
+// which resume_conversation + the transcript handler use to guard against path
+// traversal. It is a PERMISSIVE hex-group UUID shape (any hex per group, no
+// version/variant nibble) — deliberately NOT z.string().uuid(), which enforces an
+// RFC-4122 version nibble the server does not and would reject valid server ids
+// (e.g. `00000000-0000-0000-0000-0000000c0ffe`). Matching the server exactly means
+// the wire contract rejects precisely what the handler rejects — no stricter, no
+// looser. No z.catch (the #6436 field-error-swallow trap). (#6874 review)
+const CONVERSATION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+// #6860 (epic #6765): provider-agnostic READ-ONLY transcript request. Streams a
+// CLOSED conversation's full JSONL history back to the client WITHOUT creating a
+// SessionManager entry or spawning any provider process — so it works uniformly
+// even for providers whose `capabilities.resume === false` (BYOK, Codex, Gemini,
+// user-shell), for which `resume_conversation` is refused outright. Distinct from
+// `resume_conversation` (which spawns a live session) and `request_full_history`
+// (which reads a LIVE session's in-memory buffer). The response reuses the
+// existing `history_replay_start` / `message` / `history_replay_end` server→client
+// frames (sourced from disk instead of a live session) so existing renderers
+// light up unchanged. `cwd` is an optional hint — the server resolves the
+// conversation's recorded cwd authoritatively from the persisted store and only
+// falls back to this value when the scan can't find the conversation.
+export const RequestConversationTranscriptSchema = z.object({
+  type: z.literal('request_conversation_transcript'),
+  // .max(256) short-circuits pathological input before the regex runs; the
+  // anchored regex then enforces the exact conversation-id shape (fail-fast at
+  // the protocol layer instead of relying on the handler's runtime guard).
+  conversationId: z.string().max(256).regex(CONVERSATION_ID_RE, 'conversationId must be a UUID'),
+  cwd: z.string().max(4096).optional(),
+})
+
 export const RequestCostSummarySchema = z.object({
   type: z.literal('request_cost_summary'),
 })
@@ -1623,6 +1655,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   ListConversationsSchema,
   ResumeConversationSchema,
   SearchConversationsSchema,
+  RequestConversationTranscriptSchema,
   RequestCostSummarySchema,
   SubscribeSessionsSchema,
   UnsubscribeSessionsSchema,

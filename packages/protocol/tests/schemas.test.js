@@ -712,6 +712,7 @@ describe('@chroxy/protocol schemas', () => {
       'delete_checkpoint', 'close_dev_preview',
       'launch_web_task', 'list_web_tasks', 'teleport_web_task',
       'list_conversations', 'resume_conversation', 'search_conversations',
+      'request_conversation_transcript',
       'request_cost_summary', 'subscribe_sessions', 'unsubscribe_sessions',
       'client_visible',
       'list_providers', 'list_repos', 'add_repo', 'remove_repo',
@@ -731,6 +732,38 @@ describe('@chroxy/protocol schemas', () => {
           `Type '${type}' should be recognized by ClientMessageSchema discriminator`)
       }
     }
+  })
+
+  // #6874 review (Copilot): the transcript request must fail fast at the protocol
+  // layer for a malformed conversationId, matching the server's CONVERSATION_ID_RE
+  // gate exactly (no stricter, no looser) so a valid server id is never rejected.
+  it('RequestConversationTranscriptSchema requires a UUID conversationId', async () => {
+    const { RequestConversationTranscriptSchema } = await import('../src/schemas/client.ts')
+
+    const base = { type: 'request_conversation_transcript' }
+
+    // Rejected at the schema level: empty, whitespace, and non-UUID shapes.
+    for (const bad of ['', '   ', 'not-a-uuid', '../../etc/passwd', '12345', '00000000-0000-0000-0000-00000000000']) {
+      const r = RequestConversationTranscriptSchema.safeParse({ ...base, conversationId: bad })
+      assert.equal(r.success, false, `conversationId '${bad}' must be rejected`)
+    }
+
+    // Accepted: canonical hex-group UUIDs, including the permissive server-style
+    // ids that z.string().uuid() (RFC version nibble) would wrongly reject.
+    for (const good of [
+      '550e8400-e29b-41d4-a716-446655440000',
+      '00000000-0000-0000-0000-0000000c0ffe',
+      '11111111-2222-3333-4444-555555555555',
+    ]) {
+      const r = RequestConversationTranscriptSchema.safeParse({ ...base, conversationId: good })
+      assert.equal(r.success, true, `conversationId '${good}' must be accepted`)
+    }
+
+    // The optional cwd hint still round-trips.
+    const withCwd = RequestConversationTranscriptSchema.safeParse({
+      ...base, conversationId: '550e8400-e29b-41d4-a716-446655440000', cwd: '/home/dev/repo',
+    })
+    assert.equal(withCwd.success, true)
   })
 
   it('accepts ServerMessageSchema with optional code field for structured errors', async () => {

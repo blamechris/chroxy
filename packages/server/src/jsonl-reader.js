@@ -1,9 +1,19 @@
-import { readFileSync, statSync, existsSync } from 'fs'
-import { readFile } from 'fs/promises'
+import { readFileSync, statSync, existsSync, openSync, readSync, closeSync, fstatSync } from 'fs'
+import { readFile, stat, open } from 'fs/promises'
 import { join } from 'path'
 import { homedir } from 'os'
 
 const MAX_MESSAGES = 500
+
+// Byte ceiling for a single transcript read. The wire replay is capped at
+// MAX_MESSAGES frames, but the file read itself was previously unbounded — a
+// caller (including a bound client via the read-only transcript endpoint, #6860)
+// could trigger a full-file buffer of an arbitrarily large JSONL. Files larger
+// than this are read from the TAIL only (most-recent activity), so the result is
+// gracefully truncated to recent history rather than crashing or buffering the
+// whole file. 25MB comfortably fits even long real transcripts while bounding
+// worst-case memory. Overridable per-call for tests.
+export const MAX_TRANSCRIPT_BYTES = 25 * 1024 * 1024
 
 /**
  * Encode a filesystem path the same way Claude Code does for its project directories.
@@ -157,15 +167,38 @@ function parseJsonlContent(raw) {
  * @param {string} filePath - Absolute path to the JSONL file
  * @returns {Array<{ type: string, content: string, tool?: string, timestamp: number, messageId?: string }>}
  */
-export function readConversationHistory(filePath) {
+export function readConversationHistory(filePath, maxBytes = MAX_TRANSCRIPT_BYTES) {
   let raw
   try {
-    raw = readFileSync(filePath, 'utf-8')
+    const { size } = statSync(filePath)
+    raw = size > maxBytes
+      ? readTailBytesSync(filePath, maxBytes)
+      : readFileSync(filePath, 'utf-8')
   } catch {
     return []
   }
 
   return parseJsonlContent(raw)
+}
+
+/**
+ * Read the last `maxBytes` of a file (sync). Used when a JSONL exceeds the
+ * transcript byte ceiling so the read stays bounded. The window's first line is
+ * usually a partial JSONL record; parseJsonlContent skips unparseable lines, so
+ * the truncated head is dropped automatically.
+ */
+function readTailBytesSync(filePath, maxBytes) {
+  const fd = openSync(filePath, 'r')
+  try {
+    const { size } = fstatSync(fd)
+    const start = Math.max(0, size - maxBytes)
+    const length = size - start
+    const buf = Buffer.alloc(length)
+    readSync(fd, buf, 0, length, start)
+    return new TextDecoder('utf-8', { fatal: false }).decode(buf)
+  } finally {
+    closeSync(fd)
+  }
 }
 
 /**
@@ -175,13 +208,34 @@ export function readConversationHistory(filePath) {
  * @param {string} filePath - Absolute path to the JSONL file
  * @returns {Promise<Array<{ type: string, content: string, tool?: string, timestamp: number, messageId?: string }>>}
  */
-export async function readConversationHistoryAsync(filePath) {
+export async function readConversationHistoryAsync(filePath, maxBytes = MAX_TRANSCRIPT_BYTES) {
   let raw
   try {
-    raw = await readFile(filePath, 'utf-8')
+    const { size } = await stat(filePath)
+    raw = size > maxBytes
+      ? await readTailBytesAsync(filePath, maxBytes)
+      : await readFile(filePath, 'utf-8')
   } catch {
     return []
   }
 
   return parseJsonlContent(raw)
+}
+
+/**
+ * Async variant of readTailBytesSync — read the last `maxBytes` of a file so an
+ * oversized transcript read stays bounded (see MAX_TRANSCRIPT_BYTES).
+ */
+async function readTailBytesAsync(filePath, maxBytes) {
+  const handle = await open(filePath, 'r')
+  try {
+    const { size } = await handle.stat()
+    const start = Math.max(0, size - maxBytes)
+    const length = size - start
+    const buf = Buffer.alloc(length)
+    await handle.read(buf, 0, length, start)
+    return new TextDecoder('utf-8', { fatal: false }).decode(buf)
+  } finally {
+    await handle.close()
+  }
 }

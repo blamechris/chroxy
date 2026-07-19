@@ -620,6 +620,11 @@ export declare const SearchConversationsSchema: z.ZodObject<{
     query: z.ZodString;
     maxResults: z.ZodOptional<z.ZodNumber>;
 }, z.core.$strip>;
+export declare const RequestConversationTranscriptSchema: z.ZodObject<{
+    type: z.ZodLiteral<"request_conversation_transcript">;
+    conversationId: z.ZodString;
+    cwd: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
 export declare const RequestCostSummarySchema: z.ZodObject<{
     type: z.ZodLiteral<"request_cost_summary">;
 }, z.core.$strip>;
@@ -1253,6 +1258,10 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     type: z.ZodLiteral<"search_conversations">;
     query: z.ZodString;
     maxResults: z.ZodOptional<z.ZodNumber>;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"request_conversation_transcript">;
+    conversationId: z.ZodString;
+    cwd: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"request_cost_summary">;
 }, z.core.$strip>, z.ZodObject<{
