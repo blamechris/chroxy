@@ -298,12 +298,18 @@ export class JsonlSubprocessSession extends BaseSession {
 
     const args = this._buildArgs(effectiveText)
     let proc
+    // Captured once here so the spawn-time backstop (#6708) verifies the EXACT
+    // binary this attempt used — both the sync catch below and the async
+    // proc.on('error') handler — rather than a fresh re-resolve that could land
+    // on a different path than the one that failed.
+    let attemptedBinary = null
     try {
       // #6484 — the resolver can hand us a `.cmd` shim on Windows (npm-only host,
       // no native `.exe`); spawning a `.cmd` via child_process throws EINVAL on
       // Node 24, so route it through cmd.exe with proper escaping — the same
       // prepareSpawn cli-session.js uses. No-op for a `.exe` and on POSIX.
-      const spawnSpec = prepareSpawn(Klass.resolvedBinary, args)
+      attemptedBinary = Klass.resolvedBinary
+      const spawnSpec = prepareSpawn(attemptedBinary, args)
       proc = spawn(spawnSpec.command, spawnSpec.args, {
         cwd: this.cwd,
         // We pass the prompt as argv, not stdin. Some CLIs, notably
@@ -314,16 +320,16 @@ export class JsonlSubprocessSession extends BaseSession {
         ...spawnSpec.options,
       })
     } catch (err) {
-      // spawn() can throw synchronously (ENOENT for missing binary, EACCES,
+      // spawn() can throw synchronously (EINVAL for a bad `.cmd` on Node 24,
       // etc.) — leave _skillsPrepended false so a retry still injects the
       // skills text. Reset busy state and surface the error to the caller.
       this._isBusy = false
       // #6708 — a spawn failure AFTER preflight passed means the binary changed
       // out from under us (quarantined / moved / removed by XProtect between
-      // session-create and this turn). Re-verify the path so the error names
-      // the real cause + fix instead of an opaque ENOENT.
+      // session-create and this turn). Re-verify the ATTEMPTED path so the error
+      // names the real cause + fix instead of an opaque failure.
       const labeled = labelBinarySpawnFailure({
-        resolvedBinary: () => Klass.resolvedBinary,
+        attemptedPath: err?.path || attemptedBinary,
         binary: Klass.providerName,
       })
       this.emit('error', {
@@ -445,8 +451,15 @@ export class JsonlSubprocessSession extends BaseSession {
         this._skillsPrepended = false
       }
       if (this._destroying) return
+      // #6708 — a launch failure here (async ENOENT/EACCES is the REAL missing-
+      // /quarantined-binary path; the sync catch above only sees Node-24 `.cmd`
+      // EINVAL) → label the ATTEMPTED path's cause + fix instead of a bare ENOENT.
+      const labeled = labelBinarySpawnFailure({
+        attemptedPath: err?.path || attemptedBinary,
+        binary: Klass.providerName,
+      })
       this.emit('error', {
-        message: err.message || `Failed to spawn ${Klass.providerName}`,
+        message: labeled || err.message || `Failed to spawn ${Klass.providerName}`,
       })
     })
   }

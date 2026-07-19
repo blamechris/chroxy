@@ -602,13 +602,16 @@ function checkProvider(providerName) {
  */
 export function checkBinary(name, args, { parseVersion, required, installHint, candidates = [], minVersion = null, verify = defaultVerifyBinary }) {
   const resolved = resolveBinary(name, candidates)
-  // #6708 — integrity/quarantine gate BEFORE we try to exec for a version.
-  // A macOS Gatekeeper-quarantined binary keeps its X bit and only fails at
-  // exec, where the catch below would mislabel it "Not found — install …".
-  // Detect it up front so doctor distinguishes "quarantined/blocked" from
-  // "not installed" with a fix-it hint (`xattr -d …`). No-op off darwin.
+  // #6708 — integrity gate BEFORE we try to exec for a version. A macOS
+  // Gatekeeper-quarantined binary keeps its X bit, and a present-but-non-
+  // executable binary throws EACCES in the version probe — in both cases the
+  // catch below would mislabel it "Not found — install …". Detect them up front
+  // so doctor reports "quarantined/blocked" and "not executable" distinctly from
+  // "not installed", each with its own fix-it hint. The quarantine step is a
+  // no-op off darwin; NOT_FOUND still falls through to the version probe (whose
+  // catch owns the install message).
   const health = verify(resolved)
-  if (health.status === BINARY_STATUS.QUARANTINED) {
+  if (health.status === BINARY_STATUS.QUARANTINED || health.status === BINARY_STATUS.NOT_EXECUTABLE) {
     const { message } = describeBinaryHealth(health, { binary: name, installHint })
     return { name, status: required ? 'fail' : 'warn', message }
   }

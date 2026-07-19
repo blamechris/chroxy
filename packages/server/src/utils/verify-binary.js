@@ -61,17 +61,29 @@ export const BINARY_STATUS = Object.freeze({
 // the binary launches normally, so a quarantine xattr with this bit is NOT a block.
 const QTN_FLAG_ASSESSMENT_OK = 0x0040
 
+// Absolute path to the system `xattr`. This is security-hardening code — reading
+// it by bare name (`xattr`) would resolve through PATH, so a shadowed `xattr`
+// planted earlier on PATH could lie about the quarantine state and defeat the
+// whole check. `/usr/bin/xattr` is a fixed, SIP-protected macOS system binary.
+export const MACOS_XATTR = '/usr/bin/xattr'
+
 /**
  * Default macOS reader for the `com.apple.quarantine` xattr. Returns the raw
  * attribute value, or `null` when the attribute is absent (the common case —
  * `xattr -p` exits non-zero, which we swallow). Only ever called on darwin.
  *
+ * Invokes the ABSOLUTE system path {@link MACOS_XATTR} (never a PATH lookup) so
+ * a shadowed `xattr` cannot subvert the integrity check. `execFile` is injected
+ * in tests to assert exactly that.
+ *
  * @param {string} path
+ * @param {object} [opts]
+ * @param {Function} [opts.execFile=execFileSync]
  * @returns {string|null}
  */
-function defaultReadQuarantineXattr(path) {
+export function readQuarantineXattr(path, { execFile = execFileSync } = {}) {
   try {
-    const out = execFileSync('xattr', ['-p', 'com.apple.quarantine', path], {
+    const out = execFile(MACOS_XATTR, ['-p', 'com.apple.quarantine', path], {
       encoding: 'utf-8',
       stdio: ['ignore', 'pipe', 'ignore'],
       timeout: 3000,
@@ -130,7 +142,7 @@ export function verifyBinary(resolvedPath, {
   existsSync = fsExistsSync,
   accessSync = fsAccessSync,
   isAbsolute = pathIsAbsolute,
-  readQuarantineXattr = defaultReadQuarantineXattr,
+  readQuarantineXattr: readXattr = readQuarantineXattr,
 } = {}) {
   const path = typeof resolvedPath === 'string' ? resolvedPath : ''
 
@@ -149,7 +161,7 @@ export function verifyBinary(resolvedPath, {
   // macOS-only: a Gatekeeper-quarantined binary keeps its X bit but refuses to
   // launch. Skip entirely off darwin — there is no equivalent block.
   if (platform === 'darwin') {
-    const xattrValue = readQuarantineXattr(path)
+    const xattrValue = readXattr(path)
     if (isBlockingQuarantine(xattrValue)) {
       return { ok: false, status: BINARY_STATUS.QUARANTINED, path, quarantine: xattrValue }
     }
@@ -159,9 +171,26 @@ export function verifyBinary(resolvedPath, {
 }
 
 /**
+ * POSIX shell-quote a string so it survives copy-paste as a single argument.
+ * Leaves an already-safe token (the common `/opt/homebrew/bin/codex` case)
+ * unquoted; single-quotes anything containing whitespace or shell metacharacters
+ * (e.g. a path with spaces), escaping embedded single quotes. Keeps the
+ * `xattr -d …` / `chmod +x …` remediations copy-pasteable for any path.
+ *
+ * @param {string} s
+ * @returns {string}
+ */
+export function shellQuotePath(s) {
+  if (typeof s !== 'string' || s.length === 0) return "''"
+  if (/^[A-Za-z0-9_/.:@%+=-]+$/.test(s)) return s
+  return `'${s.replace(/'/g, "'\\''")}'`
+}
+
+/**
  * Build a user-facing message + remediation for a non-OK {@link BinaryHealth}.
  * Centralised so preflight errors, the spawn-time catch, and `chroxy doctor`
- * all speak the same language about what is wrong and how to fix it.
+ * all speak the same language about what is wrong and how to fix it. Paths in
+ * the copy-pasteable remediations are shell-quoted so spaces don't break them.
  *
  * @param {BinaryHealth} health
  * @param {object} [ctx]
@@ -172,16 +201,17 @@ export function verifyBinary(resolvedPath, {
 export function describeBinaryHealth(health, { binary, installHint } = {}) {
   const name = binary || 'binary'
   const path = health && health.path ? health.path : ''
+  const qPath = shellQuotePath(path)
   switch (health && health.status) {
     case BINARY_STATUS.QUARANTINED: {
-      const remediation = `verify its provenance, then run: xattr -d com.apple.quarantine ${path} (or approve it in System Settings → Privacy & Security), or re-download ${name}`
+      const remediation = `verify its provenance, then run: xattr -d com.apple.quarantine ${qPath} (or approve it in System Settings → Privacy & Security), or re-download ${name}`
       return {
         message: `"${name}" at ${path} is quarantined/blocked by macOS Gatekeeper — ${remediation}`,
         remediation,
       }
     }
     case BINARY_STATUS.NOT_EXECUTABLE: {
-      const remediation = `run: chmod +x ${path}`
+      const remediation = `run: chmod +x ${qPath}`
       return {
         message: `"${name}" at ${path} exists but is not executable — ${remediation}`,
         remediation,
@@ -200,41 +230,45 @@ export function describeBinaryHealth(health, { binary, installHint } = {}) {
 
 /**
  * Spawn-time backstop: given a spawn failure, produce a labeled message naming a
- * quarantine / not-found root cause + fix when the provider binary changed out
- * from under a running daemon — the between-preflight-and-spawn / mid-session-
- * respawn window that motivated #6708 (XProtect removed the binary while the
- * daemon was live). Returns `null` when the binary still looks healthy, so the
- * caller keeps its own error text (the failure was something else).
+ * quarantine / not-found / not-executable root cause + fix when the provider
+ * binary changed out from under a running daemon — the between-preflight-and-
+ * spawn / mid-session-respawn window that motivated #6708 (XProtect removed the
+ * binary while the daemon was live). Returns `null` when the binary still looks
+ * healthy, so the caller keeps its own error text (the failure was something
+ * else).
  *
  * Shared by every provider spawn site so the labeling lives in one place:
  * jsonl-subprocess (codex-exec + gemini), cli-session (claude), claude-tui, and
  * codex-app-server.
  *
- * `resolvedBinary` accepts a string OR a getter function — the provider
- * `resolvedBinary` static re-resolves fresh and can throw on a misconfigured
- * subclass, both of which are handled (a throw yields `null`, no crash).
+ * `attemptedPath` is the EXACT path the spawn tried to exec — take it from the
+ * spawn error's `err.path`, or the command captured at the spawn call site. It
+ * is deliberately NOT re-resolved here: a fresh `resolveBinary()` can land on a
+ * DIFFERENT path than the one that actually failed (PATH/candidate order can
+ * shift, or a since-repaired binary now resolves), so the backstop would then
+ * describe the wrong file. Verifying the attempted path describes exactly what
+ * failed.
  *
  * @param {object} opts
- * @param {string|(()=>string)} opts.resolvedBinary - spawn path, or a getter for it
+ * @param {string} opts.attemptedPath - the exact path spawn tried to exec
  * @param {string} opts.binary   - provider/binary name for labeling (e.g. 'codex')
  * @param {string} [opts.prefix] - message prefix (default `Failed to spawn <binary>`)
  * @param {Function} [opts.verify=verifyBinary] - integrity checker (injected in tests)
  * @returns {string|null} labeled message, or null when the binary looks healthy
  */
-export function labelBinarySpawnFailure({ resolvedBinary, binary, prefix, verify = verifyBinary } = {}) {
-  let resolved
-  try {
-    resolved = typeof resolvedBinary === 'function' ? resolvedBinary() : resolvedBinary
-  } catch {
-    return null // resolvedBinary getter threw (misconfigured subclass) — no label
-  }
+export function labelBinarySpawnFailure({ attemptedPath, binary, prefix, verify = verifyBinary } = {}) {
+  if (typeof attemptedPath !== 'string' || attemptedPath.length === 0) return null
   let health
   try {
-    health = verify(resolved)
+    health = verify(attemptedPath)
   } catch {
     return null
   }
-  if (health && (health.status === BINARY_STATUS.QUARANTINED || health.status === BINARY_STATUS.NOT_FOUND)) {
+  if (health && (
+    health.status === BINARY_STATUS.QUARANTINED
+    || health.status === BINARY_STATUS.NOT_FOUND
+    || health.status === BINARY_STATUS.NOT_EXECUTABLE
+  )) {
     const desc = describeBinaryHealth(health, { binary })
     return `${prefix || `Failed to spawn ${binary}`}: ${desc.message}`
   }

@@ -142,13 +142,24 @@ describe('runProviderPreflight — quarantine detection (#6708)', () => {
     assert.equal(verifiedPath, '/custom/spawn/path/codex')
   })
 
-  it('reports a quarantined binary as not-ok via the ok flag (belt-and-braces)', () => {
+  it('a not-found result (ok:false) throws ProviderBinaryNotFoundError, not the quarantine error', () => {
     const Provider = makeProvider({
       preflight: { label: 'X', binary: { name: 'node', candidates: [] } },
     })
     const notFound = () => ({ ok: false, status: BINARY_STATUS.NOT_FOUND, path: 'node', quarantine: null })
     assert.throws(
       () => runProviderPreflight(Provider, { env: {}, verifyBinary: notFound }),
+      ProviderBinaryNotFoundError,
+    )
+  })
+
+  it('a not-executable result (ok:false) also throws ProviderBinaryNotFoundError', () => {
+    const Provider = makeProvider({
+      preflight: { label: 'X', binary: { name: 'node', candidates: [] } },
+    })
+    const notExec = (path) => ({ ok: false, status: BINARY_STATUS.NOT_EXECUTABLE, path, quarantine: null })
+    assert.throws(
+      () => runProviderPreflight(Provider, { env: {}, verifyBinary: notExec }),
       ProviderBinaryNotFoundError,
     )
   })

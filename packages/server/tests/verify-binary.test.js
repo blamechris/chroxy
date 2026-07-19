@@ -5,6 +5,9 @@ import {
   isBlockingQuarantine,
   describeBinaryHealth,
   labelBinarySpawnFailure,
+  readQuarantineXattr,
+  shellQuotePath,
+  MACOS_XATTR,
   BINARY_STATUS,
 } from '../src/utils/verify-binary.js'
 
@@ -139,13 +142,18 @@ describe('isBlockingQuarantine', () => {
 })
 
 describe('labelBinarySpawnFailure — shared spawn-time backstop (#6708)', () => {
-  it('labels a quarantined-at-spawn binary with the xattr fix (not a raw error)', () => {
-    const quarantined = (path) => ({ ok: false, status: BINARY_STATUS.QUARANTINED, path, quarantine: '0081;a;b;c' })
+  it('verifies the EXACT attempted path (not a re-resolve) and labels quarantine', () => {
+    let verifiedPath = null
+    const quarantined = (path) => {
+      verifiedPath = path
+      return { ok: false, status: BINARY_STATUS.QUARANTINED, path, quarantine: '0081;a;b;c' }
+    }
     const msg = labelBinarySpawnFailure({
-      resolvedBinary: '/opt/homebrew/bin/codex',
+      attemptedPath: '/opt/homebrew/bin/codex',
       binary: 'codex',
       verify: quarantined,
     })
+    assert.equal(verifiedPath, '/opt/homebrew/bin/codex', 'must verify the attempted path verbatim')
     assert.ok(msg, 'expected a labeled message')
     assert.match(msg, /^Failed to spawn codex:/)
     assert.match(msg, /Gatekeeper/)
@@ -154,14 +162,25 @@ describe('labelBinarySpawnFailure — shared spawn-time backstop (#6708)', () =>
 
   it('labels a vanished-at-spawn binary as not found', () => {
     const gone = (path) => ({ ok: false, status: BINARY_STATUS.NOT_FOUND, path, quarantine: null })
-    const msg = labelBinarySpawnFailure({ resolvedBinary: 'codex', binary: 'codex', verify: gone })
+    const msg = labelBinarySpawnFailure({ attemptedPath: 'codex', binary: 'codex', verify: gone })
     assert.match(msg, /Failed to spawn codex:.*not found/)
+  })
+
+  it('labels a present-but-not-executable binary (with a chmod fix)', () => {
+    const notExec = (path) => ({ ok: false, status: BINARY_STATUS.NOT_EXECUTABLE, path, quarantine: null })
+    const msg = labelBinarySpawnFailure({
+      attemptedPath: '/opt/homebrew/bin/codex',
+      binary: 'codex',
+      verify: notExec,
+    })
+    assert.match(msg, /not executable/)
+    assert.match(msg, /chmod \+x \/opt\/homebrew\/bin\/codex/)
   })
 
   it('honors a custom prefix (PTY / app-server call sites)', () => {
     const gone = (path) => ({ ok: false, status: BINARY_STATUS.NOT_FOUND, path, quarantine: null })
     const msg = labelBinarySpawnFailure({
-      resolvedBinary: 'claude',
+      attemptedPath: 'claude',
       binary: 'claude',
       prefix: 'Failed to spawn claude under PTY',
       verify: gone,
@@ -171,38 +190,72 @@ describe('labelBinarySpawnFailure — shared spawn-time backstop (#6708)', () =>
 
   it('returns null when the binary is healthy (caller keeps its own error)', () => {
     const ok = (path) => ({ ok: true, status: BINARY_STATUS.OK, path, quarantine: null })
-    assert.equal(labelBinarySpawnFailure({ resolvedBinary: '/bin/x', binary: 'x', verify: ok }), null)
+    assert.equal(labelBinarySpawnFailure({ attemptedPath: '/bin/x', binary: 'x', verify: ok }), null)
   })
 
-  it('accepts a getter for resolvedBinary and calls it', () => {
+  it('returns null for an empty/missing attemptedPath (no verify call)', () => {
     let called = false
-    const quarantined = (path) => ({ ok: false, status: BINARY_STATUS.QUARANTINED, path, quarantine: '0081' })
-    const msg = labelBinarySpawnFailure({
-      resolvedBinary: () => { called = true; return '/opt/homebrew/bin/gemini' },
-      binary: 'gemini',
-      verify: quarantined,
-    })
-    assert.equal(called, true)
-    assert.match(msg, /gemini/)
-  })
-
-  it('returns null (no crash) when the resolvedBinary getter throws', () => {
-    const quarantined = () => ({ ok: false, status: BINARY_STATUS.QUARANTINED, path: 'x', quarantine: '0081' })
-    const msg = labelBinarySpawnFailure({
-      resolvedBinary: () => { throw new Error('resolvedBinary must be overridden') },
-      binary: 'codex',
-      verify: quarantined,
-    })
-    assert.equal(msg, null)
+    const spy = () => { called = true; return { ok: false, status: BINARY_STATUS.NOT_FOUND, path: '', quarantine: null } }
+    assert.equal(labelBinarySpawnFailure({ attemptedPath: '', binary: 'x', verify: spy }), null)
+    assert.equal(labelBinarySpawnFailure({ attemptedPath: undefined, binary: 'x', verify: spy }), null)
+    assert.equal(called, false, 'verify must not run without a concrete attempted path')
   })
 
   it('returns null (no crash) when verify itself throws', () => {
     const msg = labelBinarySpawnFailure({
-      resolvedBinary: '/bin/x',
+      attemptedPath: '/bin/x',
       binary: 'x',
       verify: () => { throw new Error('boom') },
     })
     assert.equal(msg, null)
+  })
+})
+
+describe('readQuarantineXattr — invokes the ABSOLUTE system xattr (#6708 security)', () => {
+  it('execs /usr/bin/xattr, never a bare PATH-resolved "xattr"', () => {
+    let calledCmd = null
+    let calledArgs = null
+    const execSpy = (cmd, args) => { calledCmd = cmd; calledArgs = args; return '0081;a;b;c\n' }
+    const value = readQuarantineXattr('/opt/homebrew/bin/codex', { execFile: execSpy })
+    assert.equal(calledCmd, '/usr/bin/xattr', 'must use the absolute system path, not a PATH lookup')
+    assert.equal(MACOS_XATTR, '/usr/bin/xattr')
+    assert.deepEqual(calledArgs, ['-p', 'com.apple.quarantine', '/opt/homebrew/bin/codex'])
+    assert.equal(value, '0081;a;b;c')
+  })
+
+  it('returns null when the attribute is absent (xattr exits non-zero)', () => {
+    const execThrows = () => { throw Object.assign(new Error('No such xattr'), { status: 1 }) }
+    assert.equal(readQuarantineXattr('/bin/x', { execFile: execThrows }), null)
+  })
+})
+
+describe('shellQuotePath — copy-pasteable remediations for spaced paths (#6708)', () => {
+  it('leaves an already-safe path unquoted', () => {
+    assert.equal(shellQuotePath('/opt/homebrew/bin/codex'), '/opt/homebrew/bin/codex')
+  })
+
+  it('single-quotes a path containing spaces', () => {
+    assert.equal(shellQuotePath('/Users/me/My Tools/codex'), "'/Users/me/My Tools/codex'")
+  })
+
+  it('escapes embedded single quotes', () => {
+    assert.equal(shellQuotePath("/a/b'c/codex"), "'/a/b'\\''c/codex'")
+  })
+
+  it('describeBinaryHealth quotes a spaced path in the xattr remediation', () => {
+    const { remediation } = describeBinaryHealth(
+      { status: BINARY_STATUS.QUARANTINED, path: '/Users/me/My Tools/codex' },
+      { binary: 'codex' },
+    )
+    assert.match(remediation, /xattr -d com\.apple\.quarantine '\/Users\/me\/My Tools\/codex'/)
+  })
+
+  it('describeBinaryHealth quotes a spaced path in the chmod remediation', () => {
+    const { remediation } = describeBinaryHealth(
+      { status: BINARY_STATUS.NOT_EXECUTABLE, path: '/Users/me/My Tools/codex' },
+      { binary: 'codex' },
+    )
+    assert.match(remediation, /chmod \+x '\/Users\/me\/My Tools\/codex'/)
   })
 })
 

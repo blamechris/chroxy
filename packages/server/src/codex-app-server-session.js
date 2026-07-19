@@ -130,8 +130,13 @@ export class CodexAppServerSession extends BaseSession {
 
   async start() {
     const sandbox = resolveCodexSandbox(this._codexSandbox)
+    // Capture the EXACT binary the client will spawn so the spawn-time backstop
+    // (#6708) verifies that path — in start()'s catch AND later in
+    // _onClientExit — rather than a fresh re-resolve.
+    const attemptedBinary = CodexAppServerSession.resolvedBinary
+    this._spawnedBinary = attemptedBinary
     this._client = new CodexAppServerClient({
-      bin: CodexAppServerSession.resolvedBinary,
+      bin: attemptedBinary,
       cwd: this.cwd,
       env: this._buildChildEnv(),
       logger: log,
@@ -157,7 +162,7 @@ export class CodexAppServerSession extends BaseSession {
       // "codex app-server exited". Only relabels when the binary is actually
       // unhealthy; otherwise the original protocol error rethrows unchanged.
       const labeled = labelBinarySpawnFailure({
-        resolvedBinary: () => CodexAppServerSession.resolvedBinary,
+        attemptedPath: err?.path || this._spawnedBinary,
         binary: 'codex',
         prefix: 'Failed to start codex app-server',
       })
@@ -888,7 +893,7 @@ export class CodexAppServerSession extends BaseSession {
     // from under the running daemon, name the cause + fix instead of a bare
     // "exited (spawn … ENOENT)". Only relabels when the binary is unhealthy.
     const labeled = labelBinarySpawnFailure({
-      resolvedBinary: () => CodexAppServerSession.resolvedBinary,
+      attemptedPath: error?.path || this._spawnedBinary,
       binary: 'codex',
       prefix: 'Codex app-server exited',
     })

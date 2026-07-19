@@ -535,7 +535,10 @@ export class CliSession extends BaseSession {
     // with no native `claude.exe`); spawning a `.cmd` via child_process throws
     // EINVAL on Node 24, so route it through cmd.exe with proper escaping. No-op
     // for a directly-runnable `.exe` and on POSIX. See utils/win-spawn.js.
-    const spawnSpec = prepareSpawn(resolveClaudeBinary(), args)
+    // Captured so the spawn-time backstop (#6708) verifies the EXACT binary this
+    // attempt used, not a fresh re-resolve that could land on a different path.
+    const attemptedBinary = resolveClaudeBinary()
+    const spawnSpec = prepareSpawn(attemptedBinary, args)
     const child = spawn(spawnSpec.command, spawnSpec.args, {
       cwd: this.cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -595,9 +598,9 @@ export class CliSession extends BaseSession {
       this._child = null
       // #6708 — a spawn error (ENOENT/EACCES) can mean the binary was quarantined
       // /moved/removed out from under the running daemon (this is the respawn
-      // path too, so it fires mid-session). Re-verify and label the cause + fix
-      // instead of surfacing a bare ENOENT. Falls back to the raw message.
-      const labeled = labelBinarySpawnFailure({ resolvedBinary: resolveClaudeBinary, binary: 'claude' })
+      // path too, so it fires mid-session). Verify the ATTEMPTED path and label
+      // the cause + fix instead of surfacing a bare ENOENT. Falls back to raw.
+      const labeled = labelBinarySpawnFailure({ attemptedPath: err?.path || attemptedBinary, binary: 'claude' })
       this.emit('error', { message: labeled || `Failed to spawn claude: ${err.message}` })
       this._scheduleRespawn()
     })

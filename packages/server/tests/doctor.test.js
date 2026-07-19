@@ -361,6 +361,21 @@ describe('checkBinary quarantine detection (#6708)', () => {
     assert.match(result.message, /Gatekeeper/)
   })
 
+  it('reports a present-but-not-executable binary distinctly (not "Not found")', () => {
+    const result = checkBinary('codex', ['--version'], {
+      parseVersion: (out) => out.trim(),
+      required: true,
+      candidates: [process.execPath],
+      installHint: 'install Codex CLI',
+      verify: (path) => ({ ok: false, status: 'not_executable', path, quarantine: null }),
+    })
+    assert.equal(result.status, 'fail')
+    assert.match(result.message, /not executable/)
+    assert.match(result.message, /chmod \+x/)
+    // A non-executable binary must not be mislabeled as missing.
+    assert.doesNotMatch(result.message, /Not found/)
+  })
+
   it('still runs the version probe when the binary is clean (verify=ok)', () => {
     const result = checkBinary('node', ['--version'], {
       parseVersion: (out) => out.trim(),

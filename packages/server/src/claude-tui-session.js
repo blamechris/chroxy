@@ -1936,13 +1936,16 @@ export class ClaudeTuiSession extends BaseSession {
     }
     log.info(`spawn claude TUI (uuid=${this._sessionId.slice(0, 8)} model=${this.model || 'default'} perms=${permissionsEnabled} skills=${skillsPrefix ? skillsPrefix.length + 'b' : 'none'})`)
 
+    // Captured so the spawn-time backstop (#6708) verifies the EXACT binary this
+    // attempt used, not a fresh re-resolve that could land on a different path.
+    const attemptedBinary = resolveClaudeBinary()
     try {
       // node-pty spawns CLAUDE directly — no cmd.exe routing needed even when
       // the Windows resolver lands on a `claude.cmd` shim. node-pty routes
       // through conpty/cmd.exe internally and runs a `.cmd` fine (verified),
       // unlike child_process.spawn which throws EINVAL on a `.cmd` (Node 24) and
       // needs the utils/win-spawn.js escaping the cli-session path uses.
-      this._term = ptyMod.spawn(resolveClaudeBinary(), args, {
+      this._term = ptyMod.spawn(attemptedBinary, args, {
         name: 'xterm-256color',
         // #5839: single-sourced default so the dashboard mirror renders at the
         // same grid. #5835 Phase 2: a prior resize is preserved across respawns
@@ -1958,7 +1961,7 @@ export class ClaudeTuiSession extends BaseSession {
       // running daemon (also the respawn path), name the cause + fix rather than
       // a bare error. Falls back to the raw message when the binary looks healthy.
       const labeled = labelBinarySpawnFailure({
-        resolvedBinary: resolveClaudeBinary,
+        attemptedPath: err?.path || attemptedBinary,
         binary: 'claude',
         prefix: 'Failed to spawn claude under PTY',
       })
