@@ -205,13 +205,37 @@ describe('GitPanel', () => {
     expect(screen.getByTestId('git-commit-btn')).toBeDisabled()
   })
 
-  it('sends requestGitCommit with the trimmed message', () => {
+  it('opens a confirmation dialog before committing (does not commit on the first click)', () => {
     render(<GitPanel />)
     act(() => capturedStatusCallback!(GIT_STATUS_WITH_CHANGES))
 
-    const input = screen.getByTestId('git-commit-input')
-    fireEvent.change(input, { target: { value: '  fix: typo  ' } })
+    fireEvent.change(screen.getByTestId('git-commit-input'), { target: { value: 'fix: typo' } })
     fireEvent.click(screen.getByTestId('git-commit-btn'))
+
+    // The confirm dialog is shown and nothing has been committed yet.
+    expect(screen.getByTestId('confirm-dialog')).toBeInTheDocument()
+    expect(mockRequestGitCommit).not.toHaveBeenCalled()
+  })
+
+  it('does not commit when the confirmation is cancelled', () => {
+    render(<GitPanel />)
+    act(() => capturedStatusCallback!(GIT_STATUS_WITH_CHANGES))
+
+    fireEvent.change(screen.getByTestId('git-commit-input'), { target: { value: 'fix: typo' } })
+    fireEvent.click(screen.getByTestId('git-commit-btn'))
+    fireEvent.click(screen.getByTestId('confirm-dialog-cancel'))
+
+    expect(mockRequestGitCommit).not.toHaveBeenCalled()
+    expect(screen.queryByTestId('confirm-dialog')).not.toBeInTheDocument()
+  })
+
+  it('sends requestGitCommit with the trimmed message after confirming', () => {
+    render(<GitPanel />)
+    act(() => capturedStatusCallback!(GIT_STATUS_WITH_CHANGES))
+
+    fireEvent.change(screen.getByTestId('git-commit-input'), { target: { value: '  fix: typo  ' } })
+    fireEvent.click(screen.getByTestId('git-commit-btn'))
+    fireEvent.click(screen.getByTestId('confirm-dialog-confirm'))
 
     expect(mockRequestGitCommit).toHaveBeenCalledWith('fix: typo')
   })
@@ -224,6 +248,7 @@ describe('GitPanel', () => {
     const input = screen.getByTestId('git-commit-input') as HTMLTextAreaElement
     fireEvent.change(input, { target: { value: 'fix: typo' } })
     fireEvent.click(screen.getByTestId('git-commit-btn'))
+    fireEvent.click(screen.getByTestId('confirm-dialog-confirm'))
     act(() => capturedCommitCallback!({ hash: 'abc1234', message: 'fix: typo', error: null }))
 
     expect((screen.getByTestId('git-commit-input') as HTMLTextAreaElement).value).toBe('')
@@ -237,10 +262,53 @@ describe('GitPanel', () => {
     const input = screen.getByTestId('git-commit-input') as HTMLTextAreaElement
     fireEvent.change(input, { target: { value: 'fix: typo' } })
     fireEvent.click(screen.getByTestId('git-commit-btn'))
+    fireEvent.click(screen.getByTestId('confirm-dialog-confirm'))
     act(() => capturedCommitCallback!({ hash: null, message: null, error: 'Commit message cannot be empty' }))
 
     expect(screen.getByTestId('git-action-error')).toHaveTextContent('Commit message cannot be empty')
     expect(input.value).toBe('fix: typo')
+  })
+
+  // Regression: the durable git_status_result handler must survive a mutation.
+  // The earlier version swapped in a one-shot status callback that nulled the
+  // slot after each stage/commit — so a subsequent Refresh produced a
+  // git_status_result no callback consumed, wedging the panel on the spinner.
+  it('keeps consuming git_status_result (Refresh works) after a stage', () => {
+    render(<GitPanel />)
+    act(() => capturedStatusCallback!(GIT_STATUS_WITH_CHANGES))
+
+    // Stage a file and let the post-stage refresh land.
+    fireEvent.click(screen.getByLabelText('Select src/unstaged.ts'))
+    fireEvent.click(screen.getByTestId('git-stage-selected-btn'))
+    act(() => capturedStageCallback!({ error: null }))
+    act(() => capturedStatusCallback!({ branch: 'feat/git-panel', staged: [{ path: 'src/unstaged.ts', status: 'modified' }], unstaged: [], untracked: [], error: null }))
+
+    // Now Refresh: its git_status_result must still be consumed (status updates,
+    // no stuck "Loading git status…" spinner).
+    fireEvent.click(screen.getByText('Refresh'))
+    act(() => capturedStatusCallback!({ branch: 'main', staged: [], unstaged: [{ path: 'other.ts', status: 'modified' }], untracked: [], error: null }))
+
+    expect(screen.queryByText('Loading git status...')).not.toBeInTheDocument()
+    expect(screen.getByTestId('git-unstaged-section').textContent).toContain('other.ts')
+    expect(screen.getByTitle('Branch: main')).toBeInTheDocument()
+  })
+
+  it('keeps consuming git_status_result (Refresh works) after a commit', () => {
+    render(<GitPanel />)
+    act(() => capturedStatusCallback!(GIT_STATUS_WITH_CHANGES))
+
+    fireEvent.change(screen.getByTestId('git-commit-input'), { target: { value: 'fix: typo' } })
+    fireEvent.click(screen.getByTestId('git-commit-btn'))
+    fireEvent.click(screen.getByTestId('confirm-dialog-confirm'))
+    act(() => capturedCommitCallback!({ hash: 'abc1234', message: 'fix: typo', error: null }))
+    act(() => capturedStatusCallback!({ branch: 'feat/git-panel', staged: [], unstaged: [], untracked: [], error: null }))
+
+    // Refresh after the commit must still be consumed.
+    fireEvent.click(screen.getByText('Refresh'))
+    act(() => capturedStatusCallback!({ branch: 'feat/git-panel', staged: [], unstaged: [{ path: 'again.ts', status: 'modified' }], untracked: [], error: null }))
+
+    expect(screen.queryByText('Loading git status...')).not.toBeInTheDocument()
+    expect(screen.getByTestId('git-unstaged-section').textContent).toContain('again.ts')
   })
 
   it('renders the branches tab with local and remote branches, current marked', () => {

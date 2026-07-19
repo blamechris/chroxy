@@ -19,6 +19,7 @@
  */
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import { useConnectionStore } from '../store/connection'
+import { ConfirmDialog } from './ConfirmDialog'
 import type {
   GitFileStatus,
   GitStatusResult,
@@ -106,26 +107,42 @@ export function GitPanel() {
   const [committing, setCommitting] = useState(false)
   const [stagingInProgress, setStagingInProgress] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
+  // #6875 review — commit is irreversible-ish; gate it behind a confirm dialog
+  // for parity with the mobile app's GitView.handleCommit (which shows an
+  // Alert "Commit N staged file(s)?" before committing).
+  const [commitConfirmOpen, setCommitConfirmOpen] = useState(false)
+
+  // The single, DURABLE git_status_result handler. Stable identity (empty deps)
+  // so the mount effect installs it exactly once, and — critically — so the
+  // stage/commit success paths can re-fire `requestGitStatus()` WITHOUT ever
+  // swapping this slot for a one-shot callback. The earlier version installed a
+  // temporary status callback ending in `setGitStatusCallback(null)` after each
+  // mutation, which tore down the durable handler with nothing to re-arm it: the
+  // next Refresh (or a reconnect refresh) produced a git_status_result no
+  // callback consumed, wedging the panel on "Loading git status…" until remount.
+  const applyStatusResult = useCallback((result: GitStatusResult) => {
+    setLoading(false)
+    setStagingInProgress(false)
+    setError(result.error)
+    if (!result.error) {
+      setBranch(result.branch)
+      setStaged(result.staged)
+      setUnstaged(result.unstaged)
+      setUntracked(result.untracked)
+    }
+  }, [])
 
   const refreshStatus = useCallback(() => {
     setLoading(true)
     requestGitStatus()
   }, [requestGitStatus])
 
-  // Wire the git_status_result callback
+  // Wire the durable git_status_result callback (installed once; never swapped
+  // out by a mutation — see applyStatusResult).
   useEffect(() => {
-    setGitStatusCallback((result: GitStatusResult) => {
-      setLoading(false)
-      setError(result.error)
-      if (!result.error) {
-        setBranch(result.branch)
-        setStaged(result.staged)
-        setUnstaged(result.unstaged)
-        setUntracked(result.untracked)
-      }
-    })
+    setGitStatusCallback(applyStatusResult)
     return () => setGitStatusCallback(null)
-  }, [setGitStatusCallback])
+  }, [setGitStatusCallback, applyStatusResult])
 
   // Wire the git_branches_result callback
   useEffect(() => {
@@ -165,8 +182,11 @@ export function GitPanel() {
     [selectedPaths, stagedPaths],
   )
 
-  // Shared stage/unstage mutation runner: arms the git_stage_result callback,
-  // fires the request, and on success re-fetches git_status. `request` is
+  // Shared stage/unstage mutation runner: arms the (one-shot) git_stage_result
+  // callback, fires the request, and on success re-fetches git_status. The
+  // refresh is consumed by the DURABLE status handler (applyStatusResult) —
+  // this path only ever touches the stage slot, never the status slot, so the
+  // durable handler survives every mutation (the wedge fix). `request` is
   // requestGitStage or requestGitUnstage (both return false when the socket
   // is closed, mirroring the app's #6288 not-connected guard).
   const performMutation = useCallback((
@@ -185,17 +205,8 @@ export function GitPanel() {
         return
       }
       setSelectedPaths(new Set())
-      setGitStatusCallback((r: GitStatusResult) => {
-        setStagingInProgress(false)
-        setError(r.error)
-        if (!r.error) {
-          setBranch(r.branch)
-          setStaged(r.staged)
-          setUnstaged(r.unstaged)
-          setUntracked(r.untracked)
-        }
-        setGitStatusCallback(null)
-      })
+      // The durable status handler consumes this refresh and clears
+      // stagingInProgress once the fresh file lists land.
       requestGitStatus()
     })
     if (!request(paths)) {
@@ -203,7 +214,7 @@ export function GitPanel() {
       setStagingInProgress(false)
       setActionError(notConnectedMessage)
     }
-  }, [setGitStageCallback, setGitStatusCallback, requestGitStatus])
+  }, [setGitStageCallback, requestGitStatus])
 
   const handleStageSelected = useCallback(() => {
     const paths = Array.from(selectedPaths).filter(p => unstagedPaths.has(p) || untrackedSet.has(p))
@@ -224,11 +235,23 @@ export function GitPanel() {
     performMutation(staged.map(f => f.path), requestGitUnstage, 'Unstage not sent — reconnect and try again')
   }, [staged, performMutation, requestGitUnstage])
 
-  const handleCommit = useCallback(() => {
+  // Commit-button click: empty-message + nothing-staged guard, then open the
+  // confirmation dialog (#6875 review — parity with the mobile app's
+  // "Commit N staged file(s)?" gate; commit is irreversible-ish).
+  const handleCommitClick = useCallback(() => {
     const msg = commitMessage.trim()
     // Empty-message guard: the server rejects an empty commit message too
     // (packages/server/src/ws-file-ops/git.js gitCommit), but guarding here
     // avoids a round-trip and matches the app's disabled-button behavior.
+    if (!msg || staged.length === 0) return
+    setCommitConfirmOpen(true)
+  }, [commitMessage, staged.length])
+
+  // Confirmed commit: fires git_commit; on success clears the message and
+  // re-fetches status via the DURABLE handler (never swaps the status slot).
+  const handleCommitConfirmed = useCallback(() => {
+    setCommitConfirmOpen(false)
+    const msg = commitMessage.trim()
     if (!msg || staged.length === 0) return
     setActionError(null)
     setCommitting(true)
@@ -240,16 +263,7 @@ export function GitPanel() {
         return
       }
       setCommitMessage('')
-      setGitStatusCallback((r: GitStatusResult) => {
-        setError(r.error)
-        if (!r.error) {
-          setBranch(r.branch)
-          setStaged(r.staged)
-          setUnstaged(r.unstaged)
-          setUntracked(r.untracked)
-        }
-        setGitStatusCallback(null)
-      })
+      // The durable status handler consumes this refresh.
       requestGitStatus()
     })
     if (!requestGitCommit(msg)) {
@@ -257,7 +271,7 @@ export function GitPanel() {
       setCommitting(false)
       setActionError('Commit not sent — reconnect and try again')
     }
-  }, [commitMessage, staged.length, setGitCommitCallback, requestGitCommit, setGitStatusCallback, requestGitStatus])
+  }, [commitMessage, staged.length, setGitCommitCallback, requestGitCommit, requestGitStatus])
 
   const hasChanges = staged.length > 0 || unstaged.length > 0 || untracked.length > 0
   const localBranches = useMemo(() => branches.filter(b => !b.isRemote), [branches])
@@ -402,7 +416,7 @@ export function GitPanel() {
               <button
                 type="button"
                 className="git-commit-btn"
-                onClick={handleCommit}
+                onClick={handleCommitClick}
                 disabled={!commitMessage.trim() || committing}
                 data-testid="git-commit-btn"
               >
@@ -439,6 +453,23 @@ export function GitPanel() {
           {branches.length === 0 && <div className="git-empty">No branches found</div>}
         </div>
       )}
+
+      {/* #6875 review — commit confirmation (parity with the mobile app's
+          "Commit N staged file(s)?" gate). Reuses the dashboard's shared
+          ConfirmDialog, the same primitive other destructive actions use. */}
+      <ConfirmDialog
+        open={commitConfirmOpen}
+        title="Commit staged changes?"
+        confirmLabel="Commit"
+        message={
+          <>
+            Commit {staged.length} staged file{staged.length !== 1 ? 's' : ''}
+            {branch ? <> on <b>{branch}</b></> : null}?
+          </>
+        }
+        onConfirm={handleCommitConfirmed}
+        onCancel={() => setCommitConfirmOpen(false)}
+      />
     </div>
   )
 }
