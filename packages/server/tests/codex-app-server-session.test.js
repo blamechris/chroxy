@@ -1,4 +1,4 @@
-import { describe, it } from 'node:test'
+import { describe, it, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, existsSync } from 'fs'
 import { tmpdir } from 'os'
@@ -399,6 +399,7 @@ describe('CodexAppServerSession — transient stream reconnect (#6623)', () => {
     assert.equal(s._isBusy, true, 'session stays busy while codex reconnects')
     assert.ok(s._activeTurn, 'the in-flight turn is preserved across the reconnect')
     s._clearResultTimeout() // release the re-armed backstop timer
+    s._clearReconnectWatchdog() // #6629 — release the reconnect watchdog armed alongside it
     cleanup()
   })
 
@@ -459,6 +460,173 @@ describe('CodexAppServerSession — transient stream reconnect (#6623)', () => {
     assert.equal(s._isTransientReconnect(s._errorPayload({ message: 'boom' })), false)
     assert.equal(s._isTransientReconnect(s._errorPayload(undefined)), false)
     cleanup()
+  })
+})
+
+describe('CodexAppServerSession — reconnect watchdog / stale-state reconciliation (#6629)', () => {
+  // #6623 keeps the turn OPEN on a transient reconnect so codex can recover; the
+  // ONLY pre-existing backstop was the 30-min result timeout — and a pending
+  // permission PAUSES that timer. #6629: a codex whose response stream wedges
+  // mid-reconnect (never recovers, never emits its terminal give-up) left the
+  // session stuck "Working..." (and any orphan in-flight tool_start unresolved)
+  // for up to 30 min, or indefinitely if a permission had paused the timer. The
+  // watchdog reconciles that stale state on a bounded window, independent of the
+  // permission pause, surfacing error{code:'stream_stall'} (the existing retry chip).
+  const RECONNECT_WATCHDOG_MS = 2 * 60 * 1000
+  const reconnectParams = (attempt = 2, max = 5) => ({
+    error: {
+      message: `Reconnecting... ${attempt}/${max}`,
+      codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: null } },
+      additionalDetails: 'stream disconnected before completion: failed to send websocket frame',
+    },
+  })
+
+  // A turn mid-shell-task: an in-flight commandExecution tool_start with no
+  // matching tool_result yet (the exact stale in-flight tool the issue describes).
+  function armBusyTurnWithInflightShell(s) {
+    s._isBusy = true
+    s._activeTurn = { messageId: 'm1', turnId: 't1', didStreamStart: true }
+    s._onNotification({ method: 'item/started', params: { item: { type: 'commandExecution', id: 'shell-1', command: 'npm run desktop:build', cwd: '/tmp' } } })
+  }
+
+  it('fires after a non-recovering reconnect: clears busy + sweeps the orphan tool_start with error{code:stream_stall}', () => {
+    mock.timers.enable({ apis: ['setTimeout', 'Date'] })
+    const { s, cleanup } = mkSession()
+    try {
+      const ev = capture(s, ['error', 'stopped', 'tool_result', 'stream_end'])
+      armBusyTurnWithInflightShell(s)
+      // Stream drops → codex is reconnecting → #6623 keeps the turn open + arms the watchdog.
+      s._onNotification({ method: 'error', params: reconnectParams(2, 5) })
+      assert.ok(s._reconnectWatchdog, 'watchdog armed on a transient reconnect')
+      assert.equal(s._isBusy, true, 'still busy while codex reconnects')
+
+      // codex never recovers and never emits its terminal give-up.
+      mock.timers.tick(RECONNECT_WATCHDOG_MS - 1)
+      assert.equal(ev.length, 0, 'watchdog must not fire 1ms before the window')
+      mock.timers.tick(1)
+
+      const err = ev.find(([e]) => e === 'error')
+      assert.ok(err, 'watchdog fails the turn with an error')
+      assert.equal(err[1].code, 'stream_stall', 'error carries stream_stall so the client shows a retry chip')
+      assert.ok(ev.some(([e, p]) => e === 'tool_result' && p.toolUseId === 'shell-1'), 'the orphan in-flight shell tool_start is swept with a synthetic tool_result')
+      assert.equal(s._isBusy, false, 'stale working state cleared')
+      assert.equal(s._activeTurn, null, 'turn cleared')
+      assert.equal(s._reconnectWatchdog, null, 'watchdog handle cleared after firing')
+    } finally {
+      s.destroy()
+      mock.timers.reset()
+      cleanup()
+    }
+  })
+
+  it('recovery disarms the watchdog: a forward-progress notification prevents a premature fail', () => {
+    mock.timers.enable({ apis: ['setTimeout', 'Date'] })
+    const { s, cleanup } = mkSession()
+    try {
+      const ev = capture(s, ['error', 'stream_end', 'result'])
+      s._isBusy = true
+      s._activeTurn = { messageId: 'm1', turnId: 't1', didStreamStart: true }
+      s._onNotification({ method: 'error', params: reconnectParams(1, 5) })
+      assert.ok(s._reconnectWatchdog, 'watchdog armed')
+      // codex re-establishes the stream and streams a delta → recovery.
+      s._onNotification({ method: 'item/agentMessage/delta', params: { delta: 'back online' } })
+      assert.equal(s._reconnectWatchdog, null, 'watchdog disarmed on genuine forward progress')
+
+      // Ticking past the window must NOT fail the turn.
+      mock.timers.tick(RECONNECT_WATCHDOG_MS * 2)
+      assert.ok(!ev.some(([e, p]) => e === 'error' && p?.code === 'stream_stall'), 'no stall error after recovery')
+
+      // …and the turn still completes normally.
+      s._onNotification({ method: 'turn/completed', params: { turn: { durationMs: 5 } } })
+      assert.equal(s._isBusy, false, 'busy cleared on clean completion')
+      assert.equal(s._activeTurn, null, 'turn cleared on clean completion')
+    } finally {
+      s.destroy()
+      mock.timers.reset()
+      cleanup()
+    }
+  })
+
+  it('is the sole backstop when a pending permission cleared the result timeout with no re-arm (the #6629 gap)', () => {
+    mock.timers.enable({ apis: ['setTimeout', 'Date'] })
+    const { s, cleanup } = mkSession()
+    try {
+      const ev = capture(s, ['error', 'tool_result'])
+      armBusyTurnWithInflightShell(s)
+      // Stream drops mid-shell → the reconnect arms the watchdog AND, via
+      // _resetResultTimeout at the top of _onNotification, re-arms the result timeout.
+      s._onNotification({ method: 'error', params: reconnectParams(2, 5) })
+      assert.ok(s._reconnectWatchdog, 'watchdog armed on the reconnect')
+      assert.ok(s._resultTimeout, 'the reconnect notification re-armed the result timeout')
+
+      // THEN codex's shell-escalation approval lands. That is a server→client
+      // REQUEST, not a notification, so it does NOT re-arm the result timeout — it
+      // CLEARS it (_pauseResultTimeoutForPermission → _clearResultTimeout). With the
+      // stream now wedged (no further notifications), nothing re-arms it: there is
+      // NO active result timeout left. Without the watchdog this hangs forever.
+      s._pauseResultTimeoutForPermission()
+      assert.equal(s._resultTimeout, null, 'result timeout cleared by the pending permission and NOT re-armed (no further notifications)')
+      assert.ok(s._reconnectWatchdog, 'watchdog survives the pause — it is independent of the result timeout')
+
+      // The watchdog alone reconciles the stale state.
+      mock.timers.tick(RECONNECT_WATCHDOG_MS)
+      const err = ev.find(([e]) => e === 'error')
+      assert.ok(err && err[1].code === 'stream_stall', 'the watchdog alone reconciles the stale state as the sole backstop')
+      assert.equal(s._isBusy, false, 'no longer stuck Working with a pending permission')
+      assert.ok(ev.some(([e, p]) => e === 'tool_result' && p.toolUseId === 'shell-1'), 'orphan shell tool_start swept')
+    } finally {
+      s.destroy()
+      mock.timers.reset()
+      cleanup()
+    }
+  })
+
+  it('a reconnect burst re-arms the watchdog so legit N/5 retries do not trip it early', () => {
+    mock.timers.enable({ apis: ['setTimeout', 'Date'] })
+    const { s, cleanup } = mkSession()
+    try {
+      const ev = capture(s, ['error'])
+      s._isBusy = true
+      s._activeTurn = { messageId: 'm1', turnId: 't1', didStreamStart: true }
+
+      s._onNotification({ method: 'error', params: reconnectParams(1, 5) })
+      mock.timers.tick(RECONNECT_WATCHDOG_MS - 1_000) // almost expired…
+      s._onNotification({ method: 'error', params: reconnectParams(2, 5) }) // …then a new retry re-arms it
+      mock.timers.tick(RECONNECT_WATCHDOG_MS - 1_000)
+      assert.equal(ev.length, 0, 'no fire: each retry within the window re-armed the watchdog')
+
+      // Silence past a full window after the LAST retry → fires.
+      mock.timers.tick(1_000)
+      assert.ok(ev.some(([e, p]) => e === 'error' && p?.code === 'stream_stall'), 'fires a full window after the last reconnect tick')
+      assert.equal(s._isBusy, false, 'busy cleared')
+    } finally {
+      s.destroy()
+      mock.timers.reset()
+      cleanup()
+    }
+  })
+
+  it('a terminal give-up clears the watchdog on its way to _failTurn (no double fail)', () => {
+    mock.timers.enable({ apis: ['setTimeout', 'Date'] })
+    const { s, cleanup } = mkSession()
+    try {
+      const ev = capture(s, ['error'])
+      s._isBusy = true
+      s._activeTurn = { messageId: 'm1', turnId: 't1', didStreamStart: false }
+      s._onNotification({ method: 'error', params: reconnectParams(2, 5) }) // arms watchdog
+      assert.ok(s._reconnectWatchdog, 'watchdog armed')
+      // codex gives up: a disconnect WITHOUT a Reconnecting message → terminal.
+      s._onNotification({ method: 'error', params: { error: { message: 'stream disconnected before completion', codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: null } } } } })
+      assert.equal(ev.length, 1, 'exactly one failure surfaced')
+      assert.equal(s._reconnectWatchdog, null, 'watchdog cleared by the terminal failure')
+      // Ticking must not produce a second (stale) failure.
+      mock.timers.tick(RECONNECT_WATCHDOG_MS * 2)
+      assert.equal(ev.length, 1, 'no second fail from a stale watchdog after teardown')
+    } finally {
+      s.destroy()
+      mock.timers.reset()
+      cleanup()
+    }
   })
 })
 
