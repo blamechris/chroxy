@@ -97,15 +97,50 @@ describe('secret-read floor (#6803)', () => {
     })
   })
 
+  // -- PR #6873 review: credential-DENSE config files must floor for READS --
+
+  describe('READS of credential config files are floored (PR #6873 review)', () => {
+    const credentialReads = [
+      '.git/config',                 // PAT-embedded remote URL
+      '.git/credentials',            // git plaintext store
+      '.config/git/config',          // XDG git config
+      '.config/git/credentials',     // XDG git store
+      '.claude/settings.json',       // may hold ANTHROPIC_API_KEY / env
+      '.claude/settings.local.json',
+      'sub/dir/.git/config',         // any depth
+    ]
+    for (const file_path of credentialReads) {
+      it(`allow Read + Read ${file_path} → prompt`, async () => {
+        const r = await run(pm, 'Read', { file_path }, 'approve', [{ tool: 'Read', decision: 'allow' }])
+        assert.equal(r.floored, true, `${file_path} read must prompt (credential leak risk), not auto-approve`)
+      })
+    }
+
+    it('auto/bypass mode + Read .git/config → prompt (floor beats bypass)', async () => {
+      const r = await run(pm, 'Read', { file_path: '.git/config' }, 'auto')
+      assert.equal(r.floored, true)
+    })
+
+    it('case-insensitive: Read .GIT/config and .Claude/Settings.Local.json → prompt', async () => {
+      const a = await run(pm, 'Read', { file_path: '.GIT/config' }, 'approve', [{ tool: 'Read', decision: 'allow' }])
+      assert.equal(a.floored, true)
+      const pm2 = createManager()
+      try {
+        const b = await run(pm2, 'Read', { file_path: '.Claude/Settings.Local.json' }, 'approve', [{ tool: 'Read', decision: 'allow' }])
+        assert.equal(b.floored, true)
+      } finally { pm2.destroy() }
+    })
+  })
+
   // -- The key #6803 change: READS of config DIRS are NOT floored --
 
-  describe('READS of config dirs stay auto-approved (not a secret concern)', () => {
+  describe('READS of NON-credential config-dir files stay auto-approved', () => {
     const benignReads = [
-      '.git/config',
-      '.git/HEAD',
-      '.claude/settings.local.json',
-      '.vscode/settings.json',
-      '.config/git/config',
+      '.git/HEAD',              // not a credential file
+      '.git/refs/heads/main',
+      '.vscode/settings.json',  // secret-free per the issue's intent
+      '.claude/skills/foo.md',  // a runtime skill, not settings
+      '.claude/agents/x.md',
       'src/foo.js',
       'docs/readme.md',
     ]
@@ -117,8 +152,8 @@ describe('secret-read floor (#6803)', () => {
       })
     }
 
-    it('auto mode + Read .claude/settings.local.json → auto-approved (no prompt)', async () => {
-      const r = await run(pm, 'Read', { file_path: '.claude/settings.local.json' }, 'auto')
+    it('auto mode + Read .git/HEAD → auto-approved (no prompt)', async () => {
+      const r = await run(pm, 'Read', { file_path: '.git/HEAD' }, 'auto')
       assert.equal(r.floored, false)
       assert.equal(r.behavior, 'allow')
     })
@@ -199,19 +234,39 @@ describe('isSecretReadTarget vs isProtectedPathTarget (#6803)', () => {
     })
   }
 
-  // Config dirs: floored by the WRITE floor ONLY — NOT the read floor.
-  const configDirs = [
+  // Credential config files: floored by BOTH floors (PR #6873 review).
+  const credentialConfig = [
     { file_path: '.git/config' },
-    { file_path: 'sub/.git/HEAD' },
-    { file_path: '.claude/settings.local.json' },
-    { file_path: '.vscode/settings.json' },
+    { file_path: '.git/credentials' },
+    { file_path: 'sub/.git/config' },
     { file_path: '.config/git/config' },
-    { file_path: '.GIT/config' },     // case-insensitive dir
+    { file_path: '.config/git/credentials' },
+    { file_path: '.claude/settings.json' },
+    { file_path: '.claude/settings.local.json' },
+    { file_path: '.GIT/config' },                    // case-insensitive
+    { path: '.git/config' },                          // any path field
+    { changes: [{ path: 'src/ok.js', kind: 'update', diff: 'd' }, { path: '.git/config', kind: 'update', diff: 'd' }] },
+  ]
+  for (const input of credentialConfig) {
+    it(`credential config ${JSON.stringify(input)}: both floors catch it`, () => {
+      assert.equal(isSecretReadTarget(input, cwd), true, 'read floor must catch credential config files')
+      assert.equal(isProtectedPathTarget(input, cwd), true, 'write floor must catch them too')
+    })
+  }
+
+  // NON-credential config-dir files: floored by the WRITE floor ONLY.
+  const configDirs = [
+    { file_path: '.git/HEAD' },
+    { file_path: 'sub/.git/HEAD' },
+    { file_path: '.claude/skills/foo.md' },
+    { file_path: '.claude/agents/x.md' },
+    { file_path: '.vscode/settings.json' },
+    { file_path: '.config/git/attributes' },   // not config/credentials
   ]
   for (const input of configDirs) {
     it(`config dir ${JSON.stringify(input)}: write floor yes, read floor no`, () => {
       assert.equal(isProtectedPathTarget(input, cwd), true, 'write floor must catch config dirs')
-      assert.equal(isSecretReadTarget(input, cwd), false, 'read floor must NOT catch config dirs')
+      assert.equal(isSecretReadTarget(input, cwd), false, 'read floor must NOT catch a non-credential config file')
     })
   }
 

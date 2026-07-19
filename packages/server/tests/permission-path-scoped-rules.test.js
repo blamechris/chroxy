@@ -86,6 +86,35 @@ describe('#6803 path-scoped session rules — _matchesRule', () => {
     assert.equal(pm._matchesRule('Write', { file_path: 'src/deep/b.js' }), null, '* does not cross /')
   })
 
+  it('glob scope NEVER matches a target that escapes the session cwd (PR #6873 review)', () => {
+    // `**/*.js` / `**` must not reach ABOVE base via `..` or an absolute path.
+    pm.setRules([{ tool: 'Write', decision: 'allow', path: '**/*.js' }])
+    assert.equal(pm._matchesRule('Write', { file_path: '../evil.js' }), null, '../ escape must not match')
+    assert.equal(pm._matchesRule('Write', { file_path: '../../etc/x.js' }), null)
+    assert.equal(pm._matchesRule('Write', { file_path: '/etc/passwd.js' }), null, 'absolute escape must not match')
+    assert.equal(pm._matchesRule('Write', { file_path: 'src/a.js' }), 'allow', 'an in-cwd target still matches')
+
+    pm.setRules([{ tool: 'Write', decision: 'allow', path: '**' }])
+    assert.equal(pm._matchesRule('Write', { file_path: '/etc/passwd' }), null, 'bare ** must not match an absolute target')
+    assert.equal(pm._matchesRule('Write', { file_path: '../secret' }), null)
+    assert.equal(pm._matchesRule('Write', { file_path: 'a/b/c' }), 'allow')
+
+    pm.setRules([{ tool: 'Write', decision: 'allow', path: 'src/**' }])
+    assert.equal(pm._matchesRule('Write', { file_path: 'src/a/b.js' }), 'allow')
+    assert.equal(pm._matchesRule('Write', { file_path: '../../etc/x' }), null, 'a ..-escape falls through to a prompt')
+  })
+
+  it('a glob-escape target falls through to a fresh prompt end-to-end', async () => {
+    pm.setRules([{ tool: 'Write', decision: 'allow', path: '**/*.js' }])
+    const events = []
+    pm.on('permission_request', (d) => events.push(d))
+    const promise = pm.handlePermission('Write', { file_path: '../evil.js' }, null, 'approve')
+    assert.equal(events.length, 1, 'an out-of-cwd glob target must prompt, not auto-approve')
+    pm.respondToPermission(events[0].requestId, 'deny')
+    const result = await promise
+    assert.equal(result.behavior, 'deny')
+  })
+
   it('multi-target: matches only when EVERY target is in scope', () => {
     pm.setRules([{ tool: 'apply_patch', decision: 'allow', path: 'src/' }])
     // all in scope → allow

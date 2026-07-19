@@ -101,6 +101,39 @@ function isSecretFileSegment(seg) {
   return false
 }
 
+/**
+ * #6803 (PR #6873 security review) — credential-DENSE config FILES that must be
+ * floored for READS too (not just writes). These live INSIDE a config dir, so
+ * the secret-file matcher above misses them, but they routinely carry secrets:
+ *   - `.git/config`            — a remote URL can embed a PAT (`https://TOKEN@…`)
+ *   - `.git/credentials`       — git's plaintext credential store
+ *   - `.config/git/config` + `.config/git/credentials` — the XDG equivalents
+ *   - `.claude/settings*.json` — may hold ANTHROPIC_API_KEY / env secrets
+ * A broad `allow Read` / auto / bypass must not silently read these (Chroxy
+ * streams tool-results to phone/Discord, amplifying any leak). OTHER files in
+ * the config dirs (`.claude/skills/*.md`, a secret-free `.vscode/settings.json`)
+ * stay un-floored for reads per #6803's intent.
+ *
+ * Matched as a 2-/3-segment sequence anchored at index `i` of the (lowercased,
+ * `..`-stripped) segment array, so any depth prefix (`sub/.git/config`) matches.
+ * Pure string ops (no regex) — consistent with the rest of the floor.
+ * @param {string[]} segments  lowercased path segments
+ * @param {number} i           the current segment index
+ * @returns {boolean}
+ */
+function isCredentialConfigSegment(segments, i) {
+  const seg = segments[i]
+  // .git/config (PAT-embedded remote URLs) and .git/credentials (git store).
+  if (seg === '.git' && (segments[i + 1] === 'config' || segments[i + 1] === 'credentials')) return true
+  // XDG git: .config/git/config and .config/git/credentials.
+  if (seg === '.config' && segments[i + 1] === 'git' &&
+      (segments[i + 2] === 'config' || segments[i + 2] === 'credentials')) return true
+  // .claude/settings*.json (settings.json / settings.local.json — may hold keys).
+  const child = segments[i + 1]
+  if (seg === '.claude' && typeof child === 'string' && child.startsWith('settings') && child.endsWith('.json')) return true
+  return false
+}
+
 // Default permission timeout (5 minutes)
 const DEFAULT_TIMEOUT_MS = 300_000
 
@@ -206,10 +239,14 @@ function isProtectedPathValue(target, base, secretsOnly = false) {
     .map((s) => s.toLowerCase())
   for (let i = 0; i < segments.length; i++) {
     const seg = segments[i]
-    // Secret files are floored under BOTH the read and the write floor.
+    // Secret files, and credential-dense config files, are floored under BOTH
+    // the read and the write floor (PR #6873 review — the read floor must not
+    // silently auto-read .git/config, git credentials, or .claude/settings*.json).
     if (isSecretFileSegment(seg)) return true
+    if (isCredentialConfigSegment(segments, i)) return true
     if (secretsOnly) continue
-    // Config DIRS are floored only under the full (write) floor.
+    // Config DIRS (any file within them) are floored only under the full (write)
+    // floor; a read of a NON-credential config file stays un-prompted.
     if (PROTECTED_DIR_SEGMENTS.has(seg)) return true
     if (seg === '.config' && segments[i + 1] === 'git') return true
   }
@@ -380,8 +417,15 @@ function globToRegExp(glob) {
 function pathWithinScope(target, scope, base) {
   const resolvedTarget = resolve(base, target)
   if (_scopeHasGlobMagic(scope)) {
-    const relPosix = relative(base, resolvedTarget).split(sep).join('/')
-    return globToRegExp(scope).test(relPosix)
+    // PR #6873 review — a glob scope must NEVER reach ABOVE the session cwd:
+    // `**/*.js` must not match `../evil.js`, `**` must not match `/etc/passwd`.
+    // Reject an escaping target FIRST (same under-base guard the prefix branch
+    // uses), THEN glob-match the under-base relative path. Without this the glob
+    // ran against `relative(base, target)` unchecked, so `..`/absolute targets
+    // supplied via set_permission_rules could be auto-approved out of scope.
+    const rel = relative(base, resolvedTarget)
+    if (isAbsolute(rel) || rel === '..' || rel.startsWith('..' + sep)) return false
+    return globToRegExp(scope).test(rel.split(sep).join('/'))
   }
   const resolvedScope = resolve(base, scope)
   const rel = relative(resolvedScope, resolvedTarget)
