@@ -60,7 +60,10 @@ const BINARY_CANDIDATES = [
   join(homedir(), '.npm-global/bin/codex'),
 ]
 
-const CODEX = resolveBinary('codex', BINARY_CANDIDATES)
+// NOTE: the codex binary is intentionally NOT cached in a module-load const.
+// A frozen path is spawned even after XProtect/Gatekeeper quarantines or moves
+// the binary out from under a long-running daemon (#6708 defect #3). The
+// `resolvedBinary` getter re-resolves fresh per access instead.
 
 /**
  * Codex CLI sandbox modes. Source: `codex exec --sandbox <MODE>` accepts
@@ -314,7 +317,10 @@ export class CodexSession extends JsonlSubprocessSession {
   }
 
   static get resolvedBinary() {
-    return CODEX
+    // Re-resolve fresh on every access (NOT a frozen module-load const) so a
+    // binary quarantined / moved / reinstalled after daemon start is spawned
+    // from its CURRENT path — and matches what preflight verified (#6708).
+    return resolveBinary('codex', BINARY_CANDIDATES)
   }
 
   static get apiKeyEnv() {

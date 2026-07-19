@@ -15,6 +15,7 @@ import { MessageTransformPipeline } from './message-transform.js'
 import { emitToolResults } from './tool-result.js'
 import { buildToolStartData, extractToolInputSemantics } from './claude-stream-parser.js'
 import { resolveBinary } from './utils/resolve-binary.js'
+import { labelBinarySpawnFailure } from './utils/verify-binary.js'
 import { prepareSpawn } from './utils/win-spawn.js'
 import { buildSpawnEnv } from './utils/spawn-env.js'
 import { RespawnRateLimiter } from './utils/respawn-rate-limiter.js'
@@ -24,16 +25,23 @@ import { BILLING_CLASSES, isProgrammaticCreditEra } from './billing-class.js'
 
 const log = createLogger('cli-session')
 
-// Resolve the claude binary once at module load. Under a GUI launch
-// (e.g. Tauri on macOS) PATH is minimal and may exclude the user's
-// install dir — fall through to known locations so `spawn()` succeeds.
-const CLAUDE = resolveBinary('claude', [
+// Well-known fallback locations. Under a GUI launch (e.g. Tauri on macOS) PATH
+// is minimal and may exclude the user's install dir — fall through to these so
+// `spawn()` succeeds.
+const CLAUDE_BINARY_CANDIDATES = [
   join(homedir(), '.local/bin/claude'),
   '/opt/homebrew/bin/claude',
   '/usr/local/bin/claude',
   join(homedir(), '.claude/local/node_modules/.bin/claude'),
   join(homedir(), '.npm-global/bin/claude'),
-])
+]
+
+// Re-resolve fresh on every spawn (NOT a frozen module-load const) so a binary
+// quarantined / moved / reinstalled after daemon start is spawned from its
+// CURRENT path — and matches what preflight verified (#6708 defect #3).
+function resolveClaudeBinary() {
+  return resolveBinary('claude', CLAUDE_BINARY_CANDIDATES)
+}
 
 // Default max accumulated size for tool_use input_json_delta chunks (~256KB)
 const DEFAULT_MAX_TOOL_INPUT_LENGTH = 262144
@@ -258,6 +266,14 @@ export class CliSession extends BaseSession {
       // providers — claude-tui is the only one that sets this to false.
       streaming: true,
     }
+  }
+
+  /**
+   * The exact path the CLI subprocess will spawn, re-resolved fresh so
+   * preflight verifies the SAME path the spawn uses (no stale const). (#6708)
+   */
+  static get resolvedBinary() {
+    return resolveClaudeBinary()
   }
 
   /**
@@ -519,7 +535,10 @@ export class CliSession extends BaseSession {
     // with no native `claude.exe`); spawning a `.cmd` via child_process throws
     // EINVAL on Node 24, so route it through cmd.exe with proper escaping. No-op
     // for a directly-runnable `.exe` and on POSIX. See utils/win-spawn.js.
-    const spawnSpec = prepareSpawn(CLAUDE, args)
+    // Captured so the spawn-time backstop (#6708) verifies the EXACT binary this
+    // attempt used, not a fresh re-resolve that could land on a different path.
+    const attemptedBinary = resolveClaudeBinary()
+    const spawnSpec = prepareSpawn(attemptedBinary, args)
     const child = spawn(spawnSpec.command, spawnSpec.args, {
       cwd: this.cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -577,7 +596,12 @@ export class CliSession extends BaseSession {
       this._cleanupReadlines()
       this._processReady = false
       this._child = null
-      this.emit('error', { message: `Failed to spawn claude: ${err.message}` })
+      // #6708 — a spawn error (ENOENT/EACCES) can mean the binary was quarantined
+      // /moved/removed out from under the running daemon (this is the respawn
+      // path too, so it fires mid-session). Verify the ATTEMPTED path and label
+      // the cause + fix instead of surfacing a bare ENOENT. Falls back to raw.
+      const labeled = labelBinarySpawnFailure({ attemptedPath: err?.path || attemptedBinary, binary: 'claude' })
+      this.emit('error', { message: labeled || `Failed to spawn claude: ${err.message}` })
       this._scheduleRespawn()
     })
 

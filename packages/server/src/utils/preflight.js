@@ -29,9 +29,8 @@
  * cannot meaningfully check it.
  */
 
-import { existsSync, accessSync, constants } from 'fs'
-import { isAbsolute } from 'path'
 import { resolveBinary } from './resolve-binary.js'
+import { verifyBinary as defaultVerifyBinary, BINARY_STATUS, describeBinaryHealth } from './verify-binary.js'
 
 /**
  * Thrown when a provider's required binary cannot be located or executed.
@@ -53,6 +52,28 @@ export class ProviderBinaryNotFoundError extends Error {
 }
 
 /**
+ * Thrown when a provider's binary is present but blocked by macOS Gatekeeper
+ * (a `com.apple.quarantine` xattr whose assessment-OK bit is clear). Distinct
+ * from ProviderBinaryNotFoundError so the client / doctor can render a
+ * quarantine-specific remediation (`xattr -d …`) rather than "install …". (#6708)
+ */
+export class ProviderBinaryQuarantinedError extends Error {
+  constructor({ provider, binary, path, quarantine, installHint }) {
+    const { message } = describeBinaryHealth(
+      { status: BINARY_STATUS.QUARANTINED, path },
+      { binary, installHint },
+    )
+    super(`${provider}: ${message}`)
+    this.name = 'ProviderBinaryQuarantinedError'
+    this.code = 'PROVIDER_BINARY_QUARANTINED'
+    this.provider = provider
+    this.binary = binary
+    this.path = path
+    this.quarantine = quarantine || null
+  }
+}
+
+/**
  * Thrown when none of a provider's required credential env vars are present.
  */
 export class ProviderCredentialMissingError extends Error {
@@ -69,37 +90,27 @@ export class ProviderCredentialMissingError extends Error {
 }
 
 /**
- * Verify a binary path exists and is executable by the current process.
- * Returns true if the resolved path is absolute, exists, and the X bit is set.
- *
- * @param {string} resolvedPath
- * @returns {boolean}
- */
-function isExecutableFile(resolvedPath) {
-  if (!isAbsolute(resolvedPath)) return false
-  if (!existsSync(resolvedPath)) return false
-  try {
-    accessSync(resolvedPath, constants.X_OK)
-    return true
-  } catch {
-    return false
-  }
-}
-
-/**
  * Run binary + credential preflight for a provider class.
  *
- * Throws ProviderBinaryNotFoundError or ProviderCredentialMissingError if
- * the spec's requirements aren't met. No-op when:
+ * Throws ProviderBinaryNotFoundError, ProviderBinaryQuarantinedError, or
+ * ProviderCredentialMissingError if the spec's requirements aren't met. No-op
+ * when:
  *   - The provider doesn't declare a `static get preflight()`
  *   - The provider is containerised (binary lives inside the container)
+ *
+ * The binary is re-resolved fresh here (per session-create), not read off a
+ * frozen module-load path, so a binary quarantined/moved AFTER daemon start is
+ * caught before spawn. When the provider exposes its real spawn path via
+ * `static get resolvedBinary`, we verify THAT exact path so preflight and the
+ * eventual spawn can't diverge (#6708 defect #3).
  *
  * @param {Function} ProviderClass - Session class with optional `preflight` getter
  * @param {object}   [options]
  * @param {NodeJS.ProcessEnv} [options.env=process.env] - Env source (for tests)
- * @throws {ProviderBinaryNotFoundError|ProviderCredentialMissingError}
+ * @param {Function} [options.verifyBinary] - integrity checker (injected in tests)
+ * @throws {ProviderBinaryNotFoundError|ProviderBinaryQuarantinedError|ProviderCredentialMissingError}
  */
-export function runProviderPreflight(ProviderClass, { env = process.env } = {}) {
+export function runProviderPreflight(ProviderClass, { env = process.env, verifyBinary = defaultVerifyBinary } = {}) {
   if (!ProviderClass) return
 
   // Containerised providers run their binary inside the container, so a host
@@ -114,10 +125,30 @@ export function runProviderPreflight(ProviderClass, { env = process.env } = {}) 
 
   if (spec.binary && spec.binary.name) {
     const candidates = spec.binary.candidates || []
-    const resolved = resolveBinary(spec.binary.name, candidates)
-    // resolveBinary returns the bare name when nothing on PATH or in
-    // candidates matched — that's the failure signal.
-    if (!isExecutableFile(resolved)) {
+    // Prefer the provider's live spawn path when it exposes one — that is the
+    // exact path child_process.spawn will exec — so the existence gate and the
+    // real spawn always agree. Fall back to a fresh PATH/candidate resolve.
+    let resolved
+    try {
+      resolved = ProviderClass.resolvedBinary
+    } catch { /* subclass throws if unset — fall through */ }
+    if (typeof resolved !== 'string' || resolved.length === 0) {
+      resolved = resolveBinary(spec.binary.name, candidates)
+    }
+    const health = verifyBinary(resolved)
+    if (health.status === BINARY_STATUS.QUARANTINED) {
+      throw new ProviderBinaryQuarantinedError({
+        provider: providerLabel,
+        binary: spec.binary.name,
+        path: health.path,
+        quarantine: health.quarantine,
+        installHint: spec.binary.installHint,
+      })
+    }
+    // NOT_FOUND / NOT_EXECUTABLE both mean "can't spawn it" — resolveBinary
+    // returns the bare name when nothing matched, which verifyBinary reports as
+    // NOT_FOUND.
+    if (!health.ok) {
       throw new ProviderBinaryNotFoundError({
         provider: providerLabel,
         binary: spec.binary.name,

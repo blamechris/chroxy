@@ -22,6 +22,7 @@ import { discoverConfiguredMcpServers } from './byok-mcp-config.js'
 import { ALLOWED_MODEL_IDS } from './models.js'
 import { CLAUDE_FALLBACK_MODELS, claudeModelMetadata } from './claude-model-catalog.js'
 import { RespawnRateLimiter } from './utils/respawn-rate-limiter.js'
+import { labelBinarySpawnFailure } from './utils/verify-binary.js'
 import { CHROXY_SECRET_DENYLIST } from './utils/spawn-env.js'
 import { createLogger, loggerForSession, redactSensitive, redactSensitivePreservingEscapes } from './logger.js'
 import { formatIdleDuration } from './session-timeout-manager.js'
@@ -43,7 +44,7 @@ import {
 import {
   ANSI_STRIP,
   formatHexDump,
-  CLAUDE,
+  resolveClaudeBinary,
   AUTH_FAILURE_PATTERNS,
   AUTH_REQUIRED_CODE,
   AUTH_REQUIRED_MESSAGE,
@@ -175,6 +176,14 @@ export class ClaudeTuiSession extends BaseSession {
       // called per connection), so it reflects the daemon's env.
       multiSelectReinject: multiSelectReinjectEnabled(),
     }
+  }
+
+  /**
+   * The exact path node-pty will spawn, re-resolved fresh so preflight verifies
+   * the SAME path the spawn uses (no stale module-load const). (#6708)
+   */
+  static get resolvedBinary() {
+    return resolveClaudeBinary()
   }
 
   static get preflight() {
@@ -1927,13 +1936,16 @@ export class ClaudeTuiSession extends BaseSession {
     }
     log.info(`spawn claude TUI (uuid=${this._sessionId.slice(0, 8)} model=${this.model || 'default'} perms=${permissionsEnabled} skills=${skillsPrefix ? skillsPrefix.length + 'b' : 'none'})`)
 
+    // Captured so the spawn-time backstop (#6708) verifies the EXACT binary this
+    // attempt used, not a fresh re-resolve that could land on a different path.
+    const attemptedBinary = resolveClaudeBinary()
     try {
       // node-pty spawns CLAUDE directly — no cmd.exe routing needed even when
       // the Windows resolver lands on a `claude.cmd` shim. node-pty routes
       // through conpty/cmd.exe internally and runs a `.cmd` fine (verified),
       // unlike child_process.spawn which throws EINVAL on a `.cmd` (Node 24) and
       // needs the utils/win-spawn.js escaping the cli-session path uses.
-      this._term = ptyMod.spawn(CLAUDE, args, {
+      this._term = ptyMod.spawn(attemptedBinary, args, {
         name: 'xterm-256color',
         // #5839: single-sourced default so the dashboard mirror renders at the
         // same grid. #5835 Phase 2: a prior resize is preserved across respawns
@@ -1944,7 +1956,16 @@ export class ClaudeTuiSession extends BaseSession {
         env,
       })
     } catch (err) {
-      this.emit('error', { message: `Failed to spawn claude under PTY: ${err.message}` })
+      // #6708 — node-pty throws synchronously when the binary is missing/
+      // unspawnable. If it was quarantined/moved/removed out from under the
+      // running daemon (also the respawn path), name the cause + fix rather than
+      // a bare error. Falls back to the raw message when the binary looks healthy.
+      const labeled = labelBinarySpawnFailure({
+        attemptedPath: err?.path || attemptedBinary,
+        binary: 'claude',
+        prefix: 'Failed to spawn claude under PTY',
+      })
+      this.emit('error', { message: labeled || `Failed to spawn claude under PTY: ${err.message}` })
       return
     }
 

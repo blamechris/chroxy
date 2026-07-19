@@ -3,8 +3,10 @@ import assert from 'node:assert/strict'
 import {
   runProviderPreflight,
   ProviderBinaryNotFoundError,
+  ProviderBinaryQuarantinedError,
   ProviderCredentialMissingError,
 } from '../src/utils/preflight.js'
+import { BINARY_STATUS } from '../src/utils/verify-binary.js'
 
 /**
  * Tests for runProviderPreflight — verifies binary + credential checks
@@ -88,6 +90,78 @@ describe('runProviderPreflight — binary checks', () => {
       },
     })
     assert.doesNotThrow(() => runProviderPreflight(Provider, { env: {} }))
+  })
+})
+
+describe('runProviderPreflight — quarantine detection (#6708)', () => {
+  it('throws ProviderBinaryQuarantinedError when the binary is present but quarantined', () => {
+    // `node` resolves to a real absolute path; the injected verifyBinary reports
+    // it as QUARANTINED so we exercise the branch with no real quarantined file.
+    const Provider = makeProvider({
+      preflight: {
+        label: 'Codex',
+        binary: { name: 'node', candidates: [], installHint: 'install Codex CLI' },
+      },
+    })
+    const fakeVerify = (path) => ({
+      ok: false,
+      status: BINARY_STATUS.QUARANTINED,
+      path,
+      quarantine: '0081;66a1;Safari;uuid',
+    })
+    assert.throws(
+      () => runProviderPreflight(Provider, { env: {}, verifyBinary: fakeVerify }),
+      (err) => {
+        assert.ok(err instanceof ProviderBinaryQuarantinedError, `got ${err?.name}`)
+        assert.equal(err.code, 'PROVIDER_BINARY_QUARANTINED')
+        assert.equal(err.binary, 'node')
+        assert.equal(err.quarantine, '0081;66a1;Safari;uuid')
+        assert.match(err.message, /Gatekeeper/)
+        assert.match(err.message, /xattr -d com\.apple\.quarantine/)
+        return true
+      },
+    )
+  })
+
+  it('verifies the provider\'s live resolvedBinary path when it exposes one', () => {
+    // Preflight must check the SAME path the spawn will use (not a stale const),
+    // so a provider with a resolvedBinary getter has THAT path handed to verify.
+    let verifiedPath = null
+    class Provider {
+      static get preflight() {
+        return { label: 'Codex', binary: { name: 'codex', candidates: [] } }
+      }
+      static get capabilities() { return {} }
+      static get resolvedBinary() { return '/custom/spawn/path/codex' }
+    }
+    const fakeVerify = (path) => {
+      verifiedPath = path
+      return { ok: true, status: BINARY_STATUS.OK, path, quarantine: null }
+    }
+    runProviderPreflight(Provider, { env: {}, verifyBinary: fakeVerify })
+    assert.equal(verifiedPath, '/custom/spawn/path/codex')
+  })
+
+  it('a not-found result (ok:false) throws ProviderBinaryNotFoundError, not the quarantine error', () => {
+    const Provider = makeProvider({
+      preflight: { label: 'X', binary: { name: 'node', candidates: [] } },
+    })
+    const notFound = () => ({ ok: false, status: BINARY_STATUS.NOT_FOUND, path: 'node', quarantine: null })
+    assert.throws(
+      () => runProviderPreflight(Provider, { env: {}, verifyBinary: notFound }),
+      ProviderBinaryNotFoundError,
+    )
+  })
+
+  it('a not-executable result (ok:false) also throws ProviderBinaryNotFoundError', () => {
+    const Provider = makeProvider({
+      preflight: { label: 'X', binary: { name: 'node', candidates: [] } },
+    })
+    const notExec = (path) => ({ ok: false, status: BINARY_STATUS.NOT_EXECUTABLE, path, quarantine: null })
+    assert.throws(
+      () => runProviderPreflight(Provider, { env: {}, verifyBinary: notExec }),
+      ProviderBinaryNotFoundError,
+    )
   })
 })
 

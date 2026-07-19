@@ -49,7 +49,10 @@ const BINARY_CANDIDATES = [
   join(homedir(), '.npm-global/bin/gemini'),
 ]
 
-const GEMINI = resolveBinary('gemini', BINARY_CANDIDATES)
+// NOTE: the gemini binary is intentionally NOT cached in a module-load const.
+// A frozen path is spawned even after the binary is quarantined/moved out from
+// under a long-running daemon (#6708 defect #3); the `resolvedBinary` getter
+// re-resolves fresh per access instead.
 
 // Per-provider model metadata — #2956.
 // Context windows come from the Gemini model docs. Kept explicit here so the
@@ -122,7 +125,10 @@ export class GeminiSession extends JsonlSubprocessSession {
   }
 
   static get resolvedBinary() {
-    return GEMINI
+    // Re-resolve fresh on every access (NOT a frozen module-load const) so a
+    // binary quarantined / moved / reinstalled after daemon start is spawned
+    // from its CURRENT path — and matches what preflight verified (#6708).
+    return resolveBinary('gemini', BINARY_CANDIDATES)
   }
 
   static get apiKeyEnv() {

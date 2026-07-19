@@ -330,6 +330,65 @@ describe('checkBinary minVersion gate (#3953)', () => {
   })
 })
 
+// #6708 — doctor must distinguish "quarantined/blocked by Gatekeeper" from
+// "not installed" so an operator can preflight the exact failure XProtect
+// caused. The verify seam is injected so no real quarantined binary is needed.
+describe('checkBinary quarantine detection (#6708)', () => {
+  it('reports a quarantined binary as fail with an xattr remediation hint', () => {
+    const result = checkBinary('codex', ['--version'], {
+      parseVersion: (out) => out.trim(),
+      required: true,
+      candidates: [process.execPath],
+      installHint: 'install Codex CLI',
+      verify: (path) => ({ ok: false, status: 'quarantined', path, quarantine: '0081;a;b;c' }),
+    })
+    assert.equal(result.status, 'fail')
+    assert.match(result.message, /Gatekeeper/)
+    assert.match(result.message, /xattr -d com\.apple\.quarantine/)
+    // Must NOT mislabel a quarantined binary as "Not found — install …".
+    assert.doesNotMatch(result.message, /Not found/)
+  })
+
+  it('downgrades a quarantined optional binary to warn (not fail)', () => {
+    const result = checkBinary('cloudflared', ['--version'], {
+      parseVersion: (out) => out.trim(),
+      required: false,
+      candidates: [process.execPath],
+      installHint: 'brew install cloudflared',
+      verify: (path) => ({ ok: false, status: 'quarantined', path, quarantine: '0081;a;b;c' }),
+    })
+    assert.equal(result.status, 'warn')
+    assert.match(result.message, /Gatekeeper/)
+  })
+
+  it('reports a present-but-not-executable binary distinctly (not "Not found")', () => {
+    const result = checkBinary('codex', ['--version'], {
+      parseVersion: (out) => out.trim(),
+      required: true,
+      candidates: [process.execPath],
+      installHint: 'install Codex CLI',
+      verify: (path) => ({ ok: false, status: 'not_executable', path, quarantine: null }),
+    })
+    assert.equal(result.status, 'fail')
+    assert.match(result.message, /not executable/)
+    assert.match(result.message, /chmod \+x/)
+    // A non-executable binary must not be mislabeled as missing.
+    assert.doesNotMatch(result.message, /Not found/)
+  })
+
+  it('still runs the version probe when the binary is clean (verify=ok)', () => {
+    const result = checkBinary('node', ['--version'], {
+      parseVersion: (out) => out.trim(),
+      required: true,
+      candidates: [process.execPath],
+      installHint: 'install node',
+      verify: (path) => ({ ok: true, status: 'ok', path, quarantine: null }),
+    })
+    assert.equal(result.status, 'pass')
+    assert.match(result.message, /^v\d+\.\d+\.\d+/)
+  })
+})
+
 describe('parseLeadingSemver / compareSemver helpers (#3953)', () => {
   it('parses a leading semver out of a decorated version string', () => {
     assert.deepEqual(parseLeadingSemver('2.1.163 (Claude Code)'), [2, 1, 163])

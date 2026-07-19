@@ -8,6 +8,7 @@ import { CodexAppServerClient } from './codex-app-server-client.js'
 import { PermissionManager, wirePermissionManager } from './permission-manager.js'
 import { materializeAttachments, buildAttachmentsPromptSuffix } from './claude-tui-attachments.js'
 import { buildSpawnEnv } from './utils/spawn-env.js'
+import { labelBinarySpawnFailure } from './utils/verify-binary.js'
 import { createLogger, loggerForSession } from './logger.js'
 
 // Image extensions codex can attach for VISION via a `localImage` input item.
@@ -129,8 +130,13 @@ export class CodexAppServerSession extends BaseSession {
 
   async start() {
     const sandbox = resolveCodexSandbox(this._codexSandbox)
+    // Capture the EXACT binary the client will spawn so the spawn-time backstop
+    // (#6708) verifies that path — in start()'s catch AND later in
+    // _onClientExit — rather than a fresh re-resolve.
+    const attemptedBinary = CodexAppServerSession.resolvedBinary
+    this._spawnedBinary = attemptedBinary
     this._client = new CodexAppServerClient({
-      bin: CodexAppServerSession.resolvedBinary,
+      bin: attemptedBinary,
       cwd: this.cwd,
       env: this._buildChildEnv(),
       logger: log,
@@ -139,13 +145,30 @@ export class CodexAppServerSession extends BaseSession {
     this._client.on('serverRequest', (r) => this._onServerRequest(r))
     this._client.on('exit', (e) => this._onClientExit(e))
 
-    await this._client.initialize({ name: 'chroxy', version: '1' })
-    const started = await this._client.request('thread/start', {
-      approvalPolicy: this._approvalPolicy(), // #6605 P2 — derived from permission mode
-      cwd: this.cwd,
-      sandbox,
-      ...(this.model ? { model: this.model } : {}),
-    })
+    let started
+    try {
+      await this._client.initialize({ name: 'chroxy', version: '1' })
+      started = await this._client.request('thread/start', {
+        approvalPolicy: this._approvalPolicy(), // #6605 P2 — derived from permission mode
+        cwd: this.cwd,
+        sandbox,
+        ...(this.model ? { model: this.model } : {}),
+      })
+    } catch (err) {
+      // #6708 — the app-server child is spawned inside initialize(); a missing/
+      // quarantined codex binary surfaces here as an initialize rejection (the
+      // child errors and _onError rejects the pending request). Re-verify so the
+      // session_create_failed names the quarantine + fix rather than an opaque
+      // "codex app-server exited". Only relabels when the binary is actually
+      // unhealthy; otherwise the original protocol error rethrows unchanged.
+      const labeled = labelBinarySpawnFailure({
+        attemptedPath: err?.path || this._spawnedBinary,
+        binary: 'codex',
+        prefix: 'Failed to start codex app-server',
+      })
+      if (labeled) throw new Error(labeled)
+      throw err
+    }
     this._threadId = started?.thread?.id || null
     // #6608 — do NOT set this.resumeSessionId in Phase 1: capabilities.resume is
     // false, and SessionManager persists resumeSessionId as the conversationId to
@@ -903,8 +926,18 @@ export class CodexAppServerSession extends BaseSession {
     const detail = error ? error.message : `code=${code}${signal ? ` signal=${signal}` : ''}`
     ;(this._log || log).warn(`codex app-server exited unexpectedly (${detail})`)
     this._processReady = false
-    if (this._activeTurn) this._failTurn(`Codex app-server exited (${detail})`)
-    else this.emit('error', { message: `Codex app-server exited (${detail})`, recoverable: true })
+    // #6708 — app-server has no respawn, so an unexpected exit IS the terminal
+    // signal. If the child died because its binary was quarantined/removed out
+    // from under the running daemon, name the cause + fix instead of a bare
+    // "exited (spawn … ENOENT)". Only relabels when the binary is unhealthy.
+    const labeled = labelBinarySpawnFailure({
+      attemptedPath: error?.path || this._spawnedBinary,
+      binary: 'codex',
+      prefix: 'Codex app-server exited',
+    })
+    const message = labeled || `Codex app-server exited (${detail})`
+    if (this._activeTurn) this._failTurn(message)
+    else this.emit('error', { message, recoverable: true })
   }
 
   // ------------------------------------------------------------------
