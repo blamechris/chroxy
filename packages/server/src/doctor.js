@@ -6,6 +6,7 @@ import { homedir } from 'os'
 import { createServer } from 'net'
 import { validateConfig } from './config.js'
 import { resolveBinary } from './utils/resolve-binary.js'
+import { verifyBinary as defaultVerifyBinary, BINARY_STATUS, describeBinaryHealth } from './utils/verify-binary.js'
 import { prepareSpawn } from './utils/win-spawn.js'
 import { cloudflaredInstallHint } from './platform.js'
 import { getProvider, DEFAULT_PROVIDER } from './providers.js'
@@ -599,8 +600,18 @@ function checkProvider(providerName) {
  *
  * Exported for tests — callers in production should use `runDoctorChecks`.
  */
-export function checkBinary(name, args, { parseVersion, required, installHint, candidates = [], minVersion = null }) {
+export function checkBinary(name, args, { parseVersion, required, installHint, candidates = [], minVersion = null, verify = defaultVerifyBinary }) {
   const resolved = resolveBinary(name, candidates)
+  // #6708 — integrity/quarantine gate BEFORE we try to exec for a version.
+  // A macOS Gatekeeper-quarantined binary keeps its X bit and only fails at
+  // exec, where the catch below would mislabel it "Not found — install …".
+  // Detect it up front so doctor distinguishes "quarantined/blocked" from
+  // "not installed" with a fix-it hint (`xattr -d …`). No-op off darwin.
+  const health = verify(resolved)
+  if (health.status === BINARY_STATUS.QUARANTINED) {
+    const { message } = describeBinaryHealth(health, { binary: name, installHint })
+    return { name, status: required ? 'fail' : 'warn', message }
+  }
   try {
     // #6484 — a resolved `.cmd` shim (npm-only Windows host) can't be spawned
     // directly on Node 24; route it through cmd.exe via prepareSpawn. No-op for

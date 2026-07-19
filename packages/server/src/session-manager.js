@@ -8,7 +8,7 @@ import { getProvider, getProviderAuthInfo, DEFAULT_PROVIDER } from './providers.
 import { isClaudeProvider } from './models.js'
 import { billingClassForProvider, BILLING_CLASSES } from './billing-class.js'
 import { MonthlyProgrammaticBudgetManager } from './billing-budget.js'
-import { runProviderPreflight, ProviderBinaryNotFoundError, ProviderCredentialMissingError } from './utils/preflight.js'
+import { runProviderPreflight, ProviderBinaryNotFoundError, ProviderBinaryQuarantinedError, ProviderCredentialMissingError } from './utils/preflight.js'
 import { GIT } from './git.js'
 import { sweepOrphanChroxyWorktrees } from './worktree-gc.js'
 import { resolveJsonlPath, readConversationHistoryAsync } from './jsonl-reader.js'
@@ -168,9 +168,10 @@ const DEFAULT_WORKTREE_BASE = join(homedir(), '.chroxy', 'worktrees')
 export { formatIdleDuration }
 
 // Re-export preflight errors so call sites that catch createSession() failures
-// can detect/branch on PROVIDER_BINARY_NOT_FOUND / PROVIDER_CREDENTIAL_MISSING
-// without taking a separate dependency on utils/preflight.js.
-export { ProviderBinaryNotFoundError, ProviderCredentialMissingError }
+// can detect/branch on PROVIDER_BINARY_NOT_FOUND / PROVIDER_BINARY_QUARANTINED /
+// PROVIDER_CREDENTIAL_MISSING without taking a separate dependency on
+// utils/preflight.js.
+export { ProviderBinaryNotFoundError, ProviderBinaryQuarantinedError, ProviderCredentialMissingError }
 
 /**
  * @typedef {Object} SessionManagerConfig

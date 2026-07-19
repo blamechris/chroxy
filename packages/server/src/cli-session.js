@@ -24,16 +24,23 @@ import { BILLING_CLASSES, isProgrammaticCreditEra } from './billing-class.js'
 
 const log = createLogger('cli-session')
 
-// Resolve the claude binary once at module load. Under a GUI launch
-// (e.g. Tauri on macOS) PATH is minimal and may exclude the user's
-// install dir — fall through to known locations so `spawn()` succeeds.
-const CLAUDE = resolveBinary('claude', [
+// Well-known fallback locations. Under a GUI launch (e.g. Tauri on macOS) PATH
+// is minimal and may exclude the user's install dir — fall through to these so
+// `spawn()` succeeds.
+const CLAUDE_BINARY_CANDIDATES = [
   join(homedir(), '.local/bin/claude'),
   '/opt/homebrew/bin/claude',
   '/usr/local/bin/claude',
   join(homedir(), '.claude/local/node_modules/.bin/claude'),
   join(homedir(), '.npm-global/bin/claude'),
-])
+]
+
+// Re-resolve fresh on every spawn (NOT a frozen module-load const) so a binary
+// quarantined / moved / reinstalled after daemon start is spawned from its
+// CURRENT path — and matches what preflight verified (#6708 defect #3).
+function resolveClaudeBinary() {
+  return resolveBinary('claude', CLAUDE_BINARY_CANDIDATES)
+}
 
 // Default max accumulated size for tool_use input_json_delta chunks (~256KB)
 const DEFAULT_MAX_TOOL_INPUT_LENGTH = 262144
@@ -258,6 +265,14 @@ export class CliSession extends BaseSession {
       // providers — claude-tui is the only one that sets this to false.
       streaming: true,
     }
+  }
+
+  /**
+   * The exact path the CLI subprocess will spawn, re-resolved fresh so
+   * preflight verifies the SAME path the spawn uses (no stale const). (#6708)
+   */
+  static get resolvedBinary() {
+    return resolveClaudeBinary()
   }
 
   /**
@@ -519,7 +534,7 @@ export class CliSession extends BaseSession {
     // with no native `claude.exe`); spawning a `.cmd` via child_process throws
     // EINVAL on Node 24, so route it through cmd.exe with proper escaping. No-op
     // for a directly-runnable `.exe` and on POSIX. See utils/win-spawn.js.
-    const spawnSpec = prepareSpawn(CLAUDE, args)
+    const spawnSpec = prepareSpawn(resolveClaudeBinary(), args)
     const child = spawn(spawnSpec.command, spawnSpec.args, {
       cwd: this.cwd,
       stdio: ['pipe', 'pipe', 'pipe'],

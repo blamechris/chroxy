@@ -87,13 +87,26 @@ export function formatHexDump(input, maxBytes) {
   return `${header}\n${lines.join('\n')}`
 }
 
-export const CLAUDE = resolveBinary('claude', [
+// Well-known fallback locations for the `claude` binary. Under a GUI launch
+// (e.g. Tauri on macOS) PATH is minimal and may exclude the user's install dir.
+export const CLAUDE_BINARY_CANDIDATES = [
   join(homedir(), '.local/bin/claude'),
   '/opt/homebrew/bin/claude',
   '/usr/local/bin/claude',
   join(homedir(), '.claude/local/node_modules/.bin/claude'),
   join(homedir(), '.npm-global/bin/claude'),
-])
+]
+
+// Re-resolve fresh on each call (NOT a frozen module-load const) so a binary
+// quarantined / moved / reinstalled after daemon start is spawned from its
+// CURRENT path — and matches what preflight verified (#6708 defect #3).
+export function resolveClaudeBinary() {
+  return resolveBinary('claude', CLAUDE_BINARY_CANDIDATES)
+}
+
+// Back-compat: kept as a lazy-resolved snapshot for any consumer that still
+// imports the constant. Prefer `resolveClaudeBinary()` at spawn time.
+export const CLAUDE = resolveClaudeBinary()
 
 // #5321 (WP-4.1) — subscription-auth failure detection. claude-tui routes via
 // the OAuth subscription (ANTHROPIC_API_KEY is deleted from the spawn env), so a

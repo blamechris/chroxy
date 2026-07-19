@@ -5,6 +5,7 @@ import { createLogger } from './logger.js'
 import { guardChildStreams } from './child-stream-guard.js'
 import { getErrorMessage } from './utils/error-message.js'
 import { prepareSpawn } from './utils/win-spawn.js'
+import { verifyBinary, describeBinaryHealth, BINARY_STATUS } from './utils/verify-binary.js'
 import { killProcessTree } from './platform.js'
 
 const log = createLogger('jsonl-subprocess-session')
@@ -317,9 +318,19 @@ export class JsonlSubprocessSession extends BaseSession {
       // etc.) — leave _skillsPrepended false so a retry still injects the
       // skills text. Reset busy state and surface the error to the caller.
       this._isBusy = false
-      this.emit('error', {
-        message: getErrorMessage(err, `Failed to spawn ${Klass.providerName}`),
-      })
+      // #6708 — a spawn failure AFTER preflight passed means the binary changed
+      // out from under us (quarantined / moved / removed by XProtect between
+      // session-create and this turn). Re-verify the path so the error names
+      // the real cause + fix instead of an opaque ENOENT.
+      let message = getErrorMessage(err, `Failed to spawn ${Klass.providerName}`)
+      try {
+        const health = verifyBinary(Klass.resolvedBinary)
+        if (health.status === BINARY_STATUS.QUARANTINED || health.status === BINARY_STATUS.NOT_FOUND) {
+          const desc = describeBinaryHealth(health, { binary: Klass.providerName })
+          message = `Failed to spawn ${Klass.providerName}: ${desc.message}`
+        }
+      } catch { /* resolvedBinary getter may throw on a misconfigured subclass */ }
+      this.emit('error', { message })
       return
     }
 

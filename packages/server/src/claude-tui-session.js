@@ -43,7 +43,7 @@ import {
 import {
   ANSI_STRIP,
   formatHexDump,
-  CLAUDE,
+  resolveClaudeBinary,
   AUTH_FAILURE_PATTERNS,
   AUTH_REQUIRED_CODE,
   AUTH_REQUIRED_MESSAGE,
@@ -175,6 +175,14 @@ export class ClaudeTuiSession extends BaseSession {
       // called per connection), so it reflects the daemon's env.
       multiSelectReinject: multiSelectReinjectEnabled(),
     }
+  }
+
+  /**
+   * The exact path node-pty will spawn, re-resolved fresh so preflight verifies
+   * the SAME path the spawn uses (no stale module-load const). (#6708)
+   */
+  static get resolvedBinary() {
+    return resolveClaudeBinary()
   }
 
   static get preflight() {
@@ -1933,7 +1941,7 @@ export class ClaudeTuiSession extends BaseSession {
       // through conpty/cmd.exe internally and runs a `.cmd` fine (verified),
       // unlike child_process.spawn which throws EINVAL on a `.cmd` (Node 24) and
       // needs the utils/win-spawn.js escaping the cli-session path uses.
-      this._term = ptyMod.spawn(CLAUDE, args, {
+      this._term = ptyMod.spawn(resolveClaudeBinary(), args, {
         name: 'xterm-256color',
         // #5839: single-sourced default so the dashboard mirror renders at the
         // same grid. #5835 Phase 2: a prior resize is preserved across respawns

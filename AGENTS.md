@@ -284,6 +284,7 @@ For component tables, WS protocol messages, data flow diagrams, and file listing
 
 - [`docs/security/bearer-token-authority.md`](docs/security/bearer-token-authority.md) — token classes (primary / pairing-bound / hook secret), what each one grants, and the checklist for adding new endpoints. Read this before touching `ws-auth.js`, `ws-permissions.js`, `pairing.js`, or any new HTTP route that touches session state.
 - [`docs/security/encryption-threat-model.md`](docs/security/encryption-threat-model.md) — transport-layer (key exchange + message encryption) threat model.
+- [`docs/security/spawned-binary-provenance.md`](docs/security/spawned-binary-provenance.md) — provider-binary integrity + macOS quarantine preflight (`verify-binary.js`) and the supply-chain threat model. Read this before touching `utils/verify-binary.js`, `utils/preflight.js`, `utils/resolve-binary.js`, or any provider `resolvedBinary`/spawn path.
 
 ## Dev Commands
 
