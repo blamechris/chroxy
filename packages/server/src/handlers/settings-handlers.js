@@ -744,6 +744,11 @@ function handleSetPermissionRules(ws, client, msg, ctx) {
       sendSessionError(ws, ctx, `rules[${i}]: tool '${rule.tool}' is not eligible for permission rules`)
       return
     }
+    // #6803 — optional path/glob scope: a non-empty string when present.
+    if (rule.path !== undefined && (typeof rule.path !== 'string' || !rule.path.trim())) {
+      sendSessionError(ws, ctx, `rules[${i}]: path scope must be a non-empty string`)
+      return
+    }
   }
 
   // #6771 — optional durable (project-scoped) rule set. When present, it FULLY
@@ -776,6 +781,11 @@ function handleSetPermissionRules(ws, client, msg, ctx) {
       }
       if (rule.decision === 'allow' && !ELIGIBLE_TOOLS.has(rule.tool)) {
         sendSessionError(ws, ctx, `projectRules[${i}]: tool '${rule.tool}' is not eligible for permission rules`)
+        return
+      }
+      // #6803 — optional path/glob scope: a non-empty string when present.
+      if (rule.path !== undefined && (typeof rule.path !== 'string' || !rule.path.trim())) {
+        sendSessionError(ws, ctx, `projectRules[${i}]: path scope must be a non-empty string`)
         return
       }
     }

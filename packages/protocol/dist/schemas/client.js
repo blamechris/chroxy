@@ -177,6 +177,15 @@ export const SetThinkingLevelSchema = z.object({
 export const PermissionRuleSchema = z.object({
     tool: z.string().min(1).max(256),
     decision: z.enum(['allow', 'deny']),
+    // #6803 — OPTIONAL path/glob SCOPE. When present, the rule only matches a
+    // tool call whose target path(s) resolve UNDER this scope (a directory prefix
+    // like `src/`, or a glob like `src/**/*.ts`). ABSENT → the rule matches every
+    // path exactly as before (unscoped, no behaviour change). This lets a user
+    // express "allow Write under src/ only" instead of an attractive-but-blunt
+    // all-paths `allow Write`. The server (permission-manager._ruleScopeMatches)
+    // resolves the scope against the session cwd; a scoped rule for a tool whose
+    // input carries no concrete path never matches (falls through to a prompt).
+    path: z.string().min(1).max(1024).optional(),
 });
 // -- BYOK credentials (#4052) --
 /**

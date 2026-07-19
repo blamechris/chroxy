@@ -156,6 +156,7 @@ export declare const PermissionRuleSchema: z.ZodObject<{
         allow: "allow";
         deny: "deny";
     }>;
+    path: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
 /**
  * Request the current BYOK credentials status. Server replies with a
@@ -225,6 +226,7 @@ export declare const SetPermissionRulesSchema: z.ZodObject<{
             allow: "allow";
             deny: "deny";
         }>;
+        path: z.ZodOptional<z.ZodString>;
     }, z.core.$strip>>;
     projectRules: z.ZodOptional<z.ZodArray<z.ZodObject<{
         tool: z.ZodString;
@@ -232,6 +234,7 @@ export declare const SetPermissionRulesSchema: z.ZodObject<{
             allow: "allow";
             deny: "deny";
         }>;
+        path: z.ZodOptional<z.ZodString>;
     }, z.core.$strip>>>;
     sessionId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
@@ -985,6 +988,7 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
             allow: "allow";
             deny: "deny";
         }>;
+        path: z.ZodOptional<z.ZodString>;
     }, z.core.$strip>>;
     projectRules: z.ZodOptional<z.ZodArray<z.ZodObject<{
         tool: z.ZodString;
@@ -992,6 +996,7 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
             allow: "allow";
             deny: "deny";
         }>;
+        path: z.ZodOptional<z.ZodString>;
     }, z.core.$strip>>>;
     sessionId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>, z.ZodObject<{
