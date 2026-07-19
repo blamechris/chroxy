@@ -762,6 +762,61 @@ describe('App', () => {
     })
   })
 
+  // #6861 / PR #6878 (Copilot review thread) — the `#`-prefix quick-append must
+  // be SKIPPED for PTY-backed sessions (claude-tui / user-shell): the composer
+  // routes to the terminal there, where a leading `#` is a shell comment, not a
+  // memory command. Mirrors the mobile SessionScreen `!hasTerminal` guard so a
+  // `# note` in a shell/TUI session goes to the terminal instead of silently
+  // being eaten as a CLAUDE.md append.
+  describe('# quick-append terminal/PTY guard (#6861)', () => {
+    const baseSession = {
+      sessionId: 's1',
+      name: 'Test',
+      cwd: '/tmp',
+      hasTerminal: true,
+      model: null,
+      permissionMode: null,
+      isBusy: false,
+      createdAt: Date.now(),
+      conversationId: null,
+    }
+
+    function sendHash(provider: string) {
+      const appendMemory = vi.fn()
+      const sendInput = vi.fn()
+      stateOverrides = {
+        connectionPhase: 'connected',
+        sessions: [{ ...baseSession, type: 'cli', provider }],
+        activeSessionId: 's1',
+        appendMemory,
+        sendInput,
+      }
+      render(<App />)
+      const textarea = screen.getByRole('textbox', { name: /message input/i })
+      fireEvent.change(textarea, { target: { value: '# remember the port is 9876' } })
+      fireEvent.keyDown(textarea, { key: 'Enter' })
+      return { appendMemory, sendInput }
+    }
+
+    it('does NOT intercept for a user-shell (PTY) session — routes to the terminal', () => {
+      const { appendMemory, sendInput } = sendHash('user-shell')
+      expect(appendMemory).not.toHaveBeenCalled()
+      expect(sendInput).toHaveBeenCalled()
+    })
+
+    it('does NOT intercept for a claude-tui (PTY) session — routes to the terminal', () => {
+      const { appendMemory, sendInput } = sendHash('claude-tui')
+      expect(appendMemory).not.toHaveBeenCalled()
+      expect(sendInput).toHaveBeenCalled()
+    })
+
+    it('DOES intercept for a non-PTY chat session (claude-sdk) — appends to memory', () => {
+      const { appendMemory, sendInput } = sendHash('claude-sdk')
+      expect(appendMemory).toHaveBeenCalledWith('remember the port is 9876')
+      expect(sendInput).not.toHaveBeenCalled()
+    })
+  })
+
   describe('System events tab', () => {
     const connectedState = {
       connectionPhase: 'connected' as const,

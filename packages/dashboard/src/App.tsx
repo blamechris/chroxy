@@ -1615,9 +1615,12 @@ export function App() {
     const allFiles = files || fileAttachments
     // #6861 — `#`-prefix quick-append. A leading `# ` (hash + space) routes the
     // note to the project CLAUDE.md instead of sending a chat turn. Skipped when
-    // attachments are pending (they can't go to memory). The confirmation lands
-    // via the `append_memory_result` ack.
-    if (allFiles.length === 0 && imageAttachments.length === 0) {
+    // attachments are pending (they can't go to memory) and for PTY-backed
+    // sessions (claude-tui / user-shell) where the composer writes to the
+    // terminal and a leading `#` is a shell comment, not a memory command —
+    // mirrors the mobile SessionScreen `!hasTerminal` guard. The confirmation
+    // lands via the `append_memory_result` ack.
+    if (!isPtyProvider && allFiles.length === 0 && imageAttachments.length === 0) {
       const memory = parseMemoryAppend(text)
       if (memory.isMemory) {
         const sent = appendMemory(memory.note)
@@ -1682,7 +1685,7 @@ export function App() {
     setInputDraftValue('')
     setPastedTextBlocks([])
     setInspectedPastedTextId(null)
-  }, [sendInput, appendMemory, addInfoNotification, fileAttachments, imageAttachments, activeSessionId])
+  }, [sendInput, appendMemory, addInfoNotification, fileAttachments, imageAttachments, activeSessionId, isPtyProvider])
 
   const handleInterrupt = useCallback(() => {
     sendInterrupt()
