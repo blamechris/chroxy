@@ -9,6 +9,7 @@
 import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { lookup as dnsLookup } from 'node:dns/promises'
 
 /**
  * Defensive upper bound on the size of `~/.claude.json`. Today the file is
@@ -154,6 +155,174 @@ export function redactMcpUrl(url) {
     return u.toString()
   } catch {
     return '[unparseable url]'
+  }
+}
+
+/**
+ * Classify a bare IP address for trust-prompt display (#6834). Returns one of
+ * 'loopback' | 'private' | 'link-local' | 'public' | 'unknown'. Purely for the
+ * human-facing consent string — the cloud-metadata range is hard-BLOCKED
+ * upstream (isBlockedMetadataHost, at config-parse and request time) so a
+ * metadata address never reaches this classifier.
+ *
+ * Covers the common private ranges a "remote" MCP server might secretly point
+ * at: IPv4 loopback (127/8), RFC1918 (10/8, 172.16/12, 192.168/16), link-local
+ * (169.254/16), and their IPv6 equivalents (::1, fc00::/7 ULA, fe80::/10
+ * link-local). IPv4-mapped IPv6 (`::ffff:a.b.c.d`) is unwrapped to its v4 form
+ * first. Anything else is 'public'. Best-effort — an unrecognisable string maps
+ * to 'unknown' (shown as such), never throws.
+ */
+export function classifyIpAddress(ip) {
+  if (typeof ip !== 'string' || ip.length === 0) return 'unknown'
+  let h = ip.toLowerCase().trim()
+  if (h.startsWith('[') && h.endsWith(']')) h = h.slice(1, -1)
+  const zone = h.indexOf('%') // strip an IPv6 zone id (fe80::1%en0)
+  if (zone !== -1) h = h.slice(0, zone)
+  // IPv4-mapped IPv6 (::ffff:a.b.c.d) — classify by the embedded v4 address.
+  const mapped = h.match(/^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/)
+  if (mapped) h = mapped[1]
+  const v4 = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/)
+  if (v4) {
+    const a = Number(v4[1])
+    const b = Number(v4[2])
+    if (v4.slice(1).some((o) => Number(o) > 255)) return 'unknown'
+    if (a === 127) return 'loopback'
+    if (a === 10) return 'private'
+    if (a === 172 && b >= 16 && b <= 31) return 'private'
+    if (a === 192 && b === 168) return 'private'
+    if (a === 169 && b === 254) return 'link-local'
+    return 'public'
+  }
+  // IPv6 literals.
+  if (h === '::1') return 'loopback'
+  // Link-local is fe80::/10 — the leading hextet spans fe80 through febf (top
+  // 10 bits fixed: 1111111010). Match the first two hex digits (fe) plus the
+  // third digit constrained to 8..b, not just the `fe80` literal. The trailing
+  // `:` covers both `fe80:...` and the compressed `fe80::...` (which begins `:`).
+  if (/^fe[89ab][0-9a-f]:/.test(h)) return 'link-local'
+  if (/^f[cd][0-9a-f]{2}:/.test(h)) return 'private' // fc00::/7 unique-local
+  if (h.includes(':')) return 'public'
+  return 'unknown'
+}
+
+// Human-readable label per classification, for the trust-prompt string.
+const _CLASSIFICATION_LABELS = {
+  loopback: 'loopback',
+  private: 'private LAN',
+  'link-local': 'link-local',
+  public: 'public',
+  unknown: 'unknown',
+}
+
+// Order of "notability" when a host resolves to several addresses — the most
+// internal wins the summary label so a remote server that ALSO resolves to an
+// internal address surfaces that fact at consent time.
+const _CLASSIFICATION_PRIORITY = ['loopback', 'private', 'link-local', 'public', 'unknown']
+
+// #6852 — cap on the trust-prompt DNS lookup. resolveTrustAddress runs inside
+// the fleet's withTrustStoreLock (byok-mcp-fleet.js), so a slow/hanging
+// resolver would both delay the consent prompt AND hold the lock for every
+// other MCP client. 2s is generous for a real resolver yet bounds the worst
+// case; on timeout we fall back to the same graceful "could not resolve host".
+export const DEFAULT_TRUST_DNS_TIMEOUT_MS = 2000
+
+// Resolved by the timeout arm of the lookup race (distinct from any address the
+// resolver could return), so a timeout maps to the graceful fallback.
+const _LOOKUP_TIMEOUT = Symbol('trust-address-lookup-timeout')
+
+function _summariseClassification(classifications) {
+  for (const c of _CLASSIFICATION_PRIORITY) {
+    if (classifications.includes(c)) return c
+  }
+  return 'unknown'
+}
+
+/**
+ * Best-effort resolution of a remote MCP server url's host, for the first-use
+ * trust prompt (#6834). Returns a small structured record describing WHERE the
+ * host actually points so a user approving a 'remote' server can see when it
+ * resolves to a loopback / private / internal address and make an informed
+ * consent decision (owner decision 2026-07-18: display, don't block).
+ *
+ * Shape: `{ resolved, hostname, addresses, classification, display }`.
+ *   - resolved:false + display 'could not resolve host' when the url is
+ *     unparseable OR DNS lookup fails / returns nothing. NEVER throws.
+ *   - a literal IP host is classified directly (no DNS round-trip).
+ *   - a DNS name is resolved via `lookup(..., { all: true })`; the summary
+ *     classification is the most-internal of the returned addresses.
+ *
+ * The `lookup` seam is injectable (defaults to node:dns/promises lookup — the
+ * same resolver the transport's metadata guard uses) so tests never touch real
+ * DNS. Credentials are NOT this function's concern: pass an already-redacted or
+ * raw url — only the hostname is read, and only IPs are returned.
+ *
+ * The lookup is bounded by `timeoutMs` (#6852): resolveTrustAddress runs under
+ * the fleet's trust-store lock, so a hanging resolver must not stall the prompt
+ * or the lock — a timeout falls back to 'could not resolve host'.
+ */
+export async function resolveTrustAddress(url, { lookup = dnsLookup, timeoutMs = DEFAULT_TRUST_DNS_TIMEOUT_MS } = {}) {
+  const miss = (hostname = null) => ({
+    resolved: false,
+    hostname,
+    addresses: [],
+    classification: 'unknown',
+    display: 'could not resolve host',
+  })
+  let hostname
+  try {
+    hostname = new URL(url).hostname
+  } catch {
+    return miss()
+  }
+  if (!hostname) return miss()
+  const bare = hostname.startsWith('[') && hostname.endsWith(']') ? hostname.slice(1, -1) : hostname
+  // Short-circuit ONLY for a syntactically-valid IP literal. A dotted-quad-
+  // shaped string with an out-of-range octet (e.g. 999.1.1.1) is NOT an IP —
+  // classifyIpAddress returns 'unknown' — so it is really a hostname and must
+  // go through the DNS path, not be echoed as a misleading "resolves to
+  // 999.1.1.1". A bracketed / colon-bearing IPv6 host is always a literal.
+  const looksLikeLiteral = /^[\d.]+$/.test(bare) || bare.includes(':')
+  const literalClass = looksLikeLiteral ? classifyIpAddress(bare) : 'unknown'
+  if (looksLikeLiteral && literalClass !== 'unknown') {
+    return {
+      resolved: true,
+      hostname,
+      addresses: [bare],
+      classification: literalClass,
+      display: `resolves to ${bare} (${_CLASSIFICATION_LABELS[literalClass] || literalClass})`,
+    }
+  }
+  let timer
+  try {
+    // Bound the lookup: whichever settles first wins. The timeout arm RESOLVES
+    // with a sentinel (never rejects) so a slow resolver maps to the graceful
+    // fallback, not an error. Promise.race registers a reaction on the lookup
+    // promise, so a late rejection from the loser stays handled. The timer is
+    // NOT unref'd — it is always cleared in `finally` once the race settles, so
+    // it never outlives this (awaited) resolution, and keeping the loop alive
+    // while we resolve is the intended behaviour.
+    const timeoutArm = new Promise((resolve) => {
+      timer = setTimeout(() => resolve(_LOOKUP_TIMEOUT), timeoutMs)
+    })
+    const addrs = await Promise.race([lookup(bare, { all: true }), timeoutArm])
+    if (addrs === _LOOKUP_TIMEOUT) return miss(hostname)
+    const addresses = (Array.isArray(addrs) ? addrs : [])
+      .map((a) => (a && typeof a.address === 'string' ? a.address : null))
+      .filter(Boolean)
+    if (addresses.length === 0) return miss(hostname)
+    const classifications = addresses.map(classifyIpAddress)
+    const classification = _summariseClassification(classifications)
+    return {
+      resolved: true,
+      hostname,
+      addresses,
+      classification,
+      display: `resolves to ${addresses.join(', ')} (${_CLASSIFICATION_LABELS[classification] || classification})`,
+    }
+  } catch {
+    return miss(hostname)
+  } finally {
+    clearTimeout(timer)
   }
 }
 

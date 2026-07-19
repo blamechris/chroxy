@@ -1155,4 +1155,86 @@ describe('PermissionManager', () => {
       custom.destroy()
     })
   })
+
+  // #6834 — the first-use trust prompt for a REMOTE server shows the resolved
+  // address so a user can see when a 'remote' URL points at an internal address.
+  describe('requestMcpTrust remote resolved-address display (#6834)', () => {
+    async function firstEvent(manager, server) {
+      const events = []
+      manager.on('permission_request', (e) => events.push(e))
+      const promise = manager.requestMcpTrust(server)
+      // requestMcpTrust awaits DNS before emitting for remote servers — let the
+      // emit land, then resolve the prompt so nothing dangles.
+      await new Promise((r) => setImmediate(r))
+      if (events[0]) manager.respondToPermission(events[0].requestId, 'deny')
+      await promise
+      return events[0]
+    }
+
+    it('shows the loopback marker for a URL that resolves to 127.0.0.1', async () => {
+      const pmLoop = createManager({ mcpTrustLookup: async () => [{ address: '127.0.0.1', family: 4 }] })
+      const e = await firstEvent(pmLoop, { name: 'lmstudio', url: 'http://lm.local:1234/mcp', headerKeys: [] })
+      assert.equal(e.tool, 'mcp_spawn')
+      assert.match(e.description, /Connect to MCP server "lmstudio"/)
+      assert.match(e.description, /resolves to 127\.0\.0\.1 \(loopback\)/)
+      assert.equal(e.input.mcpServer.resolvedAddress.classification, 'loopback')
+      assert.deepEqual(e.input.mcpServer.resolvedAddress.addresses, ['127.0.0.1'])
+      pmLoop.destroy()
+    })
+
+    it('shows the private-LAN marker for an RFC1918 literal host', async () => {
+      const pmLan = createManager({ mcpTrustLookup: async () => [] })
+      const e = await firstEvent(pmLan, { name: 'lan', url: 'http://192.168.1.9:3000/', headerKeys: [] })
+      assert.match(e.description, /resolves to 192\.168\.1\.9 \(private LAN\)/)
+      assert.equal(e.input.mcpServer.resolvedAddress.classification, 'private')
+      pmLan.destroy()
+    })
+
+    it('shows the public marker for a public host', async () => {
+      const pmPub = createManager({ mcpTrustLookup: async () => [{ address: '93.184.216.34', family: 4 }] })
+      const e = await firstEvent(pmPub, { name: 'remote', url: 'https://mcp.example.com/sse', headerKeys: [] })
+      assert.match(e.description, /resolves to 93\.184\.216\.34 \(public\)/)
+      assert.equal(e.input.mcpServer.resolvedAddress.classification, 'public')
+      pmPub.destroy()
+    })
+
+    it('shows a graceful fallback when DNS resolution fails', async () => {
+      const pmFail = createManager({ mcpTrustLookup: async () => { throw new Error('ENOTFOUND') } })
+      const e = await firstEvent(pmFail, { name: 'gone', url: 'https://nope.invalid/', headerKeys: [] })
+      assert.match(e.description, /could not resolve host/)
+      assert.equal(e.input.mcpServer.resolvedAddress.resolved, false)
+      pmFail.destroy()
+    })
+
+    it('redacts URL credentials in the displayed prompt (reuses #6833 redaction)', async () => {
+      const pmRedact = createManager({ mcpTrustLookup: async () => [{ address: '10.0.0.5', family: 4 }] })
+      const e = await firstEvent(pmRedact, {
+        name: 'creds',
+        url: 'https://user:sekret@internal.example/mcp?token=abc123',
+        headerKeys: ['Authorization'],
+      })
+      assert.doesNotMatch(e.description, /sekret/)
+      assert.doesNotMatch(e.description, /abc123/)
+      assert.doesNotMatch(e.input.mcpServer.url, /sekret|abc123/)
+      assert.match(e.description, /resolves to 10\.0\.0\.5 \(private LAN\)/)
+      pmRedact.destroy()
+    })
+
+    it('does not resolve or annotate a stdio (command) server', async () => {
+      let called = false
+      const pmStdio = createManager({ mcpTrustLookup: async () => { called = true; return [] } })
+      const events = []
+      pmStdio.on('permission_request', (e) => events.push(e))
+      // Stdio path has no url → no await → emits synchronously (pending-size
+      // assertions elsewhere depend on this).
+      const promise = pmStdio.requestMcpTrust({ name: 'fs', command: 'node', args: ['fs.js'] })
+      assert.equal(pmStdio._pendingPermissions.size, 1)
+      assert.equal(called, false)
+      assert.doesNotMatch(events[0].description, /resolves to|could not resolve/)
+      assert.equal(events[0].input.mcpServer.resolvedAddress, undefined)
+      pmStdio.respondToPermission(events[0].requestId, 'deny')
+      await promise
+      pmStdio.destroy()
+    })
+  })
 })

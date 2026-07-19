@@ -5,11 +5,14 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   CLAUDE_CONFIG_MAX_BYTES,
+  DEFAULT_TRUST_DNS_TIMEOUT_MS,
+  classifyIpAddress,
   discoverConfiguredMcpServers,
   isBlockedMetadataHost,
   loadClaudeMcpConfig,
   parseClaudeMcpConfig,
   redactMcpUrl,
+  resolveTrustAddress,
   toMcpServerMetadata,
 } from '../src/byok-mcp-config.js'
 
@@ -347,5 +350,190 @@ describe('discoverConfiguredMcpServers (#6820)', () => {
     assert.deepEqual(res.servers, [{ name: 'good' }])
     assert.equal(res.warnings.length, 1)
     assert.match(res.warnings[0], /bad/)
+  })
+})
+
+describe('classifyIpAddress (#6834)', () => {
+  it('classifies IPv4 loopback / RFC1918 / link-local / public', () => {
+    assert.equal(classifyIpAddress('127.0.0.1'), 'loopback')
+    assert.equal(classifyIpAddress('127.5.5.5'), 'loopback')
+    assert.equal(classifyIpAddress('10.0.0.1'), 'private')
+    assert.equal(classifyIpAddress('172.16.0.1'), 'private')
+    assert.equal(classifyIpAddress('172.31.255.255'), 'private')
+    assert.equal(classifyIpAddress('172.15.255.255'), 'public') // just below /12
+    assert.equal(classifyIpAddress('172.32.0.1'), 'public') // just outside /12
+    assert.equal(classifyIpAddress('192.168.1.5'), 'private')
+    assert.equal(classifyIpAddress('192.167.255.255'), 'public') // just below 192.168/16
+    assert.equal(classifyIpAddress('169.254.10.10'), 'link-local')
+    assert.equal(classifyIpAddress('93.184.216.34'), 'public')
+    assert.equal(classifyIpAddress('8.8.8.8'), 'public')
+  })
+
+  it('classifies IPv6 loopback / ULA / link-local / public + mapped v4', () => {
+    assert.equal(classifyIpAddress('::1'), 'loopback')
+    assert.equal(classifyIpAddress('[::1]'), 'loopback')
+    assert.equal(classifyIpAddress('fe80::1'), 'link-local')
+    assert.equal(classifyIpAddress('fe80::1%en0'), 'link-local')
+    assert.equal(classifyIpAddress('fd00::1'), 'private')
+    assert.equal(classifyIpAddress('fc00::1'), 'private')
+    assert.equal(classifyIpAddress('2606:4700:4700::1111'), 'public')
+    assert.equal(classifyIpAddress('::ffff:127.0.0.1'), 'loopback')
+    assert.equal(classifyIpAddress('::ffff:10.0.0.1'), 'private')
+  })
+
+  it('matches the full fe80::/10 link-local range, not just the fe80 literal (#6850 review)', () => {
+    // fe80::/10 spans the leading hextet fe80 through febf.
+    assert.equal(classifyIpAddress('fe80::1'), 'link-local')
+    assert.equal(classifyIpAddress('fe90::1'), 'link-local')
+    assert.equal(classifyIpAddress('fea0::1'), 'link-local')
+    assert.equal(classifyIpAddress('feaf::abcd'), 'link-local')
+    assert.equal(classifyIpAddress('febf::1'), 'link-local')
+    // fec0::/10 is deprecated site-local, NOT link-local — must not match.
+    assert.notEqual(classifyIpAddress('fec0::1'), 'link-local')
+    assert.notEqual(classifyIpAddress('fe7f::1'), 'link-local') // just below the range
+  })
+
+  it('maps junk / out-of-range to unknown, never throws', () => {
+    assert.equal(classifyIpAddress(''), 'unknown')
+    assert.equal(classifyIpAddress(null), 'unknown')
+    assert.equal(classifyIpAddress('not-an-ip'), 'unknown')
+    assert.equal(classifyIpAddress('999.1.1.1'), 'unknown')
+  })
+})
+
+describe('resolveTrustAddress (#6834)', () => {
+  it('classifies a literal loopback host without a DNS round-trip', async () => {
+    let called = false
+    const lookup = async () => { called = true; return [] }
+    const r = await resolveTrustAddress('http://127.0.0.1:8080/mcp', { lookup })
+    assert.equal(called, false, 'literal IP must not hit DNS')
+    assert.equal(r.resolved, true)
+    assert.equal(r.classification, 'loopback')
+    assert.deepEqual(r.addresses, ['127.0.0.1'])
+    assert.match(r.display, /resolves to 127\.0\.0\.1 \(loopback\)/)
+  })
+
+  it('classifies a literal private-LAN host', async () => {
+    const r = await resolveTrustAddress('https://192.168.1.50/', { lookup: async () => [] })
+    assert.equal(r.classification, 'private')
+    assert.match(r.display, /resolves to 192\.168\.1\.50 \(private LAN\)/)
+  })
+
+  it('resolves a DNS name to loopback via the injected lookup', async () => {
+    const lookup = async () => [{ address: '127.0.0.1', family: 4 }]
+    const r = await resolveTrustAddress('http://lm.local:1234/', { lookup })
+    assert.equal(r.resolved, true)
+    assert.equal(r.hostname, 'lm.local')
+    assert.equal(r.classification, 'loopback')
+    assert.match(r.display, /resolves to 127\.0\.0\.1 \(loopback\)/)
+  })
+
+  it('treats an out-of-range dotted-quad host as a hostname (DNS lookup), not a literal IP (#6850 review)', async () => {
+    // 999.1.1.1 is dotted-quad-SHAPED but not a valid IP (classifyIpAddress →
+    // 'unknown'), so it must go through the DNS path, never be echoed as a
+    // misleading "resolves to 999.1.1.1". A non-special scheme preserves the
+    // opaque host verbatim, so this reaches (and exercises) the guard.
+    assert.equal(classifyIpAddress('999.1.1.1'), 'unknown')
+    let looked = null
+    const lookup = async (host) => { looked = host; return [{ address: '93.184.216.34', family: 4 }] }
+    const r = await resolveTrustAddress('mcp://999.1.1.1/x', { lookup })
+    assert.equal(looked, '999.1.1.1', 'the invalid dotted-quad must be passed to DNS lookup, not treated as a literal')
+    assert.equal(r.resolved, true)
+    assert.equal(r.hostname, '999.1.1.1')
+    assert.deepEqual(r.addresses, ['93.184.216.34'])
+    assert.equal(r.classification, 'public')
+    assert.doesNotMatch(r.display, /resolves to 999\.1\.1\.1/)
+    assert.match(r.display, /resolves to 93\.184\.216\.34 \(public\)/)
+  })
+
+  it('for an http URL, the parser rejects an out-of-range quad before any lookup (graceful fallback)', async () => {
+    // Defence-in-depth alongside the guard: a special-scheme (http) URL with an
+    // out-of-range IPv4 host is rejected by the WHATWG parser outright, so it
+    // never reaches DNS and never surfaces a bogus literal — just the fallback.
+    let called = false
+    const r = await resolveTrustAddress('http://999.1.1.1/mcp', { lookup: async () => { called = true; return [] } })
+    assert.equal(called, false)
+    assert.equal(r.resolved, false)
+    assert.equal(r.display, 'could not resolve host')
+    assert.doesNotMatch(r.display, /999\.1\.1\.1/)
+  })
+
+  it('a valid IP literal still short-circuits without a DNS round-trip', async () => {
+    let called = false
+    const r = await resolveTrustAddress('http://10.0.0.1:9000/', { lookup: async () => { called = true; return [] } })
+    assert.equal(called, false)
+    assert.equal(r.classification, 'private')
+    assert.deepEqual(r.addresses, ['10.0.0.1'])
+  })
+
+  it('resolves a public DNS name as public', async () => {
+    const lookup = async () => [{ address: '93.184.216.34', family: 4 }]
+    const r = await resolveTrustAddress('https://example.com/mcp', { lookup })
+    assert.equal(r.classification, 'public')
+    assert.match(r.display, /resolves to 93\.184\.216\.34 \(public\)/)
+  })
+
+  it('summarises to the most-internal address when a name resolves to several', async () => {
+    const lookup = async () => [
+      { address: '93.184.216.34', family: 4 },
+      { address: '10.1.2.3', family: 4 },
+    ]
+    const r = await resolveTrustAddress('https://mixed.example/', { lookup })
+    assert.equal(r.classification, 'private')
+    assert.deepEqual(r.addresses, ['93.184.216.34', '10.1.2.3'])
+    assert.match(r.display, /private LAN/)
+  })
+
+  it('gracefully falls back when DNS lookup throws', async () => {
+    const lookup = async () => { throw new Error('ENOTFOUND') }
+    const r = await resolveTrustAddress('https://nope.invalid/', { lookup })
+    assert.equal(r.resolved, false)
+    assert.equal(r.display, 'could not resolve host')
+    assert.deepEqual(r.addresses, [])
+  })
+
+  it('gracefully falls back when DNS returns nothing', async () => {
+    const r = await resolveTrustAddress('https://empty.example/', { lookup: async () => [] })
+    assert.equal(r.resolved, false)
+    assert.equal(r.display, 'could not resolve host')
+  })
+
+  it('gracefully falls back on an unparseable url (no throw)', async () => {
+    const r = await resolveTrustAddress('not a url', { lookup: async () => [] })
+    assert.equal(r.resolved, false)
+    assert.equal(r.display, 'could not resolve host')
+  })
+
+  it('exports a sane default DNS timeout constant (#6852)', () => {
+    assert.equal(typeof DEFAULT_TRUST_DNS_TIMEOUT_MS, 'number')
+    assert.ok(DEFAULT_TRUST_DNS_TIMEOUT_MS > 0 && DEFAULT_TRUST_DNS_TIMEOUT_MS <= 5000)
+  })
+
+  it('times out a hanging lookup and returns the graceful fallback (#6852)', async () => {
+    // A resolver that stalls past the timeout must not hang the prompt (or the
+    // fleet's trust-store lock). The timeout arm wins the race → fallback. The
+    // lookup is gated on a promise we release AFTER asserting, so the stub
+    // settles deterministically (no dangling never-resolving promise).
+    let release
+    const gate = new Promise((resolve) => { release = resolve })
+    const stalledLookup = () => gate.then(() => [{ address: '203.0.113.7', family: 4 }])
+    const started = Date.now()
+    const r = await resolveTrustAddress('https://slow.example/mcp', { lookup: stalledLookup, timeoutMs: 40 })
+    const elapsed = Date.now() - started
+    assert.equal(r.resolved, false)
+    assert.equal(r.display, 'could not resolve host')
+    assert.equal(r.hostname, 'slow.example')
+    assert.ok(elapsed >= 40, `should wait for the timeout (elapsed ${elapsed}ms)`)
+    assert.ok(elapsed < 2000, `should not hang past the timeout (elapsed ${elapsed}ms)`)
+    // Let the abandoned lookup settle so the test leaves nothing pending.
+    release()
+    await gate
+  })
+
+  it('a lookup that resolves before the timeout still wins (#6852)', async () => {
+    const lookup = async () => [{ address: '10.0.0.9', family: 4 }]
+    const r = await resolveTrustAddress('https://fast.example/', { lookup, timeoutMs: 2000 })
+    assert.equal(r.resolved, true)
+    assert.equal(r.classification, 'private')
   })
 })

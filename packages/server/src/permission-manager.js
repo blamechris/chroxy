@@ -6,7 +6,7 @@ import { createLogger } from './logger.js'
 // the same redaction as the hook path. Shared sanitizer + value redactor live in
 // redaction.js (a leaf module — no import cycle / HTTP-handler weight).
 import { sanitizeToolInput, redactValue } from './redaction.js'
-import { redactMcpUrl } from './byok-mcp-config.js'
+import { redactMcpUrl, resolveTrustAddress } from './byok-mcp-config.js'
 // #6842 review (Copilot) — audit entries must carry the store's NORMALIZED
 // project key, not the raw session cwd, or a relative / `..`-laden cwd
 // produces entries that never correlate with the persisted rule they audit.
@@ -237,10 +237,14 @@ export function isProtectedPathTarget(input, cwd) {
  *   user_question       { toolUseId, questions }
  */
 export class PermissionManager extends EventEmitter {
-  constructor({ timeoutMs, log, maxPendingPermissions, cwd, ruleStore } = {}) {
+  constructor({ timeoutMs, log, maxPendingPermissions, cwd, ruleStore, mcpTrustLookup } = {}) {
     super()
     this._timeoutMs = timeoutMs || DEFAULT_TIMEOUT_MS
     this._log = log || console
+    // #6834 — injectable DNS resolver for the MCP-trust prompt's resolved-address
+    // display. Defaults to node:dns/promises lookup (via resolveTrustAddress)
+    // when unset; tests pass a fake so they never touch real DNS.
+    this._mcpTrustLookup = typeof mcpTrustLookup === 'function' ? mcpTrustLookup : null
     // #6448 — bound on concurrent pending permissions; injectable so the cap is
     // testable without minting 1000 real requests.
     this._maxPendingPermissions = maxPendingPermissions || MAX_PENDING_PERMISSIONS
@@ -965,18 +969,42 @@ export class PermissionManager extends EventEmitter {
    * @param {{ name: string, command?: string, args?: string[], envKeys?: string[], url?: string, headerKeys?: string[] }} server
    * @returns {Promise<boolean>}
    */
-  requestMcpTrust(server) {
+  async requestMcpTrust(server) {
+    const isRemote = typeof server.url === 'string' && server.url.length > 0
+    const safeUrl = isRemote ? redactMcpUrl(server.url) : ''
+    // #6834 — for a REMOTE server, best-effort-resolve the host BEFORE we build
+    // the prompt so the consent string can show when a "remote" URL actually
+    // points at a loopback / private / internal address (owner decision:
+    // display, never block beyond the existing cloud-metadata hard-block).
+    // Resolution is non-fatal — resolveTrustAddress returns a 'could not
+    // resolve host' record on any failure and never throws. Only the hostname
+    // is read (from the already-redacted url); only IPs come back. The stdio
+    // path has no url, so no await runs and its prompt still emits synchronously
+    // (autoAllowPending / pending-size assertions depend on that).
+    const resolved = isRemote
+      ? await resolveTrustAddress(safeUrl, { lookup: this._mcpTrustLookup || undefined })
+      : null
     return new Promise((resolve) => {
       const requestId = `mcp-trust-${this._idNonce}-${++this._permissionCounter}-${Date.now()}`
-      const isRemote = typeof server.url === 'string' && server.url.length > 0
       const argv0 = Array.isArray(server.args) && server.args.length > 0 ? server.args[0] : ''
-      const safeUrl = isRemote ? redactMcpUrl(server.url) : ''
       const input = {
         mcpServer: isRemote
           ? {
               name: server.name,
               url: safeUrl,
               headerKeys: Array.isArray(server.headerKeys) ? [...server.headerKeys] : [],
+              // Structured mirror of the resolved-address marker embedded in
+              // `description`. Plain strings/arrays/bools — survives
+              // sanitizeToolInput untouched — so a client that renders MCP-trust
+              // input structurally can surface it without re-parsing the string.
+              resolvedAddress: resolved
+                ? {
+                    resolved: resolved.resolved,
+                    addresses: resolved.addresses,
+                    classification: resolved.classification,
+                    display: resolved.display,
+                  }
+                : null,
             }
           : {
               name: server.name,
@@ -986,7 +1014,7 @@ export class PermissionManager extends EventEmitter {
             },
       }
       const description = isRemote
-        ? `Connect to MCP server "${server.name}" at ${safeUrl}`
+        ? `Connect to MCP server "${server.name}" at ${safeUrl}${resolved ? ` — ${resolved.display}` : ''}`
         : `Spawn MCP server "${server.name}" running ${server.command}${argv0 ? ' ' + argv0 : ''}`
 
       // Wrap pending entry so respondToPermission's standard mapping
