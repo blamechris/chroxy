@@ -5,6 +5,7 @@
  *          request_conversation_transcript, request_full_history,
  *          request_session_context, request_cost_summary
  */
+import { realpathSync } from 'fs'
 import { scanConversations as defaultScanConversations } from '../conversation-scanner.js'
 import { searchConversations as defaultSearchConversations } from '../conversation-search.js'
 import { resolveJsonlPath, readConversationHistoryAsync as defaultReadConversationHistoryAsync } from '../jsonl-reader.js'
@@ -178,7 +179,16 @@ async function handleRequestConversationTranscript(ws, client, msg, ctx) {
       sendSessionError(ws, ctx, cwdError)
       return
     }
-    cwd = msg.cwd
+    // Defense-in-depth: validateCwdAllowed already resolved + vetted the realpath
+    // but discarded it. Canonicalize ONCE here and reuse the resolved path for
+    // BOTH the scope check and the on-disk read, so a symlinked hint can't point
+    // the scope check at one directory and the file read at another.
+    try {
+      cwd = realpathSync(msg.cwd)
+    } catch {
+      sendSessionError(ws, ctx, `Cannot resolve path: ${msg.cwd}`)
+      return
+    }
   }
 
   if (!cwd) {

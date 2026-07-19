@@ -723,6 +723,38 @@ describe('conversation-handlers', () => {
       assert.equal(ctx.sessions.sessionManager.createSession.callCount, 0)
     })
 
+    it('uses the authoritative recorded cwd, ignoring a spoofed in-scope cwd hint', async () => {
+      // A bound client supplies a msg.cwd that IS within its scope but is NOT the
+      // conversation's real recorded cwd. The recorded cwd (from the scan) must
+      // win outright — the hint is ignored, so a client can't redirect the read
+      // to a different (still in-scope) directory it doesn't actually own.
+      const sessions = new Map()
+      sessions.set('bound-1', { session: createMockSession(), name: 'S', cwd: '/home/dev/Projects/chroxy' })
+      const ctx = makeCtx(sessions)
+      ctx.scanConversations = createSpy(async () => [
+        { conversationId: CONV_ID, cwd: '/home/dev/Projects/chroxy/real' },
+      ])
+      let readPath = null
+      ctx.readConversationTranscript = createSpy(async (p) => {
+        readPath = p
+        return [{ type: 'user_input', content: 'x', timestamp: 1 }]
+      })
+      const client = makeClient({ boundSessionId: 'bound-1' })
+
+      await conversationHandlers.request_conversation_transcript(makeWs(), client, {
+        type: 'request_conversation_transcript',
+        conversationId: CONV_ID,
+        cwd: '/home/dev/Projects/chroxy/fake', // in-scope but NOT the recorded cwd
+      }, ctx)
+
+      assert.match(readPath, /-home-dev-Projects-chroxy-real/,
+        'read path must derive from the recorded cwd, not the client-supplied hint')
+      assert.ok(!/fake/.test(readPath),
+        'the spoofed cwd hint must not influence the resolved path')
+      assert.ok(ctx._sent.find(m => m.type === 'history_replay_start'), 'in-scope recorded read must replay')
+      assert.equal(ctx.sessions.sessionManager.createSession.callCount, 0)
+    })
+
     it('validates a client-supplied cwd fallback when the scan can not find the conversation', async () => {
       // The scan misses (empty), so the handler falls back to msg.cwd — which must
       // pass the same path-hygiene gate create/resume use. A bogus dir is rejected
