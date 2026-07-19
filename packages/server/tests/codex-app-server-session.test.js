@@ -373,6 +373,95 @@ describe('CodexAppServerSession — crash / stop paths (#6607)', () => {
   })
 })
 
+describe('CodexAppServerSession — transient stream reconnect (#6623)', () => {
+  // The `error` notification codex emits WHILE its OWN retry loop re-establishes a
+  // dropped response stream — commonly right after a permission / escalation
+  // round-trip stalls a shell turn. params.error.message is `Reconnecting... N/5`
+  // and codexErrorInfo carries responseStreamDisconnected (the exact shape from the
+  // #6623 report). This is a retry-in-progress, NOT a terminal failure.
+  const reconnectParams = (attempt = 2, max = 5) => ({
+    error: {
+      message: `Reconnecting... ${attempt}/${max}`,
+      codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: null } },
+      additionalDetails: 'stream disconnected before completion: failed to send websocket frame',
+    },
+  })
+
+  it('a Reconnecting responseStreamDisconnected error keeps the turn open (does NOT fail it)', () => {
+    const { s, cleanup } = mkSession()
+    const ev = capture(s, ['error', 'stopped', 'stream_end', 'result'])
+    s._isBusy = true
+    s._activeTurn = { messageId: 'm1', turnId: 't1', didStreamStart: true }
+    s._onNotification({ method: 'error', params: reconnectParams(2, 5) })
+    // OLD behavior: case 'error' → _failTurn → emits 'error' + clears the turn.
+    // NEW: a reconnect-in-progress is suppressed and the in-flight turn is preserved.
+    assert.deepEqual(ev.map(([e]) => e), [], 'no error/stopped/stream_end/result for a reconnect-in-progress')
+    assert.equal(s._isBusy, true, 'session stays busy while codex reconnects')
+    assert.ok(s._activeTurn, 'the in-flight turn is preserved across the reconnect')
+    s._clearResultTimeout() // release the re-armed backstop timer
+    cleanup()
+  })
+
+  it('recovers cleanly: after reconnect notifications the turn still completes normally', () => {
+    const { s, cleanup } = mkSession()
+    const ev = capture(s, ['error', 'stream_end', 'result'])
+    s._isBusy = true
+    s._activeTurn = { messageId: 'm1', turnId: 't1', didStreamStart: true }
+    s._onNotification({ method: 'error', params: reconnectParams(1, 5) })
+    s._onNotification({ method: 'error', params: reconnectParams(2, 5) })
+    // codex re-establishes the stream and finishes the turn
+    s._onNotification({ method: 'turn/completed', params: { turn: { durationMs: 5 } } })
+    assert.deepEqual(ev.map(([e]) => e), ['stream_end', 'result'], 'turn completed cleanly, no error surfaced')
+    assert.equal(s._isBusy, false, 'busy cleared after recovery')
+    assert.equal(s._activeTurn, null, 'turn cleared after recovery')
+    cleanup()
+  })
+
+  it('a terminal responseStreamDisconnected (no Reconnecting message) still fails the turn', () => {
+    const { s, cleanup } = mkSession()
+    const ev = capture(s, ['error'])
+    s._isBusy = true
+    s._activeTurn = { messageId: 'm1', turnId: 't1', didStreamStart: false }
+    // codex gave up: the disconnect surfaces WITHOUT a retry message → terminal.
+    s._onNotification({
+      method: 'error',
+      params: { error: { message: 'stream disconnected before completion', codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: null } } } },
+    })
+    assert.equal(ev[0]?.[0], 'error', 'a terminal disconnect fails the turn')
+    assert.equal(s._isBusy, false, 'busy cleared on a terminal failure')
+    assert.equal(s._activeTurn, null, 'turn cleared on a terminal failure')
+    cleanup()
+  })
+
+  it('a Reconnecting message WITHOUT responseStreamDisconnected still fails (conservative gate)', () => {
+    const { s, cleanup } = mkSession()
+    const ev = capture(s, ['error'])
+    s._isBusy = true
+    s._activeTurn = { messageId: 'm1', turnId: 't1', didStreamStart: false }
+    // Only a responseStreamDisconnected reconnect is suppressed; a bare reconnect
+    // string with no disconnect info is not something we trust as recoverable.
+    s._onNotification({ method: 'error', params: { error: { message: 'Reconnecting... 1/5' } } })
+    assert.equal(ev[0]?.[0], 'error', 'no codexErrorInfo → not suppressed')
+    cleanup()
+  })
+
+  it('_isTransientReconnect / _errorPayload tolerate both wrapped and bare shapes', () => {
+    const { s, cleanup } = mkSession()
+    // wrapped { error: {...} } (the shape in the wild)
+    assert.equal(s._isTransientReconnect(s._errorPayload(reconnectParams(3, 5))), true)
+    // bare { message, codexErrorInfo } (no wrapper)
+    assert.equal(
+      s._isTransientReconnect(s._errorPayload({ message: 'Reconnecting... 3/5', codexErrorInfo: { responseStreamDisconnected: {} } })),
+      true,
+    )
+    // terminal disconnect (no reconnect text) and plain errors are NOT transient
+    assert.equal(s._isTransientReconnect(s._errorPayload({ message: 'boom', codexErrorInfo: { responseStreamDisconnected: {} } })), false)
+    assert.equal(s._isTransientReconnect(s._errorPayload({ message: 'boom' })), false)
+    assert.equal(s._isTransientReconnect(s._errorPayload(undefined)), false)
+    cleanup()
+  })
+})
+
 describe('CodexAppServerSession — approval surfacing (#6605 Phase 2)', () => {
   const tick = () => new Promise((r) => setImmediate(r))
   function mkApprovalSession(mode = 'approve') {
