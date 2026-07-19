@@ -516,6 +516,10 @@ export interface MessageInputActions {
   // badge) instead of starting a fresh turn.
   addUserMessage: (text: string, attachments?: MessageAttachment[], opts?: { clientMessageId?: string; queued?: boolean }) => void;
   sendInput: (input: string, wireAttachments?: BinaryAttachment[], options?: { isVoice?: boolean; clientMessageId?: string }) => 'sent' | 'queued' | false;
+  // #6861 — `#`-prefix composer quick-append: send the note to the server, which
+  // appends it to the session cwd's project CLAUDE.md and acks with
+  // `append_memory_result`. Not offline-queued; returns false when disconnected.
+  appendMemory: (note: string) => 'sent' | false;
   sendInterrupt: () => 'sent' | 'queued' | false;
   // #5938 (#5943) — cancel one queued follow-up by its clientMessageId before
   // it flushes. Returns false (refused) while disconnected; never offline-queued.

@@ -401,6 +401,107 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
     }
   }
 
+  /**
+   * Append a single note line to the session cwd's project CLAUDE.md, creating
+   * the file if it doesn't exist (#6861, epic #6760).
+   *
+   * The TARGET is chosen SERVER-side (`<cwd>/CLAUDE.md`) — the client sends only
+   * the note text, never a path — so the write is path-confined BY CONSTRUCTION.
+   * validatePathWithinCwd is still run for symlink-escape defence (a CLAUDE.md
+   * symlinked out of the workspace is rejected), and the open uses O_NOFOLLOW to
+   * close the post-validation TOCTOU window, matching writeFileContent above.
+   */
+  async function appendMemory(ws, note, sessionCwd) {
+    if (!sessionCwd) {
+      sendFn(ws, { type: 'append_memory_result', path: null, created: false, error: 'Memory is not available in this mode' })
+      return
+    }
+    if (typeof note !== 'string' || !note.trim()) {
+      sendFn(ws, { type: 'append_memory_result', path: null, created: false, error: 'No note provided' })
+      return
+    }
+    const MAX_NOTE = 10_000
+    if (note.length > MAX_NOTE) {
+      sendFn(ws, { type: 'append_memory_result', path: null, created: false, error: `Note too long (max ${MAX_NOTE} characters)` })
+      return
+    }
+    // Collapse to a single line — quick-append is a one-line note by definition.
+    const line = note.trim().replace(/\r?\n/g, ' ')
+
+    let absPath = null
+    try {
+      const cwdReal = await resolveSessionCwd(sessionCwd)
+      const target = normalize(resolve(cwdReal, 'CLAUDE.md'))
+
+      // Resolve symlinks: if CLAUDE.md already exists, validate its real path;
+      // if not, validate the lexical target (still inside cwd by construction).
+      let resolvedTarget
+      let fileExists = false
+      try {
+        resolvedTarget = await realpath(target)
+        fileExists = true
+      } catch (err) {
+        if (err.code === 'ENOENT') resolvedTarget = target
+        else throw err
+      }
+
+      const { valid } = await validatePathWithinCwd(fileExists ? resolvedTarget : target, sessionCwd)
+      if (!valid) {
+        sendFn(ws, {
+          type: 'append_memory_result',
+          path: null,
+          created: false,
+          error: 'Access denied: memory is restricted to the project directory',
+        })
+        return
+      }
+      absPath = fileExists ? resolvedTarget : target
+
+      // Read-modify-write the whole file: append the note on its own line,
+      // inserting a separating newline when the file doesn't already end with one.
+      let newContent
+      if (fileExists) {
+        const existing = await readFile(absPath, 'utf-8')
+        const sep = existing.length > 0 && !existing.endsWith('\n') ? '\n' : ''
+        newContent = existing + sep + line + '\n'
+      } else {
+        newContent = line + '\n'
+      }
+
+      const data = Buffer.from(newContent, 'utf-8')
+      {
+        let fh
+        try {
+          const flags = fileExists
+            ? fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW | fsConstants.O_TRUNC
+            : fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW | fsConstants.O_CREAT | fsConstants.O_EXCL
+          fh = await open(absPath, flags, 0o666)
+          await fh.writeFile(data)
+        } catch (openErr) {
+          if (openErr.code === 'ELOOP') {
+            sendFn(ws, {
+              type: 'append_memory_result',
+              path: null,
+              created: false,
+              error: 'Access denied: memory is restricted to the project directory',
+            })
+            return
+          }
+          throw openErr
+        } finally {
+          await fh?.close()
+        }
+      }
+
+      sendFn(ws, { type: 'append_memory_result', path: absPath, created: !fileExists, error: null })
+    } catch (err) {
+      let errorMessage
+      if (err.code === 'EACCES') errorMessage = 'Permission denied'
+      else errorMessage = err.message || 'Unknown error'
+      sendFn(ws, { type: 'append_memory_result', path: absPath, created: false, error: errorMessage })
+    }
+  }
+
   /** Get git diff for uncommitted changes in the session CWD */
   async function getDiff(ws, base, sessionCwd) {
     if (!sessionCwd) {
@@ -590,6 +691,7 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
   return {
     readFile: readFileContent,
     writeFile: writeFileContent,
+    appendMemory,
     getDiff,
   }
 }

@@ -99,3 +99,9 @@ export declare const ServerWriteFileResultSchema: z.ZodObject<{
     path: z.ZodNullable<z.ZodString>;
     error: z.ZodNullable<z.ZodString>;
 }, z.core.$strip>;
+export declare const ServerAppendMemoryResultSchema: z.ZodObject<{
+    type: z.ZodLiteral<"append_memory_result">;
+    path: z.ZodNullable<z.ZodString>;
+    created: z.ZodBoolean;
+    error: z.ZodNullable<z.ZodString>;
+}, z.core.$strip>;

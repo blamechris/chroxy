@@ -2653,4 +2653,36 @@ export const SWITCH_FIXTURES: ContractFixture[] = [
       },
     },
   },
+
+  // append_memory_result (#6861) — the `#`-quick-append ack. Both clients append
+  // an IDENTICAL system confirmation (via the shared formatMemoryAppendNotice) to
+  // the active session transcript, naming the file and whether it was created; an
+  // error surfaces as a system notice, not a silent optimistic "saved".
+  {
+    name: 'append_memory_result appends a "saved" system notice to the active session',
+    type: 'append_memory_result',
+    init: { activeSessionId: 's1', sessions: { s1: {} } },
+    message: { type: 'append_memory_result', path: '/repo/CLAUDE.md', created: false, error: null },
+    expect: {
+      sessions: { s1: { messages: [sysMsg('Saved your note to CLAUDE.md.')] } },
+    },
+  },
+  {
+    name: 'append_memory_result names creation when the file did not exist',
+    type: 'append_memory_result',
+    init: { activeSessionId: 's1', sessions: { s1: {} } },
+    message: { type: 'append_memory_result', path: '/repo/CLAUDE.md', created: true, error: null },
+    expect: {
+      sessions: { s1: { messages: [sysMsg('Created CLAUDE.md and saved your note.')] } },
+    },
+  },
+  {
+    name: 'append_memory_result surfaces the error as a system notice',
+    type: 'append_memory_result',
+    init: { activeSessionId: 's1', sessions: { s1: {} } },
+    message: { type: 'append_memory_result', path: null, created: false, error: 'denied' },
+    expect: {
+      sessions: { s1: { messages: [sysMsg("Couldn't save to memory: denied")] } },
+    },
+  },
 ]

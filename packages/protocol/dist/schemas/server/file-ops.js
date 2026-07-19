@@ -99,3 +99,14 @@ export const ServerWriteFileResultSchema = z.object({
     path: z.string().nullable(),
     error: z.string().nullable(),
 });
+// #6861 (epic #6760): ack for the `#`-prefix composer quick-append. `path` is
+// the absolute project `CLAUDE.md` the note landed in (null on error); `created`
+// distinguishes "created the file" from "appended to an existing one" so the
+// confirmation can name the outcome. Handled by BOTH clients — each appends a
+// system confirmation (or the error) to the active session transcript.
+export const ServerAppendMemoryResultSchema = z.object({
+    type: z.literal('append_memory_result'),
+    path: z.string().nullable(),
+    created: z.boolean(),
+    error: z.string().nullable(),
+});

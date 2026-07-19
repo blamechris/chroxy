@@ -138,6 +138,10 @@ import {
   // thin wrappers over these (never reimplement the merge/seq logic here).
   upsertRunSummary,
   applyRunDelta,
+  // #6861 — `#`-prefix quick-append ack: shared parser + confirmation formatter
+  // (byte-identical wording with the mobile app).
+  handleAppendMemoryResult as sharedAppendMemoryResult,
+  formatMemoryAppendNotice,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
 import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerByokPoolStatusSnapshotSchema, ServerByokPoolActionAckSchema, ServerHostPruneStatusSnapshotSchema, ServerHostPruneActionAckSchema, ServerSimulatorStatusSnapshotSchema, ServerSimulatorActionAckSchema, ServerEmulatorStatusSnapshotSchema, ServerEmulatorActionAckSchema, ServerWslStatusSnapshotSchema, ServerWslActionAckSchema, ServerIntegrationStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerExternalSessionsSnapshotSchema, ServerRepoEventsSnapshotSchema, ServerRepoEventsDeltaSchema, ServerPermissionInputSchema, ServerPermissionAuditResultSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerSessionPresetSnapshotSchema, ServerPairPendingSchema, ServerPairResolvedSchema, ServerBillingCanarySchema, BillingCanarySnapshotSchema, ServerSymbolsSnapshotSchema, ServerSymbolLocationSchema, ServerSearchResultsSchema, ServerReferencesResultSchema, ServerOrchestrationRunsSnapshotSchema, ServerOrchestrationRunSnapshotSchema, ServerOrchestrationRunDeltaSchema, ServerOrchestrationActionAckSchema } from '@chroxy/protocol/schemas'
@@ -1875,6 +1879,24 @@ function handleClaudeReady(msg: Record<string, unknown>, get: MsgGet, set: MsgSe
   }
 }
 
+// #6861 — `#`-prefix quick-append ack. Append a system confirmation (or the
+// error) to the active session transcript, naming the file it landed in.
+// Byte-identical wording with the mobile app via formatMemoryAppendNotice.
+function handleAppendMemoryResult(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
+  const noticeMsg: ChatMessage = {
+    id: nextMessageId('memory'),
+    type: 'system',
+    content: formatMemoryAppendNotice(sharedAppendMemoryResult(msg)),
+    timestamp: Date.now(),
+  };
+  const activeId = get().activeSessionId;
+  if (activeId && get().sessionStates[activeId]) {
+    updateSession(activeId, (ss) => ({ messages: [...ss.messages, noticeMsg] }));
+  } else {
+    get().addMessage(noticeMsg);
+  }
+}
+
 // agent_idle — migrated to the shared dispatch table (#5618; runDispatch handles
 // it before this HANDLERS map). The seeded-session path is the shared
 // dispatchAgentIdle; the dashboard's no-session FLAT fallback (its UI reads flat
@@ -3490,6 +3512,8 @@ const HANDLERS: Record<string, Handler> = {
   stream_start: handleStreamStart,
   stream_delta: handleStreamDelta,
   stream_end: handleStreamEnd,
+  // #6861 — `#`-prefix composer quick-append ack.
+  append_memory_result: handleAppendMemoryResult,
   tool_start: handleToolStart,
   tool_input_delta: handleToolInputDelta,
   tool_result: handleToolResult,

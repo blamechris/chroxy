@@ -79,6 +79,14 @@ function handleWriteFile(ws, client, msg, ctx) {
   ctx.services.fileOps.writeFile(ws, msg.path, msg.content, entry?.cwd || null)
 }
 
+function handleAppendMemory(ws, client, msg, ctx) {
+  // #6861 — `#`-prefix composer quick-append. Same mutation gate as write_file:
+  // a bound (share-a-session) token cannot append to the host's CLAUDE.md.
+  if (rejectMutationIfBound(ws, client, msg, ctx, 'append_memory')) return
+  const entry = resolveSession(ctx, msg, client)
+  ctx.services.fileOps.appendMemory(ws, msg.text, entry?.cwd || null)
+}
+
 function handleGetDiff(ws, client, msg, ctx) {
   const entry = resolveSession(ctx, msg, client)
   ctx.services.fileOps.getDiff(ws, msg.base, entry?.cwd || null)
@@ -142,6 +150,7 @@ export const fileHandlers = {
   list_files: handleListFiles,
   read_file: handleReadFile,
   write_file: handleWriteFile,
+  append_memory: handleAppendMemory,
   get_diff: handleGetDiff,
   git_status: handleGitStatus,
   git_branches: handleGitBranches,

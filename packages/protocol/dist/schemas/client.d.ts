@@ -490,6 +490,11 @@ export declare const WriteFileSchema: z.ZodObject<{
     path: z.ZodString;
     content: z.ZodString;
 }, z.core.$loose>;
+export declare const AppendMemorySchema: z.ZodObject<{
+    type: z.ZodLiteral<"append_memory">;
+    text: z.ZodString;
+    sessionId: z.ZodOptional<z.ZodString>;
+}, z.core.$loose>;
 export declare const ListFilesSchema: z.ZodObject<{
     type: z.ZodLiteral<"list_files">;
     query: z.ZodOptional<z.ZodString>;
@@ -1156,6 +1161,10 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     type: z.ZodLiteral<"write_file">;
     path: z.ZodString;
     content: z.ZodString;
+}, z.core.$loose>, z.ZodObject<{
+    type: z.ZodLiteral<"append_memory">;
+    text: z.ZodString;
+    sessionId: z.ZodOptional<z.ZodString>;
 }, z.core.$loose>, z.ZodObject<{
     type: z.ZodLiteral<"list_files">;
     query: z.ZodOptional<z.ZodString>;

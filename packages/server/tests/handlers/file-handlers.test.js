@@ -10,6 +10,7 @@ function makeFileOps(overrides = {}) {
     listFiles: createSpy(),
     readFile: createSpy(),
     writeFile: createSpy(),
+    appendMemory: createSpy(),
     getDiff: createSpy(),
     gitStatus: createSpy(),
     gitBranches: createSpy(),
@@ -136,6 +137,29 @@ describe('file-handlers', () => {
       assert.equal(callPath, 'README.md')
       assert.equal(callContent, '# Hi')
       assert.equal(callCwd, '/proj')
+    })
+  })
+
+  describe('append_memory (#6861)', () => {
+    it('passes the note text and session cwd to fileOps.appendMemory (no client path)', () => {
+      const sessions = new Map()
+      sessions.set('s1', { session: createMockSession(), name: 'S', cwd: '/proj' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+
+      fileHandlers.append_memory(makeWs(), client, { type: 'append_memory', text: 'remember X' }, ctx)
+
+      assert.equal(ctx.services.fileOps.appendMemory.callCount, 1)
+      const [, callText, callCwd] = ctx.services.fileOps.appendMemory.lastCall
+      assert.equal(callText, 'remember X')
+      assert.equal(callCwd, '/proj')
+    })
+
+    it('passes null cwd when no active session', () => {
+      const ctx = makeCtx()
+      fileHandlers.append_memory(makeWs(), makeClient(), { type: 'append_memory', text: 'x' }, ctx)
+      const [, , callCwd] = ctx.services.fileOps.appendMemory.lastCall
+      assert.equal(callCwd, null)
     })
   })
 
@@ -279,6 +303,7 @@ describe('file-handlers', () => {
   describe('#6541 — bound-token mutation gate', () => {
     const MUTATIONS = [
       ['write_file', 'writeFile', { path: '/repo/x.js', content: 'x' }],
+      ['append_memory', 'appendMemory', { text: 'a note' }],
       ['git_stage', 'gitStage', { files: ['x.js'] }],
       ['git_unstage', 'gitUnstage', { files: ['x.js'] }],
       ['git_commit', 'gitCommit', { message: 'm' }],

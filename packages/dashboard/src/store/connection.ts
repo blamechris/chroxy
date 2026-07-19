@@ -2988,6 +2988,18 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     });
   },
 
+  // #6861 — `#`-prefix composer quick-append. The server owns the target (the
+  // session cwd's project CLAUDE.md), so we send only the note text. Like a file
+  // mutation this is NOT offline-queued; the confirmation lands via the
+  // `append_memory_result` ack (handled in message-handler.ts).
+  appendMemory: (note: string) => {
+    const { socket, activeSessionId } = get();
+    if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+    const payload: Record<string, unknown> = { type: 'append_memory', text: note };
+    if (activeSessionId) payload.sessionId = activeSessionId;
+    return wsSend(socket, payload) ? 'sent' : false;
+  },
+
   sendInput: (input, wireAttachments, options) => {
     const { socket, activeSessionId } = get();
 
