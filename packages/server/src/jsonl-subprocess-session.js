@@ -308,8 +308,12 @@ export class JsonlSubprocessSession extends BaseSession {
       // no native `.exe`); spawning a `.cmd` via child_process throws EINVAL on
       // Node 24, so route it through cmd.exe with proper escaping — the same
       // prepareSpawn cli-session.js uses. No-op for a `.exe` and on POSIX.
+      // The prepareSpawn(Klass.resolvedBinary, args) call is kept verbatim (the
+      // #6484 source guard scans for it); attemptedBinary captures the same
+      // binary for the #6708 spawn-time backstop (err.path is preferred at the
+      // catch sites, this is only the fallback).
       attemptedBinary = Klass.resolvedBinary
-      const spawnSpec = prepareSpawn(attemptedBinary, args)
+      const spawnSpec = prepareSpawn(Klass.resolvedBinary, args)
       proc = spawn(spawnSpec.command, spawnSpec.args, {
         cwd: this.cwd,
         // We pass the prompt as argv, not stdin. Some CLIs, notably
