@@ -87,12 +87,10 @@ export function ViewerPreWriteReview({ filePath }: ViewerPreWriteReviewProps) {
   );
   const requestId = pending?.requestId ?? null;
   const tool = pending?.tool ?? null;
-  const messageId = pending?.id ?? null;
 
   const pulledInput = useConnectionStore((s) => (requestId ? s.permissionInputs?.[requestId] : undefined));
   const requestPermissionInput = useConnectionStore((s) => s.requestPermissionInput);
   const sendPermissionResponse = useConnectionStore((s) => s.sendPermissionResponse);
-  const markPromptAnswered = useConnectionStore((s) => s.markPromptAnswered);
 
   const [editedInput, setEditedInput] = useState<Record<string, string> | null>(null);
   // Double-submit guard: flips synchronously on the first press, before the
@@ -128,14 +126,23 @@ export function ViewerPreWriteReview({ filePath }: ViewerPreWriteReviewProps) {
     submittingRef.current = true;
     setSubmitting(true);
     // #6543: carry the per-hunk narrowing on an approve only (never on a deny).
+    // sendPermissionResponse itself records the canonical decision TOKEN on the
+    // prompt (markPromptAnsweredByRequestId — 'allow' | 'deny'). Do NOT re-mark
+    // here with a display label: a viewer DENY that stored 'Denied' would clobber
+    // the 'deny' token, and PermissionDetail (`isDenied = answer === 'deny'`) would
+    // then render a green "Allowed" pill for a denied write (#6222/#6223 — answer
+    // is the decision token, not a label).
     const sent = sendPermissionResponse(requestId, decision, decision === 'deny' ? null : editedInput);
-    if (sent === 'sent' && messageId) {
-      markPromptAnswered(messageId, decision === 'deny' ? 'Denied' : 'Approved');
-    } else {
-      // Not sent (e.g. disconnected) — leave the review actionable.
+    if (sent !== 'sent') {
+      // #6308: the socket can flip OPEN→CLOSING before this synchronous send, so
+      // sendPermissionResponse returns false without marking the token — leave the
+      // review actionable instead of wedging with submitting=true.
       submittingRef.current = false;
       setSubmitting(false);
     }
+    // On 'sent': the message's `answered` token flips → the pending memo recomputes
+    // to null → this component unmounts. Keep submitting=true in the interim so a
+    // rapid second press can't double-fire.
   };
 
   return (

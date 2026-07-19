@@ -33,7 +33,7 @@ type MockStore = {
 }
 
 const mockRequestPermissionInput = vi.fn(() => true)
-const mockSendPermissionResponse = vi.fn(() => 'sent')
+const mockSendPermissionResponse = vi.fn((): 'sent' | 'queued' | false => 'sent')
 
 let mockState: MockStore
 function resetStore(overrides: Partial<MockStore> = {}) {
@@ -194,5 +194,20 @@ describe('ViewerPreWriteReview', () => {
     expect(screen.getByTestId('viewer-prewrite-disconnected')).toBeTruthy()
     fireEvent.click(screen.getByTestId('viewer-prewrite-approve'))
     expect(mockSendPermissionResponse).not.toHaveBeenCalled()
+  })
+
+  it('re-enables the buttons when the send fails while still connected (#6308 OPEN→CLOSING race)', () => {
+    resetStore({ sessionStates: { s1: { messages: [editPrompt()] } }, permissionInputs: pulledEdit() })
+    // The socket flips OPEN→CLOSING after the `connected` gate but before the
+    // synchronous send, so sendPermissionResponse returns false while connected.
+    mockSendPermissionResponse.mockReturnValueOnce(false)
+    render(<ViewerPreWriteReview filePath={FILE} />)
+    const approve = screen.getByTestId('viewer-prewrite-approve') as HTMLButtonElement
+    expect(approve.disabled).toBe(false)
+    fireEvent.click(approve)
+    expect(mockSendPermissionResponse).toHaveBeenCalledWith('req-1', 'allow', null)
+    // result !== 'sent' → submitting is reset, so the buttons stay actionable
+    // instead of wedging disabled.
+    expect(approve.disabled).toBe(false)
   })
 })

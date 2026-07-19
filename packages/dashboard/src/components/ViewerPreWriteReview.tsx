@@ -130,7 +130,16 @@ export function ViewerPreWriteReview({ filePath }: ViewerPreWriteReviewProps) {
     submittingRef.current = true
     setSubmitting(true)
     // #6543: carry the per-hunk narrowing on an approve only (never on a deny).
-    sendPermissionResponse(requestId, decision, decision === 'deny' ? null : editedInput)
+    const result = sendPermissionResponse(requestId, decision, decision === 'deny' ? null : editedInput)
+    if (result !== 'sent') {
+      // #6308: the socket can flip OPEN→CLOSING after the `connected` gate but
+      // before this synchronous send, so sendPermissionResponse returns false
+      // while `connected` is still true. Reset so the buttons don't wedge with
+      // submitting=true. (On 'sent', markPermissionResolved flips `answered` and
+      // this component unmounts, so keeping submitting=true there is fine.)
+      submittingRef.current = false
+      setSubmitting(false)
+    }
   }
 
   if (!ideEnabled || !pending || !requestId || answered) return null
