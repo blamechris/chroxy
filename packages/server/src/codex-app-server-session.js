@@ -302,9 +302,25 @@ export class CodexAppServerSession extends BaseSession {
       case 'turn/completed':
         this._finishTurn(params?.turn)
         break
-      case 'error':
+      case 'error': {
+        // #6623 — codex emits transient `error` notifications WHILE its OWN retry
+        // loop re-establishes a dropped response stream (a `Reconnecting... N/M`
+        // message + `codexErrorInfo.responseStreamDisconnected`). This commonly
+        // fires right after a permission / escalation round-trip stalls a shell
+        // turn. These are NOT terminal: failing here surfaces a red provider error
+        // and orphans the in-flight turn even though codex is still recovering and
+        // may yet emit turn/completed. Keep the turn OPEN on a reconnect-in-progress
+        // notification — the result timeout (re-armed by _resetResultTimeout above)
+        // is the backstop if codex never recovers, and codex's terminal give-up
+        // (a disconnect WITHOUT a reconnecting message) still falls through to fail.
+        const err = this._errorPayload(params)
+        if (this._isTransientReconnect(err)) {
+          ;(this._log || log).warn(`codex app-server response stream reconnecting (turn kept open): ${err.message || 'responseStreamDisconnected'}`)
+          break
+        }
         this._failTurn(`Codex error: ${JSON.stringify(params).slice(0, 200)}`)
         break
+      }
       default:
         break // reasoning/plan/other items are ignored in Phase 1
     }
@@ -504,6 +520,28 @@ export class CodexAppServerSession extends BaseSession {
     this._endTurnAbort()
     this._clearMessageState()
     this._maybeDequeue()
+  }
+
+  // #6623 — codex's `error` notification carries the error under an `error` wrapper
+  // in the wild ({ error: { message, codexErrorInfo, ... } }) but a bare shape
+  // ({ message, ... }) elsewhere. Normalize to the inner error object either way so
+  // the callers read one shape.
+  _errorPayload(params) {
+    return params?.error && typeof params.error === 'object' ? params.error : (params || {})
+  }
+
+  // #6623 — true iff this error is codex's OWN transient response-stream reconnect
+  // (its retry loop is still running) rather than a terminal failure. Codex tags the
+  // retry with BOTH `codexErrorInfo.responseStreamDisconnected` AND a
+  // `Reconnecting... N/M` message; the terminal give-up drops the reconnecting
+  // message (or is a different error entirely), so it still fails the turn. Gating
+  // on both keeps the suppression conservative — anything not clearly a retry falls
+  // through to _failTurn.
+  _isTransientReconnect(err) {
+    const info = err?.codexErrorInfo
+    const disconnected = info && typeof info === 'object' && info.responseStreamDisconnected != null
+    if (!disconnected) return false
+    return /reconnect/i.test(typeof err?.message === 'string' ? err.message : '')
   }
 
   // #6638: also release cached fileChange diffs when per-turn state is cleared
