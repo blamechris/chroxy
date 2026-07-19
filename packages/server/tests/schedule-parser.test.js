@@ -16,6 +16,13 @@ import {
  * (new Date(y, m, d, h, min)) to stay timezone-independent.
  */
 
+// Pin the whole file to a US-DST zone so the spring-forward skip (#6879) is
+// deterministic. Every cron assertion here is TZ-RELATIVE — expected values are
+// built with the same local Date constructor that computeCronNextRun reads back —
+// so pinning the zone does not change any of the non-DST expectations (a calendar
+// date's weekday is globally invariant).
+process.env.TZ = 'America/New_York'
+
 // Local wall-clock helper — month is 0-indexed like the Date constructor.
 const local = (y, mon, d, h = 0, min = 0) => new Date(y, mon, d, h, min, 0, 0).getTime()
 
@@ -106,6 +113,70 @@ describe('#6862 computeCronNextRun (local time)', () => {
   it('returns null for an impossible expression (Feb 30)', () => {
     const c = parseCron('0 0 30 2 *')
     assert.equal(computeCronNextRun(c, local(2026, 0, 1, 0, 0)), null)
+  })
+})
+
+describe('#6879 Vixie dom/dow star rule (OR vs AND)', () => {
+  it('treats a */step dom field as a STAR -> AND with dow (not OR)', () => {
+    // `*/5` starts with `*`, so DOM_STAR is set even though it also restricts the
+    // value set to {1,6,11,16,21,26,31}. With dow restricted (Monday), the Vixie
+    // rule ANDs: fire only on Mondays that ALSO fall on a */5 day.
+    const c = parseCron('0 0 */5 * 1')
+    assert.equal(c.domStar, true, '*/5 sets the dom star flag')
+    assert.deepEqual([...c.dom].sort((a, b) => a - b), [1, 6, 11, 16, 21, 26, 31])
+
+    // July 2026 Mondays are 6/13/20/27; only the 6th is in the */5 set.
+    assert.equal(computeCronNextRun(c, local(2026, 6, 1, 0, 0)), local(2026, 6, 6, 0, 0))
+
+    // Decisive AND proof: from that Monday it SKIPS 07-13/20/27 (Mondays NOT in
+    // the */5 set) — an OR would have fired on 07-13 — and lands on 2026-08-31
+    // (a Monday that is also day 31, a */5 member).
+    const next = computeCronNextRun(c, local(2026, 6, 6, 0, 0))
+    assert.equal(next, local(2026, 7, 31, 0, 0))
+    assert.equal(new Date(next).getDay(), 1, 'is a Monday')
+    assert.equal(new Date(next).getDate(), 31, 'and a */5 day')
+  })
+
+  it('ORs when NEITHER dom nor dow is a star (both explicitly restricted)', () => {
+    // `1-7` and `1` are both restricted (no leading `*`) -> OR: fire on any day
+    // 1-7 OR any Monday.
+    const c = parseCron('0 0 1-7 * 1')
+    assert.equal(c.domStar, false)
+    assert.equal(c.dowStar, false)
+
+    // Fires on day 1 even though it is a Wednesday (OR: dom matched, dow did not).
+    const firstOfMonth = computeCronNextRun(c, local(2026, 5, 30, 12, 0))
+    assert.equal(firstOfMonth, local(2026, 6, 1, 0, 0))
+    assert.notEqual(new Date(firstOfMonth).getDay(), 1, 'day-1 fire is a non-Monday -> proves OR')
+
+    // Fires on a Monday (07-13) that is NOT in the 1-7 dom set (OR: dow matched,
+    // dom did not). Under AND it would have to also be day 1-7.
+    const monday = computeCronNextRun(c, local(2026, 6, 8, 0, 0))
+    assert.equal(monday, local(2026, 6, 13, 0, 0))
+    assert.equal(new Date(monday).getDay(), 1)
+    assert.equal(new Date(monday).getDate(), 13, 'Monday outside the dom set still fires -> proves OR')
+  })
+})
+
+describe('#6879 cron DST spring-forward skip (intended)', () => {
+  // 2026 US DST starts 2026-03-08: the local clock jumps 02:00 -> 03:00, so any
+  // 02:xx wall-clock time does not exist that day. The parser SKIPS it for that
+  // day rather than firing at the shifted 03:xx (documented product choice).
+  it('skips a daily 02:30 on the spring-forward day instead of firing at 03:30', () => {
+    const c = parseCron('30 2 * * *')
+    const next = computeCronNextRun(c, local(2026, 2, 8, 0, 0))
+    assert.equal(new Date(next).getMonth(), 2, 'March')
+    assert.equal(new Date(next).getDate(), 9, 'skipped the 8th (02:30 did not exist)')
+    assert.equal(new Date(next).getHours(), 2, 'fires at the real 02:xx that exists on the 9th')
+    assert.equal(new Date(next).getMinutes(), 30)
+  })
+
+  it('still fires 02:30 on a normal (non-transition) day', () => {
+    const c = parseCron('30 2 * * *')
+    const next = computeCronNextRun(c, local(2026, 2, 9, 12, 0))
+    assert.equal(new Date(next).getDate(), 10)
+    assert.equal(new Date(next).getHours(), 2)
+    assert.equal(new Date(next).getMinutes(), 30)
   })
 })
 

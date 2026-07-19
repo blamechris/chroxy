@@ -82,7 +82,13 @@ function parseField(raw, field, expression) {
   }
 
   const values = new Set()
-  const star = raw === '*' || raw === '?'
+  // Vixie star flag: set when the field's FIRST CHARACTER is `*` (or the Quartz
+  // `?` alias) — which deliberately INCLUDES step forms like `*/5`. Vixie's
+  // DOM_STAR / DOW_STAR are set off the leading `*` even though `*/5` also
+  // restricts the value set, and that flag drives the dom/dow OR-vs-AND rule in
+  // dayMatches. A literal-star-only check (`raw === '*'`) would wrongly treat
+  // `*/5` as non-star and OR it against a weekday instead of AND-ing (#6879).
+  const star = raw[0] === '*' || raw[0] === '?'
 
   for (const part of raw.split(',')) {
     if (part === '') throw new CronParseError(`Empty ${field} list item`, expression)
@@ -164,9 +170,20 @@ export function parseCron(expression) {
 
 /**
  * Whether a Date's calendar day matches a parsed cron's day-of-month /
- * day-of-week fields, using Vixie-cron OR-semantics: when BOTH fields are
- * restricted (neither is `*`), a day matches if EITHER matches; when only one is
- * restricted, only that one is consulted.
+ * day-of-week fields, using the standard Vixie-cron rule (#6879 — this mirrors
+ * cron.c's `(DOM_STAR || DOW_STAR) ? (dom && dow) : (dom || dow)`):
+ *
+ *   - If EITHER field is a star (its first char is `*`, which INCLUDES a
+ *     step form such as star-slash-5), the two constraints are AND-ed: the day
+ *     must satisfy BOTH. Because a bare `*` field matches every value, this
+ *     reduces to "use the non-star field" for the common `0 0 15 * *` /
+ *     `0 0 * * 1` cases — but for a dom step against a weekday (star-slash-5 in
+ *     dom, Monday in dow) it correctly means "a Monday that ALSO falls on a day
+ *     in the step set", NOT an OR of the two.
+ *   - If NEITHER field is a star (both are explicitly restricted, e.g.
+ *     `0 0 1,15 * 5` or `0 0 1-7 * 1`), the constraints are OR-ed: the day
+ *     matches if EITHER matches.
+ *
  * @param {ReturnType<typeof parseCron>} c
  * @param {Date} d - local Date
  * @returns {boolean}
@@ -174,10 +191,8 @@ export function parseCron(expression) {
 function dayMatches(c, d) {
   const domOk = c.dom.has(d.getDate())
   const dowOk = c.dow.has(d.getDay())
-  if (!c.domStar && !c.dowStar) return domOk || dowOk
-  if (!c.domStar) return domOk
-  if (!c.dowStar) return dowOk
-  return true
+  if (c.domStar || c.dowStar) return domOk && dowOk
+  return domOk || dowOk
 }
 
 /**
@@ -185,10 +200,18 @@ function dayMatches(c, d) {
  * daemon's LOCAL time zone. Returns an epoch-ms timestamp, or null if no match
  * falls within the search horizon (an impossible expression).
  *
- * Local time is deliberate: `0 9 * * *` should mean 9am wall-clock. Times that
- * do not exist on a DST spring-forward day (e.g. 02:30 where the clock jumps
- * 02:00->03:00) are naturally skipped by the Date arithmetic; on a fall-back day
- * the task fires once. Explicit per-task time zones are a future concern.
+ * Local time is deliberate: `0 9 * * *` should mean 9am wall-clock.
+ *
+ * DST is an INTENTIONAL product choice (#6879), not an accident of the
+ * arithmetic: on a spring-forward day a wall-clock time that DOES NOT EXIST
+ * (e.g. `30 2 * * *` when the clock jumps 02:00->03:00) is SKIPPED for that day
+ * rather than fired at the shifted 03:00 — we would rather miss the
+ * non-existent slot for one day than run at a time the user did not ask for.
+ * This falls out of reading getHours()/getMinutes() back off a local Date after
+ * each step: the Date never reports the non-existent 02:xx (setHours(2) on that
+ * day normalizes to 03:00), so the 02:xx minute is never matched. On a fall-back
+ * day the duplicated hour fires once. Explicit per-task time zones are a future
+ * concern.
  * @param {ReturnType<typeof parseCron>} c
  * @param {number} fromMs
  * @returns {number|null}
