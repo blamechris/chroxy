@@ -516,4 +516,58 @@ describe('protected-path floor catches ../ traversal above an under-.claude cwd 
     assert.equal(result.behavior, 'allow', 'cwd-internal .claude must not floor a benign in-workspace write')
     assert.equal(events.length, 0)
   })
+
+  // #6849 review — pin the three traversal edge cases the reviewer verified by
+  // hand. They already pass; these guard against a future refactor silently
+  // reopening the escape. All assert FLOORED through the real handlePermission
+  // path (WT_CWD = /home/me/.claude/worktrees/agent-x).
+  describe('pinned traversal edge cases (regression guard, #6849 review)', () => {
+    it('bare `..` resolving to a protected parent dir is floored', async () => {
+      // `..` → /home/me/.claude/worktrees (contains `.claude`). This is the
+      // exact edge the `rel !== '..'` clause in isProtectedPathValue exists for:
+      // drop it and underCwd flips true, the sole `..` segment is filtered, and
+      // the write silently stops being floored.
+      const events = []
+      pm.on('permission_request', (d) => events.push(d))
+
+      const promise = pm.handlePermission('Write', { file_path: '..' }, null, 'auto')
+      assert.equal(events.length, 1, 'bare `..` into a protected parent must prompt, not auto-approve')
+
+      pm.respondToPermission(events[0].requestId, 'deny')
+      const result = await promise
+      assert.equal(result.behavior, 'deny')
+    })
+
+    it('an absolute file_path landing on a protected config path is floored', async () => {
+      // Absolute input wins over cwd in resolve(); it lands outside cwd's
+      // subtree, so the absolute-path scan catches the `.claude` in the prefix.
+      const events = []
+      pm.on('permission_request', (d) => events.push(d))
+      pm.setRules([{ tool: 'Write', decision: 'allow' }])
+
+      const promise = pm.handlePermission(
+        'Write',
+        { file_path: '/home/me/.claude/settings.local.json' },
+        null,
+        'approve',
+      )
+      assert.equal(events.length, 1, 'an absolute protected target must prompt even under an allow rule')
+
+      pm.respondToPermission(events[0].requestId, 'deny')
+      await promise
+    })
+
+    it('mixed traversal `sub/../../.claude/x` from an under-.claude cwd is floored', async () => {
+      // Resolves to /home/me/.claude/worktrees/.claude/x — escapes cwd, so the
+      // absolute scan sees `.claude`.
+      const events = []
+      pm.on('permission_request', (d) => events.push(d))
+
+      const promise = pm.handlePermission('Write', { file_path: 'sub/../../.claude/x' }, null, 'acceptEdits')
+      assert.equal(events.length, 1, 'mixed traversal into .claude must prompt, not auto-approve')
+
+      pm.respondToPermission(events[0].requestId, 'deny')
+      await promise
+    })
+  })
 })
