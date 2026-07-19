@@ -368,10 +368,12 @@ function collectTargetPaths(input) {
 }
 
 // #6803 — a scope string is a GLOB (vs a plain directory prefix) when it carries
-// a wildcard/character-class metachar. Globs match path-shaped; prefixes match
-// "at or under this directory".
+// a wildcard metachar (`*` or `?`). Globs match path-shaped; prefixes match "at
+// or under this directory". Only `*` / `**` / `?` are supported — NOT character
+// classes, so a scope containing `[`/`]` is a literal directory prefix, not a
+// class (globToRegExp would escape the brackets anyway).
 function _scopeHasGlobMagic(scope) {
-  return /[*?[\]]/.test(scope)
+  return /[*?]/.test(scope)
 }
 
 /**
@@ -383,7 +385,8 @@ function _scopeHasGlobMagic(scope) {
  *     matches a bare `x`
  *   - `*`  → any run of NON-separator characters (one path segment)
  *   - `?`  → a single non-separator character
- * every other character is matched literally (regex metachars escaped).
+ * Only these wildcards are supported — NOT character classes: `[`/`]` (and every
+ * other regex metachar) are ESCAPED and matched literally.
  * @param {string} glob
  * @returns {RegExp}
  */

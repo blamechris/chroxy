@@ -229,6 +229,33 @@ describe('#6803 path-scoped rules persist + round-trip through the store', () =>
     ])
   })
 
+  it('scoped removeRule drops only its own scope, preserving sibling scopes (PR #6873 review)', () => {
+    const store = new PermissionRuleStore({ filePath, logger: silentLog })
+    store.addRule('/proj/a', { tool: 'Write', decision: 'allow', path: 'src/' })
+    store.addRule('/proj/a', { tool: 'Write', decision: 'allow', path: 'tests/' })
+    store.addRule('/proj/a', { tool: 'Read', decision: 'allow' })
+    // Remove ONE scope → the sibling scope and the unscoped Read rule survive.
+    assert.equal(store.removeRule('/proj/a', 'Write', 'src/'), true)
+    assert.deepEqual(store.getRules('/proj/a'), [
+      { tool: 'Write', decision: 'allow', path: 'tests/' },
+      { tool: 'Read', decision: 'allow' },
+    ])
+    // Removing a non-existent (tool, scope) is a no-op.
+    assert.equal(store.removeRule('/proj/a', 'Write', 'nope/'), false)
+    // Tool-wide removal (no path) clears every remaining scope for the tool.
+    assert.equal(store.removeRule('/proj/a', 'Write'), true)
+    assert.deepEqual(store.getRules('/proj/a'), [{ tool: 'Read', decision: 'allow' }])
+  })
+
+  it('scoped removeRule persists (a reloaded store reflects the removal)', () => {
+    const s1 = new PermissionRuleStore({ filePath, logger: silentLog })
+    s1.addRule('/proj/a', { tool: 'Write', decision: 'allow', path: 'src/' })
+    s1.addRule('/proj/a', { tool: 'Write', decision: 'allow', path: 'tests/' })
+    s1.removeRule('/proj/a', 'Write', 'src/')
+    const s2 = new PermissionRuleStore({ filePath, logger: silentLog }).load()
+    assert.deepEqual(s2.getRules('/proj/a'), [{ tool: 'Write', decision: 'allow', path: 'tests/' }])
+  })
+
   it('setRules preserves scopes and drops a malformed one', () => {
     const store = new PermissionRuleStore({ filePath, logger: silentLog })
     const stored = store.setRules('/proj/a', [

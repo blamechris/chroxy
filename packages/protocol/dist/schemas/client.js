@@ -185,7 +185,12 @@ export const PermissionRuleSchema = z.object({
     // all-paths `allow Write`. The server (permission-manager._ruleScopeMatches)
     // resolves the scope against the session cwd; a scoped rule for a tool whose
     // input carries no concrete path never matches (falls through to a prompt).
-    path: z.string().min(1).max(1024).optional(),
+    // #6873 review — reject a whitespace-only scope via `.refine` (NOT `.catch`,
+    // the #6436 swallow trap) so the wire contract matches the server's
+    // `!rule.path.trim()` guard rather than admitting a useless blank scope.
+    path: z.string().min(1).max(1024).refine((s) => s.trim().length > 0, {
+        message: 'path scope must not be whitespace-only',
+    }).optional(),
 });
 // -- BYOK credentials (#4052) --
 /**

@@ -56,8 +56,8 @@ export function isPersistableTool(tool) {
  * #6803 — the DEDUPE KEY for a durable rule. Before path-scoped rules a project
  * held at most one rule per tool; a scope makes `{Write, src/}` and
  * `{Write, tests/}` DISTINCT persisted rules, so identity is (tool, path) — a
- * missing scope normalizes to null so two unscoped rules for a tool still
- * collapse (last-writer-wins), exactly as before.
+ * missing scope normalizes to an empty string so two unscoped rules for a tool
+ * still collapse (last-writer-wins), exactly as before.
  * @param {{tool: string, path?: string}} rule
  * @returns {string}
  */
@@ -292,18 +292,27 @@ export class PermissionRuleStore {
   }
 
   /**
-   * Remove a single durable rule (by tool) for a project cwd and persist.
-   * Returns true when a rule was actually removed.
+   * Remove a durable rule for a project cwd and persist. #6803 (PR #6873 review)
+   * — SCOPE-AWARE: with a non-empty `path`, only the specific `(tool, path)`
+   * entry is removed, so removing one scoped rule can NOT clobber sibling scopes
+   * for the same tool. With `path` omitted (or empty), ALL scopes for the tool
+   * are removed — the existing "remove this tool entirely" affordance. Returns
+   * true when a rule was actually removed.
    * @param {string} cwd
    * @param {string} tool
+   * @param {string} [path]  optional scope; when set, remove only that (tool, path)
    * @returns {boolean}
    */
-  removeRule(cwd, tool) {
+  removeRule(cwd, tool, path) {
     const key = normalizeProjectKey(cwd)
     if (!key) return false
     const existing = this._projects.get(key)
     if (!existing) return false
-    const next = existing.filter((r) => r.tool !== tool)
+    const scoped = typeof path === 'string' && path.length > 0
+    const target = ruleKey({ tool, path })
+    const next = scoped
+      ? existing.filter((r) => ruleKey(r) !== target) // drop only the matching scope
+      : existing.filter((r) => r.tool !== tool)         // drop every scope for the tool
     if (next.length === existing.length) return false
     if (next.length === 0) this._projects.delete(key)
     else this._projects.set(key, next)
