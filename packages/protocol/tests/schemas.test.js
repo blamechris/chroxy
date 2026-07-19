@@ -712,6 +712,7 @@ describe('@chroxy/protocol schemas', () => {
       'delete_checkpoint', 'close_dev_preview',
       'launch_web_task', 'list_web_tasks', 'teleport_web_task',
       'list_conversations', 'resume_conversation', 'search_conversations',
+      'request_conversation_transcript',
       'request_cost_summary', 'subscribe_sessions', 'unsubscribe_sessions',
       'client_visible',
       'list_providers', 'list_repos', 'add_repo', 'remove_repo',

@@ -291,6 +291,7 @@ function _isSecureRequest(req) {
  *   { type: 'git_status' }                              — request git status
  *   { type: 'git_unstage', files }                      — unstage files
  *   { type: 'list_conversations' }                      — request saved conversation list
+ *   { type: 'request_conversation_transcript', conversationId, cwd? } — read-only replay of a CLOSED conversation from disk (no provider spawn; #6860)
  *   { type: 'list_files', path? }                       — request file listing for a path
  *   { type: 'list_symbols', path? }                     — request workspace symbol table (#6471, opt-in IDE — features.ide)
  *   { type: 'resolve_symbol', symbol, file? }           — resolve a symbol name to its definition (#6475, opt-in IDE — features.ide)

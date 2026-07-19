@@ -593,6 +593,156 @@ describe('conversation-handlers', () => {
     })
   })
 
+  // Issue #6860 (epic #6765) — read-only transcript endpoint.
+  //
+  // Serves a CLOSED conversation's full history straight off the persisted CLI
+  // JSONL store WITHOUT createSession or any provider spawn, so it works for
+  // every provider (including capabilities.resume === false ones). The reader is
+  // injected via ctx.readConversationTranscript so the suite never touches the
+  // real ~/.claude/projects tree.
+  describe('request_conversation_transcript', () => {
+    const CONV_ID = '00000000-0000-0000-0000-0000000c0ffe'
+
+    it('replays a closed conversation from disk WITHOUT spawning a provider', async () => {
+      const ctx = makeCtx()
+      ctx.scanConversations = createSpy(async () => [{ conversationId: CONV_ID, cwd: '/tmp/repo' }])
+      const transcript = [
+        { type: 'user_input', content: 'hello', timestamp: 1 },
+        { type: 'response', content: 'hi there', timestamp: 2 },
+        { type: 'tool_use', tool: 'Bash', content: '{"command":"ls"}', timestamp: 3 },
+      ]
+      let readPath = null
+      ctx.readConversationTranscript = createSpy(async (p) => { readPath = p; return transcript })
+
+      await conversationHandlers.request_conversation_transcript(makeWs(), makeClient(), {
+        type: 'request_conversation_transcript',
+        conversationId: CONV_ID,
+      }, ctx)
+
+      // The load-bearing assertion for this slice: NO provider was spawned.
+      assert.equal(ctx.sessions.sessionManager.createSession.callCount, 0,
+        'read-only transcript must NEVER call createSession (no provider spawn)')
+
+      // Wire shape mirrors request_full_history so existing renderers light up.
+      const start = ctx._sent.find(m => m.type === 'history_replay_start')
+      const end = ctx._sent.find(m => m.type === 'history_replay_end')
+      const messages = ctx._sent.filter(m => m.type === 'message')
+      assert.ok(start, 'history_replay_start must be sent')
+      assert.equal(start.sessionId, CONV_ID, 'replay frames carry the conversationId as sessionId')
+      assert.equal(start.fullHistory, true)
+      assert.equal(start.conversationId, CONV_ID)
+      assert.ok(end, 'history_replay_end must be sent')
+      assert.equal(end.sessionId, CONV_ID)
+      assert.deepEqual(messages.map(m => m.messageType), ['user_input', 'response', 'tool_use'])
+      assert.equal(messages[2].tool, 'Bash', 'tool_use frames must carry the tool name')
+
+      // Reader was pointed at the CLI JSONL path resolved from the recorded cwd.
+      assert.equal(ctx.readConversationTranscript.callCount, 1)
+      assert.match(readPath, new RegExp(`${CONV_ID}\\.jsonl$`))
+      assert.match(readPath, /-tmp-repo/, 'path must encode the recorded cwd (Claude Code layout)')
+    })
+
+    it('sends session_error for a missing conversationId', async () => {
+      const ctx = makeCtx()
+      await conversationHandlers.request_conversation_transcript(makeWs(), makeClient(), {
+        type: 'request_conversation_transcript',
+      }, ctx)
+      assert.equal(ctx._sent[0].type, 'session_error')
+      assert.match(ctx._sent[0].message, /Missing conversationId/)
+      assert.equal(ctx.sessions.sessionManager.createSession.callCount, 0)
+    })
+
+    it('sends session_error for an invalid conversationId format (path-traversal guard)', async () => {
+      const ctx = makeCtx()
+      await conversationHandlers.request_conversation_transcript(makeWs(), makeClient(), {
+        type: 'request_conversation_transcript',
+        conversationId: '../../etc/passwd',
+      }, ctx)
+      assert.equal(ctx._sent[0].type, 'session_error')
+      assert.match(ctx._sent[0].message, /Invalid conversationId/)
+      assert.equal(ctx.sessions.sessionManager.createSession.callCount, 0)
+    })
+
+    it('gracefully reports not-found when the conversation is not on disk (no provider spawn)', async () => {
+      const ctx = makeCtx() // default scanner returns []
+      ctx.readConversationTranscript = createSpy(async () => [])
+
+      await conversationHandlers.request_conversation_transcript(makeWs(), makeClient(), {
+        type: 'request_conversation_transcript',
+        conversationId: CONV_ID,
+      }, ctx)
+
+      assert.equal(ctx._sent[0].type, 'session_error')
+      assert.match(ctx._sent[0].message, /Conversation not found/)
+      assert.equal(ctx.readConversationTranscript.callCount, 0,
+        'must not attempt a disk read when the cwd can not be resolved')
+      assert.equal(ctx.sessions.sessionManager.createSession.callCount, 0)
+    })
+
+    it('rejects a bound client requesting a conversation OUTSIDE its bound cwd', async () => {
+      const sessions = new Map()
+      sessions.set('bound-1', { session: createMockSession(), name: 'S', cwd: '/home/dev/Projects/chroxy' })
+      const ctx = makeCtx(sessions)
+      ctx.scanConversations = createSpy(async () => [{ conversationId: CONV_ID, cwd: '/home/dev/Projects/secret' }])
+      ctx.readConversationTranscript = createSpy(async () => [{ type: 'user_input', content: 'x', timestamp: 1 }])
+      const client = makeClient({ boundSessionId: 'bound-1' })
+
+      await conversationHandlers.request_conversation_transcript(makeWs(), client, {
+        type: 'request_conversation_transcript',
+        conversationId: CONV_ID,
+      }, ctx)
+
+      const err = ctx._sent.find(m => m.type === 'session_error')
+      assert.ok(err, 'out-of-scope request must be rejected')
+      assert.match(err.message, /Not authorized/)
+      assert.equal(ctx.readConversationTranscript.callCount, 0,
+        'a rejected request must never read the transcript off disk')
+      assert.equal(ctx.sessions.sessionManager.createSession.callCount, 0)
+      assert.equal(ctx._sent.some(m => m.type === 'history_replay_start'), false)
+    })
+
+    it('allows a bound client to read a conversation WITHIN its bound cwd', async () => {
+      const sessions = new Map()
+      sessions.set('bound-1', { session: createMockSession(), name: 'S', cwd: '/home/dev/Projects/chroxy' })
+      const ctx = makeCtx(sessions)
+      ctx.scanConversations = createSpy(async () => [
+        { conversationId: CONV_ID, cwd: '/home/dev/Projects/chroxy/packages/server' },
+      ])
+      ctx.readConversationTranscript = createSpy(async () => [{ type: 'user_input', content: 'in scope', timestamp: 1 }])
+      const client = makeClient({ boundSessionId: 'bound-1' })
+
+      await conversationHandlers.request_conversation_transcript(makeWs(), client, {
+        type: 'request_conversation_transcript',
+        conversationId: CONV_ID,
+      }, ctx)
+
+      assert.equal(ctx._sent.some(m => m.type === 'session_error'), false,
+        'an in-scope bound read must not error')
+      assert.ok(ctx._sent.find(m => m.type === 'history_replay_start'), 'in-scope read must replay')
+      assert.equal(ctx.readConversationTranscript.callCount, 1)
+      assert.equal(ctx.sessions.sessionManager.createSession.callCount, 0)
+    })
+
+    it('validates a client-supplied cwd fallback when the scan can not find the conversation', async () => {
+      // The scan misses (empty), so the handler falls back to msg.cwd — which must
+      // pass the same path-hygiene gate create/resume use. A bogus dir is rejected
+      // BEFORE any disk read, and no provider is spawned.
+      const ctx = makeCtx() // default scanner returns []
+      ctx.readConversationTranscript = createSpy(async () => [])
+
+      await conversationHandlers.request_conversation_transcript(makeWs(), makeClient(), {
+        type: 'request_conversation_transcript',
+        conversationId: CONV_ID,
+        cwd: '/nonexistent/definitely/not/here',
+      }, ctx)
+
+      assert.equal(ctx._sent[0].type, 'session_error',
+        'an invalid fallback cwd must be rejected by validateCwdAllowed')
+      assert.equal(ctx.readConversationTranscript.callCount, 0)
+      assert.equal(ctx.sessions.sessionManager.createSession.callCount, 0)
+    })
+  })
+
   describe('request_full_history', () => {
     it('sends session_error when no active session', async () => {
       const ctx = makeCtx()

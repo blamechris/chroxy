@@ -820,6 +820,23 @@ export const SearchConversationsSchema = z.object({
     query: z.string().trim().min(1).max(500),
     maxResults: z.number().int().min(1).max(100).optional(),
 });
+// #6860 (epic #6765): provider-agnostic READ-ONLY transcript request. Streams a
+// CLOSED conversation's full JSONL history back to the client WITHOUT creating a
+// SessionManager entry or spawning any provider process — so it works uniformly
+// even for providers whose `capabilities.resume === false` (BYOK, Codex, Gemini,
+// user-shell), for which `resume_conversation` is refused outright. Distinct from
+// `resume_conversation` (which spawns a live session) and `request_full_history`
+// (which reads a LIVE session's in-memory buffer). The response reuses the
+// existing `history_replay_start` / `message` / `history_replay_end` server→client
+// frames (sourced from disk instead of a live session) so existing renderers
+// light up unchanged. `cwd` is an optional hint — the server resolves the
+// conversation's recorded cwd authoritatively from the persisted store and only
+// falls back to this value when the scan can't find the conversation.
+export const RequestConversationTranscriptSchema = z.object({
+    type: z.literal('request_conversation_transcript'),
+    conversationId: z.string().max(256),
+    cwd: z.string().max(4096).optional(),
+});
 export const RequestCostSummarySchema = z.object({
     type: z.literal('request_cost_summary'),
 });
@@ -1437,6 +1454,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     ListConversationsSchema,
     ResumeConversationSchema,
     SearchConversationsSchema,
+    RequestConversationTranscriptSchema,
     RequestCostSummarySchema,
     SubscribeSessionsSchema,
     UnsubscribeSessionsSchema,
