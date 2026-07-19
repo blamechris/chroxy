@@ -17,6 +17,7 @@ import { useConnectionStore } from '../store/connection';
 import type { FileWriteResult } from '../store/connection';
 import { COLORS } from '../constants/colors';
 import { SyntaxHighlightedCode, langFromPath } from './PermissionDetail';
+import { ViewerPreWriteReview } from './ViewerPreWriteReview';
 
 interface FileEditorProps {
   visible: boolean;
@@ -220,6 +221,13 @@ export function FileEditor({ visible, filePath, initialContent, onClose, onSave 
             </TouchableOpacity>
           )}
         </View>
+
+        {/* #6544 (IDE P3.3 feature A): when a Write/Edit permission is pending for
+            THIS file, surface the #6556 per-hunk pre-write diff review here on the
+            editor — the operator narrows/approves it in the file's own context.
+            Self-gates on features.ide + a matching live write (renders nothing
+            otherwise). Approve/Deny route through the same editedInput seam. */}
+        <ViewerPreWriteReview filePath={filePath} />
 
         {/* Content: syntax-highlighted view or editable TextInput */}
         {isEditing ? (

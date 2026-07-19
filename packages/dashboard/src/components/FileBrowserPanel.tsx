@@ -14,6 +14,7 @@ import {
   computeVisibleEntries, toggleDir, ancestorDirs, buildBreadcrumbs, joinPath,
 } from './fileTreeLogic'
 import type { VisibleTreeItem } from './fileTreeLogic'
+import { ViewerPreWriteReview } from './ViewerPreWriteReview'
 
 /** File icon by extension */
 function fileIcon(name: string, isDirectory: boolean): string {
@@ -654,6 +655,12 @@ export function FileBrowserPanel() {
               &times;
             </button>
           </div>
+          {/* #6544 (IDE P3.3 feature A): when a Write/Edit permission is pending
+              for THIS file, surface the #6543 per-hunk pre-write diff here on the
+              viewer — the operator narrows/approves it in the file's own context.
+              Self-gates on features.ide + a matching live write (renders nothing
+              otherwise). Approve/Deny route through the same editedInput seam. */}
+          <ViewerPreWriteReview filePath={selectedFile} />
           {ideEnabled && fileContent !== null && fileLanguage !== 'image' && (
             <SymbolsList groups={groupedSymbols} loading={symbolsLoading} onPick={scrollToLine} />
           )}
