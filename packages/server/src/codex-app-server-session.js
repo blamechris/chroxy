@@ -23,6 +23,23 @@ const MAX_PENDING_FILE_CHANGES = 500
 // tool_result can't balloon the transcript or the persisted history ring.
 const MAX_MCP_RESULT_CHARS = 10_000
 
+// #6629: bounded backstop for codex's OWN response-stream reconnect loop. #6623
+// keeps the turn OPEN on a transient `Reconnecting... N/M` error so codex can
+// recover, and the only pre-existing backstop was the 30-min result timeout —
+// but that timer is PAUSED while a permission prompt is pending
+// (`_pauseResultTimeoutForPermission`), which is exactly the situation the #6629
+// report hit: the reconnect fired right after a shell-escalation prompt. So a
+// codex whose stream silently wedged mid-reconnect left the session stuck
+// "Working..." for up to 30 min — or indefinitely if a permission had paused the
+// result timeout. This watchdog runs INDEPENDENTLY of that pause: it is armed on
+// the first reconnect notification, disarmed the moment codex makes any real
+// forward progress, and — if codex neither recovers nor emits its terminal
+// give-up — fails the turn cleanly (clears busy + sweeps orphan tool_starts) with
+// `error{code:'stream_stall'}` so the client shows its existing retry affordance
+// instead of a stale spinner. 2 min comfortably clears codex's bounded N/5 retry
+// cycle while bounding the worst-case stale state far below the 30-min default.
+const RECONNECT_WATCHDOG_MS = 2 * 60 * 1000
+
 const log = createLogger('codex-app-server')
 
 /**
@@ -99,6 +116,7 @@ export class CodexAppServerSession extends BaseSession {
     this._lastUsage = null
     this._skillsPrepended = false // #6606 — inject the skills prefix once, on turn 1
     this._turnAbort = null // per-turn AbortController — cancels pending approvals
+    this._reconnectWatchdog = null // #6629 — bounded backstop for a wedged reconnect
     // #6638: per-session sandbox override (create_session `codexSandbox`) — wins
     // over CHROXY_CODEX_SANDBOX / the default. Applied at thread start.
     this._codexSandbox = opts.codexSandbox || null
@@ -278,6 +296,11 @@ export class CodexAppServerSession extends BaseSession {
       return
     }
     this._resetResultTimeout()
+    // #6629 — any notification that is NOT another `error` tick is genuine forward
+    // progress: codex's response stream is live again, so disarm the reconnect
+    // watchdog #6623's suppression path may have armed. (A terminal `error` clears
+    // it below on its way to _failTurn; a transient reconnect `error` re-arms it.)
+    if (method !== 'error') this._clearReconnectWatchdog()
     const t = this._activeTurn
     switch (method) {
       case 'turn/started':
@@ -316,8 +339,15 @@ export class CodexAppServerSession extends BaseSession {
         const err = this._errorPayload(params)
         if (this._isTransientReconnect(err)) {
           ;(this._log || log).warn(`codex app-server response stream reconnecting (turn kept open): ${err.message || 'responseStreamDisconnected'}`)
+          // #6629 — arm the bounded watchdog so a reconnect that NEVER recovers
+          // (nor emits codex's terminal give-up) still reconciles the stale
+          // working state, even when a pending permission has paused the result
+          // timeout. Re-arms on each reconnect tick so codex's legit N/5 retry
+          // burst doesn't trip it mid-recovery.
+          this._armReconnectWatchdog()
           break
         }
+        this._clearReconnectWatchdog() // terminal error → about to fail; drop the backstop
         this._failTurn(`Codex error: ${JSON.stringify(params).slice(0, 200)}`)
         break
       }
@@ -509,13 +539,17 @@ export class CodexAppServerSession extends BaseSession {
     this._maybeDequeue()
   }
 
-  _failTurn(message) {
+  // #6629 — `code` lets the reconnect-watchdog surface its failure as
+  // `error{code:'stream_stall'}` so clients reuse the existing recoverable-stall
+  // retry chip (parity with SdkSession's stall recovery) instead of rendering a
+  // bare, non-actionable error. An intentional stop still wins and reports `stopped`.
+  _failTurn(message, { code } = {}) {
     this._clearResultTimeout()
     const t = this._activeTurn
     if (t?.didStreamStart) this.emit('stream_end', { messageId: t.messageId })
     const wasIntentional = this._consumeIntentionalStop()
     if (wasIntentional) this.emit('stopped', {})
-    else this.emit('error', { message })
+    else this.emit('error', code ? { message, code } : { message })
     this._activeTurn = null
     this._endTurnAbort()
     this._clearMessageState()
@@ -549,6 +583,7 @@ export class CodexAppServerSession extends BaseSession {
   _clearMessageState() {
     super._clearMessageState()
     this._pendingFileChanges.clear()
+    this._clearReconnectWatchdog() // #6629 — drop the reconnect backstop on any turn teardown
   }
 
   // Abort this turn's approval scope (any pending permission_request resolves as
@@ -581,6 +616,29 @@ export class CodexAppServerSession extends BaseSession {
 
   _clearResultTimeout() {
     if (this._resultTimeout) { clearTimeout(this._resultTimeout); this._resultTimeout = null }
+  }
+
+  // #6629 — bounded reconnect watchdog. Armed when #6623 keeps a turn open on a
+  // transient response-stream reconnect; unlike the result timeout it is NOT
+  // paused by a pending permission, so a codex that wedges mid-reconnect (never
+  // recovers, never emits its terminal give-up) still reconciles the stale
+  // working state promptly. Re-armed (clear + set) on each reconnect tick so
+  // codex's legit multi-attempt retry burst doesn't trip it — it only fires
+  // after a full window of silence following the last thing codex said. Disarmed
+  // by any genuine forward-progress notification (recovery) and on turn teardown.
+  _armReconnectWatchdog() {
+    this._clearReconnectWatchdog()
+    this._reconnectWatchdog = setTimeout(() => {
+      this._reconnectWatchdog = null
+      if (!this._activeTurn) return
+      ;(this._log || log).warn(`codex app-server response stream did not recover within ${RECONNECT_WATCHDOG_MS}ms — reconciling stale working state (#6629)`)
+      this._failTurn('Codex response stream disconnected and did not recover — the turn was stopped. Retry to continue.', { code: 'stream_stall' })
+    }, RECONNECT_WATCHDOG_MS)
+    if (typeof this._reconnectWatchdog.unref === 'function') this._reconnectWatchdog.unref()
+  }
+
+  _clearReconnectWatchdog() {
+    if (this._reconnectWatchdog) { clearTimeout(this._reconnectWatchdog); this._reconnectWatchdog = null }
   }
 
   // ------------------------------------------------------------------
@@ -937,6 +995,7 @@ export class CodexAppServerSession extends BaseSession {
     this.clearOutgoingQueue({ emit: false })
     this._clearIntentionalStop()
     this._clearResultTimeout()
+    this._clearReconnectWatchdog() // #6629 — never leave the reconnect timer armed past teardown
     this._endTurnAbort() // resolve any in-flight approval as a deny before teardown
     try { this._permissions?.destroy() } catch { /* noop */ }
     // #6609 — drop the materialized-attachment temp dir.
