@@ -215,6 +215,17 @@ const _CLASSIFICATION_LABELS = {
 // internal address surfaces that fact at consent time.
 const _CLASSIFICATION_PRIORITY = ['loopback', 'private', 'link-local', 'public', 'unknown']
 
+// #6852 — cap on the trust-prompt DNS lookup. resolveTrustAddress runs inside
+// the fleet's withTrustStoreLock (byok-mcp-fleet.js), so a slow/hanging
+// resolver would both delay the consent prompt AND hold the lock for every
+// other MCP client. 2s is generous for a real resolver yet bounds the worst
+// case; on timeout we fall back to the same graceful "could not resolve host".
+export const DEFAULT_TRUST_DNS_TIMEOUT_MS = 2000
+
+// Resolved by the timeout arm of the lookup race (distinct from any address the
+// resolver could return), so a timeout maps to the graceful fallback.
+const _LOOKUP_TIMEOUT = Symbol('trust-address-lookup-timeout')
+
 function _summariseClassification(classifications) {
   for (const c of _CLASSIFICATION_PRIORITY) {
     if (classifications.includes(c)) return c
@@ -240,8 +251,12 @@ function _summariseClassification(classifications) {
  * same resolver the transport's metadata guard uses) so tests never touch real
  * DNS. Credentials are NOT this function's concern: pass an already-redacted or
  * raw url — only the hostname is read, and only IPs are returned.
+ *
+ * The lookup is bounded by `timeoutMs` (#6852): resolveTrustAddress runs under
+ * the fleet's trust-store lock, so a hanging resolver must not stall the prompt
+ * or the lock — a timeout falls back to 'could not resolve host'.
  */
-export async function resolveTrustAddress(url, { lookup = dnsLookup } = {}) {
+export async function resolveTrustAddress(url, { lookup = dnsLookup, timeoutMs = DEFAULT_TRUST_DNS_TIMEOUT_MS } = {}) {
   const miss = (hostname = null) => ({
     resolved: false,
     hostname,
@@ -268,8 +283,20 @@ export async function resolveTrustAddress(url, { lookup = dnsLookup } = {}) {
       display: `resolves to ${bare} (${_CLASSIFICATION_LABELS[classification] || classification})`,
     }
   }
+  let timer
   try {
-    const addrs = await lookup(bare, { all: true })
+    // Bound the lookup: whichever settles first wins. The timeout arm RESOLVES
+    // with a sentinel (never rejects) so a slow resolver maps to the graceful
+    // fallback, not an error. Promise.race registers a reaction on the lookup
+    // promise, so a late rejection from the loser stays handled. The timer is
+    // NOT unref'd — it is always cleared in `finally` once the race settles, so
+    // it never outlives this (awaited) resolution, and keeping the loop alive
+    // while we resolve is the intended behaviour.
+    const timeoutArm = new Promise((resolve) => {
+      timer = setTimeout(() => resolve(_LOOKUP_TIMEOUT), timeoutMs)
+    })
+    const addrs = await Promise.race([lookup(bare, { all: true }), timeoutArm])
+    if (addrs === _LOOKUP_TIMEOUT) return miss(hostname)
     const addresses = (Array.isArray(addrs) ? addrs : [])
       .map((a) => (a && typeof a.address === 'string' ? a.address : null))
       .filter(Boolean)
@@ -285,6 +312,8 @@ export async function resolveTrustAddress(url, { lookup = dnsLookup } = {}) {
     }
   } catch {
     return miss(hostname)
+  } finally {
+    clearTimeout(timer)
   }
 }
 

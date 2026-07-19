@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   CLAUDE_CONFIG_MAX_BYTES,
+  DEFAULT_TRUST_DNS_TIMEOUT_MS,
   classifyIpAddress,
   discoverConfiguredMcpServers,
   isBlockedMetadataHost,
@@ -359,8 +360,10 @@ describe('classifyIpAddress (#6834)', () => {
     assert.equal(classifyIpAddress('10.0.0.1'), 'private')
     assert.equal(classifyIpAddress('172.16.0.1'), 'private')
     assert.equal(classifyIpAddress('172.31.255.255'), 'private')
+    assert.equal(classifyIpAddress('172.15.255.255'), 'public') // just below /12
     assert.equal(classifyIpAddress('172.32.0.1'), 'public') // just outside /12
     assert.equal(classifyIpAddress('192.168.1.5'), 'private')
+    assert.equal(classifyIpAddress('192.167.255.255'), 'public') // just below 192.168/16
     assert.equal(classifyIpAddress('169.254.10.10'), 'link-local')
     assert.equal(classifyIpAddress('93.184.216.34'), 'public')
     assert.equal(classifyIpAddress('8.8.8.8'), 'public')
@@ -449,5 +452,38 @@ describe('resolveTrustAddress (#6834)', () => {
     const r = await resolveTrustAddress('not a url', { lookup: async () => [] })
     assert.equal(r.resolved, false)
     assert.equal(r.display, 'could not resolve host')
+  })
+
+  it('exports a sane default DNS timeout constant (#6852)', () => {
+    assert.equal(typeof DEFAULT_TRUST_DNS_TIMEOUT_MS, 'number')
+    assert.ok(DEFAULT_TRUST_DNS_TIMEOUT_MS > 0 && DEFAULT_TRUST_DNS_TIMEOUT_MS <= 5000)
+  })
+
+  it('times out a hanging lookup and returns the graceful fallback (#6852)', async () => {
+    // A resolver that stalls past the timeout must not hang the prompt (or the
+    // fleet's trust-store lock). The timeout arm wins the race → fallback. The
+    // lookup is gated on a promise we release AFTER asserting, so the stub
+    // settles deterministically (no dangling never-resolving promise).
+    let release
+    const gate = new Promise((resolve) => { release = resolve })
+    const stalledLookup = () => gate.then(() => [{ address: '203.0.113.7', family: 4 }])
+    const started = Date.now()
+    const r = await resolveTrustAddress('https://slow.example/mcp', { lookup: stalledLookup, timeoutMs: 40 })
+    const elapsed = Date.now() - started
+    assert.equal(r.resolved, false)
+    assert.equal(r.display, 'could not resolve host')
+    assert.equal(r.hostname, 'slow.example')
+    assert.ok(elapsed >= 40, `should wait for the timeout (elapsed ${elapsed}ms)`)
+    assert.ok(elapsed < 2000, `should not hang past the timeout (elapsed ${elapsed}ms)`)
+    // Let the abandoned lookup settle so the test leaves nothing pending.
+    release()
+    await gate
+  })
+
+  it('a lookup that resolves before the timeout still wins (#6852)', async () => {
+    const lookup = async () => [{ address: '10.0.0.9', family: 4 }]
+    const r = await resolveTrustAddress('https://fast.example/', { lookup, timeoutMs: 2000 })
+    assert.equal(r.resolved, true)
+    assert.equal(r.classification, 'private')
   })
 })
