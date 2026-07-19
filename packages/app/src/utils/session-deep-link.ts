@@ -9,9 +9,11 @@
  *
  * Returns null for anything that isn't the chroxy scheme, or that doesn't
  * carry a `session` query param — including the pairing flow's
- * `chroxy://host?pair=...` / `chroxy://host?token=...` URLs, which
- * ConnectScreen's QR-scan/manual-entry paths already handle via
- * `parseChroxyUrl` and never reach the OS-level Linking listener today.
+ * `chroxy://host?pair=...` / `chroxy://host?token=...` URLs. Those CAN reach
+ * App.tsx's global Linking listener (it's the app's only OS-level deep-link
+ * handler; ConnectScreen parses pairing URLs from QR-scan/manual-entry via
+ * `parseChroxyUrl`, not from the Linking API) — this null return is exactly
+ * what makes the listener ignore them safely.
  */
 export function extractSessionIdFromDeepLink(url: string | null | undefined): string | null {
   if (!url) return null;

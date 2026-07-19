@@ -85,8 +85,8 @@ const WIDGET_CONFIG_BASE = {
  * originating session (#6792) so tapping the Live Activity on the Lock
  * Screen / Dynamic Island routes straight to that session instead of the
  * app's default screen. `App.tsx`'s Linking handler parses the `session`
- * query param back out. Falls back to a bare `chroxy://` (pre-#6792
- * behavior — opens the app, no routing) when no sessionId is available yet.
+ * query param back out. Falls back to `chroxy://open` (no `session` param —
+ * opens the app, no session routing) when no sessionId is available yet.
  */
 function buildWidgetConfig(sessionId?: string) {
   return {

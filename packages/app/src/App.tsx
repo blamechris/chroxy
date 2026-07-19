@@ -85,8 +85,13 @@ export default function App() {
   // paths. Covers both cold start (Linking.getInitialURL — the app was
   // launched by opening the URL) and warm (the 'url' event — the app was
   // already running). A URL with no `session` param, or that isn't the
-  // chroxy scheme, is a no-op here (e.g. pairing links stay handled by
-  // ConnectScreen's own parser).
+  // chroxy scheme, is a no-op here: extractSessionIdFromDeepLink returns
+  // null and we never switch. This is the safety net for the pairing flow's
+  // `chroxy://host?pair=...` / `?token=...` URLs — those CAN now reach this
+  // global listener (it's the only OS-level Linking handler in the app;
+  // ConnectScreen parses pairing URLs from QR-scan/manual-entry, not from
+  // the Linking API), and they're ignored precisely because they carry no
+  // `session` param.
   useEffect(() => {
     const handleUrl = (url: string | null) => {
       const sessionId = extractSessionIdFromDeepLink(url);
