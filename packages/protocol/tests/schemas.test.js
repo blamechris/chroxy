@@ -3244,4 +3244,23 @@ describe('@chroxy/protocol schemas', () => {
       assert.equal(missing.data.input, undefined)
     })
   })
+
+  describe('PermissionRuleSchema path scope (#6803, PR #6873 review)', () => {
+    it('accepts an unscoped rule (no path) and a valid path scope', async () => {
+      const { PermissionRuleSchema } = await import('../src/schemas/client.ts')
+      assert.ok(PermissionRuleSchema.safeParse({ tool: 'Write', decision: 'allow' }).success, 'unscoped')
+      assert.ok(PermissionRuleSchema.safeParse({ tool: 'Write', decision: 'allow', path: 'src/' }).success, 'prefix scope')
+      assert.ok(PermissionRuleSchema.safeParse({ tool: 'Write', decision: 'allow', path: 'src/**/*.ts' }).success, 'glob scope')
+    })
+
+    it('REJECTS a whitespace-only path scope (wire contract matches the server guard)', async () => {
+      const { PermissionRuleSchema } = await import('../src/schemas/client.ts')
+      for (const path of ['   ', '\t', '\n', ' \t ']) {
+        const r = PermissionRuleSchema.safeParse({ tool: 'Write', decision: 'allow', path })
+        assert.equal(r.success, false, `whitespace-only path ${JSON.stringify(path)} must be rejected`)
+      }
+      // empty string is already rejected by min(1)
+      assert.equal(PermissionRuleSchema.safeParse({ tool: 'Write', decision: 'allow', path: '' }).success, false)
+    })
+  })
 })

@@ -53,6 +53,44 @@ export function isPersistableTool(tool) {
 }
 
 /**
+ * #6803 — the DEDUPE KEY for a durable rule. Before path-scoped rules a project
+ * held at most one rule per tool; a scope makes `{Write, src/}` and
+ * `{Write, tests/}` DISTINCT persisted rules, so identity is (tool, path) — a
+ * missing scope normalizes to an empty string so two unscoped rules for a tool
+ * still collapse (last-writer-wins), exactly as before.
+ * @param {{tool: string, path?: string}} rule
+ * @returns {string}
+ */
+function ruleKey(rule) {
+  const scope = (typeof rule?.path === 'string' && rule.path.length > 0) ? rule.path : ''
+  return JSON.stringify([rule?.tool, scope])
+}
+
+/**
+ * #6803 — build the persisted record, carrying `path` ONLY when it is a
+ * non-empty string so an unscoped rule stays a plain { tool, decision,
+ * createdAt } (unchanged on-disk shape for existing files).
+ * @param {{tool: string, decision: string, path?: string}} rule
+ * @param {number} createdAt
+ */
+function storedRecord(rule, createdAt) {
+  const rec = { tool: rule.tool, decision: rule.decision, createdAt }
+  if (typeof rule.path === 'string' && rule.path.length > 0) rec.path = rule.path
+  return rec
+}
+
+/**
+ * #6803 — the public read shape PermissionManager consumes: `{ tool, decision }`
+ * plus `path` when scoped (metadata like createdAt stripped).
+ * @param {{tool: string, decision: string, path?: string}} rule
+ */
+function publicRule(rule) {
+  const out = { tool: rule.tool, decision: rule.decision }
+  if (typeof rule.path === 'string' && rule.path.length > 0) out.path = rule.path
+  return out
+}
+
+/**
  * Durable, per-project permission rule store — the "always allow / always deny"
  * decisions that must survive a daemon restart (issue #6771). Persists to a
  * single JSON file (a sibling of `session-state.json`, e.g.
@@ -149,12 +187,13 @@ export class PermissionRuleStore {
         // Enforce the same durable-eligibility floor on LOAD as on write, so a
         // hand-edited file can't smuggle a Bash allow past NEVER_AUTO_ALLOW.
         if (rule.decision === 'allow' && !isPersistableTool(rule.tool)) continue
-        if (clean.some((r) => r.tool === rule.tool)) continue
-        clean.push({
-          tool: rule.tool,
-          decision: rule.decision,
-          createdAt: typeof rule.createdAt === 'number' ? rule.createdAt : Date.now(),
-        })
+        // #6803 — ignore a malformed scope (non-string / empty) rather than
+        // persist it as an unscoped rule (which would silently WIDEN the grant).
+        if (rule.path !== undefined && (typeof rule.path !== 'string' || rule.path.length === 0)) continue
+        // #6803 — dedupe by (tool, path): two scopes for one tool coexist; two
+        // unscoped rules for one tool still collapse (first file key wins).
+        if (clean.some((r) => ruleKey(r) === ruleKey(rule))) continue
+        clean.push(storedRecord(rule, typeof rule.createdAt === 'number' ? rule.createdAt : Date.now()))
         if (clean.length >= MAX_RULES_PER_PROJECT) break
       }
       if (clean.length > 0) this._projects.set(key, clean)
@@ -176,7 +215,7 @@ export class PermissionRuleStore {
     if (!key) return []
     const rules = this._projects.get(key)
     if (!rules) return []
-    return rules.map((r) => ({ tool: r.tool, decision: r.decision }))
+    return rules.map(publicRule)
   }
 
   /**
@@ -198,13 +237,21 @@ export class PermissionRuleStore {
       this._log.warn(`Refusing to persist allow rule for non-persistable tool '${rule.tool}'`)
       return false
     }
+    // #6803 — a scope, if given, must be a non-empty string.
+    if (rule.path !== undefined && (typeof rule.path !== 'string' || rule.path.length === 0)) {
+      this._log.warn(`Refusing to persist rule for '${rule.tool}' with an invalid path scope`)
+      return false
+    }
     const existing = this._projects.get(key) || []
-    if (existing.length >= MAX_RULES_PER_PROJECT && !existing.some((r) => r.tool === rule.tool)) {
+    // #6803 — replace the same (tool, scope); different scopes coexist as
+    // separate rules, so the cap counts against a genuinely new (tool, scope).
+    const isReplacement = existing.some((r) => ruleKey(r) === ruleKey(rule))
+    if (existing.length >= MAX_RULES_PER_PROJECT && !isReplacement) {
       this._log.warn(`Project ${key} at persistent-rule cap (${MAX_RULES_PER_PROJECT}) — not adding '${rule.tool}'`)
       return false
     }
-    const next = existing.filter((r) => r.tool !== rule.tool)
-    next.push({ tool: rule.tool, decision: rule.decision, createdAt: Date.now() })
+    const next = existing.filter((r) => ruleKey(r) !== ruleKey(rule))
+    next.push(storedRecord(rule, Date.now()))
     this._projects.set(key, next)
     this._persist()
     return true
@@ -228,8 +275,11 @@ export class PermissionRuleStore {
         if (!rule || typeof rule.tool !== 'string') continue
         if (rule.decision !== 'allow' && rule.decision !== 'deny') continue
         if (rule.decision === 'allow' && !isPersistableTool(rule.tool)) continue
-        const idx = clean.findIndex((r) => r.tool === rule.tool)
-        const record = { tool: rule.tool, decision: rule.decision, createdAt: Date.now() }
+        // #6803 — drop a malformed scope; dedupe by (tool, path) so distinct
+        // scopes for one tool are preserved, same scope is last-writer-wins.
+        if (rule.path !== undefined && (typeof rule.path !== 'string' || rule.path.length === 0)) continue
+        const idx = clean.findIndex((r) => ruleKey(r) === ruleKey(rule))
+        const record = storedRecord(rule, Date.now())
         if (idx >= 0) clean[idx] = record
         else clean.push(record)
         if (clean.length >= MAX_RULES_PER_PROJECT) break
@@ -238,22 +288,31 @@ export class PermissionRuleStore {
     if (clean.length === 0) this._projects.delete(key)
     else this._projects.set(key, clean)
     this._persist()
-    return clean.map((r) => ({ tool: r.tool, decision: r.decision }))
+    return clean.map(publicRule)
   }
 
   /**
-   * Remove a single durable rule (by tool) for a project cwd and persist.
-   * Returns true when a rule was actually removed.
+   * Remove a durable rule for a project cwd and persist. #6803 (PR #6873 review)
+   * — SCOPE-AWARE: with a non-empty `path`, only the specific `(tool, path)`
+   * entry is removed, so removing one scoped rule can NOT clobber sibling scopes
+   * for the same tool. With `path` omitted (or empty), ALL scopes for the tool
+   * are removed — the existing "remove this tool entirely" affordance. Returns
+   * true when a rule was actually removed.
    * @param {string} cwd
    * @param {string} tool
+   * @param {string} [path]  optional scope; when set, remove only that (tool, path)
    * @returns {boolean}
    */
-  removeRule(cwd, tool) {
+  removeRule(cwd, tool, path) {
     const key = normalizeProjectKey(cwd)
     if (!key) return false
     const existing = this._projects.get(key)
     if (!existing) return false
-    const next = existing.filter((r) => r.tool !== tool)
+    const scoped = typeof path === 'string' && path.length > 0
+    const target = ruleKey({ tool, path })
+    const next = scoped
+      ? existing.filter((r) => ruleKey(r) !== target) // drop only the matching scope
+      : existing.filter((r) => r.tool !== tool)         // drop every scope for the tool
     if (next.length === existing.length) return false
     if (next.length === 0) this._projects.delete(key)
     else this._projects.set(key, next)
@@ -269,7 +328,7 @@ export class PermissionRuleStore {
   listProjects() {
     const out = {}
     for (const [key, rules] of this._projects) {
-      out[key] = rules.map((r) => ({ tool: r.tool, decision: r.decision }))
+      out[key] = rules.map(publicRule)
     }
     return out
   }

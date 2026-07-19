@@ -48,12 +48,91 @@ export const NEVER_AUTO_ALLOW = new Set(['Bash', 'Task', 'WebFetch', 'WebSearch'
 // git-config dir) is a two-segment sequence handled separately, not a bare segment.
 const PROTECTED_DIR_SEGMENTS = new Set(['.git', '.claude', '.vscode'])
 
+// #6803 — SECRET FILE names. Distinct from the protected DIRECTORY segments
+// above: these carry credentials / private keys, so their floor applies to
+// READS as well as writes (mirrors Claude Code's "don't auto-read known
+// secrets" floor). The write floor (isProtectedPathTarget) matches the config
+// DIRS *and* these secret files; the read floor (isSecretReadTarget) matches
+// ONLY these secret files — reading `.git/config` or `.claude/settings.json`
+// is a common benign operation and must not prompt, but auto-reading a private
+// key or an env file under a broad `allow Read` must not silently succeed.
+//
+// Matched (case-insensitively, see isProtectedPathValue) at ANY path segment:
+//   - `.env` or `.env.*`                 → env files (.env / .env.local / …)
+//   - one of SECRET_FILE_EXACT           → SSH keys, credential dotfiles
+//   - a segment ending in an extension in SECRET_FILE_EXTENSIONS → PEM / keys /
+//     PKCS#12 keystores
+// A floor only ever forces a PROMPT (never a deny), so a rare false positive on
+// an unrelated `.key`/`.pem` file is acceptable and conservative.
+const SECRET_FILE_EXACT = new Set([
+  'id_rsa', 'id_dsa', 'id_ecdsa', 'id_ed25519', // SSH private keys
+  '.npmrc', '.pgpass', '.netrc',                // credential dotfiles
+])
+const SECRET_FILE_EXTENSIONS = ['.pem', '.key', '.p12', '.pfx']
+
 // Tool-input fields that name a filesystem target. Presence of one is what
 // makes a tool "path-carrying" for the floor (Write/Edit → file_path,
 // NotebookEdit → notebook_path, Read/Glob/Grep → file_path/path). A tool with
 // none of these (Bash, Task, WebFetch, WebSearch) cannot be floored here —
 // command-shaped access is out of scope for a path floor.
 const PROTECTED_PATH_INPUT_FIELDS = ['file_path', 'path', 'notebook_path']
+
+// #6803 — tools whose floor is SECRETS-ONLY (non-mutating reads). handlePermission
+// routes these through isSecretReadTarget (env files + key material) instead of
+// the full config-dir floor. EVERY OTHER path-carrying tool — the mutating ones
+// (Write / Edit / NotebookEdit / apply_patch) and any future tool — gets the full
+// isProtectedPathTarget floor. Defaulting the unknown/mutating case to the FULL
+// floor is fail-safe: a new write-shaped tool inherits the stronger floor.
+const SECRET_READ_FLOOR_TOOLS = new Set(['Read', 'Glob', 'Grep'])
+
+/**
+ * #6803 — is a single (already-lowercased) path segment a known secret FILE?
+ * Env files, SSH/credential dotfiles, and PEM/key/keystore extensions. Pure
+ * string ops (no regex) so it can't be mangled by a later edit.
+ * @param {string} seg  a lowercased path segment
+ * @returns {boolean}
+ */
+function isSecretFileSegment(seg) {
+  if (seg === '.env' || seg.startsWith('.env.')) return true
+  if (SECRET_FILE_EXACT.has(seg)) return true
+  for (const ext of SECRET_FILE_EXTENSIONS) {
+    if (seg.length > ext.length && seg.endsWith(ext)) return true
+  }
+  return false
+}
+
+/**
+ * #6803 (PR #6873 security review) — credential-DENSE config FILES that must be
+ * floored for READS too (not just writes). These live INSIDE a config dir, so
+ * the secret-file matcher above misses them, but they routinely carry secrets:
+ *   - `.git/config`            — a remote URL can embed a PAT (`https://TOKEN@…`)
+ *   - `.git/credentials`       — git's plaintext credential store
+ *   - `.config/git/config` + `.config/git/credentials` — the XDG equivalents
+ *   - `.claude/settings*.json` — may hold ANTHROPIC_API_KEY / env secrets
+ * A broad `allow Read` / auto / bypass must not silently read these (Chroxy
+ * streams tool-results to phone/Discord, amplifying any leak). OTHER files in
+ * the config dirs (`.claude/skills/*.md`, a secret-free `.vscode/settings.json`)
+ * stay un-floored for reads per #6803's intent.
+ *
+ * Matched as a 2-/3-segment sequence anchored at index `i` of the (lowercased,
+ * `..`-stripped) segment array, so any depth prefix (`sub/.git/config`) matches.
+ * Pure string ops (no regex) — consistent with the rest of the floor.
+ * @param {string[]} segments  lowercased path segments
+ * @param {number} i           the current segment index
+ * @returns {boolean}
+ */
+function isCredentialConfigSegment(segments, i) {
+  const seg = segments[i]
+  // .git/config (PAT-embedded remote URLs) and .git/credentials (git store).
+  if (seg === '.git' && (segments[i + 1] === 'config' || segments[i + 1] === 'credentials')) return true
+  // XDG git: .config/git/config and .config/git/credentials.
+  if (seg === '.config' && segments[i + 1] === 'git' &&
+      (segments[i + 2] === 'config' || segments[i + 2] === 'credentials')) return true
+  // .claude/settings*.json (settings.json / settings.local.json — may hold keys).
+  const child = segments[i + 1]
+  if (seg === '.claude' && typeof child === 'string' && child.startsWith('settings') && child.endsWith('.json')) return true
+  return false
+}
 
 // Default permission timeout (5 minutes)
 const DEFAULT_TIMEOUT_MS = 300_000
@@ -136,11 +215,17 @@ export function mergeEditedInput(originalInput, editedInput, toolName) {
  * Windows) `.GIT/config` IS `.git/config`, so a case-sensitive match would let
  * case variants evade the floor. Over-flooring a genuinely distinct `.GIT` on
  * case-sensitive Linux is fine — the floor only forces a prompt, never denies.
+ * #6803 — `secretsOnly` narrows the match to SECRET FILES (env + key material)
+ * and SKIPS the config-DIR segments (.git/.claude/.vscode/.config/git). It is
+ * the read floor: a Read/Glob/Grep must not silently auto-read a secret, but
+ * reading a config dir is benign and must not prompt. The full (write) floor
+ * passes `secretsOnly = false` and matches both dirs and secret files.
  * @param {string} target  a path value from a tool input
  * @param {string} base    the resolution base (session cwd)
+ * @param {boolean} [secretsOnly]  match only secret files, skip config dirs
  * @returns {boolean}
  */
-function isProtectedPathValue(target, base) {
+function isProtectedPathValue(target, base, secretsOnly = false) {
   const resolved = resolve(base, target)
   const rel = relative(base, resolved)
   // Target is inside cwd's own subtree when the relative path neither is nor
@@ -154,8 +239,15 @@ function isProtectedPathValue(target, base) {
     .map((s) => s.toLowerCase())
   for (let i = 0; i < segments.length; i++) {
     const seg = segments[i]
+    // Secret files, and credential-dense config files, are floored under BOTH
+    // the read and the write floor (PR #6873 review — the read floor must not
+    // silently auto-read .git/config, git credentials, or .claude/settings*.json).
+    if (isSecretFileSegment(seg)) return true
+    if (isCredentialConfigSegment(segments, i)) return true
+    if (secretsOnly) continue
+    // Config DIRS (any file within them) are floored only under the full (write)
+    // floor; a read of a NON-credential config file stays un-prompted.
     if (PROTECTED_DIR_SEGMENTS.has(seg)) return true
-    if (seg === '.env' || seg.startsWith('.env.')) return true
     if (seg === '.config' && segments[i + 1] === 'git') return true
   }
   return false
@@ -205,20 +297,157 @@ function isProtectedPathValue(target, base) {
  * @returns {boolean}
  */
 export function isProtectedPathTarget(input, cwd) {
+  return _matchesFloor(input, cwd, false)
+}
+
+/**
+ * #6803 — the READ floor: does this tool input target a known SECRET FILE
+ * (env file or key material)? Same field-scanning as {@link isProtectedPathTarget}
+ * (every present path field + `changes[]`, resolved against cwd) but matches
+ * ONLY secret files — the config DIRS (.git/.claude/.vscode/.config/git) are a
+ * WRITE concern and are deliberately NOT floored for reads, so a Read/Glob/Grep
+ * of a config dir stays a normal, un-prompted operation. handlePermission uses
+ * this for {@link SECRET_READ_FLOOR_TOOLS}; every other tool uses the full floor.
+ * @param {object} input  the tool input
+ * @param {string} [cwd]  the session cwd (falls back to process.cwd())
+ * @returns {boolean}
+ */
+export function isSecretReadTarget(input, cwd) {
+  return _matchesFloor(input, cwd, true)
+}
+
+/**
+ * Shared floor matcher — inspects every present {@link PROTECTED_PATH_INPUT_FIELDS}
+ * value AND every `changes[]` member path (codex apply_patch, #6805/#6828),
+ * resolving each against the session cwd, and tests it with {@link isProtectedPathValue}.
+ * `secretsOnly` selects the read floor (secret files) vs the full write floor
+ * (config dirs + secret files). ANY protected field/member floors the input.
+ * @param {object} input
+ * @param {string} [cwd]
+ * @param {boolean} secretsOnly
+ * @returns {boolean}
+ */
+function _matchesFloor(input, cwd, secretsOnly) {
   if (!input || typeof input !== 'object') return false
   const base = (typeof cwd === 'string' && cwd.length > 0) ? cwd : process.cwd()
   for (const field of PROTECTED_PATH_INPUT_FIELDS) {
     if (typeof input[field] !== 'string' || input[field].length === 0) continue
-    if (isProtectedPathValue(input[field], base)) return true
+    if (isProtectedPathValue(input[field], base, secretsOnly)) return true
   }
   // #6805/#6828 — walk the array-shaped per-file targets (codex apply_patch).
   if (Array.isArray(input.changes)) {
     for (const change of input.changes) {
       if (!change || typeof change.path !== 'string' || change.path.length === 0) continue
-      if (isProtectedPathValue(change.path, base)) return true
+      if (isProtectedPathValue(change.path, base, secretsOnly)) return true
     }
   }
   return false
+}
+
+/**
+ * #6803 — collect every concrete target path a tool input names: the flat
+ * {@link PROTECTED_PATH_INPUT_FIELDS} plus `changes[]` member paths (codex
+ * apply_patch). Used by the rule-scope test so a path-scoped rule can confirm
+ * ALL of a tool call's targets fall inside its scope. Returns [] for a
+ * command-shaped / path-less input.
+ * @param {object} input
+ * @returns {string[]}
+ */
+function collectTargetPaths(input) {
+  if (!input || typeof input !== 'object') return []
+  const out = []
+  for (const field of PROTECTED_PATH_INPUT_FIELDS) {
+    if (typeof input[field] === 'string' && input[field].length > 0) out.push(input[field])
+  }
+  if (Array.isArray(input.changes)) {
+    for (const change of input.changes) {
+      if (change && typeof change.path === 'string' && change.path.length > 0) out.push(change.path)
+    }
+  }
+  return out
+}
+
+// #6803 — a scope string is a GLOB (vs a plain directory prefix) when it carries
+// a wildcard metachar (`*` or `?`). Globs match path-shaped; prefixes match "at
+// or under this directory". Only `*` / `**` / `?` are supported — NOT character
+// classes, so a scope containing `[`/`]` is a literal directory prefix, not a
+// class (globToRegExp would escape the brackets anyway).
+function _scopeHasGlobMagic(scope) {
+  return /[*?]/.test(scope)
+}
+
+/**
+ * #6803 — compile a rule-scope GLOB to an anchored RegExp. Dependency-free
+ * (the existing floor is pure string ops; a scope glob shouldn't drag in
+ * minimatch). Semantics, POSIX `/`-separated:
+ *   - `**` → any run of characters INCLUDING separators (crosses directories)
+ *   - `**` + `/` → the same, with the trailing `/` optional so `**​/x` also
+ *     matches a bare `x`
+ *   - `*`  → any run of NON-separator characters (one path segment)
+ *   - `?`  → a single non-separator character
+ * Only these wildcards are supported — NOT character classes: `[`/`]` (and every
+ * other regex metachar) are ESCAPED and matched literally.
+ * @param {string} glob
+ * @returns {RegExp}
+ */
+function globToRegExp(glob) {
+  let re = ''
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i]
+    if (c === '*' && glob[i + 1] === '*') {
+      if (glob[i + 2] === '/') { re += '(?:.*/)?'; i += 2 } // `**/` → optional dir prefix
+      else { re += '.*'; i += 1 }                           // bare `**`
+      continue
+    }
+    if (c === '*') { re += '[^/]*'; continue }
+    if (c === '?') { re += '[^/]'; continue }
+    re += c.replace(/[.+^${}()|[\]\\/]/g, '\\$&')
+  }
+  return new RegExp('^' + re + '$')
+}
+
+/**
+ * #6803 — is `target` inside the rule `scope`, both resolved against `base`
+ * (the session cwd)? A GLOB scope is matched against the target's cwd-relative,
+ * POSIX-normalized path; a plain scope is a DIRECTORY PREFIX (target is at or
+ * under the resolved scope dir). Used by _ruleScopeMatches — a scoped rule only
+ * auto-decides a tool call whose targets all fall within scope.
+ * @param {string} target  a tool-input path value
+ * @param {string} scope   the rule's `path` scope
+ * @param {string} base    the session cwd
+ * @returns {boolean}
+ */
+function pathWithinScope(target, scope, base) {
+  const resolvedTarget = resolve(base, target)
+  if (_scopeHasGlobMagic(scope)) {
+    // PR #6873 review — a glob scope must NEVER reach ABOVE the session cwd:
+    // `**/*.js` must not match `../evil.js`, `**` must not match `/etc/passwd`.
+    // Reject an escaping target FIRST (same under-base guard the prefix branch
+    // uses), THEN glob-match the under-base relative path. Without this the glob
+    // ran against `relative(base, target)` unchecked, so `..`/absolute targets
+    // supplied via set_permission_rules could be auto-approved out of scope.
+    const rel = relative(base, resolvedTarget)
+    if (isAbsolute(rel) || rel === '..' || rel.startsWith('..' + sep)) return false
+    return globToRegExp(scope).test(rel.split(sep).join('/'))
+  }
+  const resolvedScope = resolve(base, scope)
+  const rel = relative(resolvedScope, resolvedTarget)
+  // At the scope dir itself (rel === '') or under it (not `..`, not absolute).
+  return rel === '' || (!isAbsolute(rel) && rel !== '..' && !rel.startsWith('..' + sep))
+}
+
+/**
+ * #6803 — normalize a rule to the stored shape `{ tool, decision }`, carrying an
+ * optional `path` scope ONLY when it is a non-empty string. Keeping `path` off
+ * the object entirely when unscoped means unscoped rules stay deepEqual to a
+ * plain `{ tool, decision }` (the shape every existing test/consumer asserts).
+ * @param {{tool: string, decision: string, path?: string}} rule
+ * @returns {{tool: string, decision: string, path?: string}}
+ */
+function normalizeStoredRule(rule) {
+  const out = { tool: rule.tool, decision: rule.decision }
+  if (typeof rule.path === 'string' && rule.path.length > 0) out.path = rule.path
+  return out
 }
 
 /**
@@ -285,7 +514,7 @@ export class PermissionManager extends EventEmitter {
     this._lastPermissionData = new Map() // requestId -> emitted permission_request payload
 
     // Session-scoped permission rules
-    this._sessionRules = [] // [{ tool, decision }]
+    this._sessionRules = [] // [{ tool, decision, path? }] — path = #6803 optional scope
 
     // #6771 — durable per-project rules seeded from the store for THIS
     // session's cwd. Kept SEPARATE from `_sessionRules` so `setRules`/
@@ -305,9 +534,12 @@ export class PermissionManager extends EventEmitter {
   /**
    * Set session-scoped permission rules.
    * Each rule must have a `tool` in ELIGIBLE_TOOLS and a `decision` of 'allow' or 'deny'.
-   * Rules for NEVER_AUTO_ALLOW tools are rejected with an error.
+   * Rules for NEVER_AUTO_ALLOW tools are rejected with an error. #6803 — a rule
+   * may carry an optional `path` SCOPE (a non-empty string); the stored rule
+   * preserves it and {@link _matchesRule} only matches a scoped rule when the
+   * tool's target paths fall within it.
    *
-   * @param {Array<{tool: string, decision: string}>} rules
+   * @param {Array<{tool: string, decision: string, path?: string}>} rules
    * @throws {Error} if any rule is invalid
    */
   setRules(rules) {
@@ -331,17 +563,23 @@ export class PermissionManager extends EventEmitter {
       if (!ELIGIBLE_TOOLS.has(rule.tool)) {
         throw new Error(`${rule.tool} is not in ELIGIBLE_TOOLS`)
       }
+      if (rule.path !== undefined && (typeof rule.path !== 'string' || rule.path.length === 0)) {
+        throw new Error('rule path scope must be a non-empty string')
+      }
     }
-    this._sessionRules = rules.slice()
+    // #6803 — normalize to the stored shape, carrying `path` only when present so
+    // an unscoped rule stays a plain { tool, decision } (deepEqual-friendly).
+    this._sessionRules = rules.map(normalizeStoredRule)
   }
 
   /**
-   * Return a copy of the current session rules.
+   * Return a copy of the current session rules (each rule object cloned so a
+   * caller can't mutate the internal set; #6803 — carries `path` when scoped).
    *
-   * @returns {Array<{tool: string, decision: string}>}
+   * @returns {Array<{tool: string, decision: string, path?: string}>}
    */
   getRules() {
-    return this._sessionRules.slice()
+    return this._sessionRules.map(normalizeStoredRule)
   }
 
   /**
@@ -361,7 +599,11 @@ export class PermissionManager extends EventEmitter {
    * @returns {Array<{tool: string, decision: string, persist: 'project'}>}
    */
   getPersistentRules() {
-    return this._persistentRules.map((r) => ({ tool: r.tool, decision: r.decision, persist: 'project' }))
+    return this._persistentRules.map((r) => {
+      const out = { tool: r.tool, decision: r.decision, persist: 'project' }
+      if (typeof r.path === 'string' && r.path.length > 0) out.path = r.path
+      return out
+    })
   }
 
   /**
@@ -375,26 +617,50 @@ export class PermissionManager extends EventEmitter {
     this._persistentRules = Array.isArray(rules)
       ? rules
         .filter((r) => r && typeof r.tool === 'string' && (r.decision === 'allow' || r.decision === 'deny'))
-        .map((r) => ({ tool: r.tool, decision: r.decision }))
+        .map(normalizeStoredRule) // #6803 — preserve an optional `path` scope
       : []
   }
 
   /**
-   * Check whether a toolName matches a session or persistent rule. Session
+   * #6803 — does this rule's optional `path` SCOPE admit `input`? An UNSCOPED
+   * rule (no `path`) matches every input, exactly as before. A SCOPED rule
+   * matches only when the input names at least one concrete target path AND
+   * EVERY target falls within the scope (resolved against the session cwd) — so
+   * a scoped `allow` never auto-approves an out-of-scope target, and an input
+   * with no path (a command-shaped tool, or a bare `Read` with no file) never
+   * matches a scoped rule and falls through to a prompt.
+   * @param {{tool: string, decision: string, path?: string}} rule
+   * @param {object} [input]
+   * @returns {boolean}
+   */
+  _ruleScopeMatches(rule, input) {
+    if (typeof rule.path !== 'string' || rule.path.length === 0) return true
+    const targets = collectTargetPaths(input)
+    if (targets.length === 0) return false
+    const base = this._cwd || process.cwd()
+    return targets.every((t) => pathWithinScope(t, rule.path, base))
+  }
+
+  /**
+   * Check whether a tool call matches a session or persistent rule. Session
    * rules are consulted FIRST (a live, intentional session decision wins over a
-   * standing project grant), then the durable project rules (#6771).
+   * standing project grant), then the durable project rules (#6771). #6803 — a
+   * rule with a `path` scope only matches when the tool's target paths fall
+   * within it (see {@link _ruleScopeMatches}); `input` is optional, so a bare
+   * `_matchesRule(tool)` still resolves unscoped rules unchanged.
    *
    * @param {string} toolName
+   * @param {object} [input]  the tool input (for path-scope matching)
    * @returns {'allow'|'deny'|null} null if no rule matches
    */
-  _matchesRule(toolName) {
+  _matchesRule(toolName, input) {
     for (const rule of this._sessionRules) {
-      if (rule.tool === toolName) {
+      if (rule.tool === toolName && this._ruleScopeMatches(rule, input)) {
         return rule.decision
       }
     }
     for (const rule of this._persistentRules) {
-      if (rule.tool === toolName) {
+      if (rule.tool === toolName && this._ruleScopeMatches(rule, input)) {
         return rule.decision
       }
     }
@@ -412,12 +678,16 @@ export class PermissionManager extends EventEmitter {
    * _auditPersistedRuleAutoApprove) — a session-rule-sourced allow is an
    * explicit, non-durable decision the user already made this session and
    * needs no extra trail beyond what's already logged for it.
+   * #6803 — mirrors _matchesRule's scope filter too: a session rule only shadows
+   * when it actually MATCHES this input (scope included), and the persistent
+   * source must be a scope-matching allow.
    * @param {string} toolName
+   * @param {object} [input]
    * @returns {boolean}
    */
-  _persistentRuleSourced(toolName) {
-    if (this._sessionRules.some((r) => r.tool === toolName)) return false
-    return this._persistentRules.some((r) => r.tool === toolName && r.decision === 'allow')
+  _persistentRuleSourced(toolName, input) {
+    if (this._sessionRules.some((r) => r.tool === toolName && this._ruleScopeMatches(r, input))) return false
+    return this._persistentRules.some((r) => r.tool === toolName && r.decision === 'allow' && this._ruleScopeMatches(r, input))
   }
 
   /**
@@ -497,7 +767,14 @@ export class PermissionManager extends EventEmitter {
     // short-circuiting for these paths. A `deny` rule still denies (the floor
     // never widens access), and if the prompt path then auto-denies on
     // no-client/timeout, that is the existing fail-closed behavior.
-    const protectedTarget = isProtectedPathTarget(input, this._cwd)
+    //
+    // #6803 — the floor is TOOL-AWARE. A non-mutating read (Read/Glob/Grep) is
+    // floored ONLY on secret files (env + key material) via isSecretReadTarget —
+    // reading a config dir is benign and must stay un-prompted. Every other
+    // (mutating / unknown) tool gets the full config-dir + secret write floor.
+    const protectedTarget = SECRET_READ_FLOOR_TOOLS.has(toolName)
+      ? isSecretReadTarget(input, this._cwd)
+      : isProtectedPathTarget(input, this._cwd)
 
     // 'auto' (= SDK bypassPermissions) short-circuit: approve every tool
     // call without consulting rules or emitting a prompt. SdkSession also
@@ -514,7 +791,7 @@ export class PermissionManager extends EventEmitter {
     // Session rules: check before acceptEdits and the prompt path. #6794: a
     // protected target skips the `allow` branch (fall through to the prompt);
     // a `deny` rule still denies.
-    const ruleDecision = this._matchesRule(toolName)
+    const ruleDecision = this._matchesRule(toolName, input)
     if (ruleDecision !== null && !(protectedTarget && ruleDecision === 'allow')) {
       this._logInfo(`Permission rule matched for ${toolName}: ${ruleDecision}`)
       if (ruleDecision === 'allow') {
@@ -522,7 +799,7 @@ export class PermissionManager extends EventEmitter {
         // auto-approved this tool call. Record it via the direct audit sink
         // (NOT an event — see _auditPersistedRuleAutoApprove) so the
         // permission audit log has a trace even though no prompt was shown.
-        if (this._persistentRuleSourced(toolName)) {
+        if (this._persistentRuleSourced(toolName, input)) {
           this._auditPersistedRuleAutoApprove(toolName)
         }
         return Promise.resolve({ behavior: 'allow', updatedInput: input || {} })
