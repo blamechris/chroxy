@@ -19,7 +19,11 @@ export function extractSessionIdFromDeepLink(url: string | null | undefined): st
   if (!trimmed.startsWith('chroxy://')) return null;
   try {
     const parsed = new URL(trimmed.replace('chroxy://', 'https://'));
-    return parsed.searchParams.get('session');
+    // `?session=` (present but empty) or `?session=%20%20` parses to '' /
+    // whitespace — treat that as "no id" per the contract above rather than
+    // returning a blank string a caller would switchSession() to.
+    const sessionId = parsed.searchParams.get('session')?.trim();
+    return sessionId ? sessionId : null;
   } catch {
     return null;
   }

@@ -10,6 +10,7 @@ jest.mock('expo-notifications', () => ({
   setNotificationCategoryAsync: jest.fn(),
   addNotificationResponseReceivedListener: jest.fn(),
   getLastNotificationResponse: jest.fn(() => null),
+  clearLastNotificationResponse: jest.fn(),
   getPermissionsAsync: jest.fn(() =>
     Promise.resolve({ status: 'granted' }),
   ),
@@ -72,6 +73,8 @@ const mockAddListener =
   Notifications.addNotificationResponseReceivedListener as jest.Mock;
 const mockGetLastNotificationResponse =
   Notifications.getLastNotificationResponse as jest.Mock;
+const mockClearLastNotificationResponse =
+  Notifications.clearLastNotificationResponse as jest.Mock;
 
 const originalFetch = global.fetch;
 
@@ -79,6 +82,9 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockSocket.readyState = 1; // WebSocket.OPEN
   mockGetLastNotificationResponse.mockReturnValue(null);
+  // Reset to a plain no-op — clearAllMocks() clears call history but NOT a
+  // .mockImplementation set by an earlier test (e.g. the throw-path case).
+  mockClearLastNotificationResponse.mockImplementation(() => {});
   // Reset getState mock to default
   const { useConnectionStore } = require('../store/connection');
   useConnectionStore.getState.mockReturnValue({
@@ -703,6 +709,52 @@ describe('handleColdStartNotificationResponse', () => {
 
     expect(mockSwitchSession).toHaveBeenCalledWith('sess-cold-start');
     expect(mockSocket.send).not.toHaveBeenCalled();
+  });
+
+  it('clears the last notification response after handling it (no stale re-fire on a later launch)', async () => {
+    mockGetLastNotificationResponse.mockReturnValue({
+      actionIdentifier: 'expo.modules.notifications.actions.DEFAULT',
+      notification: {
+        request: {
+          identifier: 'notif-cold-start-clear',
+          content: {
+            data: { category: 'activity_update', sessionId: 'sess-cold-clear' },
+          },
+        },
+      },
+    });
+
+    await handleColdStartNotificationResponse();
+
+    expect(mockClearLastNotificationResponse).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not clear when there is no last response to handle', async () => {
+    mockGetLastNotificationResponse.mockReturnValue(null);
+
+    await handleColdStartNotificationResponse();
+
+    expect(mockClearLastNotificationResponse).not.toHaveBeenCalled();
+  });
+
+  it('degrades gracefully when clearLastNotificationResponse throws (still switches session)', async () => {
+    mockGetLastNotificationResponse.mockReturnValue({
+      actionIdentifier: 'expo.modules.notifications.actions.DEFAULT',
+      notification: {
+        request: {
+          identifier: 'notif-cold-start-clear-throws',
+          content: {
+            data: { category: 'activity_update', sessionId: 'sess-cold-clear-throw' },
+          },
+        },
+      },
+    });
+    mockClearLastNotificationResponse.mockImplementation(() => {
+      throw new Error('UnavailabilityError');
+    });
+
+    await expect(handleColdStartNotificationResponse()).resolves.toBeUndefined();
+    expect(mockSwitchSession).toHaveBeenCalledWith('sess-cold-clear-throw');
   });
 
   it('does not double-deliver a WS decision if the live listener also replays the same response', async () => {

@@ -13,6 +13,11 @@ describe('extractSessionIdFromDeepLink', () => {
     expect(extractSessionIdFromDeepLink('chroxy://')).toBeNull();
   });
 
+  it('returns null for an empty or whitespace-only session param (contract: null on no id)', () => {
+    expect(extractSessionIdFromDeepLink('chroxy://open?session=')).toBeNull();
+    expect(extractSessionIdFromDeepLink('chroxy://open?session=%20%20')).toBeNull();
+  });
+
   it('returns null for null/undefined/empty input', () => {
     expect(extractSessionIdFromDeepLink(null)).toBeNull();
     expect(extractSessionIdFromDeepLink(undefined)).toBeNull();

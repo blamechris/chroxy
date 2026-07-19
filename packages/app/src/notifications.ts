@@ -351,4 +351,14 @@ export async function handleColdStartNotificationResponse(): Promise<void> {
   }
   if (!response) return;
   await handleNotificationResponse(response);
+  // #6792: explicitly clear the last response once handled so a LATER normal
+  // launch can't re-replay this same stale cold-start tap. The identifier
+  // dedupe + server idempotency already neutralize a re-fire, but clearing
+  // makes the safety explicit. Guarded — unavailable on some platform/SDK
+  // builds, and a clear failure must not throw out of the mount effect.
+  try {
+    Notifications.clearLastNotificationResponse();
+  } catch (err) {
+    console.log('[push] clearLastNotificationResponse unavailable:', err);
+  }
 }
