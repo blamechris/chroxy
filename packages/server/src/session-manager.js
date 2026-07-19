@@ -23,6 +23,7 @@ import { SkillsUsageRecorder } from './skills-usage.js'
 import { resolveSessionPreset, foldPreamble } from './session-preset.js'
 import { SessionPresetTrustStore } from './session-preset-trust.js'
 import { PermissionRuleStore } from './permission-rule-store.js'
+import { ScheduledTaskStore, defaultScheduledTasksPath } from './scheduled-task-store.js'
 import { createLogger } from './logger.js'
 import { ExternalSessionRegistry } from './external-session-registry.js'
 import { metrics } from './metrics.js'
@@ -334,6 +335,14 @@ export class SessionManager extends EventEmitter {
     // file so a temp stateFilePath keeps it out of the real ~/.chroxy.
     permissionRuleStore,
 
+    // #6862: durable scheduled-task registry (standing schedules that run on a
+    // future/recurring cadence — SEPARATE from live session state and from the
+    // intra-session ScheduleWakeup). Tests pass their own temp-pathed store;
+    // production wires a default whose file (scheduled-tasks.json) sits next to
+    // the session-state file so a temp stateFilePath keeps it out of the real
+    // ~/.chroxy. No firing here — the engine is a sibling slice (#6865).
+    scheduledTaskStore,
+
     // Message history
     maxMessages,
     maxHistory,
@@ -527,6 +536,18 @@ export class SessionManager extends EventEmitter {
     } else {
       this.permissionRuleStore = new PermissionRuleStore({ filePath: join(dirname(this._stateFilePath), 'permission-rules.json') })
       this.permissionRuleStore.load()
+    }
+    // #6862: durable scheduled-task registry. Same temp-redirect logic as the
+    // sidecars above — the default file sits next to the session-state file so a
+    // test's temp stateFilePath keeps schedules out of the real home. Loaded once
+    // here on daemon start; a caller-supplied store owns its own load() lifecycle.
+    // Nothing fires it — the store just persists tasks + computes next-run; the
+    // engine slice (#6865) reads it off `sessionManager.scheduledTaskStore`.
+    if (scheduledTaskStore) {
+      this.scheduledTaskStore = scheduledTaskStore
+    } else {
+      this.scheduledTaskStore = new ScheduledTaskStore({ filePath: defaultScheduledTasksPath(this._stateFilePath) })
+      this.scheduledTaskStore.load()
     }
     Object.defineProperty(this, '_persistTimer', {
       get: () => this._persistence._persistTimer,
