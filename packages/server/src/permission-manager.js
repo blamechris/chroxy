@@ -1,6 +1,6 @@
 import { EventEmitter } from 'events'
 import { randomUUID } from 'crypto'
-import { resolve, relative, sep } from 'node:path'
+import { resolve, relative, sep, isAbsolute } from 'node:path'
 import { createLogger } from './logger.js'
 // #6038: the SDK/TUI permission path broadcasts to clients too, so it must apply
 // the same redaction as the hook path. Shared sanitizer + value redactor live in
@@ -42,9 +42,10 @@ export const NEVER_AUTO_ALLOW = new Set(['Bash', 'Task', 'WebFetch', 'WebSearch'
 // parity): the target simply falls through to the interactive prompt instead
 // of short-circuiting — a floor, never a hard deny.
 //
-// Protected DIRECTORY segment names, matched at any depth relative to the
-// session cwd. `.config/git` (the XDG git-config dir) is a two-segment
-// sequence handled separately in isProtectedPathTarget, not a bare segment.
+// Protected DIRECTORY segment names, matched at any depth of the path the write
+// RESOLVES into (see isProtectedPathValue for the relative-vs-absolute framing
+// that keeps a session's own cwd from false-matching). `.config/git` (the XDG
+// git-config dir) is a two-segment sequence handled separately, not a bare segment.
 const PROTECTED_DIR_SEGMENTS = new Set(['.git', '.claude', '.vscode'])
 
 // Tool-input fields that name a filesystem target. Presence of one is what
@@ -107,9 +108,30 @@ export function mergeEditedInput(originalInput, editedInput, toolName) {
 }
 
 /**
- * #6794 — is a single path value protected, resolved against `base`?
- * `resolve()` absorbs absolute paths, a leading `./`, and `..` traversal; the
- * relative path is what we segment-match so cwd's own name can't false-match.
+ * #6794 / #6806 — is a single path value protected, resolved against `base`?
+ * `resolve()` absorbs absolute paths, a leading `./`, and `..` traversal, giving
+ * the true target the write lands on.
+ *
+ * #6806 — WHICH segments we scan reconciles two goals that pull opposite ways:
+ *   (1) floor any write that RESOLVES into a protected config dir/file,
+ *       regardless of how `..` is arranged; and
+ *   (2) preserve the #6794 worktree guard — a session whose OWN cwd lives under
+ *       a real `.claude/` (the chroxy agent-worktree topology
+ *       `…/.claude/worktrees/agent-*`) must still write its own workspace files,
+ *       so cwd's own protected prefix segments must NOT false-floor it.
+ * The discriminator is whether the resolved target stays INSIDE the session's
+ * own workspace subtree (cwd):
+ *   - UNDER cwd → scan the path RELATIVE to cwd, so cwd's own prefix segments
+ *     (its `.claude`) are excluded and a benign in-workspace write is never
+ *     floored (goal 2). Under-cwd relatives never contain `..`.
+ *   - ESCAPES cwd (a `..`-traversal ABOVE it — itself suspicious) → scan the
+ *     RESOLVED ABSOLUTE path, so a protected segment sitting in cwd's PREFIX
+ *     (e.g. the very `.claude/` the worktree lives under, reached by
+ *     `../../settings.local.json`) is caught (goal 1). A protected segment that
+ *     appears BELOW the `..`s (an out-of-cwd `.git`) is caught either way. The
+ *     floor only ever forces a PROMPT, so over-flooring a sibling traversal
+ *     (which is already escaping the workspace) is safe and conservative.
+ *
  * Segments are lowercased first: on case-insensitive filesystems (macOS APFS,
  * Windows) `.GIT/config` IS `.git/config`, so a case-sensitive match would let
  * case variants evade the floor. Over-flooring a genuinely distinct `.GIT` on
@@ -119,8 +141,15 @@ export function mergeEditedInput(originalInput, editedInput, toolName) {
  * @returns {boolean}
  */
 function isProtectedPathValue(target, base) {
-  const rel = relative(base, resolve(base, target))
-  const segments = rel.split(sep)
+  const resolved = resolve(base, target)
+  const rel = relative(base, resolved)
+  // Target is inside cwd's own subtree when the relative path neither is nor
+  // begins with `..` (and isn't a foreign absolute — a Windows cross-drive
+  // `relative()` can return one). Empty rel = the target IS cwd (still "inside").
+  const underCwd = rel === '' ||
+    (!isAbsolute(rel) && rel !== '..' && !rel.startsWith('..' + sep))
+  const scanned = underCwd ? rel : resolved
+  const segments = scanned.split(sep)
     .filter((s) => s.length > 0 && s !== '..')
     .map((s) => s.toLowerCase())
   for (let i = 0; i < segments.length; i++) {
@@ -137,8 +166,9 @@ function isProtectedPathValue(target, base) {
  * {@link PROTECTED_PATH_INPUT_FIELDS} value (a benign `file_path` must not
  * shadow a protected `path`), resolves each against the session cwd (so
  * absolute paths, a leading `./`, and `..` traversal all normalize), then
- * tests the path RELATIVE to cwd segment-by-segment. ANY protected field
- * floors the input.
+ * tests the resolved path segment-by-segment. ANY protected field floors the
+ * input. See {@link isProtectedPathValue} for the #6806 relative-vs-absolute
+ * framing that decides which segments are scanned.
  *
  * #6805/#6828 — codex `apply_patch` carries its per-file targets in an ARRAY:
  * `input.changes` is `FileUpdateChange[] = { path, kind, diff }` (see
@@ -152,10 +182,13 @@ function isProtectedPathValue(target, base) {
  * `item.patch` passthrough) carries no parseable paths and is skipped, same
  * as any other non-array field.
  *
- * Matching relative-to-cwd (not the raw absolute path) is deliberate: the
- * session's OWN location can never trigger a false positive — e.g. a git
- * worktree that itself lives under a real `.claude/` dir writing to
- * `packages/…` is NOT floored, because the `.claude` segment is above cwd.
+ * A benign in-workspace write is never floored — a git worktree that itself
+ * lives under a real `.claude/` dir writing to `packages/…` stays UNfloored
+ * because a target under cwd is scanned relative to cwd (its own `.claude`
+ * prefix excluded). But a `..`-traversal back UP into that same `.claude`
+ * (`../../settings.local.json` → the real agent config) IS floored, because an
+ * above-cwd target is scanned as its resolved ABSOLUTE path (#6806). See
+ * {@link isProtectedPathValue} for the full reconciliation.
  *
  * Segment rules (a match on ANY segment floors the write; see
  * {@link isProtectedPathValue} for the lowercase rationale):
@@ -163,12 +196,9 @@ function isProtectedPathValue(target, base) {
  *   - a `.config` segment immediately followed by `git` (the XDG git-config dir)
  *   - a segment that is `.env` or starts with `.env.` (`.env` / `.env.local` / …)
  *
- * A target ABOVE cwd yields leading `..` segments; those are dropped before the
- * scan, so the real names beyond them are still checked (an out-of-cwd `.git`
- * still floors — conservative, and the floor only forces a prompt). Returns
- * false for any missing / non-string path field, so a command-shaped tool
- * (Bash, WebFetch) is never floored. Pure + side-effect-free (string ops only —
- * no regex, so the `.env.*` match can't be mangled by later edits).
+ * Returns false for any missing / non-string path field, so a command-shaped
+ * tool (Bash, WebFetch) is never floored. Pure + side-effect-free (string ops
+ * only — no regex, so the `.env.*` match can't be mangled by later edits).
  *
  * @param {object} input  the tool input
  * @param {string} [cwd]  the session cwd (falls back to process.cwd())
