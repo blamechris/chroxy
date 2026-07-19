@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Platform, UIManager, TouchableOpacity, Text } from 'react-native';
+import { Platform, UIManager, TouchableOpacity, Text, Linking } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator, NativeStackScreenProps } from '@react-navigation/native-stack';
@@ -19,9 +19,10 @@ import { ConnectionAnnouncer } from './components/ConnectionAnnouncer';
 import { useConnectionStore } from './store/connection';
 import { disconnectWithQueueGuard } from './store/disconnectWithQueueGuard';
 import { useConnectionLifecycleStore } from './store/connection-lifecycle';
-import { setupNotificationResponseListener } from './notifications';
+import { setupNotificationResponseListener, handleColdStartNotificationResponse } from './notifications';
 import { useBiometricLock } from './hooks/useBiometricLock';
 import { useNotificationStore } from './store/notifications';
+import { extractSessionIdFromDeepLink } from './utils/session-deep-link';
 
 // Enable LayoutAnimation on Android (must be called before any component uses it)
 if (Platform.OS === 'android') {
@@ -69,8 +70,35 @@ export default function App() {
 
   useEffect(() => {
     const sub = setupNotificationResponseListener();
+    // #6792 — replay the notification response that already launched the
+    // app (cold start): the live listener above only sees responses
+    // delivered after it's attached.
+    void handleColdStartNotificationResponse();
     // Load persistent activity history on mount
     void useNotificationStore.getState().loadActivityHistory();
+    return () => sub.remove();
+  }, []);
+
+  // #6792 — route a `chroxy://open?session=<id>` deep link (today: the iOS
+  // Live Activity's deepLinkUrl) to the session it names, reusing the same
+  // switchSession primitive as the notification-tap and in-app banner
+  // paths. Covers both cold start (Linking.getInitialURL — the app was
+  // launched by opening the URL) and warm (the 'url' event — the app was
+  // already running). A URL with no `session` param, or that isn't the
+  // chroxy scheme, is a no-op here: extractSessionIdFromDeepLink returns
+  // null and we never switch. This is the safety net for the pairing flow's
+  // `chroxy://host?pair=...` / `?token=...` URLs — those CAN now reach this
+  // global listener (it's the only OS-level Linking handler in the app;
+  // ConnectScreen parses pairing URLs from QR-scan/manual-entry, not from
+  // the Linking API), and they're ignored precisely because they carry no
+  // `session` param.
+  useEffect(() => {
+    const handleUrl = (url: string | null) => {
+      const sessionId = extractSessionIdFromDeepLink(url);
+      if (sessionId) useConnectionStore.getState().switchSession(sessionId);
+    };
+    Linking.getInitialURL().then(handleUrl).catch(() => {});
+    const sub = Linking.addEventListener('url', ({ url }) => handleUrl(url));
     return () => sub.remove();
   }, []);
 

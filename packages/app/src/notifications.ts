@@ -197,85 +197,168 @@ async function sendPermissionResponseHttp(
   return false;
 }
 
+/** Shape of the `data` payload a Chroxy push notification's response can carry. */
+type NotificationResponseData = {
+  category?: string;
+  requestId?: string;
+  sessionId?: string;
+  tool?: string;
+};
+
+// #6792: getLastNotificationResponse() (cold start — see
+// handleColdStartNotificationResponse below) and the live
+// addNotificationResponseReceivedListener can both deliver the SAME
+// response — dedupe by the notification's own identifier so an
+// action-button tap (approve/deny) is never sent to the server twice.
+let _lastHandledNotificationId: string | null = null;
+
 /**
- * Set up a listener for notification action responses (Approve/Deny buttons).
- * Returns the subscription — caller should call .remove() on cleanup.
+ * Handle a single notification response — shared by the live listener
+ * (setupNotificationResponseListener) and the cold-start replay
+ * (handleColdStartNotificationResponse). Two responsibilities:
+ *
+ *  1. Route to the session that triggered the notification (#6792). Every
+ *     push category that has a triggering session carries a `sessionId` in
+ *     its data (permission, activity_update, activity_waiting,
+ *     activity_error, inactivity_warning — see push.js / ws-permissions.js /
+ *     event-normalizer.js / push-notification-handler.js). Reuses the same
+ *     `switchSession` primitive as the in-app SessionNotificationBanner and
+ *     sendPermissionResponse's auto-switch, so a tap — whether the
+ *     notification body (default action) or an action button — always
+ *     lands on the right session. `switchSession` no-ops if the session id
+ *     isn't in the client's session list yet (e.g. reconnect still in
+ *     flight); it optimistically sets `activeSessionId` and the UI degrades
+ *     gracefully (SessionScreen reads via `sessions.find(...)`, which is
+ *     `undefined`-safe) rather than crashing.
+ *  2. For the 'permission' category's Approve/Deny action buttons only,
+ *     also deliver the decision over WS/HTTP — unchanged from the
+ *     pre-#6792 behavior. The default tap is pure navigation, no WS send.
  */
-export function setupNotificationResponseListener(): Notifications.EventSubscription {
+async function handleNotificationResponse(
+  response: Notifications.NotificationResponse,
+): Promise<void> {
+  const notificationId = response.notification?.request?.identifier;
+  if (notificationId && notificationId === _lastHandledNotificationId) return;
+  if (notificationId) _lastHandledNotificationId = notificationId;
+
   // Lazy import to break require cycle: connection → message-handler → notifications → connection
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const { useConnectionStore }: {
     useConnectionStore: typeof import('./store/connection')['useConnectionStore'];
   } = require('./store/connection');
 
-  return Notifications.addNotificationResponseReceivedListener(async (response) => {
-    const actionId = response.actionIdentifier;
+  const actionId = response.actionIdentifier;
+  const data = response.notification.request.content.data as
+    | NotificationResponseData
+    | undefined;
 
-    // Ignore default tap (just opens app) — only handle explicit action buttons
-    if (actionId === Notifications.DEFAULT_ACTION_IDENTIFIER) return;
+  if (data?.sessionId) {
+    useConnectionStore.getState().switchSession(data.sessionId);
+  }
 
-    const data = response.notification.request.content.data as
-      | { category?: string; requestId?: string }
-      | undefined;
+  // Default tap (notification body, not an action button) is pure
+  // navigation — the switchSession call above already handled it.
+  if (actionId === Notifications.DEFAULT_ACTION_IDENTIFIER) return;
 
-    if (data?.category !== 'permission' || !data.requestId) return;
+  if (data?.category !== 'permission' || !data.requestId) return;
 
-    const { requestId } = data;
+  const { requestId } = data;
 
-    // Explicitly handle only known action identifiers
-    let decision: 'allow' | 'deny';
-    if (actionId === 'approve') {
-      decision = 'allow';
-    } else if (actionId === 'deny') {
-      decision = 'deny';
-    } else {
-      // Ignore unexpected action identifiers
-      return;
-    }
+  // Explicitly handle only known action identifiers
+  let decision: 'allow' | 'deny';
+  if (actionId === 'approve') {
+    decision = 'allow';
+  } else if (actionId === 'deny') {
+    decision = 'deny';
+  } else {
+    // Ignore unexpected action identifiers
+    return;
+  }
 
-    console.log(`[push] Notification action: ${actionId} → ${decision} for ${requestId}`);
+  console.log(`[push] Notification action: ${actionId} → ${decision} for ${requestId}`);
 
-    // Try WebSocket first if connected
-    let delivered = false;
-    const { socket } = useConnectionStore.getState();
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      socket.send(
-        JSON.stringify({ type: 'permission_response', requestId, decision }),
-      );
-      console.log(`[push] Permission ${requestId} sent via WS: ${decision}`);
-      delivered = true;
-    } else {
-      // Fall back to HTTP POST via Cloudflare tunnel
-      delivered = await sendPermissionResponseHttp(requestId, decision);
-    }
+  // Try WebSocket first if connected
+  let delivered = false;
+  const { socket } = useConnectionStore.getState();
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    socket.send(
+      JSON.stringify({ type: 'permission_response', requestId, decision }),
+    );
+    console.log(`[push] Permission ${requestId} sent via WS: ${decision}`);
+    delivered = true;
+  } else {
+    // Fall back to HTTP POST via Cloudflare tunnel
+    delivered = await sendPermissionResponseHttp(requestId, decision);
+  }
 
-    // Only update chat UI if the response was actually delivered
-    if (delivered) {
-      useConnectionStore.getState().markPromptAnsweredByRequestId(requestId, decision);
-    } else {
-      console.warn(`[push] Permission ${requestId} could not be delivered — UI not updated`);
-      Alert.alert(
-        'Permission Response Failed',
-        'Could not deliver your response. Open the app to respond manually.',
-        [
-          { text: 'OK', style: 'cancel' },
-          {
-            text: 'Retry',
-            onPress: () => {
-              sendPermissionResponseHttp(requestId, decision).then((ok) => {
-                if (ok) {
-                  useConnectionStore.getState().markPromptAnsweredByRequestId(requestId, decision);
-                } else {
-                  Alert.alert('Still Failed', 'Open the app to respond manually.');
-                }
-              }).catch(() => {
-                // Already logged inside sendPermissionResponseHttp
+  // Only update chat UI if the response was actually delivered
+  if (delivered) {
+    useConnectionStore.getState().markPromptAnsweredByRequestId(requestId, decision);
+  } else {
+    console.warn(`[push] Permission ${requestId} could not be delivered — UI not updated`);
+    Alert.alert(
+      'Permission Response Failed',
+      'Could not deliver your response. Open the app to respond manually.',
+      [
+        { text: 'OK', style: 'cancel' },
+        {
+          text: 'Retry',
+          onPress: () => {
+            sendPermissionResponseHttp(requestId, decision).then((ok) => {
+              if (ok) {
+                useConnectionStore.getState().markPromptAnsweredByRequestId(requestId, decision);
+              } else {
                 Alert.alert('Still Failed', 'Open the app to respond manually.');
-              });
-            },
+              }
+            }).catch(() => {
+              // Already logged inside sendPermissionResponseHttp
+              Alert.alert('Still Failed', 'Open the app to respond manually.');
+            });
           },
-        ],
-      );
-    }
-  });
+        },
+      ],
+    );
+  }
+}
+
+/**
+ * Set up a listener for notification responses — both the default tap
+ * (notification body) and the explicit Approve/Deny action buttons.
+ * Returns the subscription — caller should call .remove() on cleanup.
+ */
+export function setupNotificationResponseListener(): Notifications.EventSubscription {
+  return Notifications.addNotificationResponseReceivedListener(handleNotificationResponse);
+}
+
+/**
+ * Replay the notification response that already launched the app (cold
+ * start) — tapping a notification while Chroxy wasn't running at all.
+ * `addNotificationResponseReceivedListener` only delivers responses
+ * received AFTER a JS listener is attached; the one that woke the process
+ * has to be read back explicitly (#6792). Call once on mount, alongside
+ * `setupNotificationResponseListener` — `handleNotificationResponse`'s
+ * dedupe guard makes the call order and any native replay of the same
+ * response safe either way.
+ */
+export async function handleColdStartNotificationResponse(): Promise<void> {
+  let response: Notifications.NotificationResponse | null = null;
+  try {
+    response = Notifications.getLastNotificationResponse();
+  } catch (err) {
+    // Unavailable on this platform/SDK build (e.g. Expo Go) — nothing to replay.
+    console.log('[push] getLastNotificationResponse unavailable:', err);
+    return;
+  }
+  if (!response) return;
+  await handleNotificationResponse(response);
+  // #6792: explicitly clear the last response once handled so a LATER normal
+  // launch can't re-replay this same stale cold-start tap. The identifier
+  // dedupe + server idempotency already neutralize a re-fire, but clearing
+  // makes the safety explicit. Guarded — unavailable on some platform/SDK
+  // builds, and a clear failure must not throw out of the mount effect.
+  try {
+    Notifications.clearLastNotificationResponse();
+  } catch (err) {
+    console.log('[push] clearLastNotificationResponse unavailable:', err);
+  }
 }

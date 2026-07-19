@@ -688,6 +688,24 @@ describe('EventNormalizer', () => {
       assert.equal(pushEffect.category, 'permission')
       assert.ok(pushEffect.body.includes('Bash'))
     })
+
+    it('includes ctx.sessionId in the push data so a notification tap can route to it (#6792)', () => {
+      const data = { requestId: 'req-1', tool: 'Bash', description: 'run ls', input: 'ls', remainingMs: 60000 }
+      const result = normalizer.normalize('permission_request', data, makeCtx({ sessionId: 'sess-push' }))
+      const pushEffect = result.sideEffects.find(se => se.type === 'push')
+      assert.equal(pushEffect.data.sessionId, 'sess-push')
+      assert.equal(pushEffect.data.requestId, 'req-1')
+      assert.equal(pushEffect.data.tool, 'Bash')
+    })
+
+    it('omits the sessionId key entirely when ctx.sessionId is falsy (#6847 omit-not-null, #6792)', () => {
+      const data = { requestId: 'req-1', tool: 'Bash', description: 'run ls', input: 'ls', remainingMs: 60000 }
+      const result = normalizer.normalize('permission_request', data, makeCtx({ sessionId: null }))
+      const pushEffect = result.sideEffects.find(se => se.type === 'push')
+      // The key must be ABSENT, not present-as-null — matches the HTTP hook
+      // path's omit-when-falsy wire shape (ws-permissions.js).
+      assert.equal(Object.prototype.hasOwnProperty.call(pushEffect.data, 'sessionId'), false)
+    })
   })
 
   // ---- EVENT_MAP: permission_resolved (#3048) ----

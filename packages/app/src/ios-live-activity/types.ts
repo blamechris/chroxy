@@ -12,6 +12,11 @@ export type LiveActivityState = 'active' | 'thinking' | 'waiting' | 'error' | 'e
 /** Attributes set once when the Live Activity is started (immutable). */
 export interface LiveActivityAttributes {
   sessionName: string;
+  /** #6792 — the originating chroxy session id, threaded into the widget's
+   *  deep-link URL so tapping the Live Activity routes back to this session
+   *  instead of the app's default screen. Optional: absent when the Live
+   *  Activity starts before a session is active yet. */
+  sessionId?: string;
 }
 
 /** Content state that can be updated while the Live Activity is running. */

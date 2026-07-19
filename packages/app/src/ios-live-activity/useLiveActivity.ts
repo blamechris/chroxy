@@ -49,7 +49,7 @@ export function useLiveActivity(): LiveActivityHookResult {
         isActiveRef.current = true;
         const session = activeId ? state.sessions.find((s) => s.sessionId === activeId) : undefined;
         const sessionName = session?.name ?? 'Session';
-        void manager.start(sessionName).then(() => {
+        void manager.start(sessionName, activeId ?? undefined).then(() => {
           // Send initial state update after start
           const liveState = mapActivityState(activityState);
           void manager.update(liveState, activity?.detail);

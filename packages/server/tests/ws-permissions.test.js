@@ -465,6 +465,53 @@ describe('createPermissionHandler', () => {
       assert.equal(pushManager.send.mock.calls.length, 1)
     })
 
+    it('includes sessionId in the push data when the hook resolves to a chroxy session (#6792)', async () => {
+      // The push payload must carry the owning sessionId so a notification
+      // tap can route straight to the session that asked, instead of the OS
+      // just opening the app to its default screen.
+      const pushManager = { send: mock.fn() }
+      const ownerSession = {
+        notifyPermissionPending: mock.fn(),
+        notifyPermissionResolved: mock.fn(),
+      }
+      const findSessionByHookSecret = mock.fn(() => ({
+        session: ownerSession,
+        sessionId: 'chroxy-sess-push',
+      }))
+      const opts = makeHandlerOpts({ pushManager, findSessionByHookSecret })
+      const { handlePermissionRequest, destroy } = createPermissionHandler(opts)
+      destroyFn = destroy
+      const body = JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'ls' } })
+      const req = makeReq(body, { authorization: 'Bearer hook-secret-push' })
+      const res = makeRes()
+      handlePermissionRequest(req, res)
+      await new Promise(r => setImmediate(r))
+
+      assert.equal(pushManager.send.mock.calls.length, 1)
+      const pushData = pushManager.send.mock.calls[0].arguments[3]
+      assert.equal(pushData.sessionId, 'chroxy-sess-push',
+        'push data must carry the owning sessionId so a notification tap can route to it (#6792)')
+    })
+
+    it('omits sessionId from the push data when the request maps to no chroxy session (#6792)', async () => {
+      // No hook secret → ownerSessionId stays null → the push must not
+      // invent a sessionId, matching the broadcast's #5667 convention.
+      const pushManager = { send: mock.fn() }
+      const opts = makeHandlerOpts({ pushManager })
+      const { handlePermissionRequest, destroy } = createPermissionHandler(opts)
+      destroyFn = destroy
+      const body = JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'ls' } })
+      const req = makeReq(body)
+      const res = makeRes()
+      handlePermissionRequest(req, res)
+      await new Promise(r => setImmediate(r))
+
+      assert.equal(pushManager.send.mock.calls.length, 1)
+      const pushData = pushManager.send.mock.calls[0].arguments[3]
+      assert.equal(pushData.sessionId, undefined,
+        'unmapped requests must not carry an invented sessionId in the push data (#6792)')
+    })
+
     it('populates permissionSessionMap when hookSecret resolves to a chroxy session (#2832)', async () => {
       // Regression: paired clients (boundSessionId set) cannot approve
       // hook-originated permissions unless permissionSessionMap[requestId]

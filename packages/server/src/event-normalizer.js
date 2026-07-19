@@ -589,7 +589,14 @@ Object.assign(EVENT_MAP, {
       category: 'permission',
       title: 'Permission needed',
       body: `Claude wants to use: ${data.tool}`,
-      data: { requestId: data.requestId, tool: data.tool },
+      // #6792: carry the triggering sessionId in the push data (data-only,
+      // doesn't change the visible notification) so a notification tap can
+      // route straight to this session — matches the registration above and
+      // the sessionId already carried by the HTTP hook path's push
+      // (ws-permissions.js) and the activity_* pushes. #6847 "omit not null":
+      // include the key ONLY when truthy so the wire shape matches the HTTP
+      // hook path (ws-permissions.js), which omits it for the null-ctx path.
+      data: { requestId: data.requestId, tool: data.tool, ...(ctx.sessionId ? { sessionId: ctx.sessionId } : {}) },
       channelId: 'permission',
     }],
   }),
