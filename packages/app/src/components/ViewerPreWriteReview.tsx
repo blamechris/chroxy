@@ -237,7 +237,7 @@ const styles = StyleSheet.create({
     opacity: 0.5,
   },
   btnText: {
-    color: '#fff',
+    color: COLORS.textPrimary,
     fontSize: 15,
     fontWeight: '600',
   },
