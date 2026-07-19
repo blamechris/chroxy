@@ -56,6 +56,7 @@ import { NotificationBanners } from './components/NotificationBanners'
 import { PendingPairRequests } from './components/PendingPairRequests'
 import { type ToastItem } from './components/Toast'
 import { FileBrowserPanel } from './components/FileBrowserPanel'
+import { GitPanel } from './components/GitPanel'
 import { CheckpointTimeline } from './components/CheckpointTimeline'
 import { FooterBar } from './components/FooterBar'
 import { type ShortcutEntry } from './components/ShortcutHelp'
@@ -2472,6 +2473,11 @@ export function App() {
                 )}
                 {viewMode === 'files' && connectionPhase !== 'connecting' && !isSwitchingSession && (
                   <FileBrowserPanel />
+                )}
+                {/* #6780 — stage/unstage/commit UI on top of the existing git
+                    status/diff wiring. */}
+                {viewMode === 'git' && connectionPhase !== 'connecting' && !isSwitchingSession && (
+                  <GitPanel />
                 )}
                 {/*
                   #4397 — system tab uses the same display:none kept-alive
