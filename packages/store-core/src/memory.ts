@@ -23,10 +23,13 @@ export interface MemoryAppendParse {
 /**
  * Detect the `#`-prefix quick-append in a composer draft.
  *
- * Matches the desktop-app semantics: the draft must start with a `#` followed by
- * at least one space/tab, and carry a non-empty note after it. Deliberately
- * strict so ordinary prose isn't hijacked:
+ * Matches the desktop-app semantics: the draft must be a SINGLE LINE that starts
+ * with a `#` followed by at least one space/tab, and carry a non-empty note.
+ * Deliberately strict so ordinary prose — and pasted documents — aren't hijacked:
  *   - `# remember X`  → memory append (note: "remember X")
+ *   - `# Title\nbody` → NOT a command — a multi-line draft (even one opening with
+ *                       a Markdown H1) is a normal chat turn; intercepting it
+ *                       would collapse the body to one line and silently eat it.
  *   - `#`             → NOT a command (no note)
  *   - `#tag`          → NOT a command (no space after `#`)
  *   - `see #123`      → NOT a command (`#` is mid-text, not leading)
@@ -37,7 +40,11 @@ export interface MemoryAppendParse {
  */
 export function parseMemoryAppend(text: unknown): MemoryAppendParse {
   if (typeof text !== 'string') return { isMemory: false, note: '' }
-  const match = /^#[ \t]+(.+)$/s.exec(text)
+  // Single-line drafts only: a multi-line message is always a normal chat turn.
+  // (No dotAll flag AND an explicit newline guard — belt and suspenders, since a
+  // Markdown-H1 spec/plan paste opening with `# ` must never be eaten as memory.)
+  if (text.includes('\n')) return { isMemory: false, note: '' }
+  const match = /^#[ \t]+(.+)$/.exec(text)
   const note = match?.[1]?.trim() ?? ''
   if (!note) return { isMemory: false, note: '' }
   return { isMemory: true, note }

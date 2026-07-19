@@ -75,6 +75,27 @@ describe('appendMemory handler', () => {
     await rm(dir, { recursive: true, force: true })
   })
 
+  it('does not lose a line under concurrent appends (O_APPEND atomicity)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'chroxy-memory-concurrent-'))
+    // Seed the file so every append takes the existing-file (append) path.
+    await writeFile(join(dir, 'CLAUDE.md'), 'seed\n', 'utf-8')
+
+    const N = 12
+    await Promise.all(
+      Array.from({ length: N }, (_, i) => fileOps.appendMemory(mockWs, `note-${i}`, dir)),
+    )
+
+    const content = await readFile(join(dir, 'CLAUDE.md'), 'utf-8')
+    const lines = content.split('\n').filter(Boolean)
+    // Every note line must be present exactly once (none clobbered by a race).
+    for (let i = 0; i < N; i++) {
+      const count = lines.filter((l) => l === `note-${i}`).length
+      assert.equal(count, 1, `note-${i} must appear exactly once (got ${count})`)
+    }
+    assert.equal(lines.length, N + 1, 'seed + all notes present, no lost lines')
+    await rm(dir, { recursive: true, force: true })
+  })
+
   it('returns an error when there is no session cwd', async () => {
     responses.length = 0
     await fileOps.appendMemory(mockWs, 'note', null)

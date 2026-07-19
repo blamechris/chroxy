@@ -32,6 +32,23 @@ describe('parseMemoryAppend (#6861)', () => {
     })
   })
 
+  it('does NOT intercept a multi-line draft that opens with a Markdown H1', () => {
+    // Pasting a spec/plan/doc that starts with `# Title` must reach Claude as a
+    // normal chat turn, NOT be collapsed to one line and eaten as a memory note.
+    expect(parseMemoryAppend('# Heading\nbody line one\nbody line two')).toEqual({
+      isMemory: false,
+      note: '',
+    })
+  })
+
+  it('does NOT intercept a single `# ` line followed by a trailing newline', () => {
+    expect(parseMemoryAppend('# just a heading\n')).toEqual({ isMemory: false, note: '' })
+  })
+
+  it('does NOT intercept when a later line carries the marker', () => {
+    expect(parseMemoryAppend('first\n# not a note')).toEqual({ isMemory: false, note: '' })
+  })
+
   it('does NOT intercept a bare `#`', () => {
     expect(parseMemoryAppend('#')).toEqual({ isMemory: false, note: '' })
   })

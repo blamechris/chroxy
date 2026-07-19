@@ -410,6 +410,13 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
    * validatePathWithinCwd is still run for symlink-escape defence (a CLAUDE.md
    * symlinked out of the workspace is rejected), and the open uses O_NOFOLLOW to
    * close the post-validation TOCTOU window, matching writeFileContent above.
+   *
+   * The write uses O_APPEND (+ O_CREAT): each append lands atomically at EOF, so
+   * concurrent appends can't lose a line and a crash can't truncate the file —
+   * the correct primitive for appending, unlike a read-modify-write O_TRUNC. The
+   * only read is a cheap 1-byte tail check to decide whether a separating newline
+   * is needed; a race there is benign (a stray/missing separator at worst — the
+   * note line itself is always written atomically and in full).
    */
   async function appendMemory(ws, note, sessionCwd) {
     if (!sessionCwd) {
@@ -457,24 +464,39 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
       }
       absPath = fileExists ? resolvedTarget : target
 
-      // Read-modify-write the whole file: append the note on its own line,
-      // inserting a separating newline when the file doesn't already end with one.
-      let newContent
+      // Cheap tail check: does the existing file already end with a newline? If
+      // not, prepend one so the note lands on its own line. Best-effort (a race
+      // only affects the separator, never the note itself).
+      let needsLeadingNewline = false
       if (fileExists) {
-        const existing = await readFile(absPath, 'utf-8')
-        const sep = existing.length > 0 && !existing.endsWith('\n') ? '\n' : ''
-        newContent = existing + sep + line + '\n'
-      } else {
-        newContent = line + '\n'
+        try {
+          const st = await stat(absPath)
+          if (st.size > 0) {
+            let rfh
+            try {
+              rfh = await open(absPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW)
+              const tail = Buffer.alloc(1)
+              await rfh.read(tail, 0, 1, st.size - 1)
+              needsLeadingNewline = tail[0] !== 0x0a
+            } finally {
+              await rfh?.close()
+            }
+          }
+        } catch {
+          // Tail read is advisory only — fall back to no separator.
+        }
       }
 
-      const data = Buffer.from(newContent, 'utf-8')
+      const data = Buffer.from((needsLeadingNewline ? '\n' : '') + line + '\n', 'utf-8')
+
+      // O_APPEND: atomic append at EOF (no lost-update / truncation window).
+      // O_CREAT (WITHOUT O_EXCL) opens-or-creates, so there is no EEXIST race to
+      // retry — a concurrent creator just means we append instead. O_NOFOLLOW
+      // keeps the symlink-escape defence on the final component.
       {
         let fh
         try {
-          const flags = fileExists
-            ? fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW | fsConstants.O_TRUNC
-            : fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW | fsConstants.O_CREAT | fsConstants.O_EXCL
+          const flags = fsConstants.O_WRONLY | fsConstants.O_APPEND | fsConstants.O_CREAT | fsConstants.O_NOFOLLOW
           fh = await open(absPath, flags, 0o666)
           await fh.writeFile(data)
         } catch (openErr) {

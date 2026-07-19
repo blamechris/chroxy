@@ -1620,7 +1620,14 @@ export function App() {
     if (allFiles.length === 0 && imageAttachments.length === 0) {
       const memory = parseMemoryAppend(text)
       if (memory.isMemory) {
-        appendMemory(memory.note)
+        const sent = appendMemory(memory.note)
+        if (sent === false) {
+          // #6308/#6309 — disconnected: appendMemory is NOT offline-queued, so
+          // KEEP the draft (don't clear) and surface a notice rather than
+          // silently losing the note.
+          addInfoNotification('Not connected — memory note not saved. Try again once reconnected.')
+          return
+        }
         const memSid = activeSessionId
         if (memSid) evictSessionComposerState(memSid)
         setInputDraftValue('')

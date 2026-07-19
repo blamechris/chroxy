@@ -798,7 +798,19 @@ export function SessionScreen() {
     if (text && !hasTerminal && !hasAttachments) {
       const memory = parseMemoryAppend(text);
       if (memory.isMemory) {
-        useConnectionStore.getState().appendMemory(memory.note);
+        const sent = useConnectionStore.getState().appendMemory(memory.note);
+        if (sent === false) {
+          // #6308/#6309 — disconnected: appendMemory is NOT offline-queued, so
+          // restore the draft (the input was cleared above) and surface a notice
+          // rather than silently losing the note.
+          inputRef.current?.setValue(text);
+          useConnectionStore.getState().addMessage({
+            id: `memory-fail-${Date.now()}`,
+            type: 'system',
+            content: 'Not connected — memory note not saved. Try again once reconnected.',
+            timestamp: Date.now(),
+          });
+        }
         return;
       }
     }
