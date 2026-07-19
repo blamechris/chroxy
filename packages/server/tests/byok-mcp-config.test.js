@@ -5,11 +5,13 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   CLAUDE_CONFIG_MAX_BYTES,
+  classifyIpAddress,
   discoverConfiguredMcpServers,
   isBlockedMetadataHost,
   loadClaudeMcpConfig,
   parseClaudeMcpConfig,
   redactMcpUrl,
+  resolveTrustAddress,
   toMcpServerMetadata,
 } from '../src/byok-mcp-config.js'
 
@@ -347,5 +349,105 @@ describe('discoverConfiguredMcpServers (#6820)', () => {
     assert.deepEqual(res.servers, [{ name: 'good' }])
     assert.equal(res.warnings.length, 1)
     assert.match(res.warnings[0], /bad/)
+  })
+})
+
+describe('classifyIpAddress (#6834)', () => {
+  it('classifies IPv4 loopback / RFC1918 / link-local / public', () => {
+    assert.equal(classifyIpAddress('127.0.0.1'), 'loopback')
+    assert.equal(classifyIpAddress('127.5.5.5'), 'loopback')
+    assert.equal(classifyIpAddress('10.0.0.1'), 'private')
+    assert.equal(classifyIpAddress('172.16.0.1'), 'private')
+    assert.equal(classifyIpAddress('172.31.255.255'), 'private')
+    assert.equal(classifyIpAddress('172.32.0.1'), 'public') // just outside /12
+    assert.equal(classifyIpAddress('192.168.1.5'), 'private')
+    assert.equal(classifyIpAddress('169.254.10.10'), 'link-local')
+    assert.equal(classifyIpAddress('93.184.216.34'), 'public')
+    assert.equal(classifyIpAddress('8.8.8.8'), 'public')
+  })
+
+  it('classifies IPv6 loopback / ULA / link-local / public + mapped v4', () => {
+    assert.equal(classifyIpAddress('::1'), 'loopback')
+    assert.equal(classifyIpAddress('[::1]'), 'loopback')
+    assert.equal(classifyIpAddress('fe80::1'), 'link-local')
+    assert.equal(classifyIpAddress('fe80::1%en0'), 'link-local')
+    assert.equal(classifyIpAddress('fd00::1'), 'private')
+    assert.equal(classifyIpAddress('fc00::1'), 'private')
+    assert.equal(classifyIpAddress('2606:4700:4700::1111'), 'public')
+    assert.equal(classifyIpAddress('::ffff:127.0.0.1'), 'loopback')
+    assert.equal(classifyIpAddress('::ffff:10.0.0.1'), 'private')
+  })
+
+  it('maps junk / out-of-range to unknown, never throws', () => {
+    assert.equal(classifyIpAddress(''), 'unknown')
+    assert.equal(classifyIpAddress(null), 'unknown')
+    assert.equal(classifyIpAddress('not-an-ip'), 'unknown')
+    assert.equal(classifyIpAddress('999.1.1.1'), 'unknown')
+  })
+})
+
+describe('resolveTrustAddress (#6834)', () => {
+  it('classifies a literal loopback host without a DNS round-trip', async () => {
+    let called = false
+    const lookup = async () => { called = true; return [] }
+    const r = await resolveTrustAddress('http://127.0.0.1:8080/mcp', { lookup })
+    assert.equal(called, false, 'literal IP must not hit DNS')
+    assert.equal(r.resolved, true)
+    assert.equal(r.classification, 'loopback')
+    assert.deepEqual(r.addresses, ['127.0.0.1'])
+    assert.match(r.display, /resolves to 127\.0\.0\.1 \(loopback\)/)
+  })
+
+  it('classifies a literal private-LAN host', async () => {
+    const r = await resolveTrustAddress('https://192.168.1.50/', { lookup: async () => [] })
+    assert.equal(r.classification, 'private')
+    assert.match(r.display, /resolves to 192\.168\.1\.50 \(private LAN\)/)
+  })
+
+  it('resolves a DNS name to loopback via the injected lookup', async () => {
+    const lookup = async () => [{ address: '127.0.0.1', family: 4 }]
+    const r = await resolveTrustAddress('http://lm.local:1234/', { lookup })
+    assert.equal(r.resolved, true)
+    assert.equal(r.hostname, 'lm.local')
+    assert.equal(r.classification, 'loopback')
+    assert.match(r.display, /resolves to 127\.0\.0\.1 \(loopback\)/)
+  })
+
+  it('resolves a public DNS name as public', async () => {
+    const lookup = async () => [{ address: '93.184.216.34', family: 4 }]
+    const r = await resolveTrustAddress('https://example.com/mcp', { lookup })
+    assert.equal(r.classification, 'public')
+    assert.match(r.display, /resolves to 93\.184\.216\.34 \(public\)/)
+  })
+
+  it('summarises to the most-internal address when a name resolves to several', async () => {
+    const lookup = async () => [
+      { address: '93.184.216.34', family: 4 },
+      { address: '10.1.2.3', family: 4 },
+    ]
+    const r = await resolveTrustAddress('https://mixed.example/', { lookup })
+    assert.equal(r.classification, 'private')
+    assert.deepEqual(r.addresses, ['93.184.216.34', '10.1.2.3'])
+    assert.match(r.display, /private LAN/)
+  })
+
+  it('gracefully falls back when DNS lookup throws', async () => {
+    const lookup = async () => { throw new Error('ENOTFOUND') }
+    const r = await resolveTrustAddress('https://nope.invalid/', { lookup })
+    assert.equal(r.resolved, false)
+    assert.equal(r.display, 'could not resolve host')
+    assert.deepEqual(r.addresses, [])
+  })
+
+  it('gracefully falls back when DNS returns nothing', async () => {
+    const r = await resolveTrustAddress('https://empty.example/', { lookup: async () => [] })
+    assert.equal(r.resolved, false)
+    assert.equal(r.display, 'could not resolve host')
+  })
+
+  it('gracefully falls back on an unparseable url (no throw)', async () => {
+    const r = await resolveTrustAddress('not a url', { lookup: async () => [] })
+    assert.equal(r.resolved, false)
+    assert.equal(r.display, 'could not resolve host')
   })
 })
