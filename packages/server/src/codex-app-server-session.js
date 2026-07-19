@@ -25,16 +25,19 @@ const MAX_MCP_RESULT_CHARS = 10_000
 
 // #6629: bounded backstop for codex's OWN response-stream reconnect loop. #6623
 // keeps the turn OPEN on a transient `Reconnecting... N/M` error so codex can
-// recover, and the only pre-existing backstop was the 30-min result timeout —
-// but that timer is PAUSED while a permission prompt is pending
-// (`_pauseResultTimeoutForPermission`), which is exactly the situation the #6629
-// report hit: the reconnect fired right after a shell-escalation prompt. So a
-// codex whose stream silently wedged mid-reconnect left the session stuck
-// "Working..." for up to 30 min — or indefinitely if a permission had paused the
-// result timeout. This watchdog runs INDEPENDENTLY of that pause: it is armed on
-// the first reconnect notification, disarmed the moment codex makes any real
-// forward progress, and — if codex neither recovers nor emits its terminal
-// give-up — fails the turn cleanly (clears busy + sweeps orphan tool_starts) with
+// recover, and the only pre-existing backstop was the 30-min result timeout.
+// But a pending permission prompt CLEARS that timer outright
+// (`_pauseResultTimeoutForPermission` → `_clearResultTimeout`), and it is only
+// re-armed when the NEXT notification arrives (`_resetResultTimeout`, run at the
+// top of `_onNotification`). A codex approval is a server→client REQUEST, not a
+// notification, so it never re-arms anything. So the exact #6629 situation — a
+// shell-escalation prompt pending, then the response stream wedges mid-reconnect
+// with no further notifications — leaves NO active result timeout at all, and the
+// session hangs in "Working..." indefinitely. This watchdog is the independent
+// backstop for that gap: armed on a transient reconnect notification, NOT touched
+// by the permission pause, disarmed the moment codex makes any real forward
+// progress, and — if codex neither recovers nor emits its terminal give-up —
+// fails the turn cleanly (clears busy + sweeps orphan tool_starts) with
 // `error{code:'stream_stall'}` so the client shows its existing retry affordance
 // instead of a stale spinner. 2 min comfortably clears codex's bounded N/5 retry
 // cycle while bounding the worst-case stale state far below the 30-min default.

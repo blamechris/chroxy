@@ -547,23 +547,31 @@ describe('CodexAppServerSession — reconnect watchdog / stale-state reconciliat
     }
   })
 
-  it('fires even while a pending permission has paused the result timeout (the #6629 gap)', () => {
+  it('is the sole backstop when a pending permission cleared the result timeout with no re-arm (the #6629 gap)', () => {
     mock.timers.enable({ apis: ['setTimeout', 'Date'] })
     const { s, cleanup } = mkSession()
     try {
       const ev = capture(s, ['error', 'tool_result'])
       armBusyTurnWithInflightShell(s)
-      // A shell-escalation prompt is pending → the result timeout is PAUSED (cleared).
-      s._pauseResultTimeoutForPermission()
-      assert.equal(s._resultTimeout, null, 'result timeout is paused while a permission is pending')
-
-      // THEN the stream drops. The reconnect watchdog is independent of the pause.
+      // Stream drops mid-shell → the reconnect arms the watchdog AND, via
+      // _resetResultTimeout at the top of _onNotification, re-arms the result timeout.
       s._onNotification({ method: 'error', params: reconnectParams(2, 5) })
-      assert.ok(s._reconnectWatchdog, 'watchdog armed despite the paused result timeout')
+      assert.ok(s._reconnectWatchdog, 'watchdog armed on the reconnect')
+      assert.ok(s._resultTimeout, 'the reconnect notification re-armed the result timeout')
 
+      // THEN codex's shell-escalation approval lands. That is a server→client
+      // REQUEST, not a notification, so it does NOT re-arm the result timeout — it
+      // CLEARS it (_pauseResultTimeoutForPermission → _clearResultTimeout). With the
+      // stream now wedged (no further notifications), nothing re-arms it: there is
+      // NO active result timeout left. Without the watchdog this hangs forever.
+      s._pauseResultTimeoutForPermission()
+      assert.equal(s._resultTimeout, null, 'result timeout cleared by the pending permission and NOT re-armed (no further notifications)')
+      assert.ok(s._reconnectWatchdog, 'watchdog survives the pause — it is independent of the result timeout')
+
+      // The watchdog alone reconciles the stale state.
       mock.timers.tick(RECONNECT_WATCHDOG_MS)
       const err = ev.find(([e]) => e === 'error')
-      assert.ok(err && err[1].code === 'stream_stall', 'watchdog still reconciles the stale state even with the result timeout paused')
+      assert.ok(err && err[1].code === 'stream_stall', 'the watchdog alone reconciles the stale state as the sole backstop')
       assert.equal(s._isBusy, false, 'no longer stuck Working with a pending permission')
       assert.ok(ev.some(([e, p]) => e === 'tool_result' && p.toolUseId === 'shell-1'), 'orphan shell tool_start swept')
     } finally {
