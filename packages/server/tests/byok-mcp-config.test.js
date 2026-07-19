@@ -381,6 +381,18 @@ describe('classifyIpAddress (#6834)', () => {
     assert.equal(classifyIpAddress('::ffff:10.0.0.1'), 'private')
   })
 
+  it('matches the full fe80::/10 link-local range, not just the fe80 literal (#6850 review)', () => {
+    // fe80::/10 spans the leading hextet fe80 through febf.
+    assert.equal(classifyIpAddress('fe80::1'), 'link-local')
+    assert.equal(classifyIpAddress('fe90::1'), 'link-local')
+    assert.equal(classifyIpAddress('fea0::1'), 'link-local')
+    assert.equal(classifyIpAddress('feaf::abcd'), 'link-local')
+    assert.equal(classifyIpAddress('febf::1'), 'link-local')
+    // fec0::/10 is deprecated site-local, NOT link-local — must not match.
+    assert.notEqual(classifyIpAddress('fec0::1'), 'link-local')
+    assert.notEqual(classifyIpAddress('fe7f::1'), 'link-local') // just below the range
+  })
+
   it('maps junk / out-of-range to unknown, never throws', () => {
     assert.equal(classifyIpAddress(''), 'unknown')
     assert.equal(classifyIpAddress(null), 'unknown')
@@ -414,6 +426,44 @@ describe('resolveTrustAddress (#6834)', () => {
     assert.equal(r.hostname, 'lm.local')
     assert.equal(r.classification, 'loopback')
     assert.match(r.display, /resolves to 127\.0\.0\.1 \(loopback\)/)
+  })
+
+  it('treats an out-of-range dotted-quad host as a hostname (DNS lookup), not a literal IP (#6850 review)', async () => {
+    // 999.1.1.1 is dotted-quad-SHAPED but not a valid IP (classifyIpAddress →
+    // 'unknown'), so it must go through the DNS path, never be echoed as a
+    // misleading "resolves to 999.1.1.1". A non-special scheme preserves the
+    // opaque host verbatim, so this reaches (and exercises) the guard.
+    assert.equal(classifyIpAddress('999.1.1.1'), 'unknown')
+    let looked = null
+    const lookup = async (host) => { looked = host; return [{ address: '93.184.216.34', family: 4 }] }
+    const r = await resolveTrustAddress('mcp://999.1.1.1/x', { lookup })
+    assert.equal(looked, '999.1.1.1', 'the invalid dotted-quad must be passed to DNS lookup, not treated as a literal')
+    assert.equal(r.resolved, true)
+    assert.equal(r.hostname, '999.1.1.1')
+    assert.deepEqual(r.addresses, ['93.184.216.34'])
+    assert.equal(r.classification, 'public')
+    assert.doesNotMatch(r.display, /resolves to 999\.1\.1\.1/)
+    assert.match(r.display, /resolves to 93\.184\.216\.34 \(public\)/)
+  })
+
+  it('for an http URL, the parser rejects an out-of-range quad before any lookup (graceful fallback)', async () => {
+    // Defence-in-depth alongside the guard: a special-scheme (http) URL with an
+    // out-of-range IPv4 host is rejected by the WHATWG parser outright, so it
+    // never reaches DNS and never surfaces a bogus literal — just the fallback.
+    let called = false
+    const r = await resolveTrustAddress('http://999.1.1.1/mcp', { lookup: async () => { called = true; return [] } })
+    assert.equal(called, false)
+    assert.equal(r.resolved, false)
+    assert.equal(r.display, 'could not resolve host')
+    assert.doesNotMatch(r.display, /999\.1\.1\.1/)
+  })
+
+  it('a valid IP literal still short-circuits without a DNS round-trip', async () => {
+    let called = false
+    const r = await resolveTrustAddress('http://10.0.0.1:9000/', { lookup: async () => { called = true; return [] } })
+    assert.equal(called, false)
+    assert.equal(r.classification, 'private')
+    assert.deepEqual(r.addresses, ['10.0.0.1'])
   })
 
   it('resolves a public DNS name as public', async () => {

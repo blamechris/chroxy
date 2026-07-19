@@ -195,7 +195,11 @@ export function classifyIpAddress(ip) {
   }
   // IPv6 literals.
   if (h === '::1') return 'loopback'
-  if (h.startsWith('fe80:') || h.startsWith('fe80::')) return 'link-local'
+  // Link-local is fe80::/10 — the leading hextet spans fe80 through febf (top
+  // 10 bits fixed: 1111111010). Match the first two hex digits (fe) plus the
+  // third digit constrained to 8..b, not just the `fe80` literal. The trailing
+  // `:` covers both `fe80:...` and the compressed `fe80::...` (which begins `:`).
+  if (/^fe[89ab][0-9a-f]:/.test(h)) return 'link-local'
   if (/^f[cd][0-9a-f]{2}:/.test(h)) return 'private' // fc00::/7 unique-local
   if (h.includes(':')) return 'public'
   return 'unknown'
@@ -272,15 +276,20 @@ export async function resolveTrustAddress(url, { lookup = dnsLookup, timeoutMs =
   }
   if (!hostname) return miss()
   const bare = hostname.startsWith('[') && hostname.endsWith(']') ? hostname.slice(1, -1) : hostname
-  const isLiteral = /^[\d.]+$/.test(bare) || bare.includes(':')
-  if (isLiteral) {
-    const classification = classifyIpAddress(bare)
+  // Short-circuit ONLY for a syntactically-valid IP literal. A dotted-quad-
+  // shaped string with an out-of-range octet (e.g. 999.1.1.1) is NOT an IP —
+  // classifyIpAddress returns 'unknown' — so it is really a hostname and must
+  // go through the DNS path, not be echoed as a misleading "resolves to
+  // 999.1.1.1". A bracketed / colon-bearing IPv6 host is always a literal.
+  const looksLikeLiteral = /^[\d.]+$/.test(bare) || bare.includes(':')
+  const literalClass = looksLikeLiteral ? classifyIpAddress(bare) : 'unknown'
+  if (looksLikeLiteral && literalClass !== 'unknown') {
     return {
       resolved: true,
       hostname,
       addresses: [bare],
-      classification,
-      display: `resolves to ${bare} (${_CLASSIFICATION_LABELS[classification] || classification})`,
+      classification: literalClass,
+      display: `resolves to ${bare} (${_CLASSIFICATION_LABELS[literalClass] || literalClass})`,
     }
   }
   let timer
