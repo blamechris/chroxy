@@ -298,8 +298,8 @@ export class CodexAppServerSession extends BaseSession {
     this._resetResultTimeout()
     // #6629 — any notification that is NOT another `error` tick is genuine forward
     // progress: codex's response stream is live again, so disarm the reconnect
-    // watchdog #6623's suppression path may have armed. (A terminal `error` clears
-    // it below on its way to _failTurn; a transient reconnect `error` re-arms it.)
+    // watchdog that #6623's suppression path may have armed. (A terminal `error`
+    // clears it below on its way to _failTurn; a transient reconnect `error` re-arms it.)
     if (method !== 'error') this._clearReconnectWatchdog()
     const t = this._activeTurn
     switch (method) {
@@ -631,6 +631,16 @@ export class CodexAppServerSession extends BaseSession {
     this._reconnectWatchdog = setTimeout(() => {
       this._reconnectWatchdog = null
       if (!this._activeTurn) return
+      // #6629 — INTENTIONAL that this fires even while a permission prompt is
+      // pending. The watchdog only arms on a genuine disconnect and is disarmed by
+      // ANY forward-progress notification, so reaching this callback means codex
+      // emitted no ticks and made no progress for the full window — the response
+      // stream is genuinely wedged and the turn cannot complete regardless of the
+      // pending approval. Failing cleanly (deny the pending approval via
+      // _endTurnAbort + surface a recoverable stall) is the actionable outcome;
+      // deliberately NOT firing during a pending permission would just restore the
+      // #6629 indefinite-stale-state bug (the paused result timeout is exactly what
+      // this watchdog exists to backstop). The user can retry to continue.
       ;(this._log || log).warn(`codex app-server response stream did not recover within ${RECONNECT_WATCHDOG_MS}ms — reconciling stale working state (#6629)`)
       this._failTurn('Codex response stream disconnected and did not recover — the turn was stopped. Retry to continue.', { code: 'stream_stall' })
     }, RECONNECT_WATCHDOG_MS)
