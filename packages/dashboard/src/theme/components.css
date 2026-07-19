@@ -3943,6 +3943,61 @@ button.sidebar-token-view-session-row:hover {
   color: var(--accent-orange);
 }
 
+/* #6544 (IDE P3.3 feature A): the same per-hunk pre-write review surfaced on the
+ * file viewer when a Write/Edit permission targets the open file. A bordered,
+ * accent-tinted card at the top of the viewer content so the pending write reads
+ * as an interruption to review before the current disk content below. */
+.viewer-prewrite-review {
+  margin: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--accent-orange);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+}
+
+.viewer-prewrite-title {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+
+.viewer-prewrite-tool {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.viewer-prewrite-loading {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  padding: 6px 0;
+}
+
+.viewer-prewrite-buttons {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.viewer-prewrite-buttons button {
+  padding: 5px 16px;
+  border-radius: 6px;
+  border: none;
+  font-size: var(--text-base);
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.viewer-prewrite-buttons button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.viewer-prewrite-disconnected {
+  margin-top: 6px;
+  font-size: var(--text-sm);
+  color: var(--accent-orange);
+}
+
 .perm-buttons {
   display: flex;
   gap: 8px;
