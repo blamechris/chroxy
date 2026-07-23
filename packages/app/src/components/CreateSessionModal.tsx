@@ -19,7 +19,6 @@ import { buildProviderLimitationNote } from '@chroxy/store-core';
 import {
   DEFAULT_PROVIDER,
   CODEX_PROVIDER,
-  CODEX_DEFAULT_SANDBOX,
   CODEX_SANDBOX_MODE_META,
   type CodexSandboxMode,
 } from '@chroxy/protocol';
@@ -34,14 +33,27 @@ interface CreateSessionModalProps {
 // '' means "use server default provider"; always shown as the first chip.
 const DEFAULT_PROVIDER_CHIP = { id: '', label: 'Default' };
 
+// #6903: "Default" forwards no `codexSandbox`, so the daemon's configured
+// sandbox (CHROXY_CODEX_SANDBOX floor, else workspace-write) is honored
+// instead of being silently overridden — mirrors the dashboard's Default
+// sandbox option (packages/dashboard/src/components/CreateSessionModal.tsx).
+// Always shown as the first chip, same as DEFAULT_PROVIDER_CHIP above.
+const CODEX_SANDBOX_DEFAULT_CHIP = { id: '' as const, label: 'Default' };
+const CODEX_SANDBOX_CHIPS: ReadonlyArray<{ id: '' | CodexSandboxMode; label: string }> = [
+  CODEX_SANDBOX_DEFAULT_CHIP,
+  ...CODEX_SANDBOX_MODE_META,
+];
+
 export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps) {
   const [name, setName] = useState('');
   const [cwd, setCwd] = useState('');
   const [worktree, setWorktree] = useState(false);
   const [provider, setProvider] = useState('');
-  // #6689 — per-session Codex sandbox mode; defaults to workspace-write and is
-  // only surfaced/forwarded for the codex provider.
-  const [codexSandbox, setCodexSandbox] = useState<CodexSandboxMode>(CODEX_DEFAULT_SANDBOX);
+  // #6689/#6903 — per-session Codex sandbox mode. '' is the "Default" option —
+  // it forwards no `codexSandbox`, so the daemon's CHROXY_CODEX_SANDBOX floor
+  // (else workspace-write) is honored, matching the dashboard's Default-omit
+  // path. Only surfaced/forwarded for the codex provider.
+  const [codexSandbox, setCodexSandbox] = useState<'' | CodexSandboxMode>('');
   const createSession = useConnectionStore((s) => s.createSession);
   const sessions = useConnectionStore((s) => s.sessions);
   const availableProviders = useConnectionStore((s) => s.availableProviders);
@@ -75,7 +87,7 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
       setShowBrowser(false);
       setWorktree(false);
       setProvider('');
-      setCodexSandbox(CODEX_DEFAULT_SANDBOX);
+      setCodexSandbox('');
       fetchProviders();
       startProvidersTimeout();
     } else {
@@ -108,11 +120,11 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
     }
   }, [availableProviders.length]);
 
-  // #6689 — reset the codex sandbox to the default on every provider change so
-  // a stale (e.g. danger-full-access) selection can't survive a provider
-  // round-trip and silently apply to a fresh codex session.
+  // #6689/#6903 — reset the codex sandbox to "Default" on every provider
+  // change so a stale (e.g. danger-full-access) selection can't survive a
+  // provider round-trip and silently apply to a fresh codex session.
   useEffect(() => {
-    setCodexSandbox(CODEX_DEFAULT_SANDBOX);
+    setCodexSandbox('');
   }, [provider]);
 
   const providerChips = [
@@ -151,14 +163,18 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
       cwd: sessionCwd,
       worktree: worktree || undefined,
       provider: provider || undefined,
-      // #6689 — only forward the sandbox mode for codex; other providers ignore it.
-      codexSandbox: provider === CODEX_PROVIDER ? codexSandbox : undefined,
+      // #6689/#6903 — only forward the sandbox mode for codex, and only when
+      // the user explicitly picked one — '' is the "Default" option → omit so
+      // the daemon's CHROXY_CODEX_SANDBOX floor (else workspace-write) is
+      // honored instead of being silently overridden. Other providers never
+      // forward it.
+      codexSandbox: provider === CODEX_PROVIDER && codexSandbox ? codexSandbox : undefined,
     });
     setName('');
     setCwd('');
     setWorktree(false);
     setProvider('');
-    setCodexSandbox(CODEX_DEFAULT_SANDBOX);
+    setCodexSandbox('');
     onClose();
   };
 
@@ -167,7 +183,7 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
     setCwd('');
     setWorktree(false);
     setProvider('');
-    setCodexSandbox(CODEX_DEFAULT_SANDBOX);
+    setCodexSandbox('');
     onClose();
   };
 
@@ -315,18 +331,21 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
               </Text>
             ) : null}
 
-            {/* #6689 — Codex-only sandbox selector. Codex applies the sandbox at
-                thread start, so this is a create-time choice. Hidden for every
-                non-codex provider (they ignore the field). Options + labels are
-                single-sourced from CODEX_SANDBOX_MODE_META. */}
+            {/* #6689/#6903 — Codex-only sandbox selector. Codex applies the
+                sandbox at thread start, so this is a create-time choice.
+                Hidden for every non-codex provider (they ignore the field).
+                "Default" (the first chip, '') forwards no codexSandbox so the
+                daemon's CHROXY_CODEX_SANDBOX floor (else workspace-write) is
+                honored — mirrors the dashboard's Default option. The concrete
+                modes are single-sourced from CODEX_SANDBOX_MODE_META. */}
             {provider === CODEX_PROVIDER ? (
               <View testID="codex-sandbox-field">
                 <Text style={styles.label}>Codex sandbox</Text>
                 <View style={styles.providerRow}>
-                  {CODEX_SANDBOX_MODE_META.map((m) => (
+                  {CODEX_SANDBOX_CHIPS.map((m) => (
                     <TouchableOpacity
-                      key={m.id}
-                      testID={`codex-sandbox-chip-${m.id}`}
+                      key={m.id || '__default__'}
+                      testID={`codex-sandbox-chip-${m.id || 'default'}`}
                       style={[
                         styles.providerChip,
                         codexSandbox === m.id && styles.providerChipActive,
@@ -346,8 +365,10 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
                   ))}
                 </View>
                 <Text style={styles.toggleHint} testID="codex-sandbox-hint">
-                  {CODEX_SANDBOX_MODE_META.find((m) => m.id === codexSandbox)?.description
-                    ?? 'Controls how much of the filesystem the Codex sandbox may write.'}
+                  {codexSandbox === ''
+                    ? "Use the daemon's configured sandbox (CHROXY_CODEX_SANDBOX, else workspace-write)."
+                    : CODEX_SANDBOX_MODE_META.find((m) => m.id === codexSandbox)?.description
+                      ?? 'Controls how much of the filesystem the Codex sandbox may write.'}
                 </Text>
               </View>
             ) : null}

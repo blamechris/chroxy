@@ -481,11 +481,13 @@ export interface CreateSessionOptions {
    */
   environmentId?: string;
   /**
-   * #6689 — per-session Codex sandbox mode ('read-only' | 'workspace-write' |
-   * 'danger-full-access'). Only set when the selected provider is `codex`;
-   * other providers ignore it. Surfaced in the New Session modal as a
-   * codex-only selector. Narrowed to the wire enum so an invalid value can't
-   * compile (Copilot #6900).
+   * #6689/#6903 — per-session Codex sandbox mode ('read-only' |
+   * 'workspace-write' | 'danger-full-access'). `undefined` means "use the
+   * daemon's configured sandbox" (CHROXY_CODEX_SANDBOX, else workspace-write)
+   * — the modal's "Default" chip. Only set when the selected provider is
+   * `codex`; other providers ignore it. Surfaced in the New Session modal as
+   * a codex-only selector. Narrowed to the wire enum so an invalid value
+   * can't compile (Copilot #6900).
    */
   codexSandbox?: CodexSandboxMode;
 }
