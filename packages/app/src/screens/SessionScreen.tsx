@@ -192,7 +192,7 @@ export function SessionScreen() {
       if (chatFilterCompact && isHiddenInCompactMode(m.type)) return false;
       return true;
     }),
-    [allMessages, chatFilterCompact],
+    [allMessages, chatFilterCompact, isHiddenInCompactMode],
   );
   const systemMessages = useMemo(
     () => allMessages.filter((m) => m.type === 'system'),

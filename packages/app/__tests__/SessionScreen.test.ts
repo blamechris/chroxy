@@ -140,8 +140,11 @@ describe('SessionScreen component structure', () => {
       )
       // The old hard-coded duplicate must be gone — this is the exact string
       // #6882 was filed to remove (drift risk vs. the store-core predicate).
+      // Whitespace-tolerant: catches the duplicate regardless of spacing
+      // around `===`/`||` (e.g. `m.type==='tool_use'`), without matching the
+      // legitimate isHiddenInCompactMode(m.type) call.
       expect(src).not.toMatch(
-        /chatFilterCompact\s*&&\s*\(m\.type === 'tool_use' \|\| m\.type === 'thinking'\)/,
+        /chatFilterCompact\s*&&\s*\(\s*m\.type\s*===\s*'tool_use'\s*\|\|\s*m\.type\s*===\s*'thinking'\s*\)/,
       )
     })
 
