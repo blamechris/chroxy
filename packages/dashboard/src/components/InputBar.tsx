@@ -12,7 +12,7 @@ import { SlashCommandPicker } from './SlashCommandPicker'
 import { ImageThumbnail } from './ImageThumbnail'
 import type { SlashCommand, EvaluatorResultPayload, MCPResourceItem } from '../store/types'
 import { filterImageFiles } from '../utils/image-utils'
-import { shouldCollapsePaste, findActiveMarkerIds, formatComposerLozenge } from '@chroxy/store-core'
+import { shouldCollapsePaste, findActiveMarkerIds, formatComposerLozenge, type ChatActivityState } from '@chroxy/store-core'
 import { PastedTextChip } from './PastedTextChip'
 import { tokenizeThinkingKeywords } from './thinking-keyword-tokens'
 
@@ -75,8 +75,10 @@ export interface InputBarProps {
   /** Chat redesign #6391: the canonical chat-activity state
    *  (idle/thinking/busy/waiting/error) from store-core's deriveChatActivity.
    *  Surfaced as a `data-activity-state` attribute so the live hairline +
-   *  state-lozenge (slices 4-5) are pure CSS keyed off it. */
-  chatActivityState?: string
+   *  state-lozenge (slices 4-5) are pure CSS keyed off it. Typed to the real
+   *  `ChatActivityState` union (matching FooterBar/Sidebar/AppHeader's props)
+   *  so a typo'd/unknown state is a compile error at the call site. */
+  chatActivityState?: ChatActivityState
   /** Chat redesign #6391 composer state lozenge (Phase 1 deferred item): the
    *  number of queue-while-processing follow-ups currently staged for this
    *  session (App.tsx's `queuedIds.size`). Combined with `chatActivityState`

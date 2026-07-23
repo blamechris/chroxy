@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { formatComposerLozenge } from './composer-lozenge'
+import type { ChatActivityState } from './chat-activity'
 
 describe('formatComposerLozenge', () => {
   it('hides the lozenge at idle regardless of queued count', () => {
@@ -9,7 +10,12 @@ describe('formatComposerLozenge', () => {
 
   it('hides the lozenge for an undefined/unrecognized state', () => {
     expect(formatComposerLozenge(undefined, 2)).toBeNull()
-    expect(formatComposerLozenge('some-future-state', 2)).toBeNull()
+    // `state` is typed `ChatActivityState | undefined`, so a genuinely
+    // unrecognized value can't reach here through TS-checked call sites —
+    // this cast simulates one that does anyway (a non-TS caller, or a
+    // future state added to the union without a STATE_LABEL entry) and
+    // asserts the defensive runtime fallback still hides the lozenge.
+    expect(formatComposerLozenge('some-future-state' as ChatActivityState, 2)).toBeNull()
   })
 
   it('shows "streaming" with no queued suffix when thinking and nothing queued', () => {

@@ -275,6 +275,8 @@ export const InputBar = React.memo(forwardRef<InputBarHandle, InputBarProps>(fun
           style={[styles.lozenge, { borderColor: HAIRLINE_COLOR[activityState] }]}
           pointerEvents="none"
           testID="input-bar-lozenge"
+          accessibilityElementsHidden
+          importantForAccessibility="no-hide-descendants"
         >
           <Text style={[styles.lozengeText, { color: HAIRLINE_COLOR[activityState] }]}>{lozengeText}</Text>
         </View>
