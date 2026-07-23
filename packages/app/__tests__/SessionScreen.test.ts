@@ -126,4 +126,29 @@ describe('SessionScreen component structure', () => {
     expect(src).toMatch(/import.*CreateSessionModal/)
     expect(src).toMatch(/<CreateSessionModal/)
   })
+
+  describe('compact chat filter consumes the shared predicate (#6882)', () => {
+    test('imports isHiddenInCompactMode from @chroxy/store-core', () => {
+      expect(src).toMatch(
+        /import\s*\{[^}]*\bisHiddenInCompactMode\b[^}]*\}\s*from\s*'@chroxy\/store-core'/,
+      )
+    })
+
+    test('the compact filter calls the shared predicate, not a hand-rolled duplicate', () => {
+      expect(src).toMatch(
+        /chatFilterCompact\s*&&\s*isHiddenInCompactMode\(m\.type\)/,
+      )
+      // The old hard-coded duplicate must be gone — this is the exact string
+      // #6882 was filed to remove (drift risk vs. the store-core predicate).
+      expect(src).not.toMatch(
+        /chatFilterCompact\s*&&\s*\(m\.type === 'tool_use' \|\| m\.type === 'thinking'\)/,
+      )
+    })
+
+    test('system messages are still filtered inline, separately from the compact predicate', () => {
+      // #6882: system filtering stays inline — isHiddenInCompactMode is
+      // specifically the compact-hide rule, not a catch-all message filter.
+      expect(src).toMatch(/if \(m\.type === 'system'\) return false;/)
+    })
+  })
 })
