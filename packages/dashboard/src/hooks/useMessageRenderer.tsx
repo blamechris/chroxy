@@ -59,6 +59,25 @@ function buildSessionLabel(
 }
 
 /**
+ * #6626 — recover the RAW permission description from a prompt message's stored
+ * `content`. `handlePermissionRequest` composes `content` as `"${tool}: ${description}"`
+ * (or the bare `tool` when the description is empty — see message-handler.ts).
+ * `PermissionPrompt` re-prepends `"${tool}: "` itself, so feeding it the composed
+ * `content` as its `description` prop doubled the tool label — the reported
+ * `shell: shell: …` on Codex shell approvals (and any provider's prompt). Inverting
+ * the exact composition here keeps the single source of truth in the message-handler
+ * while stripping the redundant leading `"${tool}: "` before the card re-adds it.
+ * Only the FIRST occurrence of the prefix is removed, so a description that itself
+ * legitimately begins with `"${tool}: "` is preserved intact.
+ */
+export function permissionPromptDescription(content: string, tool?: string): string {
+  if (!tool) return content
+  if (content === tool) return ''
+  const prefix = `${tool}: `
+  return content.startsWith(prefix) ? content.slice(prefix.length) : content
+}
+
+/**
  * The custom chat-message renderer (#5560): permission prompts, question
  * prompts, tool bubbles/groups, the evaluator-rewrite banner, and the
  * stream-stall / ask-user-question-stall / resume-unknown chips.
@@ -124,7 +143,9 @@ export function useMessageRenderer(args: UseMessageRendererArgs): (msg: ChatView
         <PermissionPrompt
           requestId={storeMsg.requestId}
           tool={storeMsg.tool || 'Unknown'}
-          description={storeMsg.content}
+          // #6626 — pass the RAW description, not the composed `"<tool>: <desc>"`
+          // `content`; PermissionPrompt re-prepends `"<tool>: "` (double label otherwise).
+          description={permissionPromptDescription(storeMsg.content, storeMsg.tool)}
           remainingMs={remainingMs}
           onRespond={(reqId, decision, editedInput, reason) => sendPermissionResponse(reqId, decision, editedInput, reason)}
           sessionLabel={buildSessionLabel(storeMsg.originSessionId, sessions)}
