@@ -886,6 +886,20 @@ export const GitCommitSchema = z.object({
   message: z.string().min(1).max(10_000),
 }).passthrough()
 
+// #6876 — in-app PR creation. The server pushes the current branch (if needed)
+// and shells out to `gh pr create`, replying with `git_create_pr_result`
+// (ServerGitCreatePrResultSchema). `title` is required; `body`/`base`/`draft`
+// are optional (an absent `base` lets the server resolve the repo's default
+// branch). Gated server-side by the same pairing-bound mutation guard the
+// stage/commit path uses (#6541).
+export const GitCreatePrSchema = z.object({
+  type: z.literal('git_create_pr'),
+  title: z.string().min(1).max(500),
+  body: z.string().max(50_000).optional(),
+  base: z.string().max(255).optional(),
+  draft: z.boolean().optional(),
+}).passthrough()
+
 export const ResumeBudgetSchema = z.object({
   type: z.literal('resume_budget'),
   sessionId: z.string().max(256).optional(),
@@ -1701,6 +1715,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   GitStageSchema,
   GitUnstageSchema,
   GitCommitSchema,
+  GitCreatePrSchema,
   ResumeBudgetSchema,
   ListCheckpointsSchema,
   RestoreCheckpointSchema,

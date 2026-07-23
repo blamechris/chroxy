@@ -569,6 +569,13 @@ export declare const GitCommitSchema: z.ZodObject<{
     type: z.ZodLiteral<"git_commit">;
     message: z.ZodString;
 }, z.core.$loose>;
+export declare const GitCreatePrSchema: z.ZodObject<{
+    type: z.ZodLiteral<"git_create_pr">;
+    title: z.ZodString;
+    body: z.ZodOptional<z.ZodString>;
+    base: z.ZodOptional<z.ZodString>;
+    draft: z.ZodOptional<z.ZodBoolean>;
+}, z.core.$loose>;
 export declare const ResumeBudgetSchema: z.ZodObject<{
     type: z.ZodLiteral<"resume_budget">;
     sessionId: z.ZodOptional<z.ZodString>;
@@ -1237,6 +1244,12 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
 }, z.core.$loose>, z.ZodObject<{
     type: z.ZodLiteral<"git_commit">;
     message: z.ZodString;
+}, z.core.$loose>, z.ZodObject<{
+    type: z.ZodLiteral<"git_create_pr">;
+    title: z.ZodString;
+    body: z.ZodOptional<z.ZodString>;
+    base: z.ZodOptional<z.ZodString>;
+    draft: z.ZodOptional<z.ZodBoolean>;
 }, z.core.$loose>, z.ZodObject<{
     type: z.ZodLiteral<"resume_budget">;
     sessionId: z.ZodOptional<z.ZodString>;

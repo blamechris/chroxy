@@ -3,7 +3,7 @@
  *
  * Handles: list_directory, browse_files, list_files, read_file, write_file,
  *          get_diff, git_status, git_branches, git_stage, git_unstage,
- *          git_commit, list_slash_commands, list_agents
+ *          git_commit, git_create_pr, list_slash_commands, list_agents
  */
 import { resolveSession, sendError } from '../handler-utils.js'
 import { loggerForSession } from '../logger.js'
@@ -120,6 +120,19 @@ function handleGitCommit(ws, client, msg, ctx) {
   ctx.services.fileOps.gitCommit(ws, msg.message, entry?.cwd || null)
 }
 
+function handleGitCreatePr(ws, client, msg, ctx) {
+  // #6876 — same pairing-bound mutation gate as stage/commit: opening a PR
+  // pushes a branch + creates a remote PR, a host-level side effect a bound
+  // (share-a-session) token must not reach.
+  if (rejectMutationIfBound(ws, client, msg, ctx, 'git_create_pr')) return
+  const entry = resolveSession(ctx, msg, client)
+  ctx.services.fileOps.gitCreatePR(
+    ws,
+    { title: msg.title, body: msg.body, base: msg.base, draft: msg.draft },
+    entry?.cwd || null,
+  )
+}
+
 function handleListSlashCommands(ws, client, msg, ctx) {
   const sid = msg.sessionId || client.activeSessionId
   const entry = resolveSession(ctx, msg, client)
@@ -157,6 +170,7 @@ export const fileHandlers = {
   git_stage: handleGitStage,
   git_unstage: handleGitUnstage,
   git_commit: handleGitCommit,
+  git_create_pr: handleGitCreatePr,
   list_slash_commands: handleListSlashCommands,
   list_agents: handleListAgents,
 }

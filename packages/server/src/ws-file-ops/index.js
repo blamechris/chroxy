@@ -49,5 +49,6 @@ export function createFileOps(sendFn, workspaceRoot) {
     gitStage: git.gitStage,
     gitUnstage: git.gitUnstage,
     gitCommit: git.gitCommit,
+    gitCreatePR: git.gitCreatePR,
   }
 }

@@ -14,7 +14,7 @@ import type { ActiveTool, ChatMessage, ContextOccupancy, ContextUsage, ToolResul
 import { nextMessageId } from '../utils'
 import { isReplayDuplicate } from '../replay-dedup'
 import { resolveStreamId } from '../stream-id'
-import { isRateLimitMessage } from '@chroxy/protocol'
+import { isRateLimitMessage, MAX_SANE_DURATION_MS } from '@chroxy/protocol'
 import { parseRawStringField } from './_shared'
 
 // ---------------------------------------------------------------------------
@@ -1476,8 +1476,38 @@ export interface ThinkingStreamEndPayload {
 }
 
 /**
+ * #6391 — parse a footer-stat numeric field (thinkingDurationMs / thinkingTokens)
+ * off the raw wire message. Defensive re-guard mirroring the protocol schema:
+ * a finite non-negative integer, or `undefined` when absent/malformed. Floors
+ * so a stray float can never leak a fractional ms/token onto the bubble.
+ *
+ * #6941 review (Copilot): this helper claimed to mirror the protocol schema
+ * but did not enforce `ThinkingDurationMsSchema`'s `.max(MAX_SANE_DURATION_MS)`
+ * ceiling, so a malformed payload that bypassed Zod (or a clock-jump artifact
+ * from the server side) could leak an out-of-range duration into state/UI.
+ * `max` is optional and per-call: `thinkingDurationMs` passes
+ * `MAX_SANE_DURATION_MS`, `thinkingTokens` (no documented ceiling) omits it.
+ * Out-of-range values are OMITTED (return `undefined`), never clamped — same
+ * "vanish, don't render a fake ceiling" behaviour as the server-side
+ * normalizer (packages/server/src/event-normalizer.js `boundedNonNegInt`),
+ * so both sides agree.
+ */
+function parseFiniteNonNegIntField(msg: Record<string, unknown>, key: string, max?: number): number | undefined {
+  const v = msg[key]
+  if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) return undefined
+  const floored = Math.floor(v)
+  if (typeof max === 'number' && floored > max) return undefined
+  return floored
+}
+
+/**
  * Resolve a thinking `stream_end` (a `stream_end` with `thinking: true`).
- * Finalises the bubble's streaming label without touching `streamingMessageId`.
+ * Finalises the bubble's streaming label without touching `streamingMessageId`,
+ * and — for the #6391 footer-stat — threads the server-measured
+ * `thinkingDurationMs` (+ `thinkingTokens` when a provider reports it) onto the
+ * bubble so renderers show `thought for Xs · N tokens`. Both stats are optional:
+ * a stream_end without them (old server, token-less provider) just flips the
+ * label, and the footer degrades to a bare "Thought".
  */
 export function handleThinkingStreamEnd(
   msg: Record<string, unknown>,
@@ -1485,6 +1515,8 @@ export function handleThinkingStreamEnd(
 ): ThinkingStreamEndPayload {
   const sessionId = typeof msg.sessionId === 'string' ? msg.sessionId : activeSessionId
   const thinkingMessageId = parseRawStringField(msg, 'messageId')
+  const thinkingDurationMs = parseFiniteNonNegIntField(msg, 'thinkingDurationMs', MAX_SANE_DURATION_MS)
+  const thinkingTokens = parseFiniteNonNegIntField(msg, 'thinkingTokens')
   return {
     sessionId,
     thinkingMessageId,
@@ -1495,9 +1527,29 @@ export function handleThinkingStreamEnd(
       )
       if (idx === -1) return messages
       const existing = messages[idx]!
-      if (existing.thinkingStreaming !== true) return messages
+      // Attach only stats that differ from what's already on the bubble, so a
+      // replayed / orphan-swept stream_end that carries the same numbers stays
+      // a same-reference no-op (React skip). Finalising the label is its own
+      // reason to write, independent of the stats.
+      const nextDuration =
+        thinkingDurationMs !== undefined && existing.thinkingDurationMs !== thinkingDurationMs
+          ? thinkingDurationMs
+          : undefined
+      const nextTokens =
+        thinkingTokens !== undefined && existing.thinkingTokens !== thinkingTokens
+          ? thinkingTokens
+          : undefined
+      const needsFinalize = existing.thinkingStreaming === true
+      if (!needsFinalize && nextDuration === undefined && nextTokens === undefined) {
+        return messages
+      }
       const updated = [...messages]
-      updated[idx] = { ...existing, thinkingStreaming: false }
+      updated[idx] = {
+        ...existing,
+        thinkingStreaming: false,
+        ...(nextDuration !== undefined ? { thinkingDurationMs: nextDuration } : null),
+        ...(nextTokens !== undefined ? { thinkingTokens: nextTokens } : null),
+      }
       return updated
     },
   }

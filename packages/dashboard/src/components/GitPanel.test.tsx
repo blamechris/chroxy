@@ -14,12 +14,14 @@ const mockRequestGitBranches = vi.fn()
 const mockRequestGitStage = vi.fn(() => true)
 const mockRequestGitUnstage = vi.fn(() => true)
 const mockRequestGitCommit = vi.fn(() => true)
+const mockRequestGitCreatePr = vi.fn(() => true)
 
 let storeState: Record<string, unknown> = {}
 let capturedStatusCallback: ((result: any) => void) | null = null
 let capturedBranchesCallback: ((result: any) => void) | null = null
 let capturedStageCallback: ((result: any) => void) | null = null
 let capturedCommitCallback: ((result: any) => void) | null = null
+let capturedCreatePrCallback: ((result: any) => void) | null = null
 
 vi.mock('../store/connection', () => ({
   useConnectionStore: (selector: any) => {
@@ -33,6 +35,8 @@ vi.mock('../store/connection', () => ({
       requestGitUnstage: mockRequestGitUnstage,
       setGitCommitCallback: (cb: any) => { capturedCommitCallback = cb },
       requestGitCommit: mockRequestGitCommit,
+      setGitCreatePrCallback: (cb: any) => { capturedCreatePrCallback = cb },
+      requestGitCreatePr: mockRequestGitCreatePr,
       connectionPhase: storeState.connectionPhase ?? 'connected',
     }
     return selector(store)
@@ -46,11 +50,13 @@ beforeEach(() => {
   mockRequestGitStage.mockReturnValue(true)
   mockRequestGitUnstage.mockReturnValue(true)
   mockRequestGitCommit.mockReturnValue(true)
+  mockRequestGitCreatePr.mockReturnValue(true)
   storeState = { connectionPhase: 'connected' }
   capturedStatusCallback = null
   capturedBranchesCallback = null
   capturedStageCallback = null
   capturedCommitCallback = null
+  capturedCreatePrCallback = null
 })
 
 const GIT_STATUS_WITH_CHANGES = {
@@ -329,5 +335,103 @@ describe('GitPanel', () => {
     act(() => capturedStatusCallback!({ branch: 'main', staged: [], unstaged: [{ path: 'a.ts', status: 'modified' }], untracked: [], error: null }))
 
     expect(screen.queryByTestId('git-commit-input')).not.toBeInTheDocument()
+  })
+
+  // #6876 — in-app PR creation.
+  describe('Create PR', () => {
+    const seedBranch = () =>
+      act(() => capturedStatusCallback!(GIT_STATUS_WITH_CHANGES))
+
+    it('shows the Create PR button once a branch is known', () => {
+      render(<GitPanel />)
+      expect(screen.queryByTestId('git-create-pr-open-btn')).not.toBeInTheDocument()
+      seedBranch()
+      expect(screen.getByTestId('git-create-pr-open-btn')).toBeInTheDocument()
+    })
+
+    it('opens the PR form (prefilled with the branch name) on click', () => {
+      render(<GitPanel />)
+      seedBranch()
+      fireEvent.click(screen.getByTestId('git-create-pr-open-btn'))
+
+      expect(screen.getByTestId('git-pr-form')).toBeInTheDocument()
+      expect((screen.getByTestId('git-pr-title-input') as HTMLInputElement).value).toBe('feat/git-panel')
+    })
+
+    it('is confirmation-gated: submitting opens the confirm dialog without firing the request', () => {
+      render(<GitPanel />)
+      seedBranch()
+      fireEvent.click(screen.getByTestId('git-create-pr-open-btn'))
+      fireEvent.click(screen.getByTestId('git-pr-submit-btn'))
+
+      expect(screen.getByTestId('confirm-dialog')).toBeInTheDocument()
+      expect(mockRequestGitCreatePr).not.toHaveBeenCalled()
+    })
+
+    it('fires requestGitCreatePr with title/body/base/draft after confirming', () => {
+      render(<GitPanel />)
+      seedBranch()
+      fireEvent.click(screen.getByTestId('git-create-pr-open-btn'))
+
+      fireEvent.change(screen.getByTestId('git-pr-title-input'), { target: { value: 'feat: cool' } })
+      fireEvent.change(screen.getByTestId('git-pr-body-input'), { target: { value: 'body text' } })
+      fireEvent.change(screen.getByTestId('git-pr-base-input'), { target: { value: 'develop' } })
+      fireEvent.click(screen.getByTestId('git-pr-draft-checkbox'))
+      fireEvent.click(screen.getByTestId('git-pr-submit-btn'))
+      fireEvent.click(screen.getByTestId('confirm-dialog-confirm'))
+
+      expect(mockRequestGitCreatePr).toHaveBeenCalledWith({
+        title: 'feat: cool',
+        body: 'body text',
+        base: 'develop',
+        draft: true,
+      })
+    })
+
+    it('shows the created PR URL on success', () => {
+      render(<GitPanel />)
+      seedBranch()
+      fireEvent.click(screen.getByTestId('git-create-pr-open-btn'))
+      fireEvent.click(screen.getByTestId('git-pr-submit-btn'))
+      fireEvent.click(screen.getByTestId('confirm-dialog-confirm'))
+      act(() => capturedCreatePrCallback!({ url: 'https://github.com/o/r/pull/42', number: 42, branch: 'feat/git-panel', base: 'main', error: null }))
+
+      const link = screen.getByTestId('git-pr-url') as HTMLAnchorElement
+      expect(link).toHaveAttribute('href', 'https://github.com/o/r/pull/42')
+    })
+
+    it('surfaces the server error on failure and keeps the form open', () => {
+      render(<GitPanel />)
+      seedBranch()
+      fireEvent.click(screen.getByTestId('git-create-pr-open-btn'))
+      fireEvent.click(screen.getByTestId('git-pr-submit-btn'))
+      fireEvent.click(screen.getByTestId('confirm-dialog-confirm'))
+      act(() => capturedCreatePrCallback!({ url: null, number: null, branch: 'feat/git-panel', base: 'main', error: 'GitHub CLI is not authenticated — run `gh auth login` on the daemon host to enable PR creation' }))
+
+      expect(screen.getByTestId('git-pr-error')).toHaveTextContent('not authenticated')
+      // Form still open (title input present), so the operator can retry.
+      expect(screen.getByTestId('git-pr-title-input')).toBeInTheDocument()
+    })
+
+    it('surfaces a "not connected" error when requestGitCreatePr returns false', () => {
+      mockRequestGitCreatePr.mockReturnValue(false)
+      render(<GitPanel />)
+      seedBranch()
+      fireEvent.click(screen.getByTestId('git-create-pr-open-btn'))
+      fireEvent.click(screen.getByTestId('git-pr-submit-btn'))
+      fireEvent.click(screen.getByTestId('confirm-dialog-confirm'))
+
+      expect(screen.getByTestId('git-pr-error')).toHaveTextContent('PR not sent — reconnect and try again')
+    })
+
+    it('closes the form on cancel', () => {
+      render(<GitPanel />)
+      seedBranch()
+      fireEvent.click(screen.getByTestId('git-create-pr-open-btn'))
+      expect(screen.getByTestId('git-pr-form')).toBeInTheDocument()
+
+      fireEvent.click(screen.getByTestId('git-pr-cancel-btn'))
+      expect(screen.queryByTestId('git-pr-form')).not.toBeInTheDocument()
+    })
   })
 })

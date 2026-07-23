@@ -305,6 +305,18 @@ export interface GitCommitResult {
   error: string | null;
 }
 
+// #6876 — in-app PR creation result. `url` is the created PR's URL (null on any
+// failure), `number` its integer id (best-effort), `branch`/`base` echo the
+// head/base used, and `error` carries a clear message on failure. Dashboard-only
+// for v1 (mobile PR-creation UI is a tracked follow-up).
+export interface GitCreatePrResult {
+  url: string | null;
+  number: number | null;
+  branch: string | null;
+  base: string | null;
+  error: string | null;
+}
+
 // `DiffHunkLine`, `DiffHunk`, and `DiffFile` are now re-exported from
 // `@chroxy/store-core` above (#3132).
 
@@ -1448,6 +1460,8 @@ export interface ConnectionState {
   // git_unstage_result carry the same payload shape).
   _gitStageCallback: ((result: GitStageResult) => void) | null;
   _gitCommitCallback: ((result: GitCommitResult) => void) | null;
+  // #6876 — in-app PR creation callback (git_create_pr_result). Dashboard-only.
+  _gitCreatePrCallback: ((result: GitCreatePrResult) => void) | null;
 
   // Diff viewer callback
   _diffCallback: ((result: DiffResult) => void) | null;
@@ -1705,6 +1719,10 @@ export interface ConnectionState {
   requestGitUnstage: (paths: string[]) => boolean;
   setGitCommitCallback: (cb: ((result: GitCommitResult) => void) | null) => void;
   requestGitCommit: (message: string) => boolean;
+  // #6876 — in-app PR creation. `requestGitCreatePr` returns false when the
+  // socket is closed (same not-connected guard as stage/commit/unstage).
+  setGitCreatePrCallback: (cb: ((result: GitCreatePrResult) => void) | null) => void;
+  requestGitCreatePr: (params: { title: string; body?: string; base?: string; draft?: boolean }) => boolean;
 
   // Diff viewer
   setDiffCallback: (cb: ((result: DiffResult) => void) | null) => void;

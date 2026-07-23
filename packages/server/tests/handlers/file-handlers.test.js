@@ -17,6 +17,7 @@ function makeFileOps(overrides = {}) {
     gitStage: createSpy(),
     gitUnstage: createSpy(),
     gitCommit: createSpy(),
+    gitCreatePR: createSpy(),
     listSlashCommands: createSpy(),
     listAgents: createSpy(),
     ...overrides,
@@ -213,6 +214,24 @@ describe('file-handlers', () => {
       assert.equal(callMessage, 'fix: bug')
       assert.equal(callCwd, '/repo')
     })
+
+    it('git_create_pr passes title/body/base/draft and cwd (#6876)', () => {
+      const sessions = new Map()
+      sessions.set('s1', { session: createMockSession(), name: 'S', cwd: '/repo' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+
+      fileHandlers.git_create_pr(
+        makeWs(),
+        client,
+        { title: 'feat: x', body: 'desc', base: 'main', draft: true },
+        ctx,
+      )
+
+      const [, callOpts, callCwd] = ctx.services.fileOps.gitCreatePR.lastCall
+      assert.deepEqual(callOpts, { title: 'feat: x', body: 'desc', base: 'main', draft: true })
+      assert.equal(callCwd, '/repo')
+    })
   })
 
   describe('list_slash_commands / list_agents', () => {
@@ -307,6 +326,7 @@ describe('file-handlers', () => {
       ['git_stage', 'gitStage', { files: ['x.js'] }],
       ['git_unstage', 'gitUnstage', { files: ['x.js'] }],
       ['git_commit', 'gitCommit', { message: 'm' }],
+      ['git_create_pr', 'gitCreatePR', { title: 'feat: x' }],
     ]
 
     for (const [type, method, msg] of MUTATIONS) {

@@ -1,21 +1,111 @@
-import { normalize, resolve } from 'path'
+import { normalize, resolve, join } from 'path'
 import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
+import { writeFile, unlink } from 'fs/promises'
+import { tmpdir } from 'os'
+import { randomBytes } from 'crypto'
 import { GIT } from '../git.js'
 import { validateGitPath } from './common.js'
 
 const execFileAsync = promisify(execFileCb)
 
+// #6876 — result sender for the git_create_pr flow. Every field is always
+// present (present-and-nullable) so the wire payload satisfies
+// ServerGitCreatePrResultSchema on every path.
+function prResult({ url = null, number = null, branch = null, base = null, error = null } = {}) {
+  return { type: 'git_create_pr_result', url, number, branch, base, error }
+}
+
+/** Extract the first `.../pull/<n>` URL from gh output (stdout or stderr). */
+function extractPrUrl(text) {
+  if (!text) return null
+  const m = String(text).match(/https?:\/\/\S*\/pull\/\d+/)
+  return m ? m[0] : null
+}
+
+/** Parse the numeric PR id out of a `.../pull/<n>` URL. */
+function extractPrNumber(url) {
+  if (!url) return null
+  const m = String(url).match(/\/pull\/(\d+)/)
+  return m ? Number(m[1]) : null
+}
+
 /**
- * Git operations: status, branches, stage, unstage, commit.
+ * Resolve the repo's default (base) branch from `origin/HEAD`. Returns '' when
+ * it can't be determined, in which case the caller omits `--base` and lets `gh`
+ * pick the repo default via the API.
+ */
+async function resolveDefaultBase(execImpl, cwdReal) {
+  try {
+    const { stdout } = await execImpl(GIT, ['rev-parse', '--abbrev-ref', 'origin/HEAD'], { cwd: cwdReal, timeout: 5000 })
+    const ref = (stdout || '').trim() // e.g. "origin/main"
+    if (ref && ref !== 'origin/HEAD') {
+      return ref.startsWith('origin/') ? ref.slice('origin/'.length) : ref
+    }
+  } catch {
+    // origin/HEAD not set (fresh clone / no default) — fall through to gh's default.
+  }
+  return ''
+}
+
+/** First non-empty trimmed line of a multi-line error string. */
+function firstLine(text) {
+  return String(text || '')
+    .split('\n')
+    .map(s => s.trim())
+    .filter(Boolean)[0] || ''
+}
+
+/** Map a `git push` failure to an operator-actionable message. */
+function mapPushError(err) {
+  if (err && err.code === 'ENOENT') return 'git is not available on the daemon host'
+  const stderr = String((err && (err.stderr || err.message)) || '')
+  const lower = stderr.toLowerCase()
+  if (/does not appear to be a git repository|no configured push destination|no such remote|no remote/.test(lower)) {
+    return 'Cannot push — no `origin` remote is configured for this repository'
+  }
+  if (/permission denied|authentication failed|could not read|access rights|403|denied to|fatal: could not read/.test(lower)) {
+    return 'Cannot push — the daemon is not authorized to push to origin (check its git credentials)'
+  }
+  const line = firstLine(stderr)
+  return line ? `Failed to push branch: ${line}` : 'Failed to push the current branch to origin'
+}
+
+/** Map a `gh pr create` failure to an operator-actionable message. */
+function mapGhCreateError(err) {
+  if (err && err.code === 'ENOENT') {
+    return 'GitHub CLI (gh) is not installed on the daemon host — install it from https://cli.github.com to open PRs from Chroxy'
+  }
+  const stderr = String((err && (err.stderr || err.message)) || '')
+  const lower = stderr.toLowerCase()
+  if (/already exists|a pull request for branch/.test(lower)) {
+    const existing = extractPrUrl(stderr)
+    return existing
+      ? `A pull request already exists for this branch: ${existing}`
+      : 'A pull request already exists for this branch'
+  }
+  if (/gh auth login|not logged in|authentication required|no credentials|requires authentication|http 401|gh auth status/.test(lower)) {
+    return 'GitHub CLI is not authenticated — run `gh auth login` on the daemon host to enable PR creation'
+  }
+  if (/no git remotes found|not a git repository|does not appear to be a git repository|could not determine base repo/.test(lower)) {
+    return 'No GitHub remote is configured for this repository'
+  }
+  const line = firstLine(stderr)
+  return line || (err && err.message) || 'Failed to create pull request'
+}
+
+/**
+ * Git operations: status, branches, stage, unstage, commit, create PR.
  *
  * @param {Function} sendFn - (ws, message) => void
  * @param {Function} resolveSessionCwd - shared CWD resolver
  * @param {Function} validatePathWithinCwd - shared path validator
  * @param {string} workspaceRoot - workspace root directory; git ops are restricted to paths within it
+ * @param {Function} [execImpl] - injectable promisified execFile seam (defaults to the real one; the
+ *   git_create_pr tests inject a mock so no real branch is pushed or PR opened)
  * @returns {Object} git operation methods
  */
-export function createGitOps(sendFn, resolveSessionCwd, validatePathWithinCwd, workspaceRoot) {
+export function createGitOps(sendFn, resolveSessionCwd, validatePathWithinCwd, workspaceRoot, execImpl = execFileAsync) {
 
   /** Get git status (branch, staged, unstaged, untracked) for a session CWD */
   async function gitStatus(ws, sessionCwd) {
@@ -288,11 +378,116 @@ export function createGitOps(sendFn, resolveSessionCwd, validatePathWithinCwd, w
     }
   }
 
+  /**
+   * #6876 — open a PR for the session's current branch without leaving Chroxy.
+   * Pushes the branch (creating/updating its `origin` upstream; a no-op when it
+   * is already current) then shells out to `gh pr create`. Returns the created
+   * PR URL + number to the client, or a clear, operator-actionable error on any
+   * failure (gh missing / not authenticated / no origin remote / PR already
+   * exists / detached HEAD / base === head). Never claims success on failure.
+   *
+   * @param {WebSocket} ws
+   * @param {{ title?: string, body?: string, base?: string, draft?: boolean }} opts
+   * @param {string|null} sessionCwd
+   */
+  async function gitCreatePR(ws, opts, sessionCwd) {
+    const title = typeof opts?.title === 'string' ? opts.title.trim() : ''
+    const body = typeof opts?.body === 'string' ? opts.body : ''
+    const requestedBase = typeof opts?.base === 'string' ? opts.base.trim() : ''
+    const draft = opts?.draft === true
+
+    if (!sessionCwd) {
+      sendFn(ws, prResult({ error: 'PR creation is not available in this mode' }))
+      return
+    }
+    if (!title) {
+      sendFn(ws, prResult({ error: 'Pull request title cannot be empty' }))
+      return
+    }
+
+    try {
+      await validateGitPath(sessionCwd, workspaceRoot)
+      const cwdReal = await resolveSessionCwd(sessionCwd)
+
+      // 1. Current branch (reject detached HEAD / not-a-repo).
+      let branch = null
+      try {
+        const { stdout } = await execImpl(GIT, ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: cwdReal, timeout: 5000 })
+        branch = (stdout || '').trim()
+      } catch {
+        sendFn(ws, prResult({ error: 'Not a git repository' }))
+        return
+      }
+      if (!branch || branch === 'HEAD') {
+        sendFn(ws, prResult({ error: 'Cannot open a PR from a detached HEAD — check out a branch first' }))
+        return
+      }
+
+      // 2. Base branch — explicit, else the repo default (origin/HEAD).
+      const base = requestedBase || (await resolveDefaultBase(execImpl, cwdReal))
+      if (base && base === branch) {
+        sendFn(ws, prResult({ branch, base, error: `The current branch (${branch}) is the base branch — create a feature branch before opening a PR` }))
+        return
+      }
+
+      // 3. Push the branch (set upstream). No-op when already up to date.
+      try {
+        await execImpl(GIT, ['push', '--set-upstream', 'origin', branch], { cwd: cwdReal, timeout: 120000 })
+      } catch (err) {
+        sendFn(ws, prResult({ branch, base: base || null, error: mapPushError(err) }))
+        return
+      }
+
+      // 4. gh pr create. Pass the body via a temp `--body-file` rather than an
+      // inline `--body <text>` argv element: the client schema permits a body up
+      // to 50k chars, which can blow past Windows' command-line length limit when
+      // inlined. A body-file sidesteps the limit entirely and keeps the body out
+      // of argv. The empty-body case writes an empty file (gh reads it as an
+      // empty body without opening an editor). (#6934)
+      const bodyFile = join(tmpdir(), `chroxy-pr-body-${randomBytes(8).toString('hex')}.md`)
+      let stdout = ''
+      let stderr = ''
+      try {
+        await writeFile(bodyFile, body, 'utf8')
+
+        const args = ['pr', 'create', '--title', title, '--body-file', bodyFile, '--head', branch]
+        if (base) args.push('--base', base)
+        if (draft) args.push('--draft')
+
+        try {
+          const res = await execImpl('gh', args, { cwd: cwdReal, timeout: 120000 })
+          stdout = res?.stdout || ''
+          stderr = res?.stderr || ''
+        } catch (err) {
+          sendFn(ws, prResult({ branch, base: base || null, error: mapGhCreateError(err) }))
+          return
+        }
+      } finally {
+        // Best-effort cleanup — never fail the create because the temp body-file
+        // couldn't be removed.
+        await unlink(bodyFile).catch(() => {})
+      }
+
+      // gh prints the created PR URL on stdout, but can emit it on stderr (or
+      // split its output). Parse both streams so a stderr-only URL still yields a
+      // success. (#6934)
+      const url = extractPrUrl(stdout) || extractPrUrl(stderr)
+      if (!url) {
+        sendFn(ws, prResult({ branch, base: base || null, error: 'PR command succeeded but gh returned no pull-request URL' }))
+        return
+      }
+      sendFn(ws, prResult({ url, number: extractPrNumber(url), branch, base: base || null, error: null }))
+    } catch (err) {
+      sendFn(ws, prResult({ error: err.message || 'Failed to create pull request' }))
+    }
+  }
+
   return {
     gitStatus,
     gitBranches,
     gitStage,
     gitUnstage,
     gitCommit,
+    gitCreatePR,
   }
 }

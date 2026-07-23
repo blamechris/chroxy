@@ -24,6 +24,8 @@ export declare const ServerStreamEndSchema: z.ZodObject<{
     messageId: z.ZodString;
     serverTs: z.ZodOptional<z.ZodNumber>;
     thinking: z.ZodOptional<z.ZodBoolean>;
+    thinkingDurationMs: z.ZodOptional<z.ZodNumber>;
+    thinkingTokens: z.ZodOptional<z.ZodNumber>;
 }, z.core.$strip>;
 export declare const ServerMessageSchema: z.ZodObject<{
     type: z.ZodLiteral<"message">;

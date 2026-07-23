@@ -24,6 +24,31 @@ const ServerTsSchema = z.number().int().nonnegative().finite().optional();
 // the id is distinct from the ephemeral placeholder id `'thinking'`, the
 // client's `filterThinking` still only strips the placeholder.
 const ThinkingFlagSchema = z.boolean().optional();
+// Chat-redesign footer-stat (#6391, part of epic #6389). On a THINKING
+// `stream_end` (one tagged `thinking: true`), the server stamps the reasoning
+// block's measured elapsed wall time — ms from its first streamed token to its
+// close — so the client can render a quiet `thought for 4.2s` turn footer
+// instead of a standing "Thought" block. Bounded by the shared sane-duration
+// ceiling; `.int().nonnegative()` matches the millisecond wire convention.
+// Always optional + additive: absent on response streams, on old servers, and
+// on the synchronous fallback path where no real time elapsed. Clients degrade
+// to a bare "Thought" when it is missing.
+const ThinkingDurationMsSchema = z
+    .number()
+    .int()
+    .nonnegative()
+    .finite()
+    .max(MAX_SANE_DURATION_MS)
+    .optional();
+// Chat-redesign footer-stat (#6391) — the reasoning block's token count, shown
+// as ` · N tokens` after the duration. Optional and NOT populated by the claude
+// SDK/BYOK providers: Anthropic's usage folds thinking tokens into
+// `output_tokens` with no per-block breakdown, so there is nothing clean to
+// report (tracked as a follow-up). The field exists so a future provider that
+// DOES separate reasoning tokens (e.g. an OpenAI-compatible `reasoning_tokens`)
+// can populate it without a wire change; the footer omits the token clause when
+// it is absent rather than fabricating a number.
+const ThinkingTokensSchema = z.number().int().nonnegative().finite().optional();
 export const ServerStreamStartSchema = z.object({
     type: z.literal('stream_start'),
     messageId: z.string(),
@@ -42,6 +67,12 @@ export const ServerStreamEndSchema = z.object({
     messageId: z.string(),
     serverTs: ServerTsSchema,
     thinking: ThinkingFlagSchema,
+    // #6391 footer-stat — the reasoning block's elapsed time + (when a provider
+    // separates it) token count, carried on the THINKING stream_end so the client
+    // renders `thought for Xs · N tokens`. Both optional; see the schema
+    // definitions above for why `thinkingTokens` is absent on claude SDK/BYOK.
+    thinkingDurationMs: ThinkingDurationMsSchema,
+    thinkingTokens: ThinkingTokensSchema,
 });
 export const ServerMessageSchema = z.object({
     type: z.literal('message'),

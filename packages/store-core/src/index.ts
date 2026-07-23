@@ -353,6 +353,11 @@ export {
 export { deriveChatActivity } from './chat-activity'
 export type { ChatActivityState, SessionChatActivity, ChatActivityInput } from './chat-activity'
 
+// Chat redesign #6391 (composer state lozenge, Phase 1 deferred item): pure
+// "◐ streaming · +N queued" text formatter shared by both InputBar twins so
+// the composer copy can't drift between the dashboard and mobile app.
+export { formatComposerLozenge } from './composer-lozenge'
+
 // #4242: cheap structural gate for `JSON.parse` on streaming
 // `tool_input_delta` accumulators. Amortises N-1 throws on long
 // streams (every Bash invocation, every Edit).
@@ -388,6 +393,10 @@ export {
   toChatViewMessage,
   // #6799 — shared predicate for the global compact chat filter (mobile parity).
   isHiddenInCompactMode,
+  // #6391 — shared thinking footer-stat formatters (both clients render the
+  // same `thought for Xs · N tokens` string).
+  formatThinkingDuration,
+  formatThinkingFooter,
 } from './buildChatViewMessages'
 
 // #5793: single source of truth for "is this an AskUserQuestion teardown
@@ -446,6 +455,18 @@ export {
   findActiveMarkerIds,
   detectPasteFromDiff,
 } from './paste-text'
+
+// #6800: diff line-comment → prompt composition. Shared by the dashboard
+// DiffViewerPanel and mobile DiffViewer so inline review comments / a one-click
+// "Review code" request compose the same user turn on both clients.
+export {
+  parseHunkStartLines,
+  deriveLineNumber,
+  composeCommentReviewPrompt,
+  composeReviewRequestPrompt,
+} from './diff-comments'
+
+export type { DiffLineComment } from './diff-comments'
 
 export {
   PROVIDER_LABELS,

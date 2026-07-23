@@ -5389,6 +5389,39 @@ button.sidebar-token-view-session-row:hover {
 .input-bar[data-activity-state="waiting"] { box-shadow: inset 0 2px 0 0 var(--accent-orange); }
 .input-bar[data-activity-state="error"] { box-shadow: inset 0 2px 0 0 var(--text-error); }
 
+/* Chat redesign #6391 (composer state lozenge, Phase 1 — deferred item now
+   shipping): "◐ streaming · +2 queued" badge straddling the composer's
+   top-left edge. Absolutely positioned against `.input-bar`'s existing
+   `position: relative` so it never participates in flex layout — zero
+   layout shift in any state, matching the hairline above it. The JSX only
+   mounts this element when `formatComposerLozenge` returns non-null (never
+   at idle), so there's no `display: none` state to gate here — the color
+   rules below just tint the already-rendered badge per state, mirroring
+   the hairline's color mapping one row up so the two read as one signal. */
+.input-bar-lozenge {
+  position: absolute;
+  top: 0;
+  left: var(--space-4);
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  padding: 1px var(--space-2);
+  border-radius: var(--radius-pill);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-primary);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  line-height: 1.4;
+  white-space: nowrap;
+  pointer-events: none;
+  user-select: none;
+  z-index: 3;
+}
+.input-bar[data-activity-state="thinking"] .input-bar-lozenge { color: var(--accent-blue); border-color: var(--accent-blue); }
+.input-bar[data-activity-state="busy"] .input-bar-lozenge { color: var(--accent-purple); border-color: var(--accent-purple); }
+.input-bar[data-activity-state="waiting"] .input-bar-lozenge { color: var(--accent-orange); border-color: var(--accent-orange); }
+.input-bar[data-activity-state="error"] .input-bar-lozenge { color: var(--text-error); border-color: var(--text-error); }
+
 /* ---- File Picker ---- */
 .file-picker {
   position: absolute;
@@ -9351,6 +9384,179 @@ button.sidebar-token-view-session-row:hover {
   opacity: 0.5;
 }
 
+/* ---- #6800: inline line comments + review triggers ---- */
+/* Toolbar actions: "Submit N comments" + "Review code". */
+.diff-submit-btn,
+.diff-review-btn {
+  padding: 4px 10px;
+  font-size: var(--text-sm);
+  border: 1px solid var(--border-primary);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.diff-review-btn {
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+}
+
+.diff-review-btn:hover {
+  background: var(--bg-card);
+}
+
+.diff-submit-btn {
+  background: var(--accent-blue);
+  color: var(--text-primary);
+  border-color: var(--accent-blue);
+  font-weight: 600;
+}
+
+.diff-submit-btn:hover {
+  background: var(--accent-blue-border-strong);
+}
+
+.diff-toolbar-sent {
+  font-size: var(--text-sm);
+  font-weight: 400;
+  color: var(--accent-green);
+}
+
+/* A commentable unified line reserves a left gutter for the "+" button and
+ * keeps the prefix/content aligned with the read-only lines above it. */
+.diff-line-commentable {
+  position: relative;
+  padding-left: 34px;
+}
+
+.diff-line-comment-btn {
+  position: absolute;
+  left: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  line-height: 1;
+  border: 1px solid var(--border-secondary);
+  border-radius: 4px;
+  background: var(--bg-card);
+  color: var(--accent-blue);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.1s ease;
+}
+
+.diff-line-commentable:hover .diff-line-comment-btn,
+.diff-line-has-comment .diff-line-comment-btn,
+.diff-line-comment-btn:focus-visible {
+  opacity: 1;
+}
+
+.diff-line-has-comment {
+  box-shadow: inset 2px 0 0 0 var(--accent-blue);
+}
+
+.diff-line-comment-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 16px 6px 34px;
+  background: var(--accent-blue-light);
+  border-left: 2px solid var(--accent-blue);
+  font-size: var(--text-sm);
+}
+
+.diff-comment-note-text {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--text-primary);
+  text-align: left;
+  white-space: pre-wrap;
+  word-break: break-word;
+  cursor: pointer;
+}
+
+.diff-comment-remove {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  font-size: var(--text-xs);
+  border: 1px solid var(--border-primary);
+  border-radius: 4px;
+  background: var(--bg-primary);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.diff-comment-remove:hover {
+  color: var(--accent-red);
+  border-color: var(--accent-red-border);
+}
+
+.diff-line-comment-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 16px 8px 34px;
+  background: var(--bg-tertiary);
+  border-left: 2px solid var(--accent-blue);
+}
+
+.diff-comment-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 8px;
+  font-family: inherit;
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+  background: var(--bg-input);
+  border: 1px solid var(--border-secondary);
+  border-radius: 4px;
+  resize: vertical;
+}
+
+.diff-comment-input:focus {
+  outline: none;
+  border-color: var(--border-focus);
+}
+
+.diff-comment-editor-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.diff-comment-save {
+  padding: 4px 10px;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  border: 1px solid var(--accent-blue);
+  border-radius: 4px;
+  background: var(--accent-blue);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.diff-comment-save:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.diff-comment-cancel {
+  padding: 4px 10px;
+  font-size: var(--text-sm);
+  border: 1px solid var(--border-primary);
+  border-radius: 4px;
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
 /* ---- Git Panel (#6780) ---- */
 .git-panel {
   display: flex;
@@ -9587,6 +9793,96 @@ button.sidebar-token-view-session-row:hover {
 }
 
 .git-commit-btn:disabled { opacity: 0.5; cursor: default; }
+
+/* #6876 — in-app PR creation form. */
+.git-create-pr-btn {
+  background: var(--accent-blue);
+  color: var(--text-on-accent, #fff);
+  border-color: var(--accent-blue);
+}
+
+.git-pr-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border-bottom: 1px solid var(--border-primary);
+  background: var(--bg-secondary);
+}
+
+.git-pr-form-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.git-pr-form-title {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.git-pr-form-branchline {
+  font-size: 12px;
+  font-family: var(--font-mono, monospace);
+  color: var(--text-secondary);
+}
+
+.git-pr-input {
+  width: 100%;
+  padding: 8px 10px;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  border: 1px solid var(--border-primary);
+  border-radius: 6px;
+  font-size: 14px;
+  font-family: inherit;
+  line-height: 1.4;
+  box-sizing: border-box;
+}
+
+.git-pr-input:focus {
+  outline: none;
+  border-color: var(--accent-blue);
+}
+
+.git-pr-body {
+  min-height: 72px;
+  resize: vertical;
+}
+
+.git-pr-draft {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.git-pr-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.git-pr-submit {
+  background: var(--accent-blue);
+}
+
+.git-pr-success {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.git-pr-success a {
+  color: var(--accent-blue);
+  word-break: break-all;
+}
 
 .git-branch-row {
   display: flex;

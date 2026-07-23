@@ -5,6 +5,7 @@
  * disclosure, separate from the response-text stream.
  */
 import { describe, it, expect } from 'vitest'
+import { MAX_SANE_DURATION_MS } from '@chroxy/protocol'
 import {
   handleThinkingStreamStart,
   handleThinkingDelta,
@@ -162,5 +163,115 @@ describe('handleThinkingStreamEnd (#6756)', () => {
     const p = handleThinkingStreamEnd({ type: 'stream_end', messageId: 't0', thinking: true }, SESSION)
     expect(p.applyTo(finalised)).toBe(finalised)
     expect(p.applyTo([])).toEqual([])
+  })
+
+  // #6391 — footer-stat: the thinking stream_end carries the server-measured
+  // elapsed time (+ token count for providers that separate it).
+  it('threads thinkingDurationMs + thinkingTokens onto the bubble when the wire carries them (#6391)', () => {
+    const messages: ChatMessage[] = [
+      { id: 't0', type: 'thinking', content: 'done', thinkingStreaming: true, timestamp: 0 },
+    ]
+    const p = handleThinkingStreamEnd(
+      { type: 'stream_end', messageId: 't0', thinking: true, thinkingDurationMs: 4200, thinkingTokens: 128 },
+      SESSION,
+    )
+    const next = p.applyTo(messages)
+    expect(next[0]!.thinkingStreaming).toBe(false)
+    expect(next[0]!.thinkingDurationMs).toBe(4200)
+    expect(next[0]!.thinkingTokens).toBe(128)
+  })
+
+  it('threads duration alone when tokens are absent (claude SDK/BYOK) (#6391)', () => {
+    const messages: ChatMessage[] = [
+      { id: 't0', type: 'thinking', content: 'done', thinkingStreaming: true, timestamp: 0 },
+    ]
+    const next = handleThinkingStreamEnd(
+      { type: 'stream_end', messageId: 't0', thinking: true, thinkingDurationMs: 900 },
+      SESSION,
+    ).applyTo(messages)
+    expect(next[0]!.thinkingDurationMs).toBe(900)
+    expect(next[0]!.thinkingTokens).toBeUndefined()
+  })
+
+  it('degrades gracefully when the wire carries NO stats (old server): flips label, no stat fields (#6391)', () => {
+    const messages: ChatMessage[] = [
+      { id: 't0', type: 'thinking', content: 'done', thinkingStreaming: true, timestamp: 0 },
+    ]
+    const next = handleThinkingStreamEnd({ type: 'stream_end', messageId: 't0', thinking: true }, SESSION).applyTo(messages)
+    expect(next[0]!.thinkingStreaming).toBe(false)
+    expect(next[0]!.thinkingDurationMs).toBeUndefined()
+    expect(next[0]!.thinkingTokens).toBeUndefined()
+  })
+
+  it('floors a fractional duration and rejects a negative one (defensive re-guard) (#6391)', () => {
+    const messages: ChatMessage[] = [
+      { id: 't0', type: 'thinking', content: 'done', thinkingStreaming: true, timestamp: 0 },
+    ]
+    const next = handleThinkingStreamEnd(
+      { type: 'stream_end', messageId: 't0', thinking: true, thinkingDurationMs: 4200.9, thinkingTokens: -3 },
+      SESSION,
+    ).applyTo(messages)
+    expect(next[0]!.thinkingDurationMs).toBe(4200)
+    expect(next[0]!.thinkingTokens).toBeUndefined()
+  })
+
+  it('omits a duration that exceeds MAX_SANE_DURATION_MS while keeping in-range tokens (#6941 review)', () => {
+    // A clock jump / suspend on the measuring side could hand us a bogus
+    // multi-day duration; a malformed payload could also bypass Zod entirely.
+    // The parse helper must enforce the same ceiling the protocol schema
+    // does (ThinkingDurationMsSchema.max(MAX_SANE_DURATION_MS)) and OMIT
+    // (not clamp) the field so the footer degrades instead of showing a fake
+    // exact-24h number.
+    const messages: ChatMessage[] = [
+      { id: 't0', type: 'thinking', content: 'done', thinkingStreaming: true, timestamp: 0 },
+    ]
+    const next = handleThinkingStreamEnd(
+      {
+        type: 'stream_end',
+        messageId: 't0',
+        thinking: true,
+        thinkingDurationMs: MAX_SANE_DURATION_MS + 1,
+        thinkingTokens: 128,
+      },
+      SESSION,
+    ).applyTo(messages)
+    expect(next[0]!.thinkingDurationMs).toBeUndefined()
+    expect(next[0]!.thinkingTokens).toBe(128)
+  })
+
+  it('accepts the exact MAX_SANE_DURATION_MS boundary (#6941 review)', () => {
+    const messages: ChatMessage[] = [
+      { id: 't0', type: 'thinking', content: 'done', thinkingStreaming: true, timestamp: 0 },
+    ]
+    const next = handleThinkingStreamEnd(
+      { type: 'stream_end', messageId: 't0', thinking: true, thinkingDurationMs: MAX_SANE_DURATION_MS },
+      SESSION,
+    ).applyTo(messages)
+    expect(next[0]!.thinkingDurationMs).toBe(MAX_SANE_DURATION_MS)
+  })
+
+  it('attaches stats even when the bubble was already orphan-swept to finalised (#6391)', () => {
+    // The response-stream backstop (finalizeThinkingStreams) can flip the label
+    // before the thinking block's own stream_end lands; the late stat still sticks.
+    const swept: ChatMessage[] = [
+      { id: 't0', type: 'thinking', content: 'done', thinkingStreaming: false, timestamp: 0 },
+    ]
+    const next = handleThinkingStreamEnd(
+      { type: 'stream_end', messageId: 't0', thinking: true, thinkingDurationMs: 1500 },
+      SESSION,
+    ).applyTo(swept)
+    expect(next).not.toBe(swept)
+    expect(next[0]!.thinkingDurationMs).toBe(1500)
+  })
+
+  it('is idempotent — a replayed stream_end with identical stats is a same-reference no-op (#6391)', () => {
+    const messages: ChatMessage[] = [
+      { id: 't0', type: 'thinking', content: 'done', thinkingStreaming: false, thinkingDurationMs: 4200, thinkingTokens: 128, timestamp: 0 },
+    ]
+    const again = handleThinkingStreamEnd(
+      { type: 'stream_end', messageId: 't0', thinking: true, thinkingDurationMs: 4200, thinkingTokens: 128 },
+      SESSION,
+    ).applyTo(messages)
+    expect(again).toBe(messages)
   })
 })

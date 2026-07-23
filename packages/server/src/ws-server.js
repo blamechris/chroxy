@@ -289,6 +289,7 @@ function _isSecureRequest(req) {
  *   { type: 'get_diff', path? }                         — request git diff for working directory
  *   { type: 'git_branches' }                            — request git branch list
  *   { type: 'git_commit', message, files? }             — commit staged/specified files
+ *   { type: 'git_create_pr', title, body?, base?, draft? } — push current branch + open a PR via gh (#6876)
  *   { type: 'git_stage', files }                        — stage files for commit
  *   { type: 'git_status' }                              — request git status
  *   { type: 'git_unstage', files }                      — unstage files
@@ -422,6 +423,7 @@ function _isSecureRequest(req) {
  *   { type: 'file_list', path, files, error? }          — file listing response
  *   { type: 'git_branches_result', branches, current, error? } — git branches result
  *   { type: 'git_commit_result', success, hash?, error? }     — git commit result
+ *   { type: 'git_create_pr_result', url, number, branch, base, error } — in-app PR creation result (#6876; dashboard-only v1)
  *   { type: 'git_stage_result', success, error? }       — git stage result
  *   { type: 'git_status_result', status, error? }       — git status result
  *   { type: 'git_unstage_result', success, error? }     — git unstage result

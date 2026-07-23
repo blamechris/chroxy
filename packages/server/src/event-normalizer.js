@@ -1,7 +1,7 @@
 import { performance } from 'node:perf_hooks'
 import { toShortModelId } from './models.js'
 import { createLogger } from './logger.js'
-import { buildPermissionRequestMessage } from '@chroxy/protocol'
+import { buildPermissionRequestMessage, MAX_SANE_DURATION_MS } from '@chroxy/protocol'
 
 const log = createLogger('event-normalizer')
 
@@ -34,6 +34,28 @@ const MAX_DELTA_TOTAL_BYTES = 2 * 1024 * 1024 // 2 MB across all streams
 // the links that pay for each frame. LAN sessions keep the tight floors.
 const DEFLATE_FLUSH_INTERVAL_MS = 25 // any deflate subscriber, multi-client
 const DEFLATE_SINGLE_CLIENT_FLUSH_INTERVAL_MS = 16 // any deflate subscriber, single client
+
+/**
+ * #6941 review (Copilot) — coerce+bound a footer-stat numeric field
+ * (`thinkingDurationMs` / `thinkingTokens`) before forwarding it onto the
+ * wire. Mirrors the protocol schema's
+ * `z.number().int().nonnegative().finite()[.max(ceiling)]`: floors a stray
+ * fractional value (matches store-core's `parseFiniteNonNegIntField`, which
+ * re-guards the same field client-side) and OMITS — never clamps — when the
+ * value is negative, non-finite, or exceeds an optional ceiling. A clock
+ * jump / suspend producing a bogus multi-day duration should vanish from the
+ * footer, not render as an incorrect exact-ceiling number.
+ *
+ * @param {*} value - candidate value straight off the session event.
+ * @param {{ max?: number }} [opts] - optional upper bound (inclusive).
+ * @returns {number|undefined}
+ */
+function boundedNonNegInt(value, { max } = {}) {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return undefined
+  const floored = Math.floor(value)
+  if (typeof max === 'number' && floored > max) return undefined
+  return floored
+}
 
 /**
  * Declarative event-to-WS-message mapping.
@@ -188,8 +210,27 @@ Object.assign(EVENT_MAP, {
     // flush_deltas: thinking deltas were never buffered, and flushing here would
     // prematurely emit the response text buffer.
     if (data.thinking) {
+      // #6391 footer-stat: forward the session-measured elapsed time (+ token
+      // count when a provider supplies one — claude SDK/BYOK do not) so the
+      // client renders `thought for Xs · N tokens`. Both optional and additive;
+      // the wire schema (ServerStreamEndSchema) validates them. #6941 review
+      // (Copilot): a clock jump/suspend on the measuring side could hand us a
+      // negative or wildly-oversized duration that would otherwise slip past a
+      // bare finite-check and violate the schema's
+      // `.int().nonnegative().max(MAX_SANE_DURATION_MS)` contract if a client
+      // ever validates leniently. `boundedNonNegInt` enforces that same
+      // ceiling here (defense-in-depth) and OMITS the field outright rather
+      // than clamping — the deeper monotonic-clock fix is tracked separately
+      // (#6943).
+      const msg = { type: 'stream_end', messageId: data.messageId, thinking: true }
+      const thinkingDurationMs = boundedNonNegInt(data.thinkingDurationMs, { max: MAX_SANE_DURATION_MS })
+      if (thinkingDurationMs !== undefined) msg.thinkingDurationMs = thinkingDurationMs
+      // thinkingTokens has no protocol ceiling (ThinkingTokensSchema is
+      // int().nonnegative().finite() only) — just enforce non-negative int.
+      const thinkingTokens = boundedNonNegInt(data.thinkingTokens)
+      if (thinkingTokens !== undefined) msg.thinkingTokens = thinkingTokens
       return {
-        messages: [{ msg: { type: 'stream_end', messageId: data.messageId, thinking: true } }],
+        messages: [{ msg }],
       }
     }
     return {

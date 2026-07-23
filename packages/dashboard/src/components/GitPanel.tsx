@@ -12,10 +12,12 @@
  * and UI, following the same request/callback shape as the existing
  * DiffViewerPanel / FileBrowserPanel git-status wiring.
  *
- * Branch SWITCHING (checkout) and PR creation are NOT implemented here — no
- * wire message exists for either today (the server's createGitOps only
- * exposes status/branches/stage/unstage/commit), and the mobile app's own
- * Branches tab is read-only too. Both are follow-up work.
+ * In-app PR creation (#6876) IS implemented here: the "Create PR" toolbar
+ * action opens a title/body/base form, confirmation-gates it, and fires the
+ * git_create_pr wire message — the server pushes the current branch and shells
+ * out to `gh pr create`, returning the PR URL (or a clear error) via
+ * git_create_pr_result. Branch SWITCHING (checkout) is still follow-up work (no
+ * wire message exists for it, and the mobile app's Branches tab is read-only).
  */
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import { useConnectionStore } from '../store/connection'
@@ -26,6 +28,7 @@ import type {
   GitBranchesResult,
   GitStageResult,
   GitCommitResult,
+  GitCreatePrResult,
 } from '../store/types'
 
 type TabId = 'changes' | 'branches'
@@ -92,6 +95,8 @@ export function GitPanel() {
   const requestGitUnstage = useConnectionStore(s => s.requestGitUnstage)
   const setGitCommitCallback = useConnectionStore(s => s.setGitCommitCallback)
   const requestGitCommit = useConnectionStore(s => s.requestGitCommit)
+  const setGitCreatePrCallback = useConnectionStore(s => s.setGitCreatePrCallback)
+  const requestGitCreatePr = useConnectionStore(s => s.requestGitCreatePr)
   const connectionPhase = useConnectionStore(s => s.connectionPhase)
 
   const [activeTab, setActiveTab] = useState<TabId>('changes')
@@ -111,6 +116,16 @@ export function GitPanel() {
   // for parity with the mobile app's GitView.handleCommit (which shows an
   // Alert "Commit N staged file(s)?" before committing).
   const [commitConfirmOpen, setCommitConfirmOpen] = useState(false)
+  // #6876 — in-app PR creation form + confirmation + result state.
+  const [prFormOpen, setPrFormOpen] = useState(false)
+  const [prTitle, setPrTitle] = useState('')
+  const [prBody, setPrBody] = useState('')
+  const [prBase, setPrBase] = useState('')
+  const [prDraft, setPrDraft] = useState(false)
+  const [prSubmitting, setPrSubmitting] = useState(false)
+  const [prError, setPrError] = useState<string | null>(null)
+  const [prCreatedUrl, setPrCreatedUrl] = useState<string | null>(null)
+  const [prConfirmOpen, setPrConfirmOpen] = useState(false)
 
   // The single, DURABLE git_status_result handler. Stable identity (empty deps)
   // so the mount effect installs it exactly once, and — critically — so the
@@ -273,6 +288,62 @@ export function GitPanel() {
     }
   }, [commitMessage, staged.length, setGitCommitCallback, requestGitCommit, requestGitStatus])
 
+  // #6876 — open the Create-PR form. Prefill the title with the current branch
+  // name (a sensible default the operator can edit) and clear any prior result.
+  const openPrForm = useCallback(() => {
+    setPrError(null)
+    setPrCreatedUrl(null)
+    setPrTitle(prev => prev || branch || '')
+    setPrFormOpen(true)
+  }, [branch])
+
+  const closePrForm = useCallback(() => {
+    setPrFormOpen(false)
+    setPrConfirmOpen(false)
+  }, [])
+
+  // Create-PR submit: empty-title guard, then open the confirmation dialog
+  // (AC: the action must be confirmation-gated).
+  const handleCreatePrClick = useCallback(() => {
+    if (!prTitle.trim() || prSubmitting) return
+    setPrConfirmOpen(true)
+  }, [prTitle, prSubmitting])
+
+  // Confirmed PR creation: arms the one-shot git_create_pr_result callback,
+  // fires git_create_pr, and on success shows the PR URL. Mirrors the commit
+  // flow's not-connected guard (requestGitCreatePr returns false on a closed
+  // socket).
+  const handleCreatePrConfirmed = useCallback(() => {
+    setPrConfirmOpen(false)
+    const title = prTitle.trim()
+    if (!title) return
+    setPrError(null)
+    setPrCreatedUrl(null)
+    setPrSubmitting(true)
+    setGitCreatePrCallback((result: GitCreatePrResult) => {
+      setGitCreatePrCallback(null)
+      setPrSubmitting(false)
+      if (result.error || !result.url) {
+        setPrError(result.error || 'PR creation failed')
+        return
+      }
+      setPrCreatedUrl(result.url)
+      // Refresh branches so the just-pushed branch's remote tracking shows.
+      requestGitBranches()
+    })
+    const sent = requestGitCreatePr({
+      title,
+      body: prBody.trim() || undefined,
+      base: prBase.trim() || undefined,
+      draft: prDraft || undefined,
+    })
+    if (!sent) {
+      setGitCreatePrCallback(null)
+      setPrSubmitting(false)
+      setPrError('PR not sent — reconnect and try again')
+    }
+  }, [prTitle, prBody, prBase, prDraft, setGitCreatePrCallback, requestGitCreatePr, requestGitBranches])
+
   const hasChanges = staged.length > 0 || unstaged.length > 0 || untracked.length > 0
   const localBranches = useMemo(() => branches.filter(b => !b.isRemote), [branches])
   const remoteBranches = useMemo(() => branches.filter(b => b.isRemote), [branches])
@@ -300,11 +371,107 @@ export function GitPanel() {
           {branch && (
             <span className="git-branch-badge" title={`Branch: ${branch}`}>{branch}</span>
           )}
+          {branch && (
+            <button
+              type="button"
+              className="git-refresh-btn git-create-pr-btn"
+              onClick={() => (prFormOpen ? closePrForm() : openPrForm())}
+              title="Open a pull request for the current branch"
+              data-testid="git-create-pr-open-btn"
+            >
+              Create PR
+            </button>
+          )}
           <button type="button" className="git-refresh-btn" onClick={refreshStatus} title="Refresh git status">
             Refresh
           </button>
         </div>
       </div>
+
+      {/* #6876 — in-app PR creation form. Independent of the Changes/Branches
+          tab (it acts on the whole branch). Confirmation-gated via ConfirmDialog. */}
+      {prFormOpen && (
+        <div className="git-pr-form" data-testid="git-pr-form">
+          <div className="git-pr-form-header">
+            <span className="git-pr-form-title">Open pull request</span>
+            <span className="git-pr-form-branchline" data-testid="git-pr-headline">
+              {branch}{prBase.trim() ? ` → ${prBase.trim()}` : ''}
+            </span>
+          </div>
+          {prCreatedUrl ? (
+            <div className="git-pr-success" data-testid="git-pr-success">
+              <span>Pull request opened:</span>
+              <a href={prCreatedUrl} target="_blank" rel="noreferrer" data-testid="git-pr-url">{prCreatedUrl}</a>
+              <button type="button" className="git-section-action" onClick={closePrForm} data-testid="git-pr-done-btn">
+                Done
+              </button>
+            </div>
+          ) : (
+            <>
+              {prError && <div className="git-action-error" data-testid="git-pr-error">{prError}</div>}
+              <input
+                type="text"
+                className="git-pr-input"
+                placeholder="Pull request title"
+                value={prTitle}
+                onChange={e => setPrTitle(e.target.value)}
+                maxLength={500}
+                disabled={prSubmitting}
+                data-testid="git-pr-title-input"
+              />
+              <textarea
+                className="git-pr-input git-pr-body"
+                placeholder="Description (optional)"
+                value={prBody}
+                onChange={e => setPrBody(e.target.value)}
+                maxLength={50000}
+                disabled={prSubmitting}
+                data-testid="git-pr-body-input"
+              />
+              <input
+                type="text"
+                className="git-pr-input"
+                placeholder="Base branch (optional — defaults to the repo default)"
+                value={prBase}
+                onChange={e => setPrBase(e.target.value)}
+                maxLength={255}
+                disabled={prSubmitting}
+                data-testid="git-pr-base-input"
+              />
+              <label className="git-pr-draft">
+                <input
+                  type="checkbox"
+                  checked={prDraft}
+                  onChange={e => setPrDraft(e.target.checked)}
+                  disabled={prSubmitting}
+                  data-testid="git-pr-draft-checkbox"
+                />
+                Create as draft
+              </label>
+              <div className="git-pr-actions">
+                <button
+                  type="button"
+                  className="git-commit-btn git-pr-submit"
+                  onClick={handleCreatePrClick}
+                  disabled={!prTitle.trim() || prSubmitting}
+                  data-testid="git-pr-submit-btn"
+                >
+                  {prSubmitting ? 'Opening…' : 'Create pull request'}
+                </button>
+                <button
+                  type="button"
+                  className="git-section-action"
+                  onClick={closePrForm}
+                  disabled={prSubmitting}
+                  data-testid="git-pr-cancel-btn"
+                >
+                  Cancel
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
 
       {loading && <div className="git-loading">Loading git status...</div>}
       {!loading && error && <div className="git-error">{error}</div>}
@@ -469,6 +636,22 @@ export function GitPanel() {
         }
         onConfirm={handleCommitConfirmed}
         onCancel={() => setCommitConfirmOpen(false)}
+      />
+
+      {/* #6876 — PR-creation confirmation (AC: the action must be
+          confirmation-gated). Pushes the branch + opens the PR on confirm. */}
+      <ConfirmDialog
+        open={prConfirmOpen}
+        title="Open a pull request?"
+        confirmLabel="Create PR"
+        message={
+          <>
+            Push <b>{branch}</b> and open a pull request
+            {prBase.trim() ? <> into <b>{prBase.trim()}</b></> : <> into the default branch</>}?
+          </>
+        }
+        onConfirm={handleCreatePrConfirmed}
+        onCancel={() => setPrConfirmOpen(false)}
       />
     </div>
   )

@@ -654,6 +654,11 @@ export class SdkSession extends BaseSession {
     // maps the SDK stream event `index` → that thinking id so the thinking_delta
     // and content_block_stop events (which carry only the index) route correctly.
     const thinkingBlocks = new Map()
+    // #6391 (chat-redesign footer-stat) — thinkingId -> Date.now() when the
+    // reasoning block opened, so its content_block_stop can stamp the elapsed
+    // `thinkingDurationMs` on the thinking stream_end. Turn-local; entries are
+    // deleted alongside thinkingBlocks when the block closes.
+    const thinkingStartMs = new Map()
     let thinkingBlockCount = 0
     let didStreamThinking = false
 
@@ -932,6 +937,9 @@ export class SdkSession extends BaseSession {
                   if (!thinkingId) {
                     thinkingId = `${messageId}-thinking-${thinkingBlockCount++}`
                     thinkingBlocks.set(event.index, thinkingId)
+                    // #6391 footer-stat: mark the block's start for the
+                    // content_block_stop elapsed-time computation.
+                    thinkingStartMs.set(thinkingId, Date.now())
                     this.emit('stream_start', { messageId: thinkingId, thinking: true })
                   }
                   didStreamThinking = true
@@ -973,6 +981,9 @@ export class SdkSession extends BaseSession {
                   if (!thinkingId) {
                     thinkingId = `${messageId}-thinking-${thinkingBlockCount++}`
                     thinkingBlocks.set(event.index, thinkingId)
+                    // #6391 footer-stat: mark the block's start (lazy-open path)
+                    // for the content_block_stop elapsed-time computation.
+                    thinkingStartMs.set(thinkingId, Date.now())
                     this.emit('stream_start', { messageId: thinkingId, thinking: true })
                   }
                   didStreamThinking = true
@@ -988,7 +999,18 @@ export class SdkSession extends BaseSession {
                 const thinkingId = thinkingBlocks.get(event.index)
                 if (thinkingId) {
                   thinkingBlocks.delete(event.index)
-                  this.emit('stream_end', { messageId: thinkingId, thinking: true })
+                  // #6391 footer-stat: elapsed wall time from the block's open to
+                  // now → the client's `thought for Xs` footer. Omit when the
+                  // start wasn't tracked (defensive) so we never send a bogus 0.
+                  // No token count: Anthropic's usage folds thinking tokens into
+                  // output_tokens with no per-block breakdown (see follow-up).
+                  const startMs = thinkingStartMs.get(thinkingId)
+                  thinkingStartMs.delete(thinkingId)
+                  const streamEndMsg = { messageId: thinkingId, thinking: true }
+                  if (typeof startMs === 'number') {
+                    streamEndMsg.thinkingDurationMs = Math.max(0, Date.now() - startMs)
+                  }
+                  this.emit('stream_end', streamEndMsg)
                 }
                 break
               }
