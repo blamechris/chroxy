@@ -139,3 +139,99 @@ describe('CodexSession/CodexAppServerSession getCodexSandbox() (#6901)', () => {
     assert.equal(typeof CodexAppServerSession.prototype.getCodexSandbox, 'function')
   })
 })
+
+// #6929 review — a codex thread's sandbox is chosen ONCE (at construction for the
+// exec-based CodexSession, at thread/start for CodexAppServerSession) and cannot
+// change without a new session/thread. getCodexSandbox() used to re-resolve
+// CHROXY_CODEX_SANDBOX at CALL time, so listSessions() could DISPLAY a sandbox
+// that no longer matches what the already-running session actually got if the
+// env changed mid-session. These pin the fix: the value is captured once and
+// stays fixed even when the env changes afterward.
+describe('getCodexSandbox() is fixed at start, not re-resolved on env change (#6929)', () => {
+  it('CodexSession: captured at construction; a later env change does not drift it', () => {
+    const prev = process.env.CHROXY_CODEX_SANDBOX
+    process.env.CHROXY_CODEX_SANDBOX = 'read-only'
+    try {
+      const s = new CodexSession({ cwd: '/tmp' })
+      assert.equal(s.getCodexSandbox(), 'read-only', 'resolved from the env at construction time')
+
+      process.env.CHROXY_CODEX_SANDBOX = 'danger-full-access'
+      assert.equal(s.getCodexSandbox(), 'read-only',
+        'still the value resolved at construction — must not drift with the env')
+    } finally {
+      if (prev === undefined) delete process.env.CHROXY_CODEX_SANDBOX
+      else process.env.CHROXY_CODEX_SANDBOX = prev
+    }
+  })
+
+  it('CodexSession: a per-session override is likewise fixed at construction', () => {
+    const prev = process.env.CHROXY_CODEX_SANDBOX
+    try {
+      const s = new CodexSession({ cwd: '/tmp', codexSandbox: 'workspace-write' })
+      assert.equal(s.getCodexSandbox(), 'workspace-write')
+
+      process.env.CHROXY_CODEX_SANDBOX = 'read-only' // env changes after the fact
+      assert.equal(s.getCodexSandbox(), 'workspace-write', 'per-session override still wins, unchanged')
+    } finally {
+      if (prev === undefined) delete process.env.CHROXY_CODEX_SANDBOX
+      else process.env.CHROXY_CODEX_SANDBOX = prev
+    }
+  })
+
+  it('CodexSession: the value stays fixed across turns too (_buildArgs reuses the stored value)', () => {
+    const prev = process.env.CHROXY_CODEX_SANDBOX
+    process.env.CHROXY_CODEX_SANDBOX = 'read-only'
+    try {
+      const s = new CodexSession({ cwd: '/tmp' })
+      const argsBefore = s._buildArgs('hello')
+      assert.ok(argsBefore.includes('read-only'), 'first turn spawns with the construction-time value')
+
+      process.env.CHROXY_CODEX_SANDBOX = 'danger-full-access'
+      const argsAfter = s._buildArgs('hello again')
+      assert.ok(argsAfter.includes('read-only'), 'later turn still spawns with the ORIGINAL value, not the new env')
+      assert.equal(s.getCodexSandbox(), 'read-only')
+    } finally {
+      if (prev === undefined) delete process.env.CHROXY_CODEX_SANDBOX
+      else process.env.CHROXY_CODEX_SANDBOX = prev
+    }
+  })
+
+  it('CodexAppServerSession: pre-start getCodexSandbox() live-resolves (no thread yet to drift from)', () => {
+    const prev = process.env.CHROXY_CODEX_SANDBOX
+    process.env.CHROXY_CODEX_SANDBOX = 'read-only'
+    try {
+      const s = new CodexAppServerSession({ cwd: '/tmp' })
+      assert.equal(s._resolvedCodexSandbox, null, 'nothing captured yet — start() has not run')
+      assert.equal(s.getCodexSandbox(), 'read-only', 'pre-start falls back to a live resolve')
+    } finally {
+      if (prev === undefined) delete process.env.CHROXY_CODEX_SANDBOX
+      else process.env.CHROXY_CODEX_SANDBOX = prev
+    }
+  })
+
+  // start() itself spawns a real `codex app-server` child process (via
+  // CodexAppServerClient.initialize()), so it isn't exercised directly in this
+  // unit suite (no codex binary in CI). What IS under test here is the actual
+  // fix: start()'s FIRST statement is
+  //   `this._resolvedCodexSandbox = resolveCodexSandbox(this._codexSandbox)`
+  // (see codex-app-server-session.js) — i.e. the resolve+store happens before
+  // anything else, at the exact `thread/start` apply site. This reproduces
+  // that assignment (the one line start() runs for sandbox purposes) and then
+  // asserts getCodexSandbox() reads the STORED value, not a live re-resolve.
+  it('CodexAppServerSession: captured at start(); a later env change does not drift it', () => {
+    const prev = process.env.CHROXY_CODEX_SANDBOX
+    process.env.CHROXY_CODEX_SANDBOX = 'read-only'
+    try {
+      const s = new CodexAppServerSession({ cwd: '/tmp' })
+      s._resolvedCodexSandbox = resolveCodexSandbox(s._codexSandbox) // start()'s apply-site line
+      assert.equal(s.getCodexSandbox(), 'read-only', 'resolved at "start" time')
+
+      process.env.CHROXY_CODEX_SANDBOX = 'danger-full-access'
+      assert.equal(s.getCodexSandbox(), 'read-only',
+        'still the value resolved at start — must not drift with the env')
+    } finally {
+      if (prev === undefined) delete process.env.CHROXY_CODEX_SANDBOX
+      else process.env.CHROXY_CODEX_SANDBOX = prev
+    }
+  })
+})

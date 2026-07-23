@@ -527,20 +527,29 @@ export class CodexSession extends JsonlSubprocessSession {
     // #6638: per-session sandbox override — honored on the exec path too, so a
     // read-only/full-access session isn't a silent no-op under CHROXY_CODEX_APPSERVER=0.
     this._codexSandbox = opts.codexSandbox || null
+    // #6929 review — resolve ONCE here rather than on every `_buildArgs`/
+    // `getCodexSandbox()` call. `opts.codexSandbox` is fixed for the life of this
+    // session and nothing between construction and the first spawn can change it,
+    // so resolving now and reusing the stored value keeps every turn's `--sandbox`
+    // AND the displayed `getCodexSandbox()` value in permanent agreement — a later
+    // `CHROXY_CODEX_SANDBOX` env change can no longer retroactively change what a
+    // running session reports (display/reality drift).
+    this._resolvedCodexSandbox = resolveCodexSandbox(this._codexSandbox)
   }
 
   /**
    * #6901: the ACTIVE/resolved sandbox mode this session runs under, so
    * `SessionManager.listSessions()` can surface it in `session_list`
-   * (`SessionInfo.codexSandbox`) for a running codex session. Resolves the
-   * per-session override against `CHROXY_CODEX_SANDBOX`/the default via the same
-   * `resolveCodexSandbox` the spawn path uses — always one of
-   * `CODEX_SANDBOX_MODES`. Display-only: a mid-session change needs a new session
-   * (Codex applies `--sandbox` once at thread start).
+   * (`SessionInfo.codexSandbox`) for a running codex session. #6929 review:
+   * returns the value resolved ONCE at construction (see ctor) instead of
+   * re-resolving `CHROXY_CODEX_SANDBOX` on every call, so a later env change
+   * can't make the display drift from what this session's turns actually spawn
+   * with. Display-only: a mid-session change needs a new session (Codex
+   * applies `--sandbox` fresh per turn here, but always with this same value).
    * @returns {string} one of CODEX_SANDBOX_MODES
    */
   getCodexSandbox() {
-    return resolveCodexSandbox(this._codexSandbox)
+    return this._resolvedCodexSandbox
   }
 
   // ------------------------------------------------------------------
@@ -548,7 +557,7 @@ export class CodexSession extends JsonlSubprocessSession {
   // ------------------------------------------------------------------
 
   _buildArgs(text) {
-    return buildCodexArgs(text, this.model, this.resumeSessionId, this._codexSandbox)
+    return buildCodexArgs(text, this.model, this.resumeSessionId, this._resolvedCodexSandbox)
   }
 
   _buildChildEnv() {
