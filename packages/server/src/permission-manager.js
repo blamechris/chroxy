@@ -498,7 +498,17 @@ function isProtectedPathValue(target, base, secretsOnly = false) {
   // lexically-clean target (the common benign case), so the fs cost is a couple
   // of realpath/lstat walks per otherwise-auto-approved permission check.
   try {
-    const realBase = realpathDeepestAncestorSync(resolve(base))
+    // Pass `base` DIRECTLY — never `resolve(base)`. `realpathDeepestAncestorSync`
+    // REQUIRES an absolute path and THROWS on a relative one; that guard exists
+    // precisely so a relative base can't be silently reframed against the SERVER
+    // process cwd (`process.cwd()`) — the WRONG root (the floor must be anchored
+    // on the SESSION's cwd). In normal operation `base` IS absolute (the session
+    // cwd from the WS client / a worktree dir / the process.cwd() fallback), so
+    // this is a no-op; a relative/malformed base hits the throw and FAILS CLOSED
+    // (caught below → return true → force the prompt) instead of resolving
+    // against process.cwd(). Wrapping in resolve() would defeat BOTH the guard
+    // and the wrong-root framing it protects against.
+    const realBase = realpathDeepestAncestorSync(base)
     // Pass the RAW `target` (its `..` intact) to the component walker, so a `..`
     // after a symlinked component climbs from the symlink's TARGET, not its
     // lexical parent. Do NOT pre-resolve() it — that would collapse the `..`.

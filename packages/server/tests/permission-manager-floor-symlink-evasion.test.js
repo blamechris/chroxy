@@ -302,4 +302,54 @@ describe('protected-path floor resolves symlinks (#6851)', () => {
       pm.destroy()
     }
   })
+
+  // ==========================================================================
+  // PR #6920 review (Copilot) — the SYMLINK pass must NEVER frame the floor
+  // against the SERVER process cwd. It resolves the real base via
+  // `realpathDeepestAncestorSync(base)`, whose absolute-path guard THROWS on a
+  // relative base — so a relative/`..`-laden session cwd (a defensive edge the
+  // codebase guards against elsewhere, e.g. audit-key normalization) FAILS
+  // CLOSED (the target is treated as protected → prompt) instead of being
+  // silently reframed against `process.cwd()` (the WRONG root). Wrapping `base`
+  // in `resolve()` would coerce a relative base against process.cwd() and defeat
+  // that guard; these tests pin the fail-closed behavior.
+  // ==========================================================================
+
+  it('FAILS CLOSED on a RELATIVE base: a lexically-benign target under a relative session cwd is floored, not framed against process.cwd()', () => {
+    // The target has no protected segment, so the LEXICAL pass cannot flag it —
+    // the flooring here comes purely from the symlink pass fail-closing on the
+    // relative base (`realpathDeepestAncestorSync` throws EINVAL on a non-absolute
+    // path). A deterministic assertion: it does not depend on process.cwd().
+    const relativeCwd = 'relative/session/dir'
+
+    assert.equal(
+      isProtectedPathTarget({ file_path: 'foo.js' }, relativeCwd),
+      true,
+      'a relative base must fail closed (protected), never resolve against process.cwd()',
+    )
+    // The read/credential floor takes the same base → same fail-closed outcome.
+    assert.equal(
+      isSecretReadTarget({ file_path: 'foo.js' }, relativeCwd),
+      true,
+      'the read floor must also fail closed on a relative base',
+    )
+  })
+
+  it('FAILS CLOSED on a `..`-laden relative base too (still non-absolute → guard throws)', () => {
+    assert.equal(
+      isProtectedPathTarget({ file_path: 'foo.js' }, '../up/one/dir'),
+      true,
+      'a `..`-laden relative base is still non-absolute and must fail closed',
+    )
+  })
+
+  it('CONTRAST: an ABSOLUTE base with the same benign target is NOT floored (proves the relative base is what fails closed)', () => {
+    // The same benign target under an absolute, real, existing cwd stays
+    // unfloored — the 14 absolute-base fixtures are unaffected by the fix.
+    assert.equal(
+      isProtectedPathTarget({ file_path: 'foo.js' }, root),
+      false,
+      'an absolute existing base resolves normally and a benign target is not floored',
+    )
+  })
 })
