@@ -141,7 +141,13 @@ describe('permission_expired end-to-end broadcast (#2831)', () => {
 
       const tmpState = `/tmp/chroxy-permexp-${Date.now()}-${Math.random()}.json`
       const sm = new SessionManager({ skipPreflight: true,
-        provider: 'fake-permexp',
+        // providerType (NOT provider) is the SessionManager ctor opt that sets
+        // the default provider for createSession(). Passing `provider` here was
+        // silently ignored, so createSession() fell back to DEFAULT_PROVIDER
+        // (claude-tui) and spawned a REAL `claude` PTY (node-pty tty.ReadStream)
+        // that was never torn down — leaking a live handle that kept the test
+        // worker alive and hung the suite when run without --test-force-exit.
+        providerType: 'fake-permexp',
         stateFilePath: tmpState,
         persistenceDebounceMs: 0,
       })
@@ -165,7 +171,7 @@ describe('permission_expired end-to-end broadcast (#2831)', () => {
       assert.equal(events[0].sessionId, sessionId)
       assert.equal(events[0].data.requestId, 'req-prox')
 
-      sm.destroy?.()
+      sm.destroySession(sessionId)
     })
   })
 })
