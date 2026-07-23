@@ -558,8 +558,13 @@ function MessageBubbleImpl({ message, queued, onCancelQueued, onEditQueued, onSe
           {onEditQueued && (
             <TouchableOpacity
               onPress={() => onEditQueued(message.id, typeof message.content === 'string' ? message.content : '')}
-              // #6628 — same ~44pt tap target as the cancel control.
-              hitSlop={{ top: 14, bottom: 14, left: 12, right: 12 }}
+              // #6628 — ~44pt tap target (vertical via top/bottom:14). Horizontal
+              // hitSlop is ASYMMETRIC so Edit's and Cancel's enlarged targets don't
+              // overlap across the row's 10pt gap and dispatch ambiguously: Edit
+              // grows LEFT (toward the label), Cancel grows RIGHT (toward the edge),
+              // and the facing edges stay small (3 + 3 < 10) so a tap can't hit the
+              // wrong — and Cancel is destructive — control.
+              hitSlop={{ top: 14, bottom: 14, left: 12, right: 3 }}
               accessibilityRole="button"
               accessibilityLabel="Edit queued message"
               testID={`msg-queued-edit-${message.id}`}
@@ -572,7 +577,10 @@ function MessageBubbleImpl({ message, queued, onCancelQueued, onEditQueued, onSe
               onPress={() => onCancelQueued(message.id)}
               // #5938 — pad the tap target to ~44pt (iOS HIG): the "Cancel"
               // text is ~16pt tall, so ≥14pt of vertical hitSlop clears the bar.
-              hitSlop={{ top: 14, bottom: 14, left: 12, right: 12 }}
+              // #6628 — asymmetric horizontal hitSlop (small LEFT toward Edit,
+              // full RIGHT toward the edge) so this destructive control's target
+              // doesn't overlap Edit's across the 10pt gap.
+              hitSlop={{ top: 14, bottom: 14, left: 3, right: 12 }}
               accessibilityRole="button"
               accessibilityLabel="Cancel queued message"
               testID={`msg-queued-cancel-${message.id}`}
