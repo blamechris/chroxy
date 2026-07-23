@@ -5665,7 +5665,18 @@ button.sidebar-token-view-session-row:hover {
   position: relative;
   flex: 1;
   display: flex;
-  min-width: 0;
+  /* #6624 — usable minimum width. `.input-bar` is a `flex-wrap: wrap` row and
+   * `.input-bar-actions` is `flex-shrink: 0` (keyhint + mic + Evaluate +
+   * Send/Stop), so a bare `min-width: 0` here let the textarea collapse to a
+   * 1–2-word-wide column on a narrow composer (resized window / narrow session
+   * pane) while the actions kept their full width. Flooring the wrap at a
+   * readable minimum makes the actions wrap onto their own line instead of
+   * squeezing the input; the `100%` cap keeps the floor from overflowing panes
+   * narrower than the minimum (the wrap then takes the full row and actions
+   * wrap below — no horizontal scroll). Overlay-safe: the #4306 overlay is
+   * `inset: 0` inside this wrap and the textarea is `flex: 1` filling it, so
+   * both share the same box at any width and stay pixel-aligned. */
+  min-width: min(200px, 100%);
 }
 
 .input-bar-textarea-wrap > textarea {
