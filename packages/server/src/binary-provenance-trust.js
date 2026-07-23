@@ -61,9 +61,10 @@ export function _normalizeKey(absPath) {
 
 /**
  * In-memory + on-disk pin ledger for spawned provider binaries. One instance per
- * daemon (constructed by SessionManager); the cloudflared spawn path constructs
- * a second instance over the SAME default file so pins are unified. Tests pass an
- * explicit `filePath` so they never touch the real ledger.
+ * daemon, constructed by SessionManager; that SAME instance is threaded into the
+ * tunnel config (server-cli.js → `binaryProvenance.ledger`) so the cloudflared
+ * gate and the provider spawns share one ledger and one set of pins — no second
+ * instance. Tests pass an explicit `filePath` so they never touch the real ledger.
  */
 export class BinaryProvenanceLedger extends PathHashTrustLedger {
   /**

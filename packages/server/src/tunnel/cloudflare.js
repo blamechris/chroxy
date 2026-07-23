@@ -68,6 +68,12 @@ export class CloudflareTunnelAdapter extends BaseTunnelAdapter {
     this._resolveBinary = resolveBinary
     this._verifyBinary = verifyBinary
     this._verifyProvenance = verifyProvenance
+    // #6937: the EXACT absolute cloudflared path the provenance gate resolved +
+    // verified, pinned so the spawn execs the same bytes we checked even if PATH
+    // changes between verify and spawn. null when the gate is off or the binary
+    // didn't resolve/verify — the spawn then falls back to the bare name and the
+    // normal ENOENT/doctor path, so default (feature-off) behaviour is unchanged.
+    this._resolvedCloudflaredPath = null
   }
 
   static get name() {
@@ -108,7 +114,12 @@ export class CloudflareTunnelAdapter extends BaseTunnelAdapter {
 
   /** Override point for test injection */
   _spawnCloudflared(argv, spawnOpts) {
-    return spawn('cloudflared', argv, spawnOpts)
+    // Spawn the EXACT verified absolute path when the provenance gate pinned one
+    // (#6937), so a PATH change between verify and spawn can't swap in a different
+    // binary than the one we checked. Falls back to the bare name when the gate is
+    // off / the binary didn't resolve — preserving default (feature-off) behaviour.
+    const bin = this._resolvedCloudflaredPath || 'cloudflared'
+    return spawn(bin, argv, spawnOpts)
   }
 
   /**
@@ -125,6 +136,11 @@ export class CloudflareTunnelAdapter extends BaseTunnelAdapter {
    * proceeds.
    */
   _verifyCloudflaredProvenance() {
+    // Clear any path pinned by a previous start attempt up front, so if the gate
+    // is now off — or the binary has since become unresolvable/unhealthy — the
+    // spawn falls back to the bare name instead of exec'ing a stale absolute path.
+    this._resolvedCloudflaredPath = null
+
     const prov = this.config && this.config.binaryProvenance
     const enabled = prov
       && (prov.mode === 'warn' || prov.mode === 'block' || prov.signatureGate === true)
@@ -156,6 +172,11 @@ export class CloudflareTunnelAdapter extends BaseTunnelAdapter {
     ) {
       log.warn(`cloudflared provenance ${verdict.status}: ${verdict.message || ''} (allowed — mode=${prov.mode})`)
     }
+
+    // Provenance passed (or a warn-mode issue was surfaced + allowed): pin the
+    // EXACT absolute path we just verified so _spawnCloudflared execs those bytes,
+    // not whatever `cloudflared` resolves to off PATH at spawn time (#6937).
+    this._resolvedCloudflaredPath = health.path
   }
 
   async _startTunnel() {
