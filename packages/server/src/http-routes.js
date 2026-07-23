@@ -596,6 +596,64 @@ export function createHttpHandler(server) {
       return
     }
 
+    // Paired-devices roster + live revoke (#6678, part of epic #6597). The
+    // dashboard "Paired devices" panel lists the RUNNING daemon's paired
+    // session tokens (wire-safe ids, bound session, age — never token material)
+    // and revokes them live: unlike `chroxy tokens revoke` (which edits the
+    // persisted store and needs a daemon restart), these hit PairingManager's
+    // in-memory map so the device's next auth fails immediately.
+    //
+    // PRIMARY-token only on ALL THREE. The roster is host-level pairing state —
+    // a scoped/paired device must neither enumerate its siblings (information
+    // disclosure) nor revoke them (a host-level mutation beyond one session's
+    // scope). Mirrors the DELETE /api/snapshots gate; see
+    // docs/security/bearer-token-authority.md §9.
+    if (req.method === 'GET' && snapPath === '/api/paired-devices') {
+      if (!server._validatePrimaryBearerAuth(req, res)) return
+      const pm = server._pairingManager
+      const devices = pm && typeof pm.listSessionTokens === 'function' ? pm.listSessionTokens() : []
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ devices }))
+      return
+    }
+
+    // Revoke ALL paired devices — the panic button. Exact-path match (no id), so
+    // it never collides with the per-device DELETE below.
+    if (req.method === 'DELETE' && snapPath === '/api/paired-devices') {
+      if (!server._validatePrimaryBearerAuth(req, res)) return
+      const pm = server._pairingManager
+      const revoked = pm && typeof pm.revokeAllSessionTokens === 'function' ? pm.revokeAllSessionTokens() : 0
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ ok: true, revoked }))
+      return
+    }
+
+    // Revoke ONE paired device by its wire id (from GET /api/paired-devices).
+    if (req.method === 'DELETE' && snapPath.startsWith('/api/paired-devices/')) {
+      if (!server._validatePrimaryBearerAuth(req, res)) return
+      const rawId = snapPath.slice('/api/paired-devices/'.length)
+      let id
+      try {
+        id = decodeURIComponent(rawId)
+      } catch {
+        res.writeHead(400, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'invalid id encoding' }))
+        return
+      }
+      const pm = server._pairingManager
+      const revoked = pm && typeof pm.revokeSessionTokenById === 'function' ? pm.revokeSessionTokenById(id) : 0
+      if (revoked === 0) {
+        // The device is already gone (revoked elsewhere, expired, or a stale id
+        // from a device that re-paired). 404 so the UI can reconcile its list.
+        res.writeHead(404, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'no such paired device', revoked: 0 }))
+        return
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ ok: true, revoked }))
+      return
+    }
+
     // docker-byok pool stats endpoint (#5053). Returns a rolling
     // observability snapshot — hit/miss counters, hit rate,
     // eviction-by-reason, the recent-evictions tail, and the live per-key

@@ -97,6 +97,7 @@ import { ConsolePage } from './components/ConsolePage'
 import { SnapshotsPanel } from './components/SnapshotsPanel'
 import { PoolStatsPanel } from './components/PoolStatsPanel'
 import { PagesPanel } from './components/PagesPanel'
+import { PairedDevicesPanel } from './components/PairedDevicesPanel'
 import { type RepoInvestigateRequest, type RepoOpenSessionRequest } from './components/ControlRoomSection'
 import { ControlRoomView } from './components/ControlRoomView'
 import { AppModals } from './components/AppModals'
@@ -2541,6 +2542,9 @@ export function App() {
                 )}
                 {viewMode === 'pages' && connectionPhase !== 'connecting' && !isSwitchingSession && (
                   <PagesPanel />
+                )}
+                {viewMode === 'devices' && connectionPhase !== 'connecting' && !isSwitchingSession && (
+                  <PairedDevicesPanel />
                 )}
                 {/* #5204 — the Control Room moved out of the per-session view
                     area into a dedicated top-level tab (rendered above). */}

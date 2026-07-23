@@ -8,7 +8,7 @@
  * Recently-refreshed IDs remain valid until their TTL expires (grace period).
  */
 import { EventEmitter } from 'events'
-import { randomBytes, timingSafeEqual } from 'crypto'
+import { randomBytes, timingSafeEqual, createHash } from 'crypto'
 import { createLogger } from './logger.js'
 
 const log = createLogger('pairing')
@@ -410,6 +410,86 @@ export class PairingManager extends EventEmitter {
   getSessionIdForToken(token) {
     const meta = this._lookupToken(token)
     return meta ? (meta.sessionId || null) : null
+  }
+
+  /**
+   * A stable, non-reversible identifier for a session token, safe to put on the
+   * wire — the operator UI needs a handle to name a device for revoke, but the
+   * token itself must never leave the daemon (#6678). Deterministic (so a
+   * list → revoke round-trip resolves the same token) and one-way (a SHA-256
+   * digest discloses nothing about the token). 16 hex chars ≈ 64 bits — no
+   * collision risk across the ≤100-token cap.
+   * @param {string} token
+   * @returns {string}
+   */
+  _deviceIdForToken(token) {
+    return createHash('sha256').update(token).digest('hex').slice(0, 16)
+  }
+
+  /**
+   * Live snapshot of the paired-device session tokens for an operator surface
+   * (#6678 — the dashboard Paired Devices panel). Sweeps expired tokens first so
+   * the roster is current, then maps each surviving token to a wire-safe view:
+   * a stable non-reversible id (NEVER the token itself), its bound sessionId
+   * (null = unbound / full-access, like a linking-mode QR pairing), when it was
+   * minted or last refreshed (createdAt slides on each connect), the derived age,
+   * and an optional device label (not captured yet — the deviceName follow-up).
+   * @returns {Array<{ id: string, sessionId: string|null, createdAt: number|null, ageMs: number|null, deviceName: string|null }>}
+   */
+  listSessionTokens() {
+    this._sweepSessionTokens()
+    const now = Date.now()
+    const out = []
+    for (const [token, meta] of this._sessionTokens) {
+      const createdAt = typeof meta.createdAt === 'number' ? meta.createdAt : null
+      out.push({
+        id: this._deviceIdForToken(token),
+        sessionId: (typeof meta.sessionId === 'string' && meta.sessionId) || null,
+        createdAt,
+        ageMs: createdAt !== null ? now - createdAt : null,
+        deviceName: typeof meta.deviceName === 'string' ? meta.deviceName : null,
+      })
+    }
+    return out
+  }
+
+  /**
+   * Live-revoke a single paired device by its wire id (from listSessionTokens).
+   * Drops the token from the RUNNING daemon's in-memory map and persists, so the
+   * device's next auth fails immediately — no restart required. This closes the
+   * gap the `chroxy tokens revoke` CLI left (it edits the persisted store only,
+   * which a running daemon overwrites from memory until restarted). Comparing
+   * derived ids (not the token) needs no constant-time guard — the id is not
+   * secret. Returns the count removed (0 = no device with that id).
+   * @param {string} id
+   * @returns {number}
+   */
+  revokeSessionTokenById(id) {
+    if (this._destroyed || typeof id !== 'string' || id.length === 0) return 0
+    for (const token of this._sessionTokens.keys()) {
+      if (this._deviceIdForToken(token) === id) {
+        this._sessionTokens.delete(token)
+        this._persistSessionTokens()
+        return 1
+      }
+    }
+    return 0
+  }
+
+  /**
+   * Live-revoke EVERY paired device — the operator panic button (#6678). Clears
+   * the in-memory map and persists, so all paired devices must re-pair; effective
+   * on the running daemon (their next auth fails), no restart. Returns the count
+   * removed.
+   * @returns {number}
+   */
+  revokeAllSessionTokens() {
+    if (this._destroyed) return 0
+    const n = this._sessionTokens.size
+    if (n === 0) return 0
+    this._sessionTokens.clear()
+    this._persistSessionTokens()
+    return n
   }
 
   /**

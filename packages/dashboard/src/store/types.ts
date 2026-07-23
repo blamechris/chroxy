@@ -1445,7 +1445,7 @@ export interface ConnectionState {
 
   // View mode. #5204 — 'control-room' removed: the Control Room is now a
   // session-independent top-level tab in App, not a per-session view mode.
-  viewMode: 'chat' | 'terminal' | 'files' | 'diff' | 'git' | 'system' | 'console' | 'snapshots' | 'pool' | 'pages';
+  viewMode: 'chat' | 'terminal' | 'files' | 'diff' | 'git' | 'system' | 'console' | 'snapshots' | 'pool' | 'pages' | 'devices';
 
   // Input settings
   inputSettings: InputSettings;
@@ -1464,7 +1464,7 @@ export interface ConnectionState {
   disconnect: () => void;
   loadSavedConnection: () => void;
   clearSavedConnection: () => void;
-  setViewMode: (mode: 'chat' | 'terminal' | 'files' | 'diff' | 'git' | 'system' | 'console' | 'snapshots' | 'pool' | 'pages') => void;
+  setViewMode: (mode: 'chat' | 'terminal' | 'files' | 'diff' | 'git' | 'system' | 'console' | 'snapshots' | 'pool' | 'pages' | 'devices') => void;
   addMessage: (message: ChatMessage) => void;
   addUserMessage: (text: string, attachments?: MessageAttachment[], opts?: { clientMessageId?: string; queued?: boolean }) => void;
   appendTerminalData: (data: string) => void;

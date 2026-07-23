@@ -103,7 +103,7 @@ const MAX_TERMINAL_SIZE = 50_000;
 // Containers section. A persisted 'environments' viewMode no longer validates
 // and falls back to the default, so a carried-over value can't render a
 // now-removed surface.
-const VALID_VIEW_MODES = ['chat', 'terminal', 'files', 'diff', 'git', 'system', 'console', 'snapshots', 'pool', 'pages'] as const;
+const VALID_VIEW_MODES = ['chat', 'terminal', 'files', 'diff', 'git', 'system', 'console', 'snapshots', 'pool', 'pages', 'devices'] as const;
 type ViewMode = (typeof VALID_VIEW_MODES)[number];
 
 function sessionMessagesKey(sessionId: string): string {
