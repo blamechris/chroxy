@@ -258,9 +258,20 @@ function _summariseClassification(classifications) {
  *
  * The lookup is bounded by `timeoutMs` (#6852): resolveTrustAddress runs under
  * the fleet's trust-store lock, so a hanging resolver must not stall the prompt
- * or the lock — a timeout falls back to 'could not resolve host'.
+ * or the lock — a timeout falls back to 'could not resolve host'. The timer
+ * itself is injectable via `setTimer`/`clearTimer` (default node globals) so a
+ * test can drive the timeout deterministically — firing it by hand instead of
+ * waiting on the wall clock (#6908) — with no real DNS and no real timer.
  */
-export async function resolveTrustAddress(url, { lookup = dnsLookup, timeoutMs = DEFAULT_TRUST_DNS_TIMEOUT_MS } = {}) {
+export async function resolveTrustAddress(
+  url,
+  {
+    lookup = dnsLookup,
+    timeoutMs = DEFAULT_TRUST_DNS_TIMEOUT_MS,
+    setTimer = setTimeout,
+    clearTimer = clearTimeout,
+  } = {},
+) {
   const miss = (hostname = null) => ({
     resolved: false,
     hostname,
@@ -300,9 +311,10 @@ export async function resolveTrustAddress(url, { lookup = dnsLookup, timeoutMs =
     // promise, so a late rejection from the loser stays handled. The timer is
     // NOT unref'd — it is always cleared in `finally` once the race settles, so
     // it never outlives this (awaited) resolution, and keeping the loop alive
-    // while we resolve is the intended behaviour.
+    // while we resolve is the intended behaviour. `setTimer`/`clearTimer` are
+    // injectable (default globals) so a test drives the timeout deterministically.
     const timeoutArm = new Promise((resolve) => {
-      timer = setTimeout(() => resolve(_LOOKUP_TIMEOUT), timeoutMs)
+      timer = setTimer(() => resolve(_LOOKUP_TIMEOUT), timeoutMs)
     })
     const addrs = await Promise.race([lookup(bare, { all: true }), timeoutArm])
     if (addrs === _LOOKUP_TIMEOUT) return miss(hostname)
@@ -322,7 +334,7 @@ export async function resolveTrustAddress(url, { lookup = dnsLookup, timeoutMs =
   } catch {
     return miss(hostname)
   } finally {
-    clearTimeout(timer)
+    clearTimer(timer)
   }
 }
 
