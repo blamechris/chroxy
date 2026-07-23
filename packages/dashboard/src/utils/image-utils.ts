@@ -176,6 +176,8 @@ export const THUMBNAIL_MAX_EDGE = 256
  * only a few MB per origin and we persist up to MAX_MESSAGES per session, so the
  * per-image preview must stay small. ~20 KB of base64 ≈ a 256px JPEG. This is
  * the explicit bound: any preview URI longer than this is stripped, not stored.
+ * Bounds are checked with `uri.length`, which equals the byte count here because
+ * a base64 `data:` URI is pure ASCII (no multi-byte chars) — so "_BYTES" is exact.
  */
 export const THUMBNAIL_MAX_BYTES = 20 * 1024
 
