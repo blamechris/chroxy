@@ -184,6 +184,47 @@ describe('ChatView', () => {
     expect(screen.getByTestId('thinking-toggle')).toHaveTextContent('Thought')
   })
 
+  // #6391 footer-stat — a finished thinking bubble carrying a measured duration
+  // (+ token count) renders the compact `thought for Xs · N tokens` footer in
+  // place of the bare "Thought" label.
+  it('renders the footer-stat "thought for Xs · N tokens" when duration + tokens are present (#6391)', () => {
+    const messages: ChatViewMessage[] = [
+      { id: 't1', type: 'thinking', content: 'reasoning', thinkingStreaming: false, thinkingDurationMs: 4200, thinkingTokens: 128, timestamp: Date.now() },
+    ]
+    render(<ChatView messages={messages} isStreaming={false} />)
+    expect(screen.getByTestId('thinking-toggle')).toHaveTextContent('thought for 4.2s · 128 tokens')
+  })
+
+  it('renders the footer-stat with duration alone when tokens are absent (claude SDK/BYOK) (#6391)', () => {
+    const messages: ChatViewMessage[] = [
+      { id: 't1', type: 'thinking', content: 'reasoning', thinkingStreaming: false, thinkingDurationMs: 19000, timestamp: Date.now() },
+    ]
+    render(<ChatView messages={messages} isStreaming={false} />)
+    const toggle = screen.getByTestId('thinking-toggle')
+    expect(toggle).toHaveTextContent('thought for 19s')
+    expect(toggle).not.toHaveTextContent('tokens')
+  })
+
+  it('degrades to a bare "Thought" when no footer-stat is present (old sessions) (#6391)', () => {
+    const messages: ChatViewMessage[] = [
+      { id: 't1', type: 'thinking', content: 'reasoning', thinkingStreaming: false, timestamp: Date.now() },
+    ]
+    render(<ChatView messages={messages} isStreaming={false} />)
+    const toggle = screen.getByTestId('thinking-toggle')
+    expect(toggle).toHaveTextContent('Thought')
+    expect(toggle).not.toHaveTextContent('thought for')
+  })
+
+  it('shows "Thinking…" (not the footer) while streaming even if a stale duration is set (#6391)', () => {
+    const messages: ChatViewMessage[] = [
+      { id: 't1', type: 'thinking', content: 'reasoning', thinkingStreaming: true, thinkingDurationMs: 4200, timestamp: Date.now() },
+    ]
+    render(<ChatView messages={messages} isStreaming={false} />)
+    const toggle = screen.getByTestId('thinking-toggle')
+    expect(toggle).toHaveTextContent('Thinking…')
+    expect(toggle).not.toHaveTextContent('thought for')
+  })
+
   it('surfaces a "[thinking truncated]" marker when the content hit the size cap (#6756)', () => {
     const messages: ChatViewMessage[] = [
       { id: 'msg-1-thinking-0', type: 'thinking', content: 'capped reasoning', thinkingStreaming: false, thinkingTruncated: true, timestamp: Date.now() },

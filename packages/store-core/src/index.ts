@@ -388,6 +388,10 @@ export {
   toChatViewMessage,
   // #6799 — shared predicate for the global compact chat filter (mobile parity).
   isHiddenInCompactMode,
+  // #6391 — shared thinking footer-stat formatters (both clients render the
+  // same `thought for Xs · N tokens` string).
+  formatThinkingDuration,
+  formatThinkingFooter,
 } from './buildChatViewMessages'
 
 // #5793: single source of truth for "is this an AskUserQuestion teardown

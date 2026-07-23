@@ -17,7 +17,7 @@
  * survives a row scrolling out of and back into the window.
  */
 import { memo, useRef, useState, useCallback, useEffect, useLayoutEffect, useMemo, type ReactNode, type CSSProperties } from 'react'
-import { bumpRenderCount, type ChatActivityState, type MessageAttachment } from '@chroxy/store-core'
+import { bumpRenderCount, formatThinkingFooter, type ChatActivityState, type MessageAttachment } from '@chroxy/store-core'
 import { WorkingIndicator } from './WorkingIndicator'
 import { renderMarkdown } from '../lib/markdown'
 import { handleMarkdownBodyClick } from '../lib/codeCopy'
@@ -122,6 +122,18 @@ export interface ChatViewMessage {
    * marker so the cut is never silent.
    */
   thinkingTruncated?: boolean
+  /**
+   * #6391 (chat-redesign footer-stat): on a `thinking` row, the reasoning
+   * block's measured elapsed time (ms) — ThinkingBody renders it as
+   * `thought for Xs`. Undefined on old sessions → the label stays "Thought".
+   */
+  thinkingDurationMs?: number
+  /**
+   * #6391 (chat-redesign footer-stat): on a `thinking` row, the reasoning
+   * block's token count — appended as ` · N tokens`. Undefined for providers
+   * that don't separate reasoning tokens (claude SDK/BYOK) → clause omitted.
+   */
+  thinkingTokens?: number
   /**
    * #4476: structured error code mirrored from the store ChatMessage.
    * Renderers may switch on this to surface a distinct variant for known
@@ -312,15 +324,23 @@ function rowClassFor(type: string, hasIcon: boolean): string {
 }
 
 /**
- * Chat redesign #6391 (slice 6): thinking renders as a quiet, collapsed
- * disclosure instead of a standing wall of reasoning text — "▸ Thinking…" while
- * it streams, "▸ Thought" once done; click reveals the full reasoning. (The
- * "thought for Ns" duration/token stat is deferred — it needs a thinking
- * start/end the client doesn't carry yet.) The row's MeasuredRow ResizeObserver
- * re-measures on toggle, so the virtualized list stays correct.
+ * Chat redesign #6391 (slice 6 + footer-stat): thinking renders as a quiet,
+ * collapsed disclosure instead of a standing wall of reasoning text — "▸
+ * Thinking…" while it streams, and once done a compact turn-footer stat
+ * "▸ thought for 4.2s · 128 tokens" (the signature-moment §5 footnote). Click
+ * reveals the full reasoning. The footer degrades gracefully: the server stamps
+ * `durationMs` on the thinking stream_end, but old sessions (and the token
+ * count, which the claude SDK/BYOK providers can't cleanly separate) may be
+ * absent — with neither stat the label falls back to a bare "Thought". The
+ * row's MeasuredRow ResizeObserver re-measures on toggle, so the virtualized
+ * list stays correct.
  */
-function ThinkingBody({ content, streaming, truncated }: { content: string; streaming: boolean; truncated?: boolean }) {
+function ThinkingBody({ content, streaming, truncated, durationMs, tokens }: { content: string; streaming: boolean; truncated?: boolean; durationMs?: number; tokens?: number }) {
   const [expanded, setExpanded] = useState(false)
+  // Compose the footer text from whatever stats arrived; empty when none, so we
+  // fall back to the bare "Thought" label (old sessions / no measured stats).
+  const footer = formatThinkingFooter({ durationMs, tokens })
+  const label = streaming ? 'Thinking…' : (footer || 'Thought')
   return (
     <div className="thinking-body">
       <button
@@ -333,7 +353,7 @@ function ThinkingBody({ content, streaming, truncated }: { content: string; stre
           setExpanded(v => !v)
         }}
       >
-        {expanded ? '▾' : '▸'} {streaming ? 'Thinking…' : 'Thought'}
+        {expanded ? '▾' : '▸'} {label}
       </button>
       {expanded && (
         <div className="thinking-full">
@@ -359,6 +379,8 @@ const DefaultMessageRow = memo(function DefaultMessageRow({
   isStreaming,
   thinkingStreaming,
   thinkingTruncated,
+  thinkingDurationMs,
+  thinkingTokens,
   attachments,
   queued,
   onCancelQueued,
@@ -376,6 +398,12 @@ const DefaultMessageRow = memo(function DefaultMessageRow({
   /** #6756: on a `thinking` row, the reasoning content hit the size cap —
    *  ThinkingBody appends a "[thinking truncated]" marker. */
   thinkingTruncated?: boolean
+  /** #6391: on a `thinking` row, the reasoning block's elapsed time (ms) →
+   *  ThinkingBody's `thought for Xs` footer. */
+  thinkingDurationMs?: number
+  /** #6391: on a `thinking` row, the reasoning block's token count →
+   *  appended as ` · N tokens`. */
+  thinkingTokens?: number
   /** #6632: user-message attachments (images/documents) to preview. */
   attachments?: ChatViewMessage['attachments']
   /** #5939: this user_input is held in the server's outgoing queue. */
@@ -409,7 +437,7 @@ const DefaultMessageRow = memo(function DefaultMessageRow({
       // #6793: same container also owns the per-code-block copy button click.
       ? <div onClick={handleMarkdownBodyClick} dangerouslySetInnerHTML={{ __html: renderMarkdown(content) }} />
       : type === 'thinking'
-        ? <ThinkingBody content={content} streaming={!!thinkingStreaming} truncated={thinkingTruncated} />
+        ? <ThinkingBody content={content} streaming={!!thinkingStreaming} truncated={thinkingTruncated} durationMs={thinkingDurationMs} tokens={thinkingTokens} />
         : content
 
   return (
@@ -1026,6 +1054,8 @@ function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, inFlig
                   isStreaming={msg.isStreaming}
                   thinkingStreaming={msg.thinkingStreaming}
                   thinkingTruncated={msg.thinkingTruncated}
+                  thinkingDurationMs={msg.thinkingDurationMs}
+                  thinkingTokens={msg.thinkingTokens}
                   attachments={msg.attachments}
                   queued={queuedIds?.has(msg.id) ?? false}
                   queuePosition={queuePositions?.get(msg.id)}

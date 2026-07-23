@@ -44,6 +44,55 @@ describe('EventNormalizer', () => {
     })
   })
 
+  // ---- thinking stream_end footer-stat pass-through (#6391) ----
+  describe('thinking stream_end footer-stat (#6391)', () => {
+    it('forwards thinkingDurationMs (+ thinkingTokens) on the thinking stream_end', () => {
+      const result = normalizer.normalize(
+        'stream_end',
+        { messageId: 'm1-thinking-0', thinking: true, thinkingDurationMs: 4200, thinkingTokens: 128 },
+        makeCtx(),
+      )
+      const msg = result.messages[0].msg
+      assert.equal(msg.type, 'stream_end')
+      assert.equal(msg.thinking, true)
+      assert.equal(msg.thinkingDurationMs, 4200)
+      assert.equal(msg.thinkingTokens, 128)
+    })
+
+    it('forwards duration alone (claude SDK/BYOK omit tokens) without an undefined tokens key', () => {
+      const result = normalizer.normalize(
+        'stream_end',
+        { messageId: 'm1-thinking-0', thinking: true, thinkingDurationMs: 900 },
+        makeCtx(),
+      )
+      const msg = result.messages[0].msg
+      assert.equal(msg.thinkingDurationMs, 900)
+      assert.ok(!('thinkingTokens' in msg), 'no undefined tokens key on the wire')
+    })
+
+    it('drops a non-finite duration rather than forwarding it', () => {
+      const result = normalizer.normalize(
+        'stream_end',
+        { messageId: 'm1-thinking-0', thinking: true, thinkingDurationMs: Number.NaN },
+        makeCtx(),
+      )
+      const msg = result.messages[0].msg
+      assert.ok(!('thinkingDurationMs' in msg))
+    })
+
+    it('never stamps footer-stat fields on a NON-thinking (response) stream_end', () => {
+      const result = normalizer.normalize(
+        'stream_end',
+        { messageId: 'm1', thinkingDurationMs: 4200 },
+        makeCtx(),
+      )
+      const msg = result.messages[0].msg
+      assert.equal(msg.type, 'stream_end')
+      assert.ok(!('thinkingDurationMs' in msg))
+      assert.ok(!('thinking' in msg))
+    })
+  })
+
   // ---- EVENT_MAP: session_usage (#4072) ----
 
   describe('session_usage event', () => {

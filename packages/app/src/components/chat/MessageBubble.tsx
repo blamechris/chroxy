@@ -8,7 +8,7 @@ import {
   Image,
   LayoutAnimation,
 } from 'react-native';
-import { OTHER_OPTION_VALUE, bumpRenderCount, getErrorPresentation, isRetryableAskUserQuestionError, isSingleMultiSelectForm } from '@chroxy/store-core';
+import { OTHER_OPTION_VALUE, bumpRenderCount, formatThinkingFooter, getErrorPresentation, isRetryableAskUserQuestionError, isSingleMultiSelectForm } from '@chroxy/store-core';
 // #4875: `OtherFreeformAnswer` moved to @chroxy/store-core/freeform-answer
 // so the mobile store, the mobile screen, and (eventually) the dashboard
 // can converge on a single declaration paired with the shared
@@ -75,15 +75,23 @@ export function buildPromptSessionLabel(
 }
 
 /**
- * #6756 — content-capable thinking view. The mobile parity of the dashboard's
- * `ThinkingBody`: a quiet collapsible disclosure ("▸ Thinking…" while streaming,
- * "▸ Thought" once done) that reveals the model's reasoning text on tap. Used
- * only when a thinking bubble actually carries reasoning content; an empty
- * thinking bubble (the ephemeral placeholder) keeps the `ThinkingIndicator`
- * animation.
+ * #6756 + #6391 footer-stat — content-capable thinking view. The mobile parity
+ * of the dashboard's `ThinkingBody`: a quiet collapsible disclosure ("▸
+ * Thinking…" while streaming, and once done a compact turn-footer stat "▸
+ * thought for 4.2s · 128 tokens") that reveals the model's reasoning text on
+ * tap. The footer degrades gracefully — the server stamps `durationMs` on the
+ * thinking stream_end, but old sessions (and the token count, which the claude
+ * SDK/BYOK providers can't cleanly separate) may be absent; with neither stat
+ * the label falls back to a bare "Thought". Used only when a thinking bubble
+ * actually carries reasoning content; an empty thinking bubble (the ephemeral
+ * placeholder) keeps the `ThinkingIndicator` animation.
  */
-function ThinkingBubble({ content, streaming, truncated }: { content: string; streaming: boolean; truncated?: boolean }) {
+function ThinkingBubble({ content, streaming, truncated, durationMs, tokens }: { content: string; streaming: boolean; truncated?: boolean; durationMs?: number; tokens?: number }) {
   const [expanded, setExpanded] = useState(false);
+  // Compose the footer from whatever stats arrived; empty when none, so we fall
+  // back to a bare "Thought" (old sessions / no measured stats).
+  const footer = formatThinkingFooter({ durationMs, tokens });
+  const label = streaming ? 'Thinking…' : (footer || 'Thought');
   return (
     <View style={styles.thinkingBubble} testID="thinking-bubble">
       <TouchableOpacity
@@ -93,7 +101,7 @@ function ThinkingBubble({ content, streaming, truncated }: { content: string; st
         }}
         testID="thinking-toggle"
         accessibilityRole="button"
-        accessibilityLabel={streaming ? 'Thinking' : 'Thought'}
+        accessibilityLabel={streaming ? 'Thinking' : (footer || 'Thought')}
         // Small horizontal hitSlop for comfort past the text's visual bounds;
         // the ≥44pt minimum on both axes is carried by the style's
         // minHeight/minWidth (see thinkingToggleTouchable).
@@ -101,7 +109,7 @@ function ThinkingBubble({ content, streaming, truncated }: { content: string; st
         style={styles.thinkingToggleTouchable}
       >
         <Text style={styles.thinkingToggle}>
-          {expanded ? '▾' : '▸'} {streaming ? 'Thinking…' : 'Thought'}
+          {expanded ? '▾' : '▸'} {label}
         </Text>
       </TouchableOpacity>
       {expanded && (
@@ -384,6 +392,8 @@ function MessageBubbleImpl({ message, queued, onCancelQueued, onEditQueued, onSe
           content={thinkingContent}
           streaming={message.thinkingStreaming === true}
           truncated={message.thinkingTruncated === true}
+          durationMs={message.thinkingDurationMs}
+          tokens={message.thinkingTokens}
         />
       );
     }

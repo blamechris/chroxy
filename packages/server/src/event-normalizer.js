@@ -188,8 +188,19 @@ Object.assign(EVENT_MAP, {
     // flush_deltas: thinking deltas were never buffered, and flushing here would
     // prematurely emit the response text buffer.
     if (data.thinking) {
+      // #6391 footer-stat: forward the session-measured elapsed time (+ token
+      // count when a provider supplies one — claude SDK/BYOK do not) so the
+      // client renders `thought for Xs · N tokens`. Both optional and additive;
+      // the wire schema (ServerStreamEndSchema) validates them.
+      const msg = { type: 'stream_end', messageId: data.messageId, thinking: true }
+      if (typeof data.thinkingDurationMs === 'number' && Number.isFinite(data.thinkingDurationMs)) {
+        msg.thinkingDurationMs = data.thinkingDurationMs
+      }
+      if (typeof data.thinkingTokens === 'number' && Number.isFinite(data.thinkingTokens)) {
+        msg.thinkingTokens = data.thinkingTokens
+      }
       return {
-        messages: [{ msg: { type: 'stream_end', messageId: data.messageId, thinking: true } }],
+        messages: [{ msg }],
       }
     }
     return {
