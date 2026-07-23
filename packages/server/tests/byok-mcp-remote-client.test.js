@@ -209,9 +209,37 @@ describe('MCPRemoteClient — Streamable HTTP (#6821)', () => {
     assert.equal(client.tools.length, 0, 'a dead client contributes zero tools to the fleet')
     assert.equal(client._sessionId, null, 'the expired session id must be dropped')
     assert.equal(deadEvents.length, 1, 'the DEAD transition must emit exactly one dead event')
+    // _expireSession aborts AND clears the controller set — nothing lingers
+    // post-DEAD (parity with destroy()), so no aborted controllers are retained.
+    assert.equal(client._controllers.size, 0, 'no in-flight controllers may linger after the session-expiry DEAD transition')
 
     // A subsequent call is cleanly rejected as not-ready — no zombie retries.
     await assert.rejects(client.callTool('echo', {}), /not ready/)
+    await client.destroy()
+    assert.equal(client.state, MCP_STATES.DESTROYED)
+  })
+
+  it('#6835: the non-2xx (404) throw path drains the response body — no leaked stream/socket', async () => {
+    // A non-2xx status is never read as a body on any throw path, so _checkStatus
+    // must cancel/drain it before throwing (else the Streamable-HTTP response
+    // stream lingers open — the leaked-handle / hang class this fix targets).
+    srv = await startMockMcpServer({ sessionId: 'sess-live-2', expireOnToolCall: true })
+    const client = new MCPRemoteClient({ name: 'remote', type: 'http', url: srv.url, headers: {} }, { log: silentLog() })
+    // Spy on _discardBody without changing behaviour — record the statuses it is
+    // asked to drain so we can prove the 404 throw path cancels its body.
+    const drainedStatuses = []
+    const realDiscard = client._discardBody.bind(client)
+    client._discardBody = (res) => { drainedStatuses.push(res?.status); return realDiscard(res) }
+    await client.start()
+    assert.equal(client.state, MCP_STATES.READY)
+
+    await assert.rejects(client.callTool('echo', { msg: 'hi' }), /404/)
+    assert.equal(client.state, MCP_STATES.DEAD)
+    // The 404 response body must have been drained before _checkStatus threw.
+    assert.ok(drainedStatuses.includes(404), 'the non-2xx (404) response body must be drained before throwing')
+    // And no aborted controller may survive the DEAD transition.
+    assert.equal(client._controllers.size, 0, 'no in-flight controllers may linger after the session-expiry DEAD transition')
+
     await client.destroy()
     assert.equal(client.state, MCP_STATES.DESTROYED)
   })

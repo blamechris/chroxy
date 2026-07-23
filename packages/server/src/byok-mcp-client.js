@@ -983,7 +983,7 @@ export class MCPRemoteClient extends EventEmitter {
         if (timedOut) throw new Error(`MCP ${method} timeout`)
         throw err
       }
-      this._checkStatus(res, method)
+      await this._checkStatus(res, method)
       if (captureSession) {
         const sid = res.headers.get('mcp-session-id')
         if (sid) this._sessionId = sid
@@ -1197,7 +1197,7 @@ export class MCPRemoteClient extends EventEmitter {
         redirect: 'manual', // #6834: never follow a redirect off-origin
         signal: controller.signal,
       })
-      this._checkStatus(res, method)
+      await this._checkStatus(res, method)
       await this._discardBody(res)
     } catch (err) {
       this._pending.delete(id)
@@ -1233,7 +1233,7 @@ export class MCPRemoteClient extends EventEmitter {
       // → oauth-required (propagates → DEAD), redirect/other non-2xx → error →
       // DEAD. Pre-fix this swallowed ALL statuses, letting the handshake
       // proceed past `initialized` while the server was rejecting our requests.
-      this._checkStatus(res, method)
+      await this._checkStatus(res, method)
       await this._discardBody(res)
     } finally {
       clearTimeout(timer)
@@ -1350,8 +1350,16 @@ export class MCPRemoteClient extends EventEmitter {
     return err
   }
 
-  _checkStatus(res, method) {
+  async _checkStatus(res, method) {
     const status = res.status
+    if (status >= 200 && status < 300) return
+    // Non-2xx: no throw path below ever reads the body, so cancel/drain it
+    // first — an unread Streamable-HTTP response body keeps its stream/socket
+    // dangling (a leaked handle, the #6835 hang class), and for the legacy SSE
+    // call sites the caller's own `_discardBody(res)` never runs once we throw.
+    // _discardBody wraps its own work in try/catch, so this drain can never
+    // throw-and-mask the status error we raise below.
+    await this._discardBody(res)
     if (status === 401 || status === 407) {
       throw this._oauthError(res, status)
     }
@@ -1368,9 +1376,7 @@ export class MCPRemoteClient extends EventEmitter {
       // held session), tear the client down to DEAD. See _expireSession.
       this._expireSession(method)
     }
-    if (status < 200 || status >= 300) {
-      throw new Error(`MCP server ${this.name} HTTP ${status} on ${method}`)
-    }
+    throw new Error(`MCP server ${this.name} HTTP ${status} on ${method}`)
   }
 
   /**
@@ -1394,8 +1400,11 @@ export class MCPRemoteClient extends EventEmitter {
     this._log.warn(`MCP server ${this.name}: Streamable HTTP session expired (HTTP 404 on ${method}) — marking the server dead`)
     // Abort any other in-flight requests against the now-dead session so no
     // reader/stream lingers past the transition (the request that observed the
-    // 404 has already resolved; aborting its controller is a no-op).
+    // 404 has already resolved; aborting its controller is a no-op). Clear the
+    // set after aborting — mirroring destroy() — so the DEAD transition retains
+    // no now-aborted controllers and a later destroy() repeats no abort work.
     for (const c of this._controllers) { try { c.abort() } catch { /* already settled */ } }
+    this._controllers.clear()
     this._toDead()
   }
 
