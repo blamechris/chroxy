@@ -79,4 +79,21 @@ describe('InputBar composer layout — actions overflow (#6897)', () => {
     expect(maxWidth, 'expected a max-width declaration').not.toBeNull()
     expect(maxWidth![1]!.trim()).toBe('100%')
   })
+
+  // Copilot review on #6912: `.input-bar-keyhint` is a flex item of
+  // `.input-bar-actions` and, like any flex item, defaults to
+  // `min-width: auto` — a floor at its own (nowrap) content width regardless
+  // of the parent's `flex-wrap`/`max-width`. At pane widths narrower than the
+  // hint text that floor still forces horizontal overflow. It must shrink
+  // below its content width and truncate instead (decorative/aria-hidden, so
+  // truncation is a11y-safe).
+  test('.input-bar-keyhint can shrink below its content width and truncates instead of overflowing', () => {
+    const body = ruleBody('.input-bar-keyhint')
+    expect(body).toMatch(/white-space:\s*nowrap/)
+    const minWidth = body.match(/min-width:\s*([^;]+);/)
+    expect(minWidth, 'expected a min-width declaration').not.toBeNull()
+    expect(minWidth![1]!.trim()).toBe('0')
+    expect(body).toMatch(/overflow:\s*hidden/)
+    expect(body).toMatch(/text-overflow:\s*ellipsis/)
+  })
 })

@@ -5962,7 +5962,18 @@ button.sidebar-token-view-session-row:hover {
 
 /* Chat redesign #6391 (slice 5): always-visible Enter-mode keyhint. Muted and
    small, sits inline before the action buttons — no extra row, so the composer
-   height never churns. Tokens only (ratchet-clean). */
+   height never churns. Tokens only (ratchet-clean).
+ *
+ * Copilot review (#6912) on the `.input-bar-actions` overflow fix above: this
+ * is a flex item of `.input-bar-actions` and, like any flex item, defaults to
+ * `min-width: auto` — a floor at its own content width regardless of parent
+ * `flex-wrap`/`max-width`. Combined with `white-space: nowrap` that floor
+ * still forced horizontal overflow at pane widths narrower than the hint
+ * text, even after the #6897 fix above. `min-width: 0` lets it shrink below
+ * content width; `overflow: hidden` + `text-overflow: ellipsis` truncate it
+ * instead of overflowing. Safe because the element is `aria-hidden="true"`
+ * (decorative) — truncation has no accessibility impact. At normal widths
+ * the hint fits and the ellipsis never renders. */
 .input-bar-keyhint {
   font-size: var(--text-xs);
   color: var(--text-dim);
@@ -5970,6 +5981,9 @@ button.sidebar-token-view-session-row:hover {
   white-space: nowrap;
   user-select: none;
   margin-right: 2px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .btn-mic {
