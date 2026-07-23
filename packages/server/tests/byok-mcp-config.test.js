@@ -510,30 +510,57 @@ describe('resolveTrustAddress (#6834)', () => {
   })
 
   it('times out a hanging lookup and returns the graceful fallback (#6852)', async () => {
-    // A resolver that stalls past the timeout must not hang the prompt (or the
-    // fleet's trust-store lock). The timeout arm wins the race → fallback. The
-    // lookup is gated on a promise we release AFTER asserting, so the stub
-    // settles deterministically (no dangling never-resolving promise).
-    let release
-    const gate = new Promise((resolve) => { release = resolve })
-    const stalledLookup = () => gate.then(() => [{ address: '203.0.113.7', family: 4 }])
-    const started = Date.now()
-    const r = await resolveTrustAddress('https://slow.example/mcp', { lookup: stalledLookup, timeoutMs: 40 })
-    const elapsed = Date.now() - started
+    // Hermetic (#6908): no real DNS, no real timer, no wall clock. A resolver
+    // that NEVER settles races an INJECTED timer we fire by hand — so the
+    // timeout arm wins deterministically → the graceful fallback. The lookup
+    // would resolve to a routable address if it ever won, so `resolved:false`
+    // proves the TIMEOUT path (not an empty/failed lookup) produced the miss.
+    const scheduled = []
+    let clearedHandle = null
+    const setTimer = (fn, ms) => {
+      scheduled.push({ fn, ms })
+      return { handle: scheduled.length }
+    }
+    const clearTimer = (h) => { clearedHandle = h }
+    const hangingLookup = () => new Promise(() => {}) // never settles on its own
+    const p = resolveTrustAddress('https://slow.example/mcp', {
+      lookup: hangingLookup,
+      timeoutMs: 40,
+      setTimer,
+      clearTimer,
+    })
+    // The timeout is scheduled synchronously while resolveTrustAddress runs up
+    // to its first await, so exactly one timer exists before we drive it.
+    assert.equal(scheduled.length, 1, 'exactly one timeout must be scheduled')
+    assert.equal(scheduled[0].ms, 40, 'the timeout uses the injected timeoutMs')
+    scheduled[0].fn() // fire the timeout arm; it wins the race vs the hanging lookup
+    const r = await p
     assert.equal(r.resolved, false)
     assert.equal(r.display, 'could not resolve host')
     assert.equal(r.hostname, 'slow.example')
-    assert.ok(elapsed >= 40, `should wait for the timeout (elapsed ${elapsed}ms)`)
-    assert.ok(elapsed < 2000, `should not hang past the timeout (elapsed ${elapsed}ms)`)
-    // Let the abandoned lookup settle so the test leaves nothing pending.
-    release()
-    await gate
+    assert.deepEqual(clearedHandle, { handle: 1 }, 'the timer must be cleared in finally')
   })
 
   it('a lookup that resolves before the timeout still wins (#6852)', async () => {
+    // Also hermetic: the injected timer is never fired, so the immediately-
+    // resolving lookup wins the race and the timer is cleared without waiting.
+    const scheduled = []
+    let clearedHandle = null
+    const setTimer = (fn, ms) => {
+      scheduled.push({ fn, ms })
+      return { handle: scheduled.length }
+    }
+    const clearTimer = (h) => { clearedHandle = h }
     const lookup = async () => [{ address: '10.0.0.9', family: 4 }]
-    const r = await resolveTrustAddress('https://fast.example/', { lookup, timeoutMs: 2000 })
+    const r = await resolveTrustAddress('https://fast.example/', {
+      lookup,
+      timeoutMs: 2000,
+      setTimer,
+      clearTimer,
+    })
     assert.equal(r.resolved, true)
     assert.equal(r.classification, 'private')
+    assert.equal(scheduled.length, 1, 'a timeout is scheduled but never fires')
+    assert.deepEqual(clearedHandle, { handle: 1 }, 'the timer is cleared once the lookup wins')
   })
 })
