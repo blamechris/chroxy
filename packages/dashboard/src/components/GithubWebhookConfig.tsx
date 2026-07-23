@@ -20,26 +20,41 @@
  */
 import { useCallback, useEffect, useState } from 'react'
 import { useConnectionStore } from '../store/connection'
+import { writeText } from '../utils/clipboard'
 import type { ServerGithubWebhookConfigMessage } from '@chroxy/protocol'
 
 const WS_CLOSED_MESSAGE =
   'Not connected to the server — your change was not saved. Reconnect and try again.'
 
-/** Generate a strong random webhook secret client-side (32 bytes → hex). */
-export function generateWebhookSecret(): string {
-  const bytes = new Uint8Array(32)
+/**
+ * Generate a strong random webhook secret client-side (32 bytes → hex), or
+ * `null` when no cryptographically-secure RNG is available (e.g. a
+ * non-secure `http://` context, where `crypto.getRandomValues` is absent).
+ *
+ * Deliberately NEVER falls back to `Math.random()` — that PRNG is guessable
+ * and this value becomes HMAC key material. Callers must handle `null` by
+ * disabling the "Generate" affordance and letting the operator paste their
+ * own secret instead.
+ */
+export function generateWebhookSecret(): string | null {
   const cryptoObj: Crypto | undefined = globalThis.crypto
-  if (cryptoObj && typeof cryptoObj.getRandomValues === 'function') {
-    cryptoObj.getRandomValues(bytes)
-  } else {
-    for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256)
-  }
+  if (!cryptoObj || typeof cryptoObj.getRandomValues !== 'function') return null
+  const bytes = new Uint8Array(32)
+  cryptoObj.getRandomValues(bytes)
   return 'whsec_' + Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
+}
+
+/** True when `generateWebhookSecret` can produce a cryptographically-secure value. */
+function secureRngAvailable(): boolean {
+  const cryptoObj: Crypto | undefined = globalThis.crypto
+  return Boolean(cryptoObj && typeof cryptoObj.getRandomValues === 'function')
 }
 
 function sourceLabel(config: ServerGithubWebhookConfigMessage): string {
   if (!config.configured) return 'Not configured'
-  if (config.source === 'env') return 'Set (environment)'
+  // A stored secret always wins over the env var (see resolveWebhookSecret,
+  // github-webhook.js) — `env` here means only the fallback is active.
+  if (config.source === 'env') return 'Environment fallback in use'
   if (config.source === 'store') return 'Set (stored, encrypted)'
   return 'Set'
 }
@@ -120,9 +135,26 @@ export function GithubWebhookConfig({
   const handleCopy = useCallback(() => {
     const url = config?.payloadUrl
     if (!url) return
-    void navigator?.clipboard?.writeText?.(url)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 1500)
+    // #4673/#4629: route through the shared clipboard helper (the Tauri
+    // native plugin under the desktop shell; navigator.clipboard in the
+    // browser) and only flash "Copied" on an ACTUAL write. Never assume
+    // success from a resolved promise — WKWebView's navigator.clipboard
+    // silently no-ops, and the API is missing/rejects outright in a
+    // non-secure context — either of which the helper reports as `false`.
+    // writeText() never throws, so this never produces an unhandled
+    // rejection.
+    void writeText(url).then((ok) => {
+      if (!ok) {
+        useConnectionStore.getState().addServerError(
+          'Failed to copy the webhook URL to clipboard. Please try again.',
+          undefined,
+          'warning',
+        )
+        return
+      }
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    })
   }, [config?.payloadUrl])
 
   return (
@@ -221,8 +253,9 @@ export function GithubWebhookConfig({
           {envWins ? (
             <p className="cr-dim" data-testid="github-webhook-env-hint">
               A <span className="cr-mono">GITHUB_WEBHOOK_SECRET</span> environment variable is set and
-              takes precedence over a stored value — so it can&apos;t be changed or removed here. To
-              manage the secret from the dashboard, unset that variable and reconnect.
+              is being used as a fallback because no secret is currently stored — a secret stored from
+              this dashboard always takes precedence over it. To set or rotate the secret here, unset
+              that variable and reconnect.
             </p>
           ) : (
             <div className="cr-webhook-field">
@@ -245,7 +278,16 @@ export function GithubWebhookConfig({
                   type="button"
                   className="cr-refresh"
                   data-testid="github-webhook-generate"
-                  onClick={() => setValue(generateWebhookSecret())}
+                  onClick={() => {
+                    const generated = generateWebhookSecret()
+                    if (generated) setValue(generated)
+                  }}
+                  disabled={!secureRngAvailable()}
+                  title={
+                    secureRngAvailable()
+                      ? undefined
+                      : 'Secure random generation needs a secure context (HTTPS or localhost) — paste your own secret instead.'
+                  }
                 >
                   Generate
                 </button>
@@ -270,6 +312,12 @@ export function GithubWebhookConfig({
                   </button>
                 )}
               </div>
+              {!secureRngAvailable() && (
+                <p className="cr-callout cr-callout-bad" data-testid="github-webhook-generate-unavailable" role="alert">
+                  Secure secret generation isn&apos;t available in this context (needs HTTPS or
+                  localhost) — paste your own strong, random secret instead.
+                </p>
+              )}
               <p className="cr-dim">
                 The secret is stored encrypted at rest (OS keychain when available) and never shown
                 again — paste the same value into GitHub&apos;s webhook &quot;Secret&quot; field.

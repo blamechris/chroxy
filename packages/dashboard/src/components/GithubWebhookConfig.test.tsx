@@ -3,33 +3,61 @@
  *
  * Covers the webhook-secret setup panel against a mocked `github_webhook_config`:
  *   - collapsed vs expanded (toggle)
- *   - payload URL + copy, recommended events, delivery readout
+ *   - payload URL + copy (success and failure paths), recommended events, delivery readout
  *   - status tag reflects configured / source
  *   - set/rotate sends the typed secret and clears the input; Clear calls clear
  *   - Generate fills a random secret (write-only field — never shows the stored value)
- *   - env-wins hides the editable field
+ *   - Generate is disabled, and never falls back to a weak PRNG, without a secure RNG
+ *   - env-wins hides the editable field and describes it as a fallback, not a precedence win
  *   - LAN-only note renders
  *   - refresh fires when the panel opens
  */
-import { describe, it, expect, vi, afterEach } from 'vitest'
-import { render, screen, fireEvent, cleanup } from '@testing-library/react'
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
+import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react'
 import type { ServerGithubWebhookConfigMessage } from '@chroxy/protocol'
 
-vi.mock('../store/connection', () => ({
-  useConnectionStore: (selector: (s: unknown) => unknown) =>
-    selector({
-      githubWebhookConfig: null,
-      githubWebhookConfigLoading: false,
-      connectionPhase: 'connected',
-      requestGithubWebhookConfig: () => false,
-      setGithubWebhookSecret: () => false,
-      clearGithubWebhookSecret: () => false,
-    }),
+const { addServerError, writeText } = vi.hoisted(() => ({
+  addServerError: vi.fn(),
+  writeText: vi.fn(),
 }))
+
+vi.mock('../store/connection', () => {
+  const state = {
+    githubWebhookConfig: null,
+    githubWebhookConfigLoading: false,
+    connectionPhase: 'connected',
+    requestGithubWebhookConfig: () => false,
+    setGithubWebhookSecret: () => false,
+    clearGithubWebhookSecret: () => false,
+    addServerError,
+  }
+  const useConnectionStore = (selector: (s: unknown) => unknown) => selector(state)
+  useConnectionStore.getState = () => state
+  return { useConnectionStore }
+})
+
+vi.mock('../utils/clipboard', () => ({ writeText }))
 
 import { GithubWebhookConfig, generateWebhookSecret } from './GithubWebhookConfig'
 
 afterEach(cleanup)
+beforeEach(() => {
+  addServerError.mockClear()
+  writeText.mockReset()
+  writeText.mockResolvedValue(true)
+})
+
+/** Force `globalThis.crypto` off so `generateWebhookSecret` takes its no-secure-RNG branch. */
+function withoutSecureCrypto<T>(run: () => T): T {
+  const original = globalThis.crypto
+  // @ts-expect-error — deliberately simulating a non-secure context for the test.
+  delete globalThis.crypto
+  try {
+    return run()
+  } finally {
+    globalThis.crypto = original
+  }
+}
 
 function config(over: Partial<ServerGithubWebhookConfigMessage> = {}): ServerGithubWebhookConfigMessage {
   return {
@@ -50,9 +78,20 @@ describe('generateWebhookSecret', () => {
   it('produces a prefixed high-entropy secret', () => {
     const a = generateWebhookSecret()
     const b = generateWebhookSecret()
-    expect(a.startsWith('whsec_')).toBe(true)
-    expect(a.length).toBeGreaterThan(40)
+    expect(a).not.toBeNull()
+    expect(b).not.toBeNull()
+    expect(a?.startsWith('whsec_')).toBe(true)
+    expect(a?.length).toBeGreaterThan(40)
     expect(a).not.toEqual(b)
+  })
+
+  // Copilot review (#6940): must NEVER fall back to Math.random() — that PRNG
+  // is guessable and this value becomes HMAC key material. Without a secure
+  // RNG, the function must return null rather than a weak secret.
+  it('returns null (never a Math.random() fallback) when no secure RNG is available', () => {
+    withoutSecureCrypto(() => {
+      expect(generateWebhookSecret()).toBeNull()
+    })
   })
 })
 
@@ -100,10 +139,48 @@ describe('GithubWebhookConfig (#6540)', () => {
     expect(input.value.startsWith('whsec_')).toBe(true)
   })
 
-  it('env-wins hides the editable field and shows a hint', () => {
+  it('disables Generate and shows a note (no weak secret) when no secure RNG is available', () => {
+    withoutSecureCrypto(() => {
+      render(<GithubWebhookConfig open onToggle={() => {}} config={config({ configured: false, source: 'none' })} onRefresh={() => {}} />)
+      const generateBtn = screen.getByTestId('github-webhook-generate') as HTMLButtonElement
+      const input = screen.getByTestId('github-webhook-secret-input') as HTMLInputElement
+      expect(generateBtn.disabled).toBe(true)
+      fireEvent.click(generateBtn)
+      expect(input.value).toBe('')
+      expect(screen.getByTestId('github-webhook-generate-unavailable')).toBeTruthy()
+    })
+  })
+
+  it('Copy flashes "Copied" only after a successful write', async () => {
+    writeText.mockResolvedValue(true)
+    render(<GithubWebhookConfig open onToggle={() => {}} config={config()} onRefresh={() => {}} />)
+    fireEvent.click(screen.getByTestId('github-webhook-copy'))
+    expect(writeText).toHaveBeenCalledWith('https://abc.trycloudflare.com/api/github/webhook')
+    await waitFor(() => expect(screen.getByTestId('github-webhook-copy').textContent).toBe('Copied'))
+    expect(addServerError).not.toHaveBeenCalled()
+  })
+
+  // Copilot review (#6940): a rejected/unavailable clipboard write must never
+  // show "Copied" and must not produce an unhandled rejection — the helper
+  // resolves to `false` and the component surfaces a warning toast instead.
+  it('Copy never claims success when the clipboard write fails', async () => {
+    writeText.mockResolvedValue(false)
+    render(<GithubWebhookConfig open onToggle={() => {}} config={config()} onRefresh={() => {}} />)
+    fireEvent.click(screen.getByTestId('github-webhook-copy'))
+    await waitFor(() => expect(addServerError).toHaveBeenCalled())
+    expect(screen.getByTestId('github-webhook-copy').textContent).toBe('Copy')
+    expect(addServerError).toHaveBeenCalledWith(expect.any(String), undefined, 'warning')
+  })
+
+  it('env-wins hides the editable field and describes it as a fallback', () => {
     render(<GithubWebhookConfig open onToggle={() => {}} config={config({ source: 'env' })} onRefresh={() => {}} />)
-    expect(screen.getByTestId('github-webhook-env-hint')).toBeTruthy()
+    const hint = screen.getByTestId('github-webhook-env-hint')
+    expect(hint).toBeTruthy()
+    expect(hint.textContent).toContain('fallback')
+    expect(hint.textContent).not.toMatch(/takes precedence over it here|environment variable.*takes precedence over a stored value/)
     expect(screen.queryByTestId('github-webhook-secret-input')).toBeNull()
+    // The status tag must not claim the env var "wins" — a stored secret does.
+    expect(screen.getByTestId('github-webhook-status').textContent).not.toMatch(/^Set \(environment\)$/)
   })
 
   it('renders the LAN-only unreachable note', () => {

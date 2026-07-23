@@ -153,9 +153,14 @@ export declare const RepoWebhookDeliveriesSchema: z.ZodObject<{
  *
  *   - `configured` / `source` — is a secret set, and does it come from the
  *     encrypted store (`store`), a `GITHUB_WEBHOOK_SECRET` env var (`env`), or
- *     nowhere (`none`). Only a `store` secret is manageable from the dashboard;
- *     an `env` secret takes precedence and must be unset in the shell to manage
- *     it here (mirrors the provider-credential env-wins behaviour).
+ *     nowhere (`none`). A STORED secret always takes precedence over the env
+ *     var (the OPPOSITE of the provider-credential env-wins behaviour) —
+ *     `resolveWebhookSecret` (github-webhook.js) checks the store first and
+ *     only falls back to `env` when nothing is stored. `source: 'env'` in this
+ *     reply therefore means the env var is acting as a back-compat fallback,
+ *     not that it overrides a stored value. The dashboard currently manages
+ *     the secret only while that fallback isn't active; unset the env var and
+ *     reconnect to set/rotate a secret from there.
  *   - `payloadUrl` — the fully-qualified `…/api/github/webhook` URL to paste into
  *     GitHub → repo → Settings → Webhooks, derived from the live tunnel URL when
  *     present, else the LAN address. Null only when no origin can be resolved.
