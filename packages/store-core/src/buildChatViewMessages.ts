@@ -110,8 +110,10 @@ export interface BuildChatViewMessagesOptions {
  * #6799 — predicate for the global compact chat filter: which message types
  * vanish entirely when the filter is on. `tool_use` and `thinking` are the two
  * "noise" categories the mobile app already hides session-wide; the dashboard
- * toggle (and any future client) narrows off this single predicate so every
- * surface agrees on WHAT compact mode hides. Pure — safe to call per row.
+ * toggle narrows off this single predicate. It is the shared definition other
+ * clients can adopt so every surface agrees on WHAT compact mode hides — mobile
+ * still hard-codes the same rule inline in SessionScreen.tsx; converging it onto
+ * this predicate is tracked in #6882. Pure — safe to call per row.
  */
 export function isHiddenInCompactMode(type: ChatMessage['type']): boolean {
   return type === 'tool_use' || type === 'thinking'
