@@ -140,6 +140,13 @@ export class SdkSession extends BaseSession {
       // providers — claude-tui sets this to false (deliver-on-complete), all
       // others stream incremental deltas via stream_delta during a turn.
       streaming: true,
+      // #6888: true when an operator's free-text deny reason (PermissionPrompt's
+      // "sent with Deny" textarea) actually reaches the agent. The in-process
+      // PermissionManager path feeds it back as the tool's denial message
+      // (permission-manager.js buildDenyMessage) on the very next turn — the SDK
+      // honors this end to end. Gates the dashboard's deny-reason affordance so
+      // it isn't shown on providers that silently drop it (legacy-CLI, codex).
+      denyReason: true,
       // #3209/#3246: SDK rebuilds systemPrompt.append on every turn
       // (see sdk-session.js#_callQuery), so a runtime toggle of
       // _activeManualSkills + _loadSkills() takes effect on the next
