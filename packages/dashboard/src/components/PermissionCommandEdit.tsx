@@ -35,7 +35,14 @@ export interface PermissionCommandEditProps {
 }
 
 export function PermissionCommandEdit({ input, onEditedInputChange }: PermissionCommandEditProps) {
-  const original = String(input.command ?? '')
+  // Guard against a malformed/unexpected `command` (e.g. an object or number) —
+  // `String(input.command ?? '')` would stringify it to "[object Object]" and
+  // seed the editor with a corrupted default. Only a genuine string is treated
+  // as editable content; anything else (missing or wrong-typed) degrades to the
+  // same empty-field fallback as no command at all (matches the `typeof x ===
+  // 'string' ? x : fallback` guard used elsewhere in this codebase, e.g.
+  // ChildAgentEventList.tsx).
+  const original = typeof input.command === 'string' ? input.command : ''
   const [value, setValue] = useState(original)
 
   // Reset when a new prompt/command arrives, and clear any pending edit.

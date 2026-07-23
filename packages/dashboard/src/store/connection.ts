@@ -302,6 +302,16 @@ export function capResolvedPermissions<T>(
   return next;
 }
 
+/**
+ * Wire ceiling for a permission response's free-text deny `reason` (#6773).
+ * Mirrors the protocol schema (`PermissionResponseSchema.reason: z.string().max(2000)`,
+ * packages/protocol/src/schemas/client.ts) and the server's `MAX_DENY_REASON_LEN`
+ * (permission-manager.js `buildDenyMessage`). Exported so PermissionPrompt.tsx can cap
+ * the textarea's `maxLength` to match — without a client-side bound an over-long
+ * reason would be silently rejected by the wire schema, dropping the operator's deny.
+ */
+export const DENY_REASON_MAX_LENGTH = 2000;
+
 /** Read a simple string setting from localStorage with fallback */
 function loadPersistedSetting(key: string, fallback: string): string {
   try {
@@ -3231,12 +3241,16 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // mergeEditedInput).
     // #6773: a free-text deny reason rides along on a deny only — the server
     // bounds + redacts it and feeds it back to the agent as the denial message.
+    // Bounded here too (DENY_REASON_MAX_LENGTH, mirrors the server's
+    // MAX_DENY_REASON_LEN / the wire schema's `.max(2000)`) so an over-long
+    // reason can't be silently rejected by the wire schema and drop the deny.
+    const trimmedReason = typeof reason === 'string' ? reason.trim().slice(0, DENY_REASON_MAX_LENGTH) : '';
     const payload = {
       type: 'permission_response',
       requestId,
       decision: wireDecision,
       ...(editedInput && Object.keys(editedInput).length > 0 && wireDecision !== 'deny' ? { editedInput } : {}),
-      ...(wireDecision === 'deny' && typeof reason === 'string' && reason.trim().length > 0 ? { reason: reason.trim() } : {}),
+      ...(wireDecision === 'deny' && trimmedReason.length > 0 ? { reason: trimmedReason } : {}),
     };
     // #6308: the socket can flip OPEN → CLOSING before this synchronous send (wsSend
     // → false). Bail BEFORE markPermissionResolved/markPromptAnswered — otherwise the

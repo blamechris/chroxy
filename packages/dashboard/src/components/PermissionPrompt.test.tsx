@@ -55,6 +55,9 @@ vi.mock('../store/connection', () => ({
     if (!provider) return false
     return available.find((p) => p.name === provider)?.capabilities?.sessionRules === true
   },
+  // #6773 — mirrors the real store's wire ceiling for the deny-reason textarea's
+  // `maxLength` (protocol's `PermissionResponseSchema.reason: z.string().max(2000)`).
+  DENY_REASON_MAX_LENGTH: 2000,
 }))
 
 afterEach(() => {

@@ -19,7 +19,7 @@
  * fire onRespond twice before the store's answered state catches up.
  */
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { useConnectionStore, isRuleEligibleTool, isRuleEligibleProvider } from '../store/connection'
+import { useConnectionStore, isRuleEligibleTool, isRuleEligibleProvider, DENY_REASON_MAX_LENGTH } from '../store/connection'
 import type { PermissionDecision } from '../store/types'
 import { isMacPlatform } from '../utils/platform'
 import { PreWriteDiffReview, isReviewableTool } from './PreWriteDiffReview'
@@ -282,6 +282,7 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
             data-testid="perm-deny-reason"
             value={denyReason}
             rows={2}
+            maxLength={DENY_REASON_MAX_LENGTH}
             placeholder="Optional: tell the agent what to do differently (sent with Deny)"
             aria-label="Deny reason (optional)"
             onChange={(e) => setDenyReason(e.target.value)}
