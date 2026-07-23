@@ -622,9 +622,17 @@ export function createHttpHandler(server) {
     if (req.method === 'DELETE' && snapPath === '/api/paired-devices') {
       if (!server._validatePrimaryBearerAuth(req, res)) return
       const pm = server._pairingManager
-      const revoked = pm && typeof pm.revokeAllSessionTokens === 'function' ? pm.revokeAllSessionTokens() : 0
+      const result = pm && typeof pm.revokeAllSessionTokens === 'function' ? pm.revokeAllSessionTokens() : { revoked: 0 }
+      // #6902: a failed durable write leaves every token valid on disk — report
+      // failure rather than a false `ok:true` so the operator re-tries instead of
+      // trusting a revoke a crash would undo.
+      if (result.persistFailed) {
+        res.writeHead(500, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'revoke not persisted', revoked: 0 }))
+        return
+      }
       res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ ok: true, revoked }))
+      res.end(JSON.stringify({ ok: true, revoked: result.revoked }))
       return
     }
 
@@ -641,8 +649,16 @@ export function createHttpHandler(server) {
         return
       }
       const pm = server._pairingManager
-      const revoked = pm && typeof pm.revokeSessionTokenById === 'function' ? pm.revokeSessionTokenById(id) : 0
-      if (revoked === 0) {
+      const result = pm && typeof pm.revokeSessionTokenById === 'function' ? pm.revokeSessionTokenById(id) : { revoked: 0 }
+      // #6902: the device exists but its removal could not be durably persisted —
+      // distinct from "no such device". Report failure (500) rather than a false
+      // success so the still-valid token isn't reported as revoked.
+      if (result.persistFailed) {
+        res.writeHead(500, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'revoke not persisted', revoked: 0 }))
+        return
+      }
+      if (result.revoked === 0) {
         // The device is already gone (revoked elsewhere, expired, or a stale id
         // from a device that re-paired). 404 so the UI can reconcile its list.
         res.writeHead(404, { 'Content-Type': 'application/json' })
@@ -650,7 +666,7 @@ export function createHttpHandler(server) {
         return
       }
       res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ ok: true, revoked }))
+      res.end(JSON.stringify({ ok: true, revoked: result.revoked }))
       return
     }
 

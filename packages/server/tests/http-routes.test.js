@@ -998,6 +998,47 @@ describe('http-routes', () => {
       assert.equal((await res.json()).error, 'primary_token_required')
       assert.equal(pm.isSessionTokenValid(t1), true, 'a rejected revoke-all leaves every device paired')
     })
+
+    // #6902 — when the durable write fails, the device exists but its removal
+    // could not be persisted. Report 500 (not a false ok:true / 404) so the
+    // operator retries rather than trusting a revoke a crash would undo; the
+    // still-valid token must stay in the live map.
+    it('DELETE /api/paired-devices/:id returns 500 when the durable write fails (token stays valid)', async () => {
+      let saveOk = true
+      const store = { load: () => [], save: () => saveOk }
+      pm = new PairingManager({ sessionTokenTtlMs: 60_000, sessionTokenStore: store })
+      const t1 = mintDevice()
+      const id = pm._deviceIdForToken(t1)
+      saveOk = false
+      const mock = createMockServer({ _pairingManager: pm })
+      await startWith(mock)
+      const res = await globalThis.fetch(`http://127.0.0.1:${port}/api/paired-devices/${id}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': 'Bearer test-token' },
+      })
+      assert.equal(res.status, 500)
+      assert.equal((await res.json()).error, 'revoke not persisted')
+      assert.equal(pm.isSessionTokenValid(t1), true, 'a failed persist leaves the device valid')
+    })
+
+    it('DELETE /api/paired-devices (revoke-all) returns 500 when the durable write fails (all stay valid)', async () => {
+      let saveOk = true
+      const store = { load: () => [], save: () => saveOk }
+      pm = new PairingManager({ sessionTokenTtlMs: 60_000, sessionTokenStore: store })
+      const t1 = mintDevice()
+      const t2 = mintDevice()
+      saveOk = false
+      const mock = createMockServer({ _pairingManager: pm })
+      await startWith(mock)
+      const res = await globalThis.fetch(`http://127.0.0.1:${port}/api/paired-devices`, {
+        method: 'DELETE',
+        headers: { 'Authorization': 'Bearer test-token' },
+      })
+      assert.equal(res.status, 500)
+      assert.equal((await res.json()).error, 'revoke not persisted')
+      assert.equal(pm.isSessionTokenValid(t1), true, 'a failed revoke-all leaves every device paired')
+      assert.equal(pm.isSessionTokenValid(t2), true)
+    })
   })
 
   // #5053 — docker-byok pool stats endpoint. Test seams: `_poolStatsEnabled`
