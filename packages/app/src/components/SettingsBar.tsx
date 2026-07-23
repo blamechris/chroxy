@@ -4,6 +4,9 @@ import * as Clipboard from 'expo-clipboard';
 import { resolveContextWindow, contextOccupancyTokens, contextFillPercent } from '@chroxy/store-core';
 import type { CumulativeUsage, PendingPermissionConfirm, SessionIntervention } from '@chroxy/store-core';
 import { formatCostBadge } from '@chroxy/store-core';
+// #6901: single-source the Codex sandbox label/description for the read-only
+// active-sandbox badge (same list the create-time selector uses).
+import { CODEX_SANDBOX_MODE_META, type CodexSandboxMode } from '@chroxy/protocol';
 import type { ModelInfo, ContextOccupancy, AgentInfo, ConnectedClient, CustomAgent, SessionContext, McpServer, PermissionMode } from '../store/connection';
 import { Icon } from './Icon';
 import { COLORS } from '../constants/colors';
@@ -122,6 +125,12 @@ export interface SettingsBarProps {
   // chips are hidden entirely.
   modelSwitchSupported?: boolean;
   permissionModeSwitchSupported?: boolean;
+  // #6901: active/resolved Codex sandbox mode for a running codex session
+  // (from session_list — only codex sessions carry it). When set, a READ-ONLY
+  // badge shows the current sandbox. Display-only: Codex applies the sandbox
+  // once at thread start, so changing it needs a new session. `null`/`undefined`
+  // (every non-codex session) renders nothing.
+  codexSandbox?: CodexSandboxMode | null;
 }
 
 // -- Helpers --
@@ -239,6 +248,7 @@ export function SettingsBar({
   provider,
   modelSwitchSupported = true,
   permissionModeSwitchSupported = true,
+  codexSandbox = null,
 }: SettingsBarProps) {
   // Elapsed time ticker — only runs when expanded with active agents
   const [now, setNow] = useState(Date.now());
@@ -589,6 +599,32 @@ export function SettingsBar({
                   >
                     {hint}
                   </Text>
+                );
+              })()}
+              {/* #6901: read-only Codex sandbox badge. session_list carries
+                  `codexSandbox` only for codex sessions; it's display-only —
+                  Codex applies the sandbox once at thread start, so a change
+                  needs a new session (docs/design/codex-permission-model.md §5).
+                  Label/description single-sourced from CODEX_SANDBOX_MODE_META. */}
+              {codexSandbox && (() => {
+                const meta = CODEX_SANDBOX_MODE_META.find((m) => m.id === codexSandbox);
+                const label = meta?.label ?? codexSandbox;
+                const hint = `${meta?.description ?? ''} Changing the sandbox requires a new session.`.trim();
+                return (
+                  <>
+                    <View style={styles.chipRow}>
+                      <View style={styles.chipReadOnly} testID="codex-sandbox-badge">
+                        <Text style={styles.chipReadOnlyText}>{`Sandbox: ${label}`}</Text>
+                      </View>
+                    </View>
+                    <Text
+                      style={styles.permissionModeHint}
+                      testID="codex-sandbox-hint"
+                      accessibilityLabel={`Codex sandbox: ${label}. ${hint}`}
+                    >
+                      {hint}
+                    </Text>
+                  </>
                 );
               })()}
               {(lastResultCost != null || sessionCost != null || contextOccupancy) && (

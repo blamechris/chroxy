@@ -1790,6 +1790,16 @@ export class SessionManager extends EventEmitter {
         // (ServerSessionListEntry), so a plain session omits them entirely.
         ...(entry.metadata?.orchestrationRunId ? { orchestrationRunId: entry.metadata.orchestrationRunId } : {}),
         ...(entry.metadata?.orchestrationRole ? { orchestrationRole: entry.metadata.orchestrationRole } : {}),
+        // #6901: surface the active/resolved Codex sandbox mode for a running
+        // codex session so a client can DISPLAY it (the optional half of #6689).
+        // Only the codex session classes expose `getCodexSandbox()`, so this is a
+        // provider-agnostic gate — non-codex sessions omit the field entirely
+        // (mirrors the orchestration-badge spread above). Display-only: a mid-
+        // session sandbox change needs a new session (Codex applies it once at
+        // thread start — docs/design/codex-permission-model.md §5).
+        ...(typeof entry.session.getCodexSandbox === 'function'
+          ? { codexSandbox: entry.session.getCodexSandbox() }
+          : {}),
         // #4664: per-session toggle/string settings (promptEvaluator,
         // chroxyContextHint, sessionPreamble) surface through the
         // registry so the dashboard can hydrate every knob's current

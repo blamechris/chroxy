@@ -5,6 +5,10 @@
  */
 
 import type { ChatMessage } from './chat'
+// #6901: the Codex sandbox enum, single-sourced from the protocol package so the
+// client-side SessionInfo.codexSandbox field stays in lockstep with the wire
+// schema (ServerSessionListEntrySchema) and the create-time selector.
+import type { CodexSandboxMode } from '@chroxy/protocol'
 
 /**
  * Per-turn BILLING token counts from the most recent `result.usage` — the
@@ -148,6 +152,16 @@ export interface SessionInfo {
    * channel is the `background_work_changed` event.
    */
   pendingBackgroundShells?: PendingBackgroundShell[];
+  /**
+   * #6901: the active/resolved Codex sandbox mode for a running codex session
+   * (`read-only` | `workspace-write` | `danger-full-access`). Present ONLY for
+   * codex-provider sessions — every other provider omits it, and older servers
+   * (pre-#6901) omit it too, so renderers should treat `undefined` as "unknown"
+   * and hide the indicator. Display-only: Codex applies the sandbox once at
+   * thread start, so changing it requires a NEW session (a client MUST render
+   * this read-only with copy to that effect).
+   */
+  codexSandbox?: CodexSandboxMode;
 }
 
 export interface AgentInfo {

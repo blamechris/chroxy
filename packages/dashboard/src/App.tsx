@@ -171,6 +171,14 @@ export function App() {
   const activeSessionProvider = useConnectionStore(s =>
     s.sessions.find(sess => sess.sessionId === s.activeSessionId)?.provider ?? null,
   )
+  // #6901: active session's resolved Codex sandbox mode (only codex sessions
+  // carry it — session_list omits the field for every other provider). Drives
+  // the read-only sandbox badge in the header settings dropdown so a running
+  // codex session shows its current sandbox. Display-only: changing it needs a
+  // new session (Codex applies the sandbox once at thread start).
+  const activeSessionCodexSandbox = useConnectionStore(s =>
+    s.sessions.find(sess => sess.sessionId === s.activeSessionId)?.codexSandbox ?? null,
+  )
   // #5986 (epic #5982): the embedded user-shell terminal. The server advertises
   // `userShell` in auth_ok.capabilities only when config.userShell.enabled is on
   // AND the connecting client holds the primary token class, so gating the "New
@@ -2184,6 +2192,7 @@ export function App() {
         permissionMode={permissionMode}
         onPermissionModeChange={setPermissionMode}
         showPermissionMode={dropdownFlags.showPermissionMode}
+        codexSandbox={activeSessionCodexSandbox}
         showThinkingLevel={dropdownFlags.showThinkingLevel}
         thinkingLevel={thinkingLevel}
         onThinkingLevelChange={(level) => setThinkingLevel(level as 'default' | 'high' | 'max')}

@@ -133,6 +133,10 @@ export class CodexAppServerSession extends BaseSession {
     // #6638: per-session sandbox override (create_session `codexSandbox`) — wins
     // over CHROXY_CODEX_SANDBOX / the default. Applied at thread start.
     this._codexSandbox = opts.codexSandbox || null
+    // #6929 review — the sandbox actually resolved+applied to `thread/start`
+    // (set in start(), see below). null until then; getCodexSandbox() falls
+    // back to a live resolve for that (normally unreachable) pre-start window.
+    this._resolvedCodexSandbox = null
     // #6638: fileChange item.changes cached by itemId, so a fileChange approval
     // (whose params carry NO diff) can surface WHAT will change. Cleared per turn.
     this._pendingFileChanges = new Map()
@@ -152,6 +156,24 @@ export class CodexAppServerSession extends BaseSession {
     })
   }
 
+  /**
+   * #6901: the ACTIVE/resolved sandbox mode this thread runs under — the exact
+   * value passed to `thread/start` (see start()), which STORES the resolved
+   * value on `this._resolvedCodexSandbox` at that moment. #6929 review: this
+   * returns the stored value instead of re-resolving `CHROXY_CODEX_SANDBOX` on
+   * every call, so a later env change can't make the display drift from what
+   * this already-running thread actually got (Codex applies the sandbox once
+   * at thread start; it cannot change mid-thread). Falls back to a live
+   * resolve only in the window before start() has run (session constructed but
+   * not yet started). Surfaced by `SessionManager.listSessions()` as
+   * `SessionInfo.codexSandbox` so a client can DISPLAY the current sandbox for
+   * a running codex session. Display-only: changing it needs a new session.
+   * @returns {string} one of CODEX_SANDBOX_MODES
+   */
+  getCodexSandbox() {
+    return this._resolvedCodexSandbox || resolveCodexSandbox(this._codexSandbox)
+  }
+
   _buildChildEnv() { return buildSpawnEnv('codex') }
 
   // ------------------------------------------------------------------
@@ -159,7 +181,11 @@ export class CodexAppServerSession extends BaseSession {
   // ------------------------------------------------------------------
 
   async start() {
-    const sandbox = resolveCodexSandbox(this._codexSandbox)
+    // #6929 review — resolve AND STORE here, the actual `thread/start` apply
+    // site, so getCodexSandbox() can report what this thread really got instead
+    // of re-resolving the env (and potentially drifting from it) on every call.
+    this._resolvedCodexSandbox = resolveCodexSandbox(this._codexSandbox)
+    const sandbox = this._resolvedCodexSandbox
     // Capture the EXACT binary the client will spawn so the spawn-time backstop
     // (#6708) verifies that path — in start()'s catch AND later in
     // _onClientExit — rather than a fresh re-resolve.

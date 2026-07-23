@@ -9,6 +9,10 @@ import { z } from 'zod'
 
 import { MAX_SANE_DURATION_MS } from './connection.ts'
 import { ServerPendingBackgroundShellSchema } from './stream.ts'
+// #6901: single-source the Codex sandbox enum so the `codexSandbox` field below
+// stays in lockstep with the create-time `create_session` control (client.ts)
+// and the server's `resolveCodexSandbox` — same list, one place.
+import { CODEX_SANDBOX_MODES } from '../../codex.ts'
 
 export const ServerClientFocusChangedSchema = z.object({
   type: z.literal('client_focus_changed'),
@@ -225,6 +229,14 @@ export const ServerSessionListEntrySchema = z.object({
   // metadata (E-4).
   orchestrationRunId: z.string().nullable().optional(),
   orchestrationRole: z.string().nullable().optional(),
+  // #6901: the active/resolved Codex sandbox mode for a running codex session
+  // (`resolveCodexSandbox` on the exec + app-server paths — the env/default,
+  // or the per-session create-time override from #6638/#6900). Present ONLY for
+  // the codex provider; every other provider omits it. Display-only: Codex
+  // applies the sandbox once at thread start, so changing it needs a NEW session
+  // (see docs/design/codex-permission-model.md §5) — clients should render it
+  // read-only. Older servers omit the field; treat `undefined` as "unknown".
+  codexSandbox: z.enum(CODEX_SANDBOX_MODES).optional(),
 }).passthrough()
 
 export const ServerSessionListSchema = z.object({
