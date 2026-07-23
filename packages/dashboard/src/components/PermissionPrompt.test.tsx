@@ -19,7 +19,7 @@ type MockStore = {
   resolvedPermissions: Record<string, PermissionDecision>
   activeSessionId: string | null
   sessions: { sessionId: string; provider?: string }[]
-  availableProviders: { name: string; capabilities?: { sessionRules?: boolean } }[]
+  availableProviders: { name: string; capabilities?: { sessionRules?: boolean; denyReason?: boolean } }[]
   connectionPhase: string
   // #6773 — the command-edit + write-review affordances read these; default
   // undefined (ide off) so existing tests render neither and stay unchanged.
@@ -31,7 +31,11 @@ const DEFAULT_MOCK_STORE: MockStore = {
   resolvedPermissions: {},
   activeSessionId: 's1',
   sessions: [{ sessionId: 's1', provider: 'claude-sdk' }],
-  availableProviders: [{ name: 'claude-sdk', capabilities: { sessionRules: true } }],
+  // #6888 — claude-sdk is a deny-reason-honoring provider (in-process
+  // PermissionManager forwards the reason as the tool's denial message), so
+  // the default mock keeps every pre-existing deny-reason test rendering the
+  // textarea unchanged.
+  availableProviders: [{ name: 'claude-sdk', capabilities: { sessionRules: true, denyReason: true } }],
   // #5699 — answer buttons gate on connected; default the mock to connected so
   // the existing button-interaction tests keep working.
   connectionPhase: 'connected',
@@ -54,6 +58,15 @@ vi.mock('../store/connection', () => ({
   ) => {
     if (!provider) return false
     return available.find((p) => p.name === provider)?.capabilities?.sessionRules === true
+  },
+  // #6888 — mirrors the real isDenyReasonHonoredProvider: fails closed (false)
+  // for an unknown provider or a provider whose capability isn't exactly true.
+  isDenyReasonHonoredProvider: (
+    provider: string | null | undefined,
+    available: { name: string; capabilities?: { denyReason?: boolean } }[],
+  ) => {
+    if (!provider) return false
+    return available.find((p) => p.name === provider)?.capabilities?.denyReason === true
   },
   // #6773 — mirrors the real store's wire ceiling for the deny-reason textarea's
   // `maxLength` (protocol's `PermissionResponseSchema.reason: z.string().max(2000)`).
@@ -1071,5 +1084,60 @@ describe('PermissionPrompt — deny reason + command edit (#6773)', () => {
     )
     fireEvent.click(screen.getByText('Allow'))
     expect(onRespond).toHaveBeenCalledWith('req-1', 'allow', null)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Deny-reason honesty gate (#6888) — the "sent with Deny" textarea must not
+// overpromise on a provider whose respondToPermission path drops the reason
+// (codex app-server: message never forwarded in _routeApproval's RPC reply;
+// legacy-CLI: no in-process PermissionManager at all).
+// ---------------------------------------------------------------------------
+describe('PermissionPrompt — deny-reason honesty gate (#6888)', () => {
+  beforeEach(() => {
+    resetMockStore()
+  })
+
+  it('shows the deny-reason field with the "sent with Deny" hint for a consuming provider (SDK/BYOK)', () => {
+    mockStoreState.sessions = [{ sessionId: 's1', provider: 'claude-byok' }]
+    mockStoreState.availableProviders = [{ name: 'claude-byok', capabilities: { denyReason: true } }]
+    render(
+      <PermissionPrompt requestId="req-1" tool="Bash" description="ls" remainingMs={60000} onRespond={vi.fn()} />
+    )
+    const field = screen.getByTestId('perm-deny-reason')
+    expect(field).toBeInTheDocument()
+    expect(field).toHaveAttribute('placeholder', expect.stringContaining('sent with Deny'))
+  })
+
+  it('hides the deny-reason field for a provider that drops it (codex)', () => {
+    mockStoreState.sessions = [{ sessionId: 's1', provider: 'codex' }]
+    mockStoreState.availableProviders = [{ name: 'codex', capabilities: { denyReason: false } }]
+    render(
+      <PermissionPrompt requestId="req-1" tool="Bash" description="ls" remainingMs={60000} onRespond={vi.fn()} />
+    )
+    expect(screen.queryByTestId('perm-deny-reason')).not.toBeInTheDocument()
+    // The Allow/Deny buttons are unaffected — only the reason affordance is gone.
+    expect(screen.getByText('Allow')).toBeInTheDocument()
+    expect(screen.getByText('Deny')).toBeInTheDocument()
+  })
+
+  it('hides the deny-reason field for a provider whose capability is missing entirely (fail-closed)', () => {
+    mockStoreState.sessions = [{ sessionId: 's1', provider: 'mystery' }]
+    mockStoreState.availableProviders = []
+    render(
+      <PermissionPrompt requestId="req-1" tool="Bash" description="ls" remainingMs={60000} onRespond={vi.fn()} />
+    )
+    expect(screen.queryByTestId('perm-deny-reason')).not.toBeInTheDocument()
+  })
+
+  it('a Deny on a drop-provider never carries a reason (the field cannot be typed into)', () => {
+    mockStoreState.sessions = [{ sessionId: 's1', provider: 'codex' }]
+    mockStoreState.availableProviders = [{ name: 'codex', capabilities: { denyReason: false } }]
+    const onRespond = vi.fn()
+    render(
+      <PermissionPrompt requestId="req-1" tool="Bash" description="ls" remainingMs={60000} onRespond={onRespond} />
+    )
+    fireEvent.click(screen.getByText('Deny'))
+    expect(onRespond).toHaveBeenCalledWith('req-1', 'deny', null)
   })
 })

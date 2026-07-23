@@ -269,6 +269,25 @@ export function isRuleEligibleProvider(
 }
 
 /**
+ * Whether the active session's provider actually forwards a Deny's free-text
+ * reason to the agent (#6888). Reads the `denyReason` capability surfaced by
+ * the server's provider_list message (server.js `ProviderClass.capabilities`).
+ * Mirrors isRuleEligibleProvider's shape/fail-closed default: an unknown or
+ * capability-less provider reports false, so PermissionPrompt hides the
+ * deny-reason textarea rather than showing an affordance the provider would
+ * silently discard (legacy-CLI, claude-tui, Gemini, legacy codex `exec`, and
+ * codex app-server until #6885 wires the RPC forwarding).
+ */
+export function isDenyReasonHonoredProvider(
+  provider: string | null | undefined,
+  availableProviders: { name: string; capabilities?: { denyReason?: boolean } }[],
+): boolean {
+  if (!provider) return false;
+  const info = availableProviders.find((p) => p.name === provider);
+  return info?.capabilities?.denyReason === true;
+}
+
+/**
  * Cap for `resolvedPermissions` to prevent unbounded growth over long sessions (#2838).
  * Exported for tests. LRU eviction: oldest insertion-order entry is dropped when
  * the map exceeds the cap. Re-resolving a requestId bumps it to the most-recent

@@ -32,6 +32,10 @@ vi.mock('../store/connection', () => ({
     }),
   isRuleEligibleTool: () => false,
   isRuleEligibleProvider: () => false,
+  // #6888 — this fixture's provider ('codex') drops the deny reason, so the
+  // real isDenyReasonHonoredProvider would also resolve false here; the stub
+  // just short-circuits that.
+  isDenyReasonHonoredProvider: () => false,
   DENY_REASON_MAX_LENGTH: 2000,
 }))
 

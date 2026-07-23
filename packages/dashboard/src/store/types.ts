@@ -180,6 +180,16 @@ export interface ProviderCapabilities {
   // "Conversation" option — providers that can't fork (CLI/TUI/BYOK/Gemini/Codex
   // and containerized SDK) omit it / report false, so the option is disabled.
   conversationFork?: boolean;
+  // #6888: true when an operator's free-text deny reason (PermissionPrompt's
+  // "sent with Deny" textarea) actually reaches the agent. SDK/BYOK (+ their
+  // Docker variants, DeepSeek, Ollama) report true — the reason feeds back as
+  // the tool's denial message on the in-process PermissionManager path. Legacy
+  // CLI, claude-tui, Gemini, and the legacy codex `exec` driver never take that
+  // path and omit the field (falsy). codex app-server explicitly reports false:
+  // it HAS an in-process respondToPermission but its RPC response back to codex
+  // drops the message (tracked by #6885). The dashboard gates the deny-reason
+  // textarea on this so it never promises delivery a provider won't honor.
+  denyReason?: boolean;
 }
 
 // #3404 audit (F1+F5): per-provider auth state for grey-out + billing panel.

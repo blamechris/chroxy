@@ -141,6 +141,10 @@ export class ClaudeByokSession extends BaseSession {
       // takes effect on the next user message. Same property as the
       // SDK provider.
       skillToggle: true,
+      // #6888: BYOK shares SdkSession's PermissionManager/respondToPermission
+      // path — see the matching comment in sdk-session.js's capabilities. A
+      // deny reason genuinely reaches the agent as the tool's denial message.
+      denyReason: true,
     }
   }
 

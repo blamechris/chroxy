@@ -19,7 +19,7 @@
  * fire onRespond twice before the store's answered state catches up.
  */
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { useConnectionStore, isRuleEligibleTool, isRuleEligibleProvider, DENY_REASON_MAX_LENGTH } from '../store/connection'
+import { useConnectionStore, isRuleEligibleTool, isRuleEligibleProvider, isDenyReasonHonoredProvider, DENY_REASON_MAX_LENGTH } from '../store/connection'
 import type { PermissionDecision } from '../store/types'
 import { isMacPlatform } from '../utils/platform'
 import { PreWriteDiffReview, isReviewableTool } from './PreWriteDiffReview'
@@ -99,6 +99,14 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
   })
   const availableProviders = useConnectionStore((s) => s.availableProviders)
   const providerSupportsRules = isRuleEligibleProvider(activeProvider, availableProviders)
+
+  // #6888 — the free-text deny-reason textarea's "(sent with Deny)" hint only
+  // holds true on providers whose respondToPermission path actually forwards
+  // the reason to the agent (SDK/BYOK). codex (message dropped in
+  // _routeApproval, tracked by #6885) and legacy-CLI (no in-process
+  // PermissionManager at all) silently discard it, so the honest fix is to
+  // hide the affordance rather than promise a delivery that never happens.
+  const denyReasonHonored = isDenyReasonHonoredProvider(activeProvider, availableProviders)
 
   // #6543 (feature B): per-hunk pre-write review. Gated on the server's `ide`
   // capability (features.ide) + a reviewable tool (Write/Edit). When eligible we
@@ -272,22 +280,28 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
 
       {showButtons && (
         <>
-          {/* #6773: optional free-text deny reason (tool-agnostic). When the
-              operator types here and clicks Deny, the note is fed back to the
-              agent as the denial message so it can adjust without a fresh turn
-              (desktop-app "tell Claude what to do differently" parity). Ignored
-              on Allow. */}
-          <textarea
-            className="perm-deny-reason"
-            data-testid="perm-deny-reason"
-            value={denyReason}
-            rows={2}
-            maxLength={DENY_REASON_MAX_LENGTH}
-            placeholder="Optional: tell the agent what to do differently (sent with Deny)"
-            aria-label="Deny reason (optional)"
-            onChange={(e) => setDenyReason(e.target.value)}
-            disabled={submitting || !connected}
-          />
+          {/* #6773/#6888: optional free-text deny reason (tool-agnostic). When
+              the operator types here and clicks Deny, the note is fed back to
+              the agent as the denial message so it can adjust without a fresh
+              turn (desktop-app "tell Claude what to do differently" parity).
+              Ignored on Allow. Gated on denyReasonHonored (#6888) — only
+              rendered when the active provider's respondToPermission path
+              actually forwards the reason (SDK/BYOK); hidden entirely on
+              codex / legacy-CLI / other providers that silently drop it, so
+              the affordance never overpromises delivery. */}
+          {denyReasonHonored && (
+            <textarea
+              className="perm-deny-reason"
+              data-testid="perm-deny-reason"
+              value={denyReason}
+              rows={2}
+              maxLength={DENY_REASON_MAX_LENGTH}
+              placeholder="Optional: tell the agent what to do differently (sent with Deny)"
+              aria-label="Deny reason (optional)"
+              onChange={(e) => setDenyReason(e.target.value)}
+              disabled={submitting || !connected}
+            />
+          )}
           <div className="perm-buttons">
             <button
               className="btn-allow"

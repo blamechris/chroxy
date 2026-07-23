@@ -104,6 +104,15 @@ export class CodexAppServerSession extends BaseSession {
       terminal: false,
       thinkingLevel: false,
       streaming: true,
+      // #6888: despite inProcessPermissions:true (this session's
+      // respondToPermission delegates to the shared PermissionManager, which DOES
+      // compute a deny message via buildDenyMessage(reason)), _routeApproval only
+      // reads `result.behavior` when building the RPC response back to codex —
+      // `result.message` is never forwarded, so the operator's deny reason is
+      // silently dropped. Explicit false (not just omitted) so this doesn't read
+      // as an oversight: tracked by #6885 ("Codex deny reason either reaches the
+      // model or is documented as unsupported"). Flip to true once that lands.
+      denyReason: false,
     }
   }
 
