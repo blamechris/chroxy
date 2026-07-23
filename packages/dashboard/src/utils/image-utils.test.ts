@@ -6,10 +6,13 @@ import {
   ALLOWED_IMAGE_TYPES,
   MAX_IMAGE_SIZE,
   MAX_IMAGE_COUNT,
+  THUMBNAIL_MAX_BYTES,
   validateImageFile,
   fileToBase64,
   compressImage,
   processImageFiles,
+  isPersistableThumbnailUri,
+  makeThumbnailDataUri,
 } from './image-utils'
 
 function createMockFile(name: string, size: number, type: string): File {
@@ -263,6 +266,147 @@ describe('processImageFiles', () => {
     expect(result.accepted).toHaveLength(0)
     expect(result.rejected).toHaveLength(1)
     expect(result.rejected[0]).toMatch(/2MB/i)
+  })
+})
+
+describe('isPersistableThumbnailUri (#6729)', () => {
+  it('accepts a small data:image URI', () => {
+    expect(isPersistableThumbnailUri('data:image/jpeg;base64,AAAA')).toBe(true)
+    expect(isPersistableThumbnailUri('data:image/png;base64,AAAA')).toBe(true)
+  })
+
+  it('accepts a data:image URI exactly at the byte cap', () => {
+    const uri = 'data:image/jpeg;base64,'
+    const padded = uri + 'A'.repeat(THUMBNAIL_MAX_BYTES - uri.length)
+    expect(padded.length).toBe(THUMBNAIL_MAX_BYTES)
+    expect(isPersistableThumbnailUri(padded)).toBe(true)
+  })
+
+  it('rejects a data:image URI over the byte cap', () => {
+    const oversized = 'data:image/png;base64,' + 'A'.repeat(THUMBNAIL_MAX_BYTES)
+    expect(oversized.length).toBeGreaterThan(THUMBNAIL_MAX_BYTES)
+    expect(isPersistableThumbnailUri(oversized)).toBe(false)
+  })
+
+  it('rejects non-image data URIs and non-data schemes', () => {
+    expect(isPersistableThumbnailUri('data:text/html,x')).toBe(false)
+    expect(isPersistableThumbnailUri('blob:https://app/abc')).toBe(false)
+    expect(isPersistableThumbnailUri('https://cdn/x.png')).toBe(false)
+    expect(isPersistableThumbnailUri('/local/path.png')).toBe(false)
+    expect(isPersistableThumbnailUri('[data stripped]')).toBe(false)
+  })
+
+  it('rejects null/undefined', () => {
+    expect(isPersistableThumbnailUri(null)).toBe(false)
+    expect(isPersistableThumbnailUri(undefined)).toBe(false)
+  })
+
+  it('honours a custom cap', () => {
+    expect(isPersistableThumbnailUri('data:image/png;base64,AAAA', 4)).toBe(false)
+    expect(isPersistableThumbnailUri('data:image/png;base64,AAAA', 10_000)).toBe(true)
+  })
+})
+
+describe('makeThumbnailDataUri (#6729)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('passes an already-small image through verbatim (no canvas)', async () => {
+    const base64 = 'aGVsbG8=' // "hello"
+    const result = await makeThumbnailDataUri(base64, 'image/png')
+    expect(result).toBe(`data:image/png;base64,${base64}`)
+  })
+
+  // A base64 payload guaranteed to exceed the byte cap → the canvas path.
+  const oversizedBase64 = 'A'.repeat(THUMBNAIL_MAX_BYTES + 1024)
+
+  function mockCanvasThumbnail(toDataURL: (type: string, q: number) => string) {
+    const mockCanvas = {
+      width: 0,
+      height: 0,
+      getContext: () => ({ drawImage: vi.fn() }),
+      toDataURL: vi.fn(toDataURL),
+    }
+    const origCreateElement = document.createElement.bind(document)
+    vi.spyOn(document, 'createElement').mockImplementation((tag: string) => {
+      if (tag === 'canvas') return mockCanvas as unknown as HTMLCanvasElement
+      return origCreateElement(tag)
+    })
+    const OrigImage = globalThis.Image
+    class MockImage {
+      width = 1024
+      height = 768
+      onload: (() => void) | null = null
+      onerror: (() => void) | null = null
+      set src(_: string) { setTimeout(() => this.onload?.(), 0) }
+    }
+    globalThis.Image = MockImage as unknown as typeof Image
+    return { mockCanvas, restore: () => { globalThis.Image = OrigImage } }
+  }
+
+  it('downscales an oversized image to fit maxEdge and returns a bounded thumbnail', async () => {
+    const small = 'data:image/jpeg;base64,SHORT'
+    const { mockCanvas, restore } = mockCanvasThumbnail(() => small)
+    try {
+      const result = await makeThumbnailDataUri(oversizedBase64, 'image/png')
+      expect(result).toBe(small)
+      // 1024x768 scaled to a 256px longest edge → 256x192
+      expect(mockCanvas.width).toBe(256)
+      expect(mockCanvas.height).toBe(192)
+    } finally {
+      restore()
+    }
+  })
+
+  it('returns null when even the lowest-quality encode exceeds the cap', async () => {
+    const tooBig = 'data:image/jpeg;base64,' + 'B'.repeat(THUMBNAIL_MAX_BYTES)
+    const { restore } = mockCanvasThumbnail(() => tooBig)
+    try {
+      const result = await makeThumbnailDataUri(oversizedBase64, 'image/png')
+      expect(result).toBeNull()
+    } finally {
+      restore()
+    }
+  })
+
+  it('returns null on image load error', async () => {
+    const OrigImage = globalThis.Image
+    class FailImage {
+      onload: (() => void) | null = null
+      onerror: (() => void) | null = null
+      set src(_: string) { setTimeout(() => this.onerror?.(), 0) }
+    }
+    globalThis.Image = FailImage as unknown as typeof Image
+    try {
+      const result = await makeThumbnailDataUri(oversizedBase64, 'image/png')
+      expect(result).toBeNull()
+    } finally {
+      globalThis.Image = OrigImage
+    }
+  })
+
+  it('returns null when a 2d context is unavailable', async () => {
+    const origCreateElement = document.createElement.bind(document)
+    vi.spyOn(document, 'createElement').mockImplementation((tag: string) => {
+      if (tag === 'canvas') return { width: 0, height: 0, getContext: () => null, toDataURL: () => '' } as unknown as HTMLCanvasElement
+      return origCreateElement(tag)
+    })
+    const OrigImage = globalThis.Image
+    class MockImage {
+      width = 1024
+      height = 768
+      onload: (() => void) | null = null
+      onerror: (() => void) | null = null
+      set src(_: string) { setTimeout(() => this.onload?.(), 0) }
+    }
+    globalThis.Image = MockImage as unknown as typeof Image
+    try {
+      const result = await makeThumbnailDataUri(oversizedBase64, 'image/png')
+      expect(result).toBeNull()
+    } finally {
+      globalThis.Image = OrigImage
+    }
   })
 })
 

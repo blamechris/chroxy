@@ -7,6 +7,12 @@ import type { ImageAttachment, FileAttachment } from '../components/InputBar'
  * base64 → a `data:` URI thumbnail; files carry only a path/name → a document
  * chip. Ids are index-scoped (unique within the one message's list, which is
  * all React keys need).
+ *
+ * #6729 — prefer the composer's size-bounded `thumbnailDataUri` (a downscaled
+ * `data:` URI, see `makeThumbnailDataUri`) as the preview `uri` so it survives
+ * persistence: `stripLargeData` keeps small `data:` image URIs but strips
+ * oversized ones. When no thumbnail was generated (off-DOM / oversized) the
+ * full data URI is used and degrades to a filename chip on reload.
  */
 export function toMessageAttachments(
   images?: ImageAttachment[],
@@ -17,7 +23,7 @@ export function toMessageAttachments(
     out.push({
       id: `img-${i}`,
       type: 'image',
-      uri: `data:${img.mediaType};base64,${img.data}`,
+      uri: img.thumbnailDataUri ?? `data:${img.mediaType};base64,${img.data}`,
       name: img.name,
       mediaType: img.mediaType,
       size: img.data.length,

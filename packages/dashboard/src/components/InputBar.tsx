@@ -56,6 +56,14 @@ export interface ImageAttachment {
   data: string // base64
   mediaType: string
   name: string
+  /**
+   * #6729 — a small, size-bounded `data:` URI thumbnail (see
+   * `makeThumbnailDataUri` in utils/image-utils). Used as the transcript
+   * preview URI so a resumed session can still render the thumbnail after the
+   * full-size preview is stripped from localStorage. Undefined when generation
+   * failed (off-DOM / oversized).
+   */
+  thumbnailDataUri?: string
 }
 
 export interface InputBarProps {

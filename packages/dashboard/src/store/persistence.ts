@@ -9,6 +9,7 @@
  * Data is debounced to avoid excessive writes on rapid message streams.
  */
 import type { ChatMessage, SessionInfo } from './types';
+import { isPersistableThumbnailUri } from '../utils/image-utils';
 
 const KEY_PREFIX = 'chroxy_persist_';
 const KEY_VIEW_MODE = `${KEY_PREFIX}view_mode`;
@@ -739,9 +740,15 @@ function stripLargeData(msg: ChatMessage): ChatMessage {
       ...img,
       data: img.data ? '[image data stripped for storage]' : img.data,
     })),
-    attachments: msg.attachments?.map(att => ({
-      ...att,
-      uri: att.uri.startsWith('data:') ? '[data stripped]' : att.uri,
-    })),
+    // #6729 — carve a size-bounded exception: keep a small `data:` image URI
+    // (a downscaled thumbnail within THUMBNAIL_MAX_BYTES) so a resumed session
+    // renders the preview, but still strip any oversized `data:` blob so
+    // localStorage stays bounded. Non-`data:` URIs (document paths) pass through.
+    attachments: msg.attachments?.map(att => {
+      if (!att.uri.startsWith('data:')) return att;
+      return isPersistableThumbnailUri(att.uri)
+        ? att
+        : { ...att, uri: '[data stripped]' };
+    }),
   };
 }
