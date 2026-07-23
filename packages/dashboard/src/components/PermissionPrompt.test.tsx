@@ -479,6 +479,68 @@ describe('PlanApproval', () => {
     )
     expect(container.querySelector('[data-testid="plan-approval"]')).not.toBeInTheDocument()
   })
+
+  // #6774 — combined "approve + auto-accept edits" action.
+  it('renders the "Approve & auto-accept edits" button when showAcceptEdits is set', () => {
+    render(
+      <PlanApproval
+        planHtml="Plan text"
+        onApprove={vi.fn()}
+        onFeedback={vi.fn()}
+        onApproveAcceptEdits={vi.fn()}
+        showAcceptEdits
+      />
+    )
+    expect(screen.getByTestId('btn-plan-approve-accept-edits')).toBeInTheDocument()
+    // The plain Approve button remains available (AC: plain Approve unchanged).
+    expect(screen.getByText('Approve')).toBeInTheDocument()
+  })
+
+  it('calls onApproveAcceptEdits when the combined button is clicked (#6774)', () => {
+    const onApproveAcceptEdits = vi.fn()
+    const onApprove = vi.fn()
+    render(
+      <PlanApproval
+        planHtml="Plan text"
+        onApprove={onApprove}
+        onFeedback={vi.fn()}
+        onApproveAcceptEdits={onApproveAcceptEdits}
+        showAcceptEdits
+      />
+    )
+    fireEvent.click(screen.getByTestId('btn-plan-approve-accept-edits'))
+    expect(onApproveAcceptEdits).toHaveBeenCalledTimes(1)
+    // The combined action does NOT also fire the plain approve callback.
+    expect(onApprove).not.toHaveBeenCalled()
+  })
+
+  it('hides the combined button when showAcceptEdits is false (provider lacks mode switch)', () => {
+    render(
+      <PlanApproval
+        planHtml="Plan text"
+        onApprove={vi.fn()}
+        onFeedback={vi.fn()}
+        onApproveAcceptEdits={vi.fn()}
+        showAcceptEdits={false}
+      />
+    )
+    expect(screen.queryByTestId('btn-plan-approve-accept-edits')).not.toBeInTheDocument()
+    // Plain Approve / Feedback still render.
+    expect(screen.getByText('Approve')).toBeInTheDocument()
+    expect(screen.getByText('Feedback')).toBeInTheDocument()
+  })
+
+  it('hides the combined button when no onApproveAcceptEdits handler is wired', () => {
+    render(
+      <PlanApproval
+        planHtml="Plan text"
+        onApprove={vi.fn()}
+        onFeedback={vi.fn()}
+        showAcceptEdits
+      />
+    )
+    expect(screen.queryByTestId('btn-plan-approve-accept-edits')).not.toBeInTheDocument()
+  })
 })
 
 // ---------------------------------------------------------------------------
