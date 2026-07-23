@@ -192,6 +192,13 @@ export interface ChatViewProps {
   /** #5939: cancel a single queued follow-up by its message id (cancel_queued). */
   onCancelQueued?: (id: string) => void
   /**
+   * #6628: edit a still-queued follow-up before it flushes. The parent reopens
+   * the message text in the composer for editing and cancels the queued entry
+   * (cancel + re-send, reusing `cancel_queued`); the caller supplies both the id
+   * and the current text so the composer can be pre-filled.
+   */
+  onEditQueued?: (id: string, text: string) => void
+  /**
    * #5953 (epic #5951): label for the in-chat "Claude is working" indicator
    * shown at the streaming tail. The parent derives it from the active session's
    * in-flight tool ("Running Bash…") or passes nothing for the generic default
@@ -355,6 +362,7 @@ const DefaultMessageRow = memo(function DefaultMessageRow({
   attachments,
   queued,
   onCancelQueued,
+  onEditQueued,
   queuePosition,
 }: {
   id: string
@@ -374,6 +382,9 @@ const DefaultMessageRow = memo(function DefaultMessageRow({
   queued?: boolean
   /** #5939: cancel this queued follow-up (stable callback from ChatView). */
   onCancelQueued?: (id: string) => void
+  /** #6628: edit this queued follow-up — reopen its text in the composer and
+   *  cancel the queued entry (stable callback from ChatView). */
+  onEditQueued?: (id: string, text: string) => void
   /** #6392: 1-based send position among queued follow-ups, shown only when more
    *  than one is queued (so a lone queued message stays a plain "Queued"). */
   queuePosition?: number
@@ -442,6 +453,18 @@ const DefaultMessageRow = memo(function DefaultMessageRow({
             {queuePosition != null && (
               <span className="msg-queued-position" data-testid={`msg-queued-position-${id}`}>#{queuePosition}</span>
             )}
+            {onEditQueued && (
+              <button
+                type="button"
+                className="msg-queued-edit"
+                aria-label="Edit queued message"
+                title="Edit queued message"
+                data-testid={`msg-queued-edit-${id}`}
+                onClick={() => onEditQueued(id, content)}
+              >
+                Edit
+              </button>
+            )}
             {onCancelQueued && (
               <button
                 type="button"
@@ -463,7 +486,7 @@ const DefaultMessageRow = memo(function DefaultMessageRow({
   )
 })
 
-function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, inFlightToolColor, renderMessage, scrollToBottomSignal, queuedIds, onCancelQueued, workingLabel, openSearchSignal, getSearchText }: ChatViewProps) {
+function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, inFlightToolColor, renderMessage, scrollToBottomSignal, queuedIds, onCancelQueued, onEditQueued, workingLabel, openSearchSignal, getSearchText }: ChatViewProps) {
   const containerRef = useRef<HTMLDivElement>(null)
 
   // #6392 — 1-based send position for each queued follow-up, derived from the
@@ -1007,6 +1030,7 @@ function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, inFlig
                   queued={queuedIds?.has(msg.id) ?? false}
                   queuePosition={queuePositions?.get(msg.id)}
                   onCancelQueued={onCancelQueued}
+                  onEditQueued={onEditQueued}
                 />
               </MessageRowShell>
             )

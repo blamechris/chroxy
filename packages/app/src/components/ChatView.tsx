@@ -88,6 +88,9 @@ export interface ChatViewProps {
   queuedIds?: Set<string>;
   /** #5938 — cancel a still-queued follow-up by its clientMessageId. */
   onCancelQueued?: (id: string) => void;
+  /** #6628 — edit a still-queued follow-up: reopen its text in the composer and
+   *  cancel the queued entry. Receives the message id and its current text. */
+  onEditQueued?: (id: string, text: string) => void;
   isPlanPending?: boolean;
   planAllowedPrompts?: { tool: string; prompt: string }[];
   onApprovePlan?: () => void;
@@ -199,6 +202,7 @@ export function ChatView({
   streamingMessageId,
   queuedIds,
   onCancelQueued,
+  onEditQueued,
   isPlanPending,
   planAllowedPrompts,
   onApprovePlan,
@@ -461,6 +465,7 @@ export function ChatView({
               message={msg}
               queued={msg.type === 'user_input' && (queuedIds?.has(msg.id) ?? false)}
               onCancelQueued={onCancelQueued}
+              onEditQueued={onEditQueued}
               onSelectOption={onSelectOption}
               onSubmitMultiQuestion={onSubmitMultiQuestion}
               allowMultiQuestion={allowMultiQuestion}
@@ -505,6 +510,7 @@ export function ChatView({
       allowSingleMultiSelect,
       queuedIds,
       onCancelQueued,
+      onEditQueued,
       chatTailMessageId,
       lastUserInputContent,
       sendInput,

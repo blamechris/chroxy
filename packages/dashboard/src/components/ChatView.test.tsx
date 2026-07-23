@@ -348,6 +348,22 @@ describe('ChatView', () => {
       expect(screen.getByTestId('msg-queued-uin-1')).toBeInTheDocument()
       expect(screen.queryByTestId('msg-queued-cancel-uin-1')).not.toBeInTheDocument()
     })
+
+    // #6628 — edit a still-queued follow-up: reopen its text in the composer and
+    // cancel the queued entry.
+    it('renders an edit button that calls onEditQueued with the id and message text', () => {
+      const onEditQueued = vi.fn()
+      render(<ChatView messages={[userMsg]} isStreaming queuedIds={new Set(['uin-1'])} onEditQueued={onEditQueued} />)
+      fireEvent.click(screen.getByTestId('msg-queued-edit-uin-1'))
+      expect(onEditQueued).toHaveBeenCalledTimes(1)
+      expect(onEditQueued).toHaveBeenCalledWith('uin-1', 'follow-up')
+    })
+
+    it('omits the edit button when no onEditQueued is supplied', () => {
+      render(<ChatView messages={[userMsg]} isStreaming queuedIds={new Set(['uin-1'])} onCancelQueued={() => {}} />)
+      expect(screen.getByTestId('msg-queued-cancel-uin-1')).toBeInTheDocument()
+      expect(screen.queryByTestId('msg-queued-edit-uin-1')).not.toBeInTheDocument()
+    })
   })
 
   it('hides scroll-to-bottom when at bottom', () => {

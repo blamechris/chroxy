@@ -116,7 +116,7 @@ function ThinkingBubble({ content, streaming, truncated }: { content: string; st
   );
 }
 
-function MessageBubbleImpl({ message, queued, onCancelQueued, onSelectOption, onSubmitMultiQuestion, allowMultiQuestion, allowSingleMultiSelect, isSelected, isSelecting, onLongPress, onPress, onOpenDetail, onImagePress, onRetryStreamStall, getInitialExpanded, onExpandedChange }: {
+function MessageBubbleImpl({ message, queued, onCancelQueued, onEditQueued, onSelectOption, onSubmitMultiQuestion, allowMultiQuestion, allowSingleMultiSelect, isSelected, isSelecting, onLongPress, onPress, onOpenDetail, onImagePress, onRetryStreamStall, getInitialExpanded, onExpandedChange }: {
   message: ChatMessage;
   /**
    * #5938 — true when this `user_input` bubble was sent mid-turn and is sitting
@@ -126,6 +126,9 @@ function MessageBubbleImpl({ message, queued, onCancelQueued, onSelectOption, on
   queued?: boolean;
   /** #5938 — cancel this queued follow-up by its message id before it flushes. */
   onCancelQueued?: (id: string) => void;
+  /** #6628 — edit this queued follow-up before it flushes: reopens its text in
+   *  the composer and cancels the queued entry. Receives the id and its text. */
+  onEditQueued?: (id: string, text: string) => void;
   // #6543 (feature B): `editedInput` carries the operator's per-hunk narrowing
   // from a Write/Edit pre-write-diff review — sent on an Approve so the server
   // writes only the kept hunks. `null`/omitted = no narrowing (a plain response);
@@ -552,12 +555,32 @@ function MessageBubbleImpl({ message, queued, onCancelQueued, onSelectOption, on
       {isUser && queued && (
         <View style={styles.queuedRow} testID={`msg-queued-${message.id}`}>
           <Text style={styles.queuedLabel}>Queued</Text>
+          {onEditQueued && (
+            <TouchableOpacity
+              onPress={() => onEditQueued(message.id, typeof message.content === 'string' ? message.content : '')}
+              // #6628 — ~44pt tap target (vertical via top/bottom:14). Horizontal
+              // hitSlop is ASYMMETRIC so Edit's and Cancel's enlarged targets don't
+              // overlap across the row's 10pt gap and dispatch ambiguously: Edit
+              // grows LEFT (toward the label), Cancel grows RIGHT (toward the edge),
+              // and the facing edges stay small (3 + 3 < 10) so a tap can't hit the
+              // wrong — and Cancel is destructive — control.
+              hitSlop={{ top: 14, bottom: 14, left: 12, right: 3 }}
+              accessibilityRole="button"
+              accessibilityLabel="Edit queued message"
+              testID={`msg-queued-edit-${message.id}`}
+            >
+              <Text style={styles.queuedEdit}>Edit</Text>
+            </TouchableOpacity>
+          )}
           {onCancelQueued && (
             <TouchableOpacity
               onPress={() => onCancelQueued(message.id)}
               // #5938 — pad the tap target to ~44pt (iOS HIG): the "Cancel"
               // text is ~16pt tall, so ≥14pt of vertical hitSlop clears the bar.
-              hitSlop={{ top: 14, bottom: 14, left: 12, right: 12 }}
+              // #6628 — asymmetric horizontal hitSlop (small LEFT toward Edit,
+              // full RIGHT toward the edge) so this destructive control's target
+              // doesn't overlap Edit's across the 10pt gap.
+              hitSlop={{ top: 14, bottom: 14, left: 3, right: 12 }}
               accessibilityRole="button"
               accessibilityLabel="Cancel queued message"
               testID={`msg-queued-cancel-${message.id}`}
@@ -827,8 +850,10 @@ export const MessageBubble = React.memo(MessageBubbleImpl, (prev, next) => {
     prev.allowSingleMultiSelect === next.allowSingleMultiSelect &&
     // #5938 — re-render when the queued flag flips (badge appears/clears on
     // enqueue/flush) or the cancel handler's presence changes.
+    // #6628 — likewise for the edit handler's presence.
     prev.queued === next.queued &&
     (prev.onCancelQueued == null) === (next.onCancelQueued == null) &&
+    (prev.onEditQueued == null) === (next.onEditQueued == null) &&
     (prev.onRetryStreamStall == null) === (next.onRetryStreamStall == null)
   );
 });
@@ -904,6 +929,13 @@ const styles = StyleSheet.create({
   },
   queuedCancel: {
     color: COLORS.accentRed,
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  // #6628 — edit affordance sits left of Cancel; neutral (muted) so Cancel's
+  // red stays the only destructive accent in the row.
+  queuedEdit: {
+    color: COLORS.textMuted,
     fontSize: 12,
     fontWeight: '600',
   },
