@@ -374,11 +374,14 @@ export {
 export type {
   ChatViewMessage,
   ChatViewPipelineResult,
+  BuildChatViewMessagesOptions,
 } from './buildChatViewMessages'
 
 export {
   buildChatViewMessages,
   toChatViewMessage,
+  // #6799 — shared predicate for the global compact chat filter (mobile parity).
+  isHiddenInCompactMode,
 } from './buildChatViewMessages'
 
 // #5793: single source of truth for "is this an AskUserQuestion teardown

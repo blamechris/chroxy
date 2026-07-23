@@ -89,6 +89,36 @@ export interface ChatViewMessage {
   attachments?: MessageAttachment[]
 }
 
+/**
+ * Options for the chat-view derivation.
+ */
+export interface BuildChatViewMessagesOptions {
+  /**
+   * #6799 — global "compact" chat filter (mobile parity). When true, drop
+   * every `tool_use` and `thinking` message from the transcript session-wide,
+   * so the chat pane shows only the assistant's responses (and anything needing
+   * action). Mirrors mobile's `chatFilterCompact` (SessionScreen.tsx), which
+   * pre-filters the same two types inline. Additive on top of the per-item
+   * ToolBubble/ToolGroup collapse — those stay untouched when this is off (the
+   * hidden types never reach the grouping pass, so no `tool_group` rows form).
+   * Default `false`.
+   */
+  hideToolAndThinking?: boolean
+}
+
+/**
+ * #6799 — predicate for the global compact chat filter: which message types
+ * vanish entirely when the filter is on. `tool_use` and `thinking` are the two
+ * "noise" categories the mobile app already hides session-wide; the dashboard
+ * toggle narrows off this single predicate. It is the shared definition other
+ * clients can adopt so every surface agrees on WHAT compact mode hides — mobile
+ * still hard-codes the same rule inline in SessionScreen.tsx; converging it onto
+ * this predicate is tracked in #6882. Pure — safe to call per row.
+ */
+export function isHiddenInCompactMode(type: ChatMessage['type']): boolean {
+  return type === 'tool_use' || type === 'thinking'
+}
+
 export interface ChatViewPipelineResult {
   /** Chat-view rows with contiguous tool runs collapsed to `tool_group`. */
   chatMessages: ChatViewMessage[]
@@ -153,13 +183,23 @@ export function toChatViewMessage(msg: ChatMessage): ChatViewMessage {
  * @param storeMessages full message list from BaseSessionState.messages
  * @param streamingMessageId currently-streaming message id (drives the
  *   trailing activity group's `isActive` overlay); `null` when idle.
+ * @param options derivation options — `hideToolAndThinking` (#6799) drops
+ *   `tool_use` + `thinking` rows session-wide for the compact chat filter.
  */
 export function buildChatViewMessages(
   storeMessages: ChatMessage[],
   streamingMessageId: string | null,
+  options: BuildChatViewMessagesOptions = {},
 ): ChatViewPipelineResult {
-  // Filter out `system` events — they belong on the System tab.
-  const chatFilteredMessages = storeMessages.filter(m => m.type !== 'system')
+  const { hideToolAndThinking = false } = options
+  // Filter out `system` events — they belong on the System tab. When the #6799
+  // compact filter is on, also drop tool_use + thinking session-wide (before
+  // grouping, so no `tool_group` collapse row forms for a run of hidden tools).
+  const chatFilteredMessages = storeMessages.filter(m => {
+    if (m.type === 'system') return false
+    if (hideToolAndThinking && isHiddenInCompactMode(m.type)) return false
+    return true
+  })
 
   // Group contiguous tool_use runs (#6756: thinking stays standalone), then
   // apply the streaming overlay so the trailing group flips to isActive while

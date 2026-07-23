@@ -23,6 +23,9 @@ const KEY_SHOW_CONSOLE_TAB = `${KEY_PREFIX}show_console_tab`;
 // #4891 — audible intervention ping. Defaults on; persisted per-device so a
 // muted browser tab stays muted across reload + Tauri restart.
 const KEY_INTERVENTION_PING = `${KEY_PREFIX}intervention_ping`;
+// #6799 — global "compact" chat filter (hide tool calls + thinking, mobile
+// parity). Defaults off; persisted per-device so the choice survives reload.
+const KEY_COMPACT_CHAT_FILTER = `${KEY_PREFIX}compact_chat_filter`;
 // #4303 — pluggable sidebar panel slot persistence
 const KEY_SIDEBAR_PANEL_HEIGHT = `${KEY_PREFIX}sidebar_panel_height`;
 const KEY_SIDEBAR_PANEL_VIEW = `${KEY_PREFIX}sidebar_panel_view`;
@@ -483,6 +486,34 @@ export function loadPersistedInterventionPing(): boolean {
     return localStorage.getItem(KEY_INTERVENTION_PING) !== 'false';
   } catch {
     return true;
+  }
+}
+
+/**
+ * Persist the compact-chat-filter preference (#6799 — hide tool calls +
+ * thinking across the whole transcript, mirroring the mobile app's coarse
+ * All/Compact filter).
+ */
+export function persistCompactChatFilter(enabled: boolean): void {
+  try {
+    localStorage.setItem(KEY_COMPACT_CHAT_FILTER, String(enabled));
+  } catch {
+    // Storage not available
+  }
+}
+
+/**
+ * Load the persisted compact-chat-filter preference (#6799).
+ *
+ * Defaults to OFF (returns false) when unset so the transcript ships showing
+ * every message — the filter is opt-in. Only an explicit `'true'` enables it;
+ * falls back to OFF if storage is unavailable.
+ */
+export function loadPersistedCompactChatFilter(): boolean {
+  try {
+    return localStorage.getItem(KEY_COMPACT_CHAT_FILTER) === 'true';
+  } catch {
+    return false;
   }
 }
 

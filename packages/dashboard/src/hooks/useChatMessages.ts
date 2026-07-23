@@ -48,6 +48,12 @@ void _assert
 export interface UseChatMessagesProps {
   storeMessages: ChatMessage[]
   streamingMessageId: string | null
+  /**
+   * #6799 — global compact chat filter. When true, `buildChatViewMessages`
+   * drops every `tool_use` and `thinking` row session-wide (mobile parity), so
+   * the transcript shows only the conversation. Defaults to false (off).
+   */
+  hideToolAndThinking?: boolean
 }
 
 export interface UseChatMessagesResult {
@@ -73,11 +79,11 @@ export interface UseChatMessagesResult {
 export { toChatViewMessage }
 
 export function useChatMessages(props: UseChatMessagesProps): UseChatMessagesResult {
-  const { storeMessages, streamingMessageId } = props
+  const { storeMessages, streamingMessageId, hideToolAndThinking = false } = props
 
   const result = useMemo(
-    () => buildChatViewMessages(storeMessages, streamingMessageId),
-    [storeMessages, streamingMessageId],
+    () => buildChatViewMessages(storeMessages, streamingMessageId, { hideToolAndThinking }),
+    [storeMessages, streamingMessageId, hideToolAndThinking],
   )
 
   // Destructure to drop `displayGroups` (dashboard uses the flattened

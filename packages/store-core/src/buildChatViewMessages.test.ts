@@ -11,7 +11,7 @@
  * the dashboard hook test had, run directly against the pure function.
  */
 import { describe, it, expect } from 'vitest'
-import { buildChatViewMessages, toChatViewMessage } from './buildChatViewMessages'
+import { buildChatViewMessages, toChatViewMessage, isHiddenInCompactMode } from './buildChatViewMessages'
 import type { ChatMessage } from './types'
 
 function msg(partial: Partial<ChatMessage> & { id: string; type: ChatMessage['type'] }): ChatMessage {
@@ -276,6 +276,83 @@ describe('buildChatViewMessages', () => {
       expect(joined).toContain('Delegating')
       expect(joined).not.toContain('Del\n\nDel')
       expect(joined).not.toMatch(/Del\negating/)
+    })
+  })
+
+  // #6799 — global compact chat filter (mobile parity): hide all tool_use +
+  // thinking rows session-wide via a shared pipeline flag, mirroring mobile's
+  // `chatFilterCompact` pre-filter so both clients agree on WHAT is hidden.
+  describe('compact chat filter — hideToolAndThinking (#6799)', () => {
+    it('drops tool_use and thinking rows when the flag is on', () => {
+      const messages = [
+        msg({ id: 'u1', type: 'user_input', content: 'do a thing' }),
+        msg({ id: 'th1', type: 'thinking', content: 'planning' }),
+        msg({ id: 't1', type: 'tool_use', content: '', tool: 'Bash' }),
+        msg({ id: 'r1', type: 'response', content: 'done' }),
+      ]
+      const out = buildChatViewMessages(messages, null, { hideToolAndThinking: true })
+      // Only the conversation rows survive — the tool + thinking are hidden.
+      expect(out.chatMessages.map(m => m.id)).toEqual(['u1', 'r1'])
+      expect(out.chatMessages.map(m => m.type)).toEqual(['user_input', 'response'])
+    })
+
+    it('does not collapse a run of hidden tools into a tool_group when the flag is on', () => {
+      const messages = [
+        msg({ id: 'u1', type: 'user_input', content: 'do many things' }),
+        msg({ id: 't1', type: 'tool_use', content: '', tool: 'Bash' }),
+        msg({ id: 't2', type: 'tool_use', content: '', tool: 'Read' }),
+        msg({ id: 'r1', type: 'response', content: 'done' }),
+      ]
+      const out = buildChatViewMessages(messages, null, { hideToolAndThinking: true })
+      // The tools are filtered out BEFORE grouping, so no synthetic tool_group
+      // row is emitted and the payload map stays empty.
+      expect(out.chatMessages.map(m => m.type)).toEqual(['user_input', 'response'])
+      expect(out.chatToolGroupPayloads.size).toBe(0)
+      // The tail is the last surviving conversation row, not a group id.
+      expect(out.chatTailMessageId).toBe('r1')
+    })
+
+    it('is a no-op equal to the default when the flag is off or omitted', () => {
+      const messages = [
+        msg({ id: 'u1', type: 'user_input', content: 'go' }),
+        msg({ id: 'th1', type: 'thinking', content: 'planning' }),
+        msg({ id: 't1', type: 'tool_use', content: '', tool: 'Bash' }),
+        msg({ id: 't2', type: 'tool_use', content: '', tool: 'Read' }),
+        msg({ id: 'r1', type: 'response', content: 'done' }),
+      ]
+      const off = buildChatViewMessages(messages, null, { hideToolAndThinking: false })
+      const omitted = buildChatViewMessages(messages, null)
+      const offTypes = off.chatMessages.map(m => m.type)
+      // Filter off leaves the full pipeline behaviour intact (thinking standalone,
+      // the 2-tool run collapsed to a tool_group).
+      expect(offTypes).toEqual(['user_input', 'thinking', 'tool_group', 'response'])
+      expect(omitted.chatMessages.map(m => m.type)).toEqual(offTypes)
+      expect(off.chatToolGroupPayloads.size).toBe(1)
+    })
+
+    it('keeps storeMsgMap complete (hidden rows stay resolvable for the renderer)', () => {
+      const messages = [
+        msg({ id: 'u1', type: 'user_input', content: 'go' }),
+        msg({ id: 't1', type: 'tool_use', content: '', tool: 'Bash' }),
+      ]
+      const out = buildChatViewMessages(messages, null, { hideToolAndThinking: true })
+      // The tool row is hidden from the visible list but still present in the
+      // lookup map — the map is built from the unfiltered storeMessages.
+      expect(out.chatMessages.map(m => m.id)).toEqual(['u1'])
+      expect(out.storeMsgMap.get('t1')?.tool).toBe('Bash')
+    })
+  })
+
+  describe('isHiddenInCompactMode (#6799)', () => {
+    it('hides exactly tool_use and thinking', () => {
+      expect(isHiddenInCompactMode('tool_use')).toBe(true)
+      expect(isHiddenInCompactMode('thinking')).toBe(true)
+    })
+
+    it('keeps conversation and action rows visible', () => {
+      for (const type of ['response', 'user_input', 'prompt', 'error', 'system'] as const) {
+        expect(isHiddenInCompactMode(type)).toBe(false)
+      }
     })
   })
 

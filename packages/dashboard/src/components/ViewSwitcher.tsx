@@ -11,6 +11,7 @@ export type ViewMode = 'chat' | 'terminal' | 'files' | 'diff' | 'git' | 'system'
 export function ViewSwitcher({
   viewMode, setViewMode, splitMode, setSplitMode, persistSplitMode,
   showChatTab = true, showTerminalTab = true, showConsoleTab, unreadSystemCount, checkpointsOpen, setCheckpointsOpen,
+  compactChatFilter = false, onToggleCompactChatFilter,
 }: {
   viewMode: string
   setViewMode: (m: ViewMode) => void
@@ -27,6 +28,11 @@ export function ViewSwitcher({
   unreadSystemCount: number
   checkpointsOpen: boolean
   setCheckpointsOpen: (fn: (prev: boolean) => boolean) => void
+  // #6799 — global compact chat filter (hide tool calls + thinking, mobile
+  // parity). The toggle only renders while a chat surface is on screen. When
+  // `onToggleCompactChatFilter` is omitted the control is hidden entirely.
+  compactChatFilter?: boolean
+  onToggleCompactChatFilter?: (enabled: boolean) => void
 }) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const [canScrollLeft, setCanScrollLeft] = useState(false)
@@ -140,6 +146,21 @@ export function ViewSwitcher({
         <button className={`view-tab${viewMode === 'pool' ? ' active' : ''}`} onClick={() => { setViewMode('pool'); setSplitMode(null); persistSplitMode(null) }} type="button">Pool</button>
         <button className={`view-tab${viewMode === 'pages' ? ' active' : ''}`} onClick={() => { setViewMode('pages'); setSplitMode(null); persistSplitMode(null) }} type="button">Pages</button>
         <div className="view-switch-spacer" />
+        {/* #6799 — global compact chat filter: hide every tool call + thinking
+            block from the transcript at once (mobile parity). Only meaningful
+            while a chat surface is showing — split always renders a ChatView, so
+            it counts too. A pressed/`active` toggle button rather than a tab: it
+            doesn't change viewMode, it filters the current one. */}
+        {showChatTab && onToggleCompactChatFilter && (viewMode === 'chat' || splitMode !== null) && (
+          <button
+            className={`view-tab view-tab-right${compactChatFilter ? ' active' : ''}`}
+            data-testid="compact-chat-filter-toggle"
+            onClick={() => onToggleCompactChatFilter(!compactChatFilter)}
+            type="button"
+            aria-pressed={compactChatFilter}
+            title={compactChatFilter ? 'Showing compact chat — click to show tool calls and thinking' : 'Hide tool calls and thinking from the transcript'}
+          >Compact</button>
+        )}
         <button className={`view-tab view-tab-right${checkpointsOpen ? ' active' : ''}`} onClick={() => setCheckpointsOpen(prev => !prev)} type="button" title="Toggle checkpoint timeline">Checkpoints</button>
         <button className={`view-tab${viewMode === 'diff' ? ' active' : ''}`} onClick={() => setViewMode('diff')} type="button">Diff</button>
       </div>
