@@ -293,3 +293,78 @@ describe('EventNormalizer output → Server*Schema round-trip (#6841)', () => {
     )
   })
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #6892 — negative meta-test: prove the round-trip harness above is
+// non-vacuous.
+//
+// Every `it()` above only means something if `safeParse` can actually FAIL for
+// a real drift. The #6889 PR body claimed the guard "bites" — a
+// `message_queued` missing required `sessionId`, and a `result` with a
+// non-numeric `cost`, both fail `safeParse` — but that check was only run by
+// hand, never committed. A future refactor could make every test above pass
+// VACUOUSLY (a fixture stops reaching `parse`, an emitter starts returning
+// `undefined`, `validateMessage` gets short-circuited) without a single test
+// failing.
+//
+// This reuses the SAME plumbing as the harness above (a real FIXTURES entry
+// driven through the real EventNormalizer, checked against the real
+// SCHEMA_BY_TYPE mapping) and corrupts the normalizer's actual OUTPUT the same
+// two ways: dropping a required field, and wrong-typing a required field. Each
+// case first asserts the pre-corruption field is present with the expected
+// type (proof the corruption mutates a real value, not a no-op), then asserts
+// `safeParse` on the corrupted message FAILS. If either assertion is ever
+// satisfied by a passing `safeParse`, the drift guard above has gone vacuous.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('negative meta-test: the round-trip harness catches real drift (#6892)', () => {
+  // Drive one FIXTURES entry through the real normalizer and return the first
+  // emitted message of the given wire `type` — same path the harness above
+  // uses, so the corrupted message below is a genuine normalizer output.
+  function emitFixture(event, wireType) {
+    const fixture = FIXTURES.find(([e]) => e === event)
+    assert.ok(fixture, `no FIXTURES entry for '${event}' — this meta-test must target a real fixture`)
+    const [, data, ctx] = fixture
+    const normalizer = new EventNormalizer({ flushIntervalMs: 10 })
+    try {
+      const result = normalizer.normalize(event, data, ctx)
+      const entry = (result?.messages ?? []).find((m) => m.msg?.type === wireType)
+      assert.ok(entry, `expected '${event}' to emit a '${wireType}' message`)
+      return entry.msg
+    } finally {
+      normalizer.destroy()
+    }
+  }
+
+  it('catches a dropped required field: message_queued without sessionId', () => {
+    const msg = emitFixture('message_queued', 'message_queued')
+    assert.equal(
+      typeof msg.sessionId,
+      'string',
+      'fixture sanity: sessionId must be a real string before corruption, or this proves nothing',
+    )
+    const corrupted = { ...msg }
+    delete corrupted.sessionId
+    const parsed = SCHEMA_BY_TYPE.message_queued.safeParse(corrupted)
+    assert.equal(
+      parsed.success,
+      false,
+      'dropping required sessionId must fail safeParse — a `true` here means the drift guard is vacuous',
+    )
+  })
+
+  it('catches a wrong-typed required field: result with non-numeric cost', () => {
+    const msg = emitFixture('result', 'result')
+    assert.equal(
+      typeof msg.cost,
+      'number',
+      'fixture sanity: cost must be a real number before corruption, or this proves nothing',
+    )
+    const corrupted = { ...msg, cost: 'not-a-number' }
+    const parsed = SCHEMA_BY_TYPE.result.safeParse(corrupted)
+    assert.equal(
+      parsed.success,
+      false,
+      'a non-numeric cost must fail safeParse — a `true` here means the drift guard is vacuous',
+    )
+  })
+})
