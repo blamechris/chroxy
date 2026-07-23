@@ -275,6 +275,46 @@ export const ServerPermissionRequestSchema = z.object({
     // Emitted by ws-permissions.js (resendPendingPermissions + HTTP fallback).
     sessionId: z.string().optional(),
 });
+// #6891: a pending permission prompt expired (session hard-cap / SDK timeout)
+// and can no longer be answered — the client clears the stale prompt bubble and
+// dismisses the matching notification banner. Emitted by the event-normalizer
+// `permission_expired` mapping (event-normalizer.js) from the session layer's
+// `permission_expired` event (cli-session / sdk-session fire it for every
+// outstanding permission when a turn is force-cleared).
+//   - `requestId` — the expired permission's id (always present).
+//   - `sessionId` — the owning chroxy session; the normalizer stamps it from
+//     `ctx.sessionId`, which is absent in single-session mode, so OPTIONAL
+//     (mirrors ServerPermissionRequestSchema.sessionId).
+//   - `message` — the human-readable expiry reason the client surfaces
+//     (e.g. "Permission request expired (session timeout)").
+export const ServerPermissionExpiredSchema = z.object({
+    type: z.literal('permission_expired'),
+    requestId: z.string(),
+    sessionId: z.string().optional(),
+    message: z.string(),
+});
+// #6891: a permission prompt was RESOLVED (via any path — user response, abort,
+// timeout, auto-mode, clearAll); the client dismisses the prompt on every
+// connected client and marks the bubble answered. Emitted by the
+// event-normalizer `permission_resolved` mapping (event-normalizer.js) ONLY for
+// the `requestId` (permission-prompt) variant; the AskUserQuestion `toolUseId`
+// variant emits NO wire message (routing-map cleanup only), so this schema
+// covers just the requestId shape.
+//   - `requestId` — the resolved permission's id (always present here).
+//   - `decision` — the resolution outcome, a free-form string that varies by
+//     path/provider ('allow' / 'deny' / the user's raw choice); a PLAIN string,
+//     NOT a closed enum, so a new decision value can't fail the parse. Always
+//     present in the requestId variant.
+//   - `sessionId` — the owning chroxy session (stamped from `ctx.sessionId`;
+//     absent in single-session mode → OPTIONAL).
+//   The normalizer does NOT forward the internal `reason` field to the wire, so
+//   it is intentionally absent from this schema.
+export const ServerPermissionResolvedSchema = z.object({
+    type: z.literal('permission_resolved'),
+    requestId: z.string(),
+    decision: z.string(),
+    sessionId: z.string().optional(),
+});
 /**
  * #6543 (IDE P3, feature B) — reply to a `get_permission_input`. The
  * `permission_request` broadcast truncates `input` at ~10K (secret-safe), so a

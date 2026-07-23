@@ -183,6 +183,18 @@ export declare const ServerPermissionRequestSchema: z.ZodObject<{
     remainingMs: z.ZodOptional<z.ZodNumber>;
     sessionId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
+export declare const ServerPermissionExpiredSchema: z.ZodObject<{
+    type: z.ZodLiteral<"permission_expired">;
+    requestId: z.ZodString;
+    sessionId: z.ZodOptional<z.ZodString>;
+    message: z.ZodString;
+}, z.core.$strip>;
+export declare const ServerPermissionResolvedSchema: z.ZodObject<{
+    type: z.ZodLiteral<"permission_resolved">;
+    requestId: z.ZodString;
+    decision: z.ZodString;
+    sessionId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
 /**
  * #6543 (IDE P3, feature B) — reply to a `get_permission_input`. The
  * `permission_request` broadcast truncates `input` at ~10K (secret-safe), so a

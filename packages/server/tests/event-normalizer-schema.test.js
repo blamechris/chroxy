@@ -37,6 +37,9 @@ import {
   ServerBudgetExceededSchema,
   ServerUserQuestionSchema,
   ServerPermissionRequestSchema,
+  ServerPermissionExpiredSchema,
+  ServerPermissionResolvedSchema,
+  ServerConversationIdSchema,
   ServerSessionStoppedSchema,
   ServerStdinDroppedTotalsSchema,
 } from '@chroxy/protocol'
@@ -102,22 +105,29 @@ const SCHEMA_BY_TYPE = {
   budget_exceeded: ServerBudgetExceededSchema,
   user_question: ServerUserQuestionSchema,
   permission_request: ServerPermissionRequestSchema,
+  permission_expired: ServerPermissionExpiredSchema,
+  permission_resolved: ServerPermissionResolvedSchema,
+  conversation_id: ServerConversationIdSchema,
   session_stopped: ServerSessionStoppedSchema,
   stdin_dropped_totals: ServerStdinDroppedTotalsSchema,
 }
 
 // Wire types the normalizer emits that have NO `Server*Schema` in
-// `@chroxy/protocol` today. Documented here so the round-trip harness can tell
+// `@chroxy/protocol`. Documented here so the round-trip harness can tell
 // "deliberately un-schemaed" apart from "a new emitter shipped a type nobody
 // gave a schema". If a schema is later added for one of these, WIRE IT INTO
 // `SCHEMA_BY_TYPE` above and drop it from this set (the meta-test below fails
-// until both sides agree). See the PR for #6841 — these are tracked as a
-// follow-up schema-gap, not a licence to leave new types unchecked.
-const KNOWN_UNSCHEMAED = new Set([
-  'conversation_id', // conversation_id emitter — no ServerConversationIdSchema
-  'permission_expired', // permission_expired emitter — no schema
-  'permission_resolved', // permission_resolved emitter — no schema
-])
+// until both sides agree).
+//
+// #6891 closed the last of the original #6841 gaps — `conversation_id`,
+// `permission_expired`, and `permission_resolved` now have `Server*Schema`s and
+// moved up into `SCHEMA_BY_TYPE`. The set is intentionally EMPTY now: the
+// `emits un-schemaed wire types only for the documented KNOWN_UNSCHEMAED set`
+// meta-test below therefore enforces the stronger invariant that EVERY emitted
+// wire type is schema-validated. A new emitter that ships an un-schemaed type
+// fails that meta-test until it is either schemaed (preferred) or documented
+// here with a reason.
+const KNOWN_UNSCHEMAED = new Set([])
 
 // Standard multi-session context (mirrors event-normalizer.test.js).
 function makeCtx(overrides = {}) {

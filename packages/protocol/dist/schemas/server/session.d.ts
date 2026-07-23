@@ -222,6 +222,11 @@ export declare const ServerSessionStoppedSchema: z.ZodObject<{
     sessionId: z.ZodOptional<z.ZodString>;
     code: z.ZodOptional<z.ZodNumber>;
 }, z.core.$strip>;
+export declare const ServerConversationIdSchema: z.ZodObject<{
+    type: z.ZodLiteral<"conversation_id">;
+    sessionId: z.ZodOptional<z.ZodString>;
+    conversationId: z.ZodString;
+}, z.core.$strip>;
 export declare const ServerProviderListSchema: z.ZodObject<{
     type: z.ZodLiteral<"provider_list">;
     providers: z.ZodArray<z.ZodObject<{

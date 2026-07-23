@@ -296,6 +296,22 @@ export const ServerSessionStoppedSchema = z.object({
   code: z.number().int().optional(),
 })
 
+// #6891: the provider (SDK) reported a fresh conversation handle for a session —
+// the client stamps `conversationId` onto the target session so the session is
+// portable/resumable. Emitted by the event-normalizer `conversation_id` mapping
+// (event-normalizer.js).
+//   - `sessionId` — the owning chroxy session; the normalizer stamps it from
+//     `ctx.sessionId`, absent in single-session mode, so OPTIONAL. Both clients
+//     deliberately DO NOT fall back to the active session when it is missing
+//     (handleConversationId → dispatchConversationId), so a message with no
+//     sessionId is a valid no-op on the wire.
+//   - `conversationId` — the provider's conversation handle (always emitted).
+export const ServerConversationIdSchema = z.object({
+  type: z.literal('conversation_id'),
+  sessionId: z.string().optional(),
+  conversationId: z.string(),
+})
+
 // #3404 audit (F1+F5): per-provider auth/billing summary so clients can
 // grey-out unusable providers and surface billing-identity confidence.
 // Optional on the wire so older servers stay parseable.
