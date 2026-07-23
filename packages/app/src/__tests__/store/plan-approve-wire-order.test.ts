@@ -15,13 +15,15 @@
  *
  * This test wires the combined action to the store's REAL setPermissionMode,
  * addUserMessage, sendInput and clearPlanState (mirroring SessionScreen.tsx's
- * `handleApprovePlanAcceptEdits` / `handleApprovePlan` exactly), with a
- * socket stub that records frames in send order, and asserts
- * `set_permission_mode` lands strictly before the approve `input` frame. If
- * a future refactor of either action deferred its `wsSend` call behind a
- * microtask/await, this test — unlike the store-core helper test — would
- * catch the reordering, because it observes the actual wire, not just the
- * order the two functions were called in.
+ * `handleApprovePlanAcceptEdits` / `handleApprovePlan` exactly — including
+ * the client-generated `clientMessageId` that production passes to BOTH
+ * `addUserMessage` and `sendInput` so the optimistic bubble and the wire
+ * frame correlate, per #2902), with a socket stub that records frames in
+ * send order, and asserts `set_permission_mode` lands strictly before the
+ * approve `input` frame. If a future refactor of either action deferred its
+ * `wsSend` call behind a microtask/await, this test — unlike the store-core
+ * helper test — would catch the reordering, because it observes the actual
+ * wire, not just the order the two functions were called in.
  */
 jest.mock('expo-secure-store', () => ({
   getItemAsync: jest.fn(() => Promise.resolve(null)),
@@ -37,7 +39,7 @@ jest.mock('../../utils/haptics', () => ({
 }));
 
 import { approvePlanWithAcceptEdits } from '@chroxy/store-core';
-import { useConnectionStore, createEmptySessionState } from '../../store/connection';
+import { useConnectionStore, createEmptySessionState, nextMessageId } from '../../store/connection';
 import type { SessionState } from '../../store/types';
 
 interface FakeSocket {
@@ -80,11 +82,15 @@ describe('#6895 — app combined plan-approve+acceptEdits wire order', () => {
     } as never);
 
     const { setPermissionMode, addUserMessage, sendInput, clearPlanState } = useConnectionStore.getState();
-    // Mirrors SessionScreen.tsx's handleApprovePlan exactly: addUserMessage
-    // (local-only, no wire effect) + sendInput + clearPlanState (local-only).
+    // Mirrors SessionScreen.tsx's handleApprovePlan exactly: a client-generated
+    // clientMessageId passed to BOTH addUserMessage (local-only, no wire
+    // effect) and sendInput (which puts it on the `input` frame so the
+    // optimistic bubble and server history record correlate, #2902), then
+    // clearPlanState (local-only).
     const approve = (): void => {
-      addUserMessage('Go ahead with the plan');
-      sendInput('Go ahead with the plan');
+      const clientMessageId = nextMessageId('user');
+      addUserMessage('Go ahead with the plan', undefined, { clientMessageId });
+      sendInput('Go ahead with the plan', undefined, { clientMessageId });
       clearPlanState();
     };
 
@@ -93,6 +99,13 @@ describe('#6895 — app combined plan-approve+acceptEdits wire order', () => {
     // Strict order: exactly two frames, mode change first.
     expect(sent.map((f) => f.type)).toEqual(['set_permission_mode', 'input']);
     expect(sent[0]).toMatchObject({ type: 'set_permission_mode', mode: 'acceptEdits' });
-    expect(sent[1]).toMatchObject({ type: 'input', data: 'Go ahead with the plan' });
+    // Defensive: the input frame should carry the same clientMessageId
+    // production correlates against (not the core assertion above, but
+    // guards against a regression that drops it from the wire payload).
+    expect(sent[1]).toMatchObject({
+      type: 'input',
+      data: 'Go ahead with the plan',
+      clientMessageId: expect.any(String),
+    });
   });
 });
