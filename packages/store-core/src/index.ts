@@ -447,6 +447,18 @@ export {
   detectPasteFromDiff,
 } from './paste-text'
 
+// #6800: diff line-comment → prompt composition. Shared by the dashboard
+// DiffViewerPanel and mobile DiffViewer so inline review comments / a one-click
+// "Review code" request compose the same user turn on both clients.
+export {
+  parseHunkStartLines,
+  deriveLineNumber,
+  composeCommentReviewPrompt,
+  composeReviewRequestPrompt,
+} from './diff-comments'
+
+export type { DiffLineComment } from './diff-comments'
+
 export {
   PROVIDER_LABELS,
   getProviderLabel,

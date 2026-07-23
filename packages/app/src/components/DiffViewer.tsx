@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View,
   Text,
+  TextInput,
   TouchableOpacity,
   FlatList,
   ActivityIndicator,
@@ -10,11 +11,46 @@ import {
   ScrollView,
   Platform,
 } from 'react-native';
+import {
+  composeCommentReviewPrompt,
+  composeReviewRequestPrompt,
+  deriveLineNumber,
+  type DiffLineComment,
+} from '@chroxy/store-core';
 import { useConnectionStore } from '../store/connection';
-import type { DiffResult, DiffFile, DiffHunk } from '../store/connection';
+import type { DiffResult, DiffFile, DiffHunk, DiffHunkLine } from '../store/connection';
 import { COLORS } from '../constants/colors';
 import { ICON_DIFF } from '../constants/icons';
 import { Icon } from './Icon';
+
+/** Stable, position-derived key for one diff line (used as the comment id). */
+function lineKey(filePath: string, hunkIndex: number, lineIndex: number): string {
+  return `${filePath}#${hunkIndex}#${lineIndex}`;
+}
+
+/** Everything the composer needs to build a DiffLineComment on save. */
+type LineCommentTarget = {
+  key: string;
+  filePath: string;
+  lineNumber: number | null;
+  lineType: DiffHunkLine['type'];
+  lineContent: string;
+};
+
+/**
+ * #6800: inline-comment wiring threaded down to the diff lines. Absent for the
+ * read-only / PreWriteDiffReview renders, which stay unchanged.
+ */
+type CommentApi = {
+  comments: DiffLineComment[];
+  editingKey: string | null;
+  draft: string;
+  onOpen: (target: LineCommentTarget) => void;
+  onDraftChange: (text: string) => void;
+  onSave: () => void;
+  onCancel: () => void;
+  onRemove: (key: string) => void;
+};
 
 /** Status badge color mapping */
 function statusColor(status: DiffFile['status']): string {
@@ -45,18 +81,26 @@ function statusLabel(status: DiffFile['status']): string {
  * props are a discriminated union so `selectable` ALWAYS carries `selected` +
  * `onToggle` — no dead checkbox (a control with a checkbox role but no handler).
  * The selection STATE + applyHunks wiring live in the consuming surface (#6543/#6544).
+ *
+ * #6800: when `commentApi` + `filePath` are supplied, each line becomes a
+ * touch-target that opens an inline comment editor. Read-only consumers pass
+ * neither, so the existing render is unchanged.
  */
-export type DiffHunkViewProps = { hunk: DiffHunk } & (
+export type DiffHunkViewProps = { hunk: DiffHunk; filePath?: string; hunkIndex?: number; commentApi?: CommentApi } & (
   | { selectable?: false; selected?: never; onToggle?: never }
   | { selectable: true; selected: boolean; onToggle: () => void }
 );
 
 export function DiffHunkView({
   hunk,
+  filePath,
+  hunkIndex = 0,
+  commentApi,
   selectable = false,
   selected = false,
   onToggle,
 }: DiffHunkViewProps) {
+  const commentsOn = !!commentApi && filePath != null;
   return (
     <View style={[styles.hunk, selectable && !selected ? styles.hunkRejected : null]}>
       {selectable ? (
@@ -83,11 +127,96 @@ export function DiffHunkView({
           line.type === 'addition' ? '+' :
           line.type === 'deletion' ? '-' :
           ' ';
+
+        if (!commentsOn) {
+          return (
+            <Text key={i} style={lineStyle} selectable>
+              <Text style={styles.linePrefix}>{prefix}</Text>
+              {line.content}
+            </Text>
+          );
+        }
+
+        const api = commentApi!;
+        const key = lineKey(filePath!, hunkIndex, i);
+        const existing = api.comments.find((c) => c.id === key);
+        const isEditing = api.editingKey === key;
         return (
-          <Text key={i} style={lineStyle} selectable>
-            <Text style={styles.linePrefix}>{prefix}</Text>
-            {line.content}
-          </Text>
+          <View key={i}>
+            <TouchableOpacity
+              onPress={() =>
+                api.onOpen({
+                  key,
+                  filePath: filePath!,
+                  lineNumber: deriveLineNumber(hunk, i),
+                  lineType: line.type,
+                  lineContent: line.content,
+                })
+              }
+              accessibilityRole="button"
+              accessibilityLabel={existing ? 'Edit comment on this line' : 'Comment on this line'}
+              testID={`diff-line-${i}`}
+            >
+              <Text style={[lineStyle, existing ? styles.lineHasComment : null]}>
+                <Text style={styles.linePrefix}>{prefix}</Text>
+                {line.content}
+              </Text>
+            </TouchableOpacity>
+
+            {existing && !isEditing && (
+              <TouchableOpacity
+                style={styles.commentNote}
+                onPress={() =>
+                  api.onOpen({
+                    key,
+                    filePath: filePath!,
+                    lineNumber: deriveLineNumber(hunk, i),
+                    lineType: line.type,
+                    lineContent: line.content,
+                  })
+                }
+                testID={`diff-comment-note-${i}`}
+              >
+                <Text style={styles.commentNoteText}>{existing.comment}</Text>
+                <TouchableOpacity
+                  onPress={() => api.onRemove(key)}
+                  accessibilityRole="button"
+                  accessibilityLabel="Remove comment"
+                  testID={`diff-comment-remove-${i}`}
+                >
+                  <Text style={styles.commentRemove}>Remove</Text>
+                </TouchableOpacity>
+              </TouchableOpacity>
+            )}
+
+            {isEditing && (
+              <View style={styles.commentEditor} testID={`diff-comment-editor-${i}`}>
+                <TextInput
+                  style={styles.commentInput}
+                  value={api.draft}
+                  onChangeText={api.onDraftChange}
+                  placeholder="Leave a comment for Claude…"
+                  placeholderTextColor={COLORS.textMuted}
+                  multiline
+                  autoFocus
+                  testID="diff-comment-input"
+                />
+                <View style={styles.commentEditorActions}>
+                  <TouchableOpacity
+                    style={[styles.commentSave, api.draft.trim().length === 0 ? styles.commentSaveDisabled : null]}
+                    onPress={api.onSave}
+                    disabled={api.draft.trim().length === 0}
+                    testID="diff-comment-save"
+                  >
+                    <Text style={styles.commentSaveText}>Add comment</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={styles.commentCancel} onPress={api.onCancel} testID="diff-comment-cancel">
+                    <Text style={styles.commentCancelText}>Cancel</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            )}
+          </View>
         );
       })}
     </View>
@@ -98,9 +227,11 @@ export function DiffHunkView({
 function FileDiffView({
   file,
   onBack,
+  commentApi,
 }: {
   file: DiffFile;
   onBack: () => void;
+  commentApi?: CommentApi;
 }) {
   return (
     <View style={styles.container}>
@@ -121,7 +252,7 @@ function FileDiffView({
         <ScrollView horizontal showsHorizontalScrollIndicator>
           <View>
             {file.hunks.map((hunk, i) => (
-              <DiffHunkView key={i} hunk={hunk} />
+              <DiffHunkView key={i} hunk={hunk} filePath={file.path} hunkIndex={i} commentApi={commentApi} />
             ))}
             {file.hunks.length === 0 && (
               <Text style={styles.emptyText}>No diff content</Text>
@@ -146,8 +277,14 @@ export function DiffViewer({
   const [error, setError] = useState<string | null>(null);
   const [selectedFile, setSelectedFile] = useState<DiffFile | null>(null);
 
+  // #6800: pending inline comments + the open editor.
+  const [comments, setComments] = useState<DiffLineComment[]>([]);
+  const [editing, setEditing] = useState<LineCommentTarget | null>(null);
+  const [draft, setDraft] = useState('');
+
   const setDiffCallback = useConnectionStore((s) => s.setDiffCallback);
   const requestDiff = useConnectionStore((s) => s.requestDiff);
+  const sendInput = useConnectionStore((s) => s.sendInput);
 
   const requestIdRef = useRef(0);
   const activeRequestRef = useRef(0);
@@ -159,6 +296,9 @@ export function DiffViewer({
     setLoading(true);
     setError(null);
     setSelectedFile(null);
+    setComments([]);
+    setEditing(null);
+    setDraft('');
 
     const handleResult = (result: DiffResult) => {
       if (activeRequestRef.current !== requestIdRef.current) return;
@@ -202,7 +342,83 @@ export function DiffViewer({
     setSelectedFile(null);
   }, []);
 
+  const handleOpenComment = useCallback((target: LineCommentTarget) => {
+    setEditing(target);
+    setComments((prev) => {
+      const existing = prev.find((c) => c.id === target.key);
+      setDraft(existing?.comment ?? '');
+      return prev;
+    });
+  }, []);
+
+  const handleSaveComment = useCallback(() => {
+    if (!editing) return;
+    const text = draft.trim();
+    if (!text) return;
+    setComments((prev) => {
+      const next: DiffLineComment = {
+        id: editing.key,
+        filePath: editing.filePath,
+        lineNumber: editing.lineNumber,
+        lineType: editing.lineType,
+        lineContent: editing.lineContent,
+        comment: text,
+      };
+      const idx = prev.findIndex((c) => c.id === editing.key);
+      if (idx >= 0) {
+        const copy = [...prev];
+        copy[idx] = next;
+        return copy;
+      }
+      return [...prev, next];
+    });
+    setEditing(null);
+    setDraft('');
+  }, [editing, draft]);
+
+  const handleCancelComment = useCallback(() => {
+    setEditing(null);
+    setDraft('');
+  }, []);
+
+  const handleRemoveComment = useCallback((key: string) => {
+    setComments((prev) => prev.filter((c) => c.id !== key));
+    setEditing((cur) => (cur?.key === key ? null : cur));
+  }, []);
+
+  const handleSubmitComments = useCallback(() => {
+    if (comments.length === 0) return;
+    const prompt = composeCommentReviewPrompt(comments);
+    if (!prompt) return;
+    const result = sendInput(prompt);
+    if (result) {
+      setComments([]);
+      setEditing(null);
+      setDraft('');
+      handleClose();
+    }
+  }, [comments, sendInput, handleClose]);
+
+  const handleReview = useCallback(() => {
+    const prompt = composeReviewRequestPrompt(files.map((f) => ({ path: f.path })));
+    const result = sendInput(prompt);
+    if (result) handleClose();
+  }, [files, sendInput, handleClose]);
+
+  const commentApi: CommentApi = {
+    comments,
+    editingKey: editing?.key ?? null,
+    draft,
+    onOpen: handleOpenComment,
+    onDraftChange: setDraft,
+    onSave: handleSaveComment,
+    onCancel: handleCancelComment,
+    onRemove: handleRemoveComment,
+  };
+
   if (!visible) return null;
+
+  const showActionBar = !loading && !error && files.length > 0;
 
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={handleClose}>
@@ -226,7 +442,7 @@ export function DiffViewer({
 
         {/* Content */}
         {selectedFile ? (
-          <FileDiffView file={selectedFile} onBack={handleBack} />
+          <FileDiffView file={selectedFile} onBack={handleBack} commentApi={commentApi} />
         ) : (
           <View style={styles.container}>
             {loading && (
@@ -248,26 +464,63 @@ export function DiffViewer({
               <FlatList
                 data={files}
                 keyExtractor={(item) => item.path}
-                renderItem={({ item }) => (
-                  <TouchableOpacity
-                    style={styles.fileEntry}
-                    onPress={() => setSelectedFile(item)}
-                  >
-                    <View style={[styles.statusBadge, { backgroundColor: statusColor(item.status) + '33' }]}>
-                      <Text style={[styles.statusText, { color: statusColor(item.status) }]}>
-                        {statusLabel(item.status)}
+                renderItem={({ item }) => {
+                  const fileComments = comments.filter((c) => c.filePath === item.path).length;
+                  return (
+                    <TouchableOpacity
+                      style={styles.fileEntry}
+                      onPress={() => setSelectedFile(item)}
+                      testID={`diff-file-${item.path}`}
+                    >
+                      <View style={[styles.statusBadge, { backgroundColor: statusColor(item.status) + '33' }]}>
+                        <Text style={[styles.statusText, { color: statusColor(item.status) }]}>
+                          {statusLabel(item.status)}
+                        </Text>
+                      </View>
+                      <Text style={styles.fileEntryName} numberOfLines={1}>{item.path}</Text>
+                      {fileComments > 0 && (
+                        <View style={styles.fileCommentBadge}>
+                          <Text style={styles.fileCommentBadgeText}>{fileComments}</Text>
+                        </View>
+                      )}
+                      <Text style={styles.fileEntryStat}>
+                        <Text style={styles.additionsStat}>+{item.additions}</Text>
+                        {'  '}
+                        <Text style={styles.deletionsStat}>-{item.deletions}</Text>
                       </Text>
-                    </View>
-                    <Text style={styles.fileEntryName} numberOfLines={1}>{item.path}</Text>
-                    <Text style={styles.fileEntryStat}>
-                      <Text style={styles.additionsStat}>+{item.additions}</Text>
-                      {'  '}
-                      <Text style={styles.deletionsStat}>-{item.deletions}</Text>
-                    </Text>
-                  </TouchableOpacity>
-                )}
+                    </TouchableOpacity>
+                  );
+                }}
               />
             )}
+          </View>
+        )}
+
+        {/* #6800: review action bar — submit queued comments / one-click review. */}
+        {showActionBar && (
+          <View style={styles.actionBar} testID="diff-action-bar">
+            {comments.length > 0 && (
+              <TouchableOpacity
+                style={styles.submitButton}
+                onPress={handleSubmitComments}
+                accessibilityRole="button"
+                accessibilityLabel={`Submit ${comments.length} comment${comments.length !== 1 ? 's' : ''} to Claude`}
+                testID="diff-submit-comments"
+              >
+                <Text style={styles.submitButtonText}>
+                  Submit {comments.length} comment{comments.length !== 1 ? 's' : ''}
+                </Text>
+              </TouchableOpacity>
+            )}
+            <TouchableOpacity
+              style={styles.reviewButton}
+              onPress={handleReview}
+              accessibilityRole="button"
+              accessibilityLabel="Ask Claude to review these changes"
+              testID="diff-review-code"
+            >
+              <Text style={styles.reviewButtonText}>Review code</Text>
+            </TouchableOpacity>
           </View>
         )}
       </View>
@@ -400,6 +653,22 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
+  // #6800: a per-file badge showing how many pending comments it carries.
+  fileCommentBadge: {
+    marginLeft: 8,
+    minWidth: 20,
+    height: 20,
+    paddingHorizontal: 6,
+    borderRadius: 10,
+    backgroundColor: COLORS.accentBlue,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  fileCommentBadgeText: {
+    color: COLORS.textPrimary,
+    fontSize: 11,
+    fontWeight: '700',
+  },
   additionsStat: {
     color: COLORS.accentGreen,
   },
@@ -468,5 +737,119 @@ const styles = StyleSheet.create({
   },
   linePrefix: {
     fontWeight: '700',
+  },
+  // #6800: a commented line gets a left accent so it reads at a glance.
+  lineHasComment: {
+    borderLeftWidth: 2,
+    borderLeftColor: COLORS.accentBlue,
+  },
+  commentNote: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+    paddingVertical: 6,
+    paddingHorizontal: 8,
+    marginLeft: 4,
+    backgroundColor: COLORS.accentBlueLight,
+    borderLeftWidth: 2,
+    borderLeftColor: COLORS.accentBlue,
+  },
+  commentNoteText: {
+    flex: 1,
+    color: COLORS.textPrimary,
+    fontSize: 13,
+  },
+  commentRemove: {
+    color: COLORS.textMuted,
+    fontSize: 12,
+  },
+  commentEditor: {
+    paddingVertical: 8,
+    paddingHorizontal: 8,
+    marginLeft: 4,
+    backgroundColor: COLORS.backgroundTertiary,
+    borderLeftWidth: 2,
+    borderLeftColor: COLORS.accentBlue,
+  },
+  commentInput: {
+    minHeight: 44,
+    color: COLORS.textPrimary,
+    fontSize: 13,
+    backgroundColor: COLORS.backgroundInput,
+    borderWidth: 1,
+    borderColor: COLORS.borderSecondary,
+    borderRadius: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+    textAlignVertical: 'top',
+  },
+  commentEditorActions: {
+    flexDirection: 'row',
+    gap: 8,
+    marginTop: 6,
+  },
+  commentSave: {
+    minHeight: 36,
+    paddingHorizontal: 12,
+    justifyContent: 'center',
+    borderRadius: 4,
+    backgroundColor: COLORS.accentBlue,
+  },
+  commentSaveDisabled: {
+    opacity: 0.5,
+  },
+  commentSaveText: {
+    color: COLORS.textPrimary,
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  commentCancel: {
+    minHeight: 36,
+    paddingHorizontal: 12,
+    justifyContent: 'center',
+    borderRadius: 4,
+    borderWidth: 1,
+    borderColor: COLORS.borderPrimary,
+  },
+  commentCancelText: {
+    color: COLORS.textSecondary,
+    fontSize: 13,
+  },
+  // #6800: bottom action bar with review triggers.
+  actionBar: {
+    flexDirection: 'row',
+    gap: 8,
+    padding: 12,
+    borderTopWidth: 1,
+    borderTopColor: COLORS.borderPrimary,
+    backgroundColor: COLORS.backgroundSecondary,
+  },
+  submitButton: {
+    flex: 1,
+    minHeight: 44,
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderRadius: 6,
+    backgroundColor: COLORS.accentBlue,
+  },
+  submitButtonText: {
+    color: COLORS.textPrimary,
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  reviewButton: {
+    flex: 1,
+    minHeight: 44,
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: COLORS.borderSecondary,
+    backgroundColor: COLORS.backgroundTertiary,
+  },
+  reviewButtonText: {
+    color: COLORS.textSecondary,
+    fontSize: 14,
+    fontWeight: '600',
   },
 });

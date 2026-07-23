@@ -7,6 +7,7 @@ import { DiffViewerPanel } from './DiffViewerPanel'
 
 const mockSetDiffCallback = vi.fn()
 const mockRequestDiff = vi.fn()
+const mockSendInput = vi.fn((_input: string) => 'sent' as 'sent' | 'queued' | false)
 
 let storeState: Record<string, unknown> = {}
 let capturedCallback: ((result: any) => void) | null = null
@@ -20,6 +21,7 @@ vi.mock('../store/connection', () => ({
       },
       requestDiff: mockRequestDiff,
       connectionPhase: storeState.connectionPhase ?? 'connected',
+      sendInput: mockSendInput,
     }
     return selector(store)
   },
@@ -29,6 +31,7 @@ afterEach(() => cleanup())
 
 beforeEach(() => {
   vi.clearAllMocks()
+  mockSendInput.mockReturnValue('sent')
   storeState = { connectionPhase: 'connected' }
   capturedCallback = null
 })
@@ -181,5 +184,111 @@ describe('DiffViewerPanel', () => {
     const fileViews = screen.getAllByTestId('diff-file-view')
     expect(fileViews[0]!.textContent).toContain('M')
     expect(fileViews[1]!.textContent).toContain('A')
+  })
+
+  // ---- #6800: inline comments + review triggers ----
+
+  it('exposes a comment affordance on each unified line', () => {
+    render(<DiffViewerPanel />)
+    act(() => capturedCallback!({ files: [DIFF_FILES[0]!], error: null }))
+    // 5 lines in the fixture hunk → 5 comment buttons.
+    expect(screen.getAllByTestId('diff-line-comment-btn')).toHaveLength(5)
+  })
+
+  it('does not render comment buttons in split view', () => {
+    render(<DiffViewerPanel />)
+    act(() => capturedCallback!({ files: [DIFF_FILES[0]!], error: null }))
+    fireEvent.click(screen.getByText('Split'))
+    expect(screen.queryByTestId('diff-line-comment-btn')).toBeNull()
+  })
+
+  it('opens an inline editor and queues a comment, showing the submit control', () => {
+    render(<DiffViewerPanel />)
+    act(() => capturedCallback!({ files: [DIFF_FILES[0]!], error: null }))
+
+    // Open the editor on the second line (the deletion `const y = 2`).
+    fireEvent.click(screen.getAllByTestId('diff-line-comment-btn')[1]!)
+    const input = screen.getByTestId('diff-comment-input') as HTMLTextAreaElement
+    fireEvent.change(input, { target: { value: 'why remove this?' } })
+    fireEvent.click(screen.getByTestId('diff-comment-save'))
+
+    // The note is shown and the toolbar exposes a single-comment submit button.
+    expect(screen.getByTestId('diff-line-comment-note').textContent).toContain('why remove this?')
+    expect(screen.getByTestId('diff-submit-comments-btn').textContent).toContain('Submit 1 comment')
+  })
+
+  it('submits queued comments as a composed prompt via sendInput', () => {
+    render(<DiffViewerPanel />)
+    act(() => capturedCallback!({ files: [DIFF_FILES[0]!], error: null }))
+
+    fireEvent.click(screen.getAllByTestId('diff-line-comment-btn')[2]!) // addition `const y = 3`
+    fireEvent.change(screen.getByTestId('diff-comment-input'), {
+      target: { value: 'use a const enum' },
+    })
+    fireEvent.click(screen.getByTestId('diff-comment-save'))
+    fireEvent.click(screen.getByTestId('diff-submit-comments-btn'))
+
+    expect(mockSendInput).toHaveBeenCalledTimes(1)
+    const prompt = mockSendInput.mock.calls[0]![0] as string
+    expect(prompt).toContain('review comment')
+    expect(prompt).toContain('src/utils/helper.ts:')
+    expect(prompt).toContain('use a const enum')
+    // The derived new-file line number for the first addition is 11.
+    expect(prompt).toContain('Line 11')
+
+    // After a successful send the queue clears and a confirmation shows.
+    expect(screen.queryByTestId('diff-submit-comments-btn')).toBeNull()
+    expect(screen.getByTestId('diff-toolbar-sent')).toBeTruthy()
+  })
+
+  it('keeps queued comments when the send fails', () => {
+    mockSendInput.mockReturnValue(false as any)
+    render(<DiffViewerPanel />)
+    act(() => capturedCallback!({ files: [DIFF_FILES[0]!], error: null }))
+
+    fireEvent.click(screen.getAllByTestId('diff-line-comment-btn')[0]!)
+    fireEvent.change(screen.getByTestId('diff-comment-input'), { target: { value: 'note' } })
+    fireEvent.click(screen.getByTestId('diff-comment-save'))
+    fireEvent.click(screen.getByTestId('diff-submit-comments-btn'))
+
+    expect(screen.getByTestId('diff-submit-comments-btn')).toBeTruthy()
+  })
+
+  it('removes a queued comment', () => {
+    render(<DiffViewerPanel />)
+    act(() => capturedCallback!({ files: [DIFF_FILES[0]!], error: null }))
+
+    fireEvent.click(screen.getAllByTestId('diff-line-comment-btn')[0]!)
+    fireEvent.change(screen.getByTestId('diff-comment-input'), { target: { value: 'note' } })
+    fireEvent.click(screen.getByTestId('diff-comment-save'))
+    expect(screen.getByTestId('diff-submit-comments-btn')).toBeTruthy()
+
+    fireEvent.click(screen.getByLabelText('Remove comment'))
+    expect(screen.queryByTestId('diff-submit-comments-btn')).toBeNull()
+  })
+
+  it('triggers a one-click review over the whole diff via sendInput', () => {
+    render(<DiffViewerPanel />)
+    act(() => capturedCallback!({ files: DIFF_FILES, error: null }))
+
+    fireEvent.click(screen.getByTestId('diff-review-btn'))
+    expect(mockSendInput).toHaveBeenCalledTimes(1)
+    const prompt = mockSendInput.mock.calls[0]![0] as string
+    expect(prompt).toContain('review the current uncommitted changes')
+    expect(prompt).toContain('src/utils/helper.ts')
+    expect(prompt).toContain('src/new-file.ts')
+  })
+
+  it('drops queued comments on refresh (positions may have shifted)', () => {
+    render(<DiffViewerPanel />)
+    act(() => capturedCallback!({ files: [DIFF_FILES[0]!], error: null }))
+
+    fireEvent.click(screen.getAllByTestId('diff-line-comment-btn')[0]!)
+    fireEvent.change(screen.getByTestId('diff-comment-input'), { target: { value: 'note' } })
+    fireEvent.click(screen.getByTestId('diff-comment-save'))
+    expect(screen.getByTestId('diff-submit-comments-btn')).toBeTruthy()
+
+    fireEvent.click(screen.getByText('Refresh'))
+    expect(screen.queryByTestId('diff-submit-comments-btn')).toBeNull()
   })
 })
