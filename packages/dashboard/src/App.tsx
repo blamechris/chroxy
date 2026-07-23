@@ -85,7 +85,7 @@ import { useMessageRenderer } from './hooks/useMessageRenderer'
 import { SplitPane } from './components/SplitPane'
 import { ViewSwitcher } from './components/ViewSwitcher'
 import { DEFAULT_PROVIDER, USER_SHELL_PROVIDER } from '@chroxy/protocol'
-import { persistSidebarWidth, loadPersistedSidebarWidth, persistSplitMode, persistShowConsoleTab, loadPersistedShowConsoleTab, persistInterventionPing, loadPersistedInterventionPing, loadPersistedSidebarPanelHeight, loadPersistedSidebarPanelView, loadPersistedSidebarPanelCollapsed } from './store/persistence'
+import { persistSidebarWidth, loadPersistedSidebarWidth, persistSplitMode, persistShowConsoleTab, loadPersistedShowConsoleTab, persistInterventionPing, loadPersistedInterventionPing, persistCompactChatFilter, loadPersistedCompactChatFilter, loadPersistedSidebarPanelHeight, loadPersistedSidebarPanelView, loadPersistedSidebarPanelCollapsed } from './store/persistence'
 import { applyOrderById } from './utils/reorderById'
 import { DiffViewerPanel } from './components/DiffViewerPanel'
 import { AgentMonitorPanel } from './components/AgentMonitorPanel'
@@ -813,6 +813,15 @@ export function App() {
   const [showConsoleTab, setShowConsoleTab] = useState(() => {
     return loadPersistedShowConsoleTab()
   })
+  // #6799 — global compact chat filter (hide tool calls + thinking, mobile
+  // parity). Seeded from the persisted preference so the choice survives a
+  // reload; the filter is applied in the shared `buildChatViewMessages` pass
+  // via useChatMessages below.
+  const [compactChatFilter, setCompactChatFilter] = useState(() => loadPersistedCompactChatFilter())
+  const toggleCompactChatFilter = useCallback((enabled: boolean) => {
+    setCompactChatFilter(enabled)
+    persistCompactChatFilter(enabled)
+  }, [])
   const [isSwitchingSession, setIsSwitchingSession] = useState(false)
 
   // Clear the switching flag once the active session actually changes
@@ -1156,6 +1165,9 @@ export function App() {
   } = useChatMessages({
     storeMessages,
     streamingMessageId,
+    // #6799 — global compact chat filter: drop tool_use + thinking rows
+    // session-wide when the header toggle is on (mobile parity).
+    hideToolAndThinking: compactChatFilter,
   })
 
   // #6788 — searchable-text extractor for the ChatView in-session find bar.
@@ -2366,6 +2378,8 @@ export function App() {
               unreadSystemCount={unreadSystemCount}
               checkpointsOpen={checkpointsOpen}
               setCheckpointsOpen={setCheckpointsOpen}
+              compactChatFilter={compactChatFilter}
+              onToggleCompactChatFilter={toggleCompactChatFilter}
             />
 
             {/* Main content */}

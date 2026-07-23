@@ -169,6 +169,49 @@ describe('useChatMessages', () => {
     expect(second).toBe(first)
   })
 
+  // #6799 — global compact chat filter (mobile parity). The hook forwards
+  // `hideToolAndThinking` to the shared `buildChatViewMessages` pipeline so the
+  // dashboard toggle drops tool_use + thinking rows session-wide.
+  describe('compact chat filter — hideToolAndThinking (#6799)', () => {
+    const messages = [
+      msg({ id: 'u1', type: 'user_input', content: 'do a thing' }),
+      msg({ id: 'th1', type: 'thinking', content: 'planning' }),
+      msg({ id: 't1', type: 'tool_use', content: '', tool: 'Bash' }),
+      msg({ id: 't2', type: 'tool_use', content: '', tool: 'Read' }),
+      msg({ id: 'r1', type: 'response', content: 'done' }),
+    ]
+
+    it('excludes tool_use and thinking rows from the rendered list when on', () => {
+      const { result } = renderHook(() =>
+        useChatMessages({ storeMessages: messages, streamingMessageId: null, hideToolAndThinking: true }),
+      )
+      // Only the conversation rows are handed to the ChatView; no tool_group
+      // collapse row forms because the tools are filtered before grouping.
+      expect(result.current.chatMessages.map(m => m.id)).toEqual(['u1', 'r1'])
+      expect(result.current.chatMessages.map(m => m.type)).toEqual(['user_input', 'response'])
+      expect(result.current.chatToolGroupPayloads.size).toBe(0)
+    })
+
+    it('keeps every row when off (default), preserving tool_group collapse', () => {
+      const { result } = renderHook(() =>
+        useChatMessages({ storeMessages: messages, streamingMessageId: null, hideToolAndThinking: false }),
+      )
+      expect(result.current.chatMessages.map(m => m.type)).toEqual([
+        'user_input', 'thinking', 'tool_group', 'response',
+      ])
+      expect(result.current.chatToolGroupPayloads.size).toBe(1)
+    })
+
+    it('defaults to off when the flag is omitted', () => {
+      const { result } = renderHook(() =>
+        useChatMessages({ storeMessages: messages, streamingMessageId: null }),
+      )
+      expect(result.current.chatMessages.map(m => m.type)).toEqual([
+        'user_input', 'thinking', 'tool_group', 'response',
+      ])
+    })
+  })
+
   describe('storeMsgMap', () => {
     it('keys by message id and preserves the original ChatMessage shape', () => {
       const messages = [

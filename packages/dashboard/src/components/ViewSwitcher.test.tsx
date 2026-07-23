@@ -10,7 +10,7 @@
  *     path is unaffected.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { render, screen, cleanup } from '@testing-library/react'
+import { render, screen, cleanup, fireEvent } from '@testing-library/react'
 import { ViewSwitcher } from './ViewSwitcher'
 
 afterEach(cleanup)
@@ -79,5 +79,53 @@ describe('ViewSwitcher tab gates', () => {
     cleanup()
     renderSwitcher({ showChatTab: true, showTerminalTab: false })
     expect(screen.queryByRole('button', { name: 'Split' })).not.toBeInTheDocument()
+  })
+})
+
+// #6799 — global compact chat filter toggle (hide tool calls + thinking, mobile
+// parity). The control only renders while a chat surface is on screen and only
+// when a handler is wired.
+describe('ViewSwitcher compact chat filter toggle (#6799)', () => {
+  const TOGGLE = 'compact-chat-filter-toggle'
+
+  it('renders the toggle on the chat view when a handler is supplied', () => {
+    renderSwitcher({ viewMode: 'chat', onToggleCompactChatFilter: vi.fn() })
+    expect(screen.getByTestId(TOGGLE)).toBeInTheDocument()
+  })
+
+  it('renders the toggle in split view too (split always shows a ChatView)', () => {
+    renderSwitcher({ viewMode: 'terminal', splitMode: 'horizontal', showTerminalTab: true, onToggleCompactChatFilter: vi.fn() })
+    expect(screen.getByTestId(TOGGLE)).toBeInTheDocument()
+  })
+
+  it('hides the toggle on non-chat views (e.g. the terminal tab)', () => {
+    renderSwitcher({ viewMode: 'terminal', showTerminalTab: true, onToggleCompactChatFilter: vi.fn() })
+    expect(screen.queryByTestId(TOGGLE)).not.toBeInTheDocument()
+  })
+
+  it('hides the toggle for terminal-only providers (no chat surface)', () => {
+    renderSwitcher({ viewMode: 'chat', showChatTab: false, showTerminalTab: true, onToggleCompactChatFilter: vi.fn() })
+    expect(screen.queryByTestId(TOGGLE)).not.toBeInTheDocument()
+  })
+
+  it('hides the toggle entirely when no handler is wired', () => {
+    renderSwitcher({ viewMode: 'chat' })
+    expect(screen.queryByTestId(TOGGLE)).not.toBeInTheDocument()
+  })
+
+  it('reflects the current filter state via aria-pressed', () => {
+    renderSwitcher({ viewMode: 'chat', compactChatFilter: true, onToggleCompactChatFilter: vi.fn() })
+    expect(screen.getByTestId(TOGGLE)).toHaveAttribute('aria-pressed', 'true')
+
+    cleanup()
+    renderSwitcher({ viewMode: 'chat', compactChatFilter: false, onToggleCompactChatFilter: vi.fn() })
+    expect(screen.getByTestId(TOGGLE)).toHaveAttribute('aria-pressed', 'false')
+  })
+
+  it('invokes the handler with the negated state on click', () => {
+    const onToggle = vi.fn()
+    renderSwitcher({ viewMode: 'chat', compactChatFilter: false, onToggleCompactChatFilter: onToggle })
+    fireEvent.click(screen.getByTestId(TOGGLE))
+    expect(onToggle).toHaveBeenCalledWith(true)
   })
 })
