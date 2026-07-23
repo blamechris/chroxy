@@ -5130,6 +5130,17 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         if (!parsed.success) {
           // eslint-disable-next-line no-console
           console.warn('git_create_pr_result: invalid payload from server', parsed.error.issues);
+          // Still resolve the armed callback (with an error) rather than a bare
+          // `break`: GitPanel clears `prSubmitting` only from the callback, so
+          // swallowing an invalid payload would leave the Create-PR button stuck
+          // spinning, unrecoverable without a remount. (#6934)
+          gitCreatePrCb({
+            url: null,
+            number: null,
+            branch: null,
+            base: null,
+            error: 'Received a malformed PR-creation response from the server',
+          });
           break;
         }
         const payload = parsed.data;

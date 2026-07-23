@@ -1,6 +1,6 @@
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, realpath } from 'fs/promises'
+import { mkdtemp, realpath, readFile } from 'fs/promises'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { createGitOps } from '../src/ws-file-ops/git.js'
@@ -27,7 +27,7 @@ function resolveOrThrow(x) {
 // Build an injectable exec that routes git/gh commands per `spec` and records
 // every call for assertion.
 function router(spec = {}) {
-  const calls = { all: [], push: null, gh: null }
+  const calls = { all: [], push: null, gh: null, ghBodyFile: null, ghBody: null }
   const exec = async (file, args) => {
     calls.all.push({ file, args })
     if (file === GIT && args[0] === 'rev-parse' && args[2] === 'HEAD') {
@@ -42,6 +42,14 @@ function router(spec = {}) {
     }
     if (file === 'gh' && args[0] === 'pr' && args[1] === 'create') {
       calls.gh = args
+      // The body is passed out-of-band via `--body-file`; capture the temp file
+      // path and read its content here (the way gh would, before the caller's
+      // `finally` unlinks it) so tests can assert the body round-tripped.
+      const i = args.indexOf('--body-file')
+      if (i !== -1 && args[i + 1]) {
+        calls.ghBodyFile = args[i + 1]
+        calls.ghBody = await readFile(args[i + 1], 'utf8')
+      }
       return resolveOrThrow(spec.gh ?? { stdout: 'https://github.com/o/r/pull/1\n' })
     }
     return { stdout: '', stderr: '' }
@@ -88,14 +96,23 @@ describe('gitCreatePR (#6876)', () => {
 
     // Branch was pushed with an explicit upstream.
     assert.deepEqual(calls.push, ['push', '--set-upstream', 'origin', 'feat/pr'])
-    // gh received the title/body/head/base.
+    // gh received title/head/base and the body via `--body-file` — never an
+    // inline `--body <text>` (a up-to-50k-char body on the command line is a
+    // Windows cmdline-length hazard, #6934).
+    assert.ok(!calls.gh.includes('--body'), 'gh must not receive an inline --body')
+    const bodyFilePath = calls.ghBodyFile
+    assert.ok(bodyFilePath && bodyFilePath.length > 0, 'gh must receive a --body-file path')
     assert.deepEqual(calls.gh, [
       'pr', 'create',
       '--title', 'feat: add thing',
-      '--body', 'the description',
+      '--body-file', bodyFilePath,
       '--head', 'feat/pr',
       '--base', 'main',
     ])
+    // The body was written to that temp file verbatim…
+    assert.equal(calls.ghBody, 'the description')
+    // …and the temp file is cleaned up after the call.
+    await assert.rejects(() => readFile(bodyFilePath, 'utf8'))
   })
 
   it('honours an explicit base and the draft flag (skips default-base lookup)', async () => {
@@ -110,8 +127,10 @@ describe('gitCreatePR (#6876)', () => {
     // origin/HEAD must NOT have been consulted when base is explicit.
     assert.ok(!calls.all.some(c => c.args[2] === 'origin/HEAD'))
     assert.deepEqual(calls.gh, [
-      'pr', 'create', '--title', 't', '--body', '', '--head', 'feat/pr', '--base', 'develop', '--draft',
+      'pr', 'create', '--title', 't', '--body-file', calls.ghBodyFile, '--head', 'feat/pr', '--base', 'develop', '--draft',
     ])
+    // Empty body → an empty body-file (no inline `--body ''` on the command line).
+    assert.equal(calls.ghBody, '')
   })
 
   it('rejects an empty title without touching git/gh', async () => {
@@ -229,5 +248,37 @@ describe('gitCreatePR (#6876)', () => {
 
     assert.equal(responses[0].url, null)
     assert.match(responses[0].error, /no pull-request URL/i)
+  })
+
+  it('extracts the PR URL from gh stderr when stdout carries none (#6934)', async () => {
+    const { exec } = router({
+      gh: {
+        stdout: '',
+        stderr: 'Warning: 1 uncommitted change\nhttps://github.com/o/r/pull/42\n',
+      },
+    })
+    const { git, responses } = makeGit(exec)
+
+    await git.gitCreatePR({}, { title: 't' }, tmpDir)
+
+    assert.equal(responses[0].error, null)
+    assert.equal(responses[0].url, 'https://github.com/o/r/pull/42')
+    assert.equal(responses[0].number, 42)
+  })
+
+  it('passes a large (50k) body via --body-file, never inline --body (#6934)', async () => {
+    const big = 'x'.repeat(50_000)
+    const { exec, calls } = router()
+    const { git, responses } = makeGit(exec)
+
+    await git.gitCreatePR({}, { title: 't', body: big }, tmpDir)
+
+    assert.equal(responses[0].error, null)
+    assert.ok(!calls.gh.includes('--body'), 'a 50k body must not go inline on argv')
+    assert.ok(calls.gh.includes('--body-file'))
+    // The full body round-tripped through the temp file…
+    assert.equal(calls.ghBody, big)
+    // …and the temp file was cleaned up.
+    await assert.rejects(() => readFile(calls.ghBodyFile, 'utf8'))
   })
 })

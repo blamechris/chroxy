@@ -4305,6 +4305,67 @@ describe('dashboard message-handler dispatch', () => {
     })
   })
 
+  describe('git_create_pr_result dispatch (#6934)', () => {
+    it('invokes the armed callback with the parsed fields on a valid payload', () => {
+      const calls: Array<any> = []
+      store = createMockStore(baseState({
+        _gitCreatePrCallback: (r: any) => calls.push(r),
+      } as any))
+      setStore(store)
+
+      handleMessage(
+        {
+          type: 'git_create_pr_result',
+          url: 'https://github.com/o/r/pull/5',
+          number: 5,
+          branch: 'feat/x',
+          base: 'main',
+          error: null,
+        } as any,
+        ctx() as any,
+      )
+
+      expect(calls).toHaveLength(1)
+      expect(calls[0]).toEqual({
+        url: 'https://github.com/o/r/pull/5',
+        number: 5,
+        branch: 'feat/x',
+        base: 'main',
+        error: null,
+      })
+    })
+
+    it('still resolves the callback with an error on an INVALID payload (unsticks GitPanel submitting state)', () => {
+      // Pre-fix a schema-invalid payload `break`d without invoking the callback,
+      // leaving GitPanel's `prSubmitting` stuck true — the Create-PR button
+      // spins forever, unrecoverable without a remount. The handler must still
+      // resolve the callback (with an error) so the panel clears its state.
+      const calls: Array<any> = []
+      store = createMockStore(baseState({
+        _gitCreatePrCallback: (r: any) => calls.push(r),
+      } as any))
+      setStore(store)
+
+      handleMessage(
+        // `number` as a string fails ServerGitCreatePrResultSchema.
+        {
+          type: 'git_create_pr_result',
+          url: null,
+          number: 'not-a-number',
+          branch: null,
+          base: null,
+          error: null,
+        } as any,
+        ctx() as any,
+      )
+
+      expect(calls).toHaveLength(1)
+      expect(calls[0].url).toBeNull()
+      expect(calls[0].number).toBeNull()
+      expect(calls[0].error).toBeTruthy()
+    })
+  })
+
   describe('result — cost calculation for Codex/Gemini (cost: null from server)', () => {
     // #4206: the client-side cost fallback is now gated on the session's
     // provider matching CLIENT_ESTIMATED_COST_PROVIDERS. Tests must

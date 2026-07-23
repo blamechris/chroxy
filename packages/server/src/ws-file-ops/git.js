@@ -1,6 +1,9 @@
-import { normalize, resolve } from 'path'
+import { normalize, resolve, join } from 'path'
 import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
+import { writeFile, unlink } from 'fs/promises'
+import { tmpdir } from 'os'
+import { randomBytes } from 'crypto'
 import { GIT } from '../git.js'
 import { validateGitPath } from './common.js'
 
@@ -435,21 +438,40 @@ export function createGitOps(sendFn, resolveSessionCwd, validatePathWithinCwd, w
         return
       }
 
-      // 4. gh pr create.
-      const args = ['pr', 'create', '--title', title, '--body', body, '--head', branch]
-      if (base) args.push('--base', base)
-      if (draft) args.push('--draft')
-
+      // 4. gh pr create. Pass the body via a temp `--body-file` rather than an
+      // inline `--body <text>` argv element: the client schema permits a body up
+      // to 50k chars, which can blow past Windows' command-line length limit when
+      // inlined. A body-file sidesteps the limit entirely and keeps the body out
+      // of argv. The empty-body case writes an empty file (gh reads it as an
+      // empty body without opening an editor). (#6934)
+      const bodyFile = join(tmpdir(), `chroxy-pr-body-${randomBytes(8).toString('hex')}.md`)
       let stdout = ''
+      let stderr = ''
       try {
-        const res = await execImpl('gh', args, { cwd: cwdReal, timeout: 120000 })
-        stdout = res?.stdout || ''
-      } catch (err) {
-        sendFn(ws, prResult({ branch, base: base || null, error: mapGhCreateError(err) }))
-        return
+        await writeFile(bodyFile, body, 'utf8')
+
+        const args = ['pr', 'create', '--title', title, '--body-file', bodyFile, '--head', branch]
+        if (base) args.push('--base', base)
+        if (draft) args.push('--draft')
+
+        try {
+          const res = await execImpl('gh', args, { cwd: cwdReal, timeout: 120000 })
+          stdout = res?.stdout || ''
+          stderr = res?.stderr || ''
+        } catch (err) {
+          sendFn(ws, prResult({ branch, base: base || null, error: mapGhCreateError(err) }))
+          return
+        }
+      } finally {
+        // Best-effort cleanup — never fail the create because the temp body-file
+        // couldn't be removed.
+        await unlink(bodyFile).catch(() => {})
       }
 
-      const url = extractPrUrl(stdout)
+      // gh prints the created PR URL on stdout, but can emit it on stderr (or
+      // split its output). Parse both streams so a stderr-only URL still yields a
+      // success. (#6934)
+      const url = extractPrUrl(stdout) || extractPrUrl(stderr)
       if (!url) {
         sendFn(ws, prResult({ branch, base: base || null, error: 'PR command succeeded but gh returned no pull-request URL' }))
         return
