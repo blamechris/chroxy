@@ -249,6 +249,18 @@ const CONFIG_SCHEMA = {
   // implicit.
   // Documented in CONFIG.md.
   trustMismatchMode: 'string',
+  // #6858: opt-in provenance verification for spawned provider binaries.
+  // Nested object:
+  //   binaryProvenance.mode           'off' (default) | 'warn' | 'block' —
+  //     SHA-256 pin ledger. Pins each provider binary on first sight; a changed
+  //     hash re-gates (warn surfaces + allows, block refuses the spawn).
+  //   binaryProvenance.signatureGate  boolean (default false) — macOS `spctl`
+  //     signature/notarization gate; hard-blocks un-notarized builds when on.
+  // Both OFF by default so P1 (#6708) behaviour is unchanged. Env overrides:
+  //   CHROXY_BINARY_PROVENANCE (off|warn|block), CHROXY_BINARY_SIGNATURE_GATE (1|0).
+  // See resolveBinaryProvenanceMode() / isBinarySignatureGateEnabled() and
+  // docs/security/spawned-binary-provenance.md.
+  binaryProvenance: 'object',
   // #3749 / #3884 / #3899: SOFT-warning inactivity timeout (ms). When no
   // SDK / CLI event fires within this window, the server emits an
   // `inactivity_warning` event (and push notification) — the session
@@ -692,6 +704,35 @@ export function isIdeFeatureEnabled(config) {
 export function isOrchestrationEnabled(config) {
   if (process.env.CHROXY_ENABLE_ORCHESTRATION === '1') return true
   return config?.features?.orchestration === true
+}
+
+// #6858 — resolve the opt-in provider-binary provenance PIN-LEDGER mode. One of
+// 'off' | 'warn' | 'block'. Fail-closed to 'off' (behaviour identical to the
+// pre-#6858 spawn path) for anything but an explicit 'warn' / 'block'. Precedence:
+//   CHROXY_BINARY_PROVENANCE env  >  config.binaryProvenance.mode  >  'off'.
+// 'warn' pins on first sight and surfaces a later hash change while still
+// spawning; 'block' refuses the spawn on a hash change until re-approved.
+export function resolveBinaryProvenanceMode(config) {
+  const env = typeof process.env.CHROXY_BINARY_PROVENANCE === 'string'
+    ? process.env.CHROXY_BINARY_PROVENANCE.trim().toLowerCase()
+    : ''
+  if (env === 'warn' || env === 'block') return env
+  if (env === 'off') return 'off'
+  const cfg = config?.binaryProvenance && typeof config.binaryProvenance === 'object'
+    ? config.binaryProvenance.mode
+    : undefined
+  return (cfg === 'warn' || cfg === 'block') ? cfg : 'off'
+}
+
+// #6858 — is the opt-in macOS signature/notarization gate (`spctl --assess`)
+// enabled? Fail-closed to false (chroxy's own bundled providers are ad-hoc
+// signed and would be rejected, so this can only ever be opt-in). Precedence:
+//   CHROXY_BINARY_SIGNATURE_GATE env (1/0)  >  config.binaryProvenance.signatureGate  >  false.
+export function isBinarySignatureGateEnabled(config) {
+  const env = process.env.CHROXY_BINARY_SIGNATURE_GATE
+  if (env === '1') return true
+  if (env === '0') return false
+  return config?.binaryProvenance?.signatureGate === true
 }
 
 // #6764 — opt-in semantic session titles. When on, the first user turn's sidebar

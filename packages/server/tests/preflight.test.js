@@ -4,9 +4,11 @@ import {
   runProviderPreflight,
   ProviderBinaryNotFoundError,
   ProviderBinaryQuarantinedError,
+  ProviderBinaryProvenanceError,
   ProviderCredentialMissingError,
 } from '../src/utils/preflight.js'
 import { BINARY_STATUS } from '../src/utils/verify-binary.js'
+import { PROVENANCE_STATUS } from '../src/utils/verify-provenance.js'
 
 /**
  * Tests for runProviderPreflight — verifies binary + credential checks
@@ -161,6 +163,119 @@ describe('runProviderPreflight — quarantine detection (#6708)', () => {
     assert.throws(
       () => runProviderPreflight(Provider, { env: {}, verifyBinary: notExec }),
       ProviderBinaryNotFoundError,
+    )
+  })
+})
+
+describe('runProviderPreflight — opt-in provenance gate (#6858)', () => {
+  // A healthy binary so we always reach the provenance step.
+  const okVerify = (path) => ({ ok: true, status: BINARY_STATUS.OK, path, quarantine: null })
+  const Provider = makeProvider({
+    preflight: { label: 'Codex', binary: { name: 'node', candidates: [] } },
+  })
+
+  // Minimal in-memory pin ledger (getRecord + approve) for end-to-end tests.
+  function fakeLedger(seed = {}) {
+    const records = new Map(Object.entries(seed))
+    return {
+      getRecord: (p) => (records.has(p) ? { ...records.get(p) } : null),
+      approve: (p, h) => { records.set(p, { sha256: h, firstSeen: 'x', approvedAt: 'x' }); return true },
+      _records: records,
+    }
+  }
+
+  it('is SKIPPED entirely when no provenance config is supplied (default)', () => {
+    // Inject a provenance checker that would explode if called — it must not be.
+    const boom = () => { throw new Error('provenance must not run when disabled') }
+    assert.doesNotThrow(() =>
+      runProviderPreflight(Provider, { env: {}, verifyBinary: okVerify, verifyProvenance: boom }),
+    )
+  })
+
+  it('is SKIPPED when provenance mode is off and the signature gate is off', () => {
+    const boom = () => { throw new Error('provenance must not run when off') }
+    assert.doesNotThrow(() =>
+      runProviderPreflight(Provider, {
+        env: {},
+        verifyBinary: okVerify,
+        verifyProvenance: boom,
+        provenance: { mode: 'off', signatureGate: false, ledger: fakeLedger() },
+      }),
+    )
+  })
+
+  it('block mode + a blocked verdict throws ProviderBinaryProvenanceError (fail-safe)', () => {
+    const blockedVerdict = () => ({
+      ok: false,
+      status: PROVENANCE_STATUS.HASH_MISMATCH,
+      blocked: true,
+      path: '/usr/bin/node',
+      hash: 'b'.repeat(64),
+      pinnedHash: 'a'.repeat(64),
+      message: 'binary hash changed since it was pinned',
+      remediation: 're-approve it',
+    })
+    assert.throws(
+      () => runProviderPreflight(Provider, {
+        env: {},
+        verifyBinary: okVerify,
+        verifyProvenance: blockedVerdict,
+        provenance: { mode: 'block', signatureGate: false, ledger: fakeLedger() },
+      }),
+      (err) => {
+        assert.ok(err instanceof ProviderBinaryProvenanceError, `got ${err?.name}`)
+        assert.equal(err.code, 'PROVIDER_BINARY_PROVENANCE')
+        assert.equal(err.binary, 'node')
+        assert.equal(err.provenanceStatus, PROVENANCE_STATUS.HASH_MISMATCH)
+        assert.equal(err.pinnedHash, 'a'.repeat(64))
+        assert.match(err.message, /changed/i)
+        return true
+      },
+    )
+  })
+
+  it('warn mode + a non-blocked mismatch does NOT throw (surfaced, allowed)', () => {
+    const warnVerdict = () => ({
+      ok: true,
+      status: PROVENANCE_STATUS.HASH_MISMATCH,
+      blocked: false,
+      path: '/usr/bin/node',
+      hash: 'b'.repeat(64),
+      pinnedHash: 'a'.repeat(64),
+      message: 'binary hash changed since it was pinned',
+    })
+    assert.doesNotThrow(() =>
+      runProviderPreflight(Provider, {
+        env: {},
+        verifyBinary: okVerify,
+        verifyProvenance: warnVerdict,
+        provenance: { mode: 'warn', signatureGate: false, ledger: fakeLedger() },
+      }),
+    )
+  })
+
+  it('end-to-end: real verifyProvenance pins on first sight, then blocks a swapped hash', () => {
+    // First sight over the REAL node binary + a fresh ledger: pins + allows.
+    const led = fakeLedger()
+    assert.doesNotThrow(() =>
+      runProviderPreflight(Provider, {
+        env: {},
+        verifyBinary: okVerify,
+        provenance: { mode: 'block', signatureGate: false, ledger: led },
+      }),
+    )
+    assert.equal(led._records.size, 1, 'first sight pinned exactly one binary')
+
+    // Now simulate an in-place swap: overwrite the pinned hash with a bogus one.
+    for (const [p, rec] of led._records) led._records.set(p, { ...rec, sha256: 'c'.repeat(64) })
+
+    assert.throws(
+      () => runProviderPreflight(Provider, {
+        env: {},
+        verifyBinary: okVerify,
+        provenance: { mode: 'block', signatureGate: false, ledger: led },
+      }),
+      ProviderBinaryProvenanceError,
     )
   })
 })

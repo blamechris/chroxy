@@ -8,7 +8,7 @@ import { getProvider, getProviderAuthInfo, DEFAULT_PROVIDER } from './providers.
 import { isClaudeProvider } from './models.js'
 import { billingClassForProvider, BILLING_CLASSES } from './billing-class.js'
 import { MonthlyProgrammaticBudgetManager } from './billing-budget.js'
-import { runProviderPreflight, ProviderBinaryNotFoundError, ProviderBinaryQuarantinedError, ProviderCredentialMissingError } from './utils/preflight.js'
+import { runProviderPreflight, ProviderBinaryNotFoundError, ProviderBinaryQuarantinedError, ProviderBinaryProvenanceError, ProviderCredentialMissingError } from './utils/preflight.js'
 import { GIT } from './git.js'
 import { sweepOrphanChroxyWorktrees } from './worktree-gc.js'
 import { resolveJsonlPath, readConversationHistoryAsync } from './jsonl-reader.js'
@@ -28,6 +28,7 @@ import { generateSessionTitle, DEFAULT_SEMANTIC_TITLE_MODEL, DEFAULT_SEMANTIC_TI
 import { SkillsUsageRecorder } from './skills-usage.js'
 import { resolveSessionPreset, foldPreamble } from './session-preset.js'
 import { SessionPresetTrustStore } from './session-preset-trust.js'
+import { BinaryProvenanceLedger } from './binary-provenance-trust.js'
 import { PermissionRuleStore } from './permission-rule-store.js'
 import { ScheduledTaskStore, defaultScheduledTasksPath } from './scheduled-task-store.js'
 import { createLogger } from './logger.js'
@@ -176,9 +177,9 @@ export { formatIdleDuration }
 
 // Re-export preflight errors so call sites that catch createSession() failures
 // can detect/branch on PROVIDER_BINARY_NOT_FOUND / PROVIDER_BINARY_QUARANTINED /
-// PROVIDER_CREDENTIAL_MISSING without taking a separate dependency on
-// utils/preflight.js.
-export { ProviderBinaryNotFoundError, ProviderBinaryQuarantinedError, ProviderCredentialMissingError }
+// PROVIDER_BINARY_PROVENANCE / PROVIDER_CREDENTIAL_MISSING without taking a
+// separate dependency on utils/preflight.js.
+export { ProviderBinaryNotFoundError, ProviderBinaryQuarantinedError, ProviderBinaryProvenanceError, ProviderCredentialMissingError }
 
 /**
  * @typedef {Object} SessionManagerConfig
@@ -336,6 +337,18 @@ export class SessionManager extends EventEmitter {
     // #5553: config path for the daemon-side preset override map. Tests point
     // this at a temp config.json; production uses the default ~/.chroxy/config.json.
     presetConfigPath,
+
+    // #6858: opt-in provenance verification for spawned provider binaries.
+    // `binaryProvenanceMode` ('off'|'warn'|'block') drives the SHA-256 pin
+    // ledger; `binarySignatureGate` toggles the macOS `spctl` gate. Both wired
+    // from `resolveBinaryProvenanceMode` / `isBinarySignatureGateEnabled` in
+    // server-cli. Off by default → the gate is skipped and preflight behaviour is
+    // identical to #6708. Tests pass their own temp-pathed `binaryProvenanceLedger`
+    // (like presetTrustStore) so a temp stateFilePath keeps the ledger out of the
+    // real ~/.chroxy.
+    binaryProvenanceMode = 'off',
+    binarySignatureGate = false,
+    binaryProvenanceLedger,
     // #6771: durable per-project permission rule store (persistent "always
     // allow / deny"). Tests pass their own temp-pathed store; production wires a
     // default whose file (permission-rules.json) sits next to the session-state
@@ -546,6 +559,18 @@ export class SessionManager extends EventEmitter {
     // file so a test's temp stateFilePath keeps the ledger out of the real home.
     this.presetTrustStore = presetTrustStore
       || new SessionPresetTrustStore({ filePath: join(dirname(this._stateFilePath), 'session-preset-trust.json') })
+    // #6858: opt-in provider-binary provenance. The pin ledger's default file
+    // sits next to the session-state file (same temp-redirect reasoning as the
+    // sidecars above) so a test's temp stateFilePath keeps it out of the real
+    // home. Constructing the ledger is read-only (it only writes on a first-sight
+    // pin / approve), so it is always constructed; the MODE decides whether the
+    // gate actually runs at createSession. Anything but 'warn'/'block' → 'off'.
+    this._binaryProvenanceMode = (binaryProvenanceMode === 'warn' || binaryProvenanceMode === 'block')
+      ? binaryProvenanceMode
+      : 'off'
+    this._binarySignatureGate = binarySignatureGate === true
+    this.binaryProvenanceLedger = binaryProvenanceLedger
+      || new BinaryProvenanceLedger({ filePath: join(dirname(this._stateFilePath), 'binary-trust.json') })
     // Config path the preset resolver reads the daemon override map from.
     // Defaults to undefined → resolveSessionPreset uses its own DEFAULT_CONFIG_PATH.
     this.presetConfigPath = typeof presetConfigPath === 'string' ? presetConfigPath : null
@@ -951,7 +976,17 @@ export class SessionManager extends EventEmitter {
       throw new UserShellDisabledError()
     }
     if (!this._skipPreflight) {
-      runProviderPreflight(PreflightProviderClass)
+      // #6858: opt-in provenance gate. Only build the provenance bag when the
+      // operator opted in (mode warn/block or the signature gate); otherwise pass
+      // null so runProviderPreflight skips the step entirely (unchanged behaviour).
+      const provenance = (this._binaryProvenanceMode !== 'off' || this._binarySignatureGate)
+        ? {
+          mode: this._binaryProvenanceMode,
+          signatureGate: this._binarySignatureGate,
+          ledger: this.binaryProvenanceLedger,
+        }
+        : null
+      runProviderPreflight(PreflightProviderClass, { provenance })
     }
     // #6378: a provider opted into `config.providers.allowAnyModel` skips static
     // allowlist validation entirely — the model id passes through verbatim and

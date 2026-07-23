@@ -47,7 +47,7 @@ import { getRegistryForProvider, watchModelsOverlay } from './models.js'
 // environment-manager.js itself remains behind the dynamic import below
 // (`if (config?.environments?.enabled)`).
 import { UNREACHABLE_STATUSES } from './environment-statuses.js'
-import { resolveSkipPermissions, buildEnvironmentBackend, isUserShellEnabled, getAllowAnyModelProviders, isSemanticTitlesEnabled, resolveSemanticTitleModel, resolveSemanticTitleTimeoutMs } from './config.js'
+import { resolveSkipPermissions, buildEnvironmentBackend, isUserShellEnabled, getAllowAnyModelProviders, isSemanticTitlesEnabled, resolveSemanticTitleModel, resolveSemanticTitleTimeoutMs, resolveBinaryProvenanceMode, isBinarySignatureGateEnabled } from './config.js'
 import { buildOrchestrationManager } from './orchestration/build-manager.js'
 import { parseDuration } from './duration.js'
 import { createSessionTokenStore } from './session-token-store.js'
@@ -666,6 +666,12 @@ export async function startCliServer(config) {
     // API-valid model id without a release). Empty Set unless the operator set
     // config.providers.allowAnyModel.
     allowAnyModelProviders: getAllowAnyModelProviders(config),
+    // #6858: opt-in provenance verification for spawned provider binaries. Both
+    // OFF by default (behaviour identical to #6708). `mode` drives the SHA-256
+    // pin ledger (warn surfaces a swap + allows; block refuses the spawn);
+    // `signatureGate` toggles the macOS `spctl` notarization gate.
+    binaryProvenanceMode: resolveBinaryProvenanceMode(config),
+    binarySignatureGate: isBinarySignatureGateEnabled(config),
     providerType,
     maxToolInput: config.maxToolInput || null,
     transforms: config.transforms || [],
@@ -1149,6 +1155,15 @@ export async function startCliServer(config) {
         tunnelConfig: config.tunnelConfig,
         tunnelName: config.tunnelName || null,
         tunnelHostname: config.tunnelHostname || null,
+        // #6858: fold cloudflared into the SAME opt-in provenance gate + pin
+        // ledger as the provider binaries. Reuse the SessionManager's ledger
+        // instance so pins are unified across every spawned binary. Off by
+        // default (mode 'off' + gate false) ⇒ the tunnel gate is a no-op.
+        binaryProvenance: {
+          mode: resolveBinaryProvenanceMode(config),
+          signatureGate: isBinarySignatureGateEnabled(config),
+          ledger: sessionManager.binaryProvenanceLedger,
+        },
       },
       wsServer,
       startupDisplay,

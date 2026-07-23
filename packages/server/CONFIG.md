@@ -32,6 +32,7 @@ Configuration values are resolved in the following order (highest priority first
 | `maxTotalSkillBytes` | number | - | - | Global skills-context budget. When a session's merged active-skill set exceeds this size, lower-priority skills are dropped first (frontmatter `priority` defaults to 100; ties broken alphabetically). Default `262144` (256KB). Set to `0` to disable the global cap. |
 | `providerSkillAllowlist` | object | - | - | Per-provider skill allowlist. Object keyed by provider id (e.g. `codex`, `gemini`); each value is an array of skill names that may load for that provider. See [Per-provider skill allowlist](#per-provider-skill-allowlist) below. |
 | `trustMismatchMode` | string | - | - | One of `warn` or `block`. When set, the server records a SHA-256 hash of every loaded skill on first activation and compares it on every subsequent load. See [Skill content-hash trust](#skill-content-hash-trust) below. Disabled (no hashing) when omitted. |
+| `binaryProvenance` | object | - | `CHROXY_BINARY_PROVENANCE`, `CHROXY_BINARY_SIGNATURE_GATE` | Opt-in provenance verification for spawned provider binaries (`claude`, `codex`, `gemini`, `cloudflared`). `mode` (`off`/`warn`/`block`) drives a cross-platform SHA-256 pin ledger; `signatureGate` (boolean) toggles a macOS `spctl` notarization gate. Both OFF by default. See [Binary provenance verification](#binary-provenance-verification) below. |
 | `dangerouslySkipPermissions` | boolean | `--dangerously-skip-permissions` | `CHROXY_DANGEROUSLY_SKIP_PERMISSIONS` | Server-wide default for the per-session skip-permissions flag (#4246, #4384). Honoured only by the `claude-tui` provider — spawns claude with `--dangerously-skip-permissions` and elides chroxy's permission hook. Off by default. Legacy alias `skipPermissions` (config key) and `CHROXY_SKIP_PERMISSIONS` (env var) are still honoured for one deprecation window and emit a warning at boot — rename to the canonical key. See [Skip permissions (TUI provider)](#skip-permissions-tui-provider) below. |
 | `resultTimeoutMs` | number | - | `CHROXY_RESULT_TIMEOUT_MS` | Per-session **soft-warning** inactivity window in milliseconds. When no SDK / CLI event arrives within this window, the server emits an `inactivity_warning` event (#3899) so clients can render a check-in chip and surface a push notification — the session stays alive. The kill path is `hardTimeoutMs` (below). See [Inactivity safety net](#inactivity-safety-net). Default `1800000` (30 min); range `30000`–`86400000` (30 s – 24 h). |
 | `hardTimeoutMs` | number | - | `CHROXY_HARD_TIMEOUT_MS` | Per-session **hard-kill** inactivity window in milliseconds. When `resultTimeoutMs` has already fired and silence continues to this longer threshold, the server emits `permission_expired` for every outstanding permission prompt, force-clears busy state, and emits a generic `error` event with `"Response timed out after <duration> of inactivity"` (#3899). Default `7200000` (2 h); range `30000`–`86400000` (30 s – 24 h). Must be ≥ `resultTimeoutMs` or the soft warning never fires — validator warns. |
@@ -141,6 +142,45 @@ directly. Format:
 
 A corrupted or missing trust file is treated as empty (fail-open) so a single
 bad write can't lock every skill out of every session.
+
+### Binary provenance verification
+
+`binaryProvenance` opts the daemon into pre-spawn provenance verification of the
+external binaries it executes as providers (`claude`, `codex`, `gemini`) and of
+`cloudflared`. This extends the always-on P1 integrity/quarantine check (#6708)
+with two **opt-in, OFF-by-default** gates — see
+[`docs/security/spawned-binary-provenance.md`](../../docs/security/spawned-binary-provenance.md).
+
+```jsonc
+{
+  "binaryProvenance": {
+    "mode": "off",           // "off" (default) | "warn" | "block"
+    "signatureGate": false   // macOS spctl notarization gate
+  }
+}
+```
+
+- **`mode`** — a cross-platform SHA-256 **pin ledger** (`~/.chroxy/binary-trust.json`,
+  same fail-open/atomic-0600 sidecar as the skill ledger). Each binary's hash is
+  pinned on first sight (trust-on-first-use); a later change to that hash re-gates
+  the binary. `warn` logs the change and still spawns; `block` **refuses the
+  spawn** until the operator re-approves. Catches an in-place binary swap
+  regardless of signature or quarantine state. `off` (default) skips the ledger
+  entirely. Env override: `CHROXY_BINARY_PROVENANCE` = `off`/`warn`/`block`.
+- **`signatureGate`** — when `true`, a binary that fails `spctl --assess`
+  (Gatekeeper / notarization) is hard-blocked. For operators who run only
+  notarized provider builds; chroxy's bundled providers are ad-hoc-signed and
+  would be rejected, so it can only ever be opt-in. **macOS-only** — a documented
+  no-op on Linux/Windows (the pin ledger still applies). Env override:
+  `CHROXY_BINARY_SIGNATURE_GATE` = `1`/`0`.
+
+Both fail-safe: when a gate is on, a failure blocks (`block` / signature) or is
+loudly surfaced (`warn`) — an unverified binary is never silently spawned. A
+`block`-mode failure surfaces as a `session_error`
+(`code: PROVIDER_BINARY_PROVENANCE`) for providers, or aborts the tunnel start
+(`code: TUNNEL_BINARY_PROVENANCE`) for `cloudflared`. To re-approve a
+legitimately-updated binary, remove its entry from `~/.chroxy/binary-trust.json`
+(or delete the file — it fails open and re-pins on next spawn).
 
 ### Skip permissions (TUI provider)
 

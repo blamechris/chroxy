@@ -1,9 +1,35 @@
 import { spawn, execFileSync } from 'child_process'
+import { homedir } from 'os'
+import { join } from 'path'
 import { BaseTunnelAdapter } from './base.js'
 import { createLogger, redactSensitive } from '../logger.js'
 import { cloudflaredInstallHint } from '../platform.js'
+import { resolveBinary as defaultResolveBinary } from '../utils/resolve-binary.js'
+import { verifyBinary as defaultVerifyBinary } from '../utils/verify-binary.js'
+import { verifyProvenance as defaultVerifyProvenance, PROVENANCE_STATUS } from '../utils/verify-provenance.js'
 
 const log = createLogger('tunnel')
+
+// Well-known cloudflared install locations (mirrors doctor.js) so provenance can
+// resolve the SAME absolute path the spawn will use even under a minimal PATH.
+const CLOUDFLARED_CANDIDATES = [
+  '/opt/homebrew/bin/cloudflared',
+  '/usr/local/bin/cloudflared',
+  join(homedir(), '.local/bin/cloudflared'),
+]
+
+/**
+ * Thrown when the opt-in provenance gate (#6858) refuses to spawn `cloudflared`
+ * because its pinned SHA-256 changed in place (block mode) or it failed the
+ * macOS signature gate. Never thrown when the gate is off (the default).
+ */
+export class TunnelBinaryProvenanceError extends Error {
+  constructor(message) {
+    super(message)
+    this.name = 'TunnelBinaryProvenanceError'
+    this.code = 'TUNNEL_BINARY_PROVENANCE'
+  }
+}
 
 // #5328 (WP-5.6): how much of cloudflared's recent output to retain so a
 // startup failure can quote the REAL reason in its error, not just an exit code.
@@ -27,11 +53,21 @@ function redactedTail(rawTail) {
  * Named mode: spawns `cloudflared tunnel run <name>` — stable URL via DNS CNAME.
  */
 export class CloudflareTunnelAdapter extends BaseTunnelAdapter {
-  constructor({ port, mode = 'quick', config = {}, tunnelName, tunnelHostname }) {
+  constructor({
+    port, mode = 'quick', config = {}, tunnelName, tunnelHostname,
+    // #6858 test seams — injected so the provenance gate is exercisable without a
+    // real cloudflared / ledger file. Production falls through to the real ones.
+    resolveBinary = defaultResolveBinary,
+    verifyBinary = defaultVerifyBinary,
+    verifyProvenance = defaultVerifyProvenance,
+  } = {}) {
     super({ port, mode, config })
     // Support both config object keys and legacy top-level constructor args
     this.tunnelName = config.tunnelName ?? tunnelName ?? null
     this.tunnelHostname = config.tunnelHostname ?? tunnelHostname ?? null
+    this._resolveBinary = resolveBinary
+    this._verifyBinary = verifyBinary
+    this._verifyProvenance = verifyProvenance
   }
 
   static get name() {
@@ -75,7 +111,56 @@ export class CloudflareTunnelAdapter extends BaseTunnelAdapter {
     return spawn('cloudflared', argv, spawnOpts)
   }
 
+  /**
+   * #6858: opt-in pre-spawn provenance gate for `cloudflared`. `cloudflared` is
+   * spawned by bare name (resolved off PATH) with the operator's network, so it
+   * shares the provider binaries' supply-chain surface — this folds it into the
+   * SAME pin ledger + signature gate.
+   *
+   * No-op unless `config.binaryProvenance` opted in (mode warn/block or the
+   * signature gate). A binary that can't be resolved is left to the normal spawn
+   * ENOENT path (provenance must not mask "cloudflared not installed"). Fail-safe:
+   * a block-mode hash mismatch or a failed signature gate THROWS
+   * TunnelBinaryProvenanceError before any spawn; a warn-mode issue logs and
+   * proceeds.
+   */
+  _verifyCloudflaredProvenance() {
+    const prov = this.config && this.config.binaryProvenance
+    const enabled = prov
+      && (prov.mode === 'warn' || prov.mode === 'block' || prov.signatureGate === true)
+    if (!enabled) return
+
+    const resolved = this._resolveBinary('cloudflared', CLOUDFLARED_CANDIDATES)
+    // Only gate a binary that actually resolves to a real, healthy file — a
+    // missing/quarantined cloudflared is surfaced by the spawn / doctor path, not
+    // here (provenance is about "is this the binary I pinned", not "does it exist").
+    const health = this._verifyBinary(resolved)
+    if (!health.ok) return
+
+    const verdict = this._verifyProvenance({
+      resolvedPath: health.path,
+      mode: prov.mode || 'off',
+      signatureGate: prov.signatureGate === true,
+      ledger: prov.ledger || null,
+    })
+    if (verdict.blocked) {
+      throw new TunnelBinaryProvenanceError(
+        `Refusing to spawn cloudflared: "${verdict.path}" ${verdict.message || 'failed provenance verification'}`
+        + `${verdict.remediation ? ` — ${verdict.remediation}` : ''}`,
+      )
+    }
+    if (
+      verdict.status === PROVENANCE_STATUS.HASH_MISMATCH
+      || verdict.status === PROVENANCE_STATUS.SIGNATURE_INVALID
+      || verdict.status === PROVENANCE_STATUS.UNREADABLE
+    ) {
+      log.warn(`cloudflared provenance ${verdict.status}: ${verdict.message || ''} (allowed — mode=${prov.mode})`)
+    }
+  }
+
   async _startTunnel() {
+    // #6858: gate the binary before either start path spawns it.
+    this._verifyCloudflaredProvenance()
     if (this.mode === 'named') {
       return this._startNamedTunnel()
     }
