@@ -712,6 +712,13 @@ export function clearPersistedState(): void {
  * `interventionPing`, and `compactChatFilter` are device-level choices, not
  * server-scoped session state, so they should survive an unscoped
  * `clearPersistedState()` just like `theme`/`view_mode` do.
+ *
+ * Also includes the sidebar-panel-slot prefs (#6917) — panel height, active
+ * view, and collapsed state (#4303) are plain unscoped device-level keys
+ * (they never go through `scopedKey`/`scopedRead`, unlike the genuinely
+ * server-scoped repo/session/tab ordering below), so they belong in the same
+ * survive-clear class as the #6915 device prefs. Pre-existing asymmetry from
+ * #4304 — this was never intentional exclusion.
  */
 function isGlobalKey(key: string): boolean {
   return key === KEY_VIEW_MODE
@@ -721,7 +728,10 @@ function isGlobalKey(key: string): boolean {
     || key === KEY_THEME
     || key === KEY_SHOW_CONSOLE_TAB
     || key === KEY_INTERVENTION_PING
-    || key === KEY_COMPACT_CHAT_FILTER;
+    || key === KEY_COMPACT_CHAT_FILTER
+    || key === KEY_SIDEBAR_PANEL_HEIGHT
+    || key === KEY_SIDEBAR_PANEL_VIEW
+    || key === KEY_SIDEBAR_PANEL_COLLAPSED;
 }
 
 // ---------------------------------------------------------------------------
