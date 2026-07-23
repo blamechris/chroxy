@@ -983,7 +983,7 @@ export class MCPRemoteClient extends EventEmitter {
         if (timedOut) throw new Error(`MCP ${method} timeout`)
         throw err
       }
-      this._checkStatus(res, method)
+      await this._checkStatus(res, method)
       if (captureSession) {
         const sid = res.headers.get('mcp-session-id')
         if (sid) this._sessionId = sid
@@ -1197,7 +1197,7 @@ export class MCPRemoteClient extends EventEmitter {
         redirect: 'manual', // #6834: never follow a redirect off-origin
         signal: controller.signal,
       })
-      this._checkStatus(res, method)
+      await this._checkStatus(res, method)
       await this._discardBody(res)
     } catch (err) {
       this._pending.delete(id)
@@ -1233,7 +1233,7 @@ export class MCPRemoteClient extends EventEmitter {
       // → oauth-required (propagates → DEAD), redirect/other non-2xx → error →
       // DEAD. Pre-fix this swallowed ALL statuses, letting the handshake
       // proceed past `initialized` while the server was rejecting our requests.
-      this._checkStatus(res, method)
+      await this._checkStatus(res, method)
       await this._discardBody(res)
     } finally {
       clearTimeout(timer)
@@ -1350,8 +1350,16 @@ export class MCPRemoteClient extends EventEmitter {
     return err
   }
 
-  _checkStatus(res, method) {
+  async _checkStatus(res, method) {
     const status = res.status
+    if (status >= 200 && status < 300) return
+    // Non-2xx: no throw path below ever reads the body, so cancel/drain it
+    // first — an unread Streamable-HTTP response body keeps its stream/socket
+    // dangling (a leaked handle, the #6835 hang class), and for the legacy SSE
+    // call sites the caller's own `_discardBody(res)` never runs once we throw.
+    // _discardBody wraps its own work in try/catch, so this drain can never
+    // throw-and-mask the status error we raise below.
+    await this._discardBody(res)
     if (status === 401 || status === 407) {
       throw this._oauthError(res, status)
     }
@@ -1362,13 +1370,42 @@ export class MCPRemoteClient extends EventEmitter {
       throw new Error(`MCP server ${this.name} HTTP ${status} redirect on ${method} — refused (redirects are not followed)`)
     }
     if (status === 404) {
-      // Session expired / endpoint gone — drop the session so a future connect
-      // re-initializes; this request still fails below.
-      this._sessionId = null
+      // #6835: a 404 means our Streamable HTTP session id is no longer valid —
+      // the server GC'd the session (a real long-lived-session scenario). Drop
+      // the stale id and, if this happened mid-session (live READY client with a
+      // held session), tear the client down to DEAD. See _expireSession.
+      this._expireSession(method)
     }
-    if (status < 200 || status >= 300) {
-      throw new Error(`MCP server ${this.name} HTTP ${status} on ${method}`)
-    }
+    throw new Error(`MCP server ${this.name} HTTP ${status} on ${method}`)
+  }
+
+  /**
+   * #6835: handle a 404 (Streamable HTTP session expiry). Always drops the stale
+   * session id. When it fired on a LIVE session (state READY with a session id we
+   * were echoing), the server has GC'd our session server-side — leaving the
+   * client READY would keep the fleet advertising tools that now silently 404 on
+   * every call (the zombie). The remote transport has no lazy re-handshake
+   * (single-connect model, #6821), so tear the client down to DEAD: the fleet
+   * drops its tools, matching the stdio restart-exhaustion contract; recovery is
+   * a session restart or a server re-enable (which rebuilds a fresh client).
+   *
+   * A stateless server (never issued a session id) keeps the prior per-call
+   * behaviour — a lone 404 there stays READY and the next call retries, mirroring
+   * the transient-network-blip handling.
+   */
+  _expireSession(method) {
+    const wasLive = this._state === MCP_STATES.READY && this._sessionId != null
+    this._sessionId = null
+    if (!wasLive) return
+    this._log.warn(`MCP server ${this.name}: Streamable HTTP session expired (HTTP 404 on ${method}) — marking the server dead`)
+    // Abort any other in-flight requests against the now-dead session so no
+    // reader/stream lingers past the transition (the request that observed the
+    // 404 has already resolved; aborting its controller is a no-op). Clear the
+    // set after aborting — mirroring destroy() — so the DEAD transition retains
+    // no now-aborted controllers and a later destroy() repeats no abort work.
+    for (const c of this._controllers) { try { c.abort() } catch { /* already settled */ } }
+    this._controllers.clear()
+    this._toDead()
   }
 
   async _discardBody(res) {

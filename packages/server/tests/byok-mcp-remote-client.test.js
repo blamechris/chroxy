@@ -38,6 +38,7 @@ function startMockMcpServer(opts = {}) {
     status = null, // force an HTTP status (e.g. 401) on every POST
     hangMethods = [], // methods the server never answers (timeout path)
     toolCallError = false,
+    expireOnToolCall = false, // #6835: 404 every tools/call (server-side session GC)
   } = opts
 
   const captured = []
@@ -94,6 +95,13 @@ function startMockMcpServer(opts = {}) {
       } else if (rpc === 'tools/list') {
         result = { tools }
       } else if (rpc === 'tools/call') {
+        if (expireOnToolCall) {
+          // #6835: server-side session GC — the previously-issued session id is
+          // no longer valid, so every post-initialize request 404s.
+          res.writeHead(404, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ error: 'session expired' }))
+          return
+        }
         if (toolCallError) {
           respond(res, mode, { jsonrpc: '2.0', id: msg.id, error: { code: -32000, message: 'forced remote RPC error' } })
           return
@@ -177,6 +185,63 @@ describe('MCPRemoteClient — Streamable HTTP (#6821)', () => {
     assert.equal(toolsListReq.headers['mcp-session-id'], 'sess-abc-123',
       'tools/list must echo the session id issued at initialize')
     await client.destroy()
+  })
+
+  it('#6835: a 404 on a live session (server-side GC) tears the client to DEAD, not a zombie READY', async () => {
+    // The server issues a session id at initialize, reaches READY, then 404s
+    // every subsequent tools/call — the real Streamable-HTTP session-GC path a
+    // long-lived session hits. Pre-fix, _checkStatus dropped the session id but
+    // left the client READY, so the fleet kept advertising tools that silently
+    // 404 on every call (the zombie). It must now transition to DEAD so the
+    // fleet cleanly drops the tools.
+    srv = await startMockMcpServer({ sessionId: 'sess-live-1', expireOnToolCall: true })
+    const client = new MCPRemoteClient({ name: 'remote', type: 'http', url: srv.url, headers: {} }, { log: silentLog() })
+    const deadEvents = []
+    client.on('dead', () => deadEvents.push(true))
+    await client.start()
+    assert.equal(client.state, MCP_STATES.READY)
+    assert.deepEqual(client.tools.map((t) => t.name), ['echo'])
+
+    // The tool call hits the expired session → 404. The call itself fails...
+    await assert.rejects(client.callTool('echo', { msg: 'hi' }), /404/)
+    // ...and the client must NOT linger in READY advertising now-dead tools.
+    assert.equal(client.state, MCP_STATES.DEAD, 'a session-expired client must go DEAD, not stay a zombie READY')
+    assert.equal(client.tools.length, 0, 'a dead client contributes zero tools to the fleet')
+    assert.equal(client._sessionId, null, 'the expired session id must be dropped')
+    assert.equal(deadEvents.length, 1, 'the DEAD transition must emit exactly one dead event')
+    // _expireSession aborts AND clears the controller set — nothing lingers
+    // post-DEAD (parity with destroy()), so no aborted controllers are retained.
+    assert.equal(client._controllers.size, 0, 'no in-flight controllers may linger after the session-expiry DEAD transition')
+
+    // A subsequent call is cleanly rejected as not-ready — no zombie retries.
+    await assert.rejects(client.callTool('echo', {}), /not ready/)
+    await client.destroy()
+    assert.equal(client.state, MCP_STATES.DESTROYED)
+  })
+
+  it('#6835: the non-2xx (404) throw path drains the response body — no leaked stream/socket', async () => {
+    // A non-2xx status is never read as a body on any throw path, so _checkStatus
+    // must cancel/drain it before throwing (else the Streamable-HTTP response
+    // stream lingers open — the leaked-handle / hang class this fix targets).
+    srv = await startMockMcpServer({ sessionId: 'sess-live-2', expireOnToolCall: true })
+    const client = new MCPRemoteClient({ name: 'remote', type: 'http', url: srv.url, headers: {} }, { log: silentLog() })
+    // Spy on _discardBody without changing behaviour — record the statuses it is
+    // asked to drain so we can prove the 404 throw path cancels its body.
+    const drainedStatuses = []
+    const realDiscard = client._discardBody.bind(client)
+    client._discardBody = (res) => { drainedStatuses.push(res?.status); return realDiscard(res) }
+    await client.start()
+    assert.equal(client.state, MCP_STATES.READY)
+
+    await assert.rejects(client.callTool('echo', { msg: 'hi' }), /404/)
+    assert.equal(client.state, MCP_STATES.DEAD)
+    // The 404 response body must have been drained before _checkStatus threw.
+    assert.ok(drainedStatuses.includes(404), 'the non-2xx (404) response body must be drained before throwing')
+    // And no aborted controller may survive the DEAD transition.
+    assert.equal(client._controllers.size, 0, 'no in-flight controllers may linger after the session-expiry DEAD transition')
+
+    await client.destroy()
+    assert.equal(client.state, MCP_STATES.DESTROYED)
   })
 
   it('401 → DEAD with oauth-required status, no crash (flow disabled)', async () => {
