@@ -98,10 +98,10 @@ export interface BuildChatViewMessagesOptions {
    * every `tool_use` and `thinking` message from the transcript session-wide,
    * so the chat pane shows only the assistant's responses (and anything needing
    * action). Mirrors mobile's `chatFilterCompact` (SessionScreen.tsx), which
-   * pre-filters the same two types inline. Additive on top of the per-item
-   * ToolBubble/ToolGroup collapse — those stay untouched when this is off (the
-   * hidden types never reach the grouping pass, so no `tool_group` rows form).
-   * Default `false`.
+   * pre-filters via `isHiddenInCompactMode` (#6882) rather than a hand-rolled
+   * duplicate check. Additive on top of the per-item ToolBubble/ToolGroup
+   * collapse — those stay untouched when this is off (the hidden types never
+   * reach the grouping pass, so no `tool_group` rows form). Default `false`.
    */
   hideToolAndThinking?: boolean
 }
@@ -111,9 +111,9 @@ export interface BuildChatViewMessagesOptions {
  * vanish entirely when the filter is on. `tool_use` and `thinking` are the two
  * "noise" categories the mobile app already hides session-wide; the dashboard
  * toggle narrows off this single predicate. It is the shared definition other
- * clients can adopt so every surface agrees on WHAT compact mode hides — mobile
- * still hard-codes the same rule inline in SessionScreen.tsx; converging it onto
- * this predicate is tracked in #6882. Pure — safe to call per row.
+ * clients adopt so every surface agrees on WHAT compact mode hides — mobile's
+ * SessionScreen.tsx converged onto this predicate in #6882 (was previously a
+ * hand-rolled inline duplicate). Pure — safe to call per row.
  */
 export function isHiddenInCompactMode(type: ChatMessage['type']): boolean {
   return type === 'tool_use' || type === 'thinking'

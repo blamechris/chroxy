@@ -25,7 +25,12 @@ import type { SessionIntervention } from '@chroxy/store-core';
 // 'freeformText' in`) with the same 5-condition guard the store layer
 // uses, so widening `SelectOptionValue` to a third object shape can't
 // silently misroute it as freeform.
-import { isFreeformAnswer, providerSupportsMultiQuestion, providerSupportsSingleMultiSelect, approvePlanWithAcceptEdits } from '@chroxy/store-core';
+// #6882: `isHiddenInCompactMode` is the shared compact-filter predicate from
+// store-core's buildChatViewMessages.ts (added in #6880) — the single source
+// of truth for which message types compact mode hides. Converging mobile onto
+// it (instead of a hand-maintained duplicate of the same tool_use/thinking
+// check) keeps dashboard and mobile from silently drifting.
+import { isFreeformAnswer, providerSupportsMultiQuestion, providerSupportsSingleMultiSelect, approvePlanWithAcceptEdits, isHiddenInCompactMode } from '@chroxy/store-core';
 import { USER_SHELL_PROVIDER } from '@chroxy/protocol';
 import { useConnectionLifecycleStore } from '../store/connection-lifecycle';
 import { SessionPicker } from '../components/SessionPicker';
@@ -178,14 +183,16 @@ export function SessionScreen() {
     closeGitView,
   } = useSessionViewState({ activeSessionId });
 
-  // Filter messages: exclude system (separate tab) and optionally tool_use/thinking (compact mode)
+  // Filter messages: exclude system (separate tab) and, in compact mode, whatever
+  // the shared #6880 predicate hides (tool_use/thinking today). `system` stays a
+  // separate inline check — isHiddenInCompactMode is specifically the compact-hide rule.
   const chatMessages = useMemo(
     () => allMessages.filter((m) => {
       if (m.type === 'system') return false;
-      if (chatFilterCompact && (m.type === 'tool_use' || m.type === 'thinking')) return false;
+      if (chatFilterCompact && isHiddenInCompactMode(m.type)) return false;
       return true;
     }),
-    [allMessages, chatFilterCompact],
+    [allMessages, chatFilterCompact, isHiddenInCompactMode],
   );
   const systemMessages = useMemo(
     () => allMessages.filter((m) => m.type === 'system'),
