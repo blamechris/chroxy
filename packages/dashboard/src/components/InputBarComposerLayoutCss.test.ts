@@ -61,3 +61,22 @@ describe('InputBar composer layout (#6624)', () => {
     expect(body).toMatch(/flex-shrink:\s*0/)
   })
 })
+
+describe('InputBar composer layout — actions overflow (#6897)', () => {
+  // `.input-bar-actions` keeps `flex-shrink: 0` (the #6624 invariant above)
+  // so it isn't squeezed by the textarea, but with no wrap/width handling of
+  // its own its natural content width (keyhint + mic + Evaluate + Send/Stop)
+  // was a hard floor: at extreme pane widths the row `.input-bar` wraps it
+  // onto could still be narrower than that floor, overflowing horizontally.
+  test('.input-bar-actions wraps its own buttons instead of overflowing', () => {
+    const body = ruleBody('.input-bar-actions')
+    expect(body).toMatch(/flex-wrap:\s*wrap/)
+  })
+
+  test('.input-bar-actions is capped at the width of its row (never wider than 100%)', () => {
+    const body = ruleBody('.input-bar-actions')
+    const maxWidth = body.match(/max-width:\s*([^;]+);/)
+    expect(maxWidth, 'expected a max-width declaration').not.toBeNull()
+    expect(maxWidth![1]!.trim()).toBe('100%')
+  })
+})

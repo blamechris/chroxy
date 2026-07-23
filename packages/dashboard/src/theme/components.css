@@ -5944,8 +5944,20 @@ button.sidebar-token-view-session-row:hover {
 .input-bar-actions {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
   flex-shrink: 0;
+  /* #6897 — residual overflow noted during the #6624/#6896 composer-collapse
+   * review. `.input-bar-actions` keeps `flex-shrink: 0` so it never gets
+   * squeezed by the textarea (that's the #6624 fix), but with no wrap/width
+   * handling of its own its natural content width (keyhint + mic + Evaluate
+   * + Send/Stop) was a hard floor: at extreme pane widths (SplitPane's
+   * `minSize={20}` on a narrow window) `.input-bar` wraps this row onto its
+   * own line, and that line could still overflow the pane horizontally.
+   * `flex-wrap: wrap` lets the buttons stack onto additional lines instead
+   * of overflowing, and `max-width: 100%` is a defensive cap so the row
+   * itself is never wider than the space `.input-bar` gives it. */
+  max-width: 100%;
 }
 
 /* Chat redesign #6391 (slice 5): always-visible Enter-mode keyhint. Muted and
