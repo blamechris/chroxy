@@ -19,10 +19,11 @@
  * fire onRespond twice before the store's answered state catches up.
  */
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { useConnectionStore, isRuleEligibleTool, isRuleEligibleProvider } from '../store/connection'
+import { useConnectionStore, isRuleEligibleTool, isRuleEligibleProvider, DENY_REASON_MAX_LENGTH } from '../store/connection'
 import type { PermissionDecision } from '../store/types'
 import { isMacPlatform } from '../utils/platform'
 import { PreWriteDiffReview, isReviewableTool } from './PreWriteDiffReview'
+import { PermissionCommandEdit, isEditableCommandTool } from './PermissionCommandEdit'
 
 export interface PermissionPromptProps {
   requestId: string
@@ -30,11 +31,13 @@ export interface PermissionPromptProps {
   description: string
   remainingMs: number
   /**
-   * #6543 (feature B): `editedInput` carries the operator's per-hunk narrowing
-   * for an approve (omitted for a plain Allow / a Deny). The server whitelists
-   * which fields it merges.
+   * #6543 (feature B): `editedInput` carries the operator's per-hunk narrowing /
+   * edited Bash command for an approve (omitted for a plain Allow / a Deny). The
+   * server whitelists which fields it merges.
+   * #6773: `reason` carries the operator's free-text deny note (only on a Deny) —
+   * the server feeds it back to the agent as the denial message.
    */
-  onRespond: (requestId: string, decision: PermissionDecision, editedInput?: Record<string, string> | null) => void
+  onRespond: (requestId: string, decision: PermissionDecision, editedInput?: Record<string, string> | null, reason?: string) => void
   /**
    * #5667 — human label for the session that asked (e.g. "ltl · CLI"),
    * derived by the renderer from the message's `originSessionId`. Rendered as
@@ -105,14 +108,20 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
   const requestPermissionInput = useConnectionStore((s) => s.requestPermissionInput)
   const pulledInput = useConnectionStore((s) => s.permissionInputs?.[requestId])
   const reviewEligible = ideEnabled && isReviewableTool(tool)
+  // #6773 — Bash command edit reuses the same features.ide gate + full-input pull
+  // as the Write/Edit review (the broadcast command is truncated to 200 chars).
+  const commandEditEligible = ideEnabled && isEditableCommandTool(tool)
   const [editedInput, setEditedInput] = useState<Record<string, string> | null>(null)
+  // #6773 — free-text deny reason (tool-agnostic, NOT ide-gated). Sent only on Deny.
+  const [denyReason, setDenyReason] = useState('')
 
-  // Pull the input once when a reviewable prompt appears (before it's answered).
+  // Pull the input once when a reviewable / command-edit prompt appears (before
+  // it's answered) — both need the full untruncated (still redacted) tool input.
   useEffect(() => {
-    if (reviewEligible && !answered && pulledInput === undefined) {
+    if ((reviewEligible || commandEditEligible) && !answered && pulledInput === undefined) {
       requestPermissionInput(requestId)
     }
-  }, [reviewEligible, answered, pulledInput, requestPermissionInput, requestId])
+  }, [reviewEligible, commandEditEligible, answered, pulledInput, requestPermissionInput, requestId])
 
   useEffect(() => {
     if (intervalRef.current) clearInterval(intervalRef.current)
@@ -161,9 +170,18 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
     const effective: PermissionDecision =
       (decision === 'allowSession' || decision === 'allowAlways') && !ruleOk ? 'allow' : decision
     if (intervalRef.current) clearInterval(intervalRef.current)
-    // #6543: carry the per-hunk edits on an approve only (never on deny).
-    onRespond(requestId, effective, effective === 'deny' ? null : editedInput)
-  }, [requestId, onRespond, answered, remaining, tool, providerSupportsRules, connected, editedInput])
+    // #6543: carry the per-hunk / command edits on an approve only (never on deny).
+    // #6773: carry the free-text deny reason on a deny only (trimmed; the reason
+    // arg is passed ONLY when non-blank so a plain deny keeps the 3-arg call shape
+    // and the server falls back to its default 'User denied').
+    const isDeny = effective === 'deny'
+    const trimmedReason = denyReason.trim()
+    if (isDeny && trimmedReason.length > 0) {
+      onRespond(requestId, effective, null, trimmedReason)
+    } else {
+      onRespond(requestId, effective, isDeny ? null : editedInput)
+    }
+  }, [requestId, onRespond, answered, remaining, tool, providerSupportsRules, connected, editedInput, denyReason])
 
   // #6287 — the Cmd/Ctrl+Y, Cmd/Ctrl+Shift+Y and Escape keyboard shortcuts moved
   // to a SINGLE document-level listener (useChatKeyboard, wired in App.tsx) that
@@ -226,6 +244,16 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
         />
       )}
 
+      {/* #6773: editable Bash command before Approve (features.ide on). Renders
+          once the full input lands; a genuine edit becomes `editedInput` on
+          Approve. A refusal / not-yet-pulled state simply shows no editor. */}
+      {commandEditEligible && showButtons && pulledInput?.found && pulledInput.input && (
+        <PermissionCommandEdit
+          input={pulledInput.input as Record<string, unknown>}
+          onEditedInputChange={setEditedInput}
+        />
+      )}
+
       {!answered && (
         <div
           className={`perm-countdown${isUrgent ? ' urgent' : ''}${isExpired ? ' expired' : ''}`}
@@ -244,6 +272,22 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
 
       {showButtons && (
         <>
+          {/* #6773: optional free-text deny reason (tool-agnostic). When the
+              operator types here and clicks Deny, the note is fed back to the
+              agent as the denial message so it can adjust without a fresh turn
+              (desktop-app "tell Claude what to do differently" parity). Ignored
+              on Allow. */}
+          <textarea
+            className="perm-deny-reason"
+            data-testid="perm-deny-reason"
+            value={denyReason}
+            rows={2}
+            maxLength={DENY_REASON_MAX_LENGTH}
+            placeholder="Optional: tell the agent what to do differently (sent with Deny)"
+            aria-label="Deny reason (optional)"
+            onChange={(e) => setDenyReason(e.target.value)}
+            disabled={submitting || !connected}
+          />
           <div className="perm-buttons">
             <button
               className="btn-allow"

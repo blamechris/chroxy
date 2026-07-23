@@ -463,6 +463,10 @@ function handlePermissionResponse(ws, client, msg, ctx) {
     // mergeEditedInput) — a client can narrow the content but not redirect the
     // path. Only present when the client reviewed + edited the proposed write.
     editedInput: msg.editedInput,
+    // #6773: the operator's free-text deny reason. Used only on a `deny` — the
+    // server bounds + redacts it (permission-manager.js buildDenyMessage) and
+    // feeds it back to the agent as the denial message instead of 'User denied'.
+    reason: msg.reason,
   })
 
   if (result.kind === 'binding_mismatch') {

@@ -127,6 +127,17 @@ describe('permission-resolver — SDK-before-legacy (F) + dispatch states', () =
     assert.equal(legacyResolved.length, 0, 'legacy resolver not used when SDK handled it')
   })
 
+  it('#6773: forwards the editedInput and reason opts to the SDK respondToPermission', () => {
+    const owner = makeSdkSession({ pending: ['perm-r'] })
+    const { resolver } = build({ map: [['perm-r', OWNER]], ownerSession: owner })
+    resolver.resolve('perm-r', 'deny', OWNER, { clientId: 'c1', editedInput: { command: 'ls' }, reason: 'read-only please' })
+    assert.equal(owner.respondToPermission.mock.calls.length, 1)
+    assert.deepStrictEqual(
+      owner.respondToPermission.mock.calls[0].arguments,
+      ['perm-r', 'deny', { command: 'ls' }, 'read-only please'],
+    )
+  })
+
   it('an unmapped request that exists in the legacy store resolves via legacy', () => {
     const { resolver, legacyResolved } = build({ map: [], legacy: ['perm-5'] })
     const r = resolver.resolve('perm-5', 'allow', null, { clientId: 'c1' })

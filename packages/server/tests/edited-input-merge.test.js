@@ -1,6 +1,12 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { PermissionManager, mergeEditedInput } from '../src/permission-manager.js'
+import {
+  PermissionManager,
+  mergeEditedInput,
+  buildDenyMessage,
+  EDITABLE_INPUT_FIELDS,
+  PROTECTED_PATH_INPUT_FIELDS,
+} from '../src/permission-manager.js'
 
 /**
  * #6543 (IDE P3 feature B) — the editedInput execution seam. The load-bearing
@@ -28,9 +34,20 @@ describe('mergeEditedInput whitelist (#6543)', () => {
     assert.equal(r.file_path, '/repo/a.js') // path not editable
   })
 
-  it('a non-editable tool (Bash) ignores editedInput ENTIRELY (no command change)', () => {
-    const r = mergeEditedInput({ command: 'ls' }, { command: 'rm -rf /', content: 'x' }, 'Bash')
-    assert.deepEqual(r, { command: 'ls' })
+  it('#6773 — Bash: substitutes the command (whole command is the reviewed content)', () => {
+    const r = mergeEditedInput({ command: 'ls' }, { command: 'ls -la', content: 'x' }, 'Bash')
+    assert.equal(r.command, 'ls -la')     // command IS editable for Bash now
+    assert.equal(r.content, undefined)    // non-whitelisted field ignored (can't ADD)
+  })
+
+  it('a non-editable tool (Task) ignores editedInput ENTIRELY (no field change)', () => {
+    const r = mergeEditedInput({ prompt: 'go' }, { prompt: 'HIJACK', command: 'rm -rf /' }, 'Task')
+    assert.deepEqual(r, { prompt: 'go' })
+  })
+
+  it('#6773 — codex `shell` is NOT editable (codex owns command execution)', () => {
+    const r = mergeEditedInput({ command: 'ls' }, { command: 'rm -rf /' }, 'shell')
+    assert.deepEqual(r, { command: 'ls' }) // absent from whitelist → editedInput ignored
   })
 
   it('ignores non-whitelisted fields, non-string values, and cannot ADD fields', () => {
@@ -110,5 +127,93 @@ describe('respondToPermission editedInput integration (#6543)', () => {
     const { pm, resolved } = seed('Write', { file_path: '/a', content: 'x' })
     assert.equal(pm.respondToPermission('nope', 'allow', { content: 'y' }), false)
     assert.equal(resolved(), undefined)
+  })
+
+  it('#6773 — Bash allow + editedInput.command ⇒ updatedInput runs the edited command', () => {
+    const { pm, resolved } = seed('Bash', { command: 'ls' })
+    pm.respondToPermission('req-1', 'allow', { command: 'ls -la' })
+    assert.equal(resolved().behavior, 'allow')
+    assert.equal(resolved().updatedInput.command, 'ls -la')
+  })
+})
+
+/**
+ * #6773 — the editedInput WHITELIST GUARD. The load-bearing invariant is that a
+ * client-substitutable field can NEVER be a filesystem-target (path) field — a
+ * path-redirect would let an approved edit slip a write past the protected-path
+ * floor. This guard fails if a future tool addition puts a path field in the
+ * whitelist, mirroring the "narrow-only" contract the mergeEditedInput tests prove.
+ */
+describe('editedInput whitelist guard (#6773)', () => {
+  it('no editable field is ever a protected PATH field (no path redirect possible)', () => {
+    const pathFields = new Set(PROTECTED_PATH_INPUT_FIELDS)
+    for (const [tool, fields] of Object.entries(EDITABLE_INPUT_FIELDS)) {
+      for (const field of fields) {
+        assert.ok(
+          !pathFields.has(field),
+          `EDITABLE_INPUT_FIELDS[${tool}] must not include the path field '${field}' — it would let an edit redirect the write past the floor`,
+        )
+      }
+    }
+  })
+
+  it('every editable-field list is a non-empty array of strings', () => {
+    for (const [tool, fields] of Object.entries(EDITABLE_INPUT_FIELDS)) {
+      assert.ok(Array.isArray(fields) && fields.length > 0, `${tool} must map to a non-empty field array`)
+      for (const field of fields) assert.equal(typeof field, 'string', `${tool} fields must be strings`)
+    }
+  })
+
+  it('codex `shell` is NOT in the whitelist (codex ignores updatedInput)', () => {
+    assert.equal(EDITABLE_INPUT_FIELDS.shell, undefined)
+  })
+})
+
+/**
+ * #6773 — buildDenyMessage: an operator's free-text reason replaces the fixed
+ * 'User denied' string fed back to the agent, bounded + redacted; blank / missing
+ * / non-string falls back to 'User denied'.
+ */
+describe('buildDenyMessage (#6773)', () => {
+  it('a non-empty reason replaces the default message', () => {
+    assert.equal(buildDenyMessage('use rg instead of grep'), 'use rg instead of grep')
+  })
+
+  it('missing / non-string / blank falls back to "User denied"', () => {
+    assert.equal(buildDenyMessage(undefined), 'User denied')
+    assert.equal(buildDenyMessage(null), 'User denied')
+    assert.equal(buildDenyMessage(42), 'User denied')
+    assert.equal(buildDenyMessage('   '), 'User denied')
+    assert.equal(buildDenyMessage(''), 'User denied')
+  })
+
+  it('trims and bounds the reason (no unbounded paste reaches the agent)', () => {
+    const long = 'x'.repeat(5000)
+    const out = buildDenyMessage(`   ${long}   `)
+    assert.equal(out.length, 2000)
+  })
+
+  it('redacts a secret-shaped token in the reason before it reaches the agent', () => {
+    const out = buildDenyMessage('do not use sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA')
+    assert.ok(!out.includes('sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'), 'raw secret must not survive')
+  })
+
+  it('respondToPermission deny ⇒ agent message carries the reason', () => {
+    const pm = new PermissionManager({ log: { info() {}, warn() {}, error() {} } })
+    let resolved
+    pm._pendingPermissions.set('req-1', { resolve: (r) => { resolved = r }, input: { command: 'ls' }, suggestions: [] })
+    pm._lastPermissionData.set('req-1', { tool: 'Bash' })
+    pm.respondToPermission('req-1', 'deny', undefined, 'run it read-only instead')
+    assert.equal(resolved.behavior, 'deny')
+    assert.equal(resolved.message, 'run it read-only instead')
+  })
+
+  it('respondToPermission deny WITHOUT a reason ⇒ default "User denied"', () => {
+    const pm = new PermissionManager({ log: { info() {}, warn() {}, error() {} } })
+    let resolved
+    pm._pendingPermissions.set('req-1', { resolve: (r) => { resolved = r }, input: { command: 'ls' }, suggestions: [] })
+    pm._lastPermissionData.set('req-1', { tool: 'Bash' })
+    pm.respondToPermission('req-1', 'deny')
+    assert.equal(resolved.message, 'User denied')
   })
 })

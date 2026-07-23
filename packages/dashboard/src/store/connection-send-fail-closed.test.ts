@@ -217,6 +217,34 @@ describe('#6308 — dashboard sendPermissionResponse', () => {
     useConnectionStore.getState().sendPermissionResponse('req-1', 'deny', { content: 'x' }) // deny drops it
     expect(last().editedInput).toBeUndefined()
   })
+
+  it('#6773: a deny carries a trimmed reason on the wire; allow / blank omit it', async () => {
+    const { useConnectionStore, createEmptySessionState } = await import('./connection')
+    const sent: unknown[] = []
+    const socket = liveSocket(sent)
+    useConnectionStore.setState({
+      activeSessionId: 'sess-1',
+      sessionStates: {
+        'sess-1': {
+          ...createEmptySessionState(),
+          messages: [{ id: 'p1', type: 'prompt', requestId: 'req-1', tool: 'Bash', timestamp: 1 }],
+        } as unknown as SessionState,
+      },
+      sessionNotifications: [],
+      socket,
+    } as never)
+    const last = () => sent[sent.length - 1] as { decision?: string; reason?: unknown }
+
+    useConnectionStore.getState().sendPermissionResponse('req-1', 'deny', null, '  use rg  ')
+    expect(last().decision).toBe('deny')
+    expect(last().reason).toBe('use rg') // trimmed
+
+    useConnectionStore.getState().sendPermissionResponse('req-1', 'deny', null, '   ') // blank → omitted
+    expect(last().reason).toBeUndefined()
+
+    useConnectionStore.getState().sendPermissionResponse('req-1', 'allow', null, 'ignored on allow')
+    expect(last().reason).toBeUndefined() // reason never rides an allow
+  })
 })
 
 describe('#6308 — dashboard sendInterrupt / sendUserQuestionResponse', () => {
