@@ -3130,6 +3130,28 @@ button.sidebar-token-view-session-row:hover {
   font-variant-numeric: tabular-nums;
 }
 
+/* #6628 — edit a still-queued follow-up: reopens its text in the composer and
+   cancels the queued entry. Sits left of the ✕ cancel control. */
+.msg-queued-edit {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 6px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.msg-queued-edit:hover {
+  background: color-mix(in srgb, var(--text-muted) 18%, transparent);
+  color: var(--text-primary);
+}
+
 .msg-queued-cancel {
   display: inline-flex;
   align-items: center;

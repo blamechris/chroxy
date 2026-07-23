@@ -685,6 +685,20 @@ export function SessionScreen() {
   // longer churn the TextInput on every delta.
   const inputRef = useRef<InputBarHandle>(null);
 
+  // #6628 — edit a still-queued follow-up before it flushes. Cancel-and-reopen:
+  // cancel the queued entry first (its optimistic drop clears the bubble +
+  // badge), then reopen the message text in the composer for amend + re-send.
+  // `sendCancelQueued` returns `false` on a closed socket without dropping the
+  // entry — bail then so we neither clobber the composer nor strand a queued
+  // message the cancel never reached. The already-flushing race is handled like
+  // plain cancel: the server no-ops and the badge (with these controls) is gone
+  // once `message_dequeued` lands.
+  const handleEditQueued = useCallback((id: string, text: string) => {
+    if (sendCancelQueued(id) === false) return;
+    inputRef.current?.setValue(text);
+    inputRef.current?.focus();
+  }, [sendCancelQueued]);
+
   const toggleSelection = useCallback((id: string) => {
     setSelectedIds((prev) => {
       const next = new Set(prev);
@@ -1649,6 +1663,7 @@ export function SessionScreen() {
                   streamingMessageId={streamingMessageId}
                   queuedIds={queuedIds}
                   onCancelQueued={handleCancelQueued}
+                  onEditQueued={handleEditQueued}
                   isPlanPending={isPlanPending}
                   planAllowedPrompts={planAllowedPrompts}
                   onApprovePlan={handleApprovePlan}
@@ -1687,6 +1702,7 @@ export function SessionScreen() {
               streamingMessageId={streamingMessageId}
               queuedIds={queuedIds}
               onCancelQueued={handleCancelQueued}
+              onEditQueued={handleEditQueued}
               isPlanPending={isPlanPending}
               planAllowedPrompts={planAllowedPrompts}
               onApprovePlan={handleApprovePlan}

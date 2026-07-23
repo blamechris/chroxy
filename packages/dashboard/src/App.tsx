@@ -1523,6 +1523,24 @@ export function App() {
     if (activeSessionId) inputDraftsRef.current.set(activeSessionId, text)
   }, [activeSessionId])
 
+  // #6628 — edit a still-queued follow-up before it flushes. Cancel-and-reopen:
+  // cancel the queued entry FIRST (its own optimistic-drop clears the bubble +
+  // badge), then reopen the message text in the composer so the user can amend
+  // and re-send. `sendCancelQueued` returns `false` on a closed socket without
+  // dropping the entry — bail then so we neither clobber the current draft nor
+  // strand a queued message the cancel never reached. The race where the entry
+  // has already flushed is handled the same way plain cancel handles it: the
+  // server's `cancelQueuedMessage` is a no-op and the badge (with these
+  // controls) is already gone once `message_dequeued` lands.
+  const onEditQueued = useCallback(
+    (id: string, text: string) => {
+      if (sendCancelQueued(id) === false) return
+      setInputDraftValue(text)
+      if (activeSessionId) inputDraftsRef.current.set(activeSessionId, text)
+    },
+    [sendCancelQueued, activeSessionId],
+  )
+
   // Per-session collapsed-paste storage (#3797). Each composer paste that
   // crosses the size threshold is stashed by id; the textarea sees only
   // the marker. Mirrors the draft-text per-session storage so switching
@@ -2428,6 +2446,7 @@ export function App() {
                         scrollToBottomSignal={scrollToBottomSignal}
                         queuedIds={queuedIds}
                         onCancelQueued={onCancelQueued}
+                        onEditQueued={onEditQueued}
                         workingLabel={workingLabel}
                         inFlightToolColor={inFlightToolColor}
                         openSearchSignal={openSearchSignal}
@@ -2477,6 +2496,7 @@ export function App() {
                         scrollToBottomSignal={scrollToBottomSignal}
                         queuedIds={queuedIds}
                         onCancelQueued={onCancelQueued}
+                        onEditQueued={onEditQueued}
                         workingLabel={workingLabel}
                         inFlightToolColor={inFlightToolColor}
                         openSearchSignal={openSearchSignal}

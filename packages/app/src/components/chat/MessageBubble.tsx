@@ -116,7 +116,7 @@ function ThinkingBubble({ content, streaming, truncated }: { content: string; st
   );
 }
 
-function MessageBubbleImpl({ message, queued, onCancelQueued, onSelectOption, onSubmitMultiQuestion, allowMultiQuestion, allowSingleMultiSelect, isSelected, isSelecting, onLongPress, onPress, onOpenDetail, onImagePress, onRetryStreamStall, getInitialExpanded, onExpandedChange }: {
+function MessageBubbleImpl({ message, queued, onCancelQueued, onEditQueued, onSelectOption, onSubmitMultiQuestion, allowMultiQuestion, allowSingleMultiSelect, isSelected, isSelecting, onLongPress, onPress, onOpenDetail, onImagePress, onRetryStreamStall, getInitialExpanded, onExpandedChange }: {
   message: ChatMessage;
   /**
    * #5938 — true when this `user_input` bubble was sent mid-turn and is sitting
@@ -126,6 +126,9 @@ function MessageBubbleImpl({ message, queued, onCancelQueued, onSelectOption, on
   queued?: boolean;
   /** #5938 — cancel this queued follow-up by its message id before it flushes. */
   onCancelQueued?: (id: string) => void;
+  /** #6628 — edit this queued follow-up before it flushes: reopens its text in
+   *  the composer and cancels the queued entry. Receives the id and its text. */
+  onEditQueued?: (id: string, text: string) => void;
   // #6543 (feature B): `editedInput` carries the operator's per-hunk narrowing
   // from a Write/Edit pre-write-diff review — sent on an Approve so the server
   // writes only the kept hunks. `null`/omitted = no narrowing (a plain response);
@@ -552,6 +555,18 @@ function MessageBubbleImpl({ message, queued, onCancelQueued, onSelectOption, on
       {isUser && queued && (
         <View style={styles.queuedRow} testID={`msg-queued-${message.id}`}>
           <Text style={styles.queuedLabel}>Queued</Text>
+          {onEditQueued && (
+            <TouchableOpacity
+              onPress={() => onEditQueued(message.id, typeof message.content === 'string' ? message.content : '')}
+              // #6628 — same ~44pt tap target as the cancel control.
+              hitSlop={{ top: 14, bottom: 14, left: 12, right: 12 }}
+              accessibilityRole="button"
+              accessibilityLabel="Edit queued message"
+              testID={`msg-queued-edit-${message.id}`}
+            >
+              <Text style={styles.queuedEdit}>Edit</Text>
+            </TouchableOpacity>
+          )}
           {onCancelQueued && (
             <TouchableOpacity
               onPress={() => onCancelQueued(message.id)}
@@ -827,8 +842,10 @@ export const MessageBubble = React.memo(MessageBubbleImpl, (prev, next) => {
     prev.allowSingleMultiSelect === next.allowSingleMultiSelect &&
     // #5938 — re-render when the queued flag flips (badge appears/clears on
     // enqueue/flush) or the cancel handler's presence changes.
+    // #6628 — likewise for the edit handler's presence.
     prev.queued === next.queued &&
     (prev.onCancelQueued == null) === (next.onCancelQueued == null) &&
+    (prev.onEditQueued == null) === (next.onEditQueued == null) &&
     (prev.onRetryStreamStall == null) === (next.onRetryStreamStall == null)
   );
 });
@@ -904,6 +921,13 @@ const styles = StyleSheet.create({
   },
   queuedCancel: {
     color: COLORS.accentRed,
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  // #6628 — edit affordance sits left of Cancel; neutral (muted) so Cancel's
+  // red stays the only destructive accent in the row.
+  queuedEdit: {
+    color: COLORS.textMuted,
     fontSize: 12,
     fontWeight: '600',
   },
