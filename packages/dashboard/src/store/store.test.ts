@@ -21,6 +21,13 @@ import {
   loadPersistedSidebarPanelView,
   persistSidebarPanelCollapsed,
   loadPersistedSidebarPanelCollapsed,
+  // #6883 — device-view preferences must survive an unscoped clear
+  persistShowConsoleTab,
+  loadPersistedShowConsoleTab,
+  persistInterventionPing,
+  loadPersistedInterventionPing,
+  persistCompactChatFilter,
+  loadPersistedCompactChatFilter,
 } from './persistence';
 import {
   createKeyPair,
@@ -149,6 +156,25 @@ describe('persistence', () => {
     expect(state.viewMode).toBe('chat');
     // Session-specific data is cleared
     expect(state.activeSessionId).toBeNull();
+  });
+
+  // #6883 — device-view prefs (compact filter, console tab, intervention
+  // ping) are per-device UI choices, not server-scoped session state, so an
+  // unscoped clearPersistedState() must not reset them (matching theme /
+  // view_mode). Pre-#6883, these were wiped alongside session data.
+  it('clearPersistedState preserves device-view prefs but still clears session state', () => {
+    persistShowConsoleTab(true);
+    persistInterventionPing(false);
+    persistCompactChatFilter(true);
+    persistActiveSession('sess-1');
+
+    clearPersistedState();
+
+    expect(loadPersistedShowConsoleTab()).toBe(true);
+    expect(loadPersistedInterventionPing()).toBe(false);
+    expect(loadPersistedCompactChatFilter()).toBe(true);
+    // Session-scoped state still clears
+    expect(loadPersistedState().activeSessionId).toBeNull();
   });
 
   it('loadPersistedState returns defaults when empty', () => {
