@@ -137,6 +137,21 @@ describe('composeCommentReviewPrompt', () => {
     expect(prompt).toContain('…')
     expect(prompt.length).toBeLessThan(long.length + 200)
   })
+
+  it('uses a wider backtick fence when the snippet itself contains backticks', () => {
+    const prompt = composeCommentReviewPrompt([
+      comment({
+        lineNumber: 7,
+        lineType: 'addition',
+        lineContent: 'const msg = `hello ${name}`',
+        comment: 'avoid the template literal here',
+      }),
+    ])
+    // A single backtick fence would prematurely close on the snippet's own
+    // backticks and corrupt the prompt; the fence must widen to `` and pad.
+    expect(prompt).toContain('`` const msg = `hello ${name}` ``')
+    expect(prompt).toContain(': avoid the template literal here')
+  })
 })
 
 describe('composeReviewRequestPrompt', () => {

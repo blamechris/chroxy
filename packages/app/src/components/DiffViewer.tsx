@@ -183,6 +183,12 @@ export function DiffHunkView({
                   accessibilityRole="button"
                   accessibilityLabel="Remove comment"
                   testID={`diff-comment-remove-${i}`}
+                  // The visual label stays a compact inline "Remove" so it sits
+                  // neatly next to the comment note text, but the actionable tap
+                  // area expands via hitSlop to meet the 44pt accessibility
+                  // minimum (rendered text is ~16-18pt tall; +12 top/bottom
+                  // clears 44pt, +10 left/right gives a comfortable margin).
+                  hitSlop={{ top: 12, right: 10, bottom: 12, left: 10 }}
                 >
                   <Text style={styles.commentRemove}>Remove</Text>
                 </TouchableOpacity>

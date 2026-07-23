@@ -72,6 +72,24 @@ function truncate(s: string, max: number): string {
   return s.length > max ? `${s.slice(0, max - 1)}…` : s
 }
 
+/**
+ * Wrap `content` as a Markdown inline-code span, using a backtick fence one
+ * character longer than the longest run of backticks already inside it (the
+ * CommonMark rule for nesting a backtick inside inline code — e.g. a JS
+ * template literal snippet). Content that starts/ends with a backtick gets a
+ * single space of padding on that side so it can't fuse with the fence.
+ *
+ * For the common case (no backticks in the snippet) this degrades to a plain
+ * single-backtick span, so existing prompts stay byte-identical.
+ */
+function inlineCode(content: string): string {
+  const runs = content.match(/`+/g)
+  const maxRun = runs ? Math.max(...runs.map((r) => r.length)) : 0
+  const fence = '`'.repeat(maxRun + 1)
+  const needsPadding = content.startsWith('`') || content.endsWith('`')
+  return needsPadding ? `${fence} ${content} ${fence}` : `${fence}${content}${fence}`
+}
+
 function locatorFor(comment: DiffLineComment): string {
   const removed = comment.lineType === 'deletion'
   if (comment.lineNumber == null) return removed ? 'Removed line' : 'Line'
@@ -112,7 +130,7 @@ export function composeCommentReviewPrompt(comments: DiffLineComment[]): string 
     })
     for (const c of sorted) {
       const snippet = truncate(c.lineContent.trim(), MAX_LINE_SNIPPET)
-      out.push(`  - ${locatorFor(c)} (\`${snippet}\`): ${c.comment.trim()}`)
+      out.push(`  - ${locatorFor(c)} (${inlineCode(snippet)}): ${c.comment.trim()}`)
     }
   }
 

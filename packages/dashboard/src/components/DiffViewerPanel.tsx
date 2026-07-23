@@ -17,7 +17,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import {
   composeCommentReviewPrompt,
   composeReviewRequestPrompt,
-  deriveLineNumber,
+  parseHunkStartLines,
   type DiffLineComment,
 } from '@chroxy/store-core'
 import { useConnectionStore } from '../store/connection'
@@ -311,34 +311,53 @@ export function HunkView({
         <HunkHeader header={hunk.header} />
       )}
       {viewMode === 'unified' ? (
-        hunk.lines.map((line, i) => {
-          if (!commentsOn) return <UnifiedLine key={i} line={line} />
-          const api = commentApi!
-          const key = lineKey(filePath!, hunkIndex, i)
-          const existing = api.comments.find((c) => c.id === key)
-          return (
-            <CommentableLine
-              key={i}
-              line={line}
-              target={{
-                key,
-                filePath: filePath!,
-                lineNumber: deriveLineNumber(hunk, i),
-                lineType: line.type,
-                lineContent: line.content,
-              }}
-              hasComment={!!existing}
-              existingText={existing?.comment}
-              isEditing={api.editingKey === key}
-              draft={api.draft}
-              onOpen={api.onOpen}
-              onDraftChange={api.onDraftChange}
-              onSave={api.onSave}
-              onCancel={api.onCancel}
-              onRemove={api.onRemove}
-            />
-          )
-        })
+        !commentsOn
+          ? hunk.lines.map((line, i) => <UnifiedLine key={i} line={line} />)
+          : (() => {
+              const api = commentApi!
+              // #6930: single forward pass over hunk.lines, accumulating the
+              // old/new line counters as we go — mirrors deriveLineNumber's
+              // logic exactly, but avoids the O(i) rescan that calling
+              // deriveLineNumber(hunk, i) per line would incur (making the
+              // whole hunk render O(n^2)). Rendered line numbers stay
+              // byte-identical to the per-line helper.
+              const starts = parseHunkStartLines(hunk.header)
+              let oldLine = starts?.oldStart ?? 0
+              let newLine = starts?.newStart ?? 0
+              return hunk.lines.map((line, i) => {
+                const lineNumber = starts ? (line.type === 'deletion' ? oldLine : newLine) : null
+                if (line.type === 'deletion') oldLine++
+                else if (line.type === 'addition') newLine++
+                else {
+                  oldLine++
+                  newLine++
+                }
+                const key = lineKey(filePath!, hunkIndex, i)
+                const existing = api.comments.find((c) => c.id === key)
+                return (
+                  <CommentableLine
+                    key={i}
+                    line={line}
+                    target={{
+                      key,
+                      filePath: filePath!,
+                      lineNumber,
+                      lineType: line.type,
+                      lineContent: line.content,
+                    }}
+                    hasComment={!!existing}
+                    existingText={existing?.comment}
+                    isEditing={api.editingKey === key}
+                    draft={api.draft}
+                    onOpen={api.onOpen}
+                    onDraftChange={api.onDraftChange}
+                    onSave={api.onSave}
+                    onCancel={api.onCancel}
+                    onRemove={api.onRemove}
+                  />
+                )
+              })
+            })()
       ) : (
         buildSplitPairs(hunk.lines).map((pair, i) => <SplitLine key={i} left={pair.left} right={pair.right} />)
       )}
