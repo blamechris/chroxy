@@ -2450,7 +2450,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // future fields a one-place change. Server's `create_session` handler
   // accepts these fields plus others (e.g. `sandbox`) — see
   // packages/server/src/handlers/session-handlers.js for the full set.
-  createSession: ({ name, cwd, worktree, provider, model, permissionMode, environmentId }) => {
+  createSession: ({ name, cwd, worktree, provider, model, permissionMode, environmentId, codexSandbox }) => {
     const msg: Record<string, unknown> = { type: 'create_session' };
     if (name) msg.name = name;
     if (cwd) msg.cwd = cwd;
@@ -2459,6 +2459,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     if (model) msg.model = model;
     if (permissionMode) msg.permissionMode = permissionMode;
     if (environmentId) msg.environmentId = environmentId;
+    // #6689 — per-session Codex sandbox mode. Only present when the modal is
+    // creating a codex session; other providers omit it (server ignores it).
+    if (codexSandbox) msg.codexSandbox = codexSandbox;
     sendIfOpen(msg);
   },
 

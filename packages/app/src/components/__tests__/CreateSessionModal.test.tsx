@@ -306,3 +306,100 @@ describe('CreateSessionModal — #6312/#6352 provider capability-limitation note
     expect(component!.root.findAllByProps({ testID: 'provider-limitation-note' })).toHaveLength(0);
   });
 });
+
+describe('CreateSessionModal — #6689 codex sandbox selector', () => {
+  it('does NOT render the sandbox selector until codex is selected', () => {
+    setupStore([{ name: 'codex', auth: { ready: true } }]);
+
+    let component: renderer.ReactTestRenderer;
+    act(() => {
+      component = renderer.create(<CreateSessionModal visible onClose={jest.fn()} />);
+    });
+
+    // Default provider chip ('') is active on open — selector hidden.
+    expect(component!.root.findAllByProps({ testID: 'codex-sandbox-field' })).toHaveLength(0);
+  });
+
+  it('renders the sandbox selector after selecting the codex provider', () => {
+    setupStore([{ name: 'codex', auth: { ready: true } }]);
+
+    let component: renderer.ReactTestRenderer;
+    act(() => {
+      component = renderer.create(<CreateSessionModal visible onClose={jest.fn()} />);
+    });
+
+    act(() => {
+      component!.root.findByProps({ accessibilityLabel: 'Provider: Codex (CLI)' }).props.onPress();
+    });
+
+    expect(component!.root.findByProps({ testID: 'codex-sandbox-field' })).toBeTruthy();
+    // All three mode chips are present.
+    expect(component!.root.findByProps({ testID: 'codex-sandbox-chip-read-only' })).toBeTruthy();
+    expect(component!.root.findByProps({ testID: 'codex-sandbox-chip-workspace-write' })).toBeTruthy();
+    expect(component!.root.findByProps({ testID: 'codex-sandbox-chip-danger-full-access' })).toBeTruthy();
+  });
+
+  it('forwards codexSandbox: workspace-write by default for a codex session', () => {
+    setupStore([{ name: 'codex', auth: { ready: true } }]);
+
+    let component: renderer.ReactTestRenderer;
+    act(() => {
+      component = renderer.create(<CreateSessionModal visible onClose={jest.fn()} />);
+    });
+
+    act(() => {
+      component!.root.findByProps({ accessibilityLabel: 'Provider: Codex (CLI)' }).props.onPress();
+    });
+    act(() => {
+      component!.root.findByProps({ accessibilityLabel: 'Create session' }).props.onPress();
+    });
+
+    expect(mockCreateSession).toHaveBeenCalledTimes(1);
+    expect(mockCreateSession.mock.calls[0][0]).toMatchObject({
+      provider: 'codex',
+      codexSandbox: 'workspace-write',
+    });
+  });
+
+  it('forwards the chosen sandbox mode when a chip is tapped', () => {
+    setupStore([{ name: 'codex', auth: { ready: true } }]);
+
+    let component: renderer.ReactTestRenderer;
+    act(() => {
+      component = renderer.create(<CreateSessionModal visible onClose={jest.fn()} />);
+    });
+
+    act(() => {
+      component!.root.findByProps({ accessibilityLabel: 'Provider: Codex (CLI)' }).props.onPress();
+    });
+    act(() => {
+      component!.root.findByProps({ testID: 'codex-sandbox-chip-read-only' }).props.onPress();
+    });
+    act(() => {
+      component!.root.findByProps({ accessibilityLabel: 'Create session' }).props.onPress();
+    });
+
+    expect(mockCreateSession).toHaveBeenCalledTimes(1);
+    expect(mockCreateSession.mock.calls[0][0]).toMatchObject({
+      provider: 'codex',
+      codexSandbox: 'read-only',
+    });
+  });
+
+  it('does NOT forward codexSandbox for a non-codex provider', () => {
+    setupStore([{ name: 'codex', auth: { ready: true } }]);
+
+    let component: renderer.ReactTestRenderer;
+    act(() => {
+      component = renderer.create(<CreateSessionModal visible onClose={jest.fn()} />);
+    });
+
+    // Leave the Default provider chip selected (resolves to a non-codex provider).
+    act(() => {
+      component!.root.findByProps({ accessibilityLabel: 'Create session' }).props.onPress();
+    });
+
+    expect(mockCreateSession).toHaveBeenCalledTimes(1);
+    expect(mockCreateSession.mock.calls[0][0].codexSandbox).toBeUndefined();
+  });
+});

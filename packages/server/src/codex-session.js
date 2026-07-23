@@ -11,6 +11,10 @@ import {
 } from './utils/context-window-learn.js'
 import { BILLING_CLASSES } from './billing-class.js'
 import { hasCodexOAuthCreds } from './auth-probes.js'
+import {
+  CODEX_SANDBOX_MODES as PROTOCOL_CODEX_SANDBOX_MODES,
+  CODEX_DEFAULT_SANDBOX as PROTOCOL_CODEX_DEFAULT_SANDBOX,
+} from '@chroxy/protocol'
 
 /**
  * Manages a Codex CLI session using `codex exec --json`.
@@ -70,18 +74,18 @@ const BINARY_CANDIDATES = [
  * exactly these three values (verified against codex-cli 0.128.0). Exported
  * so tests and consumers can pin the canonical list without re-declaring it.
  */
-export const CODEX_SANDBOX_MODES = Object.freeze([
-  'read-only',
-  'workspace-write',
-  'danger-full-access',
-])
+// #6689: single-sourced from @chroxy/protocol (the wire contract) so the
+// server, the create_session schema, and both client selectors share exactly
+// one list. Frozen re-export preserves the pre-#6689 API for the server
+// consumers that already `import { CODEX_SANDBOX_MODES } from './codex-session.js'`.
+export const CODEX_SANDBOX_MODES = Object.freeze([...PROTOCOL_CODEX_SANDBOX_MODES])
 
 /**
  * Default sandbox mode when nothing overrides it. Matches the #3846 stopgap
  * — Codex would otherwise fall back to read-only in any non-trusted dir and
  * be unable to edit files in fresh chroxy sessions.
  */
-export const CODEX_DEFAULT_SANDBOX = 'workspace-write'
+export const CODEX_DEFAULT_SANDBOX = PROTOCOL_CODEX_DEFAULT_SANDBOX
 
 /**
  * Module-level cache of invalid `CHROXY_CODEX_SANDBOX` values we have

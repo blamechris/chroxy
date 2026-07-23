@@ -4255,7 +4255,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // the socket is closed the create is a silent no-op, so the caller must NOT
   // latch its "Creating…" spinner (it would wedge forever — nothing arrives to
   // clear it). Mirrors revokeToken's not-open guard: false = nothing sent.
-  createSession: ({ name, cwd, provider, model, permissionMode, worktree, environmentId, skipPermissions }): boolean => {
+  createSession: ({ name, cwd, provider, model, permissionMode, worktree, environmentId, skipPermissions, codexSandbox }): boolean => {
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
       const msg: Record<string, unknown> = { type: 'create_session' };
@@ -4266,6 +4266,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       if (permissionMode) msg.permissionMode = permissionMode;
       if (worktree) msg.worktree = true;
       if (environmentId) msg.environmentId = environmentId;
+      // #6689: per-session Codex sandbox mode. Only forwarded when the caller
+      // (the create-session modal, for a codex session) passes it — non-codex
+      // providers omit it and the server ignores it if present. The wire schema
+      // rejects any value outside CODEX_SANDBOX_MODES.
+      if (codexSandbox) msg.codexSandbox = codexSandbox;
       // #4208: TUI-only opt-in to claude --dangerously-skip-permissions.
       // Forward whenever the caller passes a strict boolean so an explicit
       // `false` can override a server-wide `defaultSkipPermissions: true`

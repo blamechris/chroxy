@@ -480,6 +480,13 @@ export interface CreateSessionOptions {
    * selecting one but forwards it on the wire if a future caller passes it.
    */
   environmentId?: string;
+  /**
+   * #6689 — per-session Codex sandbox mode ('read-only' | 'workspace-write' |
+   * 'danger-full-access'). Only set when the selected provider is `codex`;
+   * other providers ignore it. Surfaced in the New Session modal as a
+   * codex-only selector.
+   */
+  codexSandbox?: string;
 }
 
 /**

@@ -64,6 +64,11 @@ export const USER_SHELL_PROVIDER = 'user-shell';
  * mirror. Phase 2 (resize sync) makes the size dynamic and retires this.
  */
 export const CLAUDE_TUI_PTY_SIZE = Object.freeze({ cols: 120, rows: 30 });
+// #6689: Codex sandbox constants (modes, default, provider id, UI metadata).
+// Single-sourced so the wire schema, the server, and both clients agree. Kept
+// in a dedicated module so `./schemas/client.ts` can import the mode list for
+// `z.enum(CODEX_SANDBOX_MODES)` without a circular import through this entry.
+export * from "./codex.js";
 // Re-export schemas for convenience (also available via '@chroxy/protocol/schemas')
 export * from "./schemas/index.js";
 // Re-export client-side error-category detection (#3151)

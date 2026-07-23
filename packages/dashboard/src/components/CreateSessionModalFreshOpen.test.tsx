@@ -181,6 +181,9 @@ describe('CreateSessionModal fresh-open guard (#2679)', () => {
       permissionMode: undefined,
       worktree: undefined,
       environmentId: undefined,
+      // #6689: a codex session now carries the per-session sandbox mode,
+      // defaulting to workspace-write.
+      codexSandbox: 'workspace-write',
     })
   })
 
