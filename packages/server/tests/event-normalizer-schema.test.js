@@ -315,6 +315,19 @@ describe('EventNormalizer output → Server*Schema round-trip (#6841)', () => {
 // type (proof the corruption mutates a real value, not a no-op), then asserts
 // `safeParse` on the corrupted message FAILS. If either assertion is ever
 // satisfied by a passing `safeParse`, the drift guard above has gone vacuous.
+//
+// A direct `safeParse` call only proves the SCHEMA rejects the corrupted
+// value — it does not prove the HARNESS above would catch it. The per-fixture
+// `it()`s at the top of this file don't call `safeParse` directly; they call
+// `validateMessage(event, entry.msg)` (defined above), which wraps
+// `safeParse` in an `assert.ok` that THROWS on failure. If a future refactor
+// ever short-circuited `validateMessage` into a no-op (e.g. dropped the
+// `assert.ok`, or started returning early), every `it()` above would keep
+// passing vacuously — while a direct-`safeParse` negative test would still
+// pass too, hiding the regression. So each case below ALSO routes the
+// corrupted message through that SAME `validateMessage` helper and asserts it
+// throws, proving the harness's actual validation path — not just the
+// schema — bites on drift.
 // ─────────────────────────────────────────────────────────────────────────────
 describe('negative meta-test: the round-trip harness catches real drift (#6892)', () => {
   // Drive one FIXTURES entry through the real normalizer and return the first
@@ -350,6 +363,18 @@ describe('negative meta-test: the round-trip harness catches real drift (#6892)'
       false,
       'dropping required sessionId must fail safeParse — a `true` here means the drift guard is vacuous',
     )
+    // Belt-and-suspenders: also drive the corrupted message through the same
+    // `validateMessage` helper the harness `it()`s above actually call. This
+    // proves the HARNESS path (not just the schema) rejects the drift — if
+    // `validateMessage` were ever short-circuited to a no-op, this throws()
+    // would stop firing even though the direct safeParse check above still
+    // passes.
+    assert.throws(
+      () => validateMessage('message_queued', corrupted),
+      (err) => err instanceof Error && /must validate against its Server\*Schema/.test(err.message),
+      'validateMessage(...) — the same harness helper the positive tests call — must also reject ' +
+        'the corrupted message; a silent pass here means the harness itself has been short-circuited',
+    )
   })
 
   it('catches a wrong-typed required field: result with non-numeric cost', () => {
@@ -365,6 +390,18 @@ describe('negative meta-test: the round-trip harness catches real drift (#6892)'
       parsed.success,
       false,
       'a non-numeric cost must fail safeParse — a `true` here means the drift guard is vacuous',
+    )
+    // Belt-and-suspenders: also drive the corrupted message through the same
+    // `validateMessage` helper the harness `it()`s above actually call. This
+    // proves the HARNESS path (not just the schema) rejects the drift — if
+    // `validateMessage` were ever short-circuited to a no-op, this throws()
+    // would stop firing even though the direct safeParse check above still
+    // passes.
+    assert.throws(
+      () => validateMessage('result', corrupted),
+      (err) => err instanceof Error && /must validate against its Server\*Schema/.test(err.message),
+      'validateMessage(...) — the same harness helper the positive tests call — must also reject ' +
+        'the corrupted message; a silent pass here means the harness itself has been short-circuited',
     )
   })
 })
