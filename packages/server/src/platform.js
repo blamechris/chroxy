@@ -1,4 +1,5 @@
-import { writeFileSync, chmodSync, renameSync, unlinkSync } from 'fs'
+import { writeFileSync, chmodSync, renameSync, unlinkSync, openSync, closeSync, fsyncSync } from 'fs'
+import { dirname } from 'path'
 import { execFileSync } from 'child_process'
 import { createLogger } from './logger.js'
 
@@ -11,6 +12,16 @@ export const isLinux = process.platform === 'linux'
 // Windows rename failures worth one retry: an open handle held by antivirus or
 // Windows Search briefly locks the destination (#6644 / #4927).
 const WIN_RENAME_RETRY_CODES = new Set(['EPERM', 'EACCES', 'EBUSY', 'EEXIST'])
+// fsync error codes that mean "this filesystem cannot provide durability here"
+// and are therefore BENIGN for the `{ durable: true }` path: the data already
+// reached the OS page cache and the atomic rename still happened, we just can't
+// force it further — exactly the guarantee of the non-durable default path. A
+// GENUINE I/O failure (EIO / ENOSPC) is NOT in this set and propagates, so a
+// durability-critical caller (the session-token revoke snapshot) reports the
+// failure instead of a false success. EINVAL is the common member: a *directory*
+// fsync on some virtual / network filesystems, or a regular-file fsync on a FS
+// with no writeback to sync, surfaces EINVAL / ENOTSUP rather than succeeding.
+const BENIGN_FSYNC_CODES = new Set(['EINVAL', 'ENOTSUP', 'EPERM', 'EISDIR', 'EBADF', 'ENOSYS'])
 // Well-known SYSTEM SID — locale-independent (the NAME "SYSTEM" is localized, so
 // icacls grants must use the SID form to work on non-English Windows).
 const SID_SYSTEM = 'S-1-5-18'
@@ -98,6 +109,43 @@ export function defaultShell({ platform = process.platform, env = process.env } 
 }
 
 /**
+ * fsync `target` so its buffered bytes — or, for a directory (`isDir`), the
+ * rename that just changed its entries — are physically on disk before we
+ * return (#6914). The fd is opened solely to drive the fsync and is ALWAYS
+ * closed in the `finally`, so this leaks no descriptor even when fsync throws.
+ *
+ * A BENIGN fsync failure (`BENIGN_FSYNC_CODES` — e.g. EINVAL on a filesystem
+ * that cannot sync a directory entry) is logged and swallowed: the write already
+ * landed in the page cache and the rename happened, so we are no worse off than
+ * the non-durable path. Any OTHER error (EIO / ENOSPC — a genuine durability
+ * failure) propagates so the caller's durability contract fails loudly.
+ *
+ * `_fsync` is a test seam (default `fsyncSync`) so the durable + benign-error
+ * paths are exercisable without a real disk fault.
+ */
+function fsyncForDurability(target, { isDir = false, _fsync = fsyncSync } = {}) {
+  let fd
+  try {
+    // Directories open read-only; regular files open `r+` so the handle is
+    // writable — a strictly read-only fd is rejected by fsync on a few
+    // platforms. The file/dir already exists (we just wrote/renamed it), so no
+    // O_CREAT and no mode is needed.
+    fd = openSync(target, isDir ? 'r' : 'r+')
+    _fsync(fd)
+  } catch (err) {
+    if (err && BENIGN_FSYNC_CODES.has(err.code)) {
+      log.warn(`durable-write: fsync of ${isDir ? 'directory' : 'file'} ${target} unsupported (${err.code}); continuing best-effort`)
+      return
+    }
+    throw err
+  } finally {
+    if (fd !== undefined) {
+      try { closeSync(fd) } catch { /* fd already invalid — nothing to reclaim */ }
+    }
+  }
+}
+
+/**
  * Write `data` to `filePath` atomically on both POSIX and Windows. The
  * write goes to a sibling temp file `<filePath><tmpSuffix>` first and is
  * then `rename`d over the destination. `rename` is atomic on the same
@@ -138,6 +186,25 @@ export function defaultShell({ platform = process.platform, env = process.env } 
  *     should pass a per-process suffix such as `.tmp-${process.pid}`
  *     so the intermediate files never overwrite each other. Honoured
  *     on POSIX since #4874, and on Windows since #4913.
+ *   - `durable` (default `false`): when `true`, `fsync` the temp file
+ *     BEFORE the rename (so its bytes are physically on disk) and, on
+ *     POSIX, `fsync` the containing DIRECTORY AFTER the rename (so the
+ *     rename itself is durable) — the standard atomic-durable-write recipe
+ *     (#6914). The default is OFF: the ordinary config / state callers are
+ *     fail-SAFE (a lost page-cache write on power loss merely reverts to a
+ *     harmless earlier state, or re-pairs), and an fsync per write would add
+ *     blocking disk I/O to hot state-persistence paths for no security gain.
+ *     Only durability-CRITICAL callers opt in — specifically the session-token
+ *     REVOKE snapshot (`_persistSessionTokensSnapshot` in `pairing.js`), where
+ *     a power loss / kernel panic within the OS writeback window could
+ *     otherwise resurrect a revoked token AFTER the operator was told the
+ *     revoke succeeded. A genuine fsync failure (EIO / ENOSPC) is re-thrown so
+ *     that caller reports the failure; a benign one (EINVAL / ENOTSUP on a FS
+ *     that cannot sync — see `BENIGN_FSYNC_CODES`) is logged and the write
+ *     still succeeds. On Windows the directory fsync is skipped: there is no
+ *     directory-fsync, and `renameSync` already passes `MOVEFILE_WRITE_THROUGH`
+ *     (a durable rename), so the temp-file fsync plus the write-through rename
+ *     cover the same guarantee.
  *   - `_isWindowsOverride` (test-only): force the Windows branch
  *     regardless of host platform. Mirrors the same hook in
  *     `SessionStatePersistence` and lets the cross-platform atomicity
@@ -169,11 +236,15 @@ export function writeFileRestricted(
   data,
   {
     tmpSuffix = '.tmp',
+    durable = false,
     _isWindowsOverride,
     // Test seams (#6644): inject the ACL stamper / rename so the Windows ACL +
     // one-shot-retry paths are exercisable on a POSIX CI runner.
     _stampAcl = stampWindowsAcl,
     _rename = renameSync,
+    // Test seam (#6914): inject the fsync used by the `durable` path so the
+    // durable + benign-fsync-error branches are exercisable without a disk fault.
+    _fsync = fsyncSync,
   } = {},
 ) {
   const onWindows = _isWindowsOverride ?? isWindows
@@ -215,6 +286,26 @@ export function writeFileRestricted(
     writeFileSync(tmpPath, data, { mode: 0o600 })
     chmodSync(tmpPath, 0o600)
   }
+  // #6914: durability-critical callers force the temp file's bytes to disk BEFORE
+  // the rename, so a power loss / kernel panic within the OS writeback window can
+  // never roll a reported-successful write back to its pre-write state. A genuine
+  // fsync failure means we cannot promise durability — clean up the orphaned temp
+  // and surface it, mirroring the rename-failure path below. (`fsyncForDurability`
+  // has already swallowed the benign, filesystem-cannot-sync codes.)
+  if (durable) {
+    try {
+      fsyncForDurability(tmpPath, { _fsync })
+    } catch (err) {
+      try {
+        unlinkSync(tmpPath)
+      } catch (cleanupErr) {
+        if (cleanupErr && cleanupErr.code !== 'ENOENT') {
+          log.warn(`Failed to remove orphaned ${tmpPath}: ${cleanupErr.message}`)
+        }
+      }
+      throw err
+    }
+  }
   try {
     _rename(tmpPath, filePath)
   } catch (err) {
@@ -223,6 +314,9 @@ export function writeFileRestricted(
     if (onWindows && err && WIN_RENAME_RETRY_CODES.has(err.code)) {
       try {
         _rename(tmpPath, filePath)
+        // Windows-only branch: no directory fsync (Windows has none; the durable
+        // rename comes from MOVEFILE_WRITE_THROUGH). The temp file was already
+        // fsynced above when `durable`.
         return
       } catch {
         // fall through to cleanup + rethrow the original error below
@@ -236,6 +330,15 @@ export function writeFileRestricted(
       }
     }
     throw err
+  }
+  // #6914: after a successful rename, fsync the CONTAINING DIRECTORY so the rename
+  // itself (a directory-metadata change) is durable — otherwise a crash could
+  // leave the new file's data on disk but the directory entry still pointing at
+  // the old inode. POSIX-only: Windows has no directory fsync, and its renameSync
+  // already passes MOVEFILE_WRITE_THROUGH (a durable rename), so the temp-file
+  // fsync above plus the write-through rename cover the same guarantee.
+  if (durable && !onWindows) {
+    fsyncForDurability(dirname(filePath), { isDir: true, _fsync })
   }
 }
 

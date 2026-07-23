@@ -245,3 +245,51 @@ describe('#6902 revoke persist-before-delete (fail-closed across a crash)', () =
     pm.destroy()
   })
 })
+
+// #6914 — the REVOKE persist path must opt into a DURABLE (fsync'd) store write so
+// a power loss / kernel panic within the OS writeback window can't resurrect a
+// revoked token after a reported-successful revoke. The fail-SAFE mint / slide /
+// sweep path stays non-durable (a lost persist there merely forces a harmless
+// re-pair) — an fsync per token issuance is not worth the extra I/O.
+describe('#6914 revoke opts into a durable store write; mint does not', () => {
+  // Record the `durable` flag every save() was called with, in order.
+  function makeDurabilityRecordingStore() {
+    const calls = []
+    return {
+      calls,
+      load: () => [],
+      save: (entries, opts = {}) => { calls.push(opts.durable === true); return true },
+    }
+  }
+
+  it('revokeSessionTokenById persists with { durable: true }', () => {
+    const store = makeDurabilityRecordingStore()
+    const pm = new PairingManager({ sessionTokenTtlMs: 60_000, sessionTokenStore: store })
+    const [t1] = mintTokens(pm, 1)
+    store.calls.length = 0 // ignore the mint write
+
+    assert.deepEqual(pm.revokeSessionTokenById(pm._deviceIdForToken(t1)), { revoked: 1 })
+    assert.deepEqual(store.calls, [true], 'the revoke performed exactly one DURABLE write')
+    pm.destroy()
+  })
+
+  it('revokeAllSessionTokens persists with { durable: true }', () => {
+    const store = makeDurabilityRecordingStore()
+    const pm = new PairingManager({ sessionTokenTtlMs: 60_000, sessionTokenStore: store })
+    mintTokens(pm, 3)
+    store.calls.length = 0
+
+    assert.deepEqual(pm.revokeAllSessionTokens(), { revoked: 3 })
+    assert.deepEqual(store.calls, [true], 'the revoke-all performed exactly one DURABLE write')
+    pm.destroy()
+  })
+
+  it('mint (the fail-safe structural persist) does NOT request durability', () => {
+    const store = makeDurabilityRecordingStore()
+    const pm = new PairingManager({ sessionTokenTtlMs: 60_000, sessionTokenStore: store })
+    mintTokens(pm, 2)
+    assert.ok(store.calls.length >= 1, 'mint persists at least once')
+    assert.ok(store.calls.every((durable) => durable === false), 'every mint write is non-durable (fail-safe)')
+    pm.destroy()
+  })
+})

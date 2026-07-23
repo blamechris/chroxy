@@ -100,6 +100,29 @@ describe('#6598 createSessionTokenStore', () => {
     }
   })
 
+  it('a durable save (revoke path, #6914) round-trips entries at 0600', () => {
+    // The REVOKE snapshot calls save(entries, { durable: true }), which forwards
+    // `durable` to writeFileRestricted so the store is fsync'd before success.
+    // Exercising the real store through the durable code path here (over a real
+    // temp filesystem, no seams) proves the flag is threaded end-to-end and the
+    // fsync'd write still lands byte-correct and owner-only.
+    const dir = mkdtempSync(join(tmpdir(), 'chroxy-stst-'))
+    try {
+      const store = createSessionTokenStore({ dir, keychain: noKeychain })
+      const entries = [['tok-durable', { createdAt: 789, sessionId: null }]]
+      assert.equal(store.save(entries, { durable: true }), true, 'durable save reports success')
+
+      const file = join(dir, 'session-tokens.json')
+      assert.ok(existsSync(file))
+      if (process.platform !== 'win32') {
+        assert.equal(statSync(file).mode & 0o777, 0o600, 'durable store file is 0600')
+      }
+      assert.deepEqual(store.load(), entries, 'the durably-saved entries round-trip')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it('a corrupt store file loads empty (never throws into the auth path)', () => {
     const dir = mkdtempSync(join(tmpdir(), 'chroxy-stst-'))
     try {

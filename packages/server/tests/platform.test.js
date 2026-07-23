@@ -1,7 +1,7 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, writeFileSync, rmSync, statSync, existsSync, renameSync } from 'fs'
+import { mkdtempSync, readFileSync, writeFileSync, rmSync, statSync, existsSync, renameSync, fsyncSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { pathToFileURL } from 'node:url'
@@ -508,6 +508,81 @@ try {
         const result = spawnSync(process.execPath, ['--import', toFileUrl(shim), runner], { encoding: 'utf-8' })
         assert.strictEqual(result.status, 2)
         assert.strictEqual(existsSync(`${filePath}.tmp-99999`), false, 'custom-suffix sidecar must be cleaned up on rename failure')
+      })
+    })
+
+    describe('durable write (fsync) — #6914', () => {
+      it('durable write produces the correct content and (POSIX) 0o600 perms', () => {
+        // The security-critical opt-in path (the session-token REVOKE snapshot)
+        // must still land byte-correct and owner-only — durability is layered on
+        // TOP of the existing atomic-write contract, not a replacement for it.
+        const filePath = join(tmpDir, 'session-tokens.json')
+        writeFileRestricted(filePath, 'revoked-snapshot', { durable: true })
+        assert.strictEqual(readFileSync(filePath, 'utf-8'), 'revoked-snapshot')
+        assert.strictEqual(existsSync(`${filePath}.tmp`), false, '.tmp sidecar cleaned up after rename')
+        if (!isWindows) {
+          assert.strictEqual(statSync(filePath).mode & 0o777, 0o600, 'durable path preserves 0o600')
+        }
+      })
+
+      it('fsyncs the temp file before the rename AND (POSIX) the directory after', () => {
+        // The full atomic-durable recipe is two fsyncs on POSIX: the temp FILE
+        // (so its bytes are on disk before the rename) and the containing
+        // DIRECTORY (so the rename itself is durable). We can't see the fd→path
+        // mapping, so we count invocations through the `_fsync` seam.
+        const filePath = join(tmpDir, 'session-tokens.json')
+        let fsyncCalls = 0
+        writeFileRestricted(filePath, 'data', {
+          durable: true,
+          _fsync: (fd) => { fsyncCalls++; fsyncSync(fd) },
+        })
+        // POSIX: temp-file fsync + directory fsync = 2. Windows: temp-file fsync
+        // only (no directory fsync; the durable rename comes from the OS).
+        assert.strictEqual(fsyncCalls, isWindows ? 1 : 2)
+        assert.strictEqual(readFileSync(filePath, 'utf-8'), 'data')
+      })
+
+      it('does NOT fsync on the default (non-durable) path — no perf regression for config/state writes', () => {
+        // Opt-in by design: the ordinary fail-safe callers (config, models cache,
+        // session state, mint/slide) must be byte-for-byte the old behaviour.
+        const filePath = join(tmpDir, 'config.json')
+        let fsyncCalls = 0
+        writeFileRestricted(filePath, 'plain', { _fsync: () => { fsyncCalls++ } })
+        assert.strictEqual(fsyncCalls, 0, 'the default path must never fsync')
+        assert.strictEqual(readFileSync(filePath, 'utf-8'), 'plain')
+      })
+
+      it('treats a BENIGN fsync failure (EINVAL) as best-effort — the write still succeeds', () => {
+        // A filesystem that cannot fsync a file/dir entry (some virtual / network
+        // FS) surfaces EINVAL. That is not a durability failure we can act on — the
+        // bytes are in the page cache and the rename happened — so the write must
+        // still succeed rather than throw and fail the whole operation.
+        const filePath = join(tmpDir, 'session-tokens.json')
+        const benign = Object.assign(new Error('fsync not supported'), { code: 'EINVAL' })
+        assert.doesNotThrow(() => {
+          writeFileRestricted(filePath, 'best-effort', {
+            durable: true,
+            _fsync: () => { throw benign },
+          })
+        })
+        assert.strictEqual(readFileSync(filePath, 'utf-8'), 'best-effort')
+        assert.strictEqual(existsSync(`${filePath}.tmp`), false)
+      })
+
+      it('propagates a GENUINE fsync failure (EIO) and cleans up the temp — the durable caller reports failure', () => {
+        // A real I/O error means we cannot promise durability, so the durable path
+        // must surface it (→ session-token store save() returns false → revoke
+        // reports persistFailed) rather than claim a false success. The failure
+        // fires on the temp-file fsync BEFORE the rename, so the destination is
+        // never created and the orphaned .tmp is cleaned up.
+        const filePath = join(tmpDir, 'session-tokens.json')
+        const hard = Object.assign(new Error('disk exploded'), { code: 'EIO' })
+        assert.throws(
+          () => writeFileRestricted(filePath, 'nope', { durable: true, _fsync: () => { throw hard } }),
+          /disk exploded/,
+        )
+        assert.strictEqual(existsSync(filePath), false, 'destination must not exist after a pre-rename fsync failure')
+        assert.strictEqual(existsSync(`${filePath}.tmp`), false, 'orphaned .tmp must be cleaned up')
       })
     })
   })
