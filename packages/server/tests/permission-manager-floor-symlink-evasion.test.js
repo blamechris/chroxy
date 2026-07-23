@@ -1,8 +1,8 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync, rmSync, realpathSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync, readFileSync, rmSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { PermissionManager, isProtectedPathTarget, isSecretReadTarget } from '../src/permission-manager.js'
 
 /**
@@ -195,6 +195,109 @@ describe('protected-path floor resolves symlinks (#6851)', () => {
       const result = await pm.handlePermission('Write', { file_path: 'src/foo.js' }, null, 'auto')
       assert.equal(result.behavior, 'allow', 'a benign in-workspace write must not be floored by the symlink pass')
       assert.equal(events.length, 0)
+    } finally {
+      pm.destroy()
+    }
+  })
+
+  // ==========================================================================
+  // #6921 — RESIDUAL evasion: a `..` AFTER a symlinked component. The #6851
+  // symlink pass used `realpathDeepestAncestorSync(resolve(realBase, target))`,
+  // and BOTH `path.resolve()` AND Node's `fs.realpathSync` collapse `..`
+  // LEXICALLY — so `link/../x` cancelled the symlink textually before it was
+  // ever followed. `open(2)` (any raw `fs` write/read) follows `link` FIRST and
+  // applies `..` from the TARGET, landing in the protected dir. The two PoCs
+  // below build the exact topologies from the issue and PROVE, with real
+  // on-disk writes, that (a) the raw path physically lands on the protected
+  // file, and (b) the floor now FLAGS it — closing the gap.
+  // ==========================================================================
+
+  it('PoC #6921/1: `work/agent-x/../../settings.local.json` from repo root is floored, and a raw write proves it lands on the REAL .claude/settings.local.json', () => {
+    // The REAL chroxy topology — no attacker-planted symlink: work -> .claude/worktrees.
+    mkdirSync(join(root, '.claude/worktrees/agent-x'), { recursive: true })
+    writeFileSync(join(root, '.claude/settings.local.json'), 'ORIGINAL')
+    symlinkSync(join(root, '.claude/worktrees'), join(root, 'work'))
+    const cwd = root // session runs at the repo root
+    const evasion = 'work/agent-x/../../settings.local.json'
+
+    // path.resolve() still LEXICALLY collapses the `..`s to a benign target —
+    // this is exactly why the pre-#6921 (lexical + realpath) floor missed it.
+    assert.equal(resolve(cwd, evasion), join(root, 'settings.local.json'))
+
+    // PROOF the target is genuinely dangerous: a raw open(2)-style write through
+    // the exact path physically clobbers the REAL .claude/settings.local.json
+    // (the file that governs the permission system itself). NOTE: the write path
+    // is built by STRING concat, not path.join — path.join would lexically
+    // collapse the `..`s (exactly the bug), never traversing the symlink.
+    writeFileSync(`${cwd}/${evasion}`, 'PWNED')
+    assert.equal(
+      readFileSync(join(root, '.claude/settings.local.json'), 'utf8'),
+      'PWNED',
+      'the raw write really lands on the protected .claude/settings.local.json',
+    )
+
+    // The floor now FLAGS it — under BOTH the write floor and the read/credential
+    // floor (settings*.json is credential-dense: may hold ANTHROPIC_API_KEY).
+    assert.equal(isProtectedPathTarget({ file_path: evasion }, cwd), true, 'write floor must flag the symlink+`..` evasion')
+    assert.equal(isSecretReadTarget({ file_path: evasion }, cwd), true, 'read/credential floor must flag settings.local.json')
+  })
+
+  it('PoC #6921/2: `glink/../config` where glink -> .git/hooks is floored under BOTH floors, and a raw write proves it lands on the REAL .git/config', () => {
+    // glink -> repo/.git/hooks ; `glink/../config` follows glink into .git/hooks,
+    // then `..` climbs to .git, landing on .git/config — a credential file (a
+    // remote URL can embed a PAT).
+    mkdirSync(join(root, 'repo/.git/hooks'), { recursive: true })
+    writeFileSync(join(root, 'repo/.git/config'), '[core]\n')
+    symlinkSync(join(root, 'repo/.git/hooks'), join(root, 'repo/glink'))
+    const cwd = join(root, 'repo')
+    const evasion = 'glink/../config'
+
+    // Lexically benign (glink/.. cancels to nothing) — the old floor missed it.
+    assert.equal(resolve(cwd, evasion), join(root, 'repo/config'))
+
+    // PROOF: a raw write really lands on the real .git/config (STRING concat, not
+    // path.join — join would collapse `glink/..` lexically and miss the symlink).
+    writeFileSync(`${cwd}/${evasion}`, 'PWNED')
+    assert.equal(readFileSync(join(root, 'repo/.git/config'), 'utf8'), 'PWNED', 'the raw write really lands on .git/config')
+
+    // Floored under BOTH the write floor and the read/credential floor.
+    assert.equal(isProtectedPathTarget({ file_path: evasion }, cwd), true, 'write floor')
+    assert.equal(isSecretReadTarget({ file_path: evasion }, cwd), true, 'read/credential floor (.git/config embeds PATs)')
+  })
+
+  // -- The component walk must NOT over-flag a benign `link/..` that lands safe --
+
+  it('does NOT over-flag a benign `link/..`: a symlink followed by `..` that resolves to a SAFE location stays unfloored', () => {
+    // safe/inner -> safe/other ; `inner/../file.js` follows inner into other,
+    // then `..` climbs back to safe → safe/file.js. No protected segment: the
+    // component walk resolves the symlink correctly but the destination is benign,
+    // so the floor must not flag it (proving the fix isn't just "flag anything
+    // with a symlink and a `..`").
+    mkdirSync(join(root, 'safe/other'), { recursive: true })
+    symlinkSync(join(root, 'safe/other'), join(root, 'safe/inner'))
+    const cwd = join(root, 'safe')
+
+    assert.equal(isProtectedPathTarget({ file_path: 'inner/../file.js' }, cwd), false)
+    // And it genuinely lands where we claim (safe/file.js), not in a protected dir.
+    writeFileSync(`${cwd}/inner/../file.js`, 'x')
+    assert.equal(readFileSync(join(root, 'safe/file.js'), 'utf8'), 'x')
+  })
+
+  it('end-to-end: the PoC #6921/1 evasion falls through handlePermission to a PROMPT under auto mode', async () => {
+    mkdirSync(join(root, '.claude/worktrees/agent-x'), { recursive: true })
+    writeFileSync(join(root, '.claude/settings.local.json'), 'ORIGINAL')
+    symlinkSync(join(root, '.claude/worktrees'), join(root, 'work'))
+    const pm = new PermissionManager({ log: silentLog, cwd: root })
+    try {
+      const events = []
+      pm.on('permission_request', (d) => events.push(d))
+
+      const promise = pm.handlePermission('Write', { file_path: 'work/agent-x/../../settings.local.json' }, null, 'auto')
+      assert.equal(events.length, 1, 'the `..`-after-symlink evasion must prompt even under auto/bypass')
+
+      pm.respondToPermission(events[0].requestId, 'deny')
+      const result = await promise
+      assert.equal(result.behavior, 'deny')
     } finally {
       pm.destroy()
     }
