@@ -1,6 +1,7 @@
 import { EventEmitter } from 'events'
 import { randomUUID } from 'crypto'
-import { resolve, relative, sep, isAbsolute } from 'node:path'
+import { realpathSync, lstatSync, readlinkSync } from 'node:fs'
+import { resolve, relative, sep, isAbsolute, dirname, basename, join, parse } from 'node:path'
 import { createLogger } from './logger.js'
 // #6038: the SDK/TUI permission path broadcasts to clients too, so it must apply
 // the same redaction as the hook path. Shared sanitizer + value redactor live in
@@ -232,51 +233,186 @@ export function buildDenyMessage(reason) {
   return redactValue(trimmed.slice(0, MAX_DENY_REASON_LEN))
 }
 
+// #6851 — depth ceiling for the sync deepest-ancestor realpath walk. Absolute
+// paths never legitimately nest this deep; the cap only guards a pathological /
+// malicious tail (a to-be-created path with hundreds of nonexistent components
+// under a symlinked parent), which FAILS CLOSED rather than trust a lexical guess.
+const _FLOOR_REALPATH_MAX_DEPTH = 256
+
+// #6921 — symlink-expansion cap for the component-wise resolver below, matching
+// the kernel's typical MAXSYMLINKS (40). A chain deeper than this — or a cycle —
+// throws ELOOP, which the floor's `catch` treats as PROTECTED (fail closed).
+const _FLOOR_MAX_SYMLINKS = 40
+
 /**
- * #6794 / #6806 — is a single path value protected, resolved against `base`?
- * `resolve()` absorbs absolute paths, a leading `./`, and `..` traversal, giving
- * the true target the write lands on.
+ * #6851 — SYNC deepest-existing-ancestor realpath: the symlink-resolving core of
+ * the floor's #6851 hardening, and the synchronous sibling of
+ * {@link realpathOfDeepestAncestor} in `ws-file-ops/common.js` (BYOK's
+ * post-approval confinement). The floor runs inside the SYNCHRONOUS
+ * `handlePermission` hot-path, so it cannot await that async twin — it uses
+ * `realpathSync` instead.
  *
- * #6806 — WHICH segments we scan reconciles two goals that pull opposite ways:
- *   (1) floor any write that RESOLVES into a protected config dir/file,
- *       regardless of how `..` is arranged; and
- *   (2) preserve the #6794 worktree guard — a session whose OWN cwd lives under
- *       a real `.claude/` (the chroxy agent-worktree topology
- *       `…/.claude/worktrees/agent-*`) must still write its own workspace files,
- *       so cwd's own protected prefix segments must NOT false-floor it.
- * The discriminator is whether the resolved target stays INSIDE the session's
- * own workspace subtree (cwd):
- *   - UNDER cwd → scan the path RELATIVE to cwd, so cwd's own prefix segments
+ * Resolves every symlink in the EXISTING ancestor chain of a (possibly not-yet-
+ * created) ABSOLUTE path, then re-appends the non-existent tail components. The
+ * naive "realpath the whole target, fall back to the lexical path on ENOENT"
+ * pattern has a symlink-escape hole on to-be-created files: a symlinked PARENT
+ * plus a non-existent leaf makes the lexical fallback hide the parent symlink.
+ * Walking up to the deepest EXISTING ancestor and realpath-ing THAT closes it.
+ *
+ * FAIL-CLOSED at every ambiguous edge — it THROWS (never returns a lexical
+ * guess) when no ancestor resolves or the depth is pathological, and lets a
+ * non-ENOENT error (EACCES on a directory, ELOOP on a symlink cycle) propagate,
+ * so the floor's `catch` treats the target as protected.
+ * @param {string} absPath  an absolute path (may not exist yet)
+ * @returns {string} the real path with all symlink ancestors resolved
+ */
+function realpathDeepestAncestorSync(absPath) {
+  if (!isAbsolute(absPath)) {
+    // A relative path would resolve against the SERVER process cwd, not the
+    // session cwd — fail loudly (and, via the caller's catch, closed).
+    throw Object.assign(new Error(`realpathDeepestAncestorSync requires an absolute path, got: ${absPath}`), { code: 'EINVAL' })
+  }
+  const segments = []
+  let cursor = absPath
+  for (let i = 0; i < _FLOOR_REALPATH_MAX_DEPTH; i++) {
+    try {
+      const realAncestor = realpathSync(cursor)
+      if (segments.length === 0) return realAncestor
+      // `segments` was pushed leaf-first while cursor climbed, so reverse to
+      // rebuild ancestor→leaf order for join().
+      return join(realAncestor, ...segments.slice().reverse())
+    } catch (err) {
+      if (err.code !== 'ENOENT') throw err
+      const parent = dirname(cursor)
+      if (parent === cursor) {
+        // Reached the fs root without resolving any ancestor — unreachable on a
+        // real OS (`/` always realpaths). FAIL CLOSED: a lexical fallback here
+        // would reopen the exact bypass this helper closes.
+        throw Object.assign(new Error(`realpathDeepestAncestorSync: no existing ancestor for ${absPath}`), { code: 'ENOENT' })
+      }
+      segments.push(basename(cursor))
+      cursor = parent
+    }
+  }
+  // Depth ceiling hit — FAIL CLOSED rather than trust a pathological tail.
+  throw Object.assign(new Error(`realpathDeepestAncestorSync: path depth exceeds ${_FLOOR_REALPATH_MAX_DEPTH}`), { code: 'ENAMETOOLONG' })
+}
+
+/**
+ * #6921 — resolve `target` against a REAL base by walking it COMPONENT BY
+ * COMPONENT, mirroring the kernel's `open(2)` path traversal. This is the crux
+ * of the #6921 hardening: it replaces the `realpath(resolve(base, target))`
+ * shape (#6851, {@link realpathDeepestAncestorSync}), which could NOT catch a
+ * `..` that follows a SYMLINKED component — because BOTH `path.resolve()` AND
+ * Node's `fs.realpathSync` collapse `..` LEXICALLY (textually) before/instead of
+ * following symlinks. `realpathSync('link/..')` yields the symlink's LEXICAL
+ * parent; `open(2)` follows `link` to its TARGET and applies `..` from THERE. So
+ * `work/agent-x/../../settings.local.json` (with `work -> .claude/worktrees`)
+ * lexically cancels to a benign `settings.local.json`, but really lands on
+ * `.claude/settings.local.json`. Only a component walk that applies `..` AFTER
+ * resolving symlinks-so-far (as the kernel does) sees the real destination.
+ *
+ * The walk starts from `realBase` (the session cwd already resolved to its real
+ * path) for a relative target, or from the filesystem root for an absolute
+ * target, and for each remaining component:
+ *   - `''` / `.`      → skip.
+ *   - `..`            → pop to the PARENT of the resolved-so-far real path
+ *                       (`dirname`), i.e. apply `..` AFTER following symlinks so
+ *                       far — NOT lexically on the pre-resolution path.
+ *   - a SYMLINK       → `readlinkSync` it; if the link is absolute, reset the
+ *                       resolved path to the fs root; splice the link's own
+ *                       components into the walk at the current position and keep
+ *                       going (so a relative link resolves from the symlink's
+ *                       parent, and any `..` inside the link is honoured too).
+ *                       Bounded by {@link _FLOOR_MAX_SYMLINKS} — a deeper chain or
+ *                       a cycle THROWS `ELOOP` (→ fail closed).
+ *   - a NON-symlink   → append it.
+ *   - a NON-EXISTENT tail component (`ENOENT` on the `lstat`) → stop filesystem
+ *                       resolution (nothing deeper can exist, so nothing deeper
+ *                       can be a symlink) and apply the REMAINING components —
+ *                       INCLUDING any `..` — against the resolved-so-far real
+ *                       path by the same pop/append rules. This models a
+ *                       to-be-created file: a `..` in the tail still pops the
+ *                       RESOLVED real path, never the unresolved lexical one. (A
+ *                       real write of a path whose intermediate dir is missing
+ *                       fails anyway, so not following a later symlink after the
+ *                       first ENOENT can't hide a write that would actually land.)
+ *
+ * A non-ENOENT `lstat`/`readlink` error (EACCES, ELOOP) propagates so the
+ * caller's `catch` fails closed. Returns the fully resolved absolute real path.
+ * @param {string} realBase  the session cwd, already resolved to its real path
+ * @param {string} target    a raw (NOT pre-`resolve`d — its `..` must survive) path value
+ * @returns {string} the open(2)-faithful resolved absolute real path
+ */
+function resolveTargetComponentwiseSync(realBase, target) {
+  // Absolute target ignores the base (as `open`/`resolve` do); start at the fs
+  // root so its own leading components are walked (and symlink-resolved) too.
+  let resolved = isAbsolute(target) ? parse(target).root : realBase
+  const pending = target.split(sep)
+  let symlinks = 0
+  // Once a component doesn't exist, the rest is a to-be-created tail: no deeper
+  // component can be a symlink, so stop lstat-ing and apply pop/append only.
+  let tailOnly = false
+  let i = 0
+  while (i < pending.length) {
+    const comp = pending[i]
+    i++
+    if (comp === '' || comp === '.') continue
+    if (comp === '..') { resolved = dirname(resolved); continue }
+    const candidate = join(resolved, comp)
+    if (tailOnly) { resolved = candidate; continue }
+    let st
+    try {
+      st = lstatSync(candidate)
+    } catch (err) {
+      if (err.code === 'ENOENT') { tailOnly = true; resolved = candidate; continue }
+      throw err // EACCES etc. — fail closed via the caller's catch
+    }
+    if (st.isSymbolicLink()) {
+      if (++symlinks > _FLOOR_MAX_SYMLINKS) {
+        throw Object.assign(new Error(`resolveTargetComponentwiseSync: symlink depth exceeds ${_FLOOR_MAX_SYMLINKS}`), { code: 'ELOOP' })
+      }
+      const link = readlinkSync(candidate)
+      // An absolute link restarts resolution from the fs root; a relative link
+      // resolves from the symlink's PARENT (`resolved`, since `comp` was not
+      // appended). Splice the link's components in at the cursor so they — and
+      // any `..` they contain — are walked next, before the remaining tail.
+      if (isAbsolute(link)) resolved = parse(link).root
+      pending.splice(i, 0, ...link.split(sep))
+    } else {
+      resolved = candidate
+    }
+  }
+  return resolved
+}
+
+/**
+ * #6851 — the pure segment scan, factored out of {@link isProtectedPathValue} so
+ * the lexical pass and the symlink-resolved pass share ONE matcher. Given a
+ * resolution `base` and an already-resolved absolute `resolved` target, applies
+ * the #6806 relative-vs-absolute framing (below) and tests each segment. No fs
+ * access — string ops only.
+ *
+ * #6806 — the discriminator is whether the resolved target stays INSIDE base's
+ * own subtree:
+ *   - UNDER base → scan the path RELATIVE to base, so base's own prefix segments
  *     (its `.claude`) are excluded and a benign in-workspace write is never
- *     floored (goal 2). Under-cwd relatives never contain `..`.
- *   - ESCAPES cwd (a `..`-traversal ABOVE it — itself suspicious) → scan the
- *     RESOLVED ABSOLUTE path, so a protected segment sitting in cwd's PREFIX
- *     (e.g. the very `.claude/` the worktree lives under, reached by
- *     `../../settings.local.json`) is caught (goal 1). A protected segment that
- *     appears BELOW the `..`s (an out-of-cwd `.git`) is caught either way. The
- *     floor only ever forces a PROMPT, so over-flooring a sibling traversal
- *     (which is already escaping the workspace) is safe and conservative.
- *
- * Segments are lowercased first: on case-insensitive filesystems (macOS APFS,
- * Windows) `.GIT/config` IS `.git/config`, so a case-sensitive match would let
- * case variants evade the floor. Over-flooring a genuinely distinct `.GIT` on
- * case-sensitive Linux is fine — the floor only forces a prompt, never denies.
- * #6803 — `secretsOnly` narrows the match to SECRET FILES (env + key material)
- * and SKIPS the config-DIR segments (.git/.claude/.vscode/.config/git). It is
- * the read floor: a Read/Glob/Grep must not silently auto-read a secret, but
- * reading a config dir is benign and must not prompt. The full (write) floor
- * passes `secretsOnly = false` and matches both dirs and secret files.
- * @param {string} target  a path value from a tool input
- * @param {string} base    the resolution base (session cwd)
- * @param {boolean} [secretsOnly]  match only secret files, skip config dirs
+ *     floored. Under-base relatives never contain `..`.
+ *   - ESCAPES base (a `..`-traversal ABOVE it — itself suspicious) → scan the
+ *     RESOLVED ABSOLUTE path, so a protected segment sitting in base's PREFIX
+ *     (the very `.claude/` a worktree lives under, reached by `../../x`) is
+ *     caught. The floor only ever forces a PROMPT, so over-flooring a sibling
+ *     traversal (already escaping the workspace) is safe and conservative.
+ * @param {string} base
+ * @param {string} resolved  an absolute path already resolved against base
+ * @param {boolean} secretsOnly
  * @returns {boolean}
  */
-function isProtectedPathValue(target, base, secretsOnly = false) {
-  const resolved = resolve(base, target)
+function _scanResolvedTarget(base, resolved, secretsOnly) {
   const rel = relative(base, resolved)
-  // Target is inside cwd's own subtree when the relative path neither is nor
+  // Target is inside base's own subtree when the relative path neither is nor
   // begins with `..` (and isn't a foreign absolute — a Windows cross-drive
-  // `relative()` can return one). Empty rel = the target IS cwd (still "inside").
+  // `relative()` can return one). Empty rel = the target IS base (still "inside").
   const underCwd = rel === '' ||
     (!isAbsolute(rel) && rel !== '..' && !rel.startsWith('..' + sep))
   const scanned = underCwd ? rel : resolved
@@ -297,6 +433,90 @@ function isProtectedPathValue(target, base, secretsOnly = false) {
     if (seg === '.config' && segments[i + 1] === 'git') return true
   }
   return false
+}
+
+/**
+ * #6794 / #6806 / #6851 — is a single path value protected, resolved against
+ * `base` (the session cwd)?
+ *
+ * TWO passes, ORed — a hit on EITHER floors the target:
+ *   (1) LEXICAL (the pre-#6851 floor, unchanged). `resolve()` absorbs absolute
+ *       paths, a leading `./`, and `..` traversal; the resolved path is scanned
+ *       segment-by-segment ({@link _scanResolvedTarget}). Pure string ops, no fs
+ *       access — fast, and every input the old floor flagged still flags.
+ *   (2) #6851/#6921 SYMLINK. The lexical pass is symlink-BLIND: because
+ *       `resolve()` collapses `..` textually, a symlink in cwd's PREFIX (the
+ *       chroxy agent worktree can live under a *symlink* to a real `.claude/`),
+ *       a symlinked COMPONENT of the target, OR a `..` that FOLLOWS a symlinked
+ *       component can make a path that lexically looks OUTSIDE a protected dir
+ *       RESOLVE INTO `.git`/`.claude`/`.vscode`/`.config/git` or a secret file
+ *       (and vice-versa). Pass (2) resolves the base to its real path, then walks
+ *       the target COMPONENT BY COMPONENT via
+ *       {@link resolveTargetComponentwiseSync} — following each symlink and
+ *       applying each `..` against the resolved-so-far REAL path, exactly as
+ *       `open(2)` does — and re-runs the SAME segment scan. It only ADDS matches
+ *       on top of (1); it never un-floors a lexical hit (pass (1) already
+ *       returned). The raw (NOT pre-`resolve`d) target is handed to the walker so
+ *       its `..` survives to be applied post-symlink — the #6921 fix. The earlier
+ *       #6851 shape (`realpathDeepestAncestorSync(resolve(realBase, target))`)
+ *       could not close this: both `resolve()` and Node's `realpathSync` collapse
+ *       `..` LEXICALLY, so a `..` after a symlinked component was cancelled before
+ *       any symlink was followed.
+ *
+ * FAIL-CLOSED: any error resolving the real paths (EACCES on a directory, ELOOP
+ * on a symlink cycle/depth bomb, an unresolvable base) is treated as PROTECTED —
+ * the floor forces the interactive prompt, never assumes the target is safe. The
+ * floor only ever forces a PROMPT (never a hard deny), so over-flooring an
+ * ambiguous resolution is conservative and correct.
+ *
+ * #6922 — TOCTOU: this resolution happens at permission-CHECK time and is NOT
+ * atomic with the downstream read/write. A symlink anywhere in the path can be
+ * swapped between this check and the executor's `open` (e.g. via an un-floored
+ * `Bash` step interleaved with the write), so a benign realpath here does not
+ * GUARANTEE a benign open later. This floor is defense-in-depth / prompt-only,
+ * and chroxy does not own the downstream `open` for SDK/TUI/codex providers, so a
+ * fully atomic guard (`openat2(RESOLVE_NO_SYMLINKS)` held across the write) is not
+ * achievable at this layer. Do not over-trust the resolved path as an atomic
+ * guarantee — see #6922.
+ *
+ * #6806 — WHICH segments each pass scans, and the #6794 worktree false-positive
+ * guard it preserves, live in {@link _scanResolvedTarget}. #6803 —
+ * `secretsOnly` narrows the match to SECRET / credential files (the read floor);
+ * the full (write) floor passes `secretsOnly = false`.
+ * @param {string} target  a path value from a tool input
+ * @param {string} base    the resolution base (session cwd)
+ * @param {boolean} [secretsOnly]  match only secret / credential files
+ * @returns {boolean}
+ */
+function isProtectedPathValue(target, base, secretsOnly = false) {
+  // (1) LEXICAL floor — pre-#6851 behavior, authoritative on a hit (no fs cost).
+  const resolvedLexical = resolve(base, target)
+  if (_scanResolvedTarget(base, resolvedLexical, secretsOnly)) return true
+  // (2) #6851/#6921 SYMLINK floor — resolve the real base, then walk the RAW
+  // target component-by-component (open(2) semantics) and re-scan. A resolution
+  // error FAILS CLOSED (return true → force the prompt). Runs only on a
+  // lexically-clean target (the common benign case), so the fs cost is a couple
+  // of realpath/lstat walks per otherwise-auto-approved permission check.
+  try {
+    // Pass `base` DIRECTLY — never `resolve(base)`. `realpathDeepestAncestorSync`
+    // REQUIRES an absolute path and THROWS on a relative one; that guard exists
+    // precisely so a relative base can't be silently reframed against the SERVER
+    // process cwd (`process.cwd()`) — the WRONG root (the floor must be anchored
+    // on the SESSION's cwd). In normal operation `base` IS absolute (the session
+    // cwd from the WS client / a worktree dir / the process.cwd() fallback), so
+    // this is a no-op; a relative/malformed base hits the throw and FAILS CLOSED
+    // (caught below → return true → force the prompt) instead of resolving
+    // against process.cwd(). Wrapping in resolve() would defeat BOTH the guard
+    // and the wrong-root framing it protects against.
+    const realBase = realpathDeepestAncestorSync(base)
+    // Pass the RAW `target` (its `..` intact) to the component walker, so a `..`
+    // after a symlinked component climbs from the symlink's TARGET, not its
+    // lexical parent. Do NOT pre-resolve() it — that would collapse the `..`.
+    const realTarget = resolveTargetComponentwiseSync(realBase, target)
+    return _scanResolvedTarget(realBase, realTarget, secretsOnly)
+  } catch {
+    return true
+  }
 }
 
 /**

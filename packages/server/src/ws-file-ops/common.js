@@ -42,6 +42,23 @@ export async function resolveSessionCwd(sessionCwd, cwdRealCache, cwdCacheTtl) {
  * defeats the otherwise-correct 04a2fbbb1 realpath-TOCTOU fix on the
  * new-file code path.
  *
+ * #6921 — KNOWN RESIDUAL LIMITATION (shared with the pre-#6921 protected-path
+ * floor): this resolves the deepest EXISTING ancestor via `realpath()`, then
+ * re-appends the unresolved tail LEXICALLY. It therefore cannot honour a `..`
+ * that FOLLOWS a symlinked component the way `open(2)` does — both this helper's
+ * `realpath` step AND every caller (which pre-computes `absPath = resolve(...)`,
+ * collapsing `..` textually before calling in) discard the ordering the kernel
+ * uses (follow symlink, THEN apply `..`). The floor closed the same gap by
+ * switching to a COMPONENT-BY-COMPONENT walk (see
+ * `permission-manager.js` `resolveTargetComponentwiseSync`, #6921). Bringing this
+ * BYOK confinement path to parity needs a caller-signature change (pass the RAW
+ * target + base, walk componentwise) rather than a local edit here, so it is
+ * tracked as a separate follow-up. Impact here is narrower than the floor's — the
+ * containment check only asks "does it escape the workspace?", and the common
+ * chroxy topology (`.claude`/`.git` under the workspace) stays inside it — but a
+ * symlink pointing OUT of the workspace followed by `..` can still evade the
+ * `startsWith(cwdReal)` check, so this remains worth fixing.
+ *
  * @param {string} absPath - Absolute path to resolve (may not exist)
  * @returns {Promise<string>} Real path with all symlink ancestors resolved
  */
