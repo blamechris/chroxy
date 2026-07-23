@@ -181,6 +181,10 @@ describe('CreateSessionModal fresh-open guard (#2679)', () => {
       permissionMode: undefined,
       worktree: undefined,
       environmentId: undefined,
+      // #6903: a codex session's sandbox now defaults to the "Default" option,
+      // which forwards no codexSandbox so the daemon's CHROXY_CODEX_SANDBOX floor
+      // (else workspace-write) is honored rather than silently overridden.
+      codexSandbox: undefined,
     })
   })
 

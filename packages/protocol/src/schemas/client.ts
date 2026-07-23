@@ -14,6 +14,7 @@
  * are). This keeps server and client schemas on a single sanity ceiling.
  */
 import { z } from 'zod'
+import { CODEX_SANDBOX_MODES } from '../codex.ts'
 
 // -- Attachment schema (reusable) --
 const BinaryAttachmentSchema = z.object({
@@ -519,7 +520,9 @@ export const CreateSessionSchema = z.object({
   sandbox: SandboxSchema.optional(),
   // #6638: per-session Codex sandbox mode (codex provider only; ignored by
   // others). Overrides the server-wide CHROXY_CODEX_SANDBOX / the default.
-  codexSandbox: z.enum(['read-only', 'workspace-write', 'danger-full-access']).optional(),
+  // #6689: single-sourced from CODEX_SANDBOX_MODES so the wire enum, the server,
+  // and the client selectors can't drift.
+  codexSandbox: z.enum(CODEX_SANDBOX_MODES).optional(),
   isolation: z.enum(['none', 'worktree', 'sandbox', 'container']).optional(),
   environmentId: z.string().max(256).optional(),
   // #4208: opt-in to spawning the claude TUI with

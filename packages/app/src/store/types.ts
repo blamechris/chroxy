@@ -11,7 +11,7 @@
 
 // #6453 — canonical WIRE attachment type for the sendInput signature (was an
 // inline `{ type; mediaType; data; name }[]`; the app only sends binary).
-import type { BinaryAttachment, ServerPermissionInputMessage } from '@chroxy/protocol';
+import type { BinaryAttachment, ServerPermissionInputMessage, CodexSandboxMode } from '@chroxy/protocol';
 
 // Re-export shared protocol types from store-core
 export type {
@@ -480,6 +480,16 @@ export interface CreateSessionOptions {
    * selecting one but forwards it on the wire if a future caller passes it.
    */
   environmentId?: string;
+  /**
+   * #6689/#6903 — per-session Codex sandbox mode ('read-only' |
+   * 'workspace-write' | 'danger-full-access'). `undefined` means "use the
+   * daemon's configured sandbox" (CHROXY_CODEX_SANDBOX, else workspace-write)
+   * — the modal's "Default" chip. Only set when the selected provider is
+   * `codex`; other providers ignore it. Surfaced in the New Session modal as
+   * a codex-only selector. Narrowed to the wire enum so an invalid value
+   * can't compile (Copilot #6900).
+   */
+  codexSandbox?: CodexSandboxMode;
 }
 
 /**
