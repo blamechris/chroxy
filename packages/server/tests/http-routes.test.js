@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import { homedir, tmpdir } from 'node:os'
 import { createHttpHandler, resolveRemoveImage, _resetSnapshotBackendCacheForTests } from '../src/http-routes.js'
 import { registerOAuthCallback, _clearOAuthCallbacksForTests } from '../src/byok-mcp-oauth.js'
+import { PairingManager } from '../src/pairing.js'
 
 // The QR endpoint falls back to reading ~/.chroxy/connection.json from disk.
 // If a Chroxy server is running (or left a stale file), the test gets 200 instead of 503.
@@ -858,6 +859,144 @@ describe('http-routes', () => {
         await fnB('tag-b')
         assert.deepEqual(calls, ['tag-a', 'tag-b'])
       })
+    })
+  })
+
+  // #6678 — paired-devices roster + LIVE per-device / revoke-all. Drives the
+  // routes against a real PairingManager so the WS + HTTP surface and the
+  // in-memory token map are exercised end-to-end. All three routes are
+  // PRIMARY-only (a paired device must not enumerate or revoke its siblings).
+  describe('paired-devices endpoints (#6678)', () => {
+    let pm
+
+    function mintDevice(sessionId = null) {
+      // A bound token when sessionId is given, else an unbound linking-mode token.
+      if (sessionId) {
+        const { pairingId } = pm.generateBoundPairing(sessionId)
+        return pm.validatePairing(pairingId).sessionToken
+      }
+      return pm.validatePairing(pm.currentPairingId).sessionToken
+    }
+
+    afterEach(() => {
+      pm?.destroy()
+      pm = null
+    })
+
+    it('GET /api/paired-devices lists the live roster (never token material)', async () => {
+      pm = new PairingManager({ sessionTokenTtlMs: 60_000 })
+      const bound = mintDevice('sess-xyz')
+      mintDevice() // unbound
+      const mock = createMockServer({ _pairingManager: pm })
+      await startWith(mock)
+      const res = await globalThis.fetch(`http://127.0.0.1:${port}/api/paired-devices`, {
+        headers: { 'Authorization': 'Bearer test-token' },
+      })
+      assert.equal(res.status, 200)
+      const body = await res.json()
+      assert.equal(body.devices.length, 2)
+      for (const d of body.devices) {
+        assert.equal(typeof d.id, 'string')
+        assert.ok(d.id.length > 0)
+        assert.notEqual(d.id, bound, 'wire id is not the token')
+      }
+      assert.ok(body.devices.some((d) => d.sessionId === 'sess-xyz'), 'bound token surfaces its session')
+      assert.ok(body.devices.some((d) => d.sessionId === null), 'unbound token surfaces null')
+    })
+
+    it('GET /api/paired-devices rejects a bound (pairing) token with primary_token_required', async () => {
+      pm = new PairingManager({ sessionTokenTtlMs: 60_000 })
+      mintDevice()
+      const mock = createMockServer({ _pairingManager: pm })
+      await startWith(mock)
+      const res = await globalThis.fetch(`http://127.0.0.1:${port}/api/paired-devices`, {
+        headers: { 'Authorization': 'Bearer pairing-bound' },
+      })
+      assert.equal(res.status, 403)
+      assert.equal((await res.json()).error, 'primary_token_required')
+    })
+
+    it('GET /api/paired-devices rejects without bearer auth', async () => {
+      pm = new PairingManager({ sessionTokenTtlMs: 60_000 })
+      const mock = createMockServer({ _pairingManager: pm })
+      await startWith(mock)
+      const res = await globalThis.fetch(`http://127.0.0.1:${port}/api/paired-devices`)
+      assert.equal(res.status, 403)
+    })
+
+    it('DELETE /api/paired-devices/:id revokes ONE device live (its next auth fails)', async () => {
+      pm = new PairingManager({ sessionTokenTtlMs: 60_000 })
+      const t1 = mintDevice()
+      const t2 = mintDevice()
+      const id = pm._deviceIdForToken(t1)
+      const mock = createMockServer({ _pairingManager: pm })
+      await startWith(mock)
+      const res = await globalThis.fetch(`http://127.0.0.1:${port}/api/paired-devices/${id}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': 'Bearer test-token' },
+      })
+      assert.equal(res.status, 200)
+      assert.deepEqual(await res.json(), { ok: true, revoked: 1 })
+      assert.equal(pm.isSessionTokenValid(t1), false, 'revoked device no longer authenticates')
+      assert.equal(pm.isSessionTokenValid(t2), true, 'the sibling survives')
+    })
+
+    it('DELETE /api/paired-devices/:id returns 404 for an unknown id', async () => {
+      pm = new PairingManager({ sessionTokenTtlMs: 60_000 })
+      mintDevice()
+      const mock = createMockServer({ _pairingManager: pm })
+      await startWith(mock)
+      const res = await globalThis.fetch(`http://127.0.0.1:${port}/api/paired-devices/deadbeefdeadbeef`, {
+        method: 'DELETE',
+        headers: { 'Authorization': 'Bearer test-token' },
+      })
+      assert.equal(res.status, 404)
+      assert.equal((await res.json()).revoked, 0)
+    })
+
+    it('DELETE /api/paired-devices/:id rejects a bound (pairing) token', async () => {
+      pm = new PairingManager({ sessionTokenTtlMs: 60_000 })
+      const t1 = mintDevice()
+      const mock = createMockServer({ _pairingManager: pm })
+      await startWith(mock)
+      const res = await globalThis.fetch(`http://127.0.0.1:${port}/api/paired-devices/${pm._deviceIdForToken(t1)}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': 'Bearer pairing-bound' },
+      })
+      assert.equal(res.status, 403)
+      assert.equal((await res.json()).error, 'primary_token_required')
+      assert.equal(pm.isSessionTokenValid(t1), true, 'a rejected revoke must not touch the map')
+    })
+
+    it('DELETE /api/paired-devices revokes ALL devices live (panic button)', async () => {
+      pm = new PairingManager({ sessionTokenTtlMs: 60_000 })
+      const t1 = mintDevice()
+      const t2 = mintDevice()
+      const mock = createMockServer({ _pairingManager: pm })
+      await startWith(mock)
+      const res = await globalThis.fetch(`http://127.0.0.1:${port}/api/paired-devices`, {
+        method: 'DELETE',
+        headers: { 'Authorization': 'Bearer test-token' },
+      })
+      assert.equal(res.status, 200)
+      assert.deepEqual(await res.json(), { ok: true, revoked: 2 })
+      assert.equal(pm.isSessionTokenValid(t1), false)
+      assert.equal(pm.isSessionTokenValid(t2), false)
+      assert.equal(pm.listSessionTokens().length, 0)
+    })
+
+    it('DELETE /api/paired-devices (revoke-all) rejects a bound (pairing) token', async () => {
+      pm = new PairingManager({ sessionTokenTtlMs: 60_000 })
+      const t1 = mintDevice()
+      const mock = createMockServer({ _pairingManager: pm })
+      await startWith(mock)
+      const res = await globalThis.fetch(`http://127.0.0.1:${port}/api/paired-devices`, {
+        method: 'DELETE',
+        headers: { 'Authorization': 'Bearer pairing-bound' },
+      })
+      assert.equal(res.status, 403)
+      assert.equal((await res.json()).error, 'primary_token_required')
+      assert.equal(pm.isSessionTokenValid(t1), true, 'a rejected revoke-all leaves every device paired')
     })
   })
 
