@@ -18,6 +18,10 @@ import { createLogger } from './logger.js'
 // deliberately a dependency-free module so importing it here never pulls
 // the BYOK/SDK machinery into the config-load path.
 import { validateProvidersConfigBlock } from './anthropic-compatible-config.js'
+// #6764: default cheap model + timeout for the one-shot semantic-title call.
+// Imported from the pure title module (no provider/SDK deps) so config load stays
+// lightweight.
+import { DEFAULT_SEMANTIC_TITLE_MODEL, DEFAULT_SEMANTIC_TITLE_TIMEOUT_MS } from './session-title.js'
 
 const log = createLogger('config')
 
@@ -688,6 +692,61 @@ export function isIdeFeatureEnabled(config) {
 export function isOrchestrationEnabled(config) {
   if (process.env.CHROXY_ENABLE_ORCHESTRATION === '1') return true
   return config?.features?.orchestration === true
+}
+
+// #6764 — opt-in semantic session titles. When on, the first user turn's sidebar
+// label is upgraded from a raw truncation of the message to a short model-
+// generated summary via a cheap one-shot (Haiku) call. Off by default; the
+// truncation fallback is used when off, when the call fails, or when no model
+// access is available. Enabled by `features.semanticTitles === true` OR the
+// `CHROXY_SEMANTIC_TITLES=1` env override; `CHROXY_SEMANTIC_TITLES=0` force-
+// disables (handy for tests / A-B without editing config).
+export function isSemanticTitlesEnabled(config) {
+  const env = process.env.CHROXY_SEMANTIC_TITLES
+  if (env === '1') return true
+  if (env === '0') return false
+  return config?.features?.semanticTitles === true
+}
+
+// #6764 — resolve the model for the one-shot title call. Precedence:
+//   CHROXY_SEMANTIC_TITLES_MODEL env  >  config.summarize.model  >  Haiku default.
+// The `summarize.{model}` cheap-model override is reused (per #6764) so an
+// operator who already tuned the summarizer's model gets the same for titles;
+// the default stays a cheap Haiku alias so titles never burn a premium model.
+export function resolveSemanticTitleModel(config) {
+  const envModel = typeof process.env.CHROXY_SEMANTIC_TITLES_MODEL === 'string'
+    && process.env.CHROXY_SEMANTIC_TITLES_MODEL.trim()
+    ? process.env.CHROXY_SEMANTIC_TITLES_MODEL.trim()
+    : null
+  if (envModel) return envModel
+  const summarizeModel = config?.summarize && typeof config.summarize === 'object'
+    && typeof config.summarize.model === 'string' && config.summarize.model.trim()
+    ? config.summarize.model.trim()
+    : null
+  return summarizeModel || DEFAULT_SEMANTIC_TITLE_MODEL
+}
+
+// #6764 — resolve the timeout (ms) for the one-shot title call. Precedence:
+//   CHROXY_SEMANTIC_TITLES_TIMEOUT_MS env  >  config.summarize.titleTimeoutMs  >  default.
+// The title call is fire-and-forget, so without a timeout a stalled provider
+// connection leaves its promise pending forever (retaining the SessionManager +
+// first message → an unbounded per-session leak) and never tears the one-shot
+// subprocess down. The resolved value is passed to SessionManager, which turns it
+// into an `AbortSignal.timeout(...)` so the call aborts and falls open to the
+// truncation label. Invalid / non-positive values fall back to the default.
+export function resolveSemanticTitleTimeoutMs(config) {
+  const env = typeof process.env.CHROXY_SEMANTIC_TITLES_TIMEOUT_MS === 'string'
+    ? process.env.CHROXY_SEMANTIC_TITLES_TIMEOUT_MS.trim()
+    : ''
+  if (env) {
+    const n = Number(env)
+    if (Number.isFinite(n) && n > 0) return n
+  }
+  const cfg = config?.summarize && typeof config.summarize === 'object'
+    ? config.summarize.titleTimeoutMs
+    : undefined
+  if (typeof cfg === 'number' && Number.isFinite(cfg) && cfg > 0) return cfg
+  return DEFAULT_SEMANTIC_TITLE_TIMEOUT_MS
 }
 
 // #6277: single source of truth for "does a user-shell spawn need host-local

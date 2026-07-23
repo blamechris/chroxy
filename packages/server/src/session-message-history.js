@@ -1,5 +1,6 @@
 import { EventEmitter } from 'events'
 import { createLogger } from './logger.js'
+import { truncateTitle } from './session-title.js'
 
 const log = createLogger('session-message-history')
 const MAX_PENDING_STREAM_SIZE = 100 * 1024 * 1024 // 100MB
@@ -11,7 +12,9 @@ const MAX_PENDING_STREAM_SIZE = 100 * 1024 * 1024 // 100MB
  * Extracted from SessionManager to isolate history concerns.
  *
  * Events emitted:
- *   auto_label  { sessionId, label }  — when first user input triggers session rename
+ *   auto_label  { sessionId, label, text }  — when first user input triggers a
+ *     session rename. `label` is the truncation applied synchronously; `text` is
+ *     the untruncated first message (source for the #6764 semantic-title upgrade).
  */
 export class SessionMessageHistory extends EventEmitter {
   /**
@@ -443,7 +446,15 @@ export class SessionMessageHistory extends EventEmitter {
 
   /**
    * Auto-label a session from the first user input if it still has a default name.
-   * Truncates to ~40 chars at word boundary, appends "..." if truncated.
+   *
+   * Applies the word-boundary truncation label SYNCHRONOUSLY (via
+   * `truncateTitle`) so a session is never left unnamed — this is the always-
+   * available fallback. It also emits `auto_label` carrying the original first
+   * message `text`, so a listener (SessionManager, #6764) can optionally fire an
+   * asynchronous cheap-model call to UPGRADE the truncation to a short semantic
+   * title. Firing only from here means the semantic path inherits this method's
+   * once-per-session + default-name + manual-rename guards for free.
+   *
    * @param {string} sessionId
    * @param {string} text
    * @param {object} sessionEntry - Must have { name, _autoLabeled } properties
@@ -464,18 +475,12 @@ export class SessionMessageHistory extends EventEmitter {
 
     sessionEntry._autoLabeled = true
 
-    const MAX_LEN = 40
-    let label
-    if (trimmed.length <= MAX_LEN) {
-      label = trimmed
-    } else {
-      const cut = trimmed.lastIndexOf(' ', MAX_LEN)
-      label = (cut > 10 ? trimmed.slice(0, cut) : trimmed.slice(0, MAX_LEN)) + '...'
-    }
-
+    const label = truncateTitle(trimmed)
     sessionEntry.name = label
     log.info(`Auto-labeled session ${sessionId} to "${label}"`)
-    this.emit('auto_label', { sessionId, label })
+    // `text` is the untruncated first message — the semantic-title upgrade path
+    // needs the full source, not the already-truncated label.
+    this.emit('auto_label', { sessionId, label, text: trimmed })
   }
 
   /**
