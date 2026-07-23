@@ -47,9 +47,9 @@ export declare const ServerCredentialsStatusSchema: z.ZodObject<{
         }>;
         source: z.ZodEnum<{
             none: "none";
+            store: "store";
             env: "env";
             oauth: "oauth";
-            store: "store";
         }>;
         masked: z.ZodOptional<z.ZodString>;
         oauth: z.ZodBoolean;
