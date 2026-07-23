@@ -12323,6 +12323,75 @@ button.sidebar-token-view-session-row:hover {
   color: var(--text-primary);
 }
 
+/* #6540 — repo-events webhook-secret setup panel (GithubWebhookConfig), a
+ * collapsible surface at the top of RepoEventsSection. Token-only styling so it
+ * tracks light/dark themes like the rest of the Control Room. */
+.cr-webhook {
+  margin: 12px 0 4px;
+  border: 1px solid var(--border-secondary);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+}
+.cr-webhook-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 14px;
+  background: transparent;
+  border: 0;
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+.cr-webhook-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 4px 14px 14px;
+}
+.cr-webhook-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.cr-webhook-label {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.cr-webhook-urlrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.cr-webhook-url {
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  padding: 6px 10px;
+  border: 1px solid var(--border-secondary);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  white-space: nowrap;
+}
+.cr-webhook-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  border: 1px solid var(--border-secondary);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+}
+.cr-webhook-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 /* #5608 — the "Investigate" row action (a real .cr-action button now, replacing
  * the pre-#5608 clickable verdict badge). Tinted amber to match the
  * investigate/warn verdict accent so the contextual action reads at a glance,

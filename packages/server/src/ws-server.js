@@ -39,6 +39,8 @@ import { terminalMirrorRecipient } from './handler-utils.js'
 import { getProviderDataDirs } from './providers.js'
 import { assertCtxShape } from './ws-handler-context.js'
 import { isLoopbackHost } from './bind-host.js'
+import { getLanIp } from './lan-ip.js'
+import { deriveWebhookPayloadUrl } from './github-webhook.js'
 import { isLocalOrLanPeer } from './connection-locality.js'
 
 const __filename = fileURLToPath(import.meta.url)
@@ -470,6 +472,7 @@ function _isSecureRequest(req) {
  *   { type: 'external_sessions_snapshot', requestId?, generatedAt, sessions, error? } — Control Room mission-control external-session survey reply (#5969, epic #5422 phase 4); reply to an `external_sessions_request`. `sessions` lists the LIVE external Claude Code sessions the daemon learned about over `POST /api/events` (#5413) — sessions it did NOT launch — each carrying source/sessionId/name/project/cwd, a read-only `status` ('running'|'idle'), active `subagents`, and `lastActivityTs`. Read-only (no PTY/control handle exists for these). Host-level: a session-bound token is refused with an additive `error: { code, message }` on an otherwise-empty (schema-valid) snapshot. `requestId` echoes the request when provided.
  *   { type: 'repo_events_delta', generatedAt, event } — Control Room repo-events LIVE delta (#6536, PR-2 of #5966); server-INITIATED (no request) push of a single newly-buffered repo-event when a GitHub webhook delivery lands, so the pane updates without a Refresh. Host-level: broadcast ONLY to unbound (host-authority) clients — a session-bound (share-a-session) token never receives host repo activity. A client that hasn't run the survey ignores it; a client with a snapshot appends the event (bounded). No `error`/`requestId` — degraded surveys still flow through the pull `repo_events_snapshot`.
  *   { type: 'repo_events_snapshot', requestId?, generatedAt, events, error? } — Control Room repo-events survey reply (#5966, epic #5422 phase 5); reply to a `repo_events_request`. `events` is the tail (most-recent-last) of the daemon's bounded RepoEventStore — GitHub-webhook activity (push/pull_request/issues/ping) ingested HMAC-verified over `POST /api/github/webhook` (#6468) — each carrying kind/repo/actor/at plus kind-specific branch/action/number/title/url and a pre-rendered `summary`. Read-only; no delta stream (a full snapshot per pull, like the host/mailbox/external surveys). Host-level: a session-bound token is refused with an additive `error: { code, message }` on an otherwise-empty (schema-valid) snapshot. `requestId` echoes the request when provided.
+ *   { type: 'github_webhook_config', requestId?, generatedAt, configured, source, payloadUrl, lanOnly, note?, recommendedEvents, deliveries, error? } — Control Room repo-events webhook-secret config reply (#6540, item 3 of #6536); reply to a `github_webhook_config_request` and to a `github_webhook_set_secret` / `github_webhook_clear_secret` write. Reports whether an HMAC secret is configured and its `source` ('store'|'env'|'none') — never the value — plus the `payloadUrl` to paste into GitHub (derived from the live tunnel URL, else the LAN address, `lanOnly` + `note` when GitHub can't reach it), the `recommendedEvents`, and the recent-`deliveries` readout (count / last / verify result). Writes are host-authority gated (a session-bound token is rejected with a generic `error`); the read is open to any authenticated client. `requestId` echoes the request when provided.
  *   { type: 'summarize_session_result', sessionId, summary, truncated?, requestId? } — reply to a `summarize_session` (#5547); the model-written continuation brief built from the session's persisted history, seeded editable into the dashboard's create-session composer. `truncated` flags a windowed history. Failures surface as a SUMMARIZE_FAILED `session_error` echoing `sessionId`/`requestId` (curated message — no token/key material).
  *   { type: 'session_preset_snapshot', cwd, preset: { source, active, trustState, enabled, preamble, seed, preambleLength, seedLength, capped, repoPath } | null, requestId? } — Control Room per-repo session-preset reply (#5553, epic #5159); reply to a host-authority `session_preset_get` / `session_preset_set` / `session_preset_approve` / `session_preset_revoke`. `preset` is null when the repo has no preset. Full preamble + seed text reaches HOST-level clients only (the four requests are rejected for session-bound pairing clients). `requestId` echoes the request when provided.
  *   { type: 'provider_list', providers }                — available providers
@@ -894,6 +897,18 @@ export class WsServer {
         // Lazily created on the first webhook delivery, so null until then —
         // the survey handler treats a null store as an empty (schema-valid) feed.
         get repoEventStore() { return self._repoEventStore ?? null },
+        // #6540: repo-events webhook-secret config surface. `webhookPayloadUrl`
+        // derives the GitHub payload URL from the live tunnel/LAN origin;
+        // `repoWebhookDeliveries` is the in-memory recent-delivery ring the HTTP
+        // webhook receiver fills (null until the first delivery);
+        // `setWebhookSecretCache` lets the config handler refresh the in-process
+        // hot cache after a set/rotate/clear so live deliveries pick it up without
+        // a keychain re-read (and a rotate never serves a stale cached value).
+        get webhookPayloadUrl() { return self.getWebhookPayloadUrl() },
+        get repoWebhookDeliveries() { return self._repoWebhookDeliveries ?? null },
+        setWebhookSecretCache: (value) => {
+          self._githubWebhookSecret = (typeof value === 'string' && value.length > 0) ? value : null
+        },
         // #6691: the OrchestrationManager, wired for real in E-4. Null until then
         // (and whenever the feature is off) — the handlers treat a null manager
         // as "engine not running" and reply with an unavailable error.
@@ -1760,6 +1775,27 @@ export class WsServer {
       bindHost: this._boundHost,
       quickTunnel: this._quickTunnelActive,
     }
+  }
+
+  /**
+   * #6540 — derive the public `…/api/github/webhook` payload URL an operator
+   * pastes into GitHub, from the server's live origin. Prefers the tunnel URL
+   * (public), then an operator-supplied external URL (SKIP_TUNNEL), then the LAN
+   * address (flagged `lanOnly` — GitHub can't reach it, e.g. `--tunnel none`).
+   * The derivation is a pure function (github-webhook.js); this just gathers the
+   * live inputs. Surfaced to the config handler via `ctx.services.webhookPayloadUrl`.
+   *
+   * @returns {{ url: string|null, lanOnly: boolean, note: string|null }}
+   */
+  getWebhookPayloadUrl() {
+    return deriveWebhookPayloadUrl({
+      tunnelUrl: this._tunnelUrl,
+      externalUrl: this.config?.externalUrl,
+      boundHost: this._boundHost,
+      port: this.port,
+      lanIp: getLanIp(),
+      isLoopbackHost,
+    })
   }
 
   start(host) {

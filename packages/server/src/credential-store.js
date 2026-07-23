@@ -499,6 +499,74 @@ export function readStoredField(field) {
 }
 
 /**
+ * #6540 — persist an arbitrary NON-`KNOWN_CREDENTIALS` string field into the
+ * same encrypted-at-rest store (mode 0600, OS-keychain-backed cipher when
+ * available), the write counterpart to `readStoredField`. Used for secrets that
+ * live in the credentials file but are not provider env-var keys injected into a
+ * spawned child — e.g. the GitHub webhook HMAC secret (`githubWebhookSecret`).
+ *
+ * Trims whitespace, refuses an empty value, and (optionally) validates via the
+ * caller-supplied `validate(value) -> string|null` rule. Merges into the existing
+ * store (a read error aborts rather than clobbering sibling fields) and writes
+ * atomically. The raw value is NEVER logged.
+ *
+ * @param {string} field - the JSON field name (e.g. 'githubWebhookSecret')
+ * @param {string} rawValue
+ * @param {{ validate?: (v: string) => (string|null) }} [opts]
+ * @throws {Error} on empty field/value, validation failure, or a read/write error
+ */
+export function setStoredField(field, rawValue, { validate } = {}) {
+  if (typeof field !== 'string' || field.length === 0) throw new Error('field is required')
+  const value = typeof rawValue === 'string' ? rawValue.trim() : ''
+  if (value.length === 0) throw new Error(`${field} is required (non-empty string)`)
+  if (typeof validate === 'function') {
+    const validationError = validate(value)
+    if (validationError) throw new Error(validationError)
+  }
+
+  const target = credentialsFilePath()
+  const dir = dirname(target)
+  mkdirSync(dir, { recursive: true, mode: 0o700 })
+  if (process.platform !== 'win32') {
+    try { chmodSync(dir, 0o700) } catch { /* best-effort */ }
+  }
+
+  // Merge with the existing store so we don't clobber sibling keys. A read
+  // error (bad mode / corrupt) aborts the write with a clear message rather than
+  // overwriting unknown content.
+  const { data, error } = readStore()
+  if (error) throw new Error(error)
+  writeStoreAtomically(target, { ...data, [field]: value })
+}
+
+/**
+ * #6540 — remove an arbitrary NON-`KNOWN_CREDENTIALS` field written by
+ * `setStoredField`. No-op when the field (or the whole file) is absent. Deletes
+ * the file entirely when it would be left empty. Mirrors `deleteStoredCredential`
+ * for the non-provider-key case.
+ *
+ * @param {string} field
+ */
+export function deleteStoredField(field) {
+  if (typeof field !== 'string' || field.length === 0) throw new Error('field is required')
+  const target = credentialsFilePath()
+  const { data, fileExists, error } = readStore()
+  if (!fileExists) return
+  if (error) throw new Error(error)
+  if (!(field in data)) return
+
+  const next = { ...data }
+  delete next[field]
+
+  if (Object.keys(next).length === 0) {
+    try { unlinkSync(target) } catch (err) { if (err.code !== 'ENOENT') throw err }
+    return
+  }
+
+  writeStoreAtomically(target, next)
+}
+
+/**
  * Resolution order: process.env > store > unset.
  *
  * Used by spawn-env.js to inject stored credentials into a spawned child's

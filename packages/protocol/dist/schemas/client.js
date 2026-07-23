@@ -1144,6 +1144,37 @@ export const RepoEventsRequestSchema = z.object({
     type: z.literal('repo_events_request'),
     requestId: z.string().max(128).optional(),
 });
+// #6540 (item 3 of #6536): Control Room repo-events webhook-secret config UX.
+// Read the current webhook config (is a secret set + from where, the payload URL
+// to point GitHub at, recent delivery status). The reply is a single
+// `github_webhook_config` (see server control-room/repo-events.ts). The secret
+// value is NEVER returned. Open to any authenticated client (the reply is
+// value-free — payload URL is non-secret connection metadata, deliveries are
+// low-sensitivity host telemetry), mirroring `get_credentials_status`.
+export const GithubWebhookConfigRequestSchema = z.object({
+    type: z.literal('github_webhook_config_request'),
+    requestId: z.string().max(128).optional(),
+});
+// #6540: set (or rotate) the GitHub webhook secret. Host-authority gated — a
+// pairing-bound (share-a-session) token is rejected server-side, mirroring the
+// provider-credential write gate (`rejectCredentialWriteIfBound`, #5155). The
+// secret is HMAC key material, stored encrypted at rest in the OS-keychain-backed
+// credentials store (never plaintext config.json). Rotation is simply setting a
+// new value (it overwrites the old). The server never echoes the secret back;
+// the reply is a value-free `github_webhook_config`.
+export const GithubWebhookSetSecretSchema = z.object({
+    type: z.literal('github_webhook_set_secret'),
+    requestId: z.string().max(128).optional(),
+    secret: z.string().min(1).max(4096),
+});
+// #6540: clear the stored GitHub webhook secret (turns the receiver inert unless
+// a `GITHUB_WEBHOOK_SECRET` env var still provides one). Host-authority gated,
+// same as the set path. The reply is a `github_webhook_config` reflecting the new
+// (cleared) state.
+export const GithubWebhookClearSecretSchema = z.object({
+    type: z.literal('github_webhook_clear_secret'),
+    requestId: z.string().max(128).optional(),
+});
 // #5253: Control Room — request a self-hosted runner status survey. The server
 // scans the runner-install root, probes each runner's service, optionally
 // enriches via `gh`, and replies with a single `runner_status_snapshot` (see
@@ -1567,6 +1598,9 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     MailboxStatusRequestSchema,
     ExternalSessionsRequestSchema,
     RepoEventsRequestSchema,
+    GithubWebhookConfigRequestSchema,
+    GithubWebhookSetSecretSchema,
+    GithubWebhookClearSecretSchema,
     IntegrationActionSchema,
     ContainersActionSchema,
     ByokPoolActionSchema,

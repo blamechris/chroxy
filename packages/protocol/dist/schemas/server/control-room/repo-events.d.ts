@@ -126,3 +126,78 @@ export declare const ServerRepoEventsDeltaSchema: z.ZodObject<{
         summary: z.ZodString;
     }, z.core.$loose>;
 }, z.core.$strip>;
+/**
+ * #6540 — recent GitHub-webhook delivery readout. `total` is the cumulative
+ * count since the daemon started; `verified` / `rejected` are over the retained
+ * in-memory window (a bounded ring, so they can be smaller than `total` on a
+ * busy daemon). `lastAt` / `lastResult` describe the most recent delivery, or
+ * null when nothing has arrived yet. `lastKind` is the `X-GitHub-Event` of the
+ * last delivery when known (null for a signature-rejected delivery).
+ */
+export declare const RepoWebhookDeliveriesSchema: z.ZodObject<{
+    total: z.ZodNumber;
+    verified: z.ZodNumber;
+    rejected: z.ZodNumber;
+    lastAt: z.ZodNullable<z.ZodString>;
+    lastResult: z.ZodNullable<z.ZodEnum<{
+        verified: "verified";
+        rejected: "rejected";
+    }>>;
+    lastKind: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+}, z.core.$strip>;
+/**
+ * #6540 (item 3 of #6536) — the GitHub webhook-secret config surface reply. Sent
+ * in response to `github_webhook_config_request` and after a
+ * `github_webhook_set_secret` / `github_webhook_clear_secret` write. The secret
+ * value is NEVER included — only whether one is configured and from which source.
+ *
+ *   - `configured` / `source` — is a secret set, and does it come from the
+ *     encrypted store (`store`), a `GITHUB_WEBHOOK_SECRET` env var (`env`), or
+ *     nowhere (`none`). A STORED secret always takes precedence over the env
+ *     var (the OPPOSITE of the provider-credential env-wins behaviour) —
+ *     `resolveWebhookSecret` (github-webhook.js) checks the store first and
+ *     only falls back to `env` when nothing is stored. `source: 'env'` in this
+ *     reply therefore means the env var is acting as a back-compat fallback,
+ *     not that it overrides a stored value. The dashboard currently manages
+ *     the secret only while that fallback isn't active; unset the env var and
+ *     reconnect to set/rotate a secret from there.
+ *   - `payloadUrl` — the fully-qualified `…/api/github/webhook` URL to paste into
+ *     GitHub → repo → Settings → Webhooks, derived from the live tunnel URL when
+ *     present, else the LAN address. Null only when no origin can be resolved.
+ *   - `lanOnly` — true when `payloadUrl` is a LAN/loopback address GitHub cannot
+ *     reach (no tunnel active, e.g. `--tunnel none`); `note` explains it.
+ *   - `recommendedEvents` — the GitHub event types to subscribe the webhook to.
+ *   - `deliveries` — the recent-delivery readout (count / last / verify result).
+ *   - `error` — additive degraded-reply annotation (unused for now; reserved for
+ *     a future host-authority refusal, mirroring the snapshot shapes).
+ */
+export declare const ServerGithubWebhookConfigSchema: z.ZodObject<{
+    type: z.ZodLiteral<"github_webhook_config">;
+    requestId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    generatedAt: z.ZodString;
+    configured: z.ZodBoolean;
+    source: z.ZodEnum<{
+        none: "none";
+        store: "store";
+        env: "env";
+    }>;
+    payloadUrl: z.ZodNullable<z.ZodString>;
+    lanOnly: z.ZodBoolean;
+    note: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    recommendedEvents: z.ZodArray<z.ZodString>;
+    deliveries: z.ZodObject<{
+        total: z.ZodNumber;
+        verified: z.ZodNumber;
+        rejected: z.ZodNumber;
+        lastAt: z.ZodNullable<z.ZodString>;
+        lastResult: z.ZodNullable<z.ZodEnum<{
+            verified: "verified";
+            rejected: "rejected";
+        }>>;
+        lastKind: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    }, z.core.$strip>;
+    error: z.ZodOptional<z.ZodObject<{
+        code: z.ZodString;
+        message: z.ZodString;
+    }, z.core.$strip>>;
+}, z.core.$strip>;

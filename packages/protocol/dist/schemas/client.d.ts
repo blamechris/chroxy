@@ -776,6 +776,19 @@ export declare const RepoEventsRequestSchema: z.ZodObject<{
     type: z.ZodLiteral<"repo_events_request">;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
+export declare const GithubWebhookConfigRequestSchema: z.ZodObject<{
+    type: z.ZodLiteral<"github_webhook_config_request">;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
+export declare const GithubWebhookSetSecretSchema: z.ZodObject<{
+    type: z.ZodLiteral<"github_webhook_set_secret">;
+    requestId: z.ZodOptional<z.ZodString>;
+    secret: z.ZodString;
+}, z.core.$strip>;
+export declare const GithubWebhookClearSecretSchema: z.ZodObject<{
+    type: z.ZodLiteral<"github_webhook_clear_secret">;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
 export declare const RunnerStatusRequestSchema: z.ZodObject<{
     type: z.ZodLiteral<"runner_status_request">;
     requestId: z.ZodOptional<z.ZodString>;
@@ -1460,6 +1473,16 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     type: z.ZodLiteral<"repo_events_request">;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"github_webhook_config_request">;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"github_webhook_set_secret">;
+    requestId: z.ZodOptional<z.ZodString>;
+    secret: z.ZodString;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"github_webhook_clear_secret">;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"integration_action">;
     action: z.ZodEnum<{
         repo_memory_reindex: "repo_memory_reindex";
@@ -1612,6 +1635,9 @@ export type SkillsInventoryRequestMessage = z.infer<typeof SkillsInventoryReques
 export type MailboxStatusRequestMessage = z.infer<typeof MailboxStatusRequestSchema>;
 export type ExternalSessionsRequestMessage = z.infer<typeof ExternalSessionsRequestSchema>;
 export type RepoEventsRequestMessage = z.infer<typeof RepoEventsRequestSchema>;
+export type GithubWebhookConfigRequestMessage = z.infer<typeof GithubWebhookConfigRequestSchema>;
+export type GithubWebhookSetSecretMessage = z.infer<typeof GithubWebhookSetSecretSchema>;
+export type GithubWebhookClearSecretMessage = z.infer<typeof GithubWebhookClearSecretSchema>;
 export type IntegrationActionMessage = z.infer<typeof IntegrationActionSchema>;
 export type ContainersActionMessage = z.infer<typeof ContainersActionSchema>;
 export type ByokPoolActionMessage = z.infer<typeof ByokPoolActionSchema>;

@@ -540,6 +540,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // repo_events_snapshot handler. Null until the first survey lands.
   repoEventsSnapshot: null,
   repoEventsLoading: false,
+  // #6540 (item 3 of #6536): repo-events webhook-secret config surface, fed by
+  // the github_webhook_config handler. Null until the first config reply lands.
+  githubWebhookConfig: null,
+  githubWebhookConfigLoading: false,
   // #6691 (S-3): orchestration Runs tab state (dashboard-only v1).
   orchestrationRuns: null,
   orchestrationRunsLoading: false,
@@ -1068,6 +1072,48 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     if (socket && socket.readyState === WebSocket.OPEN) {
       set({ repoEventsLoading: true });
       wsSend(socket, { type: 'repo_events_request' });
+      return true;
+    }
+    return false;
+  },
+
+  // #6540 (item 3 of #6536): request the GitHub webhook config (secret status +
+  // payload URL + delivery readout) for the repo-events setup surface. Mirrors
+  // requestRepoEvents — wire-or-nothing (loading flips only when the socket is
+  // OPEN). The reply is a single `github_webhook_config` handled into
+  // `githubWebhookConfig`.
+  requestGithubWebhookConfig: (): boolean => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      set({ githubWebhookConfigLoading: true });
+      wsSend(socket, { type: 'github_webhook_config_request' });
+      return true;
+    }
+    return false;
+  },
+
+  // #6540: set / rotate the GitHub webhook secret. The raw secret is sent once
+  // and NEVER kept in the store. Host-authority gated server-side (a bound token
+  // is rejected). The reply is a value-free `github_webhook_config` reflecting the
+  // new state. Wire-or-nothing: returns false without flipping loading when the
+  // socket is closed (the caller surfaces "not connected").
+  setGithubWebhookSecret: (secret: string): boolean => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      set({ githubWebhookConfigLoading: true });
+      wsSend(socket, { type: 'github_webhook_set_secret', secret });
+      return true;
+    }
+    return false;
+  },
+
+  // #6540: clear the stored GitHub webhook secret. Host-authority gated. Reply is
+  // a `github_webhook_config` reflecting the cleared state.
+  clearGithubWebhookSecret: (): boolean => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      set({ githubWebhookConfigLoading: true });
+      wsSend(socket, { type: 'github_webhook_clear_secret' });
       return true;
     }
     return false;
@@ -2462,7 +2508,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         'repoRuntimeConfigLoading', 'byokPoolStatusLoading', 'hostPruneStatusLoading',
         'simulatorStatusLoading', 'emulatorStatusLoading', 'wslStatusLoading', 'integrationStatusLoading',
         'skillsInventoryLoading', 'mailboxStatusLoading', 'externalSessionsLoading',
-        'repoEventsLoading', 'orchestrationRunsLoading',
+        'repoEventsLoading', 'githubWebhookConfigLoading', 'orchestrationRunsLoading',
       ] as const;
       const loadingReset: Partial<Record<(typeof surveyLoadingKeys)[number], boolean>> = {};
       for (const key of surveyLoadingKeys) {

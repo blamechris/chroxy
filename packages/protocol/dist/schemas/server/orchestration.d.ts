@@ -85,8 +85,8 @@ export declare const RunGateSchema: z.ZodObject<{
     status: z.ZodEnum<{
         pending: "pending";
         approved: "approved";
-        skipped: "skipped";
         rejected: "rejected";
+        skipped: "skipped";
         revise_requested: "revise_requested";
         expired: "expired";
     }>;
@@ -327,8 +327,8 @@ export declare const RunDetailSchema: z.ZodObject<{
         status: z.ZodEnum<{
             pending: "pending";
             approved: "approved";
-            skipped: "skipped";
             rejected: "rejected";
+            skipped: "skipped";
             revise_requested: "revise_requested";
             expired: "expired";
         }>;
@@ -575,8 +575,8 @@ export declare const ServerOrchestrationRunSnapshotSchema: z.ZodObject<{
             status: z.ZodEnum<{
                 pending: "pending";
                 approved: "approved";
-                skipped: "skipped";
                 rejected: "rejected";
+                skipped: "skipped";
                 revise_requested: "revise_requested";
                 expired: "expired";
             }>;
@@ -766,8 +766,8 @@ export declare const ServerOrchestrationRunDeltaSchema: z.ZodObject<{
         status: z.ZodEnum<{
             pending: "pending";
             approved: "approved";
-            skipped: "skipped";
             rejected: "rejected";
+            skipped: "skipped";
             revise_requested: "revise_requested";
             expired: "expired";
         }>;
