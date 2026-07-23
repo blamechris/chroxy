@@ -177,6 +177,26 @@ describe('persistence', () => {
     expect(loadPersistedState().activeSessionId).toBeNull();
   });
 
+  // #6917 — sidebar-panel-slot prefs (height, view, collapsed; #4303) are
+  // per-device UI choices, not server-scoped session state, so an unscoped
+  // clearPersistedState() must not reset them (matching theme / view_mode /
+  // the #6915 device prefs). Pre-#6917, these were wiped alongside session
+  // data — a pre-existing asymmetry from #4304.
+  it('clearPersistedState preserves sidebar-panel-slot prefs but still clears session state', () => {
+    persistSidebarPanelHeight(320);
+    persistSidebarPanelView('files');
+    persistSidebarPanelCollapsed(true);
+    persistActiveSession('sess-1');
+
+    clearPersistedState();
+
+    expect(loadPersistedSidebarPanelHeight()).toBe(320);
+    expect(loadPersistedSidebarPanelView()).toBe('files');
+    expect(loadPersistedSidebarPanelCollapsed()).toBe(true);
+    // Session-scoped state still clears
+    expect(loadPersistedState().activeSessionId).toBeNull();
+  });
+
   it('loadPersistedState returns defaults when empty', () => {
     const state = loadPersistedState();
     expect(state.viewMode).toBeNull();
