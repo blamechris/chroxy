@@ -98,6 +98,26 @@ export const ServerDirectoryListingSchema = z.object({
   error: z.string().nullable(),
 })
 
+// #6876 — `git_create_pr` response. The server pushes the current branch and
+// runs `gh pr create`; on success `url` is the created PR's URL and `number`
+// its integer number (best-effort — parsed from the URL). `branch`/`base` echo
+// the head/base used. On failure `url`/`number` are always null and `error`
+// carries a clear, operator-actionable message (gh not installed / not
+// authenticated / no origin remote / PR already exists / detached HEAD). The
+// identifying fields `branch`/`base` MAY still be populated on some error paths
+// (e.g. base === head, or a push failure) to help the UI show which branch it
+// tried — so only `url`/`number` are guaranteed null on failure, not every data
+// field. Handled by the dashboard only for v1 (mobile PR-creation UI is a
+// tracked follow-up).
+export const ServerGitCreatePrResultSchema = z.object({
+  type: z.literal('git_create_pr_result'),
+  url: z.string().nullable(),
+  number: z.number().nullable(),
+  branch: z.string().nullable(),
+  base: z.string().nullable(),
+  error: z.string().nullable(),
+})
+
 // `write_file` response — the wire type is `write_file_result` (NOT
 // file_write_result). Only path + error beyond type. App-only today (the
 // dashboard has no write_file handling).

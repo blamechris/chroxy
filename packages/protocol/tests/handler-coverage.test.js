@@ -113,6 +113,7 @@ const PLATFORM_SPECIFIC = {
   // `case 'git_*_result':` clauses).
 
   // Dashboard only
+  'git_create_pr_result': 'dashboard', // #6876 in-app PR creation reply — GitPanel "Create PR" flow is dashboard-only for v1 (the mobile app's git surface has no PR-creation UI yet); mobile parity is a tracked follow-up
   'pairing_refreshed': 'dashboard',  // QR display and auto-refresh is dashboard-only (#2916)
   'pair_pending': 'dashboard',       // #5510 pairing-approval primitive — host-level approval banner fan-out is dashboard-only for v1 (the mobile app has no approve surface yet); mobile/desktop-tray approve is an explicit out-of-scope fast-follow per epic #5509
   'pair_resolved': 'dashboard',      // #5510 pairing-approval primitive — banner retraction pairs with pair_pending; dashboard-only for v1, mobile parity deferred per epic #5509
