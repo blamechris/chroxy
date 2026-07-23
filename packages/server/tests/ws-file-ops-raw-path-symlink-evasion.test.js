@@ -205,4 +205,57 @@ describe('BYOK raw-path symlink-`..` evasion (#6923)', () => {
     const resolved = await resolveTargetComponentwiseAsync(join(root, 'unrelated'), join(root, 'a/b/c.txt'))
     assert.equal(resolved, join(root, 'a/b/c.txt'))
   })
+
+  // ==========================================================================
+  // #6928 — the component split must be SEPARATOR-AGNOSTIC (`/` AND `\`). Node
+  // accepts forward slashes on Windows, so the old `target.split(path.sep)` (`\`
+  // on Windows) left a forward-slash path as ONE component: the component walk
+  // broke and fell back to a lexical `join()` that collapses `..` textually —
+  // reopening the exact symlink+`..` escape this resolver closes. These tests run
+  // on POSIX but prove the LOGIC is separator-agnostic by feeding backslash /
+  // mixed separators (which a POSIX `sep='/'` split would NOT break apart) and a
+  // rooted target whose root must never be walked as a `..`-poppable component.
+  // ==========================================================================
+  it('#6928: backslash and mixed separators resolve IDENTICALLY to the forward-slash form (and stay flagged)', async () => {
+    // The PoC 1 topology — session cwd IS the worktree; `work -> .claude/worktrees`
+    // inside it, a trailing `..` climbs back into the parent .claude (above cwd).
+    mkdirSync(join(root, '.claude/worktrees/agent-x'), { recursive: true })
+    writeFileSync(join(root, '.claude/settings.local.json'), 'ORIGINAL')
+    const cwd = join(root, '.claude/worktrees/agent-x')
+    symlinkSync(join(root, '.claude/worktrees'), join(cwd, 'work'))
+
+    const forms = [
+      'work/agent-x/../../settings.local.json',      // POSIX separators (canonical)
+      'work\\agent-x\\..\\..\\settings.local.json',  // Windows separators (all backslash)
+      'work/agent-x\\..\\..\\settings.local.json',   // mixed `/` and `\`
+    ]
+    for (const f of forms) {
+      const { valid, realPath } = await validateRawPathWithinCwd(f, cwd, cwdRealCache(), cwdCacheTtl)
+      assert.equal(realPath, join(root, '.claude/settings.local.json'), `separator-agnostic walk must reach the REAL target: ${f}`)
+      assert.equal(valid, false, `the symlink+\`..\` escape must be flagged regardless of separator: ${f}`)
+    }
+  })
+
+  it('#6928: a plain relative BACKSLASH path is walked component-by-component, not treated as one blob', async () => {
+    mkdirSync(join(root, 'real/deep'), { recursive: true })
+    // With the platform `sep='/'` split, `real\deep\file.txt` would be ONE
+    // component (a literal filename with backslashes); the fix splits it.
+    const resolved = await resolveTargetComponentwiseAsync(root, 'real\\deep\\file.txt')
+    assert.equal(resolved, join(root, 'real/deep/file.txt'))
+  })
+
+  it('#6928: a rooted target strips its root — `..` at the fs root is a no-op, the root is never walked as a component', async () => {
+    // A leading-root absolute target: the parsed root (`/`) must be stripped and
+    // never treated as a `.`/`..`-poppable component. `..` at the root stays at
+    // the root (kernel semantics), so `/../..` resolves to `/`, not underflow.
+    assert.equal(await resolveTargetComponentwiseAsync(root, '/../..'), '/')
+
+    // A Windows-style backslash path is likewise split component-wise (never one
+    // blob). On POSIX `parse` can't recognise the `C:` drive, so it walks as a
+    // relative path safely UNDER the base; on win32 `parse` strips the `C:\` root.
+    assert.equal(
+      await resolveTargetComponentwiseAsync(root, 'Windows\\System32\\drivers'),
+      join(root, 'Windows/System32/drivers'),
+    )
+  })
 })

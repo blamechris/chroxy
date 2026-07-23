@@ -352,4 +352,57 @@ describe('protected-path floor resolves symlinks (#6851)', () => {
       'an absolute existing base resolves normally and a benign target is not floored',
     )
   })
+
+  // ==========================================================================
+  // #6928 — the component split must be SEPARATOR-AGNOSTIC (`/` AND `\`). Node
+  // accepts forward slashes on Windows, so the old `target.split(path.sep)` (`\`
+  // on Windows) left a forward-slash path as ONE component: the walk broke and
+  // fell back to a lexical `join()` that collapses `..` textually — reopening the
+  // symlink+`..` evasion #6921 closed, and mis-handling Windows drive roots.
+  // These run on POSIX but prove the LOGIC is separator-agnostic by feeding
+  // backslash / mixed separators a POSIX `sep='/'` split would NOT break apart.
+  // ==========================================================================
+  it('#6928: the `work\\agent-x\\..\\..\\settings.local.json` evasion is floored regardless of `/` vs `\\` separators', () => {
+    mkdirSync(join(root, '.claude/worktrees/agent-x'), { recursive: true })
+    writeFileSync(join(root, '.claude/settings.local.json'), 'ORIGINAL')
+    symlinkSync(join(root, '.claude/worktrees'), join(root, 'work'))
+    const cwd = root // session runs at the repo root; work -> .claude/worktrees
+
+    const forms = [
+      'work/agent-x/../../settings.local.json',      // POSIX separators (canonical)
+      'work\\agent-x\\..\\..\\settings.local.json',  // Windows separators (all backslash)
+      'work/agent-x\\..\\..\\settings.local.json',   // mixed `/` and `\`
+    ]
+    for (const f of forms) {
+      assert.equal(isProtectedPathTarget({ file_path: f }, cwd), true, `write floor must flag the evasion regardless of separator: ${f}`)
+      assert.equal(isSecretReadTarget({ file_path: f }, cwd), true, `read/credential floor must flag settings.local.json regardless of separator: ${f}`)
+    }
+  })
+
+  it('#6928: a Windows-style BACKSLASH path exposes its `.git` segment to the floor (split component-wise, not one blob)', () => {
+    // A pure-backslash path with no forward slashes: the old `sep='/'` split left
+    // it as ONE segment (no `.git` visible → missed); the fix splits it so the
+    // protected `.git` segment is caught, under BOTH the write and read floors.
+    const cwd = root
+    const winPath = 'Users\\me\\repo\\.git\\config'
+    assert.equal(isProtectedPathTarget({ file_path: winPath }, cwd), true, 'the `.git` segment inside a backslash path must be floored')
+    assert.equal(isSecretReadTarget({ file_path: winPath }, cwd), true, '.git/config embeds credentials — the read floor must flag it too')
+  })
+
+  it('#6928: an ABSOLUTE (rooted) target is walked from its root without treating the root as a component — a `.git` in an absolute path is still floored', () => {
+    // The leading-root case: the parsed root (`/`) must be stripped and never
+    // walked as a `.`/`..`-poppable component; the walk resolves the REAL .git.
+    mkdirSync(join(root, 'repo/.git'), { recursive: true })
+    writeFileSync(join(root, 'repo/.git/config'), '[core]\n')
+    const cwd = join(root, 'repo')
+    const abs = join(root, 'repo/.git/config') // e.g. /tmp/.../repo/.git/config
+    assert.equal(isProtectedPathTarget({ file_path: abs }, cwd), true)
+    assert.equal(isSecretReadTarget({ file_path: abs }, cwd), true)
+  })
+
+  it('#6928: does NOT over-flag a benign relative BACKSLASH path', () => {
+    // The fix must split separators, not flag anything containing a `\`: a benign
+    // in-workspace backslash path resolves to a plain file and stays unfloored.
+    assert.equal(isProtectedPathTarget({ file_path: 'src\\lib\\util.js' }, root), false)
+  })
 })

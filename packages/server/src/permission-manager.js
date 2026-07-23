@@ -298,6 +298,19 @@ function realpathDeepestAncestorSync(absPath) {
   throw Object.assign(new Error(`realpathDeepestAncestorSync: path depth exceeds ${_FLOOR_REALPATH_MAX_DEPTH}`), { code: 'ENAMETOOLONG' })
 }
 
+// #6928 — split a raw path into the components BELOW its parsed root, separating
+// on BOTH `/` and `\` regardless of platform. Node accepts forward slashes on
+// Windows, so a platform-`sep`-only split (`\` on Windows) would leave a
+// forward-slash path as ONE component — the component walk would then break and
+// fall back to a lexical `join()`, reopening the exact `..`-after-symlink escape
+// this resolver exists to close. `root` (already parsed by the caller, which
+// starts `resolved` there) is sliced off first so a drive/UNC/`/` root is never
+// walked as an ordinary component (a Windows `C:\` would otherwise appear as a
+// `C:` component and `join` straight back onto the drive root).
+function splitPathBelowRoot(p, root) {
+  return (root ? p.slice(root.length) : p).split(/[/\\]+/)
+}
+
 /**
  * #6921 — resolve `target` against a REAL base by walking it COMPONENT BY
  * COMPONENT, mirroring the kernel's `open(2)` path traversal. This is the crux
@@ -345,10 +358,13 @@ function realpathDeepestAncestorSync(absPath) {
  * @returns {string} the open(2)-faithful resolved absolute real path
  */
 function resolveTargetComponentwiseSync(realBase, target) {
-  // Absolute target ignores the base (as `open`/`resolve` do); start at the fs
-  // root so its own leading components are walked (and symlink-resolved) too.
-  let resolved = isAbsolute(target) ? parse(target).root : realBase
-  const pending = target.split(sep)
+  // Absolute target ignores the base (as `open`/`resolve` do); start at its
+  // parsed root so its own leading components are walked (and symlink-resolved)
+  // too. A relative target (empty root) starts at the base. The root is stripped
+  // BEFORE splitting so it is never re-walked as an ordinary component (#6928).
+  const targetRoot = isAbsolute(target) ? parse(target).root : ''
+  let resolved = targetRoot || realBase
+  const pending = splitPathBelowRoot(target, targetRoot)
   let symlinks = 0
   // Once a component doesn't exist, the rest is a to-be-created tail: no deeper
   // component can be a symlink, so stop lstat-ing and apply pop/append only.
@@ -373,12 +389,13 @@ function resolveTargetComponentwiseSync(realBase, target) {
         throw Object.assign(new Error(`resolveTargetComponentwiseSync: symlink depth exceeds ${_FLOOR_MAX_SYMLINKS}`), { code: 'ELOOP' })
       }
       const link = readlinkSync(candidate)
-      // An absolute link restarts resolution from the fs root; a relative link
-      // resolves from the symlink's PARENT (`resolved`, since `comp` was not
-      // appended). Splice the link's components in at the cursor so they — and
-      // any `..` they contain — are walked next, before the remaining tail.
-      if (isAbsolute(link)) resolved = parse(link).root
-      pending.splice(i, 0, ...link.split(sep))
+      // An absolute link restarts resolution from its parsed root; a relative
+      // link resolves from the symlink's PARENT (`resolved`, since `comp` was not
+      // appended). Splice the link's components (below its root) in at the cursor
+      // so they — and any `..` they contain — are walked next, before the tail.
+      const linkRoot = isAbsolute(link) ? parse(link).root : ''
+      if (linkRoot) resolved = linkRoot
+      pending.splice(i, 0, ...splitPathBelowRoot(link, linkRoot))
     } else {
       resolved = candidate
     }
@@ -416,7 +433,11 @@ function _scanResolvedTarget(base, resolved, secretsOnly) {
   const underCwd = rel === '' ||
     (!isAbsolute(rel) && rel !== '..' && !rel.startsWith('..' + sep))
   const scanned = underCwd ? rel : resolved
-  const segments = scanned.split(sep)
+  // Split on BOTH separators (#6928): `scanned` is a native-sep resolved path
+  // here, but a separator-agnostic split keeps the segment scan robust to any
+  // foreign `\`/`/` that survives (and can never wrongly merge two segments — a
+  // filename cannot contain a separator on the platform that produced it).
+  const segments = scanned.split(/[/\\]+/)
     .filter((s) => s.length > 0 && s !== '..')
     .map((s) => s.toLowerCase())
   for (let i = 0; i < segments.length; i++) {
