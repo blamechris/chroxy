@@ -114,6 +114,11 @@ export declare const ServerSessionListEntrySchema: z.ZodObject<{
     }, z.core.$strip>>>;
     orchestrationRunId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
     orchestrationRole: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    codexSandbox: z.ZodOptional<z.ZodEnum<{
+        "read-only": "read-only";
+        "workspace-write": "workspace-write";
+        "danger-full-access": "danger-full-access";
+    }>>;
 }, z.core.$loose>;
 export declare const ServerSessionListSchema: z.ZodObject<{
     type: z.ZodLiteral<"session_list">;
@@ -159,6 +164,11 @@ export declare const ServerSessionListSchema: z.ZodObject<{
         }, z.core.$strip>>>;
         orchestrationRunId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
         orchestrationRole: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+        codexSandbox: z.ZodOptional<z.ZodEnum<{
+            "read-only": "read-only";
+            "workspace-write": "workspace-write";
+            "danger-full-access": "danger-full-access";
+        }>>;
     }, z.core.$loose>>;
 }, z.core.$strip>;
 /**

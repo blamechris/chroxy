@@ -312,4 +312,37 @@ describe('ChatSettingsDropdown', () => {
       expect(legacyTitle === null || legacyTitle === '').toBe(true)
     })
   })
+
+  // #6901 — read-only Codex sandbox badge. session_list carries `codexSandbox`
+  // only for codex sessions; the badge is display-only (a change needs a new
+  // session — Codex applies the sandbox at thread start).
+  describe('#6901 codex sandbox read-only badge', () => {
+    it('renders a read-only badge with the mode label when codexSandbox is set', () => {
+      renderDropdown({ codexSandbox: 'read-only' })
+      const badge = screen.getByTestId('codex-sandbox-badge')
+      expect(badge).toBeInTheDocument()
+      expect(badge.tagName.toLowerCase()).not.toBe('select')
+      // Label single-sourced from CODEX_SANDBOX_MODE_META ('Read-only').
+      expect(badge.textContent).toContain('Read-only')
+    })
+
+    it('surfaces the mid-session constraint in the badge tooltip', () => {
+      renderDropdown({ codexSandbox: 'workspace-write' })
+      const badge = screen.getByTestId('codex-sandbox-badge')
+      const title = badge.getAttribute('title') || ''
+      expect(title).toContain('Workspace write')
+      expect(title).toMatch(/new session/i)
+      expect(badge.getAttribute('aria-label')).toBe(title)
+    })
+
+    it('does NOT render the badge for a non-codex session (codexSandbox null)', () => {
+      renderDropdown({ codexSandbox: null })
+      expect(screen.queryByTestId('codex-sandbox-badge')).toBeNull()
+    })
+
+    it('does NOT render the badge when codexSandbox is omitted entirely', () => {
+      renderDropdown()
+      expect(screen.queryByTestId('codex-sandbox-badge')).toBeNull()
+    })
+  })
 })

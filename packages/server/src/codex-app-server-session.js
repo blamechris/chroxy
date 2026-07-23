@@ -143,6 +143,19 @@ export class CodexAppServerSession extends BaseSession {
     })
   }
 
+  /**
+   * #6901: the ACTIVE/resolved sandbox mode this thread runs under — mirrors the
+   * value passed to `thread/start` (`resolveCodexSandbox(this._codexSandbox)`,
+   * see start()). Surfaced by `SessionManager.listSessions()` as
+   * `SessionInfo.codexSandbox` so a client can DISPLAY the current sandbox for a
+   * running codex session. Display-only: changing it needs a new session (Codex
+   * applies the sandbox once at thread start).
+   * @returns {string} one of CODEX_SANDBOX_MODES
+   */
+  getCodexSandbox() {
+    return resolveCodexSandbox(this._codexSandbox)
+  }
+
   _buildChildEnv() { return buildSpawnEnv('codex') }
 
   // ------------------------------------------------------------------

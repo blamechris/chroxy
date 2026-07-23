@@ -529,6 +529,20 @@ export class CodexSession extends JsonlSubprocessSession {
     this._codexSandbox = opts.codexSandbox || null
   }
 
+  /**
+   * #6901: the ACTIVE/resolved sandbox mode this session runs under, so
+   * `SessionManager.listSessions()` can surface it in `session_list`
+   * (`SessionInfo.codexSandbox`) for a running codex session. Resolves the
+   * per-session override against `CHROXY_CODEX_SANDBOX`/the default via the same
+   * `resolveCodexSandbox` the spawn path uses — always one of
+   * `CODEX_SANDBOX_MODES`. Display-only: a mid-session change needs a new session
+   * (Codex applies `--sandbox` once at thread start).
+   * @returns {string} one of CODEX_SANDBOX_MODES
+   */
+  getCodexSandbox() {
+    return resolveCodexSandbox(this._codexSandbox)
+  }
+
   // ------------------------------------------------------------------
   // JsonlSubprocessSession overrides
   // ------------------------------------------------------------------

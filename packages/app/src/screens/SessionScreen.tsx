@@ -277,6 +277,13 @@ export function SessionScreen() {
     const id = s.activeSessionId;
     return id ? s.sessions.find((sess) => sess.sessionId === id)?.provider ?? null : null;
   });
+  // #6901 — active session's resolved Codex sandbox mode (only codex sessions
+  // carry it in session_list). Drives the read-only sandbox badge in the
+  // SettingsBar. Display-only: changing it needs a new session.
+  const activeSessionCodexSandbox = useConnectionStore((s) => {
+    const id = s.activeSessionId;
+    return id ? s.sessions.find((sess) => sess.sessionId === id)?.codexSandbox ?? null : null;
+  });
   // #5731 — gate the SettingsBar model/permission chips on the active provider's
   // capabilities, mirroring the dashboard's dropdownFlags. Default to supported
   // (true) unless the provider explicitly reports the capability as false, so a
@@ -1386,6 +1393,7 @@ export function SessionScreen() {
           provider={activeSessionProvider}
           modelSwitchSupported={providerCaps.modelSwitchSupported}
           permissionModeSwitchSupported={providerCaps.permissionModeSwitchSupported}
+          codexSandbox={activeSessionCodexSandbox}
         />
       )}
 

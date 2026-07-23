@@ -11,6 +11,10 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { ModelInfo } from '../store/types'
 import type { PermissionMode } from '@chroxy/store-core'
+// #6901: single-source the sandbox label/description from protocol's
+// CODEX_SANDBOX_MODE_META so the read-only badge below never re-declares the
+// copy (same list the create-time selector uses).
+import { CODEX_SANDBOX_MODE_META, type CodexSandboxMode } from '@chroxy/protocol'
 import { ModelPickerModal } from './ModelPickerModal'
 
 /**
@@ -67,6 +71,12 @@ export interface ChatSettingsDropdownProps {
   // a permission-mode switch (e.g. Codex). Default true keeps Claude behavior
   // unchanged. #3835.
   showPermissionMode?: boolean
+  // #6901: the active/resolved Codex sandbox mode for a running codex session
+  // (from session_list — only codex sessions carry it). When set, a READ-ONLY
+  // badge renders showing the current sandbox. Codex applies the sandbox once at
+  // thread start, so this is display-only — changing it needs a new session.
+  // `null`/`undefined` (every non-codex session) renders nothing.
+  codexSandbox?: CodexSandboxMode | null
   showThinkingLevel: boolean
   thinkingLevel: string | null
   onThinkingLevelChange: (level: string) => void
@@ -86,6 +96,7 @@ export function ChatSettingsDropdown({
   permissionMode,
   onPermissionModeChange,
   showPermissionMode = true,
+  codexSandbox = null,
   showThinkingLevel,
   thinkingLevel,
   onThinkingLevelChange,
@@ -209,6 +220,28 @@ export function ChatSettingsDropdown({
           ))}
         </select>
       )}
+
+      {/* #6901: read-only Codex sandbox badge. Codex applies the sandbox once at
+          thread start, so it can't be switched mid-session — a change needs a new
+          session (docs/design/codex-permission-model.md §5). Present only for
+          codex sessions (session_list carries `codexSandbox` for no other
+          provider). Label/description single-sourced from CODEX_SANDBOX_MODE_META. */}
+      {codexSandbox && (() => {
+        const meta = CODEX_SANDBOX_MODE_META.find(m => m.id === codexSandbox)
+        const title = `Codex sandbox: ${meta?.label ?? codexSandbox}. ${meta?.description ?? ''} Changing the sandbox requires a new session — Codex applies it at thread start.`
+        return (
+          <span
+            data-testid="codex-sandbox-badge"
+            data-kind="codex-sandbox"
+            className="chat-settings-readonly-badge"
+            title={title.trim()}
+            aria-label={title.trim()}
+            role="status"
+          >
+            {`Sandbox: ${meta?.label ?? codexSandbox}`}
+          </span>
+        )
+      })()}
 
       {/* Thinking Level */}
       {showThinkingLevel && (

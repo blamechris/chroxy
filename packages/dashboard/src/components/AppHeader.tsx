@@ -44,6 +44,8 @@ export interface AppHeaderProps {
   permissionMode: ComponentProps<typeof ChatSettingsDropdown>['permissionMode']
   onPermissionModeChange: ComponentProps<typeof ChatSettingsDropdown>['onPermissionModeChange']
   showPermissionMode: boolean
+  // #6901: active codex session's resolved sandbox mode (read-only badge).
+  codexSandbox: ComponentProps<typeof ChatSettingsDropdown>['codexSandbox']
   showThinkingLevel: boolean
   thinkingLevel: ComponentProps<typeof ChatSettingsDropdown>['thinkingLevel']
   onThinkingLevelChange: (level: string) => void
@@ -176,6 +178,7 @@ export function AppHeader(props: AppHeaderProps) {
           permissionMode={props.permissionMode}
           onPermissionModeChange={props.onPermissionModeChange}
           showPermissionMode={props.showPermissionMode}
+          codexSandbox={props.codexSandbox}
           showThinkingLevel={props.showThinkingLevel}
           thinkingLevel={props.thinkingLevel}
           onThinkingLevelChange={level => props.onThinkingLevelChange(level as 'default' | 'high' | 'max')}
