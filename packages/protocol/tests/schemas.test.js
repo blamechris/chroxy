@@ -35,6 +35,32 @@ describe('@chroxy/protocol schemas', () => {
     assert.ok(!result.success, 'Should reject data over 100k chars')
   })
 
+  // #6543 / #6773 — permission_response carries an optional editedInput (per-hunk /
+  // command edit) and an optional free-text deny reason.
+  it('validates permission_response with editedInput and reason (#6773)', async () => {
+    const { PermissionResponseSchema } = await import('../src/schemas/client.ts')
+    const bare = PermissionResponseSchema.safeParse({ type: 'permission_response', requestId: 'r1', decision: 'deny' })
+    assert.ok(bare.success, 'bare allow/deny should validate (both fields optional)')
+
+    const withReason = PermissionResponseSchema.safeParse({
+      type: 'permission_response', requestId: 'r1', decision: 'deny', reason: 'run it read-only instead',
+    })
+    assert.ok(withReason.success, 'deny with a reason should validate')
+
+    const withEdit = PermissionResponseSchema.safeParse({
+      type: 'permission_response', requestId: 'r1', decision: 'allow', editedInput: { command: 'ls -la' },
+    })
+    assert.ok(withEdit.success, 'allow with an edited command should validate')
+  })
+
+  it('rejects a permission_response reason over the wire cap (#6773)', async () => {
+    const { PermissionResponseSchema } = await import('../src/schemas/client.ts')
+    const result = PermissionResponseSchema.safeParse({
+      type: 'permission_response', requestId: 'r1', decision: 'deny', reason: 'x'.repeat(2001),
+    })
+    assert.ok(!result.success, 'reason over 2000 chars must be rejected')
+  })
+
   // Swarm-audit (W2): bound the client auth collections so an adversarial auth
   // can't DoS the server (capabilities is `new Set()`-iterated server-side).
   it('degrades an oversized / over-long capabilities array to [] (no DoS, no reject)', async () => {

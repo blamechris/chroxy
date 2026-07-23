@@ -21,6 +21,11 @@ type MockStore = {
   sessions: { sessionId: string; provider?: string }[]
   availableProviders: { name: string; capabilities?: { sessionRules?: boolean } }[]
   connectionPhase: string
+  // #6773 — the command-edit + write-review affordances read these; default
+  // undefined (ide off) so existing tests render neither and stay unchanged.
+  serverCapabilities?: { ide?: boolean }
+  permissionInputs?: Record<string, { found: boolean; input?: Record<string, unknown> }>
+  requestPermissionInput?: (requestId: string) => void
 }
 const DEFAULT_MOCK_STORE: MockStore = {
   resolvedPermissions: {},
@@ -926,5 +931,80 @@ describe('PermissionPrompt — keyboard shortcut hints (#2840)', () => {
     act(() => { vi.advanceTimersByTime(3000) })
     expect(screen.queryByTestId('perm-shortcut-hints')).not.toBeInTheDocument()
     vi.useRealTimers()
+  })
+})
+
+// #6773 — free-text deny reason + editable Bash command before approve.
+describe('PermissionPrompt — deny reason + command edit (#6773)', () => {
+  it('renders an optional deny-reason field while the prompt is actionable', () => {
+    render(
+      <PermissionPrompt requestId="req-1" tool="Bash" description="ls" remainingMs={2000} onRespond={vi.fn()} />
+    )
+    expect(screen.getByTestId('perm-deny-reason')).toBeInTheDocument()
+  })
+
+  it('Deny with a typed reason threads the trimmed reason to onRespond', () => {
+    const onRespond = vi.fn()
+    render(
+      <PermissionPrompt requestId="req-1" tool="Bash" description="ls" remainingMs={2000} onRespond={onRespond} />
+    )
+    fireEvent.change(screen.getByTestId('perm-deny-reason'), { target: { value: '  run it read-only  ' } })
+    fireEvent.click(screen.getByText('Deny'))
+    expect(onRespond).toHaveBeenCalledWith('req-1', 'deny', null, 'run it read-only')
+  })
+
+  it('Deny with a blank reason omits the reason (server falls back to default)', () => {
+    const onRespond = vi.fn()
+    render(
+      <PermissionPrompt requestId="req-1" tool="Bash" description="ls" remainingMs={2000} onRespond={onRespond} />
+    )
+    fireEvent.change(screen.getByTestId('perm-deny-reason'), { target: { value: '   ' } })
+    fireEvent.click(screen.getByText('Deny'))
+    expect(onRespond).toHaveBeenCalledWith('req-1', 'deny', null)
+  })
+
+  it('Allow never carries a deny reason even when text is present', () => {
+    const onRespond = vi.fn()
+    render(
+      <PermissionPrompt requestId="req-1" tool="Bash" description="ls" remainingMs={2000} onRespond={onRespond} />
+    )
+    fireEvent.change(screen.getByTestId('perm-deny-reason'), { target: { value: 'nope' } })
+    fireEvent.click(screen.getByText('Allow'))
+    expect(onRespond).toHaveBeenCalledWith('req-1', 'allow', null)
+  })
+
+  it('does NOT show the Bash command editor when features.ide is off', () => {
+    render(
+      <PermissionPrompt requestId="req-1" tool="Bash" description="ls" remainingMs={2000} onRespond={vi.fn()} />
+    )
+    expect(screen.queryByTestId('perm-command-edit')).not.toBeInTheDocument()
+  })
+
+  it('shows the Bash command editor (features.ide on) and sends an edited command on Allow', () => {
+    mockStoreState.serverCapabilities = { ide: true }
+    mockStoreState.requestPermissionInput = vi.fn()
+    mockStoreState.permissionInputs = { 'req-1': { found: true, input: { command: 'ls' } } }
+    const onRespond = vi.fn()
+    render(
+      <PermissionPrompt requestId="req-1" tool="Bash" description="ls" remainingMs={2000} onRespond={onRespond} />
+    )
+    const editor = screen.getByTestId('perm-command-input')
+    expect(editor).toBeInTheDocument()
+    fireEvent.change(editor, { target: { value: 'ls -la' } })
+    expect(screen.getByTestId('perm-command-edited-hint')).toBeInTheDocument()
+    fireEvent.click(screen.getByText('Allow'))
+    expect(onRespond).toHaveBeenCalledWith('req-1', 'allow', { command: 'ls -la' })
+  })
+
+  it('an untouched Bash command sends a plain Allow (no editedInput)', () => {
+    mockStoreState.serverCapabilities = { ide: true }
+    mockStoreState.requestPermissionInput = vi.fn()
+    mockStoreState.permissionInputs = { 'req-1': { found: true, input: { command: 'ls' } } }
+    const onRespond = vi.fn()
+    render(
+      <PermissionPrompt requestId="req-1" tool="Bash" description="ls" remainingMs={2000} onRespond={onRespond} />
+    )
+    fireEvent.click(screen.getByText('Allow'))
+    expect(onRespond).toHaveBeenCalledWith('req-1', 'allow', null)
   })
 })

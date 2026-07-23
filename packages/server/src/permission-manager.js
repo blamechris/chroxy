@@ -74,8 +74,10 @@ const SECRET_FILE_EXTENSIONS = ['.pem', '.key', '.p12', '.pfx']
 // makes a tool "path-carrying" for the floor (Write/Edit → file_path,
 // NotebookEdit → notebook_path, Read/Glob/Grep → file_path/path). A tool with
 // none of these (Bash, Task, WebFetch, WebSearch) cannot be floored here —
-// command-shaped access is out of scope for a path floor.
-const PROTECTED_PATH_INPUT_FIELDS = ['file_path', 'path', 'notebook_path']
+// command-shaped access is out of scope for a path floor. Exported (#6773) so
+// the editedInput whitelist guard test can assert no editable field is ever a
+// path field (a path-redirect would let an edit slip past the protected floor).
+export const PROTECTED_PATH_INPUT_FIELDS = ['file_path', 'path', 'notebook_path']
 
 // #6803 — tools whose floor is SECRETS-ONLY (non-mutating reads). handlePermission
 // routes these through isSecretReadTarget (env files + key material) instead of
@@ -145,19 +147,42 @@ const MAX_SESSION_RULES = 100         // session-scoped auto-allow rules
 const MAX_RAW_DESCRIPTION_LEN = 8192  // raw tool field length fed to redactValue (far above the 200-char shown window)
 
 /**
- * #6543 (IDE P3 feature B) — per-tool whitelist of the CONTENT field(s) a client
- * may substitute via `editedInput` on an `allow` (the per-hunk pre-write review).
- * ONLY these content fields can come from the client; the path/anchor fields
- * (`file_path`, `old_string`, `command`, …) are always taken from the ORIGINAL
- * input. So an operator can narrow/edit the shown content but can NEVER redirect
- * where the write lands or what runs. A tool absent from this map ignores
- * `editedInput` entirely (accept/reject-the-whole-tool). `old_string` is
- * deliberately NOT editable — it is the Edit's match anchor, not shown content.
+ * #6543 (IDE P3 feature B) / #6773 — per-tool whitelist of the field(s) a client
+ * may substitute via `editedInput` on an `allow` (the pre-approve review/edit).
+ * ONLY these fields can come from the client; the path/anchor fields
+ * (`file_path`, `old_string`, …) are always taken from the ORIGINAL input, so an
+ * operator can narrow/edit the shown content or the command but can NEVER
+ * redirect where a write lands. A tool absent from this map ignores `editedInput`
+ * entirely (accept/reject-the-whole-tool). `old_string` is deliberately NOT
+ * editable — it is the Edit's match anchor, not shown content.
+ *
+ * #6773 — `Bash: ['command']` makes the shell command text editable before
+ * approve. For Bash the WHOLE command IS the reviewed content (there is no
+ * separate path field to redirect), and Bash carries none of
+ * {@link PROTECTED_PATH_INPUT_FIELDS}, so the protected-path floor never applied
+ * to it — editing `command` therefore cannot "edit around" the floor (the floor
+ * only ever guards a path-carrying tool's path fields, and no path field is ever
+ * whitelisted here — asserted by the editedInput-whitelist guard test). The
+ * merged command still flows to the SDK/BYOK tool executor as `updatedInput`,
+ * which runs the operator-approved text.
+ *
+ * Codex's `shell` is deliberately ABSENT: the codex app-server owns and runs its
+ * own already-parsed command and ignores `updatedInput` (see
+ * codex-app-server-session.js `_routeApproval`, which reads only allow/deny), so
+ * a `shell` edit would silently not take effect — surfacing an editable field
+ * there would mislead the operator. Deferred to a codex follow-up.
  */
-const EDITABLE_INPUT_FIELDS = {
+export const EDITABLE_INPUT_FIELDS = {
   Write: ['content'],
   Edit: ['new_string'],
+  Bash: ['command'],
 }
+
+// #6773 — hard cap on the operator-supplied DENY REASON before it becomes the
+// agent-facing tool-result message. Far above any reasonable one-liner; it only
+// bites a pathological paste. The wire schema (PermissionResponseSchema) caps at
+// the same ceiling — this is the server-authoritative re-cap.
+const MAX_DENY_REASON_LEN = 2000
 
 /**
  * Merge a client's `editedInput` into the agent's original tool input under the
@@ -184,6 +209,27 @@ export function mergeEditedInput(originalInput, editedInput, toolName) {
     }
   }
   return merged
+}
+
+/**
+ * #6773 — build the agent-facing DENY message from an optional operator reason.
+ * A deny used to always resolve as the fixed `'User denied'` string, so nothing
+ * the operator typed reached the agent. When a non-empty reason is supplied it
+ * REPLACES that string (verbatim, so the model reads the operator's intent as
+ * the refusal reason and can adjust its next attempt — desktop-app "tell Claude
+ * what to do differently" parity). Bounded ({@link MAX_DENY_REASON_LEN}) and
+ * redacted (same {@link redactValue} pass every other freeform field entering
+ * the broadcast/agent stream gets, so an operator can't accidentally leak a
+ * secret into the streamed tool result). Falls back to `'User denied'` for a
+ * missing / non-string / blank reason.
+ * @param {*} reason  the operator-supplied deny reason (untrusted)
+ * @returns {string}
+ */
+export function buildDenyMessage(reason) {
+  if (typeof reason !== 'string') return 'User denied'
+  const trimmed = reason.trim()
+  if (trimmed.length === 0) return 'User denied'
+  return redactValue(trimmed.slice(0, MAX_DENY_REASON_LEN))
 }
 
 /**
@@ -956,10 +1002,14 @@ export class PermissionManager extends EventEmitter {
    *
    * @param {string} requestId - The permission request ID
    * @param {string} decision - 'allow', 'deny', or 'allowAlways'
+   * @param {*} [editedInput] - #6543/#6773 client edits merged under the
+   *   {@link EDITABLE_INPUT_FIELDS} whitelist on an approve (ignored on deny).
+   * @param {string} [reason] - #6773 operator-supplied free-text deny reason;
+   *   used only on a `deny` to replace the fixed 'User denied' agent message.
    * @returns {boolean} true if a pending permission was found and resolved,
    *   false if the requestId was unknown (already resolved or expired).
    */
-  respondToPermission(requestId, decision, editedInput) {
+  respondToPermission(requestId, decision, editedInput, reason) {
     const pending = this._pendingPermissions.get(requestId)
     if (!pending) {
       this._logWarn(`No pending permission for ${requestId}`)
@@ -1027,7 +1077,9 @@ export class PermissionManager extends EventEmitter {
       }
       pending.resolve(result)
     } else {
-      pending.resolve({ behavior: 'deny', message: 'User denied' })
+      // #6773 — carry the operator's free-text reason (bounded + redacted) back
+      // to the agent as the denial message, instead of the fixed 'User denied'.
+      pending.resolve({ behavior: 'deny', message: buildDenyMessage(reason) })
     }
     return true
   }

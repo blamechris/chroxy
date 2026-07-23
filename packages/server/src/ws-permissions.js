@@ -430,7 +430,10 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
       // entries (clientId=null) in forensic queries. HTTP passes NO dispatch
       // fallback — it has no per-connection activeSessionId, so the dispatch
       // session is the raw mapping only (unchanged from the prior inline code).
-      const result = permissionResolver.resolve(requestId, decision, callerBoundSessionId, { clientId: 'http' })
+      // #6773: forward an optional free-text deny reason (the WS path's msg.reason
+      // analog) so an HTTP caller can also steer a denial. buildDenyMessage bounds
+      // + redacts it and ignores it on a non-deny; a missing field is a no-op.
+      const result = permissionResolver.resolve(requestId, decision, callerBoundSessionId, { clientId: 'http', reason: parsed.reason })
       switch (result.kind) {
         case 'binding_mismatch': {
           // For a bound caller the requestId MUST be explicitly mapped to that

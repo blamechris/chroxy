@@ -3998,6 +3998,57 @@ button.sidebar-token-view-session-row:hover {
   color: var(--accent-orange);
 }
 
+/* #6773: editable Bash command before Approve. Mirrors the prewrite review's
+ * bordered card; the textarea is monospace so a shell command reads clearly. */
+.perm-command-edit {
+  margin: 8px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.perm-command-edit-label {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.perm-command-edit-input {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  padding: 6px 8px;
+  font-family: var(--font-mono, monospace);
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-primary);
+  border-radius: 6px;
+}
+
+.perm-command-edit-hint {
+  font-size: var(--text-sm);
+  color: var(--accent-orange);
+}
+
+/* #6773: optional free-text deny reason fed back to the agent on Deny. */
+.perm-deny-reason {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  margin: 8px 0 4px;
+  padding: 6px 8px;
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-primary);
+  border-radius: 6px;
+}
+
+.perm-deny-reason:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .perm-buttons {
   display: flex;
   gap: 8px;

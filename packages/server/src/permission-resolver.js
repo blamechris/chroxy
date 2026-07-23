@@ -93,14 +93,17 @@ export function createPermissionResolver({
    * @param {string} requestId
    * @param {string} decision
    * @param {string|null} callerBoundSessionId  token-bound id (HTTP) / client.boundSessionId (WS); null/undefined = unbound
-   * @param {{ clientId?: string|null, dispatchFallbackSessionId?: string|null }} [opts]
+   * @param {{ clientId?: string|null, dispatchFallbackSessionId?: string|null, editedInput?: any, reason?: string }} [opts]
    *   `dispatchFallbackSessionId` is the WS-only legacy "map wasn't populated"
    *   fallback (client.activeSessionId). It is used ONLY to pick the dispatch
    *   session — NEVER for the binding check (invariant B). HTTP passes nothing.
+   *   `editedInput` (#6543) and `reason` (#6773) flow only to the in-process
+   *   (SDK/BYOK) respondToPermission — the legacy pendingPermissions path ignores
+   *   both (the CLI tool executes / denies with its own fixed message).
    * @returns {{ kind: string, [k: string]: any }} ResolveResult
    */
   function resolve(requestId, decision, callerBoundSessionId, opts = {}) {
-    const { clientId = null, dispatchFallbackSessionId = null, editedInput = undefined } = opts
+    const { clientId = null, dispatchFallbackSessionId = null, editedInput = undefined, reason = undefined } = opts
 
     // Invariant B (#2806 residual): the binding check reads the RAW map entry —
     // never an activeSessionId fallback. For a bound caller the request MUST be
@@ -137,7 +140,9 @@ export function createPermissionResolver({
         const toolName = entry.session._lastPermissionData?.get(requestId)?.tool
         // #6543 (feature B): editedInput flows ONLY to the in-process (SDK/BYOK)
         // path — the legacy HTTP path below ignores it (CLI tool executes as-is).
-        const resolved = entry.session.respondToPermission(requestId, decision, editedInput)
+        // #6773: a deny `reason` rides the same in-process path and becomes the
+        // agent-facing denial message (permission-manager.js buildDenyMessage).
+        const resolved = entry.session.respondToPermission(requestId, decision, editedInput, reason)
         consumeRoute(requestId)
         if (resolved) {
           const extra = {}

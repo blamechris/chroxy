@@ -493,7 +493,7 @@ describe('handleSessionMessage', () => {
         decision: 'allow',
       }, ctx)
       assert.equal(entry.session.respondToPermission.callCount, 1)
-      assert.deepStrictEqual(entry.session.respondToPermission.lastCall, ['req-broadcast', 'allow', undefined]) // #6543: editedInput 3rd arg (absent here)
+      assert.deepStrictEqual(entry.session.respondToPermission.lastCall, ['req-broadcast', 'allow', undefined, undefined]) // #6543 editedInput 3rd arg + #6773 reason 4th arg (both absent here)
       assert.equal(ctx.transport.broadcast.mock.calls.length, 0,
         'SDK path must NOT broadcast inline — the unified pipeline handles it (#3048)')
     })

@@ -1486,7 +1486,7 @@ export interface ConnectionState {
    * payload, or rejects on disconnect / 60s timeout. Errors from the server
    * arrive as the `error` field on the resolved value, not as a Promise reject. */
   evaluateDraft: (draft: string) => Promise<EvaluatorResultPayload>;
-  sendPermissionResponse: (requestId: string, decision: PermissionDecision, editedInput?: Record<string, string> | null) => 'sent' | 'queued' | false;
+  sendPermissionResponse: (requestId: string, decision: PermissionDecision, editedInput?: Record<string, string> | null, reason?: string) => 'sent' | 'queued' | false;
   /** Mark a permission request as resolved in the store (separate from the
    * wire-level response). Used by PermissionPrompt to render its answered
    * state across remounts (#2833). Safe to call for an already-resolved

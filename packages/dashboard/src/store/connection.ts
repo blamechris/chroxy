@@ -3203,7 +3203,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     });
   },
 
-  sendPermissionResponse: (requestId: string, decision: PermissionDecision, editedInput?: Record<string, string> | null) => {
+  sendPermissionResponse: (requestId: string, decision: PermissionDecision, editedInput?: Record<string, string> | null, reason?: string) => {
     const { socket } = get();
     // #5699 — refuse to answer a permission prompt while disconnected. A
     // permission request is NOT safely queueable: the server expires the pending
@@ -3225,14 +3225,18 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // per-project rule (permission-manager.js), no follow-up needed. (The schema
     // accepts 'allow' | 'allowAlways' | 'deny'.)
     const wireDecision = decision === 'allowSession' ? 'allow' : decision;
-    // #6543 (feature B): the operator's per-hunk edits ride along on an approve.
-    // Only sent when present (a plain Allow omits it); the server whitelists
-    // which fields it can substitute (permission-manager.js mergeEditedInput).
+    // #6543 (feature B): the operator's per-hunk / command edits ride along on an
+    // approve. Only sent when present (a plain Allow omits it); the server
+    // whitelists which fields it can substitute (permission-manager.js
+    // mergeEditedInput).
+    // #6773: a free-text deny reason rides along on a deny only — the server
+    // bounds + redacts it and feeds it back to the agent as the denial message.
     const payload = {
       type: 'permission_response',
       requestId,
       decision: wireDecision,
       ...(editedInput && Object.keys(editedInput).length > 0 && wireDecision !== 'deny' ? { editedInput } : {}),
+      ...(wireDecision === 'deny' && typeof reason === 'string' && reason.trim().length > 0 ? { reason: reason.trim() } : {}),
     };
     // #6308: the socket can flip OPEN → CLOSING before this synchronous send (wsSend
     // → false). Bail BEFORE markPermissionResolved/markPromptAnswered — otherwise the
