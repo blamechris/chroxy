@@ -732,6 +732,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   _gitBranchesCallback: null,
   _gitStageCallback: null,
   _gitCommitCallback: null,
+  _gitCreatePrCallback: null,
   _diffCallback: null,
   conversationHistory: [],
   conversationHistoryLoading: false,
@@ -4109,6 +4110,26 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
       return wsSend(socket, { type: 'git_commit', message });
+    }
+    return false;
+  },
+
+  // #6876 — in-app PR creation. The server pushes the current branch (if needed)
+  // and shells out to `gh pr create`, replying with git_create_pr_result. Same
+  // not-connected guard as stage/commit so GitPanel can surface an error instead
+  // of leaving a spinner stuck.
+  setGitCreatePrCallback: (cb) => {
+    set({ _gitCreatePrCallback: cb });
+  },
+
+  requestGitCreatePr: (params) => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      const msg: Record<string, unknown> = { type: 'git_create_pr', title: params.title };
+      if (params.body) msg.body = params.body;
+      if (params.base) msg.base = params.base;
+      if (params.draft) msg.draft = params.draft;
+      return wsSend(socket, msg);
     }
     return false;
   },

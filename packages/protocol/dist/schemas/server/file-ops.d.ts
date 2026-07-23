@@ -94,6 +94,14 @@ export declare const ServerDirectoryListingSchema: z.ZodObject<{
     }, z.core.$strip>>;
     error: z.ZodNullable<z.ZodString>;
 }, z.core.$strip>;
+export declare const ServerGitCreatePrResultSchema: z.ZodObject<{
+    type: z.ZodLiteral<"git_create_pr_result">;
+    url: z.ZodNullable<z.ZodString>;
+    number: z.ZodNullable<z.ZodNumber>;
+    branch: z.ZodNullable<z.ZodString>;
+    base: z.ZodNullable<z.ZodString>;
+    error: z.ZodNullable<z.ZodString>;
+}, z.core.$strip>;
 export declare const ServerWriteFileResultSchema: z.ZodObject<{
     type: z.ZodLiteral<"write_file_result">;
     path: z.ZodNullable<z.ZodString>;

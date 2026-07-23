@@ -47,6 +47,7 @@ export {
   GitStageSchema,
   GitUnstageSchema,
   GitCommitSchema,
+  GitCreatePrSchema,
   ResumeBudgetSchema,
   ListCheckpointsSchema,
   RestoreCheckpointSchema,

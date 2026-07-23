@@ -9588,6 +9588,96 @@ button.sidebar-token-view-session-row:hover {
 
 .git-commit-btn:disabled { opacity: 0.5; cursor: default; }
 
+/* #6876 — in-app PR creation form. */
+.git-create-pr-btn {
+  background: var(--accent-blue);
+  color: var(--text-on-accent, #fff);
+  border-color: var(--accent-blue);
+}
+
+.git-pr-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border-bottom: 1px solid var(--border-primary);
+  background: var(--bg-secondary);
+}
+
+.git-pr-form-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.git-pr-form-title {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.git-pr-form-branchline {
+  font-size: 12px;
+  font-family: var(--font-mono, monospace);
+  color: var(--text-secondary);
+}
+
+.git-pr-input {
+  width: 100%;
+  padding: 8px 10px;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  border: 1px solid var(--border-primary);
+  border-radius: 6px;
+  font-size: 14px;
+  font-family: inherit;
+  line-height: 1.4;
+  box-sizing: border-box;
+}
+
+.git-pr-input:focus {
+  outline: none;
+  border-color: var(--accent-blue);
+}
+
+.git-pr-body {
+  min-height: 72px;
+  resize: vertical;
+}
+
+.git-pr-draft {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.git-pr-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.git-pr-submit {
+  background: var(--accent-blue);
+}
+
+.git-pr-success {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.git-pr-success a {
+  color: var(--accent-blue);
+  word-break: break-all;
+}
+
 .git-branch-row {
   display: flex;
   align-items: center;
