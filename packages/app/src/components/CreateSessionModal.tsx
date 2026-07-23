@@ -21,6 +21,7 @@ import {
   CODEX_PROVIDER,
   CODEX_DEFAULT_SANDBOX,
   CODEX_SANDBOX_MODE_META,
+  type CodexSandboxMode,
 } from '@chroxy/protocol';
 
 const PROVIDERS_TIMEOUT_MS = 5000;
@@ -40,7 +41,7 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
   const [provider, setProvider] = useState('');
   // #6689 — per-session Codex sandbox mode; defaults to workspace-write and is
   // only surfaced/forwarded for the codex provider.
-  const [codexSandbox, setCodexSandbox] = useState<string>(CODEX_DEFAULT_SANDBOX);
+  const [codexSandbox, setCodexSandbox] = useState<CodexSandboxMode>(CODEX_DEFAULT_SANDBOX);
   const createSession = useConnectionStore((s) => s.createSession);
   const sessions = useConnectionStore((s) => s.sessions);
   const availableProviders = useConnectionStore((s) => s.availableProviders);

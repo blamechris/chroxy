@@ -13,8 +13,8 @@ import { useConnectionStore } from '../store/connection'
 import { buildProviderLimitationNote } from '@chroxy/store-core'
 import {
   CODEX_PROVIDER,
-  CODEX_DEFAULT_SANDBOX,
   CODEX_SANDBOX_MODE_META,
+  type CodexSandboxMode,
 } from '@chroxy/protocol'
 import type { DirectoryListing, DirectoryEntry, ModelInfo } from '../store/types'
 import { PROVIDER_LABELS } from '../lib/provider-labels'
@@ -27,10 +27,12 @@ export interface CreateSessionData {
   model?: string
   worktree?: boolean
   environmentId?: string
-  // #6689: per-session Codex sandbox mode ('read-only' | 'workspace-write' |
-  // 'danger-full-access'). Only set when the selected provider is `codex`;
-  // undefined for all other providers (the server ignores it anyway).
-  codexSandbox?: string
+  // #6689/#6903: per-session Codex sandbox mode. `undefined` means "use the
+  // daemon's configured sandbox" (CHROXY_CODEX_SANDBOX, else workspace-write) —
+  // the picker's "Default" option. Only set when the selected provider is
+  // `codex`; undefined for all other providers (the server ignores it anyway).
+  // Narrowed to the wire enum so an invalid value can't compile (Copilot #6900).
+  codexSandbox?: CodexSandboxMode
   // #4208: spawn the claude TUI with --dangerously-skip-permissions and
   // elide chroxy's permission hook entirely. Only the `claude-tui`
   // provider honours this — the checkbox is hidden for other providers
@@ -210,9 +212,11 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [permissionMode, setPermissionMode] = useState('')
   const [worktree, setWorktree] = useState(false)
-  // #6689: per-session Codex sandbox mode. Defaults to workspace-write (the
-  // server default) and is only surfaced/forwarded for the `codex` provider.
-  const [codexSandbox, setCodexSandbox] = useState<string>(CODEX_DEFAULT_SANDBOX)
+  // #6689/#6903: per-session Codex sandbox mode. '' is the "Default" option — it
+  // forwards no `codexSandbox`, so the daemon's CHROXY_CODEX_SANDBOX floor (else
+  // workspace-write) is honored, matching the mobile app's Default-provider omit
+  // path. Only surfaced/forwarded for the `codex` provider.
+  const [codexSandbox, setCodexSandbox] = useState<'' | CodexSandboxMode>('')
   // #4208/#4244: TUI-only opt-in to spawn claude with
   // --dangerously-skip-permissions. Tri-state (#4244) so the modal can
   // submit an explicit `false` and override a server-wide
@@ -306,7 +310,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
     setShowAdvanced(false)
     setPermissionMode('')
     setWorktree(false)
-    setCodexSandbox(CODEX_DEFAULT_SANDBOX)
+    setCodexSandbox('')
     setSkipPermissions('inherit')
     setShowSuggestions(false)
     setSelectedSuggestion(-1)
@@ -346,7 +350,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
     // #6689: reset the codex sandbox to the default on every provider change so
     // a stale (e.g. danger-full-access) selection can't survive a provider
     // round-trip and silently apply to a fresh codex session.
-    setCodexSandbox(CODEX_DEFAULT_SANDBOX)
+    setCodexSandbox('')
   }, [provider])
 
   // #4340: gate the Create button on the selected provider being ready.
@@ -382,9 +386,12 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
     const skipPermissionsOut: boolean | undefined = provider === 'claude-tui'
       ? (skipPermissions === 'on' ? true : skipPermissions === 'off' ? false : undefined)
       : undefined
-    // #6689: only forward the sandbox mode for codex — other providers ignore
-    // it, and sending it would pointlessly clutter the wire message.
-    const codexSandboxOut: string | undefined = provider === CODEX_PROVIDER ? codexSandbox : undefined
+    // #6689/#6903: only forward the sandbox mode for codex, and only when the
+    // user explicitly picked one — '' is the "Default" option → omit so the
+    // daemon's CHROXY_CODEX_SANDBOX floor (else workspace-write) is honored
+    // instead of being silently overridden. Other providers never forward it.
+    const codexSandboxOut: CodexSandboxMode | undefined =
+      provider === CODEX_PROVIDER && codexSandbox ? codexSandbox : undefined
     onCreate({ name: trimmed, cwd: cwdValRef.current.trim(), provider, permissionMode: permissionMode || undefined, model, worktree: worktree || undefined, environmentId: environmentId || undefined, skipPermissions: skipPermissionsOut, codexSandbox: codexSandboxOut })
   }, [onCreate, provider, permissionMode, defaultModel, availableModels, availableModelsProvider, worktree, environmentId, skipPermissions, codexSandbox, selectedProviderUnready])
 
@@ -921,17 +928,23 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
                 id="codex-sandbox-select"
                 data-testid="codex-sandbox-select"
                 value={codexSandbox}
-                onChange={e => setCodexSandbox(e.target.value)}
+                onChange={e => setCodexSandbox(e.target.value as '' | CodexSandboxMode)}
                 aria-label="Codex sandbox mode"
                 aria-describedby="codex-sandbox-hint"
               >
+                {/* #6903: "Default" forwards no codexSandbox, so the daemon's
+                    CHROXY_CODEX_SANDBOX floor (else workspace-write) is honored
+                    — matching the mobile app's Default-provider omit path. */}
+                <option value="">Default</option>
                 {CODEX_SANDBOX_MODE_META.map((m) => (
                   <option key={m.id} value={m.id}>{m.label}</option>
                 ))}
               </select>
               <span id="codex-sandbox-hint" className="form-hint">
-                {CODEX_SANDBOX_MODE_META.find((m) => m.id === codexSandbox)?.description
-                  ?? 'Controls how much of the filesystem the Codex sandbox may write.'}
+                {codexSandbox === ''
+                  ? "Use the daemon's configured sandbox (CHROXY_CODEX_SANDBOX, else workspace-write)."
+                  : CODEX_SANDBOX_MODE_META.find((m) => m.id === codexSandbox)?.description
+                    ?? 'Controls how much of the filesystem the Codex sandbox may write.'}
               </span>
             </div>
           )}
