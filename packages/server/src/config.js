@@ -18,6 +18,9 @@ import { createLogger } from './logger.js'
 // deliberately a dependency-free module so importing it here never pulls
 // the BYOK/SDK machinery into the config-load path.
 import { validateProvidersConfigBlock } from './anthropic-compatible-config.js'
+// #6764: default cheap model for the one-shot semantic-title call. Imported from
+// the pure title module (no provider/SDK deps) so config load stays lightweight.
+import { DEFAULT_SEMANTIC_TITLE_MODEL } from './session-title.js'
 
 const log = createLogger('config')
 
@@ -688,6 +691,38 @@ export function isIdeFeatureEnabled(config) {
 export function isOrchestrationEnabled(config) {
   if (process.env.CHROXY_ENABLE_ORCHESTRATION === '1') return true
   return config?.features?.orchestration === true
+}
+
+// #6764 — opt-in semantic session titles. When on, the first user turn's sidebar
+// label is upgraded from a raw truncation of the message to a short model-
+// generated summary via a cheap one-shot (Haiku) call. Off by default; the
+// truncation fallback is used when off, when the call fails, or when no model
+// access is available. Enabled by `features.semanticTitles === true` OR the
+// `CHROXY_SEMANTIC_TITLES=1` env override; `CHROXY_SEMANTIC_TITLES=0` force-
+// disables (handy for tests / A-B without editing config).
+export function isSemanticTitlesEnabled(config) {
+  const env = process.env.CHROXY_SEMANTIC_TITLES
+  if (env === '1') return true
+  if (env === '0') return false
+  return config?.features?.semanticTitles === true
+}
+
+// #6764 — resolve the model for the one-shot title call. Precedence:
+//   CHROXY_SEMANTIC_TITLES_MODEL env  >  config.summarize.model  >  Haiku default.
+// The `summarize.{model}` cheap-model override is reused (per #6764) so an
+// operator who already tuned the summarizer's model gets the same for titles;
+// the default stays a cheap Haiku alias so titles never burn a premium model.
+export function resolveSemanticTitleModel(config) {
+  const envModel = typeof process.env.CHROXY_SEMANTIC_TITLES_MODEL === 'string'
+    && process.env.CHROXY_SEMANTIC_TITLES_MODEL.trim()
+    ? process.env.CHROXY_SEMANTIC_TITLES_MODEL.trim()
+    : null
+  if (envModel) return envModel
+  const summarizeModel = config?.summarize && typeof config.summarize === 'object'
+    && typeof config.summarize.model === 'string' && config.summarize.model.trim()
+    ? config.summarize.model.trim()
+    : null
+  return summarizeModel || DEFAULT_SEMANTIC_TITLE_MODEL
 }
 
 // #6277: single source of truth for "does a user-shell spawn need host-local

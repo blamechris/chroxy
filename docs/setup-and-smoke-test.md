@@ -136,6 +136,21 @@ feature flag — off by default. Enable with `CHROXY_ENABLE_IDE=1`:
 CHROXY_ENABLE_IDE=1 PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy start --tunnel none
 ```
 
+**Opt-in semantic session titles (#6764):** by default a new session's sidebar
+label is the first user message truncated at a word boundary. With this flag on,
+that label is upgraded — once per session, asynchronously (never blocking the
+turn) — to a short model-generated title via a cheap one-shot Haiku call. If the
+call fails or no model access is available, the truncation label is kept. Off by
+default; enable with `features.semanticTitles: true` in `~/.chroxy/config.json`
+or `CHROXY_SEMANTIC_TITLES=1`:
+
+```bash
+CHROXY_SEMANTIC_TITLES=1 PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy start --tunnel none
+```
+
+The title model defaults to a cheap Haiku alias; override it with
+`CHROXY_SEMANTIC_TITLES_MODEL=<id>` or the existing `summarize.model` config key.
+
 ---
 
 ## 6. Connect

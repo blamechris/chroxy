@@ -47,7 +47,7 @@ import { getRegistryForProvider, watchModelsOverlay } from './models.js'
 // environment-manager.js itself remains behind the dynamic import below
 // (`if (config?.environments?.enabled)`).
 import { UNREACHABLE_STATUSES } from './environment-statuses.js'
-import { resolveSkipPermissions, buildEnvironmentBackend, isUserShellEnabled, getAllowAnyModelProviders } from './config.js'
+import { resolveSkipPermissions, buildEnvironmentBackend, isUserShellEnabled, getAllowAnyModelProviders, isSemanticTitlesEnabled, resolveSemanticTitleModel } from './config.js'
 import { buildOrchestrationManager } from './orchestration/build-manager.js'
 import { parseDuration } from './duration.js'
 import { createSessionTokenStore } from './session-token-store.js'
@@ -675,6 +675,13 @@ export async function startCliServer(config) {
     // #5665: monthly programmatic-credit budget meter config.
     billing: config.billing || null,
     maxMessages: config.maxMessages || config.maxHistory || null,
+    // #6764: opt-in semantic session titles. Off unless the operator set
+    // features.semanticTitles:true (or CHROXY_SEMANTIC_TITLES=1). The title model
+    // defaults to a cheap Haiku alias; summarize.model / CHROXY_SEMANTIC_TITLES_MODEL
+    // override it (resolveSemanticTitleModel). When off, the historical truncation
+    // label is used unchanged.
+    semanticTitlesEnabled: isSemanticTitlesEnabled(config),
+    semanticTitleModel: resolveSemanticTitleModel(config),
     // #3749 / #3884 / #3899: SOFT-warning inactivity timeout (ms). null = BaseSession default (30 min).
     // #3899: HARD-cap inactivity timeout (ms). null = BaseSession default (2h).
     // #4467: stream-stall recovery (ms). null = BaseSession default (5min).
