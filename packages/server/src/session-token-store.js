@@ -30,7 +30,7 @@ const STORE_FILE = 'session-tokens.json'
  *   load: () => Array<[string, object]>,
  *   loadResult: () => { status: 'absent'|'ok'|'unreadable', entries: Array<[string, object]> },
  *   exists: () => boolean,
- *   save: (entries: Array<[string, object]>) => boolean,
+ *   save: (entries: Array<[string, object]>, opts?: { durable?: boolean }) => boolean,
  * }}
  *   `entries` is the `[token, meta]` pair list from the PairingManager map.
  */
@@ -82,13 +82,19 @@ export function createSessionTokenStore({ dir, keychain = realKeychain } = {}) {
     loadResult: read,
     exists: () => existsSync(file),
 
-    save(entries) {
+    // `durable` (#6914): fsync the store to disk before returning success. The
+    // fail-CLOSED REVOKE path (`_persistSessionTokensSnapshot`) sets it so a
+    // power loss within the OS writeback window can't resurrect a revoked token
+    // after a reported-successful revoke. The fail-SAFE mint / slide / sweep
+    // path leaves it off (default) — a lost page-cache write there merely forces
+    // a harmless re-pair, and an fsync per token issuance is not worth the I/O.
+    save(entries, { durable = false } = {}) {
       try {
         mkdirSync(dir, { recursive: true })
         const payload = { v: 1, entries }
         const key = getOrCreateMasterKey(keychain)
         const body = key ? JSON.stringify(encryptJson(payload, key)) : JSON.stringify(payload)
-        writeFileRestricted(file, body)
+        writeFileRestricted(file, body, { durable })
         return true
       } catch (err) {
         // Persistence is best-effort for the daemon (a failed write just means a

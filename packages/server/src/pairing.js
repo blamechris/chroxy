@@ -598,7 +598,10 @@ export class PairingManager extends EventEmitter {
    *
    * The store's `save()` is atomic (temp file + rename via `writeFileRestricted`),
    * so the on-disk file is always either the pre- or the post-removal state, never
-   * a torn write. With no store configured (in-memory-only mode) there is no
+   * a torn write; here it is also DURABLE (#6914) — `save(entries, { durable: true })`
+   * fsyncs the temp file before the rename and the directory after, so a power
+   * loss / kernel panic within the OS writeback window cannot roll the revoked-out
+   * snapshot back after we reported success. With no store configured (in-memory-only mode) there is no
    * durability to lose — a restart wipes every token regardless — so we report
    * success and let the caller mutate memory.
    *
@@ -608,7 +611,13 @@ export class PairingManager extends EventEmitter {
   _persistSessionTokensSnapshot(entries) {
     if (!this._sessionTokenStore) return true
     try {
-      return this._sessionTokenStore.save(entries) === true
+      // #6914: DURABLE write — fsync the store before reporting success, so a
+      // power loss / kernel panic within the OS writeback window can't roll the
+      // revoked-out snapshot back to its pre-removal state after the operator was
+      // told the revoke landed. This is the one persist path that opts in; the
+      // fire-and-forget `_persistSessionTokens` (mint / slide / sweep) is
+      // fail-SAFE and stays non-durable to avoid an fsync per token issuance.
+      return this._sessionTokenStore.save(entries, { durable: true }) === true
     } catch {
       // A store whose save() throws (rather than returning false) is a failed
       // persist just the same — report it so the revoke reports failure.
