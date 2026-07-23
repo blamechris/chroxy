@@ -1811,6 +1811,7 @@ export function SessionScreen() {
         disabledPlaceholder={viewingCachedSession ? 'Offline — viewing cached history' : connectionPhase === 'server_restarting' ? 'Server restarting...' : 'Reconnecting...'}
         slashCommands={slashCommands}
         activityState={activityState}
+        queuedCount={queuedIds.size}
         isRecognizing={isRecognizing}
         onMicPress={speechAvailable ? handleMicPress : undefined}
         speechUnavailable={!speechAvailable}

@@ -5389,6 +5389,39 @@ button.sidebar-token-view-session-row:hover {
 .input-bar[data-activity-state="waiting"] { box-shadow: inset 0 2px 0 0 var(--accent-orange); }
 .input-bar[data-activity-state="error"] { box-shadow: inset 0 2px 0 0 var(--text-error); }
 
+/* Chat redesign #6391 (composer state lozenge, Phase 1 — deferred item now
+   shipping): "◐ streaming · +2 queued" badge straddling the composer's
+   top-left edge. Absolutely positioned against `.input-bar`'s existing
+   `position: relative` so it never participates in flex layout — zero
+   layout shift in any state, matching the hairline above it. The JSX only
+   mounts this element when `formatComposerLozenge` returns non-null (never
+   at idle), so there's no `display: none` state to gate here — the color
+   rules below just tint the already-rendered badge per state, mirroring
+   the hairline's color mapping one row up so the two read as one signal. */
+.input-bar-lozenge {
+  position: absolute;
+  top: 0;
+  left: var(--space-4);
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  padding: 1px var(--space-2);
+  border-radius: var(--radius-pill);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-primary);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  line-height: 1.4;
+  white-space: nowrap;
+  pointer-events: none;
+  user-select: none;
+  z-index: 3;
+}
+.input-bar[data-activity-state="thinking"] .input-bar-lozenge { color: var(--accent-blue); border-color: var(--accent-blue); }
+.input-bar[data-activity-state="busy"] .input-bar-lozenge { color: var(--accent-purple); border-color: var(--accent-purple); }
+.input-bar[data-activity-state="waiting"] .input-bar-lozenge { color: var(--accent-orange); border-color: var(--accent-orange); }
+.input-bar[data-activity-state="error"] .input-bar-lozenge { color: var(--text-error); border-color: var(--text-error); }
+
 /* ---- File Picker ---- */
 .file-picker {
   position: absolute;

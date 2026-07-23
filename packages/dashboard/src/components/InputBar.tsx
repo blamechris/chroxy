@@ -12,7 +12,7 @@ import { SlashCommandPicker } from './SlashCommandPicker'
 import { ImageThumbnail } from './ImageThumbnail'
 import type { SlashCommand, EvaluatorResultPayload, MCPResourceItem } from '../store/types'
 import { filterImageFiles } from '../utils/image-utils'
-import { shouldCollapsePaste, findActiveMarkerIds } from '@chroxy/store-core'
+import { shouldCollapsePaste, findActiveMarkerIds, formatComposerLozenge, type ChatActivityState } from '@chroxy/store-core'
 import { PastedTextChip } from './PastedTextChip'
 import { tokenizeThinkingKeywords } from './thinking-keyword-tokens'
 
@@ -75,8 +75,16 @@ export interface InputBarProps {
   /** Chat redesign #6391: the canonical chat-activity state
    *  (idle/thinking/busy/waiting/error) from store-core's deriveChatActivity.
    *  Surfaced as a `data-activity-state` attribute so the live hairline +
-   *  state-lozenge (slices 4-5) are pure CSS keyed off it. */
-  chatActivityState?: string
+   *  state-lozenge (slices 4-5) are pure CSS keyed off it. Typed to the real
+   *  `ChatActivityState` union (matching FooterBar/Sidebar/AppHeader's props)
+   *  so a typo'd/unknown state is a compile error at the call site. */
+  chatActivityState?: ChatActivityState
+  /** Chat redesign #6391 composer state lozenge (Phase 1 deferred item): the
+   *  number of queue-while-processing follow-ups currently staged for this
+   *  session (App.tsx's `queuedIds.size`). Combined with `chatActivityState`
+   *  via `formatComposerLozenge` to render the top-left "◐ streaming ·
+   *  +N queued" badge; omitted/0 just drops the queued suffix. */
+  queuedCount?: number
   placeholder?: string
   filePickerFiles?: FilePickerItem[] | null
   /** #6823 — MCP-server resources surfaced in the `@`-picker (BYOK sessions). */
@@ -191,7 +199,7 @@ function isEditableElement(el: Element | null): boolean {
   return (el as HTMLElement).isContentEditable === true
 }
 
-export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, chatActivityState, placeholder, filePickerFiles, mcpResources, onFileTrigger, attachments, onRemoveAttachment, slashCommands, onSlashTrigger, onImagePaste, onImageDrop, imageAttachments, onRemoveImage, onFileAttach, controlledValue, onValueChange, sendOnEnter, voiceInput, onEvaluate, onLargePaste, pastedTextBlocks, onInspectPastedText, onRemovePastedText, userMessageHistory, highlightThinkingKeywords }: InputBarProps) {
+export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, chatActivityState, queuedCount, placeholder, filePickerFiles, mcpResources, onFileTrigger, attachments, onRemoveAttachment, slashCommands, onSlashTrigger, onImagePaste, onImageDrop, imageAttachments, onRemoveImage, onFileAttach, controlledValue, onValueChange, sendOnEnter, voiceInput, onEvaluate, onLargePaste, pastedTextBlocks, onInspectPastedText, onRemovePastedText, userMessageHistory, highlightThinkingKeywords }: InputBarProps) {
   const [internalValue, setInternalValue] = useState('')
   const value = controlledValue !== undefined ? controlledValue : internalValue
   const setValue = onValueChange || setInternalValue
@@ -1074,6 +1082,15 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, c
 
   const hasImages = imageAttachments && imageAttachments.length > 0
 
+  // Chat redesign #6391 composer state lozenge (Phase 1 deferred item): a
+  // pure text formatter (shared with the mobile twin via store-core) so the
+  // dashboard and mobile copy can't drift. Hidden entirely at idle/undefined
+  // — `null` here means "render nothing", not an empty badge.
+  const lozengeText = useMemo(
+    () => formatComposerLozenge(chatActivityState, queuedCount ?? 0),
+    [chatActivityState, queuedCount],
+  )
+
   return (
     <div
       className={`input-bar${dragging ? ' dragging' : ''}`}
@@ -1084,6 +1101,18 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, c
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
     >
+      {/* Chat redesign #6391 (composer state lozenge, Phase 1): absolutely-
+          positioned badge on the composer's top-left edge, straddling the
+          live hairline above. Presentational only (aria-hidden) — it repeats
+          the hairline's `data-activity-state` color as a label + the queued
+          count, it doesn't introduce new information a screen-reader user
+          would be missing (the Stop/Send controls and ActivityIndicator
+          already cover turn-active state accessibly). */}
+      {lozengeText && (
+        <span className="input-bar-lozenge" data-testid="input-bar-lozenge" aria-hidden="true">
+          {lozengeText}
+        </span>
+      )}
       {filePickerOpen && filePickerFiles !== undefined && (
         <FilePicker
           files={filePickerFiles}

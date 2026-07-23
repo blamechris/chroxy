@@ -369,3 +369,77 @@ describe('InputBar slash-command grouping (chat redesign #6391)', () => {
     expect(badgeStyle('user').backgroundColor).not.toBe('transparent');
   });
 });
+
+describe('InputBar composer state lozenge (chat redesign #6391)', () => {
+  // Mirrors the dashboard's InputBarLozenge.test.tsx — same three cases the
+  // design doc's signature moment calls out: streaming with a queued
+  // follow-up, streaming with none, and hidden at idle. `formatComposerLozenge`
+  // (shared via @chroxy/store-core) is the single source of the copy, so
+  // these assert the mobile twin actually renders what that helper returns.
+  function lozengeText(tree: renderer.ReactTestRenderer): string | null {
+    try {
+      const node = tree.root.findByProps({ testID: 'input-bar-lozenge' });
+      const textNode = node.findByType(Text);
+      return Array.isArray(textNode.props.children)
+        ? textNode.props.children.join('')
+        : textNode.props.children;
+    } catch {
+      return null;
+    }
+  }
+
+  it('shows "◐ streaming · +N queued" when thinking with queued follow-ups', () => {
+    let tree!: renderer.ReactTestRenderer;
+    act(() => {
+      tree = renderer.create(
+        <InputBar {...baseProps} onChangeText={noop} activityState="thinking" queuedCount={2} />,
+      );
+    });
+    expect(lozengeText(tree)).toBe('◐ streaming · +2 queued');
+  });
+
+  it('shows "◐ streaming" with no queued suffix when thinking with none queued', () => {
+    let tree!: renderer.ReactTestRenderer;
+    act(() => {
+      tree = renderer.create(
+        <InputBar {...baseProps} onChangeText={noop} activityState="thinking" queuedCount={0} />,
+      );
+    });
+    expect(lozengeText(tree)).toBe('◐ streaming');
+  });
+
+  it('hides the lozenge entirely at idle, even with a stale queued count', () => {
+    let tree!: renderer.ReactTestRenderer;
+    act(() => {
+      tree = renderer.create(
+        <InputBar {...baseProps} onChangeText={noop} activityState="idle" queuedCount={3} />,
+      );
+    });
+    expect(lozengeText(tree)).toBeNull();
+  });
+
+  it('hides the lozenge when activityState/queuedCount are omitted (default idle)', () => {
+    let tree!: renderer.ReactTestRenderer;
+    act(() => {
+      tree = renderer.create(<InputBar {...baseProps} onChangeText={noop} />);
+    });
+    expect(lozengeText(tree)).toBeNull();
+  });
+
+  it('labels the busy and waiting states distinctly from streaming', () => {
+    let tree!: renderer.ReactTestRenderer;
+    act(() => {
+      tree = renderer.create(
+        <InputBar {...baseProps} onChangeText={noop} activityState="busy" queuedCount={1} />,
+      );
+    });
+    expect(lozengeText(tree)).toBe('◐ busy · +1 queued');
+
+    act(() => {
+      tree.update(
+        <InputBar {...baseProps} onChangeText={noop} activityState="waiting" queuedCount={0} />,
+      );
+    });
+    expect(lozengeText(tree)).toBe('◐ waiting');
+  });
+});

@@ -18,9 +18,9 @@ describe('InputBar', () => {
 
   it('exposes the chat-activity state as a data attribute (chat redesign #6391)', () => {
     const { rerender } = render(
-      <InputBar onSend={vi.fn()} onInterrupt={vi.fn()} chatActivityState="streaming" />,
+      <InputBar onSend={vi.fn()} onInterrupt={vi.fn()} chatActivityState="thinking" />,
     )
-    expect(screen.getByTestId('input-bar')).toHaveAttribute('data-activity-state', 'streaming')
+    expect(screen.getByTestId('input-bar')).toHaveAttribute('data-activity-state', 'thinking')
     rerender(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} chatActivityState="waiting" />)
     expect(screen.getByTestId('input-bar')).toHaveAttribute('data-activity-state', 'waiting')
   })
