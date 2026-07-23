@@ -16,7 +16,7 @@ import type { PermissionMode } from '@chroxy/store-core'
 // #5175: Host/Repo Status Control Room snapshot type (epic #5170). The store
 // holds the latest `host_status_snapshot` so the Control Room section can render
 // the fleet table; the type is the protocol contract pinned in @chroxy/protocol.
-import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerContainersStatusSnapshotMessage, ServerRepoRuntimeConfigSnapshotMessage, ServerByokPoolStatusSnapshotMessage, ServerHostPruneStatusSnapshotMessage, ServerSimulatorStatusSnapshotMessage, ServerEmulatorStatusSnapshotMessage, ServerWslStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, ServerSkillsInventorySnapshotMessage, ServerMailboxStatusSnapshotMessage, ServerExternalSessionsSnapshotMessage, ServerRepoEventsSnapshotMessage, ServerPermissionInputMessage, ServerSymbolsSnapshotMessage, ServerSearchResultsMessage, ServerReferencesResultMessage, IntegrationActionCounts, ServerPairPendingMessage, ServerSessionPresetFull, Attachment, ServerOrchestrationRunsSnapshot, CodexSandboxMode } from '@chroxy/protocol'
+import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerContainersStatusSnapshotMessage, ServerRepoRuntimeConfigSnapshotMessage, ServerByokPoolStatusSnapshotMessage, ServerHostPruneStatusSnapshotMessage, ServerSimulatorStatusSnapshotMessage, ServerEmulatorStatusSnapshotMessage, ServerWslStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, ServerSkillsInventorySnapshotMessage, ServerMailboxStatusSnapshotMessage, ServerExternalSessionsSnapshotMessage, ServerRepoEventsSnapshotMessage, ServerGithubWebhookConfigMessage, ServerPermissionInputMessage, ServerSymbolsSnapshotMessage, ServerSearchResultsMessage, ServerReferencesResultMessage, IntegrationActionCounts, ServerPairPendingMessage, ServerSessionPresetFull, Attachment, ServerOrchestrationRunsSnapshot, CodexSandboxMode } from '@chroxy/protocol'
 import type { HeldRunDetail } from '@chroxy/store-core'
 // #5184: header cost-badge display mode. Defined in a plain lib module
 // (which owns the union + runtime guard) — the store only needs the type
@@ -1168,6 +1168,15 @@ export interface ConnectionState {
   /** #5966 — true between dispatching a `repo_events_request` and its snapshot. */
   repoEventsLoading: boolean;
   /**
+   * #6540 (item 3 of #6536) — Control Room repo-events webhook-secret config: the
+   * latest `github_webhook_config` (is a secret set + source, the payload URL,
+   * recent delivery status — never the secret value), or null before the first
+   * one lands. Replaced wholesale on each config message.
+   */
+  githubWebhookConfig: ServerGithubWebhookConfigMessage | null;
+  /** #6540 — true between dispatching a webhook-config request/write and its reply. */
+  githubWebhookConfigLoading: boolean;
+  /**
    * #6691 (S-3) — the orchestration runs-list snapshot (wire shape, replaced
    * wholesale per survey; delta.run upserts rows between surveys), or null
    * before the first one lands.
@@ -1893,6 +1902,21 @@ export interface ConnectionState {
   requestExternalSessions: () => boolean;
   /** #5966 — request the buffered repo-events snapshot for the Control Room pane. */
   requestRepoEvents: () => boolean;
+  /**
+   * #6540 — request the current GitHub webhook config (secret status + payload
+   * URL + delivery readout). Sets `githubWebhookConfigLoading`; the reply lands
+   * in `githubWebhookConfig`. Returns false (without setting loading) when the
+   * socket is closed.
+   */
+  requestGithubWebhookConfig: () => boolean;
+  /**
+   * #6540 — set (or rotate) the GitHub webhook secret. Host-authority gated
+   * server-side. The value is sent once and never stored in the dashboard store.
+   * Returns false (without setting loading) when the socket is closed.
+   */
+  setGithubWebhookSecret: (secret: string) => boolean;
+  /** #6540 — clear the stored GitHub webhook secret. Host-authority gated. */
+  clearGithubWebhookSecret: () => boolean;
   /** #6691 (S-3) — request the orchestration runs-list snapshot for the Runs tab. */
   requestOrchestrationRuns: () => boolean;
   /** #6691 — request one run's full detail snapshot (also the seq-gap resync path). */

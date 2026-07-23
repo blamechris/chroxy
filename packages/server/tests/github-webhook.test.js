@@ -6,13 +6,22 @@ import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHmac } from 'node:crypto'
 import { EventEmitter } from 'node:events'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import {
   verifyGithubSignature,
   normalizeGithubEvent,
   RepoEventStore,
   handleGithubWebhook,
   MAX_WEBHOOK_BYTES,
+  WebhookDeliveryRing,
+  deriveWebhookPayloadUrl,
+  webhookSecretSource,
+  resolveWebhookSecret,
+  WEBHOOK_SECRET_FIELD,
 } from '../src/github-webhook.js'
+import { setStoredField } from '../src/credential-store.js'
 
 const SECRET = 'whsec_test_secret'
 const sign = (body, secret = SECRET) => `sha256=${createHmac('sha256', secret).update(body).digest('hex')}`
@@ -137,13 +146,24 @@ describe('RepoEventStore', () => {
 
 describe('handleGithubWebhook()', () => {
   let savedEnv
+  let tmpHome
+  let originalHome
   beforeEach(() => {
     savedEnv = process.env.GITHUB_WEBHOOK_SECRET
     delete process.env.GITHUB_WEBHOOK_SECRET
+    // #6540: isolate the credential-store read `resolveWebhookSecret` now performs
+    // (a `_githubWebhookSecret`-less server falls through to the store) so a
+    // developer's real ~/.chroxy/credentials.json never influences the suite.
+    tmpHome = mkdtempSync(join(tmpdir(), 'chroxy-webhook-deliver-'))
+    originalHome = process.env.HOME
+    process.env.HOME = tmpHome
   })
   afterEach(() => {
     if (savedEnv === undefined) delete process.env.GITHUB_WEBHOOK_SECRET
     else process.env.GITHUB_WEBHOOK_SECRET = savedEnv
+    if (originalHome) process.env.HOME = originalHome
+    else delete process.env.HOME
+    try { rmSync(tmpHome, { recursive: true, force: true }) } catch { /* */ }
   })
 
   // Mock req/res supporting the helpers the handler uses: sendOversizeResponse
@@ -286,5 +306,139 @@ describe('handleGithubWebhook()', () => {
     const body = JSON.stringify({ zen: 'hi', repository: { full_name: 'o/r' } })
     const res = deliver({}, { headers: { 'x-github-event': 'ping', 'x-hub-signature-256': sign(body) }, body })
     assert.equal(res.statusCode, 202)
+  })
+
+  // #6540 — the receiver reads a secret set via the encrypted credentials store.
+  it('#6540: verifies deliveries against a secret stored in the credentials store', () => {
+    setStoredField(WEBHOOK_SECRET_FIELD, SECRET)
+    const server = {} // no _githubWebhookSecret — must fall through to the store
+    const body = JSON.stringify({ ref: 'refs/heads/main', commits: [{}], repository: { full_name: 'o/r' }, sender: { login: 'bob' } })
+    const res = deliver(server, { headers: { 'x-github-event': 'push', 'x-hub-signature-256': sign(body) }, body })
+    assert.equal(res.statusCode, 202)
+    // the store value was lazily hot-cached onto the server for later deliveries
+    assert.equal(server._githubWebhookSecret, SECRET)
+  })
+
+  // #6540 — every delivery that reaches the HMAC-verify step is recorded on the ring.
+  it('#6540: records a verified delivery on the ring (with kind)', () => {
+    const server = { _githubWebhookSecret: SECRET }
+    const body = JSON.stringify({ ref: 'refs/heads/main', commits: [{}], repository: { full_name: 'o/r' }, sender: { login: 'bob' } })
+    deliver(server, { headers: { 'x-github-event': 'push', 'x-hub-signature-256': sign(body) }, body })
+    const summary = server._repoWebhookDeliveries.summary()
+    assert.equal(summary.total, 1)
+    assert.equal(summary.verified, 1)
+    assert.equal(summary.rejected, 0)
+    assert.equal(summary.lastResult, 'verified')
+    assert.equal(summary.lastKind, 'push')
+    assert.ok(summary.lastAt)
+  })
+
+  it('#6540: records a rejected delivery on a bad signature', () => {
+    const server = { _githubWebhookSecret: SECRET }
+    deliver(server, { headers: { 'x-github-event': 'push', 'x-hub-signature-256': `sha256=${'a'.repeat(64)}` }, body: '{"x":1}' })
+    const summary = server._repoWebhookDeliveries.summary()
+    assert.equal(summary.total, 1)
+    assert.equal(summary.verified, 0)
+    assert.equal(summary.rejected, 1)
+    assert.equal(summary.lastResult, 'rejected')
+    assert.equal(summary.lastKind, null)
+  })
+
+  it('#6540: does NOT record a delivery that never reached the verify step (503 no secret)', () => {
+    const server = {}
+    deliver(server, { headers: { 'x-github-event': 'push' }, body: '{}' })
+    assert.equal(server._repoWebhookDeliveries, undefined)
+  })
+})
+
+describe('WebhookDeliveryRing (#6540)', () => {
+  it('records outcomes, caps the retained window, and tracks cumulative total', () => {
+    const ring = new WebhookDeliveryRing({ cap: 2 })
+    ring.record({ verified: true, kind: 'push' })
+    ring.record({ verified: false })
+    ring.record({ verified: true, kind: 'issues' })
+    assert.equal(ring.total, 3)   // cumulative — never trimmed
+    assert.equal(ring.size, 2)    // retained window capped
+    const s = ring.summary()
+    assert.equal(s.total, 3)
+    assert.equal(s.lastResult, 'verified')
+    assert.equal(s.lastKind, 'issues')
+  })
+
+  it('summary of an empty ring is all-zero / null', () => {
+    const s = new WebhookDeliveryRing().summary()
+    assert.deepEqual(s, { total: 0, verified: 0, rejected: 0, lastAt: null, lastResult: null, lastKind: null })
+  })
+})
+
+describe('deriveWebhookPayloadUrl (#6540)', () => {
+  it('prefers the tunnel URL (wss → https) and is not lanOnly', () => {
+    const r = deriveWebhookPayloadUrl({ tunnelUrl: 'wss://abc.trycloudflare.com' })
+    assert.equal(r.url, 'https://abc.trycloudflare.com/api/github/webhook')
+    assert.equal(r.lanOnly, false)
+    assert.equal(r.note, null)
+  })
+
+  it('uses an operator external URL when no tunnel', () => {
+    const r = deriveWebhookPayloadUrl({ externalUrl: 'https://ci.example.com' })
+    assert.equal(r.url, 'https://ci.example.com/api/github/webhook')
+    assert.equal(r.lanOnly, false)
+  })
+
+  it('falls back to the LAN address (lanOnly + note) with no tunnel', () => {
+    const r = deriveWebhookPayloadUrl({ port: 8765, boundHost: '0.0.0.0', lanIp: '192.168.1.5', isLoopbackHost: () => false })
+    assert.equal(r.url, 'http://192.168.1.5:8765/api/github/webhook')
+    assert.equal(r.lanOnly, true)
+    assert.ok(r.note && /tunnel/i.test(r.note))
+  })
+
+  it('flags a loopback bind as unreachable', () => {
+    const r = deriveWebhookPayloadUrl({ port: 8765, boundHost: '127.0.0.1', isLoopbackHost: (h) => h === '127.0.0.1' })
+    assert.equal(r.url, 'http://127.0.0.1:8765/api/github/webhook')
+    assert.equal(r.lanOnly, true)
+    assert.ok(r.note && /Loopback/i.test(r.note))
+  })
+})
+
+describe('webhookSecretSource / resolveWebhookSecret precedence (#6540)', () => {
+  let tmpHome
+  let originalHome
+  let savedEnv
+  beforeEach(() => {
+    tmpHome = mkdtempSync(join(tmpdir(), 'chroxy-webhook-source-'))
+    originalHome = process.env.HOME
+    process.env.HOME = tmpHome
+    savedEnv = process.env.GITHUB_WEBHOOK_SECRET
+    delete process.env.GITHUB_WEBHOOK_SECRET
+  })
+  afterEach(() => {
+    if (originalHome) process.env.HOME = originalHome
+    else delete process.env.HOME
+    if (savedEnv === undefined) delete process.env.GITHUB_WEBHOOK_SECRET
+    else process.env.GITHUB_WEBHOOK_SECRET = savedEnv
+    try { rmSync(tmpHome, { recursive: true, force: true }) } catch { /* */ }
+  })
+
+  it('source is none with nothing configured', () => {
+    assert.equal(webhookSecretSource(), 'none')
+    assert.equal(resolveWebhookSecret({}), '')
+  })
+
+  it('source is store (and store wins over env) when set in the store', () => {
+    setStoredField(WEBHOOK_SECRET_FIELD, 'stored-secret')
+    process.env.GITHUB_WEBHOOK_SECRET = 'env-secret'
+    assert.equal(webhookSecretSource(), 'store')
+    assert.equal(resolveWebhookSecret({}), 'stored-secret')
+  })
+
+  it('source is env when only the env var is set', () => {
+    process.env.GITHUB_WEBHOOK_SECRET = 'env-secret'
+    assert.equal(webhookSecretSource(), 'env')
+    assert.equal(resolveWebhookSecret({}), 'env-secret')
+  })
+
+  it('an explicit in-process override wins over both', () => {
+    setStoredField(WEBHOOK_SECRET_FIELD, 'stored-secret')
+    assert.equal(resolveWebhookSecret({ _githubWebhookSecret: 'override' }), 'override')
   })
 })

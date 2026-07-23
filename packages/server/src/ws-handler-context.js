@@ -142,6 +142,14 @@ export const CTX_NAMESPACES = {
     // #5966: bounded RepoEventStore drained by the Control Room repo-events
     // survey. Null until the first GitHub-webhook delivery lazily creates it.
     'repoEventStore',
+    // #6540: repo-events webhook-secret config surface. `webhookPayloadUrl`
+    // derives the GitHub payload URL from the live origin; `repoWebhookDeliveries`
+    // is the in-memory recent-delivery ring (null until the first delivery);
+    // `setWebhookSecretCache` refreshes the in-process secret cache on a
+    // set/rotate/clear.
+    'webhookPayloadUrl',
+    'repoWebhookDeliveries',
+    'setWebhookSecretCache',
     // #6691: the OrchestrationManager (delegation harness). Present only when
     // the orchestration feature is enabled and the engine is wired (E-4); the
     // handlers (S-2) treat an absent manager as "engine not running".

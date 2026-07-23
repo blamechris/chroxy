@@ -31,6 +31,7 @@ import { useConnectionStore } from '../store/connection'
 import type { RepoEvent, ServerRepoEventsSnapshotMessage } from '@chroxy/protocol'
 import type { SessionInfo } from '@chroxy/store-core'
 import { formatGeneratedAgo } from './ControlRoomSection'
+import { GithubWebhookConfig } from './GithubWebhookConfig'
 
 /** ISO date (no time) for the eyebrow, e.g. "2026-07-02". */
 function isoDate(iso: string): string {
@@ -219,6 +220,9 @@ export function RepoEventsSection({
   const onRefresh = onRefreshProp ?? requestRepoEvents
 
   const [showAll, setShowAll] = useState(false)
+  // #6540 — the collapsible webhook-setup panel. Opened by the empty state's
+  // "Set up webhook" link so an operator can light the feed up end-to-end.
+  const [webhookSetupOpen, setWebhookSetupOpen] = useState(false)
 
   const refreshDisabled = loading || !connected
   const handleRefresh = () => {
@@ -274,6 +278,13 @@ export function RepoEventsSection({
           </p>
         )}
       </header>
+
+      {/* #6540 — webhook-secret setup surface (set/rotate + payload URL + delivery
+          status). Collapsed by default; the empty-state link below opens it. */}
+      <GithubWebhookConfig
+        open={webhookSetupOpen}
+        onToggle={() => setWebhookSetupOpen((v) => !v)}
+      />
 
       {snapshot?.error && (
         <p className="cr-callout cr-callout-bad" data-testid="repo-events-error" role="alert">
@@ -335,6 +346,14 @@ export function RepoEventsSection({
                 Point a GitHub webhook (pull_request / issues / push) at{' '}
                 <span className="cr-mono">POST /api/github/webhook</span> with the configured secret — events appear here as they arrive.
               </p>
+              <button
+                type="button"
+                className="cr-refresh"
+                data-testid="repo-events-setup-webhook"
+                onClick={() => setWebhookSetupOpen(true)}
+              >
+                Set up webhook
+              </button>
             </div>
           ) : groups.length === 0 ? (
             <div className="cr-empty" data-testid="repo-events-all-hidden">
