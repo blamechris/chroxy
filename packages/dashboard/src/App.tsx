@@ -2654,6 +2654,7 @@ export function App() {
               isBusy={!isIdle}
               isStreaming={streamingMessageId !== null}
               chatActivityState={chatActivity.state}
+              queuedCount={queuedIds.size}
               placeholder={isConnected ? `Type a message... (${inputSettings.chatEnterToSend ? 'Enter' : formatShortcutKeys('Cmd+Enter')} to send)` : 'Connecting...'}
               controlledValue={inputDraftValue}
               onValueChange={handleDraftChange}

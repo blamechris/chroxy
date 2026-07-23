@@ -7,6 +7,7 @@ import type { SlashCommand } from '../store/connection';
 import type { Attachment } from '../utils/attachments';
 import { formatFileSize } from '../utils/attachments';
 import type { ActivityState } from '../store/session-activity';
+import { formatComposerLozenge } from '@chroxy/store-core';
 
 
 // -- Props --
@@ -83,6 +84,15 @@ export interface InputBarProps {
    * primitive `.state` down. Mirrors the dashboard InputBar's data-activity-state.
    */
   activityState?: ActivityState;
+  /**
+   * Chat redesign #6391 composer state lozenge (Phase 1 deferred item): the
+   * number of queue-while-processing follow-ups currently staged for this
+   * session (SessionScreen's `queuedIds.size`, mirroring the dashboard).
+   * Combined with `activityState` via the shared `formatComposerLozenge`
+   * helper to render the top-left "◐ streaming · +N queued" badge; omitted
+   * defaults to 0 (just drops the queued suffix).
+   */
+  queuedCount?: number;
   isRecognizing?: boolean;
   onMicPress?: () => void;
   speechUnavailable?: boolean;
@@ -146,6 +156,7 @@ export const InputBar = React.memo(forwardRef<InputBarHandle, InputBarProps>(fun
   disabledPlaceholder,
   slashCommands = [],
   activityState = 'idle',
+  queuedCount = 0,
   isRecognizing,
   onMicPress,
   speechUnavailable,
@@ -244,8 +255,30 @@ export const InputBar = React.memo(forwardRef<InputBarHandle, InputBarProps>(fun
 
   const showDropdown = filteredCommands.length > 0;
 
+  // Chat redesign #6391 composer state lozenge (Phase 1 deferred item): the
+  // same pure formatter the dashboard InputBar uses, so the two composer
+  // twins can't drift on copy. `null` means "render nothing" (idle).
+  const lozengeText = useMemo(
+    () => formatComposerLozenge(activityState, queuedCount),
+    [activityState, queuedCount],
+  );
+
   return (
     <View style={[styles.inputContainer, { paddingBottom: bottomPadding, borderTopColor: HAIRLINE_COLOR[activityState] }]}>
+      {/* Chat redesign #6391 (composer state lozenge, Phase 1): a small badge
+          straddling the composer's top-left edge, mirroring the dashboard's
+          `.input-bar-lozenge`. `position: relative` on `inputContainer` below
+          anchors it; absolute positioning means it never affects the flex
+          layout of the rows beneath it (zero layout shift in every state). */}
+      {lozengeText && (
+        <View
+          style={[styles.lozenge, { borderColor: HAIRLINE_COLOR[activityState] }]}
+          pointerEvents="none"
+          testID="input-bar-lozenge"
+        >
+          <Text style={[styles.lozengeText, { color: HAIRLINE_COLOR[activityState] }]}>{lozengeText}</Text>
+        </View>
+      )}
       {showDropdown && (
         <ScrollView
           style={styles.dropdown}
@@ -502,9 +535,36 @@ export const InputBar = React.memo(forwardRef<InputBarHandle, InputBarProps>(fun
 
 const styles = StyleSheet.create({
   inputContainer: {
+    // #6391 composer lozenge: anchors the absolutely-positioned badge below
+    // so it straddles this container's top edge without affecting the
+    // flex layout of the rows inside it.
+    position: 'relative',
     borderTopWidth: 1,
     borderTopColor: COLORS.backgroundCard,
     backgroundColor: COLORS.backgroundSecondary,
+  },
+  // #6391 composer state lozenge — mirrors the dashboard's
+  // `.input-bar-lozenge`: a small pill straddling the composer's top-left
+  // edge, colored per chat-activity state (matching HAIRLINE_COLOR so the
+  // hairline and the lozenge read as one signal). `top`/`transform` place
+  // its vertical center on the container's top border, same as the
+  // dashboard's `transform: translateY(-50%)`.
+  lozenge: {
+    position: 'absolute',
+    top: 0,
+    left: 12,
+    transform: [{ translateY: -9 }],
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 8,
+    paddingVertical: 1,
+    borderRadius: 999,
+    borderWidth: 1,
+    backgroundColor: COLORS.backgroundSecondary,
+  },
+  lozengeText: {
+    fontSize: 11,
+    fontWeight: '500',
   },
   dropdown: {
     maxHeight: 200,

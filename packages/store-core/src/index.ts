@@ -353,6 +353,11 @@ export {
 export { deriveChatActivity } from './chat-activity'
 export type { ChatActivityState, SessionChatActivity, ChatActivityInput } from './chat-activity'
 
+// Chat redesign #6391 (composer state lozenge, Phase 1 deferred item): pure
+// "◐ streaming · +N queued" text formatter shared by both InputBar twins so
+// the composer copy can't drift between the dashboard and mobile app.
+export { formatComposerLozenge } from './composer-lozenge'
+
 // #4242: cheap structural gate for `JSON.parse` on streaming
 // `tool_input_delta` accumulators. Amortises N-1 throws on long
 // streams (every Bash invocation, every Edit).
