@@ -170,6 +170,46 @@ describe('generateSessionTitle', () => {
     assert.equal(res.title, truncateTitle('help me fix the flaky reconnect test'))
   })
 
+  it('fails open to truncation when the runner never resolves and the signal aborts (#6881)', async () => {
+    // Regression for the #6881 blocking finding: a stalled provider stream must
+    // not leave the call pending forever. The runner RESPECTS the injected signal
+    // — it only settles by rejecting on abort, never on its own — so determinism
+    // comes from the abort, not from racing a wall clock. Aborting the signal is
+    // exactly what production's AbortSignal.timeout(...) does when it fires; here
+    // we drive it synchronously so the test has no wall-clock dependence.
+    const msg = 'help me fix the flaky reconnect test in ws-server.js'
+    const controller = new AbortController()
+    const runOneShot = ({ signal }) => new Promise((_resolve, reject) => {
+      if (signal.aborted) { reject(new Error('aborted')); return }
+      signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true })
+    })
+    // The runner is invoked synchronously inside generateSessionTitle (before its
+    // first await suspends), so the abort listener is registered by the time this
+    // returns the pending promise — aborting now deterministically rejects it.
+    const pending = generateSessionTitle({
+      firstUserMessage: msg,
+      enabled: true,
+      runOneShot,
+      signal: controller.signal,
+    })
+    controller.abort()
+    const res = await pending
+    assert.equal(res.source, 'truncation')
+    assert.equal(res.title, truncateTitle(msg))
+  })
+
+  it('threads the signal through to the runner (#6881)', async () => {
+    let seen = 'UNSET'
+    const { signal } = new AbortController()
+    await generateSessionTitle({
+      firstUserMessage: 'do a thing',
+      enabled: true,
+      runOneShot: async (args) => { seen = args.signal; return 'A Title' },
+      signal,
+    })
+    assert.ok(seen instanceof AbortSignal, 'the injected signal reaches the runner')
+  })
+
   it('uses the provided fallback label verbatim', async () => {
     const res = await generateSessionTitle({
       firstUserMessage: 'anything',

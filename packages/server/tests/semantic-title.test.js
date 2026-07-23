@@ -145,6 +145,54 @@ describe('SessionManager semantic titles (#6764)', () => {
     assert.equal(mgr.getSession('s1').name, 'My Manual Name')
   })
 
+  it('threads a non-undefined AbortSignal through to the model runner (#6881)', async () => {
+    // Regression for the #6881 blocking finding: _generateSemanticTitle must pass
+    // a real abort signal so a stalled one-shot can be torn down (and fail open)
+    // instead of leaking a never-settling promise.
+    let seen = 'UNSET'
+    const mgr = new SessionManager({
+      skipPreflight: true,
+      stateFilePath: tmpStateFile(),
+      semanticTitlesEnabled: true,
+      titleRunOneShot: async (opts) => { seen = opts.signal; return 'Fix flaky reconnect test' },
+    })
+    mgr._sessions.set('s1', { session: makeMockSession(), name: 'Session 1', cwd: '/tmp' })
+
+    mgr.recordUserInput('s1', 'please help me fix the flaky WebSocket reconnect test in ws-server.js')
+    await flush()
+
+    assert.ok(seen instanceof AbortSignal, 'a non-undefined AbortSignal is threaded to the runner')
+  })
+
+  it('falls back to the truncation label when the model call times out (#6881)', async () => {
+    // End-to-end proof that the timeout aborts a stalled runner and the session
+    // keeps its truncation label — no hang, no leaked pending promise.
+    const mgr = new SessionManager({
+      skipPreflight: true,
+      stateFilePath: tmpStateFile(),
+      semanticTitlesEnabled: true,
+      semanticTitleTimeoutMs: 20,
+      // Mimic a stalled provider stream: the runner only settles by REJECTING when
+      // the injected signal aborts (i.e. on the timeout) — it never resolves itself.
+      titleRunOneShot: ({ signal }) => new Promise((_res, rej) => {
+        signal.addEventListener('abort', () => rej(new Error('aborted')), { once: true })
+      }),
+    })
+    mgr._sessions.set('s1', { session: makeMockSession(), name: 'Session 1', cwd: '/tmp' })
+
+    const names = []
+    mgr.on('session_updated', (d) => names.push(d.name))
+
+    mgr.recordUserInput('s1', 'help me refactor the tunnel reconnect logic in tunnel.js')
+    // Give the 20ms AbortSignal.timeout room to fire, then let the fail-open apply
+    // step settle.
+    await new Promise((r) => setTimeout(r, 80))
+    await flush()
+
+    assert.equal(mgr.getSession('s1').name, 'help me refactor the tunnel reconnect...')
+    assert.equal(names.length, 1, 'only the truncation update was broadcast — the model call timed out and failed open')
+  })
+
   it('does not upgrade custom-named sessions (no auto_label fires)', async () => {
     let calls = 0
     const mgr = new SessionManager({

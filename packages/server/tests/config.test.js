@@ -3,7 +3,8 @@ import assert from 'node:assert/strict'
 import { writeFileSync, mkdtempSync, rmSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
-import { validateConfig, mergeConfig, readReposFromConfig, writeReposToConfig, sanitizeConfig, isFatalConfigWarning } from '../src/config.js'
+import { validateConfig, mergeConfig, readReposFromConfig, writeReposToConfig, sanitizeConfig, isFatalConfigWarning, resolveSemanticTitleTimeoutMs } from '../src/config.js'
+import { DEFAULT_SEMANTIC_TITLE_TIMEOUT_MS } from '../src/session-title.js'
 
 // audit P1-9: fatality must come from the single isFatalConfigWarning policy,
 // and the wording convention (type=fatal, value=non-fatal) must hold — a typo
@@ -797,5 +798,43 @@ describe('sanitizeConfig', () => {
   it('handles empty config object', () => {
     const safe = sanitizeConfig({})
     assert.deepEqual(safe, {})
+  })
+})
+
+// #6764 / #6881 — timeout resolver for the fire-and-forget one-shot title call.
+describe('resolveSemanticTitleTimeoutMs', () => {
+  const ENV = 'CHROXY_SEMANTIC_TITLES_TIMEOUT_MS'
+  let saved
+  beforeEach(() => { saved = process.env[ENV]; delete process.env[ENV] })
+  afterEach(() => {
+    if (saved === undefined) delete process.env[ENV]
+    else process.env[ENV] = saved
+  })
+
+  it('defaults when nothing is configured', () => {
+    assert.equal(resolveSemanticTitleTimeoutMs(undefined), DEFAULT_SEMANTIC_TITLE_TIMEOUT_MS)
+    assert.equal(resolveSemanticTitleTimeoutMs({}), DEFAULT_SEMANTIC_TITLE_TIMEOUT_MS)
+  })
+
+  it('reads a positive summarize.titleTimeoutMs override', () => {
+    assert.equal(resolveSemanticTitleTimeoutMs({ summarize: { titleTimeoutMs: 3000 } }), 3000)
+  })
+
+  it('ignores a non-positive / non-numeric config value and uses the default', () => {
+    assert.equal(resolveSemanticTitleTimeoutMs({ summarize: { titleTimeoutMs: 0 } }), DEFAULT_SEMANTIC_TITLE_TIMEOUT_MS)
+    assert.equal(resolveSemanticTitleTimeoutMs({ summarize: { titleTimeoutMs: -5 } }), DEFAULT_SEMANTIC_TITLE_TIMEOUT_MS)
+    assert.equal(resolveSemanticTitleTimeoutMs({ summarize: { titleTimeoutMs: 'nope' } }), DEFAULT_SEMANTIC_TITLE_TIMEOUT_MS)
+  })
+
+  it('lets the env override win over config', () => {
+    process.env[ENV] = '5000'
+    assert.equal(resolveSemanticTitleTimeoutMs({ summarize: { titleTimeoutMs: 3000 } }), 5000)
+  })
+
+  it('ignores an invalid env value and falls through', () => {
+    process.env[ENV] = 'abc'
+    assert.equal(resolveSemanticTitleTimeoutMs({ summarize: { titleTimeoutMs: 3000 } }), 3000)
+    process.env[ENV] = '0'
+    assert.equal(resolveSemanticTitleTimeoutMs({}), DEFAULT_SEMANTIC_TITLE_TIMEOUT_MS)
   })
 })

@@ -25,6 +25,15 @@ export const TITLE_MODEL_MAX_LEN = 60
 // Default cheap model for the one-shot title call. The short alias resolves to
 // the latest Haiku (see claude-model-catalog.js), so it survives model bumps.
 export const DEFAULT_SEMANTIC_TITLE_MODEL = 'haiku'
+// Default timeout (ms) for the one-shot title call. The call is fire-and-forget,
+// so a stalled provider connection must never leave its promise pending forever:
+// the closure retains the SessionManager, the first message, and the sessionId,
+// so an un-timed-out call is an unbounded per-session leak for opted-in users, and
+// the underlying one-shot subprocess is never torn down. The caller passes
+// `AbortSignal.timeout(this)` as the `signal` so the call aborts (and the SDK
+// tears the subprocess down) and `generateSessionTitle` fails open to the
+// truncation label. Server-side only (Node's AbortSignal.timeout).
+export const DEFAULT_SEMANTIC_TITLE_TIMEOUT_MS = 15_000
 
 /**
  * Word-boundary truncation used as the ALWAYS-available fallback label. Byte-for

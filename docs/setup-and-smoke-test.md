@@ -140,9 +140,9 @@ CHROXY_ENABLE_IDE=1 PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy start 
 label is the first user message truncated at a word boundary. With this flag on,
 that label is upgraded — once per session, asynchronously (never blocking the
 turn) — to a short model-generated title via a cheap one-shot Haiku call. If the
-call fails or no model access is available, the truncation label is kept. Off by
-default; enable with `features.semanticTitles: true` in `~/.chroxy/config.json`
-or `CHROXY_SEMANTIC_TITLES=1`:
+call fails, times out, or no model access is available, the truncation label is
+kept. Off by default; enable with `features.semanticTitles: true` in
+`~/.chroxy/config.json` or `CHROXY_SEMANTIC_TITLES=1`:
 
 ```bash
 CHROXY_SEMANTIC_TITLES=1 PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy start --tunnel none
@@ -150,6 +150,10 @@ CHROXY_SEMANTIC_TITLES=1 PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy s
 
 The title model defaults to a cheap Haiku alias; override it with
 `CHROXY_SEMANTIC_TITLES_MODEL=<id>` or the existing `summarize.model` config key.
+The one-shot is hard-bounded by a timeout (default 15s) so a stalled provider
+aborts the call and falls back to the truncation label rather than leaking a
+never-settling request; override it with `CHROXY_SEMANTIC_TITLES_TIMEOUT_MS=<ms>`
+or the `summarize.titleTimeoutMs` config key.
 
 ---
 

@@ -47,7 +47,7 @@ import { getRegistryForProvider, watchModelsOverlay } from './models.js'
 // environment-manager.js itself remains behind the dynamic import below
 // (`if (config?.environments?.enabled)`).
 import { UNREACHABLE_STATUSES } from './environment-statuses.js'
-import { resolveSkipPermissions, buildEnvironmentBackend, isUserShellEnabled, getAllowAnyModelProviders, isSemanticTitlesEnabled, resolveSemanticTitleModel } from './config.js'
+import { resolveSkipPermissions, buildEnvironmentBackend, isUserShellEnabled, getAllowAnyModelProviders, isSemanticTitlesEnabled, resolveSemanticTitleModel, resolveSemanticTitleTimeoutMs } from './config.js'
 import { buildOrchestrationManager } from './orchestration/build-manager.js'
 import { parseDuration } from './duration.js'
 import { createSessionTokenStore } from './session-token-store.js'
@@ -682,6 +682,11 @@ export async function startCliServer(config) {
     // label is used unchanged.
     semanticTitlesEnabled: isSemanticTitlesEnabled(config),
     semanticTitleModel: resolveSemanticTitleModel(config),
+    // #6764: hard timeout (ms) for the fire-and-forget one-shot title call so a
+    // stalled provider aborts the subprocess and falls open to the truncation
+    // label instead of leaking a never-settling promise. Env / summarize.titleTimeoutMs
+    // override; default ~15s (resolveSemanticTitleTimeoutMs).
+    semanticTitleTimeoutMs: resolveSemanticTitleTimeoutMs(config),
     // #3749 / #3884 / #3899: SOFT-warning inactivity timeout (ms). null = BaseSession default (30 min).
     // #3899: HARD-cap inactivity timeout (ms). null = BaseSession default (2h).
     // #4467: stream-stall recovery (ms). null = BaseSession default (5min).

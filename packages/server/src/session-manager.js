@@ -19,7 +19,7 @@ import { CostBudgetManager } from './cost-budget-manager.js'
 import { SessionStatePersistence } from './session-state-persistence.js'
 import { SessionTimeoutManager, formatIdleDuration } from './session-timeout-manager.js'
 import { SessionMessageHistory } from './session-message-history.js'
-import { generateSessionTitle, DEFAULT_SEMANTIC_TITLE_MODEL } from './session-title.js'
+import { generateSessionTitle, DEFAULT_SEMANTIC_TITLE_MODEL, DEFAULT_SEMANTIC_TITLE_TIMEOUT_MS } from './session-title.js'
 // NB: the default one-shot title runner (defaultRunOneShot) lives in
 // summarize-session.js, which statically imports the Agent SDK. It is loaded
 // LAZILY (dynamic import inside _generateSemanticTitle) so the core
@@ -362,6 +362,13 @@ export class SessionManager extends EventEmitter {
     // that injects the model runner; production falls through to the SDK one-shot.
     semanticTitlesEnabled = false,
     semanticTitleModel = null,
+    // #6764: hard timeout (ms) for the fire-and-forget one-shot title call. The
+    // call MUST be abortable — a stalled provider stream otherwise leaves the
+    // detached promise pending forever, retaining `this`, the first message, and
+    // the sessionId (an unbounded per-session leak) and never tearing the one-shot
+    // subprocess down. `_generateSemanticTitle` turns this into an
+    // `AbortSignal.timeout(...)`; null → the DEFAULT_SEMANTIC_TITLE_TIMEOUT_MS.
+    semanticTitleTimeoutMs = null,
     titleRunOneShot = null,
 
     // #5859 (audit P1-7): opt-in boot-time sweep of orphaned chroxy session
@@ -590,6 +597,12 @@ export class SessionManager extends EventEmitter {
     this._semanticTitleModel = typeof semanticTitleModel === 'string' && semanticTitleModel
       ? semanticTitleModel
       : DEFAULT_SEMANTIC_TITLE_MODEL
+    // Hard timeout for the one-shot title call (#6764) — see the ctor opt above.
+    // Positive finite ms only; anything else falls back to the default.
+    this._semanticTitleTimeoutMs = typeof semanticTitleTimeoutMs === 'number'
+      && Number.isFinite(semanticTitleTimeoutMs) && semanticTitleTimeoutMs > 0
+      ? semanticTitleTimeoutMs
+      : DEFAULT_SEMANTIC_TITLE_TIMEOUT_MS
     // null → resolve the default SDK one-shot lazily on first use (see above).
     this._titleRunOneShot = typeof titleRunOneShot === 'function' ? titleRunOneShot : null
 
@@ -1977,12 +1990,21 @@ export class SessionManager extends EventEmitter {
     const runOneShot = this._titleRunOneShot
       || (await import('./summarize-session.js')).defaultRunOneShot
 
+    // Hard-bound the fire-and-forget call: AbortSignal.timeout fires after
+    // _semanticTitleTimeoutMs, which threads to defaultRunOneShot →
+    // query({ abortController }) so a stalled provider stream is torn down (not
+    // just abandoned). generateSessionTitle catches the resulting abort rejection
+    // and fails open to the truncation label. Without this the detached promise
+    // could stay pending forever, leaking `this` + the first message (#6764).
+    const signal = AbortSignal.timeout(this._semanticTitleTimeoutMs)
+
     const { title, source } = await generateSessionTitle({
       firstUserMessage: firstMessage,
       enabled: true,
       model: this._semanticTitleModel,
       cwd: this._sessions.get(sessionId)?.cwd,
       runOneShot,
+      signal,
       fallback: fallbackLabel,
     })
 
