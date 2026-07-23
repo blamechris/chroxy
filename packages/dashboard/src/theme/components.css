@@ -4502,6 +4502,25 @@ button.sidebar-token-view-session-row:hover {
 
 .btn-plan-approve:hover { background: #16a34a; }
 
+/* #6774 — combined "approve + auto-accept edits" action. Tinted-green outline
+   to read as a sibling of Approve (same intent) while staying visually
+   distinct from the solid primary Approve button. */
+.btn-plan-approve-accept-edits {
+  padding: 6px 18px;
+  border-radius: 6px;
+  border: 1px solid var(--accent-green);
+  background: transparent;
+  color: var(--accent-green);
+  font-size: var(--text-base);
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.btn-plan-approve-accept-edits:hover {
+  background: var(--accent-green);
+  color: #fff;
+}
+
 .btn-plan-feedback {
   padding: 6px 18px;
   border-radius: 6px;

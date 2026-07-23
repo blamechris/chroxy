@@ -11,9 +11,28 @@ export interface PlanApprovalProps {
   planHtml: string
   onApprove: () => void
   onFeedback: () => void
+  /**
+   * #6774 — combined "approve + auto-accept edits" action: approves the plan
+   * AND switches the session into `acceptEdits` in one step. Only wired (and
+   * only rendered, gated by {@link showAcceptEdits}) where the active
+   * provider supports permission-mode switching.
+   */
+  onApproveAcceptEdits?: () => void
+  /**
+   * Whether to render the combined "Approve & auto-accept edits" button.
+   * Mirrors the mode-picker gating (`caps?.permissionModeSwitch !== false`);
+   * providers that can't switch mode (e.g. claude-tui) don't get the button.
+   */
+  showAcceptEdits?: boolean
 }
 
-export function PlanApproval({ planHtml, onApprove, onFeedback }: PlanApprovalProps) {
+export function PlanApproval({
+  planHtml,
+  onApprove,
+  onFeedback,
+  onApproveAcceptEdits,
+  showAcceptEdits,
+}: PlanApprovalProps) {
   if (!planHtml) return null
 
   return (
@@ -37,6 +56,17 @@ export function PlanApproval({ planHtml, onApprove, onFeedback }: PlanApprovalPr
         <button className="btn-plan-approve" onClick={onApprove} type="button">
           Approve
         </button>
+        {showAcceptEdits && onApproveAcceptEdits && (
+          <button
+            className="btn-plan-approve-accept-edits"
+            data-testid="btn-plan-approve-accept-edits"
+            onClick={onApproveAcceptEdits}
+            type="button"
+            title="Approve this plan and auto-accept file edits for the work that follows"
+          >
+            Approve &amp; auto-accept edits
+          </button>
+        )}
         <button className="btn-plan-feedback" onClick={onFeedback} type="button">
           Feedback
         </button>

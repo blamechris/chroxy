@@ -91,6 +91,18 @@ export interface ChatViewProps {
   isPlanPending?: boolean;
   planAllowedPrompts?: { tool: string; prompt: string }[];
   onApprovePlan?: () => void;
+  /**
+   * #6774 — combined "approve + auto-accept edits": approve the plan AND switch
+   * the session into acceptEdits in one tap. Only wired where the provider
+   * supports permission-mode switching (see {@link canApproveAcceptEdits}).
+   */
+  onApprovePlanAcceptEdits?: () => void;
+  /**
+   * #6774 — gate for the combined action. Mirrors the SettingsBar mode-chip
+   * gating (`caps?.permissionModeSwitch !== false`); false hides the button
+   * for providers that can't switch mode (e.g. claude-tui).
+   */
+  canApproveAcceptEdits?: boolean;
   onFocusInput?: () => void;
   /** Search query for highlighting matching messages */
   searchQuery?: string;
@@ -107,10 +119,16 @@ export interface ChatViewProps {
 function PlanApprovalCard({
   allowedPrompts,
   onApprove,
+  onApproveAcceptEdits,
+  showAcceptEdits,
   onFeedback,
 }: {
   allowedPrompts: { tool: string; prompt: string }[];
   onApprove: () => void;
+  // #6774 — combined "approve + auto-accept edits" action. Optional +
+  // capability-gated so it only renders where the provider supports it.
+  onApproveAcceptEdits?: () => void;
+  showAcceptEdits?: boolean;
   onFeedback: () => void;
 }) {
   return (
@@ -146,6 +164,19 @@ function PlanApprovalCard({
           <Text style={styles.planFeedbackText}>Give Feedback</Text>
         </TouchableOpacity>
       </View>
+      {/* #6774 — full-width secondary action below the primary row so three
+          touch targets don't crowd a narrow phone. */}
+      {showAcceptEdits && onApproveAcceptEdits && (
+        <TouchableOpacity
+          style={styles.planAcceptEditsButton}
+          onPress={onApproveAcceptEdits}
+          accessibilityRole="button"
+          accessibilityLabel="Approve plan and auto-accept edits"
+          testID="plan-approve-accept-edits-button"
+        >
+          <Text style={styles.planAcceptEditsText}>Approve &amp; auto-accept edits</Text>
+        </TouchableOpacity>
+      )}
     </View>
   );
 }
@@ -171,6 +202,8 @@ export function ChatView({
   isPlanPending,
   planAllowedPrompts,
   onApprovePlan,
+  onApprovePlanAcceptEdits,
+  canApproveAcceptEdits,
   onFocusInput,
   searchQuery,
   searchMatchIds,
@@ -553,6 +586,8 @@ export function ChatView({
             <PlanApprovalCard
               allowedPrompts={planAllowedPrompts || []}
               onApprove={onApprovePlan}
+              onApproveAcceptEdits={onApprovePlanAcceptEdits}
+              showAcceptEdits={canApproveAcceptEdits}
               onFeedback={onFocusInput}
             />
           ) : null
@@ -722,5 +757,25 @@ const styles = StyleSheet.create({
     color: COLORS.accentGreen,
     fontSize: 14,
     fontWeight: '600',
+  },
+  // #6774 — combined "approve + auto-accept edits". Full-width tinted-green
+  // outline below the primary row: reads as a sibling of Approve (same intent)
+  // while staying distinct from the solid primary Approve button.
+  planAcceptEditsButton: {
+    marginTop: 10,
+    backgroundColor: COLORS.accentGreenLight,
+    borderWidth: 1,
+    borderColor: COLORS.accentGreen,
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+    borderRadius: 8,
+    minHeight: 44,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  planAcceptEditsText: {
+    color: COLORS.accentGreen,
+    fontSize: 14,
+    fontWeight: '700',
   },
 });

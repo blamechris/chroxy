@@ -45,6 +45,12 @@ export { buildProviderLimitationNote } from './provider-capabilities'
 export type { DegradableCapabilities } from './provider-capabilities'
 export type { OtherFreeformAnswer } from './freeform-answer'
 
+// #6774 — combined "approve plan + auto-accept edits" action. Shared so both
+// clients dispatch the mode switch and the approval in the same (mode-first)
+// order — the server drops a mid-turn permission-mode change.
+export { approvePlanWithAcceptEdits, ACCEPT_EDITS_MODE } from './plan-approval'
+export type { ApprovePlanWithAcceptEditsDeps } from './plan-approval'
+
 // #6861 (epic #6760) — `#`-prefix composer quick-append: the shared prefix
 // parser, the ack payload parser, and the confirmation formatter (both clients).
 export {

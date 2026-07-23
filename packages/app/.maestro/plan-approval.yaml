@@ -56,6 +56,14 @@ name: PlanApprovalCard approve path
 - assertVisible:
     id: "plan-deny-button"
 
+# #6774 — the combined "Approve & auto-accept edits" action is present too.
+# The mock session declares no `permissionModeSwitch: false` capability, so the
+# combined button renders (gated on the provider supporting mode switching).
+# We assert its presence but keep tapping the plain Approve below, so the rest
+# of this flow's approve-path assertions are unaffected.
+- assertVisible:
+    id: "plan-approve-accept-edits-button"
+
 # Screenshot the plan approval card before tapping Approve.
 - takeScreenshot: plan-approval-card
 

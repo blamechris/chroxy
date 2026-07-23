@@ -25,7 +25,7 @@ import type { SessionIntervention } from '@chroxy/store-core';
 // 'freeformText' in`) with the same 5-condition guard the store layer
 // uses, so widening `SelectOptionValue` to a third object shape can't
 // silently misroute it as freeform.
-import { isFreeformAnswer, providerSupportsMultiQuestion, providerSupportsSingleMultiSelect } from '@chroxy/store-core';
+import { isFreeformAnswer, providerSupportsMultiQuestion, providerSupportsSingleMultiSelect, approvePlanWithAcceptEdits } from '@chroxy/store-core';
 import { USER_SHELL_PROVIDER } from '@chroxy/protocol';
 import { useConnectionLifecycleStore } from '../store/connection-lifecycle';
 import { SessionPicker } from '../components/SessionPicker';
@@ -1006,6 +1006,16 @@ export function SessionScreen() {
     clearPlanState();
   }, [addUserMessage, sendInput, clearPlanState]);
 
+  // #6774 — combined "approve + auto-accept edits": switch the session into
+  // acceptEdits AND approve the plan in one tap so the implementation turn runs
+  // with edits auto-accepted. `approvePlanWithAcceptEdits` dispatches the mode
+  // switch BEFORE the approval — the server drops a mid-turn mode change, so it
+  // must land while the session is idle (awaiting approval). Reuses
+  // handleApprovePlan unchanged as the approve step.
+  const handleApprovePlanAcceptEdits = useCallback(() => {
+    approvePlanWithAcceptEdits({ setPermissionMode, approve: handleApprovePlan });
+  }, [setPermissionMode, handleApprovePlan]);
+
   const handleFocusInput = useCallback(() => {
     inputRef.current?.focus();
   }, []);
@@ -1642,6 +1652,8 @@ export function SessionScreen() {
                   isPlanPending={isPlanPending}
                   planAllowedPrompts={planAllowedPrompts}
                   onApprovePlan={handleApprovePlan}
+                  onApprovePlanAcceptEdits={handleApprovePlanAcceptEdits}
+                  canApproveAcceptEdits={providerCaps.permissionModeSwitchSupported}
                   onFocusInput={handleFocusInput}
                   searchQuery={searchVisible ? inSessionSearchQuery : undefined}
                   searchMatchIds={searchVisible ? searchMatchIds : undefined}
@@ -1678,6 +1690,8 @@ export function SessionScreen() {
               isPlanPending={isPlanPending}
               planAllowedPrompts={planAllowedPrompts}
               onApprovePlan={handleApprovePlan}
+              onApprovePlanAcceptEdits={handleApprovePlanAcceptEdits}
+              canApproveAcceptEdits={providerCaps.permissionModeSwitchSupported}
               onFocusInput={handleFocusInput}
               searchQuery={searchVisible ? inSessionSearchQuery : undefined}
               searchMatchIds={searchVisible ? searchMatchIds : undefined}

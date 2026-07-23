@@ -19,6 +19,7 @@ import {
   formatToolName,
   getToolPresentation,
   deriveChatActivity,
+  approvePlanWithAcceptEdits,
   type SessionInfo,
 } from '@chroxy/store-core'
 import { useConnectionStore } from './store/connection'
@@ -1785,6 +1786,16 @@ export function App() {
     setScrollToBottomSignal(n => n + 1)
   }, [sendInput])
 
+  // #6774 — combined "approve + auto-accept edits": switch the session into
+  // acceptEdits AND approve the plan in one step so the implementation turn runs
+  // with edits auto-accepted. `approvePlanWithAcceptEdits` dispatches the mode
+  // switch BEFORE the approval — the server drops a mid-turn mode change, so it
+  // has to land while the session is idle (awaiting approval). Reuses
+  // handlePlanApprove unchanged as the approve step (send 'approve' + scroll).
+  const handlePlanApproveAcceptEdits = useCallback(() => {
+    approvePlanWithAcceptEdits({ setPermissionMode, approve: handlePlanApprove })
+  }, [setPermissionMode, handlePlanApprove])
+
   const handlePlanFeedback = useCallback(() => {
     // Focus the input bar so the user can type feedback
     const textarea = document.querySelector<HTMLTextAreaElement>('.input-bar textarea')
@@ -2550,6 +2561,8 @@ export function App() {
               <PlanApproval
                 planHtml={planHtml}
                 onApprove={handlePlanApprove}
+                onApproveAcceptEdits={handlePlanApproveAcceptEdits}
+                showAcceptEdits={dropdownFlags.showPermissionMode}
                 onFeedback={handlePlanFeedback}
               />
             )}
