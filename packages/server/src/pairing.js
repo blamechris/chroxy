@@ -460,36 +460,57 @@ export class PairingManager extends EventEmitter {
    * gap the `chroxy tokens revoke` CLI left (it edits the persisted store only,
    * which a running daemon overwrites from memory until restarted). Comparing
    * derived ids (not the token) needs no constant-time guard — the id is not
-   * secret. Returns the count removed (0 = no device with that id).
+   * secret.
+   *
+   * #6902: durably persist the POST-removal snapshot BEFORE dropping the token
+   * from memory, so a crash between the two can never resurrect the revoked token
+   * on the next start (fail-CLOSED, mirroring how mint is fail-safe). If the
+   * durable write fails, the token stays valid AND persisted (memory + disk
+   * agree) and we report `persistFailed` rather than a false success — the
+   * operator can retry instead of believing a revoke that a crash would undo.
+   *
    * @param {string} id
-   * @returns {number}
+   * @returns {{ revoked: number, persistFailed?: boolean }} `revoked` is 1 on
+   *   success, 0 if no device matched OR the durable write failed; `persistFailed`
+   *   is set only in the write-failed case (the device exists but stays valid).
    */
   revokeSessionTokenById(id) {
-    if (this._destroyed || typeof id !== 'string' || id.length === 0) return 0
+    if (this._destroyed || typeof id !== 'string' || id.length === 0) return { revoked: 0 }
     for (const token of this._sessionTokens.keys()) {
       if (this._deviceIdForToken(token) === id) {
+        // Persist the map WITHOUT this token first; only drop it from memory once
+        // that durable write has landed (see _persistSessionTokensSnapshot).
+        const remaining = [...this._sessionTokens.entries()].filter(([t]) => t !== token)
+        if (!this._persistSessionTokensSnapshot(remaining)) return { revoked: 0, persistFailed: true }
         this._sessionTokens.delete(token)
-        this._persistSessionTokens()
-        return 1
+        return { revoked: 1 }
       }
     }
-    return 0
+    return { revoked: 0 }
   }
 
   /**
    * Live-revoke EVERY paired device — the operator panic button (#6678). Clears
    * the in-memory map and persists, so all paired devices must re-pair; effective
-   * on the running daemon (their next auth fails), no restart. Returns the count
-   * removed.
-   * @returns {number}
+   * on the running daemon (their next auth fails), no restart.
+   *
+   * #6902: durably persist the EMPTIED snapshot BEFORE clearing memory, so a
+   * crash mid-revoke can't resurrect the whole roster on restart (fail-CLOSED).
+   * If the durable write fails, every token stays valid (memory + disk agree) and
+   * we report `persistFailed` rather than a false success.
+   *
+   * @returns {{ revoked: number, persistFailed?: boolean }} `revoked` is the count
+   *   removed (0 when nothing was paired OR the durable write failed);
+   *   `persistFailed` is set only in the write-failed case (all tokens stay valid).
    */
   revokeAllSessionTokens() {
-    if (this._destroyed) return 0
+    if (this._destroyed) return { revoked: 0 }
     const n = this._sessionTokens.size
-    if (n === 0) return 0
+    if (n === 0) return { revoked: 0 }
+    // Persist the emptied store first; only clear memory once it has landed.
+    if (!this._persistSessionTokensSnapshot([])) return { revoked: 0, persistFailed: true }
     this._sessionTokens.clear()
-    this._persistSessionTokens()
-    return n
+    return { revoked: n }
   }
 
   /**
@@ -558,6 +579,41 @@ export class PairingManager extends EventEmitter {
     try {
       this._sessionTokenStore.save([...this._sessionTokens.entries()])
     } catch { /* store logs; a failed persist just means a restart may re-pair */ }
+  }
+
+  /**
+   * #6902: persist an explicit entries SNAPSHOT and REPORT whether the durable
+   * write succeeded. This is the fail-CLOSED counterpart to `_persistSessionTokens`
+   * (fire-and-forget, used for the fail-SAFE structural changes — mint / sweep /
+   * slide — where a lost persist merely forces a harmless re-pair).
+   *
+   * A REVOKE is the asymmetric case: dropping the token from the in-memory map
+   * FIRST and persisting best-effort is fail-OPEN — a crash between the in-memory
+   * delete and the durable write leaves the revoked token in `session-tokens.json`,
+   * so it RESURRECTS and authenticates on the next start. The revoke callers use
+   * this helper to persist the post-removal snapshot BEFORE they mutate the map,
+   * and only proceed if it durably landed — so a crash at any point either keeps
+   * the token fully valid (memory + disk agree, operator can retry) or leaves it
+   * revoked on disk. It can never resurrect.
+   *
+   * The store's `save()` is atomic (temp file + rename via `writeFileRestricted`),
+   * so the on-disk file is always either the pre- or the post-removal state, never
+   * a torn write. With no store configured (in-memory-only mode) there is no
+   * durability to lose — a restart wipes every token regardless — so we report
+   * success and let the caller mutate memory.
+   *
+   * @param {Array<[string, object]>} entries - the target `[token, meta]` snapshot
+   * @returns {boolean} true iff the snapshot is durably persisted (or no store)
+   */
+  _persistSessionTokensSnapshot(entries) {
+    if (!this._sessionTokenStore) return true
+    try {
+      return this._sessionTokenStore.save(entries) === true
+    } catch {
+      // A store whose save() throws (rather than returning false) is a failed
+      // persist just the same — report it so the revoke reports failure.
+      return false
+    }
   }
 
   /**
