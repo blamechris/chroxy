@@ -85,6 +85,11 @@ import {
   handleFileList as sharedFileList,
   handleDiffResult as sharedDiffResult,
   handleGitStatusResult as sharedGitStatusResult,
+  // #6780 — git branches (read-only listing) + stage/unstage/commit mutations.
+  // Same parsers the app already uses; the dashboard just had no callers.
+  handleGitBranchesResult as sharedGitBranchesResult,
+  handleGitStageResult as sharedGitStageResult,
+  handleGitCommitResult as sharedGitCommitResult,
   // agent_spawned / agent_completed / agent_event / background_work_changed
   // migrated to the shared dispatch table (#5556 slice 2)
   handleEnvironmentList as sharedEnvironmentList,
@@ -5067,6 +5072,46 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           staged: payload.staged,
           unstaged: payload.unstaged,
           untracked: payload.untracked,
+          error: payload.error,
+        });
+      }
+      break;
+    }
+
+    // #6780 — git branches (read-only listing) + stage/unstage/commit
+    // mutations. Same callback-then-invoke shape as diff_result /
+    // git_status_result above; git_stage_result and git_unstage_result share
+    // one callback since their payloads are identical (mirrors the app).
+    case 'git_branches_result': {
+      const gitBranchesCb = get()._gitBranchesCallback;
+      if (gitBranchesCb) {
+        const payload = sharedGitBranchesResult(msg);
+        gitBranchesCb({
+          branches: payload.branches,
+          currentBranch: payload.currentBranch,
+          error: payload.error,
+        });
+      }
+      break;
+    }
+
+    case 'git_stage_result':
+    case 'git_unstage_result': {
+      const gitStageCb = get()._gitStageCallback;
+      if (gitStageCb) {
+        const payload = sharedGitStageResult(msg);
+        gitStageCb({ error: payload.error });
+      }
+      break;
+    }
+
+    case 'git_commit_result': {
+      const gitCommitCb = get()._gitCommitCallback;
+      if (gitCommitCb) {
+        const payload = sharedGitCommitResult(msg);
+        gitCommitCb({
+          hash: payload.hash,
+          message: payload.message,
           error: payload.error,
         });
       }

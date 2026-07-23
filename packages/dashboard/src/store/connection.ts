@@ -700,6 +700,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   _fileContentCallback: null,
   lastFileContentRequestId: null,
   _gitStatusCallback: null,
+  _gitBranchesCallback: null,
+  _gitStageCallback: null,
+  _gitCommitCallback: null,
   _diffCallback: null,
   conversationHistory: [],
   conversationHistoryLoading: false,
@@ -4019,6 +4022,58 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     if (socket && socket.readyState === WebSocket.OPEN) {
       wsSend(socket, { type: 'git_status' });
     }
+  },
+
+  // #6780 — git branches (read-only listing). The wire message and its
+  // git_branches_result reply already existed server-side (createGitOps) and
+  // app-side; the dashboard simply had no handler for it (protocol comment,
+  // packages/protocol/src/schemas/server/file-ops.ts).
+  setGitBranchesCallback: (cb) => {
+    set({ _gitBranchesCallback: cb });
+  },
+
+  requestGitBranches: () => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      wsSend(socket, { type: 'git_branches' });
+    }
+  },
+
+  // #6780 — stage/unstage mutations. Mirrors the app's requestGitStage /
+  // requestGitUnstage (packages/app/src/store/connection.ts): both return
+  // false when the socket is closed so GitPanel can surface a "not
+  // connected" error instead of leaving its spinner stuck forever (#6288).
+  setGitStageCallback: (cb) => {
+    set({ _gitStageCallback: cb });
+  },
+
+  requestGitStage: (paths) => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      return wsSend(socket, { type: 'git_stage', files: paths });
+    }
+    return false;
+  },
+
+  requestGitUnstage: (paths) => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      return wsSend(socket, { type: 'git_unstage', files: paths });
+    }
+    return false;
+  },
+
+  // #6780 — commit mutation. Same not-connected-guard rationale as stage/unstage.
+  setGitCommitCallback: (cb) => {
+    set({ _gitCommitCallback: cb });
+  },
+
+  requestGitCommit: (message) => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      return wsSend(socket, { type: 'git_commit', message });
+    }
+    return false;
   },
 
   // Diff viewer

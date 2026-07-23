@@ -105,10 +105,12 @@ const PLATFORM_SPECIFIC = {
   //  paste-a-pairing-URL support in #5297 — so it's no longer platform-specific.)
   'push_token_error': 'app',    // push notifications are mobile-only
   'write_file_result': 'app',   // app file editing UI
-  'git_branches_result': 'app', // app git UI
-  'git_stage_result': 'app',    // app git UI
-  'git_unstage_result': 'app',  // app git UI
-  'git_commit_result': 'app',   // app git UI
+  // git_branches_result / git_stage_result / git_unstage_result /
+  // git_commit_result removed from PLATFORM_SPECIFIC — the dashboard now
+  // handles them too (#6780: git stage + commit UI), so they are BOTH-CLIENTS.
+  // Coverage passes because each handler covers them (the app via the shared
+  // store-core dispatch-table git callbacks, the dashboard via its new
+  // `case 'git_*_result':` clauses).
 
   // Dashboard only
   'pairing_refreshed': 'dashboard',  // QR display and auto-refresh is dashboard-only (#2916)

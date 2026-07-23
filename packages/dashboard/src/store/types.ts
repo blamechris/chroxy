@@ -78,6 +78,9 @@ export type {
   // dashboard-local GitStatusEntry. Same shape (path + status union) — was
   // missed by the #3132 dedup sweep that moved DiffFile/Hunk/HunkLine.
   GitFileStatus,
+  // #6780 — re-export GitBranch from store-core for the dashboard git panel's
+  // branch listing (mirrors the app's GitBranchesResult.branches shape).
+  GitBranch,
   // #5163 (epic #5159): Control Room activity state. The reducer + selector
   // live in store-core (#5162); the dashboard holds one `ActivityState` on
   // the connection store and the Control Room panel renders it via
@@ -105,6 +108,7 @@ import type {
   MessageAttachment,
   ModelInfo,
   GitFileStatus,
+  GitBranch,
   PendingPermissionConfirm,
   SavedConnection,
   SearchResult,
@@ -264,6 +268,30 @@ export interface GitStatusResult {
   staged: GitFileStatus[];
   unstaged: GitFileStatus[];
   untracked: string[];
+  error: string | null;
+}
+
+// #6780 — dashboard adoption of the git_branches_result / git_stage_result /
+// git_unstage_result / git_commit_result payloads. Mirrors the app's
+// packages/app/src/store/types.ts shapes 1:1 (same wire messages, same
+// store-core parsers — @chroxy/store-core's handleGitBranchesResult /
+// handleGitStageResult / handleGitCommitResult).
+
+export interface GitBranchesResult {
+  branches: GitBranch[];
+  currentBranch: string | null;
+  error: string | null;
+}
+
+// Shared by both git_stage_result and git_unstage_result (identical payload
+// shape — only an optional error string).
+export interface GitStageResult {
+  error: string | null;
+}
+
+export interface GitCommitResult {
+  hash: string | null;
+  message: string | null;
   error: string | null;
 }
 
@@ -1394,6 +1422,14 @@ export interface ConnectionState {
   // Git status callback
   _gitStatusCallback: ((result: GitStatusResult) => void) | null;
 
+  // #6780 — git branches / stage-unstage / commit callbacks. Mirrors the
+  // app's imperative-callback slots (gitBranches / gitStage / gitCommit).
+  _gitBranchesCallback: ((result: GitBranchesResult) => void) | null;
+  // Shared by requestGitStage and requestGitUnstage (git_stage_result and
+  // git_unstage_result carry the same payload shape).
+  _gitStageCallback: ((result: GitStageResult) => void) | null;
+  _gitCommitCallback: ((result: GitCommitResult) => void) | null;
+
   // Diff viewer callback
   _diffCallback: ((result: DiffResult) => void) | null;
 
@@ -1409,7 +1445,7 @@ export interface ConnectionState {
 
   // View mode. #5204 — 'control-room' removed: the Control Room is now a
   // session-independent top-level tab in App, not a per-session view mode.
-  viewMode: 'chat' | 'terminal' | 'files' | 'diff' | 'system' | 'console' | 'snapshots' | 'pool' | 'pages';
+  viewMode: 'chat' | 'terminal' | 'files' | 'diff' | 'git' | 'system' | 'console' | 'snapshots' | 'pool' | 'pages';
 
   // Input settings
   inputSettings: InputSettings;
@@ -1428,7 +1464,7 @@ export interface ConnectionState {
   disconnect: () => void;
   loadSavedConnection: () => void;
   clearSavedConnection: () => void;
-  setViewMode: (mode: 'chat' | 'terminal' | 'files' | 'diff' | 'system' | 'console' | 'snapshots' | 'pool' | 'pages') => void;
+  setViewMode: (mode: 'chat' | 'terminal' | 'files' | 'diff' | 'git' | 'system' | 'console' | 'snapshots' | 'pool' | 'pages') => void;
   addMessage: (message: ChatMessage) => void;
   addUserMessage: (text: string, attachments?: MessageAttachment[], opts?: { clientMessageId?: string; queued?: boolean }) => void;
   appendTerminalData: (data: string) => void;
@@ -1634,6 +1670,22 @@ export interface ConnectionState {
   // Git status
   setGitStatusCallback: (cb: ((result: GitStatusResult) => void) | null) => void;
   requestGitStatus: () => void;
+
+  // #6780 — git branches (read-only listing) + stage/unstage/commit mutations.
+  // Wire messages (git_branches / git_stage / git_unstage / git_commit) and
+  // their *_result replies were already server-side (packages/server/src/ws-file-ops/git.js)
+  // and app-side (packages/app/src/store/connection.ts); this is the dashboard's
+  // adoption of the same request/callback pair shape.
+  setGitBranchesCallback: (cb: ((result: GitBranchesResult) => void) | null) => void;
+  requestGitBranches: () => void;
+  setGitStageCallback: (cb: ((result: GitStageResult) => void) | null) => void;
+  // Mutation requests return false when the socket is closed (frame not
+  // sent) so callers can surface a "not connected" error instead of arming a
+  // callback that will never resolve (mirrors the app's #6288 fix).
+  requestGitStage: (paths: string[]) => boolean;
+  requestGitUnstage: (paths: string[]) => boolean;
+  setGitCommitCallback: (cb: ((result: GitCommitResult) => void) | null) => void;
+  requestGitCommit: (message: string) => boolean;
 
   // Diff viewer
   setDiffCallback: (cb: ((result: DiffResult) => void) | null) => void;
