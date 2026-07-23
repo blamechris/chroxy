@@ -35,6 +35,7 @@ export function createFileOps(sendFn, workspaceRoot) {
     browseFiles: browser.browseFiles,
     readFile: reader.readFile,
     writeFile: reader.writeFile,
+    appendMemory: reader.appendMemory,
     getDiff: reader.getDiff,
     listSlashCommands: browser.listSlashCommands,
     listAgents: browser.listAgents,

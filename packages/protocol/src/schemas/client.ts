@@ -754,6 +754,17 @@ export const WriteFileSchema = z.object({
   content: z.string().max(10_000_000),
 }).passthrough()
 
+// #6861 (epic #6760): `#`-prefix composer quick-append. The client sends only
+// the note text — the TARGET is chosen SERVER-side (the session cwd's project
+// `CLAUDE.md`), never a client-supplied path, so the write is path-confined by
+// construction (defence-in-depth on top of validatePathWithinCwd). Gated behind
+// the same rejectMutationIfBound (#6541) gate as the other file mutations.
+export const AppendMemorySchema = z.object({
+  type: z.literal('append_memory'),
+  text: z.string().min(1).max(10_000),
+  sessionId: z.string().max(256).optional(),
+}).passthrough()
+
 export const ListFilesSchema = z.object({
   type: z.literal('list_files'),
   query: z.string().max(1000).optional(),
@@ -1628,6 +1639,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   BrowseFilesSchema,
   ReadFileSchema,
   WriteFileSchema,
+  AppendMemorySchema,
   ListFilesSchema,
   ListSymbolsSchema,
   ResolveSymbolSchema,

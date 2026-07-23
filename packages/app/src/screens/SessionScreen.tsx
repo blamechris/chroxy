@@ -61,7 +61,7 @@ import { useDictationComposer } from '../hooks/useDictationComposer';
 import { useAndroidSessionNotification } from '../hooks/useAndroidSessionNotification';
 import { pickFromCamera, pickFromGallery, pickDocument, toWireAttachments, MAX_ATTACHMENTS } from '../utils/attachments';
 import type { Attachment } from '../utils/attachments';
-import { formatPasteMarker, expandPasteMarkers } from '@chroxy/store-core';
+import { formatPasteMarker, expandPasteMarkers, parseMemoryAppend } from '@chroxy/store-core';
 import { PastedTextModal } from '../components/PastedTextModal';
 import { disconnectWithQueueGuard } from '../store/disconnectWithQueueGuard';
 
@@ -786,6 +786,31 @@ export function SessionScreen() {
           return;
         }
         launchWebTask(webPrompt, sessionCwd || undefined);
+        return;
+      }
+    }
+
+    // #6861 — `#`-prefix quick-append. A leading `# ` (hash + space) routes the
+    // note to the project CLAUDE.md instead of sending a chat turn. Disabled for
+    // terminal sessions (`#` is a shell comment there) and when attachments are
+    // pending (they can't go to memory). The confirmation lands via the
+    // `append_memory_result` ack.
+    if (text && !hasTerminal && !hasAttachments) {
+      const memory = parseMemoryAppend(text);
+      if (memory.isMemory) {
+        const sent = useConnectionStore.getState().appendMemory(memory.note);
+        if (sent === false) {
+          // #6308/#6309 — disconnected: appendMemory is NOT offline-queued, so
+          // restore the draft (the input was cleared above) and surface a notice
+          // rather than silently losing the note.
+          inputRef.current?.setValue(text);
+          useConnectionStore.getState().addMessage({
+            id: `memory-fail-${Date.now()}`,
+            type: 'system',
+            content: 'Not connected — memory note not saved. Try again once reconnected.',
+            timestamp: Date.now(),
+          });
+        }
         return;
       }
     }

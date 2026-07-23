@@ -11,6 +11,7 @@ import {
   formatPasteMarker,
   formatTokensCompact,
   expandPasteMarkers,
+  parseMemoryAppend,
   resolveContextWindow,
   contextOccupancyTokens,
   contextFillPercent,
@@ -509,6 +510,7 @@ export function App() {
   const connect = useConnectionStore(s => s.connect)
   const retryConnection = useConnectionStore(s => s.retryConnection)
   const sendInput = useConnectionStore(s => s.sendInput)
+  const appendMemory = useConnectionStore(s => s.appendMemory)
   const addInfoNotification = useConnectionStore(s => s.addInfoNotification)
   const sendInterrupt = useConnectionStore(s => s.sendInterrupt)
   const sendCancelQueued = useConnectionStore(s => s.sendCancelQueued)
@@ -1611,6 +1613,32 @@ export function App() {
   // Handlers
   const handleSend = useCallback((text: string, files?: FileAttachment[]) => {
     const allFiles = files || fileAttachments
+    // #6861 — `#`-prefix quick-append. A leading `# ` (hash + space) routes the
+    // note to the project CLAUDE.md instead of sending a chat turn. Skipped when
+    // attachments are pending (they can't go to memory) and for PTY-backed
+    // sessions (claude-tui / user-shell) where the composer writes to the
+    // terminal and a leading `#` is a shell comment, not a memory command —
+    // mirrors the mobile SessionScreen `!hasTerminal` guard. The confirmation
+    // lands via the `append_memory_result` ack.
+    if (!isPtyProvider && allFiles.length === 0 && imageAttachments.length === 0) {
+      const memory = parseMemoryAppend(text)
+      if (memory.isMemory) {
+        const sent = appendMemory(memory.note)
+        if (sent === false) {
+          // #6308/#6309 — disconnected: appendMemory is NOT offline-queued, so
+          // KEEP the draft (don't clear) and surface a notice rather than
+          // silently losing the note.
+          addInfoNotification('Not connected — memory note not saved. Try again once reconnected.')
+          return
+        }
+        const memSid = activeSessionId
+        if (memSid) evictSessionComposerState(memSid)
+        setInputDraftValue('')
+        setPastedTextBlocks([])
+        setInspectedPastedTextId(null)
+        return
+      }
+    }
     const wire = toWireAttachments(
       allFiles.length > 0 ? allFiles : undefined,
       imageAttachments.length > 0 ? imageAttachments : undefined,
@@ -1657,7 +1685,7 @@ export function App() {
     setInputDraftValue('')
     setPastedTextBlocks([])
     setInspectedPastedTextId(null)
-  }, [sendInput, addInfoNotification, fileAttachments, imageAttachments, activeSessionId])
+  }, [sendInput, appendMemory, addInfoNotification, fileAttachments, imageAttachments, activeSessionId, isPtyProvider])
 
   const handleInterrupt = useCallback(() => {
     sendInterrupt()

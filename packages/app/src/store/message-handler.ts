@@ -136,6 +136,10 @@ import {
   // through this table; a miss falls through to the switch below unchanged.
   createDispatchTable,
   runDispatch,
+  // #6861 — `#`-prefix quick-append ack: shared parser + confirmation formatter
+  // (byte-identical wording with the dashboard).
+  handleAppendMemoryResult as sharedAppendMemoryResult,
+  formatMemoryAppendNotice,
 } from '@chroxy/store-core';
 import type {
   DeltaFlusher,
@@ -3250,6 +3254,25 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         }));
       } else {
         get().addMessage(statusMsg);
+      }
+      break;
+    }
+
+    // #6861 — `#`-prefix quick-append ack. Append a system confirmation (or the
+    // error) to the active session transcript, naming the file it landed in.
+    // Byte-identical wording with the dashboard via formatMemoryAppendNotice.
+    case 'append_memory_result': {
+      const noticeMsg: ChatMessage = {
+        id: nextMessageId('memory'),
+        type: 'system',
+        content: formatMemoryAppendNotice(sharedAppendMemoryResult(msg)),
+        timestamp: Date.now(),
+      };
+      const activeMemId = get().activeSessionId;
+      if (activeMemId && get().sessionStates[activeMemId]) {
+        updateActiveSession((ss) => ({ messages: [...ss.messages, noticeMsg] }));
+      } else {
+        get().addMessage(noticeMsg);
       }
       break;
     }

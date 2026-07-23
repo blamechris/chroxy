@@ -424,6 +424,7 @@ function _isSecureRequest(req) {
  *   { type: 'git_status_result', status, error? }       — git status result
  *   { type: 'git_unstage_result', success, error? }     — git unstage result
  *   { type: 'write_file_result', success, error? }      — write file result
+ *   { type: 'append_memory_result', path, created, error? } — `#`-quick-append ack (#6861)
  *   { type: 'log_entry', level, message, timestamp }    — server log entry for dashboard
  *   { type: 'session_activity', sessionId, isBusy, lastCost } — session busy/idle state change
  *   { type: 'session_context', sessionId, cwd, conversationId?, ... } — session context data

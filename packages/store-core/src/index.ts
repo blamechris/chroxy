@@ -45,6 +45,15 @@ export { buildProviderLimitationNote } from './provider-capabilities'
 export type { DegradableCapabilities } from './provider-capabilities'
 export type { OtherFreeformAnswer } from './freeform-answer'
 
+// #6861 (epic #6760) — `#`-prefix composer quick-append: the shared prefix
+// parser, the ack payload parser, and the confirmation formatter (both clients).
+export {
+  parseMemoryAppend,
+  handleAppendMemoryResult,
+  formatMemoryAppendNotice,
+} from './memory'
+export type { MemoryAppendParse, AppendMemoryResultPayload } from './memory'
+
 // #5555.3 / #5555.4 — lastSeq cursor tracking + no-blank-flash replay reconcile.
 export {
   resetReplayReconcile,
