@@ -292,7 +292,7 @@ export function PairedDevicesPanel({ fetchImpl, getToken }: PairedDevicesPanelPr
         <div
           className="env-empty"
           data-testid="paired-devices-error"
-          style={{ color: 'var(--status-error, #ef4444)' }}
+          style={{ color: 'var(--text-error)' }}
         >
           {error}
         </div>
