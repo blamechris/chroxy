@@ -1984,47 +1984,59 @@ export class SessionManager extends EventEmitter {
    * @param {string} fallbackLabel
    */
   async _generateSemanticTitle(sessionId, firstMessage, fallbackLabel) {
-    // Default runner is the SDK one-shot shared with the #5547 summarizer; loaded
-    // lazily so the SDK stays out of SessionManager's static import graph. Tests
-    // inject `titleRunOneShot`, short-circuiting the import entirely.
-    const runOneShot = this._titleRunOneShot
-      || (await import('./summarize-session.js')).defaultRunOneShot
+    try {
+      // Default runner is the SDK one-shot shared with the #5547 summarizer; loaded
+      // lazily so the SDK stays out of SessionManager's static import graph. Tests
+      // inject `titleRunOneShot`, short-circuiting the import entirely.
+      const runOneShot = this._titleRunOneShot
+        || (await import('./summarize-session.js')).defaultRunOneShot
 
-    // Hard-bound the fire-and-forget call: AbortSignal.timeout fires after
-    // _semanticTitleTimeoutMs, which threads to defaultRunOneShot →
-    // query({ abortController }) so a stalled provider stream is torn down (not
-    // just abandoned). generateSessionTitle catches the resulting abort rejection
-    // and fails open to the truncation label. Without this the detached promise
-    // could stay pending forever, leaking `this` + the first message (#6764).
-    const signal = AbortSignal.timeout(this._semanticTitleTimeoutMs)
+      // Hard-bound the fire-and-forget call: AbortSignal.timeout fires after
+      // _semanticTitleTimeoutMs, which threads to defaultRunOneShot →
+      // query({ abortController }) so a stalled provider stream is torn down (not
+      // just abandoned). generateSessionTitle catches the resulting abort rejection
+      // and fails open to the truncation label. Without this the detached promise
+      // could stay pending forever, leaking `this` + the first message (#6764).
+      const signal = AbortSignal.timeout(this._semanticTitleTimeoutMs)
 
-    const { title, source } = await generateSessionTitle({
-      firstUserMessage: firstMessage,
-      enabled: true,
-      model: this._semanticTitleModel,
-      cwd: this._sessions.get(sessionId)?.cwd,
-      runOneShot,
-      signal,
-      fallback: fallbackLabel,
-    })
+      const { title, source } = await generateSessionTitle({
+        firstUserMessage: firstMessage,
+        enabled: true,
+        model: this._semanticTitleModel,
+        cwd: this._sessions.get(sessionId)?.cwd,
+        runOneShot,
+        signal,
+        fallback: fallbackLabel,
+      })
 
-    // Only a model-generated title is worth replacing the truncation with.
-    if (source !== 'model' || typeof title !== 'string' || !title) return
+      // Only a model-generated title is worth replacing the truncation with.
+      if (source !== 'model' || typeof title !== 'string' || !title) return
 
-    const current = this._sessions.get(sessionId)
-    if (!current) return // session was destroyed while the call was in flight
-    current._semanticTitleDone = true
-    current._semanticTitlePending = false
-    // Respect a manual rename (or any other label change) that landed mid-flight:
-    // only upgrade when the name is still exactly the truncation we applied.
-    if (current.name !== fallbackLabel) return
-    if (current.name === title) return // identical — nothing to broadcast
+      const current = this._sessions.get(sessionId)
+      if (!current) return // session was destroyed while the call was in flight
+      current._semanticTitleDone = true
+      // Respect a manual rename (or any other label change) that landed mid-flight:
+      // only upgrade when the name is still exactly the truncation we applied.
+      if (current.name !== fallbackLabel) return
+      if (current.name === title) return // identical — nothing to broadcast
 
-    current.name = title
-    current._autoLabeled = true
-    log.info(`Semantic-titled session ${sessionId} to "${title}"`)
-    this.emit('session_updated', { sessionId, name: title })
-    this._flushPersistOrWarn(sessionId, title)
+      current.name = title
+      current._autoLabeled = true
+      log.info(`Semantic-titled session ${sessionId} to "${title}"`)
+      this.emit('session_updated', { sessionId, name: title })
+      this._flushPersistOrWarn(sessionId, title)
+    } finally {
+      // #6886 — clear the once-per-session in-flight guard on EVERY exit path
+      // (success, the truncation/no-usable-title early return above, or a
+      // thrown error), not just the success branch. Previously a failed or
+      // timed-out title call left `_semanticTitlePending` stuck `true` for
+      // the session's lifetime — harmless today (`auto_label` fires at most
+      // once per session, so nothing re-checks the flag) but a latent trap
+      // for any future retry logic keyed on it. Not persisted
+      // (`_serializeSessionEntry` is field-explicit) — purely in-memory hygiene.
+      const current = this._sessions.get(sessionId)
+      if (current) current._semanticTitlePending = false
+    }
   }
 
   /**

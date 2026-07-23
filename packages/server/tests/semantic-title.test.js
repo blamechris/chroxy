@@ -100,6 +100,9 @@ describe('SessionManager semantic titles (#6764)', () => {
     // Name stays the truncation; no second (model) broadcast landed.
     assert.equal(mgr.getSession('s1').name, 'help me refactor the tunnel reconnect...')
     assert.equal(modelNames.length, 1, 'only the truncation update was broadcast')
+    // #6886 — the once-per-session in-flight guard must be cleared on the fail
+    // path too, not just the success path, or it gets stuck `true` forever.
+    assert.equal(mgr._sessions.get('s1')._semanticTitlePending, false, 'pending flag must be cleared after a failed title call')
   })
 
   it('only fires once per session (second turn does not re-trigger)', async () => {
@@ -191,6 +194,8 @@ describe('SessionManager semantic titles (#6764)', () => {
 
     assert.equal(mgr.getSession('s1').name, 'help me refactor the tunnel reconnect...')
     assert.equal(names.length, 1, 'only the truncation update was broadcast — the model call timed out and failed open')
+    // #6886 — same guard-clearing requirement on the timeout/abort path.
+    assert.equal(mgr._sessions.get('s1')._semanticTitlePending, false, 'pending flag must be cleared after a timed-out title call')
   })
 
   it('does not upgrade custom-named sessions (no auto_label fires)', async () => {
