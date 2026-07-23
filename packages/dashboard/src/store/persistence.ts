@@ -705,13 +705,23 @@ export function clearPersistedState(): void {
   }
 }
 
-/** Keys that should never be cleared during server switch */
+/**
+ * Keys that should never be cleared during server switch.
+ *
+ * Includes per-device UI/view preferences (#6883) — `showConsoleTab`,
+ * `interventionPing`, and `compactChatFilter` are device-level choices, not
+ * server-scoped session state, so they should survive an unscoped
+ * `clearPersistedState()` just like `theme`/`view_mode` do.
+ */
 function isGlobalKey(key: string): boolean {
   return key === KEY_VIEW_MODE
     || key === KEY_SIDEBAR_WIDTH
     || key === KEY_SPLIT_MODE
     || key === KEY_ACTIVE_SERVER
-    || key === KEY_THEME;
+    || key === KEY_THEME
+    || key === KEY_SHOW_CONSOLE_TAB
+    || key === KEY_INTERVENTION_PING
+    || key === KEY_COMPACT_CHAT_FILTER;
 }
 
 // ---------------------------------------------------------------------------
