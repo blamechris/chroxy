@@ -61,6 +61,7 @@ import { useDictationComposer } from '../hooks/useDictationComposer';
 import { useAndroidSessionNotification } from '../hooks/useAndroidSessionNotification';
 import { pickFromCamera, pickFromGallery, pickDocument, toWireAttachments, MAX_ATTACHMENTS } from '../utils/attachments';
 import type { Attachment } from '../utils/attachments';
+import { runQueuedEdit } from '../utils/edit-queued';
 import { formatPasteMarker, expandPasteMarkers, parseMemoryAppend } from '@chroxy/store-core';
 import { PastedTextModal } from '../components/PastedTextModal';
 import { disconnectWithQueueGuard } from '../store/disconnectWithQueueGuard';
@@ -688,15 +689,28 @@ export function SessionScreen() {
   // #6628 — edit a still-queued follow-up before it flushes. Cancel-and-reopen:
   // cancel the queued entry first (its optimistic drop clears the bubble +
   // badge), then reopen the message text in the composer for amend + re-send.
-  // `sendCancelQueued` returns `false` on a closed socket without dropping the
-  // entry — bail then so we neither clobber the composer nor strand a queued
-  // message the cancel never reached. The already-flushing race is handled like
-  // plain cancel: the server no-ops and the badge (with these controls) is gone
-  // once `message_dequeued` lands.
+  // The decision logic (draft-clobber guard + fail-closed bail) lives in
+  // `runQueuedEdit`; here we wire the app's effects:
+  //   - guard: queue-while-processing is a multi-message flow, so if the
+  //     composer already holds a non-empty draft (a second follow-up mid-type)
+  //     we surface an alert and leave the queued entry intact rather than
+  //     silently discarding the draft.
+  //   - `sendCancelQueued` returns `false` on a closed socket without dropping
+  //     the entry — the helper bails then so we neither clobber the composer nor
+  //     strand a queued message the cancel never reached. The already-flushing
+  //     race is handled like plain cancel: the server no-ops and the badge (with
+  //     these controls) is gone once `message_dequeued` lands.
   const handleEditQueued = useCallback((id: string, text: string) => {
-    if (sendCancelQueued(id) === false) return;
-    inputRef.current?.setValue(text);
-    inputRef.current?.focus();
+    runQueuedEdit(id, text, {
+      getDraft: () => inputRef.current?.getValue() ?? '',
+      // sendCancelQueued returns `false` on a closed socket (fail-closed, the
+      // entry is NOT dropped) or `'sent'` otherwise — normalize to the helper's
+      // boolean contract where `false` means fail-closed.
+      cancelQueued: (mid) => sendCancelQueued(mid) !== false,
+      reopenComposer: (next) => inputRef.current?.setValue(next),
+      notify: (message) => Alert.alert('Finish your current message', message),
+      focusComposer: () => inputRef.current?.focus(),
+    });
   }, [sendCancelQueued]);
 
   const toggleSelection = useCallback((id: string) => {
