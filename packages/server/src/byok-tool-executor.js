@@ -9,17 +9,18 @@
  * the session is in `auto` mode which auto-approves). We don't do
  * permission gating in here; this module is execution only.
  *
- * Path safety is enforced for file tools by validatePathWithinCwd from
- * ws-file-ops/common.js — every file_path is realpath-ed and confirmed
- * to be inside the session cwd before any read/write happens. Symlink
- * escapes are blocked by the realpath-of-deepest-ancestor pattern there
- * (see common.js + the 2026-04-11 production-readiness audit).
+ * Path safety is enforced for file tools by validateRawPathWithinCwd from
+ * ws-file-ops/common.js — every file_path is resolved COMPONENT BY COMPONENT
+ * (open(2)-faithfully) and confirmed to be inside the session cwd before any
+ * read/write happens. Symlink escapes — including a `..` that follows a
+ * symlinked component (#6923) — are blocked by walking the RAW path rather than
+ * a pre-`resolve()`d one (see common.js + the 2026-04-11 production-readiness
+ * audit).
  */
 
-import { resolve, isAbsolute } from 'node:path'
 import { isIP } from 'node:net'
 import { lookup as dnsLookup } from 'node:dns/promises'
-import { validatePathWithinCwd } from './ws-file-ops/common.js'
+import { validateRawPathWithinCwd } from './ws-file-ops/common.js'
 import { executeBash, DEFAULT_BASH_TIMEOUT_MS } from './built-in-tools/bash-exec.js'
 import { readFileTool, writeFileTool, editFileTool } from './built-in-tools/file-ops.js'
 import {
@@ -140,9 +141,14 @@ async function safeResolve(filePath, cwd, cwdRealCache, cwdCacheTtl) {
   if (typeof filePath !== 'string' || filePath.length === 0) {
     throw Object.assign(new Error('file_path is required'), { code: 'EINVAL' })
   }
-  const absolute = isAbsolute(filePath) ? filePath : resolve(cwd, filePath)
-  const { valid, realPath, cwdReal } = await validatePathWithinCwd(
-    absolute,
+  // #6923 — hand the RAW filePath (its `..` intact) to the component-wise walker.
+  // Do NOT pre-`resolve(cwd, filePath)`: `resolve()` collapses a `..` that follows
+  // a symlinked component LEXICALLY, so `link/../x` cancelled the symlink before it
+  // was followed and an escape via a symlink-out-of-workspace + `..` looked in
+  // bounds. validateRawPathWithinCwd walks the raw path open(2)-faithfully so the
+  // true (escaping) destination is seen and rejected.
+  const { valid, realPath, cwdReal } = await validateRawPathWithinCwd(
+    filePath,
     cwd,
     cwdRealCache,
     cwdCacheTtl,
@@ -323,9 +329,10 @@ async function runGrep({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
  */
 async function safeResolveRoot(p, cwd, cwdRealCache, cwdCacheTtl) {
   if (typeof p !== 'string' || p.length === 0) return cwd
-  const absolute = isAbsolute(p) ? p : resolve(cwd, p)
-  const { valid, realPath, cwdReal } = await validatePathWithinCwd(
-    absolute,
+  // #6923 — pass the RAW path; see safeResolve for why pre-`resolve()` is unsafe
+  // (lexical `..` collapse hides a symlink+`..` escape).
+  const { valid, realPath, cwdReal } = await validateRawPathWithinCwd(
+    p,
     cwd,
     cwdRealCache,
     cwdCacheTtl,

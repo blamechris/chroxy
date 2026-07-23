@@ -7,9 +7,10 @@
  *   Edit   — string-replace with strict-uniqueness check unless `replaceAll`
  *
  * Path-safety is the caller's responsibility — by the time we reach here
- * the BYOK tool executor has already run validatePathWithinCwd() from
- * ws-file-ops/common.js to defeat symlink escape attempts. These helpers
- * receive realpaths that are known to be inside the session cwd.
+ * the BYOK tool executor has already run validateRawPathWithinCwd() from
+ * ws-file-ops/common.js to defeat symlink escape attempts (including a `..`
+ * after a symlinked component, #6923). These helpers receive realpaths that
+ * are known to be inside the session cwd.
  *
  * Each function returns `{ ok: true, ... }` on success or
  * `{ ok: false, code, message }` on a recoverable error (file not found,
@@ -118,7 +119,7 @@ export async function writeFileTool({ filePath, content, mode = 0o644 } = {}) {
 
   // Ensure parent directory exists. recursive:true is a no-op when the
   // directory already exists, so this is safe to call unconditionally.
-  // Path safety was already enforced by the caller (validatePathWithinCwd
+  // Path safety was already enforced by the caller (validateRawPathWithinCwd
   // in byok-tool-executor.js), so the dirname is guaranteed to be
   // inside the workspace cwd.
   if (!existedBefore) {
