@@ -14,7 +14,7 @@ import type { ActiveTool, ChatMessage, ContextOccupancy, ContextUsage, ToolResul
 import { nextMessageId } from '../utils'
 import { isReplayDuplicate } from '../replay-dedup'
 import { resolveStreamId } from '../stream-id'
-import { isRateLimitMessage } from '@chroxy/protocol'
+import { isRateLimitMessage, MAX_SANE_DURATION_MS } from '@chroxy/protocol'
 import { parseRawStringField } from './_shared'
 
 // ---------------------------------------------------------------------------
@@ -1480,10 +1480,24 @@ export interface ThinkingStreamEndPayload {
  * off the raw wire message. Defensive re-guard mirroring the protocol schema:
  * a finite non-negative integer, or `undefined` when absent/malformed. Floors
  * so a stray float can never leak a fractional ms/token onto the bubble.
+ *
+ * #6941 review (Copilot): this helper claimed to mirror the protocol schema
+ * but did not enforce `ThinkingDurationMsSchema`'s `.max(MAX_SANE_DURATION_MS)`
+ * ceiling, so a malformed payload that bypassed Zod (or a clock-jump artifact
+ * from the server side) could leak an out-of-range duration into state/UI.
+ * `max` is optional and per-call: `thinkingDurationMs` passes
+ * `MAX_SANE_DURATION_MS`, `thinkingTokens` (no documented ceiling) omits it.
+ * Out-of-range values are OMITTED (return `undefined`), never clamped — same
+ * "vanish, don't render a fake ceiling" behaviour as the server-side
+ * normalizer (packages/server/src/event-normalizer.js `boundedNonNegInt`),
+ * so both sides agree.
  */
-function parseFiniteNonNegIntField(msg: Record<string, unknown>, key: string): number | undefined {
+function parseFiniteNonNegIntField(msg: Record<string, unknown>, key: string, max?: number): number | undefined {
   const v = msg[key]
-  return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? Math.floor(v) : undefined
+  if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) return undefined
+  const floored = Math.floor(v)
+  if (typeof max === 'number' && floored > max) return undefined
+  return floored
 }
 
 /**
@@ -1501,7 +1515,7 @@ export function handleThinkingStreamEnd(
 ): ThinkingStreamEndPayload {
   const sessionId = typeof msg.sessionId === 'string' ? msg.sessionId : activeSessionId
   const thinkingMessageId = parseRawStringField(msg, 'messageId')
-  const thinkingDurationMs = parseFiniteNonNegIntField(msg, 'thinkingDurationMs')
+  const thinkingDurationMs = parseFiniteNonNegIntField(msg, 'thinkingDurationMs', MAX_SANE_DURATION_MS)
   const thinkingTokens = parseFiniteNonNegIntField(msg, 'thinkingTokens')
   return {
     sessionId,

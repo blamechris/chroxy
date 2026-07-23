@@ -5,6 +5,7 @@
  * disclosure, separate from the response-text stream.
  */
 import { describe, it, expect } from 'vitest'
+import { MAX_SANE_DURATION_MS } from '@chroxy/protocol'
 import {
   handleThinkingStreamStart,
   handleThinkingDelta,
@@ -212,6 +213,41 @@ describe('handleThinkingStreamEnd (#6756)', () => {
     ).applyTo(messages)
     expect(next[0]!.thinkingDurationMs).toBe(4200)
     expect(next[0]!.thinkingTokens).toBeUndefined()
+  })
+
+  it('omits a duration that exceeds MAX_SANE_DURATION_MS while keeping in-range tokens (#6941 review)', () => {
+    // A clock jump / suspend on the measuring side could hand us a bogus
+    // multi-day duration; a malformed payload could also bypass Zod entirely.
+    // The parse helper must enforce the same ceiling the protocol schema
+    // does (ThinkingDurationMsSchema.max(MAX_SANE_DURATION_MS)) and OMIT
+    // (not clamp) the field so the footer degrades instead of showing a fake
+    // exact-24h number.
+    const messages: ChatMessage[] = [
+      { id: 't0', type: 'thinking', content: 'done', thinkingStreaming: true, timestamp: 0 },
+    ]
+    const next = handleThinkingStreamEnd(
+      {
+        type: 'stream_end',
+        messageId: 't0',
+        thinking: true,
+        thinkingDurationMs: MAX_SANE_DURATION_MS + 1,
+        thinkingTokens: 128,
+      },
+      SESSION,
+    ).applyTo(messages)
+    expect(next[0]!.thinkingDurationMs).toBeUndefined()
+    expect(next[0]!.thinkingTokens).toBe(128)
+  })
+
+  it('accepts the exact MAX_SANE_DURATION_MS boundary (#6941 review)', () => {
+    const messages: ChatMessage[] = [
+      { id: 't0', type: 'thinking', content: 'done', thinkingStreaming: true, timestamp: 0 },
+    ]
+    const next = handleThinkingStreamEnd(
+      { type: 'stream_end', messageId: 't0', thinking: true, thinkingDurationMs: MAX_SANE_DURATION_MS },
+      SESSION,
+    ).applyTo(messages)
+    expect(next[0]!.thinkingDurationMs).toBe(MAX_SANE_DURATION_MS)
   })
 
   it('attaches stats even when the bubble was already orphan-swept to finalised (#6391)', () => {

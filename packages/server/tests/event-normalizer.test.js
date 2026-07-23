@@ -1,7 +1,7 @@
 import { describe, it, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventNormalizer, EVENT_MAP } from '../src/event-normalizer.js'
-import { ServerSkillChangedSchema } from '@chroxy/protocol'
+import { ServerSkillChangedSchema, MAX_SANE_DURATION_MS } from '@chroxy/protocol'
 
 // -- Helper to create a standard multi-session context --
 function makeCtx(overrides = {}) {
@@ -78,6 +78,72 @@ describe('EventNormalizer', () => {
       )
       const msg = result.messages[0].msg
       assert.ok(!('thinkingDurationMs' in msg))
+    })
+
+    // #6941 review (Copilot): the normalizer only finite-checked the fields
+    // before forwarding, so an out-of-range value (clock jump / suspend, or a
+    // malformed upstream event) could violate the wire schema's
+    // `.int().nonnegative().max(MAX_SANE_DURATION_MS)` contract. These cases
+    // pin the defense-in-depth bound.
+    it('omits a duration that exceeds MAX_SANE_DURATION_MS rather than forwarding or clamping it', () => {
+      const result = normalizer.normalize(
+        'stream_end',
+        { messageId: 'm1-thinking-0', thinking: true, thinkingDurationMs: MAX_SANE_DURATION_MS + 1, thinkingTokens: 128 },
+        makeCtx(),
+      )
+      const msg = result.messages[0].msg
+      assert.ok(!('thinkingDurationMs' in msg), 'out-of-range duration must vanish, not clamp to the ceiling')
+      assert.equal(msg.thinkingTokens, 128, 'an in-range sibling field still forwards')
+    })
+
+    it('accepts the exact MAX_SANE_DURATION_MS boundary', () => {
+      const result = normalizer.normalize(
+        'stream_end',
+        { messageId: 'm1-thinking-0', thinking: true, thinkingDurationMs: MAX_SANE_DURATION_MS },
+        makeCtx(),
+      )
+      const msg = result.messages[0].msg
+      assert.equal(msg.thinkingDurationMs, MAX_SANE_DURATION_MS)
+    })
+
+    it('omits a negative duration', () => {
+      const result = normalizer.normalize(
+        'stream_end',
+        { messageId: 'm1-thinking-0', thinking: true, thinkingDurationMs: -50 },
+        makeCtx(),
+      )
+      const msg = result.messages[0].msg
+      assert.ok(!('thinkingDurationMs' in msg))
+    })
+
+    it('floors a fractional duration rather than forwarding it as-is', () => {
+      const result = normalizer.normalize(
+        'stream_end',
+        { messageId: 'm1-thinking-0', thinking: true, thinkingDurationMs: 4200.9 },
+        makeCtx(),
+      )
+      const msg = result.messages[0].msg
+      assert.equal(msg.thinkingDurationMs, 4200)
+    })
+
+    it('thinkingTokens has no ceiling — only enforces non-negative int', () => {
+      const result = normalizer.normalize(
+        'stream_end',
+        { messageId: 'm1-thinking-0', thinking: true, thinkingTokens: MAX_SANE_DURATION_MS * 10 },
+        makeCtx(),
+      )
+      const msg = result.messages[0].msg
+      assert.equal(msg.thinkingTokens, MAX_SANE_DURATION_MS * 10)
+    })
+
+    it('omits a negative thinkingTokens', () => {
+      const result = normalizer.normalize(
+        'stream_end',
+        { messageId: 'm1-thinking-0', thinking: true, thinkingTokens: -1 },
+        makeCtx(),
+      )
+      const msg = result.messages[0].msg
+      assert.ok(!('thinkingTokens' in msg))
     })
 
     it('never stamps footer-stat fields on a NON-thinking (response) stream_end', () => {
