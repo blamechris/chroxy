@@ -6,10 +6,10 @@
  */
 import { z } from 'zod';
 import { BillingCanarySnapshotSchema, BillingCanaryWarningSchema, ServerAuthOkSchema, ServerPairPendingSchema, ServerPairRequestPendingSchema, ServerPairResolvedSchema, ServerPairResultSchema } from './connection.ts';
-import { ServerPermissionRequestSchema, ServerPermissionInputSchema, ServerStreamDeltaSchema, ServerShellPendingApprovalSchema } from './stream.ts';
+import { ServerPermissionRequestSchema, ServerPermissionInputSchema, ServerPermissionExpiredSchema, ServerPermissionResolvedSchema, ServerStreamDeltaSchema, ServerShellPendingApprovalSchema } from './stream.ts';
 import { ActivityEntrySchema, ActivityKindSchema, ActivityOutputRefSchema, ActivityStatusSchema, ServerActivityDeltaSchema, ServerActivitySnapshotSchema, ServerCancelActivityAckSchema, ServerMessageDequeuedSchema, ServerMessageQueuedSchema } from './activity.ts';
 import { ExternalSessionEntrySchema, HostStatusSummarySchema, IntegrationActionCountsSchema, IntegrationCliStatusSchema, IntegrationRepoSchema, IntegrationStatusSummarySchema, MailboxDeliveryEventSchema, MailboxRegistrationSchema, RepoEventSchema, ServerRepoEventsDeltaSchema, RepoMemoryCacheSchema, RepoMemoryReportSchema, RepoMemoryStatusSchema, RepoRelayRunSchema, RepoRelayStatusSchema, RepoRelayVerdictSchema, RepoRunnersSchema, RepoRuntimeConfigEntrySchema, RepoStatusSchema, RepoTreeSchema, RepoVerdictSchema, RunnerInfoSchema, RunnerServiceStateSchema, RunnerStatusSummarySchema, RunnerVerdictSchema, ServerByokPoolActionAckSchema, ServerByokPoolStatusSnapshotSchema, ServerContainersActionAckSchema, ServerContainersStatusSnapshotSchema, ServerEmulatorActionAckSchema, ServerEmulatorStatusSnapshotSchema, ServerExternalSessionsSnapshotSchema, ServerHostPruneActionAckSchema, ServerHostPruneStatusSnapshotSchema, ServerHostStatusSnapshotSchema, ServerIntegrationActionAckSchema, ServerIntegrationStatusSnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerRepoEventsSnapshotSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerSessionPresetDisclosureSchema, ServerSessionPresetFullSchema, ServerSessionPresetSnapshotSchema, ServerSimulatorActionAckSchema, ServerSimulatorStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerSummarizeSessionResultSchema, ServerWslActionAckSchema, ServerWslStatusSnapshotSchema, SkillInventoryEntrySchema, SkillInventoryRepoSchema } from './control-room.ts';
-import { CumulativeUsageSchema, ServerAuthBootstrapSchema, ServerSessionStoppedSchema, ServerSkillTrustGrantInvalidAuthorSchema, ServerSkillTrustGrantOkSchema, ServerSkillsListSchema, ServerTunnelUrlChangedSchema } from './session.ts';
+import { CumulativeUsageSchema, ServerAuthBootstrapSchema, ServerConversationIdSchema, ServerSessionStoppedSchema, ServerSkillTrustGrantInvalidAuthorSchema, ServerSkillTrustGrantOkSchema, ServerSkillsListSchema, ServerTunnelUrlChangedSchema } from './session.ts';
 import { ServerBillingCanarySchema, ServerBudgetResumeAckSchema, ServerByokCredentialsStatusSchema, ServerCostUpdateSchema, ServerCredentialTestResultSchema, ServerCredentialsStatusSchema, ServerErrorEnvelopeSchema, ServerErrorSchema, ServerEvaluateDraftResultSchema, ServerEvaluatorClarifySchema, ServerEvaluatorRewriteSchema, ServerExtensionMessageSchema, ServerMonthlyBudgetSchema, ServerSessionCostThresholdCrossedSchema, ServerSessionUsageSchema } from './billing.ts';
 export type BillingCanaryWarning = z.infer<typeof BillingCanaryWarningSchema>;
 export type BillingCanarySnapshot = z.infer<typeof BillingCanarySnapshotSchema>;
@@ -22,6 +22,9 @@ export type ServerPairResolvedMessage = z.infer<typeof ServerPairResolvedSchema>
 export type ServerStreamDeltaMessage = z.infer<typeof ServerStreamDeltaSchema>;
 export type ServerShellPendingApprovalMessage = z.infer<typeof ServerShellPendingApprovalSchema>;
 export type ServerPermissionRequestMessage = z.infer<typeof ServerPermissionRequestSchema>;
+export type ServerPermissionExpiredMessage = z.infer<typeof ServerPermissionExpiredSchema>;
+export type ServerPermissionResolvedMessage = z.infer<typeof ServerPermissionResolvedSchema>;
+export type ServerConversationIdMessage = z.infer<typeof ServerConversationIdSchema>;
 export type ServerPermissionInputMessage = z.infer<typeof ServerPermissionInputSchema>;
 export type ServerErrorMessage = z.infer<typeof ServerErrorSchema>;
 export type ServerErrorEnvelopeMessage = z.infer<typeof ServerErrorEnvelopeSchema>;
