@@ -26,6 +26,21 @@ describe('toMessageAttachments (#6632)', () => {
     expect(toMessageAttachments()).toEqual([])
     expect(toMessageAttachments([], [])).toEqual([])
   })
+
+  it('prefers the composer thumbnail data URI as the preview uri (#6729)', () => {
+    const out = toMessageAttachments(
+      [{ data: 'AAAA', mediaType: 'image/png', name: 'shot.png', thumbnailDataUri: 'data:image/jpeg;base64,THUMB' }],
+      undefined,
+    )
+    expect(out[0]!.uri).toBe('data:image/jpeg;base64,THUMB')
+    // `size` still reflects the original payload, not the thumbnail.
+    expect(out[0]!.size).toBe(4)
+  })
+
+  it('falls back to the full data URI when no thumbnail was generated (#6729)', () => {
+    const out = toMessageAttachments([{ data: 'AAAA', mediaType: 'image/png', name: 'shot.png' }], undefined)
+    expect(out[0]!.uri).toBe('data:image/png;base64,AAAA')
+  })
 })
 
 describe('isRenderableImageUri (#6632)', () => {
