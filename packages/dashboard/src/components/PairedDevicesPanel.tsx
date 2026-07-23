@@ -231,6 +231,17 @@ export function PairedDevicesPanel({ fetchImpl, getToken }: PairedDevicesPanelPr
     void refresh()
   }, [refresh])
 
+  // The revoke-all confirmation UI only renders behind `devices.length > 0`,
+  // so once the roster empties there's no "No" button left to dismiss it —
+  // clear it here instead. Otherwise a stale `confirmingAll=true` survives
+  // an empty roster and the "Revoke ALL devices?" prompt unexpectedly
+  // reopens the moment a device reappears (refresh / new pairing).
+  useEffect(() => {
+    if (devices.length === 0 && confirmingAll) {
+      setConfirmingAll(false)
+    }
+  }, [devices.length, confirmingAll])
+
   return (
     <div className="environment-panel" data-testid="paired-devices-panel">
       <div className="env-panel-header">

@@ -233,6 +233,58 @@ describe('PairedDevicesPanel', () => {
     expect(screen.queryByTestId('paired-devices-revoke-all')).toBeNull()
   })
 
+  it('auto-clears the revoke-all confirmation when the device list drops to zero', async () => {
+    let listCalled = 0
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input.toString()
+      if (init?.method === 'DELETE' && url.startsWith('/api/paired-devices/')) {
+        return new Response(JSON.stringify({ ok: true, revoked: 1 }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      listCalled += 1
+      // 1st call: initial load with a device. 2nd (post-revoke reconcile): empty.
+      // 3rd+ (manual refresh): a new device reappears, e.g. a fresh pairing.
+      const devices =
+        listCalled === 1
+          ? [makeDevice({ id: 'dev-a' })]
+          : listCalled === 2
+            ? []
+            : [makeDevice({ id: 'dev-new' })]
+      return new Response(JSON.stringify({ devices }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    })
+
+    render(<PairedDevicesPanel fetchImpl={fetchImpl as unknown as typeof fetch} getToken={() => 'tok'} />)
+    await waitFor(() => {
+      expect(screen.getByTestId('paired-device-card-dev-a')).toBeTruthy()
+    })
+
+    // Open the "Revoke ALL devices?" confirmation.
+    fireEvent.click(screen.getByTestId('paired-devices-revoke-all'))
+    expect(screen.getByTestId('paired-devices-revoke-all-confirm')).toBeTruthy()
+
+    // Revoke the last remaining device individually (not via revoke-all), so
+    // the roster empties while `confirmingAll` is still true.
+    fireEvent.click(screen.getByTestId('paired-device-revoke-dev-a'))
+    fireEvent.click(screen.getByTestId('paired-device-confirm-yes-dev-a'))
+    await waitFor(() => {
+      expect(screen.getByTestId('paired-devices-empty')).toBeTruthy()
+    })
+
+    // A device reappears (refresh / new pairing) — the stale "Revoke ALL
+    // devices?" confirmation must not resurface.
+    fireEvent.click(screen.getByTestId('paired-devices-refresh'))
+    await waitFor(() => {
+      expect(screen.getByTestId('paired-device-card-dev-new')).toBeTruthy()
+    })
+    expect(screen.queryByTestId('paired-devices-revoke-all-confirm')).toBeNull()
+    expect(screen.getByTestId('paired-devices-revoke-all')).toBeTruthy()
+  })
+
   it('refresh button re-fetches', async () => {
     const fetchImpl = makeFetch({ list: listOf([]) })
     render(<PairedDevicesPanel fetchImpl={fetchImpl as unknown as typeof fetch} getToken={() => 'tok'} />)
