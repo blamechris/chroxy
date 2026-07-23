@@ -180,6 +180,26 @@ export interface ChatMessage {
    * affordance.
    */
   thinkingTruncated?: boolean;
+  /**
+   * #6391 (chat-redesign footer-stat) — on a `type: 'thinking'` bubble, the
+   * server-measured elapsed wall time (ms) the reasoning block took, from its
+   * first streamed token to its close. Threaded off the thinking `stream_end`
+   * by {@link handleThinkingStreamEnd}. Renderers show it as a quiet
+   * `thought for 4.2s` turn footer in place of the plain "Thought" label.
+   * Undefined on old sessions / servers and on the synchronous fallback path
+   * (no measurable elapsed time) — the footer degrades to "Thought".
+   */
+  thinkingDurationMs?: number;
+  /**
+   * #6391 (chat-redesign footer-stat) — on a `type: 'thinking'` bubble, the
+   * reasoning block's token count, rendered as ` · N tokens` after the
+   * duration. Optional and NOT populated by the claude SDK/BYOK providers:
+   * Anthropic's usage folds thinking tokens into `output_tokens` with no
+   * per-block breakdown, so there is nothing clean to report (tracked follow-up).
+   * Present only for a provider that cleanly separates reasoning tokens; the
+   * footer omits the token clause when absent rather than fabricating a number.
+   */
+  thinkingTokens?: number;
   answered?: string;
   /**
    * #4973 — structured per-question answers map recorded when the user

@@ -80,6 +80,27 @@ describe('MessageBubble thinking content (#6756)', () => {
     expect(toggleLabel(tree)).toContain('Thinking…');
   });
 
+  // #6391 footer-stat — a finished thinking bubble carrying a measured duration
+  // (+ tokens) shows the compact `thought for Xs · N tokens` footer.
+  it('renders the footer-stat "thought for Xs · N tokens" when duration + tokens are present (#6391)', () => {
+    const tree = render(makeThinking({ thinkingStreaming: false, thinkingDurationMs: 4200, thinkingTokens: 128 }));
+    expect(toggleLabel(tree)).toContain('thought for 4.2s · 128 tokens');
+  });
+
+  it('renders duration alone when tokens are absent (claude SDK/BYOK) (#6391)', () => {
+    const tree = render(makeThinking({ thinkingStreaming: false, thinkingDurationMs: 19000 }));
+    const label = toggleLabel(tree);
+    expect(label).toContain('thought for 19s');
+    expect(label).not.toContain('tokens');
+  });
+
+  it('degrades to a bare "Thought" when no footer-stat is present (old sessions) (#6391)', () => {
+    const tree = render(makeThinking({ thinkingStreaming: false }));
+    const label = toggleLabel(tree);
+    expect(label).toContain('Thought');
+    expect(label).not.toContain('thought for');
+  });
+
   it('falls back to the ThinkingIndicator animation when there is no content', () => {
     const tree = render(makeThinking({ content: '' }));
     // No disclosure bubble…

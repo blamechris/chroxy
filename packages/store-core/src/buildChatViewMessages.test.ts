@@ -11,7 +11,13 @@
  * the dashboard hook test had, run directly against the pure function.
  */
 import { describe, it, expect } from 'vitest'
-import { buildChatViewMessages, toChatViewMessage, isHiddenInCompactMode } from './buildChatViewMessages'
+import {
+  buildChatViewMessages,
+  toChatViewMessage,
+  isHiddenInCompactMode,
+  formatThinkingDuration,
+  formatThinkingFooter,
+} from './buildChatViewMessages'
 import type { ChatMessage } from './types'
 
 function msg(partial: Partial<ChatMessage> & { id: string; type: ChatMessage['type'] }): ChatMessage {
@@ -397,6 +403,72 @@ describe('buildChatViewMessages', () => {
     it('does NOT propagate attachments for a non-user_input message (contract: user messages only)', () => {
       const attachments = [{ id: 'a1', type: 'image' as const, uri: 'data:image/png;base64,x', name: 'x.png', mediaType: 'image/png', size: 1 }]
       expect('attachments' in toChatViewMessage(msg({ id: 'r1', type: 'response', content: 'hi', attachments }))).toBe(false)
+    })
+
+    it('propagates the footer-stat duration + tokens on thinking rows (#6391)', () => {
+      const v = toChatViewMessage(
+        msg({ id: 't1', type: 'thinking', content: 'reasoning', thinkingDurationMs: 4200, thinkingTokens: 128 }),
+      )
+      expect(v.thinkingDurationMs).toBe(4200)
+      expect(v.thinkingTokens).toBe(128)
+    })
+
+    it('propagates duration alone when tokens are absent (claude SDK/BYOK) (#6391)', () => {
+      const v = toChatViewMessage(msg({ id: 't1', type: 'thinking', content: 'x', thinkingDurationMs: 900 }))
+      expect(v.thinkingDurationMs).toBe(900)
+      expect('thinkingTokens' in v).toBe(false)
+    })
+
+    it('omits the footer-stat fields on a thinking row that carries none (old sessions) (#6391)', () => {
+      const v = toChatViewMessage(msg({ id: 't1', type: 'thinking', content: 'x' }))
+      expect('thinkingDurationMs' in v).toBe(false)
+      expect('thinkingTokens' in v).toBe(false)
+    })
+
+    it('does NOT propagate footer-stat fields onto a non-thinking row (contract: thinking only) (#6391)', () => {
+      const v = toChatViewMessage(
+        msg({ id: 'r1', type: 'response', content: 'hi', thinkingDurationMs: 4200, thinkingTokens: 128 }),
+      )
+      expect('thinkingDurationMs' in v).toBe(false)
+      expect('thinkingTokens' in v).toBe(false)
+    })
+  })
+
+  describe('formatThinkingDuration (#6391)', () => {
+    it('keeps one decimal under 10s', () => {
+      expect(formatThinkingDuration(4200)).toBe('4.2s')
+      expect(formatThinkingDuration(300)).toBe('0.3s')
+      expect(formatThinkingDuration(0)).toBe('0.0s')
+    })
+
+    it('rounds to whole seconds at 10s and above', () => {
+      expect(formatThinkingDuration(19000)).toBe('19s')
+      expect(formatThinkingDuration(19400)).toBe('19s')
+      expect(formatThinkingDuration(19600)).toBe('20s')
+      expect(formatThinkingDuration(10000)).toBe('10s')
+    })
+  })
+
+  describe('formatThinkingFooter (#6391)', () => {
+    it('composes duration + tokens', () => {
+      expect(formatThinkingFooter({ durationMs: 4200, tokens: 128 })).toBe('thought for 4.2s · 128 tokens')
+    })
+
+    it('renders duration alone when tokens are absent (claude SDK/BYOK)', () => {
+      expect(formatThinkingFooter({ durationMs: 4200 })).toBe('thought for 4.2s')
+    })
+
+    it('renders tokens alone when only a token count is present', () => {
+      expect(formatThinkingFooter({ tokens: 128 })).toBe('128 tokens')
+    })
+
+    it('returns "" when neither stat is present, so the caller falls back to "Thought"', () => {
+      expect(formatThinkingFooter({})).toBe('')
+    })
+
+    it('drops malformed (negative / non-finite) inputs rather than rendering them', () => {
+      expect(formatThinkingFooter({ durationMs: -5, tokens: 128 })).toBe('128 tokens')
+      expect(formatThinkingFooter({ durationMs: Number.NaN, tokens: Number.POSITIVE_INFINITY })).toBe('')
     })
   })
 })

@@ -3150,6 +3150,38 @@ describe('@chroxy/protocol schemas', () => {
           serverTs: 'nope',
         }).success)
       })
+
+      it('ServerStreamEndSchema accepts the #6391 footer-stat thinkingDurationMs + thinkingTokens', async () => {
+        const { ServerStreamEndSchema } = await import('../src/schemas/server.ts')
+        // Both stats present (a provider that separates reasoning tokens).
+        assert.ok(ServerStreamEndSchema.safeParse({
+          type: 'stream_end',
+          messageId: 'm1-thinking-0',
+          thinking: true,
+          thinkingDurationMs: 4200,
+          thinkingTokens: 128,
+        }).success)
+        // Duration only (claude SDK/BYOK — no separable token count).
+        assert.ok(ServerStreamEndSchema.safeParse({
+          type: 'stream_end',
+          messageId: 'm1-thinking-0',
+          thinking: true,
+          thinkingDurationMs: 900,
+        }).success)
+        // Additive: a stream_end still validates without either (old server).
+        assert.ok(ServerStreamEndSchema.safeParse({ type: 'stream_end', messageId: 'm1' }).success)
+      })
+
+      it('rejects a negative / fractional / non-numeric thinkingDurationMs', async () => {
+        const { ServerStreamEndSchema } = await import('../src/schemas/server.ts')
+        const base = { type: 'stream_end', messageId: 'm1', thinking: true }
+        assert.ok(!ServerStreamEndSchema.safeParse({ ...base, thinkingDurationMs: -1 }).success)
+        assert.ok(!ServerStreamEndSchema.safeParse({ ...base, thinkingDurationMs: 4200.5 }).success)
+        assert.ok(!ServerStreamEndSchema.safeParse({ ...base, thinkingDurationMs: 'nope' }).success)
+        // Bounded by the shared sane-duration ceiling (24h in ms).
+        assert.ok(!ServerStreamEndSchema.safeParse({ ...base, thinkingDurationMs: 24 * 60 * 60 * 1000 + 1 }).success)
+        assert.ok(!ServerStreamEndSchema.safeParse({ ...base, thinkingTokens: -5 }).success)
+      })
     })
   })
 

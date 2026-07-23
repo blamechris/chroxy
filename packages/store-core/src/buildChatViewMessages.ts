@@ -77,6 +77,21 @@ export interface ChatViewMessage {
    */
   thinkingTruncated?: boolean
   /**
+   * #6391 (chat-redesign footer-stat) — mirrored from the store ChatMessage on
+   * `thinking` rows: the reasoning block's measured elapsed time (ms). Drives
+   * the `thought for Xs` turn footer; renderers compose it via
+   * {@link formatThinkingFooter}. Undefined on old sessions → footer falls back
+   * to "Thought".
+   */
+  thinkingDurationMs?: number
+  /**
+   * #6391 (chat-redesign footer-stat) — mirrored from the store ChatMessage on
+   * `thinking` rows: the reasoning block's token count, rendered as ` · N
+   * tokens` after the duration. Undefined for providers that don't separate
+   * reasoning tokens (claude SDK/BYOK) → the token clause is omitted.
+   */
+  thinkingTokens?: number
+  /**
    * #4476 — structured error code mirrored from the store ChatMessage so
    * renderers can switch on it (e.g. `'stream_stall'` → chip + retry).
    */
@@ -166,12 +181,56 @@ export function toChatViewMessage(msg: ChatMessage): ChatViewMessage {
     ...(msg.type === 'thinking' && msg.thinkingTruncated
       ? { thinkingTruncated: true }
       : {}),
+    // #6391 footer-stat: carry the reasoning block's duration (+ token count
+    // when a provider reports one) through on thinking rows so ThinkingBody /
+    // ThinkingBubble can render `thought for Xs · N tokens`. Gated to `thinking`
+    // to match the contract (these live only on thinking bubbles).
+    ...(msg.type === 'thinking' && typeof msg.thinkingDurationMs === 'number'
+      ? { thinkingDurationMs: msg.thinkingDurationMs }
+      : {}),
+    ...(msg.type === 'thinking' && typeof msg.thinkingTokens === 'number'
+      ? { thinkingTokens: msg.thinkingTokens }
+      : {}),
     // #6632: carry user-message attachments through so the transcript can
     // preview them (dropped previously → no thumbnail on the sent message).
     // Gated to `user_input` to match the contract (attachments live only on user
     // messages) — don't thread attachment data onto non-user bubbles.
     ...(msg.type === 'user_input' && msg.attachments?.length ? { attachments: msg.attachments } : {}),
   }
+}
+
+/**
+ * #6391 (chat-redesign footer-stat) — format a reasoning block's elapsed time
+ * for the `thought for Xs` footer. Sub-10s durations keep one decimal
+ * (`4.2s`, `0.3s`) so short thoughts stay legible; ≥10s rounds to whole
+ * seconds (`19s`) since the decimal is noise at that scale. Pure; shared by
+ * both clients so the dashboard and mobile footers never drift.
+ */
+export function formatThinkingDuration(ms: number): string {
+  const s = ms / 1000
+  return s < 10 ? `${s.toFixed(1)}s` : `${Math.round(s)}s`
+}
+
+/**
+ * #6391 — compose the thinking footer-stat text (WITHOUT the leading spark/caret,
+ * which each client owns) from the optional duration + token stats:
+ *   - both present → `thought for 4.2s · 128 tokens`
+ *   - duration only → `thought for 4.2s`
+ *   - neither (old session / token-less provider with no duration) → `''`
+ * Callers fall back to a bare "Thought" label on an empty string, so the footer
+ * degrades gracefully. Guards each input so a malformed value is dropped rather
+ * than rendered.
+ */
+export function formatThinkingFooter(opts: { durationMs?: number; tokens?: number }): string {
+  const parts: string[] = []
+  const { durationMs, tokens } = opts
+  if (typeof durationMs === 'number' && Number.isFinite(durationMs) && durationMs >= 0) {
+    parts.push(`thought for ${formatThinkingDuration(durationMs)}`)
+  }
+  if (typeof tokens === 'number' && Number.isFinite(tokens) && tokens >= 0) {
+    parts.push(`${tokens} tokens`)
+  }
+  return parts.join(' · ')
 }
 
 /**

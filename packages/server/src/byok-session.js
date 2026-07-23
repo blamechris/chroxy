@@ -333,6 +333,12 @@ export class ClaudeByokSession extends BaseSession {
     // correctly. Cleared alongside `_streamingIndexToToolUseId`.
     this._streamingIndexToThinkingId = new Map()
 
+    // #6391 (chat-redesign footer-stat): thinking messageId → Date.now() when
+    // the reasoning block opened, so its content_block_stop can stamp the
+    // elapsed `thinkingDurationMs` on the thinking stream_end. Cleared alongside
+    // `_streamingIndexToThinkingId`.
+    this._thinkingStartMs = new Map()
+
     // #4080: toolUseIds whose permission_request is currently pending.
     // Populated when this session re-emits permission_request (line
     // ~165), drained on permission_resolved (line ~167). Consulted on
@@ -805,6 +811,9 @@ export class ClaudeByokSession extends BaseSession {
               if (!thinkingId) {
                 thinkingId = `${messageId}-thinking-${idx}`
                 this._streamingIndexToThinkingId.set(idx, thinkingId)
+                // #6391 footer-stat: mark the block's start for the
+                // content_block_stop elapsed-time computation.
+                this._thinkingStartMs.set(thinkingId, Date.now())
                 this.emit('stream_start', { messageId: thinkingId, thinking: true })
               }
               this.emit('stream_delta', { messageId: thinkingId, delta: t.text, thinking: true })
@@ -899,7 +908,18 @@ export class ClaudeByokSession extends BaseSession {
                 const thinkingId = this._streamingIndexToThinkingId.get(t.index)
                 if (thinkingId) {
                   this._streamingIndexToThinkingId.delete(t.index)
-                  this.emit('stream_end', { messageId: thinkingId, thinking: true })
+                  // #6391 footer-stat: elapsed wall time from the block's open to
+                  // now → the client's `thought for Xs` footer. Omit when the
+                  // start wasn't tracked so we never send a bogus 0. No token
+                  // count: Anthropic's usage folds thinking tokens into
+                  // output_tokens with no per-block breakdown (see follow-up).
+                  const startMs = this._thinkingStartMs.get(thinkingId)
+                  this._thinkingStartMs.delete(thinkingId)
+                  const streamEndMsg = { messageId: thinkingId, thinking: true }
+                  if (typeof startMs === 'number') {
+                    streamEndMsg.thinkingDurationMs = Math.max(0, Date.now() - startMs)
+                  }
+                  this.emit('stream_end', streamEndMsg)
                 }
               }
               break
@@ -928,6 +948,7 @@ export class ClaudeByokSession extends BaseSession {
         // starts with an empty per-stream map.
         this._streamingIndexToToolUseId.clear()
         this._streamingIndexToThinkingId.clear()
+        this._thinkingStartMs.clear()
         lastStopReason = final.stop_reason
         const roundUsage = final.usage || {}
         // #6769: keep the raw per-round usage — the LAST one standing at emit
@@ -1206,6 +1227,7 @@ export class ClaudeByokSession extends BaseSession {
       // Safe to call when already empty.
       this._streamingIndexToToolUseId.clear()
       this._streamingIndexToThinkingId.clear()
+      this._thinkingStartMs.clear()
       this._finishTurn()
     }
   }
@@ -2389,6 +2411,7 @@ export class ClaudeByokSession extends BaseSession {
     // reference (test capture, future export) would keep them alive.
     this._streamingIndexToToolUseId.clear()
     this._streamingIndexToThinkingId.clear()
+    this._thinkingStartMs.clear()
     this._pendingPermissionToolUseIds.clear()
     // #5056: drop any outstanding subagent permission-routing pointers so
     // the destroyed parent doesn't retain references to its children.
