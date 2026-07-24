@@ -22,7 +22,7 @@ function fakeStream(events, finalMessage) {
         // #6391 — a `__delayMs` marker event advances wall-clock between the
         // real events around it (so the thinking start→stop elapsed time the
         // session measures is provably > 0), then is dropped from the stream.
-        if (e && e.__delayMs) {
+        if (e && typeof e.__delayMs === 'number') {
           await new Promise((r) => setTimeout(r, e.__delayMs))
           continue
         }

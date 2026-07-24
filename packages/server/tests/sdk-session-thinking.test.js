@@ -39,7 +39,7 @@ function asyncStream(messages) {
       // the events around it (so a thinking block's start→stop elapsed time
       // is provably > 0), then is dropped from the stream. Mirrors the
       // pattern in byok-session-thinking.test.js (#6391).
-      if (m && m.__delayMs) {
+      if (m && typeof m.__delayMs === 'number') {
         await new Promise((r) => setTimeout(r, m.__delayMs))
         continue
       }
