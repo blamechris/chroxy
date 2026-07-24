@@ -118,6 +118,61 @@ function parseCompactMetadata(value: unknown): ChatMessage['compactMetadata'] {
   }
 }
 
+// #6845: wire-boundary caps for the MCP-prompt expansion marker — a third layer
+// behind byok-session's display cap and event-normalizer's re-bound. Defends the
+// store against a wire-bypassing path (a corrupted localStorage replay blob) so
+// a renderer never receives an unbounded string.
+const MCP_PROMPT_EXPANSION_NAME_CAP = 256
+const MCP_PROMPT_EXPANSION_TEXT_CAP = 8192
+
+// Post-#6845-review fix (thread 2 / honesty nit): the suffix names that the
+// model still received the full text — kept byte-identical to
+// event-normalizer.js's and byok-session.js's suffix so a reader sees the same
+// honest note regardless of which layer re-bounded the text they're looking
+// at. The slice-length arithmetic below subtracts this string's actual
+// `.length` rather than a hardcoded magic number, so the total (slice +
+// suffix) never exceeds the cap even if the wording changes again later.
+const MCP_PROMPT_EXPANSION_TRUNCATION_SUFFIX = '\n…(truncated for display; full text sent to the model)'
+
+/**
+ * #6845 — validate + coerce the wire `message.mcpPromptExpansion` object into
+ * the store's `McpPromptExpansionMeta` shape.
+ *
+ * Requires a string `text` (the marker is meaningless without the injected
+ * content) — returns `undefined` for the WHOLE marker when `text` is not a
+ * string, rather than attaching a half-formed object that would crash a
+ * renderer expecting the full shape. Post-#6845-review (thread 1): the server
+ * normalizer (`event-normalizer.js`'s `boundedMcpPromptExpansion`) now mirrors
+ * this exact reject-on-non-string-text contract — the two layers previously
+ * disagreed (the server silently stringified a non-string `text` while this
+ * function rejected the whole marker), which meant a malformed/replayed
+ * payload could pass wire validation server-side yet still get dropped
+ * client-side for a DIFFERENT reason than the field the doc comment implied.
+ * They now agree: non-string `text` is invalid at both layers.
+ *
+ * `server`/`prompt` are cosmetic provenance labels (not content), so they stay
+ * on the more forgiving "coerce" side — a non-string value becomes `''`
+ * (matches event-normalizer.js's coercion for the same fields) — then cap at
+ * 256. `text` caps at 8192, appending
+ * {@link MCP_PROMPT_EXPANSION_TRUNCATION_SUFFIX} when it overflows; `truncated`
+ * stays true if the producer flagged it OR this re-bound truncated.
+ */
+function parseMcpPromptExpansion(value: unknown): ChatMessage['mcpPromptExpansion'] {
+  if (!value || typeof value !== 'object') return undefined
+  const obj = value as Record<string, unknown>
+  if (typeof obj.text !== 'string') return undefined
+  const asString = (v: unknown): string => (typeof v === 'string' ? v : '')
+  const cap = (s: string, n: number): string => (s.length > n ? s.slice(0, n) : s)
+  const overflow = obj.text.length > MCP_PROMPT_EXPANSION_TEXT_CAP
+  const sliceLen = Math.max(0, MCP_PROMPT_EXPANSION_TEXT_CAP - MCP_PROMPT_EXPANSION_TRUNCATION_SUFFIX.length)
+  return {
+    server: cap(asString(obj.server), MCP_PROMPT_EXPANSION_NAME_CAP),
+    prompt: cap(asString(obj.prompt), MCP_PROMPT_EXPANSION_NAME_CAP),
+    text: overflow ? `${cap(obj.text, sliceLen)}${MCP_PROMPT_EXPANSION_TRUNCATION_SUFFIX}` : obj.text,
+    truncated: obj.truncated === true || overflow,
+  }
+}
+
 export function handleMessage(
   msg: Record<string, unknown>,
   _activeSessionId: string | null,
@@ -225,6 +280,18 @@ export function handleMessage(
       ? (() => {
           const meta = parseCompactMetadata(msg.compactMetadata)
           return meta ? { compactMetadata: meta } : {}
+        })()
+      : {}),
+    // #6845: preserve the MCP-prompt expansion marker so renderers can show an
+    // "expanded from MCP prompt" block with the actual server-controlled text
+    // injected as the user turn. Gated on `msgType === 'system'` + the
+    // `mcp_prompt_expansion` subtype (same shape as the compact_boundary gate
+    // above) so a buggy producer can't sneak `mcpPromptExpansion` onto an
+    // unrelated message type.
+    ...(msgType === 'system' && msg.subtype === 'mcp_prompt_expansion'
+      ? (() => {
+          const meta = parseMcpPromptExpansion(msg.mcpPromptExpansion)
+          return meta ? { mcpPromptExpansion: meta } : {}
         })()
       : {}),
   }

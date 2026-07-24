@@ -11024,6 +11024,106 @@ button.sidebar-token-view-session-row:hover {
   word-break: break-word;
 }
 
+/* #6845 — MCP-prompt expansion marker: a collapsible honesty surface for a
+   server-controlled `/mcp__server__prompt` expansion injected as the user turn.
+   Warm-tinted (distinct from the blue evaluator-rewrite banner) to flag that
+   the content is SERVER-CONTROLLED, not user-typed — the operator should be
+   able to audit what the MCP server actually injected. Collapsed by default;
+   the injected text can be long. */
+.mcp-prompt-expansion-marker {
+  display: block;
+  width: 100%;
+  background: var(--accent-amber-subtle, rgba(251, 191, 36, 0.08));
+  border: 1px solid var(--accent-amber-subtle, rgba(251, 191, 36, 0.25));
+  border-radius: 8px;
+  padding: 0;
+  margin: 4px 0;
+  overflow: hidden;
+}
+
+.mcp-prompt-expansion-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 12px;
+  background: transparent;
+  border: 0;
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: var(--text-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.mcp-prompt-expansion-toggle:hover {
+  background: var(--accent-amber-subtle, rgba(251, 191, 36, 0.15));
+}
+
+.mcp-prompt-expansion-icon {
+  display: inline-flex;
+  color: var(--accent-amber, #fbbf24);
+  flex-shrink: 0;
+}
+
+.mcp-prompt-expansion-summary {
+  flex: 1;
+  font-weight: 500;
+}
+
+.mcp-prompt-expansion-source {
+  font-family: var(--font-mono, monospace);
+  font-size: 0.9em;
+  color: var(--text-secondary);
+}
+
+.mcp-prompt-expansion-badge {
+  flex-shrink: 0;
+  font-size: var(--text-xs, 11px);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--accent-amber, #fbbf24);
+  border: 1px solid var(--accent-amber-subtle, rgba(251, 191, 36, 0.35));
+  border-radius: 4px;
+  padding: 1px 6px;
+}
+
+.mcp-prompt-expansion-chevron {
+  color: var(--text-dim);
+  font-size: 0.9em;
+  flex-shrink: 0;
+}
+
+.mcp-prompt-expansion-details {
+  padding: 8px 12px 12px 12px;
+  border-top: 1px solid var(--border-primary, rgba(255, 255, 255, 0.08));
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.mcp-prompt-expansion-label {
+  font-size: var(--text-xs, 11px);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+}
+
+.mcp-prompt-expansion-text {
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.mcp-prompt-expansion-truncated {
+  font-size: var(--text-xs, 11px);
+  font-style: italic;
+  color: var(--text-secondary);
+}
+
 .evaluator-clarify-prompt {
   background: var(--bg-secondary);
   border: 1px solid var(--accent-purple, #a78bfa);

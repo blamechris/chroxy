@@ -58,6 +58,28 @@ export interface CompactBoundaryMeta {
 }
 
 /**
+ * #6845 — structured payload for an MCP-prompt expansion marker, attached to a
+ * `type: 'system'` ChatMessage when the server parsed an `mcp_prompt_expansion`
+ * event. When a user sends `/mcp__<server>__<prompt>`, the server expands it via
+ * the MCP server's `prompts/get` and injects the returned SERVER-CONTROLLED text
+ * as the user turn — but the transcript only shows the raw slash command. This
+ * marker surfaces the actual injected text with explicit provenance so the
+ * transcript is honest about what the model received. Mirrors
+ * `ServerMcpPromptExpansionSchema` on the wire (`@chroxy/protocol`).
+ *
+ * `server`/`prompt` name the source (rendered as an "expanded from" attribution
+ * so the content is never mistaken for user-typed text); `text` is the (bounded)
+ * injected content; `truncated` is `true` when the server capped a larger
+ * expansion for display (the FULL text still reached the model).
+ */
+export interface McpPromptExpansionMeta {
+  server: string;
+  prompt: string;
+  text: string;
+  truncated: boolean;
+}
+
+/**
  * #4604 Chunk B — one entry per question in a multi-question
  * AskUserQuestion form. `questions[0]` always mirrors the legacy
  * top-level `content` + `options` on the ChatMessage so single-question
@@ -253,6 +275,15 @@ export interface ChatMessage {
    * Undefined for every other system message and for pre-#6768 servers.
    */
   compactMetadata?: CompactBoundaryMeta;
+  /**
+   * #6845 — set on a `type: 'system'` ChatMessage when the server parsed an
+   * `mcp_prompt_expansion` event into a distinct marker. Renderers show an
+   * "expanded from MCP prompt <server>:<prompt>" block with the actual
+   * server-controlled text injected as the user turn, so the transcript is
+   * honest about what the model received. Undefined for every other system
+   * message and for pre-#6845 servers.
+   */
+  mcpPromptExpansion?: McpPromptExpansionMeta;
   /**
    * #5016 — Task subagent child progress, attached to the parent's
    * `tool_use` (Task) bubble. Each entry is one wire event the child

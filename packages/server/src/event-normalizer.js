@@ -90,6 +90,63 @@ function boundedCompactMetadata(meta) {
   }
 }
 
+// #6845: wire-boundary caps for the MCP-prompt expansion marker. server/prompt
+// mirror ServerMcpPromptExpansionSchema's 256-char names; `text` mirrors its
+// 8192 ceiling. byok-session already caps the display copy (4000 + a
+// truncation marker); this is the defense-in-depth re-bound at the serialization
+// choke point (same posture as boundedCompactMetadata) so a wire-bypassing or
+// malformed producer can't push an unbounded payload onto clients.
+const MCP_PROMPT_EXPANSION_NAME_CAP = 256
+const MCP_PROMPT_EXPANSION_TEXT_CAP = 8192
+
+// Thread-2/honesty-nit fix (post-#6845 review): the suffix now says the FULL
+// text still reached the model, matching byok-session.js's display-cap suffix
+// and store-core's client-side re-bound suffix — a reader who only sees the
+// truncated marker (mobile, System tab) must not conclude the model saw less
+// than it did. Sliced-length arithmetic below subtracts THIS string's actual
+// length rather than a hardcoded magic number, so the total (slice + suffix)
+// never exceeds the cap even if the wording changes again later.
+const MCP_PROMPT_EXPANSION_TRUNCATION_SUFFIX = '\n…(truncated for display; full text sent to the model)'
+
+/**
+ * #6845 — coerce+bound the `mcpPromptExpansion` marker fields before forwarding
+ * onto the wire. Requires a string `text` (the marker is meaningless without
+ * the injected content) — returns `null` when `text` is not a string so the
+ * caller skips attaching `subtype`/`mcpPromptExpansion` entirely rather than
+ * forwarding a marker with blank/coerced content. This mirrors store-core's
+ * `parseMcpPromptExpansion` reject-on-non-string-text contract (post-#6845
+ * review thread 1 — the two layers previously disagreed: this function used to
+ * silently stringify a non-string `text`, while the client rejected the whole
+ * marker; they now agree on reject).
+ *
+ * `server`/`prompt` are cosmetic provenance labels (not content), so they stay
+ * on the more forgiving "coerce" side: a non-string value becomes `''` rather
+ * than failing the whole marker, then caps at 256. `text` caps at 8192,
+ * appending {@link MCP_PROMPT_EXPANSION_TRUNCATION_SUFFIX} when it overflows so
+ * the client never silently drops content; `truncated` stays true if EITHER
+ * the producer flagged it or this re-bound truncated.
+ *
+ * @param {{server?: *, prompt?: *, text?: *, truncated?: *}} meta
+ * @returns {{server: string, prompt: string, text: string, truncated: boolean} | null}
+ */
+function boundedMcpPromptExpansion(meta) {
+  if (typeof meta?.text !== 'string') return null
+  const asString = (v) => (typeof v === 'string' ? v : '')
+  const cap = (s, n) => (s.length > n ? s.slice(0, n) : s)
+  const rawText = meta.text
+  const overflow = rawText.length > MCP_PROMPT_EXPANSION_TEXT_CAP
+  const sliceLen = Math.max(0, MCP_PROMPT_EXPANSION_TEXT_CAP - MCP_PROMPT_EXPANSION_TRUNCATION_SUFFIX.length)
+  const text = overflow
+    ? `${cap(rawText, sliceLen)}${MCP_PROMPT_EXPANSION_TRUNCATION_SUFFIX}`
+    : rawText
+  return {
+    server: cap(asString(meta?.server), MCP_PROMPT_EXPANSION_NAME_CAP),
+    prompt: cap(asString(meta?.prompt), MCP_PROMPT_EXPANSION_NAME_CAP),
+    text,
+    truncated: meta?.truncated === true || overflow,
+  }
+}
+
 /**
  * Declarative event-to-WS-message mapping.
  *
@@ -309,6 +366,23 @@ Object.assign(EVENT_MAP, {
     if (data.type === 'system' && data.subtype === 'compact_boundary' && data.compactMetadata) {
       msg.subtype = data.subtype
       msg.compactMetadata = boundedCompactMetadata(data.compactMetadata)
+    }
+    // #6845: forward the MCP-prompt expansion marker (the honesty surface for a
+    // server-controlled `/mcp__server__prompt` expansion injected as the user
+    // turn). Gated identically to compact_boundary — `messageType: 'system'` +
+    // the `mcp_prompt_expansion` subtype + a present payload — and re-bounded
+    // here so a malformed producer can't reach the wire unbounded. Unlike
+    // compact_boundary, `boundedMcpPromptExpansion` can return `null` (a
+    // non-string `text` — see its doc comment), in which case neither
+    // `subtype` nor `mcpPromptExpansion` is attached: the envelope falls back
+    // to a plain system message rather than claiming a structured marker it
+    // can't honestly populate.
+    if (data.type === 'system' && data.subtype === 'mcp_prompt_expansion' && data.mcpPromptExpansion) {
+      const bounded = boundedMcpPromptExpansion(data.mcpPromptExpansion)
+      if (bounded) {
+        msg.subtype = data.subtype
+        msg.mcpPromptExpansion = bounded
+      }
     }
     return { messages: [{ msg }] }
   },

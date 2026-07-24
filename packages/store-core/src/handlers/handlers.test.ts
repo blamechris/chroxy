@@ -7095,6 +7095,166 @@ describe('handleMessage', () => {
       }
     })
   })
+
+  // #6845: server (byok-session.js) expands a `/mcp__server__prompt` slash
+  // command via the MCP server's `prompts/get` and injects the returned
+  // SERVER-CONTROLLED text as the user turn — but the transcript only shows the
+  // raw command. The server emits an `mcp_prompt_expansion` marker so the store
+  // preserves `mcpPromptExpansion` onto the ChatMessage and the dashboard/app
+  // can render the actual injected text with provenance.
+  describe('mcpPromptExpansion preservation (#6845)', () => {
+    it('preserves a well-formed expansion on an mcp_prompt_expansion system message', () => {
+      const out = handleMessage(
+        {
+          messageType: 'system',
+          subtype: 'mcp_prompt_expansion',
+          content: 'Expanded /mcp__stub__greet (server-controlled MCP prompt) →\nhi',
+          mcpPromptExpansion: { server: 'stub', prompt: 'greet', text: 'server-authored text', truncated: false },
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.type).toBe('system')
+        expect(out.chatMessage.mcpPromptExpansion).toEqual({
+          server: 'stub',
+          prompt: 'greet',
+          text: 'server-authored text',
+          truncated: false,
+        })
+      }
+    })
+
+    it('leaves mcpPromptExpansion undefined for a non-expansion system message (pre-#6845 server)', () => {
+      const out = handleMessage(
+        { messageType: 'system', content: 'MCP server foo connected', timestamp: 100 },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.mcpPromptExpansion).toBeUndefined()
+      }
+    })
+
+    it('drops a malformed expansion (missing text) rather than passing junk through', () => {
+      const out = handleMessage(
+        {
+          messageType: 'system',
+          subtype: 'mcp_prompt_expansion',
+          content: 'Expanded ...',
+          mcpPromptExpansion: { server: 'stub', prompt: 'greet', truncated: false },
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.mcpPromptExpansion).toBeUndefined()
+      }
+    })
+
+    // Post-#6845-review fix (thread 1): a present-but-non-string `text` must
+    // drop the whole marker the same way a MISSING `text` does — the server
+    // normalizer (`event-normalizer.js`'s `boundedMcpPromptExpansion`) now
+    // shares this exact reject contract (it used to stringify a non-string
+    // `text` instead of rejecting, which disagreed with this function).
+    it('drops a malformed expansion (non-string text) the same way it drops a missing one', () => {
+      const out = handleMessage(
+        {
+          messageType: 'system',
+          subtype: 'mcp_prompt_expansion',
+          content: 'Expanded ...',
+          mcpPromptExpansion: { server: 'stub', prompt: 'greet', text: 42, truncated: false },
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.mcpPromptExpansion).toBeUndefined()
+      }
+    })
+
+    // Non-string `server`/`prompt` are cosmetic provenance labels, not content
+    // — they coerce to `''` rather than failing the whole marker. Matches
+    // event-normalizer.js's coercion for the same fields post-#6845-review.
+    it('coerces non-string server/prompt fields to empty string (text stays valid)', () => {
+      const out = handleMessage(
+        {
+          messageType: 'system',
+          subtype: 'mcp_prompt_expansion',
+          content: 'Expanded ...',
+          mcpPromptExpansion: { server: 42, prompt: null, text: 'hi', truncated: false },
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.mcpPromptExpansion).toEqual({
+          server: '',
+          prompt: '',
+          text: 'hi',
+          truncated: false,
+        })
+      }
+    })
+
+    it('re-bounds an over-cap text client-side and flips truncated on', () => {
+      const huge = 'Z'.repeat(20_000)
+      const out = handleMessage(
+        {
+          messageType: 'system',
+          subtype: 'mcp_prompt_expansion',
+          content: 'Expanded ...',
+          mcpPromptExpansion: { server: 'stub', prompt: 'greet', text: huge, truncated: false },
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.mcpPromptExpansion!.text.length).toBeLessThanOrEqual(8192)
+        expect(
+          out.chatMessage.mcpPromptExpansion!.text.endsWith(
+            '…(truncated for display; full text sent to the model)',
+          ),
+        ).toBe(true)
+        expect(out.chatMessage.mcpPromptExpansion!.truncated).toBe(true)
+      }
+    })
+
+    it('does NOT attach mcpPromptExpansion to an unrelated message type even if present on the payload', () => {
+      const out = handleMessage(
+        {
+          messageType: 'response',
+          content: 'hello',
+          mcpPromptExpansion: { server: 'stub', prompt: 'greet', text: 'x', truncated: false },
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.mcpPromptExpansion).toBeUndefined()
+      }
+    })
+  })
 })
 
 // ---------------------------------------------------------------------------

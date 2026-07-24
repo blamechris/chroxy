@@ -98,6 +98,30 @@ export const ServerCompactMetadataSchema = z.object({
     postTokens: z.number().nullable(),
     durationMs: z.number().nullable(),
 });
+/**
+ * #6845 — structured payload for an `mcp_prompt_expansion` system event. When a
+ * user sends `/mcp__<server>__<prompt>`, the server intercepts it, calls the
+ * MCP server's `prompts/get`, and injects the returned SERVER-CONTROLLED
+ * messages as the user turn to the model — but the transcript only shows the
+ * raw slash command the user typed. This marker surfaces what was ACTUALLY sent
+ * so the transcript is honest, with explicit provenance (`server`/`prompt`) so
+ * the content is never mistaken for user-typed text (a trusted-but-verbose, or
+ * later-compromised, MCP server could inject surprising content).
+ *
+ * Carried on `ServerMessageSchema.mcpPromptExpansion` alongside
+ * `messageType === 'system'` and `subtype === 'mcp_prompt_expansion'` — the
+ * same optional-field-on-the-existing-`message`-envelope convention as
+ * `compactMetadata` (no new wire message type). `text` is the (bounded) injected
+ * content; `truncated` flags that the producer capped a larger expansion for
+ * display (the FULL text still reached the model). Name fields are length-capped
+ * and `text` bounded so a malformed producer can't flood the wire.
+ */
+export const ServerMcpPromptExpansionSchema = z.object({
+    server: z.string().max(256),
+    prompt: z.string().max(256),
+    text: z.string().max(8192),
+    truncated: z.boolean(),
+});
 export const ServerMessageSchema = z.object({
     type: z.literal('message'),
     messageType: z.string(),
@@ -118,6 +142,13 @@ export const ServerMessageSchema = z.object({
     // event doesn't have to hijack `code`'s error-only semantics.
     subtype: z.string().max(64).optional(),
     compactMetadata: ServerCompactMetadataSchema.optional(),
+    // #6845: by the same producer convention as `subtype`/`compactMetadata`
+    // above, the server only populates `mcpPromptExpansion` on
+    // `messageType: 'system'` envelopes whose `subtype` is
+    // `'mcp_prompt_expansion'` — the honesty marker for a server-controlled
+    // `/mcp__server__prompt` expansion injected as the user turn (see
+    // ServerMcpPromptExpansionSchema).
+    mcpPromptExpansion: ServerMcpPromptExpansionSchema.optional(),
     // #4947 / #5006: only set on `messageType: 'error'` envelopes whose
     // `code` is one of the two resume-failure codes emitted by CliSession's
     // `_handleChildClose` resume-failure path:

@@ -11,6 +11,7 @@ import { PermissionPrompt } from '../components/PermissionPrompt'
 import { QuestionPrompt } from '../components/QuestionPrompt'
 import { EvaluatorRewriteBanner } from '../components/EvaluatorPrompts'
 import { CompactionMarker } from '../components/CompactionMarker'
+import { McpPromptExpansionMarker } from '../components/McpPromptExpansionMarker'
 import { StreamStallChip } from '../components/StreamStallChip'
 import { AskUserQuestionStallChip } from '../components/AskUserQuestionStallChip'
 import { ResumeUnknownChip } from '../components/ResumeUnknownChip'
@@ -254,6 +255,15 @@ export function useMessageRenderer(args: UseMessageRendererArgs): (msg: ChatView
     // literal string `compact_boundary`.
     if (storeMsg.type === 'system' && storeMsg.compactMetadata) {
       return <CompactionMarker meta={storeMsg.compactMetadata} />
+    }
+
+    // #6845: honesty marker for a server-controlled MCP-prompt expansion
+    // (byok-session.js). Surfaces the actual text the MCP server's `prompts/get`
+    // injected as the user turn — with explicit provenance — so the transcript
+    // is honest about what the model received instead of only the raw
+    // `/mcp__…` command the user typed.
+    if (storeMsg.type === 'system' && storeMsg.mcpPromptExpansion) {
+      return <McpPromptExpansionMarker meta={storeMsg.mcpPromptExpansion} />
     }
 
     // #4476: distinct chip for stream-stall errors (server PR #4475 emits
