@@ -12,6 +12,7 @@ import { Icon } from '../Icon';
 import { COLORS } from '../../constants/colors';
 import { ThinkingIndicator } from './ThinkingIndicator';
 import { TodoList, parseTodoList } from './TodoList';
+import { WebToolResultView, parseWebToolResult } from './WebToolResult';
 import { ChildAgentEventList } from './ChildAgentEventList';
 import {
   summarizeToolCounts,
@@ -95,6 +96,15 @@ function ActivityEntry({
   const todoParsed = expanded && message.tool === 'TodoWrite' && message.toolResult
     ? parseTodoList(message.toolResult)
     : null;
+  // #6982: same parse-with-fallback for WebSearch/WebFetch, sharing
+  // @chroxy/store-core's parsers with the dashboard (#6757). Routes on the
+  // RAW `message.tool` (not `displayTool` — `formatToolName` would turn
+  // `web_search` into `Web Search`, which the separator-normalizing
+  // matchers do not accept). Falls through to the plain-text branch below
+  // whenever the parse yields null.
+  const webParsed = expanded && !todoParsed
+    ? parseWebToolResult(message.tool, message.toolResult)
+    : null;
 
   return (
     <TouchableOpacity
@@ -133,6 +143,7 @@ function ActivityEntry({
         <>
           {(() => {
             if (todoParsed) return <TodoList parsed={todoParsed} />
+            if (webParsed) return <WebToolResultView parsed={webParsed} />
             // #4203: prefer toolResult text when present; otherwise fall back to
             // content (pre-result/pending state). When toolResult is undefined
             // but images are attached (e.g. screenshot tool with no text body),

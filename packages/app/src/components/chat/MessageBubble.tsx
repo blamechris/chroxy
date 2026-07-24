@@ -171,7 +171,10 @@ function MessageBubbleImpl({ message, queued, onCancelQueued, onEditQueued, onSe
   isSelecting: boolean;
   onLongPress: () => void;
   onPress: () => void;
-  onOpenDetail: (toolName: string, content: string, toolResult?: string, toolResultTruncated?: boolean, toolResultImages?: ToolResultImage[], serverName?: string) => void;
+  /** #6982: the trailing `rawToolName` carries the UNFORMATTED `message.tool`
+   *  so the detail modal can route WebSearch/WebFetch results through the
+   *  structured renderer (`toolName` is the `formatToolName` display label). */
+  onOpenDetail: (toolName: string, content: string, toolResult?: string, toolResultTruncated?: boolean, toolResultImages?: ToolResultImage[], serverName?: string, rawToolName?: string) => void;
   onImagePress?: (uri: string) => void;
   /**
    * #4496: retry handler for stream-stall error chips. ChatView wires

@@ -39,6 +39,15 @@ name: All E2E flows
 # #4180 mobile TodoList via mock-server tool_start + tool_result.
 - runFlow: chat-todolist.yaml
 
+# Flow 9b: Chat WebSearch structured renderer (#6982) — mock-server
+# 'show-websearch' trigger; also guards the store-core scheme allowlist
+# (the fixture's `javascript:` result must not render a row).
+- runFlow: chat-websearch.yaml
+
+# Flow 9c: Chat WebFetch structured renderer (#6982) — mock-server
+# 'show-webfetch' trigger; source URL as a gated link + markdown body.
+- runFlow: chat-webfetch.yaml
+
 # Flow 10: ToolBubble collapsed-preview field-priority (#4260) —
 # exercises the #4243 partial-summary extraction via mock-server
 # 'show-bash-partial' trigger (tool_start + streaming tool_input_delta).

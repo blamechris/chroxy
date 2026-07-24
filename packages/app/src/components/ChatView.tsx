@@ -219,7 +219,7 @@ export function ChatView({
   const [showScrollToTop, setShowScrollToTop] = useState(false);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const showScrollToBottomRef = useRef(false);
-  const [toolDetail, setToolDetail] = useState<{ toolName: string; content: string; toolResult?: string; toolResultTruncated?: boolean; toolResultImages?: ToolResultImage[]; serverName?: string } | null>(null);
+  const [toolDetail, setToolDetail] = useState<{ toolName: string; rawToolName?: string; content: string; toolResult?: string; toolResultTruncated?: boolean; toolResultImages?: ToolResultImage[]; serverName?: string } | null>(null);
   const [viewerUri, setViewerUri] = useState<string | null>(null);
 
   // #5750 (item 2) — assertively announce a newly-arrived permission prompt to
@@ -326,8 +326,11 @@ export function ChatView({
     // eslint-disable-next-line react-hooks/exhaustive-deps -- scrollViewRef, isSelectingRef, and showScrollToBottomRef are stable refs
   }, [hasUnansweredPrompt]);
 
-  const handleOpenDetail = (toolName: string, content: string, toolResult?: string, toolResultTruncated?: boolean, toolResultImages?: ToolResultImage[], serverName?: string) => {
-    setToolDetail({ toolName, content, toolResult, toolResultTruncated, toolResultImages, serverName });
+  // #6982: `rawToolName` is the UNFORMATTED `message.tool`, carried alongside
+  // the display `toolName` so ToolDetailModal can route WebSearch/WebFetch
+  // results through the structured renderer.
+  const handleOpenDetail = (toolName: string, content: string, toolResult?: string, toolResultTruncated?: boolean, toolResultImages?: ToolResultImage[], serverName?: string, rawToolName?: string) => {
+    setToolDetail({ toolName, rawToolName, content, toolResult, toolResultTruncated, toolResultImages, serverName });
   };
 
   // #4806: shared ChatView message pipeline (lifted from dashboard's
@@ -659,6 +662,7 @@ export function ChatView({
       <ToolDetailModal
         visible={toolDetail !== null}
         toolName={toolDetail?.toolName || ''}
+        rawToolName={toolDetail?.rawToolName}
         content={toolDetail?.content || ''}
         toolResult={toolDetail?.toolResult}
         toolResultTruncated={toolDetail?.toolResultTruncated}
