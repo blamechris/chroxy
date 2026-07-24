@@ -134,8 +134,12 @@ describe('componentwise-resolver: sync ≡ async parity (#6923/#6928)', () => {
     }
     // A symlink INTO a chmod-000 dir: resolving it must lstat inside the locked
     // dir, which EACCESes — and neither variant may swallow it into an allow.
-    mkdirSync(join(root, 'locked'), { recursive: true })
-    symlinkSync(join(root, 'locked/inner'), join(root, 'gate')) // gate -> locked/inner
+    // Create `locked/inner` (the symlink target) BEFORE the chmod so the leaf
+    // EXISTS: lstat-ing it then fails unambiguously on the search-permission
+    // check of `locked` (EACCES), never on a missing-leaf ENOENT that some
+    // platforms/filesystems could surface first for a non-existent target.
+    mkdirSync(join(root, 'locked/inner'), { recursive: true })
+    symlinkSync(join(root, 'locked/inner'), join(root, 'gate')) // gate -> locked/inner (exists)
     const { chmodSync } = await import('node:fs')
     chmodSync(join(root, 'locked'), 0o000)
     try {
