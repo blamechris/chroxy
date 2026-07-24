@@ -451,6 +451,22 @@ export {
   TOOL_OUTPUT_COLLAPSE_HEAD_LINES,
 } from './tool-output'
 
+// #6757 — shared WebSearch/WebFetch tool_result parse logic, so both the
+// dashboard and mobile ToolBubble can render a structured result list /
+// formatted view instead of a raw text dump, from the same parser.
+export {
+  isSafeWebUrl,
+  isWebSearchToolName,
+  isWebFetchToolName,
+  parseWebSearchResults,
+  parseWebFetchResult,
+} from './web-tool-results'
+export type {
+  WebSearchResultItem,
+  ParsedWebSearchResults,
+  ParsedWebFetchResult,
+} from './web-tool-results'
+
 export {
   PASTE_COLLAPSE_CHAR_THRESHOLD,
   PASTE_COLLAPSE_LINE_THRESHOLD,

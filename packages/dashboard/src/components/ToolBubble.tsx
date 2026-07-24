@@ -31,9 +31,14 @@ import {
   shouldSuppressRawToolInput,
   TOOL_OUTPUT_COLLAPSE_LINE_THRESHOLD,
   TOOL_OUTPUT_COLLAPSE_HEAD_LINES,
+  isWebSearchToolName,
+  isWebFetchToolName,
+  parseWebSearchResults,
+  parseWebFetchResult,
 } from '@chroxy/store-core'
 import type { ChildAgentEvent, ToolResultImage } from '@chroxy/store-core'
 import { TodoList, parseTodoList } from './TodoList'
+import { WebSearchResultList, WebFetchResult } from './WebToolResult'
 import { ChildAgentEventList } from './ChildAgentEventList'
 import { ImageLightbox } from './ImageLightbox'
 import { useInitialExpanded } from './chatExpandRegistry'
@@ -199,13 +204,29 @@ export function ToolBubble({ toolName, toolUseId, input, inputPartial, result, s
   const todoParsed = expanded && result && toolName === 'TodoWrite'
     ? parseTodoList(result)
     : null
+  // #6757 — WebSearch/WebFetch get the same parse-with-fallback-to-`<pre>`
+  // treatment as TodoWrite: a structured render when the result text
+  // parses cleanly, otherwise the tool falls through to the existing
+  // plain-text panel below with no data loss. The parse logic lives in
+  // `@chroxy/store-core` (`parseWebSearchResults` / `parseWebFetchResult`)
+  // so mobile can reuse it.
+  const webSearchParsed = expanded && result && isWebSearchToolName(toolName)
+    ? parseWebSearchResults(result)
+    : null
+  const webFetchParsed = expanded && result && isWebFetchToolName(toolName)
+    ? parseWebFetchResult(result)
+    : null
   // #6391 (slice 7): collapse a long tool result to its head behind a "Show N
   // more lines" pill. Independent of the bubble's own expand/collapse; the
   // per-row ResizeObserver (MeasuredRow, #5561) re-measures the row when this
   // toggles, so the virtualized list stays correct with no extra plumbing.
   const [resultExpanded, setResultExpanded] = useState(false)
   const resultLineCount = useMemo(() => (result ? result.split('\n').length : 0), [result])
-  const isLongResult = !todoParsed && resultLineCount > TOOL_OUTPUT_COLLAPSE_LINE_THRESHOLD
+  // #6757 — a structured WebSearch/WebFetch render owns its own layout
+  // (card list / markdown), so exclude both from the raw-text collapse
+  // pill exactly like `todoParsed` already does.
+  const isLongResult = !todoParsed && !webSearchParsed && !webFetchParsed
+    && resultLineCount > TOOL_OUTPUT_COLLAPSE_LINE_THRESHOLD
   // #4081: streaming preview — render the accumulator as a code block
   // while the result hasn't arrived. Best-effort pretty-print: try
   // JSON.parse first (the final delta often completes the JSON), fall
@@ -297,6 +318,10 @@ export function ToolBubble({ toolName, toolUseId, input, inputPartial, result, s
         >
           {todoParsed ? (
             <TodoList parsed={todoParsed} />
+          ) : webSearchParsed ? (
+            <WebSearchResultList parsed={webSearchParsed} />
+          ) : webFetchParsed ? (
+            <WebFetchResult parsed={webFetchParsed} />
           ) : hasTextResult && isLongResult && !resultExpanded ? (
             <>
               <pre>{result!.split('\n').slice(0, TOOL_OUTPUT_COLLAPSE_HEAD_LINES).join('\n')}</pre>

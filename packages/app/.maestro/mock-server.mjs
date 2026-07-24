@@ -29,6 +29,11 @@ let showBashPartialCounter = 0
 // invocations on the same session need unique toolUseIds so the
 // app's user_question handler doesn't collide on a fixed id.
 let showAskUserQuestionCounter = 0
+// #6757: per-trigger counters for the WebSearch/WebFetch structured-render
+// fixtures. Same rationale as `show-todos` — repeated invocations need
+// unique toolUseIds so React keys + tool_result patching stay independent.
+let showWebSearchCounter = 0
+let showWebFetchCounter = 0
 
 // #5468: connection counter — incremented once per `auth` message, used only
 // for the marker's text ("mock reconnect #N") + the [mock] Auth #N log line.
@@ -710,6 +715,105 @@ wss.on('connection', (ws) => {
             sessionId: 'mock-sess-1',
             toolUseId,
             result: todoResult,
+          })
+          secureSend(ws, { type: 'result', cost: 0.001, duration: 100, usage: {}, sessionId: 'mock-sess-1' })
+          secureSend(ws, { type: 'agent_idle', sessionId: 'mock-sess-1' })
+          break
+        }
+
+        // #6757: trigger phrase 'show-websearch' emits a synthetic WebSearch
+        // tool_use + tool_result so the structured result-list renderer
+        // (packages/dashboard/src/components/WebToolResult.tsx
+        // WebSearchResultList, driven by @chroxy/store-core's
+        // parseWebSearchResults) can be exercised end-to-end — over the
+        // real WS protocol, same path production tool messages take, no
+        // live WebSearch API call needed. Also usable from a browser: point
+        // a dashboard dev instance's "Add Server" (ServerPicker, manual
+        // entry) at ws://localhost:9876 with token 'test-token-maestro',
+        // open the session, and send this phrase in chat.
+        //
+        // The result payload is a JSON array of {title,url,snippet} —
+        // one of the shapes `parseWebSearchResults` recognizes (see
+        // packages/store-core/src/web-tool-results.ts).
+        if (text.trim() === 'show-websearch') {
+          secureSend(ws, { type: 'agent_busy', sessionId: 'mock-sess-1' })
+          showWebSearchCounter += 1
+          const toolUseId = `tu-websearch-mock-${showWebSearchCounter}`
+          const toolMessageId = `tool-websearch-mock-${showWebSearchCounter}`
+          secureSend(ws, {
+            type: 'tool_start',
+            sessionId: 'mock-sess-1',
+            tool: 'WebSearch',
+            input: { query: 'chroxy remote terminal' },
+            messageId: toolMessageId,
+            toolUseId,
+          })
+          const webSearchResult = JSON.stringify({
+            query: 'chroxy remote terminal',
+            results: [
+              {
+                title: 'chroxy — remote terminal for Claude Code',
+                url: 'https://github.com/blamechris/chroxy',
+                snippet: 'Run a lightweight daemon on your dev machine, connect from your phone via a secure tunnel.',
+              },
+              {
+                title: 'Chroxy docs — architecture reference',
+                url: 'https://github.com/blamechris/chroxy/blob/main/docs/architecture/reference.md',
+                snippet: 'Component tables, WebSocket protocol messages, and data flow diagrams.',
+              },
+              {
+                title: 'A result with an unsafe scheme (should be dropped, not rendered)',
+                url: 'javascript:alert(1)',
+              },
+            ],
+          })
+          secureSend(ws, {
+            type: 'tool_result',
+            sessionId: 'mock-sess-1',
+            toolUseId,
+            result: webSearchResult,
+          })
+          secureSend(ws, { type: 'result', cost: 0.001, duration: 100, usage: {}, sessionId: 'mock-sess-1' })
+          secureSend(ws, { type: 'agent_idle', sessionId: 'mock-sess-1' })
+          break
+        }
+
+        // #6757: trigger phrase 'show-webfetch' emits a synthetic WebFetch
+        // tool_use + tool_result so the markdown-formatted renderer
+        // (WebToolResult.tsx WebFetchResult, driven by
+        // @chroxy/store-core's parseWebFetchResult) can be exercised the
+        // same way as 'show-websearch' above.
+        //
+        // The result payload mirrors the BYOK executor's real wire shape
+        // (packages/server/src/byok-tool-executor.js runWebFetch):
+        // `Prompt: <p>\nURL: <u>\n\n<body>`.
+        if (text.trim() === 'show-webfetch') {
+          secureSend(ws, { type: 'agent_busy', sessionId: 'mock-sess-1' })
+          showWebFetchCounter += 1
+          const toolUseId = `tu-webfetch-mock-${showWebFetchCounter}`
+          const toolMessageId = `tool-webfetch-mock-${showWebFetchCounter}`
+          secureSend(ws, {
+            type: 'tool_start',
+            sessionId: 'mock-sess-1',
+            tool: 'WebFetch',
+            input: { url: 'https://example.com/chroxy', prompt: 'Summarize this page' },
+            messageId: toolMessageId,
+            toolUseId,
+          })
+          const webFetchResult = [
+            'Prompt: Summarize this page',
+            'URL: https://example.com/chroxy',
+            '',
+            '# Chroxy',
+            '',
+            'Chroxy is a **remote terminal app** for Claude Code. See also '
+              + 'https://github.com/blamechris/chroxy for the source.',
+          ].join('\n')
+          secureSend(ws, {
+            type: 'tool_result',
+            sessionId: 'mock-sess-1',
+            toolUseId,
+            result: webFetchResult,
           })
           secureSend(ws, { type: 'result', cost: 0.001, duration: 100, usage: {}, sessionId: 'mock-sess-1' })
           secureSend(ws, { type: 'agent_idle', sessionId: 'mock-sess-1' })
