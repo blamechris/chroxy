@@ -484,41 +484,90 @@ function activeSessionIsClaudeTui(get: () => ConnectionState): boolean {
 }
 
 // #6939 — client-side timeout for the git one-shot request/reply callbacks
-// (git_commit + git_create_pr). GitPanel arms a one-shot callback and flips a
-// busy flag (committing / prSubmitting) before sending the request. If the
-// socket send succeeds but the daemon never replies (mid-flight disconnect,
-// crash), the callback would stay armed and the button stuck spinning forever,
-// unrecoverable without a remount. We arm a timer alongside the callback; on
-// expiry, if the callback is still armed, we resolve it with a timeout-error
-// result so GitPanel surfaces an error and clears its busy flag, then disarm.
-// A real reply — or the not-connected send-failure path — both flow through
-// setGit*Callback(null), which clears the timer. One shared mechanism (DRY),
-// keyed by the store field name so commit + create-PR share it.
+// (git_stage/git_unstage + git_commit + git_create_pr). GitPanel arms a
+// one-shot callback and flips a busy flag (stagingInProgress / committing /
+// prSubmitting) before sending the request. If the socket send succeeds but
+// the daemon never replies (mid-flight disconnect, crash), the callback would
+// stay armed and the button stuck spinning forever, unrecoverable without a
+// remount. We arm a timer alongside the callback; on expiry, if the callback
+// is still armed, we resolve it with a timeout-error result so GitPanel
+// surfaces an error and clears its busy flag, then disarm. A real reply — or
+// the not-connected send-failure path — both flow through setGit*Callback(null),
+// which clears the timer. One shared mechanism (DRY), keyed by the store
+// field name so stage/unstage + commit + create-PR all share it.
+//
+// #6954 — the same timer registry backs a disconnect/close/error fast-reject
+// (clearGitOneshotCallbacks below): a dead socket means the daemon can never
+// reply, so there's no reason to make the user wait out the full timeout.
 export const GIT_ONESHOT_CALLBACK_TIMEOUT_MS = 30_000;
 
-// Message handed to a still-armed callback when the daemon never replies.
+// Message handed to a still-armed callback when the daemon never replies —
+// whether because the deadline elapsed or the socket dropped out from under it.
 export const GIT_ONESHOT_TIMEOUT_ERROR = 'No response from the daemon — reconnect and try again';
 
-type GitOneshotCallbackKey = '_gitCommitCallback' | '_gitCreatePrCallback';
+type GitOneshotCallbackKey = '_gitStageCallback' | '_gitCommitCallback' | '_gitCreatePrCallback';
+
+// The result type a given git one-shot callback key expects, derived directly
+// from ConnectionState's field type (GitStageResult / GitCommitResult /
+// GitCreatePrResult) rather than duplicated here — single source of truth.
+// #6955 Copilot review: replaces the earlier `unknown`-typed
+// `timeoutResult` param + `as ((result: unknown) => void)` cast in
+// armGitOneshotCallback, which let a mismatched (key, result) pair through
+// uncaught. With this, passing e.g. a GitCommitResult shape for
+// `_gitStageCallback` is now a compile error.
+type GitOneshotResult<K extends GitOneshotCallbackKey> =
+  ConnectionState[K] extends ((result: infer R) => void) | null ? R : never;
 
 // Module-level timer registry (mirrors `searchTimeoutId` above) — keeps raw
 // timer handles out of the persisted store state.
 const gitOneshotTimers: Record<GitOneshotCallbackKey, ReturnType<typeof setTimeout> | undefined> = {
+  _gitStageCallback: undefined,
   _gitCommitCallback: undefined,
   _gitCreatePrCallback: undefined,
 };
 
+// Clear `key`'s pending timer (if any) and, if a callback is still armed,
+// disarm it (null the store slot) and invoke it with `result`. Shared by the
+// timeout path (armGitOneshotCallback's setTimeout, below) and the
+// disconnect/close/error fast-reject path (clearGitOneshotCallbacks, below)
+// so both go through the exact same one-shot / null-before-invoke contract:
+// disarm BEFORE invoking so the callback's own setGit*Callback(null) is a
+// harmless no-op and a later reply/timeout/disconnect can never double-fire it.
+function disarmGitOneshotCallback<K extends GitOneshotCallbackKey>(
+  set: (partial: Partial<ConnectionState>) => void,
+  get: () => ConnectionState,
+  key: K,
+  result: GitOneshotResult<K>,
+): void {
+  const timer = gitOneshotTimers[key];
+  if (timer !== undefined) {
+    clearTimeout(timer);
+    gitOneshotTimers[key] = undefined;
+  }
+  const armed = get()[key];
+  if (!armed) return; // no callback armed (already resolved, or never armed)
+  set({ [key]: null } as Partial<ConnectionState>);
+  // TS can't fully distribute a generic conditional (infer) type over a
+  // type-parameterized index access inside a generic function body — `armed`
+  // and `result` are provably matched at every concrete call site (each
+  // passes a literal key), so this narrows the otherwise-unresolvable
+  // `ConnectionState[K]` to the same `GitOneshotResult<K>` used for `result`
+  // above, rather than falling back to `unknown`.
+  (armed as (result: GitOneshotResult<K>) => void)(result);
+}
+
 // Arm (cb non-null) or disarm (cb null) a git one-shot callback, managing its
 // timeout in one place. Always clears any prior timer first, so re-arming or
 // disarming is race-free. `timeoutResult` is the payload handed to a still-armed
-// callback if the daemon never replies — its shape must match what GitPanel
-// expects for that flow (GitCommitResult / GitCreatePrResult).
-function armGitOneshotCallback(
+// callback if the daemon never replies — its shape is inferred from `key`'s
+// own callback type (GitStageResult / GitCommitResult / GitCreatePrResult), so
+// a mismatched shape for the given key fails to compile.
+function armGitOneshotCallback<K extends GitOneshotCallbackKey>(
   set: (partial: Partial<ConnectionState>) => void,
   get: () => ConnectionState,
-  key: GitOneshotCallbackKey,
-  cb: ConnectionState[GitOneshotCallbackKey],
-  timeoutResult: unknown,
+  key: K,
+  cb: ConnectionState[K],
+  timeoutResult: GitOneshotResult<K>,
 ): void {
   const prev = gitOneshotTimers[key];
   if (prev !== undefined) {
@@ -532,13 +581,37 @@ function armGitOneshotCallback(
 
   gitOneshotTimers[key] = setTimeout(() => {
     gitOneshotTimers[key] = undefined;
-    const armed = get()[key] as ((result: unknown) => void) | null;
-    if (!armed) return; // a real reply already resolved + nulled the callback
-    // One-shot: disarm before invoking so the callback's own setGit*Callback(null)
-    // is a harmless no-op and the reply path can never double-fire it.
-    set({ [key]: null } as Partial<ConnectionState>);
-    armed(timeoutResult);
+    disarmGitOneshotCallback(set, get, key, timeoutResult);
   }, GIT_ONESHOT_CALLBACK_TIMEOUT_MS);
+}
+
+// #6954 — fast-reject every still-armed git one-shot callback (stage/unstage,
+// commit, create-PR) on socket disconnect/close/error, mirroring the sibling
+// rejectAllEvaluatorRequests / clearPendingTrustGrants / clearPendingModelReverts
+// calls in the same onclose/onerror/disconnect() paths below. Without this, a
+// mid-flight disconnect left GitPanel's busy flag (stagingInProgress /
+// committing / prSubmitting) spinning for up to the full
+// GIT_ONESHOT_CALLBACK_TIMEOUT_MS (30s) instead of clearing instantly with an
+// error — a dead socket means the daemon really can never reply. Each
+// callback gets the disconnect-shaped result matching its own type (the same
+// result the timeout path would eventually send).
+function clearGitOneshotCallbacks(
+  set: (partial: Partial<ConnectionState>) => void,
+  get: () => ConnectionState,
+): void {
+  disarmGitOneshotCallback(set, get, '_gitStageCallback', { error: GIT_ONESHOT_TIMEOUT_ERROR });
+  disarmGitOneshotCallback(set, get, '_gitCommitCallback', {
+    hash: null,
+    message: null,
+    error: GIT_ONESHOT_TIMEOUT_ERROR,
+  });
+  disarmGitOneshotCallback(set, get, '_gitCreatePrCallback', {
+    url: null,
+    number: null,
+    branch: null,
+    base: null,
+    error: GIT_ONESHOT_TIMEOUT_ERROR,
+  });
 }
 
 export const useConnectionStore = create<ConnectionState>((set, get) => ({
@@ -2491,6 +2564,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       clearPendingModelReverts();
       clearPendingPermissionModeReverts();
       clearPendingThinkingLevelReverts();
+      // #6954: a dropped socket means any in-flight git one-shot reply
+      // (stage/unstage, commit, create-PR) will never arrive — fast-reject
+      // the still-armed callback so GitPanel's busy flag clears immediately
+      // instead of spinning for up to the full 30s client-side timeout.
+      clearGitOneshotCallbacks(set, get);
       // #3605: also clear the per-session pendingTrustGrants arrays
       // (added in #3588). disconnect() handles user-initiated closes, but
       // an unexpected drop here would otherwise leave the SkillsPanel
@@ -2678,6 +2756,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       clearPendingModelReverts();
       clearPendingPermissionModeReverts();
       clearPendingThinkingLevelReverts();
+      // #6954: same fast-reject as onclose above — an errored socket means
+      // any in-flight git one-shot reply will never arrive.
+      clearGitOneshotCallbacks(set, get);
       const cleanedSessionStates = clearAllSessionPendingTrustGrants(get().sessionStates);
 
       set({ socket: null, sessionStates: cleanedSessionStates });
@@ -2716,6 +2797,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     clearPendingModelReverts();
     clearPendingPermissionModeReverts();
     clearPendingThinkingLevelReverts();
+    // #6954: same fast-reject as onclose/onerror — an explicit disconnect
+    // means any in-flight git one-shot reply will never arrive on this socket.
+    clearGitOneshotCallbacks(set, get);
     const { socket } = get();
     if (socket) {
       socket.onclose = null;
@@ -4185,8 +4269,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // requestGitUnstage (packages/app/src/store/connection.ts): both return
   // false when the socket is closed so GitPanel can surface a "not
   // connected" error instead of leaving its spinner stuck forever (#6288).
+  // #6955 — arm (or clear) a client-side timeout alongside the one-shot
+  // callback so a never-arriving git_stage_result/git_unstage_result can't
+  // strand GitPanel's stagingInProgress flag (same failure mode + mechanism
+  // as the commit/create-PR flows below).
   setGitStageCallback: (cb) => {
-    set({ _gitStageCallback: cb });
+    armGitOneshotCallback(set, get, '_gitStageCallback', cb, {
+      error: GIT_ONESHOT_TIMEOUT_ERROR,
+    });
   },
 
   requestGitStage: (paths) => {
