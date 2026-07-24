@@ -312,6 +312,67 @@ export const SubmitMcpAuthCodeSchema = z.object({
     sessionId: z.string().max(256).optional(),
     requestId: z.string().max(256).optional(),
 });
+// #6974: the two config-MUTATION scopes a client may target. Both live in
+// `~/.claude.json` (machine-local user state): 'user' is the root `mcpServers`
+// block, 'project' is `projects[<realpath(cwd)>].mcpServers`. The third READ
+// source — `<cwd>/.mcp.json` — is deliberately NOT writable: it is normally
+// checked into the user's git repo, and mutating it from a chat client would
+// dirty their working tree and could land in a commit unnoticed.
+export const McpConfigScopeSchema = z.enum(['user', 'project']);
+// #6974: add a brand-new MCP server, PERSISTING it to the user's MCP config —
+// unlike `set_mcp_server_enabled` (#6824), which only parks/unparks an
+// ALREADY-CONFIGURED server at runtime. This is the first client→server message
+// that writes `~/.claude.json`, a file owned by Claude Code rather than Chroxy.
+//
+// SECURITY: a configured MCP server is a command the daemon will SPAWN, so this
+// is remote-code-execution-adjacent and carries the HOST-AUTHORITY gate, not the
+// weaker own-session gate that #6824 uses — a pairing-bound (shared-session)
+// token is rejected outright with `MCP_CONFIG_FORBIDDEN_BOUND_CLIENT` before any
+// validation or write happens. Adding a server is still not permission to run
+// it: the fleet's first-use trust prompt gates the actual spawn.
+//
+// `name` is held to a strict lowercase-identifier charset server-side (and must
+// not contain `__`, the `mcp__<server>__<tool>` namespace separator). `config`
+// accepts either shape the read path already parses — stdio `{command,args,env}`
+// or remote `{type,url,headers}` — and only NORMALIZED, known keys are persisted,
+// so a client cannot inject arbitrary keys into the user's config. Only the BYOK
+// lane runs an in-daemon MCP fleet, so other providers reject this with an
+// `MCP_CONFIG_UNSUPPORTED` capability error. On success the session re-emits
+// `mcp_servers`, which IS the ack; `requestId` echoes back on rejection.
+export const AddMcpServerSchema = z.object({
+    type: z.literal('add_mcp_server'),
+    name: z.string().min(1).max(64),
+    config: z.object({
+        command: z.string().min(1).max(4096).optional(),
+        args: z.array(z.string().max(4096)).max(128).optional(),
+        env: z.record(z.string().min(1).max(256), z.string().max(8192)).optional(),
+        type: z.enum(['stdio', 'http', 'streamable-http', 'sse']).optional(),
+        url: z.string().max(4096).optional(),
+        headers: z.record(z.string().min(1).max(256), z.string().max(8192)).optional(),
+    }),
+    scope: McpConfigScopeSchema.optional(),
+    sessionId: z.string().max(256).optional(),
+    requestId: z.string().max(256).optional(),
+});
+// #6974: permanently remove a configured MCP server from the user's MCP config
+// — the counterpart to `add_mcp_server`, and distinct from disabling (#6824),
+// which leaves the server configured. Carries the same HOST-AUTHORITY gate: a
+// pairing-bound token is rejected with `MCP_CONFIG_FORBIDDEN_BOUND_CLIENT`
+// before any write. (Removal only reduces capability, but it still mutates a
+// host-level file a bound token has no authority over, and a bound client that
+// could delete servers could silently strip a session's tooling.)
+//
+// `name` is validated laxly here on purpose — a server the `claude` CLI created
+// under a name Chroxy would not mint must still be removable — and the removal
+// is scoped: a name absent from the REQUESTED scope reports `MCP_SERVER_NOT_FOUND`
+// rather than silently deleting a same-named server from the other scope.
+export const RemoveMcpServerSchema = z.object({
+    type: z.literal('remove_mcp_server'),
+    name: z.string().min(1).max(256),
+    scope: McpConfigScopeSchema.optional(),
+    sessionId: z.string().max(256).optional(),
+    requestId: z.string().max(256).optional(),
+});
 // #3185: per-session promptEvaluator toggle. Strict boolean — the server
 // rejects anything else with a `session_error`. `sessionId` is optional;
 // the handler falls back to the client's bound active session.
@@ -1511,6 +1572,8 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     SetPermissionRulesSchema,
     SetMcpServerEnabledSchema,
     SubmitMcpAuthCodeSchema,
+    AddMcpServerSchema,
+    RemoveMcpServerSchema,
     SetPromptEvaluatorSchema,
     SetPromptEvaluatorSkipPatternSchema,
     SetChroxyContextHintSchema,

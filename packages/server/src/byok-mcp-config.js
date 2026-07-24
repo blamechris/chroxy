@@ -6,10 +6,21 @@
  * children or wire tools.
  */
 
-import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs'
+import {
+  chmodSync,
+  existsSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs'
+import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { lookup as dnsLookup } from 'node:dns/promises'
+import { fsyncForDurability } from './platform.js'
 
 /**
  * Defensive upper bound on the size of `~/.claude.json`. Today the file is
@@ -630,4 +641,455 @@ export function discoverConfiguredMcpServers(cwd, { configPath = defaultClaudeCo
   }
 
   return { servers: [...byName.values()], warnings }
+}
+
+// ---------------------------------------------------------------------------
+// #6974 — MCP server add/remove (config MUTATION).
+//
+// Everything above this line READS. This section is the only write path into
+// `~/.claude.json`, a file this module's header explicitly calls out as "owned
+// by Claude Code, not by us". We are a guest in someone else's file, so the
+// rules below are deliberately conservative:
+//
+//   1. READ-MODIFY-WRITE, never generate. We parse the whole file, touch only
+//      the one `mcpServers` key we were asked to, and write the rest back
+//      byte-equivalent. Any key Claude Code owns (projects, history,
+//      oauthAccount, …) survives untouched.
+//   2. BAIL on a malformed file — never clobber. If the existing config is
+//      unparseable we refuse the mutation with a clear error rather than
+//      "recovering" by overwriting it with a fresh object. A user whose config
+//      we cannot read is a user whose config we must not destroy.
+//   3. ATOMIC + durable write (temp file + fsync + rename + parent-dir fsync).
+//      A crash mid-write leaves the original file intact, never a truncated
+//      one. See writeClaudeConfigAtomic for the mode-preservation rationale.
+//   4. Persist only NORMALIZED entries. What lands on disk is rebuilt from
+//      `parseClaudeMcpConfig`'s output, not copied from the caller's payload,
+//      so a client cannot inject arbitrary keys into the user's config.
+//
+// Note on execution: adding a server does NOT itself execute anything. The
+// live-fleet wiring (byok-mcp-fleet `addServer`) spawns through the SAME
+// first-use trust gate as any other server, so the user still gets the
+// `requestMcpTrust` prompt before a new command runs (#4457).
+// ---------------------------------------------------------------------------
+
+/**
+ * Charset for a NEWLY ADDED MCP server name: a lowercase identifier — leading
+ * lowercase letter, then lowercase letters / digits / dash / underscore, max 64
+ * chars. Mirrors the `PROVIDER_ID_RE` "lowercase identifier" rule in
+ * anthropic-compatible-config.js, widened by `_` because real MCP server names
+ * use it (`ccd_session_mgmt`).
+ *
+ * Being a strict allow-list, this also forecloses a family of problems for free:
+ * no `.` or `/` (so a name can never read as a path or traverse), no uppercase
+ * (so two names can't collide case-insensitively), and no whitespace/control
+ * characters (so a name can't be visually spoofed in the picker).
+ */
+export const MCP_SERVER_NAME_RE = /^[a-z][a-z0-9_-]{0,63}$/
+
+/**
+ * Names that must never be used as an object key we assign into, regardless of
+ * charset — assigning these shadows or mutates object internals. `__proto__` is
+ * already refused by MCP_SERVER_NAME_RE (leading `_`), but `constructor` and
+ * `prototype` are pure lowercase letters and WOULD pass it, so they are refused
+ * explicitly here. Also applied on the removal path, which uses a laxer charset.
+ */
+const UNSAFE_MCP_SERVER_NAMES = new Set(['__proto__', 'constructor', 'prototype'])
+
+/**
+ * Upper bound on a removable name. Removal accepts a much laxer charset than
+ * `add` (see validateMcpServerNameForRemoval) so a server the `claude` CLI
+ * created under a name Chroxy would not have minted is still removable.
+ */
+const MCP_SERVER_NAME_MAX = 256
+
+/**
+ * Validate a name for ADDING a server: the strict lowercase-identifier rule.
+ *
+ * Beyond the charset there is one non-obvious hard constraint: the name must not
+ * contain `__`. MCP tools are namespaced on the wire as `mcp__<server>__<tool>`
+ * and `parseMcpToolName` (src/mcp-tools.js) splits on the FIRST `__` after the
+ * prefix — so a server named `a__b` would have its tools parsed as server `a`,
+ * tool `b__…`, silently routing calls to the wrong (or a nonexistent) server.
+ * Refuse it at the door rather than persisting a name that mis-routes.
+ *
+ * @param {unknown} name
+ * @returns {{ ok: true, name: string } | { ok: false, error: string }}
+ */
+export function validateNewMcpServerName(name) {
+  if (typeof name !== 'string' || name.length === 0) {
+    return { ok: false, error: 'MCP server name is required' }
+  }
+  if (UNSAFE_MCP_SERVER_NAMES.has(name)) {
+    return { ok: false, error: `MCP server name '${name}' is reserved` }
+  }
+  if (!MCP_SERVER_NAME_RE.test(name)) {
+    return {
+      ok: false,
+      error:
+        `Invalid MCP server name ${JSON.stringify(name)}: expected a lowercase identifier ` +
+        '(letters, digits, dash, underscore; must start with a letter, max 64 chars)',
+    }
+  }
+  if (name.includes('__')) {
+    return {
+      ok: false,
+      error:
+        `Invalid MCP server name ${JSON.stringify(name)}: '__' is the MCP tool-namespace ` +
+        'separator (mcp__<server>__<tool>) and would mis-route this server\'s tools',
+    }
+  }
+  return { ok: true, name }
+}
+
+/**
+ * Validate a name for REMOVING a server. Deliberately laxer than the add rule:
+ * a server configured by the `claude` CLI (or hand-edited) may carry a name
+ * Chroxy would never mint — uppercase, dots, whatever — and the user must still
+ * be able to remove it. So this only refuses what is genuinely unsafe to use as
+ * a lookup/delete key: empty, over-long, control characters, or a reserved key.
+ * Removal cannot create anything, so no charset policy is warranted.
+ *
+ * @param {unknown} name
+ * @returns {{ ok: true, name: string } | { ok: false, error: string }}
+ */
+export function validateMcpServerNameForRemoval(name) {
+  if (typeof name !== 'string' || name.length === 0) {
+    return { ok: false, error: 'MCP server name is required' }
+  }
+  if (name.length > MCP_SERVER_NAME_MAX) {
+    return { ok: false, error: `MCP server name exceeds ${MCP_SERVER_NAME_MAX} characters` }
+  }
+  if (UNSAFE_MCP_SERVER_NAMES.has(name)) {
+    return { ok: false, error: `MCP server name '${name}' is reserved` }
+  }
+  if (/[\x00-\x1f\x7f]/.test(name)) {
+    return { ok: false, error: 'MCP server name must not contain control characters' }
+  }
+  return { ok: true, name }
+}
+
+/**
+ * Validate + normalize a proposed server config into the exact object to
+ * persist. Validation is delegated to `parseClaudeMcpConfig` — the SAME parser
+ * the read path uses — by round-tripping a single-entry probe block through it,
+ * so a config we accept for writing is by construction a config we can read
+ * back. Two deliberate tightenings over the read path:
+ *
+ *   - the read path is LENIENT (it coerces a bad `args[3]` away with a warning
+ *     and carries on, because a partly-usable config beats no session). A WRITE
+ *     must not silently persist something other than what the user asked for, so
+ *     ANY warning is escalated to a rejection.
+ *   - the persisted entry is rebuilt from the parser's normalized output, so
+ *     unknown/extra keys in the caller's payload are dropped rather than written
+ *     into the user's config.
+ *
+ * @param {string} name — already validated by validateNewMcpServerName
+ * @param {unknown} config
+ * @returns {{ ok: true, entry: object } | { ok: false, error: string }}
+ */
+export function normalizeMcpServerConfig(name, config) {
+  if (!config || typeof config !== 'object' || Array.isArray(config)) {
+    return { ok: false, error: 'MCP server config must be an object' }
+  }
+  // A computed key always defines an OWN property (unlike a literal
+  // `__proto__:`), and `name` is validated upstream, so this probe cannot be
+  // turned into a prototype write.
+  const { servers, warnings } = parseClaudeMcpConfig({ mcpServers: { [name]: config } })
+  if (servers.length !== 1) {
+    return {
+      ok: false,
+      error: warnings[0] || `config for '${name}' is not a usable MCP server entry`,
+    }
+  }
+  if (warnings.length > 0) return { ok: false, error: warnings[0] }
+
+  const parsed = servers[0]
+  // Remote (http/sse) transport — persist type + url + non-empty headers only.
+  if (typeof parsed.url === 'string' && parsed.url.length > 0) {
+    const entry = { type: parsed.type, url: parsed.url }
+    if (Object.keys(parsed.headers || {}).length > 0) entry.headers = { ...parsed.headers }
+    return { ok: true, entry }
+  }
+  // stdio transport — persist command + non-empty args/env only, so a minimal
+  // add produces a minimal diff in the user's file.
+  const entry = { command: parsed.command }
+  if (parsed.args.length > 0) entry.args = [...parsed.args]
+  if (Object.keys(parsed.env || {}).length > 0) entry.env = { ...parsed.env }
+  return { ok: true, entry }
+}
+
+/**
+ * Read `~/.claude.json` for a read-modify-write cycle.
+ *
+ * Unlike `loadClaudeMcpConfig` (which fails OPEN — a corrupt config yields an
+ * empty server list so session start survives), this fails CLOSED: a file we
+ * cannot parse is a file we must not overwrite, so every unreadable/malformed
+ * case returns `ok: false` and the caller aborts the mutation. A MISSING file is
+ * not an error — it is the first-write case and yields an empty object.
+ *
+ * @param {string} filePath
+ * @returns {{ ok: true, raw: object, mode: number|null, existed: boolean } | { ok: false, error: string }}
+ */
+export function readClaudeConfigForMutation(filePath) {
+  if (!filePath) return { ok: false, error: 'No Claude config path resolved' }
+  if (!existsSync(filePath)) {
+    // First write — we create the file. `mode: null` tells the writer to use a
+    // fresh-file default (0600) rather than preserving anything.
+    return { ok: true, raw: {}, mode: null, existed: false }
+  }
+  let stat
+  try {
+    stat = statSync(filePath)
+  } catch (err) {
+    return { ok: false, error: `Cannot stat ${filePath}: ${err?.message || String(err)}` }
+  }
+  if (stat.size > CLAUDE_CONFIG_MAX_BYTES) {
+    return {
+      ok: false,
+      error: `Config ${filePath} exceeds the ${CLAUDE_CONFIG_MAX_BYTES}-byte cap (${stat.size} bytes); refusing to rewrite it`,
+    }
+  }
+  let text
+  try {
+    text = readFileSync(filePath, 'utf8')
+  } catch (err) {
+    return { ok: false, error: `Cannot read ${filePath}: ${err?.message || String(err)}` }
+  }
+  let raw
+  try {
+    raw = JSON.parse(text)
+  } catch {
+    // The parser's message can quote surrounding bytes (which may include a
+    // token from elsewhere in the file), so it is deliberately NOT echoed.
+    return {
+      ok: false,
+      error: `Config ${filePath} is not valid JSON; refusing to overwrite it. Fix or move the file, then retry.`,
+    }
+  }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return { ok: false, error: `Config ${filePath} root must be a JSON object; refusing to overwrite it` }
+  }
+  return { ok: true, raw, mode: stat.mode & 0o777, existed: true }
+}
+
+/**
+ * Atomically write the mutated config back.
+ *
+ * temp file → exact mode → fsync(file) → rename → fsync(parent dir), the same
+ * shape as `writeFileRestricted(..., { durable: true })` in platform.js, with
+ * one deliberate difference: this PRESERVES the destination's existing mode
+ * instead of forcing 0600. `~/.claude.json` belongs to Claude Code; silently
+ * re-permissioning a user's file as a side effect of "add an MCP server" is not
+ * ours to do. A file we CREATE gets 0600 (it can hold OAuth material).
+ *
+ * The write is durable (fsync before rename, dir fsync after) on BOTH add and
+ * remove. Remove is the load-bearing case — it is a capability REDUCTION, and
+ * the #6914/#6927 precedent is that a security-tightening write must survive
+ * power loss rather than silently reappearing after a crash. Add rides the same
+ * path because one code path is cheaper to keep correct than two, and the cost
+ * (one fsync of a few KB, on an operation a user performs rarely) is noise.
+ *
+ * @param {string} filePath
+ * @param {object} value — the full config object to serialize
+ * @param {{ mode: number|null }} opts — `null` mode = new file, use 0600
+ */
+export function writeClaudeConfigAtomic(filePath, value, { mode }) {
+  const payload = `${JSON.stringify(value, null, 2)}\n`
+  const targetMode = mode === null || mode === undefined ? 0o600 : mode
+  // Per-call random suffix, NOT process.pid: concurrent sessions in one daemon
+  // share a pid and would race for the same sidecar path (#3922).
+  const tmpPath = `${filePath}.chroxy.${randomUUID()}.tmp`
+  try {
+    // `mode` is only honoured on create, and umask can strip bits from it — so
+    // restate the exact mode afterwards. The intermediate mode can only ever be
+    // TIGHTER than the target (umask removes bits, never adds), so there is no
+    // window in which the temp file is more permissive than the destination
+    // already was.
+    writeFileSync(tmpPath, payload, { mode: targetMode })
+    chmodSync(tmpPath, targetMode)
+    fsyncForDurability(tmpPath)
+  } catch (err) {
+    try { unlinkSync(tmpPath) } catch { /* nothing to clean up */ }
+    throw err
+  }
+  renameSync(tmpPath, filePath)
+  // Make the rename itself durable, not just the bytes it points at.
+  fsyncForDurability(dirname(filePath), { isDir: true })
+}
+
+/**
+ * Resolve the `projects` key under which cwd's config block lives, for a WRITE.
+ *
+ * Claude Code keys project blocks by `realpath(cwd)`. Reads tolerate either
+ * spelling (see resolveProjectBlock), so a write must target the key that
+ * ALREADY exists — writing the realpath when a literal-cwd key is present would
+ * create a second, shadowed block that the read path never reaches. Falls back
+ * to the realpath (or literal cwd, if it does not resolve) as the key to create.
+ *
+ * @param {object} raw — parsed config
+ * @param {string} cwd
+ * @returns {string} the projects key to read/write
+ */
+function resolveProjectKeyForWrite(raw, cwd) {
+  let realCwd = cwd
+  try {
+    realCwd = realpathSync(cwd)
+  } catch {
+    // cwd may not resolve (removed dir) — the literal key is the best we have.
+  }
+  const projects = raw?.projects
+  if (projects && typeof projects === 'object' && !Array.isArray(projects)) {
+    if (Object.prototype.hasOwnProperty.call(projects, realCwd)) return realCwd
+    if (Object.prototype.hasOwnProperty.call(projects, cwd)) return cwd
+  }
+  return realCwd
+}
+
+/** The config scopes a mutation may target. */
+export const MCP_WRITE_SCOPES = Object.freeze(['user', 'project'])
+
+/**
+ * Why `.mcp.json` is NOT a writable scope: the third read source
+ * (`<cwd>/.mcp.json`) is a project-local file that is normally checked into the
+ * user's git repository. Mutating it from a chat client would dirty their
+ * working tree and could land in a commit unnoticed. Both writable scopes live
+ * in `~/.claude.json`, which is machine-local user state.
+ */
+
+/**
+ * Add (or refuse to overwrite) one MCP server in the user's config.
+ *
+ * Scope selects WHERE: 'user' → the root `mcpServers` block; 'project' →
+ * `projects[<realpath(cwd)>].mcpServers`. There is no "wherever it fits"
+ * fallback — an ambiguous write to a user's config is worse than an error.
+ *
+ * Refuses (rather than overwrites) an existing name in the target scope: an
+ * overwrite would silently replace a command the user trusts with a different
+ * one, which is exactly the substitution the trust store exists to prevent.
+ *
+ * @param {object} opts
+ * @param {string} opts.name
+ * @param {unknown} opts.config
+ * @param {'user'|'project'} [opts.scope]
+ * @param {string} [opts.cwd] — required for scope 'project'
+ * @param {string} [opts.configPath]
+ * @returns {{ ok: true, entry: object, scope: string } | { ok: false, error: string, code?: string }}
+ */
+export function addMcpServerToConfig({ name, config, scope = 'user', cwd, configPath = defaultClaudeConfigPath() } = {}) {
+  const validName = validateNewMcpServerName(name)
+  if (!validName.ok) return { ok: false, error: validName.error }
+  if (!MCP_WRITE_SCOPES.includes(scope)) {
+    return { ok: false, error: `Unknown MCP config scope '${scope}' (expected 'user' or 'project')` }
+  }
+  if (scope === 'project' && (typeof cwd !== 'string' || cwd.length === 0)) {
+    return { ok: false, error: 'Project scope requires a session working directory' }
+  }
+  const normalized = normalizeMcpServerConfig(validName.name, config)
+  if (!normalized.ok) return { ok: false, error: normalized.error }
+
+  // Read-modify-write, synchronously and with no `await` in between, so the
+  // window in which a concurrent `claude` CLI edit could be lost is the syscall
+  // span rather than an event-loop turn. (A cross-process lock is not available
+  // — `claude` takes none — so narrowing the window is the honest ceiling.)
+  const read = readClaudeConfigForMutation(configPath)
+  if (!read.ok) return { ok: false, error: read.error }
+  const raw = read.raw
+
+  let block
+  if (scope === 'user') {
+    if (raw.mcpServers != null && (typeof raw.mcpServers !== 'object' || Array.isArray(raw.mcpServers))) {
+      return { ok: false, error: 'Existing user-scope mcpServers is not an object; refusing to replace it' }
+    }
+    if (raw.mcpServers == null) raw.mcpServers = {}
+    block = raw.mcpServers
+  } else {
+    if (raw.projects != null && (typeof raw.projects !== 'object' || Array.isArray(raw.projects))) {
+      return { ok: false, error: 'Existing projects block is not an object; refusing to replace it' }
+    }
+    if (raw.projects == null) raw.projects = {}
+    const key = resolveProjectKeyForWrite(raw, cwd)
+    const existing = raw.projects[key]
+    if (existing != null && (typeof existing !== 'object' || Array.isArray(existing))) {
+      return { ok: false, error: `Existing project block for ${key} is not an object; refusing to replace it` }
+    }
+    // Preserve every other key Claude Code keeps on the project block
+    // (allowedTools, history, …) — only mcpServers is ours to touch.
+    if (existing == null) raw.projects[key] = {}
+    const projectBlock = raw.projects[key]
+    if (projectBlock.mcpServers != null && (typeof projectBlock.mcpServers !== 'object' || Array.isArray(projectBlock.mcpServers))) {
+      return { ok: false, error: `Existing project-scope mcpServers for ${key} is not an object; refusing to replace it` }
+    }
+    if (projectBlock.mcpServers == null) projectBlock.mcpServers = {}
+    block = projectBlock.mcpServers
+  }
+
+  if (Object.prototype.hasOwnProperty.call(block, validName.name)) {
+    return {
+      ok: false,
+      code: 'EXISTS',
+      error: `An MCP server named '${validName.name}' already exists in ${scope} scope. Remove it first to replace it.`,
+    }
+  }
+  block[validName.name] = normalized.entry
+
+  writeClaudeConfigAtomic(configPath, raw, { mode: read.mode })
+  return { ok: true, entry: normalized.entry, scope }
+}
+
+/**
+ * Remove one MCP server from the user's config, in the named scope only.
+ *
+ * Returns `found: false` (no write performed) when the name is absent from the
+ * REQUESTED scope, even if it exists in the other one — a remove that silently
+ * jumped scope could delete a shared user-scope server when the caller meant to
+ * detach a project-scope one. The caller surfaces the scope in its error so a
+ * client can retry against the right one.
+ *
+ * @param {object} opts
+ * @param {string} opts.name
+ * @param {'user'|'project'} [opts.scope]
+ * @param {string} [opts.cwd] — required for scope 'project'
+ * @param {string} [opts.configPath]
+ * @returns {{ ok: true, found: boolean, scope: string } | { ok: false, error: string }}
+ */
+export function removeMcpServerFromConfig({ name, scope = 'user', cwd, configPath = defaultClaudeConfigPath() } = {}) {
+  const validName = validateMcpServerNameForRemoval(name)
+  if (!validName.ok) return { ok: false, error: validName.error }
+  if (!MCP_WRITE_SCOPES.includes(scope)) {
+    return { ok: false, error: `Unknown MCP config scope '${scope}' (expected 'user' or 'project')` }
+  }
+  if (scope === 'project' && (typeof cwd !== 'string' || cwd.length === 0)) {
+    return { ok: false, error: 'Project scope requires a session working directory' }
+  }
+
+  const read = readClaudeConfigForMutation(configPath)
+  if (!read.ok) return { ok: false, error: read.error }
+  if (!read.existed) return { ok: true, found: false, scope }
+  const raw = read.raw
+
+  let block = null
+  if (scope === 'user') {
+    if (raw.mcpServers && typeof raw.mcpServers === 'object' && !Array.isArray(raw.mcpServers)) {
+      block = raw.mcpServers
+    }
+  } else {
+    const projects = raw.projects
+    if (projects && typeof projects === 'object' && !Array.isArray(projects)) {
+      const key = resolveProjectKeyForWrite(raw, cwd)
+      const projectBlock = Object.prototype.hasOwnProperty.call(projects, key) ? projects[key] : null
+      if (projectBlock && typeof projectBlock === 'object' && !Array.isArray(projectBlock)) {
+        const servers = projectBlock.mcpServers
+        if (servers && typeof servers === 'object' && !Array.isArray(servers)) block = servers
+      }
+    }
+  }
+  if (!block || !Object.prototype.hasOwnProperty.call(block, validName.name)) {
+    // Nothing to do — and crucially, NO write. A no-op remove must not rewrite
+    // the user's file (nor risk clobbering a concurrent edit for nothing).
+    return { ok: true, found: false, scope }
+  }
+
+  delete block[validName.name]
+  writeClaudeConfigAtomic(configPath, raw, { mode: read.mode })
+  return { ok: true, found: true, scope }
 }
