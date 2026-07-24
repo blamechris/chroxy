@@ -89,12 +89,17 @@ export function setupForwarding(ctx) {
 
   // Wire the normalizer's timer-based delta flush to broadcast
   normalizer.onFlush = (entries) => {
-    for (const { sessionId, messageId, delta, emitMonoMs } of entries) {
+    for (const { sessionId, messageId, delta, emitMonoMs, thinking } of entries) {
       recordEmitToBroadcast(emitMonoMs)
+      // #6818: stamp `thinking: true` back on so a coalesced reasoning frame
+      // routes to the thinking bubble, not the response slot. Absent for
+      // response text (byte-identical to pre-#6818).
+      const msg = { type: 'stream_delta', messageId, delta }
+      if (thinking) msg.thinking = true
       if (sessionId) {
-        broadcastToSession(sessionId, withServerTs({ type: 'stream_delta', messageId, delta }))
+        broadcastToSession(sessionId, withServerTs(msg))
       } else {
-        broadcast(withServerTs({ type: 'stream_delta', messageId, delta }))
+        broadcast(withServerTs(msg))
       }
     }
   }
@@ -207,7 +212,9 @@ function setupSessionForwarding(normalizer, ctx) {
 
     // Handle delta buffering
     if (result.buffer) {
-      normalizer.bufferDelta(sessionId, data.messageId, data.delta, data._emitMonoMs)
+      // #6818: forward the thinking flag so the coalesced frame reconstructs as
+      // a thinking stream_delta on flush.
+      normalizer.bufferDelta(sessionId, data.messageId, data.delta, data._emitMonoMs, result.thinking === true)
       return
     }
 
@@ -365,7 +372,9 @@ function setupCliForwarding(normalizer, ctx) {
         if (!result) return
 
         if (result.buffer) {
-          normalizer.bufferDelta(null, data.messageId, data.delta, data._emitMonoMs)
+          // #6818: forward the thinking flag (legacy-CLI path) so a coalesced
+          // reasoning frame reconstructs as a thinking stream_delta on flush.
+          normalizer.bufferDelta(null, data.messageId, data.delta, data._emitMonoMs, result.thinking === true)
           return
         }
 
@@ -467,12 +476,15 @@ function executeSideEffects(sideEffects, sessionId, ctx) {
       case 'flush_deltas': {
         const sid = effect.sessionId ?? sessionId
         const entries = normalizer.flushSession(sid)
-        for (const { sessionId: eSid, messageId, delta, emitMonoMs } of entries) {
+        for (const { sessionId: eSid, messageId, delta, emitMonoMs, thinking } of entries) {
           recordEmitToBroadcast(emitMonoMs)
+          // #6818: preserve the thinking flag through the pre-stream_end flush.
+          const msg = { type: 'stream_delta', messageId, delta }
+          if (thinking) msg.thinking = true
           if (eSid) {
-            broadcastToSession(eSid, withServerTs({ type: 'stream_delta', messageId, delta }))
+            broadcastToSession(eSid, withServerTs(msg))
           } else {
-            broadcast(withServerTs({ type: 'stream_delta', messageId, delta }))
+            broadcast(withServerTs(msg))
           }
         }
         break

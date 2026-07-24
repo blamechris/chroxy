@@ -464,11 +464,13 @@ describe('EventNormalizer', () => {
       assert.equal(result.messages[0].msg.delta, 'hello')
     })
 
-    // #6756 — thinking deltas broadcast immediately (no buffering) with the flag
-    // intact; the coalescing buffer can't carry the flag.
-    it('thinking delta is NOT buffered and carries thinking:true', () => {
+    // #6818 — thinking deltas now coalesce through the same buffer as response
+    // text (was: broadcast per-token). The result carries `buffer: true` AND a
+    // `thinking: true` signal so the caller buffers it as a thinking delta.
+    it('thinking delta IS buffered and signals thinking:true (#6818)', () => {
       const result = normalizer.normalize('stream_delta', { messageId: 'msg-1-thinking-0', delta: 'reason', thinking: true }, makeCtx())
-      assert.ok(!result.buffer, 'thinking deltas bypass the coalescing buffer')
+      assert.equal(result.buffer, true, 'thinking deltas now coalesce like response text')
+      assert.equal(result.thinking, true, 'result flags the delta as thinking for the buffer')
       assert.equal(result.messages[0].msg.type, 'stream_delta')
       assert.equal(result.messages[0].msg.delta, 'reason')
       assert.equal(result.messages[0].msg.thinking, true)
@@ -485,13 +487,16 @@ describe('EventNormalizer', () => {
       assert.ok(result.sideEffects.some(se => se.type === 'flush_deltas'))
     })
 
-    // #6756 — a thinking stream_end carries the flag and does NOT flush the
-    // response-text buffer.
-    it('tags thinking:true and omits flush_deltas', () => {
+    // #6818 — a thinking stream_end now flushes the coalesced thinking deltas
+    // first (they ARE buffered since #6818), exactly like the response path, so
+    // the finalisation frame can't overtake still-buffered thinking text.
+    it('tags thinking:true and emits flush_deltas (#6818)', () => {
       const result = normalizer.normalize('stream_end', { messageId: 'msg-1-thinking-0', thinking: true }, makeCtx())
       assert.equal(result.messages[0].msg.type, 'stream_end')
       assert.equal(result.messages[0].msg.thinking, true)
-      assert.ok(!result.sideEffects, 'thinking end does not flush the text buffer')
+      assert.ok(result.sideEffects.some(se => se.type === 'flush_deltas'), 'thinking end flushes the coalesced thinking buffer')
+      const flush = result.sideEffects.find(se => se.type === 'flush_deltas')
+      assert.equal(flush.sessionId, 'sess-1')
     })
   })
 
@@ -1271,6 +1276,103 @@ describe('EventNormalizer', () => {
       normalizer.destroy()
       assert.equal(normalizer._deltaBuffer.size, 0)
       assert.equal(normalizer._deltaFlushTimer, null)
+    })
+  })
+
+  // ---- #6818: thinking-delta coalescing ----
+  //
+  // Thinking deltas used to bypass the coalescing buffer entirely (one WS frame
+  // per token) because the flush reconstructed a bare {messageId, delta} that
+  // couldn't carry `thinking: true`. They now coalesce through the SAME buffer,
+  // with the flag carried per key and stamped onto every flushed entry. A
+  // thinking stream uses a DISTINCT messageId from the response text, so the two
+  // never share a buffer key and never merge into one frame.
+  describe('thinking-delta coalescing (#6818)', () => {
+    it('coalesces multiple thinking deltas into one entry carrying thinking:true', () => {
+      normalizer.bufferDelta('sess-1', 'm1-thinking-0', 'Let me ', 1000, true)
+      normalizer.bufferDelta('sess-1', 'm1-thinking-0', 'reason ', 1005, true)
+      normalizer.bufferDelta('sess-1', 'm1-thinking-0', 'about this', 1010, true)
+      const entries = normalizer.flushSession('sess-1')
+      assert.equal(entries.length, 1, 'one coalesced frame, not three')
+      assert.equal(entries[0].delta, 'Let me reason about this')
+      assert.equal(entries[0].messageId, 'm1-thinking-0')
+      assert.equal(entries[0].thinking, true, 'coalesced thinking frame keeps the flag')
+    })
+
+    it('does NOT merge thinking and response deltas of the same turn (separate frames, correct flags)', () => {
+      // Distinct messageIds mirror production (#6756): <turnId>-thinking-<n> vs <turnId>.
+      normalizer.bufferDelta('sess-1', 'm1-thinking-0', 'reasoning', 1000, true)
+      normalizer.bufferDelta('sess-1', 'm1', 'visible answer', 1000, false)
+      const entries = normalizer.flushSession('sess-1')
+      assert.equal(entries.length, 2, 'thinking and response stay in separate frames')
+      const thinkingEntry = entries.find(e => e.messageId === 'm1-thinking-0')
+      const responseEntry = entries.find(e => e.messageId === 'm1')
+      assert.ok(thinkingEntry && responseEntry, 'both frames present')
+      assert.equal(thinkingEntry.delta, 'reasoning')
+      assert.equal(thinkingEntry.thinking, true)
+      assert.equal(responseEntry.delta, 'visible answer')
+      assert.ok(!('thinking' in responseEntry), 'response frame carries no thinking flag')
+    })
+
+    it('leaves response-only coalescing byte-identical — no thinking key on the entry', () => {
+      normalizer.bufferDelta('sess-1', 'm1', 'Hello')
+      normalizer.bufferDelta('sess-1', 'm1', ' World')
+      const entries = normalizer.flushSession('sess-1')
+      assert.equal(entries.length, 1)
+      assert.equal(entries[0].delta, 'Hello World')
+      assert.ok(!('thinking' in entries[0]), 'no thinking property on a response entry')
+    })
+
+    it('preserves order across a thinking→text transition (thinking flushes before response)', () => {
+      // A thinking block completes, then the response streams. flushSession
+      // returns thinking BEFORE response (insertion order into the buffer Map),
+      // and each carries its own flag — the client renders the reasoning bubble
+      // first, then the answer.
+      normalizer.bufferDelta('sess-1', 'm1-thinking-0', 'first I think', 1000, true)
+      normalizer.bufferDelta('sess-1', 'm1', 'then I answer', 1010, false)
+      const entries = normalizer.flushSession('sess-1')
+      assert.equal(entries.length, 2)
+      assert.equal(entries[0].messageId, 'm1-thinking-0', 'thinking frame comes first')
+      assert.equal(entries[0].thinking, true)
+      assert.equal(entries[1].messageId, 'm1', 'response frame comes second')
+      assert.ok(!('thinking' in entries[1]))
+    })
+
+    it('carries the thinking flag through the timer-driven onFlush path', async () => {
+      let flushed = null
+      normalizer.onFlush = (entries) => { flushed = entries }
+      normalizer.bufferDelta('sess-1', 'm1-thinking-0', 'reason a', undefined, true)
+      normalizer.bufferDelta('sess-1', 'm1-thinking-0', ' reason b', undefined, true)
+      await new Promise((resolve) => setTimeout(resolve, 30))
+      assert.ok(flushed)
+      assert.equal(flushed.length, 1)
+      assert.equal(flushed[0].delta, 'reason a reason b')
+      assert.equal(flushed[0].thinking, true)
+    })
+
+    it('preserves the thinking flag when a residency cap force-flushes the key', () => {
+      const flushed = []
+      const n = new EventNormalizer({ flushIntervalMs: 10, maxKeyBytes: 100, maxTotalBytes: 10_000 })
+      n.onFlush = (entries) => { flushed.push(...entries) }
+      try {
+        n.bufferDelta('sess-1', 'm1-thinking-0', 'a'.repeat(120), undefined, true) // trips per-key cap
+        assert.equal(flushed.length, 1, 'over-cap thinking key force-flushes')
+        assert.equal(flushed[0].thinking, true, 'force-flushed thinking frame keeps the flag')
+        assert.equal(flushed[0].delta, 'a'.repeat(120))
+      } finally {
+        n.destroy()
+      }
+    })
+
+    it('does not leak the thinking flag across flush windows for a reused key', () => {
+      // A thinking key flushes, then the SAME key (unlikely, but defensive) is
+      // reused for a non-thinking delta — the flag must not persist.
+      normalizer.bufferDelta('sess-1', 'reused', 'x', undefined, true)
+      const first = normalizer.flushSession('sess-1')
+      assert.equal(first[0].thinking, true)
+      normalizer.bufferDelta('sess-1', 'reused', 'y', undefined, false)
+      const second = normalizer.flushSession('sess-1')
+      assert.ok(!('thinking' in second[0]), 'stale thinking flag must not survive the flush')
     })
   })
 })

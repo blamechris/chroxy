@@ -79,6 +79,59 @@ describe('setupForwarding', () => {
       const msg = ctx.broadcast.mock.calls[0].arguments[0]
       assert.equal(msg.type, 'stream_delta')
     })
+
+    // #6818: a flushed THINKING entry stamps `thinking: true` back onto the wire
+    // so the coalesced frame routes to the reasoning bubble; a response entry
+    // carries no such flag.
+    it('stamps thinking:true on a flushed thinking delta and omits it for response deltas', () => {
+      const ctx = makeCtx()
+      setupForwarding(ctx)
+
+      ctx.normalizer._onFlush([
+        { sessionId: 'sess-1', messageId: 'm1-thinking-0', delta: 'reason', thinking: true },
+        { sessionId: 'sess-1', messageId: 'm1', delta: 'answer' },
+      ])
+
+      const byId = Object.fromEntries(
+        ctx.broadcastToSession.mock.calls.map(c => [c.arguments[1].messageId, c.arguments[1]]),
+      )
+      assert.equal(byId['m1-thinking-0'].thinking, true, 'thinking frame carries the flag on the wire')
+      assert.equal(byId['m1'].thinking, undefined, 'response frame carries no thinking flag')
+    })
+
+    // #6818 end-to-end: a thinking stream_delta is buffered (coalesced), then the
+    // thinking stream_end flushes it as a `thinking: true` frame BEFORE the
+    // stream_end finalisation — preserving the "Thinking… → Thought" ordering.
+    it('coalesces thinking deltas and flushes them (thinking:true) before the thinking stream_end', () => {
+      const ctx = makeCtx()
+      setupForwarding(ctx)
+
+      ctx.sessionManager.emit('session_event', {
+        sessionId: 'sess-1', event: 'stream_delta',
+        data: { messageId: 'm1-thinking-0', delta: 'think ', thinking: true },
+      })
+      ctx.sessionManager.emit('session_event', {
+        sessionId: 'sess-1', event: 'stream_delta',
+        data: { messageId: 'm1-thinking-0', delta: 'harder', thinking: true },
+      })
+      // No per-token broadcast yet — coalesced in the buffer.
+      const preEnd = ctx.broadcastToSession.mock.calls.map(c => c.arguments[1]).filter(m => m.type === 'stream_delta')
+      assert.equal(preEnd.length, 0, 'thinking deltas are buffered, not broadcast per-token')
+
+      ctx.sessionManager.emit('session_event', {
+        sessionId: 'sess-1', event: 'stream_end',
+        data: { messageId: 'm1-thinking-0', thinking: true },
+      })
+
+      const msgs = ctx.broadcastToSession.mock.calls.map(c => c.arguments[1])
+      const deltaIdx = msgs.findIndex(m => m.type === 'stream_delta')
+      const endIdx = msgs.findIndex(m => m.type === 'stream_end')
+      assert.ok(deltaIdx !== -1, 'one coalesced thinking delta frame emitted')
+      assert.equal(msgs[deltaIdx].delta, 'think harder', 'two thinking deltas coalesced into one')
+      assert.equal(msgs[deltaIdx].thinking, true)
+      assert.equal(msgs[endIdx].thinking, true)
+      assert.ok(deltaIdx < endIdx, 'coalesced thinking delta lands before the stream_end')
+    })
   })
 
   // #5515 (epic #5514): latency instrumentation — broadcast-time serverTs.
