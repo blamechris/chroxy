@@ -165,7 +165,13 @@ describe('permission_resolved end-to-end broadcast (#3048)', () => {
       const tmpState = `/tmp/chroxy-permresolved-${Date.now()}-${Math.random()}.json`
       const sm = new SessionManager({
         skipPreflight: true,
-        provider: 'fake-permresolved',
+        // providerType (NOT provider) is the SessionManager ctor opt that sets
+        // the default provider for createSession(). Passing `provider` here was
+        // silently ignored, so createSession() fell back to DEFAULT_PROVIDER
+        // (claude-tui) and spawned a REAL `claude` PTY (node-pty tty.ReadStream)
+        // that was never torn down — leaking a live handle that kept the test
+        // worker alive and hung the suite when run without --test-force-exit.
+        providerType: 'fake-permresolved',
         stateFilePath: tmpState,
         persistenceDebounceMs: 0,
       })
@@ -191,7 +197,7 @@ describe('permission_resolved end-to-end broadcast (#3048)', () => {
       assert.equal(events[0].data.requestId, 'req-prox')
       assert.equal(events[0].data.decision, 'allow')
 
-      sm.destroy?.()
+      sm.destroySession(sessionId)
     })
   })
 })

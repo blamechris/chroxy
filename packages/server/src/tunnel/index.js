@@ -38,7 +38,7 @@ export function parseTunnelArg(value) {
 /**
  * Create a CloudflareTunnelAdapter instance from a config object.
  *
- * @param {{ port: number, mode: string, tunnelConfig?: object, tunnelName?: string, tunnelHostname?: string }} config
+ * @param {{ port: number, mode: string, tunnelConfig?: object, tunnelName?: string, tunnelHostname?: string, binaryProvenance?: object }} config
  * @returns {CloudflareTunnelAdapter}
  */
 export function createTunnel(config) {
@@ -49,6 +49,9 @@ export function createTunnel(config) {
       ...config.tunnelConfig,
       tunnelName: config.tunnelName || null,
       tunnelHostname: config.tunnelHostname || null,
+      // #6858: opt-in provenance gate for the cloudflared spawn. A plain-ish bag
+      // ({ mode, signatureGate, ledger }); undefined ⇒ the gate is skipped.
+      binaryProvenance: config.binaryProvenance || null,
     },
   })
 }

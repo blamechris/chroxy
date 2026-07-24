@@ -2,9 +2,12 @@
 
 How Chroxy verifies the external binaries it executes as providers, what that
 verification does — and does **not** — protect against, and where the deeper
-hardening line sits. Implemented in `packages/server/src/utils/verify-binary.js`,
-wired into `utils/preflight.js`, the subprocess spawn path, and `chroxy doctor`
-(#6708).
+hardening line sits. P1 (detect & surface, #6708) is implemented in
+`packages/server/src/utils/verify-binary.js`, wired into `utils/preflight.js`, the
+subprocess spawn path, and `chroxy doctor`. P2 (opt-in provenance: a SHA-256 pin
+ledger + a macOS signature gate, #6858) is in `utils/verify-provenance.js` +
+`binary-provenance-trust.js`, wired into the same preflight and the `cloudflared`
+spawn — see §4.
 
 This is distinct from the [credentials-at-rest model](./credentials-at-rest.md)
 and the [transport-layer model](./encryption-threat-model.md). Those protect
@@ -88,35 +91,97 @@ mac-specific step cleanly — there is no equivalent Gatekeeper block to detect.
 - A since-moved/removed binary being spawned from a stale cached path.
 - An operator being unable to tell "quarantined/blocked" from "not installed".
 
-**Does NOT protect against (out of P1 scope):**
-- **Supply-chain compromise / PATH planting.** The daemon still executes whatever
-  binary resolves first on `PATH`. A malicious binary planted earlier in `PATH`,
-  or a compromised upstream provider release, is spawned automatically. Quarantine
-  detection is orthogonal to provenance — a planted binary carries no quarantine
-  xattr.
-- **Signature / notarization enforcement.** Chroxy deliberately does **not** gate
-  on `codesign --verify` / `spctl --assess`. The bundled provider binaries are
-  ad-hoc/linker-signed and `spctl` rejects them, so a hard spctl gate would break
-  every un-notarized provider. Verifying a signature would only prove the binary
-  is *signed*, not that it is the binary the operator intends to run.
+**Does NOT protect against in P1 (addressed by the opt-in P2 gate, §4):**
+- **Supply-chain compromise / PATH planting.** With P1 alone the daemon still
+  executes whatever binary resolves first on `PATH`. A malicious binary planted
+  earlier in `PATH`, or an in-place swap of a resolved binary, is spawned
+  automatically. Quarantine detection is orthogonal to provenance — a planted
+  binary carries no quarantine xattr. The **opt-in SHA-256 pin ledger** (§4) closes
+  the in-place-swap case: a changed hash on a previously-seen path re-gates the
+  binary. (A brand-new path planted earlier on `PATH` is pinned on first sight
+  under trust-on-first-use, so the ledger catches *changes*, not a first-run
+  plant — pair it with a controlled `PATH` for defence in depth.)
+- **Signature / notarization enforcement.** P1 deliberately does **not** gate on
+  `codesign --verify` / `spctl --assess`, because chroxy's bundled provider
+  binaries are ad-hoc/linker-signed and `spctl` rejects them, so a hard spctl gate
+  would break every un-notarized provider. §4 adds this as an **opt-in** gate for
+  operators who run only notarized provider builds.
 
-## 4. P2 — provenance verification (proposed, not yet implemented)
+## 4. P2 — opt-in provenance verification (implemented, #6858)
 
 The residual supply-chain surface grows materially once the orchestration epic
 (#6691) auto-spawns worker sessions headless with the operator's credentials —
 "the daemon runs whatever is on PATH" stops being a foreground, operator-visible
-action. Proposed P2 hardening, to land before write-capable orchestration workers
-ship:
+action. P2 adds two **opt-in, OFF-by-default** gates, so P1 behaviour is
+byte-identical unless an operator explicitly turns one on. Implemented in
+`utils/verify-provenance.js` + `binary-provenance-trust.js`, wired into
+`utils/preflight.js` (provider spawn) and `tunnel/cloudflare.js` (cloudflared
+spawn).
 
-- **Opt-in signature gate.** An optional `codesign --verify` / `spctl` assessment
-  on macOS for operators who run only notarized provider builds.
-- **Cross-platform SHA-256 pin ledger.** Reuse the existing content-trust pattern
-  (`path-hash-trust-ledger.js`, already backing `skills-trust.js` and
-  `session-preset-trust.js`: a `path → { sha256, firstSeen, approvedAt }` map,
-  fail-open, atomic `0600` writes). Pin each provider binary's hash on first
-  sight; a changed hash re-gates the binary (warn/block) until an operator
-  re-approves — catching an unexpected in-place binary swap regardless of
-  signature or quarantine state. Fold `cloudflared` into the same ledger.
+### Cross-platform SHA-256 pin ledger
+
+`binary-provenance-trust.js` (`BinaryProvenanceLedger`) is a thin subclass of the
+same `PathHashTrustLedger` that backs `skills-trust.js` / `session-preset-trust.js`
+— a `path → { sha256, firstSeen, approvedAt }` map, fail-open on a corrupt/missing
+file, atomic `0600` writes. Default file: `~/.chroxy/binary-trust.json` (next to
+the other trust ledgers), under a `binaries` wrapper key.
+
+- **First sight → pin + allow** (trust-on-first-use).
+- **Matching hash → allow.**
+- **Changed hash → re-gate.** `warn` mode logs the change and still spawns;
+  `block` mode **refuses the spawn** until the operator re-approves. This catches
+  an in-place binary swap regardless of code signature or quarantine state, and
+  works on every platform (it is pure content hashing).
+
+This is folded across **every spawned binary** — the provider binaries (`claude`,
+`codex`, `gemini`) via preflight, and `cloudflared` via the tunnel gate — sharing
+one ledger instance so pins are unified.
+
+### macOS signature gate
+
+When enabled, a binary that fails `spctl --assess --type execute` (Gatekeeper /
+notarization) is **hard-blocked** before spawn. This is for operators who run only
+notarized provider builds; chroxy's own bundled providers are ad-hoc/linker-signed
+and `spctl` rejects them, which is exactly why it can only ever be opt-in. `spctl`
+is invoked by its absolute SIP-protected path (`/usr/sbin/spctl`), never a PATH
+lookup, so a shadowed `spctl` can't subvert the gate (same hardening as the P1
+`/usr/bin/xattr` probe). The gate is **macOS-only**: on Linux/Windows it is a
+documented no-op (skipped) and the pin ledger carries the cross-platform integrity
+story alone. Windows Authenticode signature gating is a tracked follow-up.
+
+### Fail-safe semantics
+
+When a gate is ON, a verification failure blocks (`block` mode / signature gate) or
+loudly surfaces (`warn` mode) — it **never silently spawns an unverified binary**.
+A binary that can't even be hashed is treated as unverifiable: blocked in `block`
+mode, surfaced-but-allowed in `warn` mode. A `block`-mode failure throws
+`ProviderBinaryProvenanceError` (`code: PROVIDER_BINARY_PROVENANCE`) from preflight,
+or `TunnelBinaryProvenanceError` (`code: TUNNEL_BINARY_PROVENANCE`) from the tunnel.
+
+### Configuration
+
+Both gates are OFF by default. Config block (mirrored by env overrides):
+
+```jsonc
+{
+  "binaryProvenance": {
+    "mode": "off",           // "off" (default) | "warn" | "block" — pin ledger
+    "signatureGate": false   // macOS spctl gate; hard-blocks un-notarized builds
+  }
+}
+```
+
+- `CHROXY_BINARY_PROVENANCE` = `off` | `warn` | `block` (overrides `mode`)
+- `CHROXY_BINARY_SIGNATURE_GATE` = `1` | `0` (overrides `signatureGate`)
+
+Resolved by `resolveBinaryProvenanceMode()` / `isBinarySignatureGateEnabled()` in
+`config.js` — both fail-closed (anything but an explicit opt-in value ⇒ off).
+
+**Re-approving a legitimately changed binary** (e.g. after `npm i -g @openai/codex@latest`):
+remove that path's entry from `~/.chroxy/binary-trust.json` (or delete the file —
+it fails open to empty and re-pins every binary on next spawn). A programmatic
+`revoke(path)` / `approve(path, hash)` API exists on the ledger for a future CLI /
+dashboard surface.
 
 ## 5. Operator remediation quick reference
 

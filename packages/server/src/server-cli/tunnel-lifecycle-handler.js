@@ -28,7 +28,7 @@ export class TunnelLifecycleHandler {
    * @param {{
    *   createTunnel: Function, emergencyCleanup: Function, wireTunnelEvents: Function,
    *   waitForTunnel: Function, buildTunnelWarmingStatus: Function, buildTunnelReadyStatus: Function,
-   *   config: { port: number, tunnelArg: { mode: string }, tunnelConfig?: object, tunnelName?: string|null, tunnelHostname?: string|null },
+   *   config: { port: number, tunnelArg: { mode: string }, tunnelConfig?: object, tunnelName?: string|null, tunnelHostname?: string|null, binaryProvenance?: object|null },
    *   wsServer: object, startupDisplay: object, pairingManager: (object|null),
    *   cleanupRefs: { mdnsService?: object, bonjourInstance?: object, tokenManager?: object, sessionManager: object },
    *   logger: object,
@@ -73,7 +73,7 @@ export class TunnelLifecycleHandler {
    * @returns {Promise<{ ok: boolean, tunnel?: object }>}
    */
   async createAndStart() {
-    const { port, tunnelArg, tunnelConfig, tunnelName, tunnelHostname } = this._config
+    const { port, tunnelArg, tunnelConfig, tunnelName, tunnelHostname, binaryProvenance } = this._config
     const wsServer = this._wsServer
     const startupDisplay = this._startupDisplay
     const pairingManager = this._pairingManager
@@ -95,6 +95,7 @@ export class TunnelLifecycleHandler {
       tunnelConfig,
       tunnelName: tunnelName || null,
       tunnelHostname: tunnelHostname || null,
+      binaryProvenance: binaryProvenance || null,
     })
     let wsUrl, httpUrl
     try {

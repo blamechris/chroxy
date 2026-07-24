@@ -31,6 +31,10 @@
 
 import { resolveBinary } from './resolve-binary.js'
 import { verifyBinary as defaultVerifyBinary, BINARY_STATUS, describeBinaryHealth } from './verify-binary.js'
+import { verifyProvenance as defaultVerifyProvenance, PROVENANCE_STATUS } from './verify-provenance.js'
+import { createLogger } from '../logger.js'
+
+const log = createLogger('preflight')
 
 /**
  * Thrown when a provider's required binary cannot be located or executed.
@@ -74,6 +78,29 @@ export class ProviderBinaryQuarantinedError extends Error {
 }
 
 /**
+ * Thrown when the opt-in provenance gate (#6858) blocks a spawn: either the
+ * binary's pinned SHA-256 changed in place (`binaryProvenance.mode: 'block'`) or
+ * it failed the macOS signature/notarization gate. Distinct code so the client /
+ * doctor can render a provenance-specific remediation. Never thrown when the
+ * gate is off (the default) — behaviour is then identical to #6708.
+ */
+export class ProviderBinaryProvenanceError extends Error {
+  constructor({ provider, binary, path, status, message, remediation, pinnedHash, hash }) {
+    const detail = message || 'binary failed provenance verification'
+    super(`${provider}: "${binary}" at ${path} ${detail}${remediation ? ` — ${remediation}` : ''}`)
+    this.name = 'ProviderBinaryProvenanceError'
+    this.code = 'PROVIDER_BINARY_PROVENANCE'
+    this.provider = provider
+    this.binary = binary
+    this.path = path
+    this.provenanceStatus = status
+    this.remediation = remediation || null
+    this.pinnedHash = pinnedHash || null
+    this.hash = hash || null
+  }
+}
+
+/**
  * Thrown when none of a provider's required credential env vars are present.
  */
 export class ProviderCredentialMissingError extends Error {
@@ -104,13 +131,32 @@ export class ProviderCredentialMissingError extends Error {
  * `static get resolvedBinary`, we verify THAT exact path so preflight and the
  * eventual spawn can't diverge (#6708 defect #3).
  *
+ * ## Opt-in provenance gate (#6858)
+ *
+ * When `provenance` is supplied AND enabled (`mode` is 'warn'/'block', or the
+ * signature gate is on), a healthy binary is additionally run through
+ * `verifyProvenance`: a SHA-256 pin-ledger check plus (opt-in) a macOS signature
+ * gate. A `block`-mode hash mismatch or a failed signature gate throws
+ * `ProviderBinaryProvenanceError` — fail-safe: the spawn is refused, never
+ * silently allowed. A `warn`-mode issue logs and proceeds. When `provenance` is
+ * absent or disabled (the default), this step is skipped entirely and behaviour
+ * is identical to #6708.
+ *
  * @param {Function} ProviderClass - Session class with optional `preflight` getter
  * @param {object}   [options]
  * @param {NodeJS.ProcessEnv} [options.env=process.env] - Env source (for tests)
  * @param {Function} [options.verifyBinary] - integrity checker (injected in tests)
- * @throws {ProviderBinaryNotFoundError|ProviderBinaryQuarantinedError|ProviderCredentialMissingError}
+ * @param {{ mode?: string, signatureGate?: boolean, ledger?: object }|null} [options.provenance]
+ *   - opt-in provenance config + pin ledger; null/disabled ⇒ gate skipped
+ * @param {Function} [options.verifyProvenance] - provenance checker (injected in tests)
+ * @throws {ProviderBinaryNotFoundError|ProviderBinaryQuarantinedError|ProviderBinaryProvenanceError|ProviderCredentialMissingError}
  */
-export function runProviderPreflight(ProviderClass, { env = process.env, verifyBinary = defaultVerifyBinary } = {}) {
+export function runProviderPreflight(ProviderClass, {
+  env = process.env,
+  verifyBinary = defaultVerifyBinary,
+  provenance = null,
+  verifyProvenance = defaultVerifyProvenance,
+} = {}) {
   if (!ProviderClass) return
 
   // Containerised providers run their binary inside the container, so a host
@@ -155,6 +201,41 @@ export function runProviderPreflight(ProviderClass, { env = process.env, verifyB
         candidates,
         installHint: spec.binary.installHint,
       })
+    }
+
+    // #6858: opt-in provenance gate on the SAME healthy path the spawn will use.
+    // Skipped entirely unless the operator opted in (mode warn/block or the
+    // signature gate). Fail-safe: a `block`-mode hash mismatch or a failed
+    // signature gate throws; a `warn`-mode issue logs and proceeds.
+    const provenanceOn = provenance
+      && (provenance.mode === 'warn' || provenance.mode === 'block' || provenance.signatureGate === true)
+    if (provenanceOn) {
+      const verdict = verifyProvenance({
+        resolvedPath: health.path,
+        mode: provenance.mode,
+        signatureGate: provenance.signatureGate === true,
+        ledger: provenance.ledger || null,
+      })
+      if (verdict.blocked) {
+        throw new ProviderBinaryProvenanceError({
+          provider: providerLabel,
+          binary: spec.binary.name,
+          path: verdict.path,
+          status: verdict.status,
+          message: verdict.message,
+          remediation: verdict.remediation,
+          pinnedHash: verdict.pinnedHash,
+          hash: verdict.hash,
+        })
+      }
+      if (
+        verdict.status === PROVENANCE_STATUS.HASH_MISMATCH
+        || verdict.status === PROVENANCE_STATUS.SIGNATURE_INVALID
+        || verdict.status === PROVENANCE_STATUS.UNREADABLE
+      ) {
+        // warn-mode (or unverifiable-but-allowed) — surface loudly, still spawn.
+        log.warn(`Provider "${spec.binary.name}" provenance ${verdict.status}: ${verdict.message || ''} (allowed — mode=${provenance.mode})`)
+      }
     }
   }
 
