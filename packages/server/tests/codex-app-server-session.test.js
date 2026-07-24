@@ -630,6 +630,180 @@ describe('CodexAppServerSession — reconnect watchdog / stale-state reconciliat
   })
 })
 
+describe('CodexAppServerSession — reconnect suppression deadline (#6856)', () => {
+  // #6854 keeps a codex turn OPEN on a transient `responseStreamDisconnected` +
+  // `Reconnecting... N/M` error so codex can recover. The #6629 SILENCE watchdog
+  // is re-armed on every tick, so a codex that emits reconnect notifications
+  // FOREVER (never recovering, never silent) keeps pushing BOTH the 30-min result
+  // timeout and the silence watchdog out — the turn stays "Working..." far too
+  // long. This deadline is armed ONCE on entering suppression, is NOT re-armed on
+  // later ticks, and fails the turn on a fixed bound. It routes through an
+  // injectable timer seam so it is exercised with zero wall-clock (and without
+  // mock.timers, so the #6629 watchdog's real unref'd global timer never fires
+  // inside these synchronous tests).
+  const reconnectParams = (attempt = 2, max = 5) => ({
+    error: {
+      message: `Reconnecting... ${attempt}/${max}`,
+      codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: null } },
+      additionalDetails: 'stream disconnected before completion: failed to send websocket frame',
+    },
+  })
+
+  // Minimal deterministic double for the deadline timer: records each scheduled
+  // timer and lets a test fire the pending one by hand.
+  function fakeReconnectTimers() {
+    const scheduled = []
+    const setTimer = (fn, ms) => {
+      const entry = { fn, ms, cleared: false, unref() { return this } }
+      scheduled.push(entry)
+      return entry
+    }
+    const clearTimer = (handle) => { if (handle) handle.cleared = true }
+    // Fire the still-pending deadline (no-op if none / already cleared).
+    const fire = () => {
+      const entry = scheduled.find((e) => !e.cleared)
+      if (entry) { entry.cleared = true; entry.fn() }
+      return entry
+    }
+    return { scheduled, setTimer, clearTimer, fire }
+  }
+
+  function mkDeadlineSession(extraOpts = {}) {
+    const timers = fakeReconnectTimers()
+    const { s, cleanup } = mkSession({
+      setTimer: timers.setTimer,
+      clearTimer: timers.clearTimer,
+      reconnectDeadlineMs: 60_000,
+      ...extraOpts,
+    })
+    return { s, cleanup, timers }
+  }
+
+  // A busy turn with an in-flight commandExecution tool_start (no matching result
+  // yet) — the stale in-flight tool the deadline must sweep when it fires.
+  function armBusyTurnWithInflightShell(s) {
+    s._isBusy = true
+    s._activeTurn = { messageId: 'm1', turnId: 't1', didStreamStart: true }
+    s._onNotification({ method: 'item/started', params: { item: { type: 'commandExecution', id: 'shell-1', command: 'npm run build', cwd: '/tmp' } } })
+  }
+
+  it('arms the deadline on entering the reconnect-suppressed state', () => {
+    const { s, cleanup, timers } = mkDeadlineSession()
+    s._isBusy = true
+    s._activeTurn = { messageId: 'm1', turnId: 't1', didStreamStart: true }
+    s._onNotification({ method: 'error', params: reconnectParams(2, 5) })
+    assert.ok(s._reconnectDeadline, 'deadline armed on the first transient reconnect')
+    assert.equal(timers.scheduled.length, 1, 'exactly one deadline timer scheduled')
+    assert.equal(timers.scheduled[0].ms, 60_000, 'armed with the configured deadline ms')
+    assert.equal(timers.scheduled[0].cleared, false, 'the deadline is pending')
+    s.destroy()
+    cleanup()
+  })
+
+  it('a flurry of reconnect notifications does NOT push the deadline out (the #6854 gap)', () => {
+    const { s, cleanup, timers } = mkDeadlineSession()
+    s._isBusy = true
+    s._activeTurn = { messageId: 'm1', turnId: 't1', didStreamStart: true }
+    // The exact bug: many reconnect ticks, none of which may re-arm the deadline.
+    s._onNotification({ method: 'error', params: reconnectParams(1, 5) })
+    const armed = s._reconnectDeadline
+    s._onNotification({ method: 'error', params: reconnectParams(2, 5) })
+    s._onNotification({ method: 'error', params: reconnectParams(3, 5) })
+    s._onNotification({ method: 'error', params: reconnectParams(4, 5) })
+    assert.equal(timers.scheduled.length, 1, 'the deadline was armed exactly once across the whole flurry')
+    assert.equal(timers.scheduled[0].cleared, false, 'the single deadline was never cleared/re-armed')
+    assert.equal(s._reconnectDeadline, armed, 'still the SAME deadline handle — not extended by later ticks')
+    s.destroy()
+    cleanup()
+  })
+
+  it('genuine recovery before the deadline clears it (no fail)', () => {
+    const { s, cleanup, timers } = mkDeadlineSession()
+    const ev = capture(s, ['error', 'stream_end', 'result'])
+    s._isBusy = true
+    s._activeTurn = { messageId: 'm1', turnId: 't1', didStreamStart: true }
+    s._onNotification({ method: 'error', params: reconnectParams(1, 5) })
+    assert.ok(s._reconnectDeadline, 'deadline armed')
+    // codex re-establishes the stream and streams a delta → genuine forward progress.
+    s._onNotification({ method: 'item/agentMessage/delta', params: { delta: 'back online' } })
+    assert.equal(s._reconnectDeadline, null, 'deadline cleared on forward progress')
+    assert.equal(timers.scheduled[0].cleared, true, 'the scheduled deadline timer was cleared')
+    // Firing whatever the fake still holds must be a no-op — nothing pending.
+    timers.fire()
+    assert.ok(!ev.some(([e]) => e === 'error'), 'no stall error after recovery')
+    // …and the turn still completes cleanly.
+    s._onNotification({ method: 'turn/completed', params: { turn: { durationMs: 5 } } })
+    assert.equal(s._isBusy, false, 'busy cleared on clean completion')
+    assert.equal(s._activeTurn, null, 'turn cleared on clean completion')
+    s.destroy()
+    cleanup()
+  })
+
+  it('the deadline firing while still suppressed fails the turn with the reconnect error + sweeps the orphan tool_start', () => {
+    const { s, cleanup, timers } = mkDeadlineSession()
+    const ev = capture(s, ['error', 'stopped', 'tool_result', 'stream_end'])
+    armBusyTurnWithInflightShell(s)
+    s._onNotification({ method: 'error', params: reconnectParams(2, 5) })
+    assert.ok(s._reconnectDeadline, 'deadline armed while suppressed')
+    // codex never recovers, never goes silent, never emits a terminal give-up —
+    // the deadline is the backstop.
+    timers.fire()
+    const err = ev.find(([e]) => e === 'error')
+    assert.ok(err, 'the deadline fails the turn')
+    assert.match(err[1].message, /reconnect exceeded 60s/i, 'a clear "codex reconnect exceeded Ns" error')
+    assert.equal(err[1].code, 'stream_stall', 'carries stream_stall so the client shows its retry chip')
+    assert.ok(ev.some(([e, p]) => e === 'tool_result' && p.toolUseId === 'shell-1'), 'the orphan in-flight shell tool_start is swept')
+    assert.equal(s._isBusy, false, 'stale working state cleared')
+    assert.equal(s._activeTurn, null, 'turn cleared')
+    assert.equal(s._reconnectDeadline, null, 'deadline handle cleared after firing')
+    s.destroy()
+    cleanup()
+  })
+
+  it('non-reconnect turns are unaffected (no deadline ever armed)', () => {
+    const { s, cleanup, timers } = mkDeadlineSession()
+    const ev = capture(s, ['error', 'result'])
+    s._isBusy = true
+    s._activeTurn = { messageId: 'm1', turnId: 't1', didStreamStart: true }
+    s._onNotification({ method: 'item/agentMessage/delta', params: { delta: 'hello' } })
+    s._onNotification({ method: 'turn/completed', params: { turn: { durationMs: 5 } } })
+    assert.equal(timers.scheduled.length, 0, 'no reconnect deadline armed for a normal turn')
+    assert.equal(s._reconnectDeadline, null, 'deadline never armed')
+    assert.ok(!ev.some(([e]) => e === 'error'), 'no error surfaced for a clean turn')
+    assert.equal(s._isBusy, false, 'turn completed normally')
+    s.destroy()
+    cleanup()
+  })
+
+  it('the deadline is configurable via the opt (with a sensible default)', () => {
+    const custom = mkSession({ reconnectDeadlineMs: 90_000 })
+    assert.equal(custom.s._reconnectDeadlineMs, 90_000, 'opt overrides the default')
+    custom.s.destroy(); custom.cleanup()
+
+    const def = mkSession()
+    assert.equal(def.s._reconnectDeadlineMs, 5 * 60 * 1000, 'default is 5 min')
+    def.s.destroy(); def.cleanup()
+
+    // A bogus opt (non-positive / non-finite) falls back to the default.
+    const bogus = mkSession({ reconnectDeadlineMs: 0 })
+    assert.equal(bogus.s._reconnectDeadlineMs, 5 * 60 * 1000, 'a non-positive opt falls back to the default')
+    bogus.s.destroy(); bogus.cleanup()
+  })
+
+  it('the deadline is configurable via CHROXY_CODEX_RECONNECT_DEADLINE_MS', () => {
+    const prev = process.env.CHROXY_CODEX_RECONNECT_DEADLINE_MS
+    process.env.CHROXY_CODEX_RECONNECT_DEADLINE_MS = '120000'
+    try {
+      const { s, cleanup } = mkSession()
+      assert.equal(s._reconnectDeadlineMs, 120_000, 'env var sets the deadline')
+      s.destroy(); cleanup()
+    } finally {
+      if (prev === undefined) delete process.env.CHROXY_CODEX_RECONNECT_DEADLINE_MS
+      else process.env.CHROXY_CODEX_RECONNECT_DEADLINE_MS = prev
+    }
+  })
+})
+
 describe('CodexAppServerSession — approval surfacing (#6605 Phase 2)', () => {
   const tick = () => new Promise((r) => setImmediate(r))
   function mkApprovalSession(mode = 'approve') {
