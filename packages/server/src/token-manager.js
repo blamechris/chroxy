@@ -44,7 +44,10 @@ export class TokenManager extends EventEmitter {
    * @param {string} opts.token - Current API token
    * @param {string|null} opts.tokenExpiry - Expiry duration (e.g. '24h', '7d') or null
    * @param {number} opts.graceMs - Grace period in ms (default: 5 min)
-   * @param {Function} opts.onPersist - Callback to save new token: async (newToken) => {}
+   * @param {Function} opts.onPersist - Callback to save new token:
+   *   `async (newToken, { reason }) => {}`. `reason` is 'scheduled' | 'revoke'
+   *   (#6927) so the persist site can make the panic-button revoke DURABLE while
+   *   leaving the routine scheduled rotation non-durable.
    */
   constructor({ token, tokenExpiry, graceMs, onPersist } = {}) {
     super()
@@ -162,9 +165,11 @@ export class TokenManager extends EventEmitter {
       reason,
     })
 
-    // Persist the new token
+    // Persist the new token. #6927 — forward `reason` so the persist site can
+    // fsync a 'revoke' (the operator panic button killing a compromised token)
+    // while leaving a routine 'scheduled' rotation non-durable.
     if (this._onPersist) {
-      Promise.resolve(this._onPersist(newToken)).catch(err => {
+      Promise.resolve(this._onPersist(newToken, { reason })).catch(err => {
         log.error(`Failed to persist new token: ${err.message}`)
       })
     }

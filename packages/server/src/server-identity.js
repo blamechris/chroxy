@@ -192,9 +192,20 @@ function readIdentityFromKeychain(keychain) {
  * @param {object} [opts]
  * @param {object} [opts.keychain]
  * @param {string} [opts.filePath]
+ * @param {boolean} [opts.durable] - #6927: fsync the fallback-file write before
+ *   returning (temp before rename + dir after). Set ONLY by `rotateServerIdentity`
+ *   (the compromise-response path); first-run mint leaves it off (fail-safe — a
+ *   lost mint just re-mints). Applies only to the FILE fallback; the keychain
+ *   path's durability is the OS keychain's responsibility, not ours.
+ * @param {Function} [opts._write] - test seam for the atomic writer.
  * @returns {'keychain'|'file'}
  */
-export function persistServerIdentity(keyPair, { keychain = realKeychain, filePath = DEFAULT_IDENTITY_FILE } = {}) {
+export function persistServerIdentity(keyPair, {
+  keychain = realKeychain,
+  filePath = DEFAULT_IDENTITY_FILE,
+  durable = false,
+  _write = writeFileRestricted,
+} = {}) {
   const secretB64 = Buffer.from(keyPair.secretKey).toString('base64')
   if (keychain.isKeychainAvailable()) {
     try {
@@ -211,7 +222,7 @@ export function persistServerIdentity(keyPair, { keychain = realKeychain, filePa
   // on CREATION — a pre-existing file at a looser mode would keep that mode.
   // writeFileRestricted chmods the final file to 0600 unconditionally.
   mkdirSync(dirname(filePath), { recursive: true })
-  writeFileRestricted(filePath, JSON.stringify({ v: 1, secretKey: secretB64 }))
+  _write(filePath, JSON.stringify({ v: 1, secretKey: secretB64 }), { durable })
   return 'file'
 }
 
@@ -338,6 +349,7 @@ export function rotateServerIdentity({
   keychain = realKeychain,
   filePath = DEFAULT_IDENTITY_FILE,
   rotationFilePath = DEFAULT_IDENTITY_ROTATION_FILE,
+  _write = writeFileRestricted,
 } = {}) {
   const current = loadServerIdentity({ keychain, filePath })
   if (!current) {
@@ -366,8 +378,15 @@ export function rotateServerIdentity({
   // reuse writeFileRestricted for its ATOMIC temp+rename write so a crash can't
   // leave a half-written cert — the 0600 mode it also sets is incidental here
   // (nothing secret), not a requirement.
+  //
+  // #6927 — the sidecar is left NON-durable on purpose: its rollback is a
+  // CONTINUITY concern, not a security one. If a power loss drops the sidecar
+  // (while the durable secret persist below survives), the daemon serves the NEW
+  // identity and pinned clients fall back to a manual re-pair — an availability
+  // regression, never a resurrection of the retired key. Only the secret persist
+  // (whose rollback WOULD resurrect the retired/compromised key) is made durable.
   mkdirSync(dirname(rotationFilePath), { recursive: true })
-  writeFileRestricted(
+  _write(
     rotationFilePath,
     JSON.stringify({
       v: 1,
@@ -377,7 +396,12 @@ export function rotateServerIdentity({
     }),
   )
   // Persist the new secret in place of the old (keychain or fallback file).
-  const backend = persistServerIdentity(next, { keychain, filePath })
+  // #6927 — DURABLE: `chroxy identity rotate` is the compromise-response path, so
+  // a power-loss rollback resurrecting the RETIRED secret is the same acute class
+  // as a token revoke. fsync the fallback-file write before reporting success
+  // (the keychain path's durability is the OS's job). First-run mint stays
+  // non-durable (fail-safe — a lost mint just re-mints).
+  const backend = persistServerIdentity(next, { keychain, filePath, durable: true, _write })
   log.info(`Rotated server identity (backend: ${backend}); continuity cert written for previous pin`)
   return { previousPublicKey: current.publicKey, newPublicKey: next.publicKey, backend }
 }

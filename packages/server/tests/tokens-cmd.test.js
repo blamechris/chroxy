@@ -9,6 +9,7 @@ function fakeStore(initial = [], opts = {}) {
   let entries = initial.map((e) => [e[0], { ...e[1] }])
   const status = opts.status || 'ok'
   const saveOk = opts.saveOk !== false
+  const saveCalls = [] // records the { durable } opt each save() was called with (#6927)
   return {
     load: () => entries.map((e) => [e[0], { ...e[1] }]),
     loadResult: () => ({
@@ -16,12 +17,14 @@ function fakeStore(initial = [], opts = {}) {
       entries: status === 'unreadable' ? [] : entries.map((e) => [e[0], { ...e[1] }]),
     }),
     exists: () => status !== 'absent',
-    save: (next) => {
+    save: (next, saveOpts = {}) => {
+      saveCalls.push({ durable: saveOpts.durable === true })
       if (!saveOk) return false
       entries = next.map((e) => [e[0], { ...e[1] }])
       return true
     },
     _current: () => entries,
+    _saveCalls: () => saveCalls,
   }
 }
 
@@ -226,5 +229,35 @@ describe('chroxy tokens — revoke --all (#6599)', () => {
     const res = runTokensRevoke(undefined, { all: true, yes: true }, { store: s, write: w.write })
     assert.equal(res.error, 'persist-failed')
     assert.match(w.text(), /Failed to write/)
+  })
+})
+
+// #6927 — the CLI revoke is the same acute class as the daemon's live revoke
+// (#6914): an operator runs `chroxy tokens revoke`, is told it landed, and a power
+// loss must NOT roll the store back and resurrect the token on the next start. So
+// the CLI persist MUST opt into the durable (fsync) write, exactly as
+// `_persistSessionTokensSnapshot` does in the daemon.
+describe('#6927 CLI revoke persists DURABLY', () => {
+  const A = 'aaaa1111bbbb2222cccc'
+  const B = 'bbbb3333dddd4444eeee'
+
+  it('revoke <handle> saves the remaining snapshot with { durable: true }', () => {
+    const store = fakeStore([[A, { createdAt: NOW, sessionId: 's-a' }], [B, { createdAt: NOW, sessionId: 's-b' }]])
+    const res = runTokensRevoke('aaaa1111', {}, { store, write: cap().write })
+    assert.equal(res.revoked, 1)
+    assert.deepEqual(store._saveCalls(), [{ durable: true }], 'the one revoke write is durable')
+  })
+
+  it('revoke --all --yes clears the store with { durable: true }', () => {
+    const store = fakeStore([[A, { createdAt: NOW }], [B, { createdAt: NOW }]])
+    const res = runTokensRevoke(undefined, { all: true, yes: true }, { store, write: cap().write })
+    assert.equal(res.revoked, 2)
+    assert.deepEqual(store._saveCalls(), [{ durable: true }], 'the revoke-all write is durable')
+  })
+
+  it('a no-op path (no --yes) performs no write at all — nothing to make durable', () => {
+    const store = fakeStore([[A, { createdAt: NOW }]])
+    runTokensRevoke(undefined, { all: true }, { store, write: cap().write })
+    assert.deepEqual(store._saveCalls(), [], 'the confirmation gate wrote nothing')
   })
 })

@@ -829,12 +829,20 @@ export async function startCliServer(config) {
   const tokenManager = NO_AUTH ? null : new TokenManager({
     token: API_TOKEN,
     tokenExpiry: config.tokenExpiry || null,
-    onPersist: (newToken) => {
+    onPersist: (newToken, { reason } = {}) => {
+      // #6927 — a 'revoke' is the operator panic button (a compromised primary
+      // token killed NOW). Persist it DURABLY so a power loss within the OS
+      // writeback window can't roll config.json back to the compromised token and
+      // resurrect it on the next daemon start. A routine 'scheduled' rotation is
+      // fail-safe (the old token keeps working through its grace window), so it
+      // stays non-durable. Only the file fallback is fsync-controllable here; the
+      // keychain path's durability is the OS keychain's responsibility.
+      const durable = reason === 'revoke'
       const persistToFile = () => {
         const raw = existsSync(configFile) ? readFileSync(configFile, 'utf-8') : '{}'
         const cfg = JSON.parse(raw)
         cfg.apiToken = newToken
-        writeFileRestricted(configFile, JSON.stringify(cfg, null, 2))
+        writeFileRestricted(configFile, JSON.stringify(cfg, null, 2), { durable })
       }
       try {
         if (isKeychainAvailable()) {

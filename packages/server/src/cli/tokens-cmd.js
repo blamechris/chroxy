@@ -132,7 +132,12 @@ export function runTokensRevoke(target, options = {}, deps = {}) {
       )
       return { revoked: 0, mode: 'all', confirmed: false }
     }
-    if (!store.save([])) {
+    // #6927 — DURABLE revoke: fsync the emptied store before reporting success,
+    // mirroring the daemon's live revoke (`_persistSessionTokensSnapshot`, #6914).
+    // Without it a power loss within the OS writeback window rolls the file back
+    // and every "revoked" token RESURRECTS on the next daemon start — after the
+    // operator was told the panic-button revoke landed.
+    if (!store.save([], { durable: true })) {
       out(`Failed to write the session-token store — nothing revoked. ${UNREADABLE_NOTE}`)
       return { revoked: 0, mode: 'all', error: 'persist-failed' }
     }
@@ -159,7 +164,10 @@ export function runTokensRevoke(target, options = {}, deps = {}) {
   }
 
   const remaining = list.filter((e) => !tokenOf(e).startsWith(target))
-  if (!store.save(remaining)) {
+  // #6927 — DURABLE revoke (see the --all branch above): fsync the post-removal
+  // snapshot before reporting success so a power loss can't resurrect the revoked
+  // token on the next start.
+  if (!store.save(remaining, { durable: true })) {
     out(`Failed to write the session-token store — nothing revoked. ${UNREADABLE_NOTE}`)
     return { revoked: 0, mode: 'one', error: 'persist-failed' }
   }

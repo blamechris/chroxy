@@ -364,3 +364,52 @@ describe('server identity rotation (#5616/#5976)', () => {
     })
   })
 })
+
+// #6927 — `chroxy identity rotate` is the compromise-response path: a power-loss
+// rollback that resurrects the RETIRED secret is the same acute class as a token
+// revoke, so the rotation's secret persist (file fallback) MUST be durable. The
+// first-run mint stays non-durable (fail-safe — a lost mint just re-mints), and
+// the rotation SIDECAR stays non-durable (its rollback forces a re-pair, an
+// availability concern, never a resurrection of the retired key). We observe the
+// `{ durable }` opt via the injected `_write` seam.
+describe('#6927 rotation secret persist is durable; mint + sidecar are not', () => {
+  const rotPath = (filePath) => join(dirname(filePath), 'server-identity-rotation.json')
+
+  it('rotateServerIdentity fsyncs the NEW secret (durable) but not the sidecar', () => {
+    withTempDir((filePath) => {
+      const kc = fakeKeychain({ available: false }) // force the file backend
+      const rotationFilePath = rotPath(filePath)
+      getOrCreateServerIdentity({ keychain: kc, filePath })
+
+      const writes = []
+      rotateServerIdentity({
+        keychain: kc,
+        filePath,
+        rotationFilePath,
+        _write: (path, _data, opts = {}) => { writes.push({ path, durable: opts.durable === true }) },
+      })
+
+      const secretWrite = writes.find((w) => w.path === filePath)
+      const sidecarWrite = writes.find((w) => w.path === rotationFilePath)
+      assert.ok(secretWrite, 'the new secret was persisted to the fallback file')
+      assert.equal(secretWrite.durable, true, 'the rotation secret persist is durable')
+      assert.ok(sidecarWrite, 'the continuity sidecar was written')
+      assert.equal(sidecarWrite.durable, false, 'the sidecar (continuity, not security) is not durable')
+    })
+  })
+
+  it('first-run mint persists the secret NON-durably (fail-safe)', () => {
+    withTempDir((filePath) => {
+      const kc = fakeKeychain({ available: false })
+      const kp = getOrCreateServerIdentity({ keychain: kc, filePath })
+
+      let observed
+      persistServerIdentity(kp, {
+        keychain: kc,
+        filePath,
+        _write: (_path, _data, opts = {}) => { observed = opts.durable === true },
+      })
+      assert.equal(observed, false, 'a plain persist (mint) does not fsync')
+    })
+  })
+})

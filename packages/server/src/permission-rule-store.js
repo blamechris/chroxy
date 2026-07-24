@@ -91,6 +91,35 @@ function publicRule(rule) {
 }
 
 /**
+ * #6927 — does the transition `before → after` TIGHTEN the auto-approval surface?
+ * A rollback of a tightening edit (after the dashboard reported it saved) would
+ * silently re-WIDEN what auto-approves — the same power-loss-after-reported-success
+ * gap the session-token revoke closes (#6914). Two directions tighten:
+ *   - an `allow` grant present BEFORE is gone AFTER — an auto-approve was revoked
+ *     (its rollback resurrects the grant → the tool auto-approves again); and
+ *   - a `deny` rule present AFTER was absent BEFORE — a new restriction was added
+ *     (its rollback drops the restriction, re-exposing whatever it masked).
+ * The widening directions (a new `allow`, a removed `deny`) are fail-SAFE: a lost
+ * persist reverts to a broader-but-still-PROMPTING posture, so they stay
+ * non-durable (no fsync on the frequent allowAlways path). Rules are matched by
+ * `(tool, path)` identity via `ruleKey`.
+ * @param {Array<{tool: string, decision: string, path?: string}>} before
+ * @param {Array<{tool: string, decision: string, path?: string}>} after
+ * @returns {boolean}
+ */
+function tightensSurface(before, after) {
+  const allowKeys = (rules) => new Set(rules.filter((r) => r.decision === 'allow').map(ruleKey))
+  const denyKeys = (rules) => new Set(rules.filter((r) => r.decision === 'deny').map(ruleKey))
+  const beforeAllow = allowKeys(before)
+  const afterAllow = allowKeys(after)
+  const beforeDeny = denyKeys(before)
+  const afterDeny = denyKeys(after)
+  const allowRevoked = [...beforeAllow].some((k) => !afterAllow.has(k))
+  const denyAdded = [...afterDeny].some((k) => !beforeDeny.has(k))
+  return allowRevoked || denyAdded
+}
+
+/**
  * Durable, per-project permission rule store — the "always allow / always deny"
  * decisions that must survive a daemon restart (issue #6771). Persists to a
  * single JSON file (a sibling of `session-state.json`, e.g.
@@ -116,11 +145,15 @@ export class PermissionRuleStore {
    * @param {object} options
    * @param {string} options.filePath - Path to the rules JSON file.
    * @param {object} [options.logger] - Optional logger (defaults to module logger).
+   * @param {Function} [options._write] - Test seam for the atomic writer
+   *   (defaults to `writeFileRestricted`); lets a test observe the `{ durable }`
+   *   opt that a security-tightening persist forwards (#6927).
    */
-  constructor({ filePath, logger } = {}) {
+  constructor({ filePath, logger, _write = writeFileRestricted } = {}) {
     if (!filePath) throw new Error('PermissionRuleStore requires a filePath')
     this._filePath = filePath
     this._log = logger || log
+    this._write = _write
     // projectKey -> [{ tool, decision, createdAt }]
     this._projects = new Map()
     this._loaded = false
@@ -253,7 +286,12 @@ export class PermissionRuleStore {
     const next = existing.filter((r) => ruleKey(r) !== ruleKey(rule))
     next.push(storedRecord(rule, Date.now()))
     this._projects.set(key, next)
-    this._persist()
+    // #6927 — durable only when this genuinely TIGHTENS the auto-approval
+    // surface (a new/tightening deny, or an allow being revoked by a deny
+    // replacing it), per `tightensSurface`. A no-op replace of an already-
+    // identical deny rule — same (tool, path), same decision — must NOT pay
+    // the fsync cost; raw `rule.decision === 'deny'` durabled that no-op too.
+    this._persist(tightensSurface(existing, next))
     return true
   }
 
@@ -269,6 +307,10 @@ export class PermissionRuleStore {
   setRules(cwd, rules) {
     const key = normalizeProjectKey(cwd)
     if (!key) return []
+    // #6927 — snapshot the prior set BEFORE replacing it, so we can tell whether
+    // this replacement tightens the auto-approval surface (a durable write) or
+    // merely widens it (fail-safe, non-durable).
+    const before = this._projects.get(key) || []
     const clean = []
     if (Array.isArray(rules)) {
       for (const rule of rules) {
@@ -287,7 +329,7 @@ export class PermissionRuleStore {
     }
     if (clean.length === 0) this._projects.delete(key)
     else this._projects.set(key, clean)
-    this._persist()
+    this._persist(tightensSurface(before, clean))
     return clean.map(publicRule)
   }
 
@@ -316,7 +358,12 @@ export class PermissionRuleStore {
     if (next.length === existing.length) return false
     if (next.length === 0) this._projects.delete(key)
     else this._projects.set(key, next)
-    this._persist()
+    // #6927 — removing an `allow` rule REVOKES an auto-approve grant (tightening):
+    // its rollback would resurrect the grant and silently auto-approve the tool
+    // again — the same class as a session-token revoke. Removing a `deny` widens
+    // (fail-safe). Durable only when an allow was actually dropped.
+    const removedAllow = tightensSurface(existing, next)
+    this._persist(removedAllow)
     return true
   }
 
@@ -333,8 +380,18 @@ export class PermissionRuleStore {
     return out
   }
 
-  /** @private — atomic write of the whole store. */
-  _persist() {
+  /**
+   * @private — atomic write of the whole store.
+   * @param {boolean} [durable] — #6927: fsync the file before reporting success
+   *   (temp before rename + dir after, via `writeFileRestricted`'s `durable`
+   *   option). Set ONLY by the security-TIGHTENING callers (a persisted `deny`,
+   *   or a revoked `allow`), where a power-loss rollback after the dashboard
+   *   reported the edit saved would silently re-WIDEN the auto-approval surface —
+   *   the same acute class as the session-token revoke (#6914). The widening
+   *   edits (a new `allow`, a removed `deny`) stay non-durable so the frequent
+   *   allowAlways grant path never pays an fsync for a fail-safe write.
+   */
+  _persist(durable = false) {
     try {
       const dir = dirname(this._filePath)
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
@@ -343,7 +400,7 @@ export class PermissionRuleStore {
         projects[key] = { rules }
       }
       const state = { version: STORE_VERSION, projects }
-      writeFileRestricted(this._filePath, JSON.stringify(state, null, 2), { tmpSuffix: `.tmp-${process.pid}` })
+      this._write(this._filePath, JSON.stringify(state, null, 2), { tmpSuffix: `.tmp-${process.pid}`, durable })
     } catch (err) {
       // Best-effort: a failed persist leaves the in-memory set intact for this
       // process; the prior good file (if any) survives (atomic write). Surface
