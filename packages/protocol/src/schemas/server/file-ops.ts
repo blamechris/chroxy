@@ -144,3 +144,42 @@ export const ServerAppendMemoryResultSchema = z.object({
   created: z.boolean(),
   error: z.string().nullable(),
 })
+
+// #6864 (epic #6760): `memory_read` reply — the effective merged CLAUDE.md
+// memory stack with per-file provenance, plus the project's auto-generated
+// MEMORY.md descriptor. `entries` is ordered global -> project -> local
+// (Claude Code's own load order — https://code.claude.com/docs/en/memory:
+// "content is ordered from the filesystem root down to your working
+// directory"), with each root's own @import references inlined depth-first
+// immediately after it (`importedFrom` names the file that referenced them).
+// An import whose target resolves outside the session cwd or the user's
+// ~/.claude home is reported with `skipped: true` / `content: null` — the
+// read-only path-confinement guard; it is never opened, so its existence is
+// never disclosed either. `memoryFile` is null only when the request-level
+// `error` fires (memory unavailable in this mode / session cwd unresolvable);
+// otherwise it always carries the resolved MEMORY.md descriptor
+// (`exists: false` when the project has no auto-memory yet).
+const MemoryFileDescriptorSchema = z.object({
+  path: z.string().nullable(),
+  exists: z.boolean(),
+  content: z.string().nullable(),
+  truncated: z.boolean(),
+  skipped: z.boolean(),
+  error: z.string().nullable(),
+})
+
+const MemoryStackEntrySchema = MemoryFileDescriptorSchema.extend({
+  scope: z.enum(['global', 'project', 'local', 'import']),
+  importedFrom: z.string().nullable(),
+})
+
+export const ServerMemoryStackResultSchema = z.object({
+  type: z.literal('memory_stack_result'),
+  entries: z.array(MemoryStackEntrySchema),
+  memoryFile: MemoryFileDescriptorSchema.nullable(),
+  error: z.string().nullable(),
+  // Echoes the `memory_read` request nonce when the client supplied one, so a
+  // rapid session switch can drop a superseded reply (mirrors read_file's
+  // #6502 `requestId` pattern).
+  requestId: z.string().max(200).optional(),
+})

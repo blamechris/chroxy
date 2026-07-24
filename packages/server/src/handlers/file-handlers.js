@@ -87,6 +87,15 @@ function handleAppendMemory(ws, client, msg, ctx) {
   ctx.services.fileOps.appendMemory(ws, msg.text, entry?.cwd || null)
 }
 
+function handleMemoryRead(ws, client, msg, ctx) {
+  // #6864 (epic #6760) — server read of the effective merged CLAUDE.md memory
+  // stack (global/project/local + @imports) plus the auto-generated
+  // MEMORY.md descriptor. Read-only: no mutation gate needed (a bound/
+  // share-a-session client may read memory, matching read_file/get_diff).
+  const entry = resolveSession(ctx, msg, client)
+  ctx.services.fileOps.readMemory(ws, entry?.cwd || null, msg.requestId)
+}
+
 function handleGetDiff(ws, client, msg, ctx) {
   const entry = resolveSession(ctx, msg, client)
   ctx.services.fileOps.getDiff(ws, msg.base, entry?.cwd || null)
@@ -164,6 +173,7 @@ export const fileHandlers = {
   read_file: handleReadFile,
   write_file: handleWriteFile,
   append_memory: handleAppendMemory,
+  memory_read: handleMemoryRead,
   get_diff: handleGetDiff,
   git_status: handleGitStatus,
   git_branches: handleGitBranches,

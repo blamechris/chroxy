@@ -114,3 +114,31 @@ export declare const ServerAppendMemoryResultSchema: z.ZodObject<{
     created: z.ZodBoolean;
     error: z.ZodNullable<z.ZodString>;
 }, z.core.$strip>;
+export declare const ServerMemoryStackResultSchema: z.ZodObject<{
+    type: z.ZodLiteral<"memory_stack_result">;
+    entries: z.ZodArray<z.ZodObject<{
+        path: z.ZodNullable<z.ZodString>;
+        exists: z.ZodBoolean;
+        content: z.ZodNullable<z.ZodString>;
+        truncated: z.ZodBoolean;
+        skipped: z.ZodBoolean;
+        error: z.ZodNullable<z.ZodString>;
+        scope: z.ZodEnum<{
+            project: "project";
+            global: "global";
+            local: "local";
+            import: "import";
+        }>;
+        importedFrom: z.ZodNullable<z.ZodString>;
+    }, z.core.$strip>>;
+    memoryFile: z.ZodNullable<z.ZodObject<{
+        path: z.ZodNullable<z.ZodString>;
+        exists: z.ZodBoolean;
+        content: z.ZodNullable<z.ZodString>;
+        truncated: z.ZodBoolean;
+        skipped: z.ZodBoolean;
+        error: z.ZodNullable<z.ZodString>;
+    }, z.core.$strip>>;
+    error: z.ZodNullable<z.ZodString>;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;

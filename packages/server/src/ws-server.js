@@ -271,6 +271,7 @@ function _isSecureRequest(req) {
  *   { type: 'browse_files', path? }                   — request file/directory listing for file browser
  *   { type: 'read_file', path }                       — request file content for file viewer
  *   { type: 'write_file', path, content }              — write file content (path validated, 5MB limit)
+ *   { type: 'memory_read', requestId? }                 — request the effective merged CLAUDE.md memory stack + auto-memory descriptor (#6864, epic #6760); no client-supplied path (server-chosen locations only)
  *   { type: 'list_slash_commands' }                     — request available slash commands
  *   { type: 'list_agents' }                             — request available custom agents
  *   { type: 'request_full_history', sessionId? }         — request full JSONL history for a session
@@ -429,6 +430,7 @@ function _isSecureRequest(req) {
  *   { type: 'git_unstage_result', success, error? }     — git unstage result
  *   { type: 'write_file_result', success, error? }      — write file result
  *   { type: 'append_memory_result', path, created, error? } — `#`-quick-append ack (#6861)
+ *   { type: 'memory_stack_result', entries, memoryFile, error?, requestId? } — reply to `memory_read` (#6864, epic #6760): ordered global/project/local CLAUDE.md stack with per-file provenance (+ recursively-resolved @imports, path-confined to the session cwd + ~/.claude) plus the auto-generated MEMORY.md descriptor. Server-only for v1 — no client handler yet; the dashboard/mobile memory-panel consumers are the sibling slices #6867/#6870
  *   { type: 'log_entry', level, message, timestamp }    — server log entry for dashboard
  *   { type: 'session_activity', sessionId, isBusy, lastCost } — session busy/idle state change
  *   { type: 'session_context', sessionId, cwd, conversationId?, ... } — session context data

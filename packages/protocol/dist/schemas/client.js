@@ -699,6 +699,20 @@ export const AppendMemorySchema = z.object({
     text: z.string().min(1).max(10_000),
     sessionId: z.string().max(256).optional(),
 }).passthrough();
+// #6864 (epic #6760): read the effective merged CLAUDE.md memory stack
+// (global/project/local + @imports) plus the auto-generated MEMORY.md
+// descriptor — the read-only counterpart to append_memory (#6861). No
+// client-supplied path: every location the server reads is chosen
+// SERVER-side (fixed relative to the session cwd + the user's ~/.claude
+// home), so the request carries no path field at all — there is no
+// client-controlled traversal surface. `requestId` is an optional nonce
+// (mirrors read_file's #6502 pattern) echoed on the reply so a client can
+// drop a superseded response after a rapid session switch.
+export const MemoryReadSchema = z.object({
+    type: z.literal('memory_read'),
+    sessionId: z.string().max(256).optional(),
+    requestId: z.string().max(200).optional(),
+}).passthrough();
 export const ListFilesSchema = z.object({
     type: z.literal('list_files'),
     query: z.string().max(1000).optional(),
@@ -1521,6 +1535,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     ReadFileSchema,
     WriteFileSchema,
     AppendMemorySchema,
+    MemoryReadSchema,
     ListFilesSchema,
     ListSymbolsSchema,
     ResolveSymbolSchema,
