@@ -2,6 +2,7 @@
  * Tests for shared stateless message handler functions.
  */
 import { describe, it, expect, vi } from 'vitest'
+import { MAX_SANE_DURATION_MS } from '@chroxy/protocol'
 import {
   resolveSessionId,
   handleModelChanged,
@@ -6854,6 +6855,245 @@ describe('handleMessage', () => {
     if (out.shouldDispatch) {
       expect(out.chatMessage.tool).toBeUndefined()
     }
+  })
+
+  // #6768: server (sdk-session.js / cli-session.js) parses a `compact_boundary`
+  // SDK/CLI system event into a structured `message{messageType:'system',
+  // subtype:'compact_boundary', compactMetadata}` envelope (see
+  // event-normalizer.js `message:` normalizer). The store must preserve
+  // `compactMetadata` onto the ChatMessage so the dashboard/app can render a
+  // distinct "Context compacted" marker instead of the generic muted system
+  // bubble.
+  describe('compactMetadata preservation (#6768)', () => {
+    it('preserves a well-formed compactMetadata on a compact_boundary system message', () => {
+      const out = handleMessage(
+        {
+          messageType: 'system',
+          subtype: 'compact_boundary',
+          content: 'Context compacted (auto): 128,000 → 12,000 tokens',
+          compactMetadata: { trigger: 'auto', preTokens: 128_000, postTokens: 12_000, durationMs: 2_500 },
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.type).toBe('system')
+        // `subtype` is a routing/gating field read off the raw wire payload —
+        // ChatMessage has no `subtype` property, only the resulting
+        // `compactMetadata`.
+        expect(out.chatMessage.compactMetadata).toEqual({
+          trigger: 'auto',
+          preTokens: 128_000,
+          postTokens: 12_000,
+          durationMs: 2_500,
+        })
+      }
+    })
+
+    it('preserves null sub-fields (SDK/CLI omitted post_tokens/duration_ms) rather than dropping the marker', () => {
+      const out = handleMessage(
+        {
+          messageType: 'system',
+          subtype: 'compact_boundary',
+          content: 'Context compacted (manual)',
+          compactMetadata: { trigger: 'manual', preTokens: null, postTokens: null, durationMs: null },
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.compactMetadata).toEqual({
+          trigger: 'manual',
+          preTokens: null,
+          postTokens: null,
+          durationMs: null,
+        })
+      }
+    })
+
+    it('leaves compactMetadata undefined when the wire field is missing (pre-#6768 server / non-compaction system message)', () => {
+      const out = handleMessage(
+        { messageType: 'system', content: 'MCP server foo connected', timestamp: 100 },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.compactMetadata).toBeUndefined()
+      }
+    })
+
+    it('drops a malformed compactMetadata (bad trigger) rather than passing junk through', () => {
+      const out = handleMessage(
+        {
+          messageType: 'system',
+          subtype: 'compact_boundary',
+          content: 'Context compacted',
+          compactMetadata: { trigger: 'bogus', preTokens: 1, postTokens: 2, durationMs: 3 },
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.compactMetadata).toBeUndefined()
+      }
+    })
+
+    // #6973 (agent-review on #6970): preTokens/postTokens/durationMs were
+    // trusted verbatim off the wire — unlike the sibling thinkingDurationMs
+    // (#6941), nothing re-bounded them client-side. These pin the
+    // `parseFiniteNonNegIntField` defense-in-depth (second layer behind the
+    // server's own event-normalizer.js `boundedCompactMetadata`).
+    it('nulls a durationMs that exceeds MAX_SANE_DURATION_MS rather than passing it through or clamping it', () => {
+      const out = handleMessage(
+        {
+          messageType: 'system',
+          subtype: 'compact_boundary',
+          content: 'Context compacted',
+          compactMetadata: { trigger: 'auto', preTokens: 1_000, postTokens: 500, durationMs: MAX_SANE_DURATION_MS + 1 },
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.compactMetadata?.durationMs).toBeNull()
+        expect(out.chatMessage.compactMetadata?.preTokens).toBe(1_000)
+      }
+    })
+
+    it('accepts the exact MAX_SANE_DURATION_MS boundary', () => {
+      const out = handleMessage(
+        {
+          messageType: 'system',
+          subtype: 'compact_boundary',
+          content: 'Context compacted',
+          compactMetadata: { trigger: 'auto', preTokens: 1_000, postTokens: 500, durationMs: MAX_SANE_DURATION_MS },
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.compactMetadata?.durationMs).toBe(MAX_SANE_DURATION_MS)
+      }
+    })
+
+    it('nulls a negative durationMs', () => {
+      const out = handleMessage(
+        {
+          messageType: 'system',
+          subtype: 'compact_boundary',
+          content: 'Context compacted',
+          compactMetadata: { trigger: 'auto', preTokens: 1_000, postTokens: 500, durationMs: -50 },
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.compactMetadata?.durationMs).toBeNull()
+      }
+    })
+
+    it('nulls negative preTokens/postTokens rather than passing them through', () => {
+      const out = handleMessage(
+        {
+          messageType: 'system',
+          subtype: 'compact_boundary',
+          content: 'Context compacted',
+          compactMetadata: { trigger: 'manual', preTokens: -5, postTokens: -1, durationMs: 1_000 },
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.compactMetadata?.preTokens).toBeNull()
+        expect(out.chatMessage.compactMetadata?.postTokens).toBeNull()
+        expect(out.chatMessage.compactMetadata?.durationMs).toBe(1_000)
+      }
+    })
+
+    it('does not cap large preTokens/postTokens — only enforces non-negative int (context windows run into the millions)', () => {
+      const out = handleMessage(
+        {
+          messageType: 'system',
+          subtype: 'compact_boundary',
+          content: 'Context compacted',
+          compactMetadata: { trigger: 'auto', preTokens: 5_000_000, postTokens: 500_000, durationMs: 1_000 },
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.compactMetadata?.preTokens).toBe(5_000_000)
+        expect(out.chatMessage.compactMetadata?.postTokens).toBe(500_000)
+      }
+    })
+
+    it('floors fractional preTokens/postTokens/durationMs and nulls non-finite values', () => {
+      const out = handleMessage(
+        {
+          messageType: 'system',
+          subtype: 'compact_boundary',
+          content: 'Context compacted',
+          compactMetadata: { trigger: 'auto', preTokens: 1_000.9, postTokens: Number.NaN, durationMs: 2_500.7 },
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.compactMetadata?.preTokens).toBe(1_000)
+        expect(out.chatMessage.compactMetadata?.postTokens).toBeNull()
+        expect(out.chatMessage.compactMetadata?.durationMs).toBe(2_500)
+      }
+    })
+
+    it('does NOT attach compactMetadata to an unrelated message type even if present on the payload', () => {
+      // Gating hardening — mirrors the resume_unknown / attemptedResumeId gate
+      // above: a buggy producer shouldn't be able to sneak compactMetadata
+      // onto e.g. a response bubble.
+      const out = handleMessage(
+        {
+          messageType: 'response',
+          content: 'hello',
+          compactMetadata: { trigger: 'auto', preTokens: 1, postTokens: 2, durationMs: 3 },
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.compactMetadata).toBeUndefined()
+      }
+    })
   })
 })
 

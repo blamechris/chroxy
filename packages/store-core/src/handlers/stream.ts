@@ -83,6 +83,41 @@ export type MessagePayload =
  * `addMessage` vs `updateSession` choice — this helper returns the built
  * ChatMessage rather than driving the dispatch itself.
  */
+/**
+ * #6768 — validate and coerce the wire `message.compactMetadata` object
+ * into the store's `CompactBoundaryMeta` shape. Defensive against a
+ * malformed/partial payload (a future server bug, or a hand-crafted replay
+ * blob) — returns `undefined` rather than attaching a half-formed object
+ * that would crash a renderer expecting the full shape. `preTokens` /
+ * `postTokens` / `durationMs` coerce a non-finite-number value to `null`
+ * (matches the server's own null-not-absent convention) rather than
+ * dropping the whole object over one bad sub-field.
+ *
+ * #6973 (agent-review on #6970): reuses `parseFiniteNonNegIntField` — the
+ * same #6941 helper `handleThinkingStreamEnd` uses for `thinkingDurationMs`
+ * / `thinkingTokens` below — so an out-of-range/negative/non-integer
+ * sub-field is client-side re-bounded defense-in-depth, not trusted verbatim
+ * off the wire (a second layer behind the server's own
+ * `boundedCompactMetadata` in event-normalizer.js). `durationMs` gets the
+ * same `MAX_SANE_DURATION_MS` clock-jump ceiling as `thinkingDurationMs`;
+ * `preTokens`/`postTokens` have no documented ceiling (legitimate context
+ * windows run into the millions of tokens) so only non-negative-integer
+ * coercion applies. `parseFiniteNonNegIntField` returns `undefined` for an
+ * absent/invalid/out-of-range field — mapped to `null` here since this
+ * shape's fields are nullable, not optional.
+ */
+function parseCompactMetadata(value: unknown): ChatMessage['compactMetadata'] {
+  if (!value || typeof value !== 'object') return undefined
+  const obj = value as Record<string, unknown>
+  if (obj.trigger !== 'manual' && obj.trigger !== 'auto') return undefined
+  return {
+    trigger: obj.trigger,
+    preTokens: parseFiniteNonNegIntField(obj, 'preTokens') ?? null,
+    postTokens: parseFiniteNonNegIntField(obj, 'postTokens') ?? null,
+    durationMs: parseFiniteNonNegIntField(obj, 'durationMs', MAX_SANE_DURATION_MS) ?? null,
+  }
+}
+
 export function handleMessage(
   msg: Record<string, unknown>,
   _activeSessionId: string | null,
@@ -178,6 +213,18 @@ export function handleMessage(
           const trimmed = msg.attemptedResumeId.trim()
           if (trimmed.length === 0) return {}
           return { attemptedResumeId: trimmed.length > 256 ? trimmed.slice(0, 256) : trimmed }
+        })()
+      : {}),
+    // #6768: preserve the structured compaction-boundary marker so
+    // renderers can show a distinct "Context compacted" callout instead of
+    // the generic muted system bubble. Gated on `msgType === 'system'` +
+    // the compact_boundary subtype (mirrors the resume_unknown gate above)
+    // so a buggy producer can't sneak `compactMetadata` onto an unrelated
+    // message type.
+    ...(msgType === 'system' && msg.subtype === 'compact_boundary'
+      ? (() => {
+          const meta = parseCompactMetadata(msg.compactMetadata)
+          return meta ? { compactMetadata: meta } : {}
         })()
       : {}),
   }

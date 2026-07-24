@@ -10,6 +10,7 @@ import { ToolBubble } from '../components/ToolBubble'
 import { PermissionPrompt } from '../components/PermissionPrompt'
 import { QuestionPrompt } from '../components/QuestionPrompt'
 import { EvaluatorRewriteBanner } from '../components/EvaluatorPrompts'
+import { CompactionMarker } from '../components/CompactionMarker'
 import { StreamStallChip } from '../components/StreamStallChip'
 import { AskUserQuestionStallChip } from '../components/AskUserQuestionStallChip'
 import { ResumeUnknownChip } from '../components/ResumeUnknownChip'
@@ -245,6 +246,14 @@ export function useMessageRenderer(args: UseMessageRendererArgs): (msg: ChatView
     // re-fire the transient wire event.
     if (storeMsg.type === 'system' && storeMsg.evaluator?.kind === 'rewrite') {
       return <EvaluatorRewriteBanner meta={storeMsg.evaluator} />
+    }
+
+    // #6768: distinct "Context compacted" marker for a parsed
+    // compact_boundary SDK/CLI event (sdk-session.js / cli-session.js),
+    // replacing the generic muted system bubble that used to show the
+    // literal string `compact_boundary`.
+    if (storeMsg.type === 'system' && storeMsg.compactMetadata) {
+      return <CompactionMarker meta={storeMsg.compactMetadata} />
     }
 
     // #4476: distinct chip for stream-stall errors (server PR #4475 emits

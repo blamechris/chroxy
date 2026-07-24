@@ -27,6 +27,33 @@ export declare const ServerStreamEndSchema: z.ZodObject<{
     thinkingDurationMs: z.ZodOptional<z.ZodNumber>;
     thinkingTokens: z.ZodOptional<z.ZodNumber>;
 }, z.core.$strip>;
+/**
+ * #6768 — structured payload for a `compact_boundary` system event (the
+ * Agent SDK/CLI's compaction-boundary marker, emitted on both auto-compact
+ * near the context limit and a manual `/compact`). By producer convention
+ * (not a schema-enforced constraint — see the sibling `subtype` field's
+ * comment on `ServerMessageSchema`), carried on
+ * `ServerMessageSchema.compactMetadata` alongside `messageType === 'system'`
+ * and `subtype === 'compact_boundary'`. Mirrors
+ * the SDK's `SDKCompactBoundaryMessage.compact_metadata` shape (camelCased),
+ * minus `preserved_segment` (an internal resume-relink detail with no
+ * client-facing use).
+ *
+ * `preTokens`/`postTokens`/`durationMs` are nullable rather than optional:
+ * the server always emits the field once it recognizes a compact_boundary
+ * event, using `null` for any sub-field the SDK/CLI itself omitted, so
+ * clients get a stable shape to pattern-match against instead of needing an
+ * `in` check per field.
+ */
+export declare const ServerCompactMetadataSchema: z.ZodObject<{
+    trigger: z.ZodEnum<{
+        auto: "auto";
+        manual: "manual";
+    }>;
+    preTokens: z.ZodNullable<z.ZodNumber>;
+    postTokens: z.ZodNullable<z.ZodNumber>;
+    durationMs: z.ZodNullable<z.ZodNumber>;
+}, z.core.$strip>;
 export declare const ServerMessageSchema: z.ZodObject<{
     type: z.ZodLiteral<"message">;
     messageType: z.ZodString;
@@ -35,6 +62,16 @@ export declare const ServerMessageSchema: z.ZodObject<{
     options: z.ZodOptional<z.ZodAny>;
     timestamp: z.ZodNumber;
     code: z.ZodOptional<z.ZodString>;
+    subtype: z.ZodOptional<z.ZodString>;
+    compactMetadata: z.ZodOptional<z.ZodObject<{
+        trigger: z.ZodEnum<{
+            auto: "auto";
+            manual: "manual";
+        }>;
+        preTokens: z.ZodNullable<z.ZodNumber>;
+        postTokens: z.ZodNullable<z.ZodNumber>;
+        durationMs: z.ZodNullable<z.ZodNumber>;
+    }, z.core.$strip>>;
     attemptedResumeId: z.ZodOptional<z.ZodString>;
     stdout: z.ZodOptional<z.ZodString>;
     stderr: z.ZodOptional<z.ZodString>;

@@ -15,7 +15,7 @@ import {
   isRunInBackgroundInput,
   parseBashOutputShellId,
 } from './background-shells.js'
-import { buildToolStartData, extractToolInputSemantics } from './claude-stream-parser.js'
+import { buildToolStartData, extractToolInputSemantics, parseCompactBoundaryMeta, formatCompactBoundaryContent } from './claude-stream-parser.js'
 import { createLogger, loggerForSession } from './logger.js'
 import { PermissionManager, wirePermissionManager } from './permission-manager.js'
 import { formatBytes } from './utils/format-bytes.js'
@@ -891,6 +891,28 @@ export class SdkSession extends BaseSession {
               // cancel feels responsive instead of waiting for the turn-end
               // sweep. Idempotent (no-op if already finalized).
               this._finalizeAgentByToolUseId(msg.tool_use_id)
+              break
+            } else if (msg.subtype === 'compact_boundary') {
+              // #6768: the SDK compacted the conversation (auto-triggered
+              // near the context limit, or manually via `/compact`). Parse
+              // the structured `compact_metadata` into a distinct marker
+              // instead of letting it fall through to the generic
+              // "unknown system event" branch below, which would forward
+              // the literal string `compact_boundary` as `content` with no
+              // human-readable text and drop trigger/token/duration data
+              // entirely.
+              const meta = parseCompactBoundaryMeta(msg.compact_metadata)
+              ;(this._log || log).info(
+                `Context compacted (${meta.trigger}): ${meta.preTokens ?? '?'} -> ${meta.postTokens ?? '?'} tokens` +
+                  (meta.durationMs != null ? ` in ${meta.durationMs}ms` : '')
+              )
+              this.emit('message', {
+                type: 'system',
+                subtype: 'compact_boundary',
+                content: formatCompactBoundaryContent(meta),
+                compactMetadata: meta,
+                timestamp: Date.now(),
+              })
               break
             } else {
               // Forward non-init system events (e.g. /usage, /cost, other

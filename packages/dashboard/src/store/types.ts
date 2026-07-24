@@ -32,6 +32,9 @@ export type {
   // components can type-check banner props without reaching into
   // store-core.
   EvaluatorRewriteMeta,
+  // #6768: re-export the compaction-boundary marker metadata so the
+  // CompactionMarker component can type-check its props the same way.
+  CompactBoundaryMeta,
   SavedConnection,
   ContextUsage,
   // #6769: occupancy snapshot type (the context meter's only honest input).

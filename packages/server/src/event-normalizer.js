@@ -58,6 +58,39 @@ function boundedNonNegInt(value, { max } = {}) {
 }
 
 /**
+ * #6973 (agent-review on #6970) — coerce+bound `compactMetadata`'s
+ * `preTokens`/`postTokens`/`durationMs` sub-fields before forwarding onto
+ * the wire, same defense-in-depth as `boundedNonNegInt` above (the #6941
+ * thinkingDurationMs pattern) applied field-by-field. Unlike
+ * thinkingDurationMs/thinkingTokens (fully optional on the wire), these
+ * three sub-fields are `.nullable()` — not `.optional()` — on
+ * `ServerCompactMetadataSchema`, so the shape always carries all three keys;
+ * an out-of-range/malformed value is coerced to `null` here rather than
+ * dropped, matching `parseCompactBoundaryMeta`'s own "null for
+ * missing/malformed" convention (claude-stream-parser.js) so a client always
+ * gets the stable shape to pattern-match against. `durationMs` is
+ * additionally bounded by `MAX_SANE_DURATION_MS` (the same clock-jump guard
+ * as `thinkingDurationMs`); `preTokens`/`postTokens` have no documented
+ * ceiling — legitimate context windows run into the millions of tokens — so
+ * only non-negative-integer coercion applies.
+ *
+ * @param {{trigger?: *, preTokens?: *, postTokens?: *, durationMs?: *}} meta
+ * @returns {{trigger: 'manual'|'auto', preTokens: number|null, postTokens: number|null, durationMs: number|null}}
+ */
+function boundedCompactMetadata(meta) {
+  const boundedOrNull = (value, opts) => {
+    const bounded = boundedNonNegInt(value, opts)
+    return bounded === undefined ? null : bounded
+  }
+  return {
+    trigger: meta.trigger === 'manual' ? 'manual' : 'auto',
+    preTokens: boundedOrNull(meta.preTokens),
+    postTokens: boundedOrNull(meta.postTokens),
+    durationMs: boundedOrNull(meta.durationMs, { max: MAX_SANE_DURATION_MS }),
+  }
+}
+
+/**
  * Declarative event-to-WS-message mapping.
  *
  * Each entry in EVENT_MAP is:
@@ -264,6 +297,18 @@ Object.assign(EVENT_MAP, {
       tool: data.tool,
       options: data.options,
       timestamp: data.timestamp,
+    }
+    // #6768: forward the structured compaction-boundary marker fields.
+    // Gated strictly on `messageType === 'system'` + the compact_boundary
+    // subtype (mirrors the `code`/`attemptedResumeId` gating pattern in the
+    // `error:` normalizer below) so a buggy producer can't sneak
+    // `compactMetadata` onto an unrelated message type. #6973: the numeric
+    // sub-fields are bounded (see `boundedCompactMetadata`) rather than
+    // forwarded raw, so a malformed/out-of-range value from the SDK/CLI
+    // can't reach the wire unbounded.
+    if (data.type === 'system' && data.subtype === 'compact_boundary' && data.compactMetadata) {
+      msg.subtype = data.subtype
+      msg.compactMetadata = boundedCompactMetadata(data.compactMetadata)
     }
     return { messages: [{ msg }] }
   },
