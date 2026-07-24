@@ -67,6 +67,77 @@ describe('renderMarkdown', () => {
     expect(html).not.toContain('<a')
   })
 
+  // #6986 — the inline `[text](url)` scheme check is an ALLOWLIST
+  // (http/https/mailto), NOT a blocklist. This closes the link-injection
+  // hole where a WebFetch of an attacker page (its content runs through this
+  // same renderer) embeds a protocol-relative `[text](//evil)` link that
+  // DOMPurify keeps as a "safe relative URL" and that is openable via
+  // middle-click / right-click "Open Link in New Tab".
+  describe('link scheme allowlist (#6986)', () => {
+    const anchorHrefs = (html: string): string[] => {
+      const div = document.createElement('div')
+      div.innerHTML = html
+      return [...div.querySelectorAll('a')].map((a) => a.getAttribute('href') ?? '')
+    }
+
+    it('neutralizes a protocol-relative //host link (renders as text, no anchor)', () => {
+      const html = renderMarkdown('[click](//evil.example/x)')
+      // No anchor at all — and specifically no href pointing at the attacker host.
+      expect(anchorHrefs(html)).toHaveLength(0)
+      expect(html).not.toContain('<a')
+      expect(html).not.toContain('href="//evil')
+      // The link TEXT is preserved (rendered as plain text).
+      expect(html).toContain('click')
+    })
+
+    it('neutralizes a javascript: link (renders as text, no anchor)', () => {
+      const html = renderMarkdown('[js](javascript:alert(1))')
+      expect(anchorHrefs(html)).toHaveLength(0)
+      expect(html).not.toContain('<a')
+      expect(html).not.toContain('javascript:')
+      expect(html).toContain('js')
+    })
+
+    it('neutralizes leading-whitespace scheme evasion ( javascript:)', () => {
+      const html = renderMarkdown('[x]( javascript:alert(1))')
+      expect(anchorHrefs(html)).toHaveLength(0)
+      expect(html).not.toContain('<a')
+    })
+
+    it('neutralizes a same-origin relative path and a bare #fragment', () => {
+      expect(anchorHrefs(renderMarkdown('[a](/admin/delete)'))).toHaveLength(0)
+      expect(anchorHrefs(renderMarkdown('[b](#section)'))).toHaveLength(0)
+    })
+
+    it('neutralizes other non-allowlisted schemes (ftp, file, vbscript)', () => {
+      expect(anchorHrefs(renderMarkdown('[a](ftp://files.example.com)'))).toHaveLength(0)
+      expect(anchorHrefs(renderMarkdown('[b](file:///etc/passwd)'))).toHaveLength(0)
+      expect(anchorHrefs(renderMarkdown('[c](vbscript:msgbox(1))'))).toHaveLength(0)
+    })
+
+    it('STILL renders a legitimate https link as a proper anchor', () => {
+      const html = renderMarkdown('[ok](https://example.com)')
+      const div = document.createElement('div')
+      div.innerHTML = html
+      const a = div.querySelector('a')
+      expect(a).not.toBeNull()
+      expect(a!.getAttribute('href')).toBe('https://example.com')
+      expect(a!.getAttribute('target')).toBe('_blank')
+      expect(a!.getAttribute('rel')).toBe('noopener')
+      expect(a!.textContent).toBe('ok')
+    })
+
+    it('STILL renders legitimate http and mailto links as anchors', () => {
+      expect(anchorHrefs(renderMarkdown('[h](http://example.com)'))).toEqual(['http://example.com'])
+      expect(anchorHrefs(renderMarkdown('[mail](mailto:a@b.com)'))).toEqual(['mailto:a@b.com'])
+    })
+
+    it('trims surrounding whitespace from a legitimate href', () => {
+      const html = renderMarkdown('[ok]( https://example.com )')
+      expect(anchorHrefs(html)).toEqual(['https://example.com'])
+    })
+  })
+
   // Bare-URL autolinking (#3849) — bare http(s) URLs in prose render as
   // clickable anchors, not plain text. Without this, build artefact URLs
   // (e.g. expo.dev links) emitted by the agent show up unclickable.

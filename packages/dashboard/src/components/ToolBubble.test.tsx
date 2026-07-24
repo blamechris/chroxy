@@ -886,3 +886,54 @@ describe('ToolBubble', () => {
     })
   })
 })
+
+describe('ToolBubble — WebSearch/WebFetch structured render (#6757)', () => {
+  it('renders a WebSearch result as a structured list, not a <pre> dump', () => {
+    const result = JSON.stringify([
+      { title: 'Chroxy', url: 'https://github.com/blamechris/chroxy', snippet: 'Remote terminal app.' },
+    ])
+    render(<ToolBubble toolName="WebSearch" toolUseId="ws-1" result={result} isTail />)
+    expect(screen.getByTestId('web-search-results')).toBeInTheDocument()
+    expect(screen.getByTestId('web-search-result-link-0')).toHaveAttribute(
+      'href',
+      'https://github.com/blamechris/chroxy',
+    )
+    // The raw JSON must not leak into a <pre> alongside the structured render.
+    expect(document.querySelector('pre')).not.toBeInTheDocument()
+  })
+
+  it('falls back to the raw <pre> render when a WebSearch result is unparseable', () => {
+    render(<ToolBubble toolName="WebSearch" toolUseId="ws-2" result="just some plain unstructured text" isTail />)
+    expect(screen.queryByTestId('web-search-results')).not.toBeInTheDocument()
+    expect(screen.getByText('just some plain unstructured text')).toBeInTheDocument()
+  })
+
+  it('renders a WebFetch result through the markdown pipeline, not a <pre> dump', () => {
+    const result = 'Prompt: Summarize\nURL: https://example.com/page\n\nThe **fetched** content.'
+    render(<ToolBubble toolName="WebFetch" toolUseId="wf-1" result={result} isTail />)
+    const content = screen.getByTestId('web-fetch-content')
+    expect(content.querySelector('strong')).toHaveTextContent('fetched')
+    expect(screen.getByTestId('web-fetch-source')).toHaveTextContent('https://example.com/page')
+    expect(document.querySelector('pre')).not.toBeInTheDocument()
+  })
+
+  it('still renders WebFetch content (never a bare fallback) when no header is present', () => {
+    render(<ToolBubble toolName="WebFetch" toolUseId="wf-2" result="Just fetched body text." isTail />)
+    expect(screen.getByTestId('web-fetch-content')).toHaveTextContent('Just fetched body text.')
+  })
+
+  it('leaves other tools on the existing raw <pre> render (only WebSearch/WebFetch get structured treatment)', () => {
+    const result = JSON.stringify([{ title: 'Not a search result', url: 'https://example.com/' }])
+    render(<ToolBubble toolName="Bash" toolUseId="bash-1" result={result} isTail />)
+    expect(screen.queryByTestId('web-search-results')).not.toBeInTheDocument()
+    expect(document.querySelector('pre')).toBeInTheDocument()
+  })
+
+  it('does not route a merely-similar tool name (web_search_results) into the structured renderer', () => {
+    // Regression guard: this exact tool name is used elsewhere to pin
+    // formatToolName's title-casing and must keep rendering plain text.
+    const result = JSON.stringify([{ title: 'X', url: 'https://example.com/' }])
+    render(<ToolBubble toolName="web_search_results" toolUseId="wsr-1" result={result} isTail />)
+    expect(screen.queryByTestId('web-search-results')).not.toBeInTheDocument()
+  })
+})
