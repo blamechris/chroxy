@@ -1,0 +1,70 @@
+appId: com.blamechris.chroxy
+name: ChatView compaction marker rendering
+---
+
+# #6972 — mobile parity for the dashboard's CompactionMarker (#6768/#6970).
+# End-to-end coverage for the "Context compacted" divider: the wire's
+# `compact_boundary` system event carries structured `compactMetadata`
+# (trigger/preTokens/postTokens/durationMs), and the shared
+# `buildChatViewMessages` pipeline (@chroxy/store-core) filters ALL
+# `type: 'system'` messages off the Chat tab (they're meant for the
+# dashboard's System tab). Mobile has no System-tab equivalent, so
+# ChatView.tsx's `insertCompactionMarkers` reinserts the
+# compactMetadata-carrying subset back inline — this flow pins that the
+# marker actually reaches the screen, not just that the component renders
+# in isolation (jest already covers that).
+#
+# Trigger: 'show-compaction' user input → mock-server.mjs emits a
+# synthetic `{ type: 'message', messageType: 'system',
+# subtype: 'compact_boundary', compactMetadata }` envelope — the same
+# wire shape sdk-session.js / cli-session.js emit for a real compaction
+# boundary. The fixture seeding pattern is documented in CLAUDE.md →
+# "Fixture Seeding for Structured Renderers".
+#
+# Tested devices: iPhone 16 Pro (iOS 18.6), portrait.
+# Requires: dev client installed + mock server on port 9876
+#   cd packages/app && npx expo run:ios
+#   bash packages/app/.maestro/scripts/start-mock-server.sh
+
+- runFlow: setup/ensure-session-screen.yaml
+
+# Make sure Chat tab is selected
+- tapOn: "Chat"
+- waitForAnimationToEnd
+
+# Find the input area and type the trigger phrase that makes the mock
+# server emit a synthetic compact_boundary system event.
+- tapOn:
+    id: "chat-message-input"
+- inputText: "show-compaction"
+
+# Send the message — testID added in InputBar.tsx.
+- tapOn:
+    id: "chat-send-button"
+
+# Wait for the marker row to land. testID set on the outer View in
+# CompactionMarker.tsx.
+- extendedWaitUntil:
+    visible:
+      id: "compaction-marker"
+    timeout: 10000
+
+# Assert the structured content: headline, token delta, and trigger.
+# The mock fixture's exact numbers/trigger are pinned in mock-server.mjs's
+# 'show-compaction' branch (128,000 → 12,000 tokens, auto). The token-delta
+# assertion below is deliberately separator-agnostic: CompactionMarker.tsx
+# formats the counts via locale-dependent toLocaleString(), so a non-en-US
+# simulator renders e.g. "128.000" (de-DE) or "128 000" (fr-FR, narrow
+# no-break space) instead of "128,000". `.?` matches any single separator
+# character (or none), while the pinned digit groups still fail the
+# assertion if the wrong NUMBER renders.
+- assertVisible:
+    text: "Context compacted"
+- assertVisible:
+    id: "compaction-marker-tokens"
+- assertVisible:
+    text: ".*128.?000.*12.?000.*tokens.*"
+- assertVisible:
+    id: "compaction-marker-trigger"
+
+- takeScreenshot: compaction-marker-inline

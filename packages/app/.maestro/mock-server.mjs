@@ -34,6 +34,10 @@ let showAskUserQuestionCounter = 0
 // unique toolUseIds so React keys + tool_result patching stay independent.
 let showWebSearchCounter = 0
 let showWebFetchCounter = 0
+// #6972: per-trigger counter for the compaction-marker fixture. Same
+// rationale as `show-todos` — repeated invocations need a unique
+// messageId so React keys stay independent.
+let showCompactionCounter = 0
 
 // #5468: connection counter — incremented once per `auth` message, used only
 // for the marker's text ("mock reconnect #N") + the [mock] Auth #N log line.
@@ -817,6 +821,44 @@ wss.on('connection', (ws) => {
           })
           secureSend(ws, { type: 'result', cost: 0.001, duration: 100, usage: {}, sessionId: 'mock-sess-1' })
           secureSend(ws, { type: 'agent_idle', sessionId: 'mock-sess-1' })
+          break
+        }
+
+        // #6972: trigger phrase 'show-compaction' emits a synthetic
+        // `compact_boundary` system event so the mobile CompactionMarker
+        // (mobile parity for the dashboard's #6768/#6970 marker) can be
+        // exercised end-to-end over the real WS protocol — same wire
+        // shape sdk-session.js / cli-session.js emit (see
+        // packages/server/src/claude-stream-parser.js
+        // parseCompactBoundaryMeta / formatCompactBoundaryContent) and
+        // the same shape packages/store-core/src/handlers/stream.ts
+        // handleMessage's `parseCompactMetadata` gate expects
+        // (`messageType: 'system'`, `subtype: 'compact_boundary'`,
+        // `compactMetadata`). Not a tool call and not an assistant turn —
+        // no agent_busy/agent_idle wrapper, matching how a real compaction
+        // boundary can land mid-session on its own.
+        //
+        // `preTokens`/`postTokens`/`durationMs` are deliberately non-null
+        // here (the "full metadata" case); CompactionMarker's null-safety
+        // for an SDK/CLI that omits a sub-field is covered by the jest
+        // unit tests, not this fixture.
+        if (text.trim() === 'show-compaction') {
+          showCompactionCounter += 1
+          secureSend(ws, {
+            type: 'message',
+            messageType: 'system',
+            subtype: 'compact_boundary',
+            content: 'Context compacted (auto): 128,000 → 12,000 tokens',
+            compactMetadata: {
+              trigger: 'auto',
+              preTokens: 128000,
+              postTokens: 12000,
+              durationMs: 2500,
+            },
+            messageId: `sys-compaction-mock-${showCompactionCounter}`,
+            timestamp: Date.now(),
+            sessionId: 'mock-sess-1',
+          })
           break
         }
 

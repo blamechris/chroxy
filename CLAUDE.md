@@ -345,7 +345,7 @@ export PATH="$PATH:$HOME/.maestro/bin"
 
 # Full green gate (recommended) — each flow in its OWN maestro process (#6091).
 # Reliable on a single simulator over long runs: avoids the XCUITest instability
-# that accumulates when all 25 flows share one process (run-all.yaml). Parses the
+# that accumulates when all 26 flows share one process (run-all.yaml). Parses the
 # flow inventory from run-all.yaml, starts/reuses the mock server, retries a
 # failing flow once (env flakiness vs real defect), prints a pass/fail summary.
 bash packages/app/.maestro/scripts/run-all-sequential.sh --device <device-id>
@@ -377,7 +377,8 @@ When you modify app components (screens, UI elements, styling), verify with Maes
 | `chat-todolist.yaml` | TodoList renderer end-to-end (mock-server emits TodoWrite tool_use+tool_result, entry expands, structured TodoList renders with testIDs) |
 | `chat-websearch.yaml` | WebSearch structured renderer (mock-server emits WebSearch tool_start+tool_result via `show-websearch`, entry expands, `WebSearchResultList` renders title/domain/snippet rows; asserts the fixture's `javascript:` result produced no row) |
 | `chat-webfetch.yaml` | WebFetch structured renderer (`show-webfetch` trigger → source-URL link + markdown-formatted body) |
-| `run-all.yaml` | Runs all 25 flows sequentially — see its commented list for the full per-flow inventory (session, plan approval, AskUserQuestion, terminal, reconnect, disconnected-permission no-op, diff inline-comment, …) |
+| `compaction-marker.yaml` | CompactionMarker render (`show-compaction` trigger → `compact_boundary` system event → "Context compacted" headline + token delta + trigger) |
+| `run-all.yaml` | Runs all 26 flows sequentially — see its commented list for the full per-flow inventory (session, plan approval, AskUserQuestion, terminal, reconnect, disconnected-permission no-op, diff inline-comment, WebSearch/WebFetch renderers, compaction marker, …) |
 
 ### Fixture Seeding for Structured Renderers
 
