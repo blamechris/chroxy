@@ -115,7 +115,10 @@ describe('WebFetchResult', () => {
     expect(document.querySelector('a[href^="javascript:"]')).not.toBeInTheDocument()
   })
 
-  it('does not use dangerouslySetInnerHTML for raw content — the markdown pipeline HTML-escapes non-markup text', () => {
+  it('HTML-escapes non-markup fetched content so no live element is created (XSS guard)', () => {
+    // WebFetchResult DOES render via dangerouslySetInnerHTML, but only with
+    // DOMPurify-sanitized output from renderMarkdown — non-markup text like an
+    // `<img onerror>` is HTML-escaped, so no live <img> element is ever built.
     render(<WebFetchResult parsed={{ content: '<img src=x onerror=alert(1)>' }} />)
     expect(document.querySelector('img[src="x"]')).not.toBeInTheDocument()
   })
