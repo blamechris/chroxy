@@ -253,6 +253,9 @@ const UNHANDLED_BY_DESIGN = new Set<string>([
                                           //   no dedicated handler yet (dashboard exposure is a deferred follow-up)
   'stdin_dropped_totals',                 // #3544 transient counter — surface is the SessionInfo flag on
                                           //   session_list, not a dedicated wire-event handler
+  'memory_stack_result',                  // #6864 (epic #6760) reply to memory_read — server-only for v1,
+                                          //   no client handler yet; dashboard/mobile memory-panel consumers
+                                          //   are the sibling slices #6867/#6870
 ])
 
 // ---------------------------------------------------------------------------

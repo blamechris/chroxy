@@ -3,6 +3,7 @@ import { resolveSessionCwd, validatePathWithinCwd } from './common.js'
 import { createBrowserOps } from './browser.js'
 import { createReaderOps } from './reader.js'
 import { createGitOps } from './git.js'
+import { createMemoryOps } from './memory.js'
 
 /**
  * Create file operation handlers for the WsServer.
@@ -29,6 +30,7 @@ export function createFileOps(sendFn, workspaceRoot) {
   const browser = createBrowserOps(sendFn, boundResolve, boundValidate)
   const reader = createReaderOps(sendFn, boundResolve, boundValidate)
   const git = createGitOps(sendFn, boundResolve, boundValidate, gitWorkspaceRoot)
+  const memory = createMemoryOps(sendFn, boundResolve)
 
   return {
     listDirectory: browser.listDirectory,
@@ -36,6 +38,7 @@ export function createFileOps(sendFn, workspaceRoot) {
     readFile: reader.readFile,
     writeFile: reader.writeFile,
     appendMemory: reader.appendMemory,
+    readMemory: memory.readMemory,
     getDiff: reader.getDiff,
     listSlashCommands: browser.listSlashCommands,
     listAgents: browser.listAgents,
