@@ -66,9 +66,19 @@ const MIN_TOUCH_TARGET = 44;
  * the real host per the URL spec. That matters for display integrity: for
  * `https://github.com@evil.example/x` this shows `evil.example`, not the
  * `github.com` prefix an attacker put there to look legitimate.
+ *
+ * The authority character class excludes `\` as well as `/?#`: WHATWG URL
+ * parsing (what every browser actually does for special schemes like
+ * http/https) treats a backslash exactly like a forward slash — it ends the
+ * authority component. Leaving `\` out of this class let an authority like
+ * `evil.example\@github.com` be read past the backslash all the way to the
+ * LAST `@`, extracting `github.com` as the "host" while the browser (and
+ * `isSafeWebUrl`'s own parsing) resolve the real target as `evil.example`.
+ * That mismatch is a display-vs-navigation spoof: the card shows a trusted
+ * domain while tapping it opens something else entirely.
  */
 export function domainFromUrl(url: string): string {
-  const m = /^https?:\/\/([^/?#]+)/i.exec(url.trim());
+  const m = /^https?:\/\/([^/?#\\]+)/i.exec(url.trim());
   const authority = m?.[1];
   if (!authority) return url;
   const hostAndPort = authority.split('@').pop() ?? authority;

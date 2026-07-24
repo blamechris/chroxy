@@ -135,6 +135,17 @@ describe('domainFromUrl', () => {
     expect(domainFromUrl('https://github.com@evil.example/x')).toBe('evil.example');
   });
 
+  it('terminates the authority on a backslash (WHATWG parity) instead of reading past it to a spoofed @-suffix', () => {
+    // WHATWG/browsers treat `\` like `/` for special schemes, so the
+    // backslash ends the authority BEFORE `@github.com` is ever reached —
+    // the real navigation target is `evil.example`. A regex that doesn't
+    // terminate on `\` would read all the way to the last `@` and display
+    // `github.com`: a trusted-looking domain over a phishing target.
+    expect(domainFromUrl('https://evil.example\\@github.com/')).toBe('evil.example');
+    expect(domainFromUrl('https://evil.example\\\\@github.com/')).toBe('evil.example');
+    expect(domainFromUrl('https://evil.example\\?@github.com/')).toBe('evil.example');
+  });
+
   it('falls back to the raw string rather than throwing', () => {
     expect(domainFromUrl('not a url')).toBe('not a url');
   });
