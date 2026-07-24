@@ -132,3 +132,9 @@ name: All E2E flows
 # a regression that optimistically answered the tap would clear the
 # hint and fail the flow. Recovers via the self-releasing hold.
 - runFlow: permission-disconnected-noop.yaml
+
+# Flow 23: DiffViewer inline comment → submit (#6800 follow-up) — opens
+# the Changes viewer (mock answers `get_diff` with a canned diff_result),
+# taps a diff line, leaves a comment, submits it, and asserts the composed
+# composeCommentReviewPrompt() text lands in chat as the next user turn.
+- runFlow: diff-comment.yaml

@@ -1,0 +1,93 @@
+appId: com.blamechris.chroxy
+name: DiffViewer inline comment submit
+---
+
+# #6800 follow-up — End-to-end coverage for the mobile DiffViewer inline-comment
+# → submit-to-Claude path. Opens the Changes viewer, taps a diff line, leaves a
+# comment, submits it, and asserts the composed review prompt lands in chat as
+# the next user turn.
+#
+# Trigger: opening the Changes viewer sends `get_diff`; mock-server.mjs answers
+# with a canned `diff_result` (one modified file, one hunk). Saving a comment
+# queues a DiffLineComment; tapping Submit sends composeCommentReviewPrompt()
+# over the normal `input` wire path, which the mock echoes back — the composed
+# prompt therefore appears in the chat transcript (also rendered optimistically
+# by the app). The fixture-seeding pattern is documented in CLAUDE.md →
+# "Fixture Seeding for Structured Renderers".
+#
+# Tested devices: iPhone 16 Pro (iOS 18), portrait. iPad / Android untested.
+# Requires: dev client installed + mock server on port 9876
+#   cd packages/app && npx expo run:ios
+#   bash packages/app/.maestro/scripts/start-mock-server.sh
+
+- runFlow: setup/ensure-session-screen.yaml
+
+# Make sure Chat is selected so the composed prompt lands in the chat transcript.
+- tapOn: "Chat"
+- waitForAnimationToEnd
+
+# The Changes viewer opens from the collapsed "secondary tools" row. Both
+# buttons are icon-only, so they match on their accessibilityLabel (Maestro's
+# `text` matcher reads the accessible label on iOS — same as the setup flow's
+# "Disconnect and go back").
+- tapOn:
+    text: "Show tools"
+- tapOn:
+    text: "View changes"
+
+# Opening the viewer sends `get_diff`; wait for the mock's diff_result to land
+# the file entry (testID set in DiffViewer.tsx's FlatList renderItem).
+- extendedWaitUntil:
+    visible:
+      id: "diff-file-src/utils/helper.ts"
+    timeout: 10000
+
+# Open the file's hunk view.
+- tapOn:
+    id: "diff-file-src/utils/helper.ts"
+- waitForAnimationToEnd
+
+# Tap the addition line `const y = 3` (index 2 in the hunk) to open its inline
+# comment editor. testID `diff-line-<i>` is on the per-line TouchableOpacity
+# whose onPress calls onOpen — a direct tap-by-id propagates to the RN touch
+# responder (unlike the nested-View case in chat-todolist.yaml).
+- tapOn:
+    id: "diff-line-2"
+- extendedWaitUntil:
+    visible:
+      id: "diff-comment-input"
+    timeout: 5000
+
+# Type the comment and save it (queues a pending DiffLineComment). The editor
+# renders near the top of the hunk, above the keyboard, so the save button is
+# reachable without dismissing it (hideKeyboard is broken on the current
+# Maestro CLI — see #6089).
+- tapOn:
+    id: "diff-comment-input"
+- inputText: "prefer a named constant"
+- tapOn:
+    id: "diff-comment-save"
+
+# The bottom action bar's Submit control appears once ≥1 comment is queued.
+- extendedWaitUntil:
+    visible:
+      id: "diff-submit-comments"
+    timeout: 5000
+- takeScreenshot: diff-comment-queued
+
+# Submit — sends composeCommentReviewPrompt() as the next user turn and closes
+# the viewer (handleSubmitComments → sendInput → handleClose).
+- tapOn:
+    id: "diff-submit-comments"
+
+# Back in the chat, the composed prompt lands as the user turn. Assert on the
+# prompt's stable opening line and the comment text carried through from the
+# fixture. Both are single-line substrings, so they survive markdown rendering
+# and Maestro's per-element text matching.
+- extendedWaitUntil:
+    visible:
+      text: ".*Please address the following 1 review comment.*"
+    timeout: 10000
+- assertVisible:
+    text: ".*prefer a named constant.*"
+- takeScreenshot: diff-comment-submitted

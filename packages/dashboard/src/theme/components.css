@@ -9384,6 +9384,30 @@ button.sidebar-token-view-session-row:hover {
   opacity: 0.5;
 }
 
+/* #6800 follow-up: split-view line comments reuse the same gutter button as
+ * the unified line. The cell reserves a left gutter for it and shows the button
+ * on hover / focus, or persistently once the line carries a comment. Saved
+ * notes + the editor render full-width below the row (the CommentBody shares
+ * the .diff-line-comment-note / .diff-line-comment-editor rules above). */
+.diff-split-cell-commentable {
+  position: relative;
+  padding-left: 30px;
+}
+
+.diff-split-cell-commentable .diff-line-comment-btn {
+  left: 6px;
+}
+
+.diff-split-cell-commentable:hover .diff-line-comment-btn,
+.diff-split-cell-has-comment .diff-line-comment-btn,
+.diff-split-cell-commentable .diff-line-comment-btn:focus-visible {
+  opacity: 1;
+}
+
+.diff-split-cell-has-comment {
+  box-shadow: inset 2px 0 0 0 var(--accent-blue);
+}
+
 /* ---- #6800: inline line comments + review triggers ---- */
 /* Toolbar actions: "Submit N comments" + "Review code". */
 .diff-submit-btn,

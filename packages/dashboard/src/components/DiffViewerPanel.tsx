@@ -7,11 +7,11 @@
  * - Unified/split view toggle
  * - Auto-refresh on mount, manual refresh button
  * - #6800: per-line inline comments + a one-click "Review code" trigger. A line
- *   in the unified view can be annotated with free text; pending comments across
- *   files are queued and submitted together as the next user turn for the agent
- *   to address (via the normal `input` wire path — no new WS message type). This
- *   is always on (not gated behind features.ide) since it acts on already-written
- *   uncommitted changes, not the pre-write edit surface.
+ *   in either the unified or split view can be annotated with free text; pending
+ *   comments across files are queued and submitted together as the next user
+ *   turn for the agent to address (via the normal `input` wire path — no new WS
+ *   message type). This is always on (not gated behind features.ide) since it
+ *   acts on already-written uncommitted changes, not the pre-write edit surface.
  */
 import { useState, useEffect, useCallback, useRef } from 'react'
 import {
@@ -43,8 +43,8 @@ type LineCommentTarget = {
 }
 
 /**
- * Commenting wiring threaded down to the unified-view lines. Absent for the
- * read-only / split-view / PreWriteDiffReview renders, which stay unchanged.
+ * Commenting wiring threaded down to the diff lines (unified + split). Absent
+ * for the read-only PreWriteDiffReview render, which stays unchanged.
  */
 type CommentApi = {
   comments: DiffLineComment[]
@@ -106,14 +106,37 @@ function UnifiedLine({ line }: { line: DiffHunkLine }) {
   )
 }
 
+/** The gutter "+"/"×" button that opens a line's inline comment editor. */
+function CommentGutterButton({
+  target,
+  hasComment,
+  onOpen,
+}: {
+  target: LineCommentTarget
+  hasComment: boolean
+  onOpen: (target: LineCommentTarget) => void
+}) {
+  return (
+    <button
+      type="button"
+      className="diff-line-comment-btn"
+      onClick={() => onOpen(target)}
+      title={hasComment ? 'Edit comment' : 'Comment on this line'}
+      aria-label={hasComment ? 'Edit comment on this line' : 'Comment on this line'}
+      data-testid="diff-line-comment-btn"
+    >
+      <span aria-hidden="true">{hasComment ? '×' : '+'}</span>
+    </button>
+  )
+}
+
 /**
- * A unified-view line with an inline-comment affordance (#6800). Renders the
- * same content as UnifiedLine plus a gutter "comment" button; when a comment is
- * attached it shows below the line, and clicking the button (or an existing
- * comment) opens the inline editor. Only used when a CommentApi is supplied.
+ * The saved-comment note (with a Remove control) or the open editor for one
+ * line. Shared by the unified `CommentableLine` (rendered inline below the
+ * line) and the split-view row (rendered full-width below the pair), so both
+ * modes present an identical comment surface.
  */
-function CommentableLine({
-  line,
+function CommentBody({
   target,
   hasComment,
   existingText,
@@ -125,7 +148,6 @@ function CommentableLine({
   onCancel,
   onRemove,
 }: {
-  line: DiffHunkLine
   target: LineCommentTarget
   hasComment: boolean
   existingText: string | undefined
@@ -137,30 +159,8 @@ function CommentableLine({
   onCancel: () => void
   onRemove: (key: string) => void
 }) {
-  const cls =
-    line.type === 'addition' ? 'diff-line-add' :
-    line.type === 'deletion' ? 'diff-line-del' :
-    'diff-line-ctx'
-  const prefix = line.type === 'addition' ? '+' : line.type === 'deletion' ? '-' : ' '
   return (
     <>
-      <div
-        className={`diff-line diff-line-commentable ${cls}${hasComment ? ' diff-line-has-comment' : ''}`}
-        data-testid="diff-line"
-      >
-        <button
-          type="button"
-          className="diff-line-comment-btn"
-          onClick={() => onOpen(target)}
-          title={hasComment ? 'Edit comment' : 'Comment on this line'}
-          aria-label={hasComment ? 'Edit comment on this line' : 'Comment on this line'}
-          data-testid="diff-line-comment-btn"
-        >
-          <span aria-hidden="true">{hasComment ? '×' : '+'}</span>
-        </button>
-        <span className="diff-line-prefix">{prefix}</span>
-        <span className="diff-line-content">{line.content}</span>
-      </div>
       {hasComment && !isEditing && (
         <div className="diff-line-comment-note" data-testid="diff-line-comment-note">
           <button
@@ -212,37 +212,205 @@ function CommentableLine({
   )
 }
 
-function SplitLine({ left, right }: { left: DiffHunkLine | null; right: DiffHunkLine | null }) {
+/**
+ * A unified-view line with an inline-comment affordance (#6800). Renders the
+ * same content as UnifiedLine plus a gutter "comment" button; when a comment is
+ * attached it shows below the line, and clicking the button (or an existing
+ * comment) opens the inline editor. Only used when a CommentApi is supplied.
+ */
+function CommentableLine({
+  line,
+  target,
+  hasComment,
+  existingText,
+  isEditing,
+  draft,
+  onOpen,
+  onDraftChange,
+  onSave,
+  onCancel,
+  onRemove,
+}: {
+  line: DiffHunkLine
+  target: LineCommentTarget
+  hasComment: boolean
+  existingText: string | undefined
+  isEditing: boolean
+  draft: string
+  onOpen: (target: LineCommentTarget) => void
+  onDraftChange: (text: string) => void
+  onSave: () => void
+  onCancel: () => void
+  onRemove: (key: string) => void
+}) {
+  const cls =
+    line.type === 'addition' ? 'diff-line-add' :
+    line.type === 'deletion' ? 'diff-line-del' :
+    'diff-line-ctx'
+  const prefix = line.type === 'addition' ? '+' : line.type === 'deletion' ? '-' : ' '
   return (
-    <div className="diff-split-row" data-testid="split-row">
-      <div className={`diff-split-cell ${left ? (left.type === 'deletion' ? 'diff-line-del' : 'diff-line-ctx') : 'diff-line-empty'}`}>
-        {left && <span className="diff-line-content">{left.content}</span>}
+    <>
+      <div
+        className={`diff-line diff-line-commentable ${cls}${hasComment ? ' diff-line-has-comment' : ''}`}
+        data-testid="diff-line"
+      >
+        <CommentGutterButton target={target} hasComment={hasComment} onOpen={onOpen} />
+        <span className="diff-line-prefix">{prefix}</span>
+        <span className="diff-line-content">{line.content}</span>
       </div>
-      <div className={`diff-split-cell ${right ? (right.type === 'addition' ? 'diff-line-add' : 'diff-line-ctx') : 'diff-line-empty'}`}>
-        {right && <span className="diff-line-content">{right.content}</span>}
-      </div>
-    </div>
+      <CommentBody
+        target={target}
+        hasComment={hasComment}
+        existingText={existingText}
+        isEditing={isEditing}
+        draft={draft}
+        onOpen={onOpen}
+        onDraftChange={onDraftChange}
+        onSave={onSave}
+        onCancel={onCancel}
+        onRemove={onRemove}
+      />
+    </>
   )
 }
 
-function buildSplitPairs(lines: DiffHunkLine[]): { left: DiffHunkLine | null; right: DiffHunkLine | null }[] {
-  const pairs: { left: DiffHunkLine | null; right: DiffHunkLine | null }[] = []
+/** One side of a split-view row: the line plus its index in `hunk.lines`. */
+type SplitCell = { line: DiffHunkLine; index: number } | null
+
+/** Comment wiring for the split view — the panel-level API + per-line targets. */
+type SplitCommentApi = { api: CommentApi; targets: LineCommentTarget[] }
+
+/**
+ * One split-view row (#6800 follow-up). Read-only when `comment` is absent —
+ * byte-identical to the original render. With `comment`, each non-empty cell
+ * gets the same gutter button as a unified line, keyed by the cell's underlying
+ * `hunk.lines` index, and any saved comment / open editor renders full-width
+ * below the row. A context line is the same index on both sides, so it shares a
+ * single comment surface; a deletion/addition pair carries one per side.
+ */
+function SplitLine({
+  left,
+  right,
+  comment,
+}: {
+  left: SplitCell
+  right: SplitCell
+  comment?: SplitCommentApi
+}) {
+  const leftLine = left?.line ?? null
+  const rightLine = right?.line ?? null
+
+  const renderCell = (cell: SplitCell, line: DiffHunkLine | null, side: 'left' | 'right') => {
+    const base = line
+      ? side === 'left'
+        ? (line.type === 'deletion' ? 'diff-line-del' : 'diff-line-ctx')
+        : (line.type === 'addition' ? 'diff-line-add' : 'diff-line-ctx')
+      : 'diff-line-empty'
+    if (!comment || !cell) {
+      return (
+        <div className={`diff-split-cell ${base}`}>
+          {line && <span className="diff-line-content">{line.content}</span>}
+        </div>
+      )
+    }
+    const target = comment.targets[cell.index]!
+    const hasComment = comment.api.comments.some((c) => c.id === target.key)
+    return (
+      <div
+        className={`diff-split-cell diff-split-cell-commentable${hasComment ? ' diff-split-cell-has-comment' : ''} ${base}`}
+      >
+        <CommentGutterButton target={target} hasComment={hasComment} onOpen={comment.api.onOpen} />
+        {line && <span className="diff-line-content">{line.content}</span>}
+      </div>
+    )
+  }
+
+  // Distinct underlying line indices in this row: a context line is the same
+  // index on both sides (one comment surface); a deletion/addition pair is two.
+  const indices: number[] = []
+  if (left) indices.push(left.index)
+  if (right && (!left || right.index !== left.index)) indices.push(right.index)
+
+  return (
+    <>
+      <div className="diff-split-row" data-testid="split-row">
+        {renderCell(left, leftLine, 'left')}
+        {renderCell(right, rightLine, 'right')}
+      </div>
+      {comment &&
+        indices.map((idx) => {
+          const target = comment.targets[idx]!
+          const existing = comment.api.comments.find((c) => c.id === target.key)
+          const isEditing = comment.api.editingKey === target.key
+          if (!existing && !isEditing) return null
+          return (
+            <CommentBody
+              key={target.key}
+              target={target}
+              hasComment={!!existing}
+              existingText={existing?.comment}
+              isEditing={isEditing}
+              draft={comment.api.draft}
+              onOpen={comment.api.onOpen}
+              onDraftChange={comment.api.onDraftChange}
+              onSave={comment.api.onSave}
+              onCancel={comment.api.onCancel}
+              onRemove={comment.api.onRemove}
+            />
+          )
+        })}
+    </>
+  )
+}
+
+/**
+ * Build the per-line comment targets for a hunk in a single forward pass over
+ * `hunk.lines`, accumulating the old/new line counters exactly as
+ * deriveLineNumber does (deletions resolve to the old-file line, everything
+ * else to the new-file line). Shared by the unified and split renders so a
+ * comment keyed on line index `i` lands on the same line — with the same
+ * derived line number and comment id — in either mode.
+ */
+function buildLineTargets(hunk: DiffHunk, filePath: string, hunkIndex: number): LineCommentTarget[] {
+  const starts = parseHunkStartLines(hunk.header)
+  let oldLine = starts?.oldStart ?? 0
+  let newLine = starts?.newStart ?? 0
+  return hunk.lines.map((line, i) => {
+    const lineNumber = starts ? (line.type === 'deletion' ? oldLine : newLine) : null
+    if (line.type === 'deletion') oldLine++
+    else if (line.type === 'addition') newLine++
+    else {
+      oldLine++
+      newLine++
+    }
+    return {
+      key: lineKey(filePath, hunkIndex, i),
+      filePath,
+      lineNumber,
+      lineType: line.type,
+      lineContent: line.content,
+    }
+  })
+}
+
+function buildSplitPairs(lines: DiffHunkLine[]): { left: SplitCell; right: SplitCell }[] {
+  const pairs: { left: SplitCell; right: SplitCell }[] = []
   let i = 0
   while (i < lines.length) {
     const line = lines[i]!
     if (line.type === 'context') {
-      pairs.push({ left: line, right: line })
+      pairs.push({ left: { line, index: i }, right: { line, index: i } })
       i++
     } else if (line.type === 'deletion') {
       // Collect consecutive deletions and additions to pair them
-      const dels: DiffHunkLine[] = []
+      const dels: SplitCell[] = []
       while (i < lines.length && lines[i]!.type === 'deletion') {
-        dels.push(lines[i]!)
+        dels.push({ line: lines[i]!, index: i })
         i++
       }
-      const adds: DiffHunkLine[] = []
+      const adds: SplitCell[] = []
       while (i < lines.length && lines[i]!.type === 'addition') {
-        adds.push(lines[i]!)
+        adds.push({ line: lines[i]!, index: i })
         i++
       }
       const max = Math.max(dels.length, adds.length)
@@ -251,7 +419,7 @@ function buildSplitPairs(lines: DiffHunkLine[]): { left: DiffHunkLine | null; ri
       }
     } else {
       // Standalone addition (no preceding deletion)
-      pairs.push({ left: null, right: line })
+      pairs.push({ left: null, right: { line, index: i } })
       i++
     }
   }
@@ -273,7 +441,7 @@ type HunkSelectionProps =
 export type HunkViewProps = {
   hunk: DiffHunk
   viewMode: ViewMode
-  /** #6800: identity + comment wiring for the unified-view inline comments. */
+  /** #6800: identity + comment wiring for the inline comments (unified + split). */
   filePath?: string
   hunkIndex?: number
   commentApi?: CommentApi
@@ -290,9 +458,15 @@ export function HunkView({
   onToggle,
 }: HunkViewProps) {
   const cls = `diff-hunk${selectable ? ` diff-hunk-selectable${selected ? '' : ' diff-hunk-rejected'}` : ''}`
-  // Inline comments only in unified view, and only when a CommentApi + filePath
-  // are supplied. Split view and read-only consumers keep the original render.
-  const commentsOn = viewMode === 'unified' && !!commentApi && filePath != null
+  // Inline comments in BOTH unified and split view, whenever a CommentApi +
+  // filePath are supplied. Read-only consumers (PreWriteDiffReview) pass
+  // neither, so their render is byte-for-byte unchanged.
+  const commentsOn = !!commentApi && filePath != null
+  // #6930: precompute the per-line targets once (single forward pass over
+  // hunk.lines — mirrors deriveLineNumber's logic without the O(n^2) per-line
+  // rescan). Shared by the unified lines and the split cells so a comment keyed
+  // on index `i` resolves to the same line number + id in either mode.
+  const targets = commentsOn ? buildLineTargets(hunk, filePath!, hunkIndex) : null
   return (
     <div className={cls} data-testid="diff-hunk">
       {selectable ? (
@@ -311,55 +485,42 @@ export function HunkView({
         <HunkHeader header={hunk.header} />
       )}
       {viewMode === 'unified' ? (
-        !commentsOn
-          ? hunk.lines.map((line, i) => <UnifiedLine key={i} line={line} />)
-          : (() => {
+        targets
+          ? hunk.lines.map((line, i) => {
               const api = commentApi!
-              // #6930: single forward pass over hunk.lines, accumulating the
-              // old/new line counters as we go — mirrors deriveLineNumber's
-              // logic exactly, but avoids the O(i) rescan that calling
-              // deriveLineNumber(hunk, i) per line would incur (making the
-              // whole hunk render O(n^2)). Rendered line numbers stay
-              // byte-identical to the per-line helper.
-              const starts = parseHunkStartLines(hunk.header)
-              let oldLine = starts?.oldStart ?? 0
-              let newLine = starts?.newStart ?? 0
-              return hunk.lines.map((line, i) => {
-                const lineNumber = starts ? (line.type === 'deletion' ? oldLine : newLine) : null
-                if (line.type === 'deletion') oldLine++
-                else if (line.type === 'addition') newLine++
-                else {
-                  oldLine++
-                  newLine++
-                }
-                const key = lineKey(filePath!, hunkIndex, i)
-                const existing = api.comments.find((c) => c.id === key)
-                return (
-                  <CommentableLine
-                    key={i}
-                    line={line}
-                    target={{
-                      key,
-                      filePath: filePath!,
-                      lineNumber,
-                      lineType: line.type,
-                      lineContent: line.content,
-                    }}
-                    hasComment={!!existing}
-                    existingText={existing?.comment}
-                    isEditing={api.editingKey === key}
-                    draft={api.draft}
-                    onOpen={api.onOpen}
-                    onDraftChange={api.onDraftChange}
-                    onSave={api.onSave}
-                    onCancel={api.onCancel}
-                    onRemove={api.onRemove}
-                  />
-                )
-              })
-            })()
+              const target = targets[i]!
+              const existing = api.comments.find((c) => c.id === target.key)
+              return (
+                <CommentableLine
+                  key={i}
+                  line={line}
+                  target={target}
+                  hasComment={!!existing}
+                  existingText={existing?.comment}
+                  isEditing={api.editingKey === target.key}
+                  draft={api.draft}
+                  onOpen={api.onOpen}
+                  onDraftChange={api.onDraftChange}
+                  onSave={api.onSave}
+                  onCancel={api.onCancel}
+                  onRemove={api.onRemove}
+                />
+              )
+            })
+          : hunk.lines.map((line, i) => <UnifiedLine key={i} line={line} />)
       ) : (
-        buildSplitPairs(hunk.lines).map((pair, i) => <SplitLine key={i} left={pair.left} right={pair.right} />)
+        buildSplitPairs(hunk.lines).map((pair, i) =>
+          targets ? (
+            <SplitLine
+              key={i}
+              left={pair.left}
+              right={pair.right}
+              comment={{ api: commentApi!, targets }}
+            />
+          ) : (
+            <SplitLine key={i} left={pair.left} right={pair.right} />
+          ),
+        )
       )}
     </div>
   )
