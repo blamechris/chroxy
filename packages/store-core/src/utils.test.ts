@@ -44,6 +44,7 @@ describe('createEmptyBaseSessionState', () => {
       sessionRole: null,
       conversationId: null,
       sessionContext: null,
+      statusLine: null,
       mcpServers: [],
       devPreviews: [],
       inactivityWarning: null,

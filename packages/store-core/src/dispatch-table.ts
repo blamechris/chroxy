@@ -104,6 +104,7 @@ import {
   handleTunnelUrlChanged,
   handleSessionUsage,
   handleSessionContext,
+  handleStatuslineOutput,
   handleModelChangedPatch,
   handleSessionCostThresholdCrossed,
   handleDevPreview,
@@ -229,6 +230,11 @@ export interface DispatchSessionBase {
   // `sessionCost` — written by cost_update (the per-session running cost).
   // Both clients' real `SessionState` carry it (BaseSessionState).
   sessionCost?: number | null
+  // --- statusline_output (#6791) ---
+  // `statusLine` — written by statusline_output (the user's own statusLine
+  // script's rendered stdout). Both clients' real `SessionState` carry it
+  // (BaseSessionState).
+  statusLine?: string | null
 }
 
 /**
@@ -825,6 +831,13 @@ export interface DispatchMessageMap {
     gitDirty?: unknown
     gitAhead?: unknown
     projectName?: unknown
+  }
+  statusline_output: {
+    type: 'statusline_output'
+    sessionId?: string
+    text?: string
+    active?: boolean
+    truncated?: boolean
   }
   model_changed: {
     type: 'model_changed'
@@ -2118,6 +2131,7 @@ export function createDispatchTable<S extends DispatchSessionBase>(): DispatchTa
     auth_bootstrap: dispatchAuthBootstrap,
     session_usage: sessionPatchDispatcher<S>(handleSessionUsage),
     session_context: sessionPatchDispatcher<S>(handleSessionContext),
+    statusline_output: sessionPatchDispatcher<S>(handleStatuslineOutput),
     model_changed: sessionPatchDispatcher<S>(handleModelChangedPatch),
     session_cost_threshold_crossed: dispatchSessionCostThresholdCrossed,
     dev_preview: dispatchDevPreview,
@@ -2218,6 +2232,7 @@ export const DISPATCH_TABLE_TYPES: readonly DispatchMessageType[] = [
   'auth_bootstrap',
   'session_usage',
   'session_context',
+  'statusline_output',
   'session_cost_threshold_crossed',
   'dev_preview',
   'dev_preview_stopped',

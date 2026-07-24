@@ -229,6 +229,33 @@ export function handleSessionWarning(msg: Record<string, unknown>): SessionWarni
 }
 
 // ---------------------------------------------------------------------------
+// statusline_output (#6791)
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse a `statusline_output` message into a `statusLine` patch.
+ *
+ * The server executes the user's own Claude Code `statusLine` command and sends
+ * its rendered stdout here. We store the raw text (which MAY contain ANSI —
+ * renderers call `stripAnsi`) when the line is active and non-empty; anything
+ * else (`active: false`, empty/blank text, non-string) clears the strip
+ * (`statusLine: null`). Matches Claude Code's "non-zero exit / no output →
+ * blank" contract, which the server already collapses into these fields.
+ */
+export function handleStatuslineOutput(
+  msg: Record<string, unknown>,
+  activeSessionId: string | null,
+): SessionPatch {
+  const active = msg.active !== false
+  const raw = typeof msg.text === 'string' ? msg.text : ''
+  const statusLine = active && raw.trim() !== '' ? raw : null
+  return {
+    sessionId: resolveSessionId(msg, activeSessionId),
+    patch: { statusLine },
+  }
+}
+
+// ---------------------------------------------------------------------------
 // session_switched
 // ---------------------------------------------------------------------------
 

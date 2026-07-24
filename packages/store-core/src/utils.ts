@@ -103,6 +103,9 @@ export function createEmptyBaseSessionState(): BaseSessionState {
     sessionRole: null,
     conversationId: null,
     sessionContext: null,
+    // #6791: null until the first statusline_output arrives (or no statusLine
+    // configured). Additive to the cost/context StatusBar.
+    statusLine: null,
     mcpServers: [],
     devPreviews: [],
     inactivityWarning: null,

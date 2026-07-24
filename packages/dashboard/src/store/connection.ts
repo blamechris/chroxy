@@ -2068,6 +2068,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       sessionRole: null,
       conversationId: null,
       sessionContext: null,
+      // #6791: no statusLine output in the flat-state fallback (only real
+      // SessionStates receive statusline_output events).
+      statusLine: null,
       mcpServers: EMPTY_MCP_SERVERS,
       devPreviews: EMPTY_DEV_PREVIEWS,
       selectedFilePath: null,

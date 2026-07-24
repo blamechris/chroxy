@@ -635,3 +635,18 @@ export const ServerSessionTimeoutSchema = z.object({
     name: z.string(),
     idleMs: z.number(),
 });
+// #6791 — the user's Claude Code `statusLine` script output. The server reads
+// the effective `statusLine` command from the user's own settings.json
+// (~/.claude and the project's .claude), executes it under a bounded timeout +
+// stdout cap, and broadcasts its rendered stdout here so clients can show a
+// status strip alongside the existing StatusBar. `active: false` with an empty
+// `text` clears a line previously shown (config removed). `text` may carry ANSI
+// (clients strip it for a plain strip). `sessionId` is injected by
+// `_broadcastToSession`, so it is optional pre-broadcast.
+export const ServerStatuslineOutputSchema = z.object({
+    type: z.literal('statusline_output'),
+    sessionId: z.string().optional(),
+    text: z.string(),
+    active: z.boolean().optional(),
+    truncated: z.boolean().optional(),
+});

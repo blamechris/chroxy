@@ -305,6 +305,9 @@ export function App() {
     interventions,
     // #6790: active dev-server preview tunnels for the header DevPreviewChip.
     devPreviews,
+    // #6791: the user's own statusLine script output, shown as an additive
+    // strip in the header StatusBar.
+    statusLine,
   } = useConnectionStore(useShallow(s => s.getActiveSessionState()))
 
   // #3205: stable Set for SkillsPanel mismatch indicator. useMemo
@@ -2218,6 +2221,7 @@ export function App() {
         onOpenSettings={openSettings}
         cost={sessionCost ?? undefined}
         context={formatContext(contextOccupancy)}
+        statusLine={statusLine ?? undefined}
         contextPercent={contextPercent}
         contextTokens={contextTokens ?? undefined}
         contextEstimated={contextOccupancy?.source === 'final-round-prompt'}

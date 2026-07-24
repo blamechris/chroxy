@@ -1,7 +1,7 @@
 /**
  * StatusBar — cost, context, busy indicator, agent badges.
  */
-import { formatTokensCompact } from '@chroxy/store-core'
+import { formatTokensCompact, stripAnsi } from '@chroxy/store-core'
 import { getProviderInfo } from '../lib/provider-labels'
 import {
   costTooltip,
@@ -13,6 +13,14 @@ import { SidebarCostBadge, type CostBadgeMode } from './SidebarCostBadge'
 export interface StatusBarProps {
   cost?: number
   context?: string
+  /**
+   * #6791: the rendered stdout of the user's OWN Claude Code `statusLine`
+   * script (git branch / model / cost tracker / …), executed server-side. Shown
+   * as an ADDITIVE strip alongside the cost/context chips — never replaces them.
+   * May carry ANSI escapes (stripped for the plain strip). Absent/empty → the
+   * strip hides entirely.
+   */
+  statusLine?: string | null
   /** #6769: percent of the meter ceiling the conversation fills (occupancy-driven). */
   contextPercent?: number | null
   /**
@@ -84,11 +92,16 @@ export const STATUS_COMPACT_SUGGEST_THRESHOLD = 80
 export const STATUS_OVER_BUDGET_THRESHOLD = 100
 
 export function StatusBar({
-  cost, context, contextPercent, contextTokens, contextEstimated,
+  cost, context, statusLine, contextPercent, contextTokens, contextEstimated,
   inputTokens, outputTokens, contextWindow,
   isBusy, agentCount, provider, model, costBadgeMode,
 }: StatusBarProps) {
   const prov = provider ? getProviderInfo(provider) : null
+  // #6791: the user's own statusLine script output, ANSI-stripped and collapsed
+  // to a single line for the header strip. Full (multi-line) text rides along in
+  // the tooltip. Empty/whitespace-only → the strip hides.
+  const rawStatusLine = statusLine ? stripAnsi(statusLine) : ''
+  const statusLineText = rawStatusLine.replace(/\s*\n\s*/g, ' ').trim()
   // #4204 Copilot review: compute each chip's tooltip once so the
   // `title` + `aria-label` mirror pair can't drift if the formatter
   // ever takes a code path with side effects.
@@ -147,6 +160,18 @@ export function StatusBar({
       {model && (
         <span className="status-model" data-testid="status-model" title={model}>
           {model}
+        </span>
+      )}
+      {statusLineText && (
+        // #6791: additive strip for the user's own statusLine script output.
+        // Truncates with an ellipsis (CSS); the full text is in the title.
+        <span
+          className="status-userline"
+          data-testid="status-userline"
+          title={rawStatusLine}
+          aria-label={`Status line: ${statusLineText}`}
+        >
+          {statusLineText}
         </span>
       )}
     </div>

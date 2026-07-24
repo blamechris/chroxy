@@ -590,6 +590,21 @@ a.dev-preview-chip__link:focus-visible {
   min-width: 0;
 }
 
+/* #6791: the user's own statusLine script output — an additive strip beside the
+   model badge. Monospace, muted, single-line with ellipsis so a long line can't
+   blow out the header (full text is in the title tooltip). */
+.status-userline {
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  max-width: 40ch;
+  padding-left: 8px;
+  border-left: 1px solid var(--border-subtle, var(--border, rgba(255, 255, 255, 0.1)));
+}
+
 .logo {
   font-size: 18px;
   font-weight: 700;

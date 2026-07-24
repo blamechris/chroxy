@@ -51,6 +51,7 @@ import { resolveSkipPermissions, buildEnvironmentBackend, isUserShellEnabled, ge
 import { buildOrchestrationManager } from './orchestration/build-manager.js'
 import { parseDuration } from './duration.js'
 import { createSessionTokenStore } from './session-token-store.js'
+import { StatusLineManager } from './statusline.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -784,6 +785,57 @@ export async function startCliServer(config) {
     }
   })
 
+  // #6791: read + execute the user's OWN Claude Code statusLine script and
+  // surface its stdout. The command is ONLY ever the one in the user's own
+  // settings.json (~/.claude / the project's .claude) — never client-supplied —
+  // and every execution is bounded by a timeout + stdout cap + secret-stripped
+  // env (see statusline.js). Inactive (silent no-op) when no statusLine is
+  // configured. Session-scoped broadcast so one session's status never fans out
+  // to clients viewing another.
+  const statusLineManager = new StatusLineManager()
+  const buildStatuslineContext = (sessionId) => {
+    const entry = sessionManager.getSession(sessionId)
+    if (!entry) return null
+    const usage = entry.cumulativeUsage || {}
+    const cost = {}
+    if (Number.isFinite(usage.costUsd)) cost.totalCostUsd = usage.costUsd
+    return {
+      sessionId,
+      sessionName: entry.name || null,
+      cwd: entry.cwd,
+      projectDir: entry.worktreeRepoDir || entry.cwd,
+      model: { id: entry.session?.model || entry.session?.bootedModel || null },
+      cost,
+    }
+  }
+  statusLineManager.on('output', ({ sessionId, text, active, truncated }) => {
+    // wsServer is assigned further down; a periodic tick can fire first.
+    if (!wsServer) return
+    wsServer._broadcastToSession(sessionId, { type: 'statusline_output', text, active, truncated })
+  })
+  sessionManager.on('session_created', ({ sessionId }) => {
+    statusLineManager.startSession(sessionId, () => buildStatuslineContext(sessionId))
+  })
+  sessionManager.on('session_destroyed', ({ sessionId }) => {
+    // Clears the session's periodic timer. On graceful shutdown, destroyAll()
+    // cascades a session_destroyed per session, so every timer is cleared here
+    // (and all timers are .unref()'d, so they never block process exit anyway).
+    statusLineManager.stopSession(sessionId)
+  })
+  // Turn-boundary refresh for immediacy (mirrors Claude Code's "new assistant
+  // message" trigger); the periodic loop in StatusLineManager covers the rest.
+  sessionManager.on('session_event', ({ sessionId, event }) => {
+    if (event !== 'result') return
+    const ctx = buildStatuslineContext(sessionId)
+    if (ctx) statusLineManager.refresh(sessionId, ctx)
+  })
+  // NOTE: session_created above fires only for FUTURE sessions; the default
+  // session (and any restored ones) were created before these listeners
+  // registered, so their loops are started AFTER wsServer is constructed (see
+  // below) — starting them here would let the first tick's `output` fire while
+  // `wsServer` is still null, and the manager's dedupe would then swallow the
+  // (dropped) broadcast until the script's text next changed.
+
   // 3. Create push notification manager, token manager, and WebSocket server
   const pushManager = new PushManager({
     storagePath: join(homedir(), '.chroxy', 'push-tokens.json'),
@@ -991,6 +1043,12 @@ export async function startCliServer(config) {
     // enforce the 2026-04-11 audit blocker 1 workspace allowlist.
     config,
   })
+  // #6791: now that wsServer exists, start statusLine loops for the sessions
+  // that already existed at boot (the default + any restored). session_created
+  // covers every FUTURE session; startSession is idempotent so no double-start.
+  for (const s of sessionManager.listSessions()) {
+    if (s?.sessionId) statusLineManager.startSession(s.sessionId, () => buildStatuslineContext(s.sessionId))
+  }
   // Resolve the bind address. --no-auth forces loopback; otherwise an explicit
   // config.host (e.g. --host 127.0.0.1) binds that interface with auth still
   // on, and the default (undefined) binds 0.0.0.0 as before.
