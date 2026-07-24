@@ -56,14 +56,15 @@ describe('#6996 review — requestMemoryRead sessionId + requestId', () => {
 
     expect(result).toBe(true)
     expect(sent).toHaveLength(1)
-    expect(sent[0].type).toBe('memory_read')
-    expect(sent[0].sessionId).toBe('s1')
-    expect(typeof sent[0].requestId).toBe('string')
-    expect((sent[0].requestId as string).length).toBeGreaterThan(0)
+    const msg = sent[0]!
+    expect(msg.type).toBe('memory_read')
+    expect(msg.sessionId).toBe('s1')
+    expect(typeof msg.requestId).toBe('string')
+    expect((msg.requestId as string).length).toBeGreaterThan(0)
 
     const state = useConnectionStore.getState()
     expect(state.memoryStackLoading).toBe(true)
-    expect(state.lastMemoryStackRequestId).toBe(sent[0].requestId)
+    expect(state.lastMemoryStackRequestId).toBe(msg.requestId)
   })
 
   it('sends a fresh requestId on each call (never reuses the previous nonce)', async () => {
@@ -76,8 +77,10 @@ describe('#6996 review — requestMemoryRead sessionId + requestId', () => {
     useConnectionStore.getState().requestMemoryRead()
 
     expect(sent).toHaveLength(2)
-    expect(sent[0].requestId).not.toBe(sent[1].requestId)
-    expect(useConnectionStore.getState().lastMemoryStackRequestId).toBe(sent[1].requestId)
+    const first = sent[0]!
+    const second = sent[1]!
+    expect(first.requestId).not.toBe(second.requestId)
+    expect(useConnectionStore.getState().lastMemoryStackRequestId).toBe(second.requestId)
   })
 
   it('omits sessionId when there is no active session, but still sends a requestId', async () => {
@@ -89,8 +92,10 @@ describe('#6996 review — requestMemoryRead sessionId + requestId', () => {
     const result = useConnectionStore.getState().requestMemoryRead()
 
     expect(result).toBe(true)
-    expect(sent[0]).not.toHaveProperty('sessionId')
-    expect(typeof sent[0].requestId).toBe('string')
+    expect(sent).toHaveLength(1)
+    const msg = sent[0]!
+    expect(msg).not.toHaveProperty('sessionId')
+    expect(typeof msg.requestId).toBe('string')
   })
 
   it('returns false and sends nothing when WS is CLOSED', async () => {
