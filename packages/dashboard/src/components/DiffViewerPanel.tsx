@@ -57,6 +57,51 @@ type CommentApi = {
   onRemove: (key: string) => void
 }
 
+/**
+ * #6961: content-level equality for a landed diff payload. A routine WS
+ * reconnect re-runs the diff-request mount effect and re-lands a diff that is
+ * very often byte-identical to what's already shown. Comparing structurally
+ * (not by reference) lets the landing callback tell a genuine diff change
+ * (positions may have shifted — stale position-keyed comments must still be
+ * cleared, #6946) apart from a no-op re-delivery of the same content (which
+ * must NOT wipe already-queued comments or an actively-open unsaved draft).
+ */
+function diffLinesEqual(a: DiffHunkLine[], b: DiffHunkLine[]): boolean {
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) {
+    if (a[i]!.type !== b[i]!.type || a[i]!.content !== b[i]!.content) return false
+  }
+  return true
+}
+
+function diffHunksEqual(a: DiffHunk[], b: DiffHunk[]): boolean {
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) {
+    if (a[i]!.header !== b[i]!.header) return false
+    if (!diffLinesEqual(a[i]!.lines, b[i]!.lines)) return false
+  }
+  return true
+}
+
+function diffFilesEqual(a: DiffFile[], b: DiffFile[]): boolean {
+  if (a === b) return true
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) {
+    const fa = a[i]!
+    const fb = b[i]!
+    if (
+      fa.path !== fb.path ||
+      fa.status !== fb.status ||
+      fa.additions !== fb.additions ||
+      fa.deletions !== fb.deletions
+    ) {
+      return false
+    }
+    if (!diffHunksEqual(fa.hunks, fb.hunks)) return false
+  }
+  return true
+}
+
 function statusLabel(status: DiffFile['status']): string {
   switch (status) {
     case 'added': return 'A'
@@ -599,20 +644,34 @@ export function DiffViewerPanel() {
   const [draft, setDraft] = useState('')
   const [justSent, setJustSent] = useState<'comments' | 'review' | null>(null)
 
+  // #6961: the last diff content actually landed, so the callback below can
+  // tell a genuine diff change apart from a no-op re-delivery of the same
+  // content (see diffFilesEqual above).
+  const lastDiffRef = useRef<{ files: DiffFile[]; error: string | null }>({ files: [], error: null })
+
   // Wire callback
   useEffect(() => {
     setDiffCallback((result: DiffResult) => {
-      // #6946: any diff push — the manual Refresh landing OR an unprompted
-      // auto-refresh/reconnect — can shift line positions, invalidating
-      // position-keyed comments. Clear them here (not just in handleRefresh)
-      // so an auto-refresh matches mobile's DiffViewer, which drops pending
-      // comments on every diff (re)request.
+      const changed =
+        result.error !== lastDiffRef.current.error ||
+        !diffFilesEqual(result.files, lastDiffRef.current.files)
+      lastDiffRef.current = { files: result.files, error: result.error }
       setFiles(result.files)
       setError(result.error)
       setLoading(false)
-      setComments([])
-      setEditing(null)
-      setDraft('')
+      // #6946: a genuine diff change — the manual Refresh landing OR an
+      // unprompted auto-refresh/reconnect — can shift line positions,
+      // invalidating position-keyed comments. Clear them here (not just in
+      // handleRefresh) so an auto-refresh matches mobile's DiffViewer, which
+      // drops pending comments on every diff (re)request.
+      // #6961: but a routine WS reconnect very often re-lands a
+      // byte-identical diff — in that no-op case, leave already-queued
+      // comments and an actively-open unsaved draft untouched.
+      if (changed) {
+        setComments([])
+        setEditing(null)
+        setDraft('')
+      }
     })
     return () => setDiffCallback(null)
   }, [setDiffCallback])
