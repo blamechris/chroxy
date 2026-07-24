@@ -200,11 +200,18 @@ by one.
   first real spawn is checked against a hash the operator chose, not one the gate
   observed at an arbitrary first run. Because the ledger IS the trust root, its
   `0600` permission (`path-hash-trust-ledger.js`'s atomic write) is
-  **integrity-relevant, not just confidentiality-relevant**: this file is
-  user-writable by design (best-effort persistence, fail-open on a read-only
+  **integrity-relevant, not just confidentiality-relevant, on POSIX**: this file
+  is user-writable by design (best-effort persistence, fail-open on a read-only
   `$HOME`), so anyone with write access to it can pin an attacker-chosen hash and
-  have the gate wave a malicious binary through as "verified." The ledger is only
-  as trustworthy as the account that owns `~/.chroxy` — protecting that account is
+  have the gate wave a malicious binary through as "verified." On Windows the
+  mode bits are best-effort/advisory, not an enforced ACL — `flush()` persists
+  via `saveJsonState({ fsync: true })`, whose durable-write branch opens the temp
+  file directly with `openSync(tmpPath, 'wx', 0o600)` rather than going through
+  `writeFileRestricted` (the `icacls`-based owner-only-DACL writer used
+  elsewhere, e.g. for credential storage), so on Windows the ledger's real
+  protection is whatever ACL the surrounding `~/.chroxy` directory already
+  inherited, not an explicitly restricted one. The ledger is only as
+  trustworthy as the account that owns `~/.chroxy` — protecting that account is
   part of this gate's threat model, not an orthogonal concern.
 
 ### Configuration
