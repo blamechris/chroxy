@@ -35,6 +35,23 @@ describe('StatusBar', () => {
     expect(left?.querySelector('.status-cost')).toBeNull()
   })
 
+  it('#6791: renders the statusLine strip (ANSI-stripped) in the left group', () => {
+    const { container } = render(<StatusBar statusLine={'\u001b[32mmain\u001b[0m | $0.10'} />)
+    const el = container.querySelector('.status-userline')
+    expect(el).toBeTruthy()
+    // ANSI escapes stripped for the plain strip.
+    expect(el).toHaveTextContent('main | $0.10')
+    // Sits in the LEFT identity group, not the right metrics group.
+    expect(container.querySelector('.status-bar-left .status-userline')).toBeTruthy()
+  })
+
+  it('#6791: hides the statusLine strip when absent or blank', () => {
+    const { container: none } = render(<StatusBar />)
+    expect(none.querySelector('.status-userline')).toBeNull()
+    const { container: blank } = render(<StatusBar statusLine={'   \n  '} />)
+    expect(blank.querySelector('.status-userline')).toBeNull()
+  })
+
   it('shows formatted cost with 4 decimal places', () => {
     render(<StatusBar cost={0.0123} />)
     expect(screen.getByText('$0.0123')).toBeInTheDocument()

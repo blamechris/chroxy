@@ -409,6 +409,7 @@ function _isSecureRequest(req) {
  *   { type: 'token_rotated', token?, expiresAt, reason? } — API token changed. Scheduled rotation carries the new `token` to encrypted clients (transparent re-key, sessions survive). A `reason: 'revoke'` (#6006) carries NO token: the operator revoked, so the server severed user-shell sessions and cleared this connection's auth — the client must re-authenticate with the current token (obtained out-of-band).
  *   { type: 'session_warning', sessionId, name, reason, message, remainingMs } — session about to timeout
  *   { type: 'session_timeout', sessionId, name, idleMs }         — session destroyed due to idle timeout
+ *   { type: 'statusline_output', sessionId, text, active?, truncated? } — #6791: rendered stdout of the user's own Claude Code statusLine script (active:false + empty text clears it)
  *   { type: 'dev_preview', port, url, sessionId }       — dev server preview tunnel opened
  *   { type: 'dev_preview_stopped', port, sessionId }    — dev server preview tunnel closed
  *   { type: 'web_task_created', task }                  — cloud task launched

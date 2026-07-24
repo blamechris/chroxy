@@ -471,3 +471,10 @@ export declare const ServerSessionTimeoutSchema: z.ZodObject<{
     name: z.ZodString;
     idleMs: z.ZodNumber;
 }, z.core.$strip>;
+export declare const ServerStatuslineOutputSchema: z.ZodObject<{
+    type: z.ZodLiteral<"statusline_output">;
+    sessionId: z.ZodOptional<z.ZodString>;
+    text: z.ZodString;
+    active: z.ZodOptional<z.ZodBoolean>;
+    truncated: z.ZodOptional<z.ZodBoolean>;
+}, z.core.$strip>;

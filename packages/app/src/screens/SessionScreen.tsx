@@ -366,6 +366,11 @@ export function SessionScreen() {
     const id = s.activeSessionId;
     return id && s.sessionStates[id] ? s.sessionStates[id].sessionContext : null;
   });
+  // #6791: the user's own statusLine script output for the active session.
+  const statusLine = useConnectionStore((s) => {
+    const id = s.activeSessionId;
+    return id && s.sessionStates[id] ? s.sessionStates[id].statusLine : null;
+  });
   const pendingPermissionConfirm = useConnectionStore((s) => s.pendingPermissionConfirm);
   const slashCommands = useConnectionStore((s) => s.slashCommands);
   const customAgents = useConnectionStore((s) => s.customAgents);
@@ -1384,6 +1389,7 @@ export function SessionScreen() {
           onCancelPermissionConfirm={cancelPermissionConfirm}
           conversationId={conversationId}
           sessionContext={sessionContext}
+          statusLine={statusLine}
           latencyMs={latencyMs}
           connectionQuality={connectionQuality}
           activePath={activePath}

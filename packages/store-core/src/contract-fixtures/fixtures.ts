@@ -962,6 +962,26 @@ export const DISPATCH_FIXTURES: ContractFixture[] = [
     },
   },
 
+  // 15c. statusline_output — the user's own statusLine script output (#6791)
+  {
+    name: 'statusline_output stores the rendered script text on the target session',
+    type: 'statusline_output',
+    init: { sessions: { s1: {} } },
+    message: { type: 'statusline_output', sessionId: 's1', text: 'main | $0.10', active: true },
+    expect: {
+      sessions: { s1: { statusLine: 'main | $0.10' } },
+    },
+  },
+  {
+    name: 'statusline_output with active:false clears a previously shown line',
+    type: 'statusline_output',
+    init: { sessions: { s1: { statusLine: 'stale' } } },
+    message: { type: 'statusline_output', sessionId: 's1', text: '', active: false },
+    expect: {
+      sessions: { s1: { statusLine: null } },
+    },
+  },
+
   // 16. session_cost_threshold_crossed — one-shot cost banner (no active fallback)
   {
     name: 'session_cost_threshold_crossed stores the one-shot cost-warning banner',

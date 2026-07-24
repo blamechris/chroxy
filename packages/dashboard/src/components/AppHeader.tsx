@@ -77,6 +77,9 @@ export interface AppHeaderProps {
   // StatusBar (row 2)
   cost?: number
   context?: string
+  // #6791: the user's own statusLine script output, rendered as an additive
+  // strip in the StatusBar (does not replace the cost/context chips).
+  statusLine?: string | null
   contextPercent: number | null
   // #6769: window occupancy in tokens from the provider's snapshot — drives
   // the header meter's `used / total` label. Absent = no occupancy signal
@@ -302,6 +305,7 @@ export function AppHeader(props: AppHeaderProps) {
         <StatusBar
           cost={props.cost}
           context={props.context}
+          statusLine={props.statusLine}
           contextPercent={props.contextPercent}
           contextTokens={props.contextTokens}
           contextEstimated={props.contextEstimated}

@@ -515,6 +515,17 @@ export interface BaseSessionState {
   sessionRole: SessionRole | null;
   conversationId: string | null;
   sessionContext: SessionContext | null;
+  /**
+   * #6791 — the rendered stdout of the user's own Claude Code `statusLine`
+   * script (git branch / model / cost tracker / …), read from their
+   * settings.json and executed server-side. Null when no `statusLine` is
+   * configured, when the script produced no output / exited non-zero / timed
+   * out (Claude Code's "blank" states), or before the first `statusline_output`
+   * arrives. MAY contain ANSI escapes — renderers strip them (`stripAnsi`) for a
+   * plain status strip. Additive to the existing cost/context StatusBar, not a
+   * replacement.
+   */
+  statusLine: string | null;
   mcpServers: McpServer[];
   devPreviews: DevPreview[];
   // #3899 — most recent soft inactivity warning for this session, or null

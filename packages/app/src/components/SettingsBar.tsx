@@ -3,7 +3,7 @@ import { View, Text, TouchableOpacity, StyleSheet, Platform, Animated, Accessibi
 import * as Clipboard from 'expo-clipboard';
 import { resolveContextWindow, contextOccupancyTokens, contextFillPercent } from '@chroxy/store-core';
 import type { CumulativeUsage, PendingPermissionConfirm, SessionIntervention } from '@chroxy/store-core';
-import { formatCostBadge } from '@chroxy/store-core';
+import { formatCostBadge, stripAnsi } from '@chroxy/store-core';
 // #6901: single-source the Codex sandbox label/description for the read-only
 // active-sandbox badge (same list the create-time selector uses).
 import { CODEX_SANDBOX_MODE_META, type CodexSandboxMode } from '@chroxy/protocol';
@@ -103,6 +103,9 @@ export interface SettingsBarProps {
   onCancelPermissionConfirm?: () => void;
   conversationId?: string | null;
   sessionContext?: SessionContext | null;
+  // #6791: the user's own statusLine script output (ANSI-stripped strip). Null
+  // when unconfigured / no output / not yet received.
+  statusLine?: string | null;
   latencyMs?: number | null;
   connectionQuality?: 'good' | 'fair' | 'poor' | null;
   // #5518: which transport is active — 'lan' (direct ws://) or 'tunnel'
@@ -242,6 +245,7 @@ export function SettingsBar({
   onCancelPermissionConfirm,
   conversationId,
   sessionContext,
+  statusLine,
   latencyMs,
   connectionQuality,
   activePath,
@@ -498,6 +502,15 @@ export function SettingsBar({
                 {sessionContext.gitDirty > 0 ? ` \u00B7 ${sessionContext.gitDirty} uncommitted` : ''}
                 {sessionContext.gitAhead > 0 ? ` \u00B7 ${sessionContext.gitAhead} ahead` : ''}
                 {sessionContext.projectName ? ` \u00B7 ${sessionContext.projectName}` : ''}
+              </Text>
+            </View>
+          )}
+          {/* #6791: the user's own statusLine script output, ANSI-stripped and
+              collapsed to at most two lines. Hidden when unconfigured/blank. */}
+          {statusLine && stripAnsi(statusLine).trim() !== '' && (
+            <View style={styles.contextRow}>
+              <Text style={styles.contextText} numberOfLines={2} testID="statusline-strip">
+                {stripAnsi(statusLine).replace(/\s*\n\s*/g, ' ').trim()}
               </Text>
             </View>
           )}
