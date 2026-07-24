@@ -413,6 +413,32 @@ describe('GitPanel', () => {
       expect(screen.getByTestId('git-pr-title-input')).toBeInTheDocument()
     })
 
+    // #6938 — a "PR already exists" result carries the existing PR's URL as a
+    // structured `existingUrl` field. It must render as a real clickable link
+    // (the same git-pr-url testid/affordance as a fresh success), not as
+    // plain git-pr-error text.
+    it('renders the existing PR as a clickable link when existingUrl is set', () => {
+      render(<GitPanel />)
+      seedBranch()
+      fireEvent.click(screen.getByTestId('git-create-pr-open-btn'))
+      fireEvent.click(screen.getByTestId('git-pr-submit-btn'))
+      fireEvent.click(screen.getByTestId('confirm-dialog-confirm'))
+      act(() => capturedCreatePrCallback!({
+        url: null,
+        number: null,
+        branch: 'feat/git-panel',
+        base: 'main',
+        error: 'A pull request already exists for this branch: https://github.com/o/r/pull/7',
+        existingUrl: 'https://github.com/o/r/pull/7',
+      }))
+
+      expect(screen.getByTestId('git-pr-existing')).toBeInTheDocument()
+      const link = screen.getByTestId('git-pr-url') as HTMLAnchorElement
+      expect(link).toHaveAttribute('href', 'https://github.com/o/r/pull/7')
+      // Not rendered as plain error text.
+      expect(screen.queryByTestId('git-pr-error')).not.toBeInTheDocument()
+    })
+
     it('surfaces a "not connected" error when requestGitCreatePr returns false', () => {
       mockRequestGitCreatePr.mockReturnValue(false)
       render(<GitPanel />)

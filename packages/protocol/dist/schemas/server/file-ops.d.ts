@@ -101,6 +101,7 @@ export declare const ServerGitCreatePrResultSchema: z.ZodObject<{
     branch: z.ZodNullable<z.ZodString>;
     base: z.ZodNullable<z.ZodString>;
     error: z.ZodNullable<z.ZodString>;
+    existingUrl: z.ZodOptional<z.ZodNullable<z.ZodString>>;
 }, z.core.$strip>;
 export declare const ServerWriteFileResultSchema: z.ZodObject<{
     type: z.ZodLiteral<"write_file_result">;

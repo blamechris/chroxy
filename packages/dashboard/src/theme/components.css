@@ -9908,6 +9908,14 @@ button.sidebar-token-view-session-row:hover {
   word-break: break-all;
 }
 
+/* #6938 — "PR already exists" result: same layout as .git-pr-success (reuses
+   the clickable-link affordance) but the lead-in label reads as a notice
+   rather than a fresh success, so it borrows the warning/attention accent
+   already used elsewhere in this file (--accent-orange) instead of green. */
+.git-pr-existing span:first-child {
+  color: var(--accent-orange);
+}
+
 .git-branch-row {
   display: flex;
   align-items: center;

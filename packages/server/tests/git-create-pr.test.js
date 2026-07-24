@@ -211,7 +211,7 @@ describe('gitCreatePR (#6876)', () => {
     assert.match(responses[0].error, /not authenticated/i)
   })
 
-  it('surfaces the existing PR URL when one already exists', async () => {
+  it('surfaces the existing PR URL when one already exists (#6938: as a structured field too)', async () => {
     const err = Object.assign(new Error('exit 1'), {
       code: 1,
       stderr: 'a pull request for branch "feat/pr" into branch "main" already exists:\nhttps://github.com/o/r/pull/7',
@@ -224,6 +224,40 @@ describe('gitCreatePR (#6876)', () => {
     assert.match(responses[0].error, /already exists/i)
     assert.match(responses[0].error, /pull\/7/)
     assert.equal(responses[0].url, null)
+    // #6938 — the existing PR URL is ALSO returned as a structured field (not
+    // just embedded in the error string) so the dashboard can render a real
+    // link instead of plain error text.
+    assert.equal(responses[0].existingUrl, 'https://github.com/o/r/pull/7')
+  })
+
+  it('surfaces the existing PR URL from gh stdout when stderr carries none (#6951)', async () => {
+    const err = Object.assign(new Error('exit 1'), {
+      code: 1,
+      stdout: 'https://github.com/o/r/pull/9\n',
+      stderr: 'a pull request for branch "feat/pr" into branch "main" already exists:',
+    })
+    const { exec } = router({ gh: { throw: err } })
+    const { git, responses } = makeGit(exec)
+
+    await git.gitCreatePR({}, { title: 't' }, tmpDir)
+
+    assert.match(responses[0].error, /already exists/i)
+    assert.equal(responses[0].url, null)
+    assert.equal(responses[0].existingUrl, 'https://github.com/o/r/pull/9')
+  })
+
+  it('leaves existingUrl null on non-"already exists" gh failures (#6938)', async () => {
+    const err = Object.assign(new Error('exit 1'), {
+      code: 1,
+      stderr: 'To get started with GitHub CLI, please run:  gh auth login',
+    })
+    const { exec } = router({ gh: { throw: err } })
+    const { git, responses } = makeGit(exec)
+
+    await git.gitCreatePR({}, { title: 't' }, tmpDir)
+
+    assert.match(responses[0].error, /not authenticated/i)
+    assert.equal(responses[0].existingUrl, null)
   })
 
   it('surfaces a push failure (no origin) without calling gh', async () => {

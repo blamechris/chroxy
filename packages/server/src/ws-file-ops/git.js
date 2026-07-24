@@ -11,9 +11,12 @@ const execFileAsync = promisify(execFileCb)
 
 // #6876 — result sender for the git_create_pr flow. Every field is always
 // present (present-and-nullable) so the wire payload satisfies
-// ServerGitCreatePrResultSchema on every path.
-function prResult({ url = null, number = null, branch = null, base = null, error = null } = {}) {
-  return { type: 'git_create_pr_result', url, number, branch, base, error }
+// ServerGitCreatePrResultSchema on every path. #6938 — `existingUrl` is a
+// structured (non-null) field only on the "PR already exists" error path, so
+// the dashboard can render it as a clickable link instead of parsing it back
+// out of the `error` string.
+function prResult({ url = null, number = null, branch = null, base = null, error = null, existingUrl = null } = {}) {
+  return { type: 'git_create_pr_result', url, number, branch, base, error, existingUrl }
 }
 
 /** Extract the first `.../pull/<n>` URL from gh output (stdout or stderr). */
@@ -71,27 +74,46 @@ function mapPushError(err) {
   return line ? `Failed to push branch: ${line}` : 'Failed to push the current branch to origin'
 }
 
-/** Map a `gh pr create` failure to an operator-actionable message. */
+/**
+ * Map a `gh pr create` failure to an operator-actionable message.
+ *
+ * Returns `{ message, existingUrl }` — `existingUrl` is the pre-existing PR's
+ * `/pull/<n>` URL (non-null) only on the "PR already exists" path, so the
+ * caller can surface it as a structured field on `git_create_pr_result`
+ * (#6938) rather than the dashboard having to regex it back out of `message`.
+ */
 function mapGhCreateError(err) {
   if (err && err.code === 'ENOENT') {
-    return 'GitHub CLI (gh) is not installed on the daemon host — install it from https://cli.github.com to open PRs from Chroxy'
+    return {
+      message: 'GitHub CLI (gh) is not installed on the daemon host — install it from https://cli.github.com to open PRs from Chroxy',
+      existingUrl: null,
+    }
   }
   const stderr = String((err && (err.stderr || err.message)) || '')
   const lower = stderr.toLowerCase()
   if (/already exists|a pull request for branch/.test(lower)) {
-    const existing = extractPrUrl(stderr)
-    return existing
-      ? `A pull request already exists for this branch: ${existing}`
-      : 'A pull request already exists for this branch'
+    // gh sometimes writes the existing-PR URL to stdout rather than stderr —
+    // parse both streams (and the error message) the same way the success
+    // path does, so the URL isn't missed depending on which stream gh used.
+    const existing = extractPrUrl(err && err.stdout) || extractPrUrl(stderr)
+    return {
+      message: existing
+        ? `A pull request already exists for this branch: ${existing}`
+        : 'A pull request already exists for this branch',
+      existingUrl: existing,
+    }
   }
   if (/gh auth login|not logged in|authentication required|no credentials|requires authentication|http 401|gh auth status/.test(lower)) {
-    return 'GitHub CLI is not authenticated — run `gh auth login` on the daemon host to enable PR creation'
+    return {
+      message: 'GitHub CLI is not authenticated — run `gh auth login` on the daemon host to enable PR creation',
+      existingUrl: null,
+    }
   }
   if (/no git remotes found|not a git repository|does not appear to be a git repository|could not determine base repo/.test(lower)) {
-    return 'No GitHub remote is configured for this repository'
+    return { message: 'No GitHub remote is configured for this repository', existingUrl: null }
   }
   const line = firstLine(stderr)
-  return line || (err && err.message) || 'Failed to create pull request'
+  return { message: line || (err && err.message) || 'Failed to create pull request', existingUrl: null }
 }
 
 /**
@@ -459,7 +481,8 @@ export function createGitOps(sendFn, resolveSessionCwd, validatePathWithinCwd, w
           stdout = res?.stdout || ''
           stderr = res?.stderr || ''
         } catch (err) {
-          sendFn(ws, prResult({ branch, base: base || null, error: mapGhCreateError(err) }))
+          const mapped = mapGhCreateError(err)
+          sendFn(ws, prResult({ branch, base: base || null, error: mapped.message, existingUrl: mapped.existingUrl }))
           return
         }
       } finally {

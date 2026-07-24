@@ -102,6 +102,11 @@ export const ServerDirectoryListingSchema = z.object({
 // tried — so only `url`/`number` are guaranteed null on failure, not every data
 // field. Handled by the dashboard only for v1 (mobile PR-creation UI is a
 // tracked follow-up).
+// #6938 — `existingUrl` is populated (non-null) ONLY on the "a pull request
+// already exists for this branch" error path — the pre-existing PR's URL as a
+// structured field, so the dashboard can render a real link (instead of the
+// URL only ever appearing embedded inside the `error` string). Every other
+// path (success or any other error) leaves it null.
 export const ServerGitCreatePrResultSchema = z.object({
     type: z.literal('git_create_pr_result'),
     url: z.string().nullable(),
@@ -109,6 +114,7 @@ export const ServerGitCreatePrResultSchema = z.object({
     branch: z.string().nullable(),
     base: z.string().nullable(),
     error: z.string().nullable(),
+    existingUrl: z.string().nullable().optional(),
 });
 // `write_file` response — the wire type is `write_file_result` (NOT
 // file_write_result). Only path + error beyond type. App-only today (the
