@@ -829,6 +829,28 @@ a.dev-preview-chip__link:focus-visible {
   margin-top: 2px;
 }
 
+/* #6863 — View / Resume actions on a search result row. */
+.conversation-search-result-actions {
+  display: flex;
+  gap: var(--space-2);
+  margin-top: 4px;
+}
+
+.conversation-search-result-action {
+  background: transparent;
+  border: 1px solid var(--border-secondary);
+  border-radius: var(--radius-xs);
+  padding: 2px 8px;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.conversation-search-result-action:hover {
+  border-color: var(--border-focus);
+  color: var(--text-primary);
+}
+
 .sidebar-repo {
   margin-bottom: 2px;
 }

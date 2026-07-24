@@ -45,6 +45,9 @@ import {
   clearPendingThinkingLevelReverts,
   _testThinkingLevelRevertPendingSize,
   setDeltaFlushIntervalOverride,
+  beginTranscriptFetch,
+  endTranscriptFetch,
+  resetTranscriptFetchTracking,
 } from './message-handler'
 import { createEmptySessionState } from './utils'
 import type { ConnectionState } from './types'
@@ -166,6 +169,9 @@ describe('dashboard message-handler dispatch', () => {
     // #3587: reset the in-flight skill_trust_grant tracking map between
     // tests so a leftover entry from one case doesn't leak into another.
     clearPendingTrustGrants()
+    // #6863 — reset transcript-fetch pending-id tracking between tests so a
+    // leftover conversationId from one case doesn't intercept frames in another.
+    resetTranscriptFetchTracking()
     mockSocket = createMockSocket()
     store = createMockStore(baseState())
     setStore(store)
@@ -3314,6 +3320,142 @@ describe('dashboard message-handler dispatch', () => {
       )
       const msgs = (store.getState() as any).sessionStates.s1.messages
       expect(msgs).toHaveLength(0)
+    })
+  })
+
+  // #6863 (epic #6765) — read-only transcript viewer. The server's
+  // request_conversation_transcript handler (#6860) reuses the EXACT SAME
+  // history_replay_start/message/history_replay_end frames a live session's
+  // replay uses, distinguished only by sessionId carrying a conversationId
+  // with no matching live session. These tests pin the interception that
+  // keeps those frames OUT of sessionStates/addMessage entirely — the main
+  // risk this feature introduces (see applyTranscriptFrame's doc comment in
+  // message-handler.ts).
+  describe('transcript viewer frame interception (#6863)', () => {
+    const TRANSCRIPT_ID = 'conv-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+
+    function emptyTranscriptViewer() {
+      return { conversationId: null, status: 'idle' as const, messages: [], error: null }
+    }
+
+    // Seeds a LIVE session so the dangerous fallback path
+    // (`get().addMessage`) has somewhere to corrupt if interception fails,
+    // plus a top-level `messages`/`addMessage` pair to catch the flat-state
+    // fallback too.
+    function seedWithLiveSessionAndPendingTranscript(viewerOverrides: Record<string, unknown> = {}) {
+      const flatMessages: unknown[] = []
+      const seeded = baseState({
+        activeSessionId: 'live-1',
+        sessions: [{ sessionId: 'live-1', name: 'Live' } as any],
+        sessionStates: { 'live-1': createEmptySessionState() },
+      }) as Record<string, unknown>
+      seeded.messages = flatMessages
+      seeded.transcriptViewer = { ...emptyTranscriptViewer(), ...viewerOverrides }
+      seeded.addMessage = (m: unknown) => {
+        const s = store.getState() as { messages: unknown[] }
+        ;(store as { setState: (p: Record<string, unknown>) => void }).setState({
+          messages: [...s.messages, m],
+        })
+      }
+      store = createMockStore(seeded)
+      setStore(store)
+      beginTranscriptFetch(TRANSCRIPT_ID)
+    }
+
+    afterEach(() => {
+      endTranscriptFetch(TRANSCRIPT_ID)
+    })
+
+    it('routes history_replay_start/message/history_replay_end into transcriptViewer, never sessionStates or addMessage', () => {
+      seedWithLiveSessionAndPendingTranscript({ conversationId: TRANSCRIPT_ID, status: 'loading' })
+
+      handleMessage({ type: 'history_replay_start', sessionId: TRANSCRIPT_ID, conversationId: TRANSCRIPT_ID }, ctx() as any)
+      handleMessage(
+        {
+          type: 'message',
+          messageType: 'user_input',
+          content: 'what does this do',
+          sessionId: TRANSCRIPT_ID,
+          timestamp: 100,
+        },
+        ctx() as any,
+      )
+      handleMessage(
+        {
+          type: 'message',
+          messageType: 'response',
+          content: 'it reads a file',
+          sessionId: TRANSCRIPT_ID,
+          timestamp: 200,
+        },
+        ctx() as any,
+      )
+      handleMessage({ type: 'history_replay_end', sessionId: TRANSCRIPT_ID }, ctx() as any)
+
+      const state = store.getState() as any
+      // The live session and the flat fallback must be completely untouched.
+      expect(state.sessionStates['live-1'].messages).toHaveLength(0)
+      expect(state.messages).toHaveLength(0)
+      // The transcript viewer got everything instead.
+      expect(state.transcriptViewer.status).toBe('ready')
+      expect(state.transcriptViewer.messages).toHaveLength(2)
+      expect(state.transcriptViewer.messages[0].content).toBe('what does this do')
+      expect(state.transcriptViewer.messages[1].content).toBe('it reads a file')
+    })
+
+    it('a normal live-session replay for an UNRELATED sessionId is unaffected by transcript tracking', () => {
+      seedWithLiveSessionAndPendingTranscript({ conversationId: TRANSCRIPT_ID, status: 'loading' })
+
+      // live-1's OWN replay, interleaved with the transcript fetch above —
+      // must still land in sessionStates exactly as before this feature.
+      handleMessage({ type: 'history_replay_start', sessionId: 'live-1' }, ctx() as any)
+      handleMessage(
+        { type: 'message', messageType: 'user_input', content: 'live message', sessionId: 'live-1', timestamp: 50 },
+        ctx() as any,
+      )
+      const state = store.getState() as any
+      expect(state.sessionStates['live-1'].messages).toHaveLength(1)
+      expect(state.sessionStates['live-1'].messages[0].content).toBe('live message')
+      // The transcript viewer wasn't touched by live-1's replay.
+      expect(state.transcriptViewer.messages).toHaveLength(0)
+    })
+
+    it('discards late frames from a SUPERSEDED fetch instead of misfiling them into the live session or the newly-displayed viewer', () => {
+      const OTHER_ID = 'conv-11111111-2222-3333-4444-555555555555'
+      seedWithLiveSessionAndPendingTranscript({ conversationId: OTHER_ID, status: 'ready' })
+      // TRANSCRIPT_ID's fetch is still "pending" (begun in the seed helper)
+      // even though the viewer has moved on to display OTHER_ID.
+
+      handleMessage({ type: 'history_replay_start', sessionId: TRANSCRIPT_ID, conversationId: TRANSCRIPT_ID }, ctx() as any)
+      handleMessage(
+        { type: 'message', messageType: 'response', content: 'stale reply', sessionId: TRANSCRIPT_ID, timestamp: 10 },
+        ctx() as any,
+      )
+      handleMessage({ type: 'history_replay_end', sessionId: TRANSCRIPT_ID }, ctx() as any)
+
+      const state = store.getState() as any
+      // Swallowed entirely — never reached sessionStates/addMessage...
+      expect(state.sessionStates['live-1'].messages).toHaveLength(0)
+      expect(state.messages).toHaveLength(0)
+      // ...and never leaked into the viewer that's actually displayed.
+      expect(state.transcriptViewer.conversationId).toBe(OTHER_ID)
+      expect(state.transcriptViewer.messages).toHaveLength(0)
+    })
+
+    it('endTranscriptFetch stops interception — a later frame for the same id falls through normally', () => {
+      seedWithLiveSessionAndPendingTranscript({ conversationId: TRANSCRIPT_ID, status: 'ready' })
+      endTranscriptFetch(TRANSCRIPT_ID)
+
+      // No live session with this id and no pending tracking — the frame now
+      // falls through to the ordinary switch, where the 'message' case's
+      // flat-fallback (`get().addMessage`) is expected, pre-existing
+      // behavior (NOT a #6863 regression) for an unrecognized sessionId.
+      handleMessage(
+        { type: 'message', messageType: 'response', content: 'post-fetch', sessionId: TRANSCRIPT_ID, timestamp: 10 },
+        ctx() as any,
+      )
+      const state = store.getState() as any
+      expect(state.transcriptViewer.messages).toHaveLength(0)
     })
   })
 

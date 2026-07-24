@@ -62,6 +62,7 @@ function makeArgs(
     isTauri: false,
     createSession: vi.fn(),
     resumeConversation: vi.fn(),
+    viewConversation: vi.fn(),
     revealInFinder: vi.fn(() => Promise.resolve()),
     onRevealError: vi.fn(),
     copyToClipboard: vi.fn(),
@@ -85,12 +86,63 @@ describe('buildSidebarContextMenuItems', () => {
       expect(visible.length).toBeGreaterThan(0)
     })
 
-    it('includes Resume Conversation, Copy Conversation ID, and Open in Finder', () => {
+    it('includes Resume Conversation, View Conversation, Copy Conversation ID, and Open in Finder', () => {
       const items = buildSidebarContextMenuItems(makeArgs({ isTauri: true }))
       const labels = items.map(i => i.label)
       expect(labels).toContain('Resume Conversation')
+      expect(labels).toContain('View Conversation')
       expect(labels).toContain('Copy Conversation ID')
       expect(labels).toContain('Open in Finder')
+    })
+
+    // #6863 — View Conversation must be present alongside Resume and must
+    // call the RIGHT handler (viewConversation, never resumeConversation).
+    it('View calls viewConversation with the conversationId and cwd from history, not resumeConversation', () => {
+      const viewConversation = vi.fn()
+      const resumeConversation = vi.fn()
+      const items = buildSidebarContextMenuItems(
+        makeArgs({
+          target: { type: 'resumable', conversationId: 'conv-123' },
+          conversationHistory: [makeConversation({ cwd: '/home/user/projects/web' })],
+          viewConversation,
+          resumeConversation,
+        }),
+      )
+      const view = items.find(i => i.id === 'view')
+      expect(view?.label).toBe('View Conversation')
+      view?.onClick?.()
+      expect(viewConversation).toHaveBeenCalledWith('conv-123', '/home/user/projects/web')
+      expect(resumeConversation).not.toHaveBeenCalled()
+    })
+
+    it('Resume does not call viewConversation', () => {
+      const viewConversation = vi.fn()
+      const resumeConversation = vi.fn()
+      const items = buildSidebarContextMenuItems(
+        makeArgs({
+          target: { type: 'resumable', conversationId: 'conv-123' },
+          viewConversation,
+          resumeConversation,
+        }),
+      )
+      items.find(i => i.id === 'resume')?.onClick?.()
+      expect(resumeConversation).toHaveBeenCalled()
+      expect(viewConversation).not.toHaveBeenCalled()
+    })
+
+    it('View is enabled even without a resolvable cwd (works for capabilities.resume===false providers)', () => {
+      const viewConversation = vi.fn()
+      const items = buildSidebarContextMenuItems(
+        makeArgs({
+          target: { type: 'resumable', conversationId: 'unknown-conv' },
+          conversationHistory: [],
+          viewConversation,
+        }),
+      )
+      const view = items.find(i => i.id === 'view')
+      expect(typeof view?.onClick).toBe('function')
+      view?.onClick?.()
+      expect(viewConversation).toHaveBeenCalledWith('unknown-conv', undefined)
     })
 
     it('Resume calls resumeConversation with the conversationId and cwd from history', () => {

@@ -515,6 +515,33 @@ export interface FilePickerItem {
 }
 
 /**
+ * #6863 (epic #6765) — read-only transcript viewer state, fed by the
+ * `request_conversation_transcript` endpoint (#6860). Distinct from
+ * `SessionState` on purpose: a transcript viewer never has a live session
+ * behind it (no SessionManager entry, no provider process), so it does not
+ * belong in `sessionStates` and must never be mistaken for one — see
+ * `applyTranscriptFrame` in message-handler.ts for the interception that
+ * keeps the two paths apart on the wire.
+ *
+ * `status`:
+ *  - `idle`    — no fetch in flight, nothing to show (viewer closed).
+ *  - `loading` — `request_conversation_transcript` sent, replay in progress.
+ *  - `ready`   — `history_replay_end` received; `messages` is the full
+ *                (possibly empty) transcript.
+ *  - `error`   — the fetch failed (rejected by the server) or timed out
+ *                waiting for a reply; `error` carries a human-readable reason.
+ */
+export interface TranscriptViewerState {
+  /** The conversation currently open, or null when the viewer is closed. */
+  conversationId: string | null;
+  status: 'idle' | 'loading' | 'ready' | 'error';
+  /** Accumulated from `message` frames during replay; reset on each new fetch. */
+  messages: ChatMessage[];
+  /** Human-readable failure reason, set only when `status === 'error'`. */
+  error: string | null;
+}
+
+/**
  * #6823 — an MCP-server resource surfaced in the `@`-picker for BYOK sessions.
  * `server` routes a later read back to the owning MCP server; `uri` is that
  * server's own identifier for the resource.
@@ -1447,6 +1474,14 @@ export interface ConnectionState {
   searchLoading: boolean;
   searchQuery: string;
 
+  // #6863 (epic #6765) — read-only transcript viewer. Fed by the
+  // `request_conversation_transcript` endpoint (#6860): reads a CLOSED
+  // conversation's history straight off disk, with NO SessionManager entry
+  // and NO provider spawn. Deliberately a SEPARATE slice from `sessionStates`
+  // (see message-handler.ts's `applyTranscriptFrame` for why) — this is
+  // never a live session and must never be treated as one.
+  transcriptViewer: TranscriptViewerState;
+
   // Checkpoints for session rewind
   checkpoints: Checkpoint[];
 
@@ -1774,6 +1809,14 @@ export interface ConnectionState {
   // Conversation history (resume past conversations)
   fetchConversationHistory: () => void;
   resumeConversation: (conversationId: string, cwd?: string) => void;
+
+  // #6863 — read-only transcript viewer. `requestConversationTranscript`
+  // sends `request_conversation_transcript` (#6860) and opens the viewer in
+  // `loading` state; `closeTranscriptViewer` resets it to `idle` and discards
+  // any in-flight fetch's late frames (see message-handler.ts). NEVER calls
+  // `createSession` / spawns a provider — reading is the entire contract.
+  requestConversationTranscript: (conversationId: string, cwd?: string) => void;
+  closeTranscriptViewer: () => void;
 
   // Cross-session search
   searchConversations: (query: string) => void;

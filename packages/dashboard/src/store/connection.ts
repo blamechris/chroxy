@@ -49,6 +49,7 @@ export type {
   SearchResult,
   ConnectionState,
   RestoreCheckpointMode,
+  TranscriptViewerState,
 } from './types';
 
 // Re-export utility functions for backward compatibility
@@ -69,6 +70,7 @@ import type {
   ServerEntry,
   SessionInfo,
   SessionState,
+  TranscriptViewerState,
 } from './types';
 import {
   loadServerRegistry,
@@ -127,6 +129,9 @@ import {
   registerThinkingLevelChangeRequest,
   clearPendingThinkingLevelReverts,
   clearPendingPermissionModeReverts,
+  beginTranscriptFetch,
+  endTranscriptFetch,
+  resetTranscriptFetchTracking,
 } from './message-handler';
 import type { EvaluatorResultPayload } from './types';
 import { CLIENT_CAPABILITIES, DEFAULT_PROVIDER } from '@chroxy/protocol';
@@ -404,6 +409,20 @@ export const selectShowSession = (s: ConnectionState): boolean =>
 // Search request tracking — prevents stale timeout/response races
 let searchNonce = 0;
 let searchTimeoutId: ReturnType<typeof setTimeout> | undefined;
+
+// #6863 — read-only transcript viewer. `request_conversation_transcript`
+// (#6860) has no dedicated failure echo (a rejection arrives as a generic
+// `session_error{message}` with no correlating id), so — mirroring the
+// `searchTimeoutId` watchdog above — a fetch that's still `loading` after
+// this window surfaces a timeout error instead of spinning forever.
+let transcriptTimeoutId: ReturnType<typeof setTimeout> | undefined;
+const TRANSCRIPT_FETCH_TIMEOUT_MS = 15000;
+const EMPTY_TRANSCRIPT_VIEWER: TranscriptViewerState = {
+  conversationId: null,
+  status: 'idle',
+  messages: [],
+  error: null,
+};
 
 // #6502 — monotonic read_file request nonce. The server echoes it back on the
 // `file_content` reply so the file browser can drop replies from superseded
@@ -871,6 +890,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   _diffCallback: null,
   conversationHistory: [],
   conversationHistoryLoading: false,
+  transcriptViewer: EMPTY_TRANSCRIPT_VIEWER,
   searchResults: [],
   searchLoading: false,
   searchQuery: '',
@@ -2810,6 +2830,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
     // Reset replay flags in case disconnect happened mid-replay
     resetReplayFlags();
+    // #6863 — drop any in-flight transcript fetch tracking so a stale
+    // conversationId from before the disconnect can't intercept frames on a
+    // later, unrelated connection.
+    resetTranscriptFetchTracking();
+    clearTimeout(transcriptTimeoutId);
     // #5555.3/.4 — explicit disconnect is a hard reset: drop the replay
     // baseline AND the history cursors so a later connect (possibly to a
     // different server) starts from a full replay rather than presenting a
@@ -2926,6 +2951,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       viewingCachedSession: false,
       conversationHistory: [],
       conversationHistoryLoading: false,
+      transcriptViewer: EMPTY_TRANSCRIPT_VIEWER,
       searchResults: [],
       searchLoading: false,
       searchQuery: '',
@@ -4626,6 +4652,66 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       if (cwd) payload.cwd = cwd;
       wsSend(socket, payload);
     }
+  },
+
+  // #6863 (epic #6765) — read-only transcript viewer. Sends
+  // `request_conversation_transcript` (#6860): the server reads a CLOSED
+  // conversation's history straight off disk and streams it back via the
+  // shared history-replay frames — no SessionManager entry, no provider
+  // spawn. `beginTranscriptFetch` registers the conversationId BEFORE the
+  // send so message-handler.ts's interception guard is armed the instant a
+  // reply could arrive (see applyTranscriptFrame's doc comment there).
+  requestConversationTranscript: (conversationId: string, cwd?: string) => {
+    const { socket } = get();
+    set({
+      transcriptViewer: {
+        conversationId,
+        status: 'loading',
+        messages: [],
+        error: null,
+      },
+    });
+    beginTranscriptFetch(conversationId);
+    const isOpen = !!socket && socket.readyState === WebSocket.OPEN;
+    const payload: Record<string, unknown> = { type: 'request_conversation_transcript', conversationId };
+    if (cwd) payload.cwd = cwd;
+    // #6308/#6309 — wsSend's return value MUST be checked at every
+    // side-effecting call site; a false result (queued/dropped, not an open
+    // socket write) must not leave the viewer stuck in `loading`.
+    const sent = isOpen && socket ? wsSend(socket, payload) : false;
+    if (!sent) {
+      endTranscriptFetch(conversationId);
+      if (get().transcriptViewer.conversationId === conversationId) {
+        set(state => ({
+          transcriptViewer: { ...state.transcriptViewer, status: 'error', error: 'Not connected to server.' },
+        }));
+      }
+      return;
+    }
+    // request_conversation_transcript has no dedicated failure echo (a
+    // rejection — missing/invalid id, not authorized, not found — arrives as
+    // a generic `session_error{message}` with no correlating id we can match
+    // against this specific fetch). Mirror searchConversations' watchdog: if
+    // still `loading` after the window, surface a timeout rather than
+    // spinning forever. Any session_error DOES still reach the generic
+    // handler in the meantime and shows its own toast.
+    clearTimeout(transcriptTimeoutId);
+    transcriptTimeoutId = setTimeout(() => {
+      endTranscriptFetch(conversationId);
+      const state = get();
+      if (state.transcriptViewer.conversationId === conversationId && state.transcriptViewer.status === 'loading') {
+        set({
+          transcriptViewer: { ...state.transcriptViewer, status: 'error', error: 'Timed out loading transcript.' },
+        });
+      }
+    }, TRANSCRIPT_FETCH_TIMEOUT_MS);
+  },
+
+  closeTranscriptViewer: () => {
+    const current = get().transcriptViewer;
+    if (current.conversationId) endTranscriptFetch(current.conversationId);
+    clearTimeout(transcriptTimeoutId);
+    set({ transcriptViewer: EMPTY_TRANSCRIPT_VIEWER });
   },
 
   searchConversations: (query: string) => {

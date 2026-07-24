@@ -1,5 +1,7 @@
 import type { ComponentProps } from 'react'
+import type { TranscriptViewerState } from '../store/types'
 import { SettingsPanel } from './SettingsPanel'
+import { TranscriptViewer } from './TranscriptViewer'
 import { ShortcutHelp } from './ShortcutHelp'
 import { PastedTextModal } from './PastedTextModal'
 import { QrModal } from './QrModal'
@@ -67,6 +69,12 @@ export interface AppModalsProps {
   sidebarContextMenu: { x: number; y: number } | null
   sidebarContextMenuItems: ComponentProps<typeof SessionContextMenu>['items']
   onDismissSidebarContextMenu: () => void
+  // #6863 (epic #6765) — read-only transcript viewer. `transcriptViewer` is
+  // the store's `TranscriptViewerState` verbatim; rendered only while
+  // `conversationId` is non-null.
+  transcriptViewer: TranscriptViewerState
+  onTranscriptViewerClose: () => void
+  onTranscriptViewerRetry: (conversationId: string) => void
   // Create-session modal
   showCreateSession: boolean
   onCreateSessionClose: () => void
@@ -169,6 +177,26 @@ export function AppModals(props: AppModalsProps) {
           y={props.sidebarContextMenu.y}
           items={props.sidebarContextMenuItems}
           onDismiss={props.onDismissSidebarContextMenu}
+        />
+      )}
+
+      {/* #6863 — read-only transcript viewer. Rendered only while a
+          conversationId is open; unmounts (resetting all local viewer
+          state — search bar, tool-group expand, scroll position) when
+          closed. Status/messages/error come straight from the store slice;
+          onRetry re-sends the SAME request for the same conversationId. */}
+      {props.transcriptViewer.conversationId && (
+        <TranscriptViewer
+          conversationId={props.transcriptViewer.conversationId}
+          status={props.transcriptViewer.status}
+          messages={props.transcriptViewer.messages}
+          error={props.transcriptViewer.error}
+          onClose={props.onTranscriptViewerClose}
+          onRetry={() => {
+            if (props.transcriptViewer.conversationId) {
+              props.onTranscriptViewerRetry(props.transcriptViewer.conversationId)
+            }
+          }}
         />
       )}
 

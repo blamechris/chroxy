@@ -637,6 +637,10 @@ export function App() {
   const conversationHistory = useConnectionStore(s => s.conversationHistory)
   const fetchConversationHistory = useConnectionStore(s => s.fetchConversationHistory)
   const resumeConversation = useConnectionStore(s => s.resumeConversation)
+  // #6863 — read-only transcript viewer.
+  const transcriptViewer = useConnectionStore(s => s.transcriptViewer)
+  const requestConversationTranscript = useConnectionStore(s => s.requestConversationTranscript)
+  const closeTranscriptViewer = useConnectionStore(s => s.closeTranscriptViewer)
   const sendUserQuestionResponse = useConnectionStore(s => s.sendUserQuestionResponse)
   const markPromptAnswered = useConnectionStore(s => s.markPromptAnswered)
   const fetchFileList = useConnectionStore(s => s.fetchFileList)
@@ -964,6 +968,7 @@ export function App() {
       isTauri: isTauri(),
       createSession,
       resumeConversation,
+      viewConversation: requestConversationTranscript,
       revealInFinder,
       onRevealError: (message) => {
         useConnectionStore.getState().addServerError(message)
@@ -1003,6 +1008,7 @@ export function App() {
     conversationHistory,
     createSession,
     resumeConversation,
+    requestConversationTranscript,
     handleCloseSession,
     openCreateSession,
     handleCopySessionTranscript,
@@ -2255,6 +2261,7 @@ export function App() {
           onFilterChange={setSidebarFilter}
           onSessionClick={handleSwitchSession}
           onResumeSession={resumeConversation}
+          onViewConversation={requestConversationTranscript}
           onOpenControlRoom={openControlRoom}
           onNewSession={(cwd) => openCreateSession({ cwd: cwd || null })}
           onToggle={() => setSidebarOpen(prev => !prev)}
@@ -2774,6 +2781,9 @@ export function App() {
         sidebarContextMenu={sidebarContextMenu}
         sidebarContextMenuItems={sidebarContextMenuItems}
         onDismissSidebarContextMenu={dismissSidebarContextMenu}
+        transcriptViewer={transcriptViewer}
+        onTranscriptViewerClose={closeTranscriptViewer}
+        onTranscriptViewerRetry={requestConversationTranscript}
         showCreateSession={showCreateSession}
         onCreateSessionClose={() => { setShowCreateSession(false); setIsCreatingSession(false); setSessionCreateError(null); pendingSeedPromptRef.current = null }}
         onCreateSession={handleCreateSession}

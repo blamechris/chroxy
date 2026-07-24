@@ -40,6 +40,7 @@ const sampleResults: SearchResult[] = [
 
 function renderSearch(results = sampleResults) {
   const onResume = vi.fn()
+  const onView = vi.fn()
   const ret = render(
     <ConversationSearch
       searchResults={results}
@@ -48,9 +49,10 @@ function renderSearch(results = sampleResults) {
       searchConversations={vi.fn()}
       clearSearchResults={vi.fn()}
       onResumeSession={onResume}
+      onViewConversation={onView}
     />,
   )
-  return { ...ret, onResume }
+  return { ...ret, onResume, onView }
 }
 
 describe('ConversationSearch keyboard navigation (#1407)', () => {
@@ -99,10 +101,12 @@ describe('ConversationSearch keyboard navigation (#1407)', () => {
   })
 
   it('Enter on focused result calls onResumeSession', () => {
-    const { onResume } = renderSearch()
+    const { onResume, onView } = renderSearch()
     const options = screen.getAllByRole('option')
     options[1]!.focus()
     fireEvent.keyDown(options[1]!, { key: 'Enter' })
     expect(onResume).toHaveBeenCalledWith('conv-2', '/home/user/project-b')
+    // #6863 — Enter must keep resuming only; it must never fire View.
+    expect(onView).not.toHaveBeenCalled()
   })
 })

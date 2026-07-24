@@ -694,6 +694,97 @@ export function resetReplayFlags(): void {
 }
 
 // ---------------------------------------------------------------------------
+// Read-only transcript viewer (#6863, epic #6765)
+// ---------------------------------------------------------------------------
+// The server's `request_conversation_transcript` handler (#6860) streams a
+// CLOSED conversation's history back using the EXACT SAME `history_replay_start`
+// / `message` / `history_replay_end` wire frames a live session's replay uses —
+// the only difference is `sessionId` carries a conversationId with no matching
+// entry in `sessionStates` (the conversation has no live session; nothing was
+// spawned). Routing those frames through the switch below unmodified would
+// silently misfile them: the `'message'` case falls back to
+// `get().addMessage(newMsg)` — appending into whatever session IS currently
+// active — whenever `sessionStates[targetId]` doesn't exist. A transcript fetch
+// must never touch `sessionStates`, the replay dedup cache, or
+// `_replayingSessions`, so a matching frame is diverted at the top of
+// `handleMessage` into the dedicated `transcriptViewer` store slice instead
+// (see the interception guard there and `applyTranscriptFrame` below).
+//
+// Membership in `_pendingTranscriptIds` — NOT whether the id equals the
+// store's CURRENTLY DISPLAYED `transcriptViewer.conversationId` — decides
+// whether a frame gets diverted here at all. The viewer can move on to a
+// DIFFERENT conversation (View A, close, View B) before A's fetch finishes;
+// using only "currently displayed" as the interception key would let A's late
+// frames fall through into the live-session switch once B is displayed. Every
+// conversationId this client has ever sent `request_conversation_transcript`
+// for — and not yet seen `history_replay_end` for — stays in this set, so its
+// frames are ALWAYS diverted; `applyTranscriptFrame` separately decides
+// whether to apply them to visible state (id matches the displayed viewer) or
+// just discard them (a superseded fetch).
+const _pendingTranscriptIds = new Set<string>();
+
+/** Start tracking a transcript fetch — call right before sending the request. */
+export function beginTranscriptFetch(conversationId: string): void {
+  _pendingTranscriptIds.add(conversationId);
+}
+
+/** Stop tracking a transcript fetch — call on completion, close, or timeout. */
+export function endTranscriptFetch(conversationId: string): void {
+  _pendingTranscriptIds.delete(conversationId);
+}
+
+function isTranscriptFramePending(sessionId: string): boolean {
+  return _pendingTranscriptIds.has(sessionId);
+}
+
+/** Full reset — mirrors `resetReplayFlags` on a hard disconnect. */
+export function resetTranscriptFetchTracking(): void {
+  _pendingTranscriptIds.clear();
+}
+
+/**
+ * Apply a diverted `history_replay_start` / `message` / `history_replay_end`
+ * frame to the `transcriptViewer` store slice — NEVER to `sessionStates`, the
+ * replay dedup cache, or `_replayingSessions`. See the `_pendingTranscriptIds`
+ * doc above for why this is reached via the pending set, not the displayed
+ * conversationId.
+ */
+function applyTranscriptFrame(msg: Record<string, unknown>, get: MsgGet, set: MsgSet): void {
+  const sessionId = typeof msg.sessionId === 'string' ? msg.sessionId : null;
+  // The fetch completed — stop tracking it regardless of whether it's still
+  // the displayed viewer (a superseded fetch's end frame must also clear its
+  // pending entry, or it would wedge `_pendingTranscriptIds` forever).
+  if (msg.type === 'history_replay_end' && sessionId) endTranscriptFetch(sessionId);
+
+  const viewer = get().transcriptViewer;
+  // Not the conversation currently displayed (either a superseded fetch, or a
+  // malformed frame with no sessionId) — swallow it here rather than falling
+  // through to the live-session switch, but don't touch visible state.
+  if (!sessionId || viewer.conversationId !== sessionId) return;
+
+  if (msg.type === 'history_replay_start') {
+    set({ transcriptViewer: { ...viewer, status: 'loading', messages: [], error: null } });
+    return;
+  }
+  if (msg.type === 'history_replay_end') {
+    set({ transcriptViewer: { ...viewer, status: 'ready' } });
+    return;
+  }
+  // msg.type === 'message' — reuse the same pure parser live messages use.
+  // receivingHistoryReplay=true applies the same dedup-against-cache logic a
+  // live replay gets; activeSessionId is irrelevant here (unused by the
+  // parser) so null is passed.
+  const result = sharedMessageHandler(msg, null, true, viewer.messages);
+  if (!result.shouldDispatch) return;
+  set({
+    transcriptViewer: {
+      ...viewer,
+      messages: [...viewer.messages, result.chatMessage],
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Permission boundary message splitting (#554)
 // ---------------------------------------------------------------------------
 const _postPermissionSplits = new Set<string>();
@@ -3647,6 +3738,20 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
   const get = () => getStore().getState();
   const set: (s: Partial<ConnectionState> | ((state: ConnectionState) => Partial<ConnectionState>)) => void =
     (s) => getStore().setState(s as ConnectionState);
+
+  // #6863 — read-only transcript viewer interception. MUST run before the
+  // activity-bump block, runDispatch, and the HANDLERS map/switch below —
+  // every one of those keys off `sessionStates`, which a transcript's
+  // conversationId never has an entry in. See `applyTranscriptFrame`'s doc
+  // comment (near `_pendingTranscriptIds`, above) for the full rationale.
+  if (
+    (msg.type === 'history_replay_start' || msg.type === 'message' || msg.type === 'history_replay_end') &&
+    typeof msg.sessionId === 'string' &&
+    isTranscriptFramePending(msg.sessionId)
+  ) {
+    applyTranscriptFrame(msg, get, set);
+    return;
+  }
 
   // #3758 — bump lastClientActivityAt for activity-bearing events BEFORE
   // any per-case handler runs. Doing it here keeps the bump in one place

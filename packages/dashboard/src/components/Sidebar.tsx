@@ -88,6 +88,14 @@ export interface SidebarProps {
   onFilterChange: (value: string) => void
   onSessionClick: (sessionId: string) => void
   onResumeSession: (conversationId: string, cwd?: string) => void
+  /**
+   * #6863 (epic #6765) — open a read-only transcript viewer for a search
+   * result instead of resuming it. Optional (like `searchConversations` /
+   * `clearSearchResults`) so existing callers/tests that don't exercise
+   * search don't need to wire it; when omitted, ConversationSearch's View
+   * button (which requires a handler) gets a no-op.
+   */
+  onViewConversation?: (conversationId: string, cwd?: string) => void
   onNewSession: (cwd: string) => void
   onToggle: () => void
   onContextMenu: (target: ContextMenuTarget, event: React.MouseEvent) => void
@@ -149,6 +157,7 @@ export function Sidebar({
   onFilterChange,
   onSessionClick,
   onResumeSession,
+  onViewConversation,
   onNewSession,
   onToggle,
   onContextMenu,
@@ -706,6 +715,7 @@ export function Sidebar({
               searchConversations={searchConversations}
               clearSearchResults={clearSearchResults}
               onResumeSession={(convId, cwd) => onResumeSession(convId, cwd)}
+              onViewConversation={(convId, cwd) => onViewConversation?.(convId, cwd)}
             />
           )}
 

@@ -221,6 +221,11 @@ vi.mock('./store/connection', () => {
     conversationHistory: [],
     fetchConversationHistory: vi.fn(),
     resumeConversation: vi.fn(),
+    // #6863 — read-only transcript viewer store slice + actions. Mirror the
+    // real store's idle default so App/AppModals render without crashing.
+    transcriptViewer: { conversationId: null, status: 'idle', messages: [], error: null },
+    requestConversationTranscript: vi.fn(),
+    closeTranscriptViewer: vi.fn(),
     connectedClients: [],
     // #5510 — pairing-approval primitive: host-level pending pair-request banner
     // slice + actions. Mirror the real store defaults so App renders the
