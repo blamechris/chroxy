@@ -1,6 +1,6 @@
 import { stat, open } from 'fs/promises'
 import { constants as fsConstants } from 'fs'
-import { resolve, dirname, normalize, sep } from 'path'
+import { resolve, dirname, normalize, sep, extname } from 'path'
 import { homedir } from 'os'
 import { realpathOfDeepestAncestor } from './common.js'
 import { encodeProjectPath } from '../jsonl-reader.js'
@@ -13,6 +13,24 @@ const MAX_CONTENT_SIZE = 100 * 1024
 const MAX_IMPORT_DEPTH = 4
 /** hard ceiling on total import entries per read — defence against import fan-out */
 const MAX_IMPORT_ENTRIES = 50
+/**
+ * Extensions an `@import` target may resolve to. Memory `@import`s are meant to
+ * pull in MARKDOWN memory files, not arbitrary files — restricting the resolved
+ * target to this allowlist blocks the sensitive-file class under an allowed root
+ * (`~/.claude/.credentials.json`, `~/.claude/settings.json`, identity keys,
+ * other projects' `~/.claude/projects/**` `.jsonl` transcripts, extensionless
+ * files) that would otherwise resolve IN-BOUNDS and be surfaced to the client.
+ * More robust than a filename blocklist — it closes the whole class. (#6971)
+ */
+const IMPORT_ALLOWED_EXTS = ['.md', '.markdown']
+/**
+ * Single "not readable — skipped" reason string shared by EVERY skip branch
+ * (out-of-bounds, non-markdown `@import`, resolution failure). Reusing ONE
+ * message keeps the skip entries byte-identical so a client cannot distinguish
+ * "outside allowed roots" from "not a markdown file" from "couldn't resolve" —
+ * no error-string oracle. (#6971)
+ */
+const MEMORY_SKIP_ERROR = 'Outside allowed memory roots — read skipped'
 
 // Matches an `@path` memory-import reference (Claude Code's CLAUDE.md import
 // syntax — see docs.claude.com "Manage Claude's memory" / "Import additional
@@ -63,6 +81,15 @@ function resolveImportTarget(rawPath, importingFileAbsPath) {
 }
 
 /**
+ * True iff `p`'s extension is in the `@import` markdown allowlist
+ * (case-insensitive) — see IMPORT_ALLOWED_EXTS. An extensionless path
+ * (`extname` → '') is NOT markdown and is rejected.
+ */
+function hasMarkdownExt(p) {
+  return IMPORT_ALLOWED_EXTS.includes(extname(p).toLowerCase())
+}
+
+/**
  * Read+validate a single memory file that MUST resolve within one of the
  * given allowed roots — the read-only path-confinement guard for #6864.
  *
@@ -76,25 +103,51 @@ function resolveImportTarget(rawPath, importingFileAbsPath) {
  * the post-validation TOCTOU window (a symlink swapped in at the target
  * between validation and open is rejected, not followed).
  *
- * Never throws — every failure mode folds into `error`/`skipped` so a caller
- * can push the result straight onto the response array.
+ * With `{ requireMarkdownExt: true }` (the `@import` path passes this; the fixed
+ * root files do NOT), a resolved target whose extension is not in
+ * IMPORT_ALLOWED_EXTS is rejected up front — same skip shape as out-of-bounds —
+ * closing the "@import a non-markdown sensitive file under ~/.claude" class (#6971).
  *
+ * Never throws — every failure mode folds into `error`/`skipped` so a caller
+ * can push the result straight onto the response array. All skip branches share
+ * MEMORY_SKIP_ERROR and echo the LEXICAL request path, so they're byte-identical
+ * (no distinguishing oracle).
+ *
+ * @param {string} lexicalAbsPath - Absolute LEXICAL (pre-realpath) target path
+ * @param {string[]} allowedRoots - Real-path roots the target must resolve within
+ * @param {{requireMarkdownExt?: boolean}} [opts] - `@import`-only markdown-extension gate
  * @returns {Promise<{path: string|null, exists: boolean, content: string|null, truncated: boolean, skipped: boolean, error: string|null}>}
  */
-async function readConfinedMemoryFile(lexicalAbsPath, allowedRoots) {
+async function readConfinedMemoryFile(lexicalAbsPath, allowedRoots, { requireMarkdownExt = false } = {}) {
   const base = { path: lexicalAbsPath, exists: false, content: null, truncated: false, skipped: false, error: null }
+
+  // `@import` markdown allowlist (import path ONLY; the fixed root files are
+  // exempt). A non-markdown target — `~/.claude/.credentials.json`,
+  // `~/.claude/settings.json`, an identity key, a `.jsonl` transcript, an
+  // extensionless file — is rejected with the SAME shape an out-of-bounds path
+  // gets, so there's no distinguishing oracle between "out of bounds", "not
+  // markdown", and "doesn't exist". Purely LEXICAL and BEFORE any realpath/stat,
+  // so a non-markdown import never even touches the filesystem. (#6971)
+  if (requireMarkdownExt && !hasMarkdownExt(lexicalAbsPath)) {
+    return { ...base, skipped: true, error: MEMORY_SKIP_ERROR }
+  }
 
   let resolvedPath
   try {
     resolvedPath = await realpathOfDeepestAncestor(lexicalAbsPath)
-  } catch (err) {
-    return { ...base, error: err.message || 'Failed to resolve path' }
+  } catch {
+    // Resolution failed (EACCES on an ancestor dir, symlink-depth ceiling, …).
+    // Normalize to the identical clean-skip shape rather than echoing the raw
+    // error message — no error-string oracle, no content leak. (#6971)
+    return { ...base, skipped: true, error: MEMORY_SKIP_ERROR }
   }
 
   const withinRoot = allowedRoots.some((root) => resolvedPath === root || resolvedPath.startsWith(root + sep))
   if (!withinRoot) {
     // Outside every allowed root — reject WITHOUT stat'ing (no existence oracle).
-    return { ...base, path: resolvedPath, skipped: true, error: 'Outside allowed memory roots — read skipped' }
+    // Echo the LEXICAL request path (base.path), NOT the realpath-resolved path,
+    // so a skipped entry can't be used as a symlink-target oracle. (#6971)
+    return { ...base, skipped: true, error: MEMORY_SKIP_ERROR }
   }
 
   let fileStat
@@ -149,7 +202,9 @@ async function collectImports(content, importingFileAbsPath, allowedRoots, visit
   for (const rawPath of extractImportPaths(content)) {
     if (outEntries.length >= MAX_IMPORT_ENTRIES) return
     const lexicalTarget = resolveImportTarget(rawPath, importingFileAbsPath)
-    const entry = await readConfinedMemoryFile(lexicalTarget, allowedRoots)
+    // Import targets are confined to the same roots AND restricted to markdown
+    // memory files (the root files themselves are not) — see #6971.
+    const entry = await readConfinedMemoryFile(lexicalTarget, allowedRoots, { requireMarkdownExt: true })
     const key = entry.path || lexicalTarget
     if (visited.has(key)) continue // cycle guard
     visited.add(key)
@@ -191,9 +246,13 @@ export function createMemoryOps(sendFn, resolveSessionCwd) {
    * design), so there is no client-controlled traversal surface for the three
    * root files. The ONLY variable input is @import references found INSIDE
    * those files' own content, which are confined to the same two roots
-   * (session cwd, user's ~/.claude) via `readConfinedMemoryFile` — an import
-   * resolving outside both is reported (for provenance/transparency) with
-   * `skipped: true` and is never opened.
+   * (session cwd, user's ~/.claude) via `readConfinedMemoryFile` AND restricted
+   * to markdown targets (`.md`/`.markdown`) — an import resolving outside both
+   * roots, or to a non-markdown file (e.g. `~/.claude/.credentials.json`), is
+   * reported (for provenance/transparency) with `skipped: true` and is never
+   * opened. #6971 added the markdown restriction so a malicious project
+   * CLAUDE.md can't `@import` a sensitive non-memory file that happens to sit
+   * under the ~/.claude allowed root.
    *
    * Also resolves the project's auto-generated MEMORY.md descriptor, keyed by
    * the SAME per-cwd path encoding `resolveJsonlPath` uses for transcript
