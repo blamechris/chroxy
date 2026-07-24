@@ -219,11 +219,30 @@ export { ProviderBinaryNotFoundError, ProviderBinaryQuarantinedError, ProviderBi
  * @property {number}  [maxMessages=1000]        - Max history messages per session (alias: maxHistory)
  * @property {number}  [maxHistory]              - Legacy alias for maxMessages
  */
+
+// #6944 / #6952 review: process-lifetime dedup for the general unknown-ctor-opt
+// warning below — keyed by the unrecognized option name so a given typo warns
+// at most once no matter how many SessionManager instances get constructed.
+// Module-level (not per-instance) is intentional: the warning is a one-time
+// "you have a bug" signal, not per-instance telemetry.
+const warnedUnknownCtorOptKeys = new Set()
+
 export class SessionManager extends EventEmitter {
   /**
-   * @param {SessionManagerConfig} config
+   * @param {SessionManagerConfig} opts
    */
-  constructor({
+  constructor(opts = {}) {
+    super()
+
+    // #6952 review: destructure the raw `opts` object here (instead of in the
+    // parameter list) so `opts` itself stays addressable below — needed to
+    // tell "providerType explicitly passed" apart from "providerType defaulted"
+    // (see providerTypeIsExplicit) without a parallel hand-maintained key list.
+    // `let` (not `const`): parameter destructuring made every one of these an
+    // independently mutable local binding, and `providerType` in particular is
+    // reassigned below when the `provider` alias resolves onto it — a `const`
+    // destructure would throw "Assignment to constant variable" at that point.
+    let {
     // Server identity
     port,
     apiToken,
@@ -402,8 +421,7 @@ export class SessionManager extends EventEmitter {
     // opt, not the ctor's `providerType` — fell through to a claude-tui PTY
     // spawn and hung CI, #6933).
     ...unknownCtorOpts
-  } = {}) {
-    super()
+    } = opts
 
     // #6944: surface misnamed / unknown constructor options. Never throws — a
     // production caller must not crash on a friendly alias — but it refuses to
@@ -420,7 +438,15 @@ export class SessionManager extends EventEmitter {
       // ignored — never overwrite a good default with a bad alias value.
       if (Object.prototype.hasOwnProperty.call(unknownCtorOpts, 'provider')) {
         const providerAlias = unknownCtorOpts.provider
-        const providerTypeIsExplicit = providerType !== DEFAULT_PROVIDER
+        // #6952 review: explicitness must come from the ORIGINAL `opts` object,
+        // not from comparing the (already-defaulted) `providerType` binding to
+        // DEFAULT_PROVIDER. A caller passing BOTH `provider` and an explicit
+        // `providerType` that happens to equal DEFAULT_PROVIDER (e.g.
+        // `providerType: 'claude-tui'`) is indistinguishable from omitting
+        // providerType entirely under the old check — the alias would
+        // incorrectly win. `'providerType' in opts` reflects what the caller
+        // actually passed, independent of its value.
+        const providerTypeIsExplicit = Object.prototype.hasOwnProperty.call(opts, 'providerType')
         if (!providerTypeIsExplicit && typeof providerAlias === 'string' && providerAlias.length > 0) {
           log.warn(`SessionManager: 'provider' is not a constructor option — did you mean 'providerType'? Treating provider=${JSON.stringify(providerAlias)} as providerType (createSession() uses 'provider'; the constructor uses 'providerType').`)
           providerType = providerAlias
@@ -431,13 +457,29 @@ export class SessionManager extends EventEmitter {
           log.warn(`SessionManager: ignoring constructor option 'provider' (use 'providerType') — ${reason}.`)
         }
       }
-      // The rest of the class: warn on any other unrecognized key. Gated to
-      // test/dev so a single stray key can't spam a long-lived production daemon
-      // log (SessionManager is constructed once per daemon), while still
-      // catching the whole footgun class in the suite where it actually bites.
+      // The rest of the class: warn on any other unrecognized key. #6952 review:
+      // this used to be gated on `process.env.NODE_ENV === 'test'`, but nothing
+      // in the harness/CI ever sets NODE_ENV=test, so the safety net never fired
+      // outside of someone manually exporting it — the whole-key-class catch
+      // (e.g. `persistenceDebounceMs` typo'd for `persistDebounceMs`) was dead.
+      // Always-on is safe for production: SessionManager's sole prod caller
+      // (server-cli.js) constructs it from a fixed set of destructured keys, so
+      // `unknownCtorOpts` is empty there and this never fires. The module-level
+      // dedup Set bounds repeat warnings to once per distinct key for the life
+      // of the process, so it can't spam a long-lived daemon log even if some
+      // future caller does pass an unknown key repeatedly (e.g. in a loop).
+      // CHROXY_DEBUG_CTOR_OPTS='1' bypasses the dedup for extra verbosity when
+      // actively debugging a ctor-opt issue (every occurrence re-warns).
       const otherUnknown = unknownOptKeys.filter((k) => k !== 'provider')
-      if (otherUnknown.length > 0 && (process.env.NODE_ENV === 'test' || process.env.CHROXY_DEBUG_CTOR_OPTS === '1')) {
-        log.warn(`SessionManager: ignoring unrecognized constructor option(s): ${otherUnknown.join(', ')}. Check for a misnamed option.`)
+      if (otherUnknown.length > 0) {
+        const verbose = process.env.CHROXY_DEBUG_CTOR_OPTS === '1'
+        const toWarn = verbose
+          ? otherUnknown
+          : otherUnknown.filter((k) => !warnedUnknownCtorOptKeys.has(k))
+        if (toWarn.length > 0) {
+          toWarn.forEach((k) => warnedUnknownCtorOptKeys.add(k))
+          log.warn(`SessionManager: ignoring unrecognized constructor option(s): ${toWarn.join(', ')}. Check for a misnamed option.`)
+        }
       }
     }
 
