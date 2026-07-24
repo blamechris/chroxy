@@ -22,8 +22,15 @@ function fakeStream(events, finalMessage) {
         // #6391 — a `__delayMs` marker event advances wall-clock between the
         // real events around it (so the thinking start→stop elapsed time the
         // session measures is provably > 0), then is dropped from the stream.
-        if (e && e.__delayMs) {
+        if (e && typeof e.__delayMs === 'number') {
           await new Promise((r) => setTimeout(r, e.__delayMs))
+          continue
+        }
+        // #6943 — a `__exec` marker runs an arbitrary side-effect (e.g.
+        // freezing/restoring Date.now()) at a precise point in the stream,
+        // without itself being yielded as a stream event.
+        if (e && typeof e.__exec === 'function') {
+          await e.__exec()
           continue
         }
         yield e
@@ -160,5 +167,62 @@ describe('ClaudeByokSession — thinking content forwarding (#6756)', () => {
     const responseEnd = captured.find((e) => e.name === 'stream_end' && !e.thinking)
     assert.ok(responseEnd)
     assert.equal(responseEnd.thinkingDurationMs, undefined)
+  })
+
+  it('measures thinkingDurationMs from a monotonic clock, immune to a Date.now() jump (#6943)', async () => {
+    // Both server emit paths (sdk-session.js + byok-session.js) previously
+    // measured a reasoning block's elapsed time with Date.now(), which can
+    // jump (NTP step, manual clock change, DST) and produce a wrong
+    // thinkingDurationMs — a backward jump clamps to 0, a forward jump
+    // inflates it. #6943 switches the measurement to performance.now()
+    // (perf_hooks), which is immune to wall-clock jumps. This test freezes
+    // Date.now() for the reasoning block's entire open→close window: if the
+    // implementation still read Date.now(), the measured duration would be
+    // exactly 0ms despite the real 12ms delay injected below.
+    const session = new ClaudeByokSession({ cwd: '/tmp' })
+    const realDateNow = Date.now
+    session._client = {
+      messages: {
+        stream: () =>
+          fakeStream([
+            { type: 'message_start', message: { id: 'msg_1', model: 'claude-opus-4-8' } },
+            { type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '' } },
+            { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'Reasoning.' } },
+            { __exec: () => { Date.now = () => 1_700_000_000_000 } },
+            { __delayMs: 12 },
+            { type: 'content_block_stop', index: 0 },
+            // Restore Date.now() before the rest of the turn runs (result
+            // handling, cost accounting, etc. legitimately need real time).
+            { __exec: () => { Date.now = realDateNow } },
+            { type: 'content_block_start', index: 1, content_block: { type: 'text', text: '' } },
+            { type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: 'Hi' } },
+            { type: 'content_block_stop', index: 1 },
+            { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { input_tokens: 5, output_tokens: 4 } },
+            { type: 'message_stop' },
+          ], {
+            stop_reason: 'end_turn',
+            content: [{ type: 'thinking', thinking: 'Reasoning.' }, { type: 'text', text: 'Hi' }],
+            usage: { input_tokens: 5, output_tokens: 4 },
+          }),
+      },
+    }
+    const captured = capture(session)
+    try {
+      await session.start()
+      await session.sendMessage('hi')
+    } finally {
+      // Safety net in case the stream errored before the restore `__exec` ran.
+      Date.now = realDateNow
+    }
+
+    const thinkingEnds = captured.filter((e) => e.name === 'stream_end' && e.thinking === true)
+    assert.equal(thinkingEnds.length, 1)
+    const end = thinkingEnds[0]
+    assert.equal(typeof end.thinkingDurationMs, 'number')
+    assert.ok(Number.isInteger(end.thinkingDurationMs), 'duration is an integer ms')
+    assert.ok(
+      end.thinkingDurationMs > 0,
+      `duration should be > 0 despite a frozen Date.now(), got ${end.thinkingDurationMs}`
+    )
   })
 })
