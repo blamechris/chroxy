@@ -345,7 +345,7 @@ export PATH="$PATH:$HOME/.maestro/bin"
 
 # Full green gate (recommended) — each flow in its OWN maestro process (#6091).
 # Reliable on a single simulator over long runs: avoids the XCUITest instability
-# that accumulates when all 23 flows share one process (run-all.yaml). Parses the
+# that accumulates when all 25 flows share one process (run-all.yaml). Parses the
 # flow inventory from run-all.yaml, starts/reuses the mock server, retries a
 # failing flow once (env flakiness vs real defect), prints a pass/fail summary.
 bash packages/app/.maestro/scripts/run-all-sequential.sh --device <device-id>
@@ -375,7 +375,9 @@ When you modify app components (screens, UI elements, styling), verify with Maes
 | `manual-connect.yaml` | Manual entry form, URL input, Connect → optimistic SessionScreen + reconnect banner on unreachable server, header Disconnect back to ConnectScreen |
 | `lan-scan.yaml` | LAN scan trigger, in-progress or results state (scan can finish near-instantly) |
 | `chat-todolist.yaml` | TodoList renderer end-to-end (mock-server emits TodoWrite tool_use+tool_result, entry expands, structured TodoList renders with testIDs) |
-| `run-all.yaml` | Runs all 23 flows sequentially — see its commented list for the full per-flow inventory (session, plan approval, AskUserQuestion, terminal, reconnect, disconnected-permission no-op, diff inline-comment, …) |
+| `chat-websearch.yaml` | WebSearch structured renderer (mock-server emits WebSearch tool_start+tool_result via `show-websearch`, entry expands, `WebSearchResultList` renders title/domain/snippet rows; asserts the fixture's `javascript:` result produced no row) |
+| `chat-webfetch.yaml` | WebFetch structured renderer (`show-webfetch` trigger → source-URL link + markdown-formatted body) |
+| `run-all.yaml` | Runs all 25 flows sequentially — see its commented list for the full per-flow inventory (session, plan approval, AskUserQuestion, terminal, reconnect, disconnected-permission no-op, diff inline-comment, …) |
 
 ### Fixture Seeding for Structured Renderers
 

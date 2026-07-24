@@ -13,10 +13,21 @@ import {
 import type { ToolResultImage } from '../../store/connection';
 import { Icon } from '../Icon';
 import { COLORS } from '../../constants/colors';
+import { WebToolResultView, parseWebToolResult } from './WebToolResult';
 
-export function ToolDetailModal({ visible, toolName, content, toolResult, toolResultTruncated, toolResultImages, serverName, onClose, onImagePress }: {
+export function ToolDetailModal({ visible, toolName, rawToolName, content, toolResult, toolResultTruncated, toolResultImages, serverName, onClose, onImagePress }: {
   visible: boolean;
   toolName: string;
+  /**
+   * #6982: the UNFORMATTED tool name (`message.tool`), used only to route
+   * the result through the structured WebSearch/WebFetch renderer.
+   * `toolName` is the human-facing label from `formatToolName`, which
+   * rewrites `web_search` to `Web Search` — the shared matchers normalize
+   * `_`/`-` but not spaces, so routing on it would silently fail. Optional
+   * so callers that only have a display name keep working (they just fall
+   * back to the plain-text result render).
+   */
+  rawToolName?: string;
   content: string;
   toolResult?: string;
   toolResultTruncated?: boolean;
@@ -25,6 +36,10 @@ export function ToolDetailModal({ visible, toolName, content, toolResult, toolRe
   onClose: () => void;
   onImagePress: (uri: string) => void;
 }) {
+  // #6982: structured WebSearch/WebFetch render, parse-with-fallback —
+  // `null` (non-web tool, absent or unparseable result) keeps the existing
+  // `<Text selectable>` dump below.
+  const webParsed = parseWebToolResult(rawToolName, toolResult);
   return (
     <Modal
       visible={visible}
@@ -83,7 +98,11 @@ export function ToolDetailModal({ visible, toolName, content, toolResult, toolRe
             {toolResult != null ? (
               <>
                 <Text style={[styles.toolModalSectionLabel, (content || toolResultImages?.length) ? { marginTop: 12 } : undefined]}>Result{toolResultTruncated ? ' (truncated)' : ''}</Text>
-                <Text selectable style={styles.toolModalContent}>{toolResult}</Text>
+                {webParsed ? (
+                  <WebToolResultView parsed={webParsed} />
+                ) : (
+                  <Text selectable style={styles.toolModalContent}>{toolResult}</Text>
+                )}
               </>
             ) : null}
           </ScrollView>
