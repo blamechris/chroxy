@@ -17,6 +17,7 @@
 import Anthropic, { APIUserAbortError } from '@anthropic-ai/sdk'
 import { join } from 'path'
 import { homedir } from 'os'
+import { performance } from 'node:perf_hooks'
 import { BaseSession, buildBaseSessionOpts } from './base-session.js'
 import { synthesizeModelUsage } from './usage-normalize.js'
 import { PermissionManager, wirePermissionManager } from './permission-manager.js'
@@ -333,10 +334,12 @@ export class ClaudeByokSession extends BaseSession {
     // correctly. Cleared alongside `_streamingIndexToToolUseId`.
     this._streamingIndexToThinkingId = new Map()
 
-    // #6391 (chat-redesign footer-stat): thinking messageId → Date.now() when
-    // the reasoning block opened, so its content_block_stop can stamp the
+    // #6391 (chat-redesign footer-stat): thinking messageId → performance.now()
+    // when the reasoning block opened, so its content_block_stop can stamp the
     // elapsed `thinkingDurationMs` on the thinking stream_end. Cleared alongside
-    // `_streamingIndexToThinkingId`.
+    // `_streamingIndexToThinkingId`. #6943: monotonic clock (perf_hooks), not
+    // Date.now() — wall-clock jumps (NTP step, manual change, DST) would
+    // otherwise clamp a backward jump to 0 or inflate a forward jump.
     this._thinkingStartMs = new Map()
 
     // #4080: toolUseIds whose permission_request is currently pending.
@@ -812,8 +815,9 @@ export class ClaudeByokSession extends BaseSession {
                 thinkingId = `${messageId}-thinking-${idx}`
                 this._streamingIndexToThinkingId.set(idx, thinkingId)
                 // #6391 footer-stat: mark the block's start for the
-                // content_block_stop elapsed-time computation.
-                this._thinkingStartMs.set(thinkingId, Date.now())
+                // content_block_stop elapsed-time computation. #6943:
+                // performance.now() (monotonic), not Date.now().
+                this._thinkingStartMs.set(thinkingId, performance.now())
                 this.emit('stream_start', { messageId: thinkingId, thinking: true })
               }
               this.emit('stream_delta', { messageId: thinkingId, delta: t.text, thinking: true })
@@ -908,16 +912,20 @@ export class ClaudeByokSession extends BaseSession {
                 const thinkingId = this._streamingIndexToThinkingId.get(t.index)
                 if (thinkingId) {
                   this._streamingIndexToThinkingId.delete(t.index)
-                  // #6391 footer-stat: elapsed wall time from the block's open to
-                  // now → the client's `thought for Xs` footer. Omit when the
-                  // start wasn't tracked so we never send a bogus 0. No token
-                  // count: Anthropic's usage folds thinking tokens into
-                  // output_tokens with no per-block breakdown (see follow-up).
+                  // #6391 footer-stat: elapsed monotonic time from the block's
+                  // open to now → the client's `thought for Xs` footer. Omit
+                  // when the start wasn't tracked so we never send a bogus 0.
+                  // No token count: Anthropic's usage folds thinking tokens
+                  // into output_tokens with no per-block breakdown (see
+                  // follow-up). #6943: startMs is a performance.now() sample
+                  // (monotonic, immune to wall-clock jumps), so elapsed can
+                  // never legitimately be negative — Math.max(0, …) is a
+                  // defensive floor only, not a correctness requirement.
                   const startMs = this._thinkingStartMs.get(thinkingId)
                   this._thinkingStartMs.delete(thinkingId)
                   const streamEndMsg = { messageId: thinkingId, thinking: true }
                   if (typeof startMs === 'number') {
-                    streamEndMsg.thinkingDurationMs = Math.max(0, Date.now() - startMs)
+                    streamEndMsg.thinkingDurationMs = Math.max(0, Math.round(performance.now() - startMs))
                   }
                   this.emit('stream_end', streamEndMsg)
                 }

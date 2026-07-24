@@ -1,6 +1,7 @@
 import { query, forkSession } from '@anthropic-ai/claude-agent-sdk'
 import { join } from 'path'
 import { homedir } from 'os'
+import { performance } from 'node:perf_hooks'
 import { updateModels, saveModelsCache, updateContextWindow, getModels, ALLOWED_MODEL_IDS } from './models.js'
 import { CLAUDE_FALLBACK_MODELS, claudeModelMetadata } from './claude-model-catalog.js'
 import { BaseSession, buildBaseSessionOpts } from './base-session.js'
@@ -654,10 +655,13 @@ export class SdkSession extends BaseSession {
     // maps the SDK stream event `index` → that thinking id so the thinking_delta
     // and content_block_stop events (which carry only the index) route correctly.
     const thinkingBlocks = new Map()
-    // #6391 (chat-redesign footer-stat) — thinkingId -> Date.now() when the
-    // reasoning block opened, so its content_block_stop can stamp the elapsed
-    // `thinkingDurationMs` on the thinking stream_end. Turn-local; entries are
-    // deleted alongside thinkingBlocks when the block closes.
+    // #6391 (chat-redesign footer-stat) — thinkingId -> performance.now() when
+    // the reasoning block opened, so its content_block_stop can stamp the
+    // elapsed `thinkingDurationMs` on the thinking stream_end. Turn-local;
+    // entries are deleted alongside thinkingBlocks when the block closes.
+    // #6943: monotonic clock (perf_hooks), not Date.now() — wall-clock jumps
+    // (NTP step, manual change, DST) would otherwise clamp a backward jump to
+    // 0 or inflate a forward jump.
     const thinkingStartMs = new Map()
     let thinkingBlockCount = 0
     let didStreamThinking = false
@@ -938,8 +942,9 @@ export class SdkSession extends BaseSession {
                     thinkingId = `${messageId}-thinking-${thinkingBlockCount++}`
                     thinkingBlocks.set(event.index, thinkingId)
                     // #6391 footer-stat: mark the block's start for the
-                    // content_block_stop elapsed-time computation.
-                    thinkingStartMs.set(thinkingId, Date.now())
+                    // content_block_stop elapsed-time computation. #6943:
+                    // performance.now() (monotonic), not Date.now().
+                    thinkingStartMs.set(thinkingId, performance.now())
                     this.emit('stream_start', { messageId: thinkingId, thinking: true })
                   }
                   didStreamThinking = true
@@ -983,7 +988,8 @@ export class SdkSession extends BaseSession {
                     thinkingBlocks.set(event.index, thinkingId)
                     // #6391 footer-stat: mark the block's start (lazy-open path)
                     // for the content_block_stop elapsed-time computation.
-                    thinkingStartMs.set(thinkingId, Date.now())
+                    // #6943: performance.now() (monotonic), not Date.now().
+                    thinkingStartMs.set(thinkingId, performance.now())
                     this.emit('stream_start', { messageId: thinkingId, thinking: true })
                   }
                   didStreamThinking = true
@@ -999,16 +1005,20 @@ export class SdkSession extends BaseSession {
                 const thinkingId = thinkingBlocks.get(event.index)
                 if (thinkingId) {
                   thinkingBlocks.delete(event.index)
-                  // #6391 footer-stat: elapsed wall time from the block's open to
-                  // now → the client's `thought for Xs` footer. Omit when the
-                  // start wasn't tracked (defensive) so we never send a bogus 0.
-                  // No token count: Anthropic's usage folds thinking tokens into
-                  // output_tokens with no per-block breakdown (see follow-up).
+                  // #6391 footer-stat: elapsed monotonic time from the block's
+                  // open to now → the client's `thought for Xs` footer. Omit
+                  // when the start wasn't tracked (defensive) so we never send
+                  // a bogus 0. No token count: Anthropic's usage folds thinking
+                  // tokens into output_tokens with no per-block breakdown (see
+                  // follow-up). #6943: startMs is a performance.now() sample
+                  // (monotonic, immune to wall-clock jumps), so elapsed can
+                  // never legitimately be negative — Math.max(0, …) is a
+                  // defensive floor only, not a correctness requirement.
                   const startMs = thinkingStartMs.get(thinkingId)
                   thinkingStartMs.delete(thinkingId)
                   const streamEndMsg = { messageId: thinkingId, thinking: true }
                   if (typeof startMs === 'number') {
-                    streamEndMsg.thinkingDurationMs = Math.max(0, Date.now() - startMs)
+                    streamEndMsg.thinkingDurationMs = Math.max(0, Math.round(performance.now() - startMs))
                   }
                   this.emit('stream_end', streamEndMsg)
                 }
