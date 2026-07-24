@@ -393,8 +393,53 @@ export class SessionManager extends EventEmitter {
     // Test-only: skip preflight checks (binary + credential). Production must
     // leave this false so missing providers surface cleanly at createSession.
     skipPreflight = false,
+
+    // #6944: object-rest captures every option key NOT destructured above.
+    // The destructure itself is the single source of truth for "known" keys —
+    // no parallel allow-list to drift. Anything landing here is a misnamed or
+    // unrecognized ctor option; the guard below surfaces it instead of letting
+    // it be silently swallowed (which is how `provider` — the createSession()
+    // opt, not the ctor's `providerType` — fell through to a claude-tui PTY
+    // spawn and hung CI, #6933).
+    ...unknownCtorOpts
   } = {}) {
     super()
+
+    // #6944: surface misnamed / unknown constructor options. Never throws — a
+    // production caller must not crash on a friendly alias — but it refuses to
+    // silently ignore a key.
+    const unknownOptKeys = Object.keys(unknownCtorOpts)
+    if (unknownOptKeys.length > 0) {
+      // Targeted alias: `provider` is the classic typo for `providerType` (the
+      // former is the createSession() option, the latter the ctor's). When only
+      // `provider` was supplied as a usable string, map it onto `providerType`
+      // so the caller gets the provider they intended rather than a silent
+      // DEFAULT_PROVIDER (claude-tui) PTY spawn. If `providerType` was ALSO set
+      // explicitly, or `provider` is not a usable string (undefined/null/''),
+      // keep the resolved `providerType` and just warn that `provider` is
+      // ignored — never overwrite a good default with a bad alias value.
+      if (Object.prototype.hasOwnProperty.call(unknownCtorOpts, 'provider')) {
+        const providerAlias = unknownCtorOpts.provider
+        const providerTypeIsExplicit = providerType !== DEFAULT_PROVIDER
+        if (!providerTypeIsExplicit && typeof providerAlias === 'string' && providerAlias.length > 0) {
+          log.warn(`SessionManager: 'provider' is not a constructor option — did you mean 'providerType'? Treating provider=${JSON.stringify(providerAlias)} as providerType (createSession() uses 'provider'; the constructor uses 'providerType').`)
+          providerType = providerAlias
+        } else {
+          const reason = providerTypeIsExplicit
+            ? `providerType=${JSON.stringify(providerType)} is already set`
+            : `provider=${JSON.stringify(providerAlias)} is not a usable provider id`
+          log.warn(`SessionManager: ignoring constructor option 'provider' (use 'providerType') — ${reason}.`)
+        }
+      }
+      // The rest of the class: warn on any other unrecognized key. Gated to
+      // test/dev so a single stray key can't spam a long-lived production daemon
+      // log (SessionManager is constructed once per daemon), while still
+      // catching the whole footgun class in the suite where it actually bites.
+      const otherUnknown = unknownOptKeys.filter((k) => k !== 'provider')
+      if (otherUnknown.length > 0 && (process.env.NODE_ENV === 'test' || process.env.CHROXY_DEBUG_CTOR_OPTS === '1')) {
+        log.warn(`SessionManager: ignoring unrecognized constructor option(s): ${otherUnknown.join(', ')}. Check for a misnamed option.`)
+      }
+    }
 
     // Server identity
     this._port = port || null

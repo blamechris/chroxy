@@ -173,7 +173,7 @@ describe('permission_resolved end-to-end broadcast (#3048)', () => {
         // worker alive and hung the suite when run without --test-force-exit.
         providerType: 'fake-permresolved',
         stateFilePath: tmpState,
-        persistenceDebounceMs: 0,
+        persistDebounceMs: 0,
       })
 
       const events = []
