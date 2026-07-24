@@ -75,4 +75,35 @@ describe('MermaidDiagram', () => {
       expect(screen.getByTestId('mermaid-diagram').textContent).toContain('C-->D')
     })
   })
+
+  // Defense in depth (#6985): every other test here mocks mermaid.render()
+  // to return BENIGN SVG, so none of them prove the layer-2 DOMPurify.sanitize
+  // call actually strips anything — a refactor that silently dropped it would
+  // still pass. Mock a MALICIOUS render result (as if mermaid's own strict
+  // sanitization were bypassed or buggy) and assert the DOM we actually mount
+  // is clean, proving the second sanitize pass is load-bearing.
+  it('strips a malicious payload from the rendered SVG even if mermaid itself lets it through', async () => {
+    renderFn.mockImplementationOnce(async () => ({
+      svg:
+        '<svg data-mermaid="1">' +
+        '<script>window.__xss = "script"</script>' +
+        '<g onerror="window.__xss = &quot;onerror&quot;"><text>A</text></g>' +
+        '<foreignObject><div onclick="window.__xss = &quot;onclick&quot;">evil</div></foreignObject>' +
+        '<text>valid label</text>' +
+        '</svg>',
+    }))
+    render(<MermaidDiagram source="graph TD; A-->B" />)
+    const el = await screen.findByTestId('mermaid-diagram')
+
+    // The malicious elements/attributes are gone...
+    expect(el.querySelector('script')).toBeNull()
+    expect(el.querySelector('foreignObject')).toBeNull()
+    expect(el.innerHTML).not.toContain('onerror')
+    expect(el.innerHTML).not.toContain('onclick')
+    expect(el.textContent).not.toContain('__xss')
+    // ...while the legitimate diagram content survives (proves the SVG
+    // profile isn't just nuking the whole payload — it's targeted removal).
+    expect(el.querySelector('svg')).not.toBeNull()
+    expect(el.textContent).toContain('valid label')
+  })
 })

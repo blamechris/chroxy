@@ -21,8 +21,21 @@ import { handleMarkdownBodyClick } from '../lib/codeCopy'
 import { MermaidDiagram } from './MermaidDiagram'
 
 export function MarkdownBody({ content }: { content: string }) {
-  const segments = useMemo(() => splitMermaidSegments(content), [content])
-  const hasMermaid = useMemo(() => segments.some((s) => s.type === 'mermaid'), [segments])
+  // Cheap early-out BEFORE the full fence-scanning split: a real ```mermaid
+  // fence always contains the literal substring "mermaid", so this plain
+  // `includes` can never false-negative a real fence. It CAN false-positive
+  // (prose that merely mentions "mermaid" without a fence) — that case just
+  // falls through to `splitMermaidSegments`, which correctly finds no fence
+  // and this component takes the identical fast-path render below. This
+  // keeps the overwhelmingly common no-mermaid message from paying for a
+  // full regex scan on every render, on top of `renderMarkdown`'s own scan.
+  const mightHaveMermaid = content.includes('mermaid')
+
+  const segments = useMemo(
+    () => (mightHaveMermaid ? splitMermaidSegments(content) : null),
+    [content, mightHaveMermaid],
+  )
+  const hasMermaid = segments !== null && segments.some((s) => s.type === 'mermaid')
 
   // Fast path: no mermaid → byte-for-byte the pre-#6754 render.
   if (!hasMermaid) {
@@ -31,7 +44,7 @@ export function MarkdownBody({ content }: { content: string }) {
 
   return (
     <div onClick={handleMarkdownBodyClick} className="markdown-body-mixed">
-      {segments.map((seg, i) =>
+      {segments!.map((seg, i) =>
         seg.type === 'mermaid' ? (
           <MermaidDiagram key={i} source={seg.content} />
         ) : (

@@ -77,9 +77,12 @@ export function MermaidDiagram({ source }: { source: string }) {
         const { svg } = await mermaid.render(id, source)
         if (cancelled) return
         // Defense in depth: mermaid strict already sanitizes, but re-run
-        // DOMPurify (its default profile keeps SVG + <style> while stripping
-        // <script>/`on*` handlers) before we inject the markup.
-        const clean = DOMPurify.sanitize(svg)
+        // DOMPurify (with the SVG profile — same as the QR-code sanitize
+        // calls elsewhere in the dashboard) before we inject the markup. The
+        // default HTML profile can strip legitimate SVG elements/attributes
+        // (breaking valid diagrams); the SVG profile both preserves the
+        // markup mermaid emits and narrows the allowed surface to SVG.
+        const clean = DOMPurify.sanitize(svg, { USE_PROFILES: { svg: true } })
         setState({ status: 'rendered', svg: clean })
       } catch (err) {
         if (cancelled) return
