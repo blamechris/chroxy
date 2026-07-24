@@ -138,3 +138,10 @@ name: All E2E flows
 # taps a diff line, leaves a comment, submits it, and asserts the composed
 # composeCommentReviewPrompt() text lands in chat as the next user turn.
 - runFlow: diff-comment.yaml
+
+# Flow 24: ChatView compaction marker rendering (#6972) — mobile parity
+# for the dashboard's CompactionMarker (#6768/#6970). Exercises the
+# `compact_boundary` system event → insertCompactionMarkers reinsertion →
+# CompactionMarker render chain via mock-server 'show-compaction' trigger,
+# asserting the "Context compacted" headline + token delta + trigger.
+- runFlow: compaction-marker.yaml

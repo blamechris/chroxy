@@ -23,6 +23,8 @@ import { ToolDetailModal } from './chat/ToolDetailModal';
 import { MessageBubble } from './chat/MessageBubble';
 import type { SelectOptionValue } from './chat/MessageBubble';
 import type { MultiQuestionAnswersMap } from './chat/MultiQuestionForm';
+import { CompactionMarker } from './CompactionMarker';
+import { insertCompactionMarkers } from './insertCompactionMarkers';
 import { buildChatViewMessages, isRetryableAskUserQuestionError } from '@chroxy/store-core';
 import { useConnectionStore } from '../store/connection';
 import { usePermissionAnnouncer } from '../hooks/usePermissionAnnouncer';
@@ -336,12 +338,23 @@ export function ChatView({
   // ActivityGroup / MessageBubble; `chatTailMessageId` and
   // `stalledPromptIds` (#4615) flow straight through.
   const {
-    displayGroups,
+    displayGroups: baseDisplayGroups,
     chatTailMessageId,
     stalledPromptIds,
   } = useMemo(
     () => buildChatViewMessages(messages, streamingMessageId),
     [messages, streamingMessageId],
+  );
+
+  // #6972 — mobile parity: buildChatViewMessages filters `type: 'system'`
+  // off the Chat tab entirely (they're meant for the dashboard's System
+  // tab, which mobile has no equivalent of). Reinsert only the
+  // `compactMetadata`-carrying subset inline, in timestamp order, so the
+  // "Context compacted" marker is reachable at all on mobile. See
+  // insertCompactionMarkers's doc comment for the full placement rationale.
+  const displayGroups = useMemo(
+    () => insertCompactionMarkers(baseDisplayGroups, messages),
+    [baseDisplayGroups, messages],
   );
 
   // #5517: map every message id (and each id inside an activity group) to its
@@ -436,6 +449,23 @@ export function ChatView({
         );
       }
       const msg = group.message;
+      // #6972 — distinct "Context compacted" marker for a system message
+      // carrying `compactMetadata` (reinserted by insertCompactionMarkers
+      // above). Replaces the whole row — same early-return-before-the-
+      // generic-bubble shape the dashboard's useMessageRenderer uses for
+      // this same field.
+      if (msg.type === 'system' && msg.compactMetadata) {
+        return (
+          <AnimatedMessage
+            type={msg.type}
+            timestamp={msg.timestamp}
+            mountTime={mountTimeRef.current}
+            reduceMotion={reduceMotion}
+          >
+            <CompactionMarker meta={msg.compactMetadata} />
+          </AnimatedMessage>
+        );
+      }
       // #4615 (mobile parity via #4806): suppress unanswered prompts
       // invalidated by a subsequent ASK_USER_QUESTION_STALL. The pending
       // prompt has already been discarded server-side; the stall-chip
