@@ -173,7 +173,7 @@ describe('DiffViewer inline comments (#6800)', () => {
     });
     expect(tree.root.findAllByProps({ testID: 'diff-submit-comments' }).length).toBeGreaterThan(0);
 
-    sendInputSpy.mockReturnValue(false as any);
+    sendInputSpy.mockReturnValue(false);
     act(() => {
       tree.root.findByProps({ testID: 'diff-submit-comments' }).props.onPress?.();
     });
