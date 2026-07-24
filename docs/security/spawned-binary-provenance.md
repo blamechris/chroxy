@@ -145,9 +145,13 @@ notarized provider builds; chroxy's own bundled providers are ad-hoc/linker-sign
 and `spctl` rejects them, which is exactly why it can only ever be opt-in. `spctl`
 is invoked by its absolute SIP-protected path (`/usr/sbin/spctl`), never a PATH
 lookup, so a shadowed `spctl` can't subvert the gate (same hardening as the P1
-`/usr/bin/xattr` probe). The gate is **macOS-only**: on Linux/Windows it is a
-documented no-op (skipped) and the pin ledger carries the cross-platform integrity
-story alone. Windows Authenticode signature gating is a tracked follow-up.
+`/usr/bin/xattr` probe). The gate is **macOS-only**: `assessMacSignature()` checks
+`process.platform` and returns `{ ok: true, skipped: true }` immediately on any
+other platform, performing no check at all — there is no Linux or Windows
+equivalent wired up yet, regardless of the `signatureGate` config value. On those
+platforms `binaryProvenance` is **hash-pin-only**: the SHA-256 ledger is the entire
+provenance story, with no code-signature / notarization backstop. Windows
+Authenticode signature gating is tracked in #6932.
 
 ### Fail-safe semantics
 
@@ -157,6 +161,51 @@ A binary that can't even be hashed is treated as unverifiable: blocked in `block
 mode, surfaced-but-allowed in `warn` mode. A `block`-mode failure throws
 `ProviderBinaryProvenanceError` (`code: PROVIDER_BINARY_PROVENANCE`) from preflight,
 or `TunnelBinaryProvenanceError` (`code: TUNNEL_BINARY_PROVENANCE`) from the tunnel.
+
+### Known limitations (accepted, not defects)
+
+Two properties of this design are inherent to how it's built, not gaps left to
+close. They're named here so they're legible to a reviewer rather than discovered
+by one.
+
+- **check→exec is not atomic (TOCTOU).** `verifyProvenance()` hashes the bytes at
+  a resolved *path* (`sha256File`); the spawn that follows execs that same path a
+  moment later. Those are two separate filesystem operations with an
+  application-visible gap between them — Node has no `fexecve` (no way to hash an
+  already-open file descriptor and then exec that exact descriptor), so there is
+  no way to make "the bytes I hashed" and "the bytes that run" the same syscall.
+  An attacker who can write to the resolved binary path in that window can swap in
+  a different binary than the one verified. #6937 closed the *wider* version of
+  this gap for `cloudflared` — `_verifyCloudflaredProvenance()` now pins the exact
+  absolute path it verified (`this._resolvedCloudflaredPath` in
+  `tunnel/cloudflare.js`) and `_spawnCloudflared()` execs that pinned path instead
+  of re-resolving the bare `cloudflared` name off `PATH`, matching the provider
+  preflight path's existing `resolvedBinary` invariant (verify-path ==
+  spawn-path). That removes the *independent-double-resolution* race (verify one
+  path, spawn a different one) but does not — cannot — remove the fundamental
+  check-then-exec race on a single path. This is the same limitation class as the
+  protected-path floor's check-time-realpath TOCTOU (#6922). The gate still raises
+  the bar materially: instead of a one-time silent plant, an attacker now has to
+  win a race against a live spawn. It is not, and cannot be with these OS
+  primitives, an atomic guarantee — accepted and documented rather than treated as
+  an open defect.
+- **The trust ledger is TOFU, and the ledger file itself is the trust root.** A
+  path's *first* sight pins its hash automatically (`ledger.approve(path, hash)`
+  inside `verifyProvenance`) with no operator gate on that initial pin —
+  trust-on-first-use, not trust-on-verification. An operator who wants a stronger
+  baseline than "whatever was there the first time this ran" can pre-seed
+  `~/.chroxy/binary-trust.json` out of band *before* first spawn — either
+  hand-editing the `binaries` map with hashes computed on a known-good host/build,
+  or calling `BinaryProvenanceLedger.approve(path, hash)` programmatically — so the
+  first real spawn is checked against a hash the operator chose, not one the gate
+  observed at an arbitrary first run. Because the ledger IS the trust root, its
+  `0600` permission (`path-hash-trust-ledger.js`'s atomic write) is
+  **integrity-relevant, not just confidentiality-relevant**: this file is
+  user-writable by design (best-effort persistence, fail-open on a read-only
+  `$HOME`), so anyone with write access to it can pin an attacker-chosen hash and
+  have the gate wave a malicious binary through as "verified." The ledger is only
+  as trustworthy as the account that owns `~/.chroxy` — protecting that account is
+  part of this gate's threat model, not an orthogonal concern.
 
 ### Configuration
 
