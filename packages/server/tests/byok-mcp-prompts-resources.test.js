@@ -619,9 +619,22 @@ describe('ClaudeByokSession MCP prompts/resources (#6823)', () => {
     assert.equal(markers.length, 1)
     const marker = markers[0]
     assert.equal(marker.mcpPromptExpansion.truncated, true, 'display copy flagged truncated')
-    // Display copy is bounded (cap + short truncation marker), far below the raw 9000.
-    assert.ok(marker.mcpPromptExpansion.text.length < 4100, `marker text bounded (was ${marker.mcpPromptExpansion.text.length})`)
-    assert.match(marker.mcpPromptExpansion.text, /…\(truncated\)$/)
+    // Post-#6845-review fix (thread 2): the display copy (slice + suffix) must
+    // never EXCEED the cap — previously it sliced to the cap and THEN appended
+    // the suffix, so the total ran past 4000. Assert the real invariant (total
+    // length <= cap), not a loose upper bound that would pass either way.
+    assert.ok(
+      marker.mcpPromptExpansion.text.length <= 4000,
+      `marker text (incl. truncation suffix) must not exceed the display cap (was ${marker.mcpPromptExpansion.text.length})`,
+    )
+    assert.match(marker.mcpPromptExpansion.text, /…\(truncated for display; full text sent to the model\)$/)
+    // Honesty nit (post-#6845-review): the `content` fallback string — what
+    // mobile / the System tab render for clients that don't have the
+    // dedicated marker component — must carry the same "full text sent to the
+    // model" note when truncated, not just the structured `mcpPromptExpansion`
+    // field. `content` embeds the same (already-suffixed) `text`, so this
+    // should fall out for free.
+    assert.match(marker.content, /truncated for display; full text sent to the model/)
     // The model still received the FULL 9000-char expansion — bounding is
     // display-only and must never alter what was actually sent.
     assert.equal(streamed[0].content.length, 9000)

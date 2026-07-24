@@ -71,13 +71,28 @@ const CWD_CACHE_TTL_MS = 30_000
 // depth), mirroring the #6768 compact_boundary bounding chain.
 const MCP_PROMPT_EXPANSION_DISPLAY_CAP = 4000
 
+// Post-#6845-review fix (thread 2): the suffix names that the model still got
+// the full text — mirrors event-normalizer.js's and store-core's wording so a
+// reader sees the same honest note regardless of which layer's copy they're
+// looking at (the marker component, the mobile/System-tab `content` fallback
+// below, a wire-bypassing replay, etc).
+const MCP_PROMPT_EXPANSION_TRUNCATION_SUFFIX = '\n…(truncated for display; full text sent to the model)'
+
 // Bound an MCP-prompt expansion to the display cap, appending a truncation
 // marker when it overflows. Returns the (possibly truncated) text plus a
 // `truncated` flag so the renderer can badge it.
+//
+// Post-#6845-review fix (thread 2): previously sliced to `cap` and THEN
+// appended the suffix, so the returned string could exceed `cap` by the
+// suffix's length. The slice length now subtracts the suffix's own length so
+// `text.length` (slice + suffix) never exceeds `cap` — computed from the
+// suffix's actual `.length` rather than a hardcoded magic number, so this
+// stays correct if the wording changes again.
 function boundMcpPromptExpansionText(text, cap = MCP_PROMPT_EXPANSION_DISPLAY_CAP) {
   const s = typeof text === 'string' ? text : String(text ?? '')
   if (s.length <= cap) return { text: s, truncated: false }
-  return { text: `${s.slice(0, cap)}\n…(truncated)`, truncated: true }
+  const sliceLen = Math.max(0, cap - MCP_PROMPT_EXPANSION_TRUNCATION_SUFFIX.length)
+  return { text: `${s.slice(0, sliceLen)}${MCP_PROMPT_EXPANSION_TRUNCATION_SUFFIX}`, truncated: true }
 }
 
 export class ClaudeByokSession extends BaseSession {

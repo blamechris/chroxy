@@ -57,4 +57,42 @@ describe('McpPromptExpansionMarker (#6845)', () => {
     fireEvent.click(screen.getByRole('button'))
     expect(screen.queryByTestId('mcp-prompt-expansion-truncated')).toBeNull()
   })
+
+  // Honesty fix (post-#6845-review, thread 4): the server can ALSO prepend
+  // skills text (`BaseSession._buildPrependPrompt`) ahead of the MCP-prompt
+  // expansion, so the expansion is only PART of the turn, not the whole thing.
+  // The old label ("Sent to the model as your turn") overstated that.
+  it('labels the injected text as part of the turn, not the whole turn', () => {
+    render(<McpPromptExpansionMarker meta={baseMeta} />)
+    fireEvent.click(screen.getByRole('button'))
+    const details = screen.getByTestId('mcp-prompt-expansion-details')
+    expect(details).toHaveTextContent('Sent to the model as part of your turn')
+    expect(details).not.toHaveTextContent('Sent to the model as your turn')
+  })
+
+  // Fragile-id fix (post-#6845-review, thread 3): server/prompt names are
+  // server-controlled and can contain arbitrary characters. A raw
+  // interpolation into the HTML `id` produces an id that breaks
+  // `aria-controls` linkage / test selectors for anything but plain alnum
+  // names. The id must be sanitized to `[A-Za-z0-9_-]` while the
+  // aria-controls linkage between the toggle button and the details panel
+  // stays intact.
+  it('sanitizes punctuation/whitespace in server/prompt names into a valid, stable HTML id', () => {
+    const punctuatedMeta: McpPromptExpansionMeta = {
+      ...baseMeta,
+      server: 'my server/v2.0 (prod)',
+      prompt: 'greet user!!',
+    }
+    render(<McpPromptExpansionMarker meta={punctuatedMeta} />)
+    const toggle = screen.getByRole('button')
+    const ariaControlsId = toggle.getAttribute('aria-controls')
+    expect(ariaControlsId).toBeTruthy()
+    expect(ariaControlsId).toMatch(/^[A-Za-z0-9_-]+$/)
+
+    fireEvent.click(toggle)
+    const details = screen.getByTestId('mcp-prompt-expansion-details')
+    // The button's aria-controls must still resolve to the rendered details
+    // panel's actual id — sanitizing must not break the linkage.
+    expect(details.id).toBe(ariaControlsId)
+  })
 })

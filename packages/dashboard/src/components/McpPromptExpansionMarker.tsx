@@ -24,6 +24,16 @@
 import { useState } from 'react'
 import type { McpPromptExpansionMeta } from '../store/types'
 
+// Post-#6845-review fix (thread 3): `meta.server`/`meta.prompt` are
+// server-controlled MCP provenance names — they can contain arbitrary
+// characters (spaces, slashes, punctuation) that produce an invalid or
+// fragile HTML `id` (breaking `aria-controls` linkage and any test selector
+// keyed on it). Slugify to the characters HTML ids are safe with; the id
+// stays stable and readable for the common alnum-only case.
+function slugifyForId(value: string): string {
+  return value.replace(/[^A-Za-z0-9_-]/g, '-')
+}
+
 export interface McpPromptExpansionMarkerProps {
   meta: McpPromptExpansionMeta
 }
@@ -31,7 +41,7 @@ export interface McpPromptExpansionMarkerProps {
 export function McpPromptExpansionMarker({ meta }: McpPromptExpansionMarkerProps) {
   const [expanded, setExpanded] = useState(false)
   const source = `${meta.server}:${meta.prompt}`
-  const detailsId = `mcp-prompt-expansion-${meta.server}-${meta.prompt}-details`
+  const detailsId = `mcp-prompt-expansion-${slugifyForId(meta.server)}-${slugifyForId(meta.prompt)}-details`
 
   return (
     <div className="mcp-prompt-expansion-marker" data-testid="mcp-prompt-expansion-marker">
@@ -59,7 +69,7 @@ export function McpPromptExpansionMarker({ meta }: McpPromptExpansionMarkerProps
       {expanded && (
         <div id={detailsId} className="mcp-prompt-expansion-details" data-testid="mcp-prompt-expansion-details">
           <div className="mcp-prompt-expansion-label">
-            Sent to the model as your turn
+            Sent to the model as part of your turn
           </div>
           <div className="mcp-prompt-expansion-text" data-testid="mcp-prompt-expansion-text">
             {meta.text}
