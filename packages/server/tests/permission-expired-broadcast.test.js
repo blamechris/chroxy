@@ -149,7 +149,7 @@ describe('permission_expired end-to-end broadcast (#2831)', () => {
         // worker alive and hung the suite when run without --test-force-exit.
         providerType: 'fake-permexp',
         stateFilePath: tmpState,
-        persistenceDebounceMs: 0,
+        persistDebounceMs: 0,
       })
 
       const events = []
