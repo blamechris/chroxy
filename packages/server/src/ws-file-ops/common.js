@@ -1,5 +1,6 @@
-import { realpath, lstat, readlink } from 'fs/promises'
-import { resolve, dirname, basename, join, isAbsolute, parse, sep } from 'path'
+import { realpath } from 'fs/promises'
+import { resolve, dirname, basename, join, isAbsolute, sep } from 'path'
+import { resolveTargetComponentwiseAsync } from '../utils/componentwise-resolver.js'
 
 /**
  * Shared utilities for file operations: CWD resolution, path validation, exec helpers.
@@ -119,114 +120,13 @@ export async function realpathOfDeepestAncestor(absPath) {
   )
 }
 
-// #6923 — symlink-expansion cap for the async component-wise resolver below,
-// matching the kernel's typical MAXSYMLINKS (40) and the sync floor's
-// _FLOOR_MAX_SYMLINKS in permission-manager.js. A chain deeper than this — or a
-// cycle — throws ELOOP, which the raw-path validator's caller treats as a reject
-// (fail closed).
-const _COMPONENTWISE_MAX_SYMLINKS = 40
-
-// #6928 — split a raw path into the components BELOW its parsed root, separating
-// on BOTH `/` and `\` regardless of platform. Node accepts forward slashes on
-// Windows, so a platform-`sep`-only split (`\` on Windows) would leave a
-// forward-slash path as ONE component — the component walk would then break and
-// fall back to a lexical `join()`, reopening the exact `..`-after-symlink escape
-// this resolver exists to close. `root` (already parsed by the caller, which
-// starts `resolved` there) is sliced off first so a drive/UNC/`/` root is never
-// walked as an ordinary component (a Windows `C:\` would otherwise appear as a
-// `C:` component and `join` straight back onto the drive root).
-function splitPathBelowRoot(p, root) {
-  return (root ? p.slice(root.length) : p).split(/[/\\]+/)
-}
-
-/**
- * #6923 — resolve `target` against a REAL base by walking it COMPONENT BY
- * COMPONENT, mirroring the kernel's `open(2)` path traversal. This is the ASYNC
- * sibling of `resolveTargetComponentwiseSync` in `permission-manager.js` (#6921),
- * and the replacement — on the BYOK confinement path — for the
- * `realpathOfDeepestAncestor(resolve(base, target))` shape above, which could NOT
- * honour a `..` that FOLLOWS a symlinked component: BOTH `path.resolve()` (in the
- * caller) AND Node's `realpath` collapse `..` LEXICALLY, so `link/..` cancels the
- * symlink textually before it is ever followed, whereas `open(2)` follows `link`
- * to its TARGET and applies `..` from THERE. So `work/agent-x/../../x` (with
- * `work -> .claude/worktrees`) lexically cancels to a benign in-cwd `x`, but
- * really lands on `.claude/x`. Only a component walk that applies `..` AFTER
- * resolving symlinks-so-far (as the kernel does) sees the real destination.
- *
- * The walk starts from `realBase` (the session cwd already resolved to its real
- * path) for a relative target, or from the filesystem root for an absolute
- * target, and for each remaining component:
- *   - `''` / `.`      → skip.
- *   - `..`            → pop to the PARENT of the resolved-so-far real path
- *                       (`dirname`), i.e. apply `..` AFTER following symlinks so
- *                       far — NOT lexically on the pre-resolution path.
- *   - a SYMLINK       → `readlink` it; if the link is absolute, reset the resolved
- *                       path to the fs root; splice the link's own components into
- *                       the walk at the current position and keep going (so a
- *                       relative link resolves from the symlink's parent, and any
- *                       `..` inside the link is honoured too). Bounded by
- *                       {@link _COMPONENTWISE_MAX_SYMLINKS} — a deeper chain or a
- *                       cycle THROWS `ELOOP` (→ fail closed).
- *   - a NON-symlink   → append it.
- *   - a NON-EXISTENT tail component (`ENOENT` on the `lstat`) → stop filesystem
- *                       resolution (nothing deeper can exist, so nothing deeper
- *                       can be a symlink) and apply the REMAINING components —
- *                       INCLUDING any `..` — against the resolved-so-far real path
- *                       by the same pop/append rules. Models a to-be-created file:
- *                       a `..` in the tail still pops the RESOLVED real path, never
- *                       the unresolved lexical one.
- *
- * A non-ENOENT `lstat`/`readlink` error (EACCES, ELOOP) propagates so the caller
- * fails closed. Returns the fully resolved absolute real path.
- * @param {string} realBase  the session cwd, already resolved to its real path
- * @param {string} target    a raw (NOT pre-`resolve`d — its `..` must survive) path value
- * @returns {Promise<string>} the open(2)-faithful resolved absolute real path
- */
-export async function resolveTargetComponentwiseAsync(realBase, target) {
-  // Absolute target ignores the base (as `open`/`resolve` do); start at its
-  // parsed root so its own leading components are walked (and symlink-resolved)
-  // too. A relative target (empty root) starts at the base. The root is stripped
-  // BEFORE splitting so it is never re-walked as an ordinary component (#6928).
-  const targetRoot = isAbsolute(target) ? parse(target).root : ''
-  let resolved = targetRoot || realBase
-  const pending = splitPathBelowRoot(target, targetRoot)
-  let symlinks = 0
-  // Once a component doesn't exist, the rest is a to-be-created tail: no deeper
-  // component can be a symlink, so stop lstat-ing and apply pop/append only.
-  let tailOnly = false
-  let i = 0
-  while (i < pending.length) {
-    const comp = pending[i]
-    i++
-    if (comp === '' || comp === '.') continue
-    if (comp === '..') { resolved = dirname(resolved); continue }
-    const candidate = join(resolved, comp)
-    if (tailOnly) { resolved = candidate; continue }
-    let st
-    try {
-      st = await lstat(candidate)
-    } catch (err) {
-      if (err.code === 'ENOENT') { tailOnly = true; resolved = candidate; continue }
-      throw err // EACCES etc. — fail closed via the caller
-    }
-    if (st.isSymbolicLink()) {
-      if (++symlinks > _COMPONENTWISE_MAX_SYMLINKS) {
-        throw Object.assign(new Error(`resolveTargetComponentwiseAsync: symlink depth exceeds ${_COMPONENTWISE_MAX_SYMLINKS}`), { code: 'ELOOP' })
-      }
-      const link = await readlink(candidate)
-      // An absolute link restarts resolution from its parsed root; a relative
-      // link resolves from the symlink's PARENT (`resolved`, since `comp` was not
-      // appended). Splice the link's components (below its root) in at the cursor
-      // so they — and any `..` they contain — are walked next, before the tail.
-      const linkRoot = isAbsolute(link) ? parse(link).root : ''
-      if (linkRoot) resolved = linkRoot
-      pending.splice(i, 0, ...splitPathBelowRoot(link, linkRoot))
-    } else {
-      resolved = candidate
-    }
-  }
-  return resolved
-}
+// #6923/#6928 — the async component-wise resolver (and its separator-agnostic
+// split + MAXSYMLINKS cap) moved to `utils/componentwise-resolver.js`, the SINGLE
+// SOURCE shared with the sync protected-path floor (`permission-manager.js`), so
+// the two open(2)-faithful walks can no longer drift (#6928 was a bug present in
+// BOTH copies). Re-exported here so existing importers of the async resolver from
+// this module keep working.
+export { resolveTargetComponentwiseAsync }
 
 /**
  * #6923 — validate that a RAW (un-`resolve`d) target stays within the session

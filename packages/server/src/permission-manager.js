@@ -1,8 +1,9 @@
 import { EventEmitter } from 'events'
 import { randomUUID } from 'crypto'
-import { realpathSync, lstatSync, readlinkSync } from 'node:fs'
-import { resolve, relative, sep, isAbsolute, dirname, basename, join, parse } from 'node:path'
+import { realpathSync } from 'node:fs'
+import { resolve, relative, sep, isAbsolute, dirname, basename, join } from 'node:path'
 import { createLogger } from './logger.js'
+import { resolveTargetComponentwiseSync } from './utils/componentwise-resolver.js'
 // #6038: the SDK/TUI permission path broadcasts to clients too, so it must apply
 // the same redaction as the hook path. Shared sanitizer + value redactor live in
 // redaction.js (a leaf module — no import cycle / HTTP-handler weight).
@@ -239,11 +240,6 @@ export function buildDenyMessage(reason) {
 // under a symlinked parent), which FAILS CLOSED rather than trust a lexical guess.
 const _FLOOR_REALPATH_MAX_DEPTH = 256
 
-// #6921 — symlink-expansion cap for the component-wise resolver below, matching
-// the kernel's typical MAXSYMLINKS (40). A chain deeper than this — or a cycle —
-// throws ELOOP, which the floor's `catch` treats as PROTECTED (fail closed).
-const _FLOOR_MAX_SYMLINKS = 40
-
 /**
  * #6851 — SYNC deepest-existing-ancestor realpath: the symlink-resolving core of
  * the floor's #6851 hardening, and the synchronous sibling of
@@ -298,110 +294,13 @@ function realpathDeepestAncestorSync(absPath) {
   throw Object.assign(new Error(`realpathDeepestAncestorSync: path depth exceeds ${_FLOOR_REALPATH_MAX_DEPTH}`), { code: 'ENAMETOOLONG' })
 }
 
-// #6928 — split a raw path into the components BELOW its parsed root, separating
-// on BOTH `/` and `\` regardless of platform. Node accepts forward slashes on
-// Windows, so a platform-`sep`-only split (`\` on Windows) would leave a
-// forward-slash path as ONE component — the component walk would then break and
-// fall back to a lexical `join()`, reopening the exact `..`-after-symlink escape
-// this resolver exists to close. `root` (already parsed by the caller, which
-// starts `resolved` there) is sliced off first so a drive/UNC/`/` root is never
-// walked as an ordinary component (a Windows `C:\` would otherwise appear as a
-// `C:` component and `join` straight back onto the drive root).
-function splitPathBelowRoot(p, root) {
-  return (root ? p.slice(root.length) : p).split(/[/\\]+/)
-}
-
-/**
- * #6921 — resolve `target` against a REAL base by walking it COMPONENT BY
- * COMPONENT, mirroring the kernel's `open(2)` path traversal. This is the crux
- * of the #6921 hardening: it replaces the `realpath(resolve(base, target))`
- * shape (#6851, {@link realpathDeepestAncestorSync}), which could NOT catch a
- * `..` that follows a SYMLINKED component — because BOTH `path.resolve()` AND
- * Node's `fs.realpathSync` collapse `..` LEXICALLY (textually) before/instead of
- * following symlinks. `realpathSync('link/..')` yields the symlink's LEXICAL
- * parent; `open(2)` follows `link` to its TARGET and applies `..` from THERE. So
- * `work/agent-x/../../settings.local.json` (with `work -> .claude/worktrees`)
- * lexically cancels to a benign `settings.local.json`, but really lands on
- * `.claude/settings.local.json`. Only a component walk that applies `..` AFTER
- * resolving symlinks-so-far (as the kernel does) sees the real destination.
- *
- * The walk starts from `realBase` (the session cwd already resolved to its real
- * path) for a relative target, or from the filesystem root for an absolute
- * target, and for each remaining component:
- *   - `''` / `.`      → skip.
- *   - `..`            → pop to the PARENT of the resolved-so-far real path
- *                       (`dirname`), i.e. apply `..` AFTER following symlinks so
- *                       far — NOT lexically on the pre-resolution path.
- *   - a SYMLINK       → `readlinkSync` it; if the link is absolute, reset the
- *                       resolved path to the fs root; splice the link's own
- *                       components into the walk at the current position and keep
- *                       going (so a relative link resolves from the symlink's
- *                       parent, and any `..` inside the link is honoured too).
- *                       Bounded by {@link _FLOOR_MAX_SYMLINKS} — a deeper chain or
- *                       a cycle THROWS `ELOOP` (→ fail closed).
- *   - a NON-symlink   → append it.
- *   - a NON-EXISTENT tail component (`ENOENT` on the `lstat`) → stop filesystem
- *                       resolution (nothing deeper can exist, so nothing deeper
- *                       can be a symlink) and apply the REMAINING components —
- *                       INCLUDING any `..` — against the resolved-so-far real
- *                       path by the same pop/append rules. This models a
- *                       to-be-created file: a `..` in the tail still pops the
- *                       RESOLVED real path, never the unresolved lexical one. (A
- *                       real write of a path whose intermediate dir is missing
- *                       fails anyway, so not following a later symlink after the
- *                       first ENOENT can't hide a write that would actually land.)
- *
- * A non-ENOENT `lstat`/`readlink` error (EACCES, ELOOP) propagates so the
- * caller's `catch` fails closed. Returns the fully resolved absolute real path.
- * @param {string} realBase  the session cwd, already resolved to its real path
- * @param {string} target    a raw (NOT pre-`resolve`d — its `..` must survive) path value
- * @returns {string} the open(2)-faithful resolved absolute real path
- */
-function resolveTargetComponentwiseSync(realBase, target) {
-  // Absolute target ignores the base (as `open`/`resolve` do); start at its
-  // parsed root so its own leading components are walked (and symlink-resolved)
-  // too. A relative target (empty root) starts at the base. The root is stripped
-  // BEFORE splitting so it is never re-walked as an ordinary component (#6928).
-  const targetRoot = isAbsolute(target) ? parse(target).root : ''
-  let resolved = targetRoot || realBase
-  const pending = splitPathBelowRoot(target, targetRoot)
-  let symlinks = 0
-  // Once a component doesn't exist, the rest is a to-be-created tail: no deeper
-  // component can be a symlink, so stop lstat-ing and apply pop/append only.
-  let tailOnly = false
-  let i = 0
-  while (i < pending.length) {
-    const comp = pending[i]
-    i++
-    if (comp === '' || comp === '.') continue
-    if (comp === '..') { resolved = dirname(resolved); continue }
-    const candidate = join(resolved, comp)
-    if (tailOnly) { resolved = candidate; continue }
-    let st
-    try {
-      st = lstatSync(candidate)
-    } catch (err) {
-      if (err.code === 'ENOENT') { tailOnly = true; resolved = candidate; continue }
-      throw err // EACCES etc. — fail closed via the caller's catch
-    }
-    if (st.isSymbolicLink()) {
-      if (++symlinks > _FLOOR_MAX_SYMLINKS) {
-        throw Object.assign(new Error(`resolveTargetComponentwiseSync: symlink depth exceeds ${_FLOOR_MAX_SYMLINKS}`), { code: 'ELOOP' })
-      }
-      const link = readlinkSync(candidate)
-      // An absolute link restarts resolution from its parsed root; a relative
-      // link resolves from the symlink's PARENT (`resolved`, since `comp` was not
-      // appended). Splice the link's components (below its root) in at the cursor
-      // so they — and any `..` they contain — are walked next, before the tail.
-      const linkRoot = isAbsolute(link) ? parse(link).root : ''
-      if (linkRoot) resolved = linkRoot
-      pending.splice(i, 0, ...splitPathBelowRoot(link, linkRoot))
-    } else {
-      resolved = candidate
-    }
-  }
-  return resolved
-}
+// #6921/#6928 — the SYNC open(2)-faithful component-wise resolver (the crux of the
+// #6921 floor hardening: it applies `..` AFTER following each symlink, unlike the
+// lexical `realpath(resolve(base, target))` shape it replaced) now lives in
+// `utils/componentwise-resolver.js`, the SINGLE SOURCE shared with the async BYOK
+// confinement path (`ws-file-ops/common.js`). Co-locating the two open(2)-faithful
+// walks is what keeps them from drifting again — #6928 was a bug present in BOTH
+// copies. Imported as `resolveTargetComponentwiseSync` at the top of this file.
 
 /**
  * #6851 — the pure segment scan, factored out of {@link isProtectedPathValue} so
