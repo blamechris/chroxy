@@ -51,13 +51,19 @@ name: ChatView compaction marker rendering
 
 # Assert the structured content: headline, token delta, and trigger.
 # The mock fixture's exact numbers/trigger are pinned in mock-server.mjs's
-# 'show-compaction' branch (128,000 → 12,000 tokens, auto).
+# 'show-compaction' branch (128,000 → 12,000 tokens, auto). The token-delta
+# assertion below is deliberately separator-agnostic: CompactionMarker.tsx
+# formats the counts via locale-dependent toLocaleString(), so a non-en-US
+# simulator renders e.g. "128.000" (de-DE) or "128 000" (fr-FR, narrow
+# no-break space) instead of "128,000". `.?` matches any single separator
+# character (or none), while the pinned digit groups still fail the
+# assertion if the wrong NUMBER renders.
 - assertVisible:
     text: "Context compacted"
 - assertVisible:
     id: "compaction-marker-tokens"
 - assertVisible:
-    text: ".*128,000.*12,000.*tokens.*"
+    text: ".*128.?000.*12.?000.*tokens.*"
 - assertVisible:
     id: "compaction-marker-trigger"
 
