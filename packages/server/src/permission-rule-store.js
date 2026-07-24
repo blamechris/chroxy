@@ -286,9 +286,12 @@ export class PermissionRuleStore {
     const next = existing.filter((r) => ruleKey(r) !== ruleKey(rule))
     next.push(storedRecord(rule, Date.now()))
     this._projects.set(key, next)
-    // #6927 — a `deny` addition tightens; an `allow` addition (the frequent
-    // allowAlways path) widens and stays fail-safe / non-durable.
-    this._persist(rule.decision === 'deny')
+    // #6927 — durable only when this genuinely TIGHTENS the auto-approval
+    // surface (a new/tightening deny, or an allow being revoked by a deny
+    // replacing it), per `tightensSurface`. A no-op replace of an already-
+    // identical deny rule — same (tool, path), same decision — must NOT pay
+    // the fsync cost; raw `rule.decision === 'deny'` durabled that no-op too.
+    this._persist(tightensSurface(existing, next))
     return true
   }
 

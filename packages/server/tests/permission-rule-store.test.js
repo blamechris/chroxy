@@ -519,6 +519,27 @@ describe('#6927 tightening persists are durable; widening persists are not', () 
     assert.equal(calls.at(-1).durable, false, 'a persisted allow (widening) is not durable')
   })
 
+  // Gate on tightensSurface, not the raw decision (avoid a no-op fsync).
+  it('addRule: a NO-OP re-add of an already-persisted identical deny is NOT durable', () => {
+    const { store, calls } = makeRecordingStore()
+    store.addRule(CWD, { tool: 'Bash', decision: 'deny' })
+    assert.equal(calls.at(-1).durable, true, 'the first (genuinely new) deny is durable')
+    calls.length = 0
+    store.addRule(CWD, { tool: 'Bash', decision: 'deny' }) // identical (tool, path, decision) replace
+    assert.equal(calls.at(-1).durable, false, 're-adding an identical deny is a no-op — no fsync cost')
+    assert.deepEqual(store.getRules(CWD), [{ tool: 'Bash', decision: 'deny' }])
+  })
+
+  it('addRule: replacing an existing ALLOW with a deny for the same (tool, path) is durable', () => {
+    const { store, calls } = makeRecordingStore()
+    store.addRule(CWD, { tool: 'Write', decision: 'allow' })
+    assert.equal(calls.at(-1).durable, false, 'the initial allow (widening) is not durable')
+    calls.length = 0
+    store.addRule(CWD, { tool: 'Write', decision: 'deny' }) // revokes the allow AND adds a deny
+    assert.equal(calls.at(-1).durable, true, 'revoking an allow via addRule tightens the surface — durable')
+    assert.deepEqual(store.getRules(CWD), [{ tool: 'Write', decision: 'deny' }])
+  })
+
   it('removeRule that drops an ALLOW is durable; dropping a DENY is not', () => {
     const { store, calls } = makeRecordingStore()
     store.addRule(CWD, { tool: 'Write', decision: 'allow' }) // widening, not durable
