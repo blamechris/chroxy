@@ -287,6 +287,14 @@ type SplitCommentApi = { api: CommentApi; targets: LineCommentTarget[] }
  * `hunk.lines` index, and any saved comment / open editor renders full-width
  * below the row. A context line is the same index on both sides, so it shares a
  * single comment surface; a deletion/addition pair carries one per side.
+ *
+ * #6947: a context line's left and right cells resolve to the same comment
+ * target, so rendering the gutter button on both sides offered two clickable
+ * affordances for one logical comment. The button now renders once — on the
+ * new-file (right) side, matching the target's derived new-file line number —
+ * while the left cell still renders the line content and (if present) the
+ * has-comment accent. Deletion/addition cells are single-sided already and are
+ * unaffected.
  */
 function SplitLine({
   left,
@@ -315,11 +323,18 @@ function SplitLine({
     }
     const target = comment.targets[cell.index]!
     const hasComment = comment.api.comments.some((c) => c.id === target.key)
+    // #6947: a context line is the same target on both sides — only the
+    // right (new-file) cell gets the button, so a single comment offers a
+    // single affordance. Deletion (left-only) and addition (right-only)
+    // cells always show their one button as before.
+    const showButton = line?.type !== 'context' || side === 'right'
     return (
       <div
         className={`diff-split-cell diff-split-cell-commentable${hasComment ? ' diff-split-cell-has-comment' : ''} ${base}`}
       >
-        <CommentGutterButton target={target} hasComment={hasComment} onOpen={comment.api.onOpen} />
+        {showButton && (
+          <CommentGutterButton target={target} hasComment={hasComment} onOpen={comment.api.onOpen} />
+        )}
         {line && <span className="diff-line-content">{line.content}</span>}
       </div>
     )
@@ -587,9 +602,17 @@ export function DiffViewerPanel() {
   // Wire callback
   useEffect(() => {
     setDiffCallback((result: DiffResult) => {
+      // #6946: any diff push — the manual Refresh landing OR an unprompted
+      // auto-refresh/reconnect — can shift line positions, invalidating
+      // position-keyed comments. Clear them here (not just in handleRefresh)
+      // so an auto-refresh matches mobile's DiffViewer, which drops pending
+      // comments on every diff (re)request.
       setFiles(result.files)
       setError(result.error)
       setLoading(false)
+      setComments([])
+      setEditing(null)
+      setDraft('')
     })
     return () => setDiffCallback(null)
   }, [setDiffCallback])
@@ -610,8 +633,11 @@ export function DiffViewerPanel() {
   }, [justSent])
 
   const handleRefresh = useCallback(() => {
-    // A refreshed diff can shift line positions, invalidating position-keyed
-    // comments — drop pending annotations so none land on the wrong line.
+    // Clear immediately for snappy UI feedback (the toolbar's submit control
+    // isn't gated on `loading`, so it would otherwise still show a stale
+    // count while the new diff is in flight). The setDiffCallback callback
+    // above clears again once the new diff actually lands, covering the
+    // auto-refresh/reconnect path that never calls this handler (#6946).
     setComments([])
     setEditing(null)
     setDraft('')

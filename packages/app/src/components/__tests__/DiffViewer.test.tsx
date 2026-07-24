@@ -158,6 +158,35 @@ describe('DiffViewer inline comments (#6800)', () => {
     expect(onClose).toHaveBeenCalled();
   });
 
+  it('keeps queued comments when the send fails (#6946)', () => {
+    const tree = render();
+    seedFiles(tree);
+
+    act(() => {
+      tree.root.findByProps({ testID: 'diff-line-0' }).props.onPress?.();
+    });
+    act(() => {
+      tree.root.findByProps({ testID: 'diff-comment-input' }).props.onChangeText?.('note');
+    });
+    act(() => {
+      tree.root.findByProps({ testID: 'diff-comment-save' }).props.onPress?.();
+    });
+    expect(tree.root.findAllByProps({ testID: 'diff-submit-comments' }).length).toBeGreaterThan(0);
+
+    sendInputSpy.mockReturnValue(false as any);
+    act(() => {
+      tree.root.findByProps({ testID: 'diff-submit-comments' }).props.onPress?.();
+    });
+
+    // A dropped send (falsy `sendInput` result, mirroring the
+    // wssend_false_sideeffect_callsites convention) must preserve the queue
+    // and leave the modal open — not silently discard the pending comment.
+    expect(sendInputSpy).toHaveBeenCalledTimes(1);
+    expect(onClose).not.toHaveBeenCalled();
+    expect(tree.root.findAllByProps({ testID: 'diff-submit-comments' }).length).toBeGreaterThan(0);
+    expect(tree.root.findAllByProps({ testID: 'diff-comment-note-0' }).length).toBeGreaterThan(0);
+  });
+
   it('removes a queued comment', () => {
     const tree = render();
     seedFiles(tree);
