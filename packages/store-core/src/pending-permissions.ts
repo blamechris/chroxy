@@ -121,3 +121,54 @@ export function selectNextPendingSession(
   }
   return null
 }
+
+/**
+ * #6859 (IDE P3.3 follow-up of #6857/#6544) — viewer↔pending-write
+ * correlation, hoisted out of two byte-identical copies in the dashboard's and
+ * app's `ViewerPreWriteReview.tsx`. Safety-relevant for the same reason
+ * `isLivePermissionPrompt` above lives here (#5759): a divergence in the match
+ * logic could correlate the WRONG pending write to the file open in the
+ * viewer — approving one file's write believing it's another's.
+ *
+ * `isReviewableTool` (which tools have a per-hunk diff review) stays owned by
+ * each client's local `PreWriteDiffReview.tsx` — it's a presentation concern,
+ * not a correlation one — so `findPendingWriteForFile` takes it as an injected
+ * predicate rather than pulling `TOOL_DIFF` in here too.
+ */
+
+/**
+ * Tolerant path match between a permission's `file_path` and the viewer's open
+ * file. Claude passes an ABSOLUTE `file_path` for Write/Edit; the viewer's
+ * selection is absolute (a file-tree click) OR workspace-relative (a symbol
+ * jump), so compare tolerantly — an exact match, or one path tail-matching the
+ * other. Both nulls => no match (nothing to correlate).
+ */
+export function pathMatchesViewer(filePath: string | null | undefined, viewed: string | null): boolean {
+  if (!filePath || !viewed) return false
+  const a = filePath.replace(/\\/g, '/')
+  const b = viewed.replace(/\\/g, '/')
+  if (a === b) return true
+  const tail = (p: string) => p.replace(/^\.?\//, '')
+  return a.endsWith('/' + tail(b)) || b.endsWith('/' + tail(a))
+}
+
+/**
+ * The first live, reviewable (Write/Edit) permission whose target `file_path`
+ * matches the file open in the viewer — or null. Pure so it's unit-testable
+ * without a store. `now` gates the expiry inside `isLivePermissionPrompt`.
+ */
+export function findPendingWriteForFile(
+  messages: ChatMessage[],
+  viewed: string | null,
+  now: number,
+  isReviewableTool: (tool: string) => boolean,
+): ChatMessage | null {
+  if (!viewed) return null
+  for (const m of messages) {
+    if (!isLivePermissionPrompt(m, now)) continue
+    if (!m.tool || !isReviewableTool(m.tool)) continue
+    const fp = m.toolInput && typeof m.toolInput.file_path === 'string' ? (m.toolInput.file_path as string) : null
+    if (pathMatchesViewer(fp, viewed)) return m
+  }
+  return null
+}
