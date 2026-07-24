@@ -134,6 +134,27 @@ describe('MemoryPanel', () => {
     expect(screen.getByTestId('memory-entry-content-0').textContent).toContain('Project notes')
   })
 
+  // #6996 review — an entry whose file exists but whose content is empty (or
+  // whitespace-only) must still be shown as PRESENT (honest provenance — an
+  // empty CLAUDE.md is not the same as a missing one), but must NOT offer a
+  // dead expand affordance that opens to nothing.
+  it('shows an existing-but-empty entry as present without an expand affordance', () => {
+    mockEntries = [{ ...PROJECT_ENTRY, content: '   \n\t  ' }]
+    render(<MemoryPanel />)
+    const row = screen.getByTestId('memory-entry-0')
+    expect(row.textContent).toContain('Present')
+    const toggle = screen.getByTestId('memory-entry-toggle-0')
+    expect(toggle).toBeDisabled()
+    fireEvent.click(toggle)
+    expect(screen.queryByTestId('memory-entry-content-0')).toBeNull()
+  })
+
+  it('still allows expanding a non-empty entry (regression guard alongside the empty-content fix)', () => {
+    mockEntries = [PROJECT_ENTRY]
+    render(<MemoryPanel />)
+    expect(screen.getByTestId('memory-entry-toggle-0')).not.toBeDisabled()
+  })
+
   it('renders entry content escaped — a <script> tag never executes and appears as text', () => {
     mockEntries = [
       { ...PROJECT_ENTRY, content: 'Notes: <script>window.__xss = true</script> after' },
@@ -163,6 +184,22 @@ describe('MemoryPanel', () => {
     const section = screen.getByTestId('memory-file-section')
     expect(section.textContent).toContain('MEMORY.md')
     expect(section.textContent).toContain('/home/me/.claude/projects/repo/memory/MEMORY.md')
+  })
+
+  it('shows the MEMORY.md section as present without an expand affordance when its content is blank', () => {
+    mockEntries = [PROJECT_ENTRY]
+    mockFile = {
+      path: '/home/me/.claude/projects/repo/memory/MEMORY.md',
+      exists: true,
+      content: '',
+      truncated: false,
+      skipped: false,
+      error: null,
+    }
+    render(<MemoryPanel />)
+    const section = screen.getByTestId('memory-file-section')
+    expect(section.textContent).toContain('Present')
+    expect(screen.getByTestId('memory-file-toggle')).toBeDisabled()
   })
 
   it('surfaces a request-level error state instead of crashing', () => {

@@ -2705,10 +2705,23 @@ function handleSymbolsSnapshot(msg: Record<string, unknown>, _get: MsgGet, set: 
  * per-entry error so the panel can distinguish "nothing to show" from
  * "this one file failed". Dashboard-only for v1 — mobile parity is the
  * sibling slice #6870.
+ *
+ * #6996 review — requestMemoryRead() now stamps each `memory_read` with a
+ * fresh requestId nonce and tracks it as `lastMemoryStackRequestId`. If this
+ * reply echoes a requestId that doesn't match the latest one sent, it's a
+ * superseded answer (e.g. a rapid session switch fired a second memory_read
+ * before this one's reply landed) and is dropped without touching state —
+ * mirrors FileBrowserPanel's #6502 read_file correlation. A reply that
+ * doesn't echo a requestId at all (older server) falls through and is
+ * applied as before.
  */
-function handleMemoryStackResult(msg: Record<string, unknown>, _get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+function handleMemoryStackResult(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
   const parsed = ServerMemoryStackResultSchema.safeParse(msg);
   if (!parsed.success) return;
+  if (parsed.data.requestId != null) {
+    const latest = get().lastMemoryStackRequestId;
+    if (latest != null && parsed.data.requestId !== latest) return;
+  }
   set({
     memoryStackEntries: parsed.data.entries,
     memoryStackFile: parsed.data.memoryFile,

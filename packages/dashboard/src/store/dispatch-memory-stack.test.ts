@@ -73,6 +73,7 @@ function baseState(): Partial<ConnectionState> {
     memoryStackFile: null,
     memoryStackError: null,
     memoryStackLoading: true,
+    lastMemoryStackRequestId: null,
     messages: [],
   }
 }
@@ -222,5 +223,40 @@ describe('dashboard memory panel dispatch (#6867)', () => {
     )
     expect(store.getState().memoryStackEntries).toBe(before)
     expect(store.getState().memoryStackLoading).toBe(true)
+  })
+
+  // #6996 review — requestMemoryRead() stamps each memory_read with a fresh
+  // requestId nonce (tracked as lastMemoryStackRequestId); a reply that
+  // echoes a stale requestId is a superseded answer (e.g. a rapid session
+  // switch fired a second request before the first one's reply landed) and
+  // must be dropped without touching state or clearing the loading flag —
+  // the *new* request's own reply is what should clear it.
+  describe('requestId correlation', () => {
+    it('drops a reply whose requestId does not match the latest request', () => {
+      store = createMockStore({ ...baseState(), lastMemoryStackRequestId: 'req-2' })
+      setStore(store)
+      handleMessage(snapshot({ requestId: 'req-1' }), ctx() as never)
+      const s = store.getState()
+      expect(s.memoryStackEntries).toBeNull()
+      expect(s.memoryStackLoading).toBe(true)
+    })
+
+    it('applies a reply whose requestId matches the latest request', () => {
+      store = createMockStore({ ...baseState(), lastMemoryStackRequestId: 'req-2' })
+      setStore(store)
+      handleMessage(snapshot({ requestId: 'req-2' }), ctx() as never)
+      const s = store.getState()
+      expect(s.memoryStackEntries).toEqual([GLOBAL_ENTRY, PROJECT_ENTRY, LOCAL_ENTRY_MISSING])
+      expect(s.memoryStackLoading).toBe(false)
+    })
+
+    it('applies a reply with no requestId at all (older-server fallback)', () => {
+      store = createMockStore({ ...baseState(), lastMemoryStackRequestId: 'req-2' })
+      setStore(store)
+      handleMessage(snapshot(), ctx() as never)
+      const s = store.getState()
+      expect(s.memoryStackEntries).toEqual([GLOBAL_ENTRY, PROJECT_ENTRY, LOCAL_ENTRY_MISSING])
+      expect(s.memoryStackLoading).toBe(false)
+    })
   })
 })

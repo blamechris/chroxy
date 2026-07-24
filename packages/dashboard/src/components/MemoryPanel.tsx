@@ -53,6 +53,18 @@ function entryState(d: MemoryFileDescriptor): { label: string; cls: string } {
   return { label: 'Not present', cls: 'missing' }
 }
 
+// #6996 review — `!!d.content` alone treats a whitespace-only file (e.g. an
+// existing-but-blank CLAUDE.md) as expandable: the toggle enables, but
+// MarkdownBody renders nothing, so the user gets a dead affordance. Require
+// actual renderable (post-trim, non-empty) content instead. This only gates
+// the expand toggle — entryState() above is untouched, so a blank file still
+// reports as "Present" (honest provenance: existing, just empty), never
+// hidden or downgraded to "Not present". Shared by both descriptor sites
+// (entry rows + the MEMORY.md section) so the predicate lives in one place.
+function canExpandDescriptor(d: MemoryFileDescriptor): boolean {
+  return d.exists && !d.skipped && !d.error && typeof d.content === 'string' && d.content.trim().length > 0
+}
+
 function DescriptorHeader({
   descriptor, canExpand, expanded, onToggle, testId, children,
 }: {
@@ -85,7 +97,7 @@ function DescriptorHeader({
 
 function EntryRow({ entry, index }: { entry: MemoryStackEntry; index: number }) {
   const [expanded, setExpanded] = useState(false)
-  const canExpand = entry.exists && !entry.skipped && !entry.error && !!entry.content
+  const canExpand = canExpandDescriptor(entry)
   return (
     <div className={`memory-entry memory-entry-scope-${entry.scope}`} data-testid={`memory-entry-${index}`}>
       <DescriptorHeader
@@ -127,7 +139,7 @@ function EntryRow({ entry, index }: { entry: MemoryStackEntry; index: number }) 
 
 function MemoryFileSection({ file }: { file: MemoryFileDescriptor }) {
   const [expanded, setExpanded] = useState(false)
-  const canExpand = file.exists && !file.skipped && !file.error && !!file.content
+  const canExpand = canExpandDescriptor(file)
   return (
     <div className="memory-file-section" data-testid="memory-file-section">
       <div className="memory-section-title">Auto-generated memory (MEMORY.md)</div>
@@ -162,17 +174,19 @@ export function MemoryPanel() {
   const memoryFile = useConnectionStore((s) => s.memoryStackFile)
   const stackError = useConnectionStore((s) => s.memoryStackError)
   const loading = useConnectionStore((s) => s.memoryStackLoading)
-  // #6996 review — memory_read has no client-supplied sessionId; the server
-  // scopes the CLAUDE.md stack to the caller's *active* session cwd, so a
-  // reply is only valid for whichever session was active when the request
-  // went out. switchSession() resets memoryStackEntries to null on every
-  // switch so a stale stack is never rendered against the new session, but
-  // that reset alone only re-triggers a fetch if this effect re-runs. Keying
-  // the effect on activeSessionId (not just connectionPhase) guarantees the
-  // refetch fires on a switch even if App.tsx ever stops unmounting this
-  // panel across a session change (App.tsx's chat/terminal/system panes
-  // already use a kept-alive display:none pattern instead of unmount/remount
-  // — #4305/#4397 — so this panel should not depend on staying unmounted).
+  // #6996 review — requestMemoryRead() now stamps `memory_read` with the
+  // active sessionId + a fresh requestId nonce (store/connection.ts), and
+  // handleMemoryStackResult drops a reply whose echoed requestId is stale.
+  // That closes the common case, but a reply still doesn't echo sessionId,
+  // so switchSession() also resets memoryStackEntries to null on every
+  // switch as defence-in-depth — a stale stack is never rendered against the
+  // new session. That reset alone only re-triggers a fetch if this effect
+  // re-runs, so keying the effect on activeSessionId (not just
+  // connectionPhase) guarantees the refetch fires on a switch even if
+  // App.tsx ever stops unmounting this panel across a session change
+  // (App.tsx's chat/terminal/system panes already use a kept-alive
+  // display:none pattern instead of unmount/remount — #4305/#4397 — so this
+  // panel should not depend on staying unmounted).
   const activeSessionId = useConnectionStore((s) => s.activeSessionId)
 
   const refresh = useCallback(() => {

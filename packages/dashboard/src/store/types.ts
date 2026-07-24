@@ -938,11 +938,11 @@ export interface ConnectionState {
    * #6867 (epic #6760) — dashboard memory panel: the effective merged
    * CLAUDE.md stack (global/project/local + recursively-resolved @imports,
    * server load order) from the last `memory_read` reply. Null until the
-   * panel's first request lands. Scoped to the active session the same way
-   * `permissionAudit` is (the server resolves `memory_read` against the
-   * caller's active session cwd, no client-supplied sessionId) —
-   * `switchSession`/`disconnect` reset it to null (#6996 review) so it never
-   * shows a previous session's stack against a new one.
+   * panel's first request lands. `requestMemoryRead()` sends an explicit
+   * `sessionId` (#6996 review) so the request is unambiguous, but the reply
+   * doesn't echo it back — `switchSession`/`disconnect` still reset this to
+   * null so a previous session's stack is never shown against a new one, and
+   * `lastMemoryStackRequestId` (below) drops an outright superseded reply.
    */
   memoryStackEntries: MemoryStackEntry[] | null;
   /** The project's auto-generated MEMORY.md descriptor, from the same reply. */
@@ -955,6 +955,15 @@ export interface ConnectionState {
    * (see handleMemoryStackResult) so a malformed reply can't make Refresh lie.
    */
   memoryStackLoading: boolean;
+  /**
+   * #6996 review — the requestId nonce stamped on the most recent
+   * `memory_read`. handleMemoryStackResult (store/message-handler.ts) drops
+   * any `memory_stack_result` whose echoed requestId doesn't match this,
+   * so a reply superseded by a newer request (e.g. a rapid session switch)
+   * can't land after the fact. Mirrors `lastFileContentRequestId`'s #6502
+   * read_file correlation.
+   */
+  lastMemoryStackRequestId: string | null;
 
   // Mailbox (#5914 follow-up) — Control Room "Mailbox" tab snapshot (live
   // agentCommId→session registrations + recent live-interrupt deliveries). Null
