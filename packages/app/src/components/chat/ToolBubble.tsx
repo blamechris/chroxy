@@ -13,6 +13,7 @@ import { Icon } from '../Icon';
 import { COLORS } from '../../constants/colors';
 import { formatToolName } from './chat-utils';
 import { TodoList, parseTodoList } from './TodoList';
+import { WebToolResultView, parseWebToolResult } from './WebToolResult';
 import { ChildAgentEventList } from './ChildAgentEventList';
 
 /**
@@ -45,7 +46,11 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
   isSelected: boolean;
   isSelecting: boolean;
   onToggleSelection: () => void;
-  onOpenDetail: (toolName: string, content: string, toolResult?: string, toolResultTruncated?: boolean, toolResultImages?: ToolResultImage[], serverName?: string) => void;
+  /** The trailing `rawToolName` is the UNFORMATTED `message.tool` (#6982) —
+   *  the detail modal needs it to route WebSearch/WebFetch results through
+   *  the structured renderer, since `toolName` has already been through
+   *  `formatToolName`. */
+  onOpenDetail: (toolName: string, content: string, toolResult?: string, toolResultTruncated?: boolean, toolResultImages?: ToolResultImage[], serverName?: string, rawToolName?: string) => void;
   /** #5517: seed + persist expand state in ChatView's id-keyed registry so
    *  it survives FlatList row recycling. */
   getInitialExpanded?: (id: string) => boolean;
@@ -121,7 +126,7 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
     if (isSelecting) {
       onToggleSelection();
     } else if (expanded) {
-      onOpenDetail(displayTool, content, message.toolResult, message.toolResultTruncated, message.toolResultImages, message.serverName);
+      onOpenDetail(displayTool, content, message.toolResult, message.toolResultTruncated, message.toolResultImages, message.serverName, message.tool);
     } else {
       LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
       setExpanded(true);
@@ -188,10 +193,20 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
   const todoParsed = expanded && message.tool === 'TodoWrite' && message.toolResult
     ? parseTodoList(message.toolResult)
     : null;
+  // #6982: the same parse-with-fallback treatment for WebSearch/WebFetch,
+  // reusing @chroxy/store-core's parsers (shared with the dashboard's
+  // WebToolResult, #6757). Parses `message.toolResult` — NOT `content`,
+  // which is the JSON-stringified tool *input* — and routes on the RAW
+  // `message.tool` so `web_search`/`web-search` match too. `null` (wrong
+  // tool, no result yet, unparseable payload) falls through to the
+  // existing plain-text branches below.
+  const webParsed = expanded && !todoParsed
+    ? parseWebToolResult(message.tool, message.toolResult)
+    : null;
   // #6391 (mobile auto-collapse): collapse a long expanded result to its head
   // behind a "Show N more lines" pill (shared store-core threshold).
   const contentLineCount = content ? content.split('\n').length : 0;
-  const isLongContent = !todoParsed && contentLineCount > TOOL_OUTPUT_COLLAPSE_LINE_THRESHOLD;
+  const isLongContent = !todoParsed && !webParsed && contentLineCount > TOOL_OUTPUT_COLLAPSE_LINE_THRESHOLD;
 
   return (
     <TouchableOpacity
@@ -225,6 +240,8 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
         <>
           {todoParsed ? (
             <TodoList parsed={todoParsed} />
+          ) : webParsed ? (
+            <WebToolResultView parsed={webParsed} />
           ) : isLongContent && !resultExpanded ? (
             <>
               <Text selectable style={styles.toolContentExpanded}>{content.split('\n').slice(0, TOOL_OUTPUT_COLLAPSE_HEAD_LINES).join('\n')}</Text>

@@ -1,0 +1,92 @@
+appId: com.blamechris.chroxy
+name: ChatView WebSearch structured tool result
+---
+
+# #6982 — End-to-end coverage for the mobile WebSearch structured
+# renderer (packages/app/src/components/chat/WebToolResult.tsx),
+# reaching it through the real WS protocol path: mock-server emits a
+# synthetic WebSearch tool_start + tool_result, store-core's
+# handleToolStart/handleToolResult process it, the message lands in an
+# ActivityGroup, and expanding the entry runs
+# parseWebToolResult(message.tool, message.toolResult) →
+# <WebSearchResultList />.
+#
+# Trigger: 'show-websearch' user input (added by #6757 in
+# mock-server.mjs, shared with the dashboard's manual verification).
+# The fixture seeding pattern is documented in CLAUDE.md → "Fixture
+# Seeding for Structured Renderers".
+#
+# SECURITY REGRESSION GUARD: the fixture's THIRD result has a
+# `javascript:alert(1)` URL. @chroxy/store-core's parseWebSearchResults
+# drops it, so only two rows may ever render — the assertNotVisible on
+# `web-search-result-2` below fails loudly if that scheme allowlist
+# regresses and an unsafe result reaches the UI.
+#
+# Requires: dev client installed + mock server on port 9876
+#   cd packages/app && npx expo run:ios
+#   bash packages/app/.maestro/scripts/start-mock-server.sh
+
+- runFlow: setup/ensure-session-screen.yaml
+
+- tapOn: "Chat"
+- waitForAnimationToEnd
+
+# Type the trigger phrase that makes the mock server emit a WebSearch
+# tool_use + tool_result pair.
+- tapOn:
+    id: "chat-message-input"
+- inputText: "show-websearch"
+
+- tapOn:
+    id: "chat-send-button"
+
+# Wait for the activity group wrapping the WebSearch tool row.
+- extendedWaitUntil:
+    visible:
+      id: "activity-group"
+    timeout: 10000
+
+- takeScreenshot: chat-websearch-activity-group-collapsed
+
+# Expand the activity group — the onPress lives on the inner
+# `activity-group-header` TouchableOpacity (the outer `activity-group`
+# testID is for assertion only).
+- tapOn:
+    id: "activity-group-header"
+- waitForAnimationToEnd
+
+# Expand the WebSearch entry. Same rationale as chat-todolist.yaml: an
+# iOS XCUITest tap-by-id on a nested TouchableOpacity doesn't reliably
+# reach RN's touch responder, so tap the entry's collapsed-preview TEXT
+# (the head of the raw JSON tool_result, which contains the fixture's
+# query) — that resolves to coordinates on the entry row on every device.
+- tapOn:
+    text: ".*chroxy remote terminal.*"
+- waitForAnimationToEnd
+
+# LayoutAnimation can defer the state→render commit on iOS.
+- extendedWaitUntil:
+    visible:
+      id: "web-search-results"
+    timeout: 5000
+
+# The structured list replaced the flat-text dump: query header, one row
+# per SAFE result, a tappable title link, the domain, and the snippet.
+- assertVisible:
+    id: "web-search-query"
+- assertVisible:
+    id: "web-search-result-0"
+- assertVisible:
+    id: "web-search-result-link-0"
+- assertVisible:
+    id: "web-search-result-domain-0"
+- assertVisible:
+    id: "web-search-result-snippet-0"
+- assertVisible:
+    id: "web-search-result-1"
+
+# The `javascript:` fixture result must NOT have produced a row.
+- assertNotVisible:
+    id: "web-search-result-2"
+
+- takeScreenshot: chat-websearch-expanded

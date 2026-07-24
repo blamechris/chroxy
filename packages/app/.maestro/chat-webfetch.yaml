@@ -1,0 +1,60 @@
+appId: com.blamechris.chroxy
+name: ChatView WebFetch structured tool result
+---
+
+# #6982 — End-to-end coverage for the mobile WebFetch structured
+# renderer (packages/app/src/components/chat/WebToolResult.tsx
+# WebFetchResult), the sibling of chat-websearch.yaml.
+#
+# Trigger: 'show-webfetch' user input (added by #6757 in
+# mock-server.mjs). The fixture mirrors the BYOK executor's real wire
+# shape — `Prompt: <p>\nURL: <u>\n\n<body>` — which
+# @chroxy/store-core's parseWebFetchResult splits into the source URL
+# (rendered as a tappable link, gated on isSafeWebUrl) and the body
+# (rendered through the app's existing markdown pipeline instead of a
+# raw text dump).
+#
+# Requires: dev client installed + mock server on port 9876
+#   cd packages/app && npx expo run:ios
+#   bash packages/app/.maestro/scripts/start-mock-server.sh
+
+- runFlow: setup/ensure-session-screen.yaml
+
+- tapOn: "Chat"
+- waitForAnimationToEnd
+
+- tapOn:
+    id: "chat-message-input"
+- inputText: "show-webfetch"
+
+- tapOn:
+    id: "chat-send-button"
+
+- extendedWaitUntil:
+    visible:
+      id: "activity-group"
+    timeout: 10000
+
+- tapOn:
+    id: "activity-group-header"
+- waitForAnimationToEnd
+
+# Expand the WebFetch entry by tapping its collapsed-preview text (the
+# head of the raw tool_result, which begins with the Prompt: line). Same
+# tap-by-text rationale as chat-todolist.yaml / chat-websearch.yaml.
+- tapOn:
+    text: ".*Summarize this page.*"
+- waitForAnimationToEnd
+
+- extendedWaitUntil:
+    visible:
+      id: "web-fetch-result"
+    timeout: 5000
+
+# Source URL rendered as a link above the formatted body.
+- assertVisible:
+    id: "web-fetch-source"
+- assertVisible:
+    id: "web-fetch-content"
+
+- takeScreenshot: chat-webfetch-expanded
