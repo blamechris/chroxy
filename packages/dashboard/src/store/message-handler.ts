@@ -5155,6 +5155,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
             branch: null,
             base: null,
             error: 'Received a malformed PR-creation response from the server',
+            existingUrl: null,
           });
           break;
         }
@@ -5165,6 +5166,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           branch: payload.branch,
           base: payload.base,
           error: payload.error,
+          // #6938 — the pre-existing PR's URL (structured field), set only on
+          // the "PR already exists" error path.
+          existingUrl: payload.existingUrl ?? null,
         });
       }
       break;

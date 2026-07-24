@@ -4332,7 +4332,36 @@ describe('dashboard message-handler dispatch', () => {
         branch: 'feat/x',
         base: 'main',
         error: null,
+        existingUrl: null,
       })
+    })
+
+    // #6938 — the "PR already exists" path returns `existingUrl` as a
+    // structured field; the dispatch must forward it verbatim to the callback
+    // so GitPanel can render a clickable link instead of parsing `error` text.
+    it('forwards existingUrl on the "PR already exists" payload', () => {
+      const calls: Array<any> = []
+      store = createMockStore(baseState({
+        _gitCreatePrCallback: (r: any) => calls.push(r),
+      } as any))
+      setStore(store)
+
+      handleMessage(
+        {
+          type: 'git_create_pr_result',
+          url: null,
+          number: null,
+          branch: 'feat/x',
+          base: 'main',
+          error: 'A pull request already exists for this branch: https://github.com/o/r/pull/7',
+          existingUrl: 'https://github.com/o/r/pull/7',
+        } as any,
+        ctx() as any,
+      )
+
+      expect(calls).toHaveLength(1)
+      expect(calls[0].existingUrl).toBe('https://github.com/o/r/pull/7')
+      expect(calls[0].url).toBeNull()
     })
 
     it('still resolves the callback with an error on an INVALID payload (unsticks GitPanel submitting state)', () => {

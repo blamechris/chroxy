@@ -309,12 +309,16 @@ export interface GitCommitResult {
 // failure), `number` its integer id (best-effort), `branch`/`base` echo the
 // head/base used, and `error` carries a clear message on failure. Dashboard-only
 // for v1 (mobile PR-creation UI is a tracked follow-up).
+// #6938 — `existingUrl` is set (non-null) only on the "a pull request already
+// exists for this branch" error path, so the UI can render it as a real link
+// instead of the URL only ever appearing embedded inside `error` text.
 export interface GitCreatePrResult {
   url: string | null;
   number: number | null;
   branch: string | null;
   base: string | null;
   error: string | null;
+  existingUrl?: string | null;
 }
 
 // `DiffHunkLine`, `DiffHunk`, and `DiffFile` are now re-exported from

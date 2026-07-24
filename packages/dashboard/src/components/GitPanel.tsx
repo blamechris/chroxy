@@ -125,6 +125,10 @@ export function GitPanel() {
   const [prSubmitting, setPrSubmitting] = useState(false)
   const [prError, setPrError] = useState<string | null>(null)
   const [prCreatedUrl, setPrCreatedUrl] = useState<string | null>(null)
+  // #6938 — the pre-existing PR's URL (structured field on git_create_pr_result)
+  // when `gh pr create` fails because a PR is already open for this branch.
+  // Rendered as a clickable link instead of buried inside `prError` text.
+  const [prExistingUrl, setPrExistingUrl] = useState<string | null>(null)
   const [prConfirmOpen, setPrConfirmOpen] = useState(false)
 
   // The single, DURABLE git_status_result handler. Stable identity (empty deps)
@@ -293,6 +297,7 @@ export function GitPanel() {
   const openPrForm = useCallback(() => {
     setPrError(null)
     setPrCreatedUrl(null)
+    setPrExistingUrl(null)
     setPrTitle(prev => prev || branch || '')
     setPrFormOpen(true)
   }, [branch])
@@ -319,10 +324,19 @@ export function GitPanel() {
     if (!title) return
     setPrError(null)
     setPrCreatedUrl(null)
+    setPrExistingUrl(null)
     setPrSubmitting(true)
     setGitCreatePrCallback((result: GitCreatePrResult) => {
       setGitCreatePrCallback(null)
       setPrSubmitting(false)
+      // #6938 — a PR already existing for this branch is still an "error"
+      // outcome (no new PR was created), but the server now returns the
+      // existing PR's URL as a structured field — surface it as a link
+      // rather than leaving the operator to dig it out of the error text.
+      if (result.existingUrl) {
+        setPrExistingUrl(result.existingUrl)
+        return
+      }
       if (result.error || !result.url) {
         setPrError(result.error || 'PR creation failed')
         return
@@ -402,6 +416,17 @@ export function GitPanel() {
             <div className="git-pr-success" data-testid="git-pr-success">
               <span>Pull request opened:</span>
               <a href={prCreatedUrl} target="_blank" rel="noreferrer" data-testid="git-pr-url">{prCreatedUrl}</a>
+              <button type="button" className="git-section-action" onClick={closePrForm} data-testid="git-pr-done-btn">
+                Done
+              </button>
+            </div>
+          ) : prExistingUrl ? (
+            // #6938 — "already exists" is not a fresh success, so this gets its
+            // own testid/copy, but reuses the same clickable-link affordance
+            // (git-pr-url) rather than burying the URL in git-pr-error text.
+            <div className="git-pr-success git-pr-existing" data-testid="git-pr-existing">
+              <span>PR already exists →</span>
+              <a href={prExistingUrl} target="_blank" rel="noreferrer" data-testid="git-pr-url">{prExistingUrl}</a>
               <button type="button" className="git-section-action" onClick={closePrForm} data-testid="git-pr-done-btn">
                 Done
               </button>
