@@ -3,8 +3,15 @@ name: Repo Relay
 on:
   pull_request:
     types: [opened, closed, reopened, synchronize, edited, ready_for_review, converted_to_draft]
-  pull_request_review:
-    types: [submitted, edited, dismissed]
+  # No pull_request_review trigger (#6749): GitHub's bot-triggered-workflow
+  # approval policy gates the run BEFORE job-level `if` conditions evaluate,
+  # so a Copilot-authored review still spawns a run held in action_required
+  # forever (the REST approve endpoint 403s on these) — the check suite
+  # never completes and green PRs read UNSTABLE. Actor filters can't reach
+  # far enough upstream to prevent it, so the trigger itself has to go.
+  # repo-relay's piggyback review detection already surfaces a missed
+  # review on the next pull_request event, so this only trades notification
+  # latency for a PR that never gets stuck.
   issue_comment:
     types: [created, edited, deleted]
   issues:
