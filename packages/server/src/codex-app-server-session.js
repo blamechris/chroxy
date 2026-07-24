@@ -44,6 +44,34 @@ const MAX_MCP_RESULT_CHARS = 10_000
 // cycle while bounding the worst-case stale state far below the 30-min default.
 const RECONNECT_WATCHDOG_MS = 2 * 60 * 1000
 
+// #6856: dedicated HARD CAP on how long a codex turn may stay in the transient-
+// reconnect-SUPPRESSED state opened by #6854. The #6629 watchdog above is a
+// SILENCE detector — it is RE-ARMED on every `Reconnecting...` tick, so it only
+// fires after codex goes QUIET for a full window. That leaves one path still
+// unbounded-but-slow: a codex that emits reconnect notifications FOREVER (never
+// recovering, never silent, never emitting a terminal give-up). Each tick runs
+// `_resetResultTimeout` (pushing the 30-min result timeout out) AND re-arms the
+// silence watchdog — so BOTH backstops keep sliding forward and the turn stays
+// "Working..." far longer than it should. This deadline is armed ONCE the moment
+// the turn first enters suppression and is deliberately NOT re-armed on later
+// reconnect ticks, so a never-ending reconnect storm fails on a fixed bound. It
+// is cleared the instant codex makes genuine forward progress (any non-`error`
+// notification) or the turn ends. 5 min sits above codex's bounded N/5 retry
+// burst AND above the 2-min silence watchdog (so the faster silence path still
+// wins its own case), while capping the worst case 6x below the 30-min result
+// timeout. Override via `reconnectDeadlineMs` opt / CHROXY_CODEX_RECONNECT_DEADLINE_MS.
+const RECONNECT_DEADLINE_MS = 5 * 60 * 1000
+
+// #6856: resolve the reconnect-suppression deadline. Opt wins over the env var;
+// a non-finite / non-positive value (unset env → NaN, garbage → NaN, 0/negative)
+// falls back to the default. Returns ms.
+function resolveReconnectDeadlineMs(optValue) {
+  for (const candidate of [optValue, Number(process.env.CHROXY_CODEX_RECONNECT_DEADLINE_MS)]) {
+    if (typeof candidate === 'number' && Number.isFinite(candidate) && candidate > 0) return candidate
+  }
+  return RECONNECT_DEADLINE_MS
+}
+
 const log = createLogger('codex-app-server')
 
 /**
@@ -130,6 +158,15 @@ export class CodexAppServerSession extends BaseSession {
     this._skillsPrepended = false // #6606 — inject the skills prefix once, on turn 1
     this._turnAbort = null // per-turn AbortController — cancels pending approvals
     this._reconnectWatchdog = null // #6629 — bounded backstop for a wedged reconnect
+    this._reconnectDeadline = null // #6856 — one-shot hard cap on total reconnect-suppression time
+    // #6856 — configurable reconnect-suppression deadline (opt / env / default).
+    this._reconnectDeadlineMs = resolveReconnectDeadlineMs(opts.reconnectDeadlineMs)
+    // #6856 — injectable timer seam (defaults to node globals) so the reconnect
+    // deadline is unit-testable without wall-clock waits, mirroring the #6908/#6911
+    // byok-mcp-config `setTimer`/`clearTimer` pattern. Only the deadline routes
+    // through this; the #6629 silence watchdog keeps using the globals directly.
+    this._setTimer = typeof opts.setTimer === 'function' ? opts.setTimer : setTimeout
+    this._clearTimer = typeof opts.clearTimer === 'function' ? opts.clearTimer : clearTimeout
     // #6638: per-session sandbox override (create_session `codexSandbox`) — wins
     // over CHROXY_CODEX_SANDBOX / the default. Applied at thread start.
     this._codexSandbox = opts.codexSandbox || null
@@ -357,11 +394,13 @@ export class CodexAppServerSession extends BaseSession {
       return
     }
     this._resetResultTimeout()
-    // #6629 — any notification that is NOT another `error` tick is genuine forward
-    // progress: codex's response stream is live again, so disarm the reconnect
-    // watchdog that #6623's suppression path may have armed. (A terminal `error`
-    // clears it below on its way to _failTurn; a transient reconnect `error` re-arms it.)
-    if (method !== 'error') this._clearReconnectWatchdog()
+    // #6629/#6856 — any notification that is NOT another `error` tick is genuine
+    // forward progress: codex's response stream is live again, so disarm BOTH the
+    // reconnect backstops that #6623's suppression path may have armed — the #6629
+    // silence watchdog and the #6856 one-shot suppression deadline. (A terminal
+    // `error` clears both below on its way to _failTurn; a transient reconnect
+    // `error` re-arms the watchdog but leaves the deadline untouched.)
+    if (method !== 'error') { this._clearReconnectWatchdog(); this._clearReconnectDeadline() }
     const t = this._activeTurn
     switch (method) {
       case 'turn/started':
@@ -406,9 +445,16 @@ export class CodexAppServerSession extends BaseSession {
           // timeout. Re-arms on each reconnect tick so codex's legit N/5 retry
           // burst doesn't trip it mid-recovery.
           this._armReconnectWatchdog()
+          // #6856 — arm the one-shot suppression deadline the FIRST time this turn
+          // enters the reconnect-suppressed state. Unlike the watchdog it is NOT
+          // re-armed here on subsequent ticks (the guard in _armReconnectDeadline
+          // makes a later call a no-op), so a reconnect storm that keeps ticking
+          // forever still fails on a fixed bound instead of sliding both backstops out.
+          this._armReconnectDeadline()
           break
         }
-        this._clearReconnectWatchdog() // terminal error → about to fail; drop the backstop
+        this._clearReconnectWatchdog() // terminal error → about to fail; drop the backstops
+        this._clearReconnectDeadline() // #6856
         this._failTurn(`Codex error: ${JSON.stringify(params).slice(0, 200)}`)
         break
       }
@@ -645,6 +691,7 @@ export class CodexAppServerSession extends BaseSession {
     super._clearMessageState()
     this._pendingFileChanges.clear()
     this._clearReconnectWatchdog() // #6629 — drop the reconnect backstop on any turn teardown
+    this._clearReconnectDeadline() // #6856 — drop the suppression deadline on any turn teardown
   }
 
   // Abort this turn's approval scope (any pending permission_request resolves as
@@ -710,6 +757,31 @@ export class CodexAppServerSession extends BaseSession {
 
   _clearReconnectWatchdog() {
     if (this._reconnectWatchdog) { clearTimeout(this._reconnectWatchdog); this._reconnectWatchdog = null }
+  }
+
+  // #6856 — one-shot HARD CAP on the transient-reconnect-suppressed state. Armed
+  // ONCE on entering suppression; the `if (this._reconnectDeadline) return` guard
+  // is load-bearing — a subsequent reconnect tick must NOT push the deadline out
+  // (that re-arming is exactly the #6854 gap this closes). It is a strictly-shorter
+  // bound than the 30-min result timeout and independent of the #6629 silence
+  // watchdog (which keeps sliding forward on every tick). Cleared on genuine
+  // forward progress or turn teardown. Routes through the injectable timer seam so
+  // it is hermetically testable, and unref's the handle so a bare test/CI run
+  // self-exits with no leaked timer (#6933).
+  _armReconnectDeadline() {
+    if (this._reconnectDeadline) return // already suppressed — do NOT extend the deadline
+    this._reconnectDeadline = this._setTimer(() => {
+      this._reconnectDeadline = null
+      if (!this._activeTurn) return
+      const secs = Math.round(this._reconnectDeadlineMs / 1000)
+      ;(this._log || log).warn(`codex app-server reconnect exceeded ${secs}s without recovery — failing the turn (#6856)`)
+      this._failTurn(`Codex reconnect exceeded ${secs}s without recovery — the turn was stopped. Retry to continue.`, { code: 'stream_stall' })
+    }, this._reconnectDeadlineMs)
+    if (this._reconnectDeadline && typeof this._reconnectDeadline.unref === 'function') this._reconnectDeadline.unref()
+  }
+
+  _clearReconnectDeadline() {
+    if (this._reconnectDeadline) { this._clearTimer(this._reconnectDeadline); this._reconnectDeadline = null }
   }
 
   // ------------------------------------------------------------------
@@ -1077,6 +1149,7 @@ export class CodexAppServerSession extends BaseSession {
     this._clearIntentionalStop()
     this._clearResultTimeout()
     this._clearReconnectWatchdog() // #6629 — never leave the reconnect timer armed past teardown
+    this._clearReconnectDeadline() // #6856 — never leave the suppression deadline armed past teardown
     this._endTurnAbort() // resolve any in-flight approval as a deny before teardown
     try { this._permissions?.destroy() } catch { /* noop */ }
     // #6609 — drop the materialized-attachment temp dir.
