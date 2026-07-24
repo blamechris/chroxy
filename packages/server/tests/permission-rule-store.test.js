@@ -487,3 +487,76 @@ describe('#6771 PermissionManager + durable rules', () => {
     assert.equal(typeof parsed.projects['/proj/a'].rules[0].createdAt, 'number')
   })
 })
+
+// #6927 — a persist that TIGHTENS the auto-approval surface (a new deny, or a
+// revoked allow) must be DURABLE: if a power loss rolls it back after the
+// dashboard reported the edit saved, the restriction silently vanishes and the
+// broader auto-approve surface comes back — the same acute class as a token
+// revoke (#6914). The WIDENING edits (a new allow — the frequent allowAlways
+// path — or a removed deny) are fail-safe and stay non-durable (no fsync cost on
+// the hot path). We observe the `{ durable }` opt via the store's `_write` seam.
+const CWD = '/proj/durable'
+describe('#6927 tightening persists are durable; widening persists are not', () => {
+  let recordDir
+  function makeRecordingStore() {
+    const calls = []
+    const store = new PermissionRuleStore({
+      filePath: join(recordDir, 'permission-rules.json'),
+      logger: silentLog,
+      _write: (_path, _data, opts = {}) => { calls.push({ durable: opts.durable === true }) },
+    })
+    return { store, calls }
+  }
+
+  beforeEach(() => { recordDir = mkdtempSync(join(tmpdir(), 'chroxy-rule-durable-')) })
+  afterEach(() => { rmSync(recordDir, { recursive: true, force: true }) })
+
+  it('addRule(deny) is durable; addRule(allow) is not', () => {
+    const { store, calls } = makeRecordingStore()
+    store.addRule(CWD, { tool: 'Bash', decision: 'deny' })
+    assert.equal(calls.at(-1).durable, true, 'a persisted deny is durable')
+    store.addRule(CWD, { tool: 'Write', decision: 'allow' })
+    assert.equal(calls.at(-1).durable, false, 'a persisted allow (widening) is not durable')
+  })
+
+  it('removeRule that drops an ALLOW is durable; dropping a DENY is not', () => {
+    const { store, calls } = makeRecordingStore()
+    store.addRule(CWD, { tool: 'Write', decision: 'allow' }) // widening, not durable
+    store.addRule(CWD, { tool: 'Bash', decision: 'deny' })   // tightening, durable
+    calls.length = 0
+    store.removeRule(CWD, 'Write') // revokes an auto-grant → tightening
+    assert.equal(calls.at(-1).durable, true, 'removing an allow revokes an auto-grant (durable)')
+    store.removeRule(CWD, 'Bash') // drops a deny → widening
+    assert.equal(calls.at(-1).durable, false, 'removing a deny widens (not durable)')
+  })
+
+  it('setRules is durable when it adds a deny', () => {
+    const { store, calls } = makeRecordingStore()
+    store.setRules(CWD, [{ tool: 'Bash', decision: 'deny' }])
+    assert.equal(calls.at(-1).durable, true)
+  })
+
+  it('setRules is durable when it revokes an existing allow', () => {
+    const { store, calls } = makeRecordingStore()
+    store.setRules(CWD, [{ tool: 'Write', decision: 'allow' }]) // widening, not durable
+    assert.equal(calls.at(-1).durable, false)
+    store.setRules(CWD, []) // drops the allow → tightening
+    assert.equal(calls.at(-1).durable, true)
+  })
+
+  it('setRules that only ADDS an allow (pure widening) is not durable', () => {
+    const { store, calls } = makeRecordingStore()
+    store.setRules(CWD, [{ tool: 'Write', decision: 'allow' }])
+    assert.equal(calls.at(-1).durable, false)
+    store.setRules(CWD, [{ tool: 'Write', decision: 'allow' }, { tool: 'Read', decision: 'allow' }])
+    assert.equal(calls.at(-1).durable, false)
+  })
+
+  it('setRules that replaces an allow with a deny (same tool) is durable', () => {
+    const { store, calls } = makeRecordingStore()
+    store.setRules(CWD, [{ tool: 'Write', decision: 'allow' }])
+    calls.length = 0
+    store.setRules(CWD, [{ tool: 'Write', decision: 'deny' }])
+    assert.equal(calls.at(-1).durable, true, 'the allow→deny swap both revokes an allow AND adds a deny')
+  })
+})

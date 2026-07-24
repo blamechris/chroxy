@@ -181,6 +181,21 @@ describe('TokenManager', () => {
     assert.equal(persisted, newToken)
   })
 
+  // #6927 — onPersist receives the rotation `reason` so the persist site can make
+  // the panic-button revoke DURABLE (fsync config before the compromised token can
+  // resurrect on a crash) while leaving a routine scheduled rotation non-durable.
+  it('revoke() passes reason "revoke" to onPersist; scheduled rotate passes "scheduled"', async () => {
+    const reasons = []
+    manager = new TokenManager({
+      token: 'abc-123',
+      onPersist: (_newToken, opts = {}) => { reasons.push(opts.reason) },
+    })
+    manager.rotate()   // routine scheduled rotation
+    manager.revoke()   // operator panic button
+    await new Promise(r => setTimeout(r, 10))
+    assert.deepEqual(reasons, ['scheduled', 'revoke'])
+  })
+
   it('successive rotations invalidate older tokens', () => {
     manager = new TokenManager({ token: 'first', graceMs: 5000 })
     const second = manager.rotate()
