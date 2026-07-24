@@ -230,6 +230,22 @@ describe('gitCreatePR (#6876)', () => {
     assert.equal(responses[0].existingUrl, 'https://github.com/o/r/pull/7')
   })
 
+  it('surfaces the existing PR URL from gh stdout when stderr carries none (#6951)', async () => {
+    const err = Object.assign(new Error('exit 1'), {
+      code: 1,
+      stdout: 'https://github.com/o/r/pull/9\n',
+      stderr: 'a pull request for branch "feat/pr" into branch "main" already exists:',
+    })
+    const { exec } = router({ gh: { throw: err } })
+    const { git, responses } = makeGit(exec)
+
+    await git.gitCreatePR({}, { title: 't' }, tmpDir)
+
+    assert.match(responses[0].error, /already exists/i)
+    assert.equal(responses[0].url, null)
+    assert.equal(responses[0].existingUrl, 'https://github.com/o/r/pull/9')
+  })
+
   it('leaves existingUrl null on non-"already exists" gh failures (#6938)', async () => {
     const err = Object.assign(new Error('exit 1'), {
       code: 1,

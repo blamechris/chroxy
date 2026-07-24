@@ -92,7 +92,10 @@ function mapGhCreateError(err) {
   const stderr = String((err && (err.stderr || err.message)) || '')
   const lower = stderr.toLowerCase()
   if (/already exists|a pull request for branch/.test(lower)) {
-    const existing = extractPrUrl(stderr)
+    // gh sometimes writes the existing-PR URL to stdout rather than stderr —
+    // parse both streams (and the error message) the same way the success
+    // path does, so the URL isn't missed depending on which stream gh used.
+    const existing = extractPrUrl(err && err.stdout) || extractPrUrl(stderr)
     return {
       message: existing
         ? `A pull request already exists for this branch: ${existing}`
