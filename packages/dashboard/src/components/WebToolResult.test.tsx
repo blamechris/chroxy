@@ -119,4 +119,26 @@ describe('WebFetchResult', () => {
     render(<WebFetchResult parsed={{ content: '<img src=x onerror=alert(1)>' }} />)
     expect(document.querySelector('img[src="x"]')).not.toBeInTheDocument()
   })
+
+  it('neutralizes a protocol-relative //host link embedded in fetched content (#6986)', () => {
+    // The exact link-injection vector: a WebFetch of an attacker-controlled
+    // page whose (model/web-controlled) content embeds a markdown link to an
+    // external origin via `//host`. The shared allowlist markdown gate must
+    // NOT emit a functional anchor for it — otherwise it is openable via
+    // middle-click / right-click "Open Link in New Tab" despite the click gate.
+    render(<WebFetchResult parsed={{ content: 'Read more: [click here](//evil.example/steal)' }} />)
+    const content = screen.getByTestId('web-fetch-content')
+    expect(content.querySelector('a')).toBeNull()
+    expect(document.querySelector('a[href^="//evil"]')).not.toBeInTheDocument()
+    // The link text survives as plain text.
+    expect(content).toHaveTextContent('click here')
+  })
+
+  it('still renders a legitimate https markdown link in fetched content', () => {
+    render(<WebFetchResult parsed={{ content: 'See [the docs](https://example.com/docs).' }} />)
+    const content = screen.getByTestId('web-fetch-content')
+    const link = content.querySelector('a[href="https://example.com/docs"]')
+    expect(link).not.toBeNull()
+    expect(link).toHaveAttribute('target', '_blank')
+  })
 })

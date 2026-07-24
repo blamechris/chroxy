@@ -7,6 +7,7 @@
  */
 import DOMPurify from 'dompurify'
 import { highlightCode } from '@chroxy/store-core'
+import { isRenderableLinkHref } from './links'
 
 function escapeHtml(text: string): string {
   return text
@@ -66,12 +67,19 @@ export function renderMarkdown(text: string): string {
   html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
   html = html.replace(/\*(.+?)\*/g, '<em>$1</em>')
 
-  // Links — sanitize URL scheme
+  // Links — ALLOWLIST the URL scheme (#6986). Only http:/https:/mailto: emit a
+  // real anchor; every other href (dangerous `javascript:`/`data:`/`vbscript:`,
+  // protocol-relative `//host`, same-origin relative paths, `#fragment`) renders
+  // as plain text. A blocklist here was the link-injection bug: DOMPurify keeps a
+  // bare `//host` as a "safe relative URL", so attacker-controlled WebFetch'd
+  // content (rendered through this same pipeline) could smuggle an openable link
+  // to an external origin. `isRenderableLinkHref` is the shared gate in lib/links.
   html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_m, linkText: string, url: string) => {
-    if (/^\s*(javascript|data|vbscript)\s*:/i.test(url)) {
+    const trimmed = url.trim()
+    if (!isRenderableLinkHref(trimmed)) {
       return linkText
     }
-    const safeUrl = url.replace(/"/g, '&quot;')
+    const safeUrl = trimmed.replace(/"/g, '&quot;')
     return `<a href="${safeUrl}" target="_blank" rel="noopener">${linkText}</a>`
   })
 

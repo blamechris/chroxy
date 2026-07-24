@@ -1,5 +1,47 @@
 import { describe, it, expect, vi } from 'vitest'
-import { resolveLinkOpen, handleMarkdownLinkClick } from './links'
+import { resolveLinkOpen, handleMarkdownLinkClick, isRenderableLinkHref } from './links'
+
+describe('isRenderableLinkHref (#6986)', () => {
+  it('allows http, https and mailto', () => {
+    expect(isRenderableLinkHref('https://example.com')).toBe(true)
+    expect(isRenderableLinkHref('http://example.com/x')).toBe(true)
+    expect(isRenderableLinkHref('mailto:a@b.com')).toBe(true)
+    expect(isRenderableLinkHref('HTTPS://Example.com')).toBe(true)
+  })
+
+  it('rejects the protocol-relative //host injection vector', () => {
+    expect(isRenderableLinkHref('//evil.example/x')).toBe(false)
+    expect(isRenderableLinkHref('//evil.example')).toBe(false)
+  })
+
+  it('rejects dangerous schemes', () => {
+    expect(isRenderableLinkHref('javascript:alert(1)')).toBe(false)
+    expect(isRenderableLinkHref('data:text/html,x')).toBe(false)
+    expect(isRenderableLinkHref('vbscript:msgbox(1)')).toBe(false)
+  })
+
+  it('rejects relative paths and bare fragments', () => {
+    expect(isRenderableLinkHref('/admin/delete')).toBe(false)
+    expect(isRenderableLinkHref('#section')).toBe(false)
+    expect(isRenderableLinkHref('relative/path')).toBe(false)
+  })
+
+  it('rejects other non-allowlisted schemes', () => {
+    expect(isRenderableLinkHref('ftp://files.example.com')).toBe(false)
+    expect(isRenderableLinkHref('file:///etc/passwd')).toBe(false)
+  })
+
+  it('trims before testing (a leading-space scheme does not evade)', () => {
+    expect(isRenderableLinkHref('  https://example.com  ')).toBe(true)
+    expect(isRenderableLinkHref(' javascript:alert(1)')).toBe(false)
+  })
+
+  it('rejects blank / non-string input', () => {
+    expect(isRenderableLinkHref(null)).toBe(false)
+    expect(isRenderableLinkHref(undefined)).toBe(false)
+    expect(isRenderableLinkHref('   ')).toBe(false)
+  })
+})
 
 describe('resolveLinkOpen (#6625)', () => {
   it('returns the URL for a modifier-click on an http(s) link', () => {
