@@ -1,10 +1,11 @@
-import { describe, it, before, after, beforeEach, afterEach } from 'node:test'
+import { describe, it, before, after, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, rm, writeFile, symlink, realpath } from 'fs/promises'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { createFileOps } from '../src/ws-file-ops/index.js'
 import { encodeProjectPath } from '../src/jsonl-reader.js'
+import { resolveSessionCwd } from '../src/ws-file-ops/common.js'
 
 /**
  * `readMemory` op (#6864, epic #6760) — server read of the effective merged
@@ -122,6 +123,53 @@ describe('memory_read (readMemory) handler', () => {
     assert.equal(importEntry.skipped, false)
     assert.match(importEntry.path, /docs\/extra\.md$/)
     assert.equal(importEntry.importedFrom, projectEntry.path)
+
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  it('does not re-read an already-visited @import target on a duplicate reference (perf follow-up, #6971)', async () => {
+    // Two @import references to the SAME file must still only produce one
+    // entry (dedup already worked before the fix) — the assertion that
+    // matters here is that the underlying file is only actually opened
+    // ONCE, not once per reference. Requires a module instance whose
+    // `fs/promises` `open` binding resolves to the mock below, so this
+    // dynamically re-imports memory.js under a cache-busted specifier
+    // AFTER registering the mock — a plain top-of-file static import (as
+    // used by `fileOps` elsewhere in this suite) would already be bound to
+    // the real `open` before any per-test mock.module() call could apply.
+    const dir = await mkdtemp(join(tmpdir(), 'chroxy-mem-dupimport-'))
+    await writeFile(join(dir, 'dup.md'), 'dup content', 'utf-8')
+    await writeFile(join(dir, 'CLAUDE.md'), 'See @dup.md and again @dup.md here.', 'utf-8')
+
+    const realFsp = await import('fs/promises')
+    const dupOpens = []
+    const mockHandle = mock.module('fs/promises', {
+      namedExports: {
+        ...realFsp,
+        open: async (...args) => {
+          if (String(args[0]).endsWith('dup.md')) dupOpens.push(args[0])
+          return realFsp.open(...args)
+        },
+      },
+    })
+
+    try {
+      const { createMemoryOps } = await import(`../src/ws-file-ops/memory.js?dupimport=${Date.now()}`)
+      const cwdCache = new Map()
+      const freshResponses = []
+      const freshSend = (_ws, msg) => freshResponses.push(msg)
+      const freshMemory = createMemoryOps(freshSend, (cwd) => resolveSessionCwd(cwd, cwdCache, 60_000))
+
+      await freshMemory.readMemory(mockWs, dir)
+
+      const { entries } = freshResponses[0]
+      const importEntries = entries.filter((e) => e.scope === 'import')
+      assert.equal(importEntries.length, 1, 'duplicate @import must still collapse to one entry')
+      assert.equal(importEntries[0].content, 'dup content')
+      assert.equal(dupOpens.length, 1, 'dup.md must only be opened once despite two @import references to it')
+    } finally {
+      mockHandle.restore()
+    }
 
     await rm(dir, { recursive: true, force: true })
   })

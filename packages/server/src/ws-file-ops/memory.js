@@ -90,35 +90,35 @@ function hasMarkdownExt(p) {
 }
 
 /**
- * Read+validate a single memory file that MUST resolve within one of the
- * given allowed roots — the read-only path-confinement guard for #6864.
+ * Phase 1 of the confined-memory-file read: resolve + validate a LEXICAL
+ * target path within one of the given allowed roots WITHOUT touching file
+ * content — no `stat`/`open`/read, just the markdown-extension gate,
+ * symlink-safe realpath resolution, and the containment check. Split out
+ * from `readConfinedMemoryFile` so a caller (namely `collectImports`) can
+ * compute a target's cycle-guard identity — the resolved real path — and
+ * consult the `visited` set BEFORE paying for the actual read, so a
+ * duplicate/cyclical `@import` short-circuits before any I/O beyond this
+ * lightweight resolution (#6971 perf follow-up).
  *
  * Symlink-safe: resolves the deepest existing real ancestor before the
  * containment check (same helper reader.js uses), so a symlinked parent
- * directory can't smuggle the target outside the allowed roots. The
- * containment check runs BEFORE any `stat`/`open` — a path outside the
- * allowed roots is never even stat'd, so its existence can't be inferred
- * from the response (mirrors the "don't leak existence as an oracle"
- * reasoning in readFileContent). The final open uses O_NOFOLLOW to close
- * the post-validation TOCTOU window (a symlink swapped in at the target
- * between validation and open is rejected, not followed).
+ * directory can't smuggle the target outside the allowed roots.
  *
  * With `{ requireMarkdownExt: true }` (the `@import` path passes this; the fixed
  * root files do NOT), a resolved target whose extension is not in
  * IMPORT_ALLOWED_EXTS is rejected up front — same skip shape as out-of-bounds —
  * closing the "@import a non-markdown sensitive file under ~/.claude" class (#6971).
  *
- * Never throws — every failure mode folds into `error`/`skipped` so a caller
- * can push the result straight onto the response array. All skip branches share
- * MEMORY_SKIP_ERROR and echo the LEXICAL request path, so they're byte-identical
- * (no distinguishing oracle).
+ * Never throws — every failure mode folds into a ready-to-push `skipEntry`
+ * (byte-identical MEMORY_SKIP_ERROR shape, echoing the LEXICAL request path —
+ * no distinguishing oracle) instead of a resolved path.
  *
  * @param {string} lexicalAbsPath - Absolute LEXICAL (pre-realpath) target path
  * @param {string[]} allowedRoots - Real-path roots the target must resolve within
  * @param {{requireMarkdownExt?: boolean}} [opts] - `@import`-only markdown-extension gate
- * @returns {Promise<{path: string|null, exists: boolean, content: string|null, truncated: boolean, skipped: boolean, error: string|null}>}
+ * @returns {Promise<{resolvedPath: string|null, skipEntry: object|null}>}
  */
-async function readConfinedMemoryFile(lexicalAbsPath, allowedRoots, { requireMarkdownExt = false } = {}) {
+async function resolveConfinedMemoryPath(lexicalAbsPath, allowedRoots, { requireMarkdownExt = false } = {}) {
   const base = { path: lexicalAbsPath, exists: false, content: null, truncated: false, skipped: false, error: null }
 
   // `@import` markdown allowlist (import path ONLY; the fixed root files are
@@ -129,7 +129,7 @@ async function readConfinedMemoryFile(lexicalAbsPath, allowedRoots, { requireMar
   // markdown", and "doesn't exist". Purely LEXICAL and BEFORE any realpath/stat,
   // so a non-markdown import never even touches the filesystem. (#6971)
   if (requireMarkdownExt && !hasMarkdownExt(lexicalAbsPath)) {
-    return { ...base, skipped: true, error: MEMORY_SKIP_ERROR }
+    return { resolvedPath: null, skipEntry: { ...base, skipped: true, error: MEMORY_SKIP_ERROR } }
   }
 
   let resolvedPath
@@ -139,7 +139,7 @@ async function readConfinedMemoryFile(lexicalAbsPath, allowedRoots, { requireMar
     // Resolution failed (EACCES on an ancestor dir, symlink-depth ceiling, …).
     // Normalize to the identical clean-skip shape rather than echoing the raw
     // error message — no error-string oracle, no content leak. (#6971)
-    return { ...base, skipped: true, error: MEMORY_SKIP_ERROR }
+    return { resolvedPath: null, skipEntry: { ...base, skipped: true, error: MEMORY_SKIP_ERROR } }
   }
 
   const withinRoot = allowedRoots.some((root) => resolvedPath === root || resolvedPath.startsWith(root + sep))
@@ -147,22 +147,38 @@ async function readConfinedMemoryFile(lexicalAbsPath, allowedRoots, { requireMar
     // Outside every allowed root — reject WITHOUT stat'ing (no existence oracle).
     // Echo the LEXICAL request path (base.path), NOT the realpath-resolved path,
     // so a skipped entry can't be used as a symlink-target oracle. (#6971)
-    return { ...base, skipped: true, error: MEMORY_SKIP_ERROR }
+    return { resolvedPath: null, skipEntry: { ...base, skipped: true, error: MEMORY_SKIP_ERROR } }
   }
+
+  return { resolvedPath, skipEntry: null }
+}
+
+/**
+ * Phase 2 of the confined-memory-file read: `stat`/`open`/read an ALREADY
+ * resolved+validated real path (see `resolveConfinedMemoryPath`). The final
+ * open uses O_NOFOLLOW to close the post-validation TOCTOU window (a symlink
+ * swapped in at the target between validation and open is rejected, not
+ * followed).
+ *
+ * @param {string} resolvedPath - Real (post-realpath, already containment-checked) path
+ * @returns {Promise<{path: string, exists: boolean, content: string|null, truncated: boolean, skipped: boolean, error: string|null}>}
+ */
+async function readResolvedMemoryFile(resolvedPath) {
+  const base = { path: resolvedPath, exists: false, content: null, truncated: false, skipped: false, error: null }
 
   let fileStat
   try {
     fileStat = await stat(resolvedPath)
   } catch (err) {
-    if (err.code === 'ENOENT') return { ...base, path: resolvedPath, exists: false }
-    return { ...base, path: resolvedPath, error: err.code === 'EACCES' ? 'Permission denied' : (err.message || 'Unknown error') }
+    if (err.code === 'ENOENT') return { ...base, exists: false }
+    return { ...base, error: err.code === 'EACCES' ? 'Permission denied' : (err.message || 'Unknown error') }
   }
 
   if (!fileStat.isFile()) {
-    return { ...base, path: resolvedPath, exists: true, error: 'Not a regular file' }
+    return { ...base, exists: true, error: 'Not a regular file' }
   }
   if (fileStat.size > MAX_FILE_SIZE) {
-    return { ...base, path: resolvedPath, exists: true, error: 'File too large (max 512KB)' }
+    return { ...base, exists: true, error: 'File too large (max 512KB)' }
   }
 
   let buf
@@ -173,9 +189,9 @@ async function readConfinedMemoryFile(lexicalAbsPath, allowedRoots, { requireMar
   } catch (err) {
     if (err.code === 'ELOOP') {
       // Symlink appeared at the canonical path after validation — reject.
-      return { ...base, path: resolvedPath, exists: true, skipped: true, error: 'Access denied: possible symlink race — read skipped' }
+      return { ...base, exists: true, skipped: true, error: 'Access denied: possible symlink race — read skipped' }
     }
-    return { ...base, path: resolvedPath, exists: true, error: err.message || 'Unknown error' }
+    return { ...base, exists: true, error: err.message || 'Unknown error' }
   } finally {
     await fh?.close()
   }
@@ -187,7 +203,26 @@ async function readConfinedMemoryFile(lexicalAbsPath, allowedRoots, { requireMar
     truncated = true
   }
 
-  return { ...base, path: resolvedPath, exists: true, content, truncated }
+  return { ...base, exists: true, content, truncated }
+}
+
+/**
+ * Read+validate a single memory file that MUST resolve within one of the
+ * given allowed roots — the read-only path-confinement guard for #6864.
+ * Thin composition of `resolveConfinedMemoryPath` (validate, no I/O beyond
+ * resolution) + `readResolvedMemoryFile` (stat/open/read) — kept as a single
+ * entry point for callers (the three fixed root files, the MEMORY.md
+ * descriptor) that don't need to consult a cycle guard before reading.
+ *
+ * @param {string} lexicalAbsPath - Absolute LEXICAL (pre-realpath) target path
+ * @param {string[]} allowedRoots - Real-path roots the target must resolve within
+ * @param {{requireMarkdownExt?: boolean}} [opts] - `@import`-only markdown-extension gate
+ * @returns {Promise<{path: string|null, exists: boolean, content: string|null, truncated: boolean, skipped: boolean, error: string|null}>}
+ */
+async function readConfinedMemoryFile(lexicalAbsPath, allowedRoots, opts = {}) {
+  const { resolvedPath, skipEntry } = await resolveConfinedMemoryPath(lexicalAbsPath, allowedRoots, opts)
+  if (skipEntry) return skipEntry
+  return readResolvedMemoryFile(resolvedPath)
 }
 
 /**
@@ -203,11 +238,16 @@ async function collectImports(content, importingFileAbsPath, allowedRoots, visit
     if (outEntries.length >= MAX_IMPORT_ENTRIES) return
     const lexicalTarget = resolveImportTarget(rawPath, importingFileAbsPath)
     // Import targets are confined to the same roots AND restricted to markdown
-    // memory files (the root files themselves are not) — see #6971.
-    const entry = await readConfinedMemoryFile(lexicalTarget, allowedRoots, { requireMarkdownExt: true })
-    const key = entry.path || lexicalTarget
-    if (visited.has(key)) continue // cycle guard
+    // memory files (the root files themselves are not) — see #6971. Resolve
+    // the target's identity FIRST (no stat/open/read yet) so a duplicate
+    // `@import` of an already-visited file — or a cycle back to one — hits
+    // the `visited` check and short-circuits BEFORE the read, instead of
+    // paying for a redundant stat/open/read only to discard it.
+    const { resolvedPath, skipEntry } = await resolveConfinedMemoryPath(lexicalTarget, allowedRoots, { requireMarkdownExt: true })
+    const key = resolvedPath || lexicalTarget
+    if (visited.has(key)) continue // cycle/dup guard — before any read
     visited.add(key)
+    const entry = skipEntry ?? await readResolvedMemoryFile(resolvedPath)
     outEntries.push({ ...entry, scope: 'import', importedFrom: importingFileAbsPath })
     if (entry.exists && entry.content && !entry.skipped && !entry.error) {
       await collectImports(entry.content, entry.path, allowedRoots, visited, depth + 1, outEntries)
