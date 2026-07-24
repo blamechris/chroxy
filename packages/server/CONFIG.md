@@ -582,6 +582,63 @@ Status-message state (message ids, current state per project) persists in
 id in `~/.chroxy/discord-billing-state.json`. Full setup walkthrough:
 [docs/guides/discord-notifications.md](../../docs/guides/discord-notifications.md).
 
+### Opt-in features (`features`)
+
+Some surfaces are **off by default** and activate only when the operator opts in.
+Each is gated by a strict-boolean config key under `features`, or by an env
+override that must be exactly `1`:
+
+```json
+{
+  "features": {
+    "scheduler": false
+  }
+}
+```
+
+| Key | Env override | Default | What it enables |
+|-----|--------------|---------|-----------------|
+| `features.scheduler` | `CHROXY_ENABLE_SCHEDULER=1` | `false` | Headless execution of scheduled tasks (#6865) |
+| `features.ide` | `CHROXY_ENABLE_IDE=1` | `false` | The IDE navigation surface (epic #6469) |
+| `features.orchestration` | `CHROXY_ENABLE_ORCHESTRATION=1` | `false` | The orchestration/delegation harness (epic #6691) |
+
+All three are **fail-closed**: anything other than a literal `true` in config (or
+a literal `"1"` in the env) leaves the feature off, so `"yes"`, `1`, or `"true"`
+in the config file do *not* enable it.
+
+#### `features.scheduler` — headless scheduled execution
+
+Scheduled tasks (`~/.chroxy/scheduled-tasks.json`) can be created, listed, and
+edited at any time, but they **never fire** unless this flag is on. With the flag
+off the daemon arms no scheduler timers and starts no sessions — behaviour is
+identical to a daemon without the feature.
+
+When on, at each task's due time the daemon spins up (or resumes) that task's
+session and runs its prompt with **no client connected**. Because nobody is
+watching that turn, it runs under a hard permission floor:
+
+- The run is pinned to the `approve` permission mode. A task whose stored
+  `target.permissionMode` is `auto` or `acceptEdits` is **clamped down** to
+  `approve` — a scheduled task can never grant itself auto-approval.
+- The run is created with an explicit `skipPermissions: false`, so it does **not**
+  inherit a server-wide [`dangerouslySkipPermissions`](#skip-permissions-tui-provider).
+- If the turn hits a permission prompt, there is no human to answer it: the prompt
+  is **denied**, the turn is aborted, and the run is recorded as a failed run with
+  the reason. A scheduled task that needs a permission fails visibly rather than
+  escalating silently.
+- To let a scheduled task actually perform a gated operation, author an explicit
+  **permission rule** for it. Rules are matched before a prompt is raised, so an
+  allow-rule is the one auditable, human-authored way to widen what a scheduled
+  run may do — and the protected-path / secret-read floor still cannot be
+  bypassed by one.
+
+Each run records a last-run result (`success` / `error` / `timeout` / `skipped`)
+plus its session id into the registry. Runs are serialized (one at a time by
+default) so a burst of simultaneously-due tasks cannot spawn a herd of sessions,
+a task is never re-fired while its previous run is still in flight, and a task
+whose due time passed while the daemon was down is skipped rather than fired late
+if it is more than an hour stale.
+
 ## Examples
 
 ### Using Config File Only

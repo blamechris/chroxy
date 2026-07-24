@@ -706,6 +706,19 @@ export function isOrchestrationEnabled(config) {
   return config?.features?.orchestration === true
 }
 
+// #6865 — the opt-in HEADLESS SCHEDULER: fires persisted scheduled tasks (#6862)
+// into a real agent session at their due time with NO client connected. Because
+// that runs a session with nobody watching, it is off unless explicitly enabled.
+// Fail-closed exactly like isIdeFeatureEnabled/isOrchestrationEnabled: only an
+// explicit env=1 or `features.scheduler === true` arms the engine; anything else
+// (absent, false, 'yes', 0) leaves the daemon byte-identical to pre-#6865 — no
+// timers armed, no sessions spawned. Exported standalone so the CLI (#6868) and
+// dashboard (#6871) can report the gate state without constructing an engine.
+export function isSchedulerEnabled(config) {
+  if (process.env.CHROXY_ENABLE_SCHEDULER === '1') return true
+  return config?.features?.scheduler === true
+}
+
 // #6858 — resolve the opt-in provider-binary provenance PIN-LEDGER mode. One of
 // 'off' | 'warn' | 'block'. Fail-closed to 'off' (behaviour identical to the
 // pre-#6858 spawn path) for anything but an explicit 'warn' / 'block'. Precedence:
