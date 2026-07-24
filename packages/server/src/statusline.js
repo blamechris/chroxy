@@ -79,7 +79,7 @@ export function statusLineSettingsPaths(cwd, homeDir) {
  * configured" so a malformed entry is inert rather than throwing.
  *
  * @param {unknown} settings - parsed settings.json object
- * @returns {{command: string, padding: number, refreshIntervalMs: number|null}|null}
+ * @returns {{command: string, refreshIntervalMs: number|null}|null}
  */
 export function parseStatusLineConfig(settings) {
   if (!settings || typeof settings !== 'object') return null
@@ -88,14 +88,15 @@ export function parseStatusLineConfig(settings) {
   if (sl.type !== 'command') return null
   if (typeof sl.command !== 'string' || sl.command.trim() === '') return null
 
-  const padding = Number.isFinite(sl.padding) && sl.padding >= 0 ? Math.floor(sl.padding) : 0
-  // `refreshInterval` is documented in SECONDS (minimum 1). Absent → event-driven
-  // only (null); we still apply a floor so a config value can't spin the daemon.
+  // `refreshInterval` is documented in SECONDS (minimum 1). Absent → the
+  // StatusLineManager periodic loop (see `_tick`) falls back to
+  // STATUSLINE_DEFAULT_REFRESH_INTERVAL_MS rather than going event-driven-only;
+  // we still apply a floor here so a tiny configured value can't spin the daemon.
   let refreshIntervalMs = null
   if (Number.isFinite(sl.refreshInterval) && sl.refreshInterval > 0) {
     refreshIntervalMs = Math.max(Math.floor(sl.refreshInterval * 1000), STATUSLINE_MIN_CONFIGURED_INTERVAL_MS)
   }
-  return { command: sl.command, padding, refreshIntervalMs }
+  return { command: sl.command, refreshIntervalMs }
 }
 
 /**
@@ -173,8 +174,11 @@ function unrefTimer(fn, ms) {
  * `timeoutMs`. Never throws — every failure folds into the returned result.
  *
  * Modeled on built-in-tools/bash-exec.js (same SIGTERM→SIGKILL grace + byte-cap
- * discipline) but pipes stdin and runs through `/bin/sh -c` to match Claude
- * Code's own invocation.
+ * discipline) but pipes stdin and runs through the platform shell to match
+ * Claude Code's own invocation: `/bin/sh -c` on POSIX, `cmd.exe /d /s /c` on
+ * Windows (COMSPEC — same precedent as `utils/win-spawn.js`'s `prepareSpawn`
+ * and `platform.js`'s `defaultShell`), so statusLine also works on win32
+ * instead of silently failing to spawn `/bin/sh`.
  *
  * @param {object}   opts
  * @param {string}   opts.command        - the shell command (user's own config)
@@ -186,6 +190,7 @@ function unrefTimer(fn, ms) {
  * @param {Function} [opts.spawnFn]      - injectable spawn (tests)
  * @param {Function} [opts.setTimer]     - injectable setTimeout (tests)
  * @param {Function} [opts.clearTimer]   - injectable clearTimeout (tests)
+ * @param {NodeJS.Platform} [opts.platform=process.platform] - override for tests
  * @returns {Promise<{stdout:string, stderr:string, exitCode:number|null, signal:string|null, timedOut:boolean, truncated:boolean, durationMs:number, error:string|null}>}
  */
 export async function runStatusLineCommand({
@@ -198,6 +203,7 @@ export async function runStatusLineCommand({
   spawnFn = spawn,
   setTimer = unrefTimer,
   clearTimer = clearTimeout,
+  platform = process.platform,
 } = {}) {
   const startedAt = Date.now()
   const base = { stdout: '', stderr: '', exitCode: null, signal: null, timedOut: false, truncated: false, durationMs: 0, error: null }
@@ -208,10 +214,20 @@ export async function runStatusLineCommand({
 
   let child
   try {
-    child = spawnFn('/bin/sh', ['-c', command], {
+    const isWin = platform === 'win32'
+    // Same shell-selection precedent as `utils/win-spawn.js#prepareSpawn` and
+    // `platform.js#defaultShell`: Windows has no `/bin/sh`, so route through
+    // COMSPEC (cmd.exe) with `/d` (skip AutoRun) `/s` (strip exactly the outer
+    // quote pair) `/c` (run then exit) and `windowsVerbatimArguments` so Node
+    // doesn't re-quote our already-quoted command line — mirrors Node's own
+    // internal `{ shell: true }` behavior on win32.
+    const shellCommand = isWin ? (process.env.COMSPEC || 'cmd.exe') : '/bin/sh'
+    const shellArgs = isWin ? ['/d', '/s', '/c', `"${command}"`] : ['-c', command]
+    child = spawnFn(shellCommand, shellArgs, {
       cwd: cwd || process.cwd(),
       env: env || defaultBuildEnv(),
       stdio: ['pipe', 'pipe', 'pipe'],
+      ...(isWin ? { windowsVerbatimArguments: true } : {}),
     })
   } catch (err) {
     return { ...base, error: err?.message || 'spawn failed', durationMs: Date.now() - startedAt }
@@ -367,7 +383,7 @@ export class StatusLineManager extends EventEmitter {
    * settings file is skipped.
    *
    * @param {string} cwd
-   * @returns {Promise<{command:string, padding:number, refreshIntervalMs:number|null}|null>}
+   * @returns {Promise<{command:string, refreshIntervalMs:number|null}|null>}
    */
   async resolveConfig(cwd) {
     const cached = this._configCache.get(cwd)

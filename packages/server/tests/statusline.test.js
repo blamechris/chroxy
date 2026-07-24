@@ -30,8 +30,13 @@ import {
 // ---------------------------------------------------------------------------
 
 test('parseStatusLineConfig accepts a type:command entry with a command', () => {
-  const cfg = parseStatusLineConfig({ statusLine: { type: 'command', command: '~/s.sh', padding: 2, refreshInterval: 5 } })
-  assert.deepEqual(cfg, { command: '~/s.sh', padding: 2, refreshIntervalMs: 5000 })
+  const cfg = parseStatusLineConfig({ statusLine: { type: 'command', command: '~/s.sh', refreshInterval: 5 } })
+  assert.deepEqual(cfg, { command: '~/s.sh', refreshIntervalMs: 5000 })
+})
+
+test('parseStatusLineConfig ignores an unused padding field (dead config, never rendered)', () => {
+  const cfg = parseStatusLineConfig({ statusLine: { type: 'command', command: '~/s.sh', padding: 2 } })
+  assert.equal('padding' in cfg, false)
 })
 
 test('parseStatusLineConfig rejects missing / malformed / empty / non-command entries', () => {
@@ -44,12 +49,13 @@ test('parseStatusLineConfig rejects missing / malformed / empty / non-command en
   assert.equal(parseStatusLineConfig({ statusLine: { type: 'command' } }), null)
 })
 
-test('parseStatusLineConfig floors a tiny refreshInterval and defaults padding', () => {
+test('parseStatusLineConfig floors a tiny refreshInterval', () => {
   const cfg = parseStatusLineConfig({ statusLine: { type: 'command', command: 'x', refreshInterval: 0.1 } })
-  assert.equal(cfg.padding, 0)
   assert.equal(cfg.refreshIntervalMs, 1000) // floored to the 1s minimum
   const noInterval = parseStatusLineConfig({ statusLine: { type: 'command', command: 'x' } })
-  assert.equal(noInterval.refreshIntervalMs, null) // absent → event-driven only
+  // Absent → null here, but StatusLineManager._tick then falls back to
+  // STATUSLINE_DEFAULT_REFRESH_INTERVAL_MS — NOT event-driven-only.
+  assert.equal(noInterval.refreshIntervalMs, null)
 })
 
 // ---------------------------------------------------------------------------
@@ -173,6 +179,89 @@ function makeTimerHarness() {
     pending: () => [...timers.keys()],
   }
 }
+
+// ---------------------------------------------------------------------------
+// runStatusLineCommand — shell chosen by platform (#6978 Copilot thread: win32
+// hard-coded /bin/sh, which doesn't exist on Windows)
+// ---------------------------------------------------------------------------
+
+test('runStatusLineCommand spawns /bin/sh -c on a non-win32 platform', async () => {
+  const child = makeFakeChild()
+  let spawnCall = null
+  const promise = runStatusLineCommand({
+    command: 'echo hi',
+    cwd: '/x',
+    input: '{}',
+    env: {},
+    platform: 'darwin',
+    spawnFn: (file, args, options) => {
+      spawnCall = { file, args, options }
+      return child
+    },
+  })
+  assert.equal(spawnCall.file, '/bin/sh')
+  assert.deepEqual(spawnCall.args, ['-c', 'echo hi'])
+  assert.equal(spawnCall.options.windowsVerbatimArguments, undefined)
+  child.exitCode = 0
+  child.emit('exit', 0, null)
+  await promise
+})
+
+test('runStatusLineCommand spawns COMSPEC (cmd.exe) with /d /s /c on win32', async () => {
+  const child = makeFakeChild()
+  let spawnCall = null
+  const prevComspec = process.env.COMSPEC
+  process.env.COMSPEC = 'C:\\Windows\\System32\\cmd.exe'
+  try {
+    const promise = runStatusLineCommand({
+      command: 'echo hi',
+      cwd: '/x',
+      input: '{}',
+      env: {},
+      platform: 'win32',
+      spawnFn: (file, args, options) => {
+        spawnCall = { file, args, options }
+        return child
+      },
+    })
+    assert.equal(spawnCall.file, 'C:\\Windows\\System32\\cmd.exe')
+    assert.deepEqual(spawnCall.args, ['/d', '/s', '/c', '"echo hi"'])
+    assert.equal(spawnCall.options.windowsVerbatimArguments, true)
+    child.exitCode = 0
+    child.emit('exit', 0, null)
+    await promise
+  } finally {
+    if (prevComspec === undefined) delete process.env.COMSPEC
+    else process.env.COMSPEC = prevComspec
+  }
+})
+
+test('runStatusLineCommand falls back to cmd.exe on win32 when COMSPEC is unset', async () => {
+  const child = makeFakeChild()
+  let spawnCall = null
+  const prevComspec = process.env.COMSPEC
+  delete process.env.COMSPEC
+  try {
+    const promise = runStatusLineCommand({
+      command: 'echo hi',
+      cwd: '/x',
+      input: '{}',
+      env: {},
+      platform: 'win32',
+      spawnFn: (file, args, options) => {
+        spawnCall = { file, args, options }
+        return child
+      },
+    })
+    assert.equal(spawnCall.file, 'cmd.exe')
+    child.exitCode = 0
+    child.emit('exit', 0, null)
+    await promise
+  } finally {
+    if (prevComspec === undefined) delete process.env.COMSPEC
+    else process.env.COMSPEC = prevComspec
+  }
+})
 
 test('runStatusLineCommand kills a slow script on timeout (SIGTERM) and reports timedOut', async () => {
   const child = makeFakeChild()
