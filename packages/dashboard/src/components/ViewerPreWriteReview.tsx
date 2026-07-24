@@ -25,48 +25,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useConnectionStore } from '../store/connection'
 import type { ChatMessage, PermissionDecision } from '../store/types'
-import { isLivePermissionPrompt } from '@chroxy/store-core'
+import { findPendingWriteForFile } from '@chroxy/store-core'
 import { PreWriteDiffReview, isReviewableTool } from './PreWriteDiffReview'
 
 // Stable empty array so the messages selector never returns a fresh reference
 // (a new `[]` each render would re-run the memo + churn the subscription).
 const EMPTY_MESSAGES: ChatMessage[] = []
-
-/**
- * Tolerant path match between a permission's `file_path` and the viewer's open
- * file. Claude passes an ABSOLUTE `file_path` for Write/Edit; the viewer's
- * selection is absolute (a file-tree click) OR workspace-relative (a symbol
- * jump), so compare tolerantly — an exact match, or one path tail-matching the
- * other. Both nulls => no match (nothing to correlate).
- */
-export function pathMatchesViewer(filePath: string | null | undefined, viewed: string | null): boolean {
-  if (!filePath || !viewed) return false
-  const a = filePath.replace(/\\/g, '/')
-  const b = viewed.replace(/\\/g, '/')
-  if (a === b) return true
-  const tail = (p: string) => p.replace(/^\.?\//, '')
-  return a.endsWith('/' + tail(b)) || b.endsWith('/' + tail(a))
-}
-
-/**
- * The first live, reviewable (Write/Edit) permission whose target `file_path`
- * matches the file open in the viewer — or null. Pure so it's unit-testable
- * without the store. `now` gates the expiry inside `isLivePermissionPrompt`.
- */
-export function findPendingWriteForFile(
-  messages: ChatMessage[],
-  viewed: string | null,
-  now: number,
-): ChatMessage | null {
-  if (!viewed) return null
-  for (const m of messages) {
-    if (!isLivePermissionPrompt(m, now)) continue
-    if (!m.tool || !isReviewableTool(m.tool)) continue
-    const fp = m.toolInput && typeof m.toolInput.file_path === 'string' ? (m.toolInput.file_path as string) : null
-    if (pathMatchesViewer(fp, viewed)) return m
-  }
-  return null
-}
 
 export interface ViewerPreWriteReviewProps {
   /** The path currently open in the viewer (absolute, or workspace-relative). */
@@ -85,7 +49,7 @@ export function ViewerPreWriteReview({ filePath }: ViewerPreWriteReviewProps) {
   // handlers mutate the message (which re-runs this memo); the authoritative
   // countdown lives on the permission card, not here.
   const pending = useMemo(
-    () => (ideEnabled ? findPendingWriteForFile(messages, filePath, Date.now()) : null),
+    () => (ideEnabled ? findPendingWriteForFile(messages, filePath, Date.now(), isReviewableTool) : null),
     [ideEnabled, messages, filePath],
   )
   const requestId = pending?.requestId ?? null

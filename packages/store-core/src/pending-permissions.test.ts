@@ -9,6 +9,8 @@ import {
   derivePendingPermissionCounts,
   totalPendingPermissions,
   selectNextPendingSession,
+  pathMatchesViewer,
+  findPendingWriteForFile,
 } from './pending-permissions'
 
 const NOW = 1_000_000
@@ -133,5 +135,95 @@ describe('selectNextPendingSession (#5693)', () => {
   it('scans from the start when the active id is not in the list', () => {
     expect(selectNextPendingSession(order, { c: 1 }, 'unknown')).toBe('c')
     expect(selectNextPendingSession(order, { c: 1 }, null)).toBe('c')
+  })
+})
+
+// #6859 (IDE P3.3 follow-up of #6857/#6544) — viewer↔pending-write correlation,
+// hoisted out of two byte-identical copies previously in the dashboard's and
+// app's ViewerPreWriteReview.tsx (each had its own describe blocks for these
+// same assertions; ported here verbatim as the single source of truth).
+
+describe('pathMatchesViewer (#6859)', () => {
+  it('matches identical absolute paths', () => {
+    expect(pathMatchesViewer('/a/b/c.ts', '/a/b/c.ts')).toBe(true)
+  })
+  it('tail-matches an absolute file_path against a workspace-relative selection', () => {
+    expect(pathMatchesViewer('/root/pkg/src/x.ts', 'src/x.ts')).toBe(true)
+    expect(pathMatchesViewer('/root/pkg/src/x.ts', './src/x.ts')).toBe(true)
+  })
+  it('normalizes backslashes before comparing (Windows-style paths)', () => {
+    expect(pathMatchesViewer('C:\\root\\pkg\\src\\x.ts', 'C:/root/pkg/src/x.ts')).toBe(true)
+    expect(pathMatchesViewer('C:\\root\\pkg\\src\\x.ts', 'src/x.ts')).toBe(true)
+    expect(pathMatchesViewer('C:\\root\\pkg\\src\\x.ts', './src/x.ts')).toBe(true)
+  })
+  it('does not match unrelated files or when either side is empty', () => {
+    expect(pathMatchesViewer('/a/b/x.ts', '/a/b/y.ts')).toBe(false)
+    expect(pathMatchesViewer(null, '/a/b/x.ts')).toBe(false)
+    expect(pathMatchesViewer('/a/b/x.ts', null)).toBe(false)
+    expect(pathMatchesViewer(undefined, '/a/b/x.ts')).toBe(false)
+  })
+})
+
+describe('findPendingWriteForFile (#6859)', () => {
+  const NOW2 = Date.now()
+  const FILE = '/home/dev/project/src/app.ts'
+  // Mirrors each client's local PreWriteDiffReview.isReviewableTool — injected
+  // as a predicate rather than hoisted, since which tools get a diff review is
+  // a presentation concern owned by each client's PreWriteDiffReview.tsx.
+  const isReviewableTool = (tool: string) => tool === 'Write' || tool === 'Edit'
+
+  function editPrompt(overrides: Partial<ChatMessage> = {}): ChatMessage {
+    return {
+      id: 'perm-1',
+      type: 'prompt',
+      content: 'Edit: change app.ts',
+      tool: 'Edit',
+      requestId: 'req-1',
+      toolInput: { file_path: FILE, old_string: 'a\nb\nc', new_string: 'a\nB\nc' },
+      expiresAt: NOW2 + 60_000,
+      timestamp: NOW2,
+      ...overrides,
+    }
+  }
+
+  it('finds a live Edit/Write targeting the viewed file', () => {
+    expect(findPendingWriteForFile([editPrompt()], FILE, NOW2, isReviewableTool)?.requestId).toBe('req-1')
+  })
+
+  it('ignores expired, answered, non-reviewable, or non-matching prompts', () => {
+    expect(findPendingWriteForFile([editPrompt({ expiresAt: NOW2 - 1 })], FILE, NOW2, isReviewableTool)).toBeNull()
+    expect(findPendingWriteForFile([editPrompt({ answered: 'allow' })], FILE, NOW2, isReviewableTool)).toBeNull()
+    expect(findPendingWriteForFile([editPrompt({ tool: 'Bash' })], FILE, NOW2, isReviewableTool)).toBeNull()
+    expect(findPendingWriteForFile([editPrompt()], '/other/file.ts', NOW2, isReviewableTool)).toBeNull()
+    expect(findPendingWriteForFile([editPrompt()], null, NOW2, isReviewableTool)).toBeNull()
+  })
+
+  it('returns the FIRST live reviewable Write/Edit matching the file, skipping earlier non-matches', () => {
+    const msgs = [
+      editPrompt({ id: 'p-bash', requestId: 'r-bash', tool: 'Bash', toolInput: { command: 'ls' } }),
+      editPrompt({ id: 'p-other-file', requestId: 'r-other', toolInput: { file_path: '/other/file.ts' } }),
+      editPrompt({ id: 'p-match-1', requestId: 'r-match-1' }),
+      editPrompt({ id: 'p-match-2', requestId: 'r-match-2' }),
+    ]
+    expect(findPendingWriteForFile(msgs, FILE, NOW2, isReviewableTool)?.requestId).toBe('r-match-1')
+  })
+
+  it('honors the injected isReviewableTool predicate (a client that only reviews Write, not Edit)', () => {
+    const writeOnly = (tool: string) => tool === 'Write'
+    expect(findPendingWriteForFile([editPrompt()], FILE, NOW2, writeOnly)).toBeNull()
+    expect(
+      findPendingWriteForFile(
+        [editPrompt({ tool: 'Write', toolInput: { file_path: FILE, content: 'x' } })],
+        FILE,
+        NOW2,
+        writeOnly,
+      )?.tool,
+    ).toBe('Write')
+  })
+
+  it('respects `now` for staleness — a prompt live at an earlier `now` is expired at a later one', () => {
+    const msgs = [editPrompt({ expiresAt: NOW2 + 100 })]
+    expect(findPendingWriteForFile(msgs, FILE, NOW2, isReviewableTool)?.requestId).toBe('req-1')
+    expect(findPendingWriteForFile(msgs, FILE, NOW2 + 101, isReviewableTool)).toBeNull()
   })
 })

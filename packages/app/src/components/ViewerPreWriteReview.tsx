@@ -14,15 +14,17 @@
  * narrows) the edit in the file's own context. Both surfaces read the same store
  * state and drive the same response — the chat bubble keeps working independently.
  *
- * The correlation helpers mirror the dashboard's (`pathMatchesViewer` /
- * `findPendingWriteForFile`). Gated on `features.ide`; hides when no live
- * reviewable write targets the open file, or once the request is resolved
- * (locally via `markPromptAnswered`, or by another client's `permission_resolved`
- * — both set the message's `answered`, which `isLivePermissionPrompt` excludes).
+ * The correlation helpers (`pathMatchesViewer` / `findPendingWriteForFile`) are
+ * shared with the dashboard via `@chroxy/store-core` (#6859 — hoisted out of two
+ * byte-identical copies to prevent cross-client drift). Gated on `features.ide`;
+ * hides when no live reviewable write targets the open file, or once the
+ * request is resolved (locally via `markPromptAnswered`, or by another
+ * client's `permission_resolved` — both set the message's `answered`, which
+ * `isLivePermissionPrompt` excludes).
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
-import { isLivePermissionPrompt } from '@chroxy/store-core';
+import { findPendingWriteForFile } from '@chroxy/store-core';
 import type { ChatMessage } from '@chroxy/store-core';
 import { useConnectionStore } from '../store/connection';
 import { PreWriteDiffReview, isReviewableTool } from './PreWriteDiffReview';
@@ -30,41 +32,6 @@ import { COLORS } from '../constants/colors';
 
 // Stable empty array so the messages selector never returns a fresh reference.
 const EMPTY_MESSAGES: ChatMessage[] = [];
-
-/**
- * Tolerant path match between a permission's `file_path` and the file open in
- * the viewer. Claude passes an ABSOLUTE `file_path` for Write/Edit; the viewer
- * path may be absolute or workspace-relative — match exactly or by tail. Both
- * nulls => no match. Mirrors the dashboard helper of the same name.
- */
-export function pathMatchesViewer(filePath: string | null | undefined, viewed: string | null): boolean {
-  if (!filePath || !viewed) return false;
-  const a = filePath.replace(/\\/g, '/');
-  const b = viewed.replace(/\\/g, '/');
-  if (a === b) return true;
-  const tail = (p: string) => p.replace(/^\.?\//, '');
-  return a.endsWith('/' + tail(b)) || b.endsWith('/' + tail(a));
-}
-
-/**
- * The first live, reviewable (Write/Edit) permission whose target `file_path`
- * matches the file open in the viewer — or null. Pure so it's unit-testable
- * without the store. Mirrors the dashboard helper of the same name.
- */
-export function findPendingWriteForFile(
-  messages: ChatMessage[],
-  viewed: string | null,
-  now: number,
-): ChatMessage | null {
-  if (!viewed) return null;
-  for (const m of messages) {
-    if (!isLivePermissionPrompt(m, now)) continue;
-    if (!m.tool || !isReviewableTool(m.tool)) continue;
-    const fp = m.toolInput && typeof m.toolInput.file_path === 'string' ? (m.toolInput.file_path as string) : null;
-    if (pathMatchesViewer(fp, viewed)) return m;
-  }
-  return null;
-}
 
 export interface ViewerPreWriteReviewProps {
   /** The path currently open in the FileEditor (absolute, or workspace-relative). */
@@ -82,7 +49,7 @@ export function ViewerPreWriteReview({ filePath }: ViewerPreWriteReviewProps) {
   // permission_resolved / permission_expired handlers mutate the message (which
   // re-runs this memo); the authoritative countdown lives on the chat bubble.
   const pending = useMemo(
-    () => (ideEnabled ? findPendingWriteForFile(messages, filePath, Date.now()) : null),
+    () => (ideEnabled ? findPendingWriteForFile(messages, filePath, Date.now(), isReviewableTool) : null),
     [ideEnabled, messages, filePath],
   );
   const requestId = pending?.requestId ?? null;

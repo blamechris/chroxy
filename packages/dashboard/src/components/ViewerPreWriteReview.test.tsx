@@ -1,18 +1,19 @@
 /**
  * ViewerPreWriteReview (#6544, IDE P3.3 feature A) — the editable pre-write diff
- * surfaced ON THE FILE VIEWER. Covers the pure correlation helpers, that a live
- * reviewable write for the open file renders the proposed diff, that dropping a
- * hunk routes the narrowed content through the #6543 `editedInput` seam on
- * Approve, that a plain Approve sends no edit, that Deny never carries an edit,
- * and the gates (features.ide off, no matching write, resolved, disconnected).
+ * surfaced ON THE FILE VIEWER. Covers that a live reviewable write for the open
+ * file renders the proposed diff, that dropping a hunk routes the narrowed
+ * content through the #6543 `editedInput` seam on Approve, that a plain Approve
+ * sends no edit, that Deny never carries an edit, and the gates (features.ide
+ * off, no matching write, resolved, disconnected).
+ *
+ * #6859: the pure correlation helpers (`pathMatchesViewer` /
+ * `findPendingWriteForFile`) were hoisted into `@chroxy/store-core` and their
+ * unit tests moved to `packages/store-core/src/pending-permissions.test.ts` —
+ * this file now only covers the component's wiring.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, screen, fireEvent, cleanup } from '@testing-library/react'
-import {
-  ViewerPreWriteReview,
-  pathMatchesViewer,
-  findPendingWriteForFile,
-} from './ViewerPreWriteReview'
+import { ViewerPreWriteReview } from './ViewerPreWriteReview'
 import type { ChatMessage, PermissionDecision } from '../store/types'
 
 // ---- store mock (only the connection store is mocked; PreWriteDiffReview and
@@ -87,35 +88,6 @@ function pulledEdit() {
 afterEach(() => {
   cleanup()
   vi.clearAllMocks()
-})
-
-describe('pathMatchesViewer', () => {
-  it('matches identical absolute paths', () => {
-    expect(pathMatchesViewer('/a/b/c.ts', '/a/b/c.ts')).toBe(true)
-  })
-  it('tail-matches an absolute file_path against a workspace-relative selection', () => {
-    expect(pathMatchesViewer('/root/pkg/src/x.ts', 'src/x.ts')).toBe(true)
-    expect(pathMatchesViewer('/root/pkg/src/x.ts', './src/x.ts')).toBe(true)
-  })
-  it('does not match unrelated files or when either side is empty', () => {
-    expect(pathMatchesViewer('/a/b/x.ts', '/a/b/y.ts')).toBe(false)
-    expect(pathMatchesViewer(null, '/a/b/x.ts')).toBe(false)
-    expect(pathMatchesViewer('/a/b/x.ts', null)).toBe(false)
-  })
-})
-
-describe('findPendingWriteForFile', () => {
-  const now = Date.now()
-  it('finds a live Edit/Write targeting the viewed file', () => {
-    expect(findPendingWriteForFile([editPrompt()], FILE, now)?.requestId).toBe('req-1')
-  })
-  it('ignores expired, answered, non-reviewable, or non-matching prompts', () => {
-    expect(findPendingWriteForFile([editPrompt({ expiresAt: now - 1 })], FILE, now)).toBeNull()
-    expect(findPendingWriteForFile([editPrompt({ answered: 'allow' })], FILE, now)).toBeNull()
-    expect(findPendingWriteForFile([editPrompt({ tool: 'Bash' })], FILE, now)).toBeNull()
-    expect(findPendingWriteForFile([editPrompt()], '/other/file.ts', now)).toBeNull()
-    expect(findPendingWriteForFile([editPrompt()], null, now)).toBeNull()
-  })
 })
 
 describe('ViewerPreWriteReview', () => {

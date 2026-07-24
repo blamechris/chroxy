@@ -934,6 +934,11 @@ export {
   derivePendingPermissionSessions,
   totalPendingPermissions,
   selectNextPendingSession,
+  // #6859 (IDE P3.3 follow-up of #6857/#6544) — viewer↔pending-write
+  // correlation, hoisted out of two byte-identical copies in the dashboard's
+  // and app's ViewerPreWriteReview.tsx (anti-drift; safety-relevant).
+  pathMatchesViewer,
+  findPendingWriteForFile,
 } from './pending-permissions'
 
 // #6542 (IDE P3.1): client-side line hunk diff + per-hunk apply — the shared
