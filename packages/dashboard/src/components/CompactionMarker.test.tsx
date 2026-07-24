@@ -13,6 +13,13 @@ import type { CompactBoundaryMeta } from '../store/types'
 
 afterEach(cleanup)
 
+// Locale-agnostic helper — `toLocaleString()` output varies by runtime
+// locale (comma grouping in en-US, period in de-DE, space in fr-FR, none in
+// some locales); derive the expected grouped strings from the runtime's own
+// formatter instead of hard-coding en-US commas (mirrors
+// SidebarCostBadge.test.tsx's `localeNum` pattern).
+const localeNum = (n: number) => n.toLocaleString()
+
 describe('CompactionMarker (#6768)', () => {
   it('renders the token delta, duration, and trigger for a well-formed auto-compaction', () => {
     const meta: CompactBoundaryMeta = {
@@ -24,7 +31,7 @@ describe('CompactionMarker (#6768)', () => {
     render(<CompactionMarker meta={meta} />)
     const marker = screen.getByTestId('compaction-marker')
     expect(marker).toHaveTextContent('Context compacted')
-    expect(marker).toHaveTextContent('128,000 → 12,000 tokens')
+    expect(marker).toHaveTextContent(`${localeNum(128_000)} → ${localeNum(12_000)} tokens`)
     expect(marker).toHaveTextContent('2s')
     expect(marker).toHaveTextContent('auto')
   })
@@ -51,6 +58,6 @@ describe('CompactionMarker (#6768)', () => {
   it('renders "?" for a single missing token count rather than dropping the whole clause', () => {
     const meta: CompactBoundaryMeta = { trigger: 'auto', preTokens: 90_000, postTokens: null, durationMs: null }
     render(<CompactionMarker meta={meta} />)
-    expect(screen.getByTestId('compaction-marker')).toHaveTextContent('90,000 → ? tokens')
+    expect(screen.getByTestId('compaction-marker')).toHaveTextContent(`${localeNum(90_000)} → ? tokens`)
   })
 })

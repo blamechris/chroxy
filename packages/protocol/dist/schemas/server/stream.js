@@ -77,9 +77,11 @@ export const ServerStreamEndSchema = z.object({
 /**
  * #6768 — structured payload for a `compact_boundary` system event (the
  * Agent SDK/CLI's compaction-boundary marker, emitted on both auto-compact
- * near the context limit and a manual `/compact`). Carried on
- * `ServerMessageSchema.compactMetadata` when `messageType === 'system'` and
- * `subtype === 'compact_boundary'` — see the sibling `subtype` field. Mirrors
+ * near the context limit and a manual `/compact`). By producer convention
+ * (not a schema-enforced constraint — see the sibling `subtype` field's
+ * comment on `ServerMessageSchema`), carried on
+ * `ServerMessageSchema.compactMetadata` alongside `messageType === 'system'`
+ * and `subtype === 'compact_boundary'`. Mirrors
  * the SDK's `SDKCompactBoundaryMessage.compact_metadata` shape (camelCased),
  * minus `preserved_segment` (an internal resume-relink detail with no
  * client-facing use).
@@ -104,12 +106,16 @@ export const ServerMessageSchema = z.object({
     options: z.any().optional(),
     timestamp: z.number(),
     code: z.string().max(64).optional(),
-    // #6768: only set on `messageType: 'system'` envelopes whose `subtype` is
-    // `'compact_boundary'` — the structured compaction marker (see
-    // ServerCompactMetadataSchema). Distinct from `code` (error-envelope
-    // classification) — `subtype` mirrors the SDK/CLI's own system-event
-    // subtype field so a future second structured system event doesn't have
-    // to hijack `code`'s error-only semantics.
+    // #6768: by producer convention (NOT enforced by this schema — like the
+    // `code`/`attemptedResumeId` pairing below, `subtype` and
+    // `compactMetadata` are both independently optional/unconstrained here;
+    // nothing in this object cross-validates `messageType`), the server only
+    // populates `subtype`/`compactMetadata` on `messageType: 'system'`
+    // envelopes whose `subtype` is `'compact_boundary'` — the structured
+    // compaction marker (see ServerCompactMetadataSchema). Distinct from
+    // `code` (error-envelope classification) — `subtype` mirrors the SDK/CLI's
+    // own system-event subtype field so a future second structured system
+    // event doesn't have to hijack `code`'s error-only semantics.
     subtype: z.string().max(64).optional(),
     compactMetadata: ServerCompactMetadataSchema.optional(),
     // #4947 / #5006: only set on `messageType: 'error'` envelopes whose

@@ -10992,9 +10992,13 @@ button.sidebar-token-view-session-row:hover {
 .evaluator-rewrite-original { color: var(--text-secondary); font-style: italic; }
 .evaluator-rewrite-reasoning { color: var(--text-secondary); }
 
-/* #6768 — compaction-boundary marker: a single-line, non-interactive
-   divider (distinct from the muted system bubble) for a parsed
-   compact_boundary SDK/CLI event. */
+/* #6768 — compaction-boundary marker: a non-interactive divider (distinct
+   from the muted system bubble) for a parsed compact_boundary SDK/CLI
+   event. `.compaction-marker-text` below wraps (pre-wrap + break-word)
+   rather than truncating, so a long token-count/trigger clause stays fully
+   readable on the System tab instead of clipping — wrapping is fine here
+   since the marker is informational, not something the operator scans past
+   quickly. */
 .compaction-marker {
   display: flex;
   align-items: center;

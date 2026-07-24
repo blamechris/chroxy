@@ -30,9 +30,11 @@ export declare const ServerStreamEndSchema: z.ZodObject<{
 /**
  * #6768 — structured payload for a `compact_boundary` system event (the
  * Agent SDK/CLI's compaction-boundary marker, emitted on both auto-compact
- * near the context limit and a manual `/compact`). Carried on
- * `ServerMessageSchema.compactMetadata` when `messageType === 'system'` and
- * `subtype === 'compact_boundary'` — see the sibling `subtype` field. Mirrors
+ * near the context limit and a manual `/compact`). By producer convention
+ * (not a schema-enforced constraint — see the sibling `subtype` field's
+ * comment on `ServerMessageSchema`), carried on
+ * `ServerMessageSchema.compactMetadata` alongside `messageType === 'system'`
+ * and `subtype === 'compact_boundary'`. Mirrors
  * the SDK's `SDKCompactBoundaryMessage.compact_metadata` shape (camelCased),
  * minus `preserved_segment` (an internal resume-relink detail with no
  * client-facing use).

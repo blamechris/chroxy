@@ -159,6 +159,124 @@ describe('EventNormalizer', () => {
     })
   })
 
+  // ---- compact_boundary compactMetadata bounding (#6973) ----
+  //
+  // #6973 (agent-review on #6970): compactMetadata's preTokens/postTokens/
+  // durationMs were forwarded onto the wire raw — unlike the sibling
+  // thinkingDurationMs (#6941, above), nothing bounded them. These pin the
+  // same defense-in-depth via `boundedCompactMetadata`.
+  describe('compact_boundary compactMetadata bounding (#6973)', () => {
+    function compactBoundaryEvent(compactMetadata) {
+      return {
+        type: 'system',
+        subtype: 'compact_boundary',
+        content: 'Context compacted',
+        timestamp: Date.now(),
+        compactMetadata,
+      }
+    }
+
+    it('forwards a well-formed compactMetadata unchanged', () => {
+      const result = normalizer.normalize(
+        'message',
+        compactBoundaryEvent({ trigger: 'auto', preTokens: 128_000, postTokens: 12_000, durationMs: 2_500 }),
+        makeCtx(),
+      )
+      const msg = result.messages[0].msg
+      assert.deepEqual(msg.compactMetadata, {
+        trigger: 'auto',
+        preTokens: 128_000,
+        postTokens: 12_000,
+        durationMs: 2_500,
+      })
+    })
+
+    it('nulls a durationMs that exceeds MAX_SANE_DURATION_MS rather than forwarding or clamping it', () => {
+      const result = normalizer.normalize(
+        'message',
+        compactBoundaryEvent({ trigger: 'auto', preTokens: 1_000, postTokens: 500, durationMs: MAX_SANE_DURATION_MS + 1 }),
+        makeCtx(),
+      )
+      const meta = result.messages[0].msg.compactMetadata
+      assert.equal(meta.durationMs, null, 'out-of-range duration must null, not clamp to the ceiling')
+      assert.equal(meta.preTokens, 1_000, 'an in-range sibling field still forwards')
+    })
+
+    it('accepts the exact MAX_SANE_DURATION_MS boundary', () => {
+      const result = normalizer.normalize(
+        'message',
+        compactBoundaryEvent({ trigger: 'auto', preTokens: 1_000, postTokens: 500, durationMs: MAX_SANE_DURATION_MS }),
+        makeCtx(),
+      )
+      assert.equal(result.messages[0].msg.compactMetadata.durationMs, MAX_SANE_DURATION_MS)
+    })
+
+    it('nulls a negative durationMs', () => {
+      const result = normalizer.normalize(
+        'message',
+        compactBoundaryEvent({ trigger: 'auto', preTokens: 1_000, postTokens: 500, durationMs: -50 }),
+        makeCtx(),
+      )
+      assert.equal(result.messages[0].msg.compactMetadata.durationMs, null)
+    })
+
+    it('nulls negative preTokens/postTokens', () => {
+      const result = normalizer.normalize(
+        'message',
+        compactBoundaryEvent({ trigger: 'manual', preTokens: -5, postTokens: -1, durationMs: 1_000 }),
+        makeCtx(),
+      )
+      const meta = result.messages[0].msg.compactMetadata
+      assert.equal(meta.preTokens, null)
+      assert.equal(meta.postTokens, null)
+      assert.equal(meta.durationMs, 1_000)
+    })
+
+    it('does not cap preTokens/postTokens — only enforces non-negative int (context windows run into the millions)', () => {
+      const result = normalizer.normalize(
+        'message',
+        compactBoundaryEvent({ trigger: 'auto', preTokens: 5_000_000, postTokens: 500_000, durationMs: 1_000 }),
+        makeCtx(),
+      )
+      const meta = result.messages[0].msg.compactMetadata
+      assert.equal(meta.preTokens, 5_000_000)
+      assert.equal(meta.postTokens, 500_000)
+    })
+
+    it('floors fractional preTokens/postTokens/durationMs rather than forwarding as-is', () => {
+      const result = normalizer.normalize(
+        'message',
+        compactBoundaryEvent({ trigger: 'auto', preTokens: 1_000.9, postTokens: 500.2, durationMs: 2_500.7 }),
+        makeCtx(),
+      )
+      const meta = result.messages[0].msg.compactMetadata
+      assert.equal(meta.preTokens, 1_000)
+      assert.equal(meta.postTokens, 500)
+      assert.equal(meta.durationMs, 2_500)
+    })
+
+    it('nulls (not forwards) a non-finite/missing preTokens/postTokens/durationMs', () => {
+      const result = normalizer.normalize(
+        'message',
+        compactBoundaryEvent({ trigger: 'auto', preTokens: Number.NaN, postTokens: null, durationMs: undefined }),
+        makeCtx(),
+      )
+      const meta = result.messages[0].msg.compactMetadata
+      assert.equal(meta.preTokens, null)
+      assert.equal(meta.postTokens, null)
+      assert.equal(meta.durationMs, null)
+    })
+
+    it('defaults an unrecognized/missing trigger to auto', () => {
+      const result = normalizer.normalize(
+        'message',
+        compactBoundaryEvent({ preTokens: 1_000, postTokens: 500, durationMs: 1_000 }),
+        makeCtx(),
+      )
+      assert.equal(result.messages[0].msg.compactMetadata.trigger, 'auto')
+    })
+  })
+
   // ---- EVENT_MAP: session_usage (#4072) ----
 
   describe('session_usage event', () => {

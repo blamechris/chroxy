@@ -2,6 +2,7 @@
  * Tests for shared stateless message handler functions.
  */
 import { describe, it, expect, vi } from 'vitest'
+import { MAX_SANE_DURATION_MS } from '@chroxy/protocol'
 import {
   resolveSessionId,
   handleModelChanged,
@@ -6945,6 +6946,131 @@ describe('handleMessage', () => {
       expect(out.shouldDispatch).toBe(true)
       if (out.shouldDispatch) {
         expect(out.chatMessage.compactMetadata).toBeUndefined()
+      }
+    })
+
+    // #6973 (agent-review on #6970): preTokens/postTokens/durationMs were
+    // trusted verbatim off the wire — unlike the sibling thinkingDurationMs
+    // (#6941), nothing re-bounded them client-side. These pin the
+    // `parseFiniteNonNegIntField` defense-in-depth (second layer behind the
+    // server's own event-normalizer.js `boundedCompactMetadata`).
+    it('nulls a durationMs that exceeds MAX_SANE_DURATION_MS rather than passing it through or clamping it', () => {
+      const out = handleMessage(
+        {
+          messageType: 'system',
+          subtype: 'compact_boundary',
+          content: 'Context compacted',
+          compactMetadata: { trigger: 'auto', preTokens: 1_000, postTokens: 500, durationMs: MAX_SANE_DURATION_MS + 1 },
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.compactMetadata?.durationMs).toBeNull()
+        expect(out.chatMessage.compactMetadata?.preTokens).toBe(1_000)
+      }
+    })
+
+    it('accepts the exact MAX_SANE_DURATION_MS boundary', () => {
+      const out = handleMessage(
+        {
+          messageType: 'system',
+          subtype: 'compact_boundary',
+          content: 'Context compacted',
+          compactMetadata: { trigger: 'auto', preTokens: 1_000, postTokens: 500, durationMs: MAX_SANE_DURATION_MS },
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.compactMetadata?.durationMs).toBe(MAX_SANE_DURATION_MS)
+      }
+    })
+
+    it('nulls a negative durationMs', () => {
+      const out = handleMessage(
+        {
+          messageType: 'system',
+          subtype: 'compact_boundary',
+          content: 'Context compacted',
+          compactMetadata: { trigger: 'auto', preTokens: 1_000, postTokens: 500, durationMs: -50 },
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.compactMetadata?.durationMs).toBeNull()
+      }
+    })
+
+    it('nulls negative preTokens/postTokens rather than passing them through', () => {
+      const out = handleMessage(
+        {
+          messageType: 'system',
+          subtype: 'compact_boundary',
+          content: 'Context compacted',
+          compactMetadata: { trigger: 'manual', preTokens: -5, postTokens: -1, durationMs: 1_000 },
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.compactMetadata?.preTokens).toBeNull()
+        expect(out.chatMessage.compactMetadata?.postTokens).toBeNull()
+        expect(out.chatMessage.compactMetadata?.durationMs).toBe(1_000)
+      }
+    })
+
+    it('does not cap large preTokens/postTokens — only enforces non-negative int (context windows run into the millions)', () => {
+      const out = handleMessage(
+        {
+          messageType: 'system',
+          subtype: 'compact_boundary',
+          content: 'Context compacted',
+          compactMetadata: { trigger: 'auto', preTokens: 5_000_000, postTokens: 500_000, durationMs: 1_000 },
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.compactMetadata?.preTokens).toBe(5_000_000)
+        expect(out.chatMessage.compactMetadata?.postTokens).toBe(500_000)
+      }
+    })
+
+    it('floors fractional preTokens/postTokens/durationMs and nulls non-finite values', () => {
+      const out = handleMessage(
+        {
+          messageType: 'system',
+          subtype: 'compact_boundary',
+          content: 'Context compacted',
+          compactMetadata: { trigger: 'auto', preTokens: 1_000.9, postTokens: Number.NaN, durationMs: 2_500.7 },
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.compactMetadata?.preTokens).toBe(1_000)
+        expect(out.chatMessage.compactMetadata?.postTokens).toBeNull()
+        expect(out.chatMessage.compactMetadata?.durationMs).toBe(2_500)
       }
     })
 

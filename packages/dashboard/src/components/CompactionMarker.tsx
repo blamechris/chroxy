@@ -10,8 +10,11 @@
  * today it surfaces on the System tab (where every `type: 'system'`
  * message renders; see `buildChatViewMessages.ts`'s chat-tab filter).
  *
- * Deliberately non-interactive and single-line — a compaction boundary is
- * informational, not something the operator acts on.
+ * Deliberately non-interactive — a compaction boundary is informational, not
+ * something the operator acts on. The text clause wraps rather than
+ * truncating (`.compaction-marker-text` in components.css uses `pre-wrap` +
+ * `word-break: break-word`), so a long token-count/trigger combination stays
+ * fully readable.
  */
 import type { CompactBoundaryMeta } from '../store/types'
 import { formatDurationTerse } from '@chroxy/store-core'

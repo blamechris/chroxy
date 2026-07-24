@@ -87,10 +87,17 @@ describe('#6768 compact_boundary parsing', () => {
     })
 
     it('formats a human-readable fallback with the token delta when both counts are known', () => {
+      // Locale-agnostic — `toLocaleString()` output varies by runtime locale
+      // (comma grouping in en-US, period in de-DE, space in fr-FR, none in
+      // some locales); derive the expected grouped strings from the
+      // runtime's own formatter instead of hard-coding en-US commas
+      // (mirrors dashboard/src/components/SidebarCostBadge.test.tsx's
+      // `localeNum` pattern).
+      const localeNum = (n) => n.toLocaleString()
       const text = formatCompactBoundaryContent({ trigger: 'auto', preTokens: 128_000, postTokens: 12_000 })
       assert.match(text, /Context compacted/)
-      assert.match(text, /128,000/)
-      assert.match(text, /12,000/)
+      assert.ok(text.includes(localeNum(128_000)), `expected "${text}" to include "${localeNum(128_000)}"`)
+      assert.ok(text.includes(localeNum(12_000)), `expected "${text}" to include "${localeNum(12_000)}"`)
     })
 
     it('falls back to a trigger-only string when token counts are unknown', () => {
