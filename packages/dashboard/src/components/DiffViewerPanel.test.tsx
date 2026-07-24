@@ -195,11 +195,60 @@ describe('DiffViewerPanel', () => {
     expect(screen.getAllByTestId('diff-line-comment-btn')).toHaveLength(5)
   })
 
-  it('does not render comment buttons in split view', () => {
+  it('exposes a comment affordance on the split view lines too', () => {
     render(<DiffViewerPanel />)
     act(() => capturedCallback!({ files: [DIFF_FILES[0]!], error: null }))
     fireEvent.click(screen.getByText('Split'))
-    expect(screen.queryByTestId('diff-line-comment-btn')).toBeNull()
+    // Each non-empty split cell is commentable: the 2 context lines appear on
+    // both sides (2 buttons each), the deletion + its first paired addition are
+    // one button each, and the standalone second addition adds one more →
+    // 2 + 2 + 1 + 1 + 1 = 7 buttons across the 4 split rows.
+    expect(screen.getAllByTestId('diff-line-comment-btn')).toHaveLength(7)
+  })
+
+  it('queues and submits a comment made in the split view', () => {
+    render(<DiffViewerPanel />)
+    act(() => capturedCallback!({ files: [DIFF_FILES[0]!], error: null }))
+    fireEvent.click(screen.getByText('Split'))
+
+    // Button order follows the split rows: [ctx0-L, ctx0-R, del1-L, add2-R,
+    // add3-R, ctx4-L, ctx4-R]. Index 3 is the addition `const y = 3` (new-file
+    // line 11) on the right side of the second row.
+    fireEvent.click(screen.getAllByTestId('diff-line-comment-btn')[3]!)
+    fireEvent.change(screen.getByTestId('diff-comment-input'), {
+      target: { value: 'use a const enum' },
+    })
+    fireEvent.click(screen.getByTestId('diff-comment-save'))
+
+    // The comment renders full-width below the row and the toolbar exposes the
+    // submit control (still in split view — never toggled back to unified).
+    expect(screen.getByTestId('diff-line-comment-note').textContent).toContain('use a const enum')
+    fireEvent.click(screen.getByTestId('diff-submit-comments-btn'))
+
+    expect(mockSendInput).toHaveBeenCalledTimes(1)
+    const prompt = mockSendInput.mock.calls[0]![0] as string
+    expect(prompt).toContain('review comment')
+    expect(prompt).toContain('src/utils/helper.ts:')
+    expect(prompt).toContain('use a const enum')
+    expect(prompt).toContain('Line 11')
+  })
+
+  it('shows a comment added in unified view when switched to split (shared state)', () => {
+    render(<DiffViewerPanel />)
+    act(() => capturedCallback!({ files: [DIFF_FILES[0]!], error: null }))
+
+    // Add a comment on the addition (index 2) in the default unified view.
+    fireEvent.click(screen.getAllByTestId('diff-line-comment-btn')[2]!)
+    fireEvent.change(screen.getByTestId('diff-comment-input'), {
+      target: { value: 'parity note' },
+    })
+    fireEvent.click(screen.getByTestId('diff-comment-save'))
+
+    // The same position-keyed comment is present after switching to split.
+    fireEvent.click(screen.getByText('Split'))
+    expect(screen.getByTestId('diff-line-comment-note').textContent).toContain('parity note')
+    // The commented line's cell carries the has-comment accent in split too.
+    expect(document.querySelector('.diff-split-cell-has-comment')).toBeTruthy()
   })
 
   it('opens an inline editor and queues a comment, showing the submit control', () => {

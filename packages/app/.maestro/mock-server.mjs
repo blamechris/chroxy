@@ -480,6 +480,45 @@ wss.on('connection', (ws) => {
         })
         break
 
+      // #6800 follow-up: the DiffViewer requests `get_diff` when the Changes
+      // viewer opens; answer with a small canned diff so the Maestro
+      // diff-comment flow can exercise the inline-comment path (tap a line →
+      // comment → submit) end-to-end. Mirrors the production wire shape — a
+      // PTY/SDK server replies with a `diff_result` carrying validated
+      // DiffFile[] (see packages/store-core/src/handlers/git.ts handleDiffResult
+      // + isDiffFile; malformed elements are dropped fail-soft). One modified
+      // file with a single hunk (context / deletion / addition / addition /
+      // context) is enough to render the `diff-line-<i>` touch targets the flow
+      // taps, and its `deriveLineNumber` values match the dashboard fixture so
+      // the composed prompt is byte-identical across clients.
+      case 'get_diff':
+        secureSend(ws, {
+          type: 'diff_result',
+          sessionId: 'mock-sess-1',
+          files: [
+            {
+              path: 'src/utils/helper.ts',
+              status: 'modified',
+              additions: 2,
+              deletions: 1,
+              hunks: [
+                {
+                  header: '@@ -10,5 +10,6 @@',
+                  lines: [
+                    { type: 'context', content: 'const x = 1' },
+                    { type: 'deletion', content: 'const y = 2' },
+                    { type: 'addition', content: 'const y = 3' },
+                    { type: 'addition', content: 'const z = 4' },
+                    { type: 'context', content: 'export { x }' },
+                  ],
+                },
+              ],
+            },
+          ],
+          error: null,
+        })
+        break
+
       case 'input': {
         const text = msg.data || ''
         console.log(`[mock] Input: "${text}"`)
