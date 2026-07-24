@@ -13,7 +13,7 @@ import { CLAUDE_FALLBACK_MODELS, claudeModelMetadata } from './claude-model-cata
 import { forceKill, killProcessTree } from './platform.js'
 import { MessageTransformPipeline } from './message-transform.js'
 import { emitToolResults } from './tool-result.js'
-import { buildToolStartData, extractToolInputSemantics } from './claude-stream-parser.js'
+import { buildToolStartData, extractToolInputSemantics, parseCompactBoundaryMeta, formatCompactBoundaryContent } from './claude-stream-parser.js'
 import { resolveBinary } from './utils/resolve-binary.js'
 import { labelBinarySpawnFailure } from './utils/verify-binary.js'
 import { prepareSpawn } from './utils/win-spawn.js'
@@ -1019,6 +1019,25 @@ export class CliSession extends BaseSession {
             }
             this.emit('mcp_servers', { servers: data.mcp_servers })
           }
+        } else if (data.subtype === 'compact_boundary') {
+          // #6768: `claude -p --output-format stream-json` mirrors the SDK's
+          // `SDKCompactBoundaryMessage` shape, so this is the CLI equivalent
+          // of SdkSession's compact_boundary branch — parse the structured
+          // `compact_metadata` into a distinct marker instead of the generic
+          // fallback below, which would forward the literal string
+          // `compact_boundary` with no human-readable text.
+          const meta = parseCompactBoundaryMeta(data.compact_metadata)
+          ;(this._log || log).info(
+            `Context compacted (${meta.trigger}): ${meta.preTokens ?? '?'} -> ${meta.postTokens ?? '?'} tokens` +
+              (meta.durationMs != null ? ` in ${meta.durationMs}ms` : '')
+          )
+          this.emit('message', {
+            type: 'system',
+            subtype: 'compact_boundary',
+            content: formatCompactBoundaryContent(meta),
+            compactMetadata: meta,
+            timestamp: Date.now(),
+          })
         } else {
           // Forward non-init system events (e.g. usage limits, sub-agent
           // notifications) as system messages to the client

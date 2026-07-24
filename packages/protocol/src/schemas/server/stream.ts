@@ -85,6 +85,29 @@ export const ServerStreamEndSchema = z.object({
   thinkingTokens: ThinkingTokensSchema,
 })
 
+/**
+ * #6768 — structured payload for a `compact_boundary` system event (the
+ * Agent SDK/CLI's compaction-boundary marker, emitted on both auto-compact
+ * near the context limit and a manual `/compact`). Carried on
+ * `ServerMessageSchema.compactMetadata` when `messageType === 'system'` and
+ * `subtype === 'compact_boundary'` — see the sibling `subtype` field. Mirrors
+ * the SDK's `SDKCompactBoundaryMessage.compact_metadata` shape (camelCased),
+ * minus `preserved_segment` (an internal resume-relink detail with no
+ * client-facing use).
+ *
+ * `preTokens`/`postTokens`/`durationMs` are nullable rather than optional:
+ * the server always emits the field once it recognizes a compact_boundary
+ * event, using `null` for any sub-field the SDK/CLI itself omitted, so
+ * clients get a stable shape to pattern-match against instead of needing an
+ * `in` check per field.
+ */
+export const ServerCompactMetadataSchema = z.object({
+  trigger: z.enum(['manual', 'auto']),
+  preTokens: z.number().nullable(),
+  postTokens: z.number().nullable(),
+  durationMs: z.number().nullable(),
+})
+
 export const ServerMessageSchema = z.object({
   type: z.literal('message'),
   messageType: z.string(),
@@ -93,6 +116,14 @@ export const ServerMessageSchema = z.object({
   options: z.any().optional(),
   timestamp: z.number(),
   code: z.string().max(64).optional(),
+  // #6768: only set on `messageType: 'system'` envelopes whose `subtype` is
+  // `'compact_boundary'` — the structured compaction marker (see
+  // ServerCompactMetadataSchema). Distinct from `code` (error-envelope
+  // classification) — `subtype` mirrors the SDK/CLI's own system-event
+  // subtype field so a future second structured system event doesn't have
+  // to hijack `code`'s error-only semantics.
+  subtype: z.string().max(64).optional(),
+  compactMetadata: ServerCompactMetadataSchema.optional(),
   // #4947 / #5006: only set on `messageType: 'error'` envelopes whose
   // `code` is one of the two resume-failure codes emitted by CliSession's
   // `_handleChildClose` resume-failure path:

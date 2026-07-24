@@ -6855,6 +6855,120 @@ describe('handleMessage', () => {
       expect(out.chatMessage.tool).toBeUndefined()
     }
   })
+
+  // #6768: server (sdk-session.js / cli-session.js) parses a `compact_boundary`
+  // SDK/CLI system event into a structured `message{messageType:'system',
+  // subtype:'compact_boundary', compactMetadata}` envelope (see
+  // event-normalizer.js `message:` normalizer). The store must preserve
+  // `compactMetadata` onto the ChatMessage so the dashboard/app can render a
+  // distinct "Context compacted" marker instead of the generic muted system
+  // bubble.
+  describe('compactMetadata preservation (#6768)', () => {
+    it('preserves a well-formed compactMetadata on a compact_boundary system message', () => {
+      const out = handleMessage(
+        {
+          messageType: 'system',
+          subtype: 'compact_boundary',
+          content: 'Context compacted (auto): 128,000 → 12,000 tokens',
+          compactMetadata: { trigger: 'auto', preTokens: 128_000, postTokens: 12_000, durationMs: 2_500 },
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.type).toBe('system')
+        // `subtype` is a routing/gating field read off the raw wire payload —
+        // ChatMessage has no `subtype` property, only the resulting
+        // `compactMetadata`.
+        expect(out.chatMessage.compactMetadata).toEqual({
+          trigger: 'auto',
+          preTokens: 128_000,
+          postTokens: 12_000,
+          durationMs: 2_500,
+        })
+      }
+    })
+
+    it('preserves null sub-fields (SDK/CLI omitted post_tokens/duration_ms) rather than dropping the marker', () => {
+      const out = handleMessage(
+        {
+          messageType: 'system',
+          subtype: 'compact_boundary',
+          content: 'Context compacted (manual)',
+          compactMetadata: { trigger: 'manual', preTokens: null, postTokens: null, durationMs: null },
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.compactMetadata).toEqual({
+          trigger: 'manual',
+          preTokens: null,
+          postTokens: null,
+          durationMs: null,
+        })
+      }
+    })
+
+    it('leaves compactMetadata undefined when the wire field is missing (pre-#6768 server / non-compaction system message)', () => {
+      const out = handleMessage(
+        { messageType: 'system', content: 'MCP server foo connected', timestamp: 100 },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.compactMetadata).toBeUndefined()
+      }
+    })
+
+    it('drops a malformed compactMetadata (bad trigger) rather than passing junk through', () => {
+      const out = handleMessage(
+        {
+          messageType: 'system',
+          subtype: 'compact_boundary',
+          content: 'Context compacted',
+          compactMetadata: { trigger: 'bogus', preTokens: 1, postTokens: 2, durationMs: 3 },
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.compactMetadata).toBeUndefined()
+      }
+    })
+
+    it('does NOT attach compactMetadata to an unrelated message type even if present on the payload', () => {
+      // Gating hardening — mirrors the resume_unknown / attemptedResumeId gate
+      // above: a buggy producer shouldn't be able to sneak compactMetadata
+      // onto e.g. a response bubble.
+      const out = handleMessage(
+        {
+          messageType: 'response',
+          content: 'hello',
+          compactMetadata: { trigger: 'auto', preTokens: 1, postTokens: 2, durationMs: 3 },
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.compactMetadata).toBeUndefined()
+      }
+    })
+  })
 })
 
 // ---------------------------------------------------------------------------

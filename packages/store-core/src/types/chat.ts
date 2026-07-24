@@ -41,6 +41,23 @@ export interface EvaluatorRewriteMeta {
 }
 
 /**
+ * #6768 — structured compaction-boundary marker payload, attached to a
+ * `type: 'system'` ChatMessage when the server parses a `compact_boundary`
+ * SDK/CLI event into a dedicated marker (instead of falling through to a
+ * generic muted system bubble showing the literal string `compact_boundary`).
+ * Mirrors `ServerCompactMetadataSchema` on the wire (`@chroxy/protocol`).
+ * `preTokens`/`postTokens`/`durationMs` are `null` — not absent — when the
+ * SDK/CLI itself omitted that sub-field, giving renderers a stable shape to
+ * pattern-match without per-field `in` checks.
+ */
+export interface CompactBoundaryMeta {
+  trigger: 'manual' | 'auto';
+  preTokens: number | null;
+  postTokens: number | null;
+  durationMs: number | null;
+}
+
+/**
  * #4604 Chunk B — one entry per question in a multi-question
  * AskUserQuestion form. `questions[0]` always mirrors the legacy
  * top-level `content` + `options` on the ChatMessage so single-question
@@ -228,6 +245,14 @@ export interface ChatMessage {
    * the banner from the cached metadata.
    */
   evaluator?: EvaluatorRewriteMeta;
+  /**
+   * #6768 — set on a `type: 'system'` ChatMessage when the server parsed a
+   * `compact_boundary` event into a distinct marker. Renderers show a
+   * "Context compacted" divider/callout with the token delta and
+   * manual-vs-auto trigger instead of the generic muted system bubble.
+   * Undefined for every other system message and for pre-#6768 servers.
+   */
+  compactMetadata?: CompactBoundaryMeta;
   /**
    * #5016 — Task subagent child progress, attached to the parent's
    * `tool_use` (Task) bubble. Each entry is one wire event the child

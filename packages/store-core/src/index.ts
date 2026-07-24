@@ -85,6 +85,9 @@ export type {
   ChatMessageQuestion,
   // #3188: auto-evaluator rewrite metadata attached to system ChatMessages
   EvaluatorRewriteMeta,
+  // #6768: structured compaction-boundary marker metadata attached to
+  // system ChatMessages parsed from a compact_boundary SDK/CLI event.
+  CompactBoundaryMeta,
   SavedConnection,
   ContextUsage,
   // #6769: occupancy snapshot type (the context meter's only honest input).

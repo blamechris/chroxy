@@ -27,6 +27,16 @@
  *     the wire schema (`ServerToolStartSchema.toolUseId: z.string()`)
  *     holds even on the defensive fallback path when `content_block.id`
  *     is absent.
+ *
+ *   parseCompactBoundaryMeta(compactMetadata)
+ *     -> { trigger, preTokens, postTokens, durationMs }
+ *     #6768: camelCases a `compact_boundary` system event's
+ *     `compact_metadata` for the wire `message.compactMetadata` field.
+ *
+ *   formatCompactBoundaryContent(meta)
+ *     -> string
+ *     #6768: human-readable fallback `content` text for clients that
+ *     don't render `compactMetadata` as a dedicated marker.
  */
 
 import { parseMcpToolName } from './mcp-tools.js'
@@ -103,4 +113,50 @@ export function buildToolStartData(messageId, contentBlock) {
   const mcp = parseMcpToolName(contentBlock.name)
   if (mcp) data.serverName = mcp.serverName
   return data
+}
+
+/**
+ * #6768 — parse a `compact_boundary` system event's `compact_metadata` into
+ * the camelCase shape carried on the wire `message` event's
+ * `compactMetadata` field. Both providers receive the same
+ * `SDKCompactBoundaryMessage.compact_metadata` shape (the CLI's
+ * `--output-format stream-json` mirrors the SDK's message types — see
+ * `@anthropic-ai/claude-agent-sdk/sdk.d.ts` `SDKCompactBoundaryMessage`), so
+ * this is a pure function shared by both session drivers to keep field
+ * names / fallback values from drifting between them.
+ *
+ * Numeric fields fall back to `null` (not `undefined`) when missing or
+ * non-finite so the wire payload always has a stable shape; `trigger`
+ * defaults to `'auto'` for any value other than the literal `'manual'`
+ * (matches the SDK's `'manual' | 'auto'` union — an unrecognized value is
+ * more likely a spontaneous auto-compaction than a user-issued `/compact`).
+ *
+ * @param {{ trigger?: string, pre_tokens?: number, post_tokens?: number, duration_ms?: number }} [compactMetadata]
+ * @returns {{ trigger: 'manual'|'auto', preTokens: number|null, postTokens: number|null, durationMs: number|null }}
+ */
+export function parseCompactBoundaryMeta(compactMetadata) {
+  const meta = compactMetadata || {}
+  const asFiniteNumber = (value) => (typeof value === 'number' && Number.isFinite(value) ? value : null)
+  return {
+    trigger: meta.trigger === 'manual' ? 'manual' : 'auto',
+    preTokens: asFiniteNumber(meta.pre_tokens),
+    postTokens: asFiniteNumber(meta.post_tokens),
+    durationMs: asFiniteNumber(meta.duration_ms),
+  }
+}
+
+/**
+ * #6768 — human-readable fallback text for the `compact_boundary` system
+ * `message` envelope's `content` field, used by any client that doesn't yet
+ * understand `compactMetadata` (older dashboard/app builds render `content`
+ * as a plain muted system bubble).
+ *
+ * @param {{ trigger: 'manual'|'auto', preTokens: number|null, postTokens: number|null }} meta
+ * @returns {string}
+ */
+export function formatCompactBoundaryContent(meta) {
+  if (meta.preTokens != null && meta.postTokens != null) {
+    return `Context compacted (${meta.trigger}): ${meta.preTokens.toLocaleString()} → ${meta.postTokens.toLocaleString()} tokens`
+  }
+  return `Context compacted (${meta.trigger})`
 }

@@ -265,6 +265,15 @@ Object.assign(EVENT_MAP, {
       options: data.options,
       timestamp: data.timestamp,
     }
+    // #6768: forward the structured compaction-boundary marker fields.
+    // Gated strictly on `messageType === 'system'` + the compact_boundary
+    // subtype (mirrors the `code`/`attemptedResumeId` gating pattern in the
+    // `error:` normalizer below) so a buggy producer can't sneak
+    // `compactMetadata` onto an unrelated message type.
+    if (data.type === 'system' && data.subtype === 'compact_boundary' && data.compactMetadata) {
+      msg.subtype = data.subtype
+      msg.compactMetadata = data.compactMetadata
+    }
     return { messages: [{ msg }] }
   },
 
