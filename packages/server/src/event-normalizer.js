@@ -186,15 +186,23 @@ Object.assign(EVENT_MAP, {
   },
 
   stream_delta: (data, _ctx) => {
-    // #6756 — thinking deltas broadcast IMMEDIATELY (no coalescing). The delta
-    // buffer keys only on sessionId:messageId and reconstructs a bare
-    // {messageId, delta} on flush, so it can't carry the `thinking` flag; and a
-    // thinking bubble uses a distinct messageId anyway, so it never shares a
-    // buffer key with the response text. Returning no `buffer` flag sends it
-    // straight through with the flag intact.
+    // #6818 — thinking deltas ALSO coalesce now. Before this, they broadcast
+    // IMMEDIATELY (one WS frame per thinking_delta) because the delta buffer
+    // reconstructed a bare {messageId, delta} on flush and so couldn't carry the
+    // `thinking: true` flag — a frame/bandwidth storm on a high-budget turn
+    // (`high` = 32k, `max` = 128k thinking tokens streamed over the tunnel). The
+    // buffer now tracks the flag per key and stamps it back onto every flushed
+    // frame, so thinking coalesces the same way response text does. A thinking
+    // bubble uses a DISTINCT messageId (`<turnId>-thinking-<n>`, see #6756), so
+    // its deltas never share a buffer key with the response text — the two
+    // coalesce independently and flush as separate frames with distinct flags.
+    // The `thinking` flag rides the result so the caller forwards it to
+    // bufferDelta (parallel to how it reads messageId/delta off `data`).
     if (data.thinking) {
       return {
         messages: [{ msg: { type: 'stream_delta', messageId: data.messageId, delta: data.delta, thinking: true } }],
+        buffer: true, // signal to caller to buffer this delta
+        thinking: true, // signal to caller to buffer it as a thinking delta
       }
     }
     // Delta buffering is handled externally — normalizer returns the raw delta
@@ -206,9 +214,13 @@ Object.assign(EVENT_MAP, {
   },
 
   stream_end: (data, ctx) => {
-    // #6756 — a thinking stream_end finalises the reasoning bubble's label. No
-    // flush_deltas: thinking deltas were never buffered, and flushing here would
-    // prematurely emit the response text buffer.
+    // #6756/#6818 — a thinking stream_end finalises the reasoning bubble's label.
+    // Since #6818 thinking deltas ARE buffered (coalesced), so this MUST flush
+    // them first — exactly like the response-text path below — or the
+    // finalisation frame could overtake the still-buffered thinking deltas and
+    // break the "Thinking… → Thought" ordering. flush_deltas runs as a side
+    // effect BEFORE the messages broadcast (see ws-forwarding), so the coalesced
+    // thinking text is on the wire before this stream_end.
     if (data.thinking) {
       // #6391 footer-stat: forward the session-measured elapsed time (+ token
       // count when a provider supplies one — claude SDK/BYOK do not) so the
@@ -231,6 +243,8 @@ Object.assign(EVENT_MAP, {
       if (thinkingTokens !== undefined) msg.thinkingTokens = thinkingTokens
       return {
         messages: [{ msg }],
+        // #6818: flush the coalesced thinking deltas before this finalisation.
+        sideEffects: [{ type: 'flush_deltas', sessionId: ctx.sessionId }],
       }
     }
     return {
@@ -904,6 +918,15 @@ export class EventNormalizer {
     // oldest token in a flush spent inside the server (coalescing + forwarding)
     // — a true monotonic duration, same process both ends.
     this._deltaEmitMono = new Map()
+    // #6818: key -> true when this buffer key holds THINKING deltas (reasoning
+    // content) rather than response text. A thinking stream uses a DISTINCT
+    // messageId (`<turnId>-thinking-<n>`, see #6756), so it never shares a key
+    // with the response text — this map simply carries the `thinking: true` flag
+    // alongside the coalesced text so each flushed entry can be reconstructed as
+    // a thinking stream_delta instead of a bare response delta. Only thinking
+    // keys are recorded (response keys stay absent), and it is pruned in every
+    // flush/clear path in lockstep with _deltaBuffer.
+    this._deltaThinking = new Map()
     this._deltaFlushTimer = null
     // #5516: monotonic deadline (performance.now ms) the pending flush timer is
     // scheduled to fire at. Lets a later single-client buffer SHORTEN an
@@ -964,7 +987,9 @@ export class EventNormalizer {
 
   /**
    * Set the flush callback. Called with buffered deltas when the timer fires.
-   * @param {Function} cb - (entries: Array<{ key, sessionId, messageId, delta }>) => void
+   * @param {Function} cb - (entries: Array<{ key, sessionId, messageId, delta, emitMonoMs, thinking? }>) => void
+   *   `thinking` is present (=== true) only on entries that hold reasoning
+   *   content (#6818) so the caller stamps `thinking: true` back onto the wire.
    */
   set onFlush(cb) {
     this._onFlush = cb
@@ -992,8 +1017,13 @@ export class EventNormalizer {
    * @param {number} [emitMonoMs] - #5515: monotonic ms the provider emitted this
    *   delta. First-write-wins per flush window so the flushed entry reports how
    *   long the OLDEST coalesced token waited inside the server.
+   * @param {boolean} [thinking] - #6818: true when this is a reasoning
+   *   (extended-thinking) delta. Recorded per key so the flushed entry carries
+   *   the `thinking` flag and the caller reconstructs a thinking stream_delta.
+   *   Thinking uses a distinct messageId (#6756), so the flag is constant per
+   *   key — first-write-wins, mirroring emitMonoMs.
    */
-  bufferDelta(sessionId, messageId, delta, emitMonoMs) {
+  bufferDelta(sessionId, messageId, delta, emitMonoMs, thinking) {
     const key = sessionId ? `${sessionId}:${messageId}` : messageId
     // #5555: coerce a non-string delta to its string form ONCE and use that for
     // both the buffer concat AND the byte count. A bare `existing + delta` would
@@ -1007,6 +1037,12 @@ export class EventNormalizer {
     this._deltaBuffer.set(key, existing + text)
     if (typeof emitMonoMs === 'number' && !this._deltaEmitMono.has(key)) {
       this._deltaEmitMono.set(key, emitMonoMs)
+    }
+    // #6818: record the thinking flag once per key (constant per key — thinking
+    // uses a distinct messageId). Only thinking keys are stored; response keys
+    // stay absent so their flushed entries are byte-identical to pre-#6818.
+    if (thinking === true && !this._deltaThinking.has(key)) {
+      this._deltaThinking.set(key, true)
     }
     // #5555: maintain byte-size counters incrementally (UTF-8) — no
     // re-serialization on the hot path. `text` is the only new content, so its
@@ -1073,8 +1109,10 @@ export class EventNormalizer {
     if (!this._deltaBuffer.has(key)) return
     const delta = this._deltaBuffer.get(key)
     const emitMonoMs = this._deltaEmitMono.get(key)
+    const thinking = this._deltaThinking.get(key) === true
     this._deltaBuffer.delete(key)
     this._deltaEmitMono.delete(key)
+    this._deltaThinking.delete(key)
     this._deltaTotalBytes -= this._deltaKeyBytes.get(key) || 0
     this._deltaKeyBytes.delete(key)
     if (this._deltaTotalBytes < 0) this._deltaTotalBytes = 0
@@ -1083,6 +1121,7 @@ export class EventNormalizer {
       const entry = sepIdx !== -1
         ? { key, sessionId: key.slice(0, sepIdx), messageId: key.slice(sepIdx + 1), delta, emitMonoMs }
         : { key, sessionId: null, messageId: key, delta, emitMonoMs }
+      if (thinking) entry.thinking = true
       // Mirror _flushDeltas' containment: a throwing broadcast must not escape
       // the buffer hot path (which runs under the provider's event emit).
       try {
@@ -1098,7 +1137,8 @@ export class EventNormalizer {
    * Flush all buffered deltas for a specific session (called before stream_end).
    * Returns the flushed entries so the caller can broadcast them.
    * @param {string|null} sessionId - Session to flush (null = flush all)
-   * @returns {Array<{ key, sessionId, messageId, delta, emitMonoMs }>}
+   * @returns {Array<{ key, sessionId, messageId, delta, emitMonoMs, thinking? }>}
+   *   `thinking` is present (=== true) only on reasoning entries (#6818).
    */
   flushSession(sessionId) {
     const entries = []
@@ -1107,9 +1147,12 @@ export class EventNormalizer {
       for (const [key, delta] of this._deltaBuffer) {
         if (key.startsWith(prefix)) {
           const messageId = key.slice(prefix.length)
-          entries.push({ key, sessionId, messageId, delta, emitMonoMs: this._deltaEmitMono.get(key) })
+          const entry = { key, sessionId, messageId, delta, emitMonoMs: this._deltaEmitMono.get(key) }
+          if (this._deltaThinking.get(key) === true) entry.thinking = true
+          entries.push(entry)
           this._deltaBuffer.delete(key)
           this._deltaEmitMono.delete(key)
+          this._deltaThinking.delete(key)
           // #5555: keep residency counters in sync as keys leave the buffer.
           this._deltaTotalBytes -= this._deltaKeyBytes.get(key) || 0
           this._deltaKeyBytes.delete(key)
@@ -1119,10 +1162,13 @@ export class EventNormalizer {
     } else {
       // Legacy mode: flush everything
       for (const [key, delta] of this._deltaBuffer) {
-        entries.push({ key, sessionId: null, messageId: key, delta, emitMonoMs: this._deltaEmitMono.get(key) })
+        const entry = { key, sessionId: null, messageId: key, delta, emitMonoMs: this._deltaEmitMono.get(key) }
+        if (this._deltaThinking.get(key) === true) entry.thinking = true
+        entries.push(entry)
       }
       this._deltaBuffer.clear()
       this._deltaEmitMono.clear()
+      this._deltaThinking.clear()
       this._deltaKeyBytes.clear()
       this._deltaTotalBytes = 0
     }
@@ -1147,11 +1193,11 @@ export class EventNormalizer {
       for (const [key, delta] of this._deltaBuffer) {
         const emitMonoMs = this._deltaEmitMono.get(key)
         const sepIdx = key.indexOf(':')
-        if (sepIdx !== -1) {
-          entries.push({ key, sessionId: key.slice(0, sepIdx), messageId: key.slice(sepIdx + 1), delta, emitMonoMs })
-        } else {
-          entries.push({ key, sessionId: null, messageId: key, delta, emitMonoMs })
-        }
+        const entry = sepIdx !== -1
+          ? { key, sessionId: key.slice(0, sepIdx), messageId: key.slice(sepIdx + 1), delta, emitMonoMs }
+          : { key, sessionId: null, messageId: key, delta, emitMonoMs }
+        if (this._deltaThinking.get(key) === true) entry.thinking = true
+        entries.push(entry)
       }
       // #5313 (WP-1.3): _onFlush is a broadcast callback invoked from a
       // setTimeout. A throw here escapes the timer → uncaughtException →
@@ -1167,6 +1213,7 @@ export class EventNormalizer {
       } finally {
         this._deltaBuffer.clear()
         this._deltaEmitMono.clear()
+        this._deltaThinking.clear()
         this._deltaKeyBytes.clear()
         this._deltaTotalBytes = 0
       }
@@ -1174,6 +1221,7 @@ export class EventNormalizer {
     }
     this._deltaBuffer.clear()
     this._deltaEmitMono.clear()
+    this._deltaThinking.clear()
     this._deltaKeyBytes.clear()
     this._deltaTotalBytes = 0
   }
@@ -1189,6 +1237,7 @@ export class EventNormalizer {
     this._deltaFlushDeadline = 0
     this._deltaBuffer.clear()
     this._deltaEmitMono.clear()
+    this._deltaThinking.clear()
     this._deltaKeyBytes.clear()
     this._deltaTotalBytes = 0
   }
