@@ -658,6 +658,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // symbols_snapshot handler. Null until the first list_symbols reply lands.
   symbols: null,
   symbolsLoading: false,
+  // #6867 (epic #6760): dashboard memory panel — merged CLAUDE.md stack, fed
+  // by the memory_stack_result handler. Null until the panel's first request.
+  memoryStackEntries: null,
+  memoryStackFile: null,
+  memoryStackError: null,
+  memoryStackLoading: false,
   // Mailbox (#5914 follow-up): Control Room "Mailbox" tab snapshot, fed by the
   // mailbox_status_snapshot handler. Null until the first survey lands.
   mailboxStatus: null,
@@ -4238,6 +4244,21 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       if (activeSessionId) msg.sessionId = activeSessionId;
       wsSend(socket, msg);
     }
+  },
+
+  // #6867 (epic #6760): request the effective merged CLAUDE.md memory stack
+  // for the dashboard memory panel. Mirrors requestHostStatus — sends
+  // `memory_read`, flips memoryStackLoading, returns false (without setting
+  // loading) when the socket is closed so the panel can render a "not
+  // connected" state rather than spinning forever.
+  requestMemoryRead: (): boolean => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      set({ memoryStackLoading: true, memoryStackError: null });
+      wsSend(socket, { type: 'memory_read' });
+      return true;
+    }
+    return false;
   },
 
   // Git status

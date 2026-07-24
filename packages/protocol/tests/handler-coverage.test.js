@@ -83,7 +83,9 @@ const INTENTIONALLY_UNHANDLED = new Set([
   // 'dashboard'. Mobile parity is a Phase-2 fast-follow per epic #5170.
   // 'session_stopped' removed — both handlers now implement case 'session_stopped': (dashboard #4878, mobile #4879)
   'prompt_evaluator_skip_pattern_changed', // #3639 server emits the broadcast; dashboard exposure (toggle UI + receipt handler) is a deferred follow-up — until then the surface is the per-session promptEvaluatorSkipPattern field on session_list. Pairs with the parent epic #3068.
-  'memory_stack_result', // #6864 (epic #6760) reply to memory_read — server-only for v1, no client handler yet; the dashboard/mobile memory-panel consumers are the sibling slices #6867/#6870
+  // 'memory_stack_result' removed — the dashboard now handles it (#6867, the
+  // merged-CLAUDE.md-stack memory panel); it moved to PLATFORM_SPECIFIC as
+  // 'dashboard'. Mobile parity is the sibling slice #6870.
   // 'session_usage' is now handled by both dashboard (#4073) and mobile
   // app (#4074); no PLATFORM_SPECIFIC entry needed. Coverage test passes
   // because each handler has a `case 'session_usage':` clause.
@@ -164,6 +166,7 @@ const PLATFORM_SPECIFIC = {
   // passes because each handler has a `case 'activity_snapshot'/'activity_delta':`.
   'host_status_snapshot': 'dashboard', // Control Room Host/Repo Status survey reply (#5171 schema / #5174 server emitter / #5175 dashboard section) — dashboard-only for v1; mobile parity is a Phase-2 fast-follow per epic #5170
   'permission_audit_result': 'dashboard', // #6772 reply to query_permission_audit — the dashboard SettingsPanel "Permission history" view is the first (and only, for v1) client caller; the mobile PermissionHistory screen derives its summary from the live chat transcript, not this wire query, so mobile parity is a fast-follow
+  'memory_stack_result': 'dashboard', // #6867 (epic #6760) reply to memory_read — the dashboard memory panel (merged CLAUDE.md hierarchy + provenance) is the first client surface; mobile parity is the sibling slice #6870
   // 'permission_input' removed from PLATFORM_SPECIFIC — the mobile app now
   // handles it too (#6543 PR-4, the pre-write-diff mobile parity fast-follow),
   // so it is BOTH-CLIENTS. Coverage passes because the dashboard has a

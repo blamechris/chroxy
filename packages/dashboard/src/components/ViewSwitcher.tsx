@@ -5,7 +5,7 @@ import { formatShortcutKeys } from '../utils/platform'
 // #5204 — 'control-room' is no longer a per-session viewMode; the Control
 // Room is a dedicated session-independent top-level tab (see `controlRoomOpen`
 // / `controlRoomActive` in App).
-export type ViewMode = 'chat' | 'terminal' | 'files' | 'diff' | 'git' | 'system' | 'console' | 'snapshots' | 'pool' | 'pages' | 'devices'
+export type ViewMode = 'chat' | 'terminal' | 'files' | 'diff' | 'git' | 'system' | 'console' | 'snapshots' | 'pool' | 'pages' | 'devices' | 'memory'
 
 /** Scrollable tab bar with arrow buttons when overflowing */
 export function ViewSwitcher({
@@ -136,6 +136,10 @@ export function ViewSwitcher({
         {/* #6780 — stage/unstage/commit UI on top of the existing git status
             wiring (Files tab already shows read-only decorations + branch). */}
         <button className={`view-tab${viewMode === 'git' ? ' active' : ''}`} onClick={() => setViewMode('git')} type="button">Git</button>
+        {/* #6867 (epic #6760) — dashboard memory panel: merged CLAUDE.md
+            hierarchy (global/project/local) with per-file provenance, plus the
+            auto-generated MEMORY.md browsable read view. */}
+        <button className={`view-tab${viewMode === 'memory' ? ' active' : ''}`} onClick={() => setViewMode('memory')} type="button">Memory</button>
         <button className={`view-tab${viewMode === 'system' ? ' active' : ''}`} onClick={() => { setViewMode('system'); setSplitMode(null); persistSplitMode(null) }} type="button">
           System{unreadSystemCount > 0 && <span className="system-badge">{unreadSystemCount}</span>}
         </button>

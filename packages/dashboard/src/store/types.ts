@@ -275,6 +275,26 @@ export interface FileContent {
   requestId: string | null;
 }
 
+// #6867 (epic #6760): dashboard memory panel. Mirrors the server-side
+// descriptor shapes in packages/server/src/ws-file-ops/memory.js /
+// packages/protocol/src/schemas/server/file-ops.ts (MemoryFileDescriptorSchema
+// / MemoryStackEntrySchema) 1:1 — hand-written here (like FileContent /
+// GitStatusResult above) rather than imported from @chroxy/protocol, since the
+// file-ops schemas don't export z.infer type companions.
+export interface MemoryFileDescriptor {
+  path: string | null;
+  exists: boolean;
+  content: string | null;
+  truncated: boolean;
+  skipped: boolean;
+  error: string | null;
+}
+
+export interface MemoryStackEntry extends MemoryFileDescriptor {
+  scope: 'global' | 'project' | 'local' | 'import';
+  importedFrom: string | null;
+}
+
 // #3181: GitStatusEntry was structurally identical to @chroxy/store-core's
 // `GitFileStatus` (path + status union). Dropped in favour of the canonical
 // re-export above so the dashboard and app share a single shape for staged/
@@ -914,6 +934,24 @@ export interface ConnectionState {
    */
   symbolsLoading: boolean;
 
+  /**
+   * #6867 (epic #6760) — dashboard memory panel: the effective merged
+   * CLAUDE.md stack (global/project/local + recursively-resolved @imports,
+   * server load order) from the last `memory_read` reply. Null until the
+   * panel's first request lands.
+   */
+  memoryStackEntries: MemoryStackEntry[] | null;
+  /** The project's auto-generated MEMORY.md descriptor, from the same reply. */
+  memoryStackFile: MemoryFileDescriptor | null;
+  /** Request-level error (e.g. "Memory is not available in this mode"). */
+  memoryStackError: string | null;
+  /**
+   * True between `requestMemoryRead()` and the matching `memory_stack_result`,
+   * so the panel can show a loading state. Cleared only on a successful parse
+   * (see handleMemoryStackResult) so a malformed reply can't make Refresh lie.
+   */
+  memoryStackLoading: boolean;
+
   // Mailbox (#5914 follow-up) — Control Room "Mailbox" tab snapshot (live
   // agentCommId→session registrations + recent live-interrupt deliveries). Null
   // until the first survey lands.
@@ -1488,7 +1526,7 @@ export interface ConnectionState {
 
   // View mode. #5204 — 'control-room' removed: the Control Room is now a
   // session-independent top-level tab in App, not a per-session view mode.
-  viewMode: 'chat' | 'terminal' | 'files' | 'diff' | 'git' | 'system' | 'console' | 'snapshots' | 'pool' | 'pages' | 'devices';
+  viewMode: 'chat' | 'terminal' | 'files' | 'diff' | 'git' | 'system' | 'console' | 'snapshots' | 'pool' | 'pages' | 'devices' | 'memory';
 
   // Input settings
   inputSettings: InputSettings;
@@ -1507,7 +1545,7 @@ export interface ConnectionState {
   disconnect: () => void;
   loadSavedConnection: () => void;
   clearSavedConnection: () => void;
-  setViewMode: (mode: 'chat' | 'terminal' | 'files' | 'diff' | 'git' | 'system' | 'console' | 'snapshots' | 'pool' | 'pages' | 'devices') => void;
+  setViewMode: (mode: 'chat' | 'terminal' | 'files' | 'diff' | 'git' | 'system' | 'console' | 'snapshots' | 'pool' | 'pages' | 'devices' | 'memory') => void;
   addMessage: (message: ChatMessage) => void;
   addUserMessage: (text: string, attachments?: MessageAttachment[], opts?: { clientMessageId?: string; queued?: boolean }) => void;
   appendTerminalData: (data: string) => void;
@@ -1709,6 +1747,13 @@ export interface ConnectionState {
   // #6477 — find-all-references for a clicked symbol. Opens the references palette
   // (referencesOpen) + sets referencesLoading; the reply lands in referencesResult.
   requestFindReferences: (symbol: string, file?: string) => void;
+
+  // #6867 (epic #6760) — request the effective merged CLAUDE.md memory stack
+  // for the dashboard memory panel. Sets memoryStackLoading; the reply lands
+  // in memoryStackEntries/memoryStackFile/memoryStackError. Returns false
+  // (without setting loading) when the socket is closed, mirroring
+  // requestHostStatus's not-connected guard.
+  requestMemoryRead: () => boolean;
 
   // Git status
   setGitStatusCallback: (cb: ((result: GitStatusResult) => void) | null) => void;
