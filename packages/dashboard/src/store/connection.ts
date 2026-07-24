@@ -483,6 +483,64 @@ function activeSessionIsClaudeTui(get: () => ConnectionState): boolean {
   return s.sessions.find(sess => sess.sessionId === s.activeSessionId)?.provider === DEFAULT_PROVIDER;
 }
 
+// #6939 — client-side timeout for the git one-shot request/reply callbacks
+// (git_commit + git_create_pr). GitPanel arms a one-shot callback and flips a
+// busy flag (committing / prSubmitting) before sending the request. If the
+// socket send succeeds but the daemon never replies (mid-flight disconnect,
+// crash), the callback would stay armed and the button stuck spinning forever,
+// unrecoverable without a remount. We arm a timer alongside the callback; on
+// expiry, if the callback is still armed, we resolve it with a timeout-error
+// result so GitPanel surfaces an error and clears its busy flag, then disarm.
+// A real reply — or the not-connected send-failure path — both flow through
+// setGit*Callback(null), which clears the timer. One shared mechanism (DRY),
+// keyed by the store field name so commit + create-PR share it.
+export const GIT_ONESHOT_CALLBACK_TIMEOUT_MS = 30_000;
+
+// Message handed to a still-armed callback when the daemon never replies.
+export const GIT_ONESHOT_TIMEOUT_ERROR = 'No response from the daemon — reconnect and try again';
+
+type GitOneshotCallbackKey = '_gitCommitCallback' | '_gitCreatePrCallback';
+
+// Module-level timer registry (mirrors `searchTimeoutId` above) — keeps raw
+// timer handles out of the persisted store state.
+const gitOneshotTimers: Record<GitOneshotCallbackKey, ReturnType<typeof setTimeout> | undefined> = {
+  _gitCommitCallback: undefined,
+  _gitCreatePrCallback: undefined,
+};
+
+// Arm (cb non-null) or disarm (cb null) a git one-shot callback, managing its
+// timeout in one place. Always clears any prior timer first, so re-arming or
+// disarming is race-free. `timeoutResult` is the payload handed to a still-armed
+// callback if the daemon never replies — its shape must match what GitPanel
+// expects for that flow (GitCommitResult / GitCreatePrResult).
+function armGitOneshotCallback(
+  set: (partial: Partial<ConnectionState>) => void,
+  get: () => ConnectionState,
+  key: GitOneshotCallbackKey,
+  cb: ConnectionState[GitOneshotCallbackKey],
+  timeoutResult: unknown,
+): void {
+  const prev = gitOneshotTimers[key];
+  if (prev !== undefined) {
+    clearTimeout(prev);
+    gitOneshotTimers[key] = undefined;
+  }
+
+  set({ [key]: cb } as Partial<ConnectionState>);
+
+  if (!cb) return;
+
+  gitOneshotTimers[key] = setTimeout(() => {
+    gitOneshotTimers[key] = undefined;
+    const armed = get()[key] as ((result: unknown) => void) | null;
+    if (!armed) return; // a real reply already resolved + nulled the callback
+    // One-shot: disarm before invoking so the callback's own setGit*Callback(null)
+    // is a harmless no-op and the reply path can never double-fire it.
+    set({ [key]: null } as Partial<ConnectionState>);
+    armed(timeoutResult);
+  }, GIT_ONESHOT_CALLBACK_TIMEOUT_MS);
+}
+
 export const useConnectionStore = create<ConnectionState>((set, get) => ({
   connectionPhase: 'disconnected',
   wsUrl: null,
@@ -4148,8 +4206,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   // #6780 — commit mutation. Same not-connected-guard rationale as stage/unstage.
+  // #6939 — arm (or clear) a client-side timeout alongside the one-shot callback
+  // so a never-arriving git_commit_result can't strand GitPanel's committing flag.
   setGitCommitCallback: (cb) => {
-    set({ _gitCommitCallback: cb });
+    armGitOneshotCallback(set, get, '_gitCommitCallback', cb, {
+      hash: null,
+      message: null,
+      error: GIT_ONESHOT_TIMEOUT_ERROR,
+    });
   },
 
   requestGitCommit: (message) => {
@@ -4164,8 +4228,17 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // and shells out to `gh pr create`, replying with git_create_pr_result. Same
   // not-connected guard as stage/commit so GitPanel can surface an error instead
   // of leaving a spinner stuck.
+  // #6939 — arm (or clear) a client-side timeout alongside the one-shot callback
+  // so a never-arriving git_create_pr_result can't strand GitPanel's prSubmitting
+  // flag (same failure mode + mechanism as the commit flow above).
   setGitCreatePrCallback: (cb) => {
-    set({ _gitCreatePrCallback: cb });
+    armGitOneshotCallback(set, get, '_gitCreatePrCallback', cb, {
+      url: null,
+      number: null,
+      branch: null,
+      base: null,
+      error: GIT_ONESHOT_TIMEOUT_ERROR,
+    });
   },
 
   requestGitCreatePr: (params) => {
