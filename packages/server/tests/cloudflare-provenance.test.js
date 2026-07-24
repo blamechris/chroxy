@@ -13,6 +13,28 @@ import { PROVENANCE_STATUS } from '../src/utils/verify-provenance.js'
 
 const okHealth = (path) => ({ ok: true, status: 'ok', path, quarantine: null })
 
+// #6937: the spawn-path tests below exec a REAL child (`/bin/echo` when the gate
+// pinned a path, a bare-name ENOENT otherwise) purely to read its `spawnfile`.
+// That child MUST be fully reaped before the test returns — a dangling
+// ChildProcess handle keeps the test process's event loop alive, which under
+// coverage (`c8`, no `--test-force-exit`) never drains and hangs the whole CI
+// suite. Kill it and await its terminal event; a bare-name spawn that never
+// started (pid undefined → ENOENT) has nothing to reap and settles immediately.
+function reapChild(proc) {
+  return new Promise((resolve) => {
+    let settled = false
+    const done = () => { if (!settled) { settled = true; resolve() } }
+    proc.once('close', done)
+    proc.once('exit', done)
+    proc.once('error', done)
+    if (proc.exitCode !== null || proc.signalCode !== null || proc.pid === undefined) {
+      done()
+      return
+    }
+    try { proc.kill('SIGKILL') } catch { done() }
+  })
+}
+
 function makeAdapter({ binaryProvenance, resolveBinary, verifyBinary, verifyProvenance } = {}) {
   return new CloudflareTunnelAdapter({
     port: 8765,
@@ -127,7 +149,7 @@ describe('cloudflared spawns the exact verified path (#6937)', () => {
   // A pinnable, always-present absolute path so the real spawn is harmless.
   const REAL_ABS = '/bin/echo'
 
-  it('spawns the pinned verified absolute path after a passing gate', () => {
+  it('spawns the pinned verified absolute path after a passing gate', async () => {
     const adapter = makeAdapter({
       binaryProvenance: { mode: 'block', signatureGate: true, ledger: {} },
       resolveBinary: () => REAL_ABS,
@@ -139,10 +161,10 @@ describe('cloudflared spawns the exact verified path (#6937)', () => {
     const proc = adapter._spawnCloudflared([], { stdio: 'ignore' })
     proc.on('error', () => {})
     assert.equal(proc.spawnfile, REAL_ABS, 'spawn must exec the pinned absolute path, not the bare name')
-    proc.kill()
+    await reapChild(proc)
   })
 
-  it('falls back to the bare name when the gate is off (feature-off unchanged)', () => {
+  it('falls back to the bare name when the gate is off (feature-off unchanged)', async () => {
     const adapter = makeAdapter({ binaryProvenance: null })
     adapter._verifyCloudflaredProvenance()
     assert.equal(adapter._resolvedCloudflaredPath, null, 'nothing pinned when the gate is off')
@@ -150,10 +172,10 @@ describe('cloudflared spawns the exact verified path (#6937)', () => {
     const proc = adapter._spawnCloudflared([], { stdio: 'ignore' })
     proc.on('error', () => {})
     assert.equal(proc.spawnfile, 'cloudflared', 'spawn must fall back to the bare name when off')
-    proc.kill()
+    await reapChild(proc)
   })
 
-  it('clears a previously-pinned path when the binary becomes unhealthy on re-check', () => {
+  it('clears a previously-pinned path when the binary becomes unhealthy on re-check', async () => {
     const adapter = makeAdapter({
       binaryProvenance: { mode: 'block', signatureGate: true, ledger: {} },
       resolveBinary: () => REAL_ABS,
@@ -171,6 +193,6 @@ describe('cloudflared spawns the exact verified path (#6937)', () => {
     const proc = adapter._spawnCloudflared([], { stdio: 'ignore' })
     proc.on('error', () => {})
     assert.equal(proc.spawnfile, 'cloudflared')
-    proc.kill()
+    await reapChild(proc)
   })
 })
