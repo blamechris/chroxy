@@ -71,6 +71,25 @@ const DIFF_FILES = [
   },
 ]
 
+// A structurally-identical clone of DIFF_FILES[0] — a different object/array
+// reference but the same content, simulating a no-op reconnect re-landing the
+// same diff (#6961).
+const DIFF_FILES_0_CLONE = JSON.parse(JSON.stringify(DIFF_FILES[0]))
+
+// DIFF_FILES[0] with one line's content changed — simulates a genuine diff
+// change (e.g. positions shifted) landing on a reconnect (#6946).
+const DIFF_FILES_0_CHANGED = {
+  ...DIFF_FILES[0]!,
+  hunks: [
+    {
+      ...DIFF_FILES[0]!.hunks[0]!,
+      lines: DIFF_FILES[0]!.hunks[0]!.lines.map((l, i) =>
+        i === 2 ? { ...l, content: 'const y = 99' } : l,
+      ),
+    },
+  ],
+}
+
 describe('DiffViewerPanel', () => {
   it('requests diff on mount', () => {
     render(<DiffViewerPanel />)
@@ -199,11 +218,28 @@ describe('DiffViewerPanel', () => {
     render(<DiffViewerPanel />)
     act(() => capturedCallback!({ files: [DIFF_FILES[0]!], error: null }))
     fireEvent.click(screen.getByText('Split'))
-    // Each non-empty split cell is commentable: the 2 context lines appear on
-    // both sides (2 buttons each), the deletion + its first paired addition are
-    // one button each, and the standalone second addition adds one more →
-    // 2 + 2 + 1 + 1 + 1 = 7 buttons across the 4 split rows.
-    expect(screen.getAllByTestId('diff-line-comment-btn')).toHaveLength(7)
+    // Each non-empty split cell is commentable, but a context line (same
+    // target on both sides) contributes exactly ONE button, on the new-file
+    // (right) side (#6947) — not two. The 2 context lines contribute 1 each,
+    // the deletion + its paired addition are one button each, and the
+    // standalone second addition adds one more → 1 + 2 + 1 + 1 = 5 buttons
+    // across the 4 split rows.
+    expect(screen.getAllByTestId('diff-line-comment-btn')).toHaveLength(5)
+  })
+
+  it('shows exactly one comment affordance for a context line in split view (#6947)', () => {
+    render(<DiffViewerPanel />)
+    act(() => capturedCallback!({ files: [DIFF_FILES[0]!], error: null }))
+    fireEvent.click(screen.getByText('Split'))
+
+    // The two context rows (index 0 and 4 in the fixture hunk) each carry a
+    // SINGLE comment target shared by both columns — assert only one gutter
+    // button renders per context row, not one per side.
+    const rows = screen.getAllByTestId('split-row')
+    const contextRows = [rows[0]!, rows[3]!]
+    for (const row of contextRows) {
+      expect(row.querySelectorAll('[data-testid="diff-line-comment-btn"]')).toHaveLength(1)
+    }
   })
 
   it('queues and submits a comment made in the split view', () => {
@@ -211,10 +247,11 @@ describe('DiffViewerPanel', () => {
     act(() => capturedCallback!({ files: [DIFF_FILES[0]!], error: null }))
     fireEvent.click(screen.getByText('Split'))
 
-    // Button order follows the split rows: [ctx0-L, ctx0-R, del1-L, add2-R,
-    // add3-R, ctx4-L, ctx4-R]. Index 3 is the addition `const y = 3` (new-file
-    // line 11) on the right side of the second row.
-    fireEvent.click(screen.getAllByTestId('diff-line-comment-btn')[3]!)
+    // Button order follows the split rows: [ctx0-R, del1-L, add2-R, add3-R,
+    // ctx4-R] (context rows now contribute a single right-side button —
+    // #6947). Index 2 is the addition `const y = 3` (new-file line 11) on
+    // the right side of the second row.
+    fireEvent.click(screen.getAllByTestId('diff-line-comment-btn')[2]!)
     fireEvent.change(screen.getByTestId('diff-comment-input'), {
       target: { value: 'use a const enum' },
     })
@@ -338,6 +375,93 @@ describe('DiffViewerPanel', () => {
     expect(screen.getByTestId('diff-submit-comments-btn')).toBeTruthy()
 
     fireEvent.click(screen.getByText('Refresh'))
+    expect(screen.queryByTestId('diff-submit-comments-btn')).toBeNull()
+  })
+
+  it('drops queued comments when an auto-refresh/reconnect pushes a genuinely CHANGED diff, not just manual Refresh (#6946)', () => {
+    render(<DiffViewerPanel />)
+    act(() => capturedCallback!({ files: [DIFF_FILES[0]!], error: null }))
+
+    fireEvent.click(screen.getAllByTestId('diff-line-comment-btn')[0]!)
+    fireEvent.change(screen.getByTestId('diff-comment-input'), { target: { value: 'note' } })
+    fireEvent.click(screen.getByTestId('diff-comment-save'))
+    expect(screen.getByTestId('diff-submit-comments-btn')).toBeTruthy()
+
+    // Simulate an auto-refresh/reconnect diff push driven by the store — the
+    // same `capturedCallback` the connection layer invokes on every diff
+    // (re)request — WITHOUT going through the manual Refresh button. The
+    // landed diff has genuinely changed content (positions may have shifted),
+    // which is the case #6946 targets — as opposed to a no-op re-delivery of
+    // the identical diff, which #6961 below asserts is now spared.
+    act(() => capturedCallback!({ files: [DIFF_FILES_0_CHANGED as typeof DIFF_FILES[0]], error: null }))
+    expect(screen.queryByTestId('diff-submit-comments-btn')).toBeNull()
+  })
+
+  it('preserves queued comments and an open draft across a no-op reconnect landing (identical diff) (#6961)', () => {
+    render(<DiffViewerPanel />)
+    act(() => capturedCallback!({ files: [DIFF_FILES[0]!], error: null }))
+
+    // Queue a saved comment on the first line.
+    fireEvent.click(screen.getAllByTestId('diff-line-comment-btn')[0]!)
+    fireEvent.change(screen.getByTestId('diff-comment-input'), { target: { value: 'note' } })
+    fireEvent.click(screen.getByTestId('diff-comment-save'))
+    expect(screen.getByTestId('diff-submit-comments-btn')).toBeTruthy()
+
+    // Open a SECOND line's editor and leave an unsaved draft in it.
+    fireEvent.click(screen.getAllByTestId('diff-line-comment-btn')[1]!)
+    fireEvent.change(screen.getByTestId('diff-comment-input'), { target: { value: 'unsaved draft' } })
+
+    // A routine WS reconnect re-lands a byte-identical diff — same content,
+    // different object/array reference (as a fresh WS payload would be).
+    act(() => capturedCallback!({ files: [DIFF_FILES_0_CLONE], error: null }))
+
+    // The queued comment survives...
+    expect(screen.getByTestId('diff-submit-comments-btn')).toBeTruthy()
+    // ...and the open editor + its unsaved draft survive too.
+    expect((screen.getByTestId('diff-comment-input') as HTMLTextAreaElement).value).toBe('unsaved draft')
+  })
+
+  it('clears queued comments and the open draft when a diff-landing genuinely changes (#6946 still holds)', () => {
+    render(<DiffViewerPanel />)
+    act(() => capturedCallback!({ files: [DIFF_FILES[0]!], error: null }))
+
+    fireEvent.click(screen.getAllByTestId('diff-line-comment-btn')[0]!)
+    fireEvent.change(screen.getByTestId('diff-comment-input'), { target: { value: 'note' } })
+    fireEvent.click(screen.getByTestId('diff-comment-save'))
+    expect(screen.getByTestId('diff-submit-comments-btn')).toBeTruthy()
+
+    // Open a second line's editor with an unsaved draft.
+    fireEvent.click(screen.getAllByTestId('diff-line-comment-btn')[1]!)
+    fireEvent.change(screen.getByTestId('diff-comment-input'), { target: { value: 'unsaved draft' } })
+
+    // A reconnect that lands genuinely different diff content (positions may
+    // have shifted) still invalidates position-keyed comments + the open
+    // draft — the #6946 behavior is unchanged for the real-change case.
+    act(() => capturedCallback!({ files: [DIFF_FILES_0_CHANGED as typeof DIFF_FILES[0]], error: null }))
+
+    expect(screen.queryByTestId('diff-submit-comments-btn')).toBeNull()
+    expect(screen.queryByTestId('diff-comment-input')).toBeNull()
+  })
+
+  it('clears queued comments on manual Refresh even though the returned diff turns out unchanged', () => {
+    render(<DiffViewerPanel />)
+    act(() => capturedCallback!({ files: [DIFF_FILES[0]!], error: null }))
+
+    fireEvent.click(screen.getAllByTestId('diff-line-comment-btn')[0]!)
+    fireEvent.change(screen.getByTestId('diff-comment-input'), { target: { value: 'note' } })
+    fireEvent.click(screen.getByTestId('diff-comment-save'))
+    expect(screen.getByTestId('diff-submit-comments-btn')).toBeTruthy()
+
+    // Manual Refresh clears synchronously, regardless of what the diff
+    // eventually turns out to contain when it lands.
+    fireEvent.click(screen.getByText('Refresh'))
+    expect(screen.queryByTestId('diff-submit-comments-btn')).toBeNull()
+
+    // Even if the diff that lands afterward is identical to what was shown
+    // before the refresh, the comments stay cleared (there's nothing to
+    // preserve — handleRefresh already dropped them as an explicit user
+    // action).
+    act(() => capturedCallback!({ files: [DIFF_FILES_0_CLONE], error: null }))
     expect(screen.queryByTestId('diff-submit-comments-btn')).toBeNull()
   })
 })
