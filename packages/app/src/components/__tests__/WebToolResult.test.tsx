@@ -14,7 +14,7 @@
  */
 import React from 'react';
 import renderer, { act, ReactTestInstance } from 'react-test-renderer';
-import { Alert, Linking } from 'react-native';
+import { Alert, Linking, StyleSheet } from 'react-native';
 import type { ParsedWebSearchResults, ParsedWebFetchResult } from '@chroxy/store-core';
 import {
   WebSearchResultList,
@@ -303,11 +303,11 @@ describe('WebToolResultView dispatch', () => {
   });
 });
 
-/** Minimal style flattener — avoids importing StyleSheet.flatten typing noise. */
+/** Thin wrapper around RN's own `StyleSheet.flatten` (#6988 review) — a
+ *  hand-rolled merge happened to work only because `StyleSheet.create`
+ *  returns plain objects in RN 0.81; using the real API means the 44pt
+ *  touch-target assertion below fails loudly instead of vacuously passing
+ *  if that ever changes back to numeric style IDs. */
 function StyleSheetFlatten(style: unknown): Record<string, number> {
-  if (Array.isArray(style)) {
-    return style.reduce<Record<string, number>>((acc, s) => ({ ...acc, ...StyleSheetFlatten(s) }), {});
-  }
-  if (style && typeof style === 'object') return style as Record<string, number>;
-  return {};
+  return (StyleSheet.flatten(style as never) ?? {}) as Record<string, number>;
 }
