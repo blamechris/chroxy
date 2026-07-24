@@ -3463,6 +3463,46 @@ button.sidebar-token-view-session-row:hover {
   color: var(--accent-green, #22c55e);
 }
 
+/* #6754 — rendered ```mermaid diagrams. The SVG comes from mermaid (strict +
+   DOMPurify sanitized) and is centered in a padded card that matches the
+   code-block surface, so a diagram sits in the transcript like any other
+   block. `max-width` + `height:auto` on the SVG keeps a wide flowchart inside
+   the bubble (it scales down rather than forcing horizontal page scroll). */
+.mermaid-diagram {
+  display: flex;
+  justify-content: center;
+  margin: 8px 0;
+  padding: 12px;
+  background: var(--bg-code-block);
+  border: 1px solid var(--border-subtle, rgba(127, 127, 127, 0.22));
+  border-radius: var(--radius-sm, 6px);
+  overflow-x: auto;
+}
+
+.mermaid-diagram svg {
+  max-width: 100%;
+  height: auto;
+}
+
+/* Loading placeholder while the (lazy-loaded) mermaid chunk renders. */
+.mermaid-loading {
+  margin: 8px 0;
+  padding: 12px;
+  font-size: 0.85em;
+  color: var(--text-muted);
+  background: var(--bg-code-block);
+  border: 1px solid var(--border-subtle, rgba(127, 127, 127, 0.22));
+  border-radius: var(--radius-sm, 6px);
+}
+
+/* Parse/render failure → the syntax error above the raw code-block fallback
+   (the `<pre><code>` inside is styled by the shared `.msg pre` rules). */
+.mermaid-error-note {
+  margin: 8px 0 4px;
+  font-size: 0.8em;
+  color: var(--text-error, #f87171);
+}
+
 .msg code {
   font-family: var(--font-mono);
   background: var(--bg-code-block);

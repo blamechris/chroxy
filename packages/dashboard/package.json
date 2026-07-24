@@ -15,6 +15,7 @@
     "@chroxy/protocol": "*",
     "@chroxy/store-core": "*",
     "dompurify": "^3.3.1",
+    "mermaid": "^11.6.0",
     "react-resizable-panels": "^4.7.1",
     "zustand": "^5.0.11"
   },
