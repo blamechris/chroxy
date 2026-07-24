@@ -2348,6 +2348,49 @@ describe('resolvedPermissions + Allow for Session (#2833, #2834)', () => {
     expect(state.permissionAuditLoading).toBe(false);
   });
 
+  it('switchSession clears the memory stack so it never shows another session\'s CLAUDE.md provenance (#6996 review)', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const { createEmptySessionState } = await import('./utils');
+
+    useConnectionStore.setState({
+      activeSessionId: 's1',
+      sessionStates: { s1: { ...createEmptySessionState() }, s2: { ...createEmptySessionState() } },
+      sessionNotifications: [],
+      memoryStackEntries: [
+        {
+          path: '/repo-a/CLAUDE.md',
+          exists: true,
+          content: '# repo-a notes',
+          truncated: false,
+          skipped: false,
+          error: null,
+          scope: 'project',
+          importedFrom: null,
+        },
+      ],
+      memoryStackFile: {
+        path: '/repo-a/.claude/projects/repo-a/memory/MEMORY.md',
+        exists: true,
+        content: '# repo-a memory',
+        truncated: false,
+        skipped: false,
+        error: null,
+      },
+      memoryStackError: 'some stale error',
+      memoryStackLoading: true,
+      socket: null,
+    });
+
+    useConnectionStore.getState().switchSession('s2');
+
+    const state = useConnectionStore.getState();
+    expect(state.activeSessionId).toBe('s2');
+    expect(state.memoryStackEntries).toBeNull();
+    expect(state.memoryStackFile).toBeNull();
+    expect(state.memoryStackError).toBeNull();
+    expect(state.memoryStackLoading).toBe(false);
+  });
+
   it('permission_expired for an already-resolved requestId does not mutate the prompt message', async () => {
     const { useConnectionStore } = await import('./connection');
     const { createEmptySessionState } = await import('./utils');
@@ -3818,6 +3861,53 @@ describe('server_error toast scope filtering', () => {
       const after = useConnectionStore.getState().sessionStates;
       expect(after.s1!.pendingTrustGrants).toEqual([]);
       expect(after.s2!.pendingTrustGrants).toEqual([]);
+
+      useConnectionStore.setState({
+        sessions: [],
+        activeSessionId: null,
+        sessionStates: {},
+        userDisconnected: false,
+      });
+    });
+
+    it('disconnect clears the memory stack, mirroring permissionAudit (#6996 review)', async () => {
+      const { useConnectionStore } = await import('./connection');
+
+      useConnectionStore.setState({
+        activeSessionId: 's1',
+        sessionStates: { s1: { ...createEmptySessionState() } },
+        memoryStackEntries: [
+          {
+            path: '/repo-a/CLAUDE.md',
+            exists: true,
+            content: '# repo-a notes',
+            truncated: false,
+            skipped: false,
+            error: null,
+            scope: 'project',
+            importedFrom: null,
+          },
+        ],
+        memoryStackFile: {
+          path: '/repo-a/.claude/projects/repo-a/memory/MEMORY.md',
+          exists: true,
+          content: '# repo-a memory',
+          truncated: false,
+          skipped: false,
+          error: null,
+        },
+        memoryStackError: 'some stale error',
+        memoryStackLoading: true,
+        socket: null,
+      });
+
+      useConnectionStore.getState().disconnect();
+
+      const after = useConnectionStore.getState();
+      expect(after.memoryStackEntries).toBeNull();
+      expect(after.memoryStackFile).toBeNull();
+      expect(after.memoryStackError).toBeNull();
+      expect(after.memoryStackLoading).toBe(false);
 
       useConnectionStore.setState({
         sessions: [],

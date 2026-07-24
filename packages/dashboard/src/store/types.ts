@@ -938,7 +938,11 @@ export interface ConnectionState {
    * #6867 (epic #6760) — dashboard memory panel: the effective merged
    * CLAUDE.md stack (global/project/local + recursively-resolved @imports,
    * server load order) from the last `memory_read` reply. Null until the
-   * panel's first request lands.
+   * panel's first request lands. Scoped to the active session the same way
+   * `permissionAudit` is (the server resolves `memory_read` against the
+   * caller's active session cwd, no client-supplied sessionId) —
+   * `switchSession`/`disconnect` reset it to null (#6996 review) so it never
+   * shows a previous session's stack against a new one.
    */
   memoryStackEntries: MemoryStackEntry[] | null;
   /** The project's auto-generated MEMORY.md descriptor, from the same reply. */

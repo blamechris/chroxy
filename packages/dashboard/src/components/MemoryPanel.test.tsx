@@ -17,6 +17,7 @@ let mockEntries: MemoryStackEntry[] | null = null
 let mockFile: MemoryFileDescriptor | null = null
 let mockError: string | null = null
 let mockLoading = false
+let mockActiveSessionId: string | null = 's1'
 
 vi.mock('../store/connection', () => ({
   useConnectionStore: (selector: (s: unknown) => unknown) =>
@@ -27,6 +28,7 @@ vi.mock('../store/connection', () => ({
       memoryStackFile: mockFile,
       memoryStackError: mockError,
       memoryStackLoading: mockLoading,
+      activeSessionId: mockActiveSessionId,
     }),
 }))
 
@@ -39,6 +41,7 @@ beforeEach(() => {
   mockFile = null
   mockError = null
   mockLoading = false
+  mockActiveSessionId = 's1'
 })
 
 const GLOBAL_ENTRY: MemoryStackEntry = {
@@ -177,6 +180,42 @@ describe('MemoryPanel', () => {
     render(<MemoryPanel />)
     mockRequestMemoryRead.mockClear()
     fireEvent.click(screen.getByTestId('memory-refresh-btn'))
+    expect(mockRequestMemoryRead).toHaveBeenCalledOnce()
+  })
+
+  // #6996 review — CRITICAL regression guard: memory_read has no
+  // client-supplied sessionId (the server scopes it to the caller's active
+  // session cwd), so a switch to a different session must never leave the
+  // PREVIOUS session's stack on screen. switchSession() (store/connection.ts)
+  // resets memoryStackEntries/File/Error/Loading to null on every switch;
+  // this test proves the panel actually re-fetches for the new session
+  // *while it stays mounted* (no unmount/remount — the same MemoryPanel
+  // instance persists across the rerender, exactly as it would if the panel
+  // is open and the user clicks a different session tab) rather than relying
+  // on App.tsx's incidental unmount/remount around session switches.
+  it('re-fetches when the active session changes while the panel stays mounted, instead of showing stale entries', () => {
+    mockActiveSessionId = 's1'
+    mockEntries = [PROJECT_ENTRY]
+    const { rerender } = render(<MemoryPanel />)
+    expect(screen.getByText('/repo/CLAUDE.md')).toBeTruthy()
+    mockRequestMemoryRead.mockClear()
+
+    // Simulate switchSession('s2'): the store resets the memory-stack fields
+    // to null/false and flips activeSessionId — same component instance,
+    // no unmount.
+    mockActiveSessionId = 's2'
+    mockEntries = null
+    mockFile = null
+    mockError = null
+    mockLoading = false
+    rerender(<MemoryPanel />)
+
+    // The previous session's entry must be gone immediately (store already
+    // cleared it) ...
+    expect(screen.queryByText('/repo/CLAUDE.md')).toBeNull()
+    // ... and the panel must have fired a fresh request for the new session
+    // rather than sitting blank waiting for a mount effect that will never
+    // re-run.
     expect(mockRequestMemoryRead).toHaveBeenCalledOnce()
   })
 })

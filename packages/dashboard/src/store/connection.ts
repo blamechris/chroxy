@@ -2912,6 +2912,16 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   permissionAudit: null,
   permissionAuditLoading: false,
   permissionAuditError: false,
+  // #6996 review — mirror permissionAudit: memory_read is the same FLAT,
+  // per-session-cwd shape (no client-supplied sessionId), so a reconnect
+  // must not leave a stale memory stack from before the drop presented as
+  // current. viewingCachedSession/activeSessionId are preserved on
+  // disconnect, but the underlying server-side data can differ after a
+  // reconnect (e.g. server restart) — clear and let the panel re-fetch.
+  memoryStackEntries: null,
+  memoryStackFile: null,
+  memoryStackError: null,
+  memoryStackLoading: false,
       customAgents: [],
       checkpoints: [],
       _directoryListingCallback: null,
@@ -4447,6 +4457,17 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // user re-pulls on demand. The loading + error flags reset too so an
     // in-flight pull for the old session can't wedge the button.
     set({ permissionAudit: null, permissionAuditLoading: false, permissionAuditError: false });
+
+    // #6996 review — same FLAT, per-session-cwd shape as permissionAudit
+    // above (memory_read has no client-supplied sessionId; the server scopes
+    // the CLAUDE.md stack to the caller's active session cwd). Without this
+    // reset, MemoryPanel's `entries === null` mount-guard never re-fires
+    // across a switch, so the panel keeps rendering the PREVIOUS session's
+    // memory stack as though it were the new session's — the exact
+    // provenance failure this panel exists to prevent. Clear it here so the
+    // panel re-fetches for the new session; the loading + error flags reset
+    // too so an in-flight pull for the old session can't wedge the button.
+    set({ memoryStackEntries: null, memoryStackFile: null, memoryStackError: null, memoryStackLoading: false });
 
     // Optimistically switch to cached state + mark notifications for target
     // session as read. #4890 — pre-widget we filtered the target session's
