@@ -54,6 +54,30 @@ export declare const ServerCompactMetadataSchema: z.ZodObject<{
     postTokens: z.ZodNullable<z.ZodNumber>;
     durationMs: z.ZodNullable<z.ZodNumber>;
 }, z.core.$strip>;
+/**
+ * #6845 — structured payload for an `mcp_prompt_expansion` system event. When a
+ * user sends `/mcp__<server>__<prompt>`, the server intercepts it, calls the
+ * MCP server's `prompts/get`, and injects the returned SERVER-CONTROLLED
+ * messages as the user turn to the model — but the transcript only shows the
+ * raw slash command the user typed. This marker surfaces what was ACTUALLY sent
+ * so the transcript is honest, with explicit provenance (`server`/`prompt`) so
+ * the content is never mistaken for user-typed text (a trusted-but-verbose, or
+ * later-compromised, MCP server could inject surprising content).
+ *
+ * Carried on `ServerMessageSchema.mcpPromptExpansion` alongside
+ * `messageType === 'system'` and `subtype === 'mcp_prompt_expansion'` — the
+ * same optional-field-on-the-existing-`message`-envelope convention as
+ * `compactMetadata` (no new wire message type). `text` is the (bounded) injected
+ * content; `truncated` flags that the producer capped a larger expansion for
+ * display (the FULL text still reached the model). Name fields are length-capped
+ * and `text` bounded so a malformed producer can't flood the wire.
+ */
+export declare const ServerMcpPromptExpansionSchema: z.ZodObject<{
+    server: z.ZodString;
+    prompt: z.ZodString;
+    text: z.ZodString;
+    truncated: z.ZodBoolean;
+}, z.core.$strip>;
 export declare const ServerMessageSchema: z.ZodObject<{
     type: z.ZodLiteral<"message">;
     messageType: z.ZodString;
@@ -71,6 +95,12 @@ export declare const ServerMessageSchema: z.ZodObject<{
         preTokens: z.ZodNullable<z.ZodNumber>;
         postTokens: z.ZodNullable<z.ZodNumber>;
         durationMs: z.ZodNullable<z.ZodNumber>;
+    }, z.core.$strip>>;
+    mcpPromptExpansion: z.ZodOptional<z.ZodObject<{
+        server: z.ZodString;
+        prompt: z.ZodString;
+        text: z.ZodString;
+        truncated: z.ZodBoolean;
     }, z.core.$strip>>;
     attemptedResumeId: z.ZodOptional<z.ZodString>;
     stdout: z.ZodOptional<z.ZodString>;

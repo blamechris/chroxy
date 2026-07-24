@@ -88,6 +88,9 @@ export type {
   // #6768: structured compaction-boundary marker metadata attached to
   // system ChatMessages parsed from a compact_boundary SDK/CLI event.
   CompactBoundaryMeta,
+  // #6845: structured MCP-prompt expansion marker metadata attached to system
+  // ChatMessages parsed from an mcp_prompt_expansion event.
+  McpPromptExpansionMeta,
   SavedConnection,
   ContextUsage,
   // #6769: occupancy snapshot type (the context meter's only honest input).

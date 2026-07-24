@@ -277,6 +277,70 @@ describe('EventNormalizer', () => {
     })
   })
 
+  // ---- mcp_prompt_expansion marker bounding (#6845) ----
+  //
+  // The honesty marker for a server-controlled `/mcp__server__prompt` expansion
+  // injected as the user turn. Gated + re-bounded at the wire boundary exactly
+  // like compact_boundary above.
+  describe('mcp_prompt_expansion marker (#6845)', () => {
+    function expansionEvent(mcpPromptExpansion) {
+      return {
+        type: 'system',
+        subtype: 'mcp_prompt_expansion',
+        content: 'Expanded /mcp__stub__greet (server-controlled MCP prompt) →\nhi',
+        timestamp: Date.now(),
+        mcpPromptExpansion,
+      }
+    }
+
+    it('forwards a well-formed expansion with its subtype', () => {
+      const result = normalizer.normalize(
+        'message',
+        expansionEvent({ server: 'stub', prompt: 'greet', text: 'server text', truncated: false }),
+        makeCtx(),
+      )
+      const msg = result.messages[0].msg
+      assert.equal(msg.subtype, 'mcp_prompt_expansion')
+      assert.deepEqual(msg.mcpPromptExpansion, { server: 'stub', prompt: 'greet', text: 'server text', truncated: false })
+    })
+
+    it('re-bounds an over-cap text and flips truncated even if the producer said false', () => {
+      const huge = 'Z'.repeat(20_000)
+      const result = normalizer.normalize(
+        'message',
+        expansionEvent({ server: 'stub', prompt: 'greet', text: huge, truncated: false }),
+        makeCtx(),
+      )
+      const meta = result.messages[0].msg.mcpPromptExpansion
+      assert.ok(meta.text.length <= 8192, `text re-bounded to the 8192 wire cap (was ${meta.text.length})`)
+      assert.match(meta.text, /…\(truncated\)$/)
+      assert.equal(meta.truncated, true, 'wire-boundary truncation forces the flag on')
+    })
+
+    it('caps overlong server/prompt names and coerces non-string fields', () => {
+      const result = normalizer.normalize(
+        'message',
+        expansionEvent({ server: 'S'.repeat(400), prompt: 42, text: null, truncated: 'yes' }),
+        makeCtx(),
+      )
+      const meta = result.messages[0].msg.mcpPromptExpansion
+      assert.equal(meta.server.length, 256, 'server name capped at 256')
+      assert.equal(meta.prompt, '42', 'non-string prompt coerced to string')
+      assert.equal(meta.text, '', 'non-string text coerced to empty string')
+    })
+
+    it('does not attach the marker when the subtype/payload is absent', () => {
+      const result = normalizer.normalize(
+        'message',
+        { type: 'system', content: 'plain system event', timestamp: Date.now() },
+        makeCtx(),
+      )
+      const msg = result.messages[0].msg
+      assert.equal(msg.subtype, undefined)
+      assert.equal(msg.mcpPromptExpansion, undefined)
+    })
+  })
+
   // ---- EVENT_MAP: session_usage (#4072) ----
 
   describe('session_usage event', () => {

@@ -63,6 +63,23 @@ const MAX_TOOL_ROUNDS = 25
 // performance (don't re-realpath the same cwd on every file op).
 const CWD_CACHE_TTL_MS = 30_000
 
+// #6845: display cap for the server-controlled MCP-prompt expansion surfaced
+// in the transcript (the honesty marker). The FULL resolved text still goes to
+// the model as the user turn — only the copy shown in the transcript is capped
+// so a huge `prompts/get` response can't flood the chat. event-normalizer.js
+// re-bounds at the wire boundary and store-core re-bounds again (defense in
+// depth), mirroring the #6768 compact_boundary bounding chain.
+const MCP_PROMPT_EXPANSION_DISPLAY_CAP = 4000
+
+// Bound an MCP-prompt expansion to the display cap, appending a truncation
+// marker when it overflows. Returns the (possibly truncated) text plus a
+// `truncated` flag so the renderer can badge it.
+function boundMcpPromptExpansionText(text, cap = MCP_PROMPT_EXPANSION_DISPLAY_CAP) {
+  const s = typeof text === 'string' ? text : String(text ?? '')
+  if (s.length <= cap) return { text: s, truncated: false }
+  return { text: `${s.slice(0, cap)}\n…(truncated)`, truncated: true }
+}
+
 export class ClaudeByokSession extends BaseSession {
   // #5858: Claude-family flag — single source of truth for isClaudeProvider().
   // DockerByokSession (docker-byok) extends this and correctly inherits it.
@@ -670,6 +687,15 @@ export class ClaudeByokSession extends BaseSession {
         })
         return
       }
+      // #6845: honesty. The raw `/mcp__server__prompt` the user typed is NOT
+      // what the model receives — the SERVER-CONTROLLED expansion above is,
+      // injected as the user turn. Surface it in the transcript as a labeled
+      // system marker so the user can audit the actual injected content (a
+      // trusted-but-verbose, or later-compromised, MCP server could inject
+      // surprising text). Emitted before stream_start so it renders between the
+      // user's raw command echo and the assistant response. Never lets a marker
+      // failure break the turn — the message send is what matters.
+      this._emitMcpPromptExpansionMarker(mcpPromptMatch, promptText)
     }
 
     this._messageCounter += 1
@@ -2113,6 +2139,38 @@ export class ClaudeByokSession extends BaseSession {
     const text = this._extractPromptMessagesText(result)
     if (!text) throw new Error('prompt returned no injectable text content')
     return text
+  }
+
+  /**
+   * #6845: emit the honesty marker for an expanded MCP prompt. The expansion is
+   * SERVER-CONTROLLED (authored by the MCP server, not typed by the user) and
+   * lands in the user role, so the marker is explicitly provenance-labeled and
+   * carries the (bounded) injected text for audit. Structured on a `system`
+   * message with `subtype: 'mcp_prompt_expansion'` + a `mcpPromptExpansion`
+   * field — the same optional-field-on-an-existing-marker path #6768's
+   * compact_boundary uses, so no new wire type is introduced. `content` carries
+   * the same labeled+bounded text so generic renderers (mobile system bubble,
+   * the System tab) stay honest even without the dedicated marker component.
+   * A marker failure is logged and swallowed: surfacing the expansion must
+   * never break delivery of the actual user turn.
+   */
+  _emitMcpPromptExpansionMarker(match, expandedText) {
+    try {
+      const parsed = parseMcpToolName(match?.prefixedName) || {}
+      const server = typeof parsed.serverName === 'string' ? parsed.serverName : ''
+      const prompt = typeof parsed.toolName === 'string' ? parsed.toolName : ''
+      const { text, truncated } = boundMcpPromptExpansionText(expandedText)
+      const label = `Expanded /${match?.prefixedName ?? ''} (server-controlled MCP prompt)`
+      this.emit('message', {
+        type: 'system',
+        subtype: 'mcp_prompt_expansion',
+        content: `${label} →\n${text}`,
+        mcpPromptExpansion: { server, prompt, text, truncated },
+        timestamp: Date.now(),
+      })
+    } catch (err) {
+      log.warn(`failed to emit MCP prompt expansion marker: ${err?.message || String(err)}`)
+    }
   }
 
   /**

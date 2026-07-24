@@ -541,6 +541,93 @@ describe('ClaudeByokSession MCP prompts/resources (#6823)', () => {
     assert.ok(errors.some((e) => /server exploded/.test(e.message)), 'error surfaced to the client')
   })
 
+  // A stream mock that captures the last user turn sent to the model and ends
+  // the turn cleanly. Mirrors the shape the passing expansion test uses above.
+  function captureStreamMock(streamed) {
+    return {
+      messages: {
+        stream: ({ messages }) => {
+          streamed.push(messages[messages.length - 1])
+          return {
+            async *[Symbol.asyncIterator]() { yield { type: 'message_delta', delta: { stop_reason: 'end_turn' } } },
+            async finalMessage() { return { stop_reason: 'end_turn', content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 1, output_tokens: 1 } } },
+          }
+        },
+      },
+    }
+  }
+
+  it('sendMessage surfaces the expansion as a labeled server-controlled marker (#6845)', async () => {
+    const configPath = writeStubConfig({ prompts: PROMPTS })
+    const session = new ClaudeByokSession({ cwd: '/tmp', mcpConfigPath: configPath })
+    const streamed = []
+    session._client = captureStreamMock(streamed)
+    await session.start()
+    // Override getPrompt (keeping the real fleet's prompts list) so the
+    // expansion is deterministic, SERVER-CONTROLLED text distinct from the
+    // raw command the user typed.
+    const SERVER_TEXT = 'SERVER-AUTHORED CONTENT the user never typed'
+    session._mcpFleet.getPrompt = async () => ({ messages: [{ role: 'user', content: { type: 'text', text: SERVER_TEXT } }] })
+    // Record the ordered event stream so we can assert the marker lands BEFORE
+    // the assistant response starts streaming.
+    const order = []
+    const markers = []
+    session.on('message', (m) => { order.push(`message:${m.type}:${m.subtype || ''}`); if (m.subtype === 'mcp_prompt_expansion') markers.push(m) })
+    session.on('stream_start', () => order.push('stream_start'))
+
+    await session.sendMessage('/mcp__stub__greet')
+
+    assert.equal(markers.length, 1, 'exactly one expansion marker emitted')
+    const marker = markers[0]
+    assert.equal(marker.type, 'system')
+    assert.equal(marker.subtype, 'mcp_prompt_expansion')
+    // Provenance: names the source server + prompt.
+    assert.deepEqual(
+      { server: marker.mcpPromptExpansion.server, prompt: marker.mcpPromptExpansion.prompt },
+      { server: 'stub', prompt: 'greet' },
+    )
+    // The marker carries the ACTUAL server-controlled text, not the raw command.
+    assert.match(marker.mcpPromptExpansion.text, /SERVER-AUTHORED CONTENT/)
+    assert.equal(marker.mcpPromptExpansion.truncated, false)
+    // content is honest + provenance-labeled for generic (non-marker) renderers.
+    assert.match(marker.content, /server-controlled MCP prompt/)
+    assert.match(marker.content, /SERVER-AUTHORED CONTENT/)
+    assert.doesNotMatch(marker.content, /^\/mcp__stub__greet$/, 'not merely the raw command')
+    // Ordering: marker precedes the assistant stream.
+    const markerIdx = order.indexOf('message:system:mcp_prompt_expansion')
+    const streamIdx = order.indexOf('stream_start')
+    assert.ok(markerIdx !== -1 && streamIdx !== -1 && markerIdx < streamIdx, 'marker emitted before stream_start')
+    // The FULL text (not the display copy) reached the model as the user turn.
+    assert.equal(streamed[0].role, 'user')
+    assert.match(streamed[0].content, /SERVER-AUTHORED CONTENT/)
+    await session.destroy()
+  })
+
+  it('sendMessage bounds a huge expansion in the marker but sends the full text to the model (#6845)', async () => {
+    const configPath = writeStubConfig({ prompts: PROMPTS })
+    const session = new ClaudeByokSession({ cwd: '/tmp', mcpConfigPath: configPath })
+    const streamed = []
+    session._client = captureStreamMock(streamed)
+    await session.start()
+    const HUGE = 'X'.repeat(9000)
+    session._mcpFleet.getPrompt = async () => ({ messages: [{ role: 'user', content: HUGE }] })
+    const markers = []
+    session.on('message', (m) => { if (m.subtype === 'mcp_prompt_expansion') markers.push(m) })
+
+    await session.sendMessage('/mcp__stub__greet')
+
+    assert.equal(markers.length, 1)
+    const marker = markers[0]
+    assert.equal(marker.mcpPromptExpansion.truncated, true, 'display copy flagged truncated')
+    // Display copy is bounded (cap + short truncation marker), far below the raw 9000.
+    assert.ok(marker.mcpPromptExpansion.text.length < 4100, `marker text bounded (was ${marker.mcpPromptExpansion.text.length})`)
+    assert.match(marker.mcpPromptExpansion.text, /…\(truncated\)$/)
+    // The model still received the FULL 9000-char expansion — bounding is
+    // display-only and must never alter what was actually sent.
+    assert.equal(streamed[0].content.length, 9000)
+    await session.destroy()
+  })
+
   it('_extractPromptMessagesText flattens the MCP prompts/get content shapes', () => {
     const session = new ClaudeByokSession({ cwd: '/tmp' })
     const text = session._extractPromptMessagesText({

@@ -118,6 +118,37 @@ function parseCompactMetadata(value: unknown): ChatMessage['compactMetadata'] {
   }
 }
 
+// #6845: wire-boundary caps for the MCP-prompt expansion marker — a third layer
+// behind byok-session's display cap and event-normalizer's re-bound. Defends the
+// store against a wire-bypassing path (a corrupted localStorage replay blob) so
+// a renderer never receives an unbounded string.
+const MCP_PROMPT_EXPANSION_NAME_CAP = 256
+const MCP_PROMPT_EXPANSION_TEXT_CAP = 8192
+
+/**
+ * #6845 — validate + coerce the wire `message.mcpPromptExpansion` object into
+ * the store's `McpPromptExpansionMeta` shape. Requires a string `text` (the
+ * marker is meaningless without the injected content); `server`/`prompt` coerce
+ * to strings and cap at 256; `text` caps at 8192; `truncated` stays true if the
+ * producer flagged it OR this re-bound truncated. Returns `undefined` for a
+ * malformed payload rather than attaching a half-formed object that would crash
+ * a renderer expecting the full shape.
+ */
+function parseMcpPromptExpansion(value: unknown): ChatMessage['mcpPromptExpansion'] {
+  if (!value || typeof value !== 'object') return undefined
+  const obj = value as Record<string, unknown>
+  if (typeof obj.text !== 'string') return undefined
+  const asString = (v: unknown): string => (typeof v === 'string' ? v : '')
+  const cap = (s: string, n: number): string => (s.length > n ? s.slice(0, n) : s)
+  const overflow = obj.text.length > MCP_PROMPT_EXPANSION_TEXT_CAP
+  return {
+    server: cap(asString(obj.server), MCP_PROMPT_EXPANSION_NAME_CAP),
+    prompt: cap(asString(obj.prompt), MCP_PROMPT_EXPANSION_NAME_CAP),
+    text: overflow ? `${cap(obj.text, MCP_PROMPT_EXPANSION_TEXT_CAP - 14)}\n…(truncated)` : obj.text,
+    truncated: obj.truncated === true || overflow,
+  }
+}
+
 export function handleMessage(
   msg: Record<string, unknown>,
   _activeSessionId: string | null,
@@ -225,6 +256,18 @@ export function handleMessage(
       ? (() => {
           const meta = parseCompactMetadata(msg.compactMetadata)
           return meta ? { compactMetadata: meta } : {}
+        })()
+      : {}),
+    // #6845: preserve the MCP-prompt expansion marker so renderers can show an
+    // "expanded from MCP prompt" block with the actual server-controlled text
+    // injected as the user turn. Gated on `msgType === 'system'` + the
+    // `mcp_prompt_expansion` subtype (same shape as the compact_boundary gate
+    // above) so a buggy producer can't sneak `mcpPromptExpansion` onto an
+    // unrelated message type.
+    ...(msgType === 'system' && msg.subtype === 'mcp_prompt_expansion'
+      ? (() => {
+          const meta = parseMcpPromptExpansion(msg.mcpPromptExpansion)
+          return meta ? { mcpPromptExpansion: meta } : {}
         })()
       : {}),
   }

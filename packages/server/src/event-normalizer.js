@@ -90,6 +90,41 @@ function boundedCompactMetadata(meta) {
   }
 }
 
+// #6845: wire-boundary caps for the MCP-prompt expansion marker. server/prompt
+// mirror ServerMcpPromptExpansionSchema's 256-char names; `text` mirrors its
+// 8192 ceiling. byok-session already caps the display copy (4000 + a
+// truncation marker); this is the defense-in-depth re-bound at the serialization
+// choke point (same posture as boundedCompactMetadata) so a wire-bypassing or
+// malformed producer can't push an unbounded payload onto clients.
+const MCP_PROMPT_EXPANSION_NAME_CAP = 256
+const MCP_PROMPT_EXPANSION_TEXT_CAP = 8192
+
+/**
+ * #6845 — coerce+bound the `mcpPromptExpansion` marker fields before forwarding
+ * onto the wire. `server`/`prompt` coerce to strings and cap at 256; `text`
+ * coerces to a string and caps at 8192 (appending an explicit truncation marker
+ * when it overflows so the client never silently drops content); `truncated`
+ * stays true if EITHER the producer flagged it or this re-bound truncated.
+ *
+ * @param {{server?: *, prompt?: *, text?: *, truncated?: *}} meta
+ * @returns {{server: string, prompt: string, text: string, truncated: boolean}}
+ */
+function boundedMcpPromptExpansion(meta) {
+  const asString = (v) => (typeof v === 'string' ? v : String(v ?? ''))
+  const cap = (s, n) => (s.length > n ? s.slice(0, n) : s)
+  const rawText = asString(meta?.text)
+  const overflow = rawText.length > MCP_PROMPT_EXPANSION_TEXT_CAP
+  const text = overflow
+    ? `${cap(rawText, MCP_PROMPT_EXPANSION_TEXT_CAP - 14)}\n…(truncated)`
+    : rawText
+  return {
+    server: cap(asString(meta?.server), MCP_PROMPT_EXPANSION_NAME_CAP),
+    prompt: cap(asString(meta?.prompt), MCP_PROMPT_EXPANSION_NAME_CAP),
+    text,
+    truncated: meta?.truncated === true || overflow,
+  }
+}
+
 /**
  * Declarative event-to-WS-message mapping.
  *
@@ -309,6 +344,15 @@ Object.assign(EVENT_MAP, {
     if (data.type === 'system' && data.subtype === 'compact_boundary' && data.compactMetadata) {
       msg.subtype = data.subtype
       msg.compactMetadata = boundedCompactMetadata(data.compactMetadata)
+    }
+    // #6845: forward the MCP-prompt expansion marker (the honesty surface for a
+    // server-controlled `/mcp__server__prompt` expansion injected as the user
+    // turn). Gated identically to compact_boundary — `messageType: 'system'` +
+    // the `mcp_prompt_expansion` subtype + a present payload — and re-bounded
+    // here so a malformed producer can't reach the wire unbounded.
+    if (data.type === 'system' && data.subtype === 'mcp_prompt_expansion' && data.mcpPromptExpansion) {
+      msg.subtype = data.subtype
+      msg.mcpPromptExpansion = boundedMcpPromptExpansion(data.mcpPromptExpansion)
     }
     return { messages: [{ msg }] }
   },

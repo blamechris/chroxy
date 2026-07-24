@@ -35,6 +35,9 @@ export type {
   // #6768: re-export the compaction-boundary marker metadata so the
   // CompactionMarker component can type-check its props the same way.
   CompactBoundaryMeta,
+  // #6845: re-export the MCP-prompt expansion marker metadata so the
+  // McpPromptExpansionMarker component can type-check its props the same way.
+  McpPromptExpansionMeta,
   SavedConnection,
   ContextUsage,
   // #6769: occupancy snapshot type (the context meter's only honest input).
