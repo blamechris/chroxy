@@ -1200,6 +1200,11 @@ async function handleAddMcpServer(ws, client, msg, ctx) {
     sessionLogger(sessionId).info(
       `MCP server '${name}' added in ${scope} scope by ${client.id} on session ${sessionId} (status=${result.status})`,
     )
+    // #7002: a group/world-readable MCP config that just received env/headers.
+    // Operator-visible warning only — the message names the file and its mode and
+    // never echoes a secret value, and the add itself succeeded, so this must not
+    // turn into an error frame.
+    if (result.warning) sessionLogger(sessionId).warn(`MCP config permissions: ${result.warning}`)
   } catch (err) {
     sendError(ws, requestId, 'MCP_SERVER_ADD_NOT_APPLIED',
       `Failed to add MCP server '${name}': ${err?.message || String(err)}`, undefined, ctx)

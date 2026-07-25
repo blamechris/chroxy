@@ -23,9 +23,10 @@
  */
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs'
+import { chmodSync, mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { addLogListener, removeLogListener } from '../src/logger.js'
 import {
   TRUST_KEY_VERSION,
   isTrusted,
@@ -51,6 +52,10 @@ const INJECTED_ENV = {
 
 let tmpDir
 let storePath
+// Registered by the #7002 surfacing suite; declared here so the top-level
+// afterEach can guarantee it is detached even if a test throws mid-way (a leaked
+// log listener would follow the process into every later test file's output).
+let logListener = null
 
 beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), 'chroxy-mcp-trust-7001-'))
@@ -58,6 +63,10 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  if (logListener) {
+    removeLogListener(logListener)
+    logListener = null
+  }
   rmSync(tmpDir, { recursive: true, force: true })
 })
 
@@ -449,5 +458,103 @@ describe('#7001 deny-before-write (ClaudeByokSession.addMcpServer)', () => {
     assert.equal(calls[0].command, 'node')
     assert.deepEqual(calls[0].args, ['s.js'])
     assert.equal('bogusKey' in calls[0], false)
+  })
+})
+
+/**
+ * #7002 — the mode/secrets warning must be SURFACED, not merely computed.
+ *
+ * `addMcpServerToConfig` returning `result.warning` is only half the fix; the
+ * session has to (a) log it for the operator and (b) pass it back on its OWN
+ * result, because that field is the API a client-visible surface will read
+ * (#7039). Both directions are asserted here — present when the write reports a
+ * warning, ABSENT when it does not — so neither the pass-through nor the
+ * condition guarding it can be deleted without a failure.
+ */
+describe('#7002 ClaudeByokSession.addMcpServer surfaces the mode/secrets warning', () => {
+  let configPath
+  let prevTrustPath
+  let logged
+
+  beforeEach(() => {
+    configPath = join(tmpDir, 'claude.json')
+    prevTrustPath = process.env.CHROXY_MCP_TRUST_PATH
+    process.env.CHROXY_MCP_TRUST_PATH = storePath
+    logged = []
+    logListener = (entry) => logged.push(entry)
+    addLogListener(logListener)
+  })
+
+  afterEach(() => {
+    if (logListener) removeLogListener(logListener)
+    logListener = null
+    if (prevTrustPath === undefined) delete process.env.CHROXY_MCP_TRUST_PATH
+    else process.env.CHROXY_MCP_TRUST_PATH = prevTrustPath
+  })
+
+  // The mode has to be pinned with an explicit chmod: `writeFileSync`'s default is
+  // `0666 & ~umask`, so a host with a tight umask would otherwise silently make
+  // the "group-readable" fixture owner-only and the warning would never fire.
+  function seedConfig(mode) {
+    writeFileSync(configPath, JSON.stringify({ mcpServers: {} }, null, 2))
+    chmodSync(configPath, mode)
+  }
+
+  function makeSession() {
+    const session = new ClaudeByokSession({ cwd: tmpDir, mcpConfigPath: configPath })
+    session._permissions = { async requestMcpTrust() { return true } }
+    session._mcpFleet = null
+    session._emitMcpServers = () => {}
+    return session
+  }
+
+  const warnLines = () => logged
+    .filter((e) => e.level === 'warn' && e.component === 'byok-session')
+    .map((e) => e.message)
+
+  it('returns result.warning when the config is group/world-readable and the entry carries env', async () => {
+    seedConfig(0o644)
+    const session = makeSession()
+
+    const res = await session.addMcpServer('srv', { command: 'node', env: { API_TOKEN: 'sk-secret' } })
+
+    assert.equal(res.ok, true, res.error)
+    assert.ok(res.warning, 'the warning must reach the caller — #7039 builds a client-visible field on this field')
+    assert.match(res.warning, /644/, 'it names the octal mode the operator has to fix')
+    assert.match(res.warning, /env/, 'and the secret-bearing field that triggered it')
+    assert.ok(!res.warning.includes('sk-secret'), 'it must never echo the secret value')
+  })
+
+  it('logs the warning once for the operator, naming the octal mode', async () => {
+    seedConfig(0o644)
+    const session = makeSession()
+
+    await session.addMcpServer('srv', { command: 'node', env: { API_TOKEN: 'sk-secret' } })
+
+    const warned = warnLines().filter((m) => /644/.test(m))
+    assert.equal(warned.length, 1, `exactly one operator warning naming the mode, got: ${JSON.stringify(warnLines())}`)
+    assert.match(warned[0], /BYOK MCP/, 'tagged so it is greppable in the daemon log')
+    assert.ok(!warned[0].includes('sk-secret'), 'the daemon log must not gain the secret')
+  })
+
+  it('omits result.warning — and logs no warning — for an owner-only config', async () => {
+    seedConfig(0o600)
+    const session = makeSession()
+
+    const res = await session.addMcpServer('srv', { command: 'node', env: { API_TOKEN: 'sk-secret' } })
+
+    assert.equal(res.ok, true, res.error)
+    assert.equal(res.warning, undefined, 'a 0600 config is not something to nag about')
+    assert.deepEqual(warnLines().filter((m) => /mode \d{3}/.test(m)), [])
+  })
+
+  it('omits result.warning when the entry carries no secret-bearing field', async () => {
+    seedConfig(0o644)
+    const session = makeSession()
+
+    const res = await session.addMcpServer('srv', { command: 'node', args: ['s.js'] })
+
+    assert.equal(res.ok, true, res.error)
+    assert.equal(res.warning, undefined, 'a loose mode alone is the user’s own choice — we only speak up when WE added secrets')
   })
 })
