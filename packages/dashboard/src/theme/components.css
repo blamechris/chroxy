@@ -851,6 +851,16 @@ a.dev-preview-chip__link:focus-visible {
   color: var(--text-primary);
 }
 
+/* These buttons are reached by Tab (and are the only way to trigger View), so
+   they need a visible focus ring, not just a hover state — same
+   `--border-focus` outline the sidebar rows and session tabs use. */
+.conversation-search-result-action:focus-visible {
+  border-color: var(--border-focus);
+  color: var(--text-primary);
+  outline: 2px solid var(--border-focus);
+  outline-offset: 1px;
+}
+
 .sidebar-repo {
   margin-bottom: 2px;
 }
