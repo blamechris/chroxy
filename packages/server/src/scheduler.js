@@ -44,11 +44,10 @@
 //    `deny` through the same door a human clicks (`session.respondToPermission`,
 //    mirroring orchestration/permission-gate.js), interrupts the turn, and
 //    records the run as a VISIBLE failure. The prompt is answered at once (never
-//    left to sit out a permission timeout) and nothing is ever auto-approved.
-//    Note the interrupted turn's PROMISE may still not settle until the run
-//    timeout — TurnDriver does not treat `stopped` as terminal (#7009) — so the
-//    concurrency slot can be held for that window. The outcome is decided
-//    immediately either way; see _handleSessionEvent.
+//    left to sit out a permission timeout), the interrupted turn settles at once
+//    (TurnDriver treats the provider's `stopped` as terminal → TURN_STOPPED,
+//    #7009) so the concurrency slot frees immediately, and nothing is ever
+//    auto-approved. See _handleSessionEvent.
 // 4. SUPPORTED PROVIDERS ONLY — the engine REFUSES what it cannot govern. The
 //    deny mechanism in (3) rides `session_event: permission_request` +
 //    `session.respondToPermission`, which exist ONLY on providers whose
@@ -913,16 +912,13 @@ export class SchedulerEngine extends EventEmitter {
    * immediately (never left to sit out a permission timeout) and the run's outcome
    * is decided immediately (a visible failure, never an auto-approval).
    *
-   * CAVEAT on how fast the SLOT frees (#7009): deciding the outcome is not the
-   * same as settling the driving promise. TurnDriver only treats `result` /
-   * `error` / `session_destroyed` as terminal for a live turn, while SdkSession's
-   * interrupt path emits `stopped` (sdk-session.js ~1204, #4881) — which
-   * TurnDriver ignores outside its post-timeout drain. So `driveTurn` can stay
-   * pending until `runTimeoutMs` even though we already know the answer, holding
-   * the concurrency slot. The recorded outcome is unaffected (blocked ⇒ failure,
-   * never success); it is a liveness cost only. Fixing it means making `stopped`
-   * terminal in TurnDriver, which touches the shared orchestration harness and so
-   * is tracked separately as #7009 rather than done here.
+   * The SLOT frees immediately too (#7009): SdkSession's interrupt path emits
+   * `stopped` rather than a result/error (sdk-session.js, #4881), and TurnDriver
+   * treats that as terminal → `driveTurn` rejects TURN_STOPPED right away instead
+   * of sitting out `runTimeoutMs`. The recorded outcome does not depend on which
+   * way the turn settled: `runState.blocked` is already set, so _runViaSessionManager
+   * reports the blocked failure whether the promise rejects or (on a provider that
+   * lets the turn finish with the tool call refused) resolves. Never `success`.
    */
   _handleSessionEvent({ sessionId, event, data } = {}) {
     if (event !== 'permission_request') return
