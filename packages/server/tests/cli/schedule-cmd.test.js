@@ -7,8 +7,9 @@
  */
 import { describe, it, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { join } from 'path'
+import { tmpdir } from 'os'
 import { runCli, makeTempHome } from './__helpers/spawn-cli.js'
 
 /** Write `~/.chroxy/config.json` with the given `provider` into a temp HOME. */
@@ -146,6 +147,50 @@ describe('chroxy schedule — CLI wiring (#6868)', () => {
         cleanup()
       }
     })
+  })
+
+  // #7015 — `chroxy schedule` must read/write the registry the RUNNING daemon
+  // reads. That path is home-rooted at every hop: server-cli.js constructs its
+  // SessionManager with no stateFilePath, so the manager falls back to
+  // ~/.chroxy/session-state.json and derives ~/.chroxy/scheduled-tasks.json
+  // from it. Neither hop consults CHROXY_CONFIG_DIR, even though other
+  // subsystems (models.js, doctor.js, connection-info.js) do. If this CLI
+  // followed the env var instead, `create` would report "Created scheduled
+  // task" into a file the scheduler never opens and `list` would come back
+  // empty — a task that silently never fires. Point CHROXY_CONFIG_DIR at a
+  // DIFFERENT directory and prove the registry stays where the daemon looks.
+  it('keeps the registry under $HOME/.chroxy when CHROXY_CONFIG_DIR points elsewhere', async () => {
+    const { home, cleanup } = makeTempHome()
+    const elsewhere = mkdtempSync(join(tmpdir(), 'chroxy-cfgdir-'))
+    try {
+      const created = await runCli(
+        ['schedule', 'create', '--prompt', 'x', '--cron', '0 9 * * *', '--name', 'EnvProbe'],
+        { home, env: { CHROXY_CONFIG_DIR: elsewhere } },
+      )
+      assert.equal(created.code, 0, `stderr: ${created.stderr}`)
+
+      assert.ok(
+        existsSync(join(home, '.chroxy', 'scheduled-tasks.json')),
+        'registry must land beside the session-state file the daemon actually loads',
+      )
+      assert.ok(
+        !existsSync(join(elsewhere, 'scheduled-tasks.json')),
+        'registry must NOT follow CHROXY_CONFIG_DIR — the daemon scheduler never reads it there',
+      )
+
+      // Same resolution on the read side, so create and list can't disagree.
+      const listed = await runCli(
+        ['schedule', 'list', '--json'],
+        { home, env: { CHROXY_CONFIG_DIR: elsewhere } },
+      )
+      assert.equal(listed.code, 0, `stderr: ${listed.stderr}`)
+      const { tasks } = parseJsonStdout(listed.stdout)
+      assert.equal(tasks.length, 1, 'list must find the task create just wrote')
+      assert.equal(tasks[0].name, 'EnvProbe')
+    } finally {
+      rmSync(elsewhere, { recursive: true, force: true })
+      cleanup()
+    }
   })
 
   it('pause/resume/edit/delete on an unknown id exit non-zero with a clear message', async () => {

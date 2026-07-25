@@ -59,10 +59,49 @@ function readConfigSoft(configPath) {
   }
 }
 
-/** The registry file this daemon would load — a sibling of session-state.json. */
+/**
+ * The registry file THIS DAEMON would load — a sibling of session-state.json.
+ *
+ * Deliberately rooted at `homedir()/.chroxy` (shared.js's `CONFIG_DIR`) and
+ * deliberately NOT at `$CHROXY_CONFIG_DIR`, because the daemon's own registry
+ * path is home-rooted at every hop:
+ *
+ *   1. `server-cli.js` constructs its `SessionManager` withOUT a
+ *      `stateFilePath` (the string does not appear in that file at all), so the
+ *      manager falls back to `session-manager.js`'s `DEFAULT_STATE_FILE` =
+ *      `join(homedir(), '.chroxy', 'session-state.json')`.
+ *   2. `session-manager.js` then derives `this.scheduledTaskStore` from that
+ *      path via `defaultScheduledTasksPath()` — i.e. the live scheduler
+ *      (#6865) reads `~/.chroxy/scheduled-tasks.json`.
+ *
+ * Neither hop consults `CHROXY_CONFIG_DIR`. Plenty of OTHER subsystems do
+ * (models.js, connection-info.js, doctor.js, device-preferences.js, …), so the
+ * convention genuinely is inconsistent — that split is tracked in #7052, and
+ * fixing it means moving the WRITERS, not just this reader. Honouring the env var *here*
+ * would point this CLI at a file the running scheduler never opens, and
+ * `schedule create` would print "Created scheduled task …" for a task that can
+ * never fire while `schedule list` showed an empty registry. That is precisely
+ * the report-success-while-silently-wrong failure this module's doc block
+ * exists to prevent, so matching the daemon beats matching the convention.
+ *
+ * The same reasoning applies to `CONFIG_FILE` below: `server-cli-child.js`
+ * reads `join(homedir(), '.chroxy', 'config.json')`, so reading config from the
+ * home-rooted path is what makes `config.provider` / `features.scheduler` here
+ * agree with what the daemon resolved.
+ *
+ * Pinned from both sides by tests: a spawn test asserts the registry does NOT
+ * follow `CHROXY_CONFIG_DIR` (tests/cli/schedule-cmd.test.js), and a drift
+ * guard asserts the daemon-side path this mirrors is still home-rooted
+ * (tests/schedule-cli.test.js). If the session-state family is ever migrated
+ * onto `CHROXY_CONFIG_DIR` (#7052), the drift guard goes red and this resolver
+ * must move with it.
+ */
+export function defaultScheduleRegistryPath() {
+  return defaultScheduledTasksPath(join(CONFIG_DIR, 'session-state.json'))
+}
+
 function getDefaultStore() {
-  const stateFilePath = join(CONFIG_DIR, 'session-state.json')
-  const store = new ScheduledTaskStore({ filePath: defaultScheduledTasksPath(stateFilePath) })
+  const store = new ScheduledTaskStore({ filePath: defaultScheduleRegistryPath() })
   store.load()
   return store
 }
@@ -161,7 +200,17 @@ function describeLastRun(lastRun) {
 
 // -- input parsing ---------------------------------------------------------
 
-/** Parse `--at` into epoch-ms: bare digits are epoch-ms, else Date.parse (ISO-8601). */
+/**
+ * Parse `--at` into epoch-ms: bare digits are epoch-ms, else Date.parse (ISO-8601).
+ *
+ * Timezone handling is `Date.parse`'s, unchanged and on purpose: a date-time
+ * string with no offset (`2026-08-01T09:00:00`) is interpreted in the HOST's
+ * local timezone, while everything this CLI prints is UTC (`formatEpoch`).
+ * Re-interpreting an offset-less string as UTC would silently move every
+ * already-scripted `--at` invocation by the operator's UTC offset, so the fix
+ * for the mismatch is to make the hint and the `--at` help text say which is
+ * which — not to change what a given string means. See #7015.
+ */
 function parseAtValue(raw) {
   if (typeof raw !== 'string' || raw.trim().length === 0) {
     return { error: '--at requires a value' }
@@ -177,7 +226,9 @@ function parseAtValue(raw) {
   if (Number.isNaN(parsed)) {
     return {
       error: `--at '${raw}' could not be parsed — use an ISO-8601 timestamp `
-        + '(e.g. 2026-08-01T09:00:00) or epoch milliseconds',
+        + '(e.g. 2026-08-01T09:00:00Z) or epoch milliseconds. Times are displayed in UTC; '
+        + 'a timestamp with no timezone is read as LOCAL time, so add a trailing Z '
+        + '(or a ±hh:mm offset) to say exactly which instant you mean',
     }
   }
   return { at: parsed }
@@ -604,7 +655,7 @@ export function registerScheduleCommands(program) {
     .description('Create a scheduled task')
     .requiredOption('-p, --prompt <text>', 'Instructions the scheduled run executes')
     .option('-n, --name <name>', 'Optional human-readable label')
-    .option('--at <when>', 'One-time cadence: ISO-8601 timestamp or epoch-ms (mutually exclusive with --cron)')
+    .option('--at <when>', 'One-time cadence: ISO-8601 timestamp (e.g. 2026-08-01T09:00:00Z — no timezone means LOCAL time; times are displayed in UTC) or epoch-ms (mutually exclusive with --cron)')
     .option('--cron <expression>', '5-field crontab expression, e.g. "0 9 * * *" (mutually exclusive with --at)')
     .option('--provider <name>', 'Target provider (default: the daemon default provider)')
     .option('--model <name>', 'Target model')
@@ -640,7 +691,7 @@ export function registerScheduleCommands(program) {
     .description('Edit a scheduled task (id or unique id-prefix); pass an empty string to clear an optional field')
     .option('-p, --prompt <text>', 'Replace the prompt')
     .option('-n, --name <name>', 'Replace the label')
-    .option('--at <when>', 'Replace the cadence with a one-time run (mutually exclusive with --cron)')
+    .option('--at <when>', 'Replace the cadence with a one-time run: ISO-8601 timestamp (add a trailing Z for UTC — no timezone means LOCAL time) or epoch-ms (mutually exclusive with --cron)')
     .option('--cron <expression>', 'Replace the cadence with a recurring cron expression (mutually exclusive with --at)')
     .option('--provider <name>', 'Replace the target provider')
     .option('--model <name>', 'Replace the target model')

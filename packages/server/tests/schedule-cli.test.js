@@ -7,10 +7,11 @@
 // re-implemented fake.
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync } from 'fs'
+import { mkdtempSync, readFileSync } from 'fs'
 import { join } from 'path'
-import { tmpdir } from 'os'
-import { ScheduledTaskStore } from '../src/scheduled-task-store.js'
+import { fileURLToPath } from 'url'
+import { tmpdir, homedir } from 'os'
+import { ScheduledTaskStore, defaultScheduledTasksPath } from '../src/scheduled-task-store.js'
 import {
   runScheduleCreate,
   runScheduleList,
@@ -19,6 +20,7 @@ import {
   runScheduleResume,
   runScheduleDelete,
   runScheduleLastRun,
+  defaultScheduleRegistryPath,
 } from '../src/cli/schedule-cmd.js'
 
 const NOW = 1_800_000_000_000 // fixed clock so nextRun/formatted timestamps are deterministic
@@ -96,6 +98,27 @@ describe('chroxy schedule create (#6868)', () => {
     assert.equal(res.created, false)
     assert.equal(res.error, 'invalid-cadence')
     assert.equal(store.list().length, 0)
+  })
+
+  // #7015 — the invalid-date hint has to be copy-pasteable without changing
+  // meaning. This CLI renders every timestamp in UTC (formatEpoch), but
+  // Date.parse reads an offset-less date-time as LOCAL time, so suggesting
+  // "2026-08-01T09:00:00" told the operator to write something that lands at a
+  // different instant than the one they then see echoed back. The parse
+  // behaviour is deliberately unchanged (that would move existing scripted
+  // invocations); the hint has to disclose it instead.
+  it('the unparseable --at hint carries an explicit timezone and names the local/UTC split', () => {
+    const store = makeStore()
+    const w = cap()
+    const res = runScheduleCreate({ prompt: 'bad', at: 'not-a-date' }, baseDeps(store, w.write))
+    assert.equal(res.created, false)
+    assert.match(res.message, /2026-08-01T09:00:00Z/, 'the suggested example must carry an explicit zone')
+    assert.match(res.message, /UTC/, 'must say times are displayed in UTC')
+    assert.match(res.message, /local time/i, 'must say an offset-less value is read as local time')
+    // Guard the regression directly: a bare, zone-less example must not come back.
+    assert.doesNotMatch(res.message, /2026-08-01T09:00:00(?![Z+])/)
+    // The operator sees the same hint on stdout, not just in the return value.
+    assert.match(w.text(), /2026-08-01T09:00:00Z/)
   })
 
   it('requires exactly one of --at / --cron', () => {
@@ -550,5 +573,57 @@ describe('chroxy schedule — id / id-prefix resolution (#6868)', () => {
     const res = runScheduleLastRun(created.task.id.slice(0, 12), {}, baseDeps(store, cap().write))
     assert.equal(res.found, true)
     assert.equal(res.task.id, created.task.id)
+  })
+})
+
+// #7015 — the registry file this CLI touches must be the one the RUNNING daemon
+// reads. `getDefaultStore()` was flagged in review for not honouring
+// `CHROXY_CONFIG_DIR` "like the rest of the server"; the daemon's registry path
+// is in fact home-rooted at every hop, so following the env var here would aim
+// the CLI at a file the scheduler never opens — `create` would report success
+// for a task that can never fire. These tests pin the agreement AND the premise
+// it rests on: if the session-state family is ever migrated onto
+// `CHROXY_CONFIG_DIR`, the premise checks fail loudly here rather than letting
+// the CLI silently desync. The behavioural half (registry does not follow the
+// env var end-to-end) lives in tests/cli/schedule-cmd.test.js.
+describe('chroxy schedule — registry path agrees with the daemon, not with CHROXY_CONFIG_DIR (#7015)', () => {
+  const srcDir = fileURLToPath(new URL('../src/', import.meta.url))
+  const readSrc = (rel) => readFileSync(join(srcDir, rel), 'utf-8')
+
+  it('resolves to the daemon-derived, home-rooted sibling of session-state.json', () => {
+    assert.equal(
+      defaultScheduleRegistryPath(),
+      defaultScheduledTasksPath(join(homedir(), '.chroxy', 'session-state.json')),
+    )
+  })
+
+  it('premise 1: server-cli.js passes no stateFilePath, so SessionManager falls back to its default', () => {
+    assert.ok(
+      !readSrc('server-cli.js').includes('stateFilePath'),
+      'server-cli.js now sets stateFilePath — re-derive defaultScheduleRegistryPath() from whatever it passes',
+    )
+  })
+
+  it('premise 2: SessionManager\'s default state file is home-rooted, ignoring CHROXY_CONFIG_DIR', () => {
+    const sm = readSrc('session-manager.js')
+    assert.match(
+      sm,
+      /const DEFAULT_STATE_FILE = join\(homedir\(\), '\.chroxy', 'session-state\.json'\)/,
+      'DEFAULT_STATE_FILE moved or changed shape — defaultScheduleRegistryPath() must follow it',
+    )
+    assert.doesNotMatch(
+      sm,
+      /DEFAULT_STATE_FILE\s*=[^\n]*CHROXY_CONFIG_DIR/,
+      'DEFAULT_STATE_FILE now honours CHROXY_CONFIG_DIR — schedule-cmd.js must honour it too, or the CLI '
+        + 'and the daemon scheduler will read different registries',
+    )
+  })
+
+  it('premise 3: SessionManager derives its registry from that state file', () => {
+    assert.match(
+      readSrc('session-manager.js'),
+      /new ScheduledTaskStore\(\{ filePath: defaultScheduledTasksPath\(this\._stateFilePath\) \}\)/,
+      'the daemon no longer derives its registry from the session-state path — re-check the CLI resolver',
+    )
   })
 })
