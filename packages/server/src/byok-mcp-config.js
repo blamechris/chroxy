@@ -4,6 +4,13 @@
  * Foundation only for #4048/#4076: parse Claude-style mcpServers blocks and
  * expose safe read-only metadata. This module deliberately does not spawn MCP
  * children or wire tools.
+ *
+ * NOT byok-only despite the filename: `resolveClaudeConfigWritePath` +
+ * `writeClaudeConfigAtomic` are the SINGLE writer for `~/.claude.json` across the
+ * whole server, and `claude-tui/pty-driver.js`'s `ensureCwdTrusted` goes through
+ * them too (#7046). A second hand-rolled `writeFileSync(tmp)` → `renameSync(tmp,
+ * config)` over this file is how the symlink-destroying / mode-widening defect
+ * came to exist in two places at once — add callers here, not copies.
  */
 
 import {
@@ -1043,6 +1050,12 @@ export function describeConfigModeSecretWarning({ filePath, mode, entry } = {}) 
  * A SYMLINKED destination is written THROUGH (the link survives, its target gets
  * the bytes) or refused — never replaced. See `resolveClaudeConfigWritePath` for
  * the trust assumption and the race caveat (#7002).
+ *
+ * SHARED, not byok-local: `claude-tui/pty-driver.js`'s `ensureCwdTrusted` (the
+ * DEFAULT provider's trust pre-write, which runs on far more start()s than any
+ * MCP mutation) commits through this function too (#7046). Callers that need
+ * "best effort" — a refusal must not fail session start — catch and log; callers
+ * that owe the user an answer surface the error.
  *
  * @param {string} filePath
  * @param {object} value — the full config object to serialize

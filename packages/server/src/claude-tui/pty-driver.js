@@ -8,13 +8,18 @@
 // methods live on `PtyDriverMixin` and are copied onto ClaudeTuiSession.prototype
 // via applyMixin() in claude-tui-session.js, so `this` still refers to the
 // session instance and every `this._*` / static reference resolves as before.
-import { existsSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'fs'
+import { existsSync, readFileSync, realpathSync, statSync, writeFileSync } from 'fs'
 import { homedir } from 'os'
 import { dirname, join, resolve } from 'path'
 import { fileURLToPath } from 'url'
-import { randomUUID } from 'crypto'
 import { resolveBinary } from '../utils/resolve-binary.js'
 import { createLogger } from '../logger.js'
+// #7002/#7046 — the ONE writer for `~/.claude.json`. Deliberately shared with the
+// BYOK MCP add/remove path rather than re-implemented here: a second hand-rolled
+// `writeFileSync(tmp)` → `renameSync(tmp, ~/.claude.json)` is exactly how the
+// symlink-destroying, mode-widening bug survived in two places at once. Any new
+// caller that writes this file MUST come through here too.
+import { writeClaudeConfigAtomic } from '../byok-mcp-config.js'
 // Imported at call-time only (circular-safe): the writer methods read the
 // PROMPT_CHAR_DELAY_MS / MAX_THROTTLED_CHARS static getters off the class.
 import { ClaudeTuiSession } from '../claude-tui-session.js'
@@ -137,13 +142,27 @@ export const AUTH_REQUIRED_MESSAGE = 'Claude is not logged in (or the subscripti
 // block headless spawn. The dialog is interactive-only — without this, the
 // PTY would render "Is this a project you trust?" and wait for Enter.
 // Idempotent: if already trusted, no write.
+//
+// NOTE the path is `homedir()/.claude.json`, NOT `defaultClaudeConfigPath()`:
+// the point of this write is to be read by the `claude` binary we are about to
+// spawn, and it only ever reads `$HOME/.claude.json`. `CHROXY_CLAUDE_CONFIG`
+// redirects chroxy's own MCP-config reads, so honouring it here would silently
+// send the trust flags to a file claude never opens.
 export function ensureCwdTrusted(cwd) {
   const realCwd = realpathSync(cwd)
   const claudeConfig = join(homedir(), '.claude.json')
   let config = {}
+  // #7046: PRESERVE the destination's permissions. This write used to call
+  // `writeFileSync(tmp, ...)` with no `mode` and never chmod the sidecar, so the
+  // rename left `0666 & ~umask` (0644 under the usual umask) on a file that holds
+  // OAuth material — chroxy actively WIDENING a 0600 config on every start() that
+  // pre-trusts a cwd. `null` means "we are creating the file", and the shared
+  // writer then uses 0600.
+  let mode = null
   if (existsSync(claudeConfig)) {
     try {
       config = JSON.parse(readFileSync(claudeConfig, 'utf8'))
+      mode = statSync(claudeConfig).mode & 0o777
     } catch (err) {
       log.warn(`~/.claude.json unreadable, skipping trust pre-write: ${err.message}`)
       return
@@ -170,16 +189,24 @@ export function ensureCwdTrusted(cwd) {
     hasCompletedProjectOnboarding: true,
     projectOnboardingSeenCount: existing?.projectOnboardingSeenCount ?? 0,
   }
-  // Atomic write via temp + rename. Use a per-call random suffix rather
-  // than process.pid — concurrent ClaudeTuiSessions in the same chroxy
-  // server share the pid, so two start()s racing for a different cwd
-  // would clobber each other's temp file (#3922). The realpathSync()
-  // earlier in this function still means each session writes a
-  // different *target* path, but the temp file is global and needs to
-  // be unique per write.
-  const tmp = `${claudeConfig}.chroxy.${randomUUID()}.tmp`
-  writeFileSync(tmp, JSON.stringify(config, null, 2))
-  renameSync(tmp, claudeConfig)
+  // #7046: through the SHARED atomic writer, which (a) writes THROUGH a symlinked
+  // `~/.claude.json` instead of replacing the user's dotfiles link with a regular
+  // file, (b) preserves the mode we captured above rather than widening it, (c)
+  // still uses a per-call random sidecar suffix — concurrent ClaudeTuiSessions in
+  // one daemon share a pid and would race for the same temp path (#3922) — and
+  // (d) unlinks that sidecar if the rename throws, so a failed write cannot leave
+  // a full credential-bearing copy of the config lying in $HOME (#4463).
+  //
+  // Best-effort, like the unreadable-config branch above: a REFUSAL (a link we
+  // will not follow — dangling, non-regular, foreign-uid) or an I/O failure warns
+  // and skips the pre-write instead of failing session start. The degraded outcome
+  // is claude rendering its trust dialog; the alternative — destroying the link —
+  // is strictly worse.
+  try {
+    writeClaudeConfigAtomic(claudeConfig, config, { mode })
+  } catch (err) {
+    log.warn(`~/.claude.json not written, skipping trust pre-write: ${err.message}`)
+  }
 }
 
 // Build a settings.json that registers Stop + tool hooks. Claude pipes the

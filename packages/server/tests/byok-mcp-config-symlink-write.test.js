@@ -30,6 +30,7 @@ import {
   readFileSync,
   readdirSync,
   readlinkSync,
+  realpathSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -41,6 +42,7 @@ import {
   addMcpServerToConfig,
   describeConfigModeSecretWarning,
   removeMcpServerFromConfig,
+  resolveClaudeConfigWritePath,
   writeClaudeConfigAtomic,
 } from '../src/byok-mcp-config.js'
 
@@ -106,10 +108,38 @@ describe('#7002 symlinked config: the write follows the link', () => {
     assert.deepEqual(sidecars(dotfilesDir), [])
   })
 
-  it('preserves the TARGET’s mode, not a fresh-file default', () => {
+  it('preserves the TARGET’s mode ON THE TARGET, with the link intact', () => {
     linkedConfig({ mcpServers: {} }, { mode: 0o640 })
-    addMcpServerToConfig({ name: 'srv', config: { command: 'node' }, configPath: linkPath })
-    assert.equal(statSync(targetPath).mode & 0o777, 0o640)
+
+    const res = addMcpServerToConfig({ name: 'srv', config: { command: 'node' }, configPath: linkPath })
+    assert.equal(res.ok, true, res.error)
+
+    // The mode assertion ALONE is vacuous and was: pre-fix the write landed on the
+    // LINK path and never touched `targetPath`, so the target trivially kept 0640
+    // while the user's link was being destroyed. What makes the mode claim mean
+    // anything is that the bytes went to the target and the link survived — so
+    // the preserved mode belongs to the file we actually wrote.
+    assert.equal(lstatSync(linkPath).isSymbolicLink(), true, 'the link must survive the write')
+    assert.ok(JSON.parse(readFileSync(targetPath, 'utf8')).mcpServers.srv, 'the entry landed in the TARGET')
+    assert.equal(statSync(targetPath).mode & 0o777, 0o640, 'and the target kept the mode the user chose')
+  })
+
+  it('reports viaSymlink so a caller can tell a resolved write from a direct one', () => {
+    // `viaSymlink` is part of the resolver's documented contract (#7039 wants the
+    // "writing through X → Y" operator signal built on it). Pinned here so it
+    // cannot silently change shape while no production caller reads it yet.
+    linkedConfig({ mcpServers: {} })
+    const viaLink = resolveClaudeConfigWritePath(linkPath)
+    // `realpathSync(targetPath)`, not `targetPath`: on macOS a mkdtemp path
+    // resolves through /private, and the resolver returns the realpath.
+    assert.deepEqual(viaLink, { ok: true, path: realpathSync(targetPath), viaSymlink: true })
+
+    const plain = join(homeDir, 'plain.json')
+    writeFileSync(plain, '{}', { mode: 0o600 })
+    assert.deepEqual(resolveClaudeConfigWritePath(plain), { ok: true, path: plain, viaSymlink: false })
+
+    const missing = join(homeDir, 'nope.json')
+    assert.deepEqual(resolveClaudeConfigWritePath(missing), { ok: true, path: missing, viaSymlink: false })
   })
 
   it('a chain of symlinks resolves to the final regular file', () => {
