@@ -488,27 +488,60 @@ describe('chroxy schedule last-run (#6868)', () => {
 })
 
 describe('chroxy schedule — id / id-prefix resolution (#6868)', () => {
-  it('an ambiguous id prefix is rejected without acting on either task', () => {
+  // #7015 — the old version of this test derived its ambiguous prefix from
+  // two random UUIDs' *actual* shared leading characters, which only exist
+  // ~6% of the time (1/16 chance two random hex digits match); every other
+  // run silently returned early with nothing asserted. `resolveTaskId`
+  // guards every mutating command (`edit`/`pause`/`resume`/`delete`) against
+  // resolving an ambiguous prefix to the WRONG task — on `delete` that is a
+  // destructive/irreversible action, so this must be deterministic, not
+  // probabilistic. Seed two tasks via `store.add()`'s caller-supplied `id`
+  // (a real, store-supported input field, not a stub) with a fixed shared
+  // prefix, guaranteeing ambiguity on every run.
+  function seedTask(store, id) {
+    return store.add({ id, prompt: 'x', cadence: { kind: 'cron', expression: '0 9 * * *' } })
+  }
+
+  it('a prefix matching >1 task is rejected as ambiguous and resolves NO task on edit or delete', () => {
     const store = makeStore()
-    const a = runScheduleCreate({ prompt: 'a', cron: '0 9 * * *' }, baseDeps(store, cap().write)).task
-    // Force a shared prefix by editing nothing — instead, resolve using the
-    // shortest common prefix of the two real ids (UUIDs collide on a 1-char
-    // prefix with overwhelming probability across enough attempts is not
-    // practical to assert on directly, so exercise the ambiguity path via a
-    // deliberately short, near-certain-to-match single hex character).
-    const b = runScheduleCreate({ prompt: 'b', cron: '0 9 * * *' }, baseDeps(store, cap().write)).task
-    let sharedPrefixLen = 0
-    while (sharedPrefixLen < a.id.length && a.id[sharedPrefixLen] === b.id[sharedPrefixLen]) sharedPrefixLen++
-    if (sharedPrefixLen === 0) {
-      // Extremely unlikely for two random UUIDs, but if it happens this test
-      // has nothing to assert — skip gracefully rather than flake.
-      return
-    }
-    const prefix = a.id.slice(0, sharedPrefixLen)
-    const res = runScheduleEdit(prefix, { name: 'x' }, baseDeps(store, cap().write))
-    assert.equal(res.error, 'ambiguous')
-    assert.equal(store.get(a.id).name, null)
-    assert.equal(store.get(b.id).name, null)
+    const a = seedTask(store, 'ambig-0001-AAAA')
+    const b = seedTask(store, 'ambig-0002-BBBB')
+
+    const editRes = runScheduleEdit('ambig-000', { name: 'x' }, baseDeps(store, cap().write))
+    assert.equal(editRes.updated, false)
+    assert.equal(editRes.error, 'ambiguous')
+    assert.match(editRes.message, /matches 2 tasks/)
+    assert.equal(store.get(a.id).name, null, 'task A untouched by the ambiguous edit')
+    assert.equal(store.get(b.id).name, null, 'task B untouched by the ambiguous edit')
+
+    // The destructive command is the one that actually matters here: an
+    // ambiguous prefix must never delete the wrong (or any) task.
+    const delRes = runScheduleDelete('ambig-000', { yes: true }, baseDeps(store, cap().write))
+    assert.equal(delRes.deleted, false)
+    assert.equal(delRes.error, 'ambiguous')
+    assert.equal(store.list().length, 2, 'neither task was deleted')
+  })
+
+  it('a prefix matching exactly 1 task still resolves correctly', () => {
+    const store = makeStore()
+    const a = seedTask(store, 'ambig-0001-AAAA')
+    const b = seedTask(store, 'ambig-0002-BBBB')
+
+    // 'ambig-0001' is a prefix of only task A's id, even though both ids
+    // share the shorter 'ambig-000' prefix exercised above.
+    const res = runScheduleEdit('ambig-0001', { name: 'Edited A' }, baseDeps(store, cap().write))
+    assert.equal(res.updated, true)
+    assert.equal(res.task.id, a.id)
+    assert.equal(store.get(a.id).name, 'Edited A')
+    assert.equal(store.get(b.id).name, null, 'the other task is untouched')
+  })
+
+  it('a prefix matching 0 tasks errors as not-found and resolves nothing', () => {
+    const store = makeStore()
+    seedTask(store, 'ambig-0001-AAAA')
+    const res = runScheduleEdit('does-not-exist', { name: 'x' }, baseDeps(store, cap().write))
+    assert.equal(res.updated, false)
+    assert.equal(res.error, 'no-match')
   })
 
   it('a unique id prefix resolves correctly for last-run', () => {

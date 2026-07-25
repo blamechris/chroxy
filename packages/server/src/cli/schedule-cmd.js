@@ -74,18 +74,22 @@ function getDefaultStore() {
  * see tests/schedule-cli.test.js.
  */
 function buildDeps(overrides = {}) {
+  const config = readConfigSoft(CONFIG_FILE)
   return {
     store: overrides.store || getDefaultStore(),
     write: overrides.write || console.log,
     // The provider a task would ACTUALLY run against when none is set
-    // explicitly — mirrors DEFAULT_PROVIDER, the daemon's out-of-the-box
-    // default (scheduler.js's own fallback also considers a live
-    // sessionManager's configured default, which this offline CLI cannot
-    // see; DEFAULT_PROVIDER is the closest available approximation).
-    defaultProviderName: overrides.defaultProviderName || DEFAULT_PROVIDER,
+    // explicitly — mirrors the daemon's own resolution, `config.provider ||
+    // DEFAULT_PROVIDER` (server-cli.js's `providerType` wiring; scheduler.js's
+    // live `_resolveProviderName` falls back to the wired SessionManager's
+    // `providerType`, which IS this same expression). Reading config.provider
+    // here (not just hardcoding DEFAULT_PROVIDER) matters: if the operator's
+    // configured default ever diverges from DEFAULT_PROVIDER, this warning
+    // must track what will actually run, not the out-of-the-box default.
+    defaultProviderName: overrides.defaultProviderName || config.provider || DEFAULT_PROVIDER,
     checkProviderRefusal: overrides.checkProviderRefusal || ((name) => scheduledProviderRefusalReason(name)),
     resolvePermissionMode: overrides.resolvePermissionMode || resolveScheduledPermissionMode,
-    checkSchedulerEnabled: overrides.checkSchedulerEnabled || (() => isSchedulerEnabled(readConfigSoft(CONFIG_FILE))),
+    checkSchedulerEnabled: overrides.checkSchedulerEnabled || (() => isSchedulerEnabled(config)),
   }
 }
 

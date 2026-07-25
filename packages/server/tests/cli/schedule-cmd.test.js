@@ -7,7 +7,16 @@
  */
 import { describe, it, after } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdirSync, writeFileSync } from 'fs'
+import { join } from 'path'
 import { runCli, makeTempHome } from './__helpers/spawn-cli.js'
+
+/** Write `~/.chroxy/config.json` with the given `provider` into a temp HOME. */
+function writeConfig(home, config) {
+  const dir = join(home, '.chroxy')
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, 'config.json'), JSON.stringify(config, null, 2))
+}
 
 // The store logs an INFO line ("Loaded N scheduled task(s)") to stdout ahead
 // of --json output on any non-empty load — strip to the first `{` so this
@@ -97,6 +106,46 @@ describe('chroxy schedule — CLI wiring (#6868)', () => {
     const r = await runCli(['schedule', 'create', '--prompt', 'x', '--cron', 'garbage'])
     assert.notEqual(r.code, 0)
     assert.match(r.stdout, /Invalid schedule/)
+  })
+
+  // #7014 — the provider-refusal warning must follow the daemon's OWN
+  // resolution of "the effective default provider" (config.provider ||
+  // DEFAULT_PROVIDER, mirroring server-cli.js), not a hardcoded
+  // DEFAULT_PROVIDER constant. These two cases prove the warning tracks
+  // config.json rather than the constant: a configured provider that IS
+  // schedulable (in-process permissions) must NOT warn even though
+  // DEFAULT_PROVIDER (claude-tui) would; a configured provider that is
+  // hook-routed must warn even without any --provider flag.
+  describe('provider-refusal warning follows config.provider, not the DEFAULT_PROVIDER constant (#7014)', () => {
+    it('does not warn when config.provider is a schedulable (in-process-permissions) provider', async () => {
+      const { home, cleanup } = makeTempHome()
+      try {
+        writeConfig(home, { provider: 'claude-sdk' })
+        const r = await runCli(
+          ['schedule', 'create', '--prompt', 'x', '--cron', '0 9 * * *'],
+          { home },
+        )
+        assert.equal(r.code, 0, `stderr: ${r.stderr}`)
+        assert.doesNotMatch(r.stdout, /will be REFUSED/)
+      } finally {
+        cleanup()
+      }
+    })
+
+    it('warns when config.provider is a hook-routed provider, with no --provider flag given', async () => {
+      const { home, cleanup } = makeTempHome()
+      try {
+        writeConfig(home, { provider: 'claude-tui' })
+        const r = await runCli(
+          ['schedule', 'create', '--prompt', 'x', '--cron', '0 9 * * *'],
+          { home },
+        )
+        assert.equal(r.code, 0, `stderr: ${r.stderr}`)
+        assert.match(r.stdout, /WARNING:.*will be REFUSED/)
+      } finally {
+        cleanup()
+      }
+    })
   })
 
   it('pause/resume/edit/delete on an unknown id exit non-zero with a clear message', async () => {
