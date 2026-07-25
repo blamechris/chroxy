@@ -33,6 +33,22 @@ fi
 
 PORT="$CHROXY_PORT"
 TOKEN="$CHROXY_HOOK_SECRET"
+# Where the daemon's HTTP endpoints live, from this process's point of view.
+# `localhost` is right for a host-spawned session, but NOT from inside a
+# container: DockerSession forwards CHROXY_HOST=host.docker.internal precisely so
+# the callback can reach the host, and the hook has been ignoring it — meaning a
+# containerized CliSession's /permission POST went to the container's own
+# localhost and always failed (fail-closed deny). #7004 makes that reachability
+# load-bearing for auto/acceptEdits too, so honour it: CHROXY_HOOK_HOST (dedicated)
+# first, then CHROXY_HOST (what DockerSession already sets, and which on the host
+# names the interface the daemon actually bound), else localhost.
+HOOK_HOST="${CHROXY_HOOK_HOST:-$CHROXY_HOST}"
+# Sanitize: a hostname/IPv4 literal only. Anything else — an empty value, an IPv6
+# literal, a URL, or anything carrying shell/URL metacharacters — falls back to
+# localhost rather than being interpolated into the curl target.
+case "$HOOK_HOST" in
+  ''|*[!A-Za-z0-9.-]*|[!A-Za-z0-9]*) HOOK_HOST="localhost" ;;
+esac
 # Permission mode resolution order:
 #   1. CHROXY_PERMISSION_MODE_FILE — if set AND readable AND non-empty.
 #      ClaudeTuiSession writes this sidecar file when setPermissionMode()
@@ -229,7 +245,7 @@ route_to_phone() {
   # curl fail with E2BIG on a big write and the hook then reported the
   # fail-closed deny instead of prompting. Identical bytes either way for a
   # normal payload.
-  CURL_ARGS=(-s -X POST "http://localhost:${PORT}/permission" -H "Content-Type: application/json" --data-binary @- --max-time 300)
+  CURL_ARGS=(-s -X POST "http://${HOOK_HOST}:${PORT}/permission" -H "Content-Type: application/json" --data-binary @- --max-time 300)
   if [ -n "$TOKEN" ]; then
     CURL_ARGS+=(-H "Authorization: Bearer ${TOKEN}")
   fi
@@ -301,7 +317,7 @@ floor_forces_prompt() {
   # Payload over STDIN, not argv — see route_to_phone's note on MAX_ARG_STRLEN.
   # Here it matters doubly: an argv failure on a large `Write` would fail closed
   # into a prompt for a file the floor never covered.
-  FLOOR_ARGS=(-s -X POST "http://localhost:${PORT}/permission-floor" -H "Content-Type: application/json" --data-binary @- --max-time 10)
+  FLOOR_ARGS=(-s -X POST "http://${HOOK_HOST}:${PORT}/permission-floor" -H "Content-Type: application/json" --data-binary @- --max-time 10)
   if [ -n "$TOKEN" ]; then
     FLOOR_ARGS+=(-H "Authorization: Bearer ${TOKEN}")
   fi

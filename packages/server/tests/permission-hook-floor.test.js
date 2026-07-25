@@ -482,6 +482,59 @@ describe('permission-hook.sh: the floor probe fails CLOSED (#7004)', () => {
 })
 
 // ---------------------------------------------------------------------------
+// 3b. Reaching the daemon from a container
+// ---------------------------------------------------------------------------
+
+describe('permission-hook.sh: the callback host is not hardcoded to localhost (#7004)', () => {
+  let daemon
+
+  afterEach(async () => {
+    if (daemon) await daemon.close()
+    daemon = null
+  })
+
+  it('honours CHROXY_HOST (what DockerSession forwards so the container can reach the host)', async () => {
+    // Proven by pointing it somewhere unresolvable: if the hook still dialled
+    // localhost the live daemon below would have received the probe.
+    daemon = await startRealDaemon()
+    const { stdout } = await runHook({
+      payload: readPayload('src/index.js'),
+      port: daemon.port,
+      mode: 'auto',
+      extraEnv: { CHROXY_HOST: 'no-such-host-7004.invalid' },
+    })
+    assert.equal(daemon.stats.floorRequests, 0, 'the probe went to CHROXY_HOST, not localhost')
+    assert.equal(decisionOf(stdout).permissionDecision, 'deny', 'and an unreachable daemon fails closed')
+  })
+
+  it('CHROXY_HOOK_HOST wins over CHROXY_HOST', async () => {
+    daemon = await startRealDaemon()
+    const { stdout } = await runHook({
+      payload: readPayload('src/index.js'),
+      port: daemon.port,
+      mode: 'auto',
+      extraEnv: { CHROXY_HOOK_HOST: '127.0.0.1', CHROXY_HOST: 'no-such-host-7004.invalid' },
+    })
+    assert.equal(daemon.stats.floorRequests, 1)
+    assert.equal(decisionOf(stdout).permissionDecision, 'allow')
+  })
+
+  it('a host carrying shell/URL metacharacters falls back to localhost (never interpolated)', async () => {
+    daemon = await startRealDaemon()
+    const { stdout, stderr } = await runHook({
+      payload: readPayload('.env'),
+      port: daemon.port,
+      mode: 'auto',
+      extraEnv: { CHROXY_HOST: '127.0.0.1/../../etc; touch /tmp/chroxy-7004-pwned' },
+    })
+    assert.equal(daemon.stats.floorRequests, 1, 'fell back to localhost')
+    assert.equal(daemon.stats.permissionRequests, 1, 'and the floor still applied')
+    assert.equal(decisionOf(stdout).permissionDecision, 'allow')
+    assert.equal(stderr, '', 'nothing was executed or complained about')
+  })
+})
+
+// ---------------------------------------------------------------------------
 // 4. Parity: the two pipelines must agree
 // ---------------------------------------------------------------------------
 
