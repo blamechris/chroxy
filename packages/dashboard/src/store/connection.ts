@@ -131,6 +131,7 @@ import {
   clearPendingPermissionModeReverts,
   beginTranscriptFetch,
   endTranscriptFetch,
+  clearTranscriptWatchdog,
   resetTranscriptFetchTracking,
 } from './message-handler';
 import type { EvaluatorResultPayload } from './types';
@@ -412,11 +413,12 @@ let searchTimeoutId: ReturnType<typeof setTimeout> | undefined;
 
 // #6863 — read-only transcript viewer. `request_conversation_transcript`
 // (#6860) has no dedicated failure echo (a rejection arrives as a generic
-// `session_error{message}` with no correlating id), so — mirroring the
-// `searchTimeoutId` watchdog above — a fetch that's still `loading` after
-// this window surfaces a timeout error instead of spinning forever.
-let transcriptTimeoutId: ReturnType<typeof setTimeout> | undefined;
-const TRANSCRIPT_FETCH_TIMEOUT_MS = 15000;
+// `session_error{message}` with no correlating id — a per-request correlation
+// id needs a protocol change, tracked in #7007), so a fetch that goes SILENT
+// surfaces a timeout error instead of spinning forever. The timer itself lives
+// in message-handler.ts next to the frame path, because it is an INACTIVITY
+// window that every arriving frame re-arms (armed here via
+// `beginTranscriptFetch`'s callback, disarmed via `clearTranscriptWatchdog`).
 const EMPTY_TRANSCRIPT_VIEWER: TranscriptViewerState = {
   conversationId: null,
   status: 'idle',
@@ -631,6 +633,28 @@ function clearGitOneshotCallbacks(
     base: null,
     error: GIT_ONESHOT_TIMEOUT_ERROR,
   });
+}
+
+// #6863 — a dropped socket is the other terminal condition for an armed
+// transcript fetch: the frames still owed to it (including its
+// `history_replay_end`) can never arrive on this socket, so its interception
+// tracking and inactivity watchdog are dropped here. A viewer still showing
+// `loading` is failed explicitly rather than left to spin — the watchdog that
+// would otherwise have surfaced it is gone with the tracking.
+function abortTranscriptFetchesOnSocketDrop(
+  set: (partial: Partial<ConnectionState> | ((s: ConnectionState) => Partial<ConnectionState>)) => void,
+  get: () => ConnectionState,
+): void {
+  resetTranscriptFetchTracking();
+  if (get().transcriptViewer.status === 'loading') {
+    set(state => ({
+      transcriptViewer: {
+        ...state.transcriptViewer,
+        status: 'error',
+        error: 'Connection lost before the transcript finished loading.',
+      },
+    }));
+  }
 }
 
 export const useConnectionStore = create<ConnectionState>((set, get) => ({
@@ -2592,6 +2616,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // the still-armed callback so GitPanel's busy flag clears immediately
       // instead of spinning for up to the full 30s client-side timeout.
       clearGitOneshotCallbacks(set, get);
+      abortTranscriptFetchesOnSocketDrop(set, get);
       // #3605: also clear the per-session pendingTrustGrants arrays
       // (added in #3588). disconnect() handles user-initiated closes, but
       // an unexpected drop here would otherwise leave the SkillsPanel
@@ -2782,6 +2807,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // #6954: same fast-reject as onclose above — an errored socket means
       // any in-flight git one-shot reply will never arrive.
       clearGitOneshotCallbacks(set, get);
+      abortTranscriptFetchesOnSocketDrop(set, get);
       const cleanedSessionStates = clearAllSessionPendingTrustGrants(get().sessionStates);
 
       set({ socket: null, sessionStates: cleanedSessionStates });
@@ -2830,11 +2856,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
     // Reset replay flags in case disconnect happened mid-replay
     resetReplayFlags();
-    // #6863 — drop any in-flight transcript fetch tracking so a stale
-    // conversationId from before the disconnect can't intercept frames on a
-    // later, unrelated connection.
+    // #6863 — drop any in-flight transcript fetch tracking (and its watchdog)
+    // so a stale conversationId from before the disconnect can't intercept
+    // frames on a later, unrelated connection.
     resetTranscriptFetchTracking();
-    clearTimeout(transcriptTimeoutId);
     // #5555.3/.4 — explicit disconnect is a hard reset: drop the replay
     // baseline AND the history cursors so a later connect (possibly to a
     // different server) starts from a full replay rather than presenting a
@@ -4671,7 +4696,21 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         error: null,
       },
     });
-    beginTranscriptFetch(conversationId);
+    // The inactivity watchdog is armed by the same call that arms
+    // interception, and every arriving frame restarts its window (see
+    // message-handler.ts). It fires ONLY when the stream is genuinely silent,
+    // so a large transcript that legitimately takes longer than the window to
+    // finish streaming is never mislabeled an error. Note this callback does
+    // NOT end the fetch: a timed-out id stays armed so any frames still on the
+    // wire keep being intercepted instead of leaking into live session state.
+    beginTranscriptFetch(conversationId, (timedOutId: string) => {
+      const state = get();
+      if (state.transcriptViewer.conversationId === timedOutId && state.transcriptViewer.status === 'loading') {
+        set({
+          transcriptViewer: { ...state.transcriptViewer, status: 'error', error: 'Timed out loading transcript.' },
+        });
+      }
+    });
     const isOpen = !!socket && socket.readyState === WebSocket.OPEN;
     const payload: Record<string, unknown> = { type: 'request_conversation_transcript', conversationId };
     if (cwd) payload.cwd = cwd;
@@ -4680,7 +4719,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // socket write) must not leave the viewer stuck in `loading`.
     const sent = isOpen && socket ? wsSend(socket, payload) : false;
     if (!sent) {
+      // Nothing reached the wire, so nothing can arrive for this request —
+      // this is the one path that may safely settle the fetch and disarm the
+      // watchdog immediately.
       endTranscriptFetch(conversationId);
+      clearTranscriptWatchdog(conversationId);
       if (get().transcriptViewer.conversationId === conversationId) {
         set(state => ({
           transcriptViewer: { ...state.transcriptViewer, status: 'error', error: 'Not connected to server.' },
@@ -4688,29 +4731,21 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       }
       return;
     }
-    // request_conversation_transcript has no dedicated failure echo (a
-    // rejection — missing/invalid id, not authorized, not found — arrives as
-    // a generic `session_error{message}` with no correlating id we can match
-    // against this specific fetch). Mirror searchConversations' watchdog: if
-    // still `loading` after the window, surface a timeout rather than
-    // spinning forever. Any session_error DOES still reach the generic
-    // handler in the meantime and shows its own toast.
-    clearTimeout(transcriptTimeoutId);
-    transcriptTimeoutId = setTimeout(() => {
-      endTranscriptFetch(conversationId);
-      const state = get();
-      if (state.transcriptViewer.conversationId === conversationId && state.transcriptViewer.status === 'loading') {
-        set({
-          transcriptViewer: { ...state.transcriptViewer, status: 'error', error: 'Timed out loading transcript.' },
-        });
-      }
-    }, TRANSCRIPT_FETCH_TIMEOUT_MS);
   },
 
   closeTranscriptViewer: () => {
+    // Closing stops RENDERING, not INTERCEPTING. The conversationId stays in
+    // message-handler.ts's pending set until its own `history_replay_end`
+    // (or a socket drop / reset), because frames that arrive after a
+    // mid-stream disarm are NOT inert — a `message` would land in the flat
+    // `messages` list as live chat, and a late `history_replay_start` would
+    // wipe the live session's `activeAgents` and cancel a pending plan
+    // approval (`isPlanPending` / `planAllowedPrompts`). With the id still
+    // armed, `applyTranscriptFrame` sees no matching displayed viewer and
+    // discards the frame. The watchdog IS disarmed: no error may surface for
+    // a viewer the user has already closed.
     const current = get().transcriptViewer;
-    if (current.conversationId) endTranscriptFetch(current.conversationId);
-    clearTimeout(transcriptTimeoutId);
+    if (current.conversationId) clearTranscriptWatchdog(current.conversationId);
     set({ transcriptViewer: EMPTY_TRANSCRIPT_VIEWER });
   },
 

@@ -66,6 +66,17 @@ export function ConversationSearch({
   }, [searchResults.length])
 
   const handleOptionKeyDown = useCallback((e: React.KeyboardEvent, index: number, result: SearchResult) => {
+    // #6863 — handle only keys that originated on the row ITSELF. The row's
+    // action buttons (View / Resume) are tabbable children and keydown
+    // bubbles, so without this guard Enter/Space on the *View* button fell
+    // into the Enter case below and dispatched a RESUME — a real provider
+    // spawn — and its `preventDefault()` additionally suppressed the button's
+    // own native Enter → click activation, so View never fired at all.
+    // A native <button> already implements its own keyboard activation (Enter
+    // on keydown, Space on keyup, both dispatching a click that runs the
+    // button's onClick), so bowing out here is all that's needed — there is
+    // nothing to hand-roll.
+    if (e.target !== e.currentTarget) return
     switch (e.key) {
       case 'ArrowDown': {
         e.preventDefault()
