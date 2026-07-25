@@ -167,24 +167,51 @@ function HealthChip({ task, place = 'row' }: { task: ScheduledTask; place?: 'row
  * flipped flag does NOT change what a running daemon is doing.
  */
 function GateBanner({
-  enabled,
-  engineArmed,
-  restartRequired,
-  source,
+  gate,
   onToggle,
   busy,
   connected,
   error,
 }: {
-  enabled: boolean
-  engineArmed: boolean
-  restartRequired: boolean
-  source: string
+  /** `null` = not read from the daemon yet. See the UNKNOWN branch below. */
+  gate: { enabled: boolean; engineArmed: boolean; restartRequired: boolean; source: string } | null
   onToggle: (next: boolean) => void
   busy: boolean
   connected: boolean
   error: string | null
 }) {
+  // #6871 review round 2 (finding 3) — the FIFTH state: no snapshot, so the gate
+  // is genuinely unknown. `enabled × engineArmed` is four states only GIVEN a
+  // snapshot; synthesising `{false,false}` here made the banner state a positive
+  // fact about the daemon on zero data. Say "unknown" instead and claim nothing
+  // about whether tasks are firing — the whole point of this banner is that it is
+  // the one thing on the panel an operator is entitled to trust.
+  if (!gate) {
+    return (
+      <div className="cr-sched-gate" data-accent="neutral" data-testid="sched-gate-banner">
+        <div className="cr-sched-gate-text">
+          <strong data-testid="sched-gate-headline">Scheduled execution: UNKNOWN</strong>
+          <p className="cr-dim" data-testid="sched-gate-detail">
+            Scheduler state unknown — could not read it from the daemon. Any tasks listed below may
+            or may not be firing; this panel will not guess. Refresh to try again.
+          </p>
+          {error && <p className="cr-error" data-testid="sched-gate-error">{error}</p>}
+        </div>
+        {/* No toggle: "Enable"/"Disable" both describe a flip FROM a state we have
+            not read, so either label would be a guess about the daemon. */}
+        <button
+          type="button"
+          className="cr-primary-btn"
+          data-testid="sched-gate-toggle"
+          disabled
+          title="The scheduler gate has not been read from the daemon yet, so there is nothing to toggle from. Refresh first."
+        >
+          Unavailable
+        </button>
+      </div>
+    )
+  }
+  const { enabled, engineArmed, restartRequired, source } = gate
   const envForced = source === 'env'
   // #6871 review (C2): the copy is keyed on BOTH the persisted gate AND the
   // RUNTIME engine state — never on `enabled` alone.
@@ -688,14 +715,24 @@ export function ScheduledTasksSection({ now = Date.now }: ScheduledTasksSectionP
     if (selectedId && !tasks.some((t) => t.id === selectedId)) selectTask(null)
   }, [selectedId, tasks, selectTask])
 
-  // A defensive default: a snapshot that somehow lacks the gate block must not
-  // render as "enabled". Absence reads as OFF, the safe direction.
-  const gate = snapshot?.scheduler ?? {
-    enabled: false,
-    engineArmed: false,
-    restartRequired: false,
-    source: 'default' as const,
-  }
+  // #6871 review round 2 (finding 3): the gate is `null` — a distinct UNKNOWN
+  // state — whenever we have not actually read it from the daemon.
+  //
+  // This used to synthesise `{enabled: false, engineArmed: false}`, which made the
+  // banner assert "Scheduled execution: DISABLED — Tasks below are saved but will
+  // NOT fire. Enable via features.scheduler…" on ZERO data. That is the exact copy
+  // the C2 fix removed for being false in the dangerous direction, reintroduced
+  // through the fallback: the scheduler may be armed and firing headless sessions
+  // right now, and the panel would flatly deny it.
+  //
+  // "Absence reads as OFF, the safe direction" is only true of `enabled`. It is
+  // NOT true of "nothing is firing", which is the half that endangers the
+  // operator, and `engineArmed` is exactly what we cannot infer without a
+  // snapshot. `snapshot === null` is reachable throughout the first-load round
+  // trip, after a watchdog timeout or disconnect, when the first snapshot fails
+  // safeParse, and PERMANENTLY for a pairing-bound client refused with
+  // SCHEDULER_FORBIDDEN_BOUND_CLIENT.
+  const gate = snapshot?.scheduler ?? null
 
   return (
     <section className="cr-section" data-testid="sched-section">
@@ -732,10 +769,7 @@ export function ScheduledTasksSection({ now = Date.now }: ScheduledTasksSectionP
       </header>
 
       <GateBanner
-        enabled={gate.enabled}
-        engineArmed={gate.engineArmed}
-        restartRequired={gate.restartRequired}
-        source={gate.source}
+        gate={gate}
         busy={gateBusy}
         connected={connected}
         error={gateResult && !gateResult.ok ? gateResult.error : null}

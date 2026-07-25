@@ -111,10 +111,54 @@ describe('ScheduledTasksSection — the enable gate is always surfaced', () => {
     expect(screen.queryByTestId('sched-gate-restart')).toBeNull()
   })
 
-  it('renders the banner even before any snapshot lands, defaulting to DISABLED', () => {
-    // Absence must read as OFF (the safe direction), never as enabled.
+  // #6871 review round 2 (finding 3). This test previously asserted the banner
+  // read "DISABLED" before any snapshot landed, with the rationale "absence must
+  // read as OFF (the safe direction)". It was pinning the wrong behaviour: that
+  // rationale is only sound for `enabled`, and the banner's DISABLED copy also
+  // asserts "will NOT fire" plus "Enable via features.scheduler" — a positive
+  // factual claim about a daemon we have not read, and precisely the copy the C2
+  // fix removed for being false while an armed engine kept firing.
+  it('reads UNKNOWN before any snapshot lands, and claims NOTHING about firing', () => {
     render(<ScheduledTasksSection now={() => 1900000000000} />)
-    expect(screen.getByTestId('sched-gate-headline').textContent).toContain('DISABLED')
+    const headline = screen.getByTestId('sched-gate-headline').textContent!
+    const detail = screen.getByTestId('sched-gate-detail').textContent!
+    expect(headline).toContain('UNKNOWN')
+    expect(headline).not.toContain('DISABLED')
+    expect(headline).not.toContain('ENABLED')
+    // The two phrases that would be unfounded assertions on zero data.
+    expect(detail).not.toMatch(/will NOT fire/)
+    expect(detail).not.toMatch(/Enable via features\.scheduler/)
+    expect(detail).toMatch(/unknown/i)
+  })
+
+  it('offers no gate toggle while the state is UNKNOWN', () => {
+    // Both "Enable" and "Disable" describe a flip FROM a state we have not read.
+    render(<ScheduledTasksSection now={() => 1900000000000} />)
+    const toggle = screen.getByTestId('sched-gate-toggle') as HTMLButtonElement
+    expect(toggle.disabled).toBe(true)
+    expect(toggle.textContent).not.toBe('Enable')
+    expect(toggle.textContent).not.toBe('Disable')
+  })
+
+  it('a permanently-refused (pairing-bound) client sees UNKNOWN, not DISABLED', () => {
+    // SCHEDULER_FORBIDDEN_BOUND_CLIENT never yields a snapshot for this client, so
+    // the fallback state is what it sees forever — it must not be a false denial.
+    resetStore({
+      scheduledTasks: null,
+      scheduledTasksLoading: false,
+      scheduledTasksError: 'Bound clients may not read the host scheduled-task registry.',
+    })
+    render(<ScheduledTasksSection now={() => 1900000000000} />)
+    expect(screen.getByTestId('sched-gate-headline').textContent).toContain('UNKNOWN')
+    expect(screen.getByTestId('sched-gate-detail').textContent).not.toMatch(/will NOT fire/)
+    expect(screen.getByTestId('sched-read-error').textContent).toMatch(/Bound clients/)
+  })
+
+  it('a snapshot MISSING its scheduler block also reads UNKNOWN rather than DISABLED', () => {
+    // Same reasoning: no gate data is no gate data, whatever the reason.
+    resetStore({ scheduledTasks: mkSnapshot({ scheduler: undefined }) })
+    render(<ScheduledTasksSection now={() => 1900000000000} />)
+    expect(screen.getByTestId('sched-gate-headline').textContent).toContain('UNKNOWN')
   })
 
   it('calls out restartRequired when the gate is ON but nothing is armed', () => {
@@ -563,10 +607,14 @@ describe('ScheduledTasksSection — malformed payloads degrade, never crash', ()
     expect(screen.getByTestId('sched-health-task-1').textContent).toContain('ERROR')
   })
 
-  it('survives a snapshot with no scheduler block (defaults to DISABLED)', () => {
+  it('survives a snapshot with no scheduler block (reads UNKNOWN, claims nothing)', () => {
+    // #6871 review round 2 (finding 3): was "defaults to DISABLED". Degrading to a
+    // denial is the one direction that can mislead an operator about unattended
+    // execution, so absent gate data now reads UNKNOWN.
     resetStore({ scheduledTasks: mkSnapshot({ scheduler: undefined }) })
     render(<ScheduledTasksSection now={() => 1900000000000} />)
-    expect(screen.getByTestId('sched-gate-headline').textContent).toContain('DISABLED')
+    expect(screen.getByTestId('sched-gate-headline').textContent).toContain('UNKNOWN')
+    expect(screen.getByTestId('sched-gate-detail').textContent).not.toMatch(/will NOT fire/)
   })
 
   it('survives a snapshot with a non-array tasks field', () => {

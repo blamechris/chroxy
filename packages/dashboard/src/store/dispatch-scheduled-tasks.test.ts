@@ -22,6 +22,7 @@ vi.mock('./crypto', () => ({
 vi.mock('./persistence', () => ({ clearPersistedSession: vi.fn() }))
 
 import { handleMessage, setStore, clearDeltaBuffers, clearPermissionSplits, stopHeartbeat, resetReplayFlags } from './message-handler'
+import { armSchedulerRequest, hasPendingSchedulerRequests, resetSchedulerRequestsForTest } from './scheduledTaskRequests'
 import type { ConnectionState } from './types'
 
 function createMockStore(initial: Partial<ConnectionState>) {
@@ -258,6 +259,39 @@ describe('scheduled-task failure branch (#6871)', () => {
     expect(s.scheduledTasksError).toBeNull()
   })
 
+  // #6871 review round 2 (BLOCKING 1) — a `scheduled_tasks` snapshot is ALSO the
+  // mutation ack, so an UNPARSEABLE one is the ack for whatever mutation is in
+  // flight. The branch that handles it used to only settle the watchdog, which
+  // disarmed the sole mechanism that would ever release the request while leaving
+  // the pending entry in place — converting a bounded 30s stall into a permanent
+  // "Working…" / "Saving…" button. It must fail the request instead.
+  it('an UNPARSEABLE ack releases the in-flight mutation with a terminal failure', () => {
+    store.setState({ scheduledTaskPendingActions: { 'sched-action-9': { kind: 'pause', taskId: 't1', at: 1 } } })
+    // A snapshot echoing the mutation's requestId but failing safeParse (no
+    // `scheduler` block) — i.e. the ack arrived and was unreadable.
+    handleMessage({ type: 'scheduled_tasks', requestId: 'sched-action-9', generatedAt: 'nope', tasks: [] } as never, ctx() as never)
+    const s = store.getState()
+    // The pending entry must be GONE, not merely un-watchdogged.
+    expect(s.scheduledTaskPendingActions).toEqual({})
+    // ...and it must carry a verdict, so the button renders an error rather than
+    // spinning with no explanation.
+    expect(s.scheduledTaskActionResults['sched-action-9']!.ok).toBe(false)
+    expect(s.scheduledTaskActionResults['sched-action-9']!.error).toMatch(/could not read/i)
+    // Honest about the uncertainty: the mutation may have applied server-side —
+    // the ack is precisely the thing that could not be read.
+    expect(s.scheduledTaskActionResults['sched-action-9']!.error).toMatch(/may or may not have been applied/i)
+  })
+
+  it('an unparseable ack for an UNKNOWN requestId still releases the read', () => {
+    store.setState({ scheduledTaskPendingActions: { 'sched-action-1': { kind: 'pause', taskId: 't1', at: 1 } } })
+    handleMessage({ type: 'scheduled_tasks', requestId: 'not-tracked', tasks: 'bad' } as never, ctx() as never)
+    const s = store.getState()
+    expect(s.scheduledTasksLoading).toBe(false)
+    expect(s.scheduledTasksError).not.toBeNull()
+    // An unrelated in-flight mutation is left for its own watchdog, not swept.
+    expect(Object.keys(s.scheduledTaskPendingActions)).toEqual(['sched-action-1'])
+  })
+
   it('an unrelated error code does not clear scheduler pending state', () => {
     store.setState({ scheduledTaskPendingActions: { 'sched-action-1': { kind: 'create', taskId: null, at: 1 } } })
     handleMessage(
@@ -265,5 +299,105 @@ describe('scheduled-task failure branch (#6871)', () => {
       ctx() as never,
     )
     expect(Object.keys(store.getState().scheduledTaskPendingActions)).toEqual(['sched-action-1'])
+  })
+})
+
+/**
+ * #6871 review round 2 (BLOCKING 2) — `INVALID_MESSAGE` is a GLOBAL frame.
+ *
+ * ws-server emits it for ANY client message failing `ClientMessageSchema`, with
+ * `correlationId` + `details` but never a `requestId`. An earlier version of this
+ * delta called `failAllSchedulerRequests()` on it, which meant an unrelated
+ * surface's rejection (e.g. an over-cap `add_mcp_server` name) marked an in-flight
+ * scheduled-task mutation as REJECTED. Worse, because the success path only records
+ * a result while the requestId is still pending, the genuine ack that followed
+ * recorded nothing — so the modal never closed, the operator retried, and a
+ * DUPLICATE unattended scheduled task was created. Reporting failure for work that
+ * actually happened is the inverse of what this panel exists to prevent.
+ */
+describe('INVALID_MESSAGE must not be attributed to the scheduler (#6871 review round 2)', () => {
+  let store: ReturnType<typeof createMockStore>
+  let mockSocket: WebSocket
+  const ctx = () => ({ url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false })
+
+  // The request must be ARMED IN THE REGISTRY, not merely present in
+  // `scheduledTaskPendingActions` — `failAllSchedulerRequests` iterates the
+  // registry and early-returns on an empty map, so seeding only the store map
+  // makes these assertions VACUOUS (they passed against the defective source).
+  // This mirrors what connection.ts's senders actually do: arm the watchdog with
+  // an onFail that releases the pending entry.
+  function armMutation(requestId: string) {
+    store.setState({ scheduledTaskPendingActions: { [requestId]: { kind: 'create', taskId: null, at: 1 } } })
+    armSchedulerRequest(requestId, (reason) => {
+      const pending = { ...store.getState().scheduledTaskPendingActions }
+      if (!(requestId in pending)) return
+      delete pending[requestId]
+      store.setState({
+        scheduledTaskPendingActions: pending,
+        scheduledTaskActionResults: {
+          ...store.getState().scheduledTaskActionResults,
+          [requestId]: { ok: false, error: reason, at: Date.now() },
+        },
+      })
+    })
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks(); localStorage.clear(); clearDeltaBuffers(); clearPermissionSplits()
+    resetSchedulerRequestsForTest()
+    mockSocket = createMockSocket(); store = createMockStore(baseState()); setStore(store)
+  })
+  afterEach(() => {
+    stopHeartbeat(); clearDeltaBuffers(); clearPermissionSplits(); resetReplayFlags()
+    resetSchedulerRequestsForTest()
+  })
+
+  it('leaves an in-flight scheduler mutation untouched', () => {
+    armMutation('sched-action-1')
+    // A rejection caused by a DIFFERENT surface's message entirely.
+    handleMessage(
+      { type: 'error', code: 'INVALID_MESSAGE', correlationId: 'c-1', details: 'String must contain at most 64 character(s)' } as never,
+      ctx() as never,
+    )
+    const s = store.getState()
+    // Still pending — the daemon never answered OUR request, so the watchdog owns
+    // it. Nothing here can know the frame was about the scheduler.
+    expect(Object.keys(s.scheduledTaskPendingActions)).toEqual(['sched-action-1'])
+    expect(s.scheduledTaskActionResults['sched-action-1']).toBeUndefined()
+    // Still armed, so the bounded fallback is intact rather than consumed.
+    expect(hasPendingSchedulerRequests()).toBe(true)
+  })
+
+  it('does not surface another surface\'s zod message as a scheduler READ error', () => {
+    // Arms the READ the way connection.ts's requestScheduledTasks does (its onFail
+    // writes scheduledTasksError), so this pins the read-path half of the
+    // mis-attribution: an over-cap add_mcp_server name must not appear as the
+    // scheduled-tasks panel's own read failure.
+    store.setState({ scheduledTasksLoading: true })
+    armSchedulerRequest('sched-read-1', (reason) => {
+      store.setState({ scheduledTasksLoading: false, scheduledTasksError: reason })
+    })
+    handleMessage(
+      { type: 'error', code: 'INVALID_MESSAGE', correlationId: 'c-1', details: 'String must contain at most 64 character(s)' } as never,
+      ctx() as never,
+    )
+    // Null is the whole assertion — the defective version wrote the foreign zod
+    // text here. (Deliberately not a `not.toMatch(/64 character/)` follow-up:
+    // toMatch throws on null, so it would fail on the CORRECT behaviour.)
+    expect(store.getState().scheduledTasksError).toBeNull()
+  })
+
+  it('the genuine ack still succeeds after an unrelated INVALID_MESSAGE', () => {
+    // The duplicate-task path, pinned end to end: the mutation must still be able
+    // to report SUCCESS, so the modal closes and the operator does not retry.
+    armMutation('sched-action-1')
+    handleMessage(
+      { type: 'error', code: 'INVALID_MESSAGE', correlationId: 'c-1', details: 'unrelated' } as never,
+      ctx() as never,
+    )
+    handleMessage(snapshot({ requestId: 'sched-action-1' }) as never, ctx() as never)
+    const s = store.getState()
+    expect(s.scheduledTaskActionResults['sched-action-1']!.ok).toBe(true)
+    expect(s.scheduledTaskPendingActions).toEqual({})
   })
 })
