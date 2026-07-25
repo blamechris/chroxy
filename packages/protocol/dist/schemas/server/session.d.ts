@@ -245,8 +245,8 @@ export declare const ServerProviderListSchema: z.ZodObject<{
         auth: z.ZodOptional<z.ZodObject<{
             ready: z.ZodBoolean;
             source: z.ZodEnum<{
-                none: "none";
                 env: "env";
+                none: "none";
                 oauth: "oauth";
             }>;
             envVar: z.ZodNullable<z.ZodString>;
@@ -269,8 +269,8 @@ export declare const ServerAuthBootstrapSchema: z.ZodObject<{
         auth: z.ZodOptional<z.ZodObject<{
             ready: z.ZodBoolean;
             source: z.ZodEnum<{
-                none: "none";
                 env: "env";
+                none: "none";
                 oauth: "oauth";
             }>;
             envVar: z.ZodNullable<z.ZodString>;
