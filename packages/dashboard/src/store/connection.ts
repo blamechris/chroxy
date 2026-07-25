@@ -71,6 +71,9 @@ import type {
   SessionInfo,
   SessionState,
   TranscriptViewerState,
+  McpServerOpResult,
+  McpConfigScope,
+  McpServerConfigInput,
 } from './types';
 import {
   loadServerRegistry,
@@ -130,6 +133,8 @@ import {
   registerThinkingLevelChangeRequest,
   clearPendingThinkingLevelReverts,
   clearPendingPermissionModeReverts,
+  armMcpServerOpCallback,
+  clearPendingMcpServerOps,
   beginTranscriptFetch,
   endTranscriptFetch,
   clearTranscriptWatchdog,
@@ -1090,6 +1095,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
   // #3272: capability map populated from auth_ok. Empty until connected.
   serverCapabilities: {},
+
+  // #6999: no verdict yet — never assume the MCP add/remove UI is forbidden
+  // before an actual rejection (see the field's doc comment in types.ts).
+  mcpConfigForbiddenNonPrimary: false,
 
   launchWebTask: (prompt: string, cwd?: string) => {
     const { socket } = get();
@@ -2745,6 +2754,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // Refresh spinner and release every pending mutation now rather than after
       // the full watchdog window.
       failAllSchedulerRequests(SCHEDULER_DISCONNECT_ERROR);
+      // #6999: same fast-reject for any in-flight add_mcp_server /
+      // remove_mcp_server — a dropped socket means the daemon can never reply,
+      // so the add-form / remove-button spinner clears immediately instead of
+      // waiting out MCP_SERVER_OP_TIMEOUT_MS.
+      clearPendingMcpServerOps();
       abortTranscriptFetchesOnSocketDrop(set, get);
       // #3605: also clear the per-session pendingTrustGrants arrays
       // (added in #3588). disconnect() handles user-initiated closes, but
@@ -2938,6 +2952,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       clearGitOneshotCallbacks(set, get);
       // #6871 review (S1): same fast-reject for the scheduler requests.
       failAllSchedulerRequests(SCHEDULER_DISCONNECT_ERROR);
+      // #6999: ditto for any in-flight add_mcp_server / remove_mcp_server.
+      clearPendingMcpServerOps();
       abortTranscriptFetchesOnSocketDrop(set, get);
       const cleanedSessionStates = clearAllSessionPendingTrustGrants(get().sessionStates);
 
@@ -2982,6 +2998,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     clearGitOneshotCallbacks(set, get);
     // #6871 review (S1): same fast-reject for the scheduler requests.
     failAllSchedulerRequests(SCHEDULER_DISCONNECT_ERROR);
+    // #6999: ditto for any in-flight add_mcp_server / remove_mcp_server.
+    clearPendingMcpServerOps();
     const { socket } = get();
     if (socket) {
       socket.onclose = null;
@@ -3115,6 +3133,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // UI gates left enabled by stale state. Empty map = fail-closed
       // for any capability-gated affordance.
       serverCapabilities: {},
+      // #6999: same reasoning — a reconnect may present a different
+      // (possibly primary) token, so don't carry a stale "forbidden"
+      // verdict past a user-initiated disconnect.
+      mcpConfigForbiddenNonPrimary: false,
       savedConnection: null,
       userDisconnected: true,
       viewingCachedSession: false,
@@ -3792,6 +3814,64 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       sessionId: activeSessionId,
       server,
       code: code.trim(),
+      requestId,
+    });
+  },
+
+  // #6999 — add a brand-new MCP server to the active session's config (BYOK
+  // lane; server-side strict-primary gated — `client.isPrimaryToken === true`
+  // — MCP_CONFIG_FORBIDDEN_NON_PRIMARY_CLIENT otherwise — and requires the
+  // daemon's first-use spawn-trust prompt before the server is actually
+  // spawned, whatever the response). There is no dedicated result type on
+  // this request: `callback` fires exactly once via armMcpServerOpCallback's
+  // three-way race (a matching `error`, an `mcp_servers` broadcast that now
+  // contains `name`, or a bounded timeout — see message-handler.ts), so a
+  // submit button's spinner always clears. `config` is never logged anywhere
+  // in this path — it may carry secrets in `env`/`headers`.
+  addMcpServer: (
+    name: string,
+    config: McpServerConfigInput,
+    scope: McpConfigScope,
+    callback: (result: McpServerOpResult) => void,
+  ) => {
+    const { socket, activeSessionId } = get();
+    if (!socket || socket.readyState !== WebSocket.OPEN || !activeSessionId) {
+      callback({ ok: false, code: 'NOT_CONNECTED', message: 'Not connected to the daemon.' });
+      return;
+    }
+    const requestId = `add-mcp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    armMcpServerOpCallback(requestId, { op: 'add', name, sessionId: activeSessionId }, callback);
+    wsSend(socket, {
+      type: 'add_mcp_server',
+      sessionId: activeSessionId,
+      name,
+      config,
+      scope,
+      requestId,
+    });
+  },
+
+  // #6999 — permanently remove a configured MCP server from the active
+  // session's config (BYOK lane; same strict-primary gate as addMcpServer).
+  // Same three-way `callback` resolution, but success is an `mcp_servers`
+  // broadcast whose list no longer contains `name`.
+  removeMcpServer: (
+    name: string,
+    scope: McpConfigScope,
+    callback: (result: McpServerOpResult) => void,
+  ) => {
+    const { socket, activeSessionId } = get();
+    if (!socket || socket.readyState !== WebSocket.OPEN || !activeSessionId) {
+      callback({ ok: false, code: 'NOT_CONNECTED', message: 'Not connected to the daemon.' });
+      return;
+    }
+    const requestId = `remove-mcp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    armMcpServerOpCallback(requestId, { op: 'remove', name, sessionId: activeSessionId }, callback);
+    wsSend(socket, {
+      type: 'remove_mcp_server',
+      sessionId: activeSessionId,
+      name,
+      scope,
       requestId,
     });
   },
