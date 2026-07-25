@@ -49,6 +49,7 @@ import { getRegistryForProvider, watchModelsOverlay } from './models.js'
 import { UNREACHABLE_STATUSES } from './environment-statuses.js'
 import { resolveSkipPermissions, buildEnvironmentBackend, isUserShellEnabled, getAllowAnyModelProviders, isSemanticTitlesEnabled, resolveSemanticTitleModel, resolveSemanticTitleTimeoutMs, resolveBinaryProvenanceMode, isBinarySignatureGateEnabled } from './config.js'
 import { buildOrchestrationManager } from './orchestration/build-manager.js'
+import { buildSchedulerEngine } from './scheduler.js'
 import { parseDuration } from './duration.js'
 import { createSessionTokenStore } from './session-token-store.js'
 import { StatusLineManager } from './statusline.js'
@@ -1017,6 +1018,12 @@ export async function startCliServer(config) {
   // construction fails — never a throw, so it can't break daemon boot).
   const orchestrationManager = buildOrchestrationManager({ sessionManager, config, chroxyDir, log })
 
+  // #6865: the headless scheduler engine — fires due scheduled tasks (#6862)
+  // into a session with no client connected. null unless the operator opted in
+  // (`features.scheduler` / CHROXY_ENABLE_SCHEDULER=1), so a default daemon arms
+  // no timers and spawns nothing.
+  const schedulerEngine = buildSchedulerEngine({ sessionManager, config, logger: log })
+
   wsServer = new WsServer({
     port: PORT,
     apiToken: API_TOKEN,
@@ -1324,6 +1331,7 @@ export async function startCliServer(config) {
     pushManager,
     billingCanaryMonitor,
     orchestrationManager,
+    schedulerEngine,
     modelsOverlayWatcher,
     getWorktreeReapTimer: () => worktreeReapTimer,
     emergencyCleanupSync,

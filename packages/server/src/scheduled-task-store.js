@@ -19,7 +19,12 @@ const STORE_VERSION = 1
 const MAX_TASKS = 500
 
 const CADENCE_KINDS = new Set(['once', 'interval', 'cron'])
-const LAST_RUN_STATUSES = new Set(['success', 'error', 'skipped', 'timeout'])
+// `refused` (#6997 review) = the engine declined to start the run at all — an
+// unsupported hook-routed provider, a cwd outside the allowlist, or a permission
+// mode it could not verify. Distinct from `error` (the run happened and failed)
+// and `skipped` (the slot passed) so a reader can tell an operator that NOTHING
+// ran and that the task definition needs fixing.
+const LAST_RUN_STATUSES = new Set(['success', 'error', 'skipped', 'timeout', 'refused'])
 
 /**
  * Error thrown when a task submitted to add()/update() is malformed. Carries the

@@ -34,6 +34,7 @@ export class ServerOrchestrator {
     pushManager = null,
     billingCanaryMonitor = null,
     orchestrationManager = null,
+    schedulerEngine = null,
     modelsOverlayWatcher = null,
     getWorktreeReapTimer,
     emergencyCleanupSync,
@@ -57,6 +58,7 @@ export class ServerOrchestrator {
     // Disposed on shutdown: unhooks its SessionManager listeners (permission
     // gate + turn driver) and flushes the run ledger's pending snapshot writes.
     this._orchestrationManager = orchestrationManager
+    this._schedulerEngine = schedulerEngine
     // #5932: the models.json overlay fs-watcher handle (or null when watching
     // couldn't be established). Closed on shutdown so the watch doesn't outlive
     // the daemon.
@@ -120,6 +122,14 @@ export class ServerOrchestrator {
     if (this._orchestrationManager) {
       try { this._orchestrationManager.dispose() } catch (err) {
         log.warn(`Orchestration engine dispose failed: ${err?.message || err}`)
+      }
+    }
+    // #6865: stop the scheduler BEFORE destroying sessions — destroy() clears its
+    // armed timer and detaches its permission answerer, so no scheduled task can
+    // fire (or start a session) while the daemon is tearing down.
+    if (this._schedulerEngine) {
+      try { this._schedulerEngine.destroy() } catch (err) {
+        log.warn(`Scheduler engine destroy failed: ${err?.message || err}`)
       }
     }
     // Persist sessions before destroying (enables restore on restart)
