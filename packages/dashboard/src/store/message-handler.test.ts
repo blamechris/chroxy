@@ -48,6 +48,11 @@ import {
   beginTranscriptFetch,
   endTranscriptFetch,
   resetTranscriptFetchTracking,
+  armMcpServerOpCallback,
+  clearPendingMcpServerOps,
+  _testMcpServerOpPendingSize,
+  MCP_SERVER_OP_TIMEOUT_MS,
+  MCP_SERVER_OP_TIMEOUT_MESSAGE,
 } from './message-handler'
 import { createEmptySessionState } from './utils'
 import type { ConnectionState } from './types'
@@ -172,6 +177,8 @@ describe('dashboard message-handler dispatch', () => {
     // #6863 — reset transcript-fetch pending-id tracking between tests so a
     // leftover conversationId from one case doesn't intercept frames in another.
     resetTranscriptFetchTracking()
+    // #6999 — reset in-flight add_mcp_server / remove_mcp_server tracking.
+    clearPendingMcpServerOps()
     mockSocket = createMockSocket()
     store = createMockStore(baseState())
     setStore(store)
@@ -185,6 +192,8 @@ describe('dashboard message-handler dispatch', () => {
     // #3587: defensive cleanup so a test that registers a pending
     // trust-grant entry but doesn't consume it can't poison the next.
     clearPendingTrustGrants()
+    // #6999: same defensive cleanup for any pending MCP op left armed.
+    clearPendingMcpServerOps()
   })
 
   describe('auth_ok dispatch', () => {
@@ -1071,6 +1080,171 @@ describe('dashboard message-handler dispatch', () => {
         // Entry consumed (resolved): map is empty.
         expect(_testTrustGrantPendingSize()).toBe(0)
       })
+    })
+  })
+
+  describe('add_mcp_server / remove_mcp_server op tracking (#6999)', () => {
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    it('resolves ok:true when an mcp_servers broadcast for the target session now contains the added name', () => {
+      const cb = vi.fn()
+      armMcpServerOpCallback('add-1', { op: 'add', name: 'filesystem', sessionId: 's1' }, cb)
+      handleMessage(
+        { type: 'mcp_servers', sessionId: 's1', servers: [{ name: 'filesystem', status: 'configured' }] },
+        ctx() as any,
+      )
+      expect(cb).toHaveBeenCalledTimes(1)
+      expect(cb).toHaveBeenCalledWith({ ok: true })
+      expect(_testMcpServerOpPendingSize()).toBe(0)
+    })
+
+    it('does NOT resolve an add op from a broadcast for a DIFFERENT session', () => {
+      const cb = vi.fn()
+      armMcpServerOpCallback('add-2', { op: 'add', name: 'filesystem', sessionId: 's1' }, cb)
+      handleMessage(
+        { type: 'mcp_servers', sessionId: 's2', servers: [{ name: 'filesystem', status: 'configured' }] },
+        ctx() as any,
+      )
+      expect(cb).not.toHaveBeenCalled()
+      expect(_testMcpServerOpPendingSize()).toBe(1)
+    })
+
+    it('does NOT resolve an add op while the name is still absent from the broadcast list', () => {
+      const cb = vi.fn()
+      armMcpServerOpCallback('add-3', { op: 'add', name: 'filesystem', sessionId: 's1' }, cb)
+      handleMessage(
+        { type: 'mcp_servers', sessionId: 's1', servers: [{ name: 'other', status: 'configured' }] },
+        ctx() as any,
+      )
+      expect(cb).not.toHaveBeenCalled()
+      expect(_testMcpServerOpPendingSize()).toBe(1)
+    })
+
+    it('resolves ok:true for a REMOVE op once the name is absent from the broadcast list', () => {
+      const cb = vi.fn()
+      armMcpServerOpCallback('remove-1', { op: 'remove', name: 'filesystem', sessionId: 's1' }, cb)
+      // Still present — not yet satisfied.
+      handleMessage(
+        { type: 'mcp_servers', sessionId: 's1', servers: [{ name: 'filesystem', status: 'configured' }] },
+        ctx() as any,
+      )
+      expect(cb).not.toHaveBeenCalled()
+      // Now absent — satisfied.
+      handleMessage({ type: 'mcp_servers', sessionId: 's1', servers: [] }, ctx() as any)
+      expect(cb).toHaveBeenCalledTimes(1)
+      expect(cb).toHaveBeenCalledWith({ ok: true })
+    })
+
+    it('falls back to the active session when the broadcast has no sessionId (mirrors handleMcpServers)', () => {
+      store = createMockStore(baseState({ activeSessionId: 's1' }))
+      setStore(store)
+      const cb = vi.fn()
+      armMcpServerOpCallback('add-4', { op: 'add', name: 'filesystem', sessionId: 's1' }, cb)
+      handleMessage({ type: 'mcp_servers', servers: [{ name: 'filesystem', status: 'configured' }] }, ctx() as any)
+      expect(cb).toHaveBeenCalledWith({ ok: true })
+    })
+
+    it('resolves ok:false with the server code+message on a matching `error` envelope', () => {
+      const cb = vi.fn()
+      armMcpServerOpCallback('add-5', { op: 'add', name: 'filesystem', sessionId: 's1' }, cb)
+      handleMessage(
+        { type: 'error', requestId: 'add-5', code: 'MCP_SERVER_EXISTS', message: "An MCP server named 'filesystem' already exists in user scope." },
+        ctx() as any,
+      )
+      expect(cb).toHaveBeenCalledWith({
+        ok: false,
+        code: 'MCP_SERVER_EXISTS',
+        message: "An MCP server named 'filesystem' already exists in user scope.",
+      })
+      expect(_testMcpServerOpPendingSize()).toBe(0)
+    })
+
+    it('an error with an unrelated requestId does not resolve or consume the tracked op', () => {
+      const cb = vi.fn()
+      armMcpServerOpCallback('add-6', { op: 'add', name: 'filesystem', sessionId: 's1' }, cb)
+      handleMessage({ type: 'error', requestId: 'some-other-request', code: 'UNKNOWN', message: 'irrelevant' }, ctx() as any)
+      expect(cb).not.toHaveBeenCalled()
+      expect(_testMcpServerOpPendingSize()).toBe(1)
+    })
+
+    it('sets mcpConfigForbiddenNonPrimary on the store when the primary-token refusal fires', () => {
+      const cb = vi.fn()
+      armMcpServerOpCallback('add-7', { op: 'add', name: 'filesystem', sessionId: 's1' }, cb)
+      handleMessage(
+        {
+          type: 'error',
+          requestId: 'add-7',
+          code: 'MCP_CONFIG_FORBIDDEN_NON_PRIMARY_CLIENT',
+          message: 'Pairing-issued tokens cannot add or remove MCP servers.',
+        },
+        ctx() as any,
+      )
+      const state = store.getState() as any
+      expect(state.mcpConfigForbiddenNonPrimary).toBe(true)
+      expect(cb).toHaveBeenCalledWith({
+        ok: false,
+        code: 'MCP_CONFIG_FORBIDDEN_NON_PRIMARY_CLIENT',
+        message: 'Pairing-issued tokens cannot add or remove MCP servers.',
+      })
+    })
+
+    it('does not set mcpConfigForbiddenNonPrimary for an unrelated error code', () => {
+      handleMessage({ type: 'error', code: 'MCP_SERVER_EXISTS', message: 'x' }, ctx() as any)
+      const state = store.getState() as any
+      expect(state.mcpConfigForbiddenNonPrimary).toBeUndefined()
+    })
+
+    it('a fresh auth_ok resets mcpConfigForbiddenNonPrimary to false', () => {
+      store = createMockStore(baseState({ mcpConfigForbiddenNonPrimary: true } as any))
+      setStore(store)
+      handleMessage(
+        {
+          type: 'auth_ok',
+          serverMode: 'cli',
+          cwd: '/tmp',
+          serverVersion: '0.6.0',
+          protocolVersion: 3,
+          clientId: 'c1',
+        },
+        ctx() as any,
+      )
+      const state = store.getState() as any
+      expect(state.mcpConfigForbiddenNonPrimary).toBe(false)
+    })
+
+    it('resolves ok:false with TIMEOUT after MCP_SERVER_OP_TIMEOUT_MS with no reply — the no-reply path cannot hang forever', () => {
+      vi.useFakeTimers()
+      const cb = vi.fn()
+      armMcpServerOpCallback('add-8', { op: 'add', name: 'filesystem', sessionId: 's1' }, cb)
+      expect(_testMcpServerOpPendingSize()).toBe(1)
+      vi.advanceTimersByTime(MCP_SERVER_OP_TIMEOUT_MS)
+      expect(cb).toHaveBeenCalledWith({ ok: false, code: 'TIMEOUT', message: MCP_SERVER_OP_TIMEOUT_MESSAGE })
+      expect(_testMcpServerOpPendingSize()).toBe(0)
+    })
+
+    it('a callback fired exactly once — an error after a broadcast already resolved it is a no-op', () => {
+      const cb = vi.fn()
+      armMcpServerOpCallback('add-9', { op: 'add', name: 'filesystem', sessionId: 's1' }, cb)
+      handleMessage(
+        { type: 'mcp_servers', sessionId: 's1', servers: [{ name: 'filesystem', status: 'configured' }] },
+        ctx() as any,
+      )
+      expect(cb).toHaveBeenCalledTimes(1)
+      handleMessage({ type: 'error', requestId: 'add-9', code: 'MCP_SERVER_ADD_NOT_APPLIED', message: 'late' }, ctx() as any)
+      expect(cb).toHaveBeenCalledTimes(1)
+    })
+
+    it('clearPendingMcpServerOps fast-rejects every still-armed op (socket disconnect)', () => {
+      const cbA = vi.fn()
+      const cbB = vi.fn()
+      armMcpServerOpCallback('add-10', { op: 'add', name: 'a', sessionId: 's1' }, cbA)
+      armMcpServerOpCallback('remove-10', { op: 'remove', name: 'b', sessionId: 's1' }, cbB)
+      clearPendingMcpServerOps()
+      expect(cbA).toHaveBeenCalledWith({ ok: false, code: 'DISCONNECTED', message: MCP_SERVER_OP_TIMEOUT_MESSAGE })
+      expect(cbB).toHaveBeenCalledWith({ ok: false, code: 'DISCONNECTED', message: MCP_SERVER_OP_TIMEOUT_MESSAGE })
+      expect(_testMcpServerOpPendingSize()).toBe(0)
     })
   })
 

@@ -1636,6 +1636,73 @@ button.sidebar-token-view-session-row:hover {
   cursor: default;
 }
 
+/* #6999 — per-row "Remove" action + inline scope-confirm strip. Removal is
+   scope-exact server-side (a wrong scope reports MCP_SERVER_NOT_FOUND rather
+   than guessing), so the confirm step always asks which scope. */
+.sidebar-mcp-view-remove {
+  flex-shrink: 0;
+  align-self: center;
+  margin-left: 4px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border-subtle);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.sidebar-mcp-view-remove:hover:not(:disabled) {
+  border-color: var(--accent-red);
+  color: var(--accent-red);
+}
+
+.sidebar-mcp-view-remove:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.sidebar-mcp-view-remove-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding-left: 16px;
+}
+
+.sidebar-mcp-view-remove-confirm select {
+  padding: 2px 4px;
+  border-radius: 4px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: 10px;
+}
+
+.sidebar-mcp-view-remove-confirm button {
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border-subtle);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.sidebar-mcp-view-remove-confirm button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.sidebar-mcp-view-remove-error {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--text-error);
+  font-size: 10px;
+}
+
 /* #5163 (epic #5159) — Control Room panel: live read-only activity tree. */
 .control-room-panel {
   display: flex;

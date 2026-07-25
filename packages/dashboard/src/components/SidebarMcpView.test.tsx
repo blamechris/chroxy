@@ -3,22 +3,30 @@
  * panel slot, the desktop analogue of the mobile SettingsBar section.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest'
-import { render, cleanup, screen, fireEvent } from '@testing-library/react'
+import { render, cleanup, screen, fireEvent, act } from '@testing-library/react'
 import type { McpServer } from '@chroxy/store-core'
 import { SidebarMcpView, mcpViewCollapsedMetric } from './SidebarMcpView'
 
 // Mock the store so the fallback path (no `servers` prop) is deterministic.
 // Tests that pass `servers` directly never touch it. The variable is prefixed
 // `mock` so vitest allows it inside the hoisted factory. #6824 — the component
-// also selects `setMcpServerEnabled`, so the state carries a spy.
+// also selects `setMcpServerEnabled`, so the state carries a spy. #6999 —
+// `removeMcpServer` / `addMcpServer` / `mcpConfigForbiddenNonPrimary` back the
+// remove action and the embedded AddMcpServerForm.
 const mockSetMcpServerEnabled = vi.fn()
 const mockSubmitMcpAuthCode = vi.fn()
-let mockStoreState: Record<string, unknown> = {
+const mockRemoveMcpServer = vi.fn()
+const mockAddMcpServer = vi.fn()
+const defaultMockState = (): Record<string, unknown> => ({
   activeSessionId: null,
   sessionStates: {},
   setMcpServerEnabled: mockSetMcpServerEnabled,
   submitMcpAuthCode: mockSubmitMcpAuthCode,
-}
+  removeMcpServer: mockRemoveMcpServer,
+  addMcpServer: mockAddMcpServer,
+  mcpConfigForbiddenNonPrimary: false,
+})
+let mockStoreState: Record<string, unknown> = defaultMockState()
 vi.mock('../store/connection', () => ({
   useConnectionStore: (selector: (s: Record<string, unknown>) => unknown) => selector(mockStoreState),
 }))
@@ -27,7 +35,9 @@ afterEach(() => {
   cleanup()
   mockSetMcpServerEnabled.mockClear()
   mockSubmitMcpAuthCode.mockClear()
-  mockStoreState = { activeSessionId: null, sessionStates: {}, setMcpServerEnabled: mockSetMcpServerEnabled, submitMcpAuthCode: mockSubmitMcpAuthCode }
+  mockRemoveMcpServer.mockClear()
+  mockAddMcpServer.mockClear()
+  mockStoreState = defaultMockState()
 })
 
 function srv(name: string, status: string): McpServer {
@@ -154,6 +164,85 @@ describe('SidebarMcpView OAuth affordance (#6822)', () => {
     render(<SidebarMcpView servers={[{ name: 'remote', status: 'oauth-required', canToggle: true }]} />)
     expect(screen.queryByTestId('sidebar-mcp-view-authorize-remote')).toBeNull()
     expect(screen.getByTestId('sidebar-mcp-view-auth-input-remote')).toBeTruthy()
+  })
+})
+
+describe('SidebarMcpView remove action (#6999)', () => {
+  it('renders a Remove button per row and hides it while the confirm strip is open', () => {
+    render(<SidebarMcpView servers={[srv('filesystem', 'connected')]} />)
+    expect(screen.getByTestId('sidebar-mcp-view-remove-filesystem')).toBeTruthy()
+    expect(screen.queryByTestId('sidebar-mcp-view-remove-confirm-filesystem')).toBeNull()
+    fireEvent.click(screen.getByTestId('sidebar-mcp-view-remove-filesystem'))
+    expect(screen.queryByTestId('sidebar-mcp-view-remove-filesystem')).toBeNull()
+    expect(screen.getByTestId('sidebar-mcp-view-remove-confirm-filesystem')).toBeTruthy()
+  })
+
+  it('cancel returns to the idle Remove button without calling removeMcpServer', () => {
+    render(<SidebarMcpView servers={[srv('filesystem', 'connected')]} />)
+    fireEvent.click(screen.getByTestId('sidebar-mcp-view-remove-filesystem'))
+    fireEvent.click(screen.getByTestId('sidebar-mcp-view-remove-cancel-filesystem'))
+    expect(screen.getByTestId('sidebar-mcp-view-remove-filesystem')).toBeTruthy()
+    expect(mockRemoveMcpServer).not.toHaveBeenCalled()
+  })
+
+  it('confirm calls removeMcpServer(name, scope, callback) with the default "user" scope', () => {
+    render(<SidebarMcpView servers={[srv('filesystem', 'connected')]} />)
+    fireEvent.click(screen.getByTestId('sidebar-mcp-view-remove-filesystem'))
+    fireEvent.click(screen.getByTestId('sidebar-mcp-view-remove-confirm-btn-filesystem'))
+    expect(mockRemoveMcpServer).toHaveBeenCalledTimes(1)
+    const [name, scope, callback] = mockRemoveMcpServer.mock.calls[0]!
+    expect(name).toBe('filesystem')
+    expect(scope).toBe('user')
+    expect(typeof callback).toBe('function')
+  })
+
+  it('honors a "project" scope selection before confirming', () => {
+    render(<SidebarMcpView servers={[srv('filesystem', 'connected')]} />)
+    fireEvent.click(screen.getByTestId('sidebar-mcp-view-remove-filesystem'))
+    fireEvent.change(screen.getByTestId('sidebar-mcp-view-remove-scope-filesystem'), { target: { value: 'project' } })
+    fireEvent.click(screen.getByTestId('sidebar-mcp-view-remove-confirm-btn-filesystem'))
+    expect(mockRemoveMcpServer).toHaveBeenCalledWith('filesystem', 'project', expect.any(Function))
+  })
+
+  it('a failed removal (callback ok:false) surfaces the server message and returns to the confirm step', () => {
+    render(<SidebarMcpView servers={[srv('filesystem', 'connected')]} />)
+    fireEvent.click(screen.getByTestId('sidebar-mcp-view-remove-filesystem'))
+    fireEvent.click(screen.getByTestId('sidebar-mcp-view-remove-confirm-btn-filesystem'))
+    const callback = mockRemoveMcpServer.mock.calls[0]![2] as (r: { ok: boolean; code?: string; message?: string }) => void
+    act(() => {
+      callback({ ok: false, code: 'MCP_SERVER_NOT_FOUND', message: "No MCP server named 'filesystem' in project scope." })
+    })
+    expect(screen.getByTestId('sidebar-mcp-view-remove-error-filesystem').textContent).toBe(
+      "No MCP server named 'filesystem' in project scope.",
+    )
+    // Still on the confirm step (not silently dropped back to idle) so the user can retry a different scope.
+    expect(screen.getByTestId('sidebar-mcp-view-remove-confirm-filesystem')).toBeTruthy()
+  })
+
+  it('a successful removal (callback ok:true) does not synthesize any local success message — the row leaving the list on the next mcp_servers broadcast IS the confirmation', () => {
+    render(<SidebarMcpView servers={[srv('filesystem', 'connected')]} />)
+    fireEvent.click(screen.getByTestId('sidebar-mcp-view-remove-filesystem'))
+    fireEvent.click(screen.getByTestId('sidebar-mcp-view-remove-confirm-btn-filesystem'))
+    const callback = mockRemoveMcpServer.mock.calls[0]![2] as (r: { ok: boolean }) => void
+    act(() => {
+      callback({ ok: true })
+    })
+    expect(screen.queryByTestId('sidebar-mcp-view-remove-error-filesystem')).toBeNull()
+  })
+
+  it('disables the Remove button and explains why when mcpConfigForbiddenNonPrimary is true', () => {
+    mockStoreState = { ...mockStoreState, mcpConfigForbiddenNonPrimary: true }
+    render(<SidebarMcpView servers={[srv('filesystem', 'connected')]} />)
+    const btn = screen.getByTestId('sidebar-mcp-view-remove-filesystem') as HTMLButtonElement
+    expect(btn.disabled).toBe(true)
+    expect(btn.title).toMatch(/primary API token/)
+  })
+})
+
+describe('SidebarMcpView embeds the add-server form (#6999)', () => {
+  it('always renders the AddMcpServerForm entry point, even with zero servers', () => {
+    render(<SidebarMcpView servers={[]} />)
+    expect(screen.getByTestId('add-mcp-server-open')).toBeTruthy()
   })
 })
 

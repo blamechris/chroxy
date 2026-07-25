@@ -181,6 +181,7 @@ import type {
   SessionState,
   FilePickerItem,
   MCPResourceItem,
+  McpServerOpResult,
 } from './types';
 import { createEmptySessionState } from './utils';
 import { clearPersistedSession } from './persistence';
@@ -453,6 +454,139 @@ export function _testThinkingLevelRevertPendingSize(): number {
 /** @internal Exposed for tests so they can inspect the in-flight map. */
 export function _testTrustGrantPendingSize(): number {
   return _pendingTrustGrants.size;
+}
+
+// ---------------------------------------------------------------------------
+// #6999 — in-flight add_mcp_server / remove_mcp_server tracking.
+// ---------------------------------------------------------------------------
+//
+// Unlike set_model / set_permission_mode / set_thinking_level (which reply
+// with either a `*_changed` broadcast XOR a matching `error`), add_mcp_server
+// and remove_mcp_server have NO dedicated result type at all — #6974/#6998
+// deliberately shipped none; the re-emitted `mcp_servers` broadcast IS the
+// ack. So a caller (the add-server form / a remove button) needs a bounded
+// three-way resolution, armed per requestId:
+//   1. a matching `error` envelope arrives → the write was rejected
+//      (validation, MCP_CONFIG_FORBIDDEN_NON_PRIMARY_CLIENT, EXISTS,
+//      TRUST_DENIED, UNSUPPORTED, NOT_FOUND, ...).
+//   2. an `mcp_servers` broadcast for the target session arrives whose server
+//      list now satisfies the requested change (name present for add, absent
+//      for remove) → success. Checked directly against the RAW wire payload
+//      in `handleMessage`, BEFORE the shared dispatch table (#5556) applies it
+//      as a session patch — so this never races the patch application.
+//   3. neither arrives within MCP_SERVER_OP_TIMEOUT_MS → a bounded timeout,
+//      mirroring the git one-shot pattern (#6953/#6954) so a hung request
+//      can't leave a submit button's spinner stuck forever.
+//   4. the socket drops → clearPendingMcpServerOps fast-rejects every armed
+//      op, mirroring clearGitOneshotCallbacks / clearPendingTrustGrants.
+//
+// A Map (not the git pattern's fixed state-slot keys) because a name+scope
+// pair uniquely identifies a call and the UI naturally serializes submissions
+// (the form/remove-button disables while a request is in flight), so the
+// bounded FIFO cap below should never actually be hit in practice.
+
+interface PendingMcpServerOp {
+  op: 'add' | 'remove';
+  name: string;
+  sessionId: string | null;
+  callback: (result: McpServerOpResult) => void;
+}
+
+const _pendingMcpServerOps = new Map<string, PendingMcpServerOp>();
+const _mcpServerOpTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const MCP_SERVER_OP_PENDING_CAP = 8;
+export const MCP_SERVER_OP_TIMEOUT_MS = 15_000;
+export const MCP_SERVER_OP_TIMEOUT_MESSAGE =
+  'No response from the daemon — check the server list below; the request may still complete.';
+
+function _clearMcpServerOpTimer(requestId: string): void {
+  const timer = _mcpServerOpTimers.get(requestId);
+  if (timer !== undefined) {
+    clearTimeout(timer);
+    _mcpServerOpTimers.delete(requestId);
+  }
+}
+
+/**
+ * Arm a one-shot correlation for an `add_mcp_server` / `remove_mcp_server`
+ * request. `callback` fires EXACTLY once, via whichever of the three
+ * resolution paths above happens first. Bounded FIFO eviction (oldest first,
+ * silently dropped with no callback invocation — the same contract as the
+ * trust-grant / model-revert maps) defends a buggy caller that never lets a
+ * prior request resolve; ordinary use never approaches the cap.
+ */
+export function armMcpServerOpCallback(
+  requestId: string,
+  entry: { op: 'add' | 'remove'; name: string; sessionId: string | null },
+  callback: (result: McpServerOpResult) => void,
+): void {
+  if (_pendingMcpServerOps.size >= MCP_SERVER_OP_PENDING_CAP) {
+    const oldestKey = _pendingMcpServerOps.keys().next().value;
+    if (oldestKey !== undefined) {
+      _clearMcpServerOpTimer(oldestKey);
+      _pendingMcpServerOps.delete(oldestKey);
+    }
+  }
+  _pendingMcpServerOps.set(requestId, { ...entry, callback });
+  const timer = setTimeout(() => {
+    _mcpServerOpTimers.delete(requestId);
+    const pending = _pendingMcpServerOps.get(requestId);
+    if (!pending) return;
+    _pendingMcpServerOps.delete(requestId);
+    pending.callback({ ok: false, code: 'TIMEOUT', message: MCP_SERVER_OP_TIMEOUT_MESSAGE });
+  }, MCP_SERVER_OP_TIMEOUT_MS);
+  _mcpServerOpTimers.set(requestId, timer);
+}
+
+function _resolvePendingMcpServerOp(requestId: string, result: McpServerOpResult): void {
+  const pending = _pendingMcpServerOps.get(requestId);
+  if (!pending) return;
+  _clearMcpServerOpTimer(requestId);
+  _pendingMcpServerOps.delete(requestId);
+  pending.callback(result);
+}
+
+/**
+ * Check a raw `mcp_servers` broadcast against every in-flight op for the
+ * target session, resolving (ok: true) any whose expectation the new list now
+ * satisfies. Reads directly off the WIRE payload — deliberately not the
+ * already-applied store state — so this is safe to call before or after the
+ * shared dispatch table's session-patch write, with an identical result.
+ */
+function _resolveMcpServerOpsFromBroadcast(sessionId: string | null, rawServers: unknown): void {
+  if (_pendingMcpServerOps.size === 0) return;
+  const names = new Set(
+    Array.isArray(rawServers)
+      ? rawServers
+          .map((s) => (s && typeof s === 'object' ? (s as Record<string, unknown>).name : null))
+          .filter((n): n is string => typeof n === 'string')
+      : [],
+  );
+  for (const [requestId, pending] of _pendingMcpServerOps) {
+    if (pending.sessionId !== sessionId) continue;
+    const present = names.has(pending.name);
+    const satisfied = pending.op === 'add' ? present : !present;
+    if (satisfied) _resolvePendingMcpServerOp(requestId, { ok: true });
+  }
+}
+
+/**
+ * Fast-reject every still-armed MCP add/remove op on socket disconnect — a
+ * dead socket means the daemon can never reply, so there is no reason to make
+ * the caller wait out the full client-side timeout. Mirrors
+ * clearGitOneshotCallbacks / clearPendingTrustGrants.
+ */
+export function clearPendingMcpServerOps(): void {
+  for (const [requestId, pending] of _pendingMcpServerOps) {
+    _clearMcpServerOpTimer(requestId);
+    pending.callback({ ok: false, code: 'DISCONNECTED', message: MCP_SERVER_OP_TIMEOUT_MESSAGE });
+  }
+  _pendingMcpServerOps.clear();
+}
+
+/** @internal Exposed for tests so they can inspect the in-flight map. */
+export function _testMcpServerOpPendingSize(): number {
+  return _pendingMcpServerOps.size;
 }
 
 // ---------------------------------------------------------------------------
@@ -3962,6 +4096,15 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
   }
 
+  // #6999 — add_mcp_server / remove_mcp_server have no dedicated result type;
+  // the re-emitted mcp_servers broadcast IS the ack (#6974/#6998). Resolve any
+  // in-flight op off the RAW wire payload before the shared dispatch table
+  // (immediately below) applies it as a session patch, so this never races
+  // that application either way.
+  if (msg.type === 'mcp_servers') {
+    _resolveMcpServerOpsFromBroadcast(resolveSessionId(msg, get().activeSessionId), (msg as { servers?: unknown }).servers);
+  }
+
   // #5556 — shared dispatch table first. A hit handles the message and
   // returns; a miss falls through to the dashboard's own HANDLERS map +
   // switch below, keeping migration incremental.
@@ -4068,6 +4211,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         restartingSince: null,
         webFeatures: auth.webFeatures,
         serverCapabilities: auth.serverCapabilities,
+        // #6999: a fresh auth may present a different (possibly primary)
+        // token — don't carry a stale "forbidden" verdict across reconnects.
+        mcpConfigForbiddenNonPrimary: false,
       };
       if (ctx.isReconnect) {
         set(connectedState);
@@ -5767,6 +5913,23 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       const errReqId = typeof msg.requestId === 'string' ? msg.requestId : null;
       if (errReqId) {
         clearPendingTrustGrantByRequestId(errReqId, get);
+      }
+      // #6999: resolve any in-flight add_mcp_server / remove_mcp_server whose
+      // requestId matches — a no-op when the error belongs to some other
+      // handler's request (armMcpServerOpCallback / _resolvePendingMcpServerOp
+      // are no-ops for an unrecognized requestId).
+      if (errReqId) {
+        _resolvePendingMcpServerOp(errReqId, { ok: false, code: errCode, message: errMsg });
+      }
+      // #6999: sticky "not the primary token" signal for the MCP add/remove
+      // UI. Sourced from the actual rejection rather than a heuristic — see
+      // ConnectionState.mcpConfigForbiddenNonPrimary's doc comment (types.ts)
+      // for why there is no proactive wire flag to gate on instead. Set
+      // regardless of whether a tracked op matched this requestId (defensive:
+      // a future caller of add/remove that doesn't go through
+      // armMcpServerOpCallback should still flip this).
+      if (errCode === 'MCP_CONFIG_FORBIDDEN_NON_PRIMARY_CLIENT') {
+        set({ mcpConfigForbiddenNonPrimary: true });
       }
       // #5711 (Gap 2, client half): roll back the optimistic set_model when the
       // server says it never applied (MODEL_NOT_APPLIED — e.g. a mid-turn

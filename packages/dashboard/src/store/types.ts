@@ -371,6 +371,48 @@ export interface PermissionRule {
 }
 
 /**
+ * #6999 — the two MCP config MUTATION scopes a client may target. Mirrors
+ * `McpConfigScopeSchema` in `packages/protocol/src/schemas/client.ts` exactly
+ * (the wire contract shipped in #6974/#6998 and is settled). Both live in
+ * `~/.claude.json`: 'user' is the root `mcpServers` block, 'project' is
+ * `projects[<realpath(cwd)>].mcpServers`.
+ */
+export type McpConfigScope = 'user' | 'project';
+
+/**
+ * #6999 — the `config` payload shape for `add_mcp_server`, mirroring
+ * `AddMcpServerSchema.config` in `packages/protocol/src/schemas/client.ts`
+ * field-for-field. The server is authoritative (normalizeMcpServerConfig,
+ * `packages/server/src/byok-mcp-config.js`) — this type only bounds what the
+ * client is allowed to SEND; validate against the same rules client-side
+ * (mcp-server-validation.ts) before submitting for a fast, clear error.
+ */
+export interface McpServerConfigInput {
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  type?: 'stdio' | 'http' | 'streamable-http' | 'sse';
+  url?: string;
+  headers?: Record<string, string>;
+}
+
+/**
+ * #6999 — the resolved outcome of an `addMcpServer` / `removeMcpServer` call,
+ * handed to the caller's callback by `armMcpServerOpCallback`'s three-way race
+ * (matching `error` envelope / satisfying `mcp_servers` broadcast / bounded
+ * timeout — see message-handler.ts). There is no dedicated wire result type
+ * for either request (#6974/#6998 deliberately shipped none), so `code` /
+ * `message` are populated only on failure, sourced either from the server's
+ * `error` envelope or a client-side synthetic code (`NOT_CONNECTED`,
+ * `TIMEOUT`, `DISCONNECTED`).
+ */
+export interface McpServerOpResult {
+  ok: boolean;
+  code?: string;
+  message?: string;
+}
+
+/**
  * #6772 — one entry from the server's permission audit trail (permission-audit.js
  * ring buffer), returned by a `query_permission_audit` pull. Heterogeneous `type`s
  * share this shape; per-type fields are optional (mirrors the wire
@@ -1421,6 +1463,17 @@ export interface ConnectionState {
   // field, so missing keys are treated as `false` (fail-closed).
   serverCapabilities: Record<string, boolean>;
 
+  // #6999: sticky "this connection is not the primary token" signal. There is
+  // no proactive wire flag for `client.isPrimaryToken` (it is a server-only
+  // concept — see docs/security/bearer-token-authority.md), so this starts
+  // `false` (never assume forbidden) and flips permanently `true` the first
+  // time an `add_mcp_server` / `remove_mcp_server` is rejected with
+  // `MCP_CONFIG_FORBIDDEN_NON_PRIMARY_CLIENT`. Reset to `false` on every fresh
+  // `auth_ok` (a reconnect may present a different, primary token). Consumed
+  // by the MCP add/remove UI to disable + annotate the controls after the
+  // first refusal rather than re-attempting a write that will keep failing.
+  mcpConfigForbiddenNonPrimary: boolean;
+
   // Server startup phase (from server_status events)
   // #2836: 'tunnel_warming' is the current name for the DNS-propagation
   // window; 'tunnel_verifying' is retained as a legacy alias that
@@ -1693,6 +1746,37 @@ export interface ConnectionState {
    * client-side.
    */
   submitMcpAuthCode: (server: string, code: string) => void;
+  /**
+   * #6999 — add a brand-new MCP server to the active session's config (BYOK
+   * lane; server-side strict-primary gated — `client.isPrimaryToken === true`
+   * — and requires the daemon's first-use spawn-trust prompt before it takes
+   * effect). Sends `add_mcp_server`. There is no dedicated result type: the
+   * `callback` fires exactly once, resolved by whichever comes first — a
+   * matching `error` envelope, an `mcp_servers` broadcast whose list now
+   * contains `name` (success), or a bounded client-side timeout — so a submit
+   * button's spinner is guaranteed to clear. No-op (immediate
+   * `NOT_CONNECTED` callback) when the socket is closed or there is no active
+   * session. `config` is never logged — it may carry secrets in `env`/`headers`.
+   */
+  addMcpServer: (
+    name: string,
+    config: McpServerConfigInput,
+    scope: McpConfigScope,
+    callback: (result: McpServerOpResult) => void,
+  ) => void;
+  /**
+   * #6999 — permanently remove a configured MCP server from the active
+   * session's config (BYOK lane; same strict-primary gate as `addMcpServer`).
+   * Sends `remove_mcp_server`. Same three-way `callback` resolution as
+   * `addMcpServer`, but success is an `mcp_servers` broadcast whose list no
+   * longer contains `name`. No-op (immediate `NOT_CONNECTED` callback) when
+   * the socket is closed or there is no active session.
+   */
+  removeMcpServer: (
+    name: string,
+    scope: McpConfigScope,
+    callback: (result: McpServerOpResult) => void,
+  ) => void;
   /**
    * #6772 — pull the permission audit history for the active session
    * (`query_permission_audit`). Sets `permissionAuditLoading`; the reply lands in

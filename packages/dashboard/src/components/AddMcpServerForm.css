@@ -1,0 +1,138 @@
+/* AddMcpServerForm (#6999) — collapsible "+ Add server" form in the sidebar
+   MCP panel. Compact to fit the narrow sidebar slot; matches the existing
+   .sidebar-mcp-view-* sizing (11-12px type, small gaps). */
+
+.add-mcp-server-open {
+  align-self: flex-start;
+  padding: var(--space-1, 4px) var(--space-2, 8px);
+  border-radius: var(--radius-sm, 6px);
+  border: 1px solid var(--border-subtle);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.add-mcp-server-open:hover {
+  filter: brightness(1.15);
+}
+
+.add-mcp-server-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2, 8px);
+  padding: var(--space-2, 8px);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm, 6px);
+  background: var(--bg-secondary);
+  font-size: 11px;
+}
+
+.add-mcp-server-notice {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.add-mcp-server-forbidden {
+  margin: 0;
+  padding: var(--space-1, 4px) var(--space-2, 8px);
+  border: 1px solid var(--warning-fg);
+  border-radius: var(--radius-xs, 4px);
+  background: var(--warning-bg-subtle);
+  color: var(--warning-fg);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.add-mcp-server-trust-notice {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-style: italic;
+  line-height: 1.4;
+}
+
+.add-mcp-server-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.add-mcp-server-field > span {
+  color: var(--text-secondary);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.add-mcp-server-field input[type='text'],
+.add-mcp-server-field select,
+.add-mcp-server-field textarea {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 3px 6px;
+  border-radius: var(--radius-xs, 4px);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: 11px;
+  font-family: var(--font-mono, monospace);
+}
+
+.add-mcp-server-field textarea {
+  resize: vertical;
+}
+
+.add-mcp-server-transport {
+  display: flex;
+  gap: var(--space-3, 12px);
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.add-mcp-server-transport label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+}
+
+.add-mcp-server-error {
+  margin: 0;
+  color: var(--text-error);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.add-mcp-server-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2, 8px);
+}
+
+.add-mcp-server-actions button {
+  padding: 3px 10px;
+  border-radius: var(--radius-pill, 999px);
+  border: 1px solid var(--border-subtle);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.add-mcp-server-actions button[type='submit'] {
+  border-color: var(--accent-green);
+  color: var(--accent-green);
+}
+
+.add-mcp-server-actions button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.add-mcp-server-actions button:not(:disabled):hover {
+  filter: brightness(1.15);
+}
