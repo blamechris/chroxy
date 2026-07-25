@@ -26,10 +26,28 @@
  * the universal fallback (a remote/tunneled daemon whose loopback callback the
  * browser can't reach): the user pastes the code back and the daemon redeems it.
  * Both routes converge on the daemon-side redemption; the flow is broadcast-driven.
+ *
+ * #6999 — the "+ Add server" form (AddMcpServerForm) sends `add_mcp_server`;
+ * each row gets a "Remove" action that sends `remove_mcp_server` after an
+ * inline scope-confirm step (removal is scope-exact — the server reports
+ * MCP_SERVER_NOT_FOUND rather than guessing which scope a same-named server
+ * lives in). That confirm step deliberately starts with NO scope selected: the
+ * `mcp_servers` payload carries no scope field, so the client cannot derive the
+ * right one, and a pre-selected default would let a single click delete from a
+ * scope the user never chose. Confirm stays disabled until the choice is made.
+ * Both mutations require the strict-primary token class
+ * server-side; `mcpConfigForbiddenNonPrimary` (set the first time either is
+ * actually refused with MCP_CONFIG_FORBIDDEN_NON_PRIMARY_CLIENT — see
+ * message-handler.ts) disables + annotates both affordances rather than
+ * leaving them clickable-but-doomed. Neither mutation has a dedicated result
+ * type: success is simply the row appearing/disappearing from this same list
+ * on the next `mcp_servers` broadcast.
  */
 import { useState } from 'react'
 import { useConnectionStore } from '../store/connection'
 import type { McpServer } from '@chroxy/store-core'
+import type { McpConfigScope, McpServerOpResult } from '../store/types'
+import { AddMcpServerForm } from './AddMcpServerForm'
 
 // Module-level stable empty array so the store selector's fallback keeps a
 // referentially-stable identity (avoids needless re-renders / render loops).
@@ -60,6 +78,8 @@ export function SidebarMcpView({ servers: serversProp }: SidebarMcpViewProps = {
   })
   const setMcpServerEnabled = useConnectionStore((s) => s.setMcpServerEnabled)
   const submitMcpAuthCode = useConnectionStore((s) => s.submitMcpAuthCode)
+  const removeMcpServer = useConnectionStore((s) => s.removeMcpServer)
+  const forbiddenNonPrimary = useConnectionStore((s) => s.mcpConfigForbiddenNonPrimary)
   const servers = serversProp ?? storeServers
 
   return (
@@ -76,10 +96,13 @@ export function SidebarMcpView({ servers: serversProp }: SidebarMcpViewProps = {
               server={server}
               onToggle={setMcpServerEnabled}
               onSubmitAuthCode={submitMcpAuthCode}
+              onRemove={removeMcpServer}
+              removeDisabled={forbiddenNonPrimary}
             />
           ))}
         </ul>
       )}
+      <AddMcpServerForm />
     </div>
   )
 }
@@ -88,13 +111,34 @@ interface McpServerRowProps {
   server: McpServer
   onToggle: (server: string, enabled: boolean) => void
   onSubmitAuthCode: (server: string, code: string) => void
+  onRemove: (name: string, scope: McpConfigScope, callback: (result: McpServerOpResult) => void) => void
+  removeDisabled: boolean
 }
 
-function McpServerRow({ server, onToggle, onSubmitAuthCode }: McpServerRowProps) {
+function McpServerRow({ server, onToggle, onSubmitAuthCode, onRemove, removeDisabled }: McpServerRowProps) {
   const [code, setCode] = useState('')
+  const [removeStep, setRemoveStep] = useState<'idle' | 'confirm' | 'removing'>('idle')
+  // #6999: '' = no choice made yet. Removal is scope-EXACT server-side and the
+  // wire `mcp_servers` payload carries no scope, so there is nothing to derive a
+  // correct default from. Pre-selecting one would make a click-through delete
+  // from a scope the user never picked, so the choice stays explicit and the
+  // confirm button stays disabled until it is made.
+  const [removeScope, setRemoveScope] = useState<McpConfigScope | ''>('')
+  const [removeError, setRemoveError] = useState<string | null>(null)
   const connected = server.status === 'connected'
   const enabled = isServerEnabled(server)
   const needsAuth = server.status === 'oauth-required'
+
+  const confirmRemove = () => {
+    if (removeScope === '') return // guarded by the disabled button; belt-and-braces
+    setRemoveStep('removing')
+    setRemoveError(null)
+    onRemove(server.name, removeScope, (result) => {
+      if (result.ok) return // row disappears on the next mcp_servers broadcast
+      setRemoveStep('confirm')
+      setRemoveError(result.message || 'Failed to remove MCP server.')
+    })
+  }
 
   return (
     <li className="sidebar-mcp-view-row" data-testid={`sidebar-mcp-view-row-${server.name}`}>
@@ -125,7 +169,76 @@ function McpServerRow({ server, onToggle, onSubmitAuthCode }: McpServerRowProps)
             {enabled ? 'On' : 'Off'}
           </button>
         )}
+        {removeStep === 'idle' && (
+          <button
+            type="button"
+            className="sidebar-mcp-view-remove"
+            data-testid={`sidebar-mcp-view-remove-${server.name}`}
+            disabled={removeDisabled}
+            title={
+              removeDisabled
+                ? 'Removing MCP servers requires the primary API token'
+                : `Remove MCP server ${server.name}`
+            }
+            aria-label={`Remove MCP server ${server.name}`}
+            onClick={() => setRemoveStep('confirm')}
+          >
+            Remove
+          </button>
+        )}
       </div>
+      {removeStep !== 'idle' && (
+        <div className="sidebar-mcp-view-remove-confirm" data-testid={`sidebar-mcp-view-remove-confirm-${server.name}`}>
+          <select
+            data-testid={`sidebar-mcp-view-remove-scope-${server.name}`}
+            value={removeScope}
+            disabled={removeStep === 'removing'}
+            aria-label={`Scope to remove MCP server ${server.name} from`}
+            onChange={(e) => setRemoveScope(e.target.value as McpConfigScope | '')}
+          >
+            <option value="">Select scope…</option>
+            <option value="user">User scope</option>
+            <option value="project">Project scope</option>
+          </select>
+          <button
+            type="button"
+            data-testid={`sidebar-mcp-view-remove-confirm-btn-${server.name}`}
+            disabled={removeStep === 'removing' || removeScope === ''}
+            title={
+              removeScope === ''
+                ? 'Pick which scope to remove this server from'
+                : `Remove ${server.name} from ${removeScope} scope`
+            }
+            onClick={confirmRemove}
+          >
+            {removeStep === 'removing' ? 'Removing…' : 'Confirm remove'}
+          </button>
+          <button
+            type="button"
+            data-testid={`sidebar-mcp-view-remove-cancel-${server.name}`}
+            disabled={removeStep === 'removing'}
+            onClick={() => {
+              setRemoveStep('idle')
+              setRemoveError(null)
+            }}
+          >
+            Cancel
+          </button>
+          <p
+            className="sidebar-mcp-view-remove-hint"
+            data-testid={`sidebar-mcp-view-remove-hint-${server.name}`}
+          >
+            {removeScope === ''
+              ? "The server list doesn't report which scope a server is configured in, so pick the scope to remove it from — removal affects that scope only."
+              : `Removes ${server.name} from ${removeScope} scope only.`}
+          </p>
+          {removeError && (
+            <p className="sidebar-mcp-view-remove-error" data-testid={`sidebar-mcp-view-remove-error-${server.name}`} role="alert">
+              {removeError}
+            </p>
+          )}
+        </div>
+      )}
       {needsAuth && (
         <div className="sidebar-mcp-view-auth" data-testid={`sidebar-mcp-view-auth-${server.name}`}>
           {server.authUrl && (
