@@ -211,6 +211,97 @@ describe('TurnDriver — failure modes', () => {
   })
 })
 
+describe('TurnDriver — interrupt (`stopped`) is terminal (#7009)', () => {
+  // Race the turn's own settlement against a short wall-clock timer. `kind` is
+  // 'pending' ONLY if the driver left the promise hanging.
+  const settleOrPending = (p, ms = 100) => Promise.race([
+    p.then((value) => ({ kind: 'resolved', value }), (err) => ({ kind: 'rejected', err })),
+    new Promise((r) => setTimeout(() => r({ kind: 'pending' }), ms)),
+  ])
+
+  it('rejects TURN_STOPPED promptly on interrupt instead of waiting out timeoutMs', async () => {
+    const { sm, addSession } = mkStub()
+    addSession('s1')
+    driver = new TurnDriver({ sessionManager: sm })
+    // A LONG turn timeout: if `stopped` is not terminal for a live turn, this
+    // promise stays pending for the whole window (#7009 — 15 min in the
+    // scheduler), and the race below reports 'pending'.
+    const p = driver.driveTurn('s1', 'go', { timeoutMs: 60_000 })
+    p.catch(() => {}) // never leave the rejection unhandled while we race it
+    sm.ev('s1', 'stream_delta', { messageId: 'm1', delta: 'half a thought' })
+    // SdkSession.interrupt() emits `stopped` — deliberately NOT `result` and NOT
+    // `error` (sdk-session.js, #4881). Same for CliSession/JsonlSubprocessSession
+    // and the Codex app-server driver: every `stopped` emit is gated on
+    // wasIntentionalStop, so `stopped` always means "the user/engine stopped it".
+    sm.ev('s1', 'stopped', {})
+    const outcome = await settleOrPending(p)
+    assert.notEqual(outcome.kind, 'pending', 'an interrupted turn must settle promptly, not wait out timeoutMs')
+    // The success/interrupt distinction: an interrupted turn must NEVER look like
+    // a completed one to the caller.
+    assert.notEqual(outcome.kind, 'resolved', 'an interrupted turn must never report a completed turn')
+    assert.ok(outcome.err instanceof TurnError)
+    assert.equal(outcome.err.code, 'TURN_STOPPED', 'interrupt gets its OWN code, distinct from TURN_TIMEOUT/TURN_ERROR')
+    assert.equal(outcome.err.partialText, 'half a thought', 'partial output is preserved for the caller')
+  })
+
+  it('releases the mutex on a stopped turn so the next queued turn starts', async () => {
+    const { sm, addSession } = mkStub()
+    const s = addSession('s1')
+    driver = new TurnDriver({ sessionManager: sm })
+    const p1 = driver.driveTurn('s1', 'first', { timeoutMs: 60_000 })
+    p1.catch(() => {})
+    const p2 = driver.driveTurn('s1', 'second', { timeoutMs: 60_000 })
+    assert.equal(s.sent.length, 1)
+    sm.ev('s1', 'stopped', {})
+    const o1 = await settleOrPending(p1)
+    assert.equal(o1.kind, 'rejected')
+    assert.equal(o1.err.code, 'TURN_STOPPED')
+    // the concurrency slot is free again — turn-2 sent without waiting on a drain
+    assert.equal(s.sent.length, 2, 'stopped turn released the per-session mutex')
+    assert.equal(s.sent[1].prompt, 'second')
+    sm.ev('s1', 'result', { cost: 3, duration: 3, usage: {} })
+    const o2 = await settleOrPending(p2)
+    assert.equal(o2.kind, 'resolved', 'the follow-up turn still completes normally')
+    assert.equal(o2.value.result.cost, 3)
+  })
+
+  it('a completed turn still resolves success even if a trailing `stopped` arrives', async () => {
+    // The inverse guard: making `stopped` terminal must not downgrade a turn that
+    // genuinely finished. `result` settles first; the late `stopped` is dropped by
+    // the epoch guard.
+    const { sm, addSession } = mkStub()
+    addSession('s1')
+    driver = new TurnDriver({ sessionManager: sm })
+    const p = driver.driveTurn('s1', 'go', { timeoutMs: 60_000 })
+    sm.ev('s1', 'stream_delta', { messageId: 'm1', delta: 'all done' })
+    sm.ev('s1', 'result', { cost: 0.5, duration: 4, usage: { input_tokens: 1 } })
+    sm.ev('s1', 'stopped', {})
+    const outcome = await settleOrPending(p)
+    assert.equal(outcome.kind, 'resolved', 'a genuinely completed turn reports success')
+    assert.equal(outcome.value.text, 'all done')
+    assert.equal(outcome.value.result.cost, 0.5)
+  })
+
+  it('`stopped` during the post-timeout drain still only ends the drain', async () => {
+    // Regression guard on the pre-existing drain path: a timed-out turn is already
+    // settled as TURN_TIMEOUT, and its trailing `stopped` must not be re-settled
+    // as TURN_STOPPED — it just releases the mutex.
+    const { sm, addSession } = mkStub()
+    const s = addSession('s1')
+    driver = new TurnDriver({ sessionManager: sm })
+    const p1 = driver.driveTurn('s1', 'first', { timeoutMs: 10 })
+    const p2 = driver.driveTurn('s1', 'second', { timeoutMs: 60_000 })
+    p2.catch(() => {})
+    const o1 = await settleOrPending(p1, 500)
+    assert.equal(o1.kind, 'rejected')
+    assert.equal(o1.err.code, 'TURN_TIMEOUT', 'timeout keeps its own code, not TURN_STOPPED')
+    assert.equal(s.interrupted, 1)
+    sm.ev('s1', 'stopped', {}) // the interrupted session confirming it stopped
+    await Promise.resolve()
+    assert.equal(s.sent.length, 2, 'trailing stopped ended the drain and released the mutex')
+  })
+})
+
 describe('TurnDriver — post-timeout drain (no cross-turn misattribution)', () => {
   it('swallows a timed-out turn\'s trailing events; the next turn keeps its own', async () => {
     const { sm, addSession } = mkStub()

@@ -13,8 +13,23 @@
  * - Text is accumulated live from `stream_delta` (per messageId) + non-streamed
  *   `message {type:'response'}` events, bounded to MAX_ACCUM_BYTES with an
  *   explicit truncation marker (the decision parser scans from the tail).
- * - Completion keys ONLY off the `result` event (isRunning can stay true on
+ * - SUCCESS keys ONLY off the `result` event (isRunning can stay true on
  *   pending background shells). `error` is turn-terminal → TurnError.
+ * - `stopped` is turn-terminal too → TURN_STOPPED (#7009). Every provider emits
+ *   it exclusively on its intentional-stop path (`wasIntentionalStop`: see
+ *   sdk-session.js, cli-session.js, jsonl-subprocess-session.js,
+ *   codex-app-server-session.js — #4881), i.e. someone called interrupt(). Such a
+ *   turn produces NO `result` and NO `error`, so without this the caller's promise
+ *   hung until the watchdog fired. It gets its OWN code, never a success: an
+ *   interrupted turn did not do the work it was asked to do.
+ *   CAVEAT: this only helps providers that emit `stopped` INSTEAD of a result.
+ *   CliSession's intentional-stop close emits a synthetic `result` (cost:null, to
+ *   clear the dashboard's spinner) BEFORE `stopped`, so a claude-cli turn would
+ *   settle as a success on that synthetic result and never reach this case.
+ *   claude-cli is not reachable through either TurnDriver consumer today (the
+ *   scheduler requires capabilities.inProcessPermissions; orchestration workers
+ *   are restricted to claude-sdk/claude-byok/codex), but an orchestration
+ *   ARCHITECT role is not provider-restricted — tracked separately.
  * - Watchdog: on timeout, interrupt() the session and reject TURN_TIMEOUT.
  * - `session_destroyed` mid-turn → SESSION_GONE.
  */
@@ -32,7 +47,7 @@ export class TurnError extends Error {
   constructor(code, message, { partialText = '' } = {}) {
     super(message || code)
     this.name = 'TurnError'
-    this.code = code // TURN_ERROR | TURN_TIMEOUT | SESSION_GONE | SEND_FAILED
+    this.code = code // TURN_ERROR | TURN_TIMEOUT | TURN_STOPPED | SESSION_GONE | SEND_FAILED
     this.partialText = partialText
   }
 }
@@ -219,6 +234,20 @@ export class TurnDriver {
       }
       case 'error': {
         this._finishTurn(ctx, () => ctx.reject(new TurnError('TURN_ERROR', (data && data.message) || 'session error', { partialText: this._assembleText(ctx) })))
+        break
+      }
+      case 'stopped': {
+        // #7009 — someone interrupted this turn (the scheduler denying a
+        // permission prompt, an operator pressing Stop, an orchestration cancel).
+        // Providers emit `stopped` INSTEAD of `result`/`error` on that path
+        // (#4881), so ignoring it left driveTurn pending until the watchdog —
+        // 15 minutes of a held concurrency slot in the scheduler.
+        //
+        // Deliberately a REJECTION with its own code, never a resolve: the turn
+        // is over but its work did not complete, and resolving here would report
+        // an interrupted turn as a finished one. partialText carries whatever the
+        // turn managed to produce so the caller can still inspect it.
+        this._finishTurn(ctx, () => ctx.reject(new TurnError('TURN_STOPPED', 'turn interrupted before completing', { partialText: this._assembleText(ctx) })))
         break
       }
       default:

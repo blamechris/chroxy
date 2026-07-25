@@ -838,6 +838,69 @@ describe('#6865 SchedulerEngine', () => {
     })
   })
 
+  // ── #7009: a denied permission frees the concurrency slot IMMEDIATELY ───────
+
+  describe('interrupted turn settles promptly (#7009)', () => {
+    it('a denied permission finishes the run at once instead of burning runTimeoutMs', async () => {
+      // The real abort surface: interrupt() emits `stopped`, never a result/error.
+      // Before TurnDriver treated `stopped` as terminal, driveTurn stayed pending
+      // for the whole runTimeoutMs window (15 min in production), holding the
+      // single concurrency slot even though the outcome was already decided.
+      const sm = new FakeSessionManager({
+        permissionRequest: { requestId: 'req-1', toolName: 'Bash' },
+        interruptEmitsStopped: true,
+      })
+      const task = addTask({ prompt: 'rm things', cadence: { kind: 'once', at: 2000 } })
+      // A real-timer watchdog well above the wall-clock budget asserted below.
+      const engine = newEngine({ sessionManager: sm, runTimeoutMs: 5_000 })
+      engine.start()
+
+      const startedAt = Date.now()
+      clock = 2000
+      await timers.tick()
+      const elapsedMs = Date.now() - startedAt
+
+      assert.deepEqual(sm.responded, [['req-1', 'deny']])
+      assert.equal(sm.interrupted.length, 1)
+      // THE liveness assertion: the outcome is already RECORDED. With `stopped`
+      // ignored, driveTurn is still pending here and lastRun stays null until the
+      // watchdog fires — the slot held for the whole window.
+      const record = store.get(task.id)
+      assert.ok(record.lastRun, 'the interrupted run must be recorded already, not left pending until runTimeoutMs')
+      assert.ok(elapsedMs < 2_000, `settling must not block on runTimeoutMs (took ${elapsedMs}ms of a 5000ms window)`)
+      // ...and the outcome is still the VISIBLE blocked failure. Settling faster
+      // must never turn an interrupted run into a completed one.
+      assert.notEqual(record.lastRun.status, 'success', 'an interrupted run must never report success')
+      assert.equal(record.lastRun.status, 'error')
+      assert.match(record.lastRun.error, /permission required for Bash/)
+      assert.equal(record.lastRun.sessionId, 'sess-1')
+    })
+
+    it('an operator Stop on a scheduled run is an error, never a success', async () => {
+      // No permission prompt at all — the turn is simply interrupted (what a Stop
+      // from the dashboard does). `runState.blocked` is unset here, so the outcome
+      // rides entirely on TurnDriver's TURN_STOPPED rejection. If `stopped` were
+      // treated as a normal completion this would read as `success`.
+      const sm = new FakeSessionManager({ interruptEmitsStopped: true, stopAfterSend: true })
+      const task = addTask({ prompt: 'long job', cadence: { kind: 'once', at: 2000 } })
+      const engine = newEngine({ sessionManager: sm, runTimeoutMs: 5_000 })
+      engine.start()
+
+      const startedAt = Date.now()
+      clock = 2000
+      await timers.tick()
+      const elapsedMs = Date.now() - startedAt
+
+      assert.equal(sm.interrupted.length, 1)
+      const record = store.get(task.id)
+      assert.ok(record.lastRun, 'the stopped run must be recorded already, not left pending until runTimeoutMs')
+      assert.ok(elapsedMs < 2_000, `settling must not block on runTimeoutMs (took ${elapsedMs}ms of a 5000ms window)`)
+      assert.notEqual(record.lastRun.status, 'success', 'a stopped run did not do the work — never success')
+      assert.equal(record.lastRun.status, 'error')
+      assert.match(record.lastRun.error, /interrupted/)
+    })
+  })
+
   // ── SECURITY C2: cwd confinement is enforced ON THIS PATH ──────────────────
   //
   // The store only trims the cwd string and createSession only statSync's it, so
@@ -1151,8 +1214,16 @@ class FakeSessionManager extends EventEmitter {
    * @param {boolean} [opts.refuseModeChange] - model a session that REJECTS setPermissionMode
    *   (what BaseSession does for a non-`auto` switch while a turn is in flight): the
    *   setter is a no-op and `permissionMode` keeps its old value.
+   * @param {boolean} [opts.interruptEmitsStopped] - model SdkSession's REAL interrupt
+   *   path (#4881/#7009): the turn is left live by sendMessage, and `interrupt()`
+   *   ends it with `stopped` — never a `result` and never an `error`. The default
+   *   fake instead completes every turn with a `result`, which cannot exercise the
+   *   interrupted-turn settle at all.
+   * @param {boolean} [opts.stopAfterSend] - model an OPERATOR Stop landing on a
+   *   scheduled turn: the session interrupts itself right after the send, with no
+   *   permission prompt involved.
    */
-  constructor({ permissionRequest = null, providerType = undefined, defaultCwd = undefined, refuseModeChange = false } = {}) {
+  constructor({ permissionRequest = null, providerType = undefined, defaultCwd = undefined, refuseModeChange = false, interruptEmitsStopped = false, stopAfterSend = false } = {}) {
     super()
     this.sessions = new Map()
     this.created = []
@@ -1163,6 +1234,8 @@ class FakeSessionManager extends EventEmitter {
     this.scheduledTaskStore = null
     this._permissionRequest = permissionRequest
     this._refuseModeChange = refuseModeChange
+    this._interruptEmitsStopped = interruptEmitsStopped
+    this._stopAfterSend = stopAfterSend
     this._seq = 0
     if (providerType !== undefined) this.providerType = providerType
     if (defaultCwd !== undefined) this.defaultCwd = defaultCwd
@@ -1185,7 +1258,13 @@ class FakeSessionManager extends EventEmitter {
         return true
       },
       respondToPermission: (requestId, decision) => { this.responded.push([requestId, decision]) },
-      interrupt: async () => { this.interrupted.push(id) },
+      interrupt: async () => {
+        this.interrupted.push(id)
+        // The real SDK abort surface: `stopped`, with no result and no error.
+        if (this._interruptEmitsStopped) {
+          this.emit('session_event', { sessionId: id, event: 'stopped', data: {} })
+        }
+      },
       sendMessage: async (prompt) => {
         this.sends.push({ id, prompt, permissionMode: session.permissionMode })
         // TurnDriver registers its accumulator synchronously before sendMessage,
@@ -1193,6 +1272,12 @@ class FakeSessionManager extends EventEmitter {
         if (this._permissionRequest) {
           this.emit('session_event', { sessionId: id, event: 'permission_request', data: this._permissionRequest })
         }
+        // Leave the turn LIVE when interrupt() is the thing that ends it — the
+        // synchronous permission_request above already triggered the deny +
+        // interrupt, so emitting a result here would settle a turn the engine has
+        // already aborted.
+        if (this._stopAfterSend) { session.interrupt(); return }
+        if (this._interruptEmitsStopped) return
         this.emit('session_event', { sessionId: id, event: 'result', data: { cost: 0, duration: 1 } })
       },
     }
