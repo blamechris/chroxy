@@ -13,31 +13,218 @@ Configuration values are resolved in the following order (highest priority first
 
 ## Configuration Keys
 
+Every key below is a real entry in `CONFIG_SCHEMA`
+([`packages/server/src/config.js`](src/config.js)) — that object is the
+authoritative list, and anything not in it triggers an `Unknown config key`
+warning at startup and is ignored.
+
+The tables are grouped for readability only; every key lives at the **top level**
+of `~/.chroxy/config.json` regardless of which group it appears in.
+
+### Core server
+
 | Key | Type | CLI Flag | Environment Variable | Description |
 |-----|------|----------|---------------------|-------------|
 | `apiToken` | string | - | `API_TOKEN` | Authentication token for clients |
-| `sessionTokenTtl` | string | - | `CHROXY_SESSION_TOKEN_TTL` | *(default `30d`)* How long a paired device's session token stays valid without reconnecting (#6598). **Sliding** — each successful connect refreshes it, so only an *idle* device expires. A duration string (`30d`, `15d`, `12h`); floored at 5 min. Tokens are persisted encrypted at rest (`~/.chroxy/session-tokens.json`), so they now survive daemon restarts. Longer = fewer re-pairs but a wider stolen-token window; you own the dial. |
-| `port` | number | - | `PORT` | Local WebSocket port (default: 8765) |
+| `port` | number | - | `PORT` | Local WebSocket port (default: 8765). Range `1`–`65535`. |
 | `host` | string | `--host <address>` | `CHROXY_HOST` | Bind address for the server socket. Unset binds `0.0.0.0` (all interfaces) so the mobile app / LAN clients can reach it. Set to `127.0.0.1` for a loopback-only bind that keeps auth enabled — opt-in defence-in-depth for single-device setups. `--no-auth` always forces loopback regardless of this key. When bound to loopback the mDNS `_chroxy._tcp` advertisement is suppressed (the server is not LAN-reachable). |
-| `provider` | string | `--provider <name>` | `CHROXY_PROVIDER` | Default session backend. Allowed values: `claude-tui` (default, #5819), `claude-sdk`, `claude-cli`, `claude-channel` (research preview), `gemini`, `codex`, plus `docker-sdk` / `docker-cli` when Docker environments are enabled. The `claude-channel` provider is a research-preview scaffold whose `start()` currently throws — selectable for `chroxy doctor` / registry inspection but not yet runnable (bridge lands in #3954). See [../../docs/providers.md](../../docs/providers.md) for per-provider setup, env vars (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, …), and the capability matrix. |
-| `shell` | string | - | `SHELL_CMD` | Shell to use (default: `$SHELL` or `/bin/zsh`) |
 | `cwd` | string | `--cwd <path>` | `CHROXY_CWD` | Working directory (CLI mode) |
-| `model` | string | `--model <name>` | `CHROXY_MODEL` | Model to use. Provider-specific — e.g. `claude-sonnet-4`/`haiku` for Claude, `gemini-2.5-pro` for Gemini, `gpt-5.4` for Codex. |
-| `allowedTools` | array | `--allowed-tools <list>` | `CHROXY_ALLOWED_TOOLS` | Auto-approved tools (CLI mode) |
 | `noAuth` | boolean | `--no-auth` | `CHROXY_NO_AUTH` | Disable authentication (localhost only) |
+| `externalUrl` | string | - | `CHROXY_EXTERNAL_URL` | Public URL clients should use instead of a Cloudflare tunnel — for operators who front the daemon with their own reverse proxy / VPN / ingress. When set, tunnel startup **and** the supervisor are skipped. Must parse as a URL with an `http:` or `https:` scheme; a malformed value warns at startup. |
+| `showToken` | boolean | `--show-token` | `CHROXY_SHOW_TOKEN` | Print the full API token in the terminal connect block instead of a masked prefix. Off by default so a shared screen / recorded terminal doesn't leak the token. |
+| `logFormat` | string | `--log-format <format>` | `CHROXY_LOG_FORMAT` | Log output format: `text` (default) or `json`. Any value other than the literal `json` keeps the human-readable text logger. |
+| `maxRestarts` | number | `--max-restarts <count>` | `CHROXY_MAX_RESTARTS` | Max consecutive child restarts the supervisor attempts before giving up and exiting (default `10`). Only applies in supervisor mode (the default for `chroxy start` with a tunnel). |
+| `terminalDownGraceMs` | number | - | `CHROXY_TERMINAL_DOWN_GRACE_MS` | How long the supervisor keeps serving a terminal `status: "down"` health response (reason `supervisor_gave_up`) after exhausting `maxRestarts`, before exiting — long enough for a polling client to latch the terminal state instead of seeing a bare connection refusal (#6022). Default `15000` (15 s); `0` restores the pre-#6022 exit-immediately behaviour. |
+| `noEncrypt` | boolean | `--no-encrypt` | `CHROXY_NO_ENCRYPT` | Disable end-to-end message encryption (dev/testing only). Transport TLS from the tunnel still applies, but message payloads are no longer encrypted between client and daemon. |
+| `encryptLocalhost` | boolean | - | `CHROXY_ENCRYPT_LOCALHOST` | Force E2E encryption on loopback connections too, disabling the localhost plaintext bypass unconditionally (#6564). Off by default — the bypass is already auto-disabled whenever a tunnel is active. |
+| `tokenExpiry` | string | - | `CHROXY_TOKEN_EXPIRY` | Rotation lifetime for the **primary API token** (`24h`, `7d`, …). When set, the token manager rotates the token on expiry and honours a short grace window for the previous value. Unset (the default) means the primary token never expires. Distinct from `sessionTokenTtl`, which governs *paired device* session tokens. |
+| `sessionTokenTtl` | string | - | `CHROXY_SESSION_TOKEN_TTL` | *(default `30d`)* How long a paired device's session token stays valid without reconnecting (#6598). **Sliding** — each successful connect refreshes it, so only an *idle* device expires. A duration string (`30d`, `15d`, `12h`); floored at 5 min. Tokens are persisted encrypted at rest (`~/.chroxy/session-tokens.json`), so they now survive daemon restarts. Longer = fewer re-pairs but a wider stolen-token window; you own the dial. |
+| `repos` | array | - | `CHROXY_REPOS` | Explicit list of git repository paths the Control Room surveys and `chroxy worktree gc` sweeps. Unioned with the repos auto-discovered under [`controlRoomRoot`](#control-room) — an explicit entry is never dropped even if it lives outside that root. |
+
+### Sessions, history, and limits
+
+| Key | Type | CLI Flag | Environment Variable | Description |
+|-----|------|----------|---------------------|-------------|
+| `maxSessions` | number | - | `CHROXY_MAX_SESSIONS` | Maximum concurrent sessions (default `5`). Creating one past the cap is rejected with `SESSION_LIMIT_REACHED`. Must be ≥ 1. |
+| `maxMessages` | number | `--max-messages <count>` | `CHROXY_MAX_MESSAGES` | Messages retained per session before FIFO eviction (default `1000`). |
+| `maxHistory` | number | - | `CHROXY_MAX_HISTORY` | Legacy alias for `maxMessages`. `maxMessages` wins when both are set; prefer the canonical key. |
+| `maxPayload` | number | `--max-payload <bytes>` | `CHROXY_MAX_PAYLOAD` | WebSocket max message size in bytes. **Effective default `10485760` (10 MB)** — large enough for image / document attachments. Range `1024` (1 KB) – `104857600` (100 MB); values outside it warn at startup. *(The `--max-payload` help text still advertises the historical 1 MB default; the runtime default is 10 MB.)* |
+| `maxToolInput` | number | `--max-tool-input <bytes>` | `CHROXY_MAX_TOOL_INPUT` | Maximum tool-input size in bytes before the input is truncated and a notice is surfaced in the transcript. Default `262144` (256 KB). |
+| `sessionTimeout` | string | `--session-timeout <duration>` | `CHROXY_SESSION_TIMEOUT` | Idle-session timeout as a duration string (`2h`, `30m`). **Disabled by default.** Minimum 30 s; a malformed duration or a sub-30s value warns at startup. This is a plain idle reaper — distinct from the [inactivity safety net](#inactivity-safety-net), which measures silence *within* a running turn. |
 | `costBudget` | number | `--cost-budget <dollars>` | `CHROXY_COST_BUDGET` | Per-session cost budget in dollars. Applied independently to each session (not a shared pool across sessions). Warns at 80%, pauses the session at 100%. |
-| `providers` | array \| object | - | `CHROXY_PROVIDERS` | Two forms. **Array** (legacy, written by `chroxy init`): informational list of provider ids the user opted into. **Object** (#5419): `providers.anthropicCompatible` is an array of config-driven Anthropic-compatible endpoint entries (Z.ai GLM, Moonshot Kimi, MiniMax, LM Studio, llama.cpp, vLLM, OpenRouter, custom) — each entry `{ id, label?, baseUrl, apiKeyEnv?, credentialsKey?, defaultModel, models?, pricing?, contextWindow? }` registers a first-class provider at startup, selectable via `provider` / `--provider <id>`. API keys are **never** inlined: `apiKeyEnv` names an env var, `credentialsKey` names a `~/.chroxy/credentials.json` field (mode `0600`); entries carrying literal secrets are rejected. Invalid entries are warned about and skipped; valid siblings still register. See [Anthropic-compatible endpoints](../../docs/providers.md#anthropic-compatible-endpoints-config-driven). |
-| `promptEvaluatorSkipPattern` | string | - | - | Per-session regex source (case-insensitive) extending the default skip list used by the prompt evaluator's trivial-message heuristic. See [Prompt evaluator skip heuristic](#prompt-evaluator-skip-heuristic) below. |
-| `maxSkillBytes` | number | - | - | Per-skill byte cap. Skills exceeding this size are rejected with a sanitised log warning. Default `32768` (32KB). Set to `0` to disable the per-skill cap. |
-| `maxTotalSkillBytes` | number | - | - | Global skills-context budget. When a session's merged active-skill set exceeds this size, lower-priority skills are dropped first (frontmatter `priority` defaults to 100; ties broken alphabetically). Default `262144` (256KB). Set to `0` to disable the global cap. |
-| `providerSkillAllowlist` | object | - | - | Per-provider skill allowlist. Object keyed by provider id (e.g. `codex`, `gemini`); each value is an array of skill names that may load for that provider. See [Per-provider skill allowlist](#per-provider-skill-allowlist) below. |
-| `trustMismatchMode` | string | - | - | One of `warn` or `block`. When set, the server records a SHA-256 hash of every loaded skill on first activation and compares it on every subsequent load. See [Skill content-hash trust](#skill-content-hash-trust) below. Disabled (no hashing) when omitted. |
-| `binaryProvenance` | object | - | `CHROXY_BINARY_PROVENANCE`, `CHROXY_BINARY_SIGNATURE_GATE` | Opt-in provenance verification for spawned provider binaries (`claude`, `codex`, `gemini`, `cloudflared`). `mode` (`off`/`warn`/`block`) drives a cross-platform SHA-256 pin ledger; `signatureGate` (boolean) toggles a macOS `spctl` notarization gate. Both OFF by default. See [Binary provenance verification](#binary-provenance-verification) below. |
-| `dangerouslySkipPermissions` | boolean | `--dangerously-skip-permissions` | `CHROXY_DANGEROUSLY_SKIP_PERMISSIONS` | Server-wide default for the per-session skip-permissions flag (#4246, #4384). Honoured only by the `claude-tui` provider — spawns claude with `--dangerously-skip-permissions` and elides chroxy's permission hook. Off by default. Legacy alias `skipPermissions` (config key) and `CHROXY_SKIP_PERMISSIONS` (env var) are still honoured for one deprecation window and emit a warning at boot — rename to the canonical key. See [Skip permissions (TUI provider)](#skip-permissions-tui-provider) below. |
+| `summarize` | object | - | `CHROXY_SEMANTIC_TITLES_MODEL`, `CHROXY_SEMANTIC_TITLES_TIMEOUT_MS` *(title path only)* | Optional override for one-shot summarizer calls (#5547): `{ provider?: string, model?: string, titleTimeoutMs?: number }`. `model` makes the sidebar "Summarize & start new session" action use a cheaper model than the target session's own; `provider` is accepted for forward-compat but the one-shot path currently always runs through the SDK provider. `titleTimeoutMs` is read by the semantic-title path — see [Semantic session titles](#semantic-session-titles-featuressemantictitles). Unset ⇒ summarize with the session's own model. |
+| `transforms` | array | - | `CHROXY_TRANSFORMS` | Opt-in prompt pre-processing pipeline, as a list of built-in transform names applied in order to each outgoing user message. Built-ins: `contextAnnotation` (prefixes `cwd` / `model` / `git branch` / `platform` as ambient context, skipped for messages under 10 chars) and `voiceCleanup` (strips voice-to-text filler words and normalises punctuation — only fires when the message was flagged as voice input). Empty / unset ⇒ messages pass through unchanged. |
+| `sandbox` | object | - | `CHROXY_SANDBOX` | SDK sandbox settings forwarded verbatim to sessions for lightweight in-process isolation. Unset ⇒ no sandbox opts are threaded. Unrelated to the Codex per-session `codexSandbox` wire field and to the Docker/K8s [`environments`](#environments-isolation-and-worktrees) backends. |
+| `promptEvaluatorSkipPattern` | string | - | *(unmapped — see [note](#environment-variable-names))* | Per-session regex source (case-insensitive) extending the default skip list used by the prompt evaluator's trivial-message heuristic. See [Prompt evaluator skip heuristic](#prompt-evaluator-skip-heuristic) below. |
+
+### Timeouts
+
+| Key | Type | CLI Flag | Environment Variable | Description |
+|-----|------|----------|---------------------|-------------|
 | `resultTimeoutMs` | number | - | `CHROXY_RESULT_TIMEOUT_MS` | Per-session **soft-warning** inactivity window in milliseconds. When no SDK / CLI event arrives within this window, the server emits an `inactivity_warning` event (#3899) so clients can render a check-in chip and surface a push notification — the session stays alive. The kill path is `hardTimeoutMs` (below). See [Inactivity safety net](#inactivity-safety-net). Default `1800000` (30 min); range `30000`–`86400000` (30 s – 24 h). |
 | `hardTimeoutMs` | number | - | `CHROXY_HARD_TIMEOUT_MS` | Per-session **hard-kill** inactivity window in milliseconds. When `resultTimeoutMs` has already fired and silence continues to this longer threshold, the server emits `permission_expired` for every outstanding permission prompt, force-clears busy state, and emits a generic `error` event with `"Response timed out after <duration> of inactivity"` (#3899). Default `7200000` (2 h); range `30000`–`86400000` (30 s – 24 h). Must be ≥ `resultTimeoutMs` or the soft warning never fires — validator warns. |
+| `streamStallTimeoutMs` | number | - | `CHROXY_STREAM_STALL_TIMEOUT_MS` | Stream-stall recovery window in ms (#4467). Resets on any stream activity from the child; when silence reaches this window *while the session is busy*, the session emits a recoverable error (`code: stream_stall`), clears busy state, and clients can offer a retry. Default `300000` (5 min); range `5000`–`86400000` (5 s – 24 h), or `0` to disable for operators with legitimately long event gaps. |
+| `providerStreamStallTimeoutMs` | object | - | `CHROXY_PROVIDER_STREAM_STALL_TIMEOUT_MS` | Per-provider override map for `streamStallTimeoutMs`, keyed by provider id — e.g. `{ "codex": 900000, "gemini": 600000 }`. An entry wins over the global value for sessions on that provider; providers without an entry fall through to the global value. Each entry follows the same `5000`–`86400000`-or-`0` range; a bad entry warns and is dropped (falling back to the global value) rather than failing startup. As an env var, pass JSON: `CHROXY_PROVIDER_STREAM_STALL_TIMEOUT_MS='{"codex":900000}'`. |
 | `backgroundShellHardQuiesceMs` | number | - | `CHROXY_BACKGROUND_SHELL_HARD_QUIESCE_MS` | How long a background shell (`Bash` with `run_in_background: true`) may go with **no new output** before the server treats it as finished and **reaps** its liveness tracking, so a finished-but-never-polled command stops pinning the session `running` forever (#5265). Default `14400000` (4 h); range `60000`–`86400000` (60 s – 24 h), or **`0` to disable** hard-reaping (advisory-only, the #5247 behaviour). **Tradeoff:** a genuinely long-running compute that emits no output for hours (and is never polled via `BashOutput`) could have its tracking reaped and the session become idle-timeout-eligible. A noisy long-runner (e.g. a dev server logging within the window) keeps its output-file mtime fresh and is never reaped. Operators running long silent computes should raise this (e.g. 6–8 h) or set `0`. |
-| _(env-only)_ | number | - | `CHROXY_DIAGNOSTICS_RATE_LIMIT` | Per-source-IP request cap on `GET /diagnostics` over a 60 s sliding window (#3737). The endpoint reads the on-disk log tail and iterates every session per call, so it is rate-limited to protect against a stolen-token tight loop. Default `12` requests/min with a 4-request burst. Set the env var to an **integer ≥ 1** to override `maxMessages`; the burst auto-derives as `max(1, floor(N/3))`. Invalid values (non-integer, < 1, NaN) silently fall through to the default — including sub-integer values like `0.5`, which are rejected outright (truncating to `0` would otherwise raise the limit via RateLimiter's `||` fallback). No `config.json` key is exposed; this setting is intentionally env-only. Overshoot returns `429` with a `Retry-After` header and a JSON body `{ "error": "rate limited", "retryAfterMs": <ms> }`. |
+| `mcpToolCallTimeoutMs` | number | - | `CHROXY_MCP_TOOL_CALL_TIMEOUT_MS` | Per-call timeout for MCP `tools/call` requests made by BYOK sessions (#4482). Default `30000` (30 s). Range `1000` (1 s) – `600000` (10 min) — below 1 s every realistic MCP server times out, above 10 min the conversation is already lost. Unlike `streamStallTimeoutMs`, `0` is **not** a disable sentinel: any non-positive value warns and the runtime falls back to the 30 s client default. |
+
+### Tunnel and remote access
+
+| Key | Type | CLI Flag | Environment Variable | Description |
+|-----|------|----------|---------------------|-------------|
+| `tunnel` | string | `--tunnel <mode>` | `CHROXY_TUNNEL` | Tunnel mode: `quick` (default — random Cloudflare URL, no account), `named` (stable hostname, requires a Cloudflare account + `cloudflared login`), `none`, or a `provider:mode` pair such as `cloudflare:named`. Ignored when `--no-auth` or `externalUrl` is in play. |
+| `tunnelName` | string | `--tunnel-name <name>` | `CHROXY_TUNNEL_NAME` | Named-tunnel name (requires `cloudflared login`). Only meaningful with `tunnel: "named"`. |
+| `tunnelHostname` | string | `--tunnel-hostname <host>` | `CHROXY_TUNNEL_HOSTNAME` | Named-tunnel public hostname, e.g. `chroxy.example.com`. Only meaningful with `tunnel: "named"`. |
+| `tunnelConfig` | object | - | `CHROXY_TUNNEL_CONFIG` | Extra provider options spread into the tunnel provider's start call — an escape hatch for `cloudflared` knobs that have no dedicated key. As an env var, pass JSON. See [../../docs/named-tunnel-guide.md](../../docs/named-tunnel-guide.md). |
+
+### Providers and models
+
+| Key | Type | CLI Flag | Environment Variable | Description |
+|-----|------|----------|---------------------|-------------|
+| `provider` | string | `--provider <name>` | `CHROXY_PROVIDER` | Default session backend. Allowed values: `claude-tui` (default, #5819), `claude-sdk`, `claude-cli`, `claude-channel` (research preview), `gemini`, `codex`, plus `docker-sdk` / `docker-cli` when Docker environments are enabled. The `claude-channel` provider is a research-preview scaffold whose `start()` currently throws — selectable for `chroxy doctor` / registry inspection but not yet runnable (bridge lands in #3954). See [../../docs/providers.md](../../docs/providers.md) for per-provider setup, env vars (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, …), and the capability matrix. |
+| `model` | string | `--model <name>` | `CHROXY_MODEL` | Model to use. Provider-specific — e.g. `claude-sonnet-4`/`haiku` for Claude, `gemini-2.5-pro` for Gemini, `gpt-5.4` for Codex. |
+| `providers` | array \| object | - | `CHROXY_PROVIDERS` | Two forms. **Array** (legacy, written by `chroxy init`): informational list of provider ids the user opted into. **Object** (#5419): `providers.anthropicCompatible` is an array of config-driven Anthropic-compatible endpoint entries (Z.ai GLM, Moonshot Kimi, MiniMax, LM Studio, llama.cpp, vLLM, OpenRouter, custom) — each entry `{ id, label?, baseUrl, apiKeyEnv?, credentialsKey?, defaultModel, models?, pricing?, contextWindow? }` registers a first-class provider at startup, selectable via `provider` / `--provider <id>`. API keys are **never** inlined: `apiKeyEnv` names an env var, `credentialsKey` names a `~/.chroxy/credentials.json` field (mode `0600`); entries carrying literal secrets are rejected. Invalid entries are warned about and skipped; valid siblings still register. The object form carries two more sub-blocks: `providers.openaiCompatible` — the identical entry shape for endpoints that speak the **OpenAI Chat Completions** API instead (OpenAI, OpenRouter, LM Studio, vLLM, llama.cpp, Together, Groq, DeepInfra, custom), where `baseUrl` is an OpenAI API base typically ending in `/v1` — and `providers.allowAnyModel`, see [Unrestricted provider models](#unrestricted-provider-models-providersallowanymodel). See [Anthropic-compatible endpoints](../../docs/providers.md#anthropic-compatible-endpoints-config-driven) and [OpenAI-compatible endpoints](../../docs/providers.md#openai-compatible-endpoints-config-driven). |
+| `legacyCli` | boolean | `--legacy-cli` | `CHROXY_LEGACY_CLI` | Legacy shorthand that maps to `provider: "claude-cli"` when no explicit `provider` is set. Prefer setting `provider` directly; an explicit `provider` always wins. |
+
+### Permissions and security gates
+
+| Key | Type | CLI Flag | Environment Variable | Description |
+|-----|------|----------|---------------------|-------------|
+| `allowedTools` | array | `--allowed-tools <list>` | `CHROXY_ALLOWED_TOOLS` | Auto-approved tools (CLI mode) |
+| `dangerouslySkipPermissions` | boolean | `--dangerously-skip-permissions` | `CHROXY_DANGEROUSLY_SKIP_PERMISSIONS` | Server-wide default for the per-session skip-permissions flag (#4246, #4384). Honoured only by the `claude-tui` provider — spawns claude with `--dangerously-skip-permissions` and elides chroxy's permission hook. Off by default. Legacy alias `skipPermissions` (config key) and `CHROXY_SKIP_PERMISSIONS` (env var) are still honoured for one deprecation window and emit a warning at boot — rename to the canonical key. See [Skip permissions (TUI provider)](#skip-permissions-tui-provider) below. |
+| `skipPermissions` | boolean | - | `CHROXY_SKIP_PERMISSIONS` | **Deprecated** alias for `dangerouslySkipPermissions`, kept in the schema so an existing config file still validates cleanly. Setting it emits a rename warning at boot even when the canonical key is also present. See [Skip permissions (TUI provider)](#skip-permissions-tui-provider). |
+| `allowAutoPermissionMode` | boolean | - | *(unmapped — see [note](#environment-variable-names))* | Gates the `auto` permission mode (bypass every permission check). Off by default so fresh installs are secure-by-default: a client that tries to flip to `auto` is rejected with `AUTO_MODE_DISABLED_BY_CONFIG`. Opting in is a deliberate edit on the dev machine — physical access stands in for real user confirmation. |
+| `userShell` | object | - | *(unmapped — see [note](#environment-variable-names))* | Gate for the embedded user-shell terminal, which spawns the operator's `$SHELL` (arbitrary code execution on the dev machine, reachable through the tunnel). `{ enabled?: boolean, requireApproval?: boolean }`, both **off by default** — creating a `user-shell` session is rejected with `USER_SHELL_DISABLED` until `enabled` is literally `true`. `requireApproval: true` additionally demands host-local approval per spawn (#6277). See [Nested config blocks](#nested-config-blocks-at-a-glance). |
+| `workspaceRoots` | array | - | *(unmapped — see [note](#environment-variable-names))* | Allowlist of absolute directory paths a session may use as its working directory. When set and non-empty, a session `cwd` must resolve (via `realpath`) inside one of these roots or creation is rejected. When unset/empty, the legacy "must be inside `$HOME`" check applies instead. The credential-directory deny-list is defence-in-depth and stays active in **both** modes. |
+| `allowedDockerImages` | array | - | *(unmapped — see [note](#environment-variable-names))* | Allowlist of Docker image patterns `create_environment` may use. Each entry is an exact image name or a prefix pattern such as `mcr.microsoft.com/devcontainers/*`. When set, a client-supplied image must match at least one entry or the request is rejected with `DOCKER_IMAGE_NOT_ALLOWED`. When unset, a built-in default list of common base images applies. |
+| `binaryProvenance` | object | - | `CHROXY_BINARY_PROVENANCE`, `CHROXY_BINARY_SIGNATURE_GATE` | Opt-in provenance verification for spawned provider binaries (`claude`, `codex`, `gemini`, `cloudflared`). `mode` (`off`/`warn`/`block`) drives a cross-platform SHA-256 pin ledger; `signatureGate` (boolean) toggles a macOS `spctl` notarization gate. Both OFF by default. See [Binary provenance verification](#binary-provenance-verification) below. |
+
+### Skills
+
+| Key | Type | CLI Flag | Environment Variable | Description |
+|-----|------|----------|---------------------|-------------|
+| `maxSkillBytes` | number | - | *(unmapped — see [note](#environment-variable-names))* | Per-skill byte cap. Skills exceeding this size are rejected with a sanitised log warning. Default `32768` (32KB). Set to `0` to disable the per-skill cap. |
+| `maxTotalSkillBytes` | number | - | *(unmapped — see [note](#environment-variable-names))* | Global skills-context budget. When a session's merged active-skill set exceeds this size, lower-priority skills are dropped first (frontmatter `priority` defaults to 100; ties broken alphabetically). Default `262144` (256KB). Set to `0` to disable the global cap. |
+| `providerSkillAllowlist` | object | - | *(unmapped — see [note](#environment-variable-names))* | Per-provider skill allowlist. Object keyed by provider id (e.g. `codex`, `gemini`); each value is an array of skill names that may load for that provider. See [Per-provider skill allowlist](#per-provider-skill-allowlist) below. |
+| `trustMismatchMode` | string | - | *(unmapped — see [note](#environment-variable-names))* | One of `warn` or `block`. When set, the server records a SHA-256 hash of every loaded skill on first activation and compares it on every subsequent load. See [Skill content-hash trust](#skill-content-hash-trust) below. Disabled (no hashing) when omitted. |
+
+### Environments, isolation, and worktrees
+
+| Key | Type | CLI Flag | Environment Variable | Description |
+|-----|------|----------|---------------------|-------------|
+| `environments` | object | `--environments`, `--environment-backend <backend>` | *(unmapped — see [note](#environment-variable-names))* | Container / cluster isolation backends. `enabled` (boolean) turns the feature on; `backend` selects `docker` (default), `k8s`, or `rancher`; `docker`, `k8s`, and `rancher` carry the per-backend connection blocks. An unrecognised `backend` warns and falls back to Docker rather than failing startup. The `--environments` / `--environment-backend` flags layer over a file-configured block rather than replacing it. See the [Kubernetes](#kubernetes-workspace-pvc-environmentsk8sworkspace) sections below and [Nested config blocks](#nested-config-blocks-at-a-glance). |
+| `worktreeGc` | object | - | *(unmapped — see [note](#environment-variable-names))* | Garbage collection for orphaned agent worktrees (#5158). `{ autoReap?: boolean, reapIntervalMs?: number, maxLockAgeMs?: number }`. `autoReap` is **off by default**; when on, the daemon reclaims dead-pid-locked worktrees on startup and then every `reapIntervalMs` (default `1800000` / 30 min), clean trees only, never `--force`. `maxLockAgeMs` is an absolute-age fallback for the PID-liveness check — `0` (the default) disables it. The `chroxy worktree gc` CLI is always available for manual / dry-run use regardless of this block. |
+
+### Control Room
+
+| Key | Type | CLI Flag | Environment Variable | Description |
+|-----|------|----------|---------------------|-------------|
+| `controlRoomRoot` | string | - | `CHROXY_CONTROL_ROOM_ROOT` | Filesystem root the Host Status survey scans for auto-discovered git repos (#5172). The discovered set is unioned with explicit [`repos`](#core-server) entries. Defaults to `~/Projects`. |
+| `controlRoomRunnerRoot` | string | - | `CHROXY_RUNNER_ROOT` | Filesystem root the self-hosted GitHub Actions runner survey scans for runner installs — directories containing a `.runner` config (#5253). Defaults to `~/github-runners`. |
+| `controlRoomRunnerIncludeGithub` | boolean | - | `CHROXY_RUNNER_INCLUDE_GITHUB` | Whether the runner survey enriches each runner with GitHub's view (online / busy / labels) via `gh api` (#5260). Default `true`. Set `false` for a faster local-only survey, or on hosts where `gh` isn't authenticated. |
+| `controlRoomContainersIncludeStats` | boolean | - | `CHROXY_CONTAINERS_INCLUDE_STATS` | Whether the containers survey runs the `docker stats` enrichment (#6133). Default `true`. Set `false` for an inventory-only survey on a slow or socketless Docker. |
+| `controlRoomRepoMemoryBin` | string | - | `CHROXY_REPO_MEMORY_BIN` | Explicit path to the `repo-memory` binary the Integrations survey shells out to (#5499). When unset the survey probes `PATH` with `which repo-memory` once per snapshot — set this on hosts where the daemon runs under a GUI/launchd `PATH` that misses npm globals. |
+
+### Notifications, billing, and opt-in features
+
+| Key | Type | CLI Flag | Environment Variable | Description |
+|-----|------|----------|---------------------|-------------|
+| `notifications` | object | - | *(unmapped — see [note](#environment-variable-names))* | Notification-sink settings. Today the only sub-block is `notifications.discord` — see [Discord notifications](#discord-notifications-notificationsdiscord). The webhook URL is a **secret** and deliberately *not* a config key. |
+| `billing` | object | - | *(unmapped — see [note](#environment-variable-names))* | Monthly programmatic-credit budget meter (#5665). `creditTier` (`pro` \| `max5x` \| `max20x`), `monthlyCreditBudgetUsd` (a raw USD cap that wins over the tier preset), `budgetWarningPercent` (1–100, default `80`), plus the #5828 canary knobs `egressCheck` (boolean, default off — an outbound public-IP lookup that warns when a subscription-billed provider runs from a cloud host) and `datacenterPrefixes` (extra IPv4 prefixes merged into the built-in datacenter classifier). See [Nested config blocks](#nested-config-blocks-at-a-glance). |
+| `features` | object | - | `CHROXY_ENABLE_IDE`, `CHROXY_ENABLE_ORCHESTRATION`, `CHROXY_SEMANTIC_TITLES` | Opt-in feature flags, all **off by default** and all fail-closed — only a literal `true` in config (or a literal `"1"` in the env) enables one. `ide` (IDE navigation surface, epic #6469), `orchestration` (delegation harness, epic #6691), and `semanticTitles` (model-generated session titles, #6764 — `CHROXY_SEMANTIC_TITLES=0` also force-*disables*); see [Semantic session titles](#semantic-session-titles-featuressemantictitles). Each env var is read directly by its feature gate, so it overrides config regardless of the merge layer. |
+| `orchestration` | object | - | `CHROXY_ORCHESTRATION` | Tuning for the orchestration engine, which only runs when `features.orchestration` is on. `maxParallelWorkers` (default `2`), `reserveSessions` (`1`), `maxCommitteeIterations` (`4`), `maxParseRetries` (`2`), `turnTimeoutMs` (`1800000` / 30 min), `diff: { maxBytes: 65536, maxFileBytes: 8192 }`, `bash: { implementAllowlist: [] }`, and `roles` (per-role provider/model overrides). Declared in the schema so a configured block doesn't trip the misleading "unknown key" warning. See [`docs/design/orchestration/`](../../docs/design/orchestration/README.md). |
+
+### Env-only settings
+
+| Key | Type | CLI Flag | Environment Variable | Description |
+|-----|------|----------|---------------------|-------------|
+| _(env-only)_ | number | - | `CHROXY_DIAGNOSTICS_RATE_LIMIT` | Per-source-IP request cap on `GET /diagnostics` over a 60 s sliding window (#3737). The endpoint reads the on-disk log tail and iterates every session per call, so it is rate-limited to protect against a stolen-token tight loop. Default `12` requests/min with a 4-request burst. Set the env var to an **integer ≥ 1** to raise or lower that per-window cap (the rate limiter's own `maxMessages` option — unrelated to the `maxMessages` config key above); the burst auto-derives as `max(1, floor(N/3))`. Invalid values (non-integer, < 1, NaN) silently fall through to the default — including sub-integer values like `0.5`, which are rejected outright (truncating to `0` would otherwise raise the limit via RateLimiter's `\|\|` fallback). No `config.json` key is exposed; this setting is intentionally env-only. Overshoot returns `429` with a `Retry-After` header and a JSON body `{ "error": "rate limited", "retryAfterMs": <ms> }`. |
+
+### Environment variable names
+
+Two different mechanisms put an environment variable in the tables above, and
+they are worth telling apart.
+
+**1. Merge-layer overrides.** `mergeConfig` looks every schema key up in the
+environment and, if present, that value wins over the config file. The name comes
+from `envKeyForConfig()` in
+[`packages/server/src/config.js`](src/config.js) — most keys have an **explicit**
+entry there (`port` → `PORT`, `controlRoomRunnerRoot` → `CHROXY_RUNNER_ROOT`, …).
+
+**2. Direct reads.** Some settings are read straight out of `process.env` by the
+helper that consumes them, bypassing the merge layer entirely:
+`CHROXY_ENABLE_IDE` / `CHROXY_ENABLE_ORCHESTRATION` / `CHROXY_SEMANTIC_TITLES`
+(the `features` gates), `CHROXY_SEMANTIC_TITLES_MODEL` /
+`CHROXY_SEMANTIC_TITLES_TIMEOUT_MS` (which override *specific fields* of
+`summarize` on the title path only — they are not a general override for the
+`summarize` object), and `CHROXY_BINARY_PROVENANCE` /
+`CHROXY_BINARY_SIGNATURE_GATE` (`binaryProvenance`).
+
+**The naive fallback.** 16 schema keys have no explicit `envKeyForConfig` entry,
+so their *merge-layer* lookup falls back to a bare `key.toUpperCase()` — which
+drops the `CHROXY_` prefix and all word separators: `features` → `FEATURES`,
+`billing` → `BILLING`, `workspaceRoots` → `WORKSPACEROOTS`, `userShell` →
+`USERSHELL`, `trustMismatchMode` → `TRUSTMISMATCHMODE`, `summarize` →
+`SUMMARIZE`, `binaryProvenance` → `BINARYPROVENANCE`, and so on. The tables mark
+these *(unmapped)* wherever the key has no direct-read env var to list instead;
+`summarize`, `features`, and `binaryProvenance` are unmapped at the merge layer
+too, even though their rows list the direct reads above.
+
+Those fallback names are **not a supported interface**:
+
+- They are generic enough that an unrelated variable already in your environment
+  could be picked up as chroxy config (this is exactly why `orchestration` was
+  given an explicit `CHROXY_ORCHESTRATION` mapping in #6691).
+- Object-typed keys would have to be supplied as a JSON string.
+
+Set these keys in `~/.chroxy/config.json` instead. If you need an env override
+for one of them, add an explicit mapping to `envKeyForConfig()` rather than
+relying on the fallback.
+
+### Nested config blocks at a glance
+
+Several keys are object blocks whose sub-keys are validated at startup — a typo
+inside one produces a non-fatal `unknown key` warning naming the supported set,
+rather than being silently dropped.
+
+| Block | Recognised sub-keys |
+|-------|---------------------|
+| `billing` | `creditTier`, `monthlyCreditBudgetUsd`, `budgetWarningPercent`, `egressCheck`, `datacenterPrefixes` |
+| `worktreeGc` | `autoReap`, `reapIntervalMs`, `maxLockAgeMs` |
+| `userShell` | `enabled`, `requireApproval` |
+| `environments.k8s` | `namespace`, `inCluster`, `kubeconfigPath`, `sidecarImage`, `imagePullPolicy`, `connectMode`, `namespaceQuota`, `namespaceLimitRange`, `workspace` |
+| `environments.rancher` | `rancherUrl`, `clusterId`, `token`, `tokenEnv`, `tokenFile`, `caData`, `skipTLSVerify`, `defaultProjectId` |
+| `notifications.discord` | `botName`, `billingAlerts`, `colors`, `defaultColor`, `permissionColor`, `errorColor`, `updateThrottleMs`, `heartbeatIntervalMs`, `pruneAfterMs`, `staleAfterMs`, `offlineAfterMs`, `statePath`, `billingStatePath` |
+| `providers` *(object form)* | `anthropicCompatible`, `openaiCompatible`, `allowAnyModel` |
+
+`summarize`, `features`, and `orchestration` have no unknown-key check today, so
+a typo in one of those is silently ignored rather than warned about.
+
+### Unrestricted provider models (`providers.allowAnyModel`)
+
+The static-allowlist subprocess providers (e.g. `gemini`, `codex`, `deepseek`)
+hard-reject a model id that is not in their built-in list, even when the upstream
+API already serves it — which otherwise forces a chroxy release just to add one.
+`providers.allowAnyModel` is an array of provider ids that opt out of that check
+(#6378):
+
+```json
+{
+  "providers": {
+    "allowAnyModel": ["codex", "gemini"]
+  }
+}
+```
+
+An opted-in provider passes the model id through verbatim and lets the upstream
+API be the validator. Default is **off** for every provider, so the
+misconfiguration-catching strictness is preserved unless you explicitly opt in.
+A missing or non-array value is treated as an empty set; non-string entries are
+dropped.
+
+Note that this lives inside the **object** form of the `providers` key, which is
+the same block that carries `anthropicCompatible` — it does not apply to the
+legacy array form.
 
 ### Prompt evaluator skip heuristic
 
@@ -531,6 +718,57 @@ configured object's ensure is idempotent (read-or-create, already-exists
 swallowed) and cached per process, so it adds one read (plus a create if the
 object is missing) per configured object the first time a tenant namespace is
 used, and nothing on subsequent calls for that namespace.
+
+### Semantic session titles (`features.semanticTitles`)
+
+By default a session's sidebar label is a raw truncation of the first user
+message. With `features.semanticTitles` on, that first turn also fires a cheap
+one-shot model call that summarises the message into a short title (#6764).
+
+```json
+{
+  "features": {
+    "semanticTitles": true
+  },
+  "summarize": {
+    "model": "haiku",
+    "titleTimeoutMs": 15000
+  }
+}
+```
+
+**Enabling.** `features.semanticTitles: true` in config, or
+`CHROXY_SEMANTIC_TITLES=1`. The env var also force-*disables* when set to `0`,
+which is handy for tests and A/B runs without editing config. Like the other
+`features` flags this is fail-closed — only a literal `true` (or the literal env
+string `"1"`) turns it on.
+
+**Which model.** Resolution order:
+
+1. `CHROXY_SEMANTIC_TITLES_MODEL`
+2. `summarize.model` — the same cheap-model override used by the sidebar
+   "Summarize & start new session" action, deliberately reused so an operator who
+   already tuned the summarizer gets the same model for titles
+3. `haiku` (the built-in default)
+
+The default stays a cheap Haiku alias so titling never burns a premium model.
+
+**Timeout.** Resolution order:
+
+1. `CHROXY_SEMANTIC_TITLES_TIMEOUT_MS`
+2. `summarize.titleTimeoutMs`
+3. `15000` (15 s)
+
+Invalid or non-positive values in either source fall back to the default. The
+timeout matters because the title call is fire-and-forget: without one, a stalled
+provider connection leaves the promise pending forever, pinning the
+`SessionManager` and the first message (an unbounded per-session leak) and never
+tearing down the one-shot subprocess.
+
+**Failure behaviour is always fail-open.** When the flag is off, the call fails,
+the timeout fires, or no model access is available, the session silently keeps
+the truncation-based label. A title is a cosmetic nicety — it never blocks or
+fails a turn.
 
 ### Discord notifications (`notifications.discord`)
 
