@@ -482,7 +482,67 @@ describe('permission-hook.sh: the floor probe fails CLOSED (#7004)', () => {
 })
 
 // ---------------------------------------------------------------------------
-// 3b. Reaching the daemon from a container
+// 3b. #7017 — floor clearance requires an unambiguous TOP-LEVEL floor:false
+// ---------------------------------------------------------------------------
+
+describe('permission-hook.sh: floor clearance is a real JSON parse, not a substring grep (#7017)', () => {
+  let daemon
+
+  afterEach(async () => {
+    if (daemon) await daemon.close()
+    daemon = null
+  })
+
+  // Each of these bodies contains a `"floor":false` substring somewhere, but
+  // NOT as an unambiguous top-level answer — a `grep`-first-match (the
+  // pre-#7017 shape) reads every one of these as clearance and silently
+  // auto-allows. The hook must route all of them to a real prompt instead.
+  const hostileBodies = [
+    ['a NESTED floor key', '{"nested":{"floor":false},"floor":true}'],
+    ['an ARRAY-nested floor key', '{"a":[{"floor":false}],"floor":true}'],
+    ['a DUPLICATE floor key, false-then-true', '{"floor":false,"floor":true}'],
+    // The adversarial case: plain `JSON.parse` follows last-write-wins and
+    // would itself resolve THIS body to `floor: false` — silently clearing
+    // it exactly like the grep did. The occurrence-count guard rejects a
+    // duplicate key before a parser ever gets to pick a winner.
+    ['a DUPLICATE floor key, true-then-false (naive JSON.parse would clear this)', '{"floor":true,"floor":false}'],
+    ['non-JSON text that merely contains the floor substring', 'not json at all "floor":false'],
+  ]
+
+  for (const [label, body] of hostileBodies) {
+    it(`${label} → PROMPTS, never a silent allow`, async () => {
+      daemon = await startBrokenFloorDaemon({ status: 200, body, decision: 'allow' })
+      const { stdout } = await runHook({ payload: readPayload('src/index.js'), port: daemon.port, mode: 'auto' })
+      assert.equal(daemon.stats.floorRequests, 1)
+      assert.equal(daemon.stats.permissionRequests, 1, `${label} must not clear the short-circuit`)
+      assert.equal(decisionOf(stdout).permissionDecision, 'allow', 'the user then answered')
+    })
+  }
+
+  it('a legitimate {"floor":false} still ALLOWS with zero prompts (no over-blocking regression)', async () => {
+    daemon = await startBrokenFloorDaemon({ status: 200, body: '{"floor":false}', decision: 'allow' })
+    const { stdout } = await runHook({ payload: readPayload('src/index.js'), port: daemon.port, mode: 'auto' })
+    assert.equal(daemon.stats.floorRequests, 1)
+    assert.equal(daemon.stats.permissionRequests, 0, 'an unambiguous top-level floor:false must still short-circuit')
+    assert.equal(decisionOf(stdout).permissionDecision, 'allow')
+  })
+
+  it('a legitimate {"floor":true, ...extra fields} still PROMPTS', async () => {
+    // Matches the real daemon's 429/error response shape (`error` + `floor` +
+    // `retryAfterMs`), where `floor` is not the first key.
+    daemon = await startBrokenFloorDaemon({
+      status: 200,
+      body: '{"error":"rate limited","floor":true,"retryAfterMs":5000}',
+      decision: 'allow',
+    })
+    const { stdout } = await runHook({ payload: readPayload('.env'), port: daemon.port, mode: 'auto' })
+    assert.equal(daemon.stats.permissionRequests, 1)
+    assert.equal(decisionOf(stdout).permissionDecision, 'allow')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 3c. Reaching the daemon from a container
 // ---------------------------------------------------------------------------
 
 describe('permission-hook.sh: the callback host is not hardcoded to localhost (#7004)', () => {

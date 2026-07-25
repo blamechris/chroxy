@@ -326,11 +326,60 @@ floor_forces_prompt() {
   if [ $FLOOR_EXIT -ne 0 ]; then
     return 0
   fi
-  # ONLY a literal `"floor":false` clears the short-circuit. Anything else —
-  # `true`, an error body, an empty response — keeps the prompt.
-  # Whitespace-tolerant (a pretty-printed body must not read as "floored") but
-  # still literal: only the value `false` clears.
-  FLOOR_VALUE=$(printf '%s' "$FLOOR_RESPONSE" | grep -o '"floor":[[:space:]]*[a-z]*' | head -1 | cut -d':' -f2 | tr -d '[:space:]')
+  # ONLY an unambiguous, TOP-LEVEL `"floor":false` clears the short-circuit.
+  # Anything else — `true`, an error body, an empty response, or a body a real
+  # JSON parser cannot make sense of — keeps the prompt.
+  #
+  # #7017 — this is a real parse (via `node -e`), not a substring grep. A grep
+  # keyed on the FIRST `"floor"` occurrence anywhere in the body is foolable by
+  # a NESTED key (`{"nested":{"floor":false},"floor":true}`), an ARRAY-nested
+  # key (`{"a":[{"floor":false}],"floor":true}`), or a DUPLICATE top-level key
+  # (`{"floor":true,"floor":false}` — note `JSON.parse`'s own last-write-wins
+  # would silently clear this one too, so a raw occurrence count is checked
+  # BEFORE ever parsing, rather than trusting which duplicate `JSON.parse`
+  # keeps). `node` is a safe dependency here: this hook only ever runs inside a
+  # chroxy-spawned session (the CHROXY_PORT guard at the top of this file), and
+  # the daemon that spawned it IS a node process, so `node` is on PATH by
+  # construction — no new dependency is introduced.
+  #
+  # Clearance requires ALL of:
+  #   1. the literal substring `"floor"` appears EXACTLY ONCE in the raw body
+  #      (this alone rules out nested / array-nested / duplicate-key, without
+  #      needing to trust which value a parser would pick for a duplicate)
+  #   2. the body parses as JSON
+  #   3. the parsed value is a plain object (not an array, not a scalar)
+  #   4. its single top-level `floor` property is `=== false`
+  # A parse failure, a non-object top level, or `node` itself being
+  # unavailable all make the substitution empty, which fails the `= "false"`
+  # comparison below and prompts — fail-closed by construction, not by a
+  # special case.
+  FLOOR_VALUE=$(printf '%s' "$FLOOR_RESPONSE" | node -e '
+let data = "";
+process.stdin.on("data", (chunk) => { data += chunk; });
+process.stdin.on("end", () => {
+  try {
+    const marker = "\"floor\"";
+    let count = 0;
+    let idx = 0;
+    while ((idx = data.indexOf(marker, idx)) !== -1) {
+      count++;
+      idx += marker.length;
+    }
+    if (count !== 1) {
+      process.stdout.write("true");
+      return;
+    }
+    const parsed = JSON.parse(data);
+    const cleared = parsed !== null &&
+      typeof parsed === "object" &&
+      !Array.isArray(parsed) &&
+      parsed.floor === false;
+    process.stdout.write(cleared ? "false" : "true");
+  } catch {
+    process.stdout.write("true");
+  }
+});
+' 2>/dev/null)
   if [ "$FLOOR_VALUE" = "false" ]; then
     return 1
   fi

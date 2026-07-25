@@ -83,7 +83,7 @@ HOOK-ROUTED (claude-tui = the DEFAULT provider, cli-session)
 | | |
 |---|---|
 | Auth | the **per-session hook secret**, same class and same validator as `POST /permission` (see [`bearer-token-authority.md` §5](bearer-token-authority.md#5-per-session-hook-secrets)) |
-| Request | the PreToolUse payload the hook already holds (`tool_name`, `tool_input`, `cwd`), capped at 64 KB |
+| Request | the PreToolUse payload the hook already holds (`tool_name`, `tool_input`, `cwd`), capped at 1 MiB (`MAX_FLOOR_BODY` in `ws-permissions.js`) — deliberately much larger than `/permission`'s 64 KB, see §5 |
 | Response | `{ "floor": true \| false }` — nothing else; no requestId, no pending request, no broadcast, no push |
 | cwd basis | the **owning session's `cwd`** (resolved from the presented hook secret) — identical to what `PermissionManager` is constructed with; the payload's own `cwd` is used only when the session is not resolvable, and there is no `process.cwd()` fallback |
 | Rate limit | its own limiter with a much larger budget than `/permission` (600/min, burst 200): this fires once per **tool call**, not once per human decision |
