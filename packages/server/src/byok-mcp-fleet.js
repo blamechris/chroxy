@@ -76,7 +76,9 @@ export class MCPFleet {
     // user friction for tuples already trusted in a prior session); on
     // a miss it asks the PermissionManager — emitting a prompt visible to
     // the dashboard / mobile permission UI — and persists allow decisions
-    // to the store so the prompt only fires once per (name, command, args[0]).
+    // to the store so the prompt only fires once per spawn-determining config
+    // (#7001: name + command + the FULL args + env, digested — see
+    // byok-mcp-trust.js; the pre-#7001 key covered only args[0]).
     //
     // No PermissionManager → no gate → spawn behaves exactly as in #4077.
     // This keeps the lifecycle module testable in isolation; integration
@@ -132,7 +134,7 @@ export class MCPFleet {
    * #6824: build one MCPClient for a config, wiring the trust gate exactly as
    * the constructor did inline pre-#6824. Extracted so the re-enable path
    * (`setEnabled(name, true)`) rebuilds a client with an IDENTICAL gate — an
-   * already-trusted (name, command, args[0]) tuple reconnects silently; an
+   * already-trusted spawn config reconnects silently; an
    * untrusted one still prompts, so re-enabling can never bypass trust.
    */
   _makeClient(cfg) {
@@ -299,6 +301,78 @@ export class MCPFleet {
     } finally {
       this._toggling.delete(name)
     }
+  }
+
+  /**
+   * #6974: attach a NEWLY CONFIGURED server to the live fleet and connect it,
+   * without restarting the session or disturbing any other client.
+   *
+   * The client is built through `_makeClient`, so it goes through the IDENTICAL
+   * first-use trust gate as any other server: a config that is not trusted in
+   * FULL (name + command + every arg + env — #7001) still raises a
+   * `requestMcpTrust` prompt before anything is spawned. This is the backstop, not
+   * the primary gate: on the WS add path `ClaudeByokSession.addMcpServer` has
+   * already taken the decision BEFORE persisting, so an allowed add finds itself
+   * trusted here and does not prompt twice, and a denied one never reaches this
+   * method. The backstop still matters for a config that was persisted some other
+   * way (hand-edited `~/.claude.json`) or whose trust record was tampered with.
+   *
+   * A failed start is non-fatal and mirrors `start()` / `setEnabled(name, true)`:
+   * the client stays in `_clients` in a DEAD state so its 'failed' status
+   * surfaces on the next snapshot, rather than vanishing and looking unconfigured.
+   *
+   * Returns `{ added, status }` — `added: false` when a server of that name is
+   * already in the fleet (the caller has already refused the config write, so
+   * this is the belt to that braces).
+   */
+  async addServer(cfg) {
+    if (!cfg || typeof cfg.name !== 'string' || cfg.name.length === 0) {
+      return { added: false, status: null }
+    }
+    if (this._configs.some((c) => c.name === cfg.name)) {
+      return { added: false, status: null }
+    }
+    this._configs.push(cfg)
+    // A brand-new server is never parked: an explicit add is an explicit
+    // "I want this on". Clear any stale parked entry left by a same-named
+    // server that was removed earlier in this session.
+    this._disabled.delete(cfg.name)
+    const client = this._makeClient(cfg)
+    this._clients.push(client)
+    try {
+      await client.start()
+    } catch (err) {
+      ;(this._opts.log || console).warn?.(`MCP fleet: start of ${cfg.name} on add threw: ${err?.message || err}`)
+    }
+    return { added: true, status: mcpStateToStatus(client.state) }
+  }
+
+  /**
+   * #6974: detach a server from the live fleet and tear its client down.
+   *
+   * Unlike `setEnabled(name, false)` (which PARKS a still-configured server so
+   * it can be unparked later), this drops the server from `_configs` entirely —
+   * it leaves the `getServerStatuses()` snapshot altogether, matching a config
+   * removal. The parked-set entry is cleared too, so the name does not linger in
+   * the persisted `disabledMcpServers` set as a ghost.
+   *
+   * Returns `{ removed }` — `removed: false` when the name was not configured.
+   */
+  async removeServer(name) {
+    const idx = this._configs.findIndex((c) => c.name === name)
+    if (idx === -1) return { removed: false }
+    this._configs.splice(idx, 1)
+    this._disabled.delete(name)
+    const clientIdx = this._clients.findIndex((c) => c.name === name)
+    if (clientIdx !== -1) {
+      const [client] = this._clients.splice(clientIdx, 1)
+      try {
+        await client.destroy()
+      } catch (err) {
+        ;(this._opts.log || console).warn?.(`MCP fleet: destroy of ${name} on remove threw: ${err?.message || err}`)
+      }
+    }
+    return { removed: true }
   }
 
   /**

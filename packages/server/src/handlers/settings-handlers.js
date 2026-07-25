@@ -1069,6 +1069,205 @@ function handleGetPermissionInput(ws, client, msg, ctx) {
   return send({ found: true, tool, input: pending._redactedPull })
 }
 
+/**
+ * #6974 — MCP config-MUTATION gate: require the STRICT PRIMARY token class
+ * (`client.isPrimaryToken === true`) before any validation or write.
+ *
+ * Why strict-primary rather than the "any unbound client" host-authority bar the
+ * credential-write (#5155) / permission-rule / file-git (#6541) gates use: those
+ * gates reject only `client.boundSessionId`, which leaves the unbound
+ * linking-mode pairing token — an ordinary paired phone — with full authority. A
+ * configured MCP server is a command this daemon SPAWNS, so an add is arbitrary
+ * host code execution, which is the same escalation class as creating a
+ * `user-shell` session, `terminal_input`, `revoke_token` and
+ * `orchestration_run_start` — every one of which checks strict
+ * `client.isPrimaryToken === true` (docs/security/bearer-token-authority.md,
+ * "The WS primary-token gate"). #6974's first cut rejected only bound tokens
+ * while its own error message told the user to "use the primary API token from a
+ * device with physical access": the message was right and the gate was one tier
+ * too weak (#7001 review).
+ *
+ * REMOVE carries the same gate. It only reduces capability, but it still mutates
+ * a host-owned file, and a non-primary client able to delete servers could
+ * silently strip a session's tooling out from under its owner.
+ *
+ * There is no shared cross-surface helper to import: each surface defines its own
+ * local reject helper so the error CODE names the surface that refused
+ * (`rejectMutationIfBound` in file-handlers.js, `rejectCredentialWriteIfBound` in
+ * credential-handlers.js, `guardAction` in orchestration-handlers.js). This
+ * follows that convention exactly — strict `!== true` comparison, an `op`
+ * parameter for the log line, and a surface-specific code.
+ *
+ * Logging uses `sessionLogger` (not `loggerForSession`) because a non-primary
+ * client is frequently UNBOUND — `loggerForSession` throws on an absent sessionId,
+ * which would turn a rejection into a 500-shaped throw.
+ *
+ * @returns {boolean} true if the caller was rejected (handler must return).
+ */
+function rejectMcpConfigWriteUnlessPrimary(ws, client, msg, ctx, op) {
+  if (client?.isPrimaryToken === true) return false
+  // A non-primary client attempting a host-level config write is a potential
+  // privilege-escalation signal — log it (with the client id + binding) so it
+  // surfaces in triage, the same discipline as token-handlers.js.
+  sessionLogger(client?.boundSessionId).warn(
+    `Client ${client?.id}${client?.boundSessionId ? ` (bound to ${client.boundSessionId})` : ' (unbound, non-primary)'} attempted ${op} — rejected (MCP config writes require the primary token)`,
+  )
+  sendError(
+    ws,
+    msg?.requestId,
+    'MCP_CONFIG_FORBIDDEN_NON_PRIMARY_CLIENT',
+    'Pairing-issued tokens cannot add or remove MCP servers — a configured MCP server is a command this machine will run. Use the primary API token from a device with physical access to this machine.',
+    undefined,
+    ctx,
+  )
+  return true
+}
+
+/**
+ * #6974 — add a brand-new MCP server, persisting it to the user's MCP config.
+ *
+ * AUTH: two gates, in this order. (1) strict-primary — anything that is not the
+ * primary token class is refused up front by
+ * `rejectMcpConfigWriteUnlessPrimary`, BEFORE any validation, session resolve,
+ * config read or payload logging, so a non-primary client's payload never
+ * reaches the config file. (2) own-session — `resolveSession` still enforces
+ * session-token binding for the primary client's target session.
+ *
+ * Only the BYOK lane runs an in-daemon MCP fleet it can mutate, so other
+ * providers reject with `MCP_CONFIG_UNSUPPORTED` (their MCP config is managed by
+ * the underlying CLI). Every rejection echoes `requestId` with a stable code
+ * (MCP_CONFIG_FORBIDDEN_NON_PRIMARY_CLIENT / MCP_SERVER_ADD_NOT_APPLIED /
+ * MCP_CONFIG_UNSUPPORTED / MCP_SERVER_EXISTS / MCP_SERVER_ADD_TRUST_DENIED), the
+ * same echo discipline as the #6824 toggle family.
+ *
+ * The user's spawn-trust decision is taken BEFORE the config is written (#7001),
+ * so a denied add leaves no entry behind; the denial surfaces as
+ * `MCP_SERVER_ADD_TRUST_DENIED` rather than a generic failure.
+ *
+ * On success the session re-emits `mcp_servers` to every subscriber — that
+ * broadcast IS the ack, so this handler sends nothing on the happy path.
+ */
+async function handleAddMcpServer(ws, client, msg, ctx) {
+  if (rejectMcpConfigWriteUnlessPrimary(ws, client, msg, ctx, 'add_mcp_server')) return
+  const requestId = msg?.requestId
+  const name = typeof msg?.name === 'string' ? msg.name.trim() : ''
+  if (!name) {
+    sendError(ws, requestId, 'MCP_SERVER_ADD_NOT_APPLIED', 'add_mcp_server requires a non-empty `name`', undefined, ctx)
+    return
+  }
+  if (!msg?.config || typeof msg.config !== 'object' || Array.isArray(msg.config)) {
+    sendError(ws, requestId, 'MCP_SERVER_ADD_NOT_APPLIED', 'add_mcp_server requires a `config` object', undefined, ctx)
+    return
+  }
+  const scope = msg?.scope === 'project' ? 'project' : 'user'
+
+  const sessionId = msg?.sessionId || client?.activeSessionId
+  const entry = resolveSession(ctx, msg, client)
+  if (!entry) {
+    sendError(ws, requestId, 'MCP_SERVER_ADD_NOT_APPLIED', 'No active session', undefined, ctx)
+    return
+  }
+  if (!entry.session || typeof entry.session.addMcpServer !== 'function') {
+    sendError(ws, requestId, 'MCP_CONFIG_UNSUPPORTED',
+      'This provider does not support adding MCP servers (its MCP config is managed by the underlying CLI).',
+      undefined, ctx)
+    return
+  }
+
+  try {
+    const result = await entry.session.addMcpServer(name, msg.config, scope)
+    if (!result || result.ok !== true) {
+      // #7001: a denied spawn-trust prompt is a distinct outcome from a failure —
+      // nothing was written, and the client should say "you declined" rather than
+      // "the add failed".
+      const code = result?.code === 'EXISTS'
+        ? 'MCP_SERVER_EXISTS'
+        : result?.code === 'TRUST_DENIED'
+          ? 'MCP_SERVER_ADD_TRUST_DENIED'
+          : 'MCP_SERVER_ADD_NOT_APPLIED'
+      sendError(ws, requestId, code, result?.error || `Failed to add MCP server '${name}'.`, undefined, ctx)
+      return
+    }
+    // Log the NAME and scope only — never the command, args, env, url or headers
+    // (they routinely carry tokens and local paths).
+    //
+    // sessionLogger, not loggerForSession: `sessionId` is undefined whenever the
+    // request carried no sessionId and the client has no activeSessionId (the
+    // single-session cliSession adapter still resolves an entry for a null sid),
+    // and loggerForSession THROWS on an absent sessionId — inside this try/catch
+    // that turned a SUCCESSFUL mutation into an MCP_SERVER_ADD_NOT_APPLIED
+    // rejection (#7001 review).
+    sessionLogger(sessionId).info(
+      `MCP server '${name}' added in ${scope} scope by ${client.id} on session ${sessionId} (status=${result.status})`,
+    )
+  } catch (err) {
+    sendError(ws, requestId, 'MCP_SERVER_ADD_NOT_APPLIED',
+      `Failed to add MCP server '${name}': ${err?.message || String(err)}`, undefined, ctx)
+  }
+}
+
+/**
+ * #6974 — permanently remove a configured MCP server from the user's MCP config.
+ *
+ * Same two-gate AUTH as `handleAddMcpServer` (strict-primary first, then
+ * own-session), same capability gate, same requestId echo discipline. A name
+ * absent from the REQUESTED scope yields `MCP_SERVER_NOT_FOUND` and no write —
+ * a remove never silently jumps scope to find something to delete.
+ */
+async function handleRemoveMcpServer(ws, client, msg, ctx) {
+  if (rejectMcpConfigWriteUnlessPrimary(ws, client, msg, ctx, 'remove_mcp_server')) return
+  const requestId = msg?.requestId
+  const name = typeof msg?.name === 'string' ? msg.name.trim() : ''
+  if (!name) {
+    sendError(ws, requestId, 'MCP_SERVER_REMOVE_NOT_APPLIED', 'remove_mcp_server requires a non-empty `name`', undefined, ctx)
+    return
+  }
+  const scope = msg?.scope === 'project' ? 'project' : 'user'
+
+  const sessionId = msg?.sessionId || client?.activeSessionId
+  const entry = resolveSession(ctx, msg, client)
+  if (!entry) {
+    sendError(ws, requestId, 'MCP_SERVER_REMOVE_NOT_APPLIED', 'No active session', undefined, ctx)
+    return
+  }
+  if (!entry.session || typeof entry.session.removeMcpServer !== 'function') {
+    sendError(ws, requestId, 'MCP_CONFIG_UNSUPPORTED',
+      'This provider does not support removing MCP servers (its MCP config is managed by the underlying CLI).',
+      undefined, ctx)
+    return
+  }
+
+  try {
+    const result = await entry.session.removeMcpServer(name, scope)
+    if (!result || result.ok !== true) {
+      sendError(ws, requestId, 'MCP_SERVER_REMOVE_NOT_APPLIED',
+        result?.error || `Failed to remove MCP server '${name}'.`, undefined, ctx)
+      return
+    }
+    if (result.found === false) {
+      sendError(ws, requestId, 'MCP_SERVER_NOT_FOUND',
+        `No MCP server named '${name}' in ${scope} scope.`, undefined, ctx)
+      return
+    }
+    // The parked-set may have lost an entry (a disabled server that was removed),
+    // so flush session state immediately rather than waiting on the debounce —
+    // same discipline as the #6824 toggle handler.
+    try {
+      ctx.sessions.sessionManager?.serializeState?.()
+    } catch (err) {
+      sessionLogger(sessionId).warn(`Failed to persist session state after MCP remove on ${sessionId}: ${err?.message || err}`)
+    }
+    // sessionLogger, not loggerForSession — see the note in handleAddMcpServer:
+    // an absent sessionId made a successful remove report as REMOVE_NOT_APPLIED.
+    sessionLogger(sessionId).info(
+      `MCP server '${name}' removed from ${scope} scope by ${client.id} on session ${sessionId}`,
+    )
+  } catch (err) {
+    sendError(ws, requestId, 'MCP_SERVER_REMOVE_NOT_APPLIED',
+      `Failed to remove MCP server '${name}': ${err?.message || String(err)}`, undefined, ctx)
+  }
+}
+
 export const settingsHandlers = {
   set_model: handleSetModel,
   set_permission_mode: handleSetPermissionMode,
@@ -1083,6 +1282,11 @@ export const settingsHandlers = {
   set_mcp_server_enabled: handleSetMcpServerEnabled,
   // #6822: submit a pasted OAuth authorization code (BYOK lane; capability-gated).
   submit_mcp_auth_code: handleSubmitMcpAuthCode,
+  // #6974: MCP config MUTATION — add/remove a server (BYOK lane;
+  // capability-gated AND strict-primary gated: anything that is not the primary
+  // token class is refused, since a configured server is host code execution).
+  add_mcp_server: handleAddMcpServer,
+  remove_mcp_server: handleRemoveMcpServer,
   // promptEvaluatorSkipPattern keeps its bespoke handler because the
   // payload shape (string-or-null + pre-validation regex compile to
   // surface a distinct error code) doesn't fit the boolean/string

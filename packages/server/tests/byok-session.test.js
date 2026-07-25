@@ -10,9 +10,19 @@ import { BUILTIN_TOOLS } from '../src/byok-tools.js'
 import { MCP_STATES } from '../src/byok-mcp-client.js'
 import { recordTrust } from '../src/byok-mcp-trust.js'
 
-function preTrustStub() {
+/**
+ * Pre-trust the stub MCP server so the fleet's trust gate doesn't sit waiting on
+ * a prompt nobody answers.
+ *
+ * `env` MUST match the env of the config the test writes (#7001): the trust key
+ * covers the full spawn config, including env, so a record made with `env: {}`
+ * does NOT satisfy a config that sets `MCP_STUB_TOOLS`. That is the point of the
+ * hardening — for this very stub the env decides which tools the child exposes,
+ * i.e. env determines behaviour and therefore belongs in the trust decision.
+ */
+function preTrustStub(env = {}) {
   recordTrust(
-    { name: 'stub', command: process.execPath, args: [MCP_STUB], env: {} },
+    { name: 'stub', command: process.execPath, args: [MCP_STUB], env },
     process.env.CHROXY_MCP_TRUST_PATH,
   )
 }
@@ -252,8 +262,10 @@ describe('ClaudeByokSession', () => {
       // wait its full timeout for a responder that never comes. The fake
       // server still fails to start (`github-mcp.js` doesn't exist) — that
       // failure path is what this test exercises.
+      // #7001: the record must carry the config's env too, or the key does not
+      // match and the gate prompts instead of passing.
       recordTrust(
-        { name: 'github', command: 'node', args: ['github-mcp.js'] },
+        { name: 'github', command: 'node', args: ['github-mcp.js'], env: { GITHUB_TOKEN: 'secret' } },
         process.env.CHROXY_MCP_TRUST_PATH,
       )
       const configPath = join(tmpHome, '.claude.json')
@@ -362,14 +374,20 @@ describe('ClaudeByokSession', () => {
     })
 
     it('#4078: messages.stream receives BUILTIN_TOOLS + MCP tools merged for the turn', async () => {
-      preTrustStub()
+      // The env is what makes this stub expose `one`/`two`, so the trust record
+      // must be made for THIS env (#7001) — a record for `env: {}` describes a
+      // child that would expose different tools.
+      const stubEnv = {
+        MCP_STUB_TOOLS: JSON.stringify([
+          { name: 'one', description: 'first', inputSchema: { type: 'object' } },
+          { name: 'two', description: 'second', inputSchema: { type: 'object' } },
+        ]),
+      }
+      preTrustStub(stubEnv)
       const configPath = join(tmpHome, '.claude.json')
       writeFileSync(configPath, JSON.stringify({
         mcpServers: {
-          stub: { command: process.execPath, args: [MCP_STUB], env: { MCP_STUB_TOOLS: JSON.stringify([
-            { name: 'one', description: 'first', inputSchema: { type: 'object' } },
-            { name: 'two', description: 'second', inputSchema: { type: 'object' } },
-          ]) } },
+          stub: { command: process.execPath, args: [MCP_STUB], env: stubEnv },
         },
       }))
       const session = new ClaudeByokSession({ cwd: '/tmp', mcpConfigPath: configPath })
@@ -4774,6 +4792,11 @@ describe('ClaudeByokSession', () => {
       writeFileSync(configPath, JSON.stringify({
         mcpServers: { stub: { command: process.execPath, args: [MCP_STUB], env } },
       }))
+      // #7001: trust is keyed on the FULL spawn config, so the record has to carry
+      // this config's env. The callers' bare preTrustStub() covers the env-less
+      // case; this covers the variants that set MCP_STUB_TOOL_* (recordTrust is
+      // idempotent per key, so both records can coexist harmlessly).
+      preTrustStub(env)
       return configPath
     }
 

@@ -252,6 +252,43 @@ export declare const SubmitMcpAuthCodeSchema: z.ZodObject<{
     sessionId: z.ZodOptional<z.ZodString>;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
+export declare const McpConfigScopeSchema: z.ZodEnum<{
+    user: "user";
+    project: "project";
+}>;
+export declare const AddMcpServerSchema: z.ZodObject<{
+    type: z.ZodLiteral<"add_mcp_server">;
+    name: z.ZodString;
+    config: z.ZodObject<{
+        command: z.ZodOptional<z.ZodString>;
+        args: z.ZodOptional<z.ZodArray<z.ZodString>>;
+        env: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
+        type: z.ZodOptional<z.ZodEnum<{
+            stdio: "stdio";
+            http: "http";
+            "streamable-http": "streamable-http";
+            sse: "sse";
+        }>>;
+        url: z.ZodOptional<z.ZodString>;
+        headers: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
+    }, z.core.$strip>;
+    scope: z.ZodOptional<z.ZodEnum<{
+        user: "user";
+        project: "project";
+    }>>;
+    sessionId: z.ZodOptional<z.ZodString>;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
+export declare const RemoveMcpServerSchema: z.ZodObject<{
+    type: z.ZodLiteral<"remove_mcp_server">;
+    name: z.ZodString;
+    scope: z.ZodOptional<z.ZodEnum<{
+        user: "user";
+        project: "project";
+    }>>;
+    sessionId: z.ZodOptional<z.ZodString>;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
 export declare const SetPromptEvaluatorSchema: z.ZodObject<{
     type: z.ZodLiteral<"set_prompt_evaluator">;
     value: z.ZodBoolean;
@@ -1048,6 +1085,37 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     sessionId: z.ZodOptional<z.ZodString>;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"add_mcp_server">;
+    name: z.ZodString;
+    config: z.ZodObject<{
+        command: z.ZodOptional<z.ZodString>;
+        args: z.ZodOptional<z.ZodArray<z.ZodString>>;
+        env: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
+        type: z.ZodOptional<z.ZodEnum<{
+            stdio: "stdio";
+            http: "http";
+            "streamable-http": "streamable-http";
+            sse: "sse";
+        }>>;
+        url: z.ZodOptional<z.ZodString>;
+        headers: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
+    }, z.core.$strip>;
+    scope: z.ZodOptional<z.ZodEnum<{
+        user: "user";
+        project: "project";
+    }>>;
+    sessionId: z.ZodOptional<z.ZodString>;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"remove_mcp_server">;
+    name: z.ZodString;
+    scope: z.ZodOptional<z.ZodEnum<{
+        user: "user";
+        project: "project";
+    }>>;
+    sessionId: z.ZodOptional<z.ZodString>;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"set_prompt_evaluator">;
     value: z.ZodBoolean;
     sessionId: z.ZodOptional<z.ZodString>;
@@ -1627,6 +1695,9 @@ export type SetPermissionModeMessage = z.infer<typeof SetPermissionModeSchema>;
 export type SetPermissionRulesMessage = z.infer<typeof SetPermissionRulesSchema>;
 export type SetMcpServerEnabledMessage = z.infer<typeof SetMcpServerEnabledSchema>;
 export type SubmitMcpAuthCodeMessage = z.infer<typeof SubmitMcpAuthCodeSchema>;
+export type AddMcpServerMessage = z.infer<typeof AddMcpServerSchema>;
+export type RemoveMcpServerMessage = z.infer<typeof RemoveMcpServerSchema>;
+export type McpConfigScope = z.infer<typeof McpConfigScopeSchema>;
 export type PermissionResponseMessage = z.infer<typeof PermissionResponseSchema>;
 export type GetPermissionInputMessage = z.infer<typeof GetPermissionInputSchema>;
 export type ExtensionMessage = z.infer<typeof ExtensionMessageSchema>;

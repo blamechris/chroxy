@@ -5,12 +5,23 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   defaultTrustStorePath,
+  trustKeyComponents,
   trustTupleKey,
   loadTrustStore,
   recordTrust,
   isTrusted,
   withTrustStoreLock,
 } from '../src/byok-mcp-trust.js'
+
+/**
+ * A well-formed on-disk record for `server`. Since #7001 the persisted record IS
+ * the component bag the key hashes over, so building one by hand means asking the
+ * module for those components — a hand-written partial record (the pre-#7001
+ * `{ key, name, command, args0 }` shape) is deliberately no longer loadable.
+ */
+function diskEntry(server, trustedAt = '2026-05-29T00:00:00Z') {
+  return { ...trustKeyComponents(server), key: trustTupleKey(server), trustedAt }
+}
 
 let tmpDir
 let storePath
@@ -35,10 +46,21 @@ describe('byok-mcp-trust', () => {
       )
     })
 
-    it('ignores args[1..N] so version bumps do not re-prompt', () => {
+    // #7001 INVERTED: args[1..N] used to be excluded so a version bump would not
+    // re-prompt. That also made `['-y', '@legit']` and `['-y', '@attacker/pwn']`
+    // the same key. A version bump is indistinguishable from a package swap, so
+    // the full argv is now covered and a changed arg re-prompts once. See
+    // byok-mcp-trust-spawn-config.test.js for the exploit this closes.
+    it('covers args[1..N] — a changed arg is a different config (#7001)', () => {
       const k1 = trustTupleKey({ name: 'gh', command: 'node', args: ['mcp.js', '--version', '1.4.2'] })
       const k2 = trustTupleKey({ name: 'gh', command: 'node', args: ['mcp.js', '--version', '1.5.0'] })
-      assert.equal(k1, k2)
+      assert.notEqual(k1, k2)
+    })
+
+    it('covers env — an injected variable is a different config (#7001)', () => {
+      const plain = trustTupleKey({ name: 'gh', command: 'node', args: ['mcp.js'] })
+      const injected = trustTupleKey({ name: 'gh', command: 'node', args: ['mcp.js'], env: { NODE_OPTIONS: '--require /tmp/evil.js' } })
+      assert.notEqual(plain, injected)
     })
 
     it('distinguishes binary swaps as different tuples', () => {
@@ -48,7 +70,11 @@ describe('byok-mcp-trust', () => {
     })
 
     it('handles missing args (shell built-ins)', () => {
-      assert.equal(trustTupleKey({ name: 'noop', command: 'true' }), JSON.stringify(['noop', 'true', '']))
+      // #7001: the key is now a sha256 of the canonical component bag rather than
+      // a JSON tuple, so assert the shape + stability instead of a literal form.
+      const k = trustTupleKey({ name: 'noop', command: 'true' })
+      assert.match(k, /^[0-9a-f]{64}$/)
+      assert.equal(k, trustTupleKey({ name: 'noop', command: 'true', args: [], env: {} }))
     })
 
     it('throws on missing server', () => {
@@ -87,20 +113,28 @@ describe('byok-mcp-trust', () => {
       assert.notEqual(a, b)
     })
 
-    // #6821 — remote transport keys on (name, sanitized-url).
-    it('keys a remote server on (name, url), distinct from any stdio tuple', () => {
+    // #6821 — remote transport keys on the endpoint, never aliasing a stdio config.
+    it('keys a remote server distinctly from any stdio config', () => {
       const remote = trustTupleKey({ name: 'gh', url: 'https://mcp.example.com/api' })
-      assert.equal(remote, JSON.stringify(['gh', 'https://mcp.example.com/api']))
+      assert.match(remote, /^[0-9a-f]{64}$/)
       const stdio = trustTupleKey({ name: 'gh', command: 'node', args: ['mcp.js'] })
-      assert.notEqual(remote, stdio, 'a 2-element remote tuple can never alias a 3-element stdio tuple')
+      assert.notEqual(remote, stdio, 'the explicit `kind` discriminator makes aliasing impossible')
     })
 
-    it('strips url credentials + query + fragment from the remote key (no re-prompt on token rotation)', () => {
+    it('never leaks a url credential into the key, and covers the FULL url (#7001)', () => {
       const a = trustTupleKey({ name: 'gh', url: 'https://u:p1@mcp.example.com/api?t=1#x' })
       const b = trustTupleKey({ name: 'gh', url: 'https://u:p2@mcp.example.com/api?t=2#y' })
-      assert.equal(a, b, 'rotated credentials / changed query must not re-prompt for the same endpoint')
-      assert.equal(a, JSON.stringify(['gh', 'https://mcp.example.com/api']))
+      // #7001 INVERTED: #6821 keyed on the SANITIZED url only, so a changed query
+      // param did not re-prompt — but that sanitized value is broadcast verbatim
+      // on `mcp_servers`, making the key publicly known and inheritable by a
+      // different effective endpoint. The raw url is now covered, as a digest.
+      assert.notEqual(a, b, 'a changed credential / query is a different endpoint configuration')
       assert.ok(!a.includes('p1') && !a.includes('t=1'), 'no credential may reach the key')
+    })
+
+    it('the same remote url produces a stable key', () => {
+      const url = 'https://mcp.example.com/api?t=1'
+      assert.equal(trustTupleKey({ name: 'gh', url }), trustTupleKey({ name: 'gh', url }))
     })
 
     it('distinguishes different remote endpoints', () => {
@@ -127,15 +161,9 @@ describe('byok-mcp-trust', () => {
     })
 
     it('parses a well-formed file', () => {
-      // #4461: stored key MUST be the canonical JSON-stringify form;
-      // entries whose stored key doesn't recompute identically are dropped.
-      const entry = {
-        key: trustTupleKey({ name: 'gh', command: 'node', args: ['mcp.js'] }),
-        name: 'gh',
-        command: 'node',
-        args0: 'mcp.js',
-        trustedAt: '2026-05-29T00:00:00Z',
-      }
+      // #4461: the stored key MUST recompute from the recorded components;
+      // entries whose stored key doesn't match are dropped.
+      const entry = diskEntry({ name: 'gh', command: 'node', args: ['mcp.js'] })
       writeFileSync(storePath, JSON.stringify({ trustedTuples: [entry] }))
       const store = loadTrustStore(storePath)
       assert.equal(store.tuples.size, 1)
@@ -148,13 +176,7 @@ describe('byok-mcp-trust', () => {
       // The load-time recompute catches this and drops the entry with a
       // warn — next start re-prompts as if the trust were never granted.
       const original = { name: 'gh', command: 'node', args: ['mcp.js'] }
-      const tampered = {
-        key: trustTupleKey(original),
-        name: 'gh',
-        command: '/bin/rm',
-        args0: 'mcp.js',
-        trustedAt: '2026-05-29T00:00:00Z',
-      }
+      const tampered = { ...diskEntry(original), command: '/bin/rm' }
       writeFileSync(storePath, JSON.stringify({ trustedTuples: [tampered] }))
       const warned = []
       const store = loadTrustStore(storePath, { log: { warn: (msg) => warned.push(msg) } })
@@ -163,23 +185,22 @@ describe('byok-mcp-trust', () => {
       assert.equal(isTrusted(store, original), false)
     })
 
+    it('drops an entry whose args/env digest was tampered with (#7001)', () => {
+      // The digests are what make args/env part of the key — swapping one while
+      // keeping the stored key must not pass either.
+      const original = { name: 'gh', command: 'node', args: ['mcp.js'], env: { A: '1' } }
+      const tampered = { ...diskEntry(original), argsDigest: 'deadbeef', envDigest: 'deadbeef' }
+      writeFileSync(storePath, JSON.stringify({ trustedTuples: [tampered] }))
+      const warned = []
+      const store = loadTrustStore(storePath, { log: { warn: (msg) => warned.push(msg) } })
+      assert.equal(store.tuples.size, 0)
+      assert.ok(warned.some((m) => /tampered/.test(m)))
+    })
+
     it('preserves untampered entries when others are dropped', () => {
       const good = { name: 'good', command: 'node', args: ['g.js'] }
-      const tampered = {
-        key: trustTupleKey({ name: 'bad', command: 'node', args: ['b.js'] }),
-        name: 'bad',
-        command: '/bin/sh',
-        args0: 'b.js',
-        trustedAt: '2026-05-29T00:00:00Z',
-      }
-      const goodEntry = {
-        key: trustTupleKey(good),
-        name: good.name,
-        command: good.command,
-        args0: good.args[0],
-        trustedAt: '2026-05-29T00:00:00Z',
-      }
-      writeFileSync(storePath, JSON.stringify({ trustedTuples: [tampered, goodEntry] }))
+      const tampered = { ...diskEntry({ name: 'bad', command: 'node', args: ['b.js'] }), command: '/bin/sh' }
+      writeFileSync(storePath, JSON.stringify({ trustedTuples: [tampered, diskEntry(good)] }))
       const store = loadTrustStore(storePath)
       assert.equal(store.tuples.size, 1)
       assert.ok(isTrusted(store, good))
@@ -275,13 +296,22 @@ describe('byok-mcp-trust', () => {
       assert.equal(isTrusted(store, server), true)
     })
 
-    it('returns false when only args[1..N] differs (no false negative)', () => {
-      // recordTrust uses tuple key (name, command, args[0]) — checking a
-      // server with different args[1..N] still matches because tuple key
-      // ignores them. This protects against re-prompts on version bumps.
+    it('returns FALSE when args[1..N] differs (#7001 — this used to be true)', () => {
+      // The pre-#7001 key covered only args[0], so a differing args[1..N] still
+      // matched. That is exactly what let a remove + re-add swap the package being
+      // executed with no prompt; see byok-mcp-trust-spawn-config.test.js.
       recordTrust({ name: 'gh', command: 'node', args: ['mcp.js', '--v=1.0'] }, storePath)
       const store = loadTrustStore(storePath)
-      assert.equal(isTrusted(store, { name: 'gh', command: 'node', args: ['mcp.js', '--v=2.0'] }), true)
+      assert.equal(isTrusted(store, { name: 'gh', command: 'node', args: ['mcp.js', '--v=2.0'] }), false)
+    })
+
+    it('returns FALSE when only env differs (#7001 — env was not in the key at all)', () => {
+      recordTrust({ name: 'gh', command: 'node', args: ['mcp.js'] }, storePath)
+      const store = loadTrustStore(storePath)
+      assert.equal(
+        isTrusted(store, { name: 'gh', command: 'node', args: ['mcp.js'], env: { NODE_OPTIONS: '--require /tmp/evil.js' } }),
+        false,
+      )
     })
 
     it('returns false on binary swap', () => {

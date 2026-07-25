@@ -123,7 +123,7 @@ export function defaultShell({ platform = process.platform, env = process.env } 
  * `_fsync` is a test seam (default `fsyncSync`) so the durable + benign-error
  * paths are exercisable without a real disk fault.
  */
-function fsyncForDurability(target, { isDir = false, _fsync = fsyncSync } = {}) {
+export function fsyncForDurability(target, { isDir = false, _fsync = fsyncSync } = {}) {
   let fd
   try {
     // Directories open read-only; regular files open `r+` so the handle is

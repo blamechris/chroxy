@@ -177,9 +177,9 @@ export declare const ServerGithubWebhookConfigSchema: z.ZodObject<{
     generatedAt: z.ZodString;
     configured: z.ZodBoolean;
     source: z.ZodEnum<{
+        env: "env";
         none: "none";
         store: "store";
-        env: "env";
     }>;
     payloadUrl: z.ZodNullable<z.ZodString>;
     lanOnly: z.ZodBoolean;
