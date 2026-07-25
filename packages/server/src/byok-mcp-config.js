@@ -948,7 +948,17 @@ export function writeClaudeConfigAtomic(filePath, value, { mode }) {
     try { unlinkSync(tmpPath) } catch { /* nothing to clean up */ }
     throw err
   }
-  renameSync(tmpPath, filePath)
+  // A failing rename (EXDEV, FS quota, ACL) would otherwise leave the sidecar
+  // behind — and this sidecar is not inert: it holds the full config, including
+  // any `env` / `headers` the caller just supplied. Unlink it and re-throw the
+  // ORIGINAL rename error, not a cleanup-side ENOENT. Same shape as the #4463 fix
+  // in byok-mcp-trust.js `recordTrust`.
+  try {
+    renameSync(tmpPath, filePath)
+  } catch (err) {
+    try { unlinkSync(tmpPath) } catch { /* may already be gone */ }
+    throw err
+  }
   // Make the rename itself durable, not just the bytes it points at.
   fsyncForDurability(dirname(filePath), { isDir: true })
 }

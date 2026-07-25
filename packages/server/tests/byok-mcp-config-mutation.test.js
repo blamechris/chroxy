@@ -17,7 +17,7 @@
  * Every test writes to a mkdtemp path — never the real `~/.claude.json` (the
  * sandbox guard in tests/_setup.mjs blocks real-home writes and would fail loudly).
  */
-import { describe, it, beforeEach, afterEach } from 'node:test'
+import { describe, it, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, readdirSync, statSync, chmodSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -500,4 +500,67 @@ describe('#6974 round-trip', () => {
     assert.deepEqual(read(), original)
     assert.equal(before.trimEnd(), readFileSync(configPath, 'utf8').trimEnd())
   })
+})
+
+describe('writeClaudeConfigAtomic rename-failure cleanup (#7001 review)', () => {
+  // A failing renameSync left the `.chroxy.<uuid>.tmp` sidecar behind — and that
+  // sidecar holds the FULL config, including any env/headers just supplied, at the
+  // destination's (possibly group-readable) mode. Module mocks are required
+  // because there is no portable way to force a deterministic rename failure
+  // across tmpfs / ext4 / APFS. Same test shape as the #4463 fix in
+  // byok-mcp-trust.test.js.
+  if (typeof mock.module !== 'function') {
+    it('skipped — mock.module requires --experimental-test-module-mocks', (t) => {
+      t.skip('re-run with --experimental-test-module-mocks to exercise these tests')
+    })
+  } else {
+    it('unlinks the sidecar and re-throws the ORIGINAL error when renameSync fails', async () => {
+      const realFs = await import('node:fs')
+      const unlinked = []
+      const mockFs = {
+        ...realFs,
+        renameSync: () => { throw new Error('EXDEV cross-device link') },
+        unlinkSync: (p) => { unlinked.push(p) },
+      }
+      mock.module('node:fs', { defaultExport: mockFs, namedExports: mockFs })
+      try {
+        const { writeClaudeConfigAtomic } = await import(`../src/byok-mcp-config.js?cacheBust=7001-${Date.now()}`)
+        let threw = null
+        try {
+          writeClaudeConfigAtomic(configPath, { mcpServers: { s: { command: 'node' } } }, { mode: null })
+        } catch (err) {
+          threw = err
+        }
+        assert.ok(threw, 'the rename failure must surface')
+        assert.match(threw.message, /EXDEV/, 'the ORIGINAL error, not a cleanup-side ENOENT')
+        assert.equal(unlinked.length, 1, 'the sidecar is unlinked exactly once')
+        assert.ok(unlinked[0].includes('.chroxy.') && unlinked[0].endsWith('.tmp'), 'cleanup targets the sidecar')
+      } finally {
+        mock.restoreAll()
+      }
+    })
+
+    it('surfaces the rename error even when the cleanup unlink also fails', async () => {
+      const realFs = await import('node:fs')
+      const mockFs = {
+        ...realFs,
+        renameSync: () => { throw new Error('original rename failure') },
+        unlinkSync: () => { throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }) },
+      }
+      mock.module('node:fs', { defaultExport: mockFs, namedExports: mockFs })
+      try {
+        const { writeClaudeConfigAtomic } = await import(`../src/byok-mcp-config.js?cacheBust=7001b-${Date.now()}`)
+        let threw = null
+        try {
+          writeClaudeConfigAtomic(configPath, { mcpServers: {} }, { mode: null })
+        } catch (err) {
+          threw = err
+        }
+        assert.ok(threw)
+        assert.match(threw.message, /original rename failure/)
+      } finally {
+        mock.restoreAll()
+      }
+    })
+  }
 })
