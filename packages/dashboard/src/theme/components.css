@@ -13038,3 +13038,320 @@ button.sidebar-token-view-session-row:hover {
   color: var(--text-muted);
   margin-top: 10px;
 }
+
+/* ───────────────────────────────────────────────────────────────────────────
+ * #6871 — Scheduled tasks tab (ScheduledTasksSection). List + detail CRUD over
+ * the standing scheduled-task registry.
+ *
+ * Also fills in the shared Control Room primitives this panel leans on that had
+ * no rules yet (`.cr-tag[data-accent]`, `.cr-error`, `.cr-primary-btn`,
+ * `.cr-danger-btn`, `.cr-refresh-btn`). They were referenced by the #6691 Runs
+ * tab but never styled, so defining them here is additive — nothing regresses,
+ * and both panels pick up consistent chrome. Token-only: no raw colour literals.
+ * ─────────────────────────────────────────────────────────────────────────── */
+
+/* Accent variants addressed via `data-accent` (what the Runs + Scheduler panels
+ * emit) alongside the older `.cr-tag-*` modifier classes. `ok` is reserved for a
+ * genuinely healthy state — see @chroxy/protocol's scheduled-task-health. */
+.cr-tag[data-accent='ok'] {
+  background: var(--accent-green-light);
+  border-color: var(--accent-green-border);
+  color: var(--accent-green);
+}
+
+.cr-tag[data-accent='warn'] {
+  background: var(--accent-orange-subtle);
+  border-color: var(--accent-orange-border);
+  color: var(--accent-orange);
+}
+
+.cr-tag[data-accent='bad'] {
+  background: var(--accent-red-subtle);
+  border-color: var(--accent-red-border);
+  color: var(--accent-red);
+}
+
+.cr-tag[data-accent='neutral'] {
+  background: var(--bg-tertiary);
+  border-color: var(--border-secondary);
+  color: var(--text-secondary);
+}
+
+.cr-error {
+  color: var(--accent-red);
+  font-size: 13px;
+  line-height: 1.5;
+  margin: 6px 0;
+}
+
+.cr-primary-btn,
+.cr-danger-btn,
+.cr-refresh-btn {
+  font-family: var(--font-ui);
+  font-size: 13px;
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-primary);
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.cr-primary-btn {
+  border-color: var(--accent-blue-border);
+  color: var(--accent-blue);
+}
+
+.cr-danger-btn {
+  border-color: var(--accent-red-border);
+  color: var(--accent-red);
+}
+
+.cr-primary-btn:hover:not(:disabled),
+.cr-danger-btn:hover:not(:disabled),
+.cr-refresh-btn:hover:not(:disabled) {
+  border-color: var(--border-focus);
+}
+
+.cr-primary-btn:disabled,
+.cr-danger-btn:disabled,
+.cr-refresh-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.cr-sched-header-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+/* The enable-gate banner. Left-accented by state so a DISABLED (default) gate
+ * reads as a warning at a glance rather than as neutral chrome. */
+.cr-sched-gate {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: 12px 14px;
+  margin-bottom: 14px;
+  border: 1px solid var(--border-primary);
+  border-left-width: 4px;
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+}
+
+.cr-sched-gate[data-accent='ok'] {
+  border-left-color: var(--accent-green);
+}
+
+.cr-sched-gate[data-accent='warn'] {
+  border-left-color: var(--accent-orange);
+}
+
+.cr-sched-gate[data-accent='bad'] {
+  border-left-color: var(--accent-red);
+}
+
+.cr-sched-gate-text {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.cr-sched-gate-text strong {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.cr-sched-gate-text p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* List (left) + detail (right). Collapses to one column on narrow viewports so
+ * the panel stays usable in a split desktop pane. */
+.cr-sched-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 320px) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+@media (max-width: 900px) {
+  .cr-sched-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.cr-sched-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.cr-sched-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  align-items: center;
+  width: 100%;
+  text-align: left;
+  padding: 8px 10px;
+  border: 1px solid var(--border-secondary);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.cr-sched-row:hover {
+  border-color: var(--border-focus);
+}
+
+.cr-sched-row[data-selected='true'] {
+  border-color: var(--accent-blue-border-strong);
+  background: var(--bg-secondary);
+}
+
+.cr-sched-row-name {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 600;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.cr-sched-row-cadence,
+.cr-sched-row-next {
+  font-size: 11px;
+  flex: 0 1 auto;
+}
+
+.cr-sched-detail {
+  border: 1px solid var(--border-secondary);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+  padding: 14px;
+  min-width: 0;
+}
+
+.cr-sched-detail-header {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.cr-sched-detail-header h4 {
+  margin: 0 0 2px;
+  font-size: 14px;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
+.cr-sched-facts {
+  display: grid;
+  grid-template-columns: minmax(0, 140px) minmax(0, 1fr);
+  gap: 4px 12px;
+  margin: 10px 0;
+  font-size: 12px;
+}
+
+.cr-sched-facts dt {
+  color: var(--text-secondary);
+}
+
+.cr-sched-facts dd {
+  margin: 0;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
+.cr-sched-prompt {
+  margin: 10px 0;
+}
+
+/* The prompt is arbitrary user text — scroll it inside its own box rather than
+ * letting a long line widen the whole panel. */
+.cr-sched-prompt pre {
+  margin: 4px 0 0;
+  padding: 8px 10px;
+  max-height: 220px;
+  overflow: auto;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-code-block);
+  color: var(--text-primary);
+}
+
+.cr-sched-detail-actions,
+.cr-sched-modal-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+
+.cr-sched-modal-actions {
+  justify-content: flex-end;
+}
+
+.cr-sched-modal {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.cr-sched-modal p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-primary);
+}
+
+.cr-sched-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.cr-sched-field input,
+.cr-sched-field select,
+.cr-sched-field textarea {
+  font-family: var(--font-ui);
+  font-size: 13px;
+  padding: 6px 8px;
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-primary);
+}
+
+.cr-sched-field textarea {
+  font-family: var(--font-mono);
+  resize: vertical;
+}
+
+.cr-sched-field input:focus,
+.cr-sched-field select:focus,
+.cr-sched-field textarea:focus {
+  outline: none;
+  border-color: var(--border-focus);
+}

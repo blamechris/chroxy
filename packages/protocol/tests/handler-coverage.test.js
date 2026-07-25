@@ -172,6 +172,7 @@ const PLATFORM_SPECIFIC = {
   // so it is BOTH-CLIENTS. Coverage passes because the dashboard has a
   // `permission_input: handlePermissionInput` HANDLERS-map entry and the mobile
   // app has a `case 'permission_input':` clause.
+  'scheduled_tasks': 'dashboard', // #6871 (epic #6784) scheduled-task registry + scheduler-gate snapshot for the Control Room "Scheduled tasks" tab — host-level surface, dashboard-only (the mobile app has no Control Room; the `chroxy schedule` CLI #6868 is the headless counterpart); mobile parity would be a fast-follow
   'repo_events_snapshot': 'dashboard', // Control Room repo-events survey reply (#5966, epic #5422 phase 5) — GitHub-webhook activity buffered by the daemon (#6468); host-level surface, dashboard-only (the mobile app has no Control Room); mobile parity would be a fast-follow
   'repo_events_delta': 'dashboard', // Control Room repo-events LIVE delta (#6536, PR-2 of #5966) — host-broadcast of a new webhook event so the pane updates without a Refresh; host-level surface, dashboard-only (the mobile app has no Control Room); mobile parity would be a fast-follow
   'github_webhook_config': 'dashboard', // Control Room repo-events webhook-secret config reply (#6540, item 3 of #6536) — set/rotate the HMAC secret + payload URL + delivery status; host-level surface, dashboard-only (the mobile app has no Control Room); mobile parity would be a fast-follow

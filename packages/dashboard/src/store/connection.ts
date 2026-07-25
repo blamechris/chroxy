@@ -135,6 +135,8 @@ import {
   resetTranscriptFetchTracking,
 } from './message-handler';
 import type { EvaluatorResultPayload } from './types';
+// #6871: the scheduled-task create/update payload shape (wire contract).
+import type { ScheduledTaskInput } from '@chroxy/protocol';
 import { CLIENT_CAPABILITIES, DEFAULT_PROVIDER } from '@chroxy/protocol';
 import {
   getWsCloseMessage,
@@ -735,6 +737,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   orchestrationPendingActions: {},
   orchestrationActionResults: {},
   selectedRunId: null,
+  // #6871: scheduled-tasks panel state (dashboard-only; mobile parity later).
+  scheduledTasks: null,
+  scheduledTasksLoading: false,
+  scheduledTaskPendingActions: {},
+  scheduledTaskActionResults: {},
+  selectedScheduledTaskId: null,
   // #5553: per-repo session presets keyed by cwd, fed by session_preset_snapshot.
   sessionPresetSnapshots: {},
   // #5553: server-provided composer seeds keyed by sessionId (drained by App).
@@ -1389,6 +1397,68 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const requestId = `orch-action-${nextMessageId()}`;
     if (!wsSend(socket, { type: 'orchestration_run_action', runId, action, requestId })) return null;
     set({ orchestrationPendingActions: { ...get().orchestrationPendingActions, [requestId]: { kind: action, runId, at: Date.now() } } });
+    return requestId;
+  },
+
+  // #6871: request the scheduled-tasks snapshot. `scheduledTasksLoading` is set
+  // only AFTER wsSend confirms the request went on the wire — setting it first
+  // would leave a permanent spinner on a closed/failed socket (#6308/#6309).
+  requestScheduledTasks: (): boolean => {
+    const { socket } = get();
+    if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+    if (!wsSend(socket, { type: 'scheduled_tasks_request' })) return false;
+    set({ scheduledTasksLoading: true });
+    return true;
+  },
+
+  selectScheduledTask: (taskId: string | null): void => {
+    set({ selectedScheduledTaskId: taskId });
+  },
+
+  // #6871: one entry point for all five mutations, mirroring the server's single
+  // strict-primary-gated handler. Wire-or-nothing: the pending entry is written
+  // only after a confirmed send, so a mutation that never left the browser is
+  // never rendered as in-flight.
+  sendScheduledTaskAction: (
+    action: 'create' | 'update' | 'pause' | 'resume' | 'delete',
+    opts: { taskId?: string; task?: ScheduledTaskInput } = {},
+  ): string | null => {
+    const { socket } = get();
+    if (!socket || socket.readyState !== WebSocket.OPEN) return null;
+    const taskId = opts.taskId ?? null;
+    // Guard the same pairings the server enforces, so an incomplete request is
+    // not put on the wire just to come back as an error.
+    if (action !== 'create' && !taskId) return null;
+    if ((action === 'create' || action === 'update') && !opts.task) return null;
+    const requestId = `sched-action-${nextMessageId()}`;
+    const payload: Record<string, unknown> = { type: 'scheduled_task_action', action, requestId };
+    if (taskId) payload.taskId = taskId;
+    if (opts.task) payload.task = opts.task;
+    if (!wsSend(socket, payload)) return null;
+    set({
+      scheduledTaskPendingActions: {
+        ...get().scheduledTaskPendingActions,
+        [requestId]: { kind: action, taskId, at: Date.now() },
+      },
+    });
+    return requestId;
+  },
+
+  // #6871: flip the PERSISTED gate. Tracked in the same pending map so the
+  // toggle disables while in flight; the reply snapshot carries
+  // `scheduler.restartRequired`, which the panel surfaces rather than implying
+  // the running daemon changed behaviour.
+  setSchedulerEnabled: (enabled: boolean): string | null => {
+    const { socket } = get();
+    if (!socket || socket.readyState !== WebSocket.OPEN) return null;
+    const requestId = `sched-gate-${nextMessageId()}`;
+    if (!wsSend(socket, { type: 'set_scheduler_enabled', enabled, requestId })) return null;
+    set({
+      scheduledTaskPendingActions: {
+        ...get().scheduledTaskPendingActions,
+        [requestId]: { kind: enabled ? 'enable-gate' : 'disable-gate', taskId: null, at: Date.now() },
+      },
+    });
     return requestId;
   },
 

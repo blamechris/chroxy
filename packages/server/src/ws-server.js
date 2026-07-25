@@ -324,6 +324,9 @@ function _isSecureRequest(req) {
  *   { type: 'submit_mcp_auth_code', server, code, sessionId?, requestId? } — #6822 submit a pasted OAuth authorization code for a remote MCP server (BYOK lane)
  *   { type: 'add_mcp_server', name, config, scope?, sessionId?, requestId? } — #6974 ADD an MCP server, persisting it to the user's MCP config (BYOK lane; STRICT-PRIMARY gate — any non-primary token is rejected, since a configured server is a command this machine will spawn; #7001)
  *   { type: 'remove_mcp_server', name, scope?, sessionId?, requestId? } — #6974 permanently REMOVE a configured MCP server from the user's MCP config (BYOK lane; same strict-primary gate)
+ *   { type: 'scheduled_tasks_request', requestId? }     — #6871 read the standing scheduled-task registry + the scheduler gate state (host-level: a pairing-BOUND client is rejected)
+ *   { type: 'scheduled_task_action', action, taskId?, task?, requestId? } — #6871 create/update/pause/resume/delete a scheduled task (STRICT-PRIMARY gate — a scheduled task makes this machine run an agent session unattended)
+ *   { type: 'set_scheduler_enabled', enabled, requestId? } — #6871 flip the PERSISTED global scheduled-execution gate (features.scheduler); same strict-primary gate, and a daemon restart is required for it to take effect (reported as scheduler.restartRequired)
  *   { type: 'set_prompt_evaluator', value: boolean, sessionId? } — toggle the per-session promptEvaluator (#3185)
  *   { type: 'set_prompt_evaluator_skip_pattern', value: string|null, sessionId? } — set the per-session evaluator skip-pattern source (#3639)
  *   { type: 'set_chroxy_context_hint', value: boolean, sessionId? } — toggle the per-session Chroxy context hint (#3805)
@@ -521,6 +524,7 @@ function _isSecureRequest(req) {
  *   { type: 'orchestration_runs_snapshot', requestId?, generatedAt, runs: [RunSummary], error? } — orchestration runs-list survey (#6691, dashboard-only v1)
  *   { type: 'orchestration_run_snapshot', requestId?, generatedAt, seq, run: RunDetail|null, error? } — one run's full detail (pull-only; run:null = degraded reply) (#6691)
  *   { type: 'orchestration_run_delta', runId, seq, generatedAt, run?, node?, gate?, timeline? } — live run update pushed to host-level clients; client applies iff seq===held+1 (#6691)
+ *   { type: 'scheduled_tasks', generatedAt, scheduler: { enabled, engineArmed, restartRequired, source }, schedulableProviders, defaultProvider, defaultProviderRefusal, tasks[], requestId?, error? } — #6871 scheduled-task registry snapshot for the dashboard panel; sent to the REQUESTING client only, and re-emitted as the ack for every accepted mutation. Each task carries the engine's own verdicts (providerRefusal / effectivePermissionMode / permissionModeClamped / quarantined) so a client never re-derives a safety decision
  *   { type: 'orchestration_action_ack', requestId?, action, runId, gateId? } — terminal success echo for a mutating orchestration action (#6691)
  *
  * Encrypted envelope (bidirectional, wraps any message above after key exchange):
@@ -563,7 +567,7 @@ function _isSecureRequest(req) {
  *   - A session operation failed in an expected, user-facing way → `session_error`
  */
 export class WsServer {
-  constructor({ port, apiToken, cliSession, sessionManager, defaultSessionId, authRequired = true, pushManager = null, maxPayload, noEncrypt, keyExchangeTimeoutMs, localhostBypass, tokenManager, pairingManager, serverIdentity = null, maxPendingConnections, backpressureThreshold, environmentManager, orchestrationManager = null, config = null, diagnosticsRateLimit = null, devicePreferences = null, pagesStore = null, pagesRateLimiter } = {}) {
+  constructor({ port, apiToken, cliSession, sessionManager, defaultSessionId, authRequired = true, pushManager = null, maxPayload, noEncrypt, keyExchangeTimeoutMs, localhostBypass, tokenManager, pairingManager, serverIdentity = null, maxPendingConnections, backpressureThreshold, environmentManager, orchestrationManager = null, schedulerEngine = null, config = null, diagnosticsRateLimit = null, devicePreferences = null, pagesStore = null, pagesRateLimiter } = {}) {
     this.port = port
     this.apiToken = apiToken
     this._tokenManager = tokenManager || null
@@ -920,6 +924,11 @@ export class WsServer {
         // (and whenever the feature is off) — the handlers treat a null manager
         // as "engine not running" and reply with an unavailable error.
         get orchestrationManager() { return self._orchestrationManager ?? null },
+        // #6871: the SchedulerEngine, for the scheduled-tasks panel's gate +
+        // quarantine readout. Null whenever scheduled execution is disabled (the
+        // default) — the handlers report that as "not armed" rather than hiding
+        // it. Late-bound so it tracks the server instance.
+        get schedulerEngine() { return self._schedulerEngine ?? null },
       },
       runtime: {
         get draining() { return self._draining },
@@ -1104,6 +1113,8 @@ export class WsServer {
     // run_delta events are forwarded to host-level clients by server-cli via
     // _broadcastOrchestrationDelta; the handlers read it off ctx.services.
     this._orchestrationManager = orchestrationManager || null
+    // #6871: nullable by design — null whenever scheduled execution is disabled.
+    this._schedulerEngine = schedulerEngine || null
     this.defaultSessionId = defaultSessionId || null
     this._checkpointManager = new CheckpointManager()
 

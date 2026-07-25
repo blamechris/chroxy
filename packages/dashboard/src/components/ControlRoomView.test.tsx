@@ -140,11 +140,12 @@ describe('ControlRoomView', () => {
     // mock omits; the per-tab routing is covered by the targeted tab tests above
     // + the mission-control test, and ControlRoomView.registry.test.ts covers the
     // derived-set consistency.)
-    // #6691 (S-3): capability-gated tabs (runs) render only while the server
-    // advertises the capability — grant them all here so the drift guard still
-    // covers every descriptor. The gated-OFF behaviour has its own suite
-    // (ControlRoomView.runs-gating.test.tsx).
-    resetStore({ serverCapabilities: { orchestration: true } })
+    // #6691 (S-3) / #6871: capability-gated tabs (runs, scheduled-tasks) render
+    // only while the server advertises the capability — grant them all here so
+    // the drift guard still covers every descriptor. The gated-OFF behaviour has
+    // its own suites (ControlRoomView.runs-gating.test.tsx,
+    // ControlRoomView.scheduler-gating.test.tsx).
+    resetStore({ serverCapabilities: { orchestration: true, scheduledTasks: true } })
     render(<ControlRoomView />)
     for (const t of CONTROL_ROOM_TABS) {
       expect(screen.getByTestId(`cr-tab-${t.key}`)).toBeTruthy()

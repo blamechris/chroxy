@@ -230,6 +230,12 @@ const DASHBOARD_ONLY = new Set<string>([
   'orchestration_run_snapshot',  // one run's full detail (pull-only)
   'orchestration_run_delta',     // live run update (store-core applyRunDelta, seq contract)
   'orchestration_action_ack',    // mutating-action success echo
+  // Scheduler (#6871, epic #6784): the Control Room "Scheduled tasks" tab —
+  // dashboard-only v1. The mobile app has no Control Room, and the CLI (#6868)
+  // covers the headless surface, so mobile parity is a fast-follow rather than a
+  // gap. One snapshot type carries the whole panel (it doubles as the mutation
+  // ack), so there is nothing else to wire.
+  'scheduled_tasks',             // registry + scheduler-gate snapshot / mutation ack
 ])
 
 // Handled by the APP only — no dashboard surface by design.

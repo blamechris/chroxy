@@ -418,6 +418,84 @@ export const RemoveMcpServerSchema = z.object({
   requestId: z.string().max(256).optional(),
 })
 
+// ───────────────────────────────────────────────────────────────────────────
+// #6871 (epic #6784) — the dashboard scheduled-tasks panel.
+// ───────────────────────────────────────────────────────────────────────────
+
+// Read the standing scheduled-task registry + the engine's gate state. Reply is
+// a `scheduled_tasks` snapshot (schemas/server/scheduler.ts) to the REQUESTING
+// client only. Read-only, so no privileged gate — the snapshot carries prompts
+// the requester could already read via session history.
+export const ScheduledTasksRequestSchema = z.object({
+  type: z.literal('scheduled_tasks_request'),
+  requestId: z.string().max(128).optional(),
+})
+
+// The task fields a create/update may set. Bounds are wire sanity caps ONLY —
+// the real validation authority is the server's ScheduledTaskStore
+// (`ScheduledTaskValidationError` carries the offending field name back to the
+// panel), so the shape is deliberately NOT duplicated in strict form here. The
+// cadence, however, is discriminated at the wire so a malformed one is rejected
+// before it reaches the store.
+export const ScheduledTaskInputSchema = z.object({
+  name: z.string().max(256).nullable().optional(),
+  prompt: z.string().min(1).max(32768).optional(),
+  enabled: z.boolean().optional(),
+  cadence: z
+    .discriminatedUnion('kind', [
+      z.object({ kind: z.literal('once'), at: z.number().finite() }),
+      z.object({
+        kind: z.literal('interval'),
+        everyMs: z.number().finite().positive(),
+        anchor: z.number().finite().optional(),
+      }),
+      z.object({ kind: z.literal('cron'), expression: z.string().min(1).max(256) }),
+    ])
+    .optional(),
+  target: z
+    .object({
+      provider: z.string().max(128).optional(),
+      model: z.string().max(256).optional(),
+      cwd: z.string().max(4096).optional(),
+      permissionMode: z.string().max(64).optional(),
+    })
+    .optional(),
+})
+
+// Mutate the registry. ONE message for all five verbs so the authority gate has
+// exactly one entry point — creating a scheduled task is arranging UNATTENDED
+// agent execution on this machine, so the whole surface is strict-primary gated
+// (see handlers/scheduler-handlers.js), matching the tier #6998 set for MCP
+// config writes ("a configured server is a command this machine will spawn").
+//
+// `create` requires `task` (with prompt + cadence); `update` requires `taskId`
+// + `task`; `pause` / `resume` / `delete` require only `taskId`. The handler
+// enforces that pairing and reports `SCHEDULED_TASK_ACTION_FAILED` with a
+// per-field reason rather than silently ignoring a half-filled request.
+export const ScheduledTaskActionSchema = z.object({
+  type: z.literal('scheduled_task_action'),
+  action: z.enum(['create', 'update', 'pause', 'resume', 'delete']),
+  taskId: z.string().max(256).optional(),
+  task: ScheduledTaskInputSchema.optional(),
+  requestId: z.string().max(128).optional(),
+})
+
+// Flip the PERSISTED global enable gate (`features.scheduler` in config.json).
+// Strict-primary gated for the same reason as the mutations above, and MORE so:
+// this is the switch that decides whether the daemon runs agent sessions with
+// nobody watching at all.
+//
+// It writes the persisted flag; it does NOT arm or disarm a running daemon — the
+// engine is built once at boot, and its destroy() is terminal. The reply
+// snapshot therefore reports `scheduler.restartRequired` whenever the gate and
+// the live engine disagree, so the panel can never imply a toggle took effect
+// when nothing changed about what is actually firing.
+export const SetSchedulerEnabledSchema = z.object({
+  type: z.literal('set_scheduler_enabled'),
+  enabled: z.boolean(),
+  requestId: z.string().max(128).optional(),
+})
+
 // #3185: per-session promptEvaluator toggle. Strict boolean — the server
 // rejects anything else with a `session_error`. `sessionId` is optional;
 // the handler falls back to the client's bound active session.
@@ -1760,6 +1838,9 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   SubmitMcpAuthCodeSchema,
   AddMcpServerSchema,
   RemoveMcpServerSchema,
+  ScheduledTasksRequestSchema,
+  ScheduledTaskActionSchema,
+  SetSchedulerEnabledSchema,
   SetPromptEvaluatorSchema,
   SetPromptEvaluatorSkipPatternSchema,
   SetChroxyContextHintSchema,
@@ -1901,6 +1982,11 @@ export type SetMcpServerEnabledMessage = z.infer<typeof SetMcpServerEnabledSchem
 export type SubmitMcpAuthCodeMessage = z.infer<typeof SubmitMcpAuthCodeSchema>
 export type AddMcpServerMessage = z.infer<typeof AddMcpServerSchema>
 export type RemoveMcpServerMessage = z.infer<typeof RemoveMcpServerSchema>
+// #6871 — scheduled-tasks panel.
+export type ScheduledTasksRequestMessage = z.infer<typeof ScheduledTasksRequestSchema>
+export type ScheduledTaskActionMessage = z.infer<typeof ScheduledTaskActionSchema>
+export type ScheduledTaskInput = z.infer<typeof ScheduledTaskInputSchema>
+export type SetSchedulerEnabledMessage = z.infer<typeof SetSchedulerEnabledSchema>
 export type McpConfigScope = z.infer<typeof McpConfigScopeSchema>
 export type PermissionResponseMessage = z.infer<typeof PermissionResponseSchema>
 export type GetPermissionInputMessage = z.infer<typeof GetPermissionInputSchema>

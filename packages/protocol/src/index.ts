@@ -181,3 +181,9 @@ export type { Attachment, BinaryAttachment, FileRefAttachment } from './schemas/
 
 // Re-export client-side error-category detection (#3151)
 export * from './error-categories.ts'
+
+// #6871: shared scheduled-task HEALTH derivation. Zod-free and pure so BOTH the
+// `chroxy schedule` CLI (#6868) and the dashboard panel import one mapping — a
+// second copy would be free to drift toward reporting a never-run / refused /
+// paused / quarantined schedule as healthy.
+export * from './scheduled-task-health.ts'

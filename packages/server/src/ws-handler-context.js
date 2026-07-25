@@ -154,6 +154,13 @@ export const CTX_NAMESPACES = {
     // the orchestration feature is enabled and the engine is wired (E-4); the
     // handlers (S-2) treat an absent manager as "engine not running".
     'orchestrationManager',
+    // #6871: the SchedulerEngine. NULL whenever the scheduled-execution gate is
+    // closed (buildSchedulerEngine returns null), which is the DEFAULT — so the
+    // scheduled-tasks handlers must treat absence as "nothing is armed" and
+    // report it, never as "fine". The registry itself lives on the
+    // SessionManager and exists either way, so tasks are still readable and
+    // editable with no engine present.
+    'schedulerEngine',
   ],
   runtime: [
     'draining',

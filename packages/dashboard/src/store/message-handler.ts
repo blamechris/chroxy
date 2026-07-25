@@ -149,7 +149,7 @@ import {
   formatMemoryAppendNotice,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
-import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerByokPoolStatusSnapshotSchema, ServerByokPoolActionAckSchema, ServerHostPruneStatusSnapshotSchema, ServerHostPruneActionAckSchema, ServerSimulatorStatusSnapshotSchema, ServerSimulatorActionAckSchema, ServerEmulatorStatusSnapshotSchema, ServerEmulatorActionAckSchema, ServerWslStatusSnapshotSchema, ServerWslActionAckSchema, ServerIntegrationStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerExternalSessionsSnapshotSchema, ServerRepoEventsSnapshotSchema, ServerRepoEventsDeltaSchema, ServerGithubWebhookConfigSchema, ServerPermissionInputSchema, ServerPermissionAuditResultSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerSessionPresetSnapshotSchema, ServerPairPendingSchema, ServerPairResolvedSchema, ServerBillingCanarySchema, BillingCanarySnapshotSchema, ServerSymbolsSnapshotSchema, ServerSymbolLocationSchema, ServerSearchResultsSchema, ServerReferencesResultSchema, ServerOrchestrationRunsSnapshotSchema, ServerOrchestrationRunSnapshotSchema, ServerOrchestrationRunDeltaSchema, ServerOrchestrationActionAckSchema, ServerGitCreatePrResultSchema, ServerMemoryStackResultSchema } from '@chroxy/protocol/schemas'
+import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerByokPoolStatusSnapshotSchema, ServerByokPoolActionAckSchema, ServerHostPruneStatusSnapshotSchema, ServerHostPruneActionAckSchema, ServerSimulatorStatusSnapshotSchema, ServerSimulatorActionAckSchema, ServerEmulatorStatusSnapshotSchema, ServerEmulatorActionAckSchema, ServerWslStatusSnapshotSchema, ServerWslActionAckSchema, ServerIntegrationStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerExternalSessionsSnapshotSchema, ServerRepoEventsSnapshotSchema, ServerRepoEventsDeltaSchema, ServerGithubWebhookConfigSchema, ServerPermissionInputSchema, ServerPermissionAuditResultSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerSessionPresetSnapshotSchema, ServerPairPendingSchema, ServerPairResolvedSchema, ServerBillingCanarySchema, BillingCanarySnapshotSchema, ServerSymbolsSnapshotSchema, ServerSymbolLocationSchema, ServerSearchResultsSchema, ServerReferencesResultSchema, ServerOrchestrationRunsSnapshotSchema, ServerOrchestrationRunSnapshotSchema, ServerOrchestrationRunDeltaSchema, ServerOrchestrationActionAckSchema, ServerGitCreatePrResultSchema, ServerMemoryStackResultSchema, ServerScheduledTasksSchema } from '@chroxy/protocol/schemas'
 import { resolveSummarizeRequest, rejectSummarizeRequest } from './summarizeRequests'
 import {
   createKeyPair,
@@ -3104,6 +3104,41 @@ function handleOrchestrationRunsSnapshot(msg: Record<string, unknown>, _get: Msg
 }
 
 /**
+ * #6871 — `scheduled_tasks`: the scheduled-task registry + scheduler gate state.
+ *
+ * REPLACES the held snapshot wholesale — the server re-emits it as the ack for
+ * every accepted mutation, so there is no delta path that could drift from the
+ * registry. The degraded `tasks: [] + error` shape is schema-valid and stored
+ * as-is (the panel renders the error banner). Malformed → drop WITHOUT clearing
+ * loading, matching the survey-family convention, so a garbage payload cannot
+ * blank a good snapshot or present an empty list as "no scheduled tasks".
+ *
+ * The snapshot also doubles as the mutation ACK: when it echoes a `requestId`,
+ * the matching pending entry is cleared and recorded as a success. That means a
+ * mutation is only ever shown as applied once the SERVER has re-reported the
+ * registry — never optimistically.
+ */
+function handleScheduledTasks(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const parsed = ServerScheduledTasksSchema.safeParse(msg);
+  if (!parsed.success) return;
+  const requestId = parsed.data.requestId ?? null;
+  const next: Partial<ConnectionState> = {
+    scheduledTasks: parsed.data,
+    scheduledTasksLoading: false,
+  };
+  if (requestId && requestId in get().scheduledTaskPendingActions) {
+    const pending = { ...get().scheduledTaskPendingActions };
+    delete pending[requestId];
+    next.scheduledTaskPendingActions = pending;
+    next.scheduledTaskActionResults = {
+      ...get().scheduledTaskActionResults,
+      [requestId]: { ok: true, error: null, at: Date.now() },
+    };
+  }
+  set(next);
+}
+
+/**
  * #6691 (S-3) — `orchestration_run_snapshot`: one run's full detail (pull-only —
  * issued on selection or as the seq-gap resync). `run: null` is the degraded
  * not-found/unavailable reply: store the error per-run and clear loading.
@@ -3837,6 +3872,8 @@ const HANDLERS: Record<string, Handler> = {
   orchestration_run_snapshot: handleOrchestrationRunSnapshot,
   orchestration_run_delta: handleOrchestrationRunDelta,
   orchestration_action_ack: handleOrchestrationActionAck,
+  // #6871: scheduled-task registry snapshot (also the mutation ack).
+  scheduled_tasks: handleScheduledTasks,
   // #6543 (IDE P3 feature B): pulled full redacted tool input for a pre-write diff.
   permission_input: handlePermissionInput,
   // #6772: reply to query_permission_audit — the SettingsPanel "Permission history" view.
@@ -4626,6 +4663,40 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
             },
           });
         }
+      } else if (
+        (parsed.code === 'SCHEDULED_TASK_ACTION_FAILED'
+          || parsed.code === 'SCHEDULED_TASK_INVALID'
+          || parsed.code === 'SCHEDULED_TASK_NOT_FOUND'
+          || parsed.code === 'SCHEDULER_FORBIDDEN_NON_PRIMARY_CLIENT'
+          || parsed.code === 'SCHEDULER_FORBIDDEN_BOUND_CLIENT'
+          || parsed.code === 'SCHEDULER_GATE_FAILED'
+          || parsed.code === 'SCHEDULER_GATE_ENV_FORCED'
+          || parsed.code === 'SCHEDULER_REGISTRY_UNAVAILABLE')
+        && typeof msg.requestId === 'string'
+      ) {
+        // #6871: every scheduled-task rejection echoes the requestId. Clear the
+        // pending entry and record the reason so the panel shows WHY the mutation
+        // did not apply — a scheduled task that silently failed to save is the
+        // failure mode this panel exists to prevent. All of the surface's codes
+        // are listed (not just the generic one) so an authority refusal or a
+        // field-level validation error also releases the in-flight state instead
+        // of leaving a button spinning forever. `scheduledTasksLoading` is cleared
+        // too, since a rejected READ never produces the snapshot that would.
+        const schedPending = { ...get().scheduledTaskPendingActions };
+        const hadPending = msg.requestId in schedPending;
+        if (hadPending) delete schedPending[msg.requestId];
+        set({
+          scheduledTasksLoading: false,
+          ...(hadPending
+            ? {
+                scheduledTaskPendingActions: schedPending,
+                scheduledTaskActionResults: {
+                  ...get().scheduledTaskActionResults,
+                  [msg.requestId]: { ok: false, error: parsed.message || 'Scheduled-task action failed.', at: Date.now() },
+                },
+              }
+            : {}),
+        });
       } else if (parsed.code === 'CONTAINER_ACTION_FAILED' && typeof msg.environmentId === 'string') {
         // #6134: a failed containers_action echoes the exact environmentId
         // (and action) — clear that row's pending state and surface the reason

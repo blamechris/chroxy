@@ -1029,6 +1029,9 @@ export async function startCliServer(config) {
     apiToken: API_TOKEN,
     sessionManager,
     orchestrationManager,
+    // #6871: nullable — null whenever the scheduled-execution gate is closed (the
+    // default). The scheduled-tasks handlers report that as "not armed".
+    schedulerEngine,
     defaultSessionId,
     authRequired: !NO_AUTH,
     pushManager,
