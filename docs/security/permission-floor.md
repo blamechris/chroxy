@@ -85,7 +85,7 @@ HOOK-ROUTED (claude-tui = the DEFAULT provider, cli-session)
 | Auth | the **per-session hook secret**, same class and same validator as `POST /permission` (see [`bearer-token-authority.md` §5](bearer-token-authority.md#5-per-session-hook-secrets)) |
 | Request | the PreToolUse payload the hook already holds (`tool_name`, `tool_input`, `cwd`), capped at 1 MiB (`MAX_FLOOR_BODY` in `ws-permissions.js`) — deliberately much larger than `/permission`'s 64 KB, see §5 |
 | Response | `{ "floor": true \| false }` — nothing else; no requestId, no pending request, no broadcast, no push |
-| cwd basis | the **owning session's `cwd`** (resolved from the presented hook secret) — identical to what `PermissionManager` is constructed with; the payload's own `cwd` is used only when the session is not resolvable, and there is no `process.cwd()` fallback |
+| cwd basis | the **owning session's `cwd`** (resolved from the presented hook secret) and nothing else — identical to what `PermissionManager` is constructed with. There is no `process.cwd()` fallback and (#7020) no fallback to the payload's own `cwd`: a caller-chosen resolution base can UNDER-floor (naming `/repo/.git` as the base makes the relative scan of `/repo/.git/config` see only `config`). An unresolvable session answers `floor: true` |
 | Rate limit | its own limiter with a much larger budget than `/permission` (600/min, burst 200): this fires once per **tool call**, not once per human decision |
 
 **The hook treats only an explicit `"floor":false` as clearance.** Floored, `4xx`,
@@ -111,7 +111,12 @@ inputs from the SDK rather than parsing an untrusted HTTP body.
    naming **no** path field skips the round trip — such an input provably cannot be
    floored, so a path-less tool keeps its exact pre-#7004 behaviour. It is a
    *narrowing* filter, and the same test asserts it covers every field the floor
-   scans, so drift fails CI rather than silently under-flooring.
+   scans, so drift fails CI rather than silently under-flooring. #7020 restored the
+   two premises that argument rests on, both resolving toward the probe: the payload
+   must look **complete** (end in `}` — an empty or truncated body proves nothing and
+   leaves the auto-allow path directly), and a payload containing a `\u` escape is
+   probed because `\uXXXX` is the only JSON escape that can spell one of these keys,
+   which a byte-level scan would miss and the server's semantic lookup would not.
 3. **Keep the parity matrix honest.** `tests/permission-hook-floor.test.js` runs a
    `(tool, target)` matrix through both pipelines and asserts they agree.
 

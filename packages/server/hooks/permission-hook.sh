@@ -308,9 +308,41 @@ EOF
 # tests/permission-hook-floor.test.js asserts this pattern covers every
 # PROTECTED_PATH_INPUT_FIELDS entry, so extending the floor's field list without
 # updating this line fails CI.
+#
+# #7020 — the pre-filter's soundness argument ("naming no path field provably
+# cannot be floored") holds only over a COMPLETE, escape-free payload. Two
+# guards below restore that premise before the negative filter is trusted; both
+# resolve toward the PROBE (fail closed), never toward the skip:
+#   1. COMPLETENESS. An empty or truncated body used to take the same `return 1`
+#      and auto-allow, even though the "no path field" claim can only be read off
+#      a COMPLETE payload. A PreToolUse payload is always a JSON object, and
+#      `REQUEST=$(cat -)` strips trailing newlines, so a complete one always ends
+#      in `}`. Anything else leaves the auto-allow path immediately — no probe,
+#      because an unusable body proves nothing and this way the guard holds even
+#      when the daemon is unreachable. (`route_to_phone` then POSTs it to
+#      /permission, which cannot parse it either and answers its 400 deny.)
+#   2. UNICODE ESCAPES. The pre-filter is a BYTE-level substring scan while the
+#      daemon does a JSON-SEMANTIC field lookup, so a path-naming key spelled with
+#      an escape parses to file_path server-side yet never matches the pattern
+#      below. A `u`-escape of the letter f (byte sequence backslash-u-0-0-6-6,
+#      followed by `ile_path`) is such a key. `\uXXXX` is the ONLY JSON escape
+#      that can spell one of these keys — the rest of the grammar
+#      (`\" \\ \/ \b \f \n \r \t`) yields none of `[a-z_]` — so probing whenever
+#      the raw body contains `\u` closes the gap completely, and does so on the
+#      floor's own semantics rather than on an assumption about the producer's
+#      serializer. Any other malformed escape (`\U`, `\x`) makes the body
+#      unparseable, which the daemon already answers `floor:true`. Over-probing
+#      here is harmless; a `\n` / `\"`-only payload keeps the no-round-trip path.
 floor_forces_prompt() {
+  # (1) completeness — an incomplete body cannot prove "cannot be floored".
+  case "$REQUEST" in
+    *'}') ;;
+    *) return 0 ;;
+  esac
   case "$REQUEST" in
     *'"file_path"'*|*'"path"'*|*'"notebook_path"'*|*'"changes"'*) ;;
+    # (2) a \uXXXX escape may hide a path-naming key from the byte scan.
+    *'\u'*) ;;
     # No path-naming field anywhere in the payload — the floor cannot apply.
     *) return 1 ;;
   esac

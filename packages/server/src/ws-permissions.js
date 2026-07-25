@@ -51,10 +51,19 @@ const MAX_FLOOR_BODY = 1_048_576
  * rather than parsing an HTTP body.
  *
  * The cwd basis is the OWNING SESSION's cwd (`session.cwd` — exactly what
- * `PermissionManager` is constructed with, `cwd: this.cwd`), falling back to the
- * payload's own `cwd` only when the session is not resolvable (legacy/unit-test
- * shapes). It never falls back to the daemon's `process.cwd()`: resolving a
- * relative target against the wrong root could UNDER-floor.
+ * `PermissionManager` is constructed with, `cwd: this.cwd`) and NOTHING ELSE. It
+ * never falls back to the daemon's `process.cwd()`, and (#7020) never to the
+ * payload's own `cwd`: both are resolution bases the floor did not choose, and
+ * resolving a target against the wrong root UNDER-floors. The payload case is the
+ * sharper of the two because it is CALLER-chosen — naming the protected directory
+ * itself as the base makes the relative scan see nothing protected (target
+ * `/repo/.git/config` with `cwd: "/repo/.git"` scans just `config` → `floor:
+ * false`). `session.cwd` is always a real string (`BaseSession` sets
+ * `cwd || process.cwd()`), including in legacy single-session mode where
+ * `_findSessionByHookSecret` returns `{ session, sessionId: null }`, so the only
+ * shape this rejects is one where the owning session genuinely cannot be
+ * resolved — e.g. `_validateHookAuth` taking its primary-token fallback with no
+ * hook secrets registered. That answers `floor: true` (one prompt), not `false`.
  *
  * @param {*} hookData  the parsed PreToolUse payload (untrusted)
  * @param {string|null} sessionCwd  the owning session's cwd, when resolvable
@@ -72,9 +81,9 @@ export function evaluateHookFloorRequest(hookData, sessionCwd) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
     return { floor: true, reason: 'missing or non-object tool_input' }
   }
-  const cwd = (typeof sessionCwd === 'string' && sessionCwd.length > 0)
-    ? sessionCwd
-    : ((typeof hookData.cwd === 'string' && hookData.cwd.length > 0) ? hookData.cwd : null)
+  // #7020 — the OWNING SESSION's cwd is the only accepted resolution base. Never
+  // `hookData.cwd` (caller-chosen → under-floors), never `process.cwd()`.
+  const cwd = (typeof sessionCwd === 'string' && sessionCwd.length > 0) ? sessionCwd : null
   if (!cwd) {
     return { floor: true, reason: 'no resolvable session cwd' }
   }
@@ -229,8 +238,9 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
     let body = ''
     let bodyBytes = 0
     let oversized = false
+    let streamFailed = false
     req.on('data', (chunk) => {
-      if (oversized) return
+      if (oversized || streamFailed) return
       bodyBytes += Buffer.byteLength(chunk, 'utf8')
       if (bodyBytes > MAX_BODY) {
         oversized = true
@@ -244,6 +254,17 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
       }
       body += chunk
     })
+    // #7020 — same omission the floor route had: an 'error' on a stream with no
+    // listener rethrows into uncaughtException. A mid-body abort answers a DENY,
+    // so this route's fail-closed contract holds on the torn-down path too.
+    req.on('error', (err) => {
+      streamFailed = true
+      log.warn(`POST /permission request stream error: ${err?.message || err}`)
+      try {
+        if (!res.headersSent) sendJson(res, 400, { decision: 'deny' })
+        else res.end()
+      } catch { /* socket already torn down */ }
+    })
     req.on('end', () => {
       // #5313 (WP-1.3): this callback fires on a later tick, after the HTTP
       // dispatch that registered it has already returned — so a throw here is
@@ -254,7 +275,8 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
       // throw is contained and returns a 500 to the client when possible.
       try {
       // #5433: the 413 deny was already sent from the 'data' handler.
-      if (oversized) return
+      // #7020: ditto the 400 deny from the 'error' handler.
+      if (oversized || streamFailed) return
 
       let hookData
       try {
@@ -459,8 +481,9 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
     let body = ''
     let bodyBytes = 0
     let oversized = false
+    let streamFailed = false
     req.on('data', (chunk) => {
-      if (oversized) return
+      if (oversized || streamFailed) return
       bodyBytes += Buffer.byteLength(chunk, 'utf8')
       if (bodyBytes > MAX_FLOOR_BODY) {
         oversized = true
@@ -469,12 +492,25 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
       }
       body += chunk
     })
+    // #7020 — a client that aborts mid-body emits 'error' on the request stream,
+    // and an 'error' with NO listener is an unhandled 'error' event (it rethrows,
+    // escaping to uncaughtException). mailbox-route.js and github-webhook.js both
+    // attach one; match that. Answers `floor: true` so even a torn-down request
+    // fails CLOSED, and flags the read so a late 'end' cannot double-respond.
+    req.on('error', (err) => {
+      streamFailed = true
+      log.warn(`POST /permission-floor request stream error: ${err?.message || err}`)
+      try {
+        if (!res.headersSent) sendJson(res, 400, { floor: true })
+        else res.end()
+      } catch { /* socket already torn down */ }
+    })
     req.on('end', () => {
       // #5313 (WP-1.3): this fires on a later tick, so a throw here escapes the
       // route wrapper straight to uncaughtException. Contain it — and answer
       // `floor: true` so even a crash-path response fails closed.
       try {
-        if (oversized) return
+        if (oversized || streamFailed) return
 
         let hookData
         try {
