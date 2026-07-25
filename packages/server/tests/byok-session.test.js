@@ -2447,23 +2447,41 @@ describe('ClaudeByokSession', () => {
       await session.destroy()
     })
 
-    it('executes parallel tool_use blocks concurrently — wall clock < sequential (#4062)', async () => {
-      // Three Read tool_use blocks in one assistant turn. Each executor
-      // sleeps 100ms. Sequential would take ~300ms; Promise.all should
-      // collapse to ~100ms + a small scheduler margin. Assert the total
-      // is comfortably under the sequential floor.
+    it('executes parallel tool_use blocks concurrently — every block dispatched before any resolves (#4062)', async () => {
+      // Three Read tool_use blocks in one assistant turn. The property
+      // under test is CONCURRENCY, not speed: phase 2 must dispatch
+      // every approved block before any of them settles.
+      //
+      // This is asserted with an in-flight counter plus an ordered
+      // event log — NOT a wall-clock bound. The original form measured
+      // elapsed real time against a fixed 250ms threshold, which
+      // false-red'd purely because the shared CI runner was loaded
+      // (#6994). The counter/log form is independent of host speed:
+      // the executor yields across macrotask turns with ZERO delay, so
+      // a sequential orchestrator drops in-flight back to 0 between
+      // blocks no matter how fast or slow the machine is.
       const session = new ClaudeByokSession({ cwd: '/tmp' })
       session.setPermissionMode('auto')
-      const SLEEP_MS = 100
-      const startTimes = []
-      const endTimes = []
+      // Number of zero-delay macrotask yields each executor parks on.
+      // Any value >= 1 is sufficient for a sequential orchestrator to
+      // fully drain one executor before the next enters; a handful
+      // gives the interleaving room to be observed.
+      const YIELD_TICKS = 5
+      const events = []
+      let inFlight = 0
+      let peakInFlight = 0
       session._executeToolBlock = async function ({ block, messageId, decision }) {
         // Sanity check: orchestrator passes the pre-resolved decision.
         assert.ok(decision, 'orchestrator must pass a pre-resolved decision into _executeToolBlock')
         assert.equal(decision.behavior, 'allow', 'auto mode resolves to allow')
-        startTimes.push(Date.now())
-        await new Promise((r) => setTimeout(r, SLEEP_MS))
-        endTimes.push(Date.now())
+        inFlight += 1
+        peakInFlight = Math.max(peakInFlight, inFlight)
+        events.push(`enter:${block.id}`)
+        for (let tick = 0; tick < YIELD_TICKS; tick += 1) {
+          await new Promise((r) => setImmediate(r))
+        }
+        inFlight -= 1
+        events.push(`exit:${block.id}`)
         this.emit('tool_result', {
           messageId,
           toolUseId: block.id,
@@ -2499,25 +2517,35 @@ describe('ClaudeByokSession', () => {
         },
       }
       await session.start()
-      const turnStart = Date.now()
       await session.sendMessage('parallel reads')
-      const turnTotal = Date.now() - turnStart
-      // Sequential would be 3 * 100ms = 300ms (minimum). Parallel should
-      // finish in ~100ms plus a generous CI scheduler margin. Tight
-      // upper bound at 250ms — proves concurrency without flakiness on
-      // overloaded runners.
-      assert.equal(startTimes.length, 3, 'all three executors fire')
-      assert.ok(
-        turnTotal < 250,
-        `expected parallel turn < 250ms, got ${turnTotal}ms — sequential floor is ~300ms`,
+      const log = events.join(' ')
+      assert.equal(
+        events.filter((e) => e.startsWith('enter:')).length,
+        3,
+        `all three executors fire — log: ${log}`,
       )
-      // Additional concurrency check: each executor's start should be
-      // within the lifetime of the others (overlap, not back-to-back).
-      const lastStart = Math.max(...startTimes)
-      const firstEnd = Math.min(...endTimes)
+      assert.equal(
+        events.filter((e) => e.startsWith('exit:')).length,
+        3,
+        `all three executors complete — log: ${log}`,
+      )
+      assert.equal(inFlight, 0, `no execution left in flight after the turn — log: ${log}`)
+      // The concurrency assertion: at some instant all three executions
+      // were simultaneously in flight. A sequential orchestrator peaks
+      // at 1.
+      assert.equal(
+        peakInFlight,
+        3,
+        `phase 2 must run tool blocks concurrently — peak in-flight was ${peakInFlight}, expected 3; log: ${log}`,
+      )
+      // Same property expressed as ordering: every dispatch happens
+      // before the first completion, so no two executions are
+      // back-to-back.
+      const lastEnterIdx = events.reduce((acc, e, i) => (e.startsWith('enter:') ? i : acc), -1)
+      const firstExitIdx = events.findIndex((e) => e.startsWith('exit:'))
       assert.ok(
-        lastStart < firstEnd,
-        `executors must overlap — last start (${lastStart}) should precede first end (${firstEnd})`,
+        lastEnterIdx < firstExitIdx,
+        `every block must be dispatched before any resolves — last enter at ${lastEnterIdx}, first exit at ${firstExitIdx}; log: ${log}`,
       )
       await session.destroy()
     })
