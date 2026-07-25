@@ -565,7 +565,7 @@ describe('permission-hook.sh: floor clearance is a real JSON parse, not a substr
 // 3c. #7020 — the three remaining fail-OPEN edges on the floor probe
 // ---------------------------------------------------------------------------
 
-describe('permission-hook.sh: the pre-filter only skips the probe on a COMPLETE payload (#7020)', () => {
+describe('permission-hook.sh: an obviously unusable payload does not skip the probe (#7020)', () => {
   let daemon
 
   afterEach(async () => {
@@ -577,6 +577,10 @@ describe('permission-hook.sh: the pre-filter only skips the probe on a COMPLETE 
   // provably cannot be floored") holds only for a payload that is actually
   // COMPLETE. An empty or truncated body used to take the same `return 1` and
   // auto-allow under `auto` — the one place the negative filter could fail OPEN.
+  // The guard is a last-byte shape check, so what it PROVABLY catches is these
+  // two shapes: an empty body, and a truncation that does not land on a `}`. A
+  // truncation that does land on one still looks complete to it — tracked in
+  // #7043, not pinned here, because these tests state only what holds.
   const incompletePayloads = [
     ['an EMPTY payload', ''],
     ['a payload truncated before the path key', '{"tool_name":"Read","tool_in'],
@@ -587,9 +591,10 @@ describe('permission-hook.sh: the pre-filter only skips the probe on a COMPLETE 
     it(`auto + ${label} → routes to a PROMPT, never a silent allow`, async () => {
       daemon = await startRealDaemon({ promptDecision: 'allow' })
       const { stdout } = await runHook({ payload, port: daemon.port, mode: 'auto' })
-      // No probe is needed: a body that is not a complete JSON object carries no
-      // proof of anything, so the hook leaves the auto-allow path directly. That
-      // is strictly stronger than probing — it holds even if the daemon is down.
+      // No probe is needed: a body whose last non-whitespace byte is not `}` is
+      // definitely not a JSON object, so it proves nothing about path fields and
+      // the hook leaves the auto-allow path directly. That is strictly stronger
+      // than probing — it holds even if the daemon is down.
       assert.equal(daemon.stats.permissionRequests, 1, 'an incomplete payload must leave the auto-allow path')
       // /permission cannot parse it either, so it answers a 400 deny — the tool
       // is BLOCKED. The one thing that must never happen is a silent allow.
@@ -597,10 +602,12 @@ describe('permission-hook.sh: the pre-filter only skips the probe on a COMPLETE 
     })
   }
 
-  // A `\uXXXX` escape is the ONLY JSON escape that can spell a path-field key
+  // A `\uXXXX` escape is the only VALID JSON escape that can spell a path-field key
   // (`"\u0066ile_path"` parses to `file_path`), so the byte-level pre-filter
   // misses what the server's JSON-semantic lookup finds. This payload IS complete
-  // and well-formed, so only the daemon can answer it — the hook must probe.
+  // and well-formed, so only the daemon can answer it — the hook must probe. An
+  // INVALID escape (`\U`, `\x`) is out of scope: nothing parses such a body, and
+  // the pre-filter does not consult the daemon about it either (#7043).
   it('auto + a \\u-escaped path key → PROBES and routes to a PROMPT, never a silent allow', async () => {
     daemon = await startRealDaemon({ promptDecision: 'allow' })
     const payload = '{"tool_name":"Read","tool_input":{"\\u0066ile_path":".env"},"cwd":"/work/project"}'
@@ -608,6 +615,37 @@ describe('permission-hook.sh: the pre-filter only skips the probe on a COMPLETE 
     assert.equal(daemon.stats.floorRequests, 1, 'a byte-level miss must not be read as "cannot be floored"')
     assert.equal(daemon.stats.permissionRequests, 1, 'and the escaped .env read must reach the user')
     assert.equal(decisionOf(stdout).permissionDecision, 'allow', 'the user then answered')
+  })
+
+  // The completeness guard is a LAST-BYTE check and `REQUEST=$(cat -)` strips
+  // trailing NEWLINES only, so `}\r\n` / `} ` would leave a non-`}` last byte and
+  // send EVERY auto/acceptEdits tool call to a phone prompt. Fail-closed, but it
+  // would destroy the lenient modes for a CRLF-emitting producer — so the guard
+  // trims the trailing whitespace run before looking at the last byte.
+  const trailingWhitespacePayloads = [
+    ['CRLF', '\r\n'],
+    ['a trailing space', ' '],
+    ['a tab + CRLF', '\t\r\n'],
+  ]
+
+  for (const [label, suffix] of trailingWhitespacePayloads) {
+    it(`auto + an ordinary path-less call terminated by ${label} is still auto-allowed with no round trip`, async () => {
+      daemon = await startRealDaemon()
+      const payload = JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'ls' }, cwd: CWD }) + suffix
+      const { stdout } = await runHook({ payload, port: daemon.port, mode: 'auto' })
+      assert.equal(decisionOf(stdout).permissionDecision, 'allow')
+      assert.equal(daemon.stats.floorRequests, 0, 'trailing whitespace is not incompleteness')
+      assert.equal(daemon.stats.permissionRequests, 0, 'an ordinary tool call must not be routed to the phone')
+    })
+  }
+
+  it('trimming trailing whitespace does not skip the probe for a payload that DOES name a path', async () => {
+    daemon = await startRealDaemon()
+    const payload = JSON.stringify(readPayload('src/index.js')) + '\r\n'
+    const { stdout } = await runHook({ payload, port: daemon.port, mode: 'auto' })
+    assert.equal(daemon.stats.floorRequests, 1, 'the path-field scan still runs on the raw payload')
+    assert.equal(daemon.stats.permissionRequests, 0)
+    assert.equal(decisionOf(stdout).permissionDecision, 'allow')
   })
 
   it('a WELL-FORMED path-less payload still skips the probe (no new latency on the fast path)', async () => {
@@ -653,16 +691,16 @@ describe('POST /permission-floor: the cwd basis is the OWNING SESSION only (#702
   })
 })
 
-describe('POST /permission-floor: a request-stream error is handled, not thrown (#7020)', () => {
+describe('POST /permission + /permission-floor: a request-stream error is handled, not thrown (#7020)', () => {
   /** The handler under test with nothing but the plumbing it actually touches. */
-  function makeHandler() {
+  function makeHandler({ pendingPermissions = new Map() } = {}) {
     return createPermissionHandler({
       sendFn: () => {},
       broadcastFn: () => {},
       validateBearerAuth: () => true,
       validateHookAuth: () => true,
       pushManager: null,
-      pendingPermissions: new Map(),
+      pendingPermissions,
       permissionSessionMap: new Map(),
       getSessionManager: () => null,
       pairingManager: null,
@@ -677,13 +715,32 @@ describe('POST /permission-floor: a request-stream error is handled, not thrown 
     return req
   }
 
+  /**
+   * `writeHead` THROWS on a second call, exactly as a real `ServerResponse` does
+   * (`ERR_HTTP_HEADERS_SENT`). Without that, a fixture silently accepts a double
+   * response and cannot observe the defect at all — which is how the post-`end`
+   * ordering below stayed invisible. `writeHeadCalls` counts responses so
+   * "exactly one" is asserted directly rather than inferred from a status code.
+   * `on()` is a no-op registrar: `handlePermissionRequest`'s end handler attaches
+   * `res.on('close')`, and these tests exercise the window before it fires.
+   */
   function fakeRes() {
     return {
       statusCode: null,
       headersSent: false,
       body: '',
-      writeHead(status) { this.statusCode = status; this.headersSent = true; return this },
+      writeHeadCalls: 0,
+      writeHead(status) {
+        if (this.headersSent) {
+          throw Object.assign(new Error('Cannot write headers after they are sent to the client'), { code: 'ERR_HTTP_HEADERS_SENT' })
+        }
+        this.writeHeadCalls++
+        this.statusCode = status
+        this.headersSent = true
+        return this
+      },
       end(chunk) { if (chunk) this.body += chunk; return this },
+      on() { return this },
     }
   }
 
@@ -713,11 +770,56 @@ describe('POST /permission-floor: a request-stream error is handled, not thrown 
         // A late 'end' after the error must not produce a second response.
         req.emit('end')
         assert.equal(res.statusCode, 400, 'no double response')
+        assert.equal(res.writeHeadCalls, 1, 'exactly one response was written')
       } finally {
         handler.destroy()
       }
     })
   }
+
+  // The OTHER ordering, and the one that matters on /permission: the body ends
+  // normally, so the end handler registers a pendingPermissions entry and DEFERS
+  // the response for up to five minutes while the prompt sits on the user's phone
+  // — and THEN the request stream errors. Answering a 400 deny there would send a
+  // second response on a socket the pending entry still owns (the later resolve()
+  // throws ERR_HTTP_HEADERS_SENT on the #5313 tick that reaches uncaughtException)
+  // AND deny, from a transient stream error, a request the user is still looking
+  // at. Post-'end' teardown belongs to req 'aborted' / res 'close' → onClose.
+  it('/permission ignores a stream error that arrives AFTER the body ended (the pending prompt owns the response)', async () => {
+    const pendingPermissions = new Map()
+    const handler = makeHandler({ pendingPermissions })
+    try {
+      const req = fakeReq()
+      const res = fakeRes()
+      handler.handlePermissionRequest(req, res)
+      // A COMPLETE body this time, delivered and ended through the real stream so
+      // the handler's own 'end' listener runs before this test continues.
+      const ended = new Promise((resolve) => req.on('end', resolve))
+      req.end(JSON.stringify({ tool_name: 'Read', tool_input: { file_path: 'src/index.js' }, cwd: CWD }))
+      await ended
+
+      assert.equal(pendingPermissions.size, 1, 'the body ended cleanly, so a permission is pending')
+      assert.equal(res.writeHeadCalls, 0, 'and its response is deferred until the user answers')
+
+      assert.doesNotThrow(
+        () => req.emit('error', Object.assign(new Error('aborted by peer'), { code: 'ECONNRESET' })),
+        'a post-end stream error must not throw',
+      )
+      assert.equal(res.writeHeadCalls, 0, 'and must NOT answer — the pending prompt still owns this response')
+      assert.equal(pendingPermissions.size, 1, 'nor abandon the pending entry')
+
+      // The user then answers on their phone: still exactly ONE response, and it
+      // is their decision — not a deny synthesised from the stream error.
+      const [requestId] = [...pendingPermissions.keys()]
+      assert.doesNotThrow(() => handler.resolvePermission(requestId, 'allow'), 'resolving must not double-respond')
+      assert.equal(res.writeHeadCalls, 1, 'exactly one response')
+      assert.equal(res.statusCode, 200)
+      assert.deepEqual(JSON.parse(res.body), { decision: 'allow' })
+      assert.equal(pendingPermissions.size, 0, 'and the entry is cleaned up')
+    } finally {
+      handler.destroy()
+    }
+  })
 })
 
 // ---------------------------------------------------------------------------

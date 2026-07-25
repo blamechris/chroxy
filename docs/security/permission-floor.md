@@ -84,7 +84,7 @@ HOOK-ROUTED (claude-tui = the DEFAULT provider, cli-session)
 |---|---|
 | Auth | the **per-session hook secret**, same class and same validator as `POST /permission` (see [`bearer-token-authority.md` §5](bearer-token-authority.md#5-per-session-hook-secrets)) |
 | Request | the PreToolUse payload the hook already holds (`tool_name`, `tool_input`, `cwd`), capped at 1 MiB (`MAX_FLOOR_BODY` in `ws-permissions.js`) — deliberately much larger than `/permission`'s 64 KB, see §5 |
-| Response | `{ "floor": true \| false }` — nothing else; no requestId, no pending request, no broadcast, no push |
+| Response | `200` is exactly `{ "floor": true \| false }` — the top-level `floor` key is the only thing the hook reads, and the only status that can ever carry `false`. The error statuses are fail-closed by construction: `400` (unparseable body / request-stream error) and `413` (oversize) → `{ floor: true }`, `429` → `{ error, floor: true, retryAfterMs }`, `500` → `{ error, floor: true }`, and `403` (bad hook secret) → `{ error: 'unauthorized' }` with **no** `floor` key at all, which the hook treats the same way it treats every non-`false` answer: prompt. No requestId, no pending request, no broadcast, no push on any of them |
 | cwd basis | the **owning session's `cwd`** (resolved from the presented hook secret) and nothing else — identical to what `PermissionManager` is constructed with. There is no `process.cwd()` fallback and (#7020) no fallback to the payload's own `cwd`: a caller-chosen resolution base can UNDER-floor (naming `/repo/.git` as the base makes the relative scan of `/repo/.git/config` see only `config`). An unresolvable session answers `floor: true` |
 | Rate limit | its own limiter with a much larger budget than `/permission` (600/min, burst 200): this fires once per **tool call**, not once per human decision |
 
@@ -111,12 +111,27 @@ inputs from the SDK rather than parsing an untrusted HTTP body.
    naming **no** path field skips the round trip — such an input provably cannot be
    floored, so a path-less tool keeps its exact pre-#7004 behaviour. It is a
    *narrowing* filter, and the same test asserts it covers every field the floor
-   scans, so drift fails CI rather than silently under-flooring. #7020 restored the
-   two premises that argument rests on, both resolving toward the probe: the payload
-   must look **complete** (end in `}` — an empty or truncated body proves nothing and
-   leaves the auto-allow path directly), and a payload containing a `\u` escape is
-   probed because `\uXXXX` is the only JSON escape that can spell one of these keys,
-   which a byte-level scan would miss and the server's semantic lookup would not.
+   scans, so drift fails CI rather than silently under-flooring. #7020 narrowed the
+   two premises that argument rests on, both resolving toward the probe. Each guard
+   proves exactly this much, and no more:
+   - **Last-byte shape check.** A payload whose last non-whitespace byte is not `}`
+     is definitely not a JSON object, so it proves nothing about path fields and
+     leaves the auto-allow path directly (no probe, so the guard holds even when the
+     daemon is unreachable). That catches an empty body and a prefix truncation. It
+     is **not** a completeness check: a truncation that happens to land on a `}`
+     (`…,"permission_suggestions":{}`) still looks complete and still skips the
+     probe — the residual is tracked in **#7043**. Trailing whitespace is trimmed
+     before the check because `REQUEST=$(cat -)` strips trailing *newlines* only,
+     and a `}\r\n`-terminated payload would otherwise route every `auto` /
+     `acceptEdits` call to a phone prompt.
+   - **`\u` escape → probe.** `\uXXXX` is the only *valid* JSON escape that can
+     spell one of these keys, which a byte-level scan would miss and the server's
+     semantic lookup would not — so this closes the **valid-escape key-spelling**
+     gap. An *invalid* escape (`\U`, `\x`) is not covered: it matches neither the
+     key literals nor this arm, so the pre-filter still skips and the daemon is
+     never asked. Such a body parses nowhere, so it is not model- or
+     remote-reachable, but the byte-scan-vs-semantic-lookup divergence does survive
+     there — also #7043.
 3. **Keep the parity matrix honest.** `tests/permission-hook-floor.test.js` runs a
    `(tool, target)` matrix through both pipelines and asserts they agree.
 
@@ -135,6 +150,14 @@ inputs from the SDK rather than parsing an untrusted HTTP body.
   prompt. Ordinary (non-floored) large writes are unaffected — they never leave the
   fast path. This is the pre-#7004 oversize rule, unchanged; a fix belongs with that
   cap, not with the floor.
+- **The hook pre-filter's completeness guard is a heuristic (#7043).** It rejects a
+  payload whose last non-whitespace byte is not `}`, which catches an empty body and
+  a prefix truncation but not a truncation landing on a brace; and it probes on `\u`,
+  which covers every *valid* JSON escape that can spell a path key but not an invalid
+  one (`\U`, `\x`) — for those the daemon is never asked. Both residuals need a
+  producer that emits a truncated or non-JSON payload, so neither is model- or
+  remote-reachable; #7043 carries the candidate fixes (probe on any backslash, or a
+  real structural check).
 - **Command-shaped access is out of scope.** `Bash` can read `.env` — the floor
   guards *path fields*, and `Bash` is in `NEVER_AUTO_ALLOW` (never rule-whitelisted)
   but IS auto-approved under `auto`. Flipping a session to `auto` remains a

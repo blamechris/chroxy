@@ -310,32 +310,47 @@ EOF
 # updating this line fails CI.
 #
 # #7020 — the pre-filter's soundness argument ("naming no path field provably
-# cannot be floored") holds only over a COMPLETE, escape-free payload. Two
-# guards below restore that premise before the negative filter is trusted; both
-# resolve toward the PROBE (fail closed), never toward the skip:
-#   1. COMPLETENESS. An empty or truncated body used to take the same `return 1`
-#      and auto-allow, even though the "no path field" claim can only be read off
-#      a COMPLETE payload. A PreToolUse payload is always a JSON object, and
-#      `REQUEST=$(cat -)` strips trailing newlines, so a complete one always ends
-#      in `}`. Anything else leaves the auto-allow path immediately — no probe,
-#      because an unusable body proves nothing and this way the guard holds even
-#      when the daemon is unreachable. (`route_to_phone` then POSTs it to
-#      /permission, which cannot parse it either and answers its 400 deny.)
+# cannot be floored") holds only over a COMPLETE, escape-free payload. Two guards
+# below narrow that premise before the negative filter is trusted; both resolve
+# toward the PROBE (fail closed), never toward the skip. Each guard states exactly
+# what it PROVES — neither is a completeness proof, and #7043 tracks the residual:
+#   1. LAST-BYTE SHAPE CHECK. A PreToolUse payload is always a JSON object, so a
+#      complete one ends in `}` once trailing whitespace is discarded. A body that
+#      does NOT is definitely unusable, and an unusable body proves nothing about
+#      path fields, so it leaves the auto-allow path immediately — no probe,
+#      because that way the guard holds even when the daemon is unreachable.
+#      (`route_to_phone` then POSTs it to /permission, which cannot parse it
+#      either and answers its 400 deny.) This catches the shapes that motivated
+#      the guard — an EMPTY body and a PREFIX truncation (`{"tool_name":"Read"` …)
+#      — and nothing more. It is a cheap heuristic, NOT a completeness check: a
+#      truncation that happens to land on a `}` (`…,"permission_suggestions":{}`)
+#      still looks complete here and still skips the probe. Tracked in #7043.
+#      Trailing whitespace is trimmed first: `REQUEST=$(cat -)` strips trailing
+#      NEWLINES only, so a `}\r\n`- or `} `-terminated payload would otherwise
+#      fail this check and route EVERY auto/acceptEdits call to a phone prompt —
+#      fail-closed, but it would destroy the lenient modes.
 #   2. UNICODE ESCAPES. The pre-filter is a BYTE-level substring scan while the
 #      daemon does a JSON-SEMANTIC field lookup, so a path-naming key spelled with
 #      an escape parses to file_path server-side yet never matches the pattern
 #      below. A `u`-escape of the letter f (byte sequence backslash-u-0-0-6-6,
-#      followed by `ile_path`) is such a key. `\uXXXX` is the ONLY JSON escape
-#      that can spell one of these keys — the rest of the grammar
+#      followed by `ile_path`) is such a key. `\uXXXX` is the ONLY escape in the
+#      JSON grammar that can spell one of these keys — the rest
 #      (`\" \\ \/ \b \f \n \r \t`) yields none of `[a-z_]` — so probing whenever
-#      the raw body contains `\u` closes the gap completely, and does so on the
+#      the raw body contains `\u` closes the VALID-ESCAPE key-spelling gap on the
 #      floor's own semantics rather than on an assumption about the producer's
-#      serializer. Any other malformed escape (`\U`, `\x`) makes the body
-#      unparseable, which the daemon already answers `floor:true`. Over-probing
-#      here is harmless; a `\n` / `\"`-only payload keeps the no-round-trip path.
+#      serializer. That is the whole of what it proves. An INVALID escape (`\U`,
+#      `\x`) is not covered: it does not match this arm, so the pre-filter takes
+#      `return 1` and the daemon is never asked — the byte-scan-vs-semantic-lookup
+#      divergence remains for bodies no JSON parser would accept. Also #7043
+#      (which lists the candidate fixes: probe on any backslash, or a real
+#      structural check). Over-probing here is harmless; a `\n` / `\"`-only
+#      payload keeps the no-round-trip path.
 floor_forces_prompt() {
-  # (1) completeness — an incomplete body cannot prove "cannot be floored".
-  case "$REQUEST" in
+  # (1) last-byte shape check — an unusable body cannot prove "cannot be floored".
+  # Trim the trailing whitespace run first (two expansions, no loop, bash 3.2-safe:
+  # `##*[![:space:]]` leaves exactly that run, which `%` then strips off the end).
+  REQUEST_TRIMMED=${REQUEST%"${REQUEST##*[![:space:]]}"}
+  case "$REQUEST_TRIMMED" in
     *'}') ;;
     *) return 0 ;;
   esac
