@@ -48,6 +48,7 @@ import { DeviceRuntimesSection } from './DeviceRuntimesSection'
 import { IntegrationsSection } from './IntegrationsSection'
 import { RepoEventsSection } from './RepoEventsSection'
 import { OrchestrationRunsSection } from './OrchestrationRunsSection'
+import { ScheduledTasksSection } from './ScheduledTasksSection'
 import { SkillsInventorySection } from './SkillsInventorySection'
 import { MailboxPanel } from './MailboxPanel'
 import { CrossSessionMissionControl } from './CrossSessionMissionControl'
@@ -272,6 +273,24 @@ export const CONTROL_ROOM_TABS = [
     loadingKey: 'orchestrationRunsLoading',
     requestKey: 'requestOrchestrationRuns',
     capability: 'orchestration',
+  },
+  // #6871 (epic #6784): the Scheduled tasks tab — CRUD over the standing
+  // scheduled-task registry plus next-run / last-run surfacing and the global
+  // scheduled-execution enable gate. Deliberately NOT capability-gated on the
+  // scheduler being ENABLED: the gate is off by default and the registry exists
+  // either way, so hiding the tab when it is off would hide the very banner that
+  // tells an operator their saved tasks will never fire. It is gated on the
+  // server KNOWING about the surface (`scheduledTasks`), so an older daemon shows
+  // no dead chrome.
+  {
+    key: 'scheduled-tasks',
+    label: 'Scheduled tasks',
+    survey: true,
+    requestType: 'scheduled_tasks_request',
+    snapshotKey: 'scheduledTasks',
+    loadingKey: 'scheduledTasksLoading',
+    requestKey: 'requestScheduledTasks',
+    capability: 'scheduledTasks',
   },
   // #5544: the Settings tab converges the scattered preference surfaces
   // (notification categories, appearance, session defaults, BYOK, Tauri desktop
@@ -761,6 +780,8 @@ export function ControlRoomView({
         <RepoEventsSection />
       ) : tab === 'runs' ? (
         <OrchestrationRunsSection />
+      ) : tab === 'scheduled-tasks' ? (
+        <ScheduledTasksSection />
       ) : tab === 'mission-control' ? (
         <MissionControlTab />
       ) : (

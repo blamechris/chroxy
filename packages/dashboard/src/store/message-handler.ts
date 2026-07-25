@@ -149,8 +149,9 @@ import {
   formatMemoryAppendNotice,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
-import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerByokPoolStatusSnapshotSchema, ServerByokPoolActionAckSchema, ServerHostPruneStatusSnapshotSchema, ServerHostPruneActionAckSchema, ServerSimulatorStatusSnapshotSchema, ServerSimulatorActionAckSchema, ServerEmulatorStatusSnapshotSchema, ServerEmulatorActionAckSchema, ServerWslStatusSnapshotSchema, ServerWslActionAckSchema, ServerIntegrationStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerExternalSessionsSnapshotSchema, ServerRepoEventsSnapshotSchema, ServerRepoEventsDeltaSchema, ServerGithubWebhookConfigSchema, ServerPermissionInputSchema, ServerPermissionAuditResultSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerSessionPresetSnapshotSchema, ServerPairPendingSchema, ServerPairResolvedSchema, ServerBillingCanarySchema, BillingCanarySnapshotSchema, ServerSymbolsSnapshotSchema, ServerSymbolLocationSchema, ServerSearchResultsSchema, ServerReferencesResultSchema, ServerOrchestrationRunsSnapshotSchema, ServerOrchestrationRunSnapshotSchema, ServerOrchestrationRunDeltaSchema, ServerOrchestrationActionAckSchema, ServerGitCreatePrResultSchema, ServerMemoryStackResultSchema } from '@chroxy/protocol/schemas'
+import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerByokPoolStatusSnapshotSchema, ServerByokPoolActionAckSchema, ServerHostPruneStatusSnapshotSchema, ServerHostPruneActionAckSchema, ServerSimulatorStatusSnapshotSchema, ServerSimulatorActionAckSchema, ServerEmulatorStatusSnapshotSchema, ServerEmulatorActionAckSchema, ServerWslStatusSnapshotSchema, ServerWslActionAckSchema, ServerIntegrationStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerExternalSessionsSnapshotSchema, ServerRepoEventsSnapshotSchema, ServerRepoEventsDeltaSchema, ServerGithubWebhookConfigSchema, ServerPermissionInputSchema, ServerPermissionAuditResultSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerSessionPresetSnapshotSchema, ServerPairPendingSchema, ServerPairResolvedSchema, ServerBillingCanarySchema, BillingCanarySnapshotSchema, ServerSymbolsSnapshotSchema, ServerSymbolLocationSchema, ServerSearchResultsSchema, ServerReferencesResultSchema, ServerOrchestrationRunsSnapshotSchema, ServerOrchestrationRunSnapshotSchema, ServerOrchestrationRunDeltaSchema, ServerOrchestrationActionAckSchema, ServerGitCreatePrResultSchema, ServerMemoryStackResultSchema, ServerScheduledTasksSchema } from '@chroxy/protocol/schemas'
 import { resolveSummarizeRequest, rejectSummarizeRequest } from './summarizeRequests'
+import { settleSchedulerRequest } from './scheduledTaskRequests'
 import {
   createKeyPair,
   deriveSharedKey,
@@ -3254,6 +3255,99 @@ function handleOrchestrationRunsSnapshot(msg: Record<string, unknown>, _get: Msg
 }
 
 /**
+ * #6871 — `scheduled_tasks`: the scheduled-task registry + scheduler gate state.
+ *
+ * REPLACES the held snapshot wholesale — the server re-emits it as the ack for
+ * every accepted mutation, so there is no delta path that could drift from the
+ * registry. The degraded `tasks: [] + error` shape is schema-valid and stored
+ * as-is (the panel renders the error banner). Malformed → drop WITHOUT clearing
+ * loading, matching the survey-family convention, so a garbage payload cannot
+ * blank a good snapshot or present an empty list as "no scheduled tasks".
+ *
+ * The snapshot also doubles as the mutation ACK: when it echoes a `requestId`,
+ * the matching pending entry is cleared and recorded as a success. That means a
+ * mutation is only ever shown as applied once the SERVER has re-reported the
+ * registry — never optimistically.
+ */
+function handleScheduledTasks(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const parsed = ServerScheduledTasksSchema.safeParse(msg);
+  if (!parsed.success) {
+    // #6871 review: a snapshot the wire schema REJECTS must still release the
+    // read. Dropping it silently (the survey-family convention) left
+    // `scheduledTasksLoading` true forever, and that flag gates both recovery
+    // paths: Refresh is `disabled={!connected || loading}` and the Control Room
+    // survey effect bails on `if (loading) return`. So one wire-illegal task
+    // bricked the tab with "Loading…" and no error, until a full page reload.
+    //
+    // Reachable without any hand-editing, because the store enforces no length
+    // caps while the wire schema does — a 300-char `name` from the CLI was
+    // enough. The server now clamps those fields, so this is the backstop for a
+    // future schema mismatch (an older dashboard against a newer daemon).
+    //
+    // The previously-held snapshot is deliberately KEPT: a garbage payload must
+    // not blank a good list or present an empty one as "no scheduled tasks".
+    //
+    // #6871 review round 2 (BLOCKING 1): this branch must FAIL the request, not
+    // merely settle it. A `scheduled_tasks` snapshot is ALSO the mutation ack, so
+    // an unparseable one is the ack for whatever pause/resume/delete/create/gate
+    // toggle is in flight. Calling `settleSchedulerRequest` alone disarmed the
+    // watchdog — the only thing that would ever have released the request — while
+    // leaving the `scheduledTaskPendingActions` entry in place, and nothing else
+    // recovers it (that map has no reconnect/disconnect reset, and
+    // `failAllSchedulerRequests` can't help once the registry entry is gone). The
+    // result was a PERMANENT "Working…" / "Saving…" button where the watchdog
+    // would otherwise have given up after 30s: a bounded stall turned into an
+    // unbounded one, in the very branch written to prevent stuck flags.
+    const rawRequestId = typeof msg.requestId === 'string' ? msg.requestId : null;
+    settleSchedulerRequest(rawRequestId);
+    const schemaMismatchError =
+      'The daemon sent a scheduled-task snapshot this client could not read (schema mismatch) — the list below may be out of date. Refresh to retry.';
+    const failed: Partial<ConnectionState> = {
+      scheduledTasksLoading: false,
+      scheduledTasksError: schemaMismatchError,
+    };
+    // Release the in-flight mutation with a terminal FAILED verdict, mirroring the
+    // success path below and the refusal path in the `session_error` branch. The
+    // mutation may well have been applied server-side — we cannot tell, because
+    // the ack is the thing we could not read — so the honest report is "this did
+    // not verifiably apply", never silent success.
+    if (rawRequestId && rawRequestId in get().scheduledTaskPendingActions) {
+      const pending = { ...get().scheduledTaskPendingActions };
+      delete pending[rawRequestId];
+      failed.scheduledTaskPendingActions = pending;
+      failed.scheduledTaskActionResults = {
+        ...get().scheduledTaskActionResults,
+        [rawRequestId]: {
+          ok: false,
+          error: `${schemaMismatchError} The change may or may not have been applied — refresh to check before retrying.`,
+          at: Date.now(),
+        },
+      };
+    }
+    set(failed);
+    return;
+  }
+  const requestId = parsed.data.requestId ?? null;
+  // A reply landed — disarm its watchdog so it cannot later fail a settled request.
+  settleSchedulerRequest(requestId);
+  const next: Partial<ConnectionState> = {
+    scheduledTasks: parsed.data,
+    scheduledTasksLoading: false,
+    scheduledTasksError: null,
+  };
+  if (requestId && requestId in get().scheduledTaskPendingActions) {
+    const pending = { ...get().scheduledTaskPendingActions };
+    delete pending[requestId];
+    next.scheduledTaskPendingActions = pending;
+    next.scheduledTaskActionResults = {
+      ...get().scheduledTaskActionResults,
+      [requestId]: { ok: true, error: null, at: Date.now() },
+    };
+  }
+  set(next);
+}
+
+/**
  * #6691 (S-3) — `orchestration_run_snapshot`: one run's full detail (pull-only —
  * issued on selection or as the seq-gap resync). `run: null` is the degraded
  * not-found/unavailable reply: store the error per-run and clear loading.
@@ -3987,6 +4081,8 @@ const HANDLERS: Record<string, Handler> = {
   orchestration_run_snapshot: handleOrchestrationRunSnapshot,
   orchestration_run_delta: handleOrchestrationRunDelta,
   orchestration_action_ack: handleOrchestrationActionAck,
+  // #6871: scheduled-task registry snapshot (also the mutation ack).
+  scheduled_tasks: handleScheduledTasks,
   // #6543 (IDE P3 feature B): pulled full redacted tool input for a pre-write diff.
   permission_input: handlePermissionInput,
   // #6772: reply to query_permission_audit — the SettingsPanel "Permission history" view.
@@ -4788,6 +4884,53 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
             },
           });
         }
+      } else if (
+        (parsed.code === 'SCHEDULED_TASK_ACTION_FAILED'
+          || parsed.code === 'SCHEDULED_TASK_INVALID'
+          || parsed.code === 'SCHEDULED_TASK_NOT_FOUND'
+          || parsed.code === 'SCHEDULER_FORBIDDEN_NON_PRIMARY_CLIENT'
+          || parsed.code === 'SCHEDULER_FORBIDDEN_BOUND_CLIENT'
+          || parsed.code === 'SCHEDULER_GATE_FAILED'
+          || parsed.code === 'SCHEDULER_GATE_ENV_FORCED'
+          || parsed.code === 'SCHEDULER_REGISTRY_UNAVAILABLE')
+      ) {
+        // #6871: every scheduled-task rejection echoes the requestId. Clear the
+        // pending entry and record the reason so the panel shows WHY the mutation
+        // did not apply — a scheduled task that silently failed to save is the
+        // failure mode this panel exists to prevent. All of the surface's codes
+        // are listed (not just the generic one) so an authority refusal or a
+        // field-level validation error also releases the in-flight state instead
+        // of leaving a button spinning forever. `scheduledTasksLoading` is cleared
+        // too, since a rejected READ never produces the snapshot that would.
+        //
+        // #6871 review (S1): this branch no longer REQUIRES a string requestId.
+        // It used to, and a rejected read echoed `requestId: null` (the read sent
+        // none), so the whole branch was skipped and the Refresh spinner never
+        // cleared. The read now mints a requestId, but the guard is still wrong
+        // as a matter of shape: a scheduler-coded refusal is unambiguously about
+        // this surface whether or not it correlates, so it must always release
+        // the read. The per-requestId result recording stays conditional, since
+        // that genuinely needs the correlation.
+        const schedReqId = typeof msg.requestId === 'string' ? msg.requestId : null;
+        settleSchedulerRequest(schedReqId);
+        const schedPending = { ...get().scheduledTaskPendingActions };
+        const hadPending = schedReqId !== null && schedReqId in schedPending;
+        if (schedReqId !== null && hadPending) delete schedPending[schedReqId];
+        set({
+          scheduledTasksLoading: false,
+          ...(schedReqId !== null && hadPending
+            ? {
+                scheduledTaskPendingActions: schedPending,
+                scheduledTaskActionResults: {
+                  ...get().scheduledTaskActionResults,
+                  [schedReqId]: { ok: false, error: parsed.message || 'Scheduled-task action failed.', at: Date.now() },
+                },
+              }
+            : {}),
+          // Surface the refusal on the READ path too — a rejected read that just
+          // silently stops spinning tells the operator nothing.
+          ...(hadPending ? {} : { scheduledTasksError: parsed.message || 'The scheduled-task request was refused.' }),
+        });
       } else if (parsed.code === 'CONTAINER_ACTION_FAILED' && typeof msg.environmentId === 'string') {
         // #6134: a failed containers_action echoes the exact environmentId
         // (and action) — clear that row's pending state and surface the reason
@@ -5947,6 +6090,30 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       if (errCode === 'MCP_CONFIG_FORBIDDEN_NON_PRIMARY_CLIENT') {
         set({ mcpConfigForbiddenNonPrimary: true });
       }
+      // #6871 review round 2 (BLOCKING 2): there is deliberately NO scheduler
+      // handling of INVALID_MESSAGE here.
+      //
+      // An earlier version called failAllSchedulerRequests() on this code, on the
+      // premise that "the message you just sent was refused, so any outstanding
+      // scheduler request is dead". That premise is false: INVALID_MESSAGE is a
+      // GLOBAL frame — ws-server.js emits it for ANY client message that fails
+      // ClientMessageSchema, carrying only `correlationId` + `details`, never a
+      // `requestId`. So it cannot be attributed to the scheduler, and attributing
+      // it anyway inverted the exact failure this panel exists to prevent: an
+      // unrelated over-cap `add_mcp_server` would mark an in-flight scheduled-task
+      // mutation as REJECTED (showing another surface's zod message as its own),
+      // and because the success path only records a result while the requestId is
+      // still pending, the genuine ack that followed recorded nothing — so the
+      // modal never closed, the operator retried, and a DUPLICATE unattended task
+      // was created. Reporting failure for work that actually happened is worse
+      // than reporting nothing.
+      //
+      // The bounded watchdog in scheduledTaskRequests.ts already covers exactly
+      // this case — an uncorrelatable rejection frame — and it cannot mis-attribute
+      // because it only ever fires for a request the daemon never answered. Cancel
+      // is never disabled, so the operator is not trapped meanwhile. Correlating
+      // this frame would require a message type or requestId on the wire that
+      // ws-server does not send.
       // #5711 (Gap 2, client half): roll back the optimistic set_model when the
       // server says it never applied (MODEL_NOT_APPLIED — e.g. a mid-turn
       // change). Without this the dropdown keeps showing a model the session

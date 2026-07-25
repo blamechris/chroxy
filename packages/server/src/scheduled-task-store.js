@@ -19,6 +19,21 @@ const STORE_VERSION = 1
 const MAX_TASKS = 500
 
 const CADENCE_KINDS = new Set(['once', 'interval', 'cron'])
+
+/**
+ * The largest absolute epoch-ms a JS `Date` can represent (±8.64e15, i.e. ±100M
+ * days around the epoch — year ±275760). Beyond it `new Date(ms)` is an Invalid
+ * Date and `.toISOString()` THROWS `RangeError`.
+ *
+ * Checking only `Number.isFinite` let such a value be stored and served: it then
+ * crashed the dashboard's scheduled-tasks panel during render (#6871 review C3).
+ * Reachable without hand-editing the registry — a µs/ns epoch typo (`1.795e18`,
+ * a plausible unit mix-up) is finite. Rejecting it at the store boundary keeps
+ * an unrenderable instant out of the registry in the first place; every real
+ * schedule is many orders of magnitude below this bound, so nothing legitimate
+ * is refused.
+ */
+const MAX_EPOCH_MS = 8.64e15
 // `refused` (#6997 review) = the engine declined to start the run at all — an
 // unsupported hook-routed provider, a cwd outside the allowlist, or a permission
 // mode it could not verify. Distinct from `error` (the run happened and failed)
@@ -108,6 +123,12 @@ function normalizeCadence(cadence) {
       if (!Number.isFinite(cadence.at)) {
         throw new ScheduledTaskValidationError('once cadence requires a numeric `at` (epoch ms)', 'cadence.at')
       }
+      if (Math.abs(cadence.at) > MAX_EPOCH_MS) {
+        throw new ScheduledTaskValidationError(
+          `once cadence \`at\` must be a representable epoch-ms instant (|at| <= ${MAX_EPOCH_MS}); got ${cadence.at} — check for a microsecond/nanosecond timestamp`,
+          'cadence.at',
+        )
+      }
       return { kind: 'once', at: cadence.at }
     }
     case 'interval': {
@@ -118,6 +139,14 @@ function normalizeCadence(cadence) {
       if (cadence.anchor !== undefined) {
         if (!Number.isFinite(cadence.anchor)) {
           throw new ScheduledTaskValidationError('interval cadence anchor must be numeric (epoch ms)', 'cadence.anchor')
+        }
+        // Same representable-instant bound as `once.at` — an anchor feeds
+        // nextRun, which the panel renders as a date.
+        if (Math.abs(cadence.anchor) > MAX_EPOCH_MS) {
+          throw new ScheduledTaskValidationError(
+            `interval cadence anchor must be a representable epoch-ms instant (|anchor| <= ${MAX_EPOCH_MS}); got ${cadence.anchor}`,
+            'cadence.anchor',
+          )
         }
         out.anchor = cadence.anchor
       }

@@ -1854,6 +1854,45 @@ export function writeSessionPresetOverrideToConfig(repoPath, preset, configPath 
 }
 
 /**
+ * Persist the global scheduled-execution enable gate (`features.scheduler`) to a
+ * config file, preserving every other field (#6871). Mirrors
+ * writeControlRoomRootToConfig's read-modify-write.
+ *
+ * This ONLY writes the persisted flag. It does NOT arm or disarm a running
+ * daemon: the scheduler engine is built once at boot (buildSchedulerEngine
+ * returns null when the gate is closed) and its destroy() is terminal, so a
+ * running daemon must be restarted for a change here to affect what actually
+ * fires. Callers are responsible for telling the operator that — see
+ * handlers/scheduler-handlers.js, which reports `restartRequired` on every
+ * snapshot rather than implying the toggle took effect.
+ *
+ * Note `CHROXY_ENABLE_SCHEDULER=1` OVERRIDES this flag (isSchedulerEnabled
+ * checks the env first), so writing `false` while that env var is set leaves the
+ * gate open; the handler refuses that combination instead of writing a lie.
+ *
+ * @param {boolean} enabled - the new gate value.
+ * @param {string} [configPath] - Path to config.json. Defaults to ~/.chroxy/config.json.
+ */
+export function writeSchedulerEnabledToConfig(enabled, configPath = DEFAULT_CONFIG_PATH) {
+  let existing = {}
+  try {
+    if (existsSync(configPath)) {
+      existing = JSON.parse(readFileSync(configPath, 'utf-8'))
+    }
+  } catch {
+    // Start fresh if parse fails
+  }
+  if (!existing || typeof existing !== 'object') existing = {}
+  if (!existing.features || typeof existing.features !== 'object' || Array.isArray(existing.features)) {
+    existing.features = {}
+  }
+  existing.features.scheduler = enabled === true
+  const dir = dirname(configPath)
+  mkdirSync(dir, { recursive: true })
+  writeFileRestricted(configPath, JSON.stringify(existing, null, 2))
+}
+
+/**
  * Read the Control Room discovery root from a config file (#5172).
  * @param {string} [configPath] - Path to config.json. Defaults to ~/.chroxy/config.json.
  * @returns {string|undefined} The configured root, or undefined if missing/invalid.

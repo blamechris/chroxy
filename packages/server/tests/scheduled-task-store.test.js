@@ -41,6 +41,58 @@ describe('#6862 ScheduledTaskStore', () => {
     assert.throws(() => new ScheduledTaskStore({}), /requires a filePath/)
   })
 
+  // #6871 review (C3) — an epoch outside the representable Date range is finite,
+  // so a finiteness-only check let it be stored and served. It then crashed the
+  // dashboard panel during render (`new Date(1e16).toISOString()` throws
+  // RangeError), taking the whole dashboard down via the root error boundary.
+  // Rejecting it here keeps an unrenderable instant out of the registry.
+  describe('#6871 review — out-of-Date-range epochs are rejected', () => {
+    const OUT_OF_RANGE = 1e16 // finite, but > 8.64e15 → an Invalid Date
+
+    it('add() rejects a `once` cadence whose `at` cannot be represented', () => {
+      const store = newStore(() => 1000)
+      assert.throws(
+        () => store.add({ prompt: 'x', cadence: { kind: 'once', at: OUT_OF_RANGE } }),
+        (err) => err instanceof ScheduledTaskValidationError && err.field === 'cadence.at',
+      )
+      assert.throws(
+        () => store.add({ prompt: 'x', cadence: { kind: 'once', at: -OUT_OF_RANGE } }),
+        ScheduledTaskValidationError,
+      )
+    })
+
+    it('add() rejects an interval anchor that cannot be represented', () => {
+      const store = newStore(() => 1000)
+      assert.throws(
+        () => store.add({ prompt: 'x', cadence: { kind: 'interval', everyMs: HOUR, anchor: OUT_OF_RANGE } }),
+        (err) => err instanceof ScheduledTaskValidationError && err.field === 'cadence.anchor',
+      )
+    })
+
+    it('the bound admits every LEGITIMATE instant, including the exact limit', () => {
+      // Nothing real is refused: 8.64e15 ms is the year 275760.
+      const store = newStore(() => 1000)
+      assert.ok(store.add({ prompt: 'a', cadence: { kind: 'once', at: Date.now() + HOUR } }))
+      assert.ok(store.add({ prompt: 'b', cadence: { kind: 'once', at: 8.64e15 } }))
+      assert.ok(store.add({ prompt: 'c', cadence: { kind: 'once', at: -8.64e15 } }))
+      assert.ok(store.add({ prompt: 'd', cadence: { kind: 'interval', everyMs: HOUR, anchor: 0 } }))
+    })
+
+    it('load() DROPS a hand-edited out-of-range task without nuking its siblings', () => {
+      // The registry is a user-writable file, so a pre-existing bad record must
+      // degrade to one dropped task, not an empty scheduler.
+      writeFileSync(filePath, JSON.stringify({
+        version: 1,
+        tasks: [
+          { id: 'good', prompt: 'ok', cadence: { kind: 'cron', expression: '0 9 * * *' }, createdAt: 1, updatedAt: 1 },
+          { id: 'bad', prompt: 'boom', cadence: { kind: 'once', at: OUT_OF_RANGE }, createdAt: 1, updatedAt: 1 },
+        ],
+      }))
+      const tasks = newStore(() => 1000).load().list()
+      assert.deepEqual(tasks.map((t) => t.id), ['good'])
+    })
+  })
+
   it('defaultScheduledTasksPath sits next to the state file', () => {
     assert.equal(defaultScheduledTasksPath('/home/x/.chroxy/session-state.json'), '/home/x/.chroxy/scheduled-tasks.json')
   })

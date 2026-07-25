@@ -417,6 +417,14 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     // Clients gate the Runs surface on this flag; absent/false (default, or older
     // servers) → no orchestration chrome (fail-closed).
     orchestration: orchestrationEnabled === true,
+    // #6871 (epic #6784): this server has the scheduled-tasks WS surface
+    // (scheduled_tasks_request / scheduled_task_action / set_scheduler_enabled +
+    // the `scheduled_tasks` snapshot). CONSTANT true — deliberately NOT tied to
+    // whether scheduled EXECUTION is enabled. The enable gate is off by default
+    // and the registry exists either way, so gating the panel on the gate would
+    // hide exactly the banner that tells an operator their saved tasks will never
+    // fire. Clients read the real gate state off the snapshot's `scheduler` block.
+    scheduledTasks: true,
     // #5986 (epic #5982) — the embedded user-shell terminal is available to THIS
     // client: the server has it enabled (userShell.enabled) AND this connection
     // holds the primary token. Both conditions of the create gate are reflected

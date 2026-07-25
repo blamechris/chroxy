@@ -289,6 +289,71 @@ export declare const RemoveMcpServerSchema: z.ZodObject<{
     sessionId: z.ZodOptional<z.ZodString>;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
+export declare const ScheduledTasksRequestSchema: z.ZodObject<{
+    type: z.ZodLiteral<"scheduled_tasks_request">;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
+export declare const ScheduledTaskInputSchema: z.ZodObject<{
+    name: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    prompt: z.ZodOptional<z.ZodString>;
+    enabled: z.ZodOptional<z.ZodBoolean>;
+    cadence: z.ZodOptional<z.ZodDiscriminatedUnion<[z.ZodObject<{
+        kind: z.ZodLiteral<"once">;
+        at: z.ZodNumber;
+    }, z.core.$strip>, z.ZodObject<{
+        kind: z.ZodLiteral<"interval">;
+        everyMs: z.ZodNumber;
+        anchor: z.ZodOptional<z.ZodNumber>;
+    }, z.core.$strip>, z.ZodObject<{
+        kind: z.ZodLiteral<"cron">;
+        expression: z.ZodString;
+    }, z.core.$strip>], "kind">>;
+    target: z.ZodOptional<z.ZodObject<{
+        provider: z.ZodOptional<z.ZodString>;
+        model: z.ZodOptional<z.ZodString>;
+        cwd: z.ZodOptional<z.ZodString>;
+        permissionMode: z.ZodOptional<z.ZodString>;
+    }, z.core.$strip>>;
+}, z.core.$strip>;
+export declare const ScheduledTaskActionSchema: z.ZodObject<{
+    type: z.ZodLiteral<"scheduled_task_action">;
+    action: z.ZodEnum<{
+        create: "create";
+        update: "update";
+        pause: "pause";
+        resume: "resume";
+        delete: "delete";
+    }>;
+    taskId: z.ZodOptional<z.ZodString>;
+    task: z.ZodOptional<z.ZodObject<{
+        name: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+        prompt: z.ZodOptional<z.ZodString>;
+        enabled: z.ZodOptional<z.ZodBoolean>;
+        cadence: z.ZodOptional<z.ZodDiscriminatedUnion<[z.ZodObject<{
+            kind: z.ZodLiteral<"once">;
+            at: z.ZodNumber;
+        }, z.core.$strip>, z.ZodObject<{
+            kind: z.ZodLiteral<"interval">;
+            everyMs: z.ZodNumber;
+            anchor: z.ZodOptional<z.ZodNumber>;
+        }, z.core.$strip>, z.ZodObject<{
+            kind: z.ZodLiteral<"cron">;
+            expression: z.ZodString;
+        }, z.core.$strip>], "kind">>;
+        target: z.ZodOptional<z.ZodObject<{
+            provider: z.ZodOptional<z.ZodString>;
+            model: z.ZodOptional<z.ZodString>;
+            cwd: z.ZodOptional<z.ZodString>;
+            permissionMode: z.ZodOptional<z.ZodString>;
+        }, z.core.$strip>>;
+    }, z.core.$strip>>;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
+export declare const SetSchedulerEnabledSchema: z.ZodObject<{
+    type: z.ZodLiteral<"set_scheduler_enabled">;
+    enabled: z.ZodBoolean;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
 export declare const SetPromptEvaluatorSchema: z.ZodObject<{
     type: z.ZodLiteral<"set_prompt_evaluator">;
     value: z.ZodBoolean;
@@ -987,9 +1052,9 @@ export declare const OrchestrationRunActionSchema: z.ZodObject<{
     type: z.ZodLiteral<"orchestration_run_action">;
     runId: z.ZodString;
     action: z.ZodEnum<{
-        cancel: "cancel";
         pause: "pause";
         resume: "resume";
+        cancel: "cancel";
     }>;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
@@ -1114,6 +1179,46 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
         project: "project";
     }>>;
     sessionId: z.ZodOptional<z.ZodString>;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"scheduled_tasks_request">;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"scheduled_task_action">;
+    action: z.ZodEnum<{
+        create: "create";
+        update: "update";
+        pause: "pause";
+        resume: "resume";
+        delete: "delete";
+    }>;
+    taskId: z.ZodOptional<z.ZodString>;
+    task: z.ZodOptional<z.ZodObject<{
+        name: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+        prompt: z.ZodOptional<z.ZodString>;
+        enabled: z.ZodOptional<z.ZodBoolean>;
+        cadence: z.ZodOptional<z.ZodDiscriminatedUnion<[z.ZodObject<{
+            kind: z.ZodLiteral<"once">;
+            at: z.ZodNumber;
+        }, z.core.$strip>, z.ZodObject<{
+            kind: z.ZodLiteral<"interval">;
+            everyMs: z.ZodNumber;
+            anchor: z.ZodOptional<z.ZodNumber>;
+        }, z.core.$strip>, z.ZodObject<{
+            kind: z.ZodLiteral<"cron">;
+            expression: z.ZodString;
+        }, z.core.$strip>], "kind">>;
+        target: z.ZodOptional<z.ZodObject<{
+            provider: z.ZodOptional<z.ZodString>;
+            model: z.ZodOptional<z.ZodString>;
+            cwd: z.ZodOptional<z.ZodString>;
+            permissionMode: z.ZodOptional<z.ZodString>;
+        }, z.core.$strip>>;
+    }, z.core.$strip>>;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"set_scheduler_enabled">;
+    enabled: z.ZodBoolean;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"set_prompt_evaluator">;
@@ -1663,9 +1768,9 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     type: z.ZodLiteral<"orchestration_run_action">;
     runId: z.ZodString;
     action: z.ZodEnum<{
-        cancel: "cancel";
         pause: "pause";
         resume: "resume";
+        cancel: "cancel";
     }>;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>, z.ZodObject<{
@@ -1697,6 +1802,10 @@ export type SetMcpServerEnabledMessage = z.infer<typeof SetMcpServerEnabledSchem
 export type SubmitMcpAuthCodeMessage = z.infer<typeof SubmitMcpAuthCodeSchema>;
 export type AddMcpServerMessage = z.infer<typeof AddMcpServerSchema>;
 export type RemoveMcpServerMessage = z.infer<typeof RemoveMcpServerSchema>;
+export type ScheduledTasksRequestMessage = z.infer<typeof ScheduledTasksRequestSchema>;
+export type ScheduledTaskActionMessage = z.infer<typeof ScheduledTaskActionSchema>;
+export type ScheduledTaskInput = z.infer<typeof ScheduledTaskInputSchema>;
+export type SetSchedulerEnabledMessage = z.infer<typeof SetSchedulerEnabledSchema>;
 export type McpConfigScope = z.infer<typeof McpConfigScopeSchema>;
 export type PermissionResponseMessage = z.infer<typeof PermissionResponseSchema>;
 export type GetPermissionInputMessage = z.infer<typeof GetPermissionInputSchema>;

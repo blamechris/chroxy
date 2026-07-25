@@ -84,6 +84,7 @@ import {
 } from './server-registry';
 import { stripAnsi, filterThinking, nextMessageId, createEmptySessionState } from './utils';
 import { registerSummarizeRequest, cancelSummarizeRequest, rejectAllSummarizeRequests } from './summarizeRequests';
+import { armSchedulerRequest, failAllSchedulerRequests, SCHEDULER_DISCONNECT_ERROR } from './scheduledTaskRequests';
 import { formatQuestionAnswerSummary } from '../utils/questionAnswerSummary';
 import { getAuthToken } from '../utils/auth';
 import { buildAutoModeConfirmMessage } from '../lib/auto-mode-confirm';
@@ -140,6 +141,8 @@ import {
   resetTranscriptFetchTracking,
 } from './message-handler';
 import type { EvaluatorResultPayload } from './types';
+// #6871: the scheduled-task create/update payload shape (wire contract).
+import type { ScheduledTaskInput } from '@chroxy/protocol';
 import { CLIENT_CAPABILITIES, DEFAULT_PROVIDER } from '@chroxy/protocol';
 import {
   getWsCloseMessage,
@@ -611,6 +614,31 @@ function armGitOneshotCallback<K extends GitOneshotCallbackKey>(
   }, GIT_ONESHOT_CALLBACK_TIMEOUT_MS);
 }
 
+// #6871 review (S1) — release ONE scheduler mutation/gate pending entry with a
+// failure reason. Used by the watchdog and the disconnect fast-reject, i.e. the
+// paths where no reply will ever correlate the requestId, so the reply handler
+// can never release it. Same shape as the reply-side release in
+// message-handler.ts (drop the pending entry, record a terminal failed result),
+// so the panel renders the reason inline exactly as it does for a server refusal
+// instead of sitting on "Saving…". No-op if already released.
+function releaseScheduledTaskRequest(
+  set: (partial: Partial<ConnectionState>) => void,
+  get: () => ConnectionState,
+  requestId: string,
+  reason: string,
+): void {
+  const pending = { ...get().scheduledTaskPendingActions };
+  if (!(requestId in pending)) return;
+  delete pending[requestId];
+  set({
+    scheduledTaskPendingActions: pending,
+    scheduledTaskActionResults: {
+      ...get().scheduledTaskActionResults,
+      [requestId]: { ok: false, error: reason, at: Date.now() },
+    },
+  });
+}
+
 // #6954 — fast-reject every still-armed git one-shot callback (stage/unstage,
 // commit, create-PR) on socket disconnect/close/error, mirroring the sibling
 // rejectAllEvaluatorRequests / clearPendingTrustGrants / clearPendingModelReverts
@@ -740,6 +768,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   orchestrationPendingActions: {},
   orchestrationActionResults: {},
   selectedRunId: null,
+  // #6871: scheduled-tasks panel state (dashboard-only; mobile parity later).
+  scheduledTasks: null,
+  scheduledTasksLoading: false,
+  scheduledTasksError: null,
+  scheduledTaskPendingActions: {},
+  scheduledTaskActionResults: {},
+  selectedScheduledTaskId: null,
   // #5553: per-repo session presets keyed by cwd, fed by session_preset_snapshot.
   sessionPresetSnapshots: {},
   // #5553: server-provided composer seeds keyed by sessionId (drained by App).
@@ -1398,6 +1433,88 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const requestId = `orch-action-${nextMessageId()}`;
     if (!wsSend(socket, { type: 'orchestration_run_action', runId, action, requestId })) return null;
     set({ orchestrationPendingActions: { ...get().orchestrationPendingActions, [requestId]: { kind: action, runId, at: Date.now() } } });
+    return requestId;
+  },
+
+  // #6871: request the scheduled-tasks snapshot. `scheduledTasksLoading` is set
+  // only AFTER wsSend confirms the request went on the wire — setting it first
+  // would leave a permanent spinner on a closed/failed socket (#6308/#6309).
+  //
+  // #6871 review (S1): the read now carries a `requestId`. Without one the
+  // server's refusal echoed `requestId: null`, the `session_error` branch (which
+  // requires a string) took no action, and `scheduledTasksLoading` was never
+  // cleared — Refresh stayed disabled reading "Refreshing…" forever with no
+  // error shown, on the very surface whose contract says a button that spins
+  // forever is its own kind of dishonest status. The watchdog is the backstop
+  // for a reply that never arrives at all.
+  requestScheduledTasks: (): boolean => {
+    const { socket } = get();
+    if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+    const requestId = `sched-read-${nextMessageId()}`;
+    if (!wsSend(socket, { type: 'scheduled_tasks_request', requestId })) return false;
+    set({ scheduledTasksLoading: true, scheduledTasksError: null });
+    armSchedulerRequest(requestId, (reason) => {
+      set({ scheduledTasksLoading: false, scheduledTasksError: reason });
+    });
+    return true;
+  },
+
+  selectScheduledTask: (taskId: string | null): void => {
+    set({ selectedScheduledTaskId: taskId });
+  },
+
+  // #6871: one entry point for all five mutations, mirroring the server's single
+  // strict-primary-gated handler. Wire-or-nothing: the pending entry is written
+  // only after a confirmed send, so a mutation that never left the browser is
+  // never rendered as in-flight.
+  sendScheduledTaskAction: (
+    action: 'create' | 'update' | 'pause' | 'resume' | 'delete',
+    opts: { taskId?: string; task?: ScheduledTaskInput } = {},
+  ): string | null => {
+    const { socket } = get();
+    if (!socket || socket.readyState !== WebSocket.OPEN) return null;
+    const taskId = opts.taskId ?? null;
+    // Guard the same pairings the server enforces, so an incomplete request is
+    // not put on the wire just to come back as an error.
+    if (action !== 'create' && !taskId) return null;
+    if ((action === 'create' || action === 'update') && !opts.task) return null;
+    const requestId = `sched-action-${nextMessageId()}`;
+    const payload: Record<string, unknown> = { type: 'scheduled_task_action', action, requestId };
+    if (taskId) payload.taskId = taskId;
+    if (opts.task) payload.task = opts.task;
+    if (!wsSend(socket, payload)) return null;
+    set({
+      scheduledTaskPendingActions: {
+        ...get().scheduledTaskPendingActions,
+        [requestId]: { kind: action, taskId, at: Date.now() },
+      },
+    });
+    // #6871 review: bound the mutation too. A rejection frame carrying no
+    // requestId (an over-cap INVALID_MESSAGE, a rate_limit, a drain-drop) can
+    // never release this entry by correlation, and the form's submit button was
+    // left reading "Saving…" indefinitely.
+    armSchedulerRequest(requestId, (reason) => releaseScheduledTaskRequest(set, get, requestId, reason));
+    return requestId;
+  },
+
+  // #6871: flip the PERSISTED gate. Tracked in the same pending map so the
+  // toggle disables while in flight; the reply snapshot carries
+  // `scheduler.restartRequired`, which the panel surfaces rather than implying
+  // the running daemon changed behaviour.
+  setSchedulerEnabled: (enabled: boolean): string | null => {
+    const { socket } = get();
+    if (!socket || socket.readyState !== WebSocket.OPEN) return null;
+    const requestId = `sched-gate-${nextMessageId()}`;
+    if (!wsSend(socket, { type: 'set_scheduler_enabled', enabled, requestId })) return null;
+    set({
+      scheduledTaskPendingActions: {
+        ...get().scheduledTaskPendingActions,
+        [requestId]: { kind: enabled ? 'enable-gate' : 'disable-gate', taskId: null, at: Date.now() },
+      },
+    });
+    // Same bound as the CRUD mutations — an unreleased gate entry leaves
+    // Enable/Disable permanently disabled reading "Saving…".
+    armSchedulerRequest(requestId, (reason) => releaseScheduledTaskRequest(set, get, requestId, reason));
     return requestId;
   },
 
@@ -2632,6 +2749,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // the still-armed callback so GitPanel's busy flag clears immediately
       // instead of spinning for up to the full 30s client-side timeout.
       clearGitOneshotCallbacks(set, get);
+      // #6871 review (S1): same reasoning for the scheduler requests — a dropped
+      // socket means the snapshot/mutation reply can never arrive, so clear the
+      // Refresh spinner and release every pending mutation now rather than after
+      // the full watchdog window.
+      failAllSchedulerRequests(SCHEDULER_DISCONNECT_ERROR);
       // #6999: same fast-reject for any in-flight add_mcp_server /
       // remove_mcp_server — a dropped socket means the daemon can never reply,
       // so the add-form / remove-button spinner clears immediately instead of
@@ -2828,6 +2950,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // #6954: same fast-reject as onclose above — an errored socket means
       // any in-flight git one-shot reply will never arrive.
       clearGitOneshotCallbacks(set, get);
+      // #6871 review (S1): same fast-reject for the scheduler requests.
+      failAllSchedulerRequests(SCHEDULER_DISCONNECT_ERROR);
       // #6999: ditto for any in-flight add_mcp_server / remove_mcp_server.
       clearPendingMcpServerOps();
       abortTranscriptFetchesOnSocketDrop(set, get);
@@ -2872,6 +2996,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // #6954: same fast-reject as onclose/onerror — an explicit disconnect
     // means any in-flight git one-shot reply will never arrive on this socket.
     clearGitOneshotCallbacks(set, get);
+    // #6871 review (S1): same fast-reject for the scheduler requests.
+    failAllSchedulerRequests(SCHEDULER_DISCONNECT_ERROR);
     // #6999: ditto for any in-flight add_mcp_server / remove_mcp_server.
     clearPendingMcpServerOps();
     const { socket } = get();

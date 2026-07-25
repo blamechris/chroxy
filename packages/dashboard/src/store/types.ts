@@ -16,7 +16,7 @@ import type { PermissionMode } from '@chroxy/store-core'
 // #5175: Host/Repo Status Control Room snapshot type (epic #5170). The store
 // holds the latest `host_status_snapshot` so the Control Room section can render
 // the fleet table; the type is the protocol contract pinned in @chroxy/protocol.
-import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerContainersStatusSnapshotMessage, ServerRepoRuntimeConfigSnapshotMessage, ServerByokPoolStatusSnapshotMessage, ServerHostPruneStatusSnapshotMessage, ServerSimulatorStatusSnapshotMessage, ServerEmulatorStatusSnapshotMessage, ServerWslStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, ServerSkillsInventorySnapshotMessage, ServerMailboxStatusSnapshotMessage, ServerExternalSessionsSnapshotMessage, ServerRepoEventsSnapshotMessage, ServerGithubWebhookConfigMessage, ServerPermissionInputMessage, ServerSymbolsSnapshotMessage, ServerSearchResultsMessage, ServerReferencesResultMessage, IntegrationActionCounts, ServerPairPendingMessage, ServerSessionPresetFull, Attachment, ServerOrchestrationRunsSnapshot, CodexSandboxMode } from '@chroxy/protocol'
+import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerContainersStatusSnapshotMessage, ServerRepoRuntimeConfigSnapshotMessage, ServerByokPoolStatusSnapshotMessage, ServerHostPruneStatusSnapshotMessage, ServerSimulatorStatusSnapshotMessage, ServerEmulatorStatusSnapshotMessage, ServerWslStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, ServerSkillsInventorySnapshotMessage, ServerMailboxStatusSnapshotMessage, ServerExternalSessionsSnapshotMessage, ServerRepoEventsSnapshotMessage, ServerGithubWebhookConfigMessage, ServerPermissionInputMessage, ServerSymbolsSnapshotMessage, ServerSearchResultsMessage, ServerReferencesResultMessage, IntegrationActionCounts, ServerPairPendingMessage, ServerSessionPresetFull, Attachment, ServerOrchestrationRunsSnapshot, ServerScheduledTasksMessage, ScheduledTaskInput, CodexSandboxMode } from '@chroxy/protocol'
 import type { HeldRunDetail } from '@chroxy/store-core'
 // #5184: header cost-badge display mode. Defined in a plain lib module
 // (which owns the union + runtime guard) — the store only needs the type
@@ -1348,6 +1348,33 @@ export interface ConnectionState {
   /** #6691 — the run selected in the Runs tab (detail panel target). */
   selectedRunId: string | null;
   /**
+   * #6871 — the scheduled-tasks snapshot (registry + scheduler gate state), or
+   * null before the first one lands. Replaced wholesale: the server re-emits it
+   * as the ack for every accepted mutation, so there is no delta path to drift.
+   */
+  scheduledTasks: ServerScheduledTasksMessage | null;
+  /** #6871 — true between dispatching `scheduled_tasks_request` and its snapshot. */
+  scheduledTasksLoading: boolean;
+  /**
+   * #6871 review (S1) — why the last READ failed, when the failure cannot be
+   * attributed to a mutation: a refusal, a snapshot this client's schema could
+   * not parse, a watchdog timeout, or a disconnect. Distinct from
+   * `scheduledTasks.error` (a degraded snapshot the SERVER reported) because
+   * those cases produce no snapshot at all, and a read that silently clears its
+   * spinner with no explanation is as dishonest as one that spins forever.
+   */
+  scheduledTasksError: string | null;
+  /**
+   * #6871 — outstanding scheduled-task mutations keyed by requestId; cleared by
+   * the re-emitted `scheduled_tasks` snapshot echoing the requestId, or by the
+   * matching `session_error` (SCHEDULED_TASK_* / SCHEDULER_*).
+   */
+  scheduledTaskPendingActions: Record<string, { kind: string; taskId: string | null; at: number }>;
+  /** #6871 — terminal results for recent scheduled-task mutations, keyed by requestId. */
+  scheduledTaskActionResults: Record<string, { ok: boolean; error: string | null; at: number }>;
+  /** #6871 — the task selected in the Scheduled tasks tab (detail panel target). */
+  selectedScheduledTaskId: string | null;
+  /**
    * #6138 — true between dispatching a `wsl_status_request` and the matching
    * snapshot arriving (Refresh spinner). Cleared when a VALID snapshot lands (a
    * malformed payload is dropped and leaves this true).
@@ -2144,6 +2171,26 @@ export interface ConnectionState {
   sendOrchestrationRunAction: (runId: string, action: 'cancel' | 'pause' | 'resume') => string | null;
   /** #6691 (S-3c) — annotate a run (baseline session + verdict quality). Returns the requestId (or null if not sent). */
   sendOrchestrationRunAnnotate: (runId: string, opts: { baselineSessionId?: string; verdictQuality?: string }) => string | null;
+  /** #6871 — request the scheduled-tasks snapshot (registry + scheduler gate state). */
+  requestScheduledTasks: () => boolean;
+  /** #6871 — select a task in the Scheduled tasks tab (detail panel target). */
+  selectScheduledTask: (taskId: string | null) => void;
+  /**
+   * #6871 — create/update/pause/resume/delete a scheduled task. Returns the
+   * requestId (or null if it did not go on the wire). STRICT-PRIMARY gated
+   * server-side: a pairing-issued token is rejected with
+   * SCHEDULED_TASK_ACTION_FAILED's sibling code SCHEDULER_FORBIDDEN_NON_PRIMARY_CLIENT.
+   */
+  sendScheduledTaskAction: (
+    action: 'create' | 'update' | 'pause' | 'resume' | 'delete',
+    opts?: { taskId?: string; task?: ScheduledTaskInput },
+  ) => string | null;
+  /**
+   * #6871 — flip the PERSISTED global scheduled-execution gate. Returns the
+   * requestId (or null if not sent). Writing the flag does NOT arm or disarm a
+   * running daemon — the reply snapshot reports `scheduler.restartRequired`.
+   */
+  setSchedulerEnabled: (enabled: boolean) => string | null;
   /** #6543 — pull the full redacted tool input for a pending permission (for the pre-write diff). */
   requestPermissionInput: (requestId: string) => boolean;
 
