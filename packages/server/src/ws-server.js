@@ -1344,8 +1344,11 @@ export class WsServer {
           // panic-revoke's token write durable, but `onPersist` was fire-and-forget
           // and this ack raced it — so the operator could be told the highest-authority
           // token was dead while a power loss inside the OS writeback window brought the
-          // daemon back still honouring it. Wait for the write (fsync included), THEN
-          // ack. On failure the client ALSO gets an explicit error — see below.
+          // daemon back still honouring it. Wait for the persist to report success —
+          // an fsync of the temp file + containing directory on the `config.json`
+          // fallback, while the OS-keychain path delegates durability to the
+          // keychain and performs no fsync here — THEN ack. On failure the client
+          // ALSO gets an explicit error — see below.
           if (!persisted) {
             // Nothing to wait on (no persist callback configured — e.g. a test
             // TokenManager, or a deployment with no token persistence). Unchanged
