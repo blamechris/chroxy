@@ -1015,6 +1015,13 @@ export function resolveClaudeConfigWritePath(filePath) {
  */
 export function describeConfigModeSecretWarning({ filePath, mode, entry } = {}) {
   if (mode === null || mode === undefined) return null
+  // The trigger is the WHOLE `0o077` superset, not just the read bits, and the
+  // wording says "accessible" rather than "readable" to match it (review of
+  // #7040). Group/other WRITE is the sharper edge, not a lesser one: another
+  // local user who can rewrite `~/.claude.json` substitutes MCP server commands
+  // the daemon then spawns. Including the (meaningless-on-a-JSON-file) execute
+  // bit costs at most a harmless false positive on a pathological mode like
+  // 0o611, which is the right side to err on for a security advisory.
   const otherBits = mode & 0o077
   if (otherBits === 0) return null
   const fields = ['env', 'headers'].filter((key) => {
@@ -1024,7 +1031,7 @@ export function describeConfigModeSecretWarning({ filePath, mode, entry } = {}) 
   if (fields.length === 0) return null
   const octal = (mode & 0o777).toString(8).padStart(3, '0')
   return (
-    `${filePath} is mode ${octal} (readable beyond its owner) and the MCP server entry just added carries ` +
+    `${filePath} is mode ${octal} (accessible beyond its owner) and the MCP server entry just added carries ` +
     `${fields.join(' and ')}, which commonly hold API tokens. Chroxy preserved the file's existing permissions ` +
     `rather than changing them — tighten it yourself with: chmod 600 ${filePath}`
   )

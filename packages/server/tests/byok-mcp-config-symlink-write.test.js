@@ -208,6 +208,22 @@ describe('#7002 group/world-readable config + newly written secrets', () => {
     assert.ok(!warning.includes('sk-secret'), 'the warning must never echo the secret value')
   })
 
+  it('warns on a group/other WRITE bit too, and the wording matches the trigger', () => {
+    // `mode & 0o077` covers write, not just read — and group/other write is the
+    // sharper edge: another local user who can rewrite the config substitutes MCP
+    // server commands the daemon spawns. The message must not claim "readable" for
+    // a mode that is write-only beyond the owner (review of #7040).
+    const warning = describeConfigModeSecretWarning({
+      filePath: '/home/u/.claude.json',
+      mode: 0o620,
+      entry: { command: 'node', env: { API_TOKEN: 't' } },
+    })
+    assert.ok(warning, 'a config another local user can REWRITE must warn')
+    assert.match(warning, /620/)
+    assert.match(warning, /accessible beyond its owner/)
+    assert.ok(!warning.includes('readable beyond its owner'), 'a 0620 config is not readable beyond its owner')
+  })
+
   it('warns for headers on a remote server entry', () => {
     const warning = describeConfigModeSecretWarning({
       filePath: '/home/u/.claude.json',
