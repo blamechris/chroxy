@@ -16,7 +16,14 @@ const log = createLogger('token-manager')
  * 4. Calls the persist callback to save the new token
  *
  * Events:
- *   token_rotated { oldToken, newToken, expiresAt, reason }
+ *   token_rotated { oldToken, newToken, expiresAt, reason, persisted }
+ *
+ * `persisted` (#6965) is a Promise for the `onPersist` write (null when no persist
+ * callback is configured). It settles when whichever storage path ran has completed —
+ * including its fsync where the persist site performs one (the `config.json` fallback
+ * on a durable revoke; the OS keychain owns its own durability) — and REJECTS if the
+ * write failed. It exists so the revoke's client-facing ack can be gated on the write
+ * instead of racing it.
  *
  * `reason` distinguishes a scheduled/periodic rotation ('scheduled') from an
  * operator revoke ('revoke', via `revoke()`). A revoke is the panic button:
@@ -47,7 +54,9 @@ export class TokenManager extends EventEmitter {
    * @param {Function} opts.onPersist - Callback to save new token:
    *   `async (newToken, { reason }) => {}`. `reason` is 'scheduled' | 'revoke'
    *   (#6927) so the persist site can make the panic-button revoke DURABLE while
-   *   leaving the routine scheduled rotation non-durable.
+   *   leaving the routine scheduled rotation non-durable. #6965: it MUST reject (or
+   *   throw) when the write fails — the revoke ack is gated on it resolving, so a
+   *   swallowed error there is reported to the operator as a successful revoke.
    */
   constructor({ token, tokenExpiry, graceMs, onPersist } = {}) {
     super()
@@ -157,22 +166,38 @@ export class TokenManager extends EventEmitter {
       log.info(`Token rotated`)
     }
 
+    // Persist the new token. #6927 — forward `reason` so the persist site can
+    // fsync a 'revoke' (the operator panic button killing a compromised token)
+    // while leaving a routine 'scheduled' rotation non-durable.
+    //
+    // #6965 — the persist is STARTED before the event is emitted and the resulting
+    // promise rides the event as `persisted`, so the revoke's client-facing ACK can
+    // be gated on the durable write actually landing (see WsServer's `token_rotated`
+    // handler). Previously this was fire-and-forget emitted AFTER the ack: the
+    // operator could be told the highest-authority token was dead while a power loss
+    // in the writeback window brought the daemon back still honouring it.
+    // The async wrapper turns a SYNCHRONOUS throw from `onPersist` into a rejection,
+    // so a failing persist can never escape as an exception out of rotate() and can
+    // never masquerade as success.
+    let persisted = null
+    if (this._onPersist) {
+      persisted = (async () => this._onPersist(newToken, { reason }))()
+      // Attach a handler unconditionally: the log line is the SCHEDULED path's only
+      // report, and it also guarantees no unhandled rejection when nothing consumes
+      // `persisted` (no WsServer wired, or a listener that ignores it).
+      persisted.catch((err) => {
+        log.error(`Failed to persist new token: ${err?.message || err}`)
+      })
+    }
+
     // Emit event for WsServer to broadcast to clients
     this.emit('token_rotated', {
       oldToken,
       newToken,
       expiresAt: this._expiresAt,
       reason,
+      persisted,
     })
-
-    // Persist the new token. #6927 — forward `reason` so the persist site can
-    // fsync a 'revoke' (the operator panic button killing a compromised token)
-    // while leaving a routine 'scheduled' rotation non-durable.
-    if (this._onPersist) {
-      Promise.resolve(this._onPersist(newToken, { reason })).catch(err => {
-        log.error(`Failed to persist new token: ${err.message}`)
-      })
-    }
 
     // Start grace period for the old token — scheduled rotations only. A revoke
     // killed the old token above and must not resurrect it via a grace window.

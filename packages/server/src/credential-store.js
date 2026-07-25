@@ -48,6 +48,7 @@ import { randomBytes } from 'crypto'
 import { maskApiKey } from './byok-credentials.js'
 import * as realKeychain from './keychain.js'
 import { createLogger } from './logger.js'
+import { fsyncForDurability } from './platform.js'
 import {
   CRED_KEY_SERVICE,
   isEncryptedEnvelope,
@@ -135,6 +136,21 @@ function activeKeychain() {
  */
 export function _setCredentialKeychainForTests(keychain) {
   _keychainOverride = keychain || null
+}
+
+// #6964: the durable-write hook used by `writeStoreAtomically({ durable: true })`.
+// Defaults to platform.js's `fsyncForDurability` (the same helper #6914 gave
+// `writeFileRestricted`, including its benign-fsync-code handling). Injectable so
+// the durable + durability-FAILURE branches are testable without provoking a real
+// disk fault, and without mocking `fs` globally for the whole process.
+let _durabilityFsync = fsyncForDurability
+
+/**
+ * Test seam (#6964): inject the durability hook — `(target, { isDir }) => void` —
+ * or pass null to restore the real `fsyncForDurability`.
+ */
+export function _setCredentialDurabilityForTests(fn) {
+  _durabilityFsync = fn || fsyncForDurability
 }
 
 /**
@@ -370,8 +386,42 @@ export function replaceFileAtomically(tmp, target, deps = {}) {
  * plaintext. Preserves the temp-file → chmod 0600 → rename crash-safety and the
  * post-write mode re-check (POSIX). `dir` is assumed to already exist (callers
  * mkdir it). Shared by the set/delete/migrate paths.
+ *
+ * `durable` (default `false`, #6964) mirrors `writeFileRestricted({ durable: true })`
+ * from #6914: fsync the temp file BEFORE the rename, and on POSIX fsync the
+ * containing DIRECTORY AFTER it (a rename is not durable until its directory entry
+ * is) — the standard atomic-durable-write recipe. It stays OFF for the ordinary
+ * set/delete paths: an fsync per write would add blocking disk I/O for no security
+ * gain when the pre-write state is harmless. Acute credential ROTATION opts in, so
+ * an operator who is told a shared secret was rotated cannot lose that rotation to
+ * a power loss inside the OS writeback window. The benign "this filesystem cannot
+ * sync" codes are swallowed inside `fsyncForDurability`.
+ *
+ * The two fsync limbs fail DIFFERENTLY, and conflating them was its own false report:
+ *
+ *  - PRE-RENAME (temp file): a genuine failure (EIO / ENOSPC) THROWS. Nothing was
+ *    published — the live target still holds the prior value — so "the write failed"
+ *    is exactly true, and the orphaned temp file is cleaned up by the `finally` below.
+ *  - POST-RENAME (containing directory): the rename has ALREADY published the new
+ *    value and its bytes are already fsynced; only the durability of the new
+ *    directory ENTRY is unproven (a power loss could roll the rename back). Throwing
+ *    here would report a failed write for a write that LANDED — the caller would
+ *    keep the OLD value in its in-process cache while the NEW value is live on disk
+ *    (split brain), and an operator told "rotation failed" would leave the old secret
+ *    configured at the far end. So it does NOT throw: it logs at error level and is
+ *    returned to the caller as `durabilityUnconfirmed`, a distinct outcome from a
+ *    failed write. The caller must adopt the new value (it IS the live one) and
+ *    surface the caveat.
+ *
+ * On Windows the directory fsync is skipped entirely (no such call;
+ * `replaceFileAtomically`'s rename already goes through MOVEFILE_WRITE_THROUGH).
+ *
+ * @returns {{ durabilityUnconfirmed: string | null }} `durabilityUnconfirmed` is the
+ *   post-rename fsync error message when the value is live but its directory entry's
+ *   durability could not be confirmed; `null` otherwise (including every non-durable
+ *   write, which makes no durability claim at all).
  */
-function writeStoreAtomically(target, nextObj) {
+function writeStoreAtomically(target, nextObj, { durable = false } = {}) {
   const key = getOrCreateMasterKey(activeKeychain())
   const payload = key ? encryptJson(nextObj, key) : nextObj
 
@@ -380,9 +430,14 @@ function writeStoreAtomically(target, nextObj) {
   // costs nothing here and matches the pattern in path-hash-trust-ledger.js.
   const tmp = `${target}.tmp.${process.pid}.${randomBytes(4).toString('hex')}`
   let renamed = false
+  let durabilityUnconfirmed = null
   try {
     writeFileSync(tmp, JSON.stringify(payload, null, 2), { mode: 0o600 })
     if (process.platform !== 'win32') chmodSync(tmp, 0o600)
+    // #6964: force the new bytes to disk BEFORE the rename makes them the live
+    // credentials, so a crash can never publish a half-written envelope nor roll
+    // a reported-successful rotation back.
+    if (durable) _durabilityFsync(tmp, { isDir: false })
     // #5243: atomic replace — never unlink the live target first.
     replaceFileAtomically(tmp, target)
     renamed = true
@@ -393,11 +448,31 @@ function writeStoreAtomically(target, nextObj) {
         throw new Error(`credentials file ended up with mode ${perms.toString(8)} after write; refused`)
       }
     }
+    // #6964: the rename is a directory-metadata change of its own — fsync the
+    // containing directory so the new entry survives a power loss too. POSIX only.
+    if (durable && process.platform !== 'win32') {
+      try {
+        _durabilityFsync(dirname(target), { isDir: true })
+      } catch (err) {
+        // POST-RENAME: the new value is already live and its bytes are already
+        // fsynced. Only the durability of the new directory ENTRY is unproven, so
+        // this is NOT a failed write — see the doc-block above. Report it as a
+        // distinct outcome instead of throwing, so the caller keeps its cache in
+        // step with disk while still surfacing the fsync error.
+        durabilityUnconfirmed = err?.message || String(err)
+        _log.error(
+          `credentials: the new value is live at ${target} but its directory entry could not be ` +
+          `fsynced (${durabilityUnconfirmed}) — a power loss could roll the rename back. ` +
+          `The value IS in effect; treat its durability as unconfirmed.`,
+        )
+      }
+    }
   } finally {
     if (!renamed && existsSync(tmp)) {
       try { unlinkSync(tmp) } catch { /* */ }
     }
   }
+  return { durabilityUnconfirmed }
 }
 
 /**
@@ -510,12 +585,29 @@ export function readStoredField(field) {
  * store (a read error aborts rather than clobbering sibling fields) and writes
  * atomically. The raw value is NEVER logged.
  *
+ * `durable: true` (#6964) makes the write power-loss durable (fsync of the temp
+ * file before the rename + of the containing directory after it). Acute ROTATION of
+ * a shared secret opts in — the operator is told the rotation succeeded, so it must
+ * not be recoverable to the old value by a crash. Ordinary sets leave it off (no
+ * fsync in the hot path).
+ *
+ * Durability failures split by limb (see `writeStoreAtomically`): a PRE-rename fsync
+ * failure THROWS (nothing was published, the prior value stands), while a POST-rename
+ * DIRECTORY fsync failure does NOT — the new value is already live, so it is returned
+ * as `durabilityUnconfirmed` and the caller must adopt the new value and surface the
+ * caveat rather than report a failed write.
+ *
  * @param {string} field - the JSON field name (e.g. 'githubWebhookSecret')
  * @param {string} rawValue
- * @param {{ validate?: (v: string) => (string|null) }} [opts]
- * @throws {Error} on empty field/value, validation failure, or a read/write error
+ * @param {{ validate?: (v: string) => (string|null), durable?: boolean }} [opts]
+ * @returns {{ durabilityUnconfirmed: string | null }} the write outcome — see
+ *   `writeStoreAtomically`. `durabilityUnconfirmed` is non-null only for a
+ *   `durable: true` write whose value LANDED but whose directory entry could not be
+ *   fsynced; the value is in effect either way.
+ * @throws {Error} on empty field/value, validation failure, a read/write error, or a
+ *   PRE-rename fsync failure (in which case nothing was written)
  */
-export function setStoredField(field, rawValue, { validate } = {}) {
+export function setStoredField(field, rawValue, { validate, durable = false } = {}) {
   if (typeof field !== 'string' || field.length === 0) throw new Error('field is required')
   const value = typeof rawValue === 'string' ? rawValue.trim() : ''
   if (value.length === 0) throw new Error(`${field} is required (non-empty string)`)
@@ -536,7 +628,7 @@ export function setStoredField(field, rawValue, { validate } = {}) {
   // overwriting unknown content.
   const { data, error } = readStore()
   if (error) throw new Error(error)
-  writeStoreAtomically(target, { ...data, [field]: value })
+  return writeStoreAtomically(target, { ...data, [field]: value }, { durable })
 }
 
 /**
