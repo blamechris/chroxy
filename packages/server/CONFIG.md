@@ -131,7 +131,7 @@ of `~/.chroxy/config.json` regardless of which group it appears in.
 |-----|------|----------|---------------------|-------------|
 | `notifications` | object | - | *(unmapped — see [note](#environment-variable-names))* | Notification-sink settings. Today the only sub-block is `notifications.discord` — see [Discord notifications](#discord-notifications-notificationsdiscord). The webhook URL is a **secret** and deliberately *not* a config key. |
 | `billing` | object | - | *(unmapped — see [note](#environment-variable-names))* | Monthly programmatic-credit budget meter (#5665). `creditTier` (`pro` \| `max5x` \| `max20x`), `monthlyCreditBudgetUsd` (a raw USD cap that wins over the tier preset), `budgetWarningPercent` (1–100, default `80`), plus the #5828 canary knobs `egressCheck` (boolean, default off — an outbound public-IP lookup that warns when a subscription-billed provider runs from a cloud host) and `datacenterPrefixes` (extra IPv4 prefixes merged into the built-in datacenter classifier). See [Nested config blocks](#nested-config-blocks-at-a-glance). |
-| `features` | object | - | `CHROXY_ENABLE_IDE`, `CHROXY_ENABLE_ORCHESTRATION`, `CHROXY_SEMANTIC_TITLES` | Opt-in feature flags, all **off by default** and all fail-closed — only a literal `true` in config (or a literal `"1"` in the env) enables one. `ide` (IDE navigation surface, epic #6469), `orchestration` (delegation harness, epic #6691), and `semanticTitles` (model-generated session titles, #6764 — `CHROXY_SEMANTIC_TITLES=0` also force-*disables*); see [Semantic session titles](#semantic-session-titles-featuressemantictitles). Each env var is read directly by its feature gate, so it overrides config regardless of the merge layer. |
+| `features` | object | - | `CHROXY_ENABLE_IDE`, `CHROXY_ENABLE_ORCHESTRATION`, `CHROXY_ENABLE_SCHEDULER`, `CHROXY_SEMANTIC_TITLES` | Opt-in feature flags, all **off by default** and all fail-closed — only a literal `true` in config (or a literal `"1"` in the env) enables one. `ide` (IDE navigation surface, epic #6469), `orchestration` (delegation harness, epic #6691), `scheduler` (headless execution of scheduled tasks, #6865), and `semanticTitles` (model-generated session titles, #6764 — `CHROXY_SEMANTIC_TITLES=0` also force-*disables*). Full inventory in [Opt-in features](#opt-in-features-features); the title flag has its own section under [Semantic session titles](#semantic-session-titles-featuressemantictitles). Each env var is read directly by its feature gate, so it overrides config regardless of the merge layer. |
 | `orchestration` | object | - | `CHROXY_ORCHESTRATION` | Tuning for the orchestration engine, which only runs when `features.orchestration` is on. `maxParallelWorkers` (default `2`), `reserveSessions` (`1`), `maxCommitteeIterations` (`4`), `maxParseRetries` (`2`), `turnTimeoutMs` (`1800000` / 30 min), `diff: { maxBytes: 65536, maxFileBytes: 8192 }`, `bash: { implementAllowlist: [] }`, and `roles` (per-role provider/model overrides). Declared in the schema so a configured block doesn't trip the misleading "unknown key" warning. See [`docs/design/orchestration/`](../../docs/design/orchestration/README.md). |
 
 ### Env-only settings
@@ -153,8 +153,9 @@ entry there (`port` → `PORT`, `controlRoomRunnerRoot` → `CHROXY_RUNNER_ROOT`
 
 **2. Direct reads.** Some settings are read straight out of `process.env` by the
 helper that consumes them, bypassing the merge layer entirely:
-`CHROXY_ENABLE_IDE` / `CHROXY_ENABLE_ORCHESTRATION` / `CHROXY_SEMANTIC_TITLES`
-(the `features` gates), `CHROXY_SEMANTIC_TITLES_MODEL` /
+`CHROXY_ENABLE_IDE` / `CHROXY_ENABLE_ORCHESTRATION` / `CHROXY_ENABLE_SCHEDULER` /
+`CHROXY_SEMANTIC_TITLES` (the four [`features` gates](#opt-in-features-features)),
+`CHROXY_SEMANTIC_TITLES_MODEL` /
 `CHROXY_SEMANTIC_TITLES_TIMEOUT_MS` (which override *specific fields* of
 `summarize` on the title path only — they are not a general override for the
 `summarize` object), and `CHROXY_BINARY_PROVENANCE` /
@@ -839,10 +840,12 @@ override that must be exactly `1`:
 | `features.scheduler` | `CHROXY_ENABLE_SCHEDULER=1` | `false` | Headless execution of scheduled tasks (#6865) |
 | `features.ide` | `CHROXY_ENABLE_IDE=1` | `false` | The IDE navigation surface (epic #6469) |
 | `features.orchestration` | `CHROXY_ENABLE_ORCHESTRATION=1` | `false` | The orchestration/delegation harness (epic #6691) |
+| `features.semanticTitles` | `CHROXY_SEMANTIC_TITLES=1` | `false` | Model-generated session titles (#6764) — see [Semantic session titles](#semantic-session-titles-featuressemantictitles) |
 
-All three are **fail-closed**: anything other than a literal `true` in config (or
+All four are **fail-closed**: anything other than a literal `true` in config (or
 a literal `"1"` in the env) leaves the feature off, so `"yes"`, `1`, or `"true"`
-in the config file do *not* enable it.
+in the config file do *not* enable it. `CHROXY_SEMANTIC_TITLES` is the one env
+override that also force-*disables* when set to `0`.
 
 #### `features.scheduler` — headless scheduled execution
 
