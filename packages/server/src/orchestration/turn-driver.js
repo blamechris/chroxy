@@ -9,27 +9,51 @@
  *   so at most one driven turn runs per session (committee reviews serialize on
  *   the architect session).
  * - Epoch guard: events that arrive before our send, or a stray `result` with
- *   no active turn, are ignored.
+ *   no active turn, are ignored. That guard only protects a QUEUED turn because
+ *   the mutex handoff is deferred past the end of the current synchronous frame —
+ *   see _scheduleNext.
  * - Text is accumulated live from `stream_delta` (per messageId) + non-streamed
  *   `message {type:'response'}` events, bounded to MAX_ACCUM_BYTES with an
  *   explicit truncation marker (the decision parser scans from the tail).
  * - SUCCESS keys ONLY off the `result` event (isRunning can stay true on
  *   pending background shells). `error` is turn-terminal → TurnError.
- * - `stopped` is turn-terminal too → TURN_STOPPED (#7009). Every provider emits
- *   it exclusively on its intentional-stop path (`wasIntentionalStop`: see
- *   sdk-session.js, cli-session.js, jsonl-subprocess-session.js,
- *   codex-app-server-session.js — #4881), i.e. someone called interrupt(). Such a
- *   turn produces NO `result` and NO `error`, so without this the caller's promise
- *   hung until the watchdog fired. It gets its OWN code, never a success: an
- *   interrupted turn did not do the work it was asked to do.
- *   CAVEAT: this only helps providers that emit `stopped` INSTEAD of a result.
- *   CliSession's intentional-stop close emits a synthetic `result` (cost:null, to
- *   clear the dashboard's spinner) BEFORE `stopped`, so a claude-cli turn would
- *   settle as a success on that synthetic result and never reach this case.
- *   claude-cli is not reachable through either TurnDriver consumer today (the
- *   scheduler requires capabilities.inProcessPermissions; orchestration workers
- *   are restricted to claude-sdk/claude-byok/codex), but an orchestration
- *   ARCHITECT role is not provider-restricted — tracked separately.
+ * - `stopped` is turn-terminal too → TURN_STOPPED (#7009). Every provider that
+ *   emits `stopped` does so ONLY on its intentional-stop path (`wasIntentionalStop`:
+ *   see sdk-session.js, cli-session.js, jsonl-subprocess-session.js,
+ *   codex-app-server-session.js — #4881), i.e. someone called interrupt();
+ *   claude-tui and claude-byok never emit it at all. Such a turn produces NO
+ *   `result` and NO `error`, so without this the caller's promise hung until the
+ *   watchdog fired. It gets its OWN code, never a success: an interrupted turn did
+ *   not do the work it was asked to do.
+ *   This settle deliberately does NOT drain, unlike the timeout path: `stopped` is
+ *   the very event _endDrain keys off, so draining on it would always burn the full
+ *   drainTimeoutMs. Trailing events are handled by dropping the ctx from `_active`
+ *   at once and deferring the handoff instead (next bullet).
+ * - Mutex handoff crosses a tick. A queued turn is NEVER started from inside a
+ *   session-event callback (_scheduleNext). Providers emit a turn's terminal
+ *   events from ONE synchronous frame — CliSession._handleChildClose emits
+ *   `stream_end` + a synthetic `result` and THEN `stopped`; _handleHardTimeout /
+ *   _handleStreamStall emit `result` then `error`; jsonl-subprocess's child-close
+ *   and codex's _failTurn are the same shape — so starting the queued turn
+ *   synchronously on the FIRST of them handed the rest of that frame to the wrong
+ *   turn: the epoch guard could not drop those events because a fresh live ctx was
+ *   already registered. That is #6723's cross-turn misattribution through the door
+ *   the post-timeout drain does not cover (it is the result/error/stopped path that
+ *   releases the mutex, not the timeout path).
+ *   RESIDUAL: `stopped` carries no turn id, so a provider that emitted a turn's
+ *   terminal event and THEN `stopped` in a LATER macrotask would still settle the
+ *   following turn. No in-tree provider does that (every emit site listed above is
+ *   a single synchronous frame); closing it by construction needs a provider-side
+ *   turn id on the event payload.
+ * - NOT closed here (#7036): CliSession's synthetic interrupted `result`
+ *   (cost:null, load-bearing for clearing the dashboard spinner) is emitted BEFORE
+ *   `stopped`, so a claude-cli turn settles as a SUCCESS on it and never reaches
+ *   the `stopped` case. The trailing `stopped` no longer harms the next queued turn,
+ *   but the interrupted turn itself is still reported as completed. claude-cli is
+ *   unreachable through the scheduler (requires capabilities.inProcessPermissions)
+ *   and through the orchestration WORKER roles (AUDIT/IMPLEMENT_ELIGIBLE_PROVIDERS
+ *   = claude-sdk/claude-byok/codex); the orchestration ARCHITECT role is not
+ *   provider-restricted, which is what #7036 closes.
  * - Watchdog: on timeout, interrupt() the session and reject TURN_TIMEOUT.
  * - `session_destroyed` mid-turn → SESSION_GONE.
  */
@@ -68,6 +92,7 @@ export class TurnDriver {
     this._active = new Map() // sessionId -> active turn context
     this._occupied = new Set() // sessionId -> has a turn running or reserved
     this._waiters = new Map() // sessionId -> FIFO array of { start, reject }
+    this._handoff = new Set() // sessionId -> a deferred _startNext is already queued
     this._onSessionEvent = this._handleSessionEvent.bind(this)
     this._onSessionDestroyed = this._handleSessionDestroyed.bind(this)
     this._sm.on('session_event', this._onSessionEvent)
@@ -86,6 +111,7 @@ export class TurnDriver {
     this._waiters.clear()
     this._active.clear()
     this._occupied.clear()
+    this._handoff.clear()
     for (const w of waiters) {
       try { w.reject(new TurnError('SESSION_GONE', 'TurnDriver disposed')) } catch { /* ignore */ }
     }
@@ -100,10 +126,11 @@ export class TurnDriver {
 
   /**
    * Drive one turn: send `prompt`, accumulate output, resolve on `result`.
-   * The turn's context is registered SYNCHRONOUSLY when the per-session mutex is
-   * free, so no event can arrive before the accumulator exists (a fast provider
-   * can emit before the returned promise is even awaited). Contended turns queue
-   * FIFO and start synchronously when the prior turn releases.
+   * The turn's context is registered SYNCHRONOUSLY with its send, so no event can
+   * arrive before the accumulator exists (a fast provider can emit before the
+   * returned promise is even awaited). Contended turns queue FIFO and start on the
+   * tick after the prior turn releases — never inside the frame that released it
+   * (_scheduleNext).
    * @returns {Promise<{ text: string, result: { cost, duration, usage, modelUsage, model, numTurns, apiDurationMs } }>}
    * @throws {TurnError}
    */
@@ -131,7 +158,7 @@ export class TurnDriver {
     const entry = this._sm.getSession?.(sessionId)
     if (!entry || !entry.session) {
       reject(new TurnError('SESSION_GONE', `session ${sessionId} gone before its turn started`))
-      this._startNext(sessionId)
+      this._scheduleNext(sessionId)
       return
     }
     const ctx = {
@@ -173,6 +200,31 @@ export class TurnDriver {
     } catch (err) {
       this._finishTurn(ctx, () => ctx.reject(new TurnError('SEND_FAILED', (err && err.message) || 'sendMessage threw', { partialText: ctx.text() })))
     }
+  }
+
+  /**
+   * Hand the per-session mutex to the next queued turn — but never from inside the
+   * frame that released it. A provider emits a turn's terminal events (`stream_end`
+   * + a synthetic `result` + `stopped`, or `result` + `error`) from ONE synchronous
+   * frame; starting the queued turn on the first of them registered a live ctx that
+   * the REST of the frame then landed on, which is how a finished turn's trailing
+   * `stopped` came to reject the next turn (#7033 review). Deferring to
+   * process.nextTick puts the ctx removal in _finishTurn and the next ctx's
+   * registration on opposite sides of the frame boundary, so the epoch guard in
+   * _handleSessionEvent drops those trailing events instead of misattributing them.
+   *
+   * `_occupied` stays set across the gap, so a driveTurn() landing inside it queues
+   * rather than racing ahead. At most ONE handoff may be pending per session: two
+   * would each shift a waiter off the FIFO and start it, breaking the mutex.
+   */
+  _scheduleNext(sessionId) {
+    if (this._handoff.has(sessionId)) return
+    this._handoff.add(sessionId)
+    process.nextTick(() => {
+      this._handoff.delete(sessionId)
+      if (this._disposed) return
+      this._startNext(sessionId)
+    })
   }
 
   _startNext(sessionId) {
@@ -247,6 +299,13 @@ export class TurnDriver {
         // is over but its work did not complete, and resolving here would report
         // an interrupted turn as a finished one. partialText carries whatever the
         // turn managed to produce so the caller can still inspect it.
+        //
+        // This can only be THIS turn's `stopped`: a `stopped` trailing a turn that
+        // already settled arrives in the same synchronous frame as that settle, and
+        // the queued turn is not started until the next tick (_scheduleNext), so it
+        // hits the epoch guard with no active ctx. No drain here — `stopped` is the
+        // event _endDrain waits for, so draining on it would burn drainTimeoutMs
+        // every time.
         this._finishTurn(ctx, () => ctx.reject(new TurnError('TURN_STOPPED', 'turn interrupted before completing', { partialText: this._assembleText(ctx) })))
         break
       }
@@ -309,8 +368,10 @@ export class TurnDriver {
       ctx.drainTimer = setTimeout(() => this._endDrain(ctx), this._drainTimeoutMs)
       if (typeof ctx.drainTimer.unref === 'function') ctx.drainTimer.unref()
     } else {
+      // Drop the ctx NOW so every remaining event in this frame hits the epoch
+      // guard, and hand the mutex over on the next tick (see _scheduleNext).
       this._active.delete(ctx.sessionId)
-      this._startNext(ctx.sessionId)
+      this._scheduleNext(ctx.sessionId)
     }
   }
 
@@ -318,7 +379,7 @@ export class TurnDriver {
     if (ctx.drainTimer) { clearTimeout(ctx.drainTimer); ctx.drainTimer = null }
     if (this._active.get(ctx.sessionId) === ctx) {
       this._active.delete(ctx.sessionId)
-      this._startNext(ctx.sessionId)
+      this._scheduleNext(ctx.sessionId)
     }
   }
 }

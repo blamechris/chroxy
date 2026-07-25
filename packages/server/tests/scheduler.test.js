@@ -867,6 +867,9 @@ describe('#6865 SchedulerEngine', () => {
       // watchdog fires — the slot held for the whole window.
       const record = store.get(task.id)
       assert.ok(record.lastRun, 'the interrupted run must be recorded already, not left pending until runTimeoutMs')
+      // Belt-and-braces only — `runTimeoutMs` rides the FAKE clock, so this
+      // wall-clock bound can never be what fails. `record.lastRun` above is the
+      // load-bearing assertion.
       assert.ok(elapsedMs < 2_000, `settling must not block on runTimeoutMs (took ${elapsedMs}ms of a 5000ms window)`)
       // ...and the outcome is still the VISIBLE blocked failure. Settling faster
       // must never turn an interrupted run into a completed one.
@@ -894,6 +897,7 @@ describe('#6865 SchedulerEngine', () => {
       assert.equal(sm.interrupted.length, 1)
       const record = store.get(task.id)
       assert.ok(record.lastRun, 'the stopped run must be recorded already, not left pending until runTimeoutMs')
+      // Belt-and-braces only (fake clock) — see the previous test.
       assert.ok(elapsedMs < 2_000, `settling must not block on runTimeoutMs (took ${elapsedMs}ms of a 5000ms window)`)
       assert.notEqual(record.lastRun.status, 'success', 'a stopped run did not do the work — never success')
       assert.equal(record.lastRun.status, 'error')
@@ -1276,7 +1280,7 @@ class FakeSessionManager extends EventEmitter {
         // synchronous permission_request above already triggered the deny +
         // interrupt, so emitting a result here would settle a turn the engine has
         // already aborted.
-        if (this._stopAfterSend) { session.interrupt(); return }
+        if (this._stopAfterSend) { await session.interrupt(); return }
         if (this._interruptEmitsStopped) return
         this.emit('session_event', { sessionId: id, event: 'result', data: { cost: 0, duration: 1 } })
       },
