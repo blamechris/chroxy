@@ -11,10 +11,11 @@
  *   - `repo`    — New Session Here, Summarize & start new session targeting the
  *     group's most-recent session (or one item per live session when several,
  *     #5547), Open in Finder (Tauri)
- *   - `resumable` (#4249) — Resume Conversation, Copy Conversation ID,
- *     Open in Finder (Tauri+cwd). cwd is looked up from `conversationHistory`
- *     so the resume + reveal actions point at the same project the
- *     conversation lived in.
+ *   - `resumable` (#4249) — Resume Conversation, View Conversation (#6863,
+ *     read-only — see viewConversation), Copy Conversation ID, Open in Finder
+ *     (Tauri+cwd). cwd is looked up from `conversationHistory` so the resume
+ *     + view + reveal actions point at the same project the conversation
+ *     lived in.
  *
  * Capability-gated items use a falsy `onClick` so `SessionContextMenu`
  * filters them at render time (no caller-side filtering needed).
@@ -47,6 +48,13 @@ export interface BuildSidebarContextMenuItemsArgs {
     skipPermissions?: boolean
   }) => void
   resumeConversation: (conversationId: string, cwd?: string) => void
+  /**
+   * #6863 (epic #6765) — open a read-only transcript viewer instead of
+   * resuming. NEVER calls `createSession` / spawns a provider; works even
+   * for conversations whose provider has `capabilities.resume === false`
+   * (BYOK, Codex, Gemini, user-shell), for which Resume is refused outright.
+   */
+  viewConversation: (conversationId: string, cwd?: string) => void
   revealInFinder: (path: string) => Promise<unknown>
   /** Surface a Rust-side reveal failure as a toast (matches App.tsx pattern). */
   onRevealError: (message: string) => void
@@ -84,6 +92,7 @@ export function buildSidebarContextMenuItems(
     isTauri,
     createSession,
     resumeConversation,
+    viewConversation,
     revealInFinder,
     onRevealError,
     copyToClipboard,
@@ -223,6 +232,15 @@ export function buildSidebarContextMenuItems(
         id: 'resume',
         label: 'Resume Conversation',
         onClick: () => resumeConversation(conversationId, cwd),
+      },
+      {
+        // #6863 — read-only viewer, additive alongside Resume. Always
+        // enabled (unlike Resume, which the server can refuse for a
+        // capability-gated provider) since the endpoint it drives reads
+        // straight off disk and works for every provider.
+        id: 'view',
+        label: 'View Conversation',
+        onClick: () => viewConversation(conversationId, cwd),
       },
       {
         id: 'copy-id',

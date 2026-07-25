@@ -7,6 +7,7 @@ describe('ConversationSearch (#1077)', () => {
   const mockSearchConversations = vi.fn()
   const mockClearSearchResults = vi.fn()
   const mockOnResumeSession = vi.fn()
+  const mockOnViewConversation = vi.fn()
 
   const sampleResults: SearchResult[] = [
     {
@@ -47,6 +48,7 @@ describe('ConversationSearch (#1077)', () => {
         searchConversations={mockSearchConversations}
         clearSearchResults={mockClearSearchResults}
         onResumeSession={mockOnResumeSession}
+        onViewConversation={mockOnViewConversation}
       />,
     )
     expect(screen.getByPlaceholderText('Search conversations...')).toBeInTheDocument()
@@ -62,6 +64,7 @@ describe('ConversationSearch (#1077)', () => {
         searchConversations={mockSearchConversations}
         clearSearchResults={mockClearSearchResults}
         onResumeSession={mockOnResumeSession}
+        onViewConversation={mockOnViewConversation}
       />,
     )
 
@@ -87,6 +90,7 @@ describe('ConversationSearch (#1077)', () => {
         searchConversations={mockSearchConversations}
         clearSearchResults={mockClearSearchResults}
         onResumeSession={mockOnResumeSession}
+        onViewConversation={mockOnViewConversation}
       />,
     )
 
@@ -111,6 +115,7 @@ describe('ConversationSearch (#1077)', () => {
         searchConversations={mockSearchConversations}
         clearSearchResults={mockClearSearchResults}
         onResumeSession={mockOnResumeSession}
+        onViewConversation={mockOnViewConversation}
       />,
     )
 
@@ -128,6 +133,7 @@ describe('ConversationSearch (#1077)', () => {
         searchConversations={mockSearchConversations}
         clearSearchResults={mockClearSearchResults}
         onResumeSession={mockOnResumeSession}
+        onViewConversation={mockOnViewConversation}
       />,
     )
 
@@ -143,11 +149,93 @@ describe('ConversationSearch (#1077)', () => {
         searchConversations={mockSearchConversations}
         clearSearchResults={mockClearSearchResults}
         onResumeSession={mockOnResumeSession}
+        onViewConversation={mockOnViewConversation}
       />,
     )
 
     fireEvent.click(screen.getByText('Fix authentication bug'))
     expect(mockOnResumeSession).toHaveBeenCalledWith('conv-1', '/home/user/my-project')
+    expect(mockOnViewConversation).not.toHaveBeenCalled()
+  })
+
+  // #6863 — regression guard: each result row must expose BOTH a View and a
+  // Resume action, and each must call the RIGHT handler without also
+  // triggering the other. This is the exact risk the issue calls out: a
+  // mis-wire that turns a Resume click into a View (or vice versa).
+  describe('View action (#6863)', () => {
+    it('renders a View button and a Resume button for each result', () => {
+      render(
+        <ConversationSearch
+          searchResults={sampleResults}
+          searchLoading={false}
+          searchQuery="auth"
+          searchConversations={mockSearchConversations}
+          clearSearchResults={mockClearSearchResults}
+          onResumeSession={mockOnResumeSession}
+          onViewConversation={mockOnViewConversation}
+        />,
+      )
+
+      expect(screen.getByTestId('conversation-search-view-conv-1')).toBeInTheDocument()
+      expect(screen.getByTestId('conversation-search-resume-conv-1')).toBeInTheDocument()
+      expect(screen.getByTestId('conversation-search-view-conv-2')).toBeInTheDocument()
+      expect(screen.getByTestId('conversation-search-resume-conv-2')).toBeInTheDocument()
+    })
+
+    it('clicking View calls onViewConversation with the conversationId + cwd, and does NOT resume', () => {
+      render(
+        <ConversationSearch
+          searchResults={sampleResults}
+          searchLoading={false}
+          searchQuery="auth"
+          searchConversations={mockSearchConversations}
+          clearSearchResults={mockClearSearchResults}
+          onResumeSession={mockOnResumeSession}
+          onViewConversation={mockOnViewConversation}
+        />,
+      )
+
+      fireEvent.click(screen.getByTestId('conversation-search-view-conv-1'))
+      expect(mockOnViewConversation).toHaveBeenCalledWith('conv-1', '/home/user/my-project')
+      expect(mockOnResumeSession).not.toHaveBeenCalled()
+    })
+
+    it('clicking the Resume button calls onResumeSession, and does NOT view', () => {
+      render(
+        <ConversationSearch
+          searchResults={sampleResults}
+          searchLoading={false}
+          searchQuery="auth"
+          searchConversations={mockSearchConversations}
+          clearSearchResults={mockClearSearchResults}
+          onResumeSession={mockOnResumeSession}
+          onViewConversation={mockOnViewConversation}
+        />,
+      )
+
+      fireEvent.click(screen.getByTestId('conversation-search-resume-conv-2'))
+      expect(mockOnResumeSession).toHaveBeenCalledWith('conv-2', '/home/user/other-project')
+      expect(mockOnViewConversation).not.toHaveBeenCalled()
+    })
+
+    it('Enter on a focused result still resumes (unchanged) and does not view', () => {
+      render(
+        <ConversationSearch
+          searchResults={sampleResults}
+          searchLoading={false}
+          searchQuery="auth"
+          searchConversations={mockSearchConversations}
+          clearSearchResults={mockClearSearchResults}
+          onResumeSession={mockOnResumeSession}
+          onViewConversation={mockOnViewConversation}
+        />,
+      )
+
+      const option = screen.getAllByRole('option')[0]!
+      fireEvent.keyDown(option, { key: 'Enter' })
+      expect(mockOnResumeSession).toHaveBeenCalledWith('conv-1', '/home/user/my-project')
+      expect(mockOnViewConversation).not.toHaveBeenCalled()
+    })
   })
 
   it('shows "no results" when search returns empty', () => {
@@ -159,6 +247,7 @@ describe('ConversationSearch (#1077)', () => {
         searchConversations={mockSearchConversations}
         clearSearchResults={mockClearSearchResults}
         onResumeSession={mockOnResumeSession}
+        onViewConversation={mockOnViewConversation}
       />,
     )
 

@@ -694,6 +694,226 @@ export function resetReplayFlags(): void {
 }
 
 // ---------------------------------------------------------------------------
+// Read-only transcript viewer (#6863, epic #6765)
+// ---------------------------------------------------------------------------
+// The server's `request_conversation_transcript` handler (#6860) streams a
+// CLOSED conversation's history back using the EXACT SAME `history_replay_start`
+// / `message` / `history_replay_end` wire frames a live session's replay uses —
+// the only difference is `sessionId` carries a conversationId with no matching
+// entry in `sessionStates` (the conversation has no live session; nothing was
+// spawned). Routing those frames through the switch below unmodified would
+// silently misfile them: the `'message'` case falls back to
+// `get().addMessage(newMsg)` — appending into whatever session IS currently
+// active — whenever `sessionStates[targetId]` doesn't exist. A transcript fetch
+// must never touch `sessionStates`, the replay dedup cache, or
+// `_replayingSessions`, so a matching frame is diverted at the top of
+// `handleMessage` into the dedicated `transcriptViewer` store slice instead
+// (see the interception guard there and `applyTranscriptFrame` below).
+//
+// Membership in `_pendingTranscriptFetches` — NOT whether the id equals the
+// store's CURRENTLY DISPLAYED `transcriptViewer.conversationId` — decides
+// whether a frame gets diverted here at all. The viewer can move on to a
+// DIFFERENT conversation (View A, close, View B) before A's fetch finishes;
+// using only "currently displayed" as the interception key would let A's late
+// frames fall through into the live-session switch once B is displayed.
+// `applyTranscriptFrame` separately decides whether to apply a diverted frame
+// to visible state (id matches the displayed viewer) or just discard it (a
+// superseded fetch, or a fetch whose viewer has since been closed).
+//
+// ARMING LIFETIME — an id stays armed from the moment its request is sent
+// until its OWN `history_replay_end` arrives (or the socket drops / an
+// explicit reset). Closing the viewer, the watchdog firing, and Retry must
+// NOT disarm it mid-stream: frames arriving after a disarm are not inert.
+// A `message` frame would fall through the switch below to its flat
+// `get().addMessage(...)` fallback (transcript text rendered as live chat),
+// and a late `history_replay_start` would reach `updateActiveSession`, which
+// WIPES the live session's `activeAgents` and cancels `isPlanPending` /
+// `planAllowedPrompts` — i.e. opening and closing the read-only viewer could
+// silently drop a pending plan approval. So: closing the viewer stops
+// RENDERING, never INTERCEPTING.
+//
+// Arming is REFCOUNTED per id because Retry re-requests the SAME
+// conversationId while stream 1 may still be on the wire — stream 1's
+// `history_replay_end` must not disarm an id the retry still has an
+// outstanding request for. The map is insertion-ordered and capped
+// (`TRANSCRIPT_PENDING_CAP`) so a fetch that never sees an end frame (a
+// server-side rejection, a mid-stream drop) can't accumulate unbounded.
+//
+// NAMESPACE DISJOINTNESS (invariant this interception relies on) — the
+// interception key is the frame's `sessionId`, which carries a conversationId
+// for a transcript fetch and a live session id for a replay. That is only
+// safe because the two namespaces cannot collide: the server mints live
+// session ids as 32-char hex (`session-manager.js` — `randomBytes(16)
+// .toString('hex')`), while conversationIds are the dashed UUIDs it reads off
+// disk. Two defensive checks keep a future id-format change failing SAFE
+// (toward live state, the direction that can't corrupt a session) instead of
+// silently cross-wiring: an id shaped like a live session id is never treated
+// as a transcript id (`isTranscriptFramePending` below), and `handleMessage`
+// additionally refuses to divert any frame whose sessionId HAS a live
+// `sessionStates` entry.
+const _pendingTranscriptFetches = new Map<string, number>();
+const TRANSCRIPT_PENDING_CAP = 32;
+/** Live session ids are 32-char hex; a conversationId never is. */
+const LIVE_SESSION_ID_SHAPE = /^[0-9a-f]{32}$/i;
+
+// Inactivity watchdog. `request_conversation_transcript` has no dedicated
+// failure echo (a rejection arrives as a generic `session_error{message}`
+// with no correlating id — a per-request correlation id / dedicated failure
+// echo needs a protocol change, tracked in #7007), so a fetch that goes
+// SILENT is surfaced as an error instead of spinning forever. It is an
+// INACTIVITY timer, not a deadline: every diverted frame for the id re-arms
+// it, so a healthy large transcript streaming for longer than the window is
+// never mislabeled an error. Cleared on `history_replay_end` (success), on
+// close, on a failed send, and on reset — no path leaves it armed (#6933).
+const TRANSCRIPT_INACTIVITY_MS = 15000;
+let _transcriptWatchdog: {
+  conversationId: string;
+  timer: ReturnType<typeof setTimeout>;
+  onTimeout: (conversationId: string) => void;
+} | null = null;
+
+function armTranscriptWatchdog(conversationId: string, onTimeout: (conversationId: string) => void): void {
+  clearTranscriptWatchdog();
+  _transcriptWatchdog = {
+    conversationId,
+    onTimeout,
+    timer: setTimeout(() => {
+      _transcriptWatchdog = null;
+      onTimeout(conversationId);
+    }, TRANSCRIPT_INACTIVITY_MS),
+  };
+}
+
+/**
+ * Frame arrived for `conversationId` — restart its inactivity window. No-op
+ * for any other id (a superseded fetch's frames must not keep the current
+ * fetch's watchdog alive).
+ */
+function touchTranscriptWatchdog(conversationId: string): void {
+  const current = _transcriptWatchdog;
+  if (!current || current.conversationId !== conversationId) return;
+  armTranscriptWatchdog(conversationId, current.onTimeout);
+}
+
+/**
+ * Disarm the watchdog (optionally only if it belongs to `conversationId`).
+ * Exported so connection.ts can stop it on close — which must stop the error
+ * timer WITHOUT disarming interception.
+ */
+export function clearTranscriptWatchdog(conversationId?: string): void {
+  if (!_transcriptWatchdog) return;
+  if (conversationId && _transcriptWatchdog.conversationId !== conversationId) return;
+  clearTimeout(_transcriptWatchdog.timer);
+  _transcriptWatchdog = null;
+}
+
+/**
+ * Start tracking a transcript fetch — call right before sending the request.
+ * `onInactivityTimeout` (if given) fires when no frame for this id has
+ * arrived for `TRANSCRIPT_INACTIVITY_MS`.
+ */
+export function beginTranscriptFetch(
+  conversationId: string,
+  onInactivityTimeout?: (conversationId: string) => void,
+): void {
+  const outstanding = _pendingTranscriptFetches.get(conversationId);
+  _pendingTranscriptFetches.set(conversationId, (outstanding ?? 0) + 1);
+  if (outstanding === undefined) {
+    // Bounded: drop the oldest still-armed ids (insertion order) rather than
+    // growing forever when a fetch never gets its end frame.
+    while (_pendingTranscriptFetches.size > TRANSCRIPT_PENDING_CAP) {
+      const oldest = _pendingTranscriptFetches.keys().next();
+      if (oldest.done || oldest.value === conversationId) break;
+      _pendingTranscriptFetches.delete(oldest.value);
+    }
+  }
+  if (onInactivityTimeout) armTranscriptWatchdog(conversationId, onInactivityTimeout);
+}
+
+/**
+ * One outstanding request for this id has concluded — its `history_replay_end`
+ * arrived, or the send failed so nothing is coming. Refcounted: the id stays
+ * armed while a retry's request is still outstanding.
+ */
+export function endTranscriptFetch(conversationId: string): void {
+  const outstanding = _pendingTranscriptFetches.get(conversationId);
+  if (outstanding === undefined) return;
+  if (outstanding <= 1) _pendingTranscriptFetches.delete(conversationId);
+  else _pendingTranscriptFetches.set(conversationId, outstanding - 1);
+}
+
+function isTranscriptFramePending(sessionId: string): boolean {
+  // Shape check is defensive, not the discriminator — see the namespace
+  // disjointness note above.
+  if (LIVE_SESSION_ID_SHAPE.test(sessionId)) return false;
+  return _pendingTranscriptFetches.has(sessionId);
+}
+
+/** Full reset — mirrors `resetReplayFlags` on a hard disconnect / socket drop. */
+export function resetTranscriptFetchTracking(): void {
+  _pendingTranscriptFetches.clear();
+  clearTranscriptWatchdog();
+}
+
+/**
+ * Apply a diverted `history_replay_start` / `message` / `history_replay_end`
+ * frame to the `transcriptViewer` store slice — NEVER to `sessionStates`, the
+ * replay dedup cache, or `_replayingSessions`. See the `_pendingTranscriptIds`
+ * doc above for why this is reached via the pending set, not the displayed
+ * conversationId.
+ */
+function applyTranscriptFrame(msg: Record<string, unknown>, get: MsgGet, set: MsgSet): void {
+  const sessionId = typeof msg.sessionId === 'string' ? msg.sessionId : null;
+  if (sessionId) {
+    if (msg.type === 'history_replay_end') {
+      // The fetch completed — drop one outstanding request regardless of
+      // whether it's still the displayed viewer (a superseded fetch's end
+      // frame must also settle, or it would wedge `_pendingTranscriptFetches`
+      // forever).
+      endTranscriptFetch(sessionId);
+      // Success clears the watchdog explicitly — unless a Retry has another
+      // request for the same id still outstanding, in which case this end
+      // frame is just activity and the window restarts for stream 2.
+      if (_pendingTranscriptFetches.has(sessionId)) touchTranscriptWatchdog(sessionId);
+      else clearTranscriptWatchdog(sessionId);
+    } else {
+      // Any frame is proof of life — restart the inactivity window so a
+      // healthy large transcript is never mislabeled a timeout.
+      touchTranscriptWatchdog(sessionId);
+    }
+  }
+
+  const viewer = get().transcriptViewer;
+  // Not the conversation currently displayed — a superseded fetch, a fetch
+  // whose viewer the user has since CLOSED, or a malformed frame with no
+  // sessionId. Swallow it here rather than falling through to the
+  // live-session switch, but don't touch visible state. This is what makes
+  // "keep intercepting after close" inert instead of merely quiet.
+  if (!sessionId || viewer.conversationId !== sessionId) return;
+
+  if (msg.type === 'history_replay_start') {
+    set({ transcriptViewer: { ...viewer, status: 'loading', messages: [], error: null } });
+    return;
+  }
+  if (msg.type === 'history_replay_end') {
+    set({ transcriptViewer: { ...viewer, status: 'ready' } });
+    return;
+  }
+  // msg.type === 'message' — reuse the same pure parser live messages use.
+  // receivingHistoryReplay=true applies the same dedup-against-cache logic a
+  // live replay gets; activeSessionId is irrelevant here (unused by the
+  // parser) so null is passed.
+  const result = sharedMessageHandler(msg, null, true, viewer.messages);
+  if (!result.shouldDispatch) return;
+  set({
+    transcriptViewer: {
+      ...viewer,
+      messages: [...viewer.messages, result.chatMessage],
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Permission boundary message splitting (#554)
 // ---------------------------------------------------------------------------
 const _postPermissionSplits = new Set<string>();
@@ -3687,6 +3907,24 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
   const get = () => getStore().getState();
   const set: (s: Partial<ConnectionState> | ((state: ConnectionState) => Partial<ConnectionState>)) => void =
     (s) => getStore().setState(s as ConnectionState);
+
+  // #6863 — read-only transcript viewer interception. MUST run before the
+  // activity-bump block, runDispatch, and the HANDLERS map/switch below —
+  // every one of those keys off `sessionStates`, which a transcript's
+  // conversationId never has an entry in. See `applyTranscriptFrame`'s doc
+  // comment (near `_pendingTranscriptFetches`, above) for the full rationale,
+  // including the id-namespace invariant the `!get().sessionStates[...]`
+  // fail-safe below defends: a frame for a KNOWN LIVE session is never
+  // diverted, whatever the pending set says.
+  if (
+    (msg.type === 'history_replay_start' || msg.type === 'message' || msg.type === 'history_replay_end') &&
+    typeof msg.sessionId === 'string' &&
+    isTranscriptFramePending(msg.sessionId) &&
+    !get().sessionStates[msg.sessionId]
+  ) {
+    applyTranscriptFrame(msg, get, set);
+    return;
+  }
 
   // #3758 — bump lastClientActivityAt for activity-bearing events BEFORE
   // any per-case handler runs. Doing it here keeps the bump in one place

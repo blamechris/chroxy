@@ -1,0 +1,54 @@
+/* TranscriptViewer — read-only conversation transcript (#6863). */
+
+.transcript-viewer-readonly-badge {
+  margin: 0 0 var(--space-2) 0;
+  color: var(--text-dim);
+  font-size: var(--text-sm);
+}
+
+.transcript-viewer-body {
+  display: flex;
+  flex-direction: column;
+  height: min(70vh, 640px);
+  min-height: 240px;
+  background: var(--bg-primary, var(--bg-secondary));
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.transcript-viewer-status {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-4);
+  text-align: center;
+  color: var(--text-dim);
+  font-size: var(--text-md);
+}
+
+.transcript-viewer-status.transcript-viewer-error {
+  color: var(--text-error);
+}
+
+.transcript-viewer-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+
+.transcript-viewer-button {
+  background: transparent;
+  border: 1px solid var(--border-secondary);
+  border-radius: var(--radius-sm);
+  padding: 6px 12px;
+  cursor: pointer;
+  font: inherit;
+  color: var(--text-primary);
+}
+
+.transcript-viewer-button:hover {
+  border-color: var(--border-focus);
+}
