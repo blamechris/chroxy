@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
 import { createServer } from 'node:http'
+import { PassThrough } from 'node:stream'
 
 import { createPermissionHandler, evaluateHookFloorRequest } from '../src/ws-permissions.js'
 import { PermissionManager } from '../src/permission-manager.js'
@@ -93,7 +94,7 @@ function decisionOf(stdout) {
  * serving both routes the hook talks to. `promptDecision` is what the "user on
  * their phone" answers when a prompt is raised.
  */
-async function startRealDaemon({ promptDecision = 'allow', sessionCwd = CWD } = {}) {
+async function startRealDaemon({ promptDecision = 'allow', sessionCwd = CWD, resolveSession = true } = {}) {
   const stats = { floorRequests: 0, permissionRequests: 0, prompts: [] }
   const pendingPermissions = new Map()
   let handler
@@ -114,8 +115,11 @@ async function startRealDaemon({ promptDecision = 'allow', sessionCwd = CWD } = 
     getSessionManager: () => null,
     pairingManager: null,
     // The cwd basis: the owning session, exactly like the production lookup.
+    // `resolveSession: false` models the one production shape where the lookup
+    // CANNOT succeed — _validateHookAuth's primary-token fallback (no hook
+    // secrets registered) — which is the #7020 under-floor window.
     findSessionByHookSecret: (secret) => (
-      secret === HOOK_SECRET ? { session: { cwd: sessionCwd }, sessionId: 'sess-1' } : null
+      (resolveSession && secret === HOOK_SECRET) ? { session: { cwd: sessionCwd }, sessionId: 'sess-1' } : null
     ),
   })
   const server = createServer((req, res) => {
@@ -253,11 +257,27 @@ describe('evaluateHookFloorRequest — the hook path\'s floor verdict (#7004)', 
 
   it('FAILS CLOSED when no cwd can be resolved (never falls back to the daemon cwd)', () => {
     const payload = { tool_name: 'Read', tool_input: { file_path: 'src/a.js' } }
-    assert.equal(evaluateHookFloorRequest(payload, null).floor, true, 'no session cwd + no payload cwd → prompt')
-    // The payload's own cwd is the documented fallback when the session is not
-    // resolvable, and it must actually be used (not ignored).
-    assert.equal(evaluateHookFloorRequest({ ...payload, cwd: CWD }, null).floor, false)
-    assert.equal(evaluateHookFloorRequest({ ...payload, cwd: CWD, tool_input: { file_path: '.env' } }, null).floor, true)
+    assert.equal(evaluateHookFloorRequest(payload, null).floor, true, 'no session cwd → prompt')
+  })
+
+  // #7020 — the payload's own `cwd` used to be the documented fallback when the
+  // owning session was not resolvable. It is a CALLER-CHOSEN resolution base, so
+  // it can UNDER-floor in exactly the way the (deliberately absent)
+  // `process.cwd()` fallback would: point it AT the protected directory and the
+  // relative scan sees nothing protected.
+  it('IGNORES the payload cwd entirely — a caller-chosen base cannot un-floor a target (#7020)', () => {
+    // The concrete under-floor from the #7016 security review: the target sits
+    // inside `.git`, but the payload names `.git` itself as the resolution base,
+    // so the relative scan only ever sees `config`.
+    const underFloor = { tool_name: 'Read', tool_input: { file_path: '/repo/.git/config' }, cwd: '/repo/.git' }
+    assert.equal(
+      evaluateHookFloorRequest(underFloor, null).floor,
+      true,
+      'a payload-chosen cwd must not clear a target inside .git',
+    )
+    // The generic form: no resolvable session → prompt, whatever cwd the caller sent.
+    const ordinary = { tool_name: 'Read', tool_input: { file_path: 'src/a.js' }, cwd: CWD }
+    assert.equal(evaluateHookFloorRequest(ordinary, null).floor, true, 'unresolvable session → prompt')
   })
 
   it('prefers the SESSION cwd over the payload cwd (same basis as the in-process path)', () => {
@@ -542,7 +562,268 @@ describe('permission-hook.sh: floor clearance is a real JSON parse, not a substr
 })
 
 // ---------------------------------------------------------------------------
-// 3c. Reaching the daemon from a container
+// 3c. #7020 — the three remaining fail-OPEN edges on the floor probe
+// ---------------------------------------------------------------------------
+
+describe('permission-hook.sh: an obviously unusable payload does not skip the probe (#7020)', () => {
+  let daemon
+
+  afterEach(async () => {
+    if (daemon) await daemon.close()
+    daemon = null
+  })
+
+  // The pre-filter's soundness argument ("a payload naming no path field
+  // provably cannot be floored") holds only for a payload that is actually
+  // COMPLETE. An empty or truncated body used to take the same `return 1` and
+  // auto-allow under `auto` — the one place the negative filter could fail OPEN.
+  // The guard is a last-byte shape check, so what it PROVABLY catches is these
+  // two shapes: an empty body, and a truncation that does not land on a `}`. A
+  // truncation that does land on one still looks complete to it — tracked in
+  // #7043, not pinned here, because these tests state only what holds.
+  const incompletePayloads = [
+    ['an EMPTY payload', ''],
+    ['a payload truncated before the path key', '{"tool_name":"Read","tool_in'],
+    ['a payload truncated mid-object', '{"tool_name":"Read","tool_input":{"fi'],
+  ]
+
+  for (const [label, payload] of incompletePayloads) {
+    it(`auto + ${label} → routes to a PROMPT, never a silent allow`, async () => {
+      daemon = await startRealDaemon({ promptDecision: 'allow' })
+      const { stdout } = await runHook({ payload, port: daemon.port, mode: 'auto' })
+      // No probe is needed: a body whose last non-whitespace byte is not `}` is
+      // definitely not a JSON object, so it proves nothing about path fields and
+      // the hook leaves the auto-allow path directly. That is strictly stronger
+      // than probing — it holds even if the daemon is down.
+      assert.equal(daemon.stats.permissionRequests, 1, 'an incomplete payload must leave the auto-allow path')
+      // /permission cannot parse it either, so it answers a 400 deny — the tool
+      // is BLOCKED. The one thing that must never happen is a silent allow.
+      assert.equal(decisionOf(stdout).permissionDecision, 'deny', 'and an unparseable payload is denied, never allowed')
+    })
+  }
+
+  // A `\uXXXX` escape is the only VALID JSON escape that can spell a path-field key
+  // (`"\u0066ile_path"` parses to `file_path`), so the byte-level pre-filter
+  // misses what the server's JSON-semantic lookup finds. This payload IS complete
+  // and well-formed, so only the daemon can answer it — the hook must probe. An
+  // INVALID escape (`\U`, `\x`) is out of scope: nothing parses such a body, and
+  // the pre-filter does not consult the daemon about it either (#7043).
+  it('auto + a \\u-escaped path key → PROBES and routes to a PROMPT, never a silent allow', async () => {
+    daemon = await startRealDaemon({ promptDecision: 'allow' })
+    const payload = '{"tool_name":"Read","tool_input":{"\\u0066ile_path":".env"},"cwd":"/work/project"}'
+    const { stdout } = await runHook({ payload, port: daemon.port, mode: 'auto' })
+    assert.equal(daemon.stats.floorRequests, 1, 'a byte-level miss must not be read as "cannot be floored"')
+    assert.equal(daemon.stats.permissionRequests, 1, 'and the escaped .env read must reach the user')
+    assert.equal(decisionOf(stdout).permissionDecision, 'allow', 'the user then answered')
+  })
+
+  // The completeness guard is a LAST-BYTE check and `REQUEST=$(cat -)` strips
+  // trailing NEWLINES only, so `}\r\n` / `} ` would leave a non-`}` last byte and
+  // send EVERY auto/acceptEdits tool call to a phone prompt. Fail-closed, but it
+  // would destroy the lenient modes for a CRLF-emitting producer — so the guard
+  // trims the trailing whitespace run before looking at the last byte.
+  const trailingWhitespacePayloads = [
+    ['CRLF', '\r\n'],
+    ['a trailing space', ' '],
+    ['a tab + CRLF', '\t\r\n'],
+  ]
+
+  for (const [label, suffix] of trailingWhitespacePayloads) {
+    it(`auto + an ordinary path-less call terminated by ${label} is still auto-allowed with no round trip`, async () => {
+      daemon = await startRealDaemon()
+      const payload = JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'ls' }, cwd: CWD }) + suffix
+      const { stdout } = await runHook({ payload, port: daemon.port, mode: 'auto' })
+      assert.equal(decisionOf(stdout).permissionDecision, 'allow')
+      assert.equal(daemon.stats.floorRequests, 0, 'trailing whitespace is not incompleteness')
+      assert.equal(daemon.stats.permissionRequests, 0, 'an ordinary tool call must not be routed to the phone')
+    })
+  }
+
+  it('trimming trailing whitespace does not skip the probe for a payload that DOES name a path', async () => {
+    daemon = await startRealDaemon()
+    const payload = JSON.stringify(readPayload('src/index.js')) + '\r\n'
+    const { stdout } = await runHook({ payload, port: daemon.port, mode: 'auto' })
+    assert.equal(daemon.stats.floorRequests, 1, 'the path-field scan still runs on the raw payload')
+    assert.equal(daemon.stats.permissionRequests, 0)
+    assert.equal(decisionOf(stdout).permissionDecision, 'allow')
+  })
+
+  it('a WELL-FORMED path-less payload still skips the probe (no new latency on the fast path)', async () => {
+    daemon = await startRealDaemon()
+    // Carries `\n` and `\"` escapes — the common Bash shapes. Neither can spell a
+    // path-field key, so the fast path must be preserved for them: only `\u` probes.
+    const { stdout } = await runHook({
+      payload: { tool_name: 'Bash', tool_input: { command: 'printf "a\nb"\nls -la' }, cwd: CWD },
+      port: daemon.port,
+      mode: 'auto',
+    })
+    assert.equal(decisionOf(stdout).permissionDecision, 'allow')
+    assert.equal(daemon.stats.floorRequests, 0, 'a complete path-less payload is still proven un-floorable')
+    assert.equal(daemon.stats.permissionRequests, 0)
+  })
+})
+
+describe('POST /permission-floor: the cwd basis is the OWNING SESSION only (#7020)', () => {
+  let daemon
+
+  afterEach(async () => {
+    if (daemon) await daemon.close()
+    daemon = null
+  })
+
+  it('auto + an unresolvable owning session → PROMPTS (the payload cwd is not a resolution base)', async () => {
+    // Models _validateHookAuth's primary-token fallback: auth passes, but the
+    // hook-secret → session lookup necessarily returns nothing, so the handler
+    // used to fall back to the payload's own `cwd` — a caller-chosen base.
+    daemon = await startRealDaemon({ resolveSession: false, promptDecision: 'allow' })
+    const { stdout } = await runHook({ payload: readPayload('src/index.js'), port: daemon.port, mode: 'auto' })
+    assert.equal(daemon.stats.floorRequests, 1)
+    assert.equal(daemon.stats.permissionRequests, 1, 'no resolvable session cwd must fail CLOSED')
+    assert.equal(decisionOf(stdout).permissionDecision, 'allow', 'the user then answered')
+  })
+
+  it('a resolvable owning session still clears an ordinary file with zero prompts', async () => {
+    daemon = await startRealDaemon()
+    const { stdout } = await runHook({ payload: readPayload('src/index.js'), port: daemon.port, mode: 'auto' })
+    assert.equal(daemon.stats.floorRequests, 1)
+    assert.equal(daemon.stats.permissionRequests, 0)
+    assert.equal(decisionOf(stdout).permissionDecision, 'allow')
+  })
+})
+
+describe('POST /permission + /permission-floor: a request-stream error is handled, not thrown (#7020)', () => {
+  /** The handler under test with nothing but the plumbing it actually touches. */
+  function makeHandler({ pendingPermissions = new Map() } = {}) {
+    return createPermissionHandler({
+      sendFn: () => {},
+      broadcastFn: () => {},
+      validateBearerAuth: () => true,
+      validateHookAuth: () => true,
+      pushManager: null,
+      pendingPermissions,
+      permissionSessionMap: new Map(),
+      getSessionManager: () => null,
+      pairingManager: null,
+      findSessionByHookSecret: () => ({ session: { cwd: CWD }, sessionId: 'sess-1' }),
+    })
+  }
+
+  function fakeReq() {
+    const req = new PassThrough()
+    req.headers = { authorization: `Bearer ${HOOK_SECRET}` }
+    req.socket = { remoteAddress: '203.0.113.7' }
+    return req
+  }
+
+  /**
+   * `writeHead` THROWS on a second call, exactly as a real `ServerResponse` does
+   * (`ERR_HTTP_HEADERS_SENT`). Without that, a fixture silently accepts a double
+   * response and cannot observe the defect at all — which is how the post-`end`
+   * ordering below stayed invisible. `writeHeadCalls` counts responses so
+   * "exactly one" is asserted directly rather than inferred from a status code.
+   * `on()` is a no-op registrar: `handlePermissionRequest`'s end handler attaches
+   * `res.on('close')`, and these tests exercise the window before it fires.
+   */
+  function fakeRes() {
+    return {
+      statusCode: null,
+      headersSent: false,
+      body: '',
+      writeHeadCalls: 0,
+      writeHead(status) {
+        if (this.headersSent) {
+          throw Object.assign(new Error('Cannot write headers after they are sent to the client'), { code: 'ERR_HTTP_HEADERS_SENT' })
+        }
+        this.writeHeadCalls++
+        this.statusCode = status
+        this.headersSent = true
+        return this
+      },
+      end(chunk) { if (chunk) this.body += chunk; return this },
+      on() { return this },
+    }
+  }
+
+  // An `error` event on a stream with NO listener is an unhandled 'error' —
+  // `emit` rethrows it, which on the real server escapes to uncaughtException.
+  // mailbox-route.js and github-webhook.js both attach one; these two capped
+  // readers did not.
+  for (const [label, route] of [['/permission-floor', 'handlePermissionFloorCheck'], ['/permission', 'handlePermissionRequest']]) {
+    it(`${label} attaches an error listener and answers fail-closed on a mid-body abort`, () => {
+      const handler = makeHandler()
+      try {
+        const req = fakeReq()
+        const res = fakeRes()
+        handler[route](req, res)
+        req.write('{"tool_name":"Read","tool_i')
+        assert.doesNotThrow(
+          () => req.emit('error', Object.assign(new Error('aborted by peer'), { code: 'ECONNRESET' })),
+          'an aborted request body must not throw an unhandled stream error',
+        )
+        assert.equal(res.statusCode, 400, 'the aborted request gets a fail-closed response')
+        const parsed = JSON.parse(res.body)
+        if (route === 'handlePermissionFloorCheck') {
+          assert.equal(parsed.floor, true, 'a stream error answers floor:true (prompt), never floor:false')
+        } else {
+          assert.equal(parsed.decision, 'deny', 'a stream error denies, never allows')
+        }
+        // A late 'end' after the error must not produce a second response.
+        req.emit('end')
+        assert.equal(res.statusCode, 400, 'no double response')
+        assert.equal(res.writeHeadCalls, 1, 'exactly one response was written')
+      } finally {
+        handler.destroy()
+      }
+    })
+  }
+
+  // The OTHER ordering, and the one that matters on /permission: the body ends
+  // normally, so the end handler registers a pendingPermissions entry and DEFERS
+  // the response for up to five minutes while the prompt sits on the user's phone
+  // — and THEN the request stream errors. Answering a 400 deny there would send a
+  // second response on a socket the pending entry still owns (the later resolve()
+  // throws ERR_HTTP_HEADERS_SENT on the #5313 tick that reaches uncaughtException)
+  // AND deny, from a transient stream error, a request the user is still looking
+  // at. Post-'end' teardown belongs to req 'aborted' / res 'close' → onClose.
+  it('/permission ignores a stream error that arrives AFTER the body ended (the pending prompt owns the response)', async () => {
+    const pendingPermissions = new Map()
+    const handler = makeHandler({ pendingPermissions })
+    try {
+      const req = fakeReq()
+      const res = fakeRes()
+      handler.handlePermissionRequest(req, res)
+      // A COMPLETE body this time, delivered and ended through the real stream so
+      // the handler's own 'end' listener runs before this test continues.
+      const ended = new Promise((resolve) => req.on('end', resolve))
+      req.end(JSON.stringify({ tool_name: 'Read', tool_input: { file_path: 'src/index.js' }, cwd: CWD }))
+      await ended
+
+      assert.equal(pendingPermissions.size, 1, 'the body ended cleanly, so a permission is pending')
+      assert.equal(res.writeHeadCalls, 0, 'and its response is deferred until the user answers')
+
+      assert.doesNotThrow(
+        () => req.emit('error', Object.assign(new Error('aborted by peer'), { code: 'ECONNRESET' })),
+        'a post-end stream error must not throw',
+      )
+      assert.equal(res.writeHeadCalls, 0, 'and must NOT answer — the pending prompt still owns this response')
+      assert.equal(pendingPermissions.size, 1, 'nor abandon the pending entry')
+
+      // The user then answers on their phone: still exactly ONE response, and it
+      // is their decision — not a deny synthesised from the stream error.
+      const [requestId] = [...pendingPermissions.keys()]
+      assert.doesNotThrow(() => handler.resolvePermission(requestId, 'allow'), 'resolving must not double-respond')
+      assert.equal(res.writeHeadCalls, 1, 'exactly one response')
+      assert.equal(res.statusCode, 200)
+      assert.deepEqual(JSON.parse(res.body), { decision: 'allow' })
+      assert.equal(pendingPermissions.size, 0, 'and the entry is cleaned up')
+    } finally {
+      handler.destroy()
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 3d. Reaching the daemon from a container
 // ---------------------------------------------------------------------------
 
 describe('permission-hook.sh: the callback host is not hardcoded to localhost (#7004)', () => {
