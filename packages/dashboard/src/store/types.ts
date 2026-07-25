@@ -1314,6 +1314,15 @@ export interface ConnectionState {
   /** #6871 — true between dispatching `scheduled_tasks_request` and its snapshot. */
   scheduledTasksLoading: boolean;
   /**
+   * #6871 review (S1) — why the last READ failed, when the failure cannot be
+   * attributed to a mutation: a refusal, a snapshot this client's schema could
+   * not parse, a watchdog timeout, or a disconnect. Distinct from
+   * `scheduledTasks.error` (a degraded snapshot the SERVER reported) because
+   * those cases produce no snapshot at all, and a read that silently clears its
+   * spinner with no explanation is as dishonest as one that spins forever.
+   */
+  scheduledTasksError: string | null;
+  /**
    * #6871 — outstanding scheduled-task mutations keyed by requestId; cleared by
    * the re-emitted `scheduled_tasks` snapshot echoing the requestId, or by the
    * matching `session_error` (SCHEDULED_TASK_* / SCHEDULER_*).

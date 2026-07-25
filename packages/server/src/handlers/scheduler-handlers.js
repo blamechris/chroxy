@@ -149,11 +149,61 @@ function effectiveProvider(task, ctx) {
 }
 
 /**
+ * Clamp a string to the wire schema's cap for its field.
+ *
+ * The store deliberately enforces NO length caps (its validation authority is
+ * about shape, not size), but `ScheduledTaskSchema` does — `name`/`id` 256,
+ * `provider` 128, `model` 256, `cwd` 4096, `lastRun.error` 2048. That asymmetry
+ * was a live brick: a store-legal task (a 300-char `name` from the CLI, or a
+ * long engine error in `lastRun.error`) made the WHOLE snapshot fail the
+ * dashboard's `safeParse`, so every task vanished and the tab hung on
+ * "Loading…". A snapshot the contract cannot represent is worse than a
+ * shortened display string, and the store keeps the full value either way.
+ */
+function clampWire(value, max) {
+  if (typeof value !== 'string') return value
+  return value.length > max ? value.slice(0, max) : value
+}
+
+/** Clamp the target's string fields to their wire caps. */
+function projectTarget(target) {
+  if (!target || typeof target !== 'object') return {}
+  const out = { ...target }
+  if (typeof out.provider === 'string') out.provider = clampWire(out.provider, 128)
+  if (typeof out.model === 'string') out.model = clampWire(out.model, 256)
+  if (typeof out.cwd === 'string') out.cwd = clampWire(out.cwd, 4096)
+  if (typeof out.permissionMode === 'string') out.permissionMode = clampWire(out.permissionMode, 64)
+  return out
+}
+
+/**
+ * Clamp the last-run block's string fields. `error` is the realistic offender —
+ * an engine failure message (or a stack) easily exceeds the wire's 2048.
+ */
+function projectLastRun(lastRun) {
+  if (!lastRun || typeof lastRun !== 'object') return null
+  const out = { ...lastRun }
+  // A clamped status is still an unrecognized status, which the shared health
+  // helper maps to ERROR — the pessimistic direction, so this cannot invent health.
+  if (typeof out.status === 'string') out.status = clampWire(out.status, 64)
+  if (typeof out.sessionId === 'string') out.sessionId = clampWire(out.sessionId, 256)
+  if (typeof out.error === 'string') out.error = clampWire(out.error, 2048)
+  return out
+}
+
+/**
  * Project one stored task onto the wire shape, attaching the engine's own
  * verdicts. NOTHING here is re-derived: the refusal string is verbatim
  * `scheduledProviderRefusalReason()` output and the permission mode is verbatim
  * `resolveScheduledPermissionMode()` output, so the panel cannot disagree with
  * what the engine will actually do.
+ *
+ * String fields are clamped to the wire caps (see `clampWire`). `id` is
+ * deliberately NOT clamped: it is the mutation key, so a truncated id would let
+ * pause/delete address the wrong record (or nothing) — far worse than a rejected
+ * snapshot. Store ids are generated, so an over-cap id means a hand-edited
+ * registry, and the panel now surfaces that as a readable snapshot error rather
+ * than hanging.
  */
 function projectTask(task, ctx, quarantinedIds) {
   const provider = effectiveProvider(task, ctx)
@@ -161,18 +211,18 @@ function projectTask(task, ctx, quarantinedIds) {
   const effectiveMode = resolveScheduledPermissionMode(requestedMode)
   return {
     id: task.id,
-    name: task.name ?? null,
+    name: clampWire(task.name ?? null, 256),
     enabled: task.enabled === true,
     prompt: typeof task.prompt === 'string' ? task.prompt : '',
-    target: task.target && typeof task.target === 'object' ? { ...task.target } : {},
+    target: projectTarget(task.target),
     cadence: task.cadence,
     nextRun: Number.isFinite(task.nextRun) ? task.nextRun : null,
-    lastRun: task.lastRun ?? null,
+    lastRun: projectLastRun(task.lastRun),
     createdAt: Number.isFinite(task.createdAt) ? task.createdAt : 0,
     updatedAt: Number.isFinite(task.updatedAt) ? task.updatedAt : 0,
-    providerRefusal: scheduledProviderRefusalReason(provider),
-    effectiveProvider: provider,
-    effectivePermissionMode: effectiveMode,
+    providerRefusal: clampWire(scheduledProviderRefusalReason(provider), 2048),
+    effectiveProvider: clampWire(provider, 128),
+    effectivePermissionMode: clampWire(effectiveMode, 64),
     // True only when the task ASKED for something and got clamped — an absent
     // mode is a default, not a downgrade the operator needs warning about.
     permissionModeClamped: typeof requestedMode === 'string'

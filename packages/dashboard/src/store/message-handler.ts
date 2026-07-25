@@ -151,6 +151,7 @@ import {
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
 import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerByokPoolStatusSnapshotSchema, ServerByokPoolActionAckSchema, ServerHostPruneStatusSnapshotSchema, ServerHostPruneActionAckSchema, ServerSimulatorStatusSnapshotSchema, ServerSimulatorActionAckSchema, ServerEmulatorStatusSnapshotSchema, ServerEmulatorActionAckSchema, ServerWslStatusSnapshotSchema, ServerWslActionAckSchema, ServerIntegrationStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerExternalSessionsSnapshotSchema, ServerRepoEventsSnapshotSchema, ServerRepoEventsDeltaSchema, ServerGithubWebhookConfigSchema, ServerPermissionInputSchema, ServerPermissionAuditResultSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerSessionPresetSnapshotSchema, ServerPairPendingSchema, ServerPairResolvedSchema, ServerBillingCanarySchema, BillingCanarySnapshotSchema, ServerSymbolsSnapshotSchema, ServerSymbolLocationSchema, ServerSearchResultsSchema, ServerReferencesResultSchema, ServerOrchestrationRunsSnapshotSchema, ServerOrchestrationRunSnapshotSchema, ServerOrchestrationRunDeltaSchema, ServerOrchestrationActionAckSchema, ServerGitCreatePrResultSchema, ServerMemoryStackResultSchema, ServerScheduledTasksSchema } from '@chroxy/protocol/schemas'
 import { resolveSummarizeRequest, rejectSummarizeRequest } from './summarizeRequests'
+import { settleSchedulerRequest, failAllSchedulerRequests } from './scheduledTaskRequests'
 import {
   createKeyPair,
   deriveSharedKey,
@@ -3120,11 +3121,37 @@ function handleOrchestrationRunsSnapshot(msg: Record<string, unknown>, _get: Msg
  */
 function handleScheduledTasks(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
   const parsed = ServerScheduledTasksSchema.safeParse(msg);
-  if (!parsed.success) return;
+  if (!parsed.success) {
+    // #6871 review: a snapshot the wire schema REJECTS must still release the
+    // read. Dropping it silently (the survey-family convention) left
+    // `scheduledTasksLoading` true forever, and that flag gates both recovery
+    // paths: Refresh is `disabled={!connected || loading}` and the Control Room
+    // survey effect bails on `if (loading) return`. So one wire-illegal task
+    // bricked the tab with "Loading…" and no error, until a full page reload.
+    //
+    // Reachable without any hand-editing, because the store enforces no length
+    // caps while the wire schema does — a 300-char `name` from the CLI was
+    // enough. The server now clamps those fields, so this is the backstop for a
+    // future schema mismatch (an older dashboard against a newer daemon).
+    //
+    // The previously-held snapshot is deliberately KEPT: a garbage payload must
+    // not blank a good list or present an empty one as "no scheduled tasks".
+    const rawRequestId = typeof msg.requestId === 'string' ? msg.requestId : null;
+    settleSchedulerRequest(rawRequestId);
+    set({
+      scheduledTasksLoading: false,
+      scheduledTasksError:
+        'The daemon sent a scheduled-task snapshot this client could not read (schema mismatch) — the list below may be out of date. Refresh to retry.',
+    });
+    return;
+  }
   const requestId = parsed.data.requestId ?? null;
+  // A reply landed — disarm its watchdog so it cannot later fail a settled request.
+  settleSchedulerRequest(requestId);
   const next: Partial<ConnectionState> = {
     scheduledTasks: parsed.data,
     scheduledTasksLoading: false,
+    scheduledTasksError: null,
   };
   if (requestId && requestId in get().scheduledTaskPendingActions) {
     const pending = { ...get().scheduledTaskPendingActions };
@@ -4672,7 +4699,6 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           || parsed.code === 'SCHEDULER_GATE_FAILED'
           || parsed.code === 'SCHEDULER_GATE_ENV_FORCED'
           || parsed.code === 'SCHEDULER_REGISTRY_UNAVAILABLE')
-        && typeof msg.requestId === 'string'
       ) {
         // #6871: every scheduled-task rejection echoes the requestId. Clear the
         // pending entry and record the reason so the panel shows WHY the mutation
@@ -4682,20 +4708,34 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         // field-level validation error also releases the in-flight state instead
         // of leaving a button spinning forever. `scheduledTasksLoading` is cleared
         // too, since a rejected READ never produces the snapshot that would.
+        //
+        // #6871 review (S1): this branch no longer REQUIRES a string requestId.
+        // It used to, and a rejected read echoed `requestId: null` (the read sent
+        // none), so the whole branch was skipped and the Refresh spinner never
+        // cleared. The read now mints a requestId, but the guard is still wrong
+        // as a matter of shape: a scheduler-coded refusal is unambiguously about
+        // this surface whether or not it correlates, so it must always release
+        // the read. The per-requestId result recording stays conditional, since
+        // that genuinely needs the correlation.
+        const schedReqId = typeof msg.requestId === 'string' ? msg.requestId : null;
+        settleSchedulerRequest(schedReqId);
         const schedPending = { ...get().scheduledTaskPendingActions };
-        const hadPending = msg.requestId in schedPending;
-        if (hadPending) delete schedPending[msg.requestId];
+        const hadPending = schedReqId !== null && schedReqId in schedPending;
+        if (schedReqId !== null && hadPending) delete schedPending[schedReqId];
         set({
           scheduledTasksLoading: false,
-          ...(hadPending
+          ...(schedReqId !== null && hadPending
             ? {
                 scheduledTaskPendingActions: schedPending,
                 scheduledTaskActionResults: {
                   ...get().scheduledTaskActionResults,
-                  [msg.requestId]: { ok: false, error: parsed.message || 'Scheduled-task action failed.', at: Date.now() },
+                  [schedReqId]: { ok: false, error: parsed.message || 'Scheduled-task action failed.', at: Date.now() },
                 },
               }
             : {}),
+          // Surface the refusal on the READ path too — a rejected read that just
+          // silently stops spinning tells the operator nothing.
+          ...(hadPending ? {} : { scheduledTasksError: parsed.message || 'The scheduled-task request was refused.' }),
         });
       } else if (parsed.code === 'CONTAINER_ACTION_FAILED' && typeof msg.environmentId === 'string') {
         // #6134: a failed containers_action echoes the exact environmentId
@@ -5838,6 +5878,21 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       const errReqId = typeof msg.requestId === 'string' ? msg.requestId : null;
       if (errReqId) {
         clearPendingTrustGrantByRequestId(errReqId, get);
+      }
+      // #6871 review: INVALID_MESSAGE is ws-server's schema-reject frame and it
+      // carries NO requestId (only a correlationId), so no per-requestId branch
+      // can ever release the scheduler request it rejected. It means "the message
+      // you just sent was refused outright", so any outstanding scheduler request
+      // is dead — fail them now instead of making the operator wait out the
+      // watchdog with the submit button stuck on "Saving…". Scoped to this one
+      // code: other error frames are handler-specific and are covered by the
+      // bounded watchdog rather than guessed at here.
+      if (errCode === 'INVALID_MESSAGE') {
+        failAllSchedulerRequests(
+          typeof msg.details === 'string' && msg.details.length > 0
+            ? `The daemon rejected the request: ${msg.details}`
+            : 'The daemon rejected the request as invalid.',
+        );
       }
       // #5711 (Gap 2, client half): roll back the optimistic set_model when the
       // server says it never applied (MODEL_NOT_APPLIED — e.g. a mid-turn

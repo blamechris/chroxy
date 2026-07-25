@@ -30,6 +30,7 @@ function resetStore(over: Record<string, unknown> = {}) {
     connectionPhase: 'connected',
     scheduledTasks: null,
     scheduledTasksLoading: false,
+    scheduledTasksError: null,
     scheduledTaskPendingActions: {},
     scheduledTaskActionResults: {},
     selectedScheduledTaskId: null,
@@ -136,6 +137,74 @@ describe('ScheduledTasksSection — the enable gate is always surfaced', () => {
     })
     render(<ScheduledTasksSection now={() => 1900000000000} />)
     expect(screen.getByTestId('sched-gate-restart').textContent).toMatch(/still armed and WILL keep firing/)
+
+    // THE assertion that was missing, and the one that would have caught the
+    // contradiction: the banner must not simultaneously deny that tasks fire.
+    // The restart line alone was asserted, so nothing noticed that the bold
+    // headline and first paragraph said the opposite — and the false half is the
+    // skimmable half.
+    expect(screen.getByTestId('sched-gate-detail').textContent).not.toMatch(/will NOT fire/)
+  })
+
+  // #6871 review (C2): the copy is keyed on BOTH `enabled` and `engineArmed`, so
+  // all four combinations are pinned — a regression in any one of them is the
+  // panel lying about whether unattended execution is happening.
+  describe('the banner never contradicts the runtime state (all four states)', () => {
+    it('gate OFF + engine ARMED — leads with STILL FIRING and points at a restart', () => {
+      resetStore({
+        scheduledTasks: mkSnapshot({
+          scheduler: { enabled: false, engineArmed: true, restartRequired: true, source: 'config' },
+        }),
+      })
+      render(<ScheduledTasksSection now={() => 1900000000000} />)
+      const headline = screen.getByTestId('sched-gate-headline').textContent!
+      const detail = screen.getByTestId('sched-gate-detail').textContent!
+      expect(headline).toMatch(/STILL FIRING/)
+      expect(detail).toMatch(/STILL FIRING/)
+      // The remediation must be RESTART, never "enable the thing that is already
+      // running" — the old copy sent the operator at their own problem.
+      expect(detail).toMatch(/[Rr]estart the daemon/)
+      expect(detail).not.toMatch(/will NOT fire/)
+      expect(detail).not.toMatch(/Enable via features\.scheduler/)
+      // And the button must not imply the scheduler is currently stopped.
+      expect(screen.getByTestId('sched-gate-toggle').textContent).toBe('Re-enable')
+    })
+
+    it('gate OFF + engine NOT armed — "saved but will NOT fire" is correct here, and kept', () => {
+      resetStore({ scheduledTasks: mkSnapshot({ scheduler: GATE_OFF }) })
+      render(<ScheduledTasksSection now={() => 1900000000000} />)
+      const detail = screen.getByTestId('sched-gate-detail').textContent!
+      expect(screen.getByTestId('sched-gate-headline').textContent).toBe('Scheduled execution: DISABLED')
+      expect(detail).toMatch(/will NOT fire/)
+      expect(detail).toMatch(/features\.scheduler/)
+      expect(screen.getByTestId('sched-gate-toggle').textContent).toBe('Enable')
+    })
+
+    it('gate ON + engine NOT armed — says nothing is firing yet and a restart starts it', () => {
+      resetStore({
+        scheduledTasks: mkSnapshot({
+          scheduler: { enabled: true, engineArmed: false, restartRequired: true, source: 'config' },
+        }),
+      })
+      render(<ScheduledTasksSection now={() => 1900000000000} />)
+      const headline = screen.getByTestId('sched-gate-headline').textContent!
+      const detail = screen.getByTestId('sched-gate-detail').textContent!
+      expect(headline).toMatch(/ENGINE NOT ARMED/)
+      expect(detail).toMatch(/nothing is firing yet/)
+      expect(detail).toMatch(/[Rr]estart the daemon/)
+      // Must NOT claim tasks are firing automatically — that was the mirror-image
+      // contradiction (N1), failing safe but still wrong.
+      expect(detail).not.toMatch(/Due tasks fire automatically/)
+    })
+
+    it('gate ON + engine ARMED — the plain enabled copy, no restart line', () => {
+      resetStore({ scheduledTasks: mkSnapshot() })
+      render(<ScheduledTasksSection now={() => 1900000000000} />)
+      expect(screen.getByTestId('sched-gate-headline').textContent).toBe('Scheduled execution: ENABLED')
+      expect(screen.getByTestId('sched-gate-detail').textContent).toMatch(/Due tasks fire automatically/)
+      expect(screen.queryByTestId('sched-gate-restart')).toBeNull()
+      expect(screen.getByTestId('sched-gate-toggle').textContent).toBe('Disable')
+    })
   })
 
   it('explains an env-forced gate and disables the toggle (config cannot override it)', () => {
@@ -522,5 +591,118 @@ describe('ScheduledTasksSection — malformed payloads degrade, never crash', ()
     const chip = screen.getByTestId('sched-health-task-1')
     expect(chip.textContent).toContain('ERROR')
     expect(chip.getAttribute('data-accent')).toBe('bad')
+  })
+})
+
+/**
+ * #6871 review (C3) — an out-of-Date-range `once` cadence must not crash.
+ *
+ * `new Date(1e16).toISOString()` throws RangeError, and the offending call sat in
+ * a `useState` initializer — i.e. it threw DURING RENDER, so the nearest boundary
+ * was the ROOT one and the whole dashboard (chat, terminal, everything) was
+ * replaced by the error fallback until a page reload.
+ *
+ * The value is reachable without hand-editing the registry: it is finite, so the
+ * store's old `once` arm accepted it, and a microsecond/nanosecond epoch typo
+ * produces exactly this. Note `toLocaleString()` returns "Invalid Date" rather
+ * than throwing, which is why the list path was already safe and this was not.
+ */
+describe('ScheduledTasksSection — an unrenderable `once` cadence degrades instead of crashing', () => {
+  const OUT_OF_RANGE = 1e16
+
+  it('renders the task in the list without throwing', () => {
+    resetStore({
+      scheduledTasks: mkSnapshot({ tasks: [mkTask({ cadence: { kind: 'once', at: OUT_OF_RANGE }, nextRun: OUT_OF_RANGE })] }),
+    })
+    expect(() => render(<ScheduledTasksSection now={() => 1900000000000} />)).not.toThrow()
+    expect(screen.getByTestId('sched-row-task-1')).toBeTruthy()
+    // An em dash, not a crash and not a bogus date.
+    expect(screen.getByTestId('sched-row-next-task-1').textContent).toContain('—')
+  })
+
+  it('survives clicking Edit, and says the stored run-at could not be read', () => {
+    resetStore({
+      selectedScheduledTaskId: 'task-1',
+      scheduledTasks: mkSnapshot({ tasks: [mkTask({ cadence: { kind: 'once', at: OUT_OF_RANGE } })] }),
+    })
+    render(<ScheduledTasksSection now={() => 1900000000000} />)
+    // This is the click that took the dashboard down.
+    expect(() => fireEvent.click(screen.getByTestId('sched-edit'))).not.toThrow()
+    expect(screen.getByTestId('sched-form-modal')).toBeTruthy()
+    // Empty field rather than a thrown RangeError...
+    expect((screen.getByTestId('sched-form-once') as HTMLInputElement).value).toBe('')
+    // ...plus an explicit affordance, so an empty field is not mistaken for
+    // "this task had no scheduled time".
+    expect(screen.getByTestId('sched-form-once-invalid')).toBeTruthy()
+  })
+
+  it('a VALID once cadence still seeds the datetime-local field', () => {
+    // The guard must not have broken the normal path.
+    const at = Date.UTC(2026, 6, 24, 9, 30)
+    resetStore({
+      selectedScheduledTaskId: 'task-1',
+      scheduledTasks: mkSnapshot({ tasks: [mkTask({ cadence: { kind: 'once', at } })] }),
+    })
+    render(<ScheduledTasksSection now={() => 1900000000000} />)
+    fireEvent.click(screen.getByTestId('sched-edit'))
+    expect((screen.getByTestId('sched-form-once') as HTMLInputElement).value).toBe('2026-07-24T09:30')
+    expect(screen.queryByTestId('sched-form-once-invalid')).toBeNull()
+  })
+})
+
+/**
+ * #6871 review — the form must not be able to wedge itself.
+ *
+ * The wire caps `prompt` at 32768 and ws-server answers an over-cap message with
+ * an `INVALID_MESSAGE` frame that carries NO `requestId`, so the pending entry
+ * could never be released by correlation: submit sat on "Saving…" and Cancel was
+ * `disabled={inFlight}`, leaving Esc as the only way out.
+ */
+describe('ScheduledTasksSection — the form cannot wedge', () => {
+  it('caps every input at the wire schema bound, so an over-cap message is never composed', () => {
+    resetStore({ scheduledTasks: mkSnapshot() })
+    render(<ScheduledTasksSection now={() => 1900000000000} />)
+    fireEvent.click(screen.getByTestId('sched-new'))
+    expect((screen.getByTestId('sched-form-prompt') as HTMLTextAreaElement).maxLength).toBe(32768)
+    expect((screen.getByTestId('sched-form-name') as HTMLInputElement).maxLength).toBe(256)
+    expect((screen.getByTestId('sched-form-provider') as HTMLInputElement).maxLength).toBe(128)
+    expect((screen.getByTestId('sched-form-model') as HTMLInputElement).maxLength).toBe(256)
+    expect((screen.getByTestId('sched-form-cwd') as HTMLInputElement).maxLength).toBe(4096)
+    expect((screen.getByTestId('sched-form-cron') as HTMLInputElement).maxLength).toBe(256)
+  })
+
+  it('leaves Cancel ENABLED while a mutation is in flight', () => {
+    // Abandoning the form sends nothing and the mutation is not optimistic, so
+    // this is always safe — and it is the only escape when a rejection frame
+    // arrives with no requestId to release the pending entry.
+    resetStore({
+      scheduledTasks: mkSnapshot(),
+      scheduledTaskPendingActions: { 'sched-action-1': { kind: 'create', taskId: null, at: 1 } },
+    })
+    render(<ScheduledTasksSection now={() => 1900000000000} />)
+    fireEvent.click(screen.getByTestId('sched-new'))
+    fireEvent.click(screen.getByTestId('sched-form-submit'))
+    expect((screen.getByTestId('sched-form-cancel') as HTMLButtonElement).disabled).toBe(false)
+  })
+})
+
+/** #6871 review (S1) — a failed READ surfaces a reason rather than a dead spinner. */
+describe('ScheduledTasksSection — a failed read is visible', () => {
+  it('renders the read error and re-enables Refresh', () => {
+    resetStore({
+      scheduledTasks: mkSnapshot(),
+      scheduledTasksLoading: false,
+      scheduledTasksError: 'No response from the daemon — the scheduler request timed out. Refresh to retry.',
+    })
+    render(<ScheduledTasksSection now={() => 1900000000000} />)
+    expect(screen.getByTestId('sched-read-error').textContent).toMatch(/timed out/)
+    expect((screen.getByTestId('sched-refresh') as HTMLButtonElement).disabled).toBe(false)
+    expect(screen.getByTestId('sched-refresh').textContent).toBe('Refresh')
+  })
+
+  it('shows no read error when the last read succeeded', () => {
+    resetStore({ scheduledTasks: mkSnapshot() })
+    render(<ScheduledTasksSection now={() => 1900000000000} />)
+    expect(screen.queryByTestId('sched-read-error')).toBeNull()
   })
 })

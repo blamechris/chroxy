@@ -172,6 +172,58 @@ describe('scheduler handlers — snapshot shape + gate honesty', () => {
   })
 })
 
+// #6871 review — the store enforces NO length caps but the wire schema does, so
+// a perfectly store-legal task could make the WHOLE snapshot fail the dashboard's
+// safeParse. Every task then vanished and the tab hung on "Loading…" with no
+// error, unrecoverable without a page reload. The projection must always emit
+// something the contract can represent.
+describe('scheduler handlers — a store-legal task is always WIRE-legal', () => {
+  it('clamps over-cap strings so the snapshot still validates', () => {
+    const { ctx, sent, store } = mkCtx()
+    // All store-legal: the store caps none of these.
+    store.add({
+      name: 'n'.repeat(400),
+      prompt: 'p',
+      cadence: { kind: 'cron', expression: '0 9 * * *' },
+      target: { provider: 'x'.repeat(200), model: 'm'.repeat(400), cwd: `/${'d'.repeat(5000)}` },
+    })
+    schedulerHandlers.scheduled_tasks_request(WS, primaryClient, req(), ctx)
+
+    const parsed = ServerScheduledTasksSchema.safeParse(sent[0])
+    assert.ok(parsed.success, `snapshot must stay wire-valid: ${parsed.error?.message}`)
+    const task = parsed.data.tasks[0]
+    assert.equal(task.name.length, 256)
+    assert.equal(task.target.provider.length, 128)
+    assert.equal(task.target.model.length, 256)
+    assert.equal(task.target.cwd.length, 4096)
+    // The task is still THERE — clamping a display string beats dropping the
+    // whole snapshot (or hiding a scheduled task from its operator).
+    assert.equal(parsed.data.tasks.length, 1)
+  })
+
+  it('clamps a long lastRun error (the realistic case — an engine stack trace)', () => {
+    const { ctx, sent, store } = mkCtx()
+    const task = store.add({ prompt: 'p', cadence: { kind: 'cron', expression: '0 9 * * *' } })
+    store.update(task.id, { lastRun: { at: 1, status: 'error', error: 'e'.repeat(9000) } })
+    schedulerHandlers.scheduled_tasks_request(WS, primaryClient, req(), ctx)
+
+    const parsed = ServerScheduledTasksSchema.safeParse(sent[0])
+    assert.ok(parsed.success, `snapshot must stay wire-valid: ${parsed.error?.message}`)
+    assert.equal(parsed.data.tasks[0].lastRun.error.length, 2048)
+  })
+
+  it('leaves normal-length values untouched', () => {
+    const { ctx, sent, store } = mkCtx()
+    store.add({ name: 'nightly', prompt: 'p', cadence: { kind: 'cron', expression: '0 9 * * *' }, target: { provider: SCHEDULABLE } })
+    schedulerHandlers.scheduled_tasks_request(WS, primaryClient, req(), ctx)
+
+    const parsed = ServerScheduledTasksSchema.safeParse(sent[0])
+    assert.ok(parsed.success)
+    assert.equal(parsed.data.tasks[0].name, 'nightly')
+    assert.equal(parsed.data.tasks[0].target.provider, SCHEDULABLE)
+  })
+})
+
 describe('scheduler handlers — engine verdicts are passed through, not re-derived', () => {
   it('flags a task whose provider the engine REFUSES, naming the provider', () => {
     const { ctx, sent, store } = mkCtx()

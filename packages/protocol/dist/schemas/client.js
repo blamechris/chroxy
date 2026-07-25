@@ -381,8 +381,15 @@ export const RemoveMcpServerSchema = z.object({
 // ───────────────────────────────────────────────────────────────────────────
 // Read the standing scheduled-task registry + the engine's gate state. Reply is
 // a `scheduled_tasks` snapshot (schemas/server/scheduler.ts) to the REQUESTING
-// client only. Read-only, so no privileged gate — the snapshot carries prompts
-// the requester could already read via session history.
+// client only, echoing `requestId` so a refusal can be correlated to the read
+// that caused it (without one, a rejected read leaves the panel spinning).
+//
+// This read IS gated — an earlier version of this comment claimed otherwise and
+// was wrong on both halves. The registry spans every repo on the HOST, and its
+// prompts need not appear in any session history the requester is able to read,
+// so it takes the Control Room surveys' host-level bar: a pairing-BOUND client is
+// refused with SCHEDULER_FORBIDDEN_BOUND_CLIENT (handlers/scheduler-handlers.js).
+// Mutations are stricter still — strict-primary only.
 export const ScheduledTasksRequestSchema = z.object({
     type: z.literal('scheduled_tasks_request'),
     requestId: z.string().max(128).optional(),

@@ -67,7 +67,7 @@ function baseState(): Partial<ConnectionState> {
   return {
     connectionPhase: 'connected', socket: null, sessions: [], activeSessionId: null,
     sessionStates: {}, messages: [],
-    scheduledTasks: null, scheduledTasksLoading: true,
+    scheduledTasks: null, scheduledTasksLoading: true, scheduledTasksError: null,
     scheduledTaskPendingActions: {}, scheduledTaskActionResults: {},
     selectedScheduledTaskId: null,
     requestScheduledTasks: vi.fn(() => true) as never,
@@ -116,12 +116,34 @@ describe('scheduled_tasks dispatch (#6871)', () => {
     expect(s.scheduledTasksLoading).toBe(false)
   })
 
-  it('DROPS a malformed payload without clearing loading', () => {
+  it('DROPS a malformed payload but CLEARS loading and surfaces why (#6871 review)', () => {
     // `scheduler` is required — a payload missing it is not a valid snapshot.
+    //
+    // This used to leave `scheduledTasksLoading` true, which BRICKED the tab: the
+    // flag gates both recovery paths (Refresh is disabled while loading, and the
+    // Control Room survey effect bails on it), so the panel sat on "Loading…"
+    // with no error until a full page reload. Reachable from a merely
+    // store-legal task, because the store enforces no length caps and the wire
+    // schema does. The payload is still dropped; the READ is now released.
     handleMessage({ type: 'scheduled_tasks', generatedAt: 'nope', tasks: [] } as never, ctx() as never)
     const s = store.getState()
     expect(s.scheduledTasks).toBeNull()
-    expect(s.scheduledTasksLoading).toBe(true)
+    expect(s.scheduledTasksLoading).toBe(false)
+    expect(s.scheduledTasksError).toMatch(/could not read/i)
+  })
+
+  it('a wire-ILLEGAL task (over-cap name) releases the read instead of hanging', () => {
+    // The exact shape the server now clamps: store-legal, wire-illegal.
+    handleMessage(snapshot({ tasks: [mkTask({ name: 'x'.repeat(300) })] }) as never, ctx() as never)
+    const s = store.getState()
+    expect(s.scheduledTasksLoading).toBe(false)
+    expect(s.scheduledTasksError).not.toBeNull()
+  })
+
+  it('a good snapshot clears a previously-surfaced read error', () => {
+    store.setState({ scheduledTasksError: 'stale failure' })
+    handleMessage(snapshot() as never, ctx() as never)
+    expect(store.getState().scheduledTasksError).toBeNull()
   })
 
   it('a malformed payload never blanks a GOOD held snapshot', () => {
@@ -206,6 +228,34 @@ describe('scheduled-task failure branch (#6871)', () => {
       ctx() as never,
     )
     expect(store.getState().scheduledTasksLoading).toBe(false)
+  })
+
+  it('clears the spinner and surfaces the reason when a read is refused with NO requestId (#6871 review S1)', () => {
+    // The original S1 bug, pinned at the dispatch layer. The read sent no
+    // requestId, so the refusal echoed `requestId: null` and this branch —
+    // which required a string — did nothing at all: Refresh stayed disabled
+    // reading "Refreshing…" forever with no error shown. The read now mints a
+    // requestId, but the branch must not DEPEND on correlation to release a
+    // refusal that is unambiguously about this surface.
+    handleMessage(
+      { type: 'session_error', code: 'SCHEDULER_FORBIDDEN_BOUND_CLIENT', message: 'bound clients may not read the registry', requestId: null } as never,
+      ctx() as never,
+    )
+    const s = store.getState()
+    expect(s.scheduledTasksLoading).toBe(false)
+    expect(s.scheduledTasksError).toMatch(/bound clients may not read/)
+  })
+
+  it('a refusal that DOES correlate to a mutation records it per-requestId, not as a read error', () => {
+    store.setState({ scheduledTaskPendingActions: { 'sched-action-1': { kind: 'create', taskId: null, at: 1 } } })
+    handleMessage(
+      { type: 'session_error', code: 'SCHEDULED_TASK_INVALID', message: 'cadence.expression: invalid cron', requestId: 'sched-action-1' } as never,
+      ctx() as never,
+    )
+    const s = store.getState()
+    expect(s.scheduledTaskActionResults['sched-action-1']!.error).toContain('invalid cron')
+    // Not misfiled as a read failure — the form shows it inline.
+    expect(s.scheduledTasksError).toBeNull()
   })
 
   it('an unrelated error code does not clear scheduler pending state', () => {

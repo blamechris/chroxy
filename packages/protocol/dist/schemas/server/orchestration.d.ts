@@ -802,10 +802,10 @@ export declare const ServerOrchestrationActionAckSchema: z.ZodObject<{
     type: z.ZodLiteral<"orchestration_action_ack">;
     requestId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
     action: z.ZodEnum<{
-        start: "start";
-        cancel: "cancel";
         pause: "pause";
         resume: "resume";
+        start: "start";
+        cancel: "cancel";
         gate_response: "gate_response";
         annotate: "annotate";
     }>;

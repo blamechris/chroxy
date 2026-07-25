@@ -45,13 +45,72 @@ import { deriveScheduledTaskHealth } from '@chroxy/protocol'
 import { formatGeneratedAgo } from './ControlRoomSection'
 import { Modal } from './Modal'
 
+/**
+ * The wire schema's per-field caps (`ScheduledTaskInputSchema`,
+ * protocol/src/schemas/client.ts), mirrored onto the form inputs as `maxLength`.
+ *
+ * Without these the form could compose a message the wire rejects: ws-server
+ * answers an over-cap message with `{type:'error', code:'INVALID_MESSAGE'}`,
+ * which carries NO `requestId`, so the pending entry was never released and the
+ * submit button sat on "Saving…" indefinitely. Capping at the input is the fix
+ * at source — pasting a >32 kB prompt into a task form is entirely plausible.
+ * (The bounded request timeout in the store is the backstop for the rejection
+ * frames that carry no requestId for other reasons.)
+ */
+const WIRE_MAX = {
+  name: 256,
+  prompt: 32768,
+  cron: 256,
+  provider: 128,
+  model: 256,
+  cwd: 4096,
+} as const
+
+/**
+ * The SINGLE epoch→Date guard for this panel. Returns null unless `ms` is both
+ * finite AND inside the ±8.64e15 ms range `Date` can represent.
+ *
+ * Finiteness alone is not enough, and that gap was a real crash (#6871 review
+ * C3): `new Date(1e16)` is an Invalid Date, `.toLocaleString()` on it returns
+ * "Invalid Date" but `.toISOString()` THROWS `RangeError`. An out-of-range epoch
+ * is reachable without hand-editing the registry — the store's `once` arm
+ * checked only `Number.isFinite`, and a µs/ns epoch typo (`1.795e18`) from the
+ * CLI is finite. Every date render in this file goes through here so there is
+ * one guard rather than a per-call-site variant that can miss the range half.
+ */
+function epochToDate(ms: number | null | undefined): Date | null {
+  if (!Number.isFinite(ms as number)) return null
+  const d = new Date(ms as number)
+  return Number.isNaN(d.getTime()) ? null : d
+}
+
 /** Render an epoch-ms instant, or an em dash. Never throws on a bad value. */
 function formatEpoch(ms: number | null | undefined): string {
-  if (!Number.isFinite(ms as number)) return '—'
+  const d = epochToDate(ms)
+  if (!d) return '—'
   try {
-    return new Date(ms as number).toLocaleString()
+    return d.toLocaleString()
   } catch {
     return '—'
+  }
+}
+
+/**
+ * Seed value for the `datetime-local` input, or '' when the stored epoch is not
+ * a renderable instant.
+ *
+ * This is called from a `useState` initializer, i.e. DURING RENDER, so an
+ * unguarded `toISOString()` here does not degrade — it throws past this
+ * component to the ROOT error boundary and replaces the entire dashboard (chat,
+ * terminal, everything) with the error fallback until a full page reload.
+ */
+function toDatetimeLocalValue(ms: number | null | undefined): string {
+  const d = epochToDate(ms)
+  if (!d) return ''
+  try {
+    return d.toISOString().slice(0, 16)
+  } catch {
+    return ''
   }
 }
 
@@ -127,6 +186,39 @@ function GateBanner({
   error: string | null
 }) {
   const envForced = source === 'env'
+  // #6871 review (C2): the copy is keyed on BOTH the persisted gate AND the
+  // RUNTIME engine state — never on `enabled` alone.
+  //
+  // Keying on the flag alone made the banner contradict itself in the one
+  // direction that actually endangers the operator. With the gate closed on a
+  // still-armed engine it read "Tasks below are saved but will NOT fire" in the
+  // bold, skimmable first paragraph, directly above the line correctly saying
+  // the engine WILL keep firing them — and it offered "enable features.scheduler"
+  // as the remediation for a scheduler that is *already running*. Four signals
+  // said off, one said on, and the false half was the one an operator skims.
+  //
+  // So each of the four (enabled × engineArmed) states is stated exactly once,
+  // and the remediation always names the action that changes the RUNTIME:
+  // restarting the daemon, not flipping the flag that is already flipped.
+  const stillFiring = !enabled && engineArmed // the dangerous one
+  const notYetFiring = enabled && !engineArmed
+  const headline = stillFiring
+    ? 'Scheduled execution: DISABLED (saved) — ENGINE STILL FIRING'
+    : notYetFiring
+      ? 'Scheduled execution: ENABLED (saved) — ENGINE NOT ARMED'
+      : enabled
+        ? 'Scheduled execution: ENABLED'
+        : 'Scheduled execution: DISABLED'
+  // NOTE: the `stillFiring` copy must never contain the phrase "will NOT fire" —
+  // there is a regression test asserting exactly that, because that phrase is
+  // what made the old banner lie.
+  const detail = stillFiring
+    ? 'The saved setting is DISABLED, but it does not take effect until the daemon restarts — the tasks below are STILL FIRING right now, in headless sessions with nobody watching. Restart the daemon to actually stop them.'
+    : notYetFiring
+      ? 'Saved as ENABLED, but the running daemon has no armed engine, so nothing is firing yet. Restart the daemon to start firing. Once armed, due tasks run in a headless session pinned to the safest permission mode and cannot auto-approve.'
+      : enabled
+        ? 'Due tasks fire automatically in a headless session with no client connected. Runs are pinned to the safest permission mode and cannot auto-approve; a prompt with nobody to answer it is denied and the run recorded as a failure.'
+        : 'Tasks below are saved but will NOT fire. Enable via features.scheduler in config.json (or CHROXY_ENABLE_SCHEDULER=1), then restart the daemon.'
   return (
     <div
       className="cr-sched-gate"
@@ -134,14 +226,8 @@ function GateBanner({
       data-testid="sched-gate-banner"
     >
       <div className="cr-sched-gate-text">
-        <strong data-testid="sched-gate-headline">
-          {enabled ? 'Scheduled execution: ENABLED' : 'Scheduled execution: DISABLED'}
-        </strong>
-        <p className="cr-dim" data-testid="sched-gate-detail">
-          {enabled
-            ? 'Due tasks fire automatically in a headless session with no client connected. Runs are pinned to the safest permission mode and cannot auto-approve; a prompt with nobody to answer it is denied and the run recorded as a failure.'
-            : 'Tasks below are saved but will NOT fire. Enable via features.scheduler in config.json (or CHROXY_ENABLE_SCHEDULER=1), then restart the daemon.'}
-        </p>
+        <strong data-testid="sched-gate-headline">{headline}</strong>
+        <p className="cr-dim" data-testid="sched-gate-detail">{detail}</p>
         {restartRequired && (
           <p className="cr-error" data-testid="sched-gate-restart">
             Restart required — the saved setting and the running daemon disagree
@@ -165,11 +251,17 @@ function GateBanner({
         title={
           envForced && enabled
             ? 'Unset CHROXY_ENABLE_SCHEDULER in the daemon environment to disable.'
-            : 'Writes features.scheduler to config.json. A daemon restart is required for it to take effect.'
+            : stillFiring
+              ? 'Writes features.scheduler to config.json. The running engine is already armed, so this does not stop it — only a daemon restart does.'
+              : 'Writes features.scheduler to config.json. A daemon restart is required for it to take effect.'
         }
         onClick={() => onToggle(!enabled)}
       >
-        {busy ? 'Saving…' : enabled ? 'Disable' : 'Enable'}
+        {/* #6871 review (C2): "Enable" in the `stillFiring` state implied the
+            scheduler was currently stopped — the fourth contradicting signal.
+            The gate is already saved as disabled there, so the action this
+            button actually performs is undoing that save. */}
+        {busy ? 'Saving…' : enabled ? 'Disable' : stillFiring ? 'Re-enable' : 'Enable'}
       </button>
     </div>
   )
@@ -385,9 +477,16 @@ function TaskFormModal({ task, onClose }: { task?: ScheduledTask; onClose: () =>
   const [everyMinutes, setEveryMinutes] = useState(
     task?.cadence?.kind === 'interval' ? String(Math.round(task.cadence.everyMs / 60000)) : '60',
   )
-  const [onceAt, setOnceAt] = useState(
-    task?.cadence?.kind === 'once' ? new Date(task.cadence.at).toISOString().slice(0, 16) : '',
-  )
+  // #6871 review (C3): guarded via the shared epoch guard. An out-of-Date-range
+  // `at` used to throw RangeError out of this initializer and take the whole
+  // dashboard down through the root error boundary.
+  const storedOnceAt = task?.cadence?.kind === 'once' ? task.cadence.at : null
+  const [onceAt, setOnceAt] = useState(toDatetimeLocalValue(storedOnceAt))
+  // The stored instant exists but cannot be represented — show the operator that
+  // the value was dropped and must be re-entered, rather than silently
+  // presenting an empty field as if the task had no scheduled time.
+  const onceAtUnreadable =
+    task?.cadence?.kind === 'once' && storedOnceAt != null && epochToDate(storedOnceAt) === null
   const [provider, setProvider] = useState(task?.target?.provider ?? '')
   const [model, setModel] = useState(task?.target?.model ?? '')
   const [cwd, setCwd] = useState(task?.target?.cwd ?? '')
@@ -449,7 +548,7 @@ function TaskFormModal({ task, onClose }: { task?: ScheduledTask; onClose: () =>
       <div className="cr-sched-modal" data-testid="sched-form-modal">
         <label className="cr-sched-field">
           <span>Name (optional)</span>
-          <input data-testid="sched-form-name" value={name} onChange={(e) => setName(e.target.value)} disabled={inFlight} />
+          <input data-testid="sched-form-name" value={name} onChange={(e) => setName(e.target.value)} maxLength={WIRE_MAX.name} disabled={inFlight} />
         </label>
         <label className="cr-sched-field">
           <span>Prompt</span>
@@ -459,6 +558,7 @@ function TaskFormModal({ task, onClose }: { task?: ScheduledTask; onClose: () =>
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
             placeholder="What should the scheduled run do?"
+            maxLength={WIRE_MAX.prompt}
             disabled={inFlight}
           />
         </label>
@@ -478,7 +578,7 @@ function TaskFormModal({ task, onClose }: { task?: ScheduledTask; onClose: () =>
         {cadenceKind === 'cron' && (
           <label className="cr-sched-field">
             <span>Cron expression</span>
-            <input data-testid="sched-form-cron" value={cron} onChange={(e) => setCron(e.target.value)} placeholder="0 9 * * *" disabled={inFlight} />
+            <input data-testid="sched-form-cron" value={cron} onChange={(e) => setCron(e.target.value)} placeholder="0 9 * * *" maxLength={WIRE_MAX.cron} disabled={inFlight} />
           </label>
         )}
         {cadenceKind === 'interval' && (
@@ -491,6 +591,12 @@ function TaskFormModal({ task, onClose }: { task?: ScheduledTask; onClose: () =>
           <label className="cr-sched-field">
             <span>Run at</span>
             <input data-testid="sched-form-once" type="datetime-local" value={onceAt} onChange={(e) => setOnceAt(e.target.value)} disabled={inFlight} />
+            {onceAtUnreadable && (
+              <span className="cr-error" data-testid="sched-form-once-invalid">
+                The stored run-at value is not a valid date and could not be loaded — pick a new
+                time before saving.
+              </span>
+            )}
           </label>
         )}
         <label className="cr-sched-field">
@@ -501,6 +607,7 @@ function TaskFormModal({ task, onClose }: { task?: ScheduledTask; onClose: () =>
             onChange={(e) => setProvider(e.target.value)}
             placeholder={schedulable.length > 0 ? schedulable[0] : ''}
             list="sched-provider-options"
+            maxLength={WIRE_MAX.provider}
             disabled={inFlight}
           />
           <datalist id="sched-provider-options">
@@ -511,11 +618,11 @@ function TaskFormModal({ task, onClose }: { task?: ScheduledTask; onClose: () =>
         </label>
         <label className="cr-sched-field">
           <span>Model (optional)</span>
-          <input data-testid="sched-form-model" value={model} onChange={(e) => setModel(e.target.value)} disabled={inFlight} />
+          <input data-testid="sched-form-model" value={model} onChange={(e) => setModel(e.target.value)} maxLength={WIRE_MAX.model} disabled={inFlight} />
         </label>
         <label className="cr-sched-field">
           <span>Working directory (optional)</span>
-          <input data-testid="sched-form-cwd" value={cwd} onChange={(e) => setCwd(e.target.value)} placeholder="/path/to/repo" disabled={inFlight} />
+          <input data-testid="sched-form-cwd" value={cwd} onChange={(e) => setCwd(e.target.value)} placeholder="/path/to/repo" maxLength={WIRE_MAX.cwd} disabled={inFlight} />
         </label>
 
         {providerWarning && (
@@ -531,7 +638,15 @@ function TaskFormModal({ task, onClose }: { task?: ScheduledTask; onClose: () =>
 
         {result && !result.ok && <p className="cr-error" data-testid="sched-form-error">{result.error}</p>}
         <div className="cr-sched-modal-actions">
-          <button type="button" data-testid="sched-form-cancel" onClick={onClose} disabled={inFlight}>Cancel</button>
+          {/* Cancel is NEVER disabled. It used to carry `disabled={inFlight}`,
+              so any rejection frame that arrives without a `requestId` (an
+              INVALID_MESSAGE over-cap reject, a rate_limit, a drain-drop) left
+              the pending entry unreleased AND the only way out of the modal
+              disabled — Esc was the sole escape. Abandoning a form is always a
+              safe local action: it sends nothing and the mutation is not
+              optimistic, so a still-in-flight request simply resolves into a
+              closed modal. */}
+          <button type="button" data-testid="sched-form-cancel" onClick={onClose}>Cancel</button>
           <button type="button" data-testid="sched-form-submit" onClick={submit} disabled={!canSubmit}>
             {inFlight ? 'Saving…' : task ? 'Save changes' : 'Create task'}
           </button>
@@ -549,6 +664,7 @@ export interface ScheduledTasksSectionProps {
 export function ScheduledTasksSection({ now = Date.now }: ScheduledTasksSectionProps = {}) {
   const snapshot = useConnectionStore((s) => s.scheduledTasks)
   const loading = useConnectionStore((s) => s.scheduledTasksLoading)
+  const readError = useConnectionStore((s) => s.scheduledTasksError)
   const requestTasks = useConnectionStore((s) => s.requestScheduledTasks)
   const selectedId = useConnectionStore((s) => s.selectedScheduledTaskId)
   const selectTask = useConnectionStore((s) => s.selectScheduledTask)
@@ -635,6 +751,14 @@ export function ScheduledTasksSection({ now = Date.now }: ScheduledTasksSectionP
         <p className="cr-error" data-testid="sched-error">
           {snapshot.error.code}: {snapshot.error.message}
         </p>
+      )}
+
+      {/* #6871 review (S1): a read that failed WITHOUT producing a snapshot — a
+          refusal, an unparseable snapshot, a timeout, a disconnect. Without this
+          the spinner either hung forever or (once cleared) stopped silently,
+          leaving the operator with no idea the list was stale. */}
+      {readError && (
+        <p className="cr-error" data-testid="sched-read-error">{readError}</p>
       )}
 
       {tasks.length === 0 && !snapshot?.error ? (

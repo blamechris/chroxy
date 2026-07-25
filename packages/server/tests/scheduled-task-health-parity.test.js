@@ -129,9 +129,42 @@ describe('scheduled-task health — CLI source parity (#6868 / PR #7013)', () =>
       return
     }
     const src = readFileSync(CLI_PATH, 'utf-8')
-    const fn = src.slice(src.indexOf('function healthTag'))
-    assert.ok(fn.length > 0, 'expected a healthTag() in the CLI')
-    const body = fn.slice(0, fn.indexOf('\n}\n') + 1)
+    const fnStart = src.indexOf('function healthTag')
+
+    // The CLI may have DROPPED its local healthTag() in favour of importing the
+    // shared helper. That is the stated follow-up for whoever merges #7013
+    // second, and it is the ideal end state — it eliminates drift by
+    // construction instead of by comparison. So it must not read as a failure.
+    //
+    // It previously would have: with no `function healthTag`, indexOf returns -1,
+    // `slice(-1)` yields the file's LAST CHARACTER, `body` becomes '', every
+    // extraction below matches nothing, and the pair-count assertion reports
+    // "the surfaces have drifted" at precisely the moment drift became
+    // impossible. Assert the import instead.
+    if (fnStart === -1) {
+      assert.ok(
+        src.includes('deriveScheduledTaskHealthTag'),
+        'the CLI has no local healthTag() — it must then import deriveScheduledTaskHealthTag from @chroxy/protocol, or it has no health mapping at all',
+      )
+      assert.match(
+        src,
+        /from\s+'@chroxy\/protocol'/,
+        'the CLI must take its health mapping from the shared @chroxy/protocol module',
+      )
+      return
+    }
+
+    const fn = src.slice(fnStart)
+    // A real extraction guard. `assert.ok(fn.length > 0)` could never fire (a
+    // slice from a found index is always non-empty), so it asserted nothing —
+    // this checks the thing that actually has to hold for the regexes below to
+    // mean anything: that the function body was delimited at all.
+    const bodyEnd = fn.indexOf('\n}\n')
+    assert.ok(
+      bodyEnd > 0,
+      'could not find the end of the CLI healthTag() body — the status/tag extraction below would silently match nothing and pass vacuously',
+    )
+    const body = fn.slice(0, bodyEnd + 1)
 
     // Extract the tags the CLI can return, and the status→tag pairs it declares.
     const returned = new Set([...body.matchAll(/return '([^']+)'/g)].map((m) => m[1]))
