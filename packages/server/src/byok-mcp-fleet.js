@@ -76,7 +76,9 @@ export class MCPFleet {
     // user friction for tuples already trusted in a prior session); on
     // a miss it asks the PermissionManager — emitting a prompt visible to
     // the dashboard / mobile permission UI — and persists allow decisions
-    // to the store so the prompt only fires once per (name, command, args[0]).
+    // to the store so the prompt only fires once per spawn-determining config
+    // (#7001: name + command + the FULL args + env, digested — see
+    // byok-mcp-trust.js; the pre-#7001 key covered only args[0]).
     //
     // No PermissionManager → no gate → spawn behaves exactly as in #4077.
     // This keeps the lifecycle module testable in isolation; integration
@@ -132,7 +134,7 @@ export class MCPFleet {
    * #6824: build one MCPClient for a config, wiring the trust gate exactly as
    * the constructor did inline pre-#6824. Extracted so the re-enable path
    * (`setEnabled(name, true)`) rebuilds a client with an IDENTICAL gate — an
-   * already-trusted (name, command, args[0]) tuple reconnects silently; an
+   * already-trusted spawn config reconnects silently; an
    * untrusted one still prompts, so re-enabling can never bypass trust.
    */
   _makeClient(cfg) {
@@ -306,10 +308,14 @@ export class MCPFleet {
    * without restarting the session or disturbing any other client.
    *
    * The client is built through `_makeClient`, so it goes through the IDENTICAL
-   * first-use trust gate as any other server: an untrusted (name, command,
-   * args[0]) tuple still raises a `requestMcpTrust` prompt before anything is
-   * spawned. Adding a server therefore never silently executes a command — the
-   * config write and the consent to run it stay separate decisions.
+   * first-use trust gate as any other server: a config that is not trusted in
+   * FULL (name + command + every arg + env — #7001) still raises a
+   * `requestMcpTrust` prompt before anything is spawned. This is the backstop, not
+   * the primary gate: on the WS add path `ClaudeByokSession.addMcpServer` has
+   * already taken the decision BEFORE persisting, so an allowed add finds itself
+   * trusted here and does not prompt twice, and a denied one never reaches this
+   * method. The backstop still matters for a config that was persisted some other
+   * way (hand-edited `~/.claude.json`) or whose trust record was tampered with.
    *
    * A failed start is non-fatal and mirrors `start()` / `setEnabled(name, true)`:
    * the client stays in `_clients` in a DEAD state so its 'failed' status

@@ -107,8 +107,8 @@ export class MCPClient extends EventEmitter {
     this._config = config
     this._log = opts.log || createLogger('byok-mcp')
     // #4457: optional async gate consulted before EACH start() (not each
-    // restart — a trust decision applies to the whole (name, command, args[0])
-    // tuple, which doesn't change between restart attempts). Returns true →
+    // restart — a trust decision applies to the whole spawn config (#7001),
+    // which doesn't change between restart attempts). Returns true →
     // proceed; false → state=DEAD permanently, no child is ever spawned.
     this._trustGate = opts.trustGate || null
     // #4454: per-instance handshake timeout. Precedence (high → low):

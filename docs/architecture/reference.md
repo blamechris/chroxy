@@ -158,7 +158,7 @@ Docker providers (`docker`, `docker-sdk`) require `--environments` flag. See [Co
 
 | Type | Purpose |
 |------|---------|
-| `add_mcp_server` | Add an MCP server, persisting it to the user's MCP config (BYOK lane; host-authority gated — bound tokens rejected) |
+| `add_mcp_server` | Add an MCP server, persisting it to the user's MCP config (BYOK lane; strict-primary gated — any non-primary token rejected) |
 | `add_repo` | Add a repo to the server's configured repo list |
 | `auth` | Authenticate with server token and device info |
 | `browse_files` | Request file/directory listing within project |
@@ -201,7 +201,7 @@ Docker providers (`docker`, `docker-sdk`) require `--environments` flag. See [Co
 | `request_session_context` | Get context info for specific session |
 | `restore_checkpoint` | Restore from a checkpoint (creates new session) |
 | `resume_budget` | Resume a paused session after budget exceeded |
-| `remove_mcp_server` | Permanently remove a configured MCP server from the user's MCP config (BYOK lane; host-authority gated) |
+| `remove_mcp_server` | Permanently remove a configured MCP server from the user's MCP config (BYOK lane; strict-primary gated) |
 | `resume_conversation` | Resume a past conversation by creating a new session |
 | `search_conversations` | Search conversation history by query |
 | `set_model` | Change active Claude model |

@@ -64,6 +64,17 @@ function coerceStringArray(value, { warnings, serverName }) {
 }
 
 /**
+ * Keys that must never be assigned into a string→string map we build with `{}`.
+ * `map.__proto__ = 'some string'` hits `Object.prototype`'s `__proto__` setter,
+ * which ignores non-object values — so the key vanished SILENTLY, and a caller
+ * who asked for `env.__proto__` got a server spawned without it and no
+ * explanation. `constructor` / `prototype` are plain own-property writes (no
+ * setter) but are refused alongside it: a map key that shadows an object internal
+ * is never a legitimate environment variable or HTTP header (#7001 review).
+ */
+const UNSAFE_MAP_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
+
+/**
  * Coerce an env object to string→string only. Pushes one warning per dropped
  * key naming the server, the offending field (`env.<KEY>`), and the value's
  * type. Non-objects drop the whole field with a single warning.
@@ -79,6 +90,14 @@ function coerceEnv(value, { warnings, serverName }) {
   const env = {}
   for (const [key, raw] of Object.entries(value)) {
     if (typeof key !== 'string' || key.length === 0) continue
+    if (UNSAFE_MAP_KEYS.has(key)) {
+      // Warn rather than drop silently: on the WRITE path
+      // (normalizeMcpServerConfig) any warning is escalated to a rejection, so
+      // the caller is told the key is refused instead of receiving an `ok` for a
+      // config that quietly lost it.
+      warnings.push(`MCP server ${serverName}: refusing env.${key} (reserved object key, never a real environment variable)`)
+      continue
+    }
     if (typeof raw === 'string') {
       env[key] = raw
     } else {
@@ -108,6 +127,11 @@ function coerceHeaders(value, { warnings, serverName }) {
   const headers = {}
   for (const [key, raw] of Object.entries(value)) {
     if (typeof key !== 'string' || key.length === 0) continue
+    if (UNSAFE_MAP_KEYS.has(key)) {
+      // Same silent-drop hazard as env.__proto__ — refuse explicitly (#7001 review).
+      warnings.push(`MCP server ${serverName}: refusing headers.${key} (reserved object key, never a real HTTP header)`)
+      continue
+    }
     if (typeof raw === 'string') {
       headers[key] = raw
     } else {
@@ -432,6 +456,18 @@ export function parseClaudeMcpConfig(raw) {
     const hasUrl = typeof entry.url === 'string' && entry.url.trim().length > 0
     const isRemote =
       rawType === 'http' || rawType === 'streamable-http' || rawType === 'sse' || (!hasCommand && hasUrl)
+    // #7001 review: an entry carrying BOTH a command and a url is AMBIGUOUS —
+    // whichever branch wins, the other field is dropped and the caller is never
+    // told which transport it actually got. The read path stays lenient (it warns
+    // and still resolves a usable server, so a hand-edited config keeps working),
+    // but a WRITE escalates every warning to a rejection, so `add_mcp_server`
+    // refuses it rather than silently persisting one of the two shapes.
+    if (hasCommand && hasUrl) {
+      warnings.push(
+        `MCP server ${name}: ambiguous config — carries BOTH command (stdio) and url (remote); ` +
+        `resolving as ${isRemote ? 'remote (command ignored)' : 'stdio (url ignored)'}. Specify exactly one transport.`,
+      )
+    }
     if (isRemote) {
       const remote = parseRemoteEntry(name, entry, { warnings })
       if (remote) servers.push(remote)
@@ -957,25 +993,21 @@ export const MCP_WRITE_SCOPES = Object.freeze(['user', 'project'])
  */
 
 /**
- * Add (or refuse to overwrite) one MCP server in the user's config.
+ * Everything `addMcpServerToConfig` does EXCEPT the write: validate the name and
+ * scope, normalize the config, read the existing file, locate the target block,
+ * and refuse a duplicate name. Returns the located block + parsed tree so the
+ * caller can either commit (write) or discard (plan).
  *
- * Scope selects WHERE: 'user' → the root `mcpServers` block; 'project' →
- * `projects[<realpath(cwd)>].mcpServers`. There is no "wherever it fits"
- * fallback — an ambiguous write to a user's config is worse than an error.
+ * Split out for #7001's deny-before-write ordering: the trust prompt has to run
+ * BEFORE anything is persisted, and prompting for an add that was going to fail
+ * validation or EXISTS anyway is both bad UX and a needless prompt. `raw` is a
+ * per-call freshly-parsed tree, so the plan path mutating it (creating an empty
+ * `mcpServers` block) is discarded harmlessly.
  *
- * Refuses (rather than overwrites) an existing name in the target scope: an
- * overwrite would silently replace a command the user trusts with a different
- * one, which is exactly the substitution the trust store exists to prevent.
- *
- * @param {object} opts
- * @param {string} opts.name
- * @param {unknown} opts.config
- * @param {'user'|'project'} [opts.scope]
- * @param {string} [opts.cwd] — required for scope 'project'
- * @param {string} [opts.configPath]
- * @returns {{ ok: true, entry: object, scope: string } | { ok: false, error: string, code?: string }}
+ * The commit path re-runs this, so the read→check→write critical section stays
+ * synchronous and `await`-free: a plan result is ADVISORY, never the authority.
  */
-export function addMcpServerToConfig({ name, config, scope = 'user', cwd, configPath = defaultClaudeConfigPath() } = {}) {
+function prepareAddMcpServer({ name, config, scope = 'user', cwd, configPath = defaultClaudeConfigPath() } = {}) {
   const validName = validateNewMcpServerName(name)
   if (!validName.ok) return { ok: false, error: validName.error }
   if (!MCP_WRITE_SCOPES.includes(scope)) {
@@ -1030,10 +1062,52 @@ export function addMcpServerToConfig({ name, config, scope = 'user', cwd, config
       error: `An MCP server named '${validName.name}' already exists in ${scope} scope. Remove it first to replace it.`,
     }
   }
-  block[validName.name] = normalized.entry
+  return { ok: true, raw, block, mode: read.mode, entry: normalized.entry, scope, name: validName.name, configPath }
+}
 
-  writeClaudeConfigAtomic(configPath, raw, { mode: read.mode })
-  return { ok: true, entry: normalized.entry, scope }
+/**
+ * #7001: DRY-RUN of an add — every check `addMcpServerToConfig` performs, with no
+ * write. Returns the exact normalized `entry` that WOULD be persisted, so a caller
+ * can obtain the user's spawn-trust decision for that precise config before
+ * anything reaches disk (a denied add must leave no config entry behind).
+ *
+ * @returns {{ ok: true, entry: object, scope: string } | { ok: false, error: string, code?: string }}
+ */
+export function planAddMcpServerToConfig(opts = {}) {
+  const prepared = prepareAddMcpServer(opts)
+  if (!prepared.ok) return prepared.code ? { ok: false, error: prepared.error, code: prepared.code } : { ok: false, error: prepared.error }
+  return { ok: true, entry: prepared.entry, scope: prepared.scope }
+}
+
+/**
+ * Add (or refuse to overwrite) one MCP server in the user's config.
+ *
+ * Scope selects WHERE: 'user' → the root `mcpServers` block; 'project' →
+ * `projects[<realpath(cwd)>].mcpServers`. There is no "wherever it fits"
+ * fallback — an ambiguous write to a user's config is worse than an error.
+ *
+ * Refuses (rather than overwrites) an existing name in the target scope: an
+ * overwrite would silently replace a command the user trusts with a different
+ * one, which is exactly the substitution the trust store exists to prevent.
+ *
+ * NOTE (#7001): this is the COMMIT. On the WS add path the caller must already
+ * have obtained the user's spawn-trust decision (via `planAddMcpServerToConfig`)
+ * — persisting first and prompting afterwards leaves a denied server configured.
+ *
+ * @param {object} opts
+ * @param {string} opts.name
+ * @param {unknown} opts.config
+ * @param {'user'|'project'} [opts.scope]
+ * @param {string} [opts.cwd] — required for scope 'project'
+ * @param {string} [opts.configPath]
+ * @returns {{ ok: true, entry: object, scope: string } | { ok: false, error: string, code?: string }}
+ */
+export function addMcpServerToConfig(opts = {}) {
+  const prepared = prepareAddMcpServer(opts)
+  if (!prepared.ok) return prepared.code ? { ok: false, error: prepared.error, code: prepared.code } : { ok: false, error: prepared.error }
+  prepared.block[prepared.name] = prepared.entry
+  writeClaudeConfigAtomic(prepared.configPath, prepared.raw, { mode: prepared.mode })
+  return { ok: true, entry: prepared.entry, scope: prepared.scope }
 }
 
 /**

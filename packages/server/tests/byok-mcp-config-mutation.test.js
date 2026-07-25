@@ -24,6 +24,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   addMcpServerToConfig,
+  parseClaudeMcpConfig,
+  planAddMcpServerToConfig,
   removeMcpServerFromConfig,
   normalizeMcpServerConfig,
   readClaudeConfigForMutation,
@@ -137,6 +139,130 @@ describe('#6974 config normalization', () => {
   it('rejects a non-http(s) remote url and a cloud-metadata host', () => {
     assert.equal(normalizeMcpServerConfig('srv', { type: 'http', url: 'file:///etc/passwd' }).ok, false)
     assert.equal(normalizeMcpServerConfig('srv', { type: 'http', url: 'http://169.254.169.254/latest' }).ok, false)
+  })
+})
+
+describe('#7001 silent-drop escape hatches are explicit rejections', () => {
+  it('a config carrying BOTH command and url is refused as ambiguous', () => {
+    // Previously one field silently won (which one depended on `type`) and the
+    // other was dropped with no warning at all, so the escalate-warnings-to-
+    // rejection rule never fired and the user got a transport they did not ask for.
+    const res = normalizeMcpServerConfig('both', { command: 'node', url: 'https://mcp.example.com/api' })
+    assert.equal(res.ok, false)
+    assert.match(res.error, /ambiguous/i)
+    assert.match(res.error, /command/)
+    assert.match(res.error, /url/)
+  })
+
+  it('the ambiguous rejection also fires when an explicit remote `type` is present', () => {
+    const res = normalizeMcpServerConfig('both', { type: 'http', command: 'node', url: 'https://mcp.example.com/api' })
+    assert.equal(res.ok, false)
+    assert.match(res.error, /ambiguous/i)
+  })
+
+  it('the ambiguous case only WARNS on the read path, so an existing config keeps working', () => {
+    // The read path must stay lenient — a partly-usable config beats no session.
+    const { servers, warnings } = parseClaudeMcpConfig({
+      mcpServers: { both: { command: 'node', url: 'https://mcp.example.com/api' } },
+    })
+    assert.equal(servers.length, 1, 'the server still resolves at session start')
+    assert.ok(warnings.some((w) => /ambiguous/i.test(w)), 'but the ambiguity is now visible')
+  })
+
+  it('an ambiguous config is NOT written to disk', () => {
+    writeFileSync(configPath, JSON.stringify({ mcpServers: {} }))
+    const res = addMcpServerToConfig({ name: 'both', config: { command: 'node', url: 'https://x.example.com/' }, configPath })
+    assert.equal(res.ok, false)
+    assert.deepEqual(Object.keys(JSON.parse(readFileSync(configPath, 'utf8')).mcpServers), [])
+  })
+
+  it('a reserved key in env is REFUSED, not silently dropped', () => {
+    // `{}['__proto__'] = 'str'` is a no-op, so this key used to disappear with no
+    // warning and no error — the caller got `ok` for a config missing a field.
+    const config = JSON.parse('{"command":"node","env":{"__proto__":"payload"}}')
+    const res = normalizeMcpServerConfig('proto', config)
+    assert.equal(res.ok, false)
+    assert.match(res.error, /__proto__/)
+    assert.match(res.error, /reserved/i)
+  })
+
+  it('constructor / prototype in env are refused too', () => {
+    for (const key of ['constructor', 'prototype']) {
+      const res = normalizeMcpServerConfig('proto', { command: 'node', env: { [key]: 'x' } })
+      assert.equal(res.ok, false, `env.${key} must be refused`)
+      assert.match(res.error, new RegExp(key))
+    }
+  })
+
+  it('a reserved key in headers is refused as well (same hazard)', () => {
+    const config = JSON.parse('{"type":"http","url":"https://mcp.example.com/api","headers":{"__proto__":"payload"}}')
+    const res = normalizeMcpServerConfig('proto-h', config)
+    assert.equal(res.ok, false)
+    assert.match(res.error, /__proto__/)
+  })
+
+  it('a reserved env key never reaches the config file', () => {
+    writeFileSync(configPath, JSON.stringify({ mcpServers: {} }))
+    const config = JSON.parse('{"command":"node","env":{"__proto__":"payload"}}')
+    const res = addMcpServerToConfig({ name: 'proto', config, configPath })
+    assert.equal(res.ok, false)
+    const disk = readFileSync(configPath, 'utf8')
+    assert.ok(!disk.includes('payload'))
+    assert.deepEqual(Object.keys(JSON.parse(disk).mcpServers), [])
+  })
+
+  it('an ordinary env var is of course still accepted', () => {
+    const res = normalizeMcpServerConfig('ok', { command: 'node', env: { GITHUB_TOKEN: 'x' } })
+    assert.equal(res.ok, true)
+    assert.deepEqual(res.entry.env, { GITHUB_TOKEN: 'x' })
+  })
+})
+
+describe('#7001 planAddMcpServerToConfig (dry-run for deny-before-write)', () => {
+  it('returns the exact entry that would be persisted, and writes nothing', () => {
+    writeFileSync(configPath, JSON.stringify({ mcpServers: {} }))
+    const before = readFileSync(configPath, 'utf8')
+    const plan = planAddMcpServerToConfig({ name: 'srv', config: { command: 'node', args: ['s.js'], bogus: 1 }, configPath })
+    assert.equal(plan.ok, true)
+    assert.deepEqual(plan.entry, { command: 'node', args: ['s.js'] }, 'normalized, unknown keys dropped')
+    assert.equal(readFileSync(configPath, 'utf8'), before, 'a plan must not touch the file')
+  })
+
+  it('reports EXISTS without writing, so no consent prompt is spent on a doomed add', () => {
+    writeFileSync(configPath, JSON.stringify({ mcpServers: { dup: { command: 'a' } } }))
+    const plan = planAddMcpServerToConfig({ name: 'dup', config: { command: 'b' }, configPath })
+    assert.equal(plan.ok, false)
+    assert.equal(plan.code, 'EXISTS')
+  })
+
+  it('reports the same validation errors as the commit path', () => {
+    for (const bad of [
+      { name: 'Bad Name', config: { command: 'node' } },
+      { name: 'ok-name', config: { nothing: true } },
+      { name: 'ok-name', config: { command: 'node' }, scope: 'global' },
+      { name: 'ok-name', config: { command: 'node' }, scope: 'project' },
+    ]) {
+      const plan = planAddMcpServerToConfig({ ...bad, configPath })
+      const commit = addMcpServerToConfig({ ...bad, configPath })
+      assert.equal(plan.ok, false)
+      assert.equal(commit.ok, false)
+      assert.equal(plan.error, commit.error, 'plan and commit must agree on why it failed')
+    }
+  })
+
+  it('a plan followed by a commit yields exactly the planned entry', () => {
+    writeFileSync(configPath, JSON.stringify({ mcpServers: {} }))
+    const cfg = { name: 'srv', config: { command: 'node', args: ['s.js'], env: { K: 'v' } }, configPath }
+    const plan = planAddMcpServerToConfig(cfg)
+    const commit = addMcpServerToConfig(cfg)
+    assert.deepEqual(commit.entry, plan.entry)
+    assert.equal(commit.scope, plan.scope)
+  })
+
+  it('a malformed existing config fails the plan, so nothing is prompted for', () => {
+    writeFileSync(configPath, '{ not json')
+    const plan = planAddMcpServerToConfig({ name: 'srv', config: { command: 'node' }, configPath })
+    assert.equal(plan.ok, false)
   })
 })
 

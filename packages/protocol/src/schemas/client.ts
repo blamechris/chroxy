@@ -365,11 +365,14 @@ export const McpConfigScopeSchema = z.enum(['user', 'project'])
 // that writes `~/.claude.json`, a file owned by Claude Code rather than Chroxy.
 //
 // SECURITY: a configured MCP server is a command the daemon will SPAWN, so this
-// is remote-code-execution-adjacent and carries the HOST-AUTHORITY gate, not the
-// weaker own-session gate that #6824 uses — a pairing-bound (shared-session)
-// token is rejected outright with `MCP_CONFIG_FORBIDDEN_BOUND_CLIENT` before any
-// validation or write happens. Adding a server is still not permission to run
-// it: the fleet's first-use trust prompt gates the actual spawn.
+// is arbitrary host code execution and carries the STRICT-PRIMARY gate (#7001) —
+// not the own-session gate #6824 uses, and not even the weaker "any unbound
+// client" host-authority bar, which includes an ordinary paired phone. Anything
+// that is not the primary token class is rejected with
+// `MCP_CONFIG_FORBIDDEN_NON_PRIMARY_CLIENT` before any validation or write
+// happens. Adding a server is still not permission to run it: the user's
+// spawn-trust decision is taken BEFORE the entry is persisted, so a denied add
+// (`MCP_SERVER_ADD_TRUST_DENIED`) writes nothing at all.
 //
 // `name` is held to a strict lowercase-identifier charset server-side (and must
 // not contain `__`, the `mcp__<server>__<tool>` namespace separator). `config`
@@ -397,10 +400,10 @@ export const AddMcpServerSchema = z.object({
 
 // #6974: permanently remove a configured MCP server from the user's MCP config
 // — the counterpart to `add_mcp_server`, and distinct from disabling (#6824),
-// which leaves the server configured. Carries the same HOST-AUTHORITY gate: a
-// pairing-bound token is rejected with `MCP_CONFIG_FORBIDDEN_BOUND_CLIENT`
+// which leaves the server configured. Carries the same STRICT-PRIMARY gate: a
+// non-primary token is rejected with `MCP_CONFIG_FORBIDDEN_NON_PRIMARY_CLIENT`
 // before any write. (Removal only reduces capability, but it still mutates a
-// host-level file a bound token has no authority over, and a bound client that
+// host-level file a pairing token has no authority over, and a client that
 // could delete servers could silently strip a session's tooling.)
 //
 // `name` is validated laxly here on purpose — a server the `claude` CLI created

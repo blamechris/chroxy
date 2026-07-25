@@ -38,12 +38,20 @@ import {
   addMcpServerToConfig,
   defaultClaudeConfigPath,
   loadClaudeMcpConfig,
+  planAddMcpServerToConfig,
   removeMcpServerFromConfig,
   toMcpServerMetadata,
   validateMcpServerNameForRemoval,
   validateNewMcpServerName,
 } from './byok-mcp-config.js'
 import { MCPFleet, MCP_TOOL_PREFIX, parseMcpToolName } from './byok-mcp-fleet.js'
+import {
+  defaultTrustStorePath,
+  isTrusted,
+  loadTrustStore,
+  recordTrust,
+  withTrustStoreLock,
+} from './byok-mcp-trust.js'
 import { getSubagentProfile, SUBAGENT_PROFILE_NAMES } from './byok-subagent-profiles.js'
 
 const log = createLogger('byok-session')
@@ -559,7 +567,8 @@ export class ClaudeByokSession extends BaseSession {
     // by the time we emit 'ready'.
     if (this._mcpServerConfigs.length > 0 && this._mcpFleet === null) {
       // #4457: pass the session's PermissionManager so the fleet can
-      // emit a trust prompt for new (name, command, args[0]) tuples.
+      // emit a trust prompt for a not-yet-trusted spawn config (#7001: name +
+      // command + the full args + env).
       // Tuples already trusted in ~/.chroxy/mcp-trust.json spawn directly
       // with no prompt; denied tuples set state=DEAD without spawning.
       // #4456: forward startCapMs override so operators can tune the
@@ -687,25 +696,127 @@ export class ClaudeByokSession extends BaseSession {
   }
 
   /**
+   * The trust-store path this session's gates use. Resolved through
+   * `defaultTrustStorePath()` (which honours `CHROXY_MCP_TRUST_PATH`) so the
+   * session's pre-write gate and the fleet's spawn-time gate always agree on the
+   * same file — the fleet resolves it the same way when no override is passed.
+   */
+  _mcpTrustStorePath() {
+    return defaultTrustStorePath()
+  }
+
+  /**
+   * #7001: obtain the user's SPAWN-TRUST decision for `cfg` BEFORE its config
+   * entry is persisted.
+   *
+   * Why this cannot be left to the fleet's spawn-time gate alone: the gate runs
+   * after the write, so a denial left the server configured. The user said "no",
+   * yet the entry stayed in `~/.claude.json` and re-prompted on every subsequent
+   * session start — one accidental "allow" (or a UI that auto-confirms) later and
+   * it runs. Deciding first means a denied add persists NOTHING.
+   *
+   * Same gate the fleet uses, so the two cannot disagree: same trust store, same
+   * `withTrustStoreLock` critical section (load → prompt → recordTrust), same
+   * `requestMcpTrust` payload shape (header/env VALUES never included). On allow
+   * the decision is recorded, so the fleet's own gate then sees `isTrusted` and
+   * does NOT prompt a second time for the same add.
+   *
+   * The lock is NOT held across the subsequent write/fleet-attach —
+   * `withTrustStoreLock` is not re-entrant and the fleet's gate takes it again.
+   *
+   * No PermissionManager → no gate, exactly as in `MCPFleet._makeClient` (#4457):
+   * there is no one to ask, and this must not become a hard failure for headless
+   * contexts that never had a trust prompt in the first place.
+   *
+   * @returns {Promise<{ allowed: boolean, prompted: boolean }>}
+   */
+  async _decideMcpSpawnTrust(cfg) {
+    const pm = this._permissions
+    if (!pm || typeof pm.requestMcpTrust !== 'function') return { allowed: true, prompted: false }
+    const trustPath = this._mcpTrustStorePath()
+    return withTrustStoreLock(trustPath, async () => {
+      const store = loadTrustStore(trustPath, { log })
+      if (isTrusted(store, cfg)) return { allowed: true, prompted: false }
+      const isRemote = typeof cfg.url === 'string' && cfg.url.length > 0
+      const trustReq = isRemote
+        ? { name: cfg.name, url: cfg.url, headerKeys: Object.keys(cfg.headers || {}).sort() }
+        : { name: cfg.name, command: cfg.command, args: cfg.args, envKeys: Object.keys(cfg.env || {}).sort() }
+      const allowed = await pm.requestMcpTrust(trustReq)
+      if (allowed) recordTrust(cfg, trustPath)
+      return { allowed: allowed === true, prompted: true }
+    })
+  }
+
+  /**
+   * Build the in-memory fleet config from a normalized persisted entry, filling
+   * the shape defaults (`args`/`env` for stdio, `headers` for remote) the fleet
+   * and the trust key both read.
+   */
+  static _mcpCfgFromEntry(name, entry) {
+    const cfg = { name, ...entry }
+    if (cfg.command !== undefined) {
+      cfg.args = Array.isArray(cfg.args) ? cfg.args : []
+      cfg.env = cfg.env && typeof cfg.env === 'object' ? cfg.env : {}
+    } else {
+      cfg.headers = cfg.headers && typeof cfg.headers === 'object' ? cfg.headers : {}
+    }
+    return cfg
+  }
+
+  /**
    * #6974: add a brand-new MCP server — a CONFIG MUTATION, not a runtime toggle.
    *
-   * Order is deliberate: the config write happens FIRST and is the commit point.
-   * If it fails, nothing about the live session changed and the user's file is
-   * untouched. Only once the entry is durably on disk do we attach it to the
-   * live fleet, so a user can never end up with a running server that vanishes
-   * on restart (the failure mode of wiring the fleet first).
+   * Order (tightened by #7001):
+   *   1. validate + PLAN the write (`planAddMcpServerToConfig`) — every check the
+   *      commit performs, no write. Yields the exact normalized entry that would
+   *      be persisted, so the trust decision is made against precisely the config
+   *      that would run, and a name that would fail (EXISTS / invalid) never
+   *      raises a prompt.
+   *   2. obtain the spawn-trust decision for that entry. DENIED → return without
+   *      writing anything: the user's config is untouched.
+   *   3. commit the config write — the durability commit point. If it fails,
+   *      nothing about the live session changed.
+   *   4. only then attach to the live fleet, so a user can never end up with a
+   *      running server that vanishes on restart.
    *
-   * The spawn still goes through the fleet's first-use trust gate, so adding a
-   * server is not by itself permission to execute its command — the user gets
-   * the usual `requestMcpTrust` prompt for an untrusted tuple.
+   * Adding is still not, by itself, permission to execute: step 2 IS that
+   * permission, and the fleet's independent gate re-checks it at spawn time (a
+   * config entry that is persisted but untrusted — e.g. hand-added to
+   * `~/.claude.json`, or trusted-then-tampered — still prompts).
    *
    * Returns `{ ok, error?, code?, status? }`. `code: 'EXISTS'` distinguishes a
-   * duplicate name (the caller maps it to a distinct wire error) from a generic
-   * validation failure.
+   * duplicate name from a generic validation failure; `code: 'TRUST_DENIED'`
+   * distinguishes "the user said no" from a failure.
    */
   async addMcpServer(name, config, scope = 'user') {
     const valid = validateNewMcpServerName(name)
     if (!valid.ok) return { ok: false, error: valid.error }
+
+    let planned
+    try {
+      planned = planAddMcpServerToConfig({
+        name: valid.name,
+        config,
+        scope,
+        cwd: this.cwd,
+        configPath: this._mcpConfigPath,
+      })
+    } catch (err) {
+      return { ok: false, error: `Failed to read MCP config: ${err?.message || String(err)}` }
+    }
+    if (!planned.ok) return { ok: false, error: planned.error, code: planned.code }
+
+    // The candidate config, exactly as it would be persisted and spawned.
+    const cfg = ClaudeByokSession._mcpCfgFromEntry(valid.name, planned.entry)
+
+    const trust = await this._decideMcpSpawnTrust(cfg)
+    if (!trust.allowed) {
+      return {
+        ok: false,
+        code: 'TRUST_DENIED',
+        error: `Spawning MCP server '${valid.name}' was denied, so it was not added to the config.`,
+      }
+    }
 
     let written
     try {
@@ -725,20 +836,18 @@ export class ClaudeByokSession extends BaseSession {
     if (!written.ok) return { ok: false, error: written.error, code: written.code }
 
     // Mirror the persisted entry into the in-memory config list. `entry` is the
-    // NORMALIZED object that was written, so memory and disk cannot diverge.
-    const cfg = { name: valid.name, ...written.entry }
-    if (cfg.command !== undefined) {
-      cfg.args = Array.isArray(cfg.args) ? cfg.args : []
-      cfg.env = cfg.env && typeof cfg.env === 'object' ? cfg.env : {}
-    } else {
-      cfg.headers = cfg.headers && typeof cfg.headers === 'object' ? cfg.headers : {}
-    }
-    this._mcpServerConfigs = [...this._mcpServerConfigs, cfg]
+    // NORMALIZED object that was actually written, so memory and disk cannot
+    // diverge. Normalization is pure over (name, config), so this is structurally
+    // identical to the `cfg` the trust decision was made against — and if it ever
+    // were not, the fleet's own gate below would see an untrusted config and
+    // prompt rather than spawn.
+    const persistedCfg = ClaudeByokSession._mcpCfgFromEntry(valid.name, written.entry)
+    this._mcpServerConfigs = [...this._mcpServerConfigs, persistedCfg]
     this._refreshMcpServerMetadata()
 
     let status = 'configured'
     if (this._mcpFleet) {
-      const result = await this._mcpFleet.addServer(cfg)
+      const result = await this._mcpFleet.addServer(persistedCfg)
       if (result.status) status = result.status
     }
     // No fleet yet (nothing was configured at start, so it was never created):

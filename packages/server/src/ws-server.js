@@ -322,8 +322,8 @@ function _isSecureRequest(req) {
  *   { type: 'set_permission_rules', rules, sessionId }  — set per-session auto-approval rules
  *   { type: 'set_mcp_server_enabled', server, enabled, sessionId?, requestId? } — #6824 runtime park/unpark of an ALREADY-CONFIGURED MCP server (BYOK lane; own-session gate)
  *   { type: 'submit_mcp_auth_code', server, code, sessionId?, requestId? } — #6822 submit a pasted OAuth authorization code for a remote MCP server (BYOK lane)
- *   { type: 'add_mcp_server', name, config, scope?, sessionId?, requestId? } — #6974 ADD an MCP server, persisting it to the user's MCP config (BYOK lane; HOST-AUTHORITY gate — a pairing-bound token is rejected, since a configured server is a command this machine will spawn)
- *   { type: 'remove_mcp_server', name, scope?, sessionId?, requestId? } — #6974 permanently REMOVE a configured MCP server from the user's MCP config (BYOK lane; same host-authority gate)
+ *   { type: 'add_mcp_server', name, config, scope?, sessionId?, requestId? } — #6974 ADD an MCP server, persisting it to the user's MCP config (BYOK lane; STRICT-PRIMARY gate — any non-primary token is rejected, since a configured server is a command this machine will spawn; #7001)
+ *   { type: 'remove_mcp_server', name, scope?, sessionId?, requestId? } — #6974 permanently REMOVE a configured MCP server from the user's MCP config (BYOK lane; same strict-primary gate)
  *   { type: 'set_prompt_evaluator', value: boolean, sessionId? } — toggle the per-session promptEvaluator (#3185)
  *   { type: 'set_prompt_evaluator_skip_pattern', value: string|null, sessionId? } — set the per-session evaluator skip-pattern source (#3639)
  *   { type: 'set_chroxy_context_hint', value: boolean, sessionId? } — toggle the per-session Chroxy context hint (#3805)
