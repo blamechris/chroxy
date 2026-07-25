@@ -19,9 +19,11 @@ const log = createLogger('token-manager')
  *   token_rotated { oldToken, newToken, expiresAt, reason, persisted }
  *
  * `persisted` (#6965) is a Promise for the `onPersist` write (null when no persist
- * callback is configured). It settles when the write — including its fsync, for the
- * durable revoke path — has completed, and REJECTS if the write failed. It exists so
- * the revoke's client-facing ack can be gated on durability instead of racing it.
+ * callback is configured). It settles when whichever storage path ran has completed —
+ * including its fsync where the persist site performs one (the `config.json` fallback
+ * on a durable revoke; the OS keychain owns its own durability) — and REJECTS if the
+ * write failed. It exists so the revoke's client-facing ack can be gated on the write
+ * instead of racing it.
  *
  * `reason` distinguishes a scheduled/periodic rotation ('scheduled') from an
  * operator revoke ('revoke', via `revoke()`). A revoke is the panic button:
@@ -183,7 +185,7 @@ export class TokenManager extends EventEmitter {
       // Attach a handler unconditionally: the log line is the SCHEDULED path's only
       // report, and it also guarantees no unhandled rejection when nothing consumes
       // `persisted` (no WsServer wired, or a listener that ignores it).
-      persisted.catch(err => {
+      persisted.catch((err) => {
         log.error(`Failed to persist new token: ${err?.message || err}`)
       })
     }

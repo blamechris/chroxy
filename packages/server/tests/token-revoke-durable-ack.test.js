@@ -128,7 +128,7 @@ describe('primary-token revoke: durable-write ack gating (#6965)', () => {
     assert.deepEqual(sent[0].msg, { type: 'token_rotated', expiresAt: null, reason: 'revoke' })
   })
 
-  it('a durability failure yields REVOKE_NOT_DURABLE and never the success ack', async () => {
+  it('a durability failure sends REVOKE_NOT_DURABLE *and* the revoke transition, in that order', async () => {
     const gate = deferred()
     const manager = track(new TokenManager({ token: 'token-old', onPersist: () => gate.promise }))
     const { server, sent, client } = makeServer(manager)
@@ -141,14 +141,27 @@ describe('primary-token revoke: durable-write ack gating (#6965)', () => {
 
     assert.equal(outcome.ok, false)
     assert.equal(client.authenticated, false, 'enforcement still holds in-process')
-    assert.equal(sent.length, 1)
+    assert.equal(sent.length, 2, 'the diagnostic AND the state transition, one of each per connection')
+
+    // The operator diagnostic goes FIRST: `token_rotated{reason:'revoke'}` makes the
+    // mobile client tear the socket down, so a frame queued after it can be lost.
     assert.equal(sent[0].msg.type, 'error')
     assert.equal(sent[0].msg.code, 'REVOKE_NOT_DURABLE')
     assert.match(sent[0].msg.message, /durabl|restart/i)
-    assert.equal(
-      sent.filter((s) => s.msg.type === 'token_rotated').length,
-      0,
-      'a non-durable revoke must never report success',
+
+    // ...and the transition is NOT withheld. It is this connection's ONLY automatic
+    // trigger for clearing the now-dead credential and prompting re-auth
+    // (packages/app/src/store/message-handler.ts `case 'token_rotated'` with no
+    // token → clearSavedConnection() + disconnect() + re-scan alert). The `error`
+    // envelope reaches neither the socket nor secure storage, so withholding this
+    // left every mobile client "connected" holding a REVOKED token with server-side
+    // authority already stripped — every privileged op failing opaquely, nothing
+    // prompting a re-pair. The message carries no token and makes no durability
+    // claim; "your authority is gone" is TRUE on this branch.
+    assert.deepEqual(
+      sent[1].msg,
+      { type: 'token_rotated', expiresAt: null, reason: 'revoke' },
+      'the revoke transition must still be delivered when the write was not durable',
     )
   })
 

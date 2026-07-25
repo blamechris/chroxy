@@ -19,8 +19,15 @@ import { nsCtx } from './test-helpers.js'
  *   - ON for the rotation path: temp file fsynced BEFORE the rename, containing
  *     directory fsynced AFTER it (a rename is not durable until its directory
  *     entry is),
- *   - a durability FAILURE throws instead of reporting success, and the prior
- *     value survives.
+ *   - a PRE-RENAME (temp file) durability failure throws instead of reporting
+ *     success, and the prior value survives — nothing was published,
+ *   - a POST-RENAME (directory) durability failure does NOT throw: the rename has
+ *     already published the new value, so only the durability of the new directory
+ *     ENTRY is unproven. Reporting a failed write there would be factually wrong
+ *     and would leave the in-process cache holding a value that is no longer on
+ *     disk (split brain). It reports a distinct `durabilityUnconfirmed` outcome,
+ *     the caller updates its cache to match disk, and the operator gets a
+ *     `WEBHOOK_SECRET_DURABILITY_UNCONFIRMED` diagnostic alongside the config ack.
  *
  * The durability hook is injected (`_setCredentialDurabilityForTests`) so the
  * assertions never depend on real fsync behaviour of the host filesystem.
@@ -45,6 +52,14 @@ function makeCtx(cache = { value: undefined }) {
   })
 }
 
+/** Every frame the handler produced, in order, across both send paths. */
+function allReplies(ws, ctx) {
+  const out = []
+  for (const call of ctx.transport.send.mock.calls) out.push(call.arguments[1])
+  for (const call of ws.send.mock.calls) out.push(JSON.parse(call.arguments[0]))
+  return out
+}
+
 function lastReply(ws, ctx) {
   if (ws.send.mock.callCount() > 0) {
     return JSON.parse(ws.send.mock.calls[ws.send.mock.calls.length - 1].arguments[0])
@@ -53,6 +68,18 @@ function lastReply(ws, ctx) {
     return ctx.transport.send.mock.calls[ctx.transport.send.mock.calls.length - 1].arguments[1]
   }
   return null
+}
+
+function throwOnDirFsync(calls) {
+  return (target, { isDir = false } = {}) => {
+    calls.push({ target, isDir })
+    // The temp-file fsync (pre-rename) SUCCEEDS — only the containing
+    // directory's fsync (post-rename, after the value is already live) fails.
+    if (!isDir) return
+    const err = new Error('simulated directory fsync I/O failure')
+    err.code = 'EIO'
+    throw err
+  }
 }
 
 describe('credential-store durable-write seam (#6964)', () => {
@@ -126,7 +153,7 @@ describe('credential-store durable-write seam (#6964)', () => {
     assert.equal(dirCall.targetExists, true, 'directory fsync must happen AFTER the rename')
   })
 
-  it('a durability failure throws and leaves the previously stored value intact', () => {
+  it('a PRE-RENAME (temp file) durability failure throws and leaves the previously stored value intact', () => {
     credStore.setStoredField(WEBHOOK_SECRET_FIELD, 'whsec-original-value-0001')
     calls = []
     credStore._setCredentialDurabilityForTests(() => {
@@ -148,6 +175,34 @@ describe('credential-store durable-write seam (#6964)', () => {
     )
     const leftovers = readdirSync(credDir).filter((n) => n.includes('.tmp.'))
     assert.deepEqual(leftovers, [], 'the orphaned temp file must be cleaned up')
+  })
+
+  it('a POST-RENAME (directory) durability failure does NOT throw — the value is live, only its durability is unproven', () => {
+    if (IS_WINDOWS) return // no directory fsync on Windows (MOVEFILE_WRITE_THROUGH covers the rename)
+    credStore.setStoredField(WEBHOOK_SECRET_FIELD, 'whsec-original-value-0001')
+    calls = []
+    credStore._setCredentialDurabilityForTests(throwOnDirFsync(calls))
+
+    let outcome
+    assert.doesNotThrow(() => {
+      outcome = credStore.setStoredField(WEBHOOK_SECRET_FIELD, 'whsec-rotated-value-0002', { durable: true })
+    }, 'the rename already published the new value — reporting a failed write would be factually wrong')
+    credStore._setCredentialDurabilityForTests(null)
+
+    assert.equal(calls.length, 2, 'both limbs ran: temp-file fsync then directory fsync')
+    assert.equal(
+      credStore.readStoredField(WEBHOOK_SECRET_FIELD).value,
+      'whsec-rotated-value-0002',
+      'the new value IS on disk — the rename succeeded before the directory fsync failed',
+    )
+    assert.equal(
+      typeof outcome?.durabilityUnconfirmed,
+      'string',
+      'the caller must be told durability is UNCONFIRMED (distinct from the write failing)',
+    )
+    assert.match(outcome.durabilityUnconfirmed, /directory fsync/)
+    const leftovers = readdirSync(credDir).filter((n) => n.includes('.tmp.'))
+    assert.deepEqual(leftovers, [], 'no orphaned temp file')
   })
 
   it('the webhook-secret ROTATION path drives the durable write and acks only on success', () => {
@@ -173,7 +228,51 @@ describe('credential-store durable-write seam (#6964)', () => {
     }
   })
 
-  it('the rotation path reports a durability failure instead of acking success', () => {
+  it('the rotation path never reports a failed write for a rotation that LANDED, and the cache follows disk', () => {
+    if (IS_WINDOWS) return // no directory fsync on Windows
+    credStore.setStoredField(WEBHOOK_SECRET_FIELD, 'whsec-original-value-0001')
+    calls = []
+    credStore._setCredentialDurabilityForTests(throwOnDirFsync(calls))
+
+    const ws = makeWs()
+    const cache = { value: undefined }
+    const ctx = makeCtx(cache)
+    githubWebhookHandlers.github_webhook_set_secret(
+      ws,
+      { id: 'c1', isPrimaryToken: true },
+      { type: 'github_webhook_set_secret', requestId: 'r3', secret: 'whsec-rotated-value-0002' },
+      ctx,
+    )
+    const replies = allReplies(ws, ctx)
+    credStore._setCredentialDurabilityForTests(null)
+
+    // The new secret is live on disk...
+    assert.equal(credStore.readStoredField(WEBHOOK_SECRET_FIELD).value, 'whsec-rotated-value-0002')
+    // ...so the reply must NOT claim the write failed (the operator would leave
+    // the OLD secret configured at GitHub while the daemon verifies with the new one).
+    assert.deepEqual(
+      replies.filter((r) => r.code === 'WEBHOOK_SECRET_WRITE_FAILED'),
+      [],
+      'a write that landed must never be reported as a failed write',
+    )
+    const config = replies.find((r) => r.type === 'github_webhook_config')
+    assert.ok(config, 'the reply is still the value-free config')
+    assert.equal(config.configured, true)
+    // ...and the in-process cache must never diverge from what is on disk.
+    assert.equal(
+      cache.value,
+      'whsec-rotated-value-0002',
+      'the hot cache must track disk — otherwise live deliveries verify with the OLD secret',
+    )
+    // ...while the operator still learns the durability of the write is unproven.
+    const caveat = replies.find((r) => r.code === 'WEBHOOK_SECRET_DURABILITY_UNCONFIRMED')
+    assert.ok(caveat, 'the fsync failure must still be surfaced to the operator')
+    assert.equal(caveat.type, 'error')
+    assert.match(caveat.message, /durab/i)
+    assert.match(caveat.message, /saved|live|stored/i)
+  })
+
+  it('the rotation path reports a PRE-RENAME durability failure instead of acking success', () => {
     credStore.setStoredField(WEBHOOK_SECRET_FIELD, 'whsec-original-value-0001')
     credStore._setCredentialDurabilityForTests(() => {
       const err = new Error('simulated fsync I/O failure')

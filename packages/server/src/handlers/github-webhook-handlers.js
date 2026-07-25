@@ -110,6 +110,7 @@ function handleGithubWebhookSetSecret(ws, client, msg, ctx) {
     sendError(ws, msg?.requestId, 'INVALID_REQUEST', `secret must be at least ${MIN_SECRET_LENGTH} characters`, undefined, ctx)
     return
   }
+  let outcome
   try {
     // Encrypt-at-rest aware, atomic 0600 write into the credentials store — never
     // plaintext config.json. err.message is validation/file-mode text, never the value.
@@ -118,9 +119,10 @@ function handleGithubWebhookSetSecret(ws, client, msg, ctx) {
     // GitHub. The operator gets a success ack and then re-points the GitHub webhook
     // at the new secret, so losing the write to a power loss inside the OS writeback
     // window would leave the daemon verifying deliveries with the old secret and
-    // rejecting every real one. The fsync failure path throws and is reported below
-    // as WEBHOOK_SECRET_WRITE_FAILED rather than acked as configured.
-    setStoredField(WEBHOOK_SECRET_FIELD, secret, { durable: true })
+    // rejecting every real one. A THROW here means nothing was published (the write
+    // itself failed, or its PRE-rename fsync did) — the old secret still stands, so
+    // report WEBHOOK_SECRET_WRITE_FAILED and do not touch the cache.
+    outcome = setStoredField(WEBHOOK_SECRET_FIELD, secret, { durable: true })
   } catch (err) {
     sendError(ws, msg?.requestId, 'WEBHOOK_SECRET_WRITE_FAILED', err?.message || 'write failed', undefined, ctx)
     return
@@ -128,10 +130,33 @@ function handleGithubWebhookSetSecret(ws, client, msg, ctx) {
   // Update the in-process hot cache so live webhook deliveries pick up the new
   // secret without a keychain re-read (and so a rotate never serves the stale
   // lazily-cached value). Guarded — a minimal test ctx may omit it.
+  //
+  // This runs for `outcome.durabilityUnconfirmed` too, and must: that outcome means
+  // the new secret IS live on disk and only the durability of the rename is unproven.
+  // Skipping it would leave the running daemon verifying deliveries with the OLD
+  // secret while the NEW one is what a restart loads — a silent, delayed outage.
   if (typeof ctx?.services?.setWebhookSecretCache === 'function') {
     ctx.services.setWebhookSecretCache(secret)
   }
+  // The reply is the success config: the rotation took effect. Reporting a failure
+  // for a write that landed would send the operator to re-point GitHub back at the
+  // old secret that the daemon no longer accepts.
   sendWebhookConfig(ws, ctx, msg?.requestId)
+  if (outcome?.durabilityUnconfirmed) {
+    // ...but the operator still learns the fsync failed. Deliberately requestId-LESS:
+    // the config above is this request's reply, and a client correlating an error to
+    // its in-flight requestId must not read this as the rotation's verdict.
+    sendError(
+      ws,
+      null,
+      'WEBHOOK_SECRET_DURABILITY_UNCONFIRMED',
+      'The new webhook secret is saved and live, but the filesystem could not confirm the write is durable ' +
+      `(${outcome.durabilityUnconfirmed}) — a power loss could roll the rotation back. ` +
+      'Resolve the storage error, then re-check the configured secret after the next restart.',
+      undefined,
+      ctx,
+    )
+  }
 }
 
 function handleGithubWebhookClearSecret(ws, client, msg, ctx) {

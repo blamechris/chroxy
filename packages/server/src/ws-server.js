@@ -410,7 +410,7 @@ function _isSecureRequest(req) {
  *   { type: 'session_role', sessionId, primaryClientId } — #5589/#5281: explicit primary-ownership; client derives its role (primary iff primaryClientId === own clientId, observer if another holds it, null = unclaimed)
  *   { type: 'pong' }                                    — heartbeat response
  *   { type: 'permission_expired', requestId, sessionId, message }  — permission response could not be routed (expired/handled)
- *   { type: 'token_rotated', token?, expiresAt, reason? } — API token changed. Scheduled rotation carries the new `token` to encrypted clients (transparent re-key, sessions survive). A `reason: 'revoke'` (#6006) carries NO token: the operator revoked, so the server severed user-shell sessions and cleared this connection's auth — the client must re-authenticate with the current token (obtained out-of-band). #6965: for a revoke this message is WITHHELD until the daemon's durable token write has fsynced, so the ack can never precede the revocation actually being on disk; if that write FAILS the connection receives an `error` with `code: 'REVOKE_NOT_DURABLE'` instead (the revoke still holds in the running process).
+ *   { type: 'token_rotated', token?, expiresAt, reason? } — API token changed. Scheduled rotation carries the new `token` to encrypted clients (transparent re-key, sessions survive). A `reason: 'revoke'` (#6006) carries NO token: the operator revoked, so the server severed user-shell sessions and cleared this connection's auth — the client must re-authenticate with the current token (obtained out-of-band). #6965: for a revoke this message is WITHHELD until the daemon's token persist reports success, so the ack can never precede the revocation being stored — that persist is an fsync of the temp file + containing directory on the `config.json` fallback, while on the OS-keychain path (the macOS/libsecret default) durability is delegated to the keychain and no fsync is performed here. If the persist FAILS the connection receives an `error` with `code: 'REVOKE_NOT_DURABLE'` FIRST and then this message anyway: enforcement already ran unconditionally, so the client must still re-authenticate — the message carries no token and makes no durability claim, and the caveat rides the error.
  *   { type: 'session_warning', sessionId, name, reason, message, remainingMs } — session about to timeout
  *   { type: 'session_timeout', sessionId, name, idleMs }         — session destroyed due to idle timeout
  *   { type: 'statusline_output', sessionId, text, active?, truncated? } — #6791: rendered stdout of the user's own Claude Code statusLine script (active:false + empty text clears it)
@@ -1345,7 +1345,7 @@ export class WsServer {
           // and this ack raced it — so the operator could be told the highest-authority
           // token was dead while a power loss inside the OS writeback window brought the
           // daemon back still honouring it. Wait for the write (fsync included), THEN
-          // ack. On failure send an explicit error instead: never a silent success.
+          // ack. On failure the client ALSO gets an explicit error — see below.
           if (!persisted) {
             // Nothing to wait on (no persist callback configured — e.g. a test
             // TokenManager, or a deployment with no token persistence). Unchanged
@@ -1362,19 +1362,41 @@ export class WsServer {
             (err) => {
               const message = err?.message || String(err)
               log.error(
-                `Token REVOKE could not be persisted durably (${message}) — the revoke HOLDS in this process, ` +
-                `but a restart may resurrect the previous token. Fix the storage error and revoke again.`,
+                `Token REVOKE could not be confirmed durable (${message}) — the revoke HOLDS in this process, ` +
+                `but a restart is not guaranteed to come back on the new token. Fix the storage error and revoke again.`,
               )
+              // Send the operator DIAGNOSTIC first, then the revoke transition.
+              //
+              // Both, deliberately. The `error` envelope is the operator's report that
+              // durability is unproven; `token_rotated{reason:'revoke'}` is the CLIENT
+              // STATE TRANSITION — for the mobile app it is the sole automatic trigger
+              // for clearing the now-dead credential and prompting re-auth (app
+              // message-handler `case 'token_rotated'` with no token →
+              // clearSavedConnection() + disconnect() + re-scan alert). `case 'error'`
+              // shows an alert and touches neither the socket nor secure storage, so
+              // withholding the transition left every connected device "connected" while
+              // holding a REVOKED token with its server-side authority already stripped:
+              // privileged ops failing opaquely, nothing prompting a re-pair.
+              //
+              // Sending it is not a false success: the message carries NO token and makes
+              // NO durability claim. It says "this connection's authority is gone, you must
+              // re-authenticate", which is TRUE here — enforcement above already ran,
+              // unconditionally. The durability caveat rides the error, not this message.
+              //
+              // Diagnostic first because the transition tears the socket down client-side;
+              // a frame queued after it can be dropped before the client reads it.
               for (const ws of forcedSockets) {
                 if (ws.readyState !== 1) continue
                 this._send(ws, {
                   type: 'error',
                   code: 'REVOKE_NOT_DURABLE',
                   message:
-                    'Token revoke is enforced for the running daemon but could NOT be written durably to disk — ' +
-                    'the previous token may become valid again if the daemon restarts. Resolve the storage error and revoke again.',
+                    'Token revoke is enforced for the running daemon but its write could NOT be confirmed durable on disk — ' +
+                    'after a restart the daemon may come back on either the new token or the previous one. ' +
+                    'Resolve the storage error and revoke again.',
                 })
               }
+              sendRevokeAck()
               return { ok: false, error: message }
             },
           )
