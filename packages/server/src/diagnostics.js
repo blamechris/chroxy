@@ -101,6 +101,9 @@ function collectRateLimiters(server) {
     // The HTTP-permission limiter lives inside the permission handler
     // closure and is re-exported on the handler object for this purpose.
     server?._permissions?._httpPermissionLimiter,
+    // #7004 — the /permission-floor probe's own (much larger) limiter, same
+    // closure-re-export pattern.
+    server?._permissions?._httpFloorLimiter,
   ]
   for (const limiter of candidates) {
     if (limiter && typeof limiter.getEvictionStats === 'function') {

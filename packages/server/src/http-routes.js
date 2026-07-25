@@ -861,6 +861,16 @@ export function createHttpHandler(server) {
       return
     }
 
+    // #7004 — protected-path / secret-read FLOOR probe for the permission hook.
+    // The hook decides auto/acceptEdits in shell, so it asks here whether the
+    // target is floored before short-circuiting; a floored target is routed to a
+    // real prompt via POST /permission. Same per-session hook-secret auth as
+    // /permission; read-only (no pending request, no broadcast, no push).
+    if (req.method === 'POST' && req.url === '/permission-floor') {
+      server._permissions.handlePermissionFloorCheck(req, res)
+      return
+    }
+
     // Permission response endpoint (HTTP fallback)
     if (req.method === 'POST' && req.url === '/permission-response') {
       server._permissions.handlePermissionResponseHttp(req, res)

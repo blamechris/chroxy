@@ -283,6 +283,7 @@ For component tables, WS protocol messages, data flow diagrams, and file listing
 ### Security model
 
 - [`docs/security/bearer-token-authority.md`](docs/security/bearer-token-authority.md) — token classes (primary / pairing-bound / hook secret), what each one grants, and the checklist for adding new endpoints. Read this before touching `ws-auth.js`, `ws-permissions.js`, `pairing.js`, or any new HTTP route that touches session state.
+- [`docs/security/permission-floor.md`](docs/security/permission-floor.md) — the protected-path / secret-read floor: what it covers, why it beats every lenient mode (`auto` / `acceptEdits` / a broad `allow` rule), and the fact that it must hold on BOTH the in-process and the hook-routed pipeline. Read this before touching `permission-floor.js`, `permission-manager.js`'s `handlePermission`, `ws-permissions.js`, or `hooks/permission-hook.sh` — the floor has exactly one implementation and adding a second is #7004 all over again.
 - [`docs/security/encryption-threat-model.md`](docs/security/encryption-threat-model.md) — transport-layer (key exchange + message encryption) threat model.
 - [`docs/security/spawned-binary-provenance.md`](docs/security/spawned-binary-provenance.md) — provider-binary integrity + macOS quarantine preflight (`verify-binary.js`) and the supply-chain threat model. Read this before touching `utils/verify-binary.js`, `utils/preflight.js`, `utils/resolve-binary.js`, or any provider `resolvedBinary`/spawn path.
 

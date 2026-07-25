@@ -6,12 +6,80 @@ import { settlePush } from './push.js'
 import { createPermissionResolver } from './permission-resolver.js'
 import { sendOversizeResponse } from './http-oversize.js'
 import { redactValue, sanitizeToolInput } from './redaction.js'
+// #7004: the protected-path / secret-read FLOOR. Imported from permission-floor.js
+// — the leaf module that is the SINGLE source of the floor — so the hook-routed
+// path applies the byte-identical predicate the in-process path
+// (permission-manager.js handlePermission) does. Never reimplement it here or in
+// the shell hook.
+import { isFlooredTarget } from './permission-floor.js'
 import { buildPermissionRequestMessage } from '@chroxy/protocol'
 
 const log = createLogger('ws')
 
 // -- Permission TTL --
 const PERMISSION_TTL_MS = 300_000 // 5 minutes
+
+// #7004 — body cap for POST /permission-floor. Deliberately MUCH larger than
+// /permission's 64KB, for two reasons:
+//   1. Nothing is retained. /permission's cap bounds a request that is HELD for up
+//      to 5 minutes with its payload stashed in `pendingPermissions`; the floor
+//      probe parses the body, answers a boolean, and drops it inside one tick.
+//   2. Over-capping here would BREAK legitimate work rather than merely prompt for
+//      it. The hook POSTs the whole PreToolUse payload, and a `Write` carries its
+//      full `content` — a >64KB file write in auto/acceptEdits would 413, and the
+//      hook's fail-closed rule would then route it to a prompt whose own POST is
+//      likewise oversize (a deny). 1 MiB keeps every realistic write on the
+//      auto-allow path; a payload past it is pathological and still fails CLOSED.
+const MAX_FLOOR_BODY = 1_048_576
+
+/**
+ * #7004 — the hook path's floor decision for one PreToolUse payload.
+ *
+ * Pure, and exported for tests: the HTTP handler below is only auth + body
+ * plumbing around this. The floor VERDICT itself comes from
+ * {@link isFlooredTarget} (permission-floor.js), the same call
+ * `permission-manager.js` `handlePermission` makes — so the two pipelines cannot
+ * disagree about which tool gets which floor or how targets are extracted.
+ *
+ * FAILS CLOSED on an ambiguous payload — a floored verdict only ever forces the
+ * interactive PROMPT (never a deny), so "prompt when unsure" costs one prompt,
+ * whereas guessing `false` would silently auto-approve a target we could not
+ * inspect. Ambiguous means: a non-object payload, a missing/blank `tool_name`, a
+ * missing or non-object `tool_input` (a path-carrying tool call always has one),
+ * or no resolvable cwd to anchor the resolution on. This is deliberately STRICTER
+ * than the in-process path, which receives already-typed inputs from the SDK
+ * rather than parsing an HTTP body.
+ *
+ * The cwd basis is the OWNING SESSION's cwd (`session.cwd` — exactly what
+ * `PermissionManager` is constructed with, `cwd: this.cwd`), falling back to the
+ * payload's own `cwd` only when the session is not resolvable (legacy/unit-test
+ * shapes). It never falls back to the daemon's `process.cwd()`: resolving a
+ * relative target against the wrong root could UNDER-floor.
+ *
+ * @param {*} hookData  the parsed PreToolUse payload (untrusted)
+ * @param {string|null} sessionCwd  the owning session's cwd, when resolvable
+ * @returns {{ floor: boolean, reason: string }}
+ */
+export function evaluateHookFloorRequest(hookData, sessionCwd) {
+  if (!hookData || typeof hookData !== 'object' || Array.isArray(hookData)) {
+    return { floor: true, reason: 'payload is not an object' }
+  }
+  const tool = hookData.tool_name
+  if (typeof tool !== 'string' || tool.length === 0) {
+    return { floor: true, reason: 'missing tool_name' }
+  }
+  const input = hookData.tool_input
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    return { floor: true, reason: 'missing or non-object tool_input' }
+  }
+  const cwd = (typeof sessionCwd === 'string' && sessionCwd.length > 0)
+    ? sessionCwd
+    : ((typeof hookData.cwd === 'string' && hookData.cwd.length > 0) ? hookData.cwd : null)
+  if (!cwd) {
+    return { floor: true, reason: 'no resolvable session cwd' }
+  }
+  return { floor: isFlooredTarget(tool, input, cwd), reason: 'floor predicate' }
+}
 
 // -- Broadcast safety --
 // `sanitizeToolInput` (key-name + recursive value-shape redaction) lives in
@@ -89,6 +157,18 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
   // from a test fixture) can't displace the canonical 'http-permission'
   // tag that operators rely on in eviction logs and /diagnostics.
   const _httpPermissionLimiter = new RateLimiter({ ...(rateLimit || { windowMs: 60_000, maxMessages: 30, burst: 10 }), name: 'http-permission' })
+
+  // #7004 — separate, MUCH larger budget for POST /permission-floor. Unlike
+  // /permission (one request per HUMAN decision, so 30/min is generous), the floor
+  // probe fires once per TOOL CALL while a lenient mode is active — machine speed.
+  // A budget as low as /permission's would rate-limit the probe, and because the
+  // hook fails CLOSED on anything but an explicit `floor:false` that would turn a
+  // busy auto-mode session into a prompt storm (and then, with /permission itself
+  // limited, a deny storm). 600/min + 200 burst sits far above any real session's
+  // tool-call rate while still bounding an abusive caller; the work per request is
+  // a few lstat/realpath calls, so the ceiling is about bounding, not cost.
+  // Overridable via `rateLimit.floor` for tests.
+  const _httpFloorLimiter = new RateLimiter({ ...(rateLimit?.floor || { windowMs: 60_000, maxMessages: 600, burst: 200 }), name: 'http-permission-floor' })
 
   // Fall back to validateBearerAuth if validateHookAuth is not provided (backwards compat for tests)
   const _validateHookAuth = validateHookAuth || validateBearerAuth
@@ -322,6 +402,117 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
         try {
           if (!res.headersSent) {
             sendJson(res, 500, { error: 'Internal server error' })
+          } else {
+            res.end()
+          }
+        } catch { /* socket already torn down */ }
+      }
+    })
+  }
+
+  /**
+   * #7004 — Handle POST /permission-floor from the hook script.
+   *
+   * WHY THIS EXISTS. `hooks/permission-hook.sh` decides `auto` and `acceptEdits`
+   * ITSELF, in shell, and never reaches `permission-manager.js` — so the
+   * protected-path / secret-read floor that #6794/#6803 put in front of every
+   * lenient-mode short-circuit did not exist for the hook-routed providers
+   * (claude-tui — the DEFAULT provider — and cli-session). Under `auto` /
+   * `acceptEdits` those sessions read `.env` / `id_rsa` and wrote into `.git`/
+   * `.claude` with no prompt.
+   *
+   * The floor is non-trivial path logic (lexical + symlink component-walk,
+   * fail-closed), so reimplementing it in bash would guarantee drift. Instead the
+   * hook asks the daemon: this route answers the ONE question the shell cannot,
+   * `{ floor: true | false }`, using the shared {@link isFlooredTarget}. The hook
+   * treats ONLY an explicit `floor:false` as clearance to short-circuit;
+   * everything else (floored, 4xx, 429, 5xx, an unparseable body, an unreachable
+   * daemon) routes the call to a real prompt. So every failure mode here degrades
+   * to "the user is asked", never to "silently allowed".
+   *
+   * Deliberately NOT a permission request: it creates no pending entry, mints no
+   * requestId, broadcasts nothing and sends no push. It is a read-only predicate
+   * over a path the caller already supplied, gated on the same per-session hook
+   * secret as `POST /permission` (see docs/security/bearer-token-authority.md §5).
+   */
+  function handlePermissionFloorCheck(req, res) {
+    // Rate limit by source IP — see getRateLimitKey's note on the cloudflared
+    // loopback peer in handlePermissionRequest above. A 429 answers `floor:true`
+    // so a limited caller still fails CLOSED (prompt), never open.
+    const socketIp = req.socket?.remoteAddress || ''
+    const clientIp = getRateLimitKey(socketIp, req)
+    const { allowed, retryAfterMs } = _httpFloorLimiter.check(clientIp)
+    if (!allowed) {
+      log.warn(`Rate limited POST /permission-floor from ${clientIp}`)
+      sendJson(res, 429, { error: 'rate limited', floor: true, retryAfterMs }, { 'Retry-After': Math.ceil(retryAfterMs / 1000) })
+      return
+    }
+
+    if (!_validateHookAuth(req, res)) {
+      log.warn('Rejected unauthenticated POST /permission-floor')
+      return
+    }
+
+    // Capped, byte-accurate body read — same shape as the other three capped
+    // readers (#5433); the oversize response carries `floor: true`.
+    req.setEncoding('utf8')
+    let body = ''
+    let bodyBytes = 0
+    let oversized = false
+    req.on('data', (chunk) => {
+      if (oversized) return
+      bodyBytes += Buffer.byteLength(chunk, 'utf8')
+      if (bodyBytes > MAX_FLOOR_BODY) {
+        oversized = true
+        sendOversizeResponse(req, res, { floor: true })
+        return
+      }
+      body += chunk
+    })
+    req.on('end', () => {
+      // #5313 (WP-1.3): this fires on a later tick, so a throw here escapes the
+      // route wrapper straight to uncaughtException. Contain it — and answer
+      // `floor: true` so even a crash-path response fails closed.
+      try {
+        if (oversized) return
+
+        let hookData
+        try {
+          hookData = JSON.parse(body)
+        } catch {
+          sendJson(res, 400, { floor: true })
+          return
+        }
+
+        // The cwd basis must match the in-process path's (`PermissionManager`'s
+        // `cwd: this.cwd`), so resolve the OWNING session from the presented hook
+        // secret — the same lookup handlePermissionRequest uses for the #2831
+        // inactivity pause and the #2832 session mapping.
+        const authHeader = (req.headers && req.headers['authorization']) || ''
+        const hookToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null
+        const ownerLookup = (hookToken && typeof findSessionByHookSecret === 'function')
+          ? findSessionByHookSecret(hookToken)
+          : null
+        const sessionCwd = ownerLookup?.session?.cwd ?? null
+
+        const { floor, reason } = evaluateHookFloorRequest(hookData, sessionCwd)
+        if (floor) {
+          // Security-relevant and RARE (a protected/secret target under a lenient
+          // mode), so info-level: this is the line that explains a prompt the user
+          // did not expect in auto mode. The tool name is safe to log; the path is
+          // not logged here (the prompt that follows carries a redacted description).
+          log.info(`Permission floor forces a prompt for ${hookData?.tool_name || 'unknown tool'} (${reason})`)
+        } else {
+          // One per tool call — debug only.
+          log.debug(`Permission floor clear for ${hookData.tool_name}`)
+        }
+        sendJson(res, 200, { floor })
+      } catch (err) {
+        const message = err?.message || String(err)
+        log.error(`POST /permission-floor end handler threw: ${message}${err?.stack ? '\n' + err.stack : ''}`)
+        try {
+          if (!res.headersSent) {
+            sendJson(res, 500, { error: 'Internal server error', floor: true })
           } else {
             res.end()
           }
@@ -686,6 +877,9 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
 
   return {
     handlePermissionRequest,
+    // #7004 — the floor probe the shell hook consults before its auto /
+    // acceptEdits short-circuit (wired at POST /permission-floor).
+    handlePermissionFloorCheck,
     handlePermissionResponseHttp,
     resendPendingPermissions,
     resolvePermission,
@@ -695,6 +889,8 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
     // its eviction stats alongside the three WsServer-owned limiters.
     // Read-only handle — callers must only invoke getEvictionStats() on it.
     _httpPermissionLimiter,
+    // #7004 — same, for the /permission-floor limiter.
+    _httpFloorLimiter,
   }
 }
 

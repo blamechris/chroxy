@@ -9,6 +9,14 @@
 #    random secret specific to this session — never the primary API token.
 # 4. Translates the response into Claude Code's hookSpecificOutput format
 #
+# In the lenient modes (auto / acceptEdits) it decides locally instead of routing
+# to the phone — but FIRST asks POST /permission-floor whether the protected-path /
+# secret-read floor covers the target (#7004). A floored target (.env, key material,
+# a write into .git/.claude/.vscode) is routed to the normal prompt rather than
+# auto-allowed, so the floor holds on this path exactly as it does in-process. The
+# floor logic itself lives only in the daemon — see floor_forces_prompt below and
+# docs/security/permission-floor.md.
+#
 # Non-Chroxy Claude sessions don't have CHROXY_PORT set, so the hook immediately
 # falls through to Claude's normal permission prompt.
 #
@@ -25,6 +33,22 @@ fi
 
 PORT="$CHROXY_PORT"
 TOKEN="$CHROXY_HOOK_SECRET"
+# Where the daemon's HTTP endpoints live, from this process's point of view.
+# `localhost` is right for a host-spawned session, but NOT from inside a
+# container: DockerSession forwards CHROXY_HOST=host.docker.internal precisely so
+# the callback can reach the host, and the hook has been ignoring it — meaning a
+# containerized CliSession's /permission POST went to the container's own
+# localhost and always failed (fail-closed deny). #7004 makes that reachability
+# load-bearing for auto/acceptEdits too, so honour it: CHROXY_HOOK_HOST (dedicated)
+# first, then CHROXY_HOST (what DockerSession already sets, and which on the host
+# names the interface the daemon actually bound), else localhost.
+HOOK_HOST="${CHROXY_HOOK_HOST:-$CHROXY_HOST}"
+# Sanitize: a hostname/IPv4 literal only. Anything else — an empty value, an IPv6
+# literal, a URL, or anything carrying shell/URL metacharacters — falls back to
+# localhost rather than being interpolated into the curl target.
+case "$HOOK_HOST" in
+  ''|*[!A-Za-z0-9.-]*|[!A-Za-z0-9]*) HOOK_HOST="localhost" ;;
+esac
 # Permission mode resolution order:
 #   1. CHROXY_PERMISSION_MODE_FILE — if set AND readable AND non-empty.
 #      ClaudeTuiSession writes this sidecar file when setPermissionMode()
@@ -215,12 +239,18 @@ emit_unreachable_fallback() {
 # Expects $REQUEST to contain the JSON body to POST.
 # Outputs the appropriate hookSpecificOutput JSON and exits.
 route_to_phone() {
-  CURL_ARGS=(-s -X POST "http://localhost:${PORT}/permission" -H "Content-Type: application/json" -d "$REQUEST" --max-time 300)
+  # The payload goes over STDIN (`--data-binary @-`), not as an argv string. A
+  # tool input can be large — a `Write` carries its whole `content` — and Linux
+  # caps a SINGLE argv string at 128KB (MAX_ARG_STRLEN), so `-d "$REQUEST"` made
+  # curl fail with E2BIG on a big write and the hook then reported the
+  # fail-closed deny instead of prompting. Identical bytes either way for a
+  # normal payload.
+  CURL_ARGS=(-s -X POST "http://${HOOK_HOST}:${PORT}/permission" -H "Content-Type: application/json" --data-binary @- --max-time 300)
   if [ -n "$TOKEN" ]; then
     CURL_ARGS+=(-H "Authorization: Bearer ${TOKEN}")
   fi
 
-  RESPONSE=$(curl "${CURL_ARGS[@]}")
+  RESPONSE=$(printf '%s' "$REQUEST" | curl "${CURL_ARGS[@]}")
   EXIT_CODE=$?
 
   if [ $EXIT_CODE -ne 0 ]; then
@@ -250,8 +280,124 @@ EOF
   exit 0
 }
 
-# Auto mode — allow everything without routing to the phone
+# ---- Shared: does the protected-path / secret-read FLOOR cover this call? ----
+# #7004. Returns 0 ("must prompt") when the daemon says the target is floored —
+# and ALSO whenever the answer is anything other than an explicit `"floor":false`.
+# So every failure mode (daemon unreachable, rate limited, unauthorized,
+# unparseable body, 5xx) FAILS CLOSED into the normal prompt path instead of
+# silently auto-allowing a `.env` / `id_rsa` / `.git` target.
+#
+# The floor is deliberately NOT reimplemented here. It is non-trivial path logic
+# (lexical scan + an open(2)-faithful symlink component-walk, fail-closed on any
+# resolution error) that lives in ONE place — packages/server/src/permission-floor.js
+# — and is applied by the in-process providers through the very same function. A
+# shell copy would be a second source of truth and would drift; this hook only
+# asks the question. Expects $REQUEST to hold the PreToolUse payload.
+#
+# The `case` below is a FAST NEGATIVE PRE-FILTER, not a floor decision. The floor's
+# verdict is a pure function of whether the tool input carries a path-NAMING field
+# — PROTECTED_PATH_INPUT_FIELDS (file_path / path / notebook_path) or the codex
+# `changes[]` array (see permission-floor.js `_matchesFloor`) — so a payload
+# carrying NONE of them provably cannot be floored, and skipping the probe keeps a
+# path-less tool (Bash / Task / WebFetch / WebSearch / AskUserQuestion / an MCP
+# tool) on its exact pre-#7004 behavior: no round trip, no new daemon dependency,
+# no added latency. It is a substring scan over the RAW payload, so it also matches
+# nested keys and OVER-matches a literal `"path"` sitting in a value — over-probing
+# is harmless (the daemon just answers floor:false); under-probing would not be,
+# which is why the list must stay in sync. It IS kept in sync mechanically:
+# tests/permission-hook-floor.test.js asserts this pattern covers every
+# PROTECTED_PATH_INPUT_FIELDS entry, so extending the floor's field list without
+# updating this line fails CI.
+floor_forces_prompt() {
+  case "$REQUEST" in
+    *'"file_path"'*|*'"path"'*|*'"notebook_path"'*|*'"changes"'*) ;;
+    # No path-naming field anywhere in the payload — the floor cannot apply.
+    *) return 1 ;;
+  esac
+  # Payload over STDIN, not argv — see route_to_phone's note on MAX_ARG_STRLEN.
+  # Here it matters doubly: an argv failure on a large `Write` would fail closed
+  # into a prompt for a file the floor never covered.
+  FLOOR_ARGS=(-s -X POST "http://${HOOK_HOST}:${PORT}/permission-floor" -H "Content-Type: application/json" --data-binary @- --max-time 10)
+  if [ -n "$TOKEN" ]; then
+    FLOOR_ARGS+=(-H "Authorization: Bearer ${TOKEN}")
+  fi
+  FLOOR_RESPONSE=$(printf '%s' "$REQUEST" | curl "${FLOOR_ARGS[@]}")
+  FLOOR_EXIT=$?
+  if [ $FLOOR_EXIT -ne 0 ]; then
+    return 0
+  fi
+  # ONLY an unambiguous, TOP-LEVEL `"floor":false` clears the short-circuit.
+  # Anything else — `true`, an error body, an empty response, or a body a real
+  # JSON parser cannot make sense of — keeps the prompt.
+  #
+  # #7017 — this is a real parse (via `node -e`), not a substring grep. A grep
+  # keyed on the FIRST `"floor"` occurrence anywhere in the body is foolable by
+  # a NESTED key (`{"nested":{"floor":false},"floor":true}`), an ARRAY-nested
+  # key (`{"a":[{"floor":false}],"floor":true}`), or a DUPLICATE top-level key
+  # (`{"floor":true,"floor":false}` — note `JSON.parse`'s own last-write-wins
+  # would silently clear this one too, so a raw occurrence count is checked
+  # BEFORE ever parsing, rather than trusting which duplicate `JSON.parse`
+  # keeps). `node` is a safe dependency here: this hook only ever runs inside a
+  # chroxy-spawned session (the CHROXY_PORT guard at the top of this file), and
+  # the daemon that spawned it IS a node process, so `node` is on PATH by
+  # construction — no new dependency is introduced.
+  #
+  # Clearance requires ALL of:
+  #   1. the literal substring `"floor"` appears EXACTLY ONCE in the raw body
+  #      (this alone rules out nested / array-nested / duplicate-key, without
+  #      needing to trust which value a parser would pick for a duplicate)
+  #   2. the body parses as JSON
+  #   3. the parsed value is a plain object (not an array, not a scalar)
+  #   4. its single top-level `floor` property is `=== false`
+  # A parse failure, a non-object top level, or `node` itself being
+  # unavailable all make the substitution empty, which fails the `= "false"`
+  # comparison below and prompts — fail-closed by construction, not by a
+  # special case.
+  FLOOR_VALUE=$(printf '%s' "$FLOOR_RESPONSE" | node -e '
+let data = "";
+process.stdin.on("data", (chunk) => { data += chunk; });
+process.stdin.on("end", () => {
+  try {
+    const marker = "\"floor\"";
+    let count = 0;
+    let idx = 0;
+    while ((idx = data.indexOf(marker, idx)) !== -1) {
+      count++;
+      idx += marker.length;
+    }
+    if (count !== 1) {
+      process.stdout.write("true");
+      return;
+    }
+    const parsed = JSON.parse(data);
+    const cleared = parsed !== null &&
+      typeof parsed === "object" &&
+      !Array.isArray(parsed) &&
+      parsed.floor === false;
+    process.stdout.write(cleared ? "false" : "true");
+  } catch {
+    process.stdout.write("true");
+  }
+});
+' 2>/dev/null)
+  if [ "$FLOOR_VALUE" = "false" ]; then
+    return 1
+  fi
+  return 0
+}
+
+# Auto mode — allow everything without routing to the phone, EXCEPT a target the
+# protected-path / secret-read floor covers (#7004). #6794/#6803 gave that floor
+# precedence over every lenient mode for the in-process providers, but this hook
+# decides auto/acceptEdits itself and never reaches permission-manager.js — so
+# claude-tui (the DEFAULT provider) and cli-session were auto-allowing `.env` /
+# `id_rsa` reads and `.git`/`.claude` writes with no prompt. A floored target is
+# never DENIED here; it is routed to the normal prompt, exactly as the in-process
+# path falls through to one.
 if [ "$PERM_MODE" = "auto" ]; then
+  if floor_forces_prompt; then
+    route_to_phone
+  fi
   cat <<'EOF'
 {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}
 EOF
@@ -263,6 +409,11 @@ if [ "$PERM_MODE" = "acceptEdits" ]; then
   # $REQUEST and $TOOL_NAME already populated at top of script (#4648).
   case "$TOOL_NAME" in
     Read|Write|Edit|NotebookEdit|Glob|Grep)
+      # #7004 — same floor precedence as auto above. Mirrors permission-manager.js,
+      # whose acceptEdits short-circuit is likewise gated on the floor.
+      if floor_forces_prompt; then
+        route_to_phone
+      fi
       cat <<'EOF'
 {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}
 EOF
