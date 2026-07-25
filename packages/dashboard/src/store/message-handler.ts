@@ -494,10 +494,12 @@ interface PendingMcpServerOp {
 
 const _pendingMcpServerOps = new Map<string, PendingMcpServerOp>();
 const _mcpServerOpTimers = new Map<string, ReturnType<typeof setTimeout>>();
-const MCP_SERVER_OP_PENDING_CAP = 8;
+export const MCP_SERVER_OP_PENDING_CAP = 8;
 export const MCP_SERVER_OP_TIMEOUT_MS = 15_000;
 export const MCP_SERVER_OP_TIMEOUT_MESSAGE =
   'No response from the daemon — check the server list below; the request may still complete.';
+export const MCP_SERVER_OP_EVICTED_MESSAGE =
+  'Too many MCP config requests in flight — this one stopped being tracked; check the server list below, as it may still have completed.';
 
 function _clearMcpServerOpTimer(requestId: string): void {
   const timer = _mcpServerOpTimers.get(requestId);
@@ -509,23 +511,37 @@ function _clearMcpServerOpTimer(requestId: string): void {
 
 /**
  * Arm a one-shot correlation for an `add_mcp_server` / `remove_mcp_server`
- * request. `callback` fires EXACTLY once, via whichever of the three
- * resolution paths above happens first. Bounded FIFO eviction (oldest first,
- * silently dropped with no callback invocation — the same contract as the
- * trust-grant / model-revert maps) defends a buggy caller that never lets a
- * prior request resolve; ordinary use never approaches the cap.
+ * request. `callback` fires EXACTLY once, via whichever of the FOUR resolution
+ * paths above happens first — error envelope, satisfying broadcast, timeout, or
+ * socket drop.
+ *
+ * Bounded FIFO eviction (oldest first) defends a buggy caller that never lets a
+ * prior request resolve; ordinary use never approaches the cap because the UI
+ * serializes submissions. Eviction RESOLVES the evicted op with an error rather
+ * than dropping it silently: the callback is what clears the caller's submit
+ * spinner, so a dropped callback is a permanently stuck button — exactly the
+ * stuck-flag class of bug #6939/#6954 fixed for the git one-shots. Unlike the
+ * trust-grant / model-revert maps (whose entries are passive state slots with no
+ * waiting caller), every entry here has a UI spinner blocked on it, so
+ * "exactly once" has to survive eviction too.
  */
 export function armMcpServerOpCallback(
   requestId: string,
   entry: { op: 'add' | 'remove'; name: string; sessionId: string | null },
   callback: (result: McpServerOpResult) => void,
 ): void {
-  if (_pendingMcpServerOps.size >= MCP_SERVER_OP_PENDING_CAP) {
+  // Evict oldest-first until there is room. `evictBudget` bounds the loop by the
+  // entries present on entry, so an eviction callback that synchronously arms a
+  // replacement op (a retry) can't spin here forever.
+  let evictBudget = _pendingMcpServerOps.size;
+  while (_pendingMcpServerOps.size >= MCP_SERVER_OP_PENDING_CAP && evictBudget-- > 0) {
     const oldestKey = _pendingMcpServerOps.keys().next().value;
-    if (oldestKey !== undefined) {
-      _clearMcpServerOpTimer(oldestKey);
-      _pendingMcpServerOps.delete(oldestKey);
-    }
+    if (oldestKey === undefined) break;
+    _resolvePendingMcpServerOp(oldestKey, {
+      ok: false,
+      code: 'EVICTED',
+      message: MCP_SERVER_OP_EVICTED_MESSAGE,
+    });
   }
   _pendingMcpServerOps.set(requestId, { ...entry, callback });
   const timer = setTimeout(() => {

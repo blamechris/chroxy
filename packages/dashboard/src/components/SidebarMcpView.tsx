@@ -31,7 +31,11 @@
  * each row gets a "Remove" action that sends `remove_mcp_server` after an
  * inline scope-confirm step (removal is scope-exact — the server reports
  * MCP_SERVER_NOT_FOUND rather than guessing which scope a same-named server
- * lives in). Both mutations require the strict-primary token class
+ * lives in). That confirm step deliberately starts with NO scope selected: the
+ * `mcp_servers` payload carries no scope field, so the client cannot derive the
+ * right one, and a pre-selected default would let a single click delete from a
+ * scope the user never chose. Confirm stays disabled until the choice is made.
+ * Both mutations require the strict-primary token class
  * server-side; `mcpConfigForbiddenNonPrimary` (set the first time either is
  * actually refused with MCP_CONFIG_FORBIDDEN_NON_PRIMARY_CLIENT — see
  * message-handler.ts) disables + annotates both affordances rather than
@@ -114,13 +118,19 @@ interface McpServerRowProps {
 function McpServerRow({ server, onToggle, onSubmitAuthCode, onRemove, removeDisabled }: McpServerRowProps) {
   const [code, setCode] = useState('')
   const [removeStep, setRemoveStep] = useState<'idle' | 'confirm' | 'removing'>('idle')
-  const [removeScope, setRemoveScope] = useState<McpConfigScope>('user')
+  // #6999: '' = no choice made yet. Removal is scope-EXACT server-side and the
+  // wire `mcp_servers` payload carries no scope, so there is nothing to derive a
+  // correct default from. Pre-selecting one would make a click-through delete
+  // from a scope the user never picked, so the choice stays explicit and the
+  // confirm button stays disabled until it is made.
+  const [removeScope, setRemoveScope] = useState<McpConfigScope | ''>('')
   const [removeError, setRemoveError] = useState<string | null>(null)
   const connected = server.status === 'connected'
   const enabled = isServerEnabled(server)
   const needsAuth = server.status === 'oauth-required'
 
   const confirmRemove = () => {
+    if (removeScope === '') return // guarded by the disabled button; belt-and-braces
     setRemoveStep('removing')
     setRemoveError(null)
     onRemove(server.name, removeScope, (result) => {
@@ -183,15 +193,22 @@ function McpServerRow({ server, onToggle, onSubmitAuthCode, onRemove, removeDisa
             data-testid={`sidebar-mcp-view-remove-scope-${server.name}`}
             value={removeScope}
             disabled={removeStep === 'removing'}
-            onChange={(e) => setRemoveScope(e.target.value as McpConfigScope)}
+            aria-label={`Scope to remove MCP server ${server.name} from`}
+            onChange={(e) => setRemoveScope(e.target.value as McpConfigScope | '')}
           >
+            <option value="">Select scope…</option>
             <option value="user">User scope</option>
             <option value="project">Project scope</option>
           </select>
           <button
             type="button"
             data-testid={`sidebar-mcp-view-remove-confirm-btn-${server.name}`}
-            disabled={removeStep === 'removing'}
+            disabled={removeStep === 'removing' || removeScope === ''}
+            title={
+              removeScope === ''
+                ? 'Pick which scope to remove this server from'
+                : `Remove ${server.name} from ${removeScope} scope`
+            }
             onClick={confirmRemove}
           >
             {removeStep === 'removing' ? 'Removing…' : 'Confirm remove'}
@@ -207,6 +224,14 @@ function McpServerRow({ server, onToggle, onSubmitAuthCode, onRemove, removeDisa
           >
             Cancel
           </button>
+          <p
+            className="sidebar-mcp-view-remove-hint"
+            data-testid={`sidebar-mcp-view-remove-hint-${server.name}`}
+          >
+            {removeScope === ''
+              ? "The server list doesn't report which scope a server is configured in, so pick the scope to remove it from — removal affects that scope only."
+              : `Removes ${server.name} from ${removeScope} scope only.`}
+          </p>
           {removeError && (
             <p className="sidebar-mcp-view-remove-error" data-testid={`sidebar-mcp-view-remove-error-${server.name}`} role="alert">
               {removeError}

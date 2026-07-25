@@ -185,9 +185,41 @@ describe('SidebarMcpView remove action (#6999)', () => {
     expect(mockRemoveMcpServer).not.toHaveBeenCalled()
   })
 
-  it('confirm calls removeMcpServer(name, scope, callback) with the default "user" scope', () => {
+  // #6999 review: the scope a server lives in is NOT on the wire, so the confirm
+  // strip must not pre-select a guess — a single click-through would otherwise
+  // delete from a scope the user never chose.
+  it('opens the confirm strip with NO scope pre-selected and the confirm button disabled', () => {
     render(<SidebarMcpView servers={[srv('filesystem', 'connected')]} />)
     fireEvent.click(screen.getByTestId('sidebar-mcp-view-remove-filesystem'))
+    const select = screen.getByTestId('sidebar-mcp-view-remove-scope-filesystem') as HTMLSelectElement
+    expect(select.value).toBe('')
+    const btn = screen.getByTestId('sidebar-mcp-view-remove-confirm-btn-filesystem') as HTMLButtonElement
+    expect(btn.disabled).toBe(true)
+  })
+
+  it('clicking confirm before choosing a scope does not call removeMcpServer', () => {
+    render(<SidebarMcpView servers={[srv('filesystem', 'connected')]} />)
+    fireEvent.click(screen.getByTestId('sidebar-mcp-view-remove-filesystem'))
+    fireEvent.click(screen.getByTestId('sidebar-mcp-view-remove-confirm-btn-filesystem'))
+    expect(mockRemoveMcpServer).not.toHaveBeenCalled()
+  })
+
+  it('explains that the scope could not be determined until one is chosen, then states what will be affected', () => {
+    render(<SidebarMcpView servers={[srv('filesystem', 'connected')]} />)
+    fireEvent.click(screen.getByTestId('sidebar-mcp-view-remove-filesystem'))
+    expect(screen.getByTestId('sidebar-mcp-view-remove-hint-filesystem').textContent).toMatch(
+      /doesn't report which scope/,
+    )
+    fireEvent.change(screen.getByTestId('sidebar-mcp-view-remove-scope-filesystem'), { target: { value: 'project' } })
+    expect(screen.getByTestId('sidebar-mcp-view-remove-hint-filesystem').textContent).toBe(
+      'Removes filesystem from project scope only.',
+    )
+  })
+
+  it('confirm calls removeMcpServer(name, scope, callback) with the explicitly chosen "user" scope', () => {
+    render(<SidebarMcpView servers={[srv('filesystem', 'connected')]} />)
+    fireEvent.click(screen.getByTestId('sidebar-mcp-view-remove-filesystem'))
+    fireEvent.change(screen.getByTestId('sidebar-mcp-view-remove-scope-filesystem'), { target: { value: 'user' } })
     fireEvent.click(screen.getByTestId('sidebar-mcp-view-remove-confirm-btn-filesystem'))
     expect(mockRemoveMcpServer).toHaveBeenCalledTimes(1)
     const [name, scope, callback] = mockRemoveMcpServer.mock.calls[0]!
@@ -207,6 +239,7 @@ describe('SidebarMcpView remove action (#6999)', () => {
   it('a failed removal (callback ok:false) surfaces the server message and returns to the confirm step', () => {
     render(<SidebarMcpView servers={[srv('filesystem', 'connected')]} />)
     fireEvent.click(screen.getByTestId('sidebar-mcp-view-remove-filesystem'))
+    fireEvent.change(screen.getByTestId('sidebar-mcp-view-remove-scope-filesystem'), { target: { value: 'user' } })
     fireEvent.click(screen.getByTestId('sidebar-mcp-view-remove-confirm-btn-filesystem'))
     const callback = mockRemoveMcpServer.mock.calls[0]![2] as (r: { ok: boolean; code?: string; message?: string }) => void
     act(() => {
@@ -222,6 +255,7 @@ describe('SidebarMcpView remove action (#6999)', () => {
   it('a successful removal (callback ok:true) does not synthesize any local success message — the row leaving the list on the next mcp_servers broadcast IS the confirmation', () => {
     render(<SidebarMcpView servers={[srv('filesystem', 'connected')]} />)
     fireEvent.click(screen.getByTestId('sidebar-mcp-view-remove-filesystem'))
+    fireEvent.change(screen.getByTestId('sidebar-mcp-view-remove-scope-filesystem'), { target: { value: 'user' } })
     fireEvent.click(screen.getByTestId('sidebar-mcp-view-remove-confirm-btn-filesystem'))
     const callback = mockRemoveMcpServer.mock.calls[0]![2] as (r: { ok: boolean }) => void
     act(() => {

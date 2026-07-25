@@ -1703,6 +1703,19 @@ button.sidebar-token-view-session-row:hover {
   font-size: 10px;
 }
 
+/*
+ * #6999 — the scope a server actually lives in is not on the wire (the
+ * `mcp_servers` payload carries no scope), so the confirm strip must ask rather
+ * than pre-select a guess. This spells that out instead of letting a wrong
+ * default ride behind a confident-looking dialog.
+ */
+.sidebar-mcp-view-remove-hint {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+
 /* #5163 (epic #5159) — Control Room panel: live read-only activity tree. */
 .control-room-panel {
   display: flex;

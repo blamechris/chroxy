@@ -53,6 +53,8 @@ import {
   _testMcpServerOpPendingSize,
   MCP_SERVER_OP_TIMEOUT_MS,
   MCP_SERVER_OP_TIMEOUT_MESSAGE,
+  MCP_SERVER_OP_EVICTED_MESSAGE,
+  MCP_SERVER_OP_PENDING_CAP,
 } from './message-handler'
 import { createEmptySessionState } from './utils'
 import type { ConnectionState } from './types'
@@ -1245,6 +1247,62 @@ describe('dashboard message-handler dispatch', () => {
       expect(cbA).toHaveBeenCalledWith({ ok: false, code: 'DISCONNECTED', message: MCP_SERVER_OP_TIMEOUT_MESSAGE })
       expect(cbB).toHaveBeenCalledWith({ ok: false, code: 'DISCONNECTED', message: MCP_SERVER_OP_TIMEOUT_MESSAGE })
       expect(_testMcpServerOpPendingSize()).toBe(0)
+    })
+
+    // #6999 review: FIFO eviction used to delete the oldest op AND its timeout
+    // timer without ever invoking its callback — the one exit path of the four
+    // that broke the exactly-once contract, leaving the caller's submit spinner
+    // stuck forever (the #6939/#6954 stuck-flag class, for the git one-shots).
+    it('eviction at the pending cap RESOLVES the evicted op with an error instead of dropping it', () => {
+      const callbacks = Array.from({ length: 9 }, () => vi.fn())
+      // Fill to the cap (8), then arm a 9th to force one eviction.
+      callbacks.forEach((cb, i) => {
+        armMcpServerOpCallback(`evict-${i}`, { op: 'add', name: `srv-${i}`, sessionId: 's1' }, cb)
+      })
+      // The oldest (index 0) was evicted and MUST have been told so.
+      expect(callbacks[0]).toHaveBeenCalledTimes(1)
+      expect(callbacks[0]).toHaveBeenCalledWith({
+        ok: false,
+        code: 'EVICTED',
+        message: MCP_SERVER_OP_EVICTED_MESSAGE,
+      })
+      // Everyone else is still armed and untouched.
+      callbacks.slice(1).forEach((cb) => expect(cb).not.toHaveBeenCalled())
+      expect(_testMcpServerOpPendingSize()).toBe(8)
+    })
+
+    it('an evicted op is fully deregistered — its timeout can never fire a second callback', () => {
+      vi.useFakeTimers()
+      const callbacks = Array.from({ length: 9 }, () => vi.fn())
+      callbacks.forEach((cb, i) => {
+        armMcpServerOpCallback(`evict2-${i}`, { op: 'add', name: `srv-${i}`, sessionId: 's1' }, cb)
+      })
+      expect(callbacks[0]).toHaveBeenCalledTimes(1)
+      // Advancing past the timeout must NOT re-fire the evicted op's callback
+      // (exactly-once holds across eviction + timeout).
+      vi.advanceTimersByTime(MCP_SERVER_OP_TIMEOUT_MS)
+      expect(callbacks[0]).toHaveBeenCalledTimes(1)
+      expect(callbacks[0]).toHaveBeenCalledWith({
+        ok: false,
+        code: 'EVICTED',
+        message: MCP_SERVER_OP_EVICTED_MESSAGE,
+      })
+    })
+
+    it('an eviction callback that synchronously re-arms cannot push the map past the cap', () => {
+      const tail = vi.fn()
+      // The evicted op retries from inside its own eviction callback — the
+      // re-entrancy the bounded evict budget defends against.
+      const retrying = vi.fn(() => {
+        armMcpServerOpCallback('retry-op', { op: 'add', name: 'retry', sessionId: 's1' }, vi.fn())
+      })
+      armMcpServerOpCallback('reentrant-0', { op: 'add', name: 'srv-0', sessionId: 's1' }, retrying)
+      for (let i = 1; i < 8; i++) {
+        armMcpServerOpCallback(`reentrant-${i}`, { op: 'add', name: `srv-${i}`, sessionId: 's1' }, vi.fn())
+      }
+      armMcpServerOpCallback('reentrant-tail', { op: 'add', name: 'tail', sessionId: 's1' }, tail)
+      expect(retrying).toHaveBeenCalledTimes(1)
+      expect(_testMcpServerOpPendingSize()).toBeLessThanOrEqual(MCP_SERVER_OP_PENDING_CAP)
     })
   })
 
