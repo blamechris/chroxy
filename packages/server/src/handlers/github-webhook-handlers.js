@@ -113,7 +113,14 @@ function handleGithubWebhookSetSecret(ws, client, msg, ctx) {
   try {
     // Encrypt-at-rest aware, atomic 0600 write into the credentials store — never
     // plaintext config.json. err.message is validation/file-mode text, never the value.
-    setStoredField(WEBHOOK_SECRET_FIELD, secret)
+    //
+    // #6964: `durable: true` — this is credential ROTATION of a secret SHARED with
+    // GitHub. The operator gets a success ack and then re-points the GitHub webhook
+    // at the new secret, so losing the write to a power loss inside the OS writeback
+    // window would leave the daemon verifying deliveries with the old secret and
+    // rejecting every real one. The fsync failure path throws and is reported below
+    // as WEBHOOK_SECRET_WRITE_FAILED rather than acked as configured.
+    setStoredField(WEBHOOK_SECRET_FIELD, secret, { durable: true })
   } catch (err) {
     sendError(ws, msg?.requestId, 'WEBHOOK_SECRET_WRITE_FAILED', err?.message || 'write failed', undefined, ctx)
     return

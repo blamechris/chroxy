@@ -910,6 +910,12 @@ export async function startCliServer(config) {
         }
       } catch (err) {
         log.error(`Failed to persist token: ${err.message}`)
+        // #6965 — RETHROW. The revoke ack is now gated on this callback resolving,
+        // so swallowing the error here would report a durable revoke that never
+        // reached the disk (the exact false-safety this closes). TokenManager logs
+        // the rejection too, and for a revoke WsServer turns it into an explicit
+        // REVOKE_NOT_DURABLE error instead of the success ack.
+        throw err
       }
     },
   })

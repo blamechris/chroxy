@@ -410,7 +410,7 @@ function _isSecureRequest(req) {
  *   { type: 'session_role', sessionId, primaryClientId } — #5589/#5281: explicit primary-ownership; client derives its role (primary iff primaryClientId === own clientId, observer if another holds it, null = unclaimed)
  *   { type: 'pong' }                                    — heartbeat response
  *   { type: 'permission_expired', requestId, sessionId, message }  — permission response could not be routed (expired/handled)
- *   { type: 'token_rotated', token?, expiresAt, reason? } — API token changed. Scheduled rotation carries the new `token` to encrypted clients (transparent re-key, sessions survive). A `reason: 'revoke'` (#6006) carries NO token: the operator revoked, so the server severed user-shell sessions and cleared this connection's auth — the client must re-authenticate with the current token (obtained out-of-band).
+ *   { type: 'token_rotated', token?, expiresAt, reason? } — API token changed. Scheduled rotation carries the new `token` to encrypted clients (transparent re-key, sessions survive). A `reason: 'revoke'` (#6006) carries NO token: the operator revoked, so the server severed user-shell sessions and cleared this connection's auth — the client must re-authenticate with the current token (obtained out-of-band). #6965: for a revoke this message is WITHHELD until the daemon's durable token write has fsynced, so the ack can never precede the revocation actually being on disk; if that write FAILS the connection receives an `error` with `code: 'REVOKE_NOT_DURABLE'` instead (the revoke still holds in the running process).
  *   { type: 'session_warning', sessionId, name, reason, message, remainingMs } — session about to timeout
  *   { type: 'session_timeout', sessionId, name, idleMs }         — session destroyed due to idle timeout
  *   { type: 'statusline_output', sessionId, text, active?, truncated? } — #6791: rendered stdout of the user's own Claude Code statusLine script (active:false + empty text clears it)
@@ -1288,8 +1288,12 @@ export class WsServer {
 
     // Wire TokenManager rotation events — broadcast new token to all clients
     this._tokenRotatedHandler = null
+    // #6965: the in-flight revoke-ack gate (a promise resolving to
+    // `{ ok, error? }`), or null when the last revoke had nothing to wait on.
+    // Exposed so a test can await the gate deterministically.
+    this._lastRevokeAck = null
     if (this._tokenManager) {
-      this._tokenRotatedHandler = ({ newToken, expiresAt, reason }) => {
+      this._tokenRotatedHandler = ({ newToken, expiresAt, reason, persisted = null }) => {
         // Update our reference so subsequent auth checks use the new token
         this.apiToken = newToken
 
@@ -1313,7 +1317,11 @@ export class WsServer {
           } catch (err) {
             log.error(`Failed to sever user-shell sessions on revoke: ${err.message}`)
           }
-          let forced = 0
+          //
+          // ENFORCEMENT (severing above + stripping authority below) is immediate
+          // and unconditional — it must NEVER wait on, or be skipped because of,
+          // disk I/O. Only the client-facing ACK is gated on durability (#6965).
+          const forcedSockets = []
           for (const [ws, client] of this.clients) {
             // Skip connections still mid-handshake (not yet authenticated): they
             // hold no authority to strip and will fail their pending auth step
@@ -1321,10 +1329,55 @@ export class WsServer {
             if (!client.authenticated || ws.readyState !== 1) continue
             client.authenticated = false
             client.isPrimaryToken = false
-            this._send(ws, { type: 'token_rotated', expiresAt, reason: 'revoke' })
-            forced++
+            forcedSockets.push(ws)
           }
-          log.warn(`Token REVOKED — severed ${severed} user-shell session(s), forced re-auth on ${forced} connection(s)`)
+          log.warn(`Token REVOKED — severed ${severed} user-shell session(s), forced re-auth on ${forcedSockets.length} connection(s)`)
+
+          const sendRevokeAck = () => {
+            for (const ws of forcedSockets) {
+              if (ws.readyState !== 1) continue
+              this._send(ws, { type: 'token_rotated', expiresAt, reason: 'revoke' })
+            }
+          }
+
+          // #6965: the revoke ack must not precede its durable write. #6963 made the
+          // panic-revoke's token write durable, but `onPersist` was fire-and-forget
+          // and this ack raced it — so the operator could be told the highest-authority
+          // token was dead while a power loss inside the OS writeback window brought the
+          // daemon back still honouring it. Wait for the write (fsync included), THEN
+          // ack. On failure send an explicit error instead: never a silent success.
+          if (!persisted) {
+            // Nothing to wait on (no persist callback configured — e.g. a test
+            // TokenManager, or a deployment with no token persistence). Unchanged
+            // synchronous behaviour.
+            this._lastRevokeAck = null
+            sendRevokeAck()
+            return
+          }
+          this._lastRevokeAck = persisted.then(
+            () => {
+              sendRevokeAck()
+              return { ok: true }
+            },
+            (err) => {
+              const message = err?.message || String(err)
+              log.error(
+                `Token REVOKE could not be persisted durably (${message}) — the revoke HOLDS in this process, ` +
+                `but a restart may resurrect the previous token. Fix the storage error and revoke again.`,
+              )
+              for (const ws of forcedSockets) {
+                if (ws.readyState !== 1) continue
+                this._send(ws, {
+                  type: 'error',
+                  code: 'REVOKE_NOT_DURABLE',
+                  message:
+                    'Token revoke is enforced for the running daemon but could NOT be written durably to disk — ' +
+                    'the previous token may become valid again if the daemon restarts. Resolve the storage error and revoke again.',
+                })
+              }
+              return { ok: false, error: message }
+            },
+          )
           return
         }
 
