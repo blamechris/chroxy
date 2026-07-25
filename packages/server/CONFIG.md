@@ -153,8 +153,9 @@ entry there (`port` → `PORT`, `controlRoomRunnerRoot` → `CHROXY_RUNNER_ROOT`
 
 **2. Direct reads.** Some settings are read straight out of `process.env` by the
 helper that consumes them, bypassing the merge layer entirely:
-`CHROXY_ENABLE_IDE` / `CHROXY_ENABLE_ORCHESTRATION` / `CHROXY_SEMANTIC_TITLES`
-(the `features` gates), `CHROXY_SEMANTIC_TITLES_MODEL` /
+`CHROXY_ENABLE_IDE` / `CHROXY_ENABLE_ORCHESTRATION` / `CHROXY_ENABLE_SCHEDULER` /
+`CHROXY_SEMANTIC_TITLES` (the four [`features` gates](#opt-in-features-features)),
+`CHROXY_SEMANTIC_TITLES_MODEL` /
 `CHROXY_SEMANTIC_TITLES_TIMEOUT_MS` (which override *specific fields* of
 `summarize` on the title path only — they are not a general override for the
 `summarize` object), and `CHROXY_BINARY_PROVENANCE` /
