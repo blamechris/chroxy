@@ -162,7 +162,10 @@ export function planRepoGc(repoPath, deps = {}) {
     exists = existsSync,
     readLockReason = (wtPath) => readLockReasonFromAdmin(wtPath),
     // #5706: age-fallback seams. `now`/`mtimeMs` are injectable for tests.
-    // `maxLockAgeMs` defaults to 30d; 0 (or negative) disables the fallback.
+    // `maxLockAgeMs` defaults to 0 — i.e. OFF; any value <= 0 disables the
+    // fallback. When on, it fires only STRICTLY past the threshold: an age of
+    // exactly `maxLockAgeMs` is still skipped. See DEFAULT_MAX_LOCK_AGE_MS
+    // above for why it's opt-in.
     now = () => Date.now(),
     mtimeMs = (p) => { try { return statSync(p).mtimeMs } catch { return null } },
     maxLockAgeMs = DEFAULT_MAX_LOCK_AGE_MS,

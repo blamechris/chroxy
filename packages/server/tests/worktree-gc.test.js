@@ -287,10 +287,26 @@ describe('worktree-gc integration (real git repo)', () => {
       assert.match(item.skipReason, /uncommitted/)
     })
 
-    it('maxLockAgeMs=0 disables the fallback — a stale live pid is still skipped', () => {
-      addWorktree('live-stale-disabled', { lockReason: `claude agent a4 (pid ${LIVE_PID})` })
-      const item = planRepoGc(repo, { kill: fakeKill, now: () => 1_000_000, mtimeMs: () => 0, maxLockAgeMs: 0 })
-        .items.find((i) => i.path.endsWith('/live-stale-disabled'))
+    it('maxLockAgeMs <= 0 disables the fallback — a stale live pid is still skipped', () => {
+      // Both the default (0) and a negative must fail SAFE (fallback off), never
+      // "every worktree looks stale". config.js warns on negatives but does not
+      // hard-reject them, so this guard is the last line of defence.
+      for (const maxLockAgeMs of [0, -1]) {
+        const name = `live-stale-off-${maxLockAgeMs < 0 ? 'neg' : 'zero'}`
+        addWorktree(name, { lockReason: `claude agent a4 (pid ${LIVE_PID})` })
+        const item = planRepoGc(repo, { kill: fakeKill, now: () => 1_000_000, mtimeMs: () => 0, maxLockAgeMs })
+          .items.find((i) => i.path.endsWith(`/${name}`))
+        assert.equal(item.action, 'skip', `maxLockAgeMs=${maxLockAgeMs} must disable the fallback`)
+        assert.match(item.skipReason, /live process/)
+      }
+    })
+
+    it('fires only STRICTLY past the threshold — an age of exactly maxLockAgeMs is skipped', () => {
+      // The guard is `ageMs <= maxLockAgeMs` -> skip, so the boundary itself is
+      // NOT reclaimed. Pins the exclusivity claim in planRepoGc's dep comment.
+      addWorktree('live-boundary', { lockReason: `claude agent a5 (pid ${LIVE_PID})` })
+      const item = planRepoGc(repo, { kill: fakeKill, now: () => 1_000_000, mtimeMs: () => 999_000, maxLockAgeMs: 1000 })
+        .items.find((i) => i.path.endsWith('/live-boundary'))
       assert.equal(item.action, 'skip')
       assert.match(item.skipReason, /live process/)
     })
