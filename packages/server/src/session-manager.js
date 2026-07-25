@@ -2338,6 +2338,20 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
+   * The provider id createSession falls back to when its `provider` option is
+   * omitted (i.e. this daemon's configured default, DEFAULT_PROVIDER unless the
+   * operator changed it). Exposed so callers that must reason about the provider a
+   * session WOULD use — before creating it — resolve it the same way createSession
+   * does instead of guessing. The scheduler's provider-capability gate (#6865)
+   * needs exactly this: it refuses to fire an unattended run on a provider whose
+   * permission prompts it cannot answer.
+   * @returns {string}
+   */
+  get providerType() {
+    return this._providerType
+  }
+
+  /**
    * Current max messages per session (from SessionMessageHistory).
    * @returns {number}
    */

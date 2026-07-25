@@ -45,12 +45,47 @@
 //    mirroring orchestration/permission-gate.js), interrupts the turn, and
 //    records the run as a VISIBLE failure. It never waits out the 5-minute
 //    permission timeout, and it never auto-approves anything.
-// 4. Every fire attempt — success, error, timeout, permission-blocked, shed — is
-//    recorded into the registry so #6868/#6871 can surface it.
-// 5. Per-task scoping: the run is created with the task's own stored
-//    provider/model/cwd. No new path check is invented here; cwd confinement and
-//    the protected-path floor stay exactly where they already live (the store's
-//    validation and permission-manager's floor).
+// 4. SUPPORTED PROVIDERS ONLY — the engine REFUSES what it cannot govern. The
+//    deny mechanism in (3) rides `session_event: permission_request` +
+//    `session.respondToPermission`, which exist ONLY on providers whose
+//    `capabilities.inProcessPermissions === true` (today: claude-sdk, claude-byok,
+//    codex via its app-server driver, deepseek, ollama — the live list is
+//    listSchedulableProviders(), read off the registry rather than hardcoded).
+//    Hook-routed providers — INCLUDING the daemon default `claude-tui`, plus
+//    claude-cli, claude-channel, gemini, and codex when CHROXY_CODEX_APPSERVER=0
+//    downgrades it to the exec driver — route prompts through
+//    hooks/permission-hook.sh → POST /permission → ws-permissions.js, which emits
+//    NO events this engine can observe and auto-denies after a 300s wait. On such
+//    a provider an unattended run would stall five minutes per gated tool call
+//    and then report SUCCESS for a turn whose every tool call was silently
+//    refused. Rather than pretend to govern it, a task resolving to a hook-routed
+//    provider is refused BEFORE any session is created and recorded `refused`
+//    with the provider named. Widening this to hook-routed providers needs a
+//    programmatic permission-answering surface — tracked in #7003.
+// 5. CWD CONFINEMENT is enforced HERE, on this path. It is NOT inherited: the
+//    store only trims the cwd string and SessionManager.createSession only
+//    `statSync`s it, so the real check (`validateCwdAllowed` — credential-dir
+//    deny-list + workspace allowlist + $HOME fallback) is handler-only. A task
+//    definition is a user-writable JSON file, so a hand-edited `target.cwd` of
+//    `/`, `~/.ssh`, or `~/.chroxy` would otherwise reach a session the dashboard
+//    would have rejected. This engine therefore calls the SAME imported
+//    `validateCwdAllowed` the WS handlers call, wired exactly the way the sibling
+//    feature does it (orchestration/build-manager.js:38), and refuses the run
+//    when it rejects. (Moving the check INTO createSession so no caller can miss
+//    it is the right long-term fix — tracked in #7005.)
+// 6. THE CLAMP IS RE-ASSERTED PER FIRE, not just at create. Scheduled sessions
+//    are deliberately kept alive and reused, and `set_permission_mode` accepts
+//    `auto` on any session (handlers/settings-handlers.js) — even mid-turn
+//    (base-session.js:1115-1133). An operator who opens a scheduled session and
+//    flips it to Auto once would otherwise make every subsequent unattended fire
+//    run in bypass, indefinitely. So before each fire the engine re-asserts the
+//    clamped mode on the session and VERIFIES it by read-back. The invariant is
+//    absolute: a scheduled fire runs at the clamped mode, or it does not run.
+// 7. Every fire attempt — success, error, timeout, permission-blocked, refused,
+//    shed — is recorded into the registry so #6868/#6871 can surface it. A run
+//    the engine refused is recorded `refused` (never `success`), and a run whose
+//    tool calls were blocked is recorded `error`. NOTHING reports `success`
+//    unless the turn actually completed with no permission prompt raised.
 //
 // ── Resource posture (#6933 lesson) ──────────────────────────────────────────
 // One self-rescheduling timer (never setInterval), injectable via
@@ -62,6 +97,8 @@
 import { EventEmitter } from 'events'
 import { createLogger } from './logger.js'
 import { isSchedulerEnabled } from './config.js'
+import { getProvider, listProviders, DEFAULT_PROVIDER } from './providers.js'
+import { validateCwdAllowed } from './handler-utils.js'
 import { TurnDriver, TurnError } from './orchestration/turn-driver.js'
 
 const log = createLogger('scheduler')
@@ -120,8 +157,102 @@ export const SCHEDULED_PERMISSION_MODE = 'approve'
  * stored task grant itself approvals no human ever gave, which is exactly the
  * escalation this engine exists to prevent. Clamping (rather than refusing to run)
  * keeps the floor a FLOOR: the task still runs, just never above the ceiling.
+ *
+ * DO NOT relax the `acceptEdits` clamp. It is load-bearing, not merely strict:
+ * `acceptEdits` auto-approves file reads, so an unattended run under it would read
+ * `.env` / `id_rsa` with nothing gating it. The in-process providers this engine
+ * fires at do apply permission-manager's protected-path floor to those reads, but
+ * the hook path does NOT — hooks/permission-hook.sh:262-271 allows
+ * Read|Write|Edit|NotebookEdit|Glob|Grep outright with no protected-path check
+ * (tracked as #7004). Today posture (4) refuses hook-routed providers outright, so
+ * that gap is not reachable from here; keeping the clamp means it stays unreachable
+ * if #7003 ever widens provider support.
  */
 const SCHEDULED_ALLOWED_PERMISSION_MODES = new Set([SCHEDULED_PERMISSION_MODE, 'plan'])
+
+/**
+ * The `lastRun.status` recorded when the engine REFUSED to start a run at all:
+ * an unsupported (hook-routed) provider, a disallowed cwd, or a permission mode
+ * it could not verify. Deliberately its OWN status rather than `error` (which
+ * means "the run happened and went wrong") or `skipped` (which means "the slot
+ * passed"), so #6868/#6871 can tell an operator that nothing ran AND why — a
+ * refused task is a misconfiguration to fix, not a transient failure to retry.
+ *
+ * NOTHING coerces to `success`: a refused run never touched a provider.
+ */
+export const REFUSED_STATUS = 'refused'
+
+/** Statuses `_fire` passes through verbatim; everything else becomes `error`. */
+const PASSTHROUGH_STATUSES = new Set(['success', 'timeout', 'skipped', REFUSED_STATUS])
+
+/**
+ * Thrown internally when a run must be refused after the executor was entered
+ * (currently: the per-fire permission-mode re-assertion). Carries no data beyond
+ * its message — the caller turns it into a `refused` outcome.
+ */
+class ScheduledRunRefusedError extends Error {
+  constructor(message) {
+    super(message)
+    this.name = 'ScheduledRunRefusedError'
+  }
+}
+
+/**
+ * The provider ids a scheduled task MAY currently target: every registered,
+ * non-hidden provider that answers permissions in-process. Derived from the
+ * registry rather than hardcoded, so it follows both new providers and the
+ * runtime driver swap (`codex` resolves to the app-server driver unless
+ * CHROXY_CODEX_APPSERVER=0 downgrades it to the unsupported exec driver) instead
+ * of going stale in a doc string.
+ *
+ * @param {() => Array<{name: string, capabilities?: object}>} [list=listProviders] - registry seam
+ * @returns {string[]} sorted provider ids
+ */
+export function listSchedulableProviders(list = listProviders) {
+  try {
+    return list()
+      .filter((p) => p?.capabilities?.inProcessPermissions === true)
+      .map((p) => p.name)
+      .sort()
+  } catch {
+    return []
+  }
+}
+
+/**
+ * Why an unattended run may NOT be fired at this provider, or null when it may.
+ *
+ * The engine's whole permission story (deny-the-prompt, fail visibly) depends on
+ * observing `session_event: permission_request` and answering via
+ * `session.respondToPermission`. Both exist only where
+ * `capabilities.inProcessPermissions === true`. A hook-routed provider instead
+ * shells out to hooks/permission-hook.sh → POST /permission → ws-permissions.js,
+ * which emits nothing observable and auto-denies after 300s — so an unattended
+ * run there would stall five minutes per gated tool call and then look
+ * successful. Refusing is the honest outcome; #7003 tracks giving hook-routed
+ * providers a programmatic answering surface so support can widen.
+ *
+ * @param {string} providerName - the provider the run would actually use
+ * @param {(name: string) => Function} [getProviderClass=getProvider] - registry seam
+ * @returns {string|null} refusal reason, or null when the provider is supported
+ */
+export function scheduledProviderRefusalReason(providerName, getProviderClass = getProvider) {
+  if (typeof providerName !== 'string' || providerName.length === 0) {
+    return 'no provider could be resolved for this scheduled task — refusing to fire an unattended run at an unknown provider'
+  }
+  let ProviderClass = null
+  try {
+    ProviderClass = getProviderClass(providerName)
+  } catch (err) {
+    return `unknown provider '${providerName}': ${err?.message || err}`
+  }
+  if (ProviderClass?.capabilities?.inProcessPermissions === true) return null
+  // Kept under the 500-char cap _recordRefusal applies, so the #7003 pointer and
+  // the supported-provider list survive into the registry rather than being cut.
+  const supported = listSchedulableProviders()
+  const isDefault = providerName === DEFAULT_PROVIDER
+  return `provider '${providerName}' routes permission prompts through the permission hook (POST /permission), which the scheduler cannot answer — an unattended run would stall on every gated tool call until the 300s auto-deny, then report a turn whose tool calls were all silently refused.${isDefault ? ` It is also the daemon DEFAULT, so a task with no target.provider lands here.` : ''} Set target.provider to one of: ${supported.length ? supported.join(', ') : '(none)'}. Hook-routed support: #7003.`
+}
 
 /** setTimeout that never keeps the event loop alive (self-exit safety, #6933). */
 function unrefTimer(fn, ms) {
@@ -153,6 +284,10 @@ export function resolveScheduledPermissionMode(requested) {
  *   - 'run-start' { taskId, at, sessionId? }
  *   - 'run-end'   { taskId, at, status, sessionId?, error? }
  *   - 'run-skip'  { taskId, at, reason }
+ *   - 'task-quarantined' { taskId, at, reason }
+ *
+ * A REFUSED task (unsupported provider / disallowed cwd) emits `run-end` with
+ * status `refused` and NO `run-start`: nothing was started, so nothing started.
  */
 export class SchedulerEngine extends EventEmitter {
   /**
@@ -164,6 +299,10 @@ export class SchedulerEngine extends EventEmitter {
    *   defaults to the SessionManager+TurnDriver headless runner. This seam keeps
    *   tests hermetic — no provider is ever spawned under test (#6933).
    * @param {() => number} [options.now=Date.now] - clock seam
+   * @param {(cwd: string) => (string|null)} [options.validateCwd] - cwd allowlist seam;
+   *   defaults to the SAME `validateCwdAllowed` the WS handlers use, wired the way
+   *   orchestration/build-manager.js:38 wires it. Returns an error STRING (falsy = allowed).
+   * @param {(name: string) => Function} [options.getProviderClass=getProvider] - provider-registry seam
    * @param {Function} [options.setTimer] - injectable setTimeout (unref'd by default)
    * @param {Function} [options.clearTimer=clearTimeout] - injectable clearTimeout
    * @param {number} [options.maxConcurrentRuns]
@@ -178,6 +317,8 @@ export class SchedulerEngine extends EventEmitter {
     config = null,
     runTask = null,
     now = Date.now,
+    validateCwd = null,
+    getProviderClass = getProvider,
     setTimer = unrefTimer,
     clearTimer = clearTimeout,
     maxConcurrentRuns = DEFAULT_MAX_CONCURRENT_RUNS,
@@ -194,6 +335,13 @@ export class SchedulerEngine extends EventEmitter {
     this._config = config
     this._injectedRunTask = typeof runTask === 'function' ? runTask : null
     this._now = now
+    // The cwd allowlist. Default wires the SAME exported validateCwdAllowed the WS
+    // handlers call, against this daemon's config (workspaceRoots etc.) — mirroring
+    // orchestration/build-manager.js:38. Not reimplemented, not approximated.
+    this._validateCwd = typeof validateCwd === 'function'
+      ? validateCwd
+      : (cwd) => validateCwdAllowed(cwd, this._config)
+    this._getProviderClass = typeof getProviderClass === 'function' ? getProviderClass : getProvider
     this._setTimer = setTimer
     this._clearTimer = clearTimer
     this._maxConcurrentRuns = Math.max(1, Math.floor(maxConcurrentRuns) || 1)
@@ -235,6 +383,17 @@ export class SchedulerEngine extends EventEmitter {
   /** Task ids currently mid-run (test/observability aid). */
   get runningTaskIds() {
     return new Set(this._running)
+  }
+
+  /**
+   * Task ids this process has quarantined (their outcome could not be persisted,
+   * so they have STOPPED firing until the daemon restarts). Part of the engine's
+   * gate state that #6868/#6871 read: a quarantined task's registry entry may
+   * still show an old healthy-looking lastRun, so this is the authoritative
+   * "why has this task gone quiet?" signal alongside the `task-quarantined` event.
+   */
+  get quarantinedTaskIds() {
+    return new Set(this._quarantined)
   }
 
   /** Whether a timer is currently armed (test/observability aid). */
@@ -395,15 +554,28 @@ export class SchedulerEngine extends EventEmitter {
    * run it, then record the outcome and re-arm. Never rejects.
    */
   async _fire(task, at) {
-    this._running.add(task.id)
-    this.emit('run-start', { taskId: task.id, at })
-    this._log.info(`Firing scheduled task ${task.id}${task.name ? ` (${task.name})` : ''}`)
-
     const ctx = {
       at,
       permissionMode: resolveScheduledPermissionMode(task.target?.permissionMode),
       runTimeoutMs: this._runTimeoutMs,
     }
+
+    // ── PREFLIGHT: refuse before firing ──────────────────────────────────────
+    // Runs BEFORE the overlap guard, BEFORE `run-start`, and BEFORE any session
+    // exists — a refused task never spawns a session and is never reported as a
+    // run that started. Placed here (the single chokepoint every run passes
+    // through) rather than inside the default executor so a future second
+    // executor cannot bypass it: a check that lives on only one path is exactly
+    // the class of bug this fixes (validateCwdAllowed was handler-only).
+    const refusal = this._preflightRefusal(task)
+    if (refusal) {
+      this._recordRefusal(task, at, refusal)
+      return
+    }
+
+    this._running.add(task.id)
+    this.emit('run-start', { taskId: task.id, at })
+    this._log.info(`Firing scheduled task ${task.id}${task.name ? ` (${task.name})` : ''}`)
 
     let outcome
     try {
@@ -418,7 +590,7 @@ export class SchedulerEngine extends EventEmitter {
     const status = outcome?.status
     const result = {
       at,
-      status: status === 'success' || status === 'timeout' || status === 'skipped' ? status : 'error',
+      status: PASSTHROUGH_STATUSES.has(status) ? status : 'error',
       ...(outcome?.sessionId ? { sessionId: outcome.sessionId } : {}),
       ...(outcome?.error ? { error: String(outcome.error).slice(0, 500) } : {}),
     }
@@ -434,6 +606,78 @@ export class SchedulerEngine extends EventEmitter {
   }
 
   /**
+   * @private — the pre-fire safety gate: everything that must hold BEFORE an
+   * unattended turn is allowed to exist. Returns a refusal reason, or null to
+   * proceed. Both checks are things the engine cannot recover from by retrying —
+   * they are misconfigurations in the stored task definition.
+   */
+  _preflightRefusal(task) {
+    // (a) Can we actually govern this provider's permission prompts? (#7003)
+    const providerRefusal = scheduledProviderRefusalReason(this._resolveProviderName(task), this._getProviderClass)
+    if (providerRefusal) return providerRefusal
+
+    // (b) Is the cwd one a session may be created in at all? The registry is a
+    // user-writable JSON file, so `target.cwd` is untrusted input — and neither
+    // the store (trims the string) nor createSession (statSync only) applies the
+    // real allowlist. Validate the EFFECTIVE cwd: the task's own, else whatever
+    // createSession would default to. (#7005 moves this into createSession.)
+    const cwd = this._resolveTaskCwd(task)
+    if (cwd) {
+      let cwdError
+      try {
+        cwdError = this._validateCwd(cwd)
+      } catch (err) {
+        // A throwing validator must fail CLOSED, never fall through to allowed.
+        return `working directory ${cwd} could not be validated for a scheduled run: ${err?.message || err}`
+      }
+      if (cwdError) {
+        return `working directory ${cwd} is not allowed for a scheduled run: ${cwdError}`
+      }
+    }
+    return null
+  }
+
+  /**
+   * @private — the provider a run would ACTUALLY use, resolved the same way
+   * SessionManager.createSession resolves it (`provider || this._providerType`),
+   * so the capability gate judges the real provider rather than the stored field.
+   * Falls back to DEFAULT_PROVIDER when no manager is wired.
+   */
+  _resolveProviderName(task) {
+    const explicit = task.target?.provider
+    if (typeof explicit === 'string' && explicit.length > 0) return explicit
+    const managerDefault = this._sm?.providerType
+    if (typeof managerDefault === 'string' && managerDefault.length > 0) return managerDefault
+    return DEFAULT_PROVIDER
+  }
+
+  /**
+   * @private — the cwd a run would ACTUALLY use: the task's own, else the
+   * manager's default (what createSession falls back to). Null when neither is
+   * knowable, in which case there is no manager and the run fails anyway.
+   */
+  _resolveTaskCwd(task) {
+    const explicit = task.target?.cwd
+    if (typeof explicit === 'string' && explicit.length > 0) return explicit
+    const managerDefault = this._sm?.defaultCwd
+    if (typeof managerDefault === 'string' && managerDefault.length > 0) return managerDefault
+    return null
+  }
+
+  /**
+   * @private — record a run the engine refused to start. A VISIBLE, explicit
+   * non-success outcome: never `success`, and distinguishable from both `error`
+   * (the run happened and failed) and `skipped` (the slot passed) by its own
+   * status, so #6868/#6871 can tell the operator nothing ran and why.
+   */
+  _recordRefusal(task, at, reason) {
+    this._log.error(`Scheduled task ${task.id} REFUSED — nothing was run: ${reason}`)
+    const result = { at, status: REFUSED_STATUS, error: String(reason).slice(0, 500) }
+    this._recordRun(task, result)
+    this.emit('run-end', { taskId: task.id, ...result })
+  }
+
+  /**
    * @private — persist a lastRun result. The store recomputes nextRun off the
    * cadence on update(), which is what retires a one-time task (computeNextRun
    * returns null for a `once` cadence that has a lastRun) and advances a recurring
@@ -443,13 +687,37 @@ export class SchedulerEngine extends EventEmitter {
     try {
       this._store.update(task.id, { lastRun: result })
     } catch (err) {
-      // A task removed mid-run (update() returns null — not a throw) or a rejected
-      // result value must not take the engine down. It must ALSO not be retried
-      // forever: without a recorded run its nextRun never advances, so quarantine
-      // it for this process rather than re-firing it every tick.
-      this._quarantined.add(task.id)
-      this._log.error(`Failed to record run for scheduled task ${task.id} — quarantining it until restart: ${err?.message || err}`)
+      // A rejected result value or a storage fault must not take the engine down.
+      // It must ALSO not be retried forever: without a recorded run its nextRun
+      // never advances, so quarantine it for this process rather than re-firing it
+      // every tick.
+      this._quarantine(task, result?.at ?? this._now(), `its run outcome could not be recorded: ${err?.message || err}`)
     }
+  }
+
+  /**
+   * @private — stop firing a task for the rest of this process, and make that
+   * VISIBLE. Quarantine used to be a log line only, so a task that had
+   * permanently stopped firing still showed its last healthy `lastRun` to every
+   * registry-reading surface — indistinguishable from a task that is fine. Now
+   * the engine (a) best-effort writes the quarantine onto the task itself, (b)
+   * emits `task-quarantined`, and (c) exposes it on `quarantinedTaskIds`. The
+   * write is best-effort ON PURPOSE: the usual reason to quarantine is that the
+   * store itself is failing, so (b) and (c) are the fallbacks that always work.
+   *
+   * Quarantine stays process-scoped (a restart re-reads the file), so the task is
+   * NOT disabled in the registry.
+   */
+  _quarantine(task, at, reason) {
+    const firstTime = !this._quarantined.has(task.id)
+    this._quarantined.add(task.id)
+    this._log.error(`Scheduled task ${task.id} QUARANTINED until daemon restart — it will not fire again: ${reason}`)
+    try {
+      this._store.update(task.id, {
+        lastRun: { at, status: REFUSED_STATUS, error: `quarantined until daemon restart: ${reason}`.slice(0, 500) },
+      })
+    } catch { /* the store is usually the thing that's broken — the event + getter carry the signal */ }
+    if (firstTime) this.emit('task-quarantined', { taskId: task.id, at, reason })
   }
 
   // ── the default (production) executor ──────────────────────────────────────
@@ -463,7 +731,15 @@ export class SchedulerEngine extends EventEmitter {
    * task to ONE session instead of one per fire, keeps the recorded `sessionId`
    * meaningful (the operator can open it and read what the run actually did), and
    * gives a recurring task continuity across runs. Sessions are NOT auto-destroyed
-   * afterwards — they are ordinary sessions the operator can inspect and close.
+   * afterwards — they are ordinary sessions the operator can inspect and close
+   * (never reaping them is tracked in #7006).
+   *
+   * Because they are ordinary sessions, the operator can also change their
+   * permission mode. That makes reuse an escalation vector, so the clamped mode is
+   * re-asserted and verified on EVERY fire — see _assertPermissionMode. The
+   * interactive mode switch is deliberately left working (an operator inspecting a
+   * scheduled session may legitimately want to drive it by hand); what is
+   * guaranteed is that their change cannot survive into the next unattended fire.
    */
   async _runViaSessionManager(task, ctx) {
     if (!this._sm) return { status: 'error', error: 'no sessionManager wired — cannot run scheduled task' }
@@ -472,6 +748,7 @@ export class SchedulerEngine extends EventEmitter {
     try {
       sessionId = this._resolveSession(task, ctx)
     } catch (err) {
+      if (err instanceof ScheduledRunRefusedError) return { status: REFUSED_STATUS, error: err.message }
       return { status: 'error', error: `session create failed: ${err?.message || err}` }
     }
     if (!sessionId) return { status: 'error', error: 'session create failed (no sessionId)' }
@@ -488,8 +765,15 @@ export class SchedulerEngine extends EventEmitter {
         label: `scheduled:${task.id}`,
         timeoutMs: ctx.runTimeoutMs,
       })
-      // A denied permission usually lets the agent finish "successfully" with the
-      // tool call refused. That is NOT a successful scheduled run — surface it.
+      // `success` is the NARROWEST outcome, asserted positively: the turn
+      // completed AND no permission prompt was ever raised on this run. Any
+      // permission activity at all sets `runState.blocked` (set before any other
+      // decision in _handleSessionEvent, so a malformed prompt we could not even
+      // answer still counts), because a denied permission usually lets the agent
+      // finish "successfully" with the tool call refused — which is NOT a
+      // successful scheduled run. Reporting success for a run whose every tool
+      // call was refused is the worst failure mode this engine has, so the
+      // default here is to disbelieve success.
       if (runState.blocked) return this._blockedOutcome(runState, sessionId)
       return { status: 'success', sessionId }
     } catch (err) {
@@ -513,10 +797,29 @@ export class SchedulerEngine extends EventEmitter {
     }
   }
 
-  /** @private — reuse this task's still-live session, else create a fresh one. */
+  /**
+   * @private — reuse this task's still-live session, else create a fresh one.
+   * EITHER WAY the clamped permission mode is asserted before the caller drives a
+   * turn: createSession is passed it, and a reused session has it re-asserted and
+   * verified. A session that cannot be brought to the clamped mode is refused.
+   */
   _resolveSession(task, ctx) {
     const existing = this._sessionByTask.get(task.id)
-    if (existing && this._sm.getSession?.(existing)) return existing
+    if (existing) {
+      const entry = this._sm.getSession?.(existing)
+      if (entry?.session) {
+        // THE ESCALATION VECTOR (#6997 review C3): scheduled sessions are kept
+        // alive and reused, and an operator can flip any session to `auto` from
+        // the dashboard — even mid-turn. Without re-asserting here, one manual
+        // flip would silently put every future unattended fire of this task into
+        // bypass, forever, each recorded as a clean success.
+        this._assertPermissionMode(entry.session, ctx.permissionMode, existing)
+        return existing
+      }
+      // The session is gone (operator closed it) — drop the stale mapping so a
+      // fresh one is created below rather than resumed by id.
+      this._sessionByTask.delete(task.id)
+    }
 
     const target = task.target || {}
     const sessionId = this._sm.createSession({
@@ -531,8 +834,44 @@ export class SchedulerEngine extends EventEmitter {
       skipPermissions: false,
       metadata: { scheduledTaskId: task.id },
     })
+    // Trust nothing: verify the freshly-created session really came up at the
+    // clamped mode rather than assuming createSession honoured the option.
+    const created = this._sm.getSession?.(sessionId)
+    if (created?.session) this._assertPermissionMode(created.session, ctx.permissionMode, sessionId)
     this._sessionByTask.set(task.id, sessionId)
     return sessionId
+  }
+
+  /**
+   * @private — force `mode` onto a session and PROVE it took, or throw. The
+   * invariant this exists to hold: **a scheduled fire runs at the clamped mode,
+   * or it does not run.**
+   *
+   * Read-back is the only evidence accepted. `setPermissionMode` returns false
+   * both for a harmless no-op (already in that mode) and for a REFUSED change (a
+   * session mid-turn rejects every non-`auto` switch — base-session.js:1115-1133),
+   * so its return value cannot distinguish "fine" from "escalated and stuck".
+   * Only the value the session reports afterwards can.
+   *
+   * @throws {ScheduledRunRefusedError} when the mode cannot be verified
+   */
+  _assertPermissionMode(session, mode, sessionId) {
+    const read = () => (typeof session.permissionMode === 'string' ? session.permissionMode : null)
+    if (read() !== mode) {
+      try {
+        session.setPermissionMode?.(mode)
+      } catch (err) {
+        throw new ScheduledRunRefusedError(
+          `could not re-assert the '${mode}' permission mode on scheduled session ${sessionId}: ${err?.message || err} — refusing to fire an unattended run at an unverified permission mode`
+        )
+      }
+    }
+    const actual = read()
+    if (actual !== mode) {
+      throw new ScheduledRunRefusedError(
+        `scheduled session ${sessionId} reports permission mode '${actual ?? 'unknown'}' and could not be re-clamped to '${mode}' (the session is mid-turn, or its provider ignores the setter) — refusing to fire an unattended run at an unverified permission mode`
+      )
+    }
   }
 
   /** @private — build the TurnDriver on first real run. */
@@ -573,9 +912,18 @@ export class SchedulerEngine extends EventEmitter {
     if (!runState) return // never answer a session this engine does not own
     const requestId = data?.requestId ?? data?.id ?? null
     const toolName = data?.toolName ?? data?.tool ?? ''
-    if (requestId == null) return
+    // Mark the run blocked FIRST, before any other decision. A prompt was raised
+    // on an unattended run: that alone disqualifies the run from `success`,
+    // whether or not we manage to answer it. Bailing out on a malformed payload
+    // BEFORE this (the previous order) left `blocked` unset, so a prompt carrying
+    // no requestId went unanswered AND the run still reported success — the exact
+    // false-success this engine must never produce.
     if (!runState.blocked) runState.blocked = { toolName }
     this._log.warn(`Scheduled task ${runState.taskId} requested permission for ${toolName || 'a tool'} with no client connected — denying`)
+    if (requestId == null) {
+      this._log.warn(`Scheduled task ${runState.taskId} permission request carried no requestId — cannot answer it; the run is recorded as blocked`)
+      return
+    }
 
     const entry = this._sm.getSession?.(sessionId)
     const session = entry?.session

@@ -614,30 +614,79 @@ off the daemon arms no scheduler timers and starts no sessions — behaviour is
 identical to a daemon without the feature.
 
 When on, at each task's due time the daemon spins up (or resumes) that task's
-session and runs its prompt with **no client connected**. Because nobody is
-watching that turn, it runs under a hard permission floor:
+session and runs its prompt with **no client connected**.
+
+##### Supported providers — hook-routed providers (including the default) are refused
+
+> **A scheduled task only fires on a provider that answers permission prompts
+> in-process.** Right now that is `claude-sdk`, `claude-byok`, `codex` (the
+> app-server driver), `deepseek`, and `ollama`. Every other provider — **including
+> the daemon default `claude-tui`**, plus `claude-cli`, `claude-channel`, and
+> `gemini` — is **refused**: the task does not fire, no session is created, and the
+> run is recorded with status `refused` naming the provider.
+
+This is deliberate, not an oversight. The scheduler's whole safety story is that a
+permission prompt raised by an unattended turn gets **denied** and the run fails
+visibly. That requires observing the prompt and answering it programmatically,
+which only providers with in-process permissions expose. Hook-routed providers
+instead go out through `hooks/permission-hook.sh` → `POST /permission`, which the
+daemon cannot answer with no client attached — such a run would stall on every
+gated tool call until the 300-second auto-deny and then finish looking successful
+with nothing actually done. Refusing is the honest outcome.
+
+**A task with no explicit `target.provider` therefore does not fire**, because it
+resolves to the daemon default. Set `target.provider` to one of the supported ids.
+Widening support to hook-routed providers needs a programmatic
+permission-answering surface for them — tracked in
+[#7003](https://github.com/blamechris/chroxy/issues/7003).
+
+##### The permission floor
+
+Because nobody is watching the turn, a run that does fire runs under a hard floor:
 
 - The run is pinned to the `approve` permission mode. A task whose stored
   `target.permissionMode` is `auto` or `acceptEdits` is **clamped down** to
-  `approve` — a scheduled task can never grant itself auto-approval.
+  `approve` — a scheduled task can never grant itself auto-approval. (`plan` is
+  allowed: it is stricter than `approve`.)
+- **The clamp is re-asserted before every fire, not just at session creation.**
+  A task's session is deliberately kept alive and reused across runs, and an
+  operator inspecting it can change its permission mode by hand — so before each
+  fire the daemon forces the clamped mode back on and verifies it by reading it
+  back. If it cannot be verified, **the fire is skipped** and recorded `refused`.
+  A manual switch to Auto therefore cannot leak into the next unattended run.
 - The run is created with an explicit `skipPermissions: false`, so it does **not**
   inherit a server-wide [`dangerouslySkipPermissions`](#skip-permissions-tui-provider).
+- The task's `target.cwd` is checked against the **same working-directory
+  allowlist the dashboard enforces** — the credential-directory deny-list
+  (`~/.ssh`, `~/.aws`, `~/.config`, `~/.chroxy`, …), your `workspaceRoots`
+  allowlist if configured, and the `$HOME` fallback otherwise. `~/.chroxy/scheduled-tasks.json`
+  is an editable file, so a hand-written `target.cwd` gets no more trust than one
+  typed into the UI: a disallowed directory is recorded `refused` and does not fire.
 - If the turn hits a permission prompt, there is no human to answer it: the prompt
   is **denied**, the turn is aborted, and the run is recorded as a failed run with
   the reason. A scheduled task that needs a permission fails visibly rather than
-  escalating silently.
+  escalating silently. A run that raised any prompt is **never** recorded
+  `success`, even when the agent went on to finish its turn without the tool.
 - To let a scheduled task actually perform a gated operation, author an explicit
   **permission rule** for it. Rules are matched before a prompt is raised, so an
   allow-rule is the one auditable, human-authored way to widen what a scheduled
   run may do — and the protected-path / secret-read floor still cannot be
   bypassed by one.
 
-Each run records a last-run result (`success` / `error` / `timeout` / `skipped`)
-plus its session id into the registry. Runs are serialized (one at a time by
-default) so a burst of simultaneously-due tasks cannot spawn a herd of sessions,
-a task is never re-fired while its previous run is still in flight, and a task
-whose due time passed while the daemon was down is skipped rather than fired late
-if it is more than an hour stale.
+Each run records a last-run result plus its session id into the registry:
+
+| status | meaning |
+|--------|---------|
+| `success` | the turn completed and no permission prompt was raised |
+| `error` | the run happened and failed — including a run whose tool calls were denied |
+| `timeout` | the run exceeded the per-run timeout and was abandoned |
+| `skipped` | the slot passed unused (the daemon was down past the grace window) |
+| `refused` | **nothing ran** — unsupported provider, disallowed cwd, or an unverifiable permission mode. A misconfiguration to fix, not a transient failure |
+
+Runs are serialized (one at a time by default) so a burst of simultaneously-due
+tasks cannot spawn a herd of sessions, a task is never re-fired while its previous
+run is still in flight, and a task whose due time passed while the daemon was down
+is skipped rather than fired late if it is more than an hour stale.
 
 ## Examples
 
