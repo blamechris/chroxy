@@ -658,6 +658,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // symbols_snapshot handler. Null until the first list_symbols reply lands.
   symbols: null,
   symbolsLoading: false,
+  // #6867 (epic #6760): dashboard memory panel — merged CLAUDE.md stack, fed
+  // by the memory_stack_result handler. Null until the panel's first request.
+  memoryStackEntries: null,
+  memoryStackFile: null,
+  memoryStackError: null,
+  memoryStackLoading: false,
+  lastMemoryStackRequestId: null,
   // Mailbox (#5914 follow-up): Control Room "Mailbox" tab snapshot, fed by the
   // mailbox_status_snapshot handler. Null until the first survey lands.
   mailboxStatus: null,
@@ -2906,6 +2913,17 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   permissionAudit: null,
   permissionAuditLoading: false,
   permissionAuditError: false,
+  // #6996 review — mirror permissionAudit: memory_read is a FLAT,
+  // per-session-cwd pull, so a reconnect must not leave a stale memory stack
+  // from before the drop presented as current. viewingCachedSession/
+  // activeSessionId are preserved on disconnect, but the underlying
+  // server-side data can differ after a reconnect (e.g. server restart) —
+  // clear and let the panel re-fetch.
+  memoryStackEntries: null,
+  memoryStackFile: null,
+  memoryStackError: null,
+  memoryStackLoading: false,
+  lastMemoryStackRequestId: null,
       customAgents: [],
       checkpoints: [],
       _directoryListingCallback: null,
@@ -4240,6 +4258,33 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
   },
 
+  // #6867 (epic #6760): request the effective merged CLAUDE.md memory stack
+  // for the dashboard memory panel. Mirrors requestHostStatus — sends
+  // `memory_read`, flips memoryStackLoading, returns false (without setting
+  // loading) when the socket is closed so the panel can render a "not
+  // connected" state rather than spinning forever.
+  //
+  // #6996 review — the request now carries the active sessionId explicitly
+  // (MemoryReadSchema has supported it since #6864; the server's
+  // resolveSession() already prefers a client-supplied sessionId over the
+  // implicit client.activeSessionId fallback) rather than leaving resolution
+  // entirely implicit, plus a fresh requestId nonce (mirrors requestFileContent's
+  // #6502 pattern) so handleMemoryStackResult can drop a reply superseded by
+  // a later request — e.g. a rapid session switch firing a second
+  // memory_read before the first one's answer lands.
+  requestMemoryRead: (): boolean => {
+    const { socket, activeSessionId } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      const requestId = `memory-read-${nextMessageId()}`;
+      set({ memoryStackLoading: true, memoryStackError: null, lastMemoryStackRequestId: requestId });
+      const msg: Record<string, unknown> = { type: 'memory_read', requestId };
+      if (activeSessionId) msg.sessionId = activeSessionId;
+      wsSend(socket, msg);
+      return true;
+    }
+    return false;
+  },
+
   // Git status
 
   setGitStatusCallback: (cb) => {
@@ -4426,6 +4471,19 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // user re-pulls on demand. The loading + error flags reset too so an
     // in-flight pull for the old session can't wedge the button.
     set({ permissionAudit: null, permissionAuditLoading: false, permissionAuditError: false });
+
+    // #6996 review — same FLAT, per-session-cwd shape as permissionAudit
+    // above. requestMemoryRead() now sends an explicit sessionId and a
+    // requestId nonce that handleMemoryStackResult uses to drop a superseded
+    // reply, but the reply itself still doesn't echo sessionId — so this
+    // reset stays as defence-in-depth. Without it, MemoryPanel's
+    // `entries === null` mount-guard never re-fires across a switch, so the
+    // panel keeps rendering the PREVIOUS session's memory stack as though it
+    // were the new session's — the exact provenance failure this panel
+    // exists to prevent. Clear it here so the panel re-fetches for the new
+    // session; the loading + error flags reset too so an in-flight pull for
+    // the old session can't wedge the button.
+    set({ memoryStackEntries: null, memoryStackFile: null, memoryStackError: null, memoryStackLoading: false });
 
     // Optimistically switch to cached state + mark notifications for target
     // session as read. #4890 — pre-widget we filtered the target session's

@@ -59,6 +59,7 @@ import { PendingPairRequests } from './components/PendingPairRequests'
 import { type ToastItem } from './components/Toast'
 import { FileBrowserPanel } from './components/FileBrowserPanel'
 import { GitPanel } from './components/GitPanel'
+import { MemoryPanel } from './components/MemoryPanel'
 import { CheckpointTimeline } from './components/CheckpointTimeline'
 import { FooterBar } from './components/FooterBar'
 import { type ShortcutEntry } from './components/ShortcutHelp'
@@ -2554,6 +2555,12 @@ export function App() {
                     status/diff wiring. */}
                 {viewMode === 'git' && connectionPhase !== 'connecting' && !isSwitchingSession && (
                   <GitPanel />
+                )}
+                {/* #6867 (epic #6760) — dashboard memory panel: merged
+                    CLAUDE.md hierarchy with per-file provenance, plus the
+                    auto-generated MEMORY.md browsable read view. */}
+                {viewMode === 'memory' && connectionPhase !== 'connecting' && !isSwitchingSession && (
+                  <MemoryPanel />
                 )}
                 {/*
                   #4397 — system tab uses the same display:none kept-alive

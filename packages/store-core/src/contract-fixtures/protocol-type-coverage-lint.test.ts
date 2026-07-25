@@ -194,6 +194,7 @@ const DASHBOARD_ONLY = new Set<string>([
   'evaluator_rewrite',          // auto-evaluator rewrite banner (#3188) — dashboard-only
   'host_status_snapshot',       // Control Room Host/Repo Status (#5170) — dashboard-only for v1
   'permission_audit_result',    // #6772 query_permission_audit reply — dashboard SettingsPanel "Permission history"; first client caller, dashboard-only for v1 (mobile PermissionHistory reads the chat transcript, not this wire query)
+  'memory_stack_result',        // #6867 (epic #6760) reply to memory_read — dashboard memory panel (merged CLAUDE.md hierarchy + provenance); dashboard-only for v1, mobile parity is the sibling slice #6870
   // permission_input removed — the mobile app now handles it too (#6543 PR-4,
   // the pre-write-diff mobile parity fast-follow), so it is no longer
   // dashboard-only. Both clients dispatch it into `permissionInputs[requestId]`.
@@ -253,9 +254,8 @@ const UNHANDLED_BY_DESIGN = new Set<string>([
                                           //   no dedicated handler yet (dashboard exposure is a deferred follow-up)
   'stdin_dropped_totals',                 // #3544 transient counter — surface is the SessionInfo flag on
                                           //   session_list, not a dedicated wire-event handler
-  'memory_stack_result',                  // #6864 (epic #6760) reply to memory_read — server-only for v1,
-                                          //   no client handler yet; dashboard/mobile memory-panel consumers
-                                          //   are the sibling slices #6867/#6870
+  // 'memory_stack_result' removed — the dashboard now handles it (#6867); it
+  // moved to DASHBOARD_ONLY below. Mobile parity is the sibling slice #6870.
 ])
 
 // ---------------------------------------------------------------------------
