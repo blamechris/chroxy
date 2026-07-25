@@ -835,6 +835,13 @@ export class ClaudeByokSession extends BaseSession {
     }
     if (!written.ok) return { ok: false, error: written.error, code: written.code }
 
+    // #7002: the config's existing mode is PRESERVED by design, so a
+    // group/world-readable `~/.claude.json` that just received `env`/`headers`
+    // (routinely API tokens) is a case where we are the party making things
+    // worse. Say so loudly in the daemon log — it never echoes a secret value —
+    // and hand it to the caller so a client can surface it too.
+    if (written.warning) log.warn(`BYOK MCP: ${written.warning}`)
+
     // Mirror the persisted entry into the in-memory config list. `entry` is the
     // NORMALIZED object that was actually written, so memory and disk cannot
     // diverge. Normalization is pure over (name, config), so this is structurally
@@ -854,7 +861,9 @@ export class ClaudeByokSession extends BaseSession {
     // the entry is persisted and `start()` will pick it up. Spinning a fleet up
     // here would duplicate start()'s wiring for no gain.
     this._emitMcpServers()
-    return { ok: true, status }
+    const result = { ok: true, status }
+    if (written.warning) result.warning = written.warning
+    return result
   }
 
   /**

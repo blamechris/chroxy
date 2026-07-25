@@ -9,6 +9,7 @@
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   readFileSync,
   realpathSync,
   renameSync,
@@ -909,6 +910,120 @@ export function readClaudeConfigForMutation(filePath) {
 }
 
 /**
+ * #7002 — resolve the path the atomic write must actually LAND on.
+ *
+ * The write is `writeFileSync(tmp)` → `renameSync(tmp, dest)`, and `rename(2)`
+ * replaces the FINAL PATH COMPONENT itself. If that component is a symlink — the
+ * common dotfiles-repo arrangement, `~/.claude.json` → `~/dotfiles/claude.json` —
+ * the rename destroys the LINK and leaves a regular file in its place: the user's
+ * dotfiles link silently disappears and their real config stops receiving
+ * updates. (The read path follows the link, so nothing complains.) So a symlinked
+ * destination must be resolved to its target and written THERE.
+ *
+ * TRUST ASSUMPTION, stated plainly: `~/.claude.json` and any link the user has
+ * put in its place are USER-OWNED, USER-AUTHORED configuration. We follow the
+ * link because a user who symlinked their own config meant it. What we do NOT do
+ * is follow it blindly — resolving a symlink and writing to whatever it points at
+ * is precisely how a planted link turns "write my config" into "write an arbitrary
+ * file", so the resolved target must satisfy all of:
+ *
+ *   - it resolves at all (a DANGLING link is refused, not materialized — creating
+ *     the missing target would be us inventing a file at an attacker-chosen path)
+ *   - it is a REGULAR file (no directory, fifo, socket or device)
+ *   - it is owned by the uid we run as (a link into another user's file is refused)
+ *
+ * RACE HONESTY: resolution happens ONCE, and the subsequent `rename` re-walks the
+ * path by name, so an attacker who can replace the link between the two syscalls
+ * can still redirect the write (classic TOCTOU). This is NOT closed here — POSIX
+ * offers no "rename onto this exact inode" primitive to close it with. The
+ * residual exposure requires write access to the user's own `$HOME`, which is
+ * already game over for a config the daemon reads and executes commands from;
+ * see the follow-up issue referenced in the PR for a fully race-free design.
+ *
+ * @param {string} filePath
+ * @returns {{ ok: true, path: string, viaSymlink: boolean } | { ok: false, error: string }}
+ */
+export function resolveClaudeConfigWritePath(filePath) {
+  let link
+  try {
+    link = lstatSync(filePath)
+  } catch {
+    // Missing (the first-write case) or unstattable — write the path as given,
+    // exactly as before this fix.
+    return { ok: true, path: filePath, viaSymlink: false }
+  }
+  if (!link.isSymbolicLink()) return { ok: true, path: filePath, viaSymlink: false }
+
+  let resolved
+  try {
+    resolved = realpathSync(filePath)
+  } catch (err) {
+    return {
+      ok: false,
+      error: `${filePath} is a symlink whose target cannot be resolved (${err?.code || err?.message || String(err)}); refusing to replace the link with a regular file. Fix or remove the link, then retry.`,
+    }
+  }
+  let target
+  try {
+    target = lstatSync(resolved)
+  } catch (err) {
+    return {
+      ok: false,
+      error: `${filePath} is a symlink to ${resolved}, which cannot be stat'd (${err?.code || err?.message || String(err)}); refusing to write through it.`,
+    }
+  }
+  if (!target.isFile()) {
+    return {
+      ok: false,
+      error: `${filePath} is a symlink to ${resolved}, which is not a regular file; refusing to write through it.`,
+    }
+  }
+  const uid = typeof process.getuid === 'function' ? process.getuid() : null
+  if (uid !== null && target.uid !== uid) {
+    return {
+      ok: false,
+      error: `${filePath} is a symlink to ${resolved}, which is owned by uid ${target.uid} rather than uid ${uid}; refusing to write through it.`,
+    }
+  }
+  return { ok: true, path: resolved, viaSymlink: true }
+}
+
+/**
+ * #7002 — the residual risk of PRESERVING a destination's mode.
+ *
+ * `writeClaudeConfigAtomic` deliberately does not force 0600 on a file the user
+ * (or Claude Code) already owns. That is the right call for permissions, but it
+ * leaves one case where Chroxy is the party making things worse: an existing
+ * config that is group/world-readable, plus a new entry carrying `env` or
+ * `headers` — the two fields that routinely hold API tokens. We do not silently
+ * re-permission the file; we say so loudly instead, naming the file and its mode,
+ * so the user can tighten it themselves.
+ *
+ * Returns `null` when there is nothing to warn about (owner-only mode, no
+ * secret-bearing field, or a file WE created — those get 0600). The message never
+ * echoes a secret VALUE, only the field names.
+ *
+ * @param {{ filePath: string, mode: number|null|undefined, entry: object }} args
+ * @returns {string|null}
+ */
+export function describeConfigModeSecretWarning({ filePath, mode, entry } = {}) {
+  if (mode === null || mode === undefined) return null
+  const otherBits = mode & 0o077
+  if (otherBits === 0) return null
+  const fields = ['env', 'headers'].filter((key) => {
+    const value = entry?.[key]
+    return value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length > 0
+  })
+  if (fields.length === 0) return null
+  const octal = (mode & 0o777).toString(8).padStart(3, '0')
+  return (
+    `${filePath} is mode ${octal} (readable beyond its owner) and the MCP server entry just added carries ` +
+    `${fields.join(' and ')}, which commonly hold API tokens. Chroxy preserved the file's existing permissions ` +
+    `rather than changing them — tighten it yourself with: chmod 600 ${filePath}`
+  )
+}
+
+/**
  * Atomically write the mutated config back.
  *
  * temp file → exact mode → fsync(file) → rename → fsync(parent dir), the same
@@ -925,16 +1040,27 @@ export function readClaudeConfigForMutation(filePath) {
  * path because one code path is cheaper to keep correct than two, and the cost
  * (one fsync of a few KB, on an operation a user performs rarely) is noise.
  *
+ * A SYMLINKED destination is written THROUGH (the link survives, its target gets
+ * the bytes) or refused — never replaced. See `resolveClaudeConfigWritePath` for
+ * the trust assumption and the race caveat (#7002).
+ *
  * @param {string} filePath
  * @param {object} value — the full config object to serialize
  * @param {{ mode: number|null }} opts — `null` mode = new file, use 0600
  */
 export function writeClaudeConfigAtomic(filePath, value, { mode }) {
+  const resolved = resolveClaudeConfigWritePath(filePath)
+  if (!resolved.ok) throw new Error(resolved.error)
+  // Everything below targets the RESOLVED path: the sidecar has to live in the
+  // target's directory (rename is only atomic within one filesystem, and a
+  // dotfiles target is frequently on a different one from $HOME), and the
+  // dir-fsync has to be the target's directory too.
+  const destPath = resolved.path
   const payload = `${JSON.stringify(value, null, 2)}\n`
   const targetMode = mode === null || mode === undefined ? 0o600 : mode
   // Per-call random suffix, NOT process.pid: concurrent sessions in one daemon
   // share a pid and would race for the same sidecar path (#3922).
-  const tmpPath = `${filePath}.chroxy.${randomUUID()}.tmp`
+  const tmpPath = `${destPath}.chroxy.${randomUUID()}.tmp`
   try {
     // `mode` is only honoured on create, and umask can strip bits from it — so
     // restate the exact mode afterwards. The intermediate mode can only ever be
@@ -954,13 +1080,13 @@ export function writeClaudeConfigAtomic(filePath, value, { mode }) {
   // ORIGINAL rename error, not a cleanup-side ENOENT. Same shape as the #4463 fix
   // in byok-mcp-trust.js `recordTrust`.
   try {
-    renameSync(tmpPath, filePath)
+    renameSync(tmpPath, destPath)
   } catch (err) {
     try { unlinkSync(tmpPath) } catch { /* may already be gone */ }
     throw err
   }
   // Make the rename itself durable, not just the bytes it points at.
-  fsyncForDurability(dirname(filePath), { isDir: true })
+  fsyncForDurability(dirname(destPath), { isDir: true })
 }
 
 /**
@@ -1110,14 +1236,24 @@ export function planAddMcpServerToConfig(opts = {}) {
  * @param {'user'|'project'} [opts.scope]
  * @param {string} [opts.cwd] — required for scope 'project'
  * @param {string} [opts.configPath]
- * @returns {{ ok: true, entry: object, scope: string } | { ok: false, error: string, code?: string }}
+ * @returns {{ ok: true, entry: object, scope: string, warning?: string } | { ok: false, error: string, code?: string }}
  */
 export function addMcpServerToConfig(opts = {}) {
   const prepared = prepareAddMcpServer(opts)
   if (!prepared.ok) return prepared.code ? { ok: false, error: prepared.error, code: prepared.code } : { ok: false, error: prepared.error }
   prepared.block[prepared.name] = prepared.entry
   writeClaudeConfigAtomic(prepared.configPath, prepared.raw, { mode: prepared.mode })
-  return { ok: true, entry: prepared.entry, scope: prepared.scope }
+  // #7002: computed from the mode we just PRESERVED and the entry we just wrote,
+  // so it only fires when Chroxy is the party that put secret material into a
+  // group/world-readable file. Advisory — we still do not re-permission the file.
+  const warning = describeConfigModeSecretWarning({
+    filePath: prepared.configPath,
+    mode: prepared.mode,
+    entry: prepared.entry,
+  })
+  const result = { ok: true, entry: prepared.entry, scope: prepared.scope }
+  if (warning) result.warning = warning
+  return result
 }
 
 /**

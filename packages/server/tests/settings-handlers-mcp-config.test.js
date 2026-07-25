@@ -236,6 +236,22 @@ describe('handleAddMcpServer (#6974)', () => {
     assert.equal(ctx.transport.send.mock.callCount(), 0, 'a successful mutation must send NO error frame')
   })
 
+  it('a success carrying the #7002 mode warning still sends NO error frame', async () => {
+    // The permissions warning is advisory: the add SUCCEEDED, the file was left
+    // at the mode the user chose, and the operator log is where it belongs. A
+    // client must not see this as a failed mutation.
+    const session = makeSession({
+      addMcpServer: mock.fn(async () => ({
+        ok: true,
+        status: 'connected',
+        warning: '/home/u/.claude.json is mode 644 (readable beyond its owner) …',
+      })),
+    })
+    const ctx = makeCtx({ 'sess-1': { session } })
+    await addHandler(WS, { ...PRIMARY }, { ...VALID_ADD, requestId: 'r' }, ctx)
+    assert.equal(ctx.transport.send.mock.callCount(), 0, 'a warning is not an error frame')
+  })
+
   it('a duplicate name surfaces as MCP_SERVER_EXISTS', async () => {
     const session = makeSession({
       addMcpServer: mock.fn(async () => ({ ok: false, code: 'EXISTS', error: 'already exists' })),
