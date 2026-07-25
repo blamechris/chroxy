@@ -14,7 +14,7 @@ Configuration values are resolved in the following order (highest priority first
 ## Configuration Keys
 
 Every key below is a real entry in `CONFIG_SCHEMA`
-([`packages/server/src/config.js`](src/config.js)) — that array is the
+([`packages/server/src/config.js`](src/config.js)) — that object is the
 authoritative list, and anything not in it triggers an `Unknown config key`
 warning at startup and is ignored.
 
@@ -83,7 +83,7 @@ of `~/.chroxy/config.json` regardless of which group it appears in.
 |-----|------|----------|---------------------|-------------|
 | `provider` | string | `--provider <name>` | `CHROXY_PROVIDER` | Default session backend. Allowed values: `claude-tui` (default, #5819), `claude-sdk`, `claude-cli`, `claude-channel` (research preview), `gemini`, `codex`, plus `docker-sdk` / `docker-cli` when Docker environments are enabled. The `claude-channel` provider is a research-preview scaffold whose `start()` currently throws — selectable for `chroxy doctor` / registry inspection but not yet runnable (bridge lands in #3954). See [../../docs/providers.md](../../docs/providers.md) for per-provider setup, env vars (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, …), and the capability matrix. |
 | `model` | string | `--model <name>` | `CHROXY_MODEL` | Model to use. Provider-specific — e.g. `claude-sonnet-4`/`haiku` for Claude, `gemini-2.5-pro` for Gemini, `gpt-5.4` for Codex. |
-| `providers` | array \| object | - | `CHROXY_PROVIDERS` | Two forms. **Array** (legacy, written by `chroxy init`): informational list of provider ids the user opted into. **Object** (#5419): `providers.anthropicCompatible` is an array of config-driven Anthropic-compatible endpoint entries (Z.ai GLM, Moonshot Kimi, MiniMax, LM Studio, llama.cpp, vLLM, OpenRouter, custom) — each entry `{ id, label?, baseUrl, apiKeyEnv?, credentialsKey?, defaultModel, models?, pricing?, contextWindow? }` registers a first-class provider at startup, selectable via `provider` / `--provider <id>`. API keys are **never** inlined: `apiKeyEnv` names an env var, `credentialsKey` names a `~/.chroxy/credentials.json` field (mode `0600`); entries carrying literal secrets are rejected. Invalid entries are warned about and skipped; valid siblings still register. The object form also carries `providers.allowAnyModel` — see [Unrestricted provider models](#unrestricted-provider-models-providersallowanymodel). See [Anthropic-compatible endpoints](../../docs/providers.md#anthropic-compatible-endpoints-config-driven). |
+| `providers` | array \| object | - | `CHROXY_PROVIDERS` | Two forms. **Array** (legacy, written by `chroxy init`): informational list of provider ids the user opted into. **Object** (#5419): `providers.anthropicCompatible` is an array of config-driven Anthropic-compatible endpoint entries (Z.ai GLM, Moonshot Kimi, MiniMax, LM Studio, llama.cpp, vLLM, OpenRouter, custom) — each entry `{ id, label?, baseUrl, apiKeyEnv?, credentialsKey?, defaultModel, models?, pricing?, contextWindow? }` registers a first-class provider at startup, selectable via `provider` / `--provider <id>`. API keys are **never** inlined: `apiKeyEnv` names an env var, `credentialsKey` names a `~/.chroxy/credentials.json` field (mode `0600`); entries carrying literal secrets are rejected. Invalid entries are warned about and skipped; valid siblings still register. The object form carries two more sub-blocks: `providers.openaiCompatible` — the identical entry shape for endpoints that speak the **OpenAI Chat Completions** API instead (OpenAI, OpenRouter, LM Studio, vLLM, llama.cpp, Together, Groq, DeepInfra, custom), where `baseUrl` is an OpenAI API base typically ending in `/v1` — and `providers.allowAnyModel`, see [Unrestricted provider models](#unrestricted-provider-models-providersallowanymodel). See [Anthropic-compatible endpoints](../../docs/providers.md#anthropic-compatible-endpoints-config-driven) and [OpenAI-compatible endpoints](../../docs/providers.md#openai-compatible-endpoints-config-driven). |
 | `legacyCli` | boolean | `--legacy-cli` | `CHROXY_LEGACY_CLI` | Legacy shorthand that maps to `provider: "claude-cli"` when no explicit `provider` is set. Prefer setting `provider` directly; an explicit `provider` always wins. |
 
 ### Permissions and security gates
@@ -142,16 +142,33 @@ of `~/.chroxy/config.json` regardless of which group it appears in.
 
 ### Environment variable names
 
-Most keys have an **explicit** environment-variable name, listed in the tables
-above and defined by `envKeyForConfig()` in
-[`packages/server/src/config.js`](src/config.js).
+Two different mechanisms put an environment variable in the tables above, and
+they are worth telling apart.
 
-Keys marked *(unmapped)* have no explicit entry. They still participate in the
-env layer — `mergeConfig` looks every schema key up in the environment — but they
-fall back to a naive `key.toUpperCase()`, which drops the `CHROXY_` prefix and
-all word separators: `features` → `FEATURES`, `billing` → `BILLING`,
-`workspaceRoots` → `WORKSPACEROOTS`, `userShell` → `USERSHELL`,
-`trustMismatchMode` → `TRUSTMISMATCHMODE`, and so on.
+**1. Merge-layer overrides.** `mergeConfig` looks every schema key up in the
+environment and, if present, that value wins over the config file. The name comes
+from `envKeyForConfig()` in
+[`packages/server/src/config.js`](src/config.js) — most keys have an **explicit**
+entry there (`port` → `PORT`, `controlRoomRunnerRoot` → `CHROXY_RUNNER_ROOT`, …).
+
+**2. Direct reads.** Some settings are read straight out of `process.env` by the
+helper that consumes them, bypassing the merge layer entirely:
+`CHROXY_ENABLE_IDE` / `CHROXY_ENABLE_ORCHESTRATION` / `CHROXY_SEMANTIC_TITLES`
+(the `features` gates), `CHROXY_SEMANTIC_TITLES_MODEL` /
+`CHROXY_SEMANTIC_TITLES_TIMEOUT_MS` (which override *specific fields* of
+`summarize` on the title path only — they are not a general override for the
+`summarize` object), and `CHROXY_BINARY_PROVENANCE` /
+`CHROXY_BINARY_SIGNATURE_GATE` (`binaryProvenance`).
+
+**The naive fallback.** 16 schema keys have no explicit `envKeyForConfig` entry,
+so their *merge-layer* lookup falls back to a bare `key.toUpperCase()` — which
+drops the `CHROXY_` prefix and all word separators: `features` → `FEATURES`,
+`billing` → `BILLING`, `workspaceRoots` → `WORKSPACEROOTS`, `userShell` →
+`USERSHELL`, `trustMismatchMode` → `TRUSTMISMATCHMODE`, `summarize` →
+`SUMMARIZE`, `binaryProvenance` → `BINARYPROVENANCE`, and so on. The tables mark
+these *(unmapped)* wherever the key has no direct-read env var to list instead;
+`summarize`, `features`, and `binaryProvenance` are unmapped at the merge layer
+too, even though their rows list the direct reads above.
 
 Those fallback names are **not a supported interface**:
 
@@ -178,13 +195,14 @@ rather than being silently dropped.
 | `environments.k8s` | `namespace`, `inCluster`, `kubeconfigPath`, `sidecarImage`, `imagePullPolicy`, `connectMode`, `namespaceQuota`, `namespaceLimitRange`, `workspace` |
 | `environments.rancher` | `rancherUrl`, `clusterId`, `token`, `tokenEnv`, `tokenFile`, `caData`, `skipTLSVerify`, `defaultProjectId` |
 | `notifications.discord` | `botName`, `billingAlerts`, `colors`, `defaultColor`, `permissionColor`, `errorColor`, `updateThrottleMs`, `heartbeatIntervalMs`, `pruneAfterMs`, `staleAfterMs`, `offlineAfterMs`, `statePath`, `billingStatePath` |
+| `providers` *(object form)* | `anthropicCompatible`, `openaiCompatible`, `allowAnyModel` |
 
 `summarize`, `features`, and `orchestration` have no unknown-key check today, so
 a typo in one of those is silently ignored rather than warned about.
 
 ### Unrestricted provider models (`providers.allowAnyModel`)
 
-The static-allowlist subprocess providers (`gemini`, `codex`, `deepseek`)
+The static-allowlist subprocess providers (e.g. `gemini`, `codex`, `deepseek`)
 hard-reject a model id that is not in their built-in list, even when the upstream
 API already serves it — which otherwise forces a chroxy release just to add one.
 `providers.allowAnyModel` is an array of provider ids that opt out of that check
