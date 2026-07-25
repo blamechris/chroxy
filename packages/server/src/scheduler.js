@@ -164,13 +164,15 @@ export const SCHEDULED_PERMISSION_MODE = 'approve'
  *
  * DO NOT relax the `acceptEdits` clamp. It is load-bearing, not merely strict:
  * `acceptEdits` auto-approves file reads, so an unattended run under it would read
- * `.env` / `id_rsa` with nothing gating it. The in-process providers this engine
- * fires at do apply permission-manager's protected-path floor to those reads, but
- * the hook path does NOT — hooks/permission-hook.sh:262-271 allows
- * Read|Write|Edit|NotebookEdit|Glob|Grep outright with no protected-path check
- * (tracked as #7004). Today posture (4) refuses hook-routed providers outright, so
- * that gap is not reachable from here; keeping the clamp means it stays unreachable
- * if #7003 ever widens provider support.
+ * every non-floored file with nothing gating it. Both pipelines now apply the
+ * protected-path / secret-read floor — the in-process providers via
+ * permission-manager's `isFlooredTarget`, and the hook path via the
+ * `POST /permission-floor` probe the shell hook consults before its short-circuit
+ * (#7004, previously a hook-path gap) — so `.env` / `id_rsa` specifically would
+ * prompt rather than be read silently. That does NOT make the clamp redundant: the
+ * floor covers protected/secret TARGETS only, and an unattended run has no human to
+ * answer the prompt it forces (it auto-denies after 300s), so `acceptEdits` would
+ * still hand a stored task blanket approval over every ordinary file.
  */
 const SCHEDULED_ALLOWED_PERMISSION_MODES = new Set([SCHEDULED_PERMISSION_MODE, 'plan'])
 
