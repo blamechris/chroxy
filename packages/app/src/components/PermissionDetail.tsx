@@ -6,13 +6,14 @@ import {
   StyleSheet,
   ScrollView,
   Platform,
-  Linking,
   LayoutAnimation,
 } from 'react-native';
+import { isSafeWebUrl } from '@chroxy/store-core';
 import { ChatMessage } from '../store/types';
 import { ICON_CHECK, ICON_CLOSE } from '../constants/icons';
 import { COLORS } from '../constants/colors';
 import { tokenize, SYNTAX_COLORS, Token } from '../utils/syntax';
+import { openWebResultUrl } from './chat/WebToolResult';
 
 // ---------------------------------------------------------------------------
 // Syntax-highlighted code block
@@ -219,17 +220,41 @@ export function renderPermissionDetail(tool?: string, toolInput?: Record<string,
   }
 
   // WebFetch: URL + prompt
+  //
+  // SECURITY: `toolInput.url` is the model's PROPOSED tool call — fully
+  // model-controlled content, rendered at exactly the moment the user is
+  // being asked to approve it. Gate the scheme on the shared `isSafeWebUrl`
+  // allowlist (http/https only) before it can become a tappable element, the
+  // same treatment `MarkdownRenderer`'s `openURL` (#6447) and
+  // `WebToolResult` (#6988) apply to every other model-supplied link. An
+  // unsafe scheme (`file://`, `tel:`, `itms-apps://`, another app's custom
+  // scheme…) must never be handed to the OS straight off a permission card.
+  //
+  // An unsafe URL still RENDERS — as inert text with no press handler — so
+  // the user can see exactly what the model asked for before deciding.
   if (toolName === 'webfetch') {
     const url = typeof toolInput.url === 'string' ? toolInput.url : null;
     const prompt = typeof toolInput.prompt === 'string' ? toolInput.prompt : null;
+    const safeUrl = isSafeWebUrl(url) ? url : null;
     return (
       <View style={styles.permDetailBlock}>
         {url && (
           <>
             <Text style={styles.permDetailLabel}>URL</Text>
-            <TouchableOpacity onPress={() => void Linking.openURL(url).catch(() => {})} accessibilityRole="link">
-              <Text selectable style={[styles.permDetailCode, styles.linkText]}>{url}</Text>
-            </TouchableOpacity>
+            {safeUrl ? (
+              <TouchableOpacity
+                onPress={() => openWebResultUrl(safeUrl)}
+                accessibilityRole="link"
+                accessibilityHint="Opens in your browser after confirmation"
+                testID="permission-webfetch-url-link"
+              >
+                <Text selectable style={[styles.permDetailCode, styles.linkText]}>{url}</Text>
+              </TouchableOpacity>
+            ) : (
+              <Text selectable style={styles.permDetailCode} testID="permission-webfetch-url-unsafe">
+                {url}
+              </Text>
+            )}
           </>
         )}
         {prompt && (
