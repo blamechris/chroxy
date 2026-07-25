@@ -44,7 +44,14 @@ function parseLines(text: string): string[] {
 
 /** `KEY=VALUE` per line. A line with no `=` (or an empty key) is reported as invalid rather than silently dropped. */
 function parseKeyValueLines(text: string): { map: Record<string, string>; invalidLines: string[] } {
-  const map: Record<string, string> = {};
+  // Null-prototype map, NOT `{}`. On a plain object `map['__proto__'] = 'x'`
+  // hits the legacy `__proto__` setter, which ignores a string value — so the
+  // key never becomes an own property. That silently discarded the line AND
+  // made it invisible to the reserved-key refusal in mcp-server-validation.ts
+  // (which iterates Object.keys), so `__proto__` could never be reported.
+  // With a null prototype every key is an ordinary own key: `__proto__` is
+  // carried through and correctly rejected as reserved.
+  const map: Record<string, string> = Object.create(null);
   const invalidLines: string[] = [];
   for (const line of parseLines(text)) {
     const idx = line.indexOf('=');

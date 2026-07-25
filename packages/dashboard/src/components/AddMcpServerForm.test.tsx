@@ -120,6 +120,31 @@ describe('AddMcpServerForm client-side validation (#6999)', () => {
     expect(mockAddMcpServer).not.toHaveBeenCalled();
   });
 
+  // Review (#7022): the key/value map must have a NULL prototype. On a plain
+  // `{}`, `map['__proto__'] = 'x'` hits the legacy setter, which ignores a
+  // string — the key never becomes an own property, so the line was silently
+  // discarded AND unreachable by the Object.keys-based reserved-key check.
+  it('rejects a reserved env key (__proto__) instead of silently swallowing the line', () => {
+    openForm();
+    fireEvent.change(screen.getByTestId('add-mcp-server-name'), { target: { value: 'filesystem' } });
+    fireEvent.change(screen.getByTestId('add-mcp-server-command'), { target: { value: 'npx' } });
+    fireEvent.change(screen.getByTestId('add-mcp-server-env'), { target: { value: '__proto__=x' } });
+    fireEvent.click(screen.getByTestId('add-mcp-server-submit'));
+    expect(screen.getByTestId('add-mcp-server-error').textContent).toMatch(/env key '__proto__' is reserved/);
+    expect(mockAddMcpServer).not.toHaveBeenCalled();
+  });
+
+  it('rejects a reserved header key (__proto__) on the remote transport too', () => {
+    openForm();
+    fireEvent.change(screen.getByTestId('add-mcp-server-name'), { target: { value: 'remote-srv' } });
+    fireEvent.click(screen.getByTestId('add-mcp-server-transport-remote'));
+    fireEvent.change(screen.getByTestId('add-mcp-server-url'), { target: { value: 'https://example.com/mcp' } });
+    fireEvent.change(screen.getByTestId('add-mcp-server-headers'), { target: { value: '__proto__=x' } });
+    fireEvent.click(screen.getByTestId('add-mcp-server-submit'));
+    expect(screen.getByTestId('add-mcp-server-error').textContent).toMatch(/headers key '__proto__' is reserved/);
+    expect(mockAddMcpServer).not.toHaveBeenCalled();
+  });
+
   it('rejects a non-KEY=VALUE env line with a clear message', () => {
     openForm();
     fireEvent.change(screen.getByTestId('add-mcp-server-name'), { target: { value: 'filesystem' } });
