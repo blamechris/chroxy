@@ -24,9 +24,11 @@ permissions:
 # exposes it as a JSON-string output (`needs.runner-target.outputs.runner`).
 # Jobs that opt into the routing declare `needs: runner-target` and
 # `runs-on: ${{ fromJSON(needs.runner-target.outputs.runner) }}`. This routes
-# them to the self-hosted Linux runner pool (Docker-based, labels
-# self-hosted,Linux,ARM64) for SAME-REPO pushes and PRs, keeping them off the
-# GitHub-hosted bill. If no self-hosted Linux runner is online, those jobs queue
+# them to the self-hosted Linux runner pool (labels
+# self-hosted,Linux,chroxy-linux) for SAME-REPO pushes and PRs, keeping them off
+# the GitHub-hosted bill. The selector is deliberately NOT arch-pinned: the pool
+# is MIXED — ARM64 Docker members on the Mac plus an x86_64 Hyper-V VM member on
+# the always-on Windows host. If no self-hosted Linux runner is online, those jobs queue
 # until one appears. FORK PRs fall back to `ubuntu-24.04` (GitHub-hosted) so
 # untrusted contributor code never executes on the self-hosted machine, while
 # external contributors still get full CI.
@@ -55,8 +57,9 @@ jobs:
     # Tiny hosted gate job that resolves the SELF_HOSTED_OR_HOSTED routing once
     # and exposes it as a JSON-string output, consumed downstream via
     # `runs-on: ${{ fromJSON(needs.runner-target.outputs.runner) }}`:
-    #   * SAME-REPO push or PR -> the JSON array ["self-hosted","Linux","ARM64"]
-    #     (fromJSON yields a label array -> self-hosted Linux pool).
+    #   * SAME-REPO push or PR -> the JSON array
+    #     ["self-hosted","Linux","chroxy-linux"] (fromJSON yields a label array
+    #     -> self-hosted Linux pool; NOT arch-pinned, the pool is mixed).
     #   * FORK PR              -> the JSON string "ubuntu-24.04"
     #     (fromJSON yields the plain string -> GitHub-hosted).
     # MUST stay GitHub-hosted: a fork PR has to be able to resolve the target
@@ -71,11 +74,11 @@ jobs:
       - id: resolve
         # The condition is the same routing predicate the per-job ternary used:
         # push events and same-repo PRs are trusted; fork PRs are not.
-        #   * runner    — Linux pool (self-hosted ARM64) / ubuntu-24.04 for forks
+        #   * runner    — Linux pool (label `chroxy-linux`) / ubuntu-24.04 for forks
         #   * winrunner — Windows pool (self-hosted chroxy-win) / windows-latest for forks
         run: |
           if [ "${{ github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository }}" = "true" ]; then
-            echo 'runner=["self-hosted", "Linux", "ARM64"]' >> "$GITHUB_OUTPUT"
+            echo 'runner=["self-hosted", "Linux", "chroxy-linux"]' >> "$GITHUB_OUTPUT"
             echo 'winrunner=["self-hosted", "Windows", "X64", "chroxy-win"]' >> "$GITHUB_OUTPUT"
           else
             echo 'runner="ubuntu-24.04"' >> "$GITHUB_OUTPUT"
@@ -94,14 +97,20 @@ jobs:
     #
     # RUNNER CONTRACT (#6094): this job has NO `container:` key, so its uid/image
     # come from how the self-hosted Linux runner agent is configured, OUT OF BAND
-    # from this repo. The portability story above ASSUMES it runs as ROOT in
-    # node:22-bookworm: POSIX_PERM_SKIP (packages/server/tests/test-helpers.js)
-    # only skips the four chmod-denial asserts when `process.getuid() === 0`. If a
-    # future runner reconfig runs jobs as a NON-root user, those four tests run
-    # again and may fail on container fs semantics — investigate the runner's
-    # uid/image first, not the tests. (Pinning `container: node:22-bookworm` here
-    # would make this reproducible, but the other self-hosted Linux consumers are
-    # container-less too, so that's a pool-wide decision — left for a follow-up.)
+    # from this repo. The pool is now HETEROGENEOUS in uid, not just arch:
+    #   * Mac Docker members — ROOT (uid 0) in node:22-bookworm, ARM64
+    #   * winbox member      — NON-root (uid 1001) on an Ubuntu VM, x86_64
+    # POSIX_PERM_SKIP (packages/server/tests/test-helpers.js) skips the four
+    # chmod-denial asserts only when `process.getuid() === 0`, so those four RUN
+    # on the winbox member and SKIP on the Docker members. That is fine and was
+    # verified empirically before the pool went mixed: the four permission-guarded
+    # suites were run on the winbox VM as uid 1001 — 77/77 pass, 0 skipped (real
+    # ext4 enforces mode bits, which is exactly what the asserts expect; it is
+    # root-in-container that bypasses them). If they ever fail there, investigate
+    # the runner's uid/image and filesystem first, not the tests. (Pinning
+    # `container: node:22-bookworm` would make this uniform, but the other
+    # self-hosted Linux consumers are container-less too — pool-wide decision,
+    # left for a follow-up.)
     needs: runner-target
     runs-on: ${{ fromJSON(needs.runner-target.outputs.runner) }}  # SELF_HOSTED_OR_HOSTED (see header)
     timeout-minutes: 10
