@@ -632,6 +632,39 @@ export function setStoredField(field, rawValue, { validate, durable = false } = 
 }
 
 /**
+ * #7056 — confirm that a REMOVAL (or a no-op standing in for one) is durable.
+ *
+ * A file's bytes and its directory entry are separate durability concerns: an
+ * `unlink` changes only the entry, so there is no file to fsync — the containing
+ * directory is the only thing that can confirm it. Never throws: by the time this
+ * runs the live filesystem already reflects the removal, so a failure means the
+ * effect is real but its crash-durability is unproven, which is reported rather
+ * than raised (throwing would send the operator to re-clear an already-cleared
+ * value — and that retry would itself no-op).
+ *
+ * Windows has no directory-fsync primitive reachable from Node (`FlushFileBuffers`
+ * on a directory needs FILE_FLAG_BACKUP_SEMANTICS, which `fs.openSync` cannot
+ * request), so the confirmation is skipped there — matching #6964's posture.
+ *
+ * @returns {{ durabilityUnconfirmed: string | null }}
+ */
+function _confirmDirDurability(target, durable) {
+  if (!durable || process.platform === 'win32') return { durabilityUnconfirmed: null }
+  try {
+    _durabilityFsync(dirname(target), { isDir: true })
+    return { durabilityUnconfirmed: null }
+  } catch (err) {
+    const durabilityUnconfirmed = err?.message || String(err)
+    _log.error(
+      `credentials: the directory entry for ${target} could not be fsynced ` +
+      `(${durabilityUnconfirmed}) — a power loss could roll the removal back and restore the ` +
+      `cleared value. The value IS gone; treat the removal's durability as unconfirmed.`,
+    )
+    return { durabilityUnconfirmed }
+  }
+}
+
+/**
  * #6540 — remove an arbitrary NON-`KNOWN_CREDENTIALS` field written by
  * `setStoredField`. No-op when the field (or the whole file) is absent. Deletes
  * the file entirely when it would be left empty. Mirrors `deleteStoredCredential`
@@ -662,30 +695,27 @@ export function deleteStoredField(field, { durable = false } = {}) {
   if (typeof field !== 'string' || field.length === 0) throw new Error('field is required')
   const target = credentialsFilePath()
   const { data, fileExists, error } = readStore()
-  if (!fileExists) return { durabilityUnconfirmed: null }
+  // #7056: `error` MUST be checked before `fileExists`. readStore() reports a
+  // non-ENOENT stat failure (EACCES/EIO/ELOOP) as `{ fileExists: false, error }`,
+  // so testing `fileExists` first turned an unreadable credentials file into a
+  // silent no-op SUCCESS — the caller acked a clear that cleared nothing while
+  // the secret was still on disk. ENOENT keeps `error: null`, so a genuinely
+  // absent file still takes the no-op path below.
   if (error) throw new Error(error)
-  if (!(field in data)) return { durabilityUnconfirmed: null }
+  // A durable no-op still confirms: the retry after an unconfirmed clear lands
+  // on exactly these two branches (an unlinked file -> !fileExists, a rewritten
+  // one -> !(field in data)), and in both the outstanding doubt is the
+  // containing DIRECTORY's entry. Acking for free here would convert
+  // "unconfirmed" into false comfort.
+  if (!fileExists) return _confirmDirDurability(target, durable)
+  if (!(field in data)) return _confirmDirDurability(target, durable)
 
   const next = { ...data }
   delete next[field]
 
   if (Object.keys(next).length === 0) {
     try { unlinkSync(target) } catch (err) { if (err.code !== 'ENOENT') throw err }
-    // POSIX only — Windows has no directory fsync (and no equivalent need here).
-    if (durable && process.platform !== 'win32') {
-      try {
-        _durabilityFsync(dirname(target), { isDir: true })
-      } catch (err) {
-        const durabilityUnconfirmed = err?.message || String(err)
-        _log.error(
-          `credentials: ${target} was removed but its directory entry could not be fsynced ` +
-          `(${durabilityUnconfirmed}) — a power loss could roll the removal back and restore the ` +
-          `cleared value. The value IS gone; treat the removal's durability as unconfirmed.`,
-        )
-        return { durabilityUnconfirmed }
-      }
-    }
-    return { durabilityUnconfirmed: null }
+    return _confirmDirDurability(target, durable)
   }
 
   return writeStoreAtomically(target, next, { durable })

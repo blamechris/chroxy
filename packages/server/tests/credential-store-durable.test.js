@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, existsSync, readdirSync } from 'node:fs'
+import { mkdtempSync, rmSync, existsSync, readdirSync, chmodSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as credStore from '../src/credential-store.js'
@@ -399,5 +399,54 @@ describe('credential-store durable-write seam (#6964)', () => {
       unconfirmed.requestId ?? null, null,
       'the durability warning must be requestId-LESS so a client cannot read it as the clear\'s verdict',
     )
+  })
+
+  // --- review follow-ups on #7056 -------------------------------------------
+
+  it('an UNREADABLE store throws instead of acking a clear that cleared nothing', () => {
+    if (IS_WINDOWS) return // POSIX dir-permission semantics
+    if (process.getuid && process.getuid() === 0) return // root ignores mode bits
+    credStore.setStoredField(WEBHOOK_SECRET_FIELD, 'whsec-still-on-disk-0001')
+    // Make statSync fail with EACCES (NOT ENOENT): readStore reports that as
+    // { fileExists: false, error }, which a fileExists-first guard would treat
+    // as "nothing to clear" and ack — while the secret is still on disk.
+    chmodSync(credDir, 0o000)
+    try {
+      assert.throws(
+        () => credStore.deleteStoredField(WEBHOOK_SECRET_FIELD, { durable: true }),
+        /unable to stat/,
+        'an unreadable store must surface, never report a successful clear',
+      )
+    } finally {
+      chmodSync(credDir, 0o700)
+    }
+    assert.equal(
+      credStore.readStoredField(WEBHOOK_SECRET_FIELD).value, 'whsec-still-on-disk-0001',
+      'the secret is demonstrably still there — acking the clear would have been a lie',
+    )
+  })
+
+  it('a durable clear of an ALREADY-absent field still confirms the directory (retries can confirm)', () => {
+    if (IS_WINDOWS) return
+    credStore.setStoredField(WEBHOOK_SECRET_FIELD, 'whsec-gone-0001')
+    credStore.deleteStoredField(WEBHOOK_SECRET_FIELD, { durable: true })
+    calls = []
+
+    // The operator's natural move after an unconfirmed clear is to re-run it.
+    // That retry must be able to CONFIRM durability, not ack for free.
+    const outcome = credStore.deleteStoredField(WEBHOOK_SECRET_FIELD, { durable: true })
+
+    assert.equal(outcome.durabilityUnconfirmed, null)
+    assert.equal(calls.length, 1, 'a durable no-op must still fsync the containing directory')
+    assert.equal(calls[0].isDir, true)
+    assert.equal(calls[0].target, credDir)
+  })
+
+  it('a NON-durable clear of an absent field stays a free no-op', () => {
+    credStore.setStoredField('otherField', 'keep-me-0001')
+    calls = []
+    const outcome = credStore.deleteStoredField(WEBHOOK_SECRET_FIELD)
+    assert.equal(outcome.durabilityUnconfirmed, null)
+    assert.deepEqual(calls, [], 'the default path must add no fsync')
   })
 })
