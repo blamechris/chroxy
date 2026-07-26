@@ -449,4 +449,39 @@ describe('credential-store durable-write seam (#6964)', () => {
     assert.equal(outcome.durabilityUnconfirmed, null)
     assert.deepEqual(calls, [], 'the default path must add no fsync')
   })
+
+  it('a durable clear of an absent field with SIBLINGS present still confirms the directory', () => {
+    if (IS_WINDOWS) return
+    // Distinct from the retry test above: there the store was unlinked, so the
+    // retry hit !fileExists. Here the FILE SURVIVES (a sibling keeps it alive)
+    // and the retry hits the !(field in data) limb, which needs its own pin —
+    // mutating that one line alone otherwise leaves the suite green.
+    credStore.setStoredField('otherField', 'keep-me-0001')
+    calls = []
+
+    const outcome = credStore.deleteStoredField(WEBHOOK_SECRET_FIELD, { durable: true })
+
+    assert.equal(existsSync(credFile), true, 'the sibling keeps the store file alive')
+    assert.equal(outcome.durabilityUnconfirmed, null)
+    assert.equal(calls.length, 1, 'the !(field in data) durable limb must fsync the directory too')
+    assert.equal(calls[0].isDir, true)
+    assert.equal(calls[0].target, credDir)
+  })
+
+  it('#7056: deleteStoredCredential also surfaces an unreadable store instead of acking', () => {
+    if (IS_WINDOWS) return
+    if (process.getuid && process.getuid() === 0) return
+    credStore.setStoredCredential('ANTHROPIC_API_KEY', 'sk-ant-still-here-0001')
+    chmodSync(credDir, 0o000)
+    try {
+      assert.throws(
+        () => credStore.deleteStoredCredential('ANTHROPIC_API_KEY'),
+        /unable to stat/,
+        'the API-key delete must not ack a deletion it could not perform',
+      )
+    } finally {
+      chmodSync(credDir, 0o700)
+    }
+    assert.equal(credStore.getStoredCredential('ANTHROPIC_API_KEY'), 'sk-ant-still-here-0001')
+  })
 })

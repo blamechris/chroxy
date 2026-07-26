@@ -794,10 +794,15 @@ export function deleteStoredCredential(key) {
   if (!isKnownCredentialKey(key)) throw new Error(`Unknown credential key: ${key}`)
   const target = credentialsFilePath()
   const { data, fileExists, error } = readStore()
-  if (!fileExists) return
   // A bad-mode/JSON file can't be safely rewritten without risking clobber of
-  // unknown content; surface the error rather than guess.
+  // unknown content; surface the error rather than guess. #7056: this MUST come
+  // before the `fileExists` test — readStore() reports a non-ENOENT stat failure
+  // (EACCES/EIO/ELOOP) as { fileExists: false, error }, so checking `fileExists`
+  // first turned an unreadable store into a silent no-op SUCCESS while the
+  // credential was still on disk. ENOENT keeps `error: null`, so a genuinely
+  // absent file still no-ops below.
   if (error) throw new Error(error)
+  if (!fileExists) return
 
   const legacyField = LEGACY_FIELD_BY_KEY[key]
   if (!(key in data) && !(legacyField && legacyField in data)) return // nothing to remove
