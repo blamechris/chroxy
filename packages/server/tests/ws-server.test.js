@@ -1129,9 +1129,6 @@ describe('outbound message sequence numbers', () => {
     // Wait for client_joined on client1 from client2's connection
     await waitForMessage(messages1, 'client_joined')
 
-    const client1CountBefore = messages1.length
-    const client2CountBefore = messages2.length
-
     // Broadcast a message — each client gets their own seq
     server.broadcast({ type: 'discovered_sessions', tmux: [] })
 
@@ -1140,16 +1137,27 @@ describe('outbound message sequence numbers', () => {
     assert.ok(disc1, 'Client 1 should receive broadcast')
     assert.ok(disc2, 'Client 2 should receive broadcast')
 
-    // Client 1 connected first and received more messages before the broadcast,
-    // plus it got a client_joined when client 2 connected
-    assert.equal(disc1.seq, client1CountBefore + 1,
-      'Client 1 broadcast seq should continue from its own counter')
-    assert.equal(disc2.seq, client2CountBefore + 1,
-      'Client 2 broadcast seq should continue from its own counter')
+    // #7059: assert the INVARIANT — each client's seq is its own contiguous run
+    // from 1 — rather than comparing against a `messages.length` snapshot taken
+    // before the broadcast. Any server message still in flight at snapshot time
+    // made that comparison off by one, which is what flaked in CI (10 !== 9).
+    // This is the same sweep the monotonic-seq test above uses, applied per
+    // client, and it proves independence more directly than the old assertion:
+    // a single SHARED counter would leave gaps in at least one client's run.
+    for (const [label, msgs] of [['Client 1', messages1], ['Client 2', messages2]]) {
+      assert.ok(msgs.length > 0, `${label} should have received messages`)
+      msgs.forEach((m, i) => {
+        assert.equal(m.seq, i + 1,
+          `${label} message ${i} (type: ${m.type}) should have seq ${i + 1}, got ${m.seq}`)
+      })
+    }
 
-    // The seq values should differ since the clients have different message counts
-    assert.notEqual(disc1.seq, disc2.seq,
-      'Different clients should have different seq values for the same broadcast')
+    // Each client numbered the SAME broadcast off its OWN counter, so the seq it
+    // landed on is that client's own position — not a shared global value.
+    assert.equal(disc1.seq, messages1.indexOf(disc1) + 1,
+      'Client 1 broadcast seq should be its own position in its own stream')
+    assert.equal(disc2.seq, messages2.indexOf(disc2) + 1,
+      'Client 2 broadcast seq should be its own position in its own stream')
 
     ws1.close()
     ws2.close()
