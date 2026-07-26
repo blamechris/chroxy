@@ -24,8 +24,10 @@ permissions:
 # exposes it as a JSON-string output (`needs.runner-target.outputs.runner`).
 # Jobs that opt into the routing declare `needs: runner-target` and
 # `runs-on: ${{ fromJSON(needs.runner-target.outputs.runner) }}`. This routes
-# them to the self-hosted Linux runner pool (Docker-based, labels
-# self-hosted,Linux,ARM64) for SAME-REPO pushes and PRs, keeping them off the
+# them to the self-hosted Linux runner pool (labels self-hosted,Linux,chroxy-linux
+# — deliberately NOT arch-pinned, so both the ARM64 Docker members on the Mac and
+# the x86_64 Hyper-V member on winbox can serve) for SAME-REPO pushes and PRs,
+# keeping them off the
 # GitHub-hosted bill. If no self-hosted Linux runner is online, those jobs queue
 # until one appears. FORK PRs fall back to `ubuntu-24.04` (GitHub-hosted) so
 # untrusted contributor code never executes on the self-hosted machine, while
@@ -71,11 +73,11 @@ jobs:
       - id: resolve
         # The condition is the same routing predicate the per-job ternary used:
         # push events and same-repo PRs are trusted; fork PRs are not.
-        #   * runner    — Linux pool (self-hosted ARM64) / ubuntu-24.04 for forks
+        #   * runner    — Linux pool (label `chroxy-linux`) / ubuntu-24.04 for forks
         #   * winrunner — Windows pool (self-hosted chroxy-win) / windows-latest for forks
         run: |
           if [ "${{ github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository }}" = "true" ]; then
-            echo 'runner=["self-hosted", "Linux", "ARM64"]' >> "$GITHUB_OUTPUT"
+            echo 'runner=["self-hosted", "Linux", "chroxy-linux"]' >> "$GITHUB_OUTPUT"
             echo 'winrunner=["self-hosted", "Windows", "X64", "chroxy-win"]' >> "$GITHUB_OUTPUT"
           else
             echo 'runner="ubuntu-24.04"' >> "$GITHUB_OUTPUT"
