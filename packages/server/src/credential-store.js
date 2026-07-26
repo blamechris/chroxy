@@ -784,11 +784,21 @@ export function setStoredCredential(key, rawValue) {
 }
 
 /**
- * Remove a single credential from the store. No-op when absent. Rewrites the
- * file atomically with the remaining keys (and removes the legacy alias too).
- * Deletes the file entirely when it would be left empty.
+ * Remove a single credential from the store. No-op when the file or the key is
+ * genuinely absent. Rewrites the file atomically with the remaining keys (and
+ * removes the legacy alias too). Deletes the file entirely when it would be
+ * left empty.
+ *
+ * Throws rather than returning quietly when the store cannot be READ (#7056) —
+ * an unreadable file is not an absent one, and acking a deletion that could not
+ * be performed would leave the credential on disk while the caller believes it
+ * is gone. Callers surface this as a clear/delete failure.
+ *
+ * Durability: this path is NOT durable-capable yet — see #7062. Its sibling
+ * `deleteStoredField` takes `{ durable }`; do not assume parity.
  *
  * @param {string} key
+ * @throws {Error} when the credentials file exists but cannot be read
  */
 export function deleteStoredCredential(key) {
   if (!isKnownCredentialKey(key)) throw new Error(`Unknown credential key: ${key}`)
