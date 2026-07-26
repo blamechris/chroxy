@@ -161,8 +161,13 @@ function handleGithubWebhookSetSecret(ws, client, msg, ctx) {
 
 function handleGithubWebhookClearSecret(ws, client, msg, ctx) {
   if (rejectWebhookSecretWriteIfBound(ws, client, msg, ctx)) return
+  let outcome
   try {
-    deleteStoredField(WEBHOOK_SECRET_FIELD)
+    // #7056: durable, for the same reason the rotation is. An operator clears a
+    // shared secret precisely because they believe it leaked — a clear that is
+    // acked but still sitting in the OS writeback window can restore the leaked
+    // value on the next start after a power loss.
+    outcome = deleteStoredField(WEBHOOK_SECRET_FIELD, { durable: true })
   } catch (err) {
     sendError(ws, msg?.requestId, 'WEBHOOK_SECRET_CLEAR_FAILED', err?.message || 'clear failed', undefined, ctx)
     return
@@ -171,7 +176,25 @@ function handleGithubWebhookClearSecret(ws, client, msg, ctx) {
   if (typeof ctx?.services?.setWebhookSecretCache === 'function') {
     ctx.services.setWebhookSecretCache(null)
   }
+  // The reply is the success config: the secret IS cleared. Reporting a failure for
+  // a clear that landed would send the operator to re-clear an already-cleared value.
   sendWebhookConfig(ws, ctx, msg?.requestId)
+  if (outcome?.durabilityUnconfirmed) {
+    // ...but the operator still learns the fsync failed. Deliberately requestId-LESS,
+    // mirroring the rotation path: the config above is this request's reply, and a
+    // client correlating an error to its in-flight requestId must not read this as
+    // the clear's verdict.
+    sendError(
+      ws,
+      null,
+      'WEBHOOK_SECRET_DURABILITY_UNCONFIRMED',
+      'The webhook secret is cleared, but the filesystem could not confirm the removal is durable ' +
+      `(${outcome.durabilityUnconfirmed}) — a power loss could restore the cleared secret. ` +
+      'Resolve the storage error, then re-check the configured secret after the next restart.',
+      undefined,
+      ctx,
+    )
+  }
 }
 
 export const githubWebhookHandlers = {

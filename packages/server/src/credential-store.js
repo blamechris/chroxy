@@ -637,25 +637,58 @@ export function setStoredField(field, rawValue, { validate, durable = false } = 
  * the file entirely when it would be left empty. Mirrors `deleteStoredCredential`
  * for the non-provider-key case.
  *
+ * #7056 — `durable` opts the CLEAR path into the same durability guarantee
+ * `setStoredField` got in #6964. Clearing a shared secret is as acute as rotating
+ * it: an operator clears precisely because they believe the value leaked, so a
+ * clear that is acked but not on disk can resurrect the leaked secret on the next
+ * start after a power loss.
+ *
+ * The two limbs need different fsyncs:
+ *   - REWRITE (siblings survive) — the ordinary atomic temp-file + rename, so it
+ *     delegates to `writeStoreAtomically({ durable })` unchanged.
+ *   - UNLINK (the field was the last key) — there is no new file to fsync. The
+ *     removal lives entirely in the containing DIRECTORY's entry, so only that
+ *     directory is fsynced, and only AFTER the unlink. As with a post-rename
+ *     failure, a failed fsync here is NOT a failed clear: the secret is already
+ *     gone from the live filesystem, so it is reported as `durabilityUnconfirmed`
+ *     rather than thrown (throwing would send the operator to re-clear a secret
+ *     that is already cleared).
+ *
  * @param {string} field
+ * @param {{ durable?: boolean }} [opts]
+ * @returns {{ durabilityUnconfirmed: string | null }}
  */
-export function deleteStoredField(field) {
+export function deleteStoredField(field, { durable = false } = {}) {
   if (typeof field !== 'string' || field.length === 0) throw new Error('field is required')
   const target = credentialsFilePath()
   const { data, fileExists, error } = readStore()
-  if (!fileExists) return
+  if (!fileExists) return { durabilityUnconfirmed: null }
   if (error) throw new Error(error)
-  if (!(field in data)) return
+  if (!(field in data)) return { durabilityUnconfirmed: null }
 
   const next = { ...data }
   delete next[field]
 
   if (Object.keys(next).length === 0) {
     try { unlinkSync(target) } catch (err) { if (err.code !== 'ENOENT') throw err }
-    return
+    // POSIX only — Windows has no directory fsync (and no equivalent need here).
+    if (durable && process.platform !== 'win32') {
+      try {
+        _durabilityFsync(dirname(target), { isDir: true })
+      } catch (err) {
+        const durabilityUnconfirmed = err?.message || String(err)
+        _log.error(
+          `credentials: ${target} was removed but its directory entry could not be fsynced ` +
+          `(${durabilityUnconfirmed}) — a power loss could roll the removal back and restore the ` +
+          `cleared value. The value IS gone; treat the removal's durability as unconfirmed.`,
+        )
+        return { durabilityUnconfirmed }
+      }
+    }
+    return { durabilityUnconfirmed: null }
   }
 
-  writeStoreAtomically(target, next)
+  return writeStoreAtomically(target, next, { durable })
 }
 
 /**
