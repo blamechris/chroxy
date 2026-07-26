@@ -1438,7 +1438,15 @@ export class WsServer {
             (err) => {
               const message = err?.message || String(err)
               if (settled) {
-                log.warn(`Token REVOKE persist failed (${message}) AFTER the durability bound had already been reported as unknown.`)
+                // error, not warn: this is a CONFIRMED non-durable write — strictly
+                // worse than the "unknown" the operator was already told — and no
+                // client frame is sent for it (that would double-send), so this
+                // line is the only surviving artifact. It must not rank below the
+                // on-time failure in alerting.
+                log.error(
+                  `Token REVOKE persist FAILED (${message}) after the durability bound had already reported unknown — ` +
+                  `the write is now known NOT to be durable. Fix the storage error and revoke again.`,
+                )
                 return
               }
               settled = true
