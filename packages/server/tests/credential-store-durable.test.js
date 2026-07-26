@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, existsSync, readdirSync } from 'node:fs'
+import { mkdtempSync, rmSync, existsSync, readdirSync, chmodSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as credStore from '../src/credential-store.js'
@@ -294,5 +294,194 @@ describe('credential-store durable-write seam (#6964)', () => {
     assert.equal(cache.value, undefined, 'the hot cache must not adopt a secret that never landed')
     credStore._setCredentialDurabilityForTests(null)
     assert.equal(credStore.readStoredField(WEBHOOK_SECRET_FIELD).value, 'whsec-original-value-0001')
+  })
+
+  // ---------------------------------------------------------------------------
+  // #7056 — the CLEAR path. Clearing a shared secret is as acute as rotating it:
+  // an operator clears precisely because they believe the value leaked. A
+  // non-durable clear can report success and then resurrect the leaked secret
+  // after a power loss. The clear has TWO limbs, and the second one is the
+  // interesting one: when the field was the last key the file is UNLINKED, and an
+  // unlink's durability lives in the containing DIRECTORY's entry, not in any
+  // file fsync.
+  // ---------------------------------------------------------------------------
+
+  it('does NOT fsync on an ordinary (non-durable) delete — the default stays off', () => {
+    credStore.setStoredField(WEBHOOK_SECRET_FIELD, 'whsec-ordinary-value-0001')
+    credStore.setStoredField('otherField', 'keep-me-around-0001')
+    calls = []
+    credStore.deleteStoredField(WEBHOOK_SECRET_FIELD)
+    assert.equal(credStore.readStoredField(WEBHOOK_SECRET_FIELD).value, null)
+    assert.deepEqual(calls, [], 'a default delete must add no fsync to the write path')
+  })
+
+  it('durable delete (siblings survive) fsyncs the temp file BEFORE the rename and the directory AFTER', () => {
+    credStore.setStoredField(WEBHOOK_SECRET_FIELD, 'whsec-durable-value-0001')
+    credStore.setStoredField('otherField', 'keep-me-around-0001')
+    calls = []
+
+    credStore.deleteStoredField(WEBHOOK_SECRET_FIELD, { durable: true })
+
+    assert.equal(credStore.readStoredField(WEBHOOK_SECRET_FIELD).value, null, 'the field is gone')
+    assert.equal(credStore.readStoredField('otherField').value, 'keep-me-around-0001', 'siblings survive')
+
+    assert.ok(calls.length >= 1, 'durable delete must fsync the temp file')
+    const [fileCall] = calls
+    assert.equal(fileCall.isDir, false, 'first fsync is the temp FILE')
+    assert.equal(fileCall.targetExists, true, 'the live file still exists pre-rename on a rewrite delete')
+
+    if (IS_WINDOWS) {
+      assert.equal(calls.length, 1, 'Windows has no directory fsync')
+      return
+    }
+    assert.equal(calls.length, 2, 'POSIX durable rewrite-delete = temp-file fsync + directory fsync')
+    assert.equal(calls[1].isDir, true, 'second fsync is the containing DIRECTORY')
+    assert.equal(calls[1].target, credDir)
+  })
+
+  it('durable delete of the LAST field unlinks the file and fsyncs the directory AFTER the unlink', () => {
+    if (IS_WINDOWS) return // no directory fsync on Windows
+    credStore.setStoredField(WEBHOOK_SECRET_FIELD, 'whsec-last-field-0001')
+    calls = []
+
+    credStore.deleteStoredField(WEBHOOK_SECRET_FIELD, { durable: true })
+
+    assert.equal(existsSync(credFile), false, 'the file is removed when it would be left empty')
+    assert.equal(calls.length, 1, 'an unlink has no temp file — only the containing directory is fsynced')
+    assert.equal(calls[0].isDir, true, 'the unlink limb must fsync the DIRECTORY, not a file')
+    assert.equal(calls[0].target, credDir)
+    assert.equal(
+      calls[0].targetExists, false,
+      'the directory fsync must happen AFTER the unlink — otherwise it proves nothing about the removal',
+    )
+  })
+
+  it('a directory-fsync failure on the UNLINK limb does NOT throw — the secret is already gone, only durability is unproven', () => {
+    if (IS_WINDOWS) return
+    credStore.setStoredField(WEBHOOK_SECRET_FIELD, 'whsec-last-field-0001')
+    calls = []
+    credStore._setCredentialDurabilityForTests(throwOnDirFsync(calls))
+
+    let outcome
+    assert.doesNotThrow(() => {
+      outcome = credStore.deleteStoredField(WEBHOOK_SECRET_FIELD, { durable: true })
+    }, 'the unlink already removed the secret — reporting a failed clear would be factually wrong')
+    credStore._setCredentialDurabilityForTests(null)
+
+    assert.equal(existsSync(credFile), false, 'the secret IS gone from the live filesystem')
+    assert.equal(
+      typeof outcome?.durabilityUnconfirmed, 'string',
+      'the clear must report unconfirmed durability rather than silently acking it',
+    )
+    assert.match(outcome.durabilityUnconfirmed, /EIO|simulated directory fsync/)
+  })
+
+  it('the webhook CLEAR handler opts into durability and surfaces an unconfirmed clear', () => {
+    if (IS_WINDOWS) return
+    credStore.setStoredField(WEBHOOK_SECRET_FIELD, 'whsec-to-be-cleared-0001')
+    const cache = { value: 'stale' }
+    const ws = makeWs()
+    const ctx = makeCtx(cache)
+    calls = []
+    credStore._setCredentialDurabilityForTests(throwOnDirFsync(calls))
+
+    githubWebhookHandlers.github_webhook_clear_secret(ws, {}, { requestId: 'req-clear-1' }, ctx)
+    credStore._setCredentialDurabilityForTests(null)
+
+    assert.ok(calls.some((c) => c.isDir), 'the clear path must have opted into the durable write')
+    assert.equal(credStore.readStoredField(WEBHOOK_SECRET_FIELD).value, null, 'the secret is cleared')
+    assert.equal(cache.value, null, 'the hot cache is dropped so the next delivery re-resolves')
+
+    const replies = allReplies(ws, ctx)
+    const unconfirmed = replies.find((r) => r?.code === 'WEBHOOK_SECRET_DURABILITY_UNCONFIRMED')
+    assert.ok(unconfirmed, `expected a durability-unconfirmed error frame, got ${JSON.stringify(replies.map((r) => r?.type || r?.code))}`)
+    assert.equal(
+      unconfirmed.requestId ?? null, null,
+      'the durability warning must be requestId-LESS so a client cannot read it as the clear\'s verdict',
+    )
+  })
+
+  // --- review follow-ups on #7056 -------------------------------------------
+
+  it('an UNREADABLE store throws instead of acking a clear that cleared nothing', () => {
+    if (IS_WINDOWS) return // POSIX dir-permission semantics
+    if (process.getuid && process.getuid() === 0) return // root ignores mode bits
+    credStore.setStoredField(WEBHOOK_SECRET_FIELD, 'whsec-still-on-disk-0001')
+    // Make statSync fail with EACCES (NOT ENOENT): readStore reports that as
+    // { fileExists: false, error }, which a fileExists-first guard would treat
+    // as "nothing to clear" and ack — while the secret is still on disk.
+    chmodSync(credDir, 0o000)
+    try {
+      assert.throws(
+        () => credStore.deleteStoredField(WEBHOOK_SECRET_FIELD, { durable: true }),
+        /unable to stat/,
+        'an unreadable store must surface, never report a successful clear',
+      )
+    } finally {
+      chmodSync(credDir, 0o700)
+    }
+    assert.equal(
+      credStore.readStoredField(WEBHOOK_SECRET_FIELD).value, 'whsec-still-on-disk-0001',
+      'the secret is demonstrably still there — acking the clear would have been a lie',
+    )
+  })
+
+  it('a durable clear of an ALREADY-absent field still confirms the directory (retries can confirm)', () => {
+    if (IS_WINDOWS) return
+    credStore.setStoredField(WEBHOOK_SECRET_FIELD, 'whsec-gone-0001')
+    credStore.deleteStoredField(WEBHOOK_SECRET_FIELD, { durable: true })
+    calls = []
+
+    // The operator's natural move after an unconfirmed clear is to re-run it.
+    // That retry must be able to CONFIRM durability, not ack for free.
+    const outcome = credStore.deleteStoredField(WEBHOOK_SECRET_FIELD, { durable: true })
+
+    assert.equal(outcome.durabilityUnconfirmed, null)
+    assert.equal(calls.length, 1, 'a durable no-op must still fsync the containing directory')
+    assert.equal(calls[0].isDir, true)
+    assert.equal(calls[0].target, credDir)
+  })
+
+  it('a NON-durable clear of an absent field stays a free no-op', () => {
+    credStore.setStoredField('otherField', 'keep-me-0001')
+    calls = []
+    const outcome = credStore.deleteStoredField(WEBHOOK_SECRET_FIELD)
+    assert.equal(outcome.durabilityUnconfirmed, null)
+    assert.deepEqual(calls, [], 'the default path must add no fsync')
+  })
+
+  it('a durable clear of an absent field with SIBLINGS present still confirms the directory', () => {
+    if (IS_WINDOWS) return
+    // Distinct from the retry test above: there the store was unlinked, so the
+    // retry hit !fileExists. Here the FILE SURVIVES (a sibling keeps it alive)
+    // and the retry hits the !(field in data) limb, which needs its own pin —
+    // mutating that one line alone otherwise leaves the suite green.
+    credStore.setStoredField('otherField', 'keep-me-0001')
+    calls = []
+
+    const outcome = credStore.deleteStoredField(WEBHOOK_SECRET_FIELD, { durable: true })
+
+    assert.equal(existsSync(credFile), true, 'the sibling keeps the store file alive')
+    assert.equal(outcome.durabilityUnconfirmed, null)
+    assert.equal(calls.length, 1, 'the !(field in data) durable limb must fsync the directory too')
+    assert.equal(calls[0].isDir, true)
+    assert.equal(calls[0].target, credDir)
+  })
+
+  it('#7056: deleteStoredCredential also surfaces an unreadable store instead of acking', () => {
+    if (IS_WINDOWS) return
+    if (process.getuid && process.getuid() === 0) return
+    credStore.setStoredCredential('ANTHROPIC_API_KEY', 'sk-ant-still-here-0001')
+    chmodSync(credDir, 0o000)
+    try {
+      assert.throws(
+        () => credStore.deleteStoredCredential('ANTHROPIC_API_KEY'),
+        /unable to stat/,
+        'the API-key delete must not ack a deletion it could not perform',
+      )
+    } finally {
+      chmodSync(credDir, 0o700)
+    }
+    assert.equal(credStore.getStoredCredential('ANTHROPIC_API_KEY'), 'sk-ant-still-here-0001')
   })
 })

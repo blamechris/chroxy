@@ -632,30 +632,93 @@ export function setStoredField(field, rawValue, { validate, durable = false } = 
 }
 
 /**
+ * #7056 — confirm that a REMOVAL (or a no-op standing in for one) is durable.
+ *
+ * A file's bytes and its directory entry are separate durability concerns: an
+ * `unlink` changes only the entry, so there is no file to fsync — the containing
+ * directory is the only thing that can confirm it. Never throws: by the time this
+ * runs the live filesystem already reflects the removal, so a failure means the
+ * effect is real but its crash-durability is unproven, which is reported rather
+ * than raised (throwing would send the operator to re-clear an already-cleared
+ * value — and that retry would itself no-op).
+ *
+ * Windows has no directory-fsync primitive reachable from Node (`FlushFileBuffers`
+ * on a directory needs FILE_FLAG_BACKUP_SEMANTICS, which `fs.openSync` cannot
+ * request), so the confirmation is skipped there — matching #6964's posture.
+ *
+ * @returns {{ durabilityUnconfirmed: string | null }}
+ */
+function _confirmDirDurability(target, durable) {
+  if (!durable || process.platform === 'win32') return { durabilityUnconfirmed: null }
+  try {
+    _durabilityFsync(dirname(target), { isDir: true })
+    return { durabilityUnconfirmed: null }
+  } catch (err) {
+    const durabilityUnconfirmed = err?.message || String(err)
+    _log.error(
+      `credentials: the directory entry for ${target} could not be fsynced ` +
+      `(${durabilityUnconfirmed}) — a power loss could roll the removal back and restore the ` +
+      `cleared value. The value IS gone; treat the removal's durability as unconfirmed.`,
+    )
+    return { durabilityUnconfirmed }
+  }
+}
+
+/**
  * #6540 — remove an arbitrary NON-`KNOWN_CREDENTIALS` field written by
  * `setStoredField`. No-op when the field (or the whole file) is absent. Deletes
  * the file entirely when it would be left empty. Mirrors `deleteStoredCredential`
  * for the non-provider-key case.
  *
+ * #7056 — `durable` opts the CLEAR path into the same durability guarantee
+ * `setStoredField` got in #6964. Clearing a shared secret is as acute as rotating
+ * it: an operator clears precisely because they believe the value leaked, so a
+ * clear that is acked but not on disk can resurrect the leaked secret on the next
+ * start after a power loss.
+ *
+ * The two limbs need different fsyncs:
+ *   - REWRITE (siblings survive) — the ordinary atomic temp-file + rename, so it
+ *     delegates to `writeStoreAtomically({ durable })` unchanged.
+ *   - UNLINK (the field was the last key) — there is no new file to fsync. The
+ *     removal lives entirely in the containing DIRECTORY's entry, so only that
+ *     directory is fsynced, and only AFTER the unlink. As with a post-rename
+ *     failure, a failed fsync here is NOT a failed clear: the secret is already
+ *     gone from the live filesystem, so it is reported as `durabilityUnconfirmed`
+ *     rather than thrown (throwing would send the operator to re-clear a secret
+ *     that is already cleared).
+ *
  * @param {string} field
+ * @param {{ durable?: boolean }} [opts]
+ * @returns {{ durabilityUnconfirmed: string | null }}
  */
-export function deleteStoredField(field) {
+export function deleteStoredField(field, { durable = false } = {}) {
   if (typeof field !== 'string' || field.length === 0) throw new Error('field is required')
   const target = credentialsFilePath()
   const { data, fileExists, error } = readStore()
-  if (!fileExists) return
+  // #7056: `error` MUST be checked before `fileExists`. readStore() reports a
+  // non-ENOENT stat failure (EACCES/EIO/ELOOP) as `{ fileExists: false, error }`,
+  // so testing `fileExists` first turned an unreadable credentials file into a
+  // silent no-op SUCCESS — the caller acked a clear that cleared nothing while
+  // the secret was still on disk. ENOENT keeps `error: null`, so a genuinely
+  // absent file still takes the no-op path below.
   if (error) throw new Error(error)
-  if (!(field in data)) return
+  // A durable no-op still confirms: the retry after an unconfirmed clear lands
+  // on exactly these two branches (an unlinked file -> !fileExists, a rewritten
+  // one -> !(field in data)), and in both the outstanding doubt is the
+  // containing DIRECTORY's entry. Acking for free here would convert
+  // "unconfirmed" into false comfort.
+  if (!fileExists) return _confirmDirDurability(target, durable)
+  if (!(field in data)) return _confirmDirDurability(target, durable)
 
   const next = { ...data }
   delete next[field]
 
   if (Object.keys(next).length === 0) {
     try { unlinkSync(target) } catch (err) { if (err.code !== 'ENOENT') throw err }
-    return
+    return _confirmDirDurability(target, durable)
   }
 
-  writeStoreAtomically(target, next)
+  return writeStoreAtomically(target, next, { durable })
 }
 
 /**
@@ -721,20 +784,35 @@ export function setStoredCredential(key, rawValue) {
 }
 
 /**
- * Remove a single credential from the store. No-op when absent. Rewrites the
- * file atomically with the remaining keys (and removes the legacy alias too).
- * Deletes the file entirely when it would be left empty.
+ * Remove a single credential from the store. No-op when the file or the key is
+ * genuinely absent. Rewrites the file atomically with the remaining keys (and
+ * removes the legacy alias too). Deletes the file entirely when it would be
+ * left empty.
+ *
+ * Throws rather than returning quietly when the store cannot be READ (#7056) —
+ * an unreadable file is not an absent one, and acking a deletion that could not
+ * be performed would leave the credential on disk while the caller believes it
+ * is gone. Callers surface this as a clear/delete failure.
+ *
+ * Durability: this path is NOT durable-capable yet — see #7062. Its sibling
+ * `deleteStoredField` takes `{ durable }`; do not assume parity.
  *
  * @param {string} key
+ * @throws {Error} when the credentials file exists but cannot be read
  */
 export function deleteStoredCredential(key) {
   if (!isKnownCredentialKey(key)) throw new Error(`Unknown credential key: ${key}`)
   const target = credentialsFilePath()
   const { data, fileExists, error } = readStore()
-  if (!fileExists) return
   // A bad-mode/JSON file can't be safely rewritten without risking clobber of
-  // unknown content; surface the error rather than guess.
+  // unknown content; surface the error rather than guess. #7056: this MUST come
+  // before the `fileExists` test — readStore() reports a non-ENOENT stat failure
+  // (EACCES/EIO/ELOOP) as { fileExists: false, error }, so checking `fileExists`
+  // first turned an unreadable store into a silent no-op SUCCESS while the
+  // credential was still on disk. ENOENT keeps `error: null`, so a genuinely
+  // absent file still no-ops below.
   if (error) throw new Error(error)
+  if (!fileExists) return
 
   const legacyField = LEGACY_FIELD_BY_KEY[key]
   if (!(key in data) && !(legacyField && legacyField in data)) return // nothing to remove
