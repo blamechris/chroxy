@@ -183,4 +183,74 @@ describe('primary-token revoke: durable-write ack gating (#6965)', () => {
     assert.equal(sent[0].msg.reason, 'scheduled')
     gate.resolve()
   })
+
+  // ---------------------------------------------------------------------------
+  // #7053 — the gate must be BOUNDED. Contract 2 above ("ack strictly after the
+  // persist settles") has a failure mode of its own: if the persist NEVER
+  // settles, the operator gets nothing at all — no ack, no error — while
+  // enforcement has silently already happened in-process. A panic button that
+  // appears to do nothing is its own kind of false safety.
+  // ---------------------------------------------------------------------------
+
+  it('a never-settling onPersist still produces a client-facing message (bounded gate)', async () => {
+    const manager = track(new TokenManager({ token: 'token-old', onPersist: () => new Promise(() => {}) }))
+    const { server, sent } = makeServer(manager)
+    server._revokeAckTimeoutMs = 40 // keep the test fast; production default is seconds
+
+    manager.revoke()
+    await drain()
+    assert.deepEqual(sent.map((s) => s.msg.type), [], 'nothing before the bound elapses — the gate still gates')
+
+    await new Promise((r) => setTimeout(r, 80))
+    await drain()
+
+    const types = sent.map((s) => s.msg.type)
+    assert.ok(types.length > 0, 'a hung persist must NOT swallow the revoke silently')
+
+    // Same shape as the rejection branch: diagnostic first, then the transition.
+    assert.equal(sent[0].msg.type, 'error')
+    assert.equal(
+      sent[0].msg.code, 'REVOKE_DURABILITY_UNKNOWN',
+      'a timeout is UNKNOWN, not known-failed — it must not claim REVOKE_NOT_DURABLE',
+    )
+    assert.match(sent[0].msg.message, /did not report|timed out|unknown/i)
+
+    const transition = sent.find((s) => s.msg.type === 'token_rotated')
+    assert.ok(transition, 'the revoke transition must still be sent — it is the client\'s only trigger to drop the dead token')
+    assert.equal(transition.msg.reason, 'revoke')
+    assert.equal(transition.msg.token, undefined, 'the transition carries NO token and makes no durability claim')
+  })
+
+  it('a persist that settles AFTER the timeout does not double-send', async () => {
+    const gate = deferred()
+    const manager = track(new TokenManager({ token: 'token-old', onPersist: () => gate.promise }))
+    const { server, sent } = makeServer(manager)
+    server._revokeAckTimeoutMs = 40
+
+    manager.revoke()
+    await new Promise((r) => setTimeout(r, 80))
+    await drain()
+    const afterTimeout = sent.length
+    assert.ok(afterTimeout > 0, 'the timeout path fired')
+
+    gate.resolve() // the storage layer finally comes back
+    await drain()
+
+    assert.equal(sent.length, afterTimeout, 'a late persist must not emit a second ack or error')
+  })
+
+  it('a persist that settles BEFORE the bound behaves exactly as before (no timeout frame)', async () => {
+    const gate = deferred()
+    const manager = track(new TokenManager({ token: 'token-old', onPersist: () => gate.promise }))
+    const { server, sent } = makeServer(manager)
+    server._revokeAckTimeoutMs = 5000
+
+    manager.revoke()
+    await drain()
+    gate.resolve()
+    await drain()
+
+    assert.deepEqual(sent.map((s) => s.msg.type), ['token_rotated'], 'success path is unchanged: the ack only')
+    assert.equal(sent.filter((s) => s.msg.code === 'REVOKE_DURABILITY_UNKNOWN').length, 0)
+  })
 })

@@ -184,6 +184,13 @@ export const TUNNEL_STATUS_MIN_PROTOCOL_VERSION = 2
 let _latestVersionCache = { version: null, checkedAt: 0 }
 const VERSION_CHECK_TTL = 3600_000 // 1 hour
 
+// #7053: how long the panic-revoke ack waits on its durable-write persist before
+// reporting the outcome as UNKNOWN. Long enough that a slow-but-working fsync or
+// keychain call still reports the truthful result, short enough that an operator
+// who just hit the panic button is not left staring at nothing. Overridable per
+// instance via `_revokeAckTimeoutMs` (tests use a few ms).
+const REVOKE_ACK_TIMEOUT_MS = 10_000
+
 // #5555.6 — keepalive sweep cadence. Previously 30s, which (with the
 // two-phase mark-then-terminate cycle) held a zombie client up to ~60s — ~6×
 // longer than a client holds a zombie server (15s ping + 5s pong timeout =
@@ -413,7 +420,7 @@ function _isSecureRequest(req) {
  *   { type: 'session_role', sessionId, primaryClientId } — #5589/#5281: explicit primary-ownership; client derives its role (primary iff primaryClientId === own clientId, observer if another holds it, null = unclaimed)
  *   { type: 'pong' }                                    — heartbeat response
  *   { type: 'permission_expired', requestId, sessionId, message }  — permission response could not be routed (expired/handled)
- *   { type: 'token_rotated', token?, expiresAt, reason? } — API token changed. Scheduled rotation carries the new `token` to encrypted clients (transparent re-key, sessions survive). A `reason: 'revoke'` (#6006) carries NO token: the operator revoked, so the server severed user-shell sessions and cleared this connection's auth — the client must re-authenticate with the current token (obtained out-of-band). #6965: for a revoke this message is WITHHELD until the daemon's token persist reports success, so the ack can never precede the revocation being stored — that persist is an fsync of the temp file + containing directory on the `config.json` fallback, while on the OS-keychain path (the macOS/libsecret default) durability is delegated to the keychain and no fsync is performed here. If the persist FAILS the connection receives an `error` with `code: 'REVOKE_NOT_DURABLE'` FIRST and then this message anyway: enforcement already ran unconditionally, so the client must still re-authenticate — the message carries no token and makes no durability claim, and the caveat rides the error.
+ *   { type: 'token_rotated', token?, expiresAt, reason? } — API token changed. Scheduled rotation carries the new `token` to encrypted clients (transparent re-key, sessions survive). A `reason: 'revoke'` (#6006) carries NO token: the operator revoked, so the server severed user-shell sessions and cleared this connection's auth — the client must re-authenticate with the current token (obtained out-of-band). #6965: for a revoke this message is WITHHELD until the daemon's token persist reports success, so the ack can never precede the revocation being stored — that persist is an fsync of the temp file + containing directory on the `config.json` fallback, while on the OS-keychain path (the macOS/libsecret default) durability is delegated to the keychain and no fsync is performed here. If the persist FAILS the connection receives an `error` with `code: 'REVOKE_NOT_DURABLE'` FIRST and then this message anyway: enforcement already ran unconditionally, so the client must still re-authenticate — the message carries no token and makes no durability claim, and the caveat rides the error. #7053: the wait is BOUNDED (`REVOKE_ACK_TIMEOUT_MS`), because an `onPersist` that never settles would otherwise emit nothing at all and make the panic button look like a no-op; on timeout the connection gets `code: 'REVOKE_DURABILITY_UNKNOWN'` — deliberately NOT `REVOKE_NOT_DURABLE`, since a timeout means the outcome is unknown and may still land, not that the write is known to have failed — followed by this message on the same reasoning.
  *   { type: 'session_warning', sessionId, name, reason, message, remainingMs } — session about to timeout
  *   { type: 'session_timeout', sessionId, name, idleMs }         — session destroyed due to idle timeout
  *   { type: 'statusline_output', sessionId, text, active?, truncated? } — #6791: rendered stdout of the user's own Claude Code statusLine script (active:false + empty text clears it)
@@ -1368,13 +1375,74 @@ export class WsServer {
             sendRevokeAck()
             return
           }
-          this._lastRevokeAck = persisted.then(
+          // #7053: BOUND the gate. Waiting on `persisted` is right, but waiting
+          // FOREVER is its own false safety: a persist that never settles emits
+          // no ack and no error, so the operator sees a panic-revoke that appears
+          // to do nothing — while enforcement above has already run. Today's
+          // `onPersist` (server-cli) is synchronous, so this is latent rather
+          // than live; the moment it becomes async, an unbounded gate turns the
+          // most consequential control in the daemon into a silent no-op.
+          //
+          // A timeout is NOT the same verdict as a rejection: a rejection means
+          // the write is KNOWN to have failed, a timeout means the outcome is
+          // UNKNOWN and may still land. It gets its own code so the operator is
+          // not told something the daemon does not know.
+          let settled = false
+          let resolveAck
+          const ackSettled = new Promise((res) => { resolveAck = res })
+          this._lastRevokeAck = ackSettled
+          const timeoutMs = this._revokeAckTimeoutMs ?? REVOKE_ACK_TIMEOUT_MS
+          const timer = setTimeout(() => {
+            if (settled) return
+            settled = true
+            log.error(
+              `Token REVOKE persist did not report within ${timeoutMs}ms — the revoke HOLDS in this process, ` +
+              `but whether it reached disk is UNKNOWN. Check the storage layer; re-revoke after a restart to be sure.`,
+            )
+            // Same ordering as the rejection branch, and for the same reason: the
+            // diagnostic first, then the state transition (which tears the socket
+            // down client-side, so a frame queued after it can be lost).
+            for (const ws of forcedSockets) {
+              if (ws.readyState !== 1) continue
+              this._send(ws, {
+                type: 'error',
+                code: 'REVOKE_DURABILITY_UNKNOWN',
+                message:
+                  `Token revoke is enforced for the running daemon, but its write did not report within ${timeoutMs}ms — ` +
+                  'whether it reached disk is unknown. After a restart the daemon may come back on either token. ' +
+                  'Check the storage layer and revoke again to be certain.',
+              })
+            }
+            // Still send the transition. It carries no token and claims no
+            // durability; it is the client's ONLY automatic trigger to drop the
+            // now-dead credential and re-authenticate. Withholding it would leave
+            // every device "connected" holding a revoked token.
+            sendRevokeAck()
+            resolveAck({ ok: false, timedOut: true })
+          }, timeoutMs)
+          // Never let the bound hold the event loop open (a pending timer here
+          // would keep the process — and the test runner — alive).
+          timer.unref?.()
+
+          persisted.then(
             () => {
+              if (settled) {
+                log.warn('Token REVOKE persist landed AFTER the durability bound had already been reported as unknown.')
+                return
+              }
+              settled = true
+              clearTimeout(timer)
               sendRevokeAck()
-              return { ok: true }
+              resolveAck({ ok: true })
             },
             (err) => {
               const message = err?.message || String(err)
+              if (settled) {
+                log.warn(`Token REVOKE persist failed (${message}) AFTER the durability bound had already been reported as unknown.`)
+                return
+              }
+              settled = true
+              clearTimeout(timer)
               log.error(
                 `Token REVOKE could not be confirmed durable (${message}) — the revoke HOLDS in this process, ` +
                 `but a restart is not guaranteed to come back on the new token. Fix the storage error and revoke again.`,
@@ -1411,7 +1479,7 @@ export class WsServer {
                 })
               }
               sendRevokeAck()
-              return { ok: false, error: message }
+              resolveAck({ ok: false, error: message })
             },
           )
           return
