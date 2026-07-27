@@ -904,6 +904,20 @@ export class ClaudeByokSession extends BaseSession {
     // force: removing the last configured server still has to publish the now-
     // empty list, or clients keep rendering the row we just deleted.
     this._emitMcpServers({ force: true })
+    // #7054/#7068: surface the durability caveat on the REDUCTION path. The
+    // removal IS in effect (fleet stopped, config rewritten), so this is a
+    // warning riding a success — not a failure. Mirrors addMcpServer's existing
+    // `warning` channel rather than inventing a second convention.
+    if (written.durabilityUnconfirmed) {
+      return {
+        ok: true,
+        found: true,
+        warning:
+          `The server was removed and is no longer running, but the config write could not be confirmed ` +
+          `durable (${written.durabilityUnconfirmed}) — a power loss could restore it on the next start. ` +
+          `Resolve the storage error and re-check.`,
+      }
+    }
     return { ok: true, found: true }
   }
 

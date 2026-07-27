@@ -146,6 +146,60 @@ export function fsyncForDurability(target, { isDir = false, _fsync = fsyncSync }
 }
 
 /**
+ * #7054 — the ONE implementation of "confirm a rename is durable, and REPORT
+ * rather than throw when it is not".
+ *
+ * This policy lived in three places (`writeFileRestricted`,
+ * `credential-store.writeStoreAtomically`, `byok-mcp-config.writeClaudeConfigAtomic`)
+ * and drifted exactly as #7054 predicted: two of the three threw on a post-rename
+ * directory-fsync failure, reporting a write that had ALREADY landed as failed
+ * (#7067). Rename STRATEGY stays with each caller — they genuinely differ, and
+ * credential-store's snapshot-and-restore retry is strictly more protective than a
+ * plain rename — but the durability VERDICT is now shared.
+ *
+ * Never throws. By the time this runs the rename has published the file, so the
+ * write succeeded; only the durability of its directory ENTRY is unproven.
+ * Callers for whom that caveat must be operator-visible re-raise it themselves
+ * (see server-cli's revoke persist, which feeds #6965's REVOKE_NOT_DURABLE frame).
+ *
+ * @param {string} filePath — the path whose DIRECTORY ENTRY changed; its dirname
+ *   is fsynced. The entry may have been created (rename) or removed (unlink) —
+ *   both are directory-metadata changes with the same durability requirement.
+ * @param {{ durable?: boolean, fsync?: Function, onWindows?: boolean, change?: string }} [opts]
+ *   `change` describes what happened to the entry, for the log only ('rename' by
+ *   default, 'removal' for an unlink). The generic wording matters: this helper
+ *   serves both, and telling an operator a REMOVED file is "written and live"
+ *   would send them looking for the wrong thing.
+ *   `fsync` is injected at the `fsyncForDurability(target, { isDir })` level so a
+ *   test can pin ORDERING (which target, file-or-dir, whether the final file
+ *   existed yet) rather than merely that a syscall happened.
+ * @returns {{ durabilityUnconfirmed: string | null }}
+ */
+export function confirmRenameDurable(
+  filePath,
+  { durable = false, fsync = fsyncForDurability, onWindows = isWindows, change = 'rename' } = {},
+) {
+  // Windows has no directory fsync, and renameSync already passes
+  // MOVEFILE_WRITE_THROUGH (a durable rename), so the temp-file fsync plus the
+  // write-through rename cover the same guarantee.
+  if (!durable || onWindows) return { durabilityUnconfirmed: null }
+  try {
+    fsync(dirname(filePath), { isDir: true })
+    return { durabilityUnconfirmed: null }
+  } catch (err) {
+    const durabilityUnconfirmed = err?.message || String(err)
+    // The only surviving artifact: nothing is thrown and callers that ignore the
+    // return value see a plain success, so this must be `error`.
+    log.error(
+      `durable-write: the ${change} of ${filePath} IS in effect, but its directory entry could not be ` +
+      `fsynced (${durabilityUnconfirmed}) — a power loss could roll that ${change} back. ` +
+      `Treat its durability as unconfirmed.`,
+    )
+    return { durabilityUnconfirmed }
+  }
+}
+
+/**
  * Write `data` to `filePath` atomically on both POSIX and Windows. The
  * write goes to a sibling temp file `<filePath><tmpSuffix>` first and is
  * then `rename`d over the destination. `rename` is atomic on the same
@@ -237,60 +291,6 @@ export function fsyncForDurability(target, { isDir = false, _fsync = fsyncSync }
  * attempt and to the transient-lock error codes, so a genuine failure (e.g.
  * ENOSPC, a bad path) still surfaces immediately. See `platform-windows.test.js`.
  */
-/**
- * #7054 — the ONE implementation of "confirm a rename is durable, and REPORT
- * rather than throw when it is not".
- *
- * This policy lived in three places (`writeFileRestricted`,
- * `credential-store.writeStoreAtomically`, `byok-mcp-config.writeClaudeConfigAtomic`)
- * and drifted exactly as #7054 predicted: two of the three threw on a post-rename
- * directory-fsync failure, reporting a write that had ALREADY landed as failed
- * (#7067). Rename STRATEGY stays with each caller — they genuinely differ, and
- * credential-store's snapshot-and-restore retry is strictly more protective than a
- * plain rename — but the durability VERDICT is now shared.
- *
- * Never throws. By the time this runs the rename has published the file, so the
- * write succeeded; only the durability of its directory ENTRY is unproven.
- * Callers for whom that caveat must be operator-visible re-raise it themselves
- * (see server-cli's revoke persist, which feeds #6965's REVOKE_NOT_DURABLE frame).
- *
- * @param {string} filePath — the path whose DIRECTORY ENTRY changed; its dirname
- *   is fsynced. The entry may have been created (rename) or removed (unlink) —
- *   both are directory-metadata changes with the same durability requirement.
- * @param {{ durable?: boolean, fsync?: Function, onWindows?: boolean, change?: string }} [opts]
- *   `change` describes what happened to the entry, for the log only ('rename' by
- *   default, 'removal' for an unlink). The generic wording matters: this helper
- *   serves both, and telling an operator a REMOVED file is "written and live"
- *   would send them looking for the wrong thing.
- *   `fsync` is injected at the `fsyncForDurability(target, { isDir })` level so a
- *   test can pin ORDERING (which target, file-or-dir, whether the final file
- *   existed yet) rather than merely that a syscall happened.
- * @returns {{ durabilityUnconfirmed: string | null }}
- */
-export function confirmRenameDurable(
-  filePath,
-  { durable = false, fsync = fsyncForDurability, onWindows = isWindows, change = 'rename' } = {},
-) {
-  // Windows has no directory fsync, and renameSync already passes
-  // MOVEFILE_WRITE_THROUGH (a durable rename), so the temp-file fsync plus the
-  // write-through rename cover the same guarantee.
-  if (!durable || onWindows) return { durabilityUnconfirmed: null }
-  try {
-    fsync(dirname(filePath), { isDir: true })
-    return { durabilityUnconfirmed: null }
-  } catch (err) {
-    const durabilityUnconfirmed = err?.message || String(err)
-    // The only surviving artifact: nothing is thrown and callers that ignore the
-    // return value see a plain success, so this must be `error`.
-    log.error(
-      `durable-write: the ${change} of ${filePath} IS in effect, but its directory entry could not be ` +
-      `fsynced (${durabilityUnconfirmed}) — a power loss could roll that ${change} back. ` +
-      `Treat its durability as unconfirmed.`,
-    )
-    return { durabilityUnconfirmed }
-  }
-}
-
 /**
  * @returns {{ durabilityUnconfirmed: string | null }} `durabilityUnconfirmed` is
  *   the post-rename directory-fsync error message when the file is live but its
