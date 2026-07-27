@@ -28,7 +28,7 @@ import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { lookup as dnsLookup } from 'node:dns/promises'
-import { fsyncForDurability } from './platform.js'
+import { fsyncForDurability, confirmRenameDurable } from './platform.js'
 
 /**
  * Defensive upper bound on the size of `~/.claude.json`. Today the file is
@@ -1106,7 +1106,16 @@ export function writeClaudeConfigAtomic(filePath, value, { mode }) {
     throw err
   }
   // Make the rename itself durable, not just the bytes it points at.
-  fsyncForDurability(dirname(destPath), { isDir: true })
+  //
+  // #7054/#7067: this used to be an UNWRAPPED call, so a post-rename
+  // directory-fsync failure THREW — after the rename had already published the
+  // file. The write succeeded; only its directory entry's durability was
+  // unproven. Both callers were harmed by that lie: `ensureCwdTrusted` treats a
+  // throw as "skip the pre-write", so the user got claude's trust dialog for a
+  // trust write that had actually landed; the MCP add/remove paths reported a
+  // failure for a config change that was on disk. Shared verdict now — report,
+  // never throw — via the one implementation in platform.js.
+  return confirmRenameDurable(destPath, { durable: true })
 }
 
 /**

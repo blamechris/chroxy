@@ -48,7 +48,7 @@ import { randomBytes } from 'crypto'
 import { maskApiKey } from './byok-credentials.js'
 import * as realKeychain from './keychain.js'
 import { createLogger } from './logger.js'
-import { fsyncForDurability } from './platform.js'
+import { fsyncForDurability, confirmRenameDurable } from './platform.js'
 import {
   CRED_KEY_SERVICE,
   isEncryptedEnvelope,
@@ -649,19 +649,16 @@ export function setStoredField(field, rawValue, { validate, durable = false } = 
  * @returns {{ durabilityUnconfirmed: string | null }}
  */
 function _confirmDirDurability(target, durable) {
-  if (!durable || process.platform === 'win32') return { durabilityUnconfirmed: null }
-  try {
-    _durabilityFsync(dirname(target), { isDir: true })
-    return { durabilityUnconfirmed: null }
-  } catch (err) {
-    const durabilityUnconfirmed = err?.message || String(err)
-    _log.error(
-      `credentials: the directory entry for ${target} could not be fsynced ` +
-      `(${durabilityUnconfirmed}) — a power loss could roll the removal back and restore the ` +
-      `cleared value. The value IS gone; treat the removal's durability as unconfirmed.`,
-    )
-    return { durabilityUnconfirmed }
-  }
+  // #7054: the VERDICT (report, never throw) is now the shared implementation in
+  // platform.js — this policy drifted across three copies, and #7067 was the bug
+  // that drift produced. Only the injected SEAM stays local: credential-store's
+  // hook replaces `fsyncForDurability` wholesale so its tests can assert ORDERING
+  // (target, isDir, and whether the file still existed at fsync time), which a
+  // raw fd-level hook cannot express.
+  return confirmRenameDurable(target, {
+    durable,
+    fsync: (t, opts) => _durabilityFsync(t, opts),
+  })
 }
 
 /**
