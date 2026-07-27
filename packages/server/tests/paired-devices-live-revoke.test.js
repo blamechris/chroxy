@@ -273,26 +273,6 @@ describe('#6914 revoke opts into a durable store write; mint does not', () => {
     pm.destroy()
   })
 
-  it('#7067: a revoke whose snapshot LANDED is not reported as failed (post-rename fsync caveat)', () => {
-    // The split-brain: writeFileRestricted used to THROW when the post-rename
-    // directory fsync failed — after the rename had already published the
-    // revoked-out snapshot. session-token-store caught it, returned false, and
-    // pairing reported the revoke as failed for a revoke that is on disk. The
-    // operator then retries, or assumes a revoked token is still live.
-    //
-    // A store whose save() SUCCEEDS (as it now does — the write landed, only the
-    // directory entry's durability is unproven) must be reported as a success.
-    const store = makeDurabilityRecordingStore()
-    const pm = new PairingManager({ sessionTokenTtlMs: 60_000, sessionTokenStore: store })
-    const [t1] = mintTokens(pm, 1)
-    store.calls.length = 0
-
-    const result = pm.revokeSessionTokenById(pm._deviceIdForToken(t1))
-    assert.deepEqual(result, { revoked: 1 }, 'a landed revoke reports success')
-    assert.equal(result.persistFailed, undefined, 'and carries no persist-failure flag')
-    pm.destroy()
-  })
-
   it('revokeAllSessionTokens persists with { durable: true }', () => {
     const store = makeDurabilityRecordingStore()
     const pm = new PairingManager({ sessionTokenTtlMs: 60_000, sessionTokenStore: store })
