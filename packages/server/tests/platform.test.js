@@ -569,6 +569,42 @@ try {
         assert.strictEqual(existsSync(`${filePath}.tmp`), false)
       })
 
+      it('#7067: a POST-RENAME directory-fsync failure does NOT throw — the write already landed', () => {
+        // The rename has already published the file, so the write SUCCEEDED; only
+        // the durability of its directory entry is unproven. Throwing here told the
+        // caller the write failed, and pairing.js turned that into "the session-token
+        // revoke failed" for a revoke whose snapshot was already on disk — the
+        // operator then retries or assumes the token is still live. Mirrors the
+        // credential-store precedent (#6964/#7061), which reports rather than throws.
+        if (isWindows) return // no directory fsync on Windows
+        const filePath = join(tmpDir, 'session-tokens.json')
+        const hard = Object.assign(new Error('dir fsync exploded'), { code: 'EIO' })
+        let calls = 0
+        let outcome
+        assert.doesNotThrow(() => {
+          outcome = writeFileRestricted(filePath, 'revoked-snapshot', {
+            durable: true,
+            // 1st call = the temp FILE (pre-rename) and must succeed; 2nd = the
+            // containing DIRECTORY (post-rename) and is the limb under test.
+            _fsync: (fd) => { calls++; if (calls === 1) return fsyncSync(fd); throw hard },
+          })
+        }, 'the file is on disk — reporting a failed write would be factually wrong')
+        assert.strictEqual(calls, 2, 'both limbs ran: temp-file fsync then directory fsync')
+        assert.strictEqual(readFileSync(filePath, 'utf-8'), 'revoked-snapshot', 'the write DID land')
+        assert.strictEqual(existsSync(`${filePath}.tmp`), false, 'no orphaned sidecar')
+        assert.strictEqual(
+          typeof outcome?.durabilityUnconfirmed, 'string',
+          'the caveat must be reported, not swallowed — the caller needs to distinguish it from a clean write',
+        )
+        assert.match(outcome.durabilityUnconfirmed, /EIO|dir fsync exploded/)
+      })
+
+      it('#7067: a clean durable write reports durabilityUnconfirmed: null', () => {
+        const filePath = join(tmpDir, 'clean.json')
+        const outcome = writeFileRestricted(filePath, 'ok', { durable: true })
+        assert.strictEqual(outcome?.durabilityUnconfirmed, null, 'a clean write makes no caveat')
+      })
+
       it('propagates a GENUINE fsync failure (EIO) and cleans up the temp — the durable caller reports failure', () => {
         // A real I/O error means we cannot promise durability, so the durable path
         // must surface it (→ session-token store save() returns false → revoke

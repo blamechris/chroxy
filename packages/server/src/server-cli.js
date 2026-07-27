@@ -75,6 +75,34 @@ const SERVER_VERSION = packageJson.version
  * @param {{ tunnelMode: string, tunnelUrl: string, attempt?: number, maxAttempts?: number }} args
  * @returns {object} WS message envelope
  */
+/**
+ * #6927/#7067 — write the (possibly rotated) primary token into config.json.
+ *
+ * Exported and `_write`-injectable so the DURABILITY limb is testable: #7067
+ * made `writeFileRestricted` REPORT a post-rename directory-fsync failure rather
+ * than throw, which is right for callers where a landed write must not be
+ * reported as failed. This caller is the deliberate exception — #6965 built an
+ * operator-visible `REVOKE_NOT_DURABLE` frame for exactly this outcome and the
+ * revoke ack is gated on this callback, so swallowing the caveat would trade the
+ * old false-FAILURE for a false SUCCESS on the panic button. Re-raise it and let
+ * #6965's existing path surface it.
+ *
+ * @param {string} configFile
+ * @param {string} newToken
+ * @param {{ durable?: boolean, _write?: Function }} [opts]
+ */
+export function persistTokenToConfigFile(configFile, newToken, { durable = false, _write = writeFileRestricted } = {}) {
+  const raw = existsSync(configFile) ? readFileSync(configFile, 'utf-8') : '{}'
+  const cfg = JSON.parse(raw)
+  cfg.apiToken = newToken
+  const outcome = _write(configFile, JSON.stringify(cfg, null, 2), { durable })
+  if (durable && outcome?.durabilityUnconfirmed) {
+    throw new Error(
+      `token written but its directory entry could not be fsynced (${outcome.durabilityUnconfirmed})`,
+    )
+  }
+}
+
 export function buildTunnelWarmingStatus({ tunnelMode, tunnelUrl, attempt, maxAttempts }) {
   const base = {
     type: 'server_status',
@@ -891,12 +919,7 @@ export async function startCliServer(config) {
       // stays non-durable. Only the file fallback is fsync-controllable here; the
       // keychain path's durability is the OS keychain's responsibility.
       const durable = reason === 'revoke'
-      const persistToFile = () => {
-        const raw = existsSync(configFile) ? readFileSync(configFile, 'utf-8') : '{}'
-        const cfg = JSON.parse(raw)
-        cfg.apiToken = newToken
-        writeFileRestricted(configFile, JSON.stringify(cfg, null, 2), { durable })
-      }
+      const persistToFile = () => persistTokenToConfigFile(configFile, newToken, { durable })
       try {
         if (isKeychainAvailable()) {
           try {

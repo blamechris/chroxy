@@ -198,10 +198,16 @@ export function fsyncForDurability(target, { isDir = false, _fsync = fsyncSync }
  *     REVOKE snapshot (`_persistSessionTokensSnapshot` in `pairing.js`), where
  *     a power loss / kernel panic within the OS writeback window could
  *     otherwise resurrect a revoked token AFTER the operator was told the
- *     revoke succeeded. A genuine fsync failure (EIO / ENOSPC) is re-thrown so
- *     that caller reports the failure; a benign one (EINVAL / ENOTSUP on a FS
- *     that cannot sync — see `BENIGN_FSYNC_CODES`) is logged and the write
- *     still succeeds. On Windows the directory fsync is skipped: there is no
+ *     revoke succeeded. A genuine PRE-rename fsync failure (EIO / ENOSPC) is
+ *     re-thrown so that caller reports the failure — nothing was published, so
+ *     "the write failed" is true. A POST-rename DIRECTORY-fsync failure is NOT
+ *     thrown (#7067): the rename already published the file, so the write
+ *     SUCCEEDED and only its directory entry's durability is unproven; it is
+ *     returned as `durabilityUnconfirmed` and logged at error. Callers for whom
+ *     that caveat must be operator-visible re-raise it themselves — see
+ *     server-cli's revoke persist, which feeds #6965's REVOKE_NOT_DURABLE frame.
+ *     A benign fsync failure (EINVAL / ENOTSUP on a FS that cannot sync — see
+ *     `BENIGN_FSYNC_CODES`) is logged and the write still succeeds. On Windows the directory fsync is skipped: there is no
  *     directory-fsync, and `renameSync` already passes `MOVEFILE_WRITE_THROUGH`
  *     (a durable rename), so the temp-file fsync plus the write-through rename
  *     cover the same guarantee.
@@ -230,6 +236,13 @@ export function fsyncForDurability(target, { isDir = false, _fsync = fsyncSync }
  * (a keychain write with no outer retry). The retry is bounded to a single extra
  * attempt and to the transient-lock error codes, so a genuine failure (e.g.
  * ENOSPC, a bad path) still surfaces immediately. See `platform-windows.test.js`.
+ */
+/**
+ * @returns {{ durabilityUnconfirmed: string | null }} `durabilityUnconfirmed` is
+ *   the post-rename directory-fsync error message when the file is live but its
+ *   directory entry's durability could not be confirmed; `null` otherwise —
+ *   including every non-durable write, which makes no durability claim at all.
+ *   Mirrors `credential-store.writeStoreAtomically`'s contract (#7067).
  */
 export function writeFileRestricted(
   filePath,
@@ -317,7 +330,7 @@ export function writeFileRestricted(
         // Windows-only branch: no directory fsync (Windows has none; the durable
         // rename comes from MOVEFILE_WRITE_THROUGH). The temp file was already
         // fsynced above when `durable`.
-        return
+        return { durabilityUnconfirmed: null }
       } catch {
         // fall through to cleanup + rethrow the original error below
       }
@@ -337,9 +350,32 @@ export function writeFileRestricted(
   // the old inode. POSIX-only: Windows has no directory fsync, and its renameSync
   // already passes MOVEFILE_WRITE_THROUGH (a durable rename), so the temp-file
   // fsync above plus the write-through rename cover the same guarantee.
+  //
+  // #7067: this failure does NOT throw, unlike the PRE-rename fsync above. The
+  // asymmetry is the point. Before the rename nothing is published, so "the write
+  // failed" is TRUE and throwing is right. After it, the file is already live and
+  // only the durability of its directory ENTRY is unproven — throwing there told
+  // the caller a landed write had failed, and `pairing.js` turned that into "the
+  // session-token revoke failed" for a revoke already on disk, sending the
+  // operator to retry or to assume a revoked token was still live. Report the
+  // caveat instead, matching `credential-store.writeStoreAtomically` (#6964/#7061),
+  // which resolved this exact moment the same way.
   if (durable && !onWindows) {
-    fsyncForDurability(dirname(filePath), { isDir: true, _fsync })
+    try {
+      fsyncForDurability(dirname(filePath), { isDir: true, _fsync })
+    } catch (err) {
+      const durabilityUnconfirmed = err?.message || String(err)
+      // The only surviving artifact: no exception is raised and callers that
+      // ignore the return value see a plain success, so this must be `error`.
+      log.error(
+        `durable-write: ${filePath} is written and live, but its directory entry could not be fsynced ` +
+        `(${durabilityUnconfirmed}) — a power loss could roll the rename back. The write IS in effect; ` +
+        `treat its durability as unconfirmed.`,
+      )
+      return { durabilityUnconfirmed }
+    }
   }
+  return { durabilityUnconfirmed: null }
 }
 
 /**
