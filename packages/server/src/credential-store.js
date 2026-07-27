@@ -450,23 +450,13 @@ function writeStoreAtomically(target, nextObj, { durable = false } = {}) {
     }
     // #6964: the rename is a directory-metadata change of its own — fsync the
     // containing directory so the new entry survives a power loss too. POSIX only.
-    if (durable && process.platform !== 'win32') {
-      try {
-        _durabilityFsync(dirname(target), { isDir: true })
-      } catch (err) {
-        // POST-RENAME: the new value is already live and its bytes are already
-        // fsynced. Only the durability of the new directory ENTRY is unproven, so
-        // this is NOT a failed write — see the doc-block above. Report it as a
-        // distinct outcome instead of throwing, so the caller keeps its cache in
-        // step with disk while still surfacing the fsync error.
-        durabilityUnconfirmed = err?.message || String(err)
-        _log.error(
-          `credentials: the new value is live at ${target} but its directory entry could not be ` +
-          `fsynced (${durabilityUnconfirmed}) — a power loss could roll the rename back. ` +
-          `The value IS in effect; treat its durability as unconfirmed.`,
-        )
-      }
-    }
+    //
+    // POST-RENAME: the new value is already live and its bytes are already
+    // fsynced, so a failure here is NOT a failed write — it is reported as a
+    // distinct outcome rather than thrown, keeping the caller's cache in step
+    // with disk while still surfacing the error. That verdict is #7054's shared
+    // implementation; only the injected seam is local.
+    ;({ durabilityUnconfirmed } = _confirmDirDurability(target, durable))
   } finally {
     if (!renamed && existsSync(tmp)) {
       try { unlinkSync(tmp) } catch { /* */ }

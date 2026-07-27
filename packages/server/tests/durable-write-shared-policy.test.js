@@ -67,22 +67,38 @@ describe('durable-write shared policy (#7054)', () => {
     assert.deepEqual(calls, [])
   })
 
-  it('every writer that renames delegates here — no second copy of the verdict', async () => {
-    // A regression guard on the DUPLICATION itself, which is what #7054 is about:
-    // a future hand-rolled `fsyncForDurability(dirname(...), { isDir: true })`
-    // would reintroduce the drift that produced #7067.
-    if (IS_WINDOWS) return
-    const { readFileSync } = await import('node:fs')
+  it('the directory-fsync verdict exists in exactly ONE place (drift guard)', async () => {
+    // #7054 is about DRIFT, so the guard must survive the ways drift actually
+    // arrives. The first version of this test grepped the three writers for
+    // `fsyncForDurability(dirname(` — and MISSED a live copy in
+    // writeStoreAtomically that called the same thing through a module-local
+    // alias (`_durabilityFsync(dirname(target), { isDir: true })`). A guard keyed
+    // on one spelling of one function name is theatre.
+    //
+    // Assert the invariant instead: across ALL server source, `isDir: true` — the
+    // thing that makes an fsync a DIRECTORY fsync, whatever function carries it —
+    // appears exactly once, inside the shared helper. Any new copy, in any file,
+    // through any alias, trips this. Runs on every platform: it reads source text
+    // and has no platform-specific behaviour.
+    const { readFileSync, readdirSync } = await import('node:fs')
     const { fileURLToPath } = await import('node:url')
     const { dirname, join } = await import('node:path')
     const srcDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'src')
-    for (const f of ['platform.js', 'credential-store.js', 'byok-mcp-config.js']) {
-      const body = readFileSync(join(srcDir, f), 'utf-8')
-      const handRolled = body.match(/fsyncForDurability\(\s*dirname\(/g) || []
-      assert.deepEqual(
-        handRolled, [],
-        `${f} must reach the directory fsync through confirmRenameDurable, not a local copy of the verdict`,
-      )
+
+    const walk = (d) => readdirSync(d, { withFileTypes: true }).flatMap((e) =>
+      e.isDirectory() ? walk(join(d, e.name)) : (e.name.endsWith('.js') ? [join(d, e.name)] : []))
+
+    const sites = []
+    for (const file of walk(srcDir)) {
+      const body = readFileSync(file, 'utf-8')
+      for (const m of body.matchAll(/isDir:\s*true/g)) {
+        sites.push(`${file.slice(srcDir.length + 1)}:${body.slice(0, m.index).split('\n').length}`)
+      }
     }
+    assert.equal(
+      sites.length, 1,
+      `the directory-fsync verdict must live in exactly one place; found ${sites.length}: ${sites.join(', ')}`,
+    )
+    assert.match(sites[0], /^platform\.js:/, 'and that place must be the shared helper in platform.js')
   })
 })

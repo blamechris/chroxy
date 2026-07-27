@@ -254,8 +254,14 @@ export function fsyncForDurability(target, { isDir = false, _fsync = fsyncSync }
  * Callers for whom that caveat must be operator-visible re-raise it themselves
  * (see server-cli's revoke persist, which feeds #6965's REVOKE_NOT_DURABLE frame).
  *
- * @param {string} filePath — the renamed-INTO path; its dirname is fsynced
- * @param {{ durable?: boolean, fsync?: Function, onWindows?: boolean }} [opts]
+ * @param {string} filePath — the path whose DIRECTORY ENTRY changed; its dirname
+ *   is fsynced. The entry may have been created (rename) or removed (unlink) —
+ *   both are directory-metadata changes with the same durability requirement.
+ * @param {{ durable?: boolean, fsync?: Function, onWindows?: boolean, change?: string }} [opts]
+ *   `change` describes what happened to the entry, for the log only ('rename' by
+ *   default, 'removal' for an unlink). The generic wording matters: this helper
+ *   serves both, and telling an operator a REMOVED file is "written and live"
+ *   would send them looking for the wrong thing.
  *   `fsync` is injected at the `fsyncForDurability(target, { isDir })` level so a
  *   test can pin ORDERING (which target, file-or-dir, whether the final file
  *   existed yet) rather than merely that a syscall happened.
@@ -263,7 +269,7 @@ export function fsyncForDurability(target, { isDir = false, _fsync = fsyncSync }
  */
 export function confirmRenameDurable(
   filePath,
-  { durable = false, fsync = fsyncForDurability, onWindows = isWindows } = {},
+  { durable = false, fsync = fsyncForDurability, onWindows = isWindows, change = 'rename' } = {},
 ) {
   // Windows has no directory fsync, and renameSync already passes
   // MOVEFILE_WRITE_THROUGH (a durable rename), so the temp-file fsync plus the
@@ -277,9 +283,9 @@ export function confirmRenameDurable(
     // The only surviving artifact: nothing is thrown and callers that ignore the
     // return value see a plain success, so this must be `error`.
     log.error(
-      `durable-write: ${filePath} is written and live, but its directory entry could not be fsynced ` +
-      `(${durabilityUnconfirmed}) — a power loss could roll the rename back. The write IS in effect; ` +
-      `treat its durability as unconfirmed.`,
+      `durable-write: the ${change} of ${filePath} IS in effect, but its directory entry could not be ` +
+      `fsynced (${durabilityUnconfirmed}) — a power loss could roll that ${change} back. ` +
+      `Treat its durability as unconfirmed.`,
     )
     return { durabilityUnconfirmed }
   }
