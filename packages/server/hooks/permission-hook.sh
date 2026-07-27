@@ -346,20 +346,57 @@ EOF
 #      structural check). Over-probing here is harmless; a `\n` / `\"`-only
 #      payload keeps the no-round-trip path.
 floor_forces_prompt() {
-  # (1) last-byte shape check — an unusable body cannot prove "cannot be floored".
-  # Trim the trailing whitespace run first (two expansions, no loop, bash 3.2-safe:
-  # `##*[![:space:]]` leaves exactly that run, which `%` then strips off the end).
-  REQUEST_TRIMMED=${REQUEST%"${REQUEST##*[![:space:]]}"}
-  case "$REQUEST_TRIMMED" in
-    *'}') ;;
-    *) return 0 ;;
-  esac
   case "$REQUEST" in
     *'"file_path"'*|*'"path"'*|*'"notebook_path"'*|*'"changes"'*) ;;
-    # (2) a \uXXXX escape may hide a path-naming key from the byte scan.
+    # (1) a \uXXXX escape may spell a path-naming key the byte scan cannot see.
     *'\u'*) ;;
-    # No path-naming field anywhere in the payload — the floor cannot apply.
-    *) return 1 ;;
+    # (2) #7043: an INVALID escape can hide one too, and never reaches the
+    # daemon's fail-closed parse because this pre-filter short-circuits first.
+    # `\U0066ile_path` is the worked example: the `\u` arm above is
+    # case-SENSITIVE, so it missed. Rather than enumerate malformed escapes,
+    # match "a backslash NOT starting one of JSON's valid non-unicode escapes"
+    # (`" \ / b f n r t`). That covers `\U`, `\x` and every other invalid form,
+    # while deliberately KEEPING the `\n` / `\"` fast path the Bash tool relies
+    # on - those cannot spell a key, and #7035 pinned that they stay fast.
+    *'\'[!\"\\/bfnrt]*) ;;
+    *)
+      # Fast-path candidate. ONLY here is a completeness proof load-bearing, so
+      # only here is it paid for - running it earlier would scan large payloads
+      # that were going to probe anyway (a 200KB Write blew the hook's timeout
+      # and got SIGKILLed, which is a dead hook, not a slow one).
+      #
+      # The pre-filter's justification is that a payload naming no path field
+      # PROVABLY cannot be floored. That proof needs all the bytes, and #7043
+      # showed a last-byte `}` test does not establish it: a truncation can land
+      # on `}` (`..."permission_suggestions":{}`), carry no key literal, and take
+      # the skip. Shape + brace balance instead.
+      REQUEST_TRIMMED=${REQUEST%"${REQUEST##*[![:space:]]}"}
+      case "$REQUEST_TRIMMED" in
+        '{'*'}') ;;
+        *) return 0 ;;
+      esac
+      # Bash pattern substitution is superlinear on long strings, so the scan is
+      # size-bounded. Past the bound the proof is simply not attempted and the
+      # call falls through to a prompt - declining to claim a proof is the whole
+      # point. A >64KB payload naming no path field is rare; a dead hook is not
+      # an acceptable price for auto-allowing one.
+      if [ ${#REQUEST_TRIMMED} -gt 65536 ]; then
+        return 0
+      fi
+      # Counts braces inside strings too, so `awk '{print}'` is judged on its
+      # literal braces rather than its structure. That is an over-approximation
+      # in the SAFE direction: a miscount can only ever ADD a probe/prompt, never
+      # skip one. RESIDUAL, precisely: this is not a parse. A truncation whose
+      # literal brace counts happen to balance is still not detected; closing
+      # that needs a structural walk costing about what the probe costs (#7043).
+      FLOOR_OPEN=${REQUEST_TRIMMED//[!\{]/}
+      FLOOR_CLOSE=${REQUEST_TRIMMED//[!\}]/}
+      if [ ${#FLOOR_OPEN} -ne ${#FLOOR_CLOSE} ]; then
+        return 0
+      fi
+      # A COMPLETE, escape-clean payload naming no path field: the floor cannot apply.
+      return 1
+      ;;
   esac
   # Payload over STDIN, not argv — see route_to_phone's note on MAX_ARG_STRLEN.
   # Here it matters doubly: an argv failure on a large `Write` would fail closed

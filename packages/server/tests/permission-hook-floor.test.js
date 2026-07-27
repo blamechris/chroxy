@@ -422,6 +422,77 @@ describe('permission-hook.sh: the floor forces a PROMPT under auto/acceptEdits (
     assert.equal(daemon.stats.permissionRequests, 0)
   })
 
+  // -- #7043: the pre-filter's completeness guard --
+  //
+  // The negative pre-filter's justification is "a payload naming no path field
+  // PROVABLY cannot be floored". That proof needs the body to be the complete
+  // tool input. A last-byte `}` check does not establish that, and two shapes
+  // slipped through it into a silent auto-allow. Both are producer-side defects
+  // (a model cannot influence them), so this is invariant hygiene — but the
+  // pre-filter must not claim a proof it does not have.
+
+  it('#7043: a TRUNCATED body that happens to end in `}` still probes (braces unbalanced)', async () => {
+    daemon = await startRealDaemon()
+    // Ends in `}`, carries none of the four path-key literals, and the tool_input
+    // path key never made it into the body. Under a last-byte check this took the
+    // fast path and auto-allowed.
+    const raw = '{"session_id":"s","hook_event_name":"PreToolUse","permission_suggestions":{}'
+    const { stdout } = await runHook({ payload: raw, port: daemon.port, mode: 'auto' })
+    // Assert the SECURITY PROPERTY, not the mechanism: an incomplete body must not
+    // be silently auto-allowed. Forcing the prompt without a probe is the better
+    // outcome (fail closed, no round trip) — either route is acceptable, a silent
+    // allow is not.
+    assert.notEqual(
+      decisionOf(stdout).permissionDecision, 'allow',
+      'an incomplete body cannot prove "no path field", so it must never take the silent auto-allow',
+    )
+    assert.ok(
+      daemon.stats.floorRequests + daemon.stats.permissionRequests >= 1,
+      'it must be checked somewhere — prompt or probe — rather than short-circuited',
+    )
+  })
+
+  it('#7043: an INVALID escape (\\U, uppercase) still probes — the guard must not be case-sensitive about escapes', async () => {
+    daemon = await startRealDaemon()
+    // `\U0066ile_path` hides `file_path` from the byte scan. The old guard only
+    // matched a lowercase `\u`, so this took the fast path and auto-allowed.
+    const raw = '{"session_id":"s","hook_event_name":"PreToolUse","tool_name":"Read","tool_input":{"\\U0066ile_path":".env"},"cwd":"' + CWD + '"}'
+    const { stdout } = await runHook({ payload: raw, port: daemon.port, mode: 'auto' })
+    assert.notEqual(
+      decisionOf(stdout).permissionDecision, 'allow',
+      'an escape can hide a path-naming key from a byte scan — it must not be silently allowed',
+    )
+    assert.ok(
+      daemon.stats.floorRequests >= 1,
+      'a complete body with an escape is probe-able, so it should reach the daemon rather than blind-prompt',
+    )
+  })
+
+  it('#7043: a complete, escape-free path-LESS payload still takes the fast path (no regression)', async () => {
+    daemon = await startRealDaemon()
+    const { stdout } = await runHook({
+      payload: { tool_name: 'Bash', tool_input: { command: 'ls -la' }, cwd: CWD },
+      port: daemon.port,
+      mode: 'auto',
+    })
+    assert.equal(decisionOf(stdout).permissionDecision, 'allow')
+    assert.equal(daemon.stats.floorRequests, 0, 'the whole point of the pre-filter must survive the hardening')
+  })
+
+  it('#7043: a LARGE path-LESS payload does not hang the hook (the completeness scan is size-bounded)', async () => {
+    daemon = await startRealDaemon()
+    // No path key, so this is a fast-path CANDIDATE and does reach the completeness
+    // scan — unlike a large Write, which takes the path-key arm long before it.
+    // Bash pattern substitution is superlinear, and an unbounded scan here killed
+    // the hook outright (SIGKILL on the 15s timeout) rather than merely slowing it.
+    const payload = { tool_name: 'Bash', tool_input: { command: `echo ${'x'.repeat(200_000)}` }, cwd: CWD }
+    const { stdout } = await runHook({ payload, port: daemon.port, mode: 'auto', timeout: 15000 })
+    // The hook must SURVIVE and emit a decision. Which decision is a policy call
+    // (past the bound the proof is declined, so it prompts rather than skipping);
+    // the property pinned here is that it answers at all.
+    assert.ok(decisionOf(stdout).permissionDecision, 'the hook must return a decision, not be killed')
+  })
+
   // -- the other modes are untouched --
 
   it('approve mode never probes the floor (it already prompts for everything)', async () => {
