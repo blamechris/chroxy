@@ -317,7 +317,7 @@ export function writeFileRestricted(
         // Windows-only branch: no directory fsync (Windows has none; the durable
         // rename comes from MOVEFILE_WRITE_THROUGH). The temp file was already
         // fsynced above when `durable`.
-        return
+        return { durabilityUnconfirmed: null }
       } catch {
         // fall through to cleanup + rethrow the original error below
       }
@@ -337,9 +337,32 @@ export function writeFileRestricted(
   // the old inode. POSIX-only: Windows has no directory fsync, and its renameSync
   // already passes MOVEFILE_WRITE_THROUGH (a durable rename), so the temp-file
   // fsync above plus the write-through rename cover the same guarantee.
+  //
+  // #7067: this failure does NOT throw, unlike the PRE-rename fsync above. The
+  // asymmetry is the point. Before the rename nothing is published, so "the write
+  // failed" is TRUE and throwing is right. After it, the file is already live and
+  // only the durability of its directory ENTRY is unproven — throwing there told
+  // the caller a landed write had failed, and `pairing.js` turned that into "the
+  // session-token revoke failed" for a revoke already on disk, sending the
+  // operator to retry or to assume a revoked token was still live. Report the
+  // caveat instead, matching `credential-store.writeStoreAtomically` (#6964/#7061),
+  // which resolved this exact moment the same way.
   if (durable && !onWindows) {
-    fsyncForDurability(dirname(filePath), { isDir: true, _fsync })
+    try {
+      fsyncForDurability(dirname(filePath), { isDir: true, _fsync })
+    } catch (err) {
+      const durabilityUnconfirmed = err?.message || String(err)
+      // The only surviving artifact: no exception is raised and callers that
+      // ignore the return value see a plain success, so this must be `error`.
+      log.error(
+        `durable-write: ${filePath} is written and live, but its directory entry could not be fsynced ` +
+        `(${durabilityUnconfirmed}) — a power loss could roll the rename back. The write IS in effect; ` +
+        `treat its durability as unconfirmed.`,
+      )
+      return { durabilityUnconfirmed }
+    }
   }
+  return { durabilityUnconfirmed: null }
 }
 
 /**
