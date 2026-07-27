@@ -479,7 +479,25 @@ describe('permission-hook.sh: the floor forces a PROMPT under auto/acceptEdits (
     assert.equal(daemon.stats.floorRequests, 0, 'the whole point of the pre-filter must survive the hardening')
   })
 
-  it('#7043: a LARGE path-LESS payload does not hang the hook (the completeness scan is size-bounded)', async () => {
+  it('#7043: a MID-SIZE path-LESS payload completes fast (the scan must be O(n), not bash substitution)', async () => {
+    daemon = await startRealDaemon()
+    // THE REGRESSION WINDOW. `${VAR//[!\{]/}` is ~O(n^3) on bash 3.2 — macOS's
+    // /bin/bash and this hook's shebang — measured at 0.68s/4KB and 28.7s/16KB.
+    // A path-less body in this range is a Bash heredoc or a Task prompt: utterly
+    // ordinary. The earlier tests probed only tiny and 200KB bodies, so both
+    // dodged this window and CI (Linux bash 5.2, instant) stayed green while the
+    // primary platform stalled or SIGKILLed. Pinned with a tight timeout so a
+    // regression fails loudly instead of merely being slow.
+    const payload = { tool_name: 'Bash', tool_input: { command: `echo ${'x'.repeat(24_000)}` }, cwd: CWD }
+    const started = Date.now()
+    const { stdout } = await runHook({ payload, port: daemon.port, mode: 'auto', timeout: 10_000 })
+    const elapsed = Date.now() - started
+    assert.equal(decisionOf(stdout).permissionDecision, 'allow', 'a complete path-less body is still proven un-floorable')
+    assert.equal(daemon.stats.floorRequests, 0, 'and still takes the fast path')
+    assert.ok(elapsed < 5_000, `the completeness scan must be linear; took ${elapsed}ms`)
+  })
+
+  it('#7043: a LARGE path-LESS payload does not hang the hook', async () => {
     daemon = await startRealDaemon()
     // No path key, so this is a fast-path CANDIDATE and does reach the completeness
     // scan — unlike a large Write, which takes the path-key arm long before it.

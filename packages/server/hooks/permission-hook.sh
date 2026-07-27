@@ -349,6 +349,8 @@ floor_forces_prompt() {
   case "$REQUEST" in
     *'"file_path"'*|*'"path"'*|*'"notebook_path"'*|*'"changes"'*) ;;
     # (1) a \uXXXX escape may spell a path-naming key the byte scan cannot see.
+    # Kept explicit for readability though arm (2) now subsumes it (`u` is not in
+    # that arm's negated set), so a `\u` body probes either way.
     *'\u'*) ;;
     # (2) #7043: an INVALID escape can hide one too, and never reaches the
     # daemon's fail-closed parse because this pre-filter short-circuits first.
@@ -358,42 +360,55 @@ floor_forces_prompt() {
     # (`" \ / b f n r t`). That covers `\U`, `\x` and every other invalid form,
     # while deliberately KEEPING the `\n` / `\"` fast path the Bash tool relies
     # on - those cannot spell a key, and #7035 pinned that they stay fast.
+    # NOT kept fast: an ESCAPED backslash followed by a non-set char (`\\U`,
+    # `\\d`, `\\.`) — so a Windows cwd (`C:\\Users\\...`) or a regex-carrying
+    # Grep/Bash payload now probes. Distinguishing those needs escape-state
+    # tracking, i.e. a parse; over-probing is the price of not doing one, and it
+    # errs safe.
     *'\'[!\"\\/bfnrt]*) ;;
     *)
       # Fast-path candidate. ONLY here is a completeness proof load-bearing, so
-      # only here is it paid for - running it earlier would scan large payloads
-      # that were going to probe anyway (a 200KB Write blew the hook's timeout
-      # and got SIGKILLed, which is a dead hook, not a slow one).
+      # only here is it paid for - running it before the path-key arm scanned
+      # payloads that were going to probe anyway, and a 200KB Write blew the
+      # hook's timeout and got SIGKILLed (a dead hook, not a slow one).
       #
       # The pre-filter's justification is that a payload naming no path field
       # PROVABLY cannot be floored. That proof needs all the bytes, and #7043
       # showed a last-byte `}` test does not establish it: a truncation can land
       # on `}` (`..."permission_suggestions":{}`), carry no key literal, and take
       # the skip. Shape + brace balance instead.
+      #
+      # Whitespace is trimmed at BOTH ends. JSON.parse accepts leading
+      # whitespace and `cat -` preserves it, so anchoring the shape check on the
+      # raw first byte would send every call from a producer that emits a
+      # leading newline to a phone prompt - destroying the lenient modes for a
+      # formatting detail.
       REQUEST_TRIMMED=${REQUEST%"${REQUEST##*[![:space:]]}"}
+      REQUEST_TRIMMED=${REQUEST_TRIMMED#"${REQUEST_TRIMMED%%[![:space:]]*}"}
       case "$REQUEST_TRIMMED" in
         '{'*'}') ;;
         *) return 0 ;;
       esac
-      # Bash pattern substitution is superlinear on long strings, so the scan is
-      # size-bounded. Past the bound the proof is simply not attempted and the
-      # call falls through to a prompt - declining to claim a proof is the whole
-      # point. A >64KB payload naming no path field is rare; a dead hook is not
-      # an acceptable price for auto-allowing one.
-      if [ ${#REQUEST_TRIMMED} -gt 65536 ]; then
-        return 0
-      fi
-      # Counts braces inside strings too, so `awk '{print}'` is judged on its
-      # literal braces rather than its structure. That is an over-approximation
-      # in the SAFE direction: a miscount can only ever ADD a probe/prompt, never
-      # skip one. RESIDUAL, precisely: this is not a parse. A truncation whose
-      # literal brace counts happen to balance is still not detected; closing
-      # that needs a structural walk costing about what the probe costs (#7043).
-      FLOOR_OPEN=${REQUEST_TRIMMED//[!\{]/}
-      FLOOR_CLOSE=${REQUEST_TRIMMED//[!\}]/}
+      # Brace balance, counted by `tr` rather than bash pattern substitution.
+      # That is not a style choice: `${VAR//[!\{]/}` is ~O(n^3) on bash 3.2,
+      # which is macOS's /bin/bash and this file's shebang. Measured there:
+      # 0.68s at 4KB, 28.7s at 16KB - so a mid-size path-less body (a Bash
+      # heredoc, a Task prompt) would stall or be killed outright, which is the
+      # very failure this guard is supposed to prevent. `tr -cd` is O(n) and
+      # reduces the body to just its braces (0.00s at 16KB); the two
+      # substitutions below then run on that tiny result. LC_ALL=C keeps it
+      # byte-oriented so a multibyte payload cannot change the count.
+      FLOOR_BRACES=$(printf '%s' "$REQUEST_TRIMMED" | LC_ALL=C tr -cd '{}')
+      FLOOR_OPEN=${FLOOR_BRACES//\}/}
+      FLOOR_CLOSE=${FLOOR_BRACES//\{/}
       if [ ${#FLOOR_OPEN} -ne ${#FLOOR_CLOSE} ]; then
         return 0
       fi
+      # Counting braces inside strings too is an over-approximation in the SAFE
+      # direction: a miscount can only ever ADD a probe/prompt, never skip one.
+      # RESIDUAL, precisely: this is not a parse. A truncation whose literal
+      # brace counts happen to balance is still undetected; closing that needs a
+      # structural walk costing about what the probe it avoids costs (#7043).
       # A COMPLETE, escape-clean payload naming no path field: the floor cannot apply.
       return 1
       ;;
