@@ -130,6 +130,53 @@ describe('#6862 ScheduledTaskStore', () => {
       assert.equal(onDisk.length, 504, '505 minus the one actually removed')
     })
 
+    it('a RELOAD that hits an early return clears preserved entries too (they must not leak forward)', () => {
+      // load() clears _tasks FIRST precisely so every early return below leaves
+      // the store empty. The preserved set must follow the same rule: otherwise a
+      // second load() that hits ENOENT / bad JSON / the version gate keeps the
+      // PREVIOUS load's raw entries, and the next add() writes them back into a
+      // file that no longer contains them — resurrecting deleted records.
+      const store = writeMixedRegistry()
+      assert.equal(store.unreadableCount(), 1, 'precondition: one entry preserved')
+
+      rmSync(filePath) // registry goes away (operator wiped it / fresh machine)
+      store.load()     // early return: ENOENT
+
+      assert.equal(store.unreadableCount(), 0, 'an emptied store must not retain the old preserved entries')
+      store.add({ prompt: 'fresh', cadence: { kind: 'cron', expression: '0 9 * * *' } })
+      const onDisk = JSON.parse(readFileSync(filePath, 'utf-8')).tasks.map((t) => t.id)
+      assert.ok(!onDisk.includes('typo'), `a wiped registry must not resurrect 'typo', got ${JSON.stringify(onDisk)}`)
+    })
+
+    it('remove() with a non-string id does not mass-delete the id-less preserved entries', () => {
+      // Entries with no usable id are preserved as `{ id: null }`, and
+      // listUnreadable() emits those rows publicly — so a caller forwarding one
+      // back as remove(null) must not wipe every one of them and report success.
+      writeFileSync(filePath, JSON.stringify({
+        version: 1,
+        tasks: [
+          { prompt: 'no id at all', cadence: { kind: 'cron', expression: '*/5 * * * *' } },
+          { id: 42, prompt: 'numeric id', cadence: { kind: 'cron', expression: '*/5 * * * *' } },
+        ],
+      }))
+      const store = newStore(() => 1000).load()
+      assert.equal(store.unreadableCount(), 2, 'both are unreadable and id-less')
+      assert.equal(store.remove(null), false, 'a null id must not match the null-id rows')
+      assert.equal(store.remove(''), false)
+      assert.equal(store.unreadableCount(), 2, 'nothing was deleted')
+    })
+
+    it('add() refuses an id that a preserved entry already occupies', () => {
+      // The preserved entry is ON DISK, so minting a live task with the same id
+      // would put two entries with that id in the file.
+      const store = writeMixedRegistry()
+      assert.throws(
+        () => store.add({ id: 'typo', prompt: 'collide', cadence: { kind: 'cron', expression: '0 9 * * *' } }),
+        (err) => err instanceof ScheduledTaskValidationError && err.field === 'id',
+        'a preserved id is taken, not free',
+      )
+    })
+
     it('an operator can delete an unreadable entry (it must not be undeletable)', () => {
       const store = writeMixedRegistry()
       assert.equal(store.remove('typo'), true, 'remove() must reach preserved entries too')

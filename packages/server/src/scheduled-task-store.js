@@ -299,6 +299,12 @@ export class ScheduledTaskStore {
     // Reset FIRST — every early return below must leave the store EMPTY, not
     // holding the previous load's (now unbacked) tasks.
     this._tasks.clear()
+    // #7050: reset with `_tasks`, NOT after the early returns below. Every early
+    // return must leave the store EMPTY — a reload that hits ENOENT / bad JSON /
+    // the version gate would otherwise keep the PREVIOUS load's preserved entries
+    // and `_persist()` would write them back into a file that no longer has them,
+    // resurrecting records the operator deleted.
+    this._unreadable = []
     let raw
     try {
       raw = fs.readFileSync(this._filePath, 'utf-8')
@@ -324,14 +330,13 @@ export class ScheduledTaskStore {
     }
     const tasks = parsed.tasks
     if (!Array.isArray(tasks)) return this
-    this._unreadable = []
     for (const [i, entry] of tasks.entries()) {
       if (this._tasks.size >= MAX_TASKS) {
         // #7050: the remainder is never even examined, so it would be erased on
         // the next write. Preserve it verbatim — these are valid tasks losing a
         // race with a cap, which is the least defensible thing to delete.
         const rest = tasks.slice(i)
-        this._log.warn(`Scheduled-tasks file exceeds cap (${MAX_TASKS}) — ${rest.length} entr(ies) not loaded (preserved on disk)`)
+        this._log.warn(`Scheduled-tasks file exceeds cap (${MAX_TASKS}) — ${rest.length} ${rest.length === 1 ? 'entry' : 'entries'} not loaded (preserved on disk)`)
         for (const skipped of rest) this._preserveUnreadable(skipped, `store cap (${MAX_TASKS}) reached`)
         break
       }
@@ -375,7 +380,11 @@ export class ScheduledTaskStore {
         throw new ScheduledTaskValidationError('id must be a non-empty string', 'id')
       }
       id = id.trim()
-      if (this._tasks.has(id)) throw new ScheduledTaskValidationError(`task id ${id} already exists`, 'id')
+      // #7050: preserved (unreadable) ids count as taken. They are on disk, so
+      // reusing one would put two entries with the same id in the file.
+      if (this._tasks.has(id) || this._unreadable.some((u) => u.id === id)) {
+        throw new ScheduledTaskValidationError(`task id ${id} already exists`, 'id')
+      }
     }
 
     const now = this._now()
@@ -459,6 +468,12 @@ export class ScheduledTaskStore {
     // #7050: a preserved (unreadable) entry must stay deletable — otherwise
     // refusing to erase it would trade silent data loss for an undeletable
     // record the operator has no way to clear.
+    //
+    // Guard the id: preserved entries with no usable id carry `id: null`, so a
+    // `remove(null)` (or any non-string) would match and delete ALL of them at
+    // once and report success. `listUnreadable()` publicly emits those null rows,
+    // so this is reachable the moment a caller forwards one back.
+    if (typeof id !== 'string' || id.length === 0) return false
     const before = this._unreadable.length
     this._unreadable = this._unreadable.filter((u) => u.id !== id)
     if (this._unreadable.length === before) return false
