@@ -1,7 +1,9 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
+import { ScheduledTaskCadenceCronSchema } from '@chroxy/protocol'
 import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, statSync, readdirSync } from 'fs'
 import { tmpdir } from 'os'
+import { parseCron } from '../src/schedule-parser.js'
 import { join } from 'path'
 import {
   ScheduledTaskStore,
@@ -39,6 +41,138 @@ describe('#6862 ScheduledTaskStore', () => {
 
   it('requires a filePath', () => {
     assert.throws(() => new ScheduledTaskStore({}), /requires a filePath/)
+  })
+
+  // #7051 — a cron expression the WIRE cannot carry must never enter the
+  // registry. ScheduledTaskCadenceCronSchema caps `expression` at 256; the store
+  // had no cap at all, so a longer-but-valid cron was store-legal and
+  // wire-ILLEGAL. Blast radius is the whole panel, not one row: the dashboard
+  // safeParses the entire `scheduled_tasks` snapshot, so ONE such task makes it
+  // render zero tasks (plus "may be out of date") while N are armed and firing.
+  //
+  // REJECT rather than clamp, unlike the string fields projectTask truncates:
+  // truncating a cron silently CHANGES THE SCHEDULE, which is worse than
+  // refusing it.
+  describe('#7051 cron expression wire cap', () => {
+    // Fully enumerated minute/hour/day-of-month lists — 319 chars, and every
+    // field is legal, so LENGTH is the only thing that can reject it. The
+    // self-check below pins that: a fixture that quietly fell under the cap
+    // would make the rejection tests fail for an unrelated reason.
+    const LONG_VALID_CRON = [
+      Array.from({ length: 60 }, (_, i) => i).join(','),
+      Array.from({ length: 24 }, (_, i) => i).join(','),
+      Array.from({ length: 31 }, (_, i) => i + 1).join(','),
+      '*',
+      '*',
+    ].join(' ')
+
+    const cronOfExactLength = (target) => {
+      // '<minute-list> * * * *' — the tail is 8 chars, so the list carries the
+      // rest. Mixing 1- and 2-digit entries hits any length exactly.
+      const want = target - 8
+      for (let k = 1; k < 400; k++) {
+        for (let j = 0; j <= k; j++) {
+          if (3 * k - j - 1 === want) {
+            return [...Array(k)].map((_, i) => (i < j ? '1' : '59')).join(',') + ' * * * *'
+          }
+        }
+      }
+      throw new Error(`cannot build a cron of length ${target}`)
+    }
+
+    it('the fixture is a VALID cron that is merely too long (length is the only defect)', () => {
+      assert.ok(LONG_VALID_CRON.length > 256, `fixture must exceed the cap, got ${LONG_VALID_CRON.length}`)
+      assert.doesNotThrow(() => parseCron(LONG_VALID_CRON), 'fixture must parse — otherwise the test proves nothing about the cap')
+    })
+
+    it('add() rejects a cron expression longer than the wire cap', () => {
+      const store = newStore(() => 1000)
+      assert.throws(
+        () => store.add({ prompt: 'x', cadence: { kind: 'cron', expression: LONG_VALID_CRON } }),
+        (err) => err instanceof ScheduledTaskValidationError && err.field === 'cadence.expression',
+        'a store-legal / wire-illegal cron must be refused at the boundary',
+      )
+    })
+
+    it('accepts a cron expression of exactly the cap length (the bound is inclusive)', () => {
+      const store = newStore(() => 1000)
+      const atCap = cronOfExactLength(256)
+      // Assert the EXACT length: a fixture that drifted shorter would still pass
+      // the add() below while no longer testing the boundary at all.
+      assert.equal(atCap.length, 256)
+      assert.doesNotThrow(() => store.add({ prompt: 'x', cadence: { kind: 'cron', expression: atCap } }))
+    })
+
+    // The reachable path today: ~/.chroxy/scheduled-tasks.json edited by hand,
+    // or a non-WS writer. _normalizeStoredTask must refuse it too, or the
+    // snapshot breaks for every client despite add() being guarded.
+    //
+    // These two cases share one fixture writer and differ ONLY in the cron, so
+    // the control below is what gives the drop case its meaning. The first
+    // version of this test wrote `{ v: 1 }` instead of `{ version: 1 }`; the
+    // store's version gate then ignored the whole file, `list()` was empty for
+    // a reason that had nothing to do with the cap, and the test passed with
+    // the cap guard deleted. The control fails loudly on that mistake.
+    const writeRegistryWithCron = (expression) => {
+      writeFileSync(filePath, JSON.stringify({
+        version: 1,
+        tasks: [{ id: 'a', prompt: 'x', cadence: { kind: 'cron', expression }, createdAt: 1, updatedAt: 1 }],
+      }))
+      // .load() is explicit — the constructor does NOT read the file.
+      return newStore(() => 1000).load()
+    }
+
+    // Drift guard. The store's cap is a HAND-COPIED constant; the wire schema is
+    // the real authority. This asserts the two boundaries coincide by comparing
+    // behaviour at exactly 256 and exactly 257 chars, so raising/lowering
+    // ScheduledTaskCadenceCronSchema without touching MAX_CRON_EXPRESSION_LENGTH
+    // (or vice versa) fails here rather than silently reopening the bug.
+    it('the store cap and the wire schema agree at the boundary (drift guard)', () => {
+      const store = newStore(() => 1000)
+      for (const len of [256, 257]) {
+        const expression = cronOfExactLength(len)
+        assert.equal(expression.length, len, 'builder must hit the length exactly')
+        assert.doesNotThrow(() => parseCron(expression), `len ${len} must be a valid cron`)
+
+        const wireOk = ScheduledTaskCadenceCronSchema.safeParse({ kind: 'cron', expression }).success
+        let storeOk = true
+        try {
+          store.add({ prompt: 'x', cadence: { kind: 'cron', expression } })
+        } catch {
+          storeOk = false
+        }
+        assert.equal(
+          storeOk,
+          wireOk,
+          `at ${len} chars the store (${storeOk ? 'accepts' : 'rejects'}) and the wire schema ` +
+          `(${wireOk ? 'accepts' : 'rejects'}) disagree — MAX_CRON_EXPRESSION_LENGTH has drifted ` +
+          'from ScheduledTaskCadenceCronSchema',
+        )
+      }
+    })
+
+    it('CONTROL: the registry fixture loads when the cron is short (so the drop below means something)', () => {
+      assert.equal(writeRegistryWithCron('*/5 * * * *').list().length, 1)
+    })
+
+    it('padding is not counted against the cap, and cannot sneak past it', () => {
+      const store = newStore(() => 1000)
+      // Whitespace is stripped before storing, so an at-cap expression stays
+      // legal however it is padded...
+      const atCap = cronOfExactLength(256)
+      const t = store.add({ prompt: 'x', cadence: { kind: 'cron', expression: `   ${atCap}   ` } })
+      assert.equal(t.cadence.expression, atCap, 'the stored expression must be the trimmed one')
+      // ...and padding an over-cap expression does not make it legal either.
+      assert.throws(
+        () => store.add({ prompt: 'x', cadence: { kind: 'cron', expression: `  ${cronOfExactLength(257)}  ` } }),
+        (err) => err instanceof ScheduledTaskValidationError && err.field === 'cadence.expression',
+      )
+    })
+
+    it('a hand-edited registry file with an over-cap cron is rejected on load, not served', () => {
+      const store = writeRegistryWithCron(LONG_VALID_CRON)
+      assert.deepEqual(store.list(), [], 'an unrepresentable task must be dropped on load rather than served to clients')
+    })
   })
 
   // #6871 review (C3) — an epoch outside the representable Date range is finite,
