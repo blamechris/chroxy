@@ -53,6 +53,58 @@ const DEFAULTS = {
 // design matrix). audit workers must be one of these.
 const AUDIT_ELIGIBLE_PROVIDERS = new Set(['claude-sdk', 'claude-byok', 'codex'])
 
+// #7036: providers vetted for the ARCHITECT role. The members coincide with
+// AUDIT_ELIGIBLE_PROVIDERS today but the REASON is different, so this is named
+// separately rather than aliased — the two can diverge without one silently
+// re-opening the other's hole.
+//
+// The architect drives TurnDriver, which treats any `result` as turn-terminal.
+// `claude-cli` emits a SYNTHETIC result on an intentional stop
+// (`cli-session._emitInterruptedTurnResult`, fired BEFORE `stopped`), and
+// TurnDriver cannot distinguish it from a real one. Two consequences: an
+// interrupted architect turn resolves as COMPLETED, so the decision parser reads
+// a truncated plan/review as authoritative; and since #7033 the trailing
+// `stopped` lands on the NEXT queued turn and rejects it TURN_STOPPED — and
+// committee reviews serialise on the architect session, so a queued turn there
+// is the normal case, not an edge case.
+//
+// PRECISELY what this closes, and what it does NOT:
+//
+//   CLOSED — the queued-turn kill. Only claude-cli emits `result` THEN `stopped`
+//   for one interrupt, so only claude-cli can settle turn 1 and have the trailing
+//   `stopped` land on turn 2. None of the three below emit `stopped` after a
+//   `result`, so excluding claude-cli removes this failure by construction.
+//
+//   NOT CLOSED — false success on an interrupted turn. This is broader than
+//   claude-cli and membership here does NOT imply immunity:
+//     * claude-byok: an interrupt landing in the TOOL phase (not mid-stream)
+//       breaks the loop at the `signal.aborted` check and falls THROUGH to the
+//       normal `emit('result')` with real usage (byok-session.js ~1328 -> ~1459).
+//     * claude-sdk: a stream STALL emits a synthetic `result` then `error`;
+//       TurnDriver settles on the `result` and the trailing `error` is dropped by
+//       the epoch guard.
+//     * codex app-server: safe if the binary's answer to `turn/interrupt` routes
+//       to `_failTurn` (which emits `stopped`) rather than to `turn/completed`.
+//       Client exit and the result-timeout also reach `_failTurn`, so an `error`
+//       notification is sufficient but not necessary — which of these the real
+//       binary actually does is unverified in-repo (#7072).
+//   Closing that needs the provider-side `interrupted: true` flag the turn-driver
+//   doc-block names, so a terminal-looking result can be marked
+//   terminal-but-not-successful. Tracked separately; it is a cross-provider wire
+//   change, not something this gate can express.
+//
+// So this set means "vetted to not kill the NEXT turn", not "cannot report a
+// truncated turn as complete". Anything outside it is unvetted for either.
+//
+// Keeping claude-byok here is deliberate on that reading: it genuinely satisfies
+// the enforceable predicate (it never emits `stopped`), and dropping it while
+// retaining claude-sdk — which has its own false-success path via the stall —
+// would re-encode the very mistake this comment exists to correct, namely set
+// membership implying a safety property it does not deliver. That position holds
+// only while #7072 is open and honest; if #7072 is ever closed wontfix, revisit
+// byok's membership rather than leaving this comment to rot.
+const ARCHITECT_ELIGIBLE_PROVIDERS = new Set(['claude-sdk', 'claude-byok', 'codex'])
+
 // v1: write/implement workers are codex-ONLY. codexSandbox:'workspace-write' is a
 // verified OS jail confining edits to the worktree; acceptEdits/allow rules are
 // path-AGNOSTIC and do NOT confine paths, so sdk/byok can't be safely write-
@@ -175,6 +227,13 @@ export class OrchestrationManager extends EventEmitter {
     const worker = merged.auditWorker || merged.worker
     if (!architect?.provider || !architect?.model) throw new Error('orchestration roles.architect must set { provider, model }')
     if (!worker?.provider || !worker?.model) throw new Error('orchestration roles.worker/auditWorker must set { provider, model }')
+    // NOTE: this runs at createRun only. A future resume path (#6743) will carry
+    // `configSnapshot.roleModels` persisted BEFORE this gate existed, so a
+    // pre-#7036 record could reintroduce a claude-cli architect — re-validate
+    // there too rather than trusting the snapshot.
+    if (!ARCHITECT_ELIGIBLE_PROVIDERS.has(architect.provider)) {
+      throw new Error(`architect provider '${architect.provider}' is not vetted for turn-terminal semantics (use ${[...ARCHITECT_ELIGIBLE_PROVIDERS].join('/')})`)
+    }
     if (!AUDIT_ELIGIBLE_PROVIDERS.has(worker.provider)) {
       throw new Error(`audit worker provider '${worker.provider}' cannot be permission-gated read-only (use ${[...AUDIT_ELIGIBLE_PROVIDERS].join('/')})`)
     }

@@ -45,15 +45,28 @@
  *   following turn. No in-tree provider does that (every emit site listed above is
  *   a single synchronous frame); closing it by construction needs a provider-side
  *   turn id on the event payload.
- * - NOT closed here (#7036): CliSession's synthetic interrupted `result`
- *   (cost:null, load-bearing for clearing the dashboard spinner) is emitted BEFORE
- *   `stopped`, so a claude-cli turn settles as a SUCCESS on it and never reaches
- *   the `stopped` case. The trailing `stopped` no longer harms the next queued turn,
- *   but the interrupted turn itself is still reported as completed. claude-cli is
- *   unreachable through the scheduler (requires capabilities.inProcessPermissions)
- *   and through the orchestration WORKER roles (AUDIT/IMPLEMENT_ELIGIBLE_PROVIDERS
- *   = claude-sdk/claude-byok/codex); the orchestration ARCHITECT role is not
- *   provider-restricted, which is what #7036 closes.
+ * - PARTLY closed (#7036) — be precise about which half.
+ *   CliSession emits its synthetic interrupted `result` (cost:null, load-bearing
+ *   for clearing the dashboard spinner) BEFORE `stopped`. Two harms follow: the
+ *   turn settles as a SUCCESS on the `result`, and (since #7033) the trailing
+ *   `stopped` lands on the NEXT queued turn and kills it.
+ *
+ *   The QUEUED-TURN KILL is now closed by construction: only claude-cli emits
+ *   `result` then `stopped` for one interrupt, and claude-cli cannot enter
+ *   TurnDriver by ANY route — the scheduler requires
+ *   capabilities.inProcessPermissions (cli-session sets it false), the
+ *   orchestration WORKER roles are gated on AUDIT/IMPLEMENT_ELIGIBLE_PROVIDERS,
+ *   and the ARCHITECT role is now gated on ARCHITECT_ELIGIBLE_PROVIDERS.
+ *
+ *   The FALSE SUCCESS is NOT closed, and eligibility does not imply immunity:
+ *   claude-byok can fall through to a normal `result` when an interrupt lands in
+ *   the tool phase, and claude-sdk's stream-stall path emits `result` then
+ *   `error` (this driver settles on the `result`; the epoch guard drops the
+ *   `error`). Codex app-server depends on what the binary answers to
+ *   `turn/interrupt`, which is unverified here. Closing that needs the
+ *   provider-side `interrupted: true` flag so a terminal-looking result can be
+ *   marked terminal-but-NOT-successful — a cross-provider wire change, not
+ *   something a provider allowlist can express.
  * - Watchdog: on timeout, interrupt() the session and reject TURN_TIMEOUT.
  * - `session_destroyed` mid-turn → SESSION_GONE.
  */
