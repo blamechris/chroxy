@@ -92,8 +92,8 @@ split the synthesized map" note still applies to whichever future PR adds the ov
 
 | Provider | respondToPermission | setPermissionRules | v1 roles |
 |---|---|---|---|
-| claude-sdk | ✓ | ✓ | architect + all workers |
-| claude-byok | ✓ | ✓ | architect + all workers |
+| claude-sdk | ✓ | ✓ | architect + audit workers (implement is codex-only, #6735) |
+| claude-byok | ✓ | ✓ | architect + audit workers (implement is codex-only, #6735) |
 | codex (app-server) | ✓ | ✗ — use per-session `codexSandbox: 'read-only'` (#6690, landed 2026-07-16) | architect + all workers |
 | claude-cli | ✗ (HTTP hook only) | ✗ | excluded v1 — now enforced (#7036) |
 | gemini | ✗ (no permission surface) | ✗ | excluded v1 |
@@ -101,6 +101,9 @@ split the synthesized map" note still applies to whichever future PR adds the ov
 
 Notes: `reserveSessions` does not exist in SessionManager — the engine scheduler implements its
 own headroom under `maxSessions` (default 5, tight; config validation warns). One run at a time
+in v1. `#6690` landed after the engine doc was written and supersedes its "codex sandbox opt"
+gap: `createSession({codexSandbox: 'read-only'})` is the audit-worker posture for codex.
+
 **Enforcement (#7036).** The `v1 roles` column is no longer advisory for the
 architect. `orchestration-manager._resolveRoles` validates `architect.provider`
 against `ARCHITECT_ELIGIBLE_PROVIDERS` (`claude-sdk` / `claude-byok` / `codex`),
@@ -116,6 +119,3 @@ interrupted turn as complete — `claude-byok` can fall through to a normal
 `result` when an interrupt lands in its tool phase, and `claude-sdk`'s
 stream-stall path settles a turn the same way. That needs a provider-side
 `interrupted: true` signal on the wire, not a provider allowlist.
-
-in v1. `#6690` landed after the engine doc was written and supersedes its "codex sandbox opt"
-gap: `createSession({codexSandbox: 'read-only'})` is the audit-worker posture for codex.

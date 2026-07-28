@@ -83,8 +83,11 @@ const AUDIT_ELIGIBLE_PROVIDERS = new Set(['claude-sdk', 'claude-byok', 'codex'])
 //     * claude-sdk: a stream STALL emits a synthetic `result` then `error`;
 //       TurnDriver settles on the `result` and the trailing `error` is dropped by
 //       the epoch guard.
-//     * codex app-server: safe only if the binary answers `turn/interrupt` with an
-//       `error` notification rather than `turn/completed` — unverified in-repo.
+//     * codex app-server: safe if the binary's answer to `turn/interrupt` routes
+//       to `_failTurn` (which emits `stopped`) rather than to `turn/completed`.
+//       Client exit and the result-timeout also reach `_failTurn`, so an `error`
+//       notification is sufficient but not necessary — which of these the real
+//       binary actually does is unverified in-repo (#7072).
 //   Closing that needs the provider-side `interrupted: true` flag the turn-driver
 //   doc-block names, so a terminal-looking result can be marked
 //   terminal-but-not-successful. Tracked separately; it is a cross-provider wire
@@ -92,6 +95,14 @@ const AUDIT_ELIGIBLE_PROVIDERS = new Set(['claude-sdk', 'claude-byok', 'codex'])
 //
 // So this set means "vetted to not kill the NEXT turn", not "cannot report a
 // truncated turn as complete". Anything outside it is unvetted for either.
+//
+// Keeping claude-byok here is deliberate on that reading: it genuinely satisfies
+// the enforceable predicate (it never emits `stopped`), and dropping it while
+// retaining claude-sdk — which has its own false-success path via the stall —
+// would re-encode the very mistake this comment exists to correct, namely set
+// membership implying a safety property it does not deliver. That position holds
+// only while #7072 is open and honest; if #7072 is ever closed wontfix, revisit
+// byok's membership rather than leaving this comment to rot.
 const ARCHITECT_ELIGIBLE_PROVIDERS = new Set(['claude-sdk', 'claude-byok', 'codex'])
 
 // v1: write/implement workers are codex-ONLY. codexSandbox:'workspace-write' is a
