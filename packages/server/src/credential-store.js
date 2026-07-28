@@ -48,7 +48,7 @@ import { randomBytes } from 'crypto'
 import { maskApiKey } from './byok-credentials.js'
 import * as realKeychain from './keychain.js'
 import { createLogger } from './logger.js'
-import { fsyncForDurability } from './platform.js'
+import { fsyncForDurability, confirmRenameDurable } from './platform.js'
 import {
   CRED_KEY_SERVICE,
   isEncryptedEnvelope,
@@ -450,23 +450,13 @@ function writeStoreAtomically(target, nextObj, { durable = false } = {}) {
     }
     // #6964: the rename is a directory-metadata change of its own — fsync the
     // containing directory so the new entry survives a power loss too. POSIX only.
-    if (durable && process.platform !== 'win32') {
-      try {
-        _durabilityFsync(dirname(target), { isDir: true })
-      } catch (err) {
-        // POST-RENAME: the new value is already live and its bytes are already
-        // fsynced. Only the durability of the new directory ENTRY is unproven, so
-        // this is NOT a failed write — see the doc-block above. Report it as a
-        // distinct outcome instead of throwing, so the caller keeps its cache in
-        // step with disk while still surfacing the fsync error.
-        durabilityUnconfirmed = err?.message || String(err)
-        _log.error(
-          `credentials: the new value is live at ${target} but its directory entry could not be ` +
-          `fsynced (${durabilityUnconfirmed}) — a power loss could roll the rename back. ` +
-          `The value IS in effect; treat its durability as unconfirmed.`,
-        )
-      }
-    }
+    //
+    // POST-RENAME: the new value is already live and its bytes are already
+    // fsynced, so a failure here is NOT a failed write — it is reported as a
+    // distinct outcome rather than thrown, keeping the caller's cache in step
+    // with disk while still surfacing the error. That verdict is #7054's shared
+    // implementation; only the injected seam is local.
+    ;({ durabilityUnconfirmed } = _confirmDirDurability(target, durable))
   } finally {
     if (!renamed && existsSync(tmp)) {
       try { unlinkSync(tmp) } catch { /* */ }
@@ -649,19 +639,16 @@ export function setStoredField(field, rawValue, { validate, durable = false } = 
  * @returns {{ durabilityUnconfirmed: string | null }}
  */
 function _confirmDirDurability(target, durable) {
-  if (!durable || process.platform === 'win32') return { durabilityUnconfirmed: null }
-  try {
-    _durabilityFsync(dirname(target), { isDir: true })
-    return { durabilityUnconfirmed: null }
-  } catch (err) {
-    const durabilityUnconfirmed = err?.message || String(err)
-    _log.error(
-      `credentials: the directory entry for ${target} could not be fsynced ` +
-      `(${durabilityUnconfirmed}) — a power loss could roll the removal back and restore the ` +
-      `cleared value. The value IS gone; treat the removal's durability as unconfirmed.`,
-    )
-    return { durabilityUnconfirmed }
-  }
+  // #7054: the VERDICT (report, never throw) is now the shared implementation in
+  // platform.js — this policy drifted across three copies, and #7067 was the bug
+  // that drift produced. Only the injected SEAM stays local: credential-store's
+  // hook replaces `fsyncForDurability` wholesale so its tests can assert ORDERING
+  // (target, isDir, and whether the file still existed at fsync time), which a
+  // raw fd-level hook cannot express.
+  return confirmRenameDurable(target, {
+    durable,
+    fsync: (t, opts) => _durabilityFsync(t, opts),
+  })
 }
 
 /**

@@ -28,7 +28,7 @@ import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { lookup as dnsLookup } from 'node:dns/promises'
-import { fsyncForDurability } from './platform.js'
+import { fsyncForDurability, confirmRenameDurable } from './platform.js'
 
 /**
  * Defensive upper bound on the size of `~/.claude.json`. Today the file is
@@ -1064,9 +1064,16 @@ export function describeConfigModeSecretWarning({ filePath, mode, entry } = {}) 
  * "best effort" — a refusal must not fail session start — catch and log; callers
  * that owe the user an answer surface the error.
  *
+ * #7054: the post-rename directory fsync no longer THROWS. The rename has
+ * already published the file, so a dir-fsync failure means the write LANDED and
+ * only its directory entry's durability is unproven — throwing reported a landed
+ * write as failed (#7067). It is returned instead; callers on a
+ * capability-REDUCTION path propagate it (see `removeMcpServerFromConfig`).
+ *
  * @param {string} filePath
  * @param {object} value — the full config object to serialize
  * @param {{ mode: number|null }} opts — `null` mode = new file, use 0600
+ * @returns {{ durabilityUnconfirmed: string | null }}
  */
 export function writeClaudeConfigAtomic(filePath, value, { mode }) {
   const resolved = resolveClaudeConfigWritePath(filePath)
@@ -1106,7 +1113,16 @@ export function writeClaudeConfigAtomic(filePath, value, { mode }) {
     throw err
   }
   // Make the rename itself durable, not just the bytes it points at.
-  fsyncForDurability(dirname(destPath), { isDir: true })
+  //
+  // #7054/#7067: this used to be an UNWRAPPED call, so a post-rename
+  // directory-fsync failure THREW — after the rename had already published the
+  // file. The write succeeded; only its directory entry's durability was
+  // unproven. Both callers were harmed by that lie: `ensureCwdTrusted` treats a
+  // throw as "skip the pre-write", so the user got claude's trust dialog for a
+  // trust write that had actually landed; the MCP add/remove paths reported a
+  // failure for a config change that was on disk. Shared verdict now — report,
+  // never throw — via the one implementation in platform.js.
+  return confirmRenameDurable(destPath, { durable: true })
 }
 
 /**
@@ -1330,6 +1346,11 @@ export function removeMcpServerFromConfig({ name, scope = 'user', cwd, configPat
   }
 
   delete block[validName.name]
-  writeClaudeConfigAtomic(configPath, raw, { mode: read.mode })
-  return { ok: true, found: true, scope }
+  const { durabilityUnconfirmed } = writeClaudeConfigAtomic(configPath, raw, { mode: read.mode }) ?? {}
+  // #7054/#7068: REMOVE is the load-bearing durable case — this write is durable
+  // precisely so a capability REDUCTION cannot silently reappear after a power
+  // loss. Dropping the caveat here would sever the only caller-visible signal on
+  // the one path that exists to carry it, which is the same false-green #7068
+  // had to undo on the token revoke. Propagate rather than swallow.
+  return { ok: true, found: true, scope, ...(durabilityUnconfirmed ? { durabilityUnconfirmed } : {}) }
 }
