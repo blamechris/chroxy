@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as credStore from '../src/credential-store.js'
 import { githubWebhookHandlers } from '../src/handlers/github-webhook-handlers.js'
+import { credentialHandlers } from '../src/handlers/credential-handlers.js'
 import { WEBHOOK_SECRET_FIELD } from '../src/github-webhook.js'
 import { nsCtx } from './test-helpers.js'
 
@@ -483,5 +484,160 @@ describe('credential-store durable-write seam (#6964)', () => {
       chmodSync(credDir, 0o700)
     }
     assert.equal(credStore.getStoredCredential('ANTHROPIC_API_KEY'), 'sk-ant-still-here-0001')
+  })
+
+  // --- #7062: the API-key delete ---------------------------------------------
+  // `deleteStoredCredential` is the sibling of the field clear above and had the
+  // identical non-durable shape: neither limb forced anything to disk. Same
+  // threat model — an operator deletes a provider key precisely because they
+  // believe it leaked, and a delete that is acked but still in the OS writeback
+  // window can bring the key back on the next start after a power loss.
+
+  it('#7062: does NOT fsync on an ordinary (non-durable) credential delete', () => {
+    credStore.setStoredCredential('ANTHROPIC_API_KEY', 'sk-ant-ordinary-0001')
+    credStore.setStoredCredential('OPENAI_API_KEY', 'sk-keep-me-0001')
+    calls = []
+    credStore.deleteStoredCredential('ANTHROPIC_API_KEY')
+    assert.equal(credStore.getStoredCredential('ANTHROPIC_API_KEY'), null)
+    assert.deepEqual(calls, [], 'a default credential delete must add no fsync to the write path')
+  })
+
+  it('#7062: durable credential delete (siblings survive) fsyncs the temp file BEFORE the rename and the directory AFTER', () => {
+    credStore.setStoredCredential('ANTHROPIC_API_KEY', 'sk-ant-durable-0001')
+    credStore.setStoredCredential('OPENAI_API_KEY', 'sk-keep-me-0001')
+    calls = []
+
+    credStore.deleteStoredCredential('ANTHROPIC_API_KEY', { durable: true })
+
+    assert.equal(credStore.getStoredCredential('ANTHROPIC_API_KEY'), null, 'the key is gone')
+    assert.equal(credStore.getStoredCredential('OPENAI_API_KEY'), 'sk-keep-me-0001', 'siblings survive')
+
+    assert.ok(calls.length >= 1, 'durable delete must fsync the temp file')
+    const [fileCall] = calls
+    assert.equal(fileCall.isDir, false, 'first fsync is the temp FILE')
+    assert.equal(fileCall.targetExists, true, 'the live file still exists pre-rename on a rewrite delete')
+
+    if (IS_WINDOWS) {
+      assert.equal(calls.length, 1, 'Windows has no directory fsync')
+      return
+    }
+    assert.equal(calls.length, 2, 'POSIX durable rewrite-delete = temp-file fsync + directory fsync')
+    assert.equal(calls[1].isDir, true, 'second fsync is the containing DIRECTORY')
+    assert.equal(calls[1].target, credDir)
+  })
+
+  it('#7062: durable delete of the LAST credential unlinks the file and fsyncs the directory AFTER the unlink', () => {
+    if (IS_WINDOWS) return
+    credStore.setStoredCredential('ANTHROPIC_API_KEY', 'sk-ant-last-key-0001')
+    calls = []
+
+    credStore.deleteStoredCredential('ANTHROPIC_API_KEY', { durable: true })
+
+    assert.equal(existsSync(credFile), false, 'the file is removed when it would be left empty')
+    assert.equal(calls.length, 1, 'an unlink has no temp file — only the containing directory is fsynced')
+    assert.equal(calls[0].isDir, true, 'the unlink limb must fsync the DIRECTORY, not a file')
+    assert.equal(calls[0].target, credDir)
+    assert.equal(
+      calls[0].targetExists, false,
+      'the directory fsync must happen AFTER the unlink — otherwise it proves nothing about the removal',
+    )
+  })
+
+  it('#7062: a directory-fsync failure on the credential UNLINK limb does NOT throw — the key is already gone', () => {
+    if (IS_WINDOWS) return
+    credStore.setStoredCredential('ANTHROPIC_API_KEY', 'sk-ant-last-key-0001')
+    calls = []
+    credStore._setCredentialDurabilityForTests(throwOnDirFsync(calls))
+
+    let outcome
+    assert.doesNotThrow(() => {
+      outcome = credStore.deleteStoredCredential('ANTHROPIC_API_KEY', { durable: true })
+    }, 'the unlink already removed the key — reporting a failed delete would be factually wrong')
+    credStore._setCredentialDurabilityForTests(null)
+
+    assert.equal(existsSync(credFile), false, 'the key IS gone from the live filesystem')
+    assert.equal(
+      typeof outcome?.durabilityUnconfirmed, 'string',
+      'the delete must report unconfirmed durability rather than silently acking it',
+    )
+    assert.match(outcome.durabilityUnconfirmed, /EIO|simulated directory fsync/)
+  })
+
+  it('#7062: a durable credential delete of an ALREADY-absent key still confirms the directory', () => {
+    if (IS_WINDOWS) return
+    credStore.setStoredCredential('OPENAI_API_KEY', 'sk-sibling-0001')
+    calls = []
+    // The retry after an unconfirmed delete lands exactly here: the key is
+    // already gone, and the outstanding doubt is the directory entry.
+    const outcome = credStore.deleteStoredCredential('ANTHROPIC_API_KEY', { durable: true })
+    assert.equal(outcome?.durabilityUnconfirmed, null)
+    assert.equal(calls.length, 1, 'the already-absent durable limb must fsync the directory too')
+    assert.equal(calls[0].isDir, true)
+    assert.equal(calls[0].target, credDir)
+  })
+
+  it('#7062: the delete_credential handler opts into durability and surfaces an unconfirmed delete', () => {
+    if (IS_WINDOWS) return
+    credStore.setStoredCredential('ANTHROPIC_API_KEY', 'sk-ant-to-be-deleted-01')
+    const ws = makeWs()
+    const ctx = makeCtx()
+    calls = []
+    credStore._setCredentialDurabilityForTests(throwOnDirFsync(calls))
+
+    credentialHandlers.delete_credential(ws, {}, { requestId: 'req-del-1', key: 'ANTHROPIC_API_KEY' }, ctx)
+    credStore._setCredentialDurabilityForTests(null)
+
+    assert.ok(calls.some((c) => c.isDir), 'the delete path must have opted into the durable write')
+    assert.equal(credStore.getStoredCredential('ANTHROPIC_API_KEY'), null, 'the key is deleted')
+
+    const replies = allReplies(ws, ctx)
+    const unconfirmed = replies.find((r) => r?.code === 'CREDENTIAL_DELETE_DURABILITY_UNCONFIRMED')
+    assert.ok(unconfirmed, `expected a durability-unconfirmed error frame, got ${JSON.stringify(replies.map((r) => r?.type || r?.code))}`)
+    assert.equal(
+      unconfirmed.requestId ?? null, null,
+      'the durability warning must be requestId-LESS so a client cannot read it as the delete\'s verdict',
+    )
+  })
+
+  // --- review follow-ups on #7062 --------------------------------------------
+  // Both added because the mutation that removes the guard left the suite green:
+  // an unpinned opt-in is how #7062 happened in the first place (the durable fix
+  // landed on one sibling and skipped the other), so each opt-in gets its own test.
+
+  it('#7062: the BYOK CLEAR handler also opts into durability and surfaces an unconfirmed clear', () => {
+    if (IS_WINDOWS) return
+    credStore.setStoredCredential('ANTHROPIC_API_KEY', 'sk-ant-byok-clear-0001')
+    const ws = makeWs()
+    const ctx = makeCtx()
+    calls = []
+    credStore._setCredentialDurabilityForTests(throwOnDirFsync(calls))
+
+    credentialHandlers.byok_clear_credentials(ws, {}, { requestId: 'req-byok-clear-1' }, ctx)
+    credStore._setCredentialDurabilityForTests(null)
+
+    assert.ok(calls.some((c) => c.isDir), 'the BYOK clear path must have opted into the durable write')
+    assert.equal(credStore.getStoredCredential('ANTHROPIC_API_KEY'), null, 'the key is cleared')
+
+    const replies = allReplies(ws, ctx)
+    const unconfirmed = replies.find((r) => r?.code === 'CREDENTIAL_DELETE_DURABILITY_UNCONFIRMED')
+    assert.ok(unconfirmed, `expected a durability-unconfirmed error frame, got ${JSON.stringify(replies.map((r) => r?.type || r?.code))}`)
+    assert.equal(
+      unconfirmed.requestId ?? null, null,
+      'the durability warning must be requestId-LESS so a client cannot read it as the clear\'s verdict',
+    )
+  })
+
+  it('#7062: a durable credential delete with NO store file at all still confirms the directory', () => {
+    if (IS_WINDOWS) return
+    // The !fileExists limb. A retry after an unconfirmed delete that unlinked the
+    // last key lands exactly here, and the outstanding doubt is still the
+    // directory entry — acking for free would turn "unconfirmed" into false comfort.
+    assert.equal(existsSync(credFile), false, 'precondition: no credentials file')
+    calls = []
+    const outcome = credStore.deleteStoredCredential('ANTHROPIC_API_KEY', { durable: true })
+    assert.equal(outcome?.durabilityUnconfirmed, null)
+    assert.equal(calls.length, 1, 'the !fileExists durable limb must fsync the directory too')
+    assert.equal(calls[0].isDir, true)
+    assert.equal(calls[0].target, credDir)
   })
 })

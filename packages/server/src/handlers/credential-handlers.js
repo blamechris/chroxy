@@ -116,18 +116,41 @@ function handleByokSetCredentials(ws, client, msg, ctx) {
 
 function handleByokClearCredentials(ws, client, msg, ctx) {
   if (rejectCredentialWriteIfBound(ws, client, msg, ctx)) return
+  let outcome
   try {
     // Remove only the Anthropic key from the canonical store — siblings (and
     // the encrypted envelope) survive; the file is unlinked only when empty.
-    deleteStoredCredential('ANTHROPIC_API_KEY')
+    //
+    // #7062: durable. An operator clears a BYOK key precisely because they
+    // believe it leaked — a clear that is acked but still in the OS writeback
+    // window can restore the leaked key on the next start after a power loss.
+    outcome = deleteStoredCredential('ANTHROPIC_API_KEY', { durable: true })
   } catch (err) {
     sendError(ws, msg?.requestId, 'CREDENTIALS_CLEAR_FAILED', err?.message || 'clear failed', undefined, ctx)
     return
   }
+  // The reply is the success status: the key IS cleared. Reporting a failure for
+  // a clear that landed would send the operator to re-clear an already-cleared key.
   const status = getAnthropicApiKeyStatus()
   ctx.transport.send(ws, { type: 'byok_credentials_status', requestId: msg?.requestId, ...status })
   if (typeof ctx.transport.broadcast === 'function') {
     ctx.transport.broadcast({ type: 'byok_credentials_status', ...status })
+  }
+  if (outcome?.durabilityUnconfirmed) {
+    // ...but the operator still learns the fsync failed. Deliberately requestId-LESS,
+    // mirroring the webhook clear: the status above is this request's reply, and a
+    // client correlating an error to its in-flight requestId must not read this as
+    // the clear's verdict.
+    sendError(
+      ws,
+      null,
+      'CREDENTIAL_DELETE_DURABILITY_UNCONFIRMED',
+      'The API key is cleared, but the filesystem could not confirm the removal is durable ' +
+      `(${outcome.durabilityUnconfirmed}) — a power loss could restore the cleared key. ` +
+      'Resolve the storage error, then re-check the stored credentials after the next restart.',
+      undefined,
+      ctx,
+    )
   }
 }
 
@@ -201,13 +224,31 @@ function handleDeleteCredential(ws, client, msg, ctx) {
     sendError(ws, msg?.requestId, 'INVALID_REQUEST', `Unknown credential key: ${key}`, undefined, ctx)
     return
   }
+  let outcome
   try {
-    deleteStoredCredential(key)
+    // #7062: durable — see handleByokClearCredentials for the reasoning. A
+    // deleted provider key that comes back after a power loss is exactly the
+    // failure the operator was trying to prevent.
+    outcome = deleteStoredCredential(key, { durable: true })
   } catch (err) {
     sendError(ws, msg?.requestId, 'CREDENTIAL_CLEAR_FAILED', err?.message || 'clear failed', undefined, ctx)
     return
   }
+  // The reply is the success status: the key IS deleted.
   _sendCredentialsStatus(ctx, ws, msg?.requestId)
+  if (outcome?.durabilityUnconfirmed) {
+    // requestId-LESS, for the same reason as the clear path above.
+    sendError(
+      ws,
+      null,
+      'CREDENTIAL_DELETE_DURABILITY_UNCONFIRMED',
+      `The ${key} credential is deleted, but the filesystem could not confirm the removal is durable ` +
+      `(${outcome.durabilityUnconfirmed}) — a power loss could restore the deleted key. ` +
+      'Resolve the storage error, then re-check the stored credentials after the next restart.',
+      undefined,
+      ctx,
+    )
+  }
 }
 
 async function handleTestCredential(ws, client, msg, ctx) {

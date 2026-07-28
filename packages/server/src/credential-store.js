@@ -781,13 +781,28 @@ export function setStoredCredential(key, rawValue) {
  * be performed would leave the credential on disk while the caller believes it
  * is gone. Callers surface this as a clear/delete failure.
  *
- * Durability: this path is NOT durable-capable yet — see #7062. Its sibling
- * `deleteStoredField` takes `{ durable }`; do not assume parity.
+ * #7062 — `durable` opts this path into the same guarantee `deleteStoredField`
+ * got in #7056, and for the same reason: an operator deletes a provider API key
+ * precisely because they believe it leaked, so a delete that is acked but still
+ * sitting in the OS writeback window can restore the leaked key on the next
+ * start after a power loss.
+ *
+ * The two limbs need different fsyncs:
+ *   - REWRITE (siblings survive) — the ordinary atomic temp-file + rename, so it
+ *     delegates to `writeStoreAtomically({ durable })` unchanged.
+ *   - UNLINK (this was the last key) — there is no new file to fsync. The removal
+ *     lives entirely in the containing DIRECTORY's entry, so only that directory
+ *     is fsynced, and only AFTER the unlink. A failed fsync here is NOT a failed
+ *     delete: the key is already gone from the live filesystem, so it is reported
+ *     as `durabilityUnconfirmed` rather than thrown (throwing would send the
+ *     operator to re-delete a key that is already deleted).
  *
  * @param {string} key
+ * @param {{ durable?: boolean }} [opts]
+ * @returns {{ durabilityUnconfirmed: string | null }}
  * @throws {Error} when the credentials file exists but cannot be read
  */
-export function deleteStoredCredential(key) {
+export function deleteStoredCredential(key, { durable = false } = {}) {
   if (!isKnownCredentialKey(key)) throw new Error(`Unknown credential key: ${key}`)
   const target = credentialsFilePath()
   const { data, fileExists, error } = readStore()
@@ -799,10 +814,16 @@ export function deleteStoredCredential(key) {
   // credential was still on disk. ENOENT keeps `error: null`, so a genuinely
   // absent file still no-ops below.
   if (error) throw new Error(error)
-  if (!fileExists) return
+  // A durable no-op still confirms. The retry after an unconfirmed delete lands
+  // on exactly these two branches (an unlinked file -> !fileExists, a rewritten
+  // one -> the key already absent), and in both the outstanding doubt is the
+  // containing DIRECTORY's entry. Acking for free here would convert
+  // "unconfirmed" into false comfort.
+  if (!fileExists) return _confirmDirDurability(target, durable)
 
   const legacyField = LEGACY_FIELD_BY_KEY[key]
-  if (!(key in data) && !(legacyField && legacyField in data)) return // nothing to remove
+  // nothing to remove
+  if (!(key in data) && !(legacyField && legacyField in data)) return _confirmDirDurability(target, durable)
 
   const next = { ...data }
   delete next[key]
@@ -811,10 +832,10 @@ export function deleteStoredCredential(key) {
   // If the store is now empty, remove the file entirely.
   if (Object.keys(next).length === 0) {
     try { unlinkSync(target) } catch (err) { if (err.code !== 'ENOENT') throw err }
-    return
+    return _confirmDirDurability(target, durable)
   }
 
-  writeStoreAtomically(target, next)
+  return writeStoreAtomically(target, next, { durable })
 }
 
 /**
