@@ -369,6 +369,43 @@ test('rejects an ineligible worker provider at createRun', () => {
   }
 })
 
+test('#7036: rejects an ineligible ARCHITECT provider at createRun', () => {
+  // claude-cli was accepted here because only the worker was checked. It is the
+  // one TurnDriver consumer that is not excluded by construction elsewhere, and
+  // it emits a SYNTHETIC turn-terminal `result` on an intentional stop
+  // (cli-session._emitInterruptedTurnResult, before `stopped`). TurnDriver cannot
+  // tell that from a real result, so an interrupted architect turn resolves as a
+  // COMPLETED one and the decision parser reads a truncated plan as authoritative
+  // — and since #7033 the trailing `stopped` then lands on the next queued turn
+  // and kills it. Committee reviews serialise on the architect session, so a
+  // queued turn there is the normal case.
+  const { mgr, cleanup } = makeHarness(happyDecider, {
+    roles: { architect: { provider: 'claude-cli', model: 'sonnet' }, auditWorker: ROLES.auditWorker },
+  })
+  try {
+    assert.throws(
+      () => mgr.createRun({ goal: 'x', cwd: '/repo' }),
+      /architect provider 'claude-cli'/,
+      'an unvetted architect provider must be rejected by construction, not merely unlikely',
+    )
+  } finally {
+    cleanup()
+  }
+})
+
+test('#7036: still accepts every vetted architect provider', () => {
+  for (const provider of ['claude-sdk', 'claude-byok', 'codex']) {
+    const { mgr, cleanup } = makeHarness(happyDecider, {
+      roles: { architect: { provider, model: 'm' }, auditWorker: ROLES.auditWorker },
+    })
+    try {
+      assert.doesNotThrow(() => mgr.createRun({ goal: 'x', cwd: '/repo' }), `${provider} must stay eligible`)
+    } finally {
+      cleanup()
+    }
+  }
+})
+
 test('rejects a cwd that fails validation', () => {
   const dir = mkdtempSync(join(tmpdir(), 'orch-cwd-'))
   const sm = new FakeSM(happyDecider)

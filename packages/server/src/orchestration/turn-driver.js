@@ -45,15 +45,20 @@
  *   following turn. No in-tree provider does that (every emit site listed above is
  *   a single synchronous frame); closing it by construction needs a provider-side
  *   turn id on the event payload.
- * - NOT closed here (#7036): CliSession's synthetic interrupted `result`
+ * - CLOSED by construction (#7036): CliSession's synthetic interrupted `result`
  *   (cost:null, load-bearing for clearing the dashboard spinner) is emitted BEFORE
- *   `stopped`, so a claude-cli turn settles as a SUCCESS on it and never reaches
- *   the `stopped` case. The trailing `stopped` no longer harms the next queued turn,
- *   but the interrupted turn itself is still reported as completed. claude-cli is
- *   unreachable through the scheduler (requires capabilities.inProcessPermissions)
- *   and through the orchestration WORKER roles (AUDIT/IMPLEMENT_ELIGIBLE_PROVIDERS
- *   = claude-sdk/claude-byok/codex); the orchestration ARCHITECT role is not
- *   provider-restricted, which is what #7036 closes.
+ *   `stopped`, so a claude-cli turn would settle as a SUCCESS on it and never reach
+ *   the `stopped` case — reporting an interrupted turn as completed, and (since
+ *   #7033) letting the trailing `stopped` land on the next queued turn.
+ *   That is now unreachable rather than merely unlikely: claude-cli cannot enter
+ *   TurnDriver by ANY route. The scheduler requires
+ *   capabilities.inProcessPermissions (cli-session sets it false); the
+ *   orchestration WORKER roles are gated on AUDIT/IMPLEMENT_ELIGIBLE_PROVIDERS;
+ *   and the ARCHITECT role — the last hole — is now gated on
+ *   ARCHITECT_ELIGIBLE_PROVIDERS (orchestration-manager.js). Should a provider
+ *   with the same emit shape ever need admitting, the alternative remains a
+ *   provider-side `interrupted: true` flag so a synthetic result is
+ *   terminal-but-not-successful; that touches the client wire.
  * - Watchdog: on timeout, interrupt() the session and reject TURN_TIMEOUT.
  * - `session_destroyed` mid-turn → SESSION_GONE.
  */

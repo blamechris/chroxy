@@ -53,6 +53,28 @@ const DEFAULTS = {
 // design matrix). audit workers must be one of these.
 const AUDIT_ELIGIBLE_PROVIDERS = new Set(['claude-sdk', 'claude-byok', 'codex'])
 
+// #7036: providers vetted for the ARCHITECT role. The members coincide with
+// AUDIT_ELIGIBLE_PROVIDERS today but the REASON is different, so this is named
+// separately rather than aliased — the two can diverge without one silently
+// re-opening the other's hole.
+//
+// The architect drives TurnDriver, which treats any `result` as turn-terminal.
+// `claude-cli` emits a SYNTHETIC result on an intentional stop
+// (`cli-session._emitInterruptedTurnResult`, fired BEFORE `stopped`), and
+// TurnDriver cannot distinguish it from a real one. Two consequences: an
+// interrupted architect turn resolves as COMPLETED, so the decision parser reads
+// a truncated plan/review as authoritative; and since #7033 the trailing
+// `stopped` lands on the NEXT queued turn and rejects it TURN_STOPPED — and
+// committee reviews serialise on the architect session, so a queued turn there
+// is the normal case, not an edge case.
+//
+// The listed three are safe from that specific hazard: codex/byok never emit a
+// synthetic result, and claude-sdk only does so on a stream STALL (followed by
+// `error`, not `stopped`). Anything outside this set is simply unvetted for
+// TurnDriver's turn-terminal semantics — the point is to make the failure
+// unreachable by construction rather than unreachable by hope.
+const ARCHITECT_ELIGIBLE_PROVIDERS = new Set(['claude-sdk', 'claude-byok', 'codex'])
+
 // v1: write/implement workers are codex-ONLY. codexSandbox:'workspace-write' is a
 // verified OS jail confining edits to the worktree; acceptEdits/allow rules are
 // path-AGNOSTIC and do NOT confine paths, so sdk/byok can't be safely write-
@@ -175,6 +197,9 @@ export class OrchestrationManager extends EventEmitter {
     const worker = merged.auditWorker || merged.worker
     if (!architect?.provider || !architect?.model) throw new Error('orchestration roles.architect must set { provider, model }')
     if (!worker?.provider || !worker?.model) throw new Error('orchestration roles.worker/auditWorker must set { provider, model }')
+    if (!ARCHITECT_ELIGIBLE_PROVIDERS.has(architect.provider)) {
+      throw new Error(`architect provider '${architect.provider}' is not vetted for turn-terminal semantics (use ${[...ARCHITECT_ELIGIBLE_PROVIDERS].join('/')})`)
+    }
     if (!AUDIT_ELIGIBLE_PROVIDERS.has(worker.provider)) {
       throw new Error(`audit worker provider '${worker.provider}' cannot be permission-gated read-only (use ${[...AUDIT_ELIGIBLE_PROVIDERS].join('/')})`)
     }
