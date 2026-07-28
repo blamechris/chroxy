@@ -598,4 +598,46 @@ describe('credential-store durable-write seam (#6964)', () => {
       'the durability warning must be requestId-LESS so a client cannot read it as the delete\'s verdict',
     )
   })
+
+  // --- review follow-ups on #7062 --------------------------------------------
+  // Both added because the mutation that removes the guard left the suite green:
+  // an unpinned opt-in is how #7062 happened in the first place (the durable fix
+  // landed on one sibling and skipped the other), so each opt-in gets its own test.
+
+  it('#7062: the BYOK CLEAR handler also opts into durability and surfaces an unconfirmed clear', () => {
+    if (IS_WINDOWS) return
+    credStore.setStoredCredential('ANTHROPIC_API_KEY', 'sk-ant-byok-clear-0001')
+    const ws = makeWs()
+    const ctx = makeCtx()
+    calls = []
+    credStore._setCredentialDurabilityForTests(throwOnDirFsync(calls))
+
+    credentialHandlers.byok_clear_credentials(ws, {}, { requestId: 'req-byok-clear-1' }, ctx)
+    credStore._setCredentialDurabilityForTests(null)
+
+    assert.ok(calls.some((c) => c.isDir), 'the BYOK clear path must have opted into the durable write')
+    assert.equal(credStore.getStoredCredential('ANTHROPIC_API_KEY'), null, 'the key is cleared')
+
+    const replies = allReplies(ws, ctx)
+    const unconfirmed = replies.find((r) => r?.code === 'CREDENTIAL_DELETE_DURABILITY_UNCONFIRMED')
+    assert.ok(unconfirmed, `expected a durability-unconfirmed error frame, got ${JSON.stringify(replies.map((r) => r?.type || r?.code))}`)
+    assert.equal(
+      unconfirmed.requestId ?? null, null,
+      'the durability warning must be requestId-LESS so a client cannot read it as the clear\'s verdict',
+    )
+  })
+
+  it('#7062: a durable credential delete with NO store file at all still confirms the directory', () => {
+    if (IS_WINDOWS) return
+    // The !fileExists limb. A retry after an unconfirmed delete that unlinked the
+    // last key lands exactly here, and the outstanding doubt is still the
+    // directory entry — acking for free would turn "unconfirmed" into false comfort.
+    assert.equal(existsSync(credFile), false, 'precondition: no credentials file')
+    calls = []
+    const outcome = credStore.deleteStoredCredential('ANTHROPIC_API_KEY', { durable: true })
+    assert.equal(outcome?.durabilityUnconfirmed, null)
+    assert.equal(calls.length, 1, 'the !fileExists durable limb must fsync the directory too')
+    assert.equal(calls[0].isDir, true)
+    assert.equal(calls[0].target, credDir)
+  })
 })
