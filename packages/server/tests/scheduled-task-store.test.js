@@ -53,6 +53,138 @@ describe('#6862 ScheduledTaskStore', () => {
   // REJECT rather than clamp, unlike the string fields projectTask truncates:
   // truncating a cron silently CHANGES THE SCHEDULE, which is worse than
   // refusing it.
+  describe('#7050 a load-refused task is preserved, not erased', () => {
+    // load() drops any entry _normalizeStoredTask refuses. _persist() then wrote
+    // only the SURVIVORS, so the next unrelated mutation erased the operator's
+    // named task from disk permanently, with only a daemon-log warn as a trace.
+    const TYPO_EPOCH = 1795000000000000000 // ns-vs-ms typo: past MAX_EPOCH_MS
+
+    const writeMixedRegistry = () => {
+      writeFileSync(filePath, JSON.stringify({
+        version: 1,
+        tasks: [
+          { id: 'good', prompt: 'keep me', cadence: { kind: 'cron', expression: '*/5 * * * *' }, createdAt: 1, updatedAt: 1 },
+          { id: 'typo', prompt: 'operator named task', cadence: { kind: 'once', at: TYPO_EPOCH }, createdAt: 1, updatedAt: 1 },
+        ],
+      }))
+      return newStore(() => 1000).load()
+    }
+
+    const onDiskIds = () => JSON.parse(readFileSync(filePath, 'utf-8')).tasks.map((t) => t.id).sort()
+
+    it('CONTROL: the refused entry really is refused (it is not silently loading)', () => {
+      const store = writeMixedRegistry()
+      assert.deepEqual(store.list().map((t) => t.id), ['good'], 'only the good task loads')
+      assert.deepEqual(onDiskIds(), ['good', 'typo'], 'both are still on disk before any mutation')
+    })
+
+    it('an unrelated mutation does NOT erase the refused entry from disk', () => {
+      const store = writeMixedRegistry()
+      store.add({ prompt: 'unrelated', cadence: { kind: 'cron', expression: '0 9 * * *' } })
+      assert.ok(onDiskIds().includes('typo'), 'the operator\'s unreadable task must survive an unrelated write')
+    })
+
+    it('remove() of a live task also does not erase it', () => {
+      const store = writeMixedRegistry()
+      assert.equal(store.remove('good'), true)
+      assert.deepEqual(onDiskIds(), ['typo'], 'the refused entry is all that is left, and it is still there')
+    })
+
+    it('reports how many stored entries could not be read', () => {
+      const store = writeMixedRegistry()
+      assert.equal(store.unreadableCount(), 1)
+      const [only] = store.listUnreadable()
+      assert.equal(only.id, 'typo', 'the id is surfaced so the panel can name what is missing')
+      assert.match(only.reason, /epoch|representable/i, 'and why')
+    })
+
+    it('the refused entry is NOT served as a live task', () => {
+      const store = writeMixedRegistry()
+      assert.equal(store.get('typo'), null)
+      assert.ok(!store.list().some((t) => t.id === 'typo'))
+    })
+
+    it('round-trips stably: reloading does not duplicate or resurrect it', () => {
+      writeMixedRegistry().add({ prompt: 'x', cadence: { kind: 'cron', expression: '0 9 * * *' } })
+      const reloaded = newStore(() => 1000).load()
+      assert.equal(reloaded.unreadableCount(), 1, 'still exactly one unreadable entry after a round trip')
+      assert.equal(onDiskIds().filter((id) => id === 'typo').length, 1, 'and exactly one copy on disk')
+    })
+
+    it('entries past the store cap are preserved too, not silently dropped and erased', () => {
+      // The over-cap remainder is never even examined by the loader, so before
+      // #7050 it was erased on the next write — valid tasks deleted for losing a
+      // race with a cap.
+      const many = Array.from({ length: 505 }, (_, i) => ({
+        id: `t${i}`, prompt: 'p', cadence: { kind: 'cron', expression: '*/5 * * * *' }, createdAt: 1, updatedAt: 1,
+      }))
+      writeFileSync(filePath, JSON.stringify({ version: 1, tasks: many }))
+      const store = newStore(() => 1000).load()
+
+      assert.equal(store.list().length, 500, 'the cap still bounds what is LOADED')
+      assert.equal(store.unreadableCount(), 5, 'the remainder is preserved rather than dropped')
+
+      store.remove('t0') // any unrelated mutation triggers a persist
+      const onDisk = JSON.parse(readFileSync(filePath, 'utf-8')).tasks.map((t) => t.id)
+      assert.ok(onDisk.includes('t504'), 'an over-cap entry must survive the write')
+      assert.equal(onDisk.length, 504, '505 minus the one actually removed')
+    })
+
+    it('a RELOAD that hits an early return clears preserved entries too (they must not leak forward)', () => {
+      // load() clears _tasks FIRST precisely so every early return below leaves
+      // the store empty. The preserved set must follow the same rule: otherwise a
+      // second load() that hits ENOENT / bad JSON / the version gate keeps the
+      // PREVIOUS load's raw entries, and the next add() writes them back into a
+      // file that no longer contains them — resurrecting deleted records.
+      const store = writeMixedRegistry()
+      assert.equal(store.unreadableCount(), 1, 'precondition: one entry preserved')
+
+      rmSync(filePath) // registry goes away (operator wiped it / fresh machine)
+      store.load()     // early return: ENOENT
+
+      assert.equal(store.unreadableCount(), 0, 'an emptied store must not retain the old preserved entries')
+      store.add({ prompt: 'fresh', cadence: { kind: 'cron', expression: '0 9 * * *' } })
+      const onDisk = JSON.parse(readFileSync(filePath, 'utf-8')).tasks.map((t) => t.id)
+      assert.ok(!onDisk.includes('typo'), `a wiped registry must not resurrect 'typo', got ${JSON.stringify(onDisk)}`)
+    })
+
+    it('remove() with a non-string id does not mass-delete the id-less preserved entries', () => {
+      // Entries with no usable id are preserved as `{ id: null }`, and
+      // listUnreadable() emits those rows publicly — so a caller forwarding one
+      // back as remove(null) must not wipe every one of them and report success.
+      writeFileSync(filePath, JSON.stringify({
+        version: 1,
+        tasks: [
+          { prompt: 'no id at all', cadence: { kind: 'cron', expression: '*/5 * * * *' } },
+          { id: 42, prompt: 'numeric id', cadence: { kind: 'cron', expression: '*/5 * * * *' } },
+        ],
+      }))
+      const store = newStore(() => 1000).load()
+      assert.equal(store.unreadableCount(), 2, 'both are unreadable and id-less')
+      assert.equal(store.remove(null), false, 'a null id must not match the null-id rows')
+      assert.equal(store.remove(''), false)
+      assert.equal(store.unreadableCount(), 2, 'nothing was deleted')
+    })
+
+    it('add() refuses an id that a preserved entry already occupies', () => {
+      // The preserved entry is ON DISK, so minting a live task with the same id
+      // would put two entries with that id in the file.
+      const store = writeMixedRegistry()
+      assert.throws(
+        () => store.add({ id: 'typo', prompt: 'collide', cadence: { kind: 'cron', expression: '0 9 * * *' } }),
+        (err) => err instanceof ScheduledTaskValidationError && err.field === 'id',
+        'a preserved id is taken, not free',
+      )
+    })
+
+    it('an operator can delete an unreadable entry (it must not be undeletable)', () => {
+      const store = writeMixedRegistry()
+      assert.equal(store.remove('typo'), true, 'remove() must reach preserved entries too')
+      assert.equal(store.unreadableCount(), 0)
+      assert.deepEqual(onDiskIds(), ['good'])
+    })
+  })
+
   describe('#7051 cron expression wire cap', () => {
     // Fully enumerated minute/hour/day-of-month lists — 319 chars, and every
     // field is legal, so LENGTH is the only thing that can reject it. The

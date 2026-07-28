@@ -272,6 +272,11 @@ export class ScheduledTaskStore {
     this._now = typeof now === 'function' ? now : Date.now
     // id -> normalized task record
     this._tasks = new Map()
+    // #7050 — raw entries the loader REFUSED, kept verbatim so `_persist()` cannot
+    // erase them. Shape: `{ raw, id, reason }`. These are never served as live
+    // tasks; they exist so an operator's unreadable task survives the next
+    // unrelated mutation instead of being silently deleted from disk.
+    this._unreadable = []
     this._loaded = false
   }
 
@@ -294,6 +299,12 @@ export class ScheduledTaskStore {
     // Reset FIRST — every early return below must leave the store EMPTY, not
     // holding the previous load's (now unbacked) tasks.
     this._tasks.clear()
+    // #7050: reset with `_tasks`, NOT after the early returns below. Every early
+    // return must leave the store EMPTY — a reload that hits ENOENT / bad JSON /
+    // the version gate would otherwise keep the PREVIOUS load's preserved entries
+    // and `_persist()` would write them back into a file that no longer has them,
+    // resurrecting records the operator deleted.
+    this._unreadable = []
     let raw
     try {
       raw = fs.readFileSync(this._filePath, 'utf-8')
@@ -319,16 +330,22 @@ export class ScheduledTaskStore {
     }
     const tasks = parsed.tasks
     if (!Array.isArray(tasks)) return this
-    for (const entry of tasks) {
+    for (const [i, entry] of tasks.entries()) {
       if (this._tasks.size >= MAX_TASKS) {
-        this._log.warn(`Scheduled-tasks file exceeds cap (${MAX_TASKS}) — dropping the rest`)
+        // #7050: the remainder is never even examined, so it would be erased on
+        // the next write. Preserve it verbatim — these are valid tasks losing a
+        // race with a cap, which is the least defensible thing to delete.
+        const rest = tasks.slice(i)
+        this._log.warn(`Scheduled-tasks file exceeds cap (${MAX_TASKS}) — ${rest.length} ${rest.length === 1 ? 'entry' : 'entries'} not loaded (preserved on disk)`)
+        for (const skipped of rest) this._preserveUnreadable(skipped, `store cap (${MAX_TASKS}) reached`)
         break
       }
       let record
       try {
         record = this._normalizeStoredTask(entry)
       } catch (err) {
-        this._log.warn(`Dropping malformed scheduled task on load: ${err.message}`)
+        this._log.warn(`Refusing malformed scheduled task on load (preserved on disk): ${err.message}`)
+        this._preserveUnreadable(entry, err.message)
         continue
       }
       if (this._tasks.has(record.id)) {
@@ -363,7 +380,11 @@ export class ScheduledTaskStore {
         throw new ScheduledTaskValidationError('id must be a non-empty string', 'id')
       }
       id = id.trim()
-      if (this._tasks.has(id)) throw new ScheduledTaskValidationError(`task id ${id} already exists`, 'id')
+      // #7050: preserved (unreadable) ids count as taken. They are on disk, so
+      // reusing one would put two entries with the same id in the file.
+      if (this._tasks.has(id) || this._unreadable.some((u) => u.id === id)) {
+        throw new ScheduledTaskValidationError(`task id ${id} already exists`, 'id')
+      }
     }
 
     const now = this._now()
@@ -439,10 +460,50 @@ export class ScheduledTaskStore {
    * @returns {boolean}
    */
   remove(id) {
-    if (!this._tasks.has(id)) return false
-    this._tasks.delete(id)
+    if (this._tasks.has(id)) {
+      this._tasks.delete(id)
+      this._persist()
+      return true
+    }
+    // #7050: a preserved (unreadable) entry must stay deletable — otherwise
+    // refusing to erase it would trade silent data loss for an undeletable
+    // record the operator has no way to clear.
+    //
+    // Guard the id: preserved entries with no usable id carry `id: null`, so a
+    // `remove(null)` (or any non-string) would match and delete ALL of them at
+    // once and report success. `listUnreadable()` publicly emits those null rows,
+    // so this is reachable the moment a caller forwards one back.
+    if (typeof id !== 'string' || id.length === 0) return false
+    const before = this._unreadable.length
+    this._unreadable = this._unreadable.filter((u) => u.id !== id)
+    if (this._unreadable.length === before) return false
     this._persist()
     return true
+  }
+
+  /**
+   * #7050 — how many stored entries the loader could not read. Non-zero means
+   * `list()` is SHORTER than what is on disk, which the panel should say out
+   * loud rather than rendering a silently short list.
+   * @returns {number}
+   */
+  unreadableCount() {
+    return this._unreadable.length
+  }
+
+  /**
+   * #7050 — the refused entries' ids and reasons (never their raw contents, which
+   * may be any shape). `id` is null when the entry had no usable string id.
+   * @returns {{ id: string|null, reason: string }[]}
+   */
+  listUnreadable() {
+    return this._unreadable.map(({ id, reason }) => ({ id, reason }))
+  }
+
+  /** @private — keep a refused raw entry so `_persist()` cannot erase it (#7050). */
+  _preserveUnreadable(raw, reason) {
+    const id = typeof raw?.id === 'string' && raw.id.trim().length > 0 ? raw.id.trim() : null
+    this._unreadable.push({ raw, id, reason: String(reason) })
   }
 
   /** @private — require a non-empty string prompt. */
@@ -500,7 +561,14 @@ export class ScheduledTaskStore {
     try {
       const dir = dirname(this._filePath)
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
-      const state = { version: STORE_VERSION, tasks: Array.from(this._tasks.values()) }
+      // #7050: the preserved raw entries ride along so an unrelated mutation
+      // cannot erase a task the loader merely could not READ. They are appended
+      // (never re-serialized from a normalized record) so nothing is lost in a
+      // round trip through a shape this version does not understand.
+      const state = {
+        version: STORE_VERSION,
+        tasks: [...this._tasks.values(), ...this._unreadable.map((u) => u.raw)],
+      }
       writeFileRestricted(this._filePath, JSON.stringify(state, null, 2), { tmpSuffix: `.tmp-${process.pid}` })
     } catch (err) {
       // Best-effort: a failed persist leaves the in-memory set intact for this
