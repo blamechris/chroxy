@@ -66,6 +66,20 @@ describe('#6862 ScheduledTaskStore', () => {
       '*',
     ].join(' ')
 
+    const cronOfExactLength = (target) => {
+      // '<minute-list> * * * *' — the tail is 8 chars, so the list carries the
+      // rest. Mixing 1- and 2-digit entries hits any length exactly.
+      const want = target - 8
+      for (let k = 1; k < 400; k++) {
+        for (let j = 0; j <= k; j++) {
+          if (3 * k - j - 1 === want) {
+            return [...Array(k)].map((_, i) => (i < j ? '1' : '59')).join(',') + ' * * * *'
+          }
+        }
+      }
+      throw new Error(`cannot build a cron of length ${target}`)
+    }
+
     it('the fixture is a VALID cron that is merely too long (length is the only defect)', () => {
       assert.ok(LONG_VALID_CRON.length > 256, `fixture must exceed the cap, got ${LONG_VALID_CRON.length}`)
       assert.doesNotThrow(() => parseCron(LONG_VALID_CRON), 'fixture must parse — otherwise the test proves nothing about the cap')
@@ -80,12 +94,12 @@ describe('#6862 ScheduledTaskStore', () => {
       )
     })
 
-    it('accepts a cron expression exactly AT the cap', () => {
+    it('accepts a cron expression of exactly the cap length (the bound is inclusive)', () => {
       const store = newStore(() => 1000)
-      // '*/2 * * * *' padded with trailing spaces trims back under the cap, so
-      // build an exactly-256 expression instead of relying on trimming.
-      const atCap = [Array.from({ length: 60 }, (_, i) => i).join(','), '*', '*', '*', '*'].join(' ')
-      assert.ok(atCap.length <= 256 && atCap.length > 160, `at-cap fixture should sit just under the cap, got ${atCap.length}`)
+      const atCap = cronOfExactLength(256)
+      // Assert the EXACT length: a fixture that drifted shorter would still pass
+      // the add() below while no longer testing the boundary at all.
+      assert.equal(atCap.length, 256)
       assert.doesNotThrow(() => store.add({ prompt: 'x', cadence: { kind: 'cron', expression: atCap } }))
     })
 
@@ -113,20 +127,6 @@ describe('#6862 ScheduledTaskStore', () => {
     // behaviour at exactly 256 and exactly 257 chars, so raising/lowering
     // ScheduledTaskCadenceCronSchema without touching MAX_CRON_EXPRESSION_LENGTH
     // (or vice versa) fails here rather than silently reopening the bug.
-    const cronOfExactLength = (target) => {
-      // '<minute-list> * * * *' — the tail is 8 chars, so the list carries the
-      // rest. Mixing 1- and 2-digit entries hits any length exactly.
-      const want = target - 8
-      for (let k = 1; k < 400; k++) {
-        for (let j = 0; j <= k; j++) {
-          if (3 * k - j - 1 === want) {
-            return [...Array(k)].map((_, i) => (i < j ? '1' : '59')).join(',') + ' * * * *'
-          }
-        }
-      }
-      throw new Error(`cannot build a cron of length ${target}`)
-    }
-
     it('the store cap and the wire schema agree at the boundary (drift guard)', () => {
       const store = newStore(() => 1000)
       for (const len of [256, 257]) {
