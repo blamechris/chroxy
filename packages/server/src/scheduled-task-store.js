@@ -21,6 +21,29 @@ const MAX_TASKS = 500
 const CADENCE_KINDS = new Set(['once', 'interval', 'cron'])
 
 /**
+ * #7051 — the wire cap on `cadence.cron.expression`, mirroring
+ * `ScheduledTaskCadenceCronSchema` in @chroxy/protocol
+ * (schemas/server/scheduler.ts). Kept as a local constant rather than imported
+ * so this module stays dependency-light, and pinned by a test that safeParses
+ * the REAL schema at the boundary — a comment cannot stop the two drifting, a
+ * failing test can.
+ *
+ * Rejected, NOT clamped. `projectTask` truncates the other capped strings
+ * (name, provider, model, ...) because a truncated label is merely ugly.
+ * Truncating a cron expression silently CHANGES THE SCHEDULE — `0,30 * * * *`
+ * cut to `0,3` is a different, still-valid schedule that fires at the wrong
+ * time forever. Refusing at the store boundary is the only safe option, the
+ * same reasoning as the unrepresentable-epoch check below.
+ *
+ * The blast radius is why this matters at all: the dashboard safeParses the
+ * WHOLE `scheduled_tasks` snapshot, so ONE over-cap task makes the panel render
+ * zero tasks (plus "the list below may be out of date") while N tasks are armed
+ * and firing — the store-legal / wire-illegal asymmetry the clamping in
+ * `scheduler-handlers.js` was added to eliminate.
+ */
+const MAX_CRON_EXPRESSION_LENGTH = 256
+
+/**
  * The largest absolute epoch-ms a JS `Date` can represent (±8.64e15, i.e. ±100M
  * days around the epoch — year ±275760). Beyond it `new Date(ms)` is an Invalid
  * Date and `.toISOString()` THROWS `RangeError`.
@@ -156,14 +179,27 @@ function normalizeCadence(cadence) {
       if (typeof cadence.expression !== 'string') {
         throw new ScheduledTaskValidationError('cron cadence requires a string `expression`', 'cadence.expression')
       }
+      // Measure the TRIMMED form, because that is what gets stored and sent
+      // (see the return below) — padding must not count against the cap, and
+      // must not sneak past it either.
+      const expression = cadence.expression.trim()
+      // #7051: length BEFORE parse — a 300-char expression can be perfectly valid
+      // cron, so parseCron will happily accept a value the wire cannot carry.
+      if (expression.length > MAX_CRON_EXPRESSION_LENGTH) {
+        throw new ScheduledTaskValidationError(
+          `cron expression must be <= ${MAX_CRON_EXPRESSION_LENGTH} characters (got ${expression.length}) — ` +
+          'longer expressions cannot be carried on the wire and would make the whole scheduled-tasks snapshot unparseable',
+          'cadence.expression',
+        )
+      }
       // parseCron throws CronParseError on a malformed field — re-surface it as a
       // validation error so callers get one error type off add()/update().
       try {
-        parseCron(cadence.expression)
+        parseCron(expression)
       } catch (err) {
         throw new ScheduledTaskValidationError(`invalid cron expression: ${err.message}`, 'cadence.expression')
       }
-      return { kind: 'cron', expression: cadence.expression.trim() }
+      return { kind: 'cron', expression }
     }
     default:
       // Unreachable — CADENCE_KINDS gates kind above.
