@@ -94,12 +94,28 @@ split the synthesized map" note still applies to whichever future PR adds the ov
 |---|---|---|---|
 | claude-sdk | ✓ | ✓ | architect + all workers |
 | claude-byok | ✓ | ✓ | architect + all workers |
-| codex (app-server) | ✓ | ✗ — use per-session `codexSandbox: 'read-only'` (#6690, landed 2026-07-16) | workers |
-| claude-cli | ✗ (HTTP hook only) | ✗ | excluded v1 |
+| codex (app-server) | ✓ | ✗ — use per-session `codexSandbox: 'read-only'` (#6690, landed 2026-07-16) | architect + all workers |
+| claude-cli | ✗ (HTTP hook only) | ✗ | excluded v1 — now enforced (#7036) |
 | gemini | ✗ (no permission surface) | ✗ | excluded v1 |
 | claude-tui / channel | n/a | n/a | excluded (no usage telemetry) |
 
 Notes: `reserveSessions` does not exist in SessionManager — the engine scheduler implements its
 own headroom under `maxSessions` (default 5, tight; config validation warns). One run at a time
+**Enforcement (#7036).** The `v1 roles` column is no longer advisory for the
+architect. `orchestration-manager._resolveRoles` validates `architect.provider`
+against `ARCHITECT_ELIGIBLE_PROVIDERS` (`claude-sdk` / `claude-byok` / `codex`),
+the same way the worker is validated against `AUDIT_ELIGIBLE_PROVIDERS`. codex is
+listed as architect-eligible because the code already supported it (the architect
+runs `codexSandbox: 'read-only'`) and it was reachable before the gate existed —
+the gate records that, it does not newly grant it.
+
+What the gate does and does not buy is worth stating exactly: it removes the
+QUEUED-TURN KILL by construction (only `claude-cli` emits `result` then
+`stopped`), but it does NOT make an eligible provider immune to reporting an
+interrupted turn as complete — `claude-byok` can fall through to a normal
+`result` when an interrupt lands in its tool phase, and `claude-sdk`'s
+stream-stall path settles a turn the same way. That needs a provider-side
+`interrupted: true` signal on the wire, not a provider allowlist.
+
 in v1. `#6690` landed after the engine doc was written and supersedes its "codex sandbox opt"
 gap: `createSession({codexSandbox: 'read-only'})` is the audit-worker posture for codex.

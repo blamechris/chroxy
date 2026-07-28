@@ -68,11 +68,30 @@ const AUDIT_ELIGIBLE_PROVIDERS = new Set(['claude-sdk', 'claude-byok', 'codex'])
 // committee reviews serialise on the architect session, so a queued turn there
 // is the normal case, not an edge case.
 //
-// The listed three are safe from that specific hazard: codex/byok never emit a
-// synthetic result, and claude-sdk only does so on a stream STALL (followed by
-// `error`, not `stopped`). Anything outside this set is simply unvetted for
-// TurnDriver's turn-terminal semantics — the point is to make the failure
-// unreachable by construction rather than unreachable by hope.
+// PRECISELY what this closes, and what it does NOT:
+//
+//   CLOSED — the queued-turn kill. Only claude-cli emits `result` THEN `stopped`
+//   for one interrupt, so only claude-cli can settle turn 1 and have the trailing
+//   `stopped` land on turn 2. None of the three below emit `stopped` after a
+//   `result`, so excluding claude-cli removes this failure by construction.
+//
+//   NOT CLOSED — false success on an interrupted turn. This is broader than
+//   claude-cli and membership here does NOT imply immunity:
+//     * claude-byok: an interrupt landing in the TOOL phase (not mid-stream)
+//       breaks the loop at the `signal.aborted` check and falls THROUGH to the
+//       normal `emit('result')` with real usage (byok-session.js ~1328 -> ~1459).
+//     * claude-sdk: a stream STALL emits a synthetic `result` then `error`;
+//       TurnDriver settles on the `result` and the trailing `error` is dropped by
+//       the epoch guard.
+//     * codex app-server: safe only if the binary answers `turn/interrupt` with an
+//       `error` notification rather than `turn/completed` — unverified in-repo.
+//   Closing that needs the provider-side `interrupted: true` flag the turn-driver
+//   doc-block names, so a terminal-looking result can be marked
+//   terminal-but-not-successful. Tracked separately; it is a cross-provider wire
+//   change, not something this gate can express.
+//
+// So this set means "vetted to not kill the NEXT turn", not "cannot report a
+// truncated turn as complete". Anything outside it is unvetted for either.
 const ARCHITECT_ELIGIBLE_PROVIDERS = new Set(['claude-sdk', 'claude-byok', 'codex'])
 
 // v1: write/implement workers are codex-ONLY. codexSandbox:'workspace-write' is a
@@ -197,6 +216,10 @@ export class OrchestrationManager extends EventEmitter {
     const worker = merged.auditWorker || merged.worker
     if (!architect?.provider || !architect?.model) throw new Error('orchestration roles.architect must set { provider, model }')
     if (!worker?.provider || !worker?.model) throw new Error('orchestration roles.worker/auditWorker must set { provider, model }')
+    // NOTE: this runs at createRun only. A future resume path (#6743) will carry
+    // `configSnapshot.roleModels` persisted BEFORE this gate existed, so a
+    // pre-#7036 record could reintroduce a claude-cli architect — re-validate
+    // there too rather than trusting the snapshot.
     if (!ARCHITECT_ELIGIBLE_PROVIDERS.has(architect.provider)) {
       throw new Error(`architect provider '${architect.provider}' is not vetted for turn-terminal semantics (use ${[...ARCHITECT_ELIGIBLE_PROVIDERS].join('/')})`)
     }
