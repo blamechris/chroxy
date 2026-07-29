@@ -43,16 +43,6 @@ describe('#6862 ScheduledTaskStore', () => {
     assert.throws(() => new ScheduledTaskStore({}), /requires a filePath/)
   })
 
-  // #7051 — a cron expression the WIRE cannot carry must never enter the
-  // registry. ScheduledTaskCadenceCronSchema caps `expression` at 256; the store
-  // had no cap at all, so a longer-but-valid cron was store-legal and
-  // wire-ILLEGAL. Blast radius is the whole panel, not one row: the dashboard
-  // safeParses the entire `scheduled_tasks` snapshot, so ONE such task makes it
-  // render zero tasks (plus "may be out of date") while N are armed and firing.
-  //
-  // REJECT rather than clamp, unlike the string fields projectTask truncates:
-  // truncating a cron silently CHANGES THE SCHEDULE, which is worse than
-  // refusing it.
   describe('#7074 task id wire cap', () => {
     // Companion to #7051. `ScheduledTaskSchema.id` is max(256) but neither add()
     // nor _normalizeStoredTask bounded it, so an over-cap id loaded clean and then
@@ -102,7 +92,7 @@ describe('#6862 ScheduledTaskStore', () => {
       assert.deepEqual(store.list(), [], 'an unrepresentable task must not reach the wire')
     })
 
-    it('and #7076 preserves it, so the operator can still fix it', () => {
+    it('and #7050 preserves it on disk rather than erasing it', () => {
       const store = writeRegistryWithId(overCapId)
       assert.equal(store.unreadableCount(), 1, 'refusing must not mean erasing')
       store.add({ prompt: 'unrelated', cadence: { kind: 'cron', expression: '0 9 * * *' } })
@@ -123,7 +113,15 @@ describe('#6862 ScheduledTaskStore', () => {
         let storeOk = true
         try {
           newStore(() => 1000).add({ id, prompt: 'x', cadence: { kind: 'cron', expression: '*/5 * * * *' } })
-        } catch { storeOk = false }
+        } catch (err) {
+          // Assert WHICH error: a bare catch would let an unrelated throw count as
+          // "the cap rejected it", so half this comparison would prove nothing.
+          assert.ok(
+            err instanceof ScheduledTaskValidationError && err.field === 'id',
+            `expected an id-cap rejection at ${len} chars, got ${err?.message}`,
+          )
+          storeOk = false
+        }
         assert.equal(storeOk, wireOk, `at ${len} chars the store and ScheduledTaskSchema disagree — the id cap has drifted`)
       }
     })
@@ -261,6 +259,16 @@ describe('#6862 ScheduledTaskStore', () => {
     })
   })
 
+  // #7051 — a cron expression the WIRE cannot carry must never enter the
+  // registry. ScheduledTaskCadenceCronSchema caps `expression` at 256; the store
+  // had no cap at all, so a longer-but-valid cron was store-legal and
+  // wire-ILLEGAL. Blast radius is the whole panel, not one row: the dashboard
+  // safeParses the entire `scheduled_tasks` snapshot, so ONE such task makes it
+  // render zero tasks (plus "may be out of date") while N are armed and firing.
+  //
+  // REJECT rather than clamp, unlike the string fields projectTask truncates:
+  // truncating a cron silently CHANGES THE SCHEDULE, which is worse than
+  // refusing it.
   describe('#7051 cron expression wire cap', () => {
     // Fully enumerated minute/hour/day-of-month lists — 319 chars, and every
     // field is legal, so LENGTH is the only thing that can reject it. The
@@ -346,7 +354,11 @@ describe('#6862 ScheduledTaskStore', () => {
         let storeOk = true
         try {
           store.add({ prompt: 'x', cadence: { kind: 'cron', expression } })
-        } catch {
+        } catch (err) {
+          assert.ok(
+            err instanceof ScheduledTaskValidationError && err.field === 'cadence.expression',
+            `expected a cron-cap rejection at ${len} chars, got ${err?.message}`,
+          )
           storeOk = false
         }
         assert.equal(

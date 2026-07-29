@@ -57,11 +57,25 @@ const MAX_CRON_EXPRESSION_LENGTH = 256
  * Generated ids are uuids (36 chars), and no writer supplies one: the WS path
  * cannot (`ScheduledTaskInputSchema` has no `id` field and `z.object` strips
  * unknown keys, so `ws-server.js` dispatches a payload without it) and the CLI
- * omits it. The reachable path is therefore a hand-edited registry file — and
- * since #7050 a refused entry is PRESERVED on disk rather than erased, so
- * refusing here is what lets the operator correct it.
+ * omits it. The reachable path is therefore a hand-edited registry file.
+ *
+ * Since #7050 a refused entry is PRESERVED on disk rather than erased, so
+ * refusing here does not destroy the operator's task. It does NOT yet mean they
+ * can repair it in-product: an over-cap id is unaddressable at the wire
+ * (`ScheduledTaskActionSchema.taskId` is capped too) and absent from
+ * `store.list()`, so today the only remediation is hand-editing the same file.
+ * Closing that loop is #7079.
  */
 const MAX_WIRE_ID_LENGTH = 256
+
+// Audited alongside #7074: every OTHER capped field on `ScheduledTaskSchema` is
+// already clamped before send by `projectTask`/`projectTarget`/`projectLastRun`
+// in handlers/scheduler-handlers.js (name, target.*, lastRun.*, providerRefusal,
+// effectiveProvider, effectivePermissionMode), and `prompt` is `z.string()` with
+// NO wire cap, so it is symmetric and has nothing to violate. If a cap is ever
+// added to `prompt` on the wire, it needs a bound HERE too — otherwise it
+// becomes the next #7051.
+
 
 /**
  * Throw unless `id` fits the wire cap. Shared by `add()` and
