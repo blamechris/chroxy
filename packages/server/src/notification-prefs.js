@@ -119,6 +119,26 @@ export const CATEGORY_DEFAULTS = Object.freeze(
  */
 export const DEFAULT_BYPASS_CATEGORIES = Object.freeze(['permission', 'activity_error'])
 
+/**
+ * #7080 — wire bounds mirroring `ServerNotificationPrefsSchema` in @chroxy/protocol
+ * (schemas/server/billing.ts): a bypass entry is `min(1).max(64)`, the list is
+ * `.max(64)` items, and a device token is a record key of `min(1).max(512)`.
+ *
+ * The loader used to enforce TYPE only (`typeof s === 'string' && s.length > 0`)
+ * while the schema constrains RANGE, so a hand-edited prefs file produced a
+ * message the clients could not parse. The failure is unusually bad for a
+ * "cosmetic" cap: the client safeParses the WHOLE message, so `notificationPrefs`
+ * stays null and the dashboard renders "Loading preferences…" indefinitely on both
+ * clients — and `push.js` re-persists the offending value on the next patch, so it
+ * never self-heals. Refusing the value here is what keeps the panel alive.
+ *
+ * Pinned by a test that safeParses the REAL schema, so these cannot drift silently.
+ * (#7085 tracks exporting these from @chroxy/protocol so loaders stop retyping them.)
+ */
+const MAX_BYPASS_CATEGORY_CHARS = 64
+const MAX_BYPASS_CATEGORIES = 64
+const MAX_DEVICE_TOKEN_CHARS = 512
+
 const _ALL_CATEGORIES_SET = new Set(ALL_CATEGORIES)
 // Two-digit zero-padded HH:MM with HH in 00-23 and MM in 00-59 (#4566).
 // The narrower regex replaces the older `/^\d{2}:\d{2}$/`, which accepted
@@ -179,6 +199,14 @@ function sanitizeDevices(raw, { log } = {}) {
   const out = {}
   for (const [token, entry] of Object.entries(raw)) {
     if (typeof token !== 'string' || token.length === 0) continue
+    // #7080: DROP an over-cap token, symmetric with the non-string/empty cases
+    // above. A push token is an ADDRESS: truncating it to 512 yields a token that
+    // addresses nothing and is then re-persisted by the next patch, permanently
+    // corrupting the file. Dropping self-heals on the next register_push_token.
+    if (token.length > MAX_DEVICE_TOKEN_CHARS) {
+      log?.warn?.(`notification-prefs: dropped a device entry whose token exceeds ${MAX_DEVICE_TOKEN_CHARS} chars (unrepresentable on the wire)`)
+      continue
+    }
     if (!entry || typeof entry !== 'object') continue
     const cleaned = { categories: sanitizeCategoryMap(entry.categories) }
     // Tri-state: present-as-null means "explicitly disable muting on this
@@ -196,7 +224,7 @@ function sanitizeDevices(raw, { log } = {}) {
       }
     }
     if (Object.prototype.hasOwnProperty.call(entry, 'bypassCategories')) {
-      const bypass = sanitizeBypassList(entry.bypassCategories)
+      const bypass = sanitizeBypassList(entry.bypassCategories, { log, context: `device ${token} bypassCategories` })
       if (bypass !== null) cleaned.bypassCategories = bypass
     }
     // #4587: non-critical metadata for the per-device list UI. Operators
@@ -260,17 +288,38 @@ function sanitizeQuietHours(raw) {
  * (older binary, newer prefs file mentioning a category the binary hasn't
  * shipped yet) preserves the stored value.
  */
-function sanitizeBypassList(raw) {
+function sanitizeBypassList(raw, { log, context = 'bypassCategories' } = {}) {
   if (raw == null) return null
   if (!Array.isArray(raw)) return []
   const seen = new Set()
+  let droppedLong = 0
   for (const item of raw) {
     if (typeof item !== 'string') continue
     const trimmed = item.trim()
     if (trimmed.length === 0) continue
+    // #7080: REJECT the element rather than truncating it. A category name is an
+    // identifier matched against ALL_CATEGORIES, so a truncated name matches
+    // nothing AND gets re-persisted — strictly worse than dropping it. This does
+    // narrow the forward-compat intent above: a future category longer than the
+    // wire cap will not be preserved by an older binary. That trade is
+    // deliberate — one un-bypassed category beats a dead notification panel.
+    if (trimmed.length > MAX_BYPASS_CATEGORY_CHARS) {
+      droppedLong += 1
+      continue
+    }
     seen.add(trimmed)
   }
-  return [...seen]
+  if (droppedLong > 0) {
+    log?.warn?.(`notification-prefs: dropped ${droppedLong} ${context} entr${droppedLong === 1 ? 'y' : 'ies'} longer than ${MAX_BYPASS_CATEGORY_CHARS} chars (unrepresentable on the wire)`)
+  }
+  const list = [...seen]
+  // CLAMP the length: at most a handful of real categories exist, so an
+  // over-long list is garbage, and truncating a SET corrupts no identifier.
+  if (list.length > MAX_BYPASS_CATEGORIES) {
+    log?.warn?.(`notification-prefs: ${context} had ${list.length} entries; keeping the first ${MAX_BYPASS_CATEGORIES}`)
+    return list.slice(0, MAX_BYPASS_CATEGORIES)
+  }
+  return list
 }
 
 /**
@@ -289,7 +338,7 @@ export function loadPrefs(filePath = defaultNotificationPrefsPath(), { log } = {
     // coerced to defaults so the gate never misbehaves.
     let bypass = base.bypassCategories
     if (Object.prototype.hasOwnProperty.call(raw ?? {}, 'bypassCategories')) {
-      const cleaned = sanitizeBypassList(raw.bypassCategories)
+      const cleaned = sanitizeBypassList(raw.bypassCategories, { log })
       bypass = cleaned ?? [...DEFAULT_BYPASS_CATEGORIES]
     }
     const cleanedQuietHours = sanitizeQuietHours(raw?.quietHours)
