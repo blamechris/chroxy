@@ -44,6 +44,42 @@ const CADENCE_KINDS = new Set(['once', 'interval', 'cron'])
 const MAX_CRON_EXPRESSION_LENGTH = 256
 
 /**
+ * #7074 — the wire cap on a task `id`, mirroring `ScheduledTaskSchema.id`
+ * (max 256) in @chroxy/protocol. Pinned by a test that safeParses the REAL
+ * schema at the boundary, so the two cannot drift silently.
+ *
+ * Rejected, NOT clamped — and unlike the other capped strings the reason is not
+ * cosmetic: `id` is the MUTATION KEY, so a truncated id would make
+ * pause/update/delete address the wrong record, or nothing. `projectTask` in
+ * scheduler-handlers.js deliberately leaves `id` unclamped for exactly this
+ * reason, which leaves refusing at the store boundary as the only safe option.
+ *
+ * Generated ids are uuids (36 chars), and no writer supplies one: the WS path
+ * cannot (`ScheduledTaskInputSchema` has no `id` field and `z.object` strips
+ * unknown keys, so `ws-server.js` dispatches a payload without it) and the CLI
+ * omits it. The reachable path is therefore a hand-edited registry file — and
+ * since #7050 a refused entry is PRESERVED on disk rather than erased, so
+ * refusing here is what lets the operator correct it.
+ */
+const MAX_WIRE_ID_LENGTH = 256
+
+/**
+ * Throw unless `id` fits the wire cap. Shared by `add()` and
+ * `_normalizeStoredTask()` so the client path and the load path cannot diverge
+ * — the split that made #7051 reachable through the file after add() was fixed.
+ * @param {string} id - an already-trimmed, non-empty id
+ */
+function requireIdWithinWireCap(id) {
+  if (id.length > MAX_WIRE_ID_LENGTH) {
+    throw new ScheduledTaskValidationError(
+      `task id must be <= ${MAX_WIRE_ID_LENGTH} characters (got ${id.length}) — ` +
+      'a longer id cannot be carried on the wire and would make the whole scheduled-tasks snapshot unparseable',
+      'id',
+    )
+  }
+}
+
+/**
  * The largest absolute epoch-ms a JS `Date` can represent (±8.64e15, i.e. ±100M
  * days around the epoch — year ±275760). Beyond it `new Date(ms)` is an Invalid
  * Date and `.toISOString()` THROWS `RangeError`.
@@ -380,6 +416,7 @@ export class ScheduledTaskStore {
         throw new ScheduledTaskValidationError('id must be a non-empty string', 'id')
       }
       id = id.trim()
+      requireIdWithinWireCap(id)
       // #7050: preserved (unreadable) ids count as taken. They are on disk, so
       // reusing one would put two entries with the same id in the file.
       if (this._tasks.has(id) || this._unreadable.some((u) => u.id === id)) {
@@ -526,6 +563,7 @@ export class ScheduledTaskStore {
     if (typeof entry.id !== 'string' || entry.id.trim().length === 0) {
       throw new ScheduledTaskValidationError('task id must be a non-empty string', 'id')
     }
+    requireIdWithinWireCap(entry.id.trim())
     const createdAt = Number.isFinite(entry.createdAt) ? entry.createdAt : this._now()
     const updatedAt = Number.isFinite(entry.updatedAt) ? entry.updatedAt : createdAt
     const record = {
