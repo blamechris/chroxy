@@ -46,6 +46,7 @@ import { join } from 'node:path'
 import { createLogger } from './logger.js'
 import { loadJsonState, saveJsonState } from './json-state-file.js'
 import { getErrorMessage } from './utils/error-message.js'
+import { MAX_WIRE_DATETIME_MS } from './utils/iso-datetime.js'
 
 const log = createLogger('skills-usage')
 
@@ -115,7 +116,17 @@ function normalizeAggregate(agg) {
   const count = typeof agg.count === 'number' && Number.isFinite(agg.count) && agg.count >= 0
     ? Math.trunc(agg.count)
     : 0
-  const lastUsed = typeof agg.lastUsed === 'number' && Number.isFinite(agg.lastUsed) && agg.lastUsed > 0
+  // #7081: bound the RANGE, not just the type. `lastUsed` is rendered by
+  // skills-inventory.js via `new Date(ms).toISOString()` into a
+  // `z.string().datetime()` field, and there is a band above year 9999 where
+  // toISOString SUCCEEDS but emits the expanded-year form the wire rejects —
+  // which failed the whole snapshot's safeParse and left the Skills tab
+  // spinning with Refresh disabled. The adjacent `count` above already
+  // Math.truncs to match its int cap; this is the same rule, applied.
+  const lastUsed = typeof agg.lastUsed === 'number'
+    && Number.isFinite(agg.lastUsed)
+    && agg.lastUsed > 0
+    && agg.lastUsed <= MAX_WIRE_DATETIME_MS
     ? agg.lastUsed
     : null
   const repos = []
@@ -184,7 +195,14 @@ export function saveUsageStore(store, filePath = defaultSkillsUsagePath()) {
 export function applyUsage(store, record) {
   const skill = record && typeof record.skill === 'string' && record.skill.length > 0 ? record.skill : null
   if (!skill) return store
-  const ts = typeof record.ts === 'number' && Number.isFinite(record.ts) && record.ts > 0 ? record.ts : Date.now()
+  // #7081: bound the RANGE here too. normalizeAggregate guards the LOAD path, but
+  // this is the WRITE path — it wrote `ts` verbatim into agg.lastUsed, persisting a
+  // number the next snapshot could not render. An out-of-range ts falls back to
+  // now(), which is what an unparseable one already did.
+  const tsRaw = record.ts
+  const ts = typeof tsRaw === 'number' && Number.isFinite(tsRaw) && tsRaw > 0 && tsRaw <= MAX_WIRE_DATETIME_MS
+    ? tsRaw
+    : Date.now()
   const sessionId = typeof record.sessionId === 'string' && record.sessionId.length > 0 ? record.sessionId : null
   const repo = typeof record.repo === 'string' && record.repo.length > 0 ? record.repo : null
 

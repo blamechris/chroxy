@@ -54,6 +54,7 @@ import { readFile, stat } from 'fs/promises'
 import { join } from 'path'
 import { parseGithubOwnerRepo } from './survey.js'
 import { DEFAULT_CONCURRENCY, EXEC_TIMEOUT_MS } from './constants.js'
+import { isoFromEpochMs } from '../utils/iso-datetime.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -127,16 +128,16 @@ export function parseRepoMemoryConfig(text) {
  */
 function deriveLastActivity(parsed) {
   const raw = parsed.lastEventAt ?? parsed.lastActivityAt ?? parsed.lastActivity
-  if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) {
-    try {
-      return new Date(raw).toISOString()
-    } catch {
-      return null
-    }
-  }
+  // #7081: both branches go through isoFromEpochMs. The destination is
+  // `z.string().datetime()`, and this input is repo-memory's own report JSON —
+  // arbitrary third-party output, so weaker protection than the mtime site below.
+  if (typeof raw === 'number') return isoFromEpochMs(raw)
   if (typeof raw === 'string' && raw.length > 0) {
+    // Date.parse ROUND-TRIPS the expanded-year form, so parsing a
+    // '+058851-…' string and re-emitting it reproduces the same wire-illegal
+    // value. The string branch needs the range check just as much as the number one.
     const ms = Date.parse(raw)
-    if (!Number.isNaN(ms)) return new Date(ms).toISOString()
+    if (!Number.isNaN(ms)) return isoFromEpochMs(ms)
   }
   return null
 }
@@ -247,7 +248,11 @@ async function surveyCache(statFn, repoPath) {
   }
   const sizeBytes = Math.max(0, Math.trunc(nonNegNumber(db?.size, 0) + nonNegNumber(wal?.size, 0)))
   const mtimes = [db?.mtimeMs, wal?.mtimeMs].filter(m => typeof m === 'number' && Number.isFinite(m) && m > 0)
-  const lastModified = mtimes.length > 0 ? new Date(Math.max(...mtimes)).toISOString() : null
+  // #7081: same unbounded epoch->ISO shape as skills `lastUsed`. Unreachable on
+  // APFS/ext4 (neither can store a year > 9999) but a network/FUSE mount or a
+  // deliberately-set mtime can, and the adjacent sizeBytes above is already
+  // bounded — so the rule gets applied here rather than relying on the filesystem.
+  const lastModified = mtimes.length > 0 ? isoFromEpochMs(Math.max(...mtimes)) : null
   return { present: true, sizeBytes, lastModified }
 }
 
@@ -524,7 +529,8 @@ export function parseRelayRuns(json) {
       status: str(r.status),
       conclusion: str(r.conclusion),
       event: str(r.event),
-      createdAt: Number.isNaN(createdMs) ? null : new Date(createdMs).toISOString(),
+      // #7081: same bound — gh run JSON is third-party input.
+      createdAt: Number.isNaN(createdMs) ? null : isoFromEpochMs(createdMs),
     })
   }
   return runs
