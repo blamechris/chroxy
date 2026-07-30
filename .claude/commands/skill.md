@@ -40,7 +40,10 @@ every skill into every repo, a repo pulls a skill the moment it needs one and th
 - **Targets** — the coding agents a skill is compiled for. `.claude/commands/<name>.md`
   (the customized install) is the provider-NEUTRAL source; `scripts/compile-skill-targets.mjs`
   emits each agent's NATIVE custom-command format: `claude` → `.claude/skills/<name>/SKILL.md`,
-  `gemini` → `.gemini/commands/<name>.toml`, `codex` → `.codex/skills/<name>/SKILL.md`. The active
+  `gemini` → `.gemini/commands/<name>.toml`, `codex` → `~/.codex/prompts/<name>.md`, `pi` →
+  `~/.pi/agent/skills/<name>/`. **This repo's compiler diverges from the registry's**: it adds a
+  fourth `pi` target (#6573) and emits both `codex` and `pi` **user-global** rather than
+  repo-tracked, and both are opt-in. The active
   list comes from the `targets:` line in `.claude/skill-profile.md` (prompt the user if absent;
   the compiler falls back to `claude`). This is what makes a skill model-agnostic — author once,
   run under any model. The neutral arg token is `$ARGUMENTS`; the compiler maps it per agent
@@ -226,8 +229,8 @@ note in the report that hashes may be stale. Record which source you used.
    run `node scripts/compile-skill-targets.mjs --name <name>` (it reads the profile targets), or
    `--targets <list>` to override. It writes the native artifact per target and exits non-zero on
    any emit failure — treat that as a hard gate: fix and re-run before locking. Codex emits a
-   repo-tracked skill folder under `.codex/skills/` so it can be reviewed, copied into
-   `~/.codex/skills`, or used by runners that support repo-local Codex skills. Keep the list of
+   user-global prompt at `~/.codex/prompts/<name>.md` in this repo — not a repo-tracked
+   folder — so nothing appears in the diff for that target. Same for `pi`. Keep the list of
    `targets` you compiled with for the next step.
 8. **Record in the lockfile.** Only after a successful compile, create `.claude/skills.lock`
    (schema below) if absent and upsert `<name>` **atomically** with: the template `hash`; the
@@ -273,7 +276,8 @@ note in the report that hashes may be stale. Record which source you used.
 Read the skill's `targets` from its `.claude/skills.lock` entry, then delete
 `.claude/commands/<name>.md`, its lock entry, and exactly the native artifacts for those targets:
 `claude` → `.claude/skills/<name>/` (dir), `gemini` → `.gemini/commands/<name>.toml`,
-`codex` → `.codex/skills/<name>/` (dir). If the lock entry has no `targets` (an older install),
+`codex` → `~/.codex/prompts/<name>.md`, `pi` → `~/.pi/agent/skills/<name>/` (both user-global
+in this repo). If the lock entry has no `targets` (an older install),
 fall back to removing whichever of those three exist. Report what was removed.
 
 ## Lockfile schema (`.claude/skills.lock`)
