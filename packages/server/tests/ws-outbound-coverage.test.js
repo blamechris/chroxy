@@ -225,7 +225,12 @@ describe('#7085 outbound schema coverage', () => {
     })
 
     it('reports a schema violation with the offending path', () => {
-      const r = validateOutbound({ type: 'available_models', models: [], defaultModel: null })
+      // Uses a value that is invalid for a TYPE reason, deliberately. The original
+      // fixture here was `defaultModel: null` — which was the #7089 bug, i.e. this
+      // test was pinned to a violation that was about to be fixed, and #7092 (making
+      // the field nullable) turned it red. A fixture whose validity depends on an
+      // open bug expires the moment the bug is closed.
+      const r = validateOutbound({ type: 'available_models', models: [], defaultModel: 42 })
       assert.equal(r.ok, false)
       assert.equal(r.reason, 'invalid')
       assert.deepEqual(r.issue.path, ['defaultModel'], 'the caller needs the field, not just a boolean')
