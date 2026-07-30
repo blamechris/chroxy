@@ -236,7 +236,7 @@ export declare const ServerAvailableModelsEntrySchema: z.ZodObject<{
 export declare const ServerAvailableModelsSchema: z.ZodObject<{
     type: z.ZodLiteral<"available_models">;
     models: z.ZodOptional<z.ZodArray<z.ZodUnknown>>;
-    defaultModel: z.ZodOptional<z.ZodString>;
+    defaultModel: z.ZodOptional<z.ZodNullable<z.ZodString>>;
     provider: z.ZodOptional<z.ZodNullable<z.ZodString>>;
 }, z.core.$strip>;
 export declare const ServerPermissionModeChangedSchema: z.ZodObject<{
