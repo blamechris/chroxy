@@ -282,7 +282,15 @@ export const ServerResultSchema = z.object({
   // distinct from a genuine $0 turn. Subscription runs and any turn whose model
   // pricing is unknown emit `null`; the dashboard renders "n/a" for it.
   cost: z.number().nullable().optional(),
-  duration: z.number().optional(),
+  // #7093: NULLABLE, like `cost` above and `sessionId` below. Four providers emit
+  // `duration: null` on every turn end — jsonl-subprocess-session.js:231 (which sends
+  // cost/duration/usage/sessionId all null in one object, three of which were already
+  // nullable), codex-session.js:638, gemini-session.js:423 and :495 — and
+  // event-normalizer.js forwards it verbatim, so null has always been on the wire.
+  // store-core already models it that way (`typeof msg.duration === 'number' ? … : null`),
+  // so the schema was the outlier. Same reasoning as `cost`: null means "unknown",
+  // which is distinct from 0.
+  duration: z.number().nullable().optional(),
   usage: z.any().optional(),
   sessionId: z.string().nullable().optional(),
   // #6627: the session's authoritative outgoing-queue length at turn end, so

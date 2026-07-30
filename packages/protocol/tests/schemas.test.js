@@ -3185,6 +3185,57 @@ describe('@chroxy/protocol schemas', () => {
     })
   })
 
+  describe('ServerResultSchema duration (#7093)', () => {
+    // Sibling of #7089, same file, and higher-frequency: FOUR providers emit
+    // `duration: null` on every turn end (jsonl-subprocess-session.js:231,
+    // codex-session.js:638, gemini-session.js:423 and :495), and
+    // event-normalizer.js forwards it verbatim while conditionally spreading its
+    // neighbours. `result` is in PROXIED_EVENTS and is persisted for replay, so a
+    // stored history replayed a wire-illegal frame.
+    //
+    // These import ../src via tsx, so they validate THIS branch rather than resolving
+    // @chroxy/protocol through the main clone's node_modules symlink.
+    const parse = async (duration) => {
+      const { ServerResultSchema } = await import('../src/schemas/server/stream.ts')
+      return ServerResultSchema.safeParse({ type: 'result', cost: null, duration, usage: null, sessionId: null })
+    }
+
+    it('accepts duration: null — what all four non-Claude providers send', async () => {
+      const r = await parse(null)
+      assert.ok(r.success, 'null must be wire-legal — it is what the providers emit')
+      assert.equal(r.data.duration, null)
+    })
+
+    it('accepts a numeric duration', async () => {
+      const r = await parse(1234)
+      assert.ok(r.success)
+      assert.equal(r.data.duration, 1234)
+    })
+
+    it('accepts an omitted duration (backward compatible)', async () => {
+      const { ServerResultSchema } = await import('../src/schemas/server/stream.ts')
+      const r = ServerResultSchema.safeParse({ type: 'result' })
+      assert.ok(r.success)
+      assert.equal(r.data.duration, undefined)
+    })
+
+    it('still REFUSES a non-number, non-null duration (nullable is not untyped)', async () => {
+      for (const bad of ['1234', {}, [], true]) {
+        const r = await parse(bad)
+        assert.equal(r.success, false, `duration: ${JSON.stringify(bad)} must still be refused`)
+      }
+    })
+
+    it('the exact payload jsonl-subprocess-session.js:231 emits is wire-legal', async () => {
+      // That sender passes cost/duration/usage/sessionId all null in one object.
+      // Three were already nullable; duration was the only one that made the frame
+      // illegal, so this is the whole-frame regression guard.
+      const { ServerResultSchema } = await import('../src/schemas/server/stream.ts')
+      const r = ServerResultSchema.safeParse({ type: 'result', cost: null, duration: null, usage: null, sessionId: null })
+      assert.ok(r.success, `the real emitted payload must parse; got ${JSON.stringify((r.error?.issues || [])[0])}`)
+    })
+  })
+
   describe('ServerAvailableModelsSchema defaultModel (#7089)', () => {
     // The server has always sent `defaultModel: null` — registry.getDefaultModelId()
     // returns null with no default and every sender passes it through. The schema said
