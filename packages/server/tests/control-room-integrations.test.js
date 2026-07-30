@@ -903,3 +903,33 @@ describe('controlRoomRepoMemoryBin config key (#5499)', () => {
     assert.ok(typeWarn, 'expected a type warning for a non-string value')
   })
 })
+
+describe('#7081 repo-memory cache lastModified stays wire-representable', () => {
+  const runSurvey = (mtimeMs) => surveyIntegrations(
+    [{ path: '/repo/a', name: 'a' }],
+    {
+      _readFile: async (p) => (String(p).endsWith('.repo-memory.json') ? '{}' : ''),
+      _stat: async () => ({ size: 10, mtimeMs }),
+      // No repo-memory binary: the survey degrades to a "CLI missing" note, which
+      // is enough to exercise the cache block we care about.
+      _execFile: async () => { throw new Error('not installed') },
+      _now: () => new Date(1785000000000),
+    },
+  )
+
+  it('CONTROL: an ordinary mtime yields an ISO string and a valid snapshot', async () => {
+    const snap = await runSurvey(1785000000000)
+    const entry = snap.repos.find(r => r.path === '/repo/a')
+    assert.equal(typeof entry.repoMemory.cache.lastModified, 'string')
+    assert.ok(ServerIntegrationStatusSnapshotSchema.safeParse({ type: 'integration_status_snapshot', ...snap }).success)
+  })
+
+  it('nulls an out-of-range mtime rather than emitting an expanded-year string', async () => {
+    const snap = await runSurvey(1795000000000000)
+    const entry = snap.repos.find(r => r.path === '/repo/a')
+    assert.equal(entry.repoMemory.cache.lastModified, null)
+    assert.equal(entry.repoMemory.cache.present, true, 'the cache row still reports present')
+    const r = ServerIntegrationStatusSnapshotSchema.safeParse({ type: 'integration_status_snapshot', ...snap })
+    assert.ok(r.success, `snapshot must stay wire-legal; got ${JSON.stringify((r.error?.issues || [])[0])}`)
+  })
+})

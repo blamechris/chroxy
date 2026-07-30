@@ -6,6 +6,8 @@ import {
   lockPathForSkillsDir,
   toInventoryEntry,
 } from '../src/control-room/skills-inventory.js'
+import { SkillInventoryEntrySchema } from '@chroxy/protocol'
+import { MAX_WIRE_DATETIME_MS } from '../src/utils/iso-datetime.js'
 
 /**
  * #5554 — tests for the Skills inventory survey (control-room/skills-inventory.js).
@@ -221,5 +223,36 @@ describe('surveySkillsInventory', () => {
     assert.equal(result.global[0].useCount, 3)
     assert.equal(result.global[0].lastUsed, '2026-06-09T00:00:00.000Z')
     assert.deepEqual(result.global[0].usedRepos, ['/p'])
+  })
+})
+
+describe('#7081 toInventoryEntry keeps lastUsed wire-representable', () => {
+  const skill = { name: 'batch-merge', description: 'd', source: 'global', activation: 'auto', active: true, providers: [] }
+
+  // `lock` and `usage` are Maps keyed by skill name (lock is dereferenced unguarded).
+  const usageMap = (lastUsed, count = 2) => new Map([[skill.name, { count, lastUsed, repos: [] }]])
+
+  it('CONTROL: an ordinary lastUsed becomes an ISO string the wire accepts', () => {
+    const entry = toInventoryEntry(skill, new Map(), usageMap(1785000000000), new Set())
+    assert.equal(typeof entry.lastUsed, 'string')
+    assert.ok(SkillInventoryEntrySchema.safeParse(entry).success)
+  })
+
+  it('nulls an out-of-range lastUsed instead of emitting an expanded-year string', () => {
+    // Raw `new Date(ms).toISOString()` yields '+058851-04-14T23:06:40.000Z' here,
+    // which z.string().datetime() rejects -> the WHOLE snapshot fails safeParse and
+    // the dashboard Skills tab spins with Refresh disabled for the life of the socket.
+    const entry = toInventoryEntry(skill, new Map(), usageMap(1795000000000000), new Set())
+    assert.equal(entry.lastUsed, null)
+    assert.equal(entry.useCount, 2, 'the rest of the rollup survives — only the unusable timestamp is dropped')
+    const r = SkillInventoryEntrySchema.safeParse(entry)
+    assert.ok(r.success, `entry must satisfy the real schema; got ${JSON.stringify((r.error?.issues || [])[0])}`)
+  })
+
+  it('accepts the largest wire-representable instant and rejects one ms past it', () => {
+    const ok = toInventoryEntry(skill, new Map(), usageMap(MAX_WIRE_DATETIME_MS, 1), new Set())
+    assert.equal(ok.lastUsed, '9999-12-31T23:59:59.999Z')
+    const bad = toInventoryEntry(skill, new Map(), usageMap(MAX_WIRE_DATETIME_MS + 1, 1), new Set())
+    assert.equal(bad.lastUsed, null)
   })
 })

@@ -47,6 +47,7 @@ import { readFileSync } from 'fs'
 import { join, dirname } from 'path'
 import { loadActiveSkills, findRepoSkillsDir, DEFAULT_SKILLS_DIR } from '../skills-loader.js'
 import { DEFAULT_CONCURRENCY } from './constants.js'
+import { isoFromEpochMs } from '../utils/iso-datetime.js'
 
 /**
  * Parse a `skills.lock` file into a name → { hash, installed } map. The lock
@@ -163,7 +164,11 @@ export function toInventoryEntry(skill, lock, usage, globalNames) {
     hash: lockRec ? lockRec.hash : null,
     installed: lockRec ? lockRec.installed : null,
     // Usage rollup (#5554 Phase 2). Null when never recorded.
-    lastUsed: usageRec && typeof usageRec.lastUsed === 'number' ? new Date(usageRec.lastUsed).toISOString() : null,
+    // #7081: via the shared helper, which returns null for anything that would
+    // render as an expanded-year (>year 9999) string the wire cannot carry.
+    // skills-usage.js already bounds what it PERSISTS; this covers any other path
+    // that reaches here with an unbounded number.
+    lastUsed: isoFromEpochMs(usageRec?.lastUsed),
     useCount: usageRec ? usageRec.count : 0,
     usedRepos: usageRec && Array.isArray(usageRec.repos) ? usageRec.repos.slice() : [],
   }

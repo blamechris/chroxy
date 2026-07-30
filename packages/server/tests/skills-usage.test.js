@@ -12,6 +12,8 @@ import {
   MAX_REPOS_PER_SKILL,
   MAX_SKILLS,
 } from '../src/skills-usage.js'
+import { z } from 'zod'
+import { isoFromEpochMs, MAX_WIRE_DATETIME_MS } from '../src/utils/iso-datetime.js'
 
 /**
  * #5554 Phase 2 — tests for the bounded, atomic skills usage log
@@ -19,6 +21,62 @@ import {
  * ~/.chroxy/skills-usage.json is never touched (the #4633 sandbox guard would
  * throw otherwise).
  */
+
+describe('#7081 lastUsed must stay wire-representable', () => {
+  let dir, fp
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'chroxy-usage-7081-'))
+    fp = join(dir, 'skills-usage.json')
+  })
+  afterEach(() => rmSync(dir, { recursive: true, force: true }))
+
+  const loadWith = (lastUsed) => {
+    writeFileSync(fp, JSON.stringify({
+      version: 1,
+      entries: [],
+      aggregates: { 'batch-merge': { count: 3, lastUsed, repos: ['/p/a'] } },
+    }))
+    return loadUsageStore(fp).aggregates['batch-merge']
+  }
+
+  it('CONTROL: an ordinary lastUsed survives the load untouched', () => {
+    const agg = loadWith(1785000000000)
+    assert.equal(agg.lastUsed, 1785000000000)
+    assert.equal(agg.count, 3, 'and the rest of the aggregate is intact')
+  })
+
+  it('accepts the largest wire-representable instant', () => {
+    assert.equal(loadWith(MAX_WIRE_DATETIME_MS).lastUsed, MAX_WIRE_DATETIME_MS)
+  })
+
+  it('nulls a lastUsed one ms past the cap — the value toISOString would ACCEPT', () => {
+    // This is the whole defect: Date renders it fine, so only a range check catches
+    // it, and the resulting +010000-… string failed the snapshot safeParse.
+    const agg = loadWith(MAX_WIRE_DATETIME_MS + 1)
+    assert.equal(agg.lastUsed, null)
+    assert.equal(agg.count, 3, 'the aggregate is kept — only the unusable timestamp is dropped')
+  })
+
+  it('nulls the whole expanded-year band and beyond', () => {
+    for (const ms of [253402300800000, 1795000000000000, 8640000000000000, 8640000000000001]) {
+      assert.equal(loadWith(ms).lastUsed, null, `${ms} must not survive as a number`)
+    }
+  })
+
+  it('DRIFT GUARD: a hostile lastUsed still yields a wire-legal ISO or null', () => {
+    // Asserts against the REAL wire cap rather than a hand-rolled shape, so a
+    // change to skills.ts fails here instead of silently reopening this.
+    const wireCap = z.string().datetime().nullable()
+    for (const ms of [1785000000000, MAX_WIRE_DATETIME_MS, MAX_WIRE_DATETIME_MS + 1, 8640000000000000]) {
+      const { lastUsed } = loadWith(ms)
+      const iso = isoFromEpochMs(lastUsed)
+      assert.ok(
+        wireCap.safeParse(iso).success,
+        `epoch ${ms} produced ${JSON.stringify(iso)}, which the wire rejects`,
+      )
+    }
+  })
+})
 
 describe('applyUsage (bounding + aggregates)', () => {
   it('appends an entry and updates the per-skill aggregate', () => {

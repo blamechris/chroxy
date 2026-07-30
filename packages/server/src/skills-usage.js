@@ -46,6 +46,7 @@ import { join } from 'node:path'
 import { createLogger } from './logger.js'
 import { loadJsonState, saveJsonState } from './json-state-file.js'
 import { getErrorMessage } from './utils/error-message.js'
+import { MAX_WIRE_DATETIME_MS } from './utils/iso-datetime.js'
 
 const log = createLogger('skills-usage')
 
@@ -115,7 +116,17 @@ function normalizeAggregate(agg) {
   const count = typeof agg.count === 'number' && Number.isFinite(agg.count) && agg.count >= 0
     ? Math.trunc(agg.count)
     : 0
-  const lastUsed = typeof agg.lastUsed === 'number' && Number.isFinite(agg.lastUsed) && agg.lastUsed > 0
+  // #7081: bound the RANGE, not just the type. `lastUsed` is rendered by
+  // skills-inventory.js via `new Date(ms).toISOString()` into a
+  // `z.string().datetime()` field, and there is a band above year 9999 where
+  // toISOString SUCCEEDS but emits the expanded-year form the wire rejects —
+  // which failed the whole snapshot's safeParse and left the Skills tab
+  // spinning with Refresh disabled. The adjacent `count` above already
+  // Math.truncs to match its int cap; this is the same rule, applied.
+  const lastUsed = typeof agg.lastUsed === 'number'
+    && Number.isFinite(agg.lastUsed)
+    && agg.lastUsed > 0
+    && agg.lastUsed <= MAX_WIRE_DATETIME_MS
     ? agg.lastUsed
     : null
   const repos = []
