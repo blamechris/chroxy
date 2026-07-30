@@ -128,16 +128,16 @@ export function parseRepoMemoryConfig(text) {
  */
 function deriveLastActivity(parsed) {
   const raw = parsed.lastEventAt ?? parsed.lastActivityAt ?? parsed.lastActivity
-  if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) {
-    try {
-      return new Date(raw).toISOString()
-    } catch {
-      return null
-    }
-  }
+  // #7081: both branches go through isoFromEpochMs. The destination is
+  // `z.string().datetime()`, and this input is repo-memory's own report JSON —
+  // arbitrary third-party output, so weaker protection than the mtime site below.
+  if (typeof raw === 'number') return isoFromEpochMs(raw)
   if (typeof raw === 'string' && raw.length > 0) {
+    // Date.parse ROUND-TRIPS the expanded-year form, so parsing a
+    // '+058851-…' string and re-emitting it reproduces the same wire-illegal
+    // value. The string branch needs the range check just as much as the number one.
     const ms = Date.parse(raw)
-    if (!Number.isNaN(ms)) return new Date(ms).toISOString()
+    if (!Number.isNaN(ms)) return isoFromEpochMs(ms)
   }
   return null
 }
@@ -529,7 +529,8 @@ export function parseRelayRuns(json) {
       status: str(r.status),
       conclusion: str(r.conclusion),
       event: str(r.event),
-      createdAt: Number.isNaN(createdMs) ? null : new Date(createdMs).toISOString(),
+      // #7081: same bound — gh run JSON is third-party input.
+      createdAt: Number.isNaN(createdMs) ? null : isoFromEpochMs(createdMs),
     })
   }
   return runs

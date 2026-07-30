@@ -19,6 +19,7 @@ import {
 } from '../src/control-room/integrations.js'
 import { validateConfig } from '../src/config.js'
 import { ServerIntegrationStatusSnapshotSchema } from '@chroxy/protocol'
+import { z } from 'zod'
 
 /**
  * Tests for the Control Room Integrations survey (#5499, epic #5498).
@@ -931,5 +932,41 @@ describe('#7081 repo-memory cache lastModified stays wire-representable', () => 
     assert.equal(entry.repoMemory.cache.present, true, 'the cache row still reports present')
     const r = ServerIntegrationStatusSnapshotSchema.safeParse({ type: 'integration_status_snapshot', ...snap })
     assert.ok(r.success, `snapshot must stay wire-legal; got ${JSON.stringify((r.error?.issues || [])[0])}`)
+  })
+})
+
+describe('#7081 review: the other epoch-to-ISO sites in this file', () => {
+  const wireCap = z.string().datetime().nullable()
+
+  it('deriveLastActivity NUMBER branch is bounded (arbitrary third-party CLI JSON)', () => {
+    // Same predicate the fix was written against, 115 lines above the line first
+    // changed — and its input is repo-memory's own report JSON, so it is weaker
+    // protection than the filesystem-backed mtime site.
+    const r = parseRepoMemoryReport(JSON.stringify({ lastEventAt: 1795000000000000 }))
+    assert.equal(r.lastActivity, null)
+    assert.ok(wireCap.safeParse(r.lastActivity).success)
+  })
+
+  it('deriveLastActivity STRING branch is bounded too (Date.parse round-trips expanded years)', () => {
+    const r = parseRepoMemoryReport(JSON.stringify({ lastEventAt: '+058851-04-14T23:06:40.000Z' }))
+    assert.equal(r.lastActivity, null, 'Date.parse accepts the expanded form, so the string branch needs the same guard')
+    assert.ok(wireCap.safeParse(r.lastActivity).success)
+  })
+
+  it('CONTROL: both branches still accept an ordinary value', () => {
+    const n = parseRepoMemoryReport(JSON.stringify({ lastEventAt: 1785000000000 }))
+    assert.equal(typeof n.lastActivity, 'string')
+    const s2 = parseRepoMemoryReport(JSON.stringify({ lastEventAt: '2026-07-29T12:00:00.000Z' }))
+    assert.equal(s2.lastActivity, '2026-07-29T12:00:00.000Z')
+  })
+
+  it('parseRelayRuns createdAt is bounded', () => {
+    const runs = parseRelayRuns(JSON.stringify([
+      { databaseId: 1, status: 'completed', conclusion: 'success', event: 'push', createdAt: '+058851-04-14T23:06:40.000Z' },
+      { databaseId: 2, status: 'completed', conclusion: 'success', event: 'push', createdAt: '2026-07-29T12:00:00.000Z' },
+    ]))
+    assert.equal(runs[0].createdAt, null, 'out-of-range becomes null')
+    assert.equal(runs[1].createdAt, '2026-07-29T12:00:00.000Z', 'CONTROL: a normal run is untouched')
+    for (const r of runs) assert.ok(wireCap.safeParse(r.createdAt).success)
   })
 })

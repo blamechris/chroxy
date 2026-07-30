@@ -195,7 +195,14 @@ export function saveUsageStore(store, filePath = defaultSkillsUsagePath()) {
 export function applyUsage(store, record) {
   const skill = record && typeof record.skill === 'string' && record.skill.length > 0 ? record.skill : null
   if (!skill) return store
-  const ts = typeof record.ts === 'number' && Number.isFinite(record.ts) && record.ts > 0 ? record.ts : Date.now()
+  // #7081: bound the RANGE here too. normalizeAggregate guards the LOAD path, but
+  // this is the WRITE path — it wrote `ts` verbatim into agg.lastUsed, persisting a
+  // number the next snapshot could not render. An out-of-range ts falls back to
+  // now(), which is what an unparseable one already did.
+  const tsRaw = record.ts
+  const ts = typeof tsRaw === 'number' && Number.isFinite(tsRaw) && tsRaw > 0 && tsRaw <= MAX_WIRE_DATETIME_MS
+    ? tsRaw
+    : Date.now()
   const sessionId = typeof record.sessionId === 'string' && record.sessionId.length > 0 ? record.sessionId : null
   const repo = typeof record.repo === 'string' && record.repo.length > 0 ? record.repo : null
 

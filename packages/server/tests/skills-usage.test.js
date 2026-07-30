@@ -292,3 +292,27 @@ describe('SkillsUsageRecorder', () => {
     assert.equal(rec2.aggregatesByName().get('a').count, 2, 'count should accumulate across restarts')
   })
 })
+
+describe('#7081 review: applyUsage must not PERSIST an out-of-range lastUsed', () => {
+  it('an out-of-range record ts does not become an unrepresentable lastUsed', () => {
+    // normalizeAggregate guards the LOAD path; applyUsage is the WRITE path and
+    // wrote `ts` verbatim, so a bad record persisted a number that the next
+    // snapshot could not render. Both ends need the bound.
+    const store = { version: 1, entries: [], aggregates: {} }
+    applyUsage(store, { skill: 'batch-merge', sessionId: 's1', repo: '/p/a', ts: 1795000000000000 })
+    const agg = store.aggregates['batch-merge']
+    if (agg) {
+      assert.ok(
+        agg.lastUsed === null || agg.lastUsed <= MAX_WIRE_DATETIME_MS,
+        `persisted lastUsed must stay wire-representable, got ${agg.lastUsed}`,
+      )
+      assert.ok(z.string().datetime().nullable().safeParse(isoFromEpochMs(agg.lastUsed)).success)
+    }
+  })
+
+  it('CONTROL: an ordinary record still advances lastUsed', () => {
+    const store = { version: 1, entries: [], aggregates: {} }
+    applyUsage(store, { skill: 'batch-merge', sessionId: 's1', repo: '/p/a', ts: 1785000000000 })
+    assert.equal(store.aggregates['batch-merge'].lastUsed, 1785000000000)
+  })
+})
