@@ -172,7 +172,7 @@ export declare const ServerContextOccupancySnapshotSchema: z.ZodObject<{
 export declare const ServerResultSchema: z.ZodObject<{
     type: z.ZodLiteral<"result">;
     cost: z.ZodOptional<z.ZodNullable<z.ZodNumber>>;
-    duration: z.ZodOptional<z.ZodNumber>;
+    duration: z.ZodOptional<z.ZodNullable<z.ZodNumber>>;
     usage: z.ZodOptional<z.ZodAny>;
     sessionId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
     queueLength: z.ZodOptional<z.ZodNumber>;

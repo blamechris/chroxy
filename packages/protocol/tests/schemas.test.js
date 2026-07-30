@@ -3185,6 +3185,80 @@ describe('@chroxy/protocol schemas', () => {
     })
   })
 
+  describe('ServerResultSchema duration (#7093)', () => {
+    // Sibling of #7089, same file, and higher-frequency: FOUR providers emit
+    // `duration: null` on every turn end (jsonl-subprocess-session.js:231,
+    // codex-session.js:638, gemini-session.js:423 and :495), and
+    // event-normalizer.js forwards it verbatim while conditionally spreading its
+    // neighbours. `result` is in PROXIED_EVENTS and is persisted for replay, so a
+    // stored history replayed a wire-illegal frame.
+    //
+    // These import ../src via tsx, so they validate THIS branch rather than resolving
+    // @chroxy/protocol through the main clone's node_modules symlink.
+    const parse = async (duration) => {
+      const { ServerResultSchema } = await import('../src/schemas/server/stream.ts')
+      return ServerResultSchema.safeParse({ type: 'result', cost: null, duration, usage: null, sessionId: null })
+    }
+
+    it('accepts duration: null — what all four non-Claude providers send', async () => {
+      const r = await parse(null)
+      assert.ok(r.success, 'null must be wire-legal — it is what the providers emit')
+      assert.equal(r.data.duration, null)
+    })
+
+    it('accepts a numeric duration', async () => {
+      const r = await parse(1234)
+      assert.ok(r.success)
+      assert.equal(r.data.duration, 1234)
+    })
+
+    it('accepts an omitted duration (backward compatible)', async () => {
+      const { ServerResultSchema } = await import('../src/schemas/server/stream.ts')
+      const r = ServerResultSchema.safeParse({ type: 'result' })
+      assert.ok(r.success)
+      assert.equal(r.data.duration, undefined)
+    })
+
+    it('still REFUSES a non-number, non-null duration (nullable is not untyped)', async () => {
+      for (const bad of ['1234', {}, [], true]) {
+        const r = await parse(bad)
+        assert.equal(r.success, false, `duration: ${JSON.stringify(bad)} must still be refused`)
+      }
+    })
+
+    it('CHARACTERIZATION: z.number() itself excludes non-finite values', async () => {
+      // Named honestly. This does NOT guard the `.finite()` on the field — measured on
+      // Zod 4.3.6, `z.number()` already rejects Infinity/-Infinity/NaN, so removing
+      // `.finite()` reddens nothing. What this pins is that BASELINE: if a future Zod
+      // ever loosened `z.number()`, this fails and `.finite()` stops being decorative.
+      for (const bad of [Infinity, -Infinity, Number.NaN]) {
+        const r = await parse(bad)
+        assert.equal(r.success, false, `duration: ${String(bad)} must be refused`)
+      }
+    })
+
+    it('accepts the values real senders produce today, INCLUDING the awkward ones', async () => {
+      // Deliberately built without the shared parse() helper, which fixes the other
+      // three fields — an earlier version of this test reused it and was therefore a
+      // byte-identical duplicate of the null case above, proving nothing extra.
+      //
+      // These are the values the constraints this PR did NOT apply would have broken.
+      // If someone later adds .int()/.nonnegative()/.max(), this test tells them which
+      // sender they are about to make wire-illegal.
+      const { ServerResultSchema } = await import('../src/schemas/server/stream.ts')
+      const cases = [
+        ['fractional, from a parseFloat config option (sdk-session.js:1964)', 1800000.5],
+        ['negative, from a backwards clock jump (byok-session.js:1463)', -5000],
+        ['longer than the 24h sane-duration ceiling', 24 * 60 * 60 * 1000 + 1],
+        ['zero', 0],
+      ]
+      for (const [why, duration] of cases) {
+        const r = ServerResultSchema.safeParse({ type: 'result', cost: 0.01, duration, usage: {}, sessionId: 's1' })
+        assert.ok(r.success, `${why}: duration ${duration} must still parse — see the deferred-constraint note in stream.ts`)
+      }
+    })
+  })
+
   describe('ServerAvailableModelsSchema defaultModel (#7089)', () => {
     // The server has always sent `defaultModel: null` — registry.getDefaultModelId()
     // returns null with no default and every sender passes it through. The schema said
