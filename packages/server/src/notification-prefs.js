@@ -204,7 +204,15 @@ function sanitizeDevices(raw, { log } = {}) {
     // addresses nothing and is then re-persisted by the next patch, permanently
     // corrupting the file. Dropping self-heals on the next register_push_token.
     if (token.length > MAX_DEVICE_TOKEN_CHARS) {
-      log?.warn?.(`notification-prefs: dropped a device entry whose token exceeds ${MAX_DEVICE_TOKEN_CHARS} chars (unrepresentable on the wire)`)
+      // NOTE this is DESTRUCTIVE on the next write: loadPrefs' output is also what
+      // savePrefs persists, and push.js `touchDevice` re-persists the whole
+      // sanitized object on every register_push_token — so one phone reconnecting
+      // erases this entry from disk. Accepted deliberately: a >512-char key cannot
+      // be a real push token, so nothing addressable is lost, and the alternative
+      // (preserving it) needs a load-for-wire / load-for-persistence split that
+      // does not exist here. Unlike a scheduled task (#7050), there is no operator
+      // data in an unrouteable token worth keeping.
+      log?.warn?.(`notification-prefs: dropped a device entry whose token exceeds ${MAX_DEVICE_TOKEN_CHARS} chars (unrepresentable on the wire; it will not survive the next save)`)
       continue
     }
     if (!entry || typeof entry !== 'object') continue
@@ -313,13 +321,22 @@ function sanitizeBypassList(raw, { log, context = 'bypassCategories' } = {}) {
     log?.warn?.(`notification-prefs: dropped ${droppedLong} ${context} entr${droppedLong === 1 ? 'y' : 'ies'} longer than ${MAX_BYPASS_CATEGORY_CHARS} chars (unrepresentable on the wire)`)
   }
   const list = [...seen]
-  // CLAMP the length: at most a handful of real categories exist, so an
-  // over-long list is garbage, and truncating a SET corrupts no identifier.
-  if (list.length > MAX_BYPASS_CATEGORIES) {
-    log?.warn?.(`notification-prefs: ${context} had ${list.length} entries; keeping the first ${MAX_BYPASS_CATEGORIES}`)
-    return list.slice(0, MAX_BYPASS_CATEGORIES)
-  }
-  return list
+  if (list.length <= MAX_BYPASS_CATEGORIES) return list
+  // CLAMP the length — but NOT positionally. A plain slice(0, N) drops whatever
+  // sits past the cap, which can be a REAL category: losing `permission` from the
+  // bypass list suppresses a blocking permission prompt during quiet hours and the
+  // agent stalls indefinitely (the #4544 rationale above). That is a worse failure
+  // than the unparseable snapshot this bound exists to prevent.
+  //
+  // So keep every RECOGNISED category first, then fill the remaining slots with
+  // unrecognised ones (preserving their relative order). This also serves the
+  // forward-compat intent better than a slice: the entries at risk of being
+  // dropped are now exactly the ones this binary cannot act on anyway.
+  const known = list.filter((c) => ALL_CATEGORIES.includes(c))
+  const unknown = list.filter((c) => !ALL_CATEGORIES.includes(c))
+  const kept = [...known, ...unknown].slice(0, MAX_BYPASS_CATEGORIES)
+  log?.warn?.(`notification-prefs: ${context} had ${list.length} entries; keeping ${kept.length} (recognised categories first, ${list.length - kept.length} unrecognised dropped)`)
+  return kept
 }
 
 /**

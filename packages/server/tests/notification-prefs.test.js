@@ -142,6 +142,46 @@ describe('notification-prefs', () => {
       assert.equal(prefs.bypassCategories.length, 64)
     })
 
+    it('CRITICAL: clamping never drops a REAL category in favour of junk', () => {
+      // A positional slice(0, 64) drops whatever sits at index >= 64 — including a
+      // functional category. Dropping `permission` from the bypass list means a
+      // blocking permission prompt is SUPPRESSED during quiet hours and the agent
+      // stalls indefinitely (the #4544 rationale this file documents). That would be
+      // a worse bug than the unparseable snapshot this fix exists to prevent, so
+      // known categories are kept ahead of unrecognised ones.
+      const junk = Array.from({ length: 64 }, (_, i) => `junk${i}`)
+      const prefs = load({ bypassCategories: [...junk, 'permission'] })
+      assert.equal(prefs.bypassCategories.length, 64, 'still clamped to the wire cap')
+      assert.ok(
+        prefs.bypassCategories.includes('permission'),
+        'a real category must survive the clamp regardless of its position on disk',
+      )
+    })
+
+    it('boundary: exactly-at-cap values are accepted, one-over is refused', () => {
+      // Pins the inclusive bound in all three guards — a `>` that became `>=`
+      // (or vice versa) otherwise passes every other test in this block.
+      const atCapCat = 'c'.repeat(64)
+      const atCapToken = 't'.repeat(512)
+      const prefs = load({
+        bypassCategories: [atCapCat, 'c'.repeat(65)],
+        devices: { [atCapToken]: { platform: 'ios' }, ['t'.repeat(513)]: { platform: 'ios' } },
+      })
+      assert.deepEqual(prefs.bypassCategories, [atCapCat], 'a 64-char name is legal, 65 is not')
+      assert.deepEqual(Object.keys(prefs.devices), [atCapToken], 'a 512-char token is legal, 513 is not')
+
+      // Exactly 64 entries must not be clamped — and must not WARN that they were.
+      // The clamp is output-identical at the cap, so only the absent warn
+      // distinguishes `<=` from `<` here.
+      const warned = []
+      const exact = load(
+        { bypassCategories: Array.from({ length: 64 }, (_, i) => `cat${i}`) },
+        { warn: (m) => warned.push(m) },
+      )
+      assert.equal(exact.bypassCategories.length, 64)
+      assert.deepEqual(warned, [], 'a list exactly at the cap is untouched, so nothing should be reported')
+    })
+
     it('drops a device whose token key exceeds the wire cap', () => {
       const good = 'ExponentPushToken[ok]'
       const prefs = load({ devices: { [LONG_TOKEN]: { platform: 'ios' }, [good]: { platform: 'android' } } })
