@@ -34,32 +34,108 @@
 
 import * as protocol from '@chroxy/protocol'
 
-/** Pull the `type` literal out of a Zod object schema, or null if it has none. */
-function typeLiteralOf(schema) {
-  // Zod exposes `.shape` on object schemas; older/inner forms keep it on `_def`.
+/** Zod object shape, whichever way this version exposes it. */
+function shapeOf(schema) {
   const shape = schema?.shape ?? schema?._def?.shape
-  const value = shape?.type?.value
-  return typeof value === 'string' ? value : null
+  // A shape can be lazily defined as a getter/thunk.
+  return typeof shape === 'function' ? shape() : shape
+}
+
+/** The union arms of a schema, or null when it is not a union. */
+function unionArmsOf(schema) {
+  const def = schema?._def
+  const kind = def?.type ?? def?.typeName
+  if (kind !== 'union' && kind !== 'discriminatedUnion' && kind !== 'ZodUnion' && kind !== 'ZodDiscriminatedUnion') return null
+  const options = def?.options ?? schema?.options
+  return options ? [...options] : null
+}
+
+/**
+ * Every `type` literal a schema can produce.
+ *
+ * Returns a Set because a UNION is still one frame schema but reaches the
+ * registry through each arm's literal. Missing this is not a cosmetic gap: a
+ * union-shaped frame schema has no top-level `.shape`, so a naive
+ * `shape.type.value` lookup drops it SILENTLY and the frame then looks
+ * schema-less. That is exactly what happened to `evaluate_draft_result`
+ * (ServerEvaluateDraftResultSchema) and `permission_input`
+ * (ServerPermissionInputSchema) — both real frames, both briefly recorded as
+ * uncovered because of it.
+ *
+ * @param {object} schema
+ * @returns {Set<string>}
+ */
+export function typeLiteralsOf(schema) {
+  const out = new Set()
+  const arms = unionArmsOf(schema)
+  if (arms) {
+    for (const arm of arms) for (const t of typeLiteralsOf(arm)) out.add(t)
+    return out
+  }
+  const type = shapeOf(schema)?.type
+  if (!type) return out
+  // A literal exposes `.value`; some versions expose a `values` collection instead.
+  if (typeof type.value === 'string') out.add(type.value)
+  const values = type?._def?.values ?? type?.options
+  if (values) for (const v of values) if (typeof v === 'string') out.add(v)
+  return out
+}
+
+/**
+ * True when a schema is a sub-object rather than a frame.
+ *
+ * A frame is discriminated by a `type` LITERAL. A schema whose `type` is ordinary
+ * data — `ServerPermissionAuditEntrySchema.type` is `z.string()`, naming the audited
+ * tool — is not a frame, and neither is one with no `type` at all.
+ *
+ * Classifying on "has a type field" instead of "has a type LITERAL" is too crude and
+ * flagged that audit-entry schema as unreadable. The distinction that matters is
+ * between a legitimate exclusion and a SILENT DROP, so the rule is: no literal to
+ * read is fine; a literal we failed to read is not.
+ */
+function looksLikeNonFrame(schema) {
+  const arms = unionArmsOf(schema)
+  if (arms) return arms.every((arm) => looksLikeNonFrame(arm))
+  const type = shapeOf(schema)?.type
+  if (type === undefined) return true
+  const kind = type?._def?.type ?? type?._def?.typeName
+  // Only a literal (or an enum of literals) can discriminate a frame.
+  return kind !== 'literal' && kind !== 'ZodLiteral' && kind !== 'enum' && kind !== 'ZodEnum'
 }
 
 function buildRegistry() {
   /** @type {Map<string, Array<{ name: string, schema: object }>>} */
   const byType = new Map()
   const nonFrame = []
+  const unreadable = []
   for (const [name, schema] of Object.entries(protocol)) {
     if (!name.startsWith('Server') || !name.endsWith('Schema')) continue
-    const type = typeLiteralOf(schema)
-    if (type === null) {
-      nonFrame.push(name)
+    const types = typeLiteralsOf(schema)
+    if (types.size === 0) {
+      // No literal extracted. Either it genuinely has no `type` field (fine), or it
+      // has one this code could not read (NOT fine — that is the silent drop).
+      if (looksLikeNonFrame(schema)) nonFrame.push(name)
+      else unreadable.push(name)
       continue
     }
-    if (!byType.has(type)) byType.set(type, [])
-    byType.get(type).push({ name, schema })
+    for (const type of types) {
+      if (!byType.has(type)) byType.set(type, [])
+      byType.get(type).push({ name, schema })
+    }
   }
-  return { byType, nonFrame }
+  return { byType, nonFrame, unreadable }
 }
 
-const { byType: REGISTRY, nonFrame: NON_FRAME_SCHEMAS } = buildRegistry()
+const { byType: REGISTRY, nonFrame: NON_FRAME_SCHEMAS, unreadable: UNREADABLE_SCHEMAS } = buildRegistry()
+
+/**
+ * Schemas that DO carry a `type` field whose literal could not be extracted.
+ *
+ * Must always be empty. A non-empty list means the derivation silently dropped a
+ * frame and the coverage numbers are understated — so the test asserts on it
+ * rather than leaving it to be noticed.
+ */
+export const UNREADABLE_FRAME_SCHEMA_NAMES = Object.freeze([...UNREADABLE_SCHEMAS].sort())
 
 /** Every outbound message `type` that has at least one schema. */
 export const SCHEMA_BACKED_OUTBOUND_TYPES = Object.freeze([...REGISTRY.keys()].sort())

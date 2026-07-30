@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path'
 import {
   SCHEMA_BACKED_OUTBOUND_TYPES,
   NON_FRAME_SCHEMA_NAMES,
+  UNREADABLE_FRAME_SCHEMA_NAMES,
   outboundSchemasForType,
   validateOutbound,
 } from '../src/ws-outbound-schemas.js'
@@ -31,9 +32,13 @@ const WS_SERVER = join(HERE, '..', 'src', 'ws-server.js')
  * long after the schemas landed, and nobody would notice.
  */
 
-// The 30 frames the server documents sending that have no outbound schema, measured
+// The 28 frames the server documents sending that have no outbound schema, measured
 // against the roster in ws-server.js. Delete entries as schemas land — the test
 // below fails if you forget.
+//
+// `encrypted` is arguably a legitimate permanent entry (it is the E2E envelope
+// wrapper, not a semantic frame) — left in the list rather than special-cased so
+// the decision is made deliberately when someone gets to it.
 const UNSCHEMAD = new Set([
   'agent_list',
   'available_permission_modes',
@@ -42,7 +47,6 @@ const UNSCHEMAD = new Set([
   'dev_preview_stopped',
   'discovered_sessions',
   'encrypted',
-  'evaluate_draft_result',
   'file_list',
   'file_listing',
   'git_commit_result',
@@ -52,7 +56,6 @@ const UNSCHEMAD = new Set([
   'history_replay_start',
   'log_entry',
   'pairing_refreshed',
-  'permission_input',
   'permission_rules_updated',
   'primary_changed',
   'server_mode',
@@ -127,6 +130,36 @@ describe('#7085 outbound schema coverage', () => {
     // types that no sender ever emits.
     assert.ok(NON_FRAME_SCHEMA_NAMES.includes('ServerSessionListEntrySchema'))
     assert.equal(outboundSchemasForType('').length, 0)
+  })
+
+  it('a UNION-shaped frame schema is registered under its arms\' literal', () => {
+    // ServerEvaluateDraftResultSchema and ServerPermissionInputSchema are unions, so
+    // they have no top-level `.shape` and a naive `shape.type.value` lookup dropped
+    // them SILENTLY — both were briefly recorded as uncovered frames because of it.
+    for (const type of ['evaluate_draft_result', 'permission_input']) {
+      const arms = outboundSchemasForType(type)
+      assert.ok(arms.length > 0, `union-shaped frame '${type}' must be registered, got none`)
+    }
+  })
+
+  it('INVARIANT: no schema carries a type literal the derivation cannot read', () => {
+    // The whole point of deriving rather than declaring: a schema that HAS a
+    // discriminating literal but whose literal cannot be extracted is a SILENT DROP,
+    // which understates coverage and lets a real frame look schema-less. This must
+    // stay empty for any Zod version — if it fires, fix typeLiteralsOf, do not
+    // suppress it.
+    assert.deepEqual(
+      UNREADABLE_FRAME_SCHEMA_NAMES, [],
+      'these have a type literal that could not be read — the registry is understating coverage',
+    )
+  })
+
+  it('a `type` field that is DATA, not a literal, is not mistaken for a frame', () => {
+    // ServerPermissionAuditEntrySchema.type is z.string() (it names the audited tool).
+    // Classifying on "has a type field" instead of "has a type LITERAL" wrongly
+    // flagged it as an unreadable frame.
+    assert.ok(NON_FRAME_SCHEMA_NAMES.includes('ServerPermissionAuditEntrySchema'))
+    assert.equal(UNREADABLE_FRAME_SCHEMA_NAMES.includes('ServerPermissionAuditEntrySchema'), false)
   })
 
   describe('validateOutbound', () => {
