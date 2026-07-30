@@ -78,8 +78,8 @@
       "installed": "2026-06-02"
     },
     "skill": {
-      "hash": "21fe7c3",
-      "installed": "2026-06-14",
+      "hash": "987eb2b",
+      "installed": "2026-07-29",
       "targets": [
         "claude",
         "gemini"
