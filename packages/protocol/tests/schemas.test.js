@@ -3185,6 +3185,45 @@ describe('@chroxy/protocol schemas', () => {
     })
   })
 
+  describe('ServerAvailableModelsSchema defaultModel (#7089)', () => {
+    // The server has always sent `defaultModel: null` — registry.getDefaultModelId()
+    // returns null with no default and every sender passes it through. The schema said
+    // z.string().optional(), so null was wire-illegal: 309 failing sends in a
+    // 2337-test subset, the highest-volume wire-contract violation in the repo.
+    //
+    // These import ../src directly (tsx), so unlike a packages/server test they see
+    // THIS branch's schema rather than resolving @chroxy/protocol through the main
+    // clone's symlink.
+    it('accepts defaultModel: null (what a registry with no default actually sends)', async () => {
+      const { ServerAvailableModelsSchema } = await import('../src/schemas/server/stream.ts')
+      const r = ServerAvailableModelsSchema.safeParse({ type: 'available_models', models: [], defaultModel: null })
+      assert.ok(r.success, 'null must be wire-legal — it is what the server emits')
+      assert.equal(r.data.defaultModel, null)
+    })
+
+    it('accepts a defaultModel string', async () => {
+      const { ServerAvailableModelsSchema } = await import('../src/schemas/server/stream.ts')
+      const r = ServerAvailableModelsSchema.safeParse({ type: 'available_models', models: [], defaultModel: 'opus' })
+      assert.ok(r.success)
+      assert.equal(r.data.defaultModel, 'opus')
+    })
+
+    it('accepts an omitted defaultModel (backward compatible)', async () => {
+      const { ServerAvailableModelsSchema } = await import('../src/schemas/server/stream.ts')
+      const r = ServerAvailableModelsSchema.safeParse({ type: 'available_models', models: [] })
+      assert.ok(r.success)
+      assert.equal(r.data.defaultModel, undefined)
+    })
+
+    it('still REFUSES a non-string, non-null defaultModel (nullable is not untyped)', async () => {
+      const { ServerAvailableModelsSchema } = await import('../src/schemas/server/stream.ts')
+      for (const bad of [42, {}, [], true]) {
+        const r = ServerAvailableModelsSchema.safeParse({ type: 'available_models', models: [], defaultModel: bad })
+        assert.equal(r.success, false, `defaultModel: ${JSON.stringify(bad)} must still be refused`)
+      }
+    })
+  })
+
   describe('ServerAvailableModelsSchema provider tag (#6370)', () => {
     it('accepts a roster tagged with a provider string', async () => {
       const { ServerAvailableModelsSchema } = await import('../src/schemas/server/stream.ts')

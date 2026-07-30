@@ -8,6 +8,12 @@ import { createModelsRegistry } from '../src/models.js'
  * `z.string().optional()`, the single highest-volume wire-contract violation in the
  * codebase (309 failing sends across a 2337-test subset).
  *
+ * Field-level nullability coverage (null / string / omitted / non-string refused) lives
+ * in packages/protocol/tests/schemas.test.js beside the equivalent `provider` block —
+ * that suite imports ../src via tsx, so it validates THIS branch rather than resolving
+ * @chroxy/protocol through the main clone's symlink. This file's job is narrower and
+ * complementary: prove a payload built by a REAL sender is wire-legal.
+ *
  * The payload is built from a REAL registry rather than a literal, because that is
  * the only way to catch it: every existing fixture hardcodes a string default, and
  * `registry.getDefaultModelId()` returning null is exactly the condition those
@@ -49,10 +55,5 @@ describe('#7089 available_models wire shape', () => {
       const r = ServerAvailableModelsSchema.safeParse({ ...payloadFrom(createModelsRegistry({})), defaultModel: bad })
       assert.equal(r.success, false, `defaultModel: ${JSON.stringify(bad)} must still be rejected`)
     }
-  })
-
-  it('provider stays nullable too (the field this fix was modelled on)', () => {
-    const payload = payloadFrom(createModelsRegistry({}), null)
-    assert.ok(ServerAvailableModelsSchema.safeParse(payload).success)
   })
 })
