@@ -299,8 +299,15 @@ function sanitizeQuietHours(raw) {
 function sanitizeBypassList(raw, { log, context = 'bypassCategories' } = {}) {
   if (raw == null) return null
   if (!Array.isArray(raw)) return []
-  const seen = new Set()
+  // Retain KNOWN categories (a fixed set of ALL_CATEGORIES.length) and at most
+  // MAX_BYPASS_CATEGORIES unknowns, so a hostile file with a huge array cannot make
+  // the loader hold the whole thing. Deliberately NOT "keep the first N while
+  // iterating": that bounds memory but is positional, which is exactly what dropped
+  // a real `permission` entry past the cap (see the clamp comment below).
+  const knownSeen = new Set()
+  const unknownSeen = new Set()
   let droppedLong = 0
+  let droppedOverflow = 0
   for (const item of raw) {
     if (typeof item !== 'string') continue
     const trimmed = item.trim()
@@ -315,13 +322,23 @@ function sanitizeBypassList(raw, { log, context = 'bypassCategories' } = {}) {
       droppedLong += 1
       continue
     }
-    seen.add(trimmed)
+    if (ALL_CATEGORIES.includes(trimmed)) {
+      knownSeen.add(trimmed)
+      continue
+    }
+    // Unknowns are the only unbounded input, so they are the only thing capped
+    // during iteration. A known category can never be lost this way.
+    if (unknownSeen.size >= MAX_BYPASS_CATEGORIES) {
+      droppedOverflow += 1
+      continue
+    }
+    unknownSeen.add(trimmed)
   }
   if (droppedLong > 0) {
     log?.warn?.(`notification-prefs: dropped ${droppedLong} ${context} entr${droppedLong === 1 ? 'y' : 'ies'} longer than ${MAX_BYPASS_CATEGORY_CHARS} chars (unrepresentable on the wire)`)
   }
-  const list = [...seen]
-  if (list.length <= MAX_BYPASS_CATEGORIES) return list
+  const list = [...knownSeen, ...unknownSeen]
+  if (list.length <= MAX_BYPASS_CATEGORIES && droppedOverflow === 0) return list
   // CLAMP the length — but NOT positionally. A plain slice(0, N) drops whatever
   // sits past the cap, which can be a REAL category: losing `permission` from the
   // bypass list suppresses a blocking permission prompt during quiet hours and the
@@ -332,10 +349,9 @@ function sanitizeBypassList(raw, { log, context = 'bypassCategories' } = {}) {
   // unrecognised ones (preserving their relative order). This also serves the
   // forward-compat intent better than a slice: the entries at risk of being
   // dropped are now exactly the ones this binary cannot act on anyway.
-  const known = list.filter((c) => ALL_CATEGORIES.includes(c))
-  const unknown = list.filter((c) => !ALL_CATEGORIES.includes(c))
-  const kept = [...known, ...unknown].slice(0, MAX_BYPASS_CATEGORIES)
-  log?.warn?.(`notification-prefs: ${context} had ${list.length} entries; keeping ${kept.length} (recognised categories first, ${list.length - kept.length} unrecognised dropped)`)
+  const kept = list.slice(0, MAX_BYPASS_CATEGORIES)
+  const dropped = (list.length - kept.length) + droppedOverflow
+  log?.warn?.(`notification-prefs: ${context} exceeded ${MAX_BYPASS_CATEGORIES} entries; keeping ${kept.length} (recognised categories first, ${dropped} unrecognised dropped)`)
   return kept
 }
 

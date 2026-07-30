@@ -158,6 +158,19 @@ describe('notification-prefs', () => {
       )
     })
 
+    it('a huge array stays memory-bounded WITHOUT dropping a real category at the end', () => {
+      // Guards both halves at once: the loader must not retain the whole array, and
+      // the bound must not be positional — "keep the first 64 while iterating" would
+      // bound memory but re-break the quiet-hours gate (see the CRITICAL test above).
+      const huge = [...Array.from({ length: 50000 }, (_, i) => `junk${i}`), 'permission']
+      const prefs = load({ bypassCategories: huge })
+      assert.equal(prefs.bypassCategories.length, 64, 'clamped to the wire cap')
+      assert.ok(
+        prefs.bypassCategories.includes('permission'),
+        'the real category is at index 50000 and must still survive',
+      )
+    })
+
     it('boundary: exactly-at-cap values are accepted, one-over is refused', () => {
       // Pins the inclusive bound in all three guards — a `>` that became `>=`
       // (or vice versa) otherwise passes every other test in this block.
