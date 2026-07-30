@@ -13,6 +13,7 @@ import {
   CATEGORY_DEFAULTS,
   ALL_CATEGORIES,
 } from '../src/notification-prefs.js'
+import { ServerNotificationPrefsSchema } from '@chroxy/protocol'
 
 let tmpDir
 let prefsPath
@@ -102,6 +103,142 @@ describe('notification-prefs', () => {
       const prefs = loadPrefs(prefsPath)
       assert.equal(prefs.categories.bogus_category, undefined)
       assert.equal(prefs.categories.result, false)
+    })
+  })
+
+  // #7080 — the loader accepted values ServerNotificationPrefsSchema rejects, so a
+  // hand-edited prefs file wedged the notification panel on BOTH clients: the
+  // whole-message safeParse fails -> notificationPrefs stays null -> the dashboard
+  // renders "Loading preferences..." forever, and push.js re-persists the bad value
+  // on the next patch so it never self-heals.
+  describe('#7080 wire bounds on the prefs loader', () => {
+    const LONG_CATEGORY = 'c'.repeat(65)   // cap is 64
+    const LONG_TOKEN = 't'.repeat(513)     // cap is 512
+    const quiet = { warn: () => {} }
+
+    const load = (obj, log = quiet) => {
+      writeFileSync(prefsPath, JSON.stringify(obj))
+      return loadPrefs(prefsPath, { log })
+    }
+
+    it('CONTROL: legal values survive untouched (so the drops below mean something)', () => {
+      const token = 'ExponentPushToken[abc123]'
+      const prefs = load({
+        bypassCategories: ['permission', 'activity_error'],
+        devices: { [token]: { platform: 'ios', bypassCategories: ['permission'] } },
+      })
+      assert.deepEqual(prefs.bypassCategories, ['permission', 'activity_error'])
+      assert.deepEqual(Object.keys(prefs.devices), [token])
+      assert.deepEqual(prefs.devices[token].bypassCategories, ['permission'])
+    })
+
+    it('drops an over-cap bypass category but keeps the legal siblings', () => {
+      const prefs = load({ bypassCategories: ['permission', LONG_CATEGORY, 'activity_error'] })
+      assert.deepEqual(prefs.bypassCategories, ['permission', 'activity_error'])
+    })
+
+    it('caps the bypass list length', () => {
+      const prefs = load({ bypassCategories: Array.from({ length: 70 }, (_, i) => `cat${i}`) })
+      assert.equal(prefs.bypassCategories.length, 64)
+    })
+
+    it('CRITICAL: clamping never drops a REAL category in favour of junk', () => {
+      // A positional slice(0, 64) drops whatever sits at index >= 64 — including a
+      // functional category. Dropping `permission` from the bypass list means a
+      // blocking permission prompt is SUPPRESSED during quiet hours and the agent
+      // stalls indefinitely (the #4544 rationale this file documents). That would be
+      // a worse bug than the unparseable snapshot this fix exists to prevent, so
+      // known categories are kept ahead of unrecognised ones.
+      const junk = Array.from({ length: 64 }, (_, i) => `junk${i}`)
+      const prefs = load({ bypassCategories: [...junk, 'permission'] })
+      assert.equal(prefs.bypassCategories.length, 64, 'still clamped to the wire cap')
+      assert.ok(
+        prefs.bypassCategories.includes('permission'),
+        'a real category must survive the clamp regardless of its position on disk',
+      )
+    })
+
+    it('a huge array stays memory-bounded WITHOUT dropping a real category at the end', () => {
+      // Guards both halves at once: the loader must not retain the whole array, and
+      // the bound must not be positional — "keep the first 64 while iterating" would
+      // bound memory but re-break the quiet-hours gate (see the CRITICAL test above).
+      const huge = [...Array.from({ length: 50000 }, (_, i) => `junk${i}`), 'permission']
+      const prefs = load({ bypassCategories: huge })
+      assert.equal(prefs.bypassCategories.length, 64, 'clamped to the wire cap')
+      assert.ok(
+        prefs.bypassCategories.includes('permission'),
+        'the real category is at index 50000 and must still survive',
+      )
+    })
+
+    it('boundary: exactly-at-cap values are accepted, one-over is refused', () => {
+      // Pins the inclusive bound in all three guards — a `>` that became `>=`
+      // (or vice versa) otherwise passes every other test in this block.
+      const atCapCat = 'c'.repeat(64)
+      const atCapToken = 't'.repeat(512)
+      const prefs = load({
+        bypassCategories: [atCapCat, 'c'.repeat(65)],
+        devices: { [atCapToken]: { platform: 'ios' }, ['t'.repeat(513)]: { platform: 'ios' } },
+      })
+      assert.deepEqual(prefs.bypassCategories, [atCapCat], 'a 64-char name is legal, 65 is not')
+      assert.deepEqual(Object.keys(prefs.devices), [atCapToken], 'a 512-char token is legal, 513 is not')
+
+      // Exactly 64 entries must not be clamped — and must not WARN that they were.
+      // The clamp is output-identical at the cap, so only the absent warn
+      // distinguishes `<=` from `<` here.
+      const warned = []
+      const exact = load(
+        { bypassCategories: Array.from({ length: 64 }, (_, i) => `cat${i}`) },
+        { warn: (m) => warned.push(m) },
+      )
+      assert.equal(exact.bypassCategories.length, 64)
+      assert.deepEqual(warned, [], 'a list exactly at the cap is untouched, so nothing should be reported')
+    })
+
+    it('drops a device whose token key exceeds the wire cap', () => {
+      const good = 'ExponentPushToken[ok]'
+      const prefs = load({ devices: { [LONG_TOKEN]: { platform: 'ios' }, [good]: { platform: 'android' } } })
+      assert.deepEqual(Object.keys(prefs.devices), [good], 'the over-cap device is dropped, the legal one survives')
+    })
+
+    it('bounds the PER-DEVICE bypass list too, and names the device in the warn', () => {
+      // Two call sites share sanitizeBypassList; fixing only loadPrefs leaves this broken.
+      const token = 'ExponentPushToken[dev]'
+      const warned = []
+      const prefs = load(
+        { devices: { [token]: { bypassCategories: ['permission', LONG_CATEGORY] } } },
+        { warn: (m) => warned.push(m) },
+      )
+      assert.deepEqual(prefs.devices[token].bypassCategories, ['permission'])
+      // Attribution matters: with several devices, an unattributed warn cannot tell
+      // the operator which entry to repair.
+      assert.ok(
+        warned.some((m) => m.includes(token)),
+        `expected the warn to name the device, got ${JSON.stringify(warned)}`,
+      )
+    })
+
+    it('warns so the operator can tell a value was refused', () => {
+      const warned = []
+      load({ bypassCategories: ['permission', LONG_CATEGORY] }, { warn: (m) => warned.push(m) })
+      assert.ok(warned.some((m) => /bypass/i.test(m)), `expected a bypass warn, got ${JSON.stringify(warned)}`)
+    })
+
+    it('DRIFT GUARD: a hostile file still loads to something the real wire schema accepts', () => {
+      // The point of the whole fix. Asserts against the REAL schema rather than a
+      // hand-rolled shape, so a cap change in @chroxy/protocol fails here.
+      const prefs = load({
+        bypassCategories: [...Array.from({ length: 70 }, (_, i) => `cat${i}`), LONG_CATEGORY],
+        devices: {
+          [LONG_TOKEN]: { platform: 'ios', bypassCategories: [LONG_CATEGORY] },
+          'ExponentPushToken[ok]': { platform: 'android', bypassCategories: [LONG_CATEGORY, 'permission'] },
+        },
+      })
+      const r = ServerNotificationPrefsSchema.safeParse({ type: 'notification_prefs', prefs })
+      assert.ok(
+        r.success,
+        `loaded prefs must satisfy the wire schema; got ${JSON.stringify((r.error?.issues || []).slice(0, 3).map((i) => ({ code: i.code, path: i.path })))}`,
+      )
     })
   })
 
