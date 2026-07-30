@@ -135,9 +135,12 @@ Launch implementation agents using the Agent tool with `isolation: "worktree"`. 
 
 **Delegation tiers (cost discipline — do not strip):**
 
-- **Implementers run on sonnet by default.** Well-scoped, low/medium-complexity issues are workhorse-tier work. Spawn an **opus implementer only for a non-trivial issue** — genuine design latitude, cross-cutting change surface, or a prior sonnet failure on the same issue — and note which issues got opus in the progress table.
-- **Triage/classification on haiku.** The queue triage pass (complexity read, skip-criteria checks, label classification) runs on haiku at low effort; sample-verify ~10% of its classifications with a stronger model rather than running the whole triage on an expensive tier.
-- **Fan-out budget: ~12-20 subagents per run** (implementers + reviewers + triage/verify passes across all batches). Exceeding it requires an explicit one-line justification recorded in the session summary.
+Roles per `/tiered-delegation`: **workhorse** = one tier below the session ceiling, **mechanical** = cheapest available tier. Concrete model names live only in that skill's `{{CUSTOMIZE}}` ladder — never here.
+
+- **Implementers run at the workhorse tier by default.** Well-scoped, low/medium-complexity issues are workhorse work. Spawn a **ceiling-tier implementer only for a non-trivial issue** — genuine design latitude, cross-cutting change surface, or a prior workhorse failure on the same issue — and note which issues got the ceiling tier in the progress table.
+- **Triage/classification at the mechanical tier.** The queue triage pass (complexity read, skip-criteria checks, label classification) runs at the mechanical tier at low effort.
+- **Sample-verify instead of up-tiering.** Re-check a ~10% sample of the mechanical triage's classifications with a stronger tier rather than running the whole triage on an expensive one; a failed sample sends the batch back for verification, not up-tier.
+- **Fan-out budget: ~12 workhorse/ceiling subagents per run** (implementers + reviewers across all batches). Mechanical-tier triage/pre-filter agents and the ~10% sample-verify checks do not count against it. Exceeding 12 (up to a hard 20) requires an explicit one-line justification recorded in the session summary.
 
 Each agent independently:
 1. Installs dependencies in its worktree
@@ -399,4 +402,5 @@ This makes the skill **idempotent** — safe to re-run without duplicating work.
 13. **Comment on skips** — Every skipped issue gets a GitHub comment explaining why.
 14. **Pre-Skill Checkpoint** — Re-read CLAUDE.md and skill files before each /full-review run.
 15. **Compose existing skills** — /full-review is called as-is. Don't reinvent its logic.
-<!-- skill-templates: parallel-dev a9ed830 2026-07-30 -->
+
+<!-- skill-templates: parallel-dev 8196307 2026-07-30 -->

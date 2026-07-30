@@ -420,15 +420,19 @@ One entry per self-merged PR — MANDATORY (Unattended Merge Gate rule 6). Omit 
 
 ## Session Boundaries
 
-Long autonomous runs are a sequence of bounded sessions, not one endless context — context re-reads dominate their cost, and a restart that halves context pays for itself within ~6–10 requests. When this skill runs inside a marathon (`/tackle-issues`), the wave boundary is the session boundary; run standalone, apply the same discipline at queue checkpoints:
+Long autonomous runs are a sequence of bounded sessions, not one endless context — context re-reads dominate their cost, and a restart that halves context pays for itself within ~6–10 requests. When this skill runs inside a marathon (`/tackle-issues`), the wave boundary is the session boundary; run standalone, apply the same discipline at wave boundaries of its own (queue checkpoints — every few issues, and always before starting a large one). How a session ends at a wave boundary is **mode-aware**:
 
-- **~150K main-thread context ceiling.** Past ~150K tokens of main-thread context, finish the current issue only, write a short handoff note (queue position, open blockers, awaiting-user items, last verified merge), and end the session. Resume Strategy below makes the fresh session lossless — it re-derives progress from GitHub state, so the handoff plus the queue is all the seed a restart needs.
-- **Cost circuit breaker at queue checkpoints.** Every few issues (and always before starting a large one), check session cost. No per-session dollar budget is documented for Chroxy yet — until the owner sets one in `.claude/skill-profile.md`, treat continuous work spanning many issues in one sitting as the trigger to checkpoint. Over budget → write the handoff and **stop and notify** instead of continuing.
+- **Attended runs** — end the session at the wave boundary; the user/orchestrator relaunches the next segment seeded from the handoff note (`$CLAUDE_BRIEF_DIR/../handoffs/chroxy-<date>-handoff.md`) + the queue (`scratchpad/autonomous-queue.json`).
+- **Unattended with a configured re-launcher** (none configured for this repo yet) — end the session; the re-launcher starts the next segment from the same seeds.
+- **Unattended with no re-launcher** — do **NOT** end the session (nothing would relaunch it): write the handoff seed, force/await a compaction at the boundary so the next segment starts lean, and continue. The cost goal — shed context at the boundary — holds in every mode.
+
+- **~150K main-thread context ceiling.** Past ~150K tokens of main-thread context, finish the current issue only, write the short handoff note (queue position, open blockers, awaiting-user items, last verified merge), and end the session (unattended with no re-launcher: force a compaction instead). Resume Strategy below makes the fresh session lossless — it re-derives progress from GitHub state, so the handoff plus the queue is all the seed a restart needs.
+- **Cost circuit breaker at wave boundaries (queue checkpoints).** At each boundary, check session cost. No per-session dollar budget is documented for Chroxy yet — until the owner sets one in `.claude/skill-profile.md`, treat continuous work spanning many issues in one sitting as the trigger to checkpoint. Over budget → write the handoff and **stop and notify** instead of continuing. This breaker is the sole sanctioned exception to Critical Rule 4's "everything after is fully autonomous".
 - **Verify state directly.** A background monitor ending is not a verdict — assert PR/CI state with a direct query before recording it, and re-check `mergeStateStatus` at the current head after any push.
 
 ## Resume Strategy
 
-This skill uses **GitHub state** for resume — no local state files.
+This skill resumes from **GitHub state** — GitHub remains the source of truth for issue/PR status. The wave handoff note (Session Boundaries) carries only session-boundary seeds — queue position, open blockers, awaiting-user items, last verified merge — and is disposable: everything in it is re-derivable from GitHub. It is a seed for the next segment, not a second source of truth.
 
 If a session is interrupted (crash, timeout, user stops it), re-running with the same arguments will:
 
@@ -443,16 +447,17 @@ This makes the skill **idempotent** — safe to re-run without duplicating work.
 1. **NO attribution** — No Co-Authored-By, no "Generated with Claude", no AI mentions anywhere. Zero Attribution Policy.
 2. **TDD is mandatory** — RED → GREEN → REFACTOR for every issue. No skipping tests. If pure docs/config, note why tests are N/A.
 3. **Branch from main every time** — Never stack branches. Each PR is independently mergeable in any order.
-4. **One confirmation point** — The initial queue approval. Everything after is fully autonomous.
+4. **One confirmation point** — The initial queue approval. Everything after is fully autonomous; the sole sanctioned stop is the cost circuit breaker (see Session Boundaries).
 5. **Self-merge authority for this repo** — Merge only through the Unattended Merge Gate — /full-review clean + ALL checks green on the final commit + ALL review threads resolved. No `gh pr merge --auto`, no GitHub auto-merge, no protection overrides. A failed gate means flag, don't merge. Every self-merged PR MUST appear as an entry in the final session report.
 6. **Never block on review findings** — Flag and move on. The user handles flagged PRs during check-ins.
 7. **Two fix attempts max** — If /full-review finds critical issues, fix them. If a second attempt still fails, flag and move on.
 8. **Progress table after every issue** — The user may check in at any time. The table must be current.
-9. **Respect the hard cap** — Max 15 issues per session. Refuse larger queues.
-10. **Resume from GitHub state** — No local state files. Query branches matching `BRANCH_PREFIX` and PR titles to detect prior work.
+9. **Respect the hard cap** — Max 15 issues per session segment (wave). Refuse larger queues.
+10. **Resume from GitHub state** — GitHub is the source of truth for issue/PR status; query branches matching `BRANCH_PREFIX` and PR titles to detect prior work. The wave handoff note is a disposable session-boundary seed, never a second source of truth.
 11. **Compose existing skills** — /full-review is called as-is (chains /agent-review → /check-pr). Don't reinvent their logic.
 12. **Decompose, don't skip** — High-complexity issues get broken into sub-issues, not skipped. Only skip truly non-automatable work.
 13. **Comment on skips** — Every skipped issue gets a GitHub comment explaining why. The user sees the reason.
 14. **Pre-Skill Checkpoint** — Re-read CLAUDE.md and skill files before running /full-review to prevent context drift.
 15. **Sync before branching** — Always `git checkout main && git pull` before starting each issue. Check for merged PRs first.
-<!-- skill-templates: autonomous-dev-flow d4fba03 2026-07-30 -->
+
+<!-- skill-templates: autonomous-dev-flow 8196307 2026-07-30 -->

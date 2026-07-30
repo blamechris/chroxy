@@ -39,10 +39,15 @@ Each wave runs the full Phase 1-6 cycle from `/autonomous-dev-flow` for each iss
 
 A marathon spans multiple *sessions*, not one endless context. Context re-reads dominate marathon cost, so wave boundaries double as session boundaries:
 
-- **Session ledger + STATE header.** Keep an append-only session ledger (`autonomous-session-<date>.md` at the repo root — gitignored, never commit). Its top carries a rolling **STATE header** — a compact block (~2K tokens, hard-capped, rewritten in place) holding: current wave + position, queue pointer, open blockers, awaiting-user list, and the last **verified** merge (PR + SHA). After a compaction or on a fresh session, the STATE header is the **only mandatory read**; the full history below it is consulted on-demand only (a prior decision, a retry's failure reason) — never re-read top-to-bottom as a ritual.
-- **End the session at each wave boundary.** When a wave completes (after Phase 2 replenishment and the Phase 4 convergence check), write/refresh the handoff note and STATE header, then end the session; the next wave starts fresh, seeded from handoff note + queue + STATE header — never the full history. A restart that halves context pays for itself within ~6–10 requests.
-- **~150K main-thread context ceiling.** Past ~150K tokens of main-thread context, finish the current issue only, write the handoff, end the session mid-wave if necessary.
-- **Per-wave cost circuit breaker.** At each wave boundary, check session cost. No per-session dollar budget is documented for Chroxy yet — until the owner sets one in `.claude/skill-profile.md`, treat continuous unattended work spanning many waves in one sitting as the trigger to checkpoint. Over budget → write the handoff and **stop and notify**; do not start the next wave.
+- **Session ledger + STATE header.** Keep an append-only session ledger (`autonomous-session-<date>.md` at the repo root — gitignored, never commit). Its top carries a rolling **STATE header** — a compact block (~2K tokens, hard-capped, rewritten in place) holding: current wave + position, queue pointer, open blockers, awaiting-user list, the last **verified** merge (PR + SHA), completions from the last wave, and a compact per-issue attempt table (issue# → attempts, last strategy tried, status) — the fields the Phase 4 convergence check reads instead of the full history. After a compaction or on a fresh session, the STATE header is the **only mandatory read**. The full history below it is consulted on-demand — allowed, and expected, for three purposes: the **Phase 4 convergence assessment**, **Phase 5 merge accounting**, and the **Phase 6 morning summary**. What is prohibited is the routine post-compaction top-to-bottom re-read as a ritual, not these accounting passes.
+- **Per-wave merge table.** At each wave boundary, append a **"Merged this wave"** table (PR, issue, review, checks, merge SHA) to the ledger history. Phases 5–6 aggregate these tables across all waves — with per-wave session restarts, "merged by this session" means the whole marathon, never just the last wave.
+- **Shed context at each wave boundary — mode-aware.** When a wave completes (after Phase 2 replenishment and the Phase 4 convergence check), write/refresh the handoff note (`$CLAUDE_BRIEF_DIR/../handoffs/chroxy-<date>-handoff.md`) and the durable queue (`scratchpad/autonomous-queue.json`), update the STATE header, then:
+  - **Attended runs** — end the session; the user/orchestrator relaunches the next wave seeded from handoff note + queue + STATE header — never the full history.
+  - **Unattended with a configured re-launcher** (none configured for this repo yet) — end the session; the re-launcher starts the next wave from the same seeds.
+  - **Unattended with no re-launcher** — do **NOT** end the session (nothing would relaunch it; the marathon would silently halt after one wave): write the STATE header, then force/await a compaction at the wave boundary so the next wave starts lean, and continue.
+  A restart (or boundary compaction) that halves context pays for itself within ~6–10 requests; the context-shedding goal holds in all three modes.
+- **~150K main-thread context ceiling.** Past ~150K tokens of main-thread context, finish the current issue only, write the handoff, end the session mid-wave if necessary (unattended with no re-launcher: force a compaction instead of ending).
+- **Per-wave cost circuit breaker.** At each wave boundary, check session cost. No per-session dollar budget is documented for Chroxy yet — until the owner sets one in `.claude/skill-profile.md`, treat continuous unattended work spanning many waves in one sitting as the trigger to checkpoint. Over budget → write the handoff and **stop and notify**; do not start the next wave. This breaker is the sole sanctioned exception to Critical Rule 4's "everything after is fully autonomous".
 - **Verify state directly, never from a stale reading.** A monitor/watcher ending is **not** a verdict — assert PR/CI state with a direct query before recording it. And `mergeStateStatus` is only meaningful at the **current** head — re-check it after any push before acting on a BLOCKED/CLEAN reading.
 
 `MASTER_LOG` (below) lives in the ledger; the STATE header summarizes it, and Resume Strategy re-derives ground truth from GitHub regardless.
@@ -279,9 +284,9 @@ After each wave, check for convergence BEFORE entering the next wave:
 
 ### Phase 5: Merge Accounting
 
-Where Critical Rule 5 grants gated self-merge, merging happens **inline during waves** via the Unattended Merge Gate (see `unattended-merge`): a PR self-merges the moment /full-review is clean, ALL CI checks pass on the final commit, and ALL review threads are resolved — no `gh pr merge --auto`, no human pause, and the merge is verified `MERGED` before moving on. This unblocks dependent queue items mid-marathon. Where rule 5 withholds it, nothing merges inline and every finished PR is left open for review. This phase is accounting only:
+Where Critical Rule 5 grants gated self-merge, merging happens **inline during waves** via the Unattended Merge Gate (see `unattended-merge`): a PR self-merges the moment /full-review is clean, ALL CI checks pass on the final commit, and ALL review threads are resolved — no `gh pr merge --auto`, no human pause, and the merge is verified `MERGED` before moving on. This unblocks dependent queue items mid-marathon. Where rule 5 withholds it, nothing merges inline and every finished PR is left open for review. This phase is accounting only, and it accounts for the **whole marathon, across every wave** — with per-wave session restarts, the last wave's memory is not the session's history:
 
-1. Collect every PR merged by the session — each MUST appear as an entry in the Morning Summary's "Merged by this session" table
+1. Collect every PR merged by the session **across all waves** — aggregate the ledger's per-wave "Merged this wave" tables (an on-demand-allowed ledger read; see Session Boundaries), and each merged PR MUST appear as an entry in the Morning Summary's "Merged by this session" table
 2. Any PR that passed review but failed a later gate (e.g. CI red at merge time) stays open — list it under Needs Attention with the failed gate named
 3. If `merge:off` was specified, or Critical Rule 5 withholds merge authority for this repo, no self-merges happened; note in the summary:
 ```
@@ -290,7 +295,7 @@ Where Critical Rule 5 grants gated self-merge, merging happens **inline during w
 
 ### Phase 6: Morning Summary
 
-Output a comprehensive summary designed for the user to read when they return. This is the primary deliverable of an overnight session.
+Output a comprehensive summary designed for the user to read when they return. This is the primary deliverable of an overnight session. It covers the **entire marathon across all waves** — build it from the ledger's per-wave "Merged this wave" tables and full history (an on-demand-allowed read; see Session Boundaries), not from what the current session segment happens to remember.
 
 ```markdown
 ## Marathon Session Complete
@@ -371,7 +376,7 @@ These issues could not be implemented after {W} waves. Each has a detailed comme
 
 ## Resume Strategy
 
-This skill uses **GitHub state** for resume — no local state files. Same as `/autonomous-dev-flow`.
+This skill resumes from **GitHub state** — GitHub remains the source of truth for issue/PR status, same as `/autonomous-dev-flow`. The session ledger carries the plan/decision record and the wave handoff note carries only session-boundary seeds (queue position, blockers, awaiting-user, last verified merge); both are disposable for resume purposes — everything they seed is re-derivable from GitHub.
 
 If a marathon session is interrupted (crash, timeout, user stops it), re-running with the same arguments will:
 
@@ -393,20 +398,21 @@ This makes the skill **idempotent** — safe to re-run without duplicating work.
 1. **NO attribution** — No Co-Authored-By, no "Generated with Claude", no AI mentions. Zero Attribution Policy.
 2. **TDD is mandatory** — RED → GREEN → REFACTOR for every issue, every wave. No skipping tests.
 3. **Branch from main every time** — Never stack branches. Fresh branch for every attempt, including retries.
-4. **One confirmation point** — The initial marathon queue approval. Everything after — including all waves and retries — is fully autonomous.
+4. **One confirmation point** — The initial marathon queue approval. Everything after — including all waves and retries — is fully autonomous; the sole sanctioned stop besides convergence is the per-wave cost circuit breaker (see Session Boundaries and the Session Ledger).
 5. **Self-merge authority for this repo** — Merge only through the Unattended Merge Gate — `/full-review` clean + ALL checks green on the final commit + ALL review threads resolved. No `gh pr merge --auto`, no protection overrides. `merge:off` disables self-merging for a single run (PRs accumulate for `/batch-merge`). Every self-merged PR MUST appear as an entry in the Morning Summary.
 6. **Clean up failed attempts** — Close old PRs and delete old branches before retrying. Don't leave orphaned PRs.
 7. **Escalate strategy across waves** — Wave 1: standard approach. Wave 2: fresh context + address failures. Wave 3: alternative approach + scope reduction. Don't repeat the same failing approach.
 8. **Converge, don't loop forever** — If a wave produces zero new completions, stop. Further waves won't help.
 9. **Progress table after every issue** — The user may check in at any time. The table must show wave context.
 10. **Respect the hard cap** — Max 30 issues across all waves (including sub-issues from decomposition). Refuse larger queues.
-11. **Resume from GitHub state** — No local state files. Detect wave progress from closed/open PR counts per issue.
+11. **Resume from GitHub state** — GitHub is the source of truth for issue/PR status; detect wave progress from closed/open PR counts per issue. The ledger and handoff note are seeds, never a second source of truth.
 12. **Compose existing skills** — `/full-review` is called as-is. Where Critical Rule 5 grants self-merge, the Unattended Merge Gate (`unattended-merge`) governs it; `/batch-merge` handles leftovers under `merge:off` or where rule 5 withholds merge authority. Don't reinvent their logic.
 13. **Decompose in Wave 1 only** — High-complexity decomposition happens once. Retries work on the sub-issues, not the parent.
 14. **Comment on blocked issues** — Every issue that fails all waves gets a detailed GitHub comment with what was tried and why it failed.
 15. **Pre-Skill Checkpoint** — Re-read CLAUDE.md and skill files before running `/full-review` in every wave.
 16. **Sync before every branch** — Always `git checkout main && git pull` before starting each issue in each wave.
 17. **Morning summary is mandatory** — Even if interrupted, output the best summary possible with data collected so far.
-18. **Wave boundaries are session boundaries** — End the session at each wave boundary and restart fresh from handoff note + queue + the ledger's STATE header. Respect the ~150K main-thread context ceiling and the per-wave cost circuit breaker (see Session Boundaries and the Session Ledger).
+18. **Wave boundaries are session boundaries** — Shed context at each wave boundary, mode-aware: end + restart fresh from handoff note + queue + the ledger's STATE header where the user or a configured re-launcher will relaunch; force a boundary compaction and continue where nothing would. Respect the ~150K main-thread context ceiling and the per-wave cost circuit breaker (see Session Boundaries and the Session Ledger).
 19. **STATE header over full re-reads** — After compaction, read only the ledger's STATE header; the full ledger history is on-demand reference, never a mandatory re-read.
-<!-- skill-templates: tackle-issues d4fba03 2026-07-30 -->
+
+<!-- skill-templates: tackle-issues 8196307 2026-07-30 -->

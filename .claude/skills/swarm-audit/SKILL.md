@@ -91,6 +91,15 @@ Your job is to audit the following from the lens of **{LENS}**.
 
 **IMPORTANT**: Do NOT run agents in the background. Run them as foreground Task calls so their output returns directly. If running more than 4 agents, batch them: first 4 in parallel, then remaining agents in parallel.
 
+**Delegation tiers (cost discipline — do not strip):**
+
+Roles per `/tiered-delegation`: **workhorse** = one tier below the session ceiling, **mechanical** = cheapest available tier. Concrete model names live only in that skill's `{{CUSTOMIZE}}` ladder — never here.
+
+- **Panel agents run at the workhorse tier by default.** Audit breadth is workhorse work. Do not spawn panel agents at the ceiling; the orchestrator's synthesis (step 6) is where the expensive judgment lives.
+- **Pre-filter at the mechanical tier.** Any triage/classification pre-pass (e.g. deciding which files or sections are in scope before the panel reads them) runs at the mechanical tier at low effort.
+- **Sample-verify instead of up-tiering everything.** If panel output quality is in doubt, have a stronger tier re-check a ~10% sample of findings rather than re-running the whole panel up-tier.
+- **Fan-out budget: ~12 workhorse/ceiling subagents per run.** The budget counts workhorse- and ceiling-tier agents (the panel); mechanical-tier pre-filter agents and the ~10% sample-verify checks do not count against it. Exceeding 12 (up to a hard 20) requires an explicit one-line justification recorded in the master assessment. The 10-agent panel maximum sits comfortably inside this budget.
+
 ### 5. Write Individual Reports
 
 After all agents return, write each agent's findings to its own file:

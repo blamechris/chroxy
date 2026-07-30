@@ -89,10 +89,12 @@ Your job is to audit the following from the lens of **{LENS}**.
 
 **Delegation tiers (cost discipline — do not strip):**
 
-- **Audit agents run on sonnet by default.** The default subagent model for panel agents is sonnet — audit breadth is workhorse-tier work. Do not spawn panel agents on opus or above; the orchestrator's synthesis (step 6) is where the expensive judgment lives.
-- **Pre-filter on haiku.** Any triage/classification pre-pass (e.g. deciding which files or sections are in scope before the panel reads them) runs on haiku at low effort.
-- **Sample-verify instead of up-tiering everything.** If panel output quality is in doubt, have a stronger model re-check a ~10% sample of findings rather than re-running the whole panel on a higher tier.
-- **Fan-out budget: ~12 subagents per run** (panel + any pre-filter/verify passes combined). Exceeding it requires an explicit one-line justification recorded in the master assessment.
+Roles per `/tiered-delegation`: **workhorse** = one tier below the session ceiling, **mechanical** = cheapest available tier. Concrete model names live only in that skill's `{{CUSTOMIZE}}` ladder — never here.
+
+- **Panel agents run at the workhorse tier by default.** Audit breadth is workhorse work. Do not spawn panel agents at the ceiling; the orchestrator's synthesis (step 6) is where the expensive judgment lives.
+- **Pre-filter at the mechanical tier.** Any triage/classification pre-pass (e.g. deciding which files or sections are in scope before the panel reads them) runs at the mechanical tier at low effort.
+- **Sample-verify instead of up-tiering everything.** If panel output quality is in doubt, have a stronger tier re-check a ~10% sample of findings rather than re-running the whole panel up-tier.
+- **Fan-out budget: ~12 workhorse/ceiling subagents per run.** The budget counts workhorse- and ceiling-tier agents (the panel); mechanical-tier pre-filter agents and the ~10% sample-verify checks do not count against it. Exceeding 12 (up to a hard 20) requires an explicit one-line justification recorded in the master assessment. The 10-agent panel maximum sits comfortably inside this budget.
 
 ### 5. Write Individual Reports
 
@@ -213,4 +215,5 @@ Output a concise summary:
 /swarm-audit docs/rfc-push-notifications.md
 /swarm-audit "session management across server restart" 6
 ```
-<!-- skill-templates: swarm-audit a9ed830 2026-07-30 -->
+
+<!-- skill-templates: swarm-audit 8196307 2026-07-30 -->

@@ -230,6 +230,15 @@ Single rating X.X/5 with one-paragraph justification.
 
 **Batching:** Launch agents in parallel batches. First batch of up to 5 agents, then remaining agents in a second batch. Do NOT run agents in the background — use foreground Task calls so output returns directly.
 
+**Delegation tiers (cost discipline — do not strip):**
+
+Roles per `/tiered-delegation`: **workhorse** = one tier below the session ceiling, **mechanical** = cheapest available tier. Concrete model names live only in that skill's `{{CUSTOMIZE}}` ladder — never here.
+
+- **Audit agents run at the workhorse tier by default.** Codebase exploration and per-lens reporting are workhorse work; do not spawn panel agents at the ceiling. The orchestrator's master assessment (step 7) is where the expensive judgment lives.
+- **Discovery pre-pass at the mechanical tier.** The step-2 profile scan's mechanical parts (file inventories, signal detection, dependency counts) run at the mechanical tier at low effort; the orchestrator interprets the results.
+- **Sample-verify instead of up-tiering.** Before filing issues from agent recommendations (step 8), re-check a ~10% sample of the load-bearing findings with a stronger tier rather than re-running agents up-tier.
+- **Fan-out budget: ~12 workhorse/ceiling subagents per run.** The budget counts workhorse- and ceiling-tier agents — a full 12-persona panel fills it exactly, and stays legal because the mechanical discovery pre-pass and the ~10% sample-verify checks do not count against it. Exceeding 12 (up to a hard 20) requires an explicit one-line justification in the master assessment.
+
 ### 6. Write Individual Reports
 
 After all agents return, write each report to its own file:

@@ -1,3 +1,7 @@
+---
+description: "The session bookends, codified — one skill that makes every repo start, run, and end sessions the same way."
+---
+
 # /session-lifecycle
 
 The session bookends, codified — one skill that makes every repo start, run, and end sessions the same way. It bundles the Resume protocol (session start), the during-session reporting conventions, the end-of-session checklist, and the follow-on protocol into a single installable unit, composing the component skills (`/catchup`, `/learn`, `/visual-brief`, `/create-issue`) by reference. Natural-language cues like *"resume"*, *"let's start"*, *"wrap up"*, or *"close out the session"* should route here.
@@ -59,6 +63,3 @@ The canonical rules live in `~/.claude/CLAUDE.md` under **"Follow-on protocol"**
 | `/create-issue` | File scoped follow-on issues | `skill add create-issue` |
 
 Installing `session-lifecycle` should be followed by installing any missing components in the same pass — the bundle head without its components is a checklist that can't execute.
-
-
-<!-- skill-templates: session-lifecycle 8196307 2026-07-30 -->

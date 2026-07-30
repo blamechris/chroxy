@@ -143,10 +143,12 @@ Cap your findings at 6. Quality over quantity.
 
 **Delegation tiers (cost discipline — do not strip):**
 
-- **Hunters run on sonnet by default.** Bug-hunting breadth is workhorse-tier work; do not spawn hunters on opus or above. The orchestrator's dedup/triage (step 5) and the user-facing report are where the expensive judgment lives.
-- **Mechanical passes on haiku.** The step-5 dedup key matching, severity-floor filtering, and any pre-filter over candidate files run on haiku at low effort.
-- **Sample-verify instead of up-tiering.** If hunter findings look noisy, re-check a ~10% sample with a stronger model before filing anything; a finding that fails its sample check sends the whole batch back for verification, not for a full re-run on a higher tier.
-- **Fan-out budget: ~12 subagents per run** (hunters + verify passes combined). Exceeding it requires an explicit one-line justification in the report.
+Roles per `/tiered-delegation`: **workhorse** = one tier below the session ceiling, **mechanical** = cheapest available tier. Concrete model names live only in that skill's `{{CUSTOMIZE}}` ladder — never here.
+
+- **Hunters run at the workhorse tier by default.** Bug-hunting breadth is workhorse work; do not spawn hunters at the ceiling. The orchestrator's dedup/triage (step 5) and the user-facing report are where the expensive judgment lives.
+- **Mechanical passes at the mechanical tier.** The step-5 dedup key matching, severity-floor filtering, and any pre-filter over candidate files run at the mechanical tier at low effort.
+- **Sample-verify instead of up-tiering.** If hunter findings look noisy, re-check a ~10% sample with a stronger tier before filing anything; a finding that fails its sample check sends the whole batch back for verification, not for a full re-run up-tier.
+- **Fan-out budget: ~12 workhorse/ceiling subagents per run.** The budget counts workhorse- and ceiling-tier agents (the hunters); mechanical-tier passes and the ~10% sample-verify checks do not count against it. Exceeding 12 (up to a hard 20) requires an explicit one-line justification in the report. The 6-hunter maximum sits well inside this budget.
 
 ### 5. Dedup and Triage
 
@@ -318,4 +320,5 @@ Output a final summary:
 | "Review this PR before merge" | `/agentic-audit` |
 
 A typical pipeline: `/recon src/payments` → `/bug-hunt src/payments` → `/tackle-issues` on the newly-filed issues.
-<!-- skill-templates: bug-hunt a9ed830 2026-07-30 -->
+
+<!-- skill-templates: bug-hunt 8196307 2026-07-30 -->
