@@ -40,10 +40,10 @@ every skill into every repo, a repo pulls a skill the moment it needs one and th
 - **Targets** — the coding agents a skill is compiled for. `.claude/commands/<name>.md`
   (the customized install) is the provider-NEUTRAL source; `scripts/compile-skill-targets.mjs`
   emits each agent's NATIVE custom-command format: `claude` → `.claude/skills/<name>/SKILL.md`,
-  `gemini` → `.gemini/commands/<name>.toml`, `codex` → `~/.codex/prompts/<name>.md`, `pi` →
-  `~/.pi/agent/skills/<name>/`. **This repo's compiler diverges from the registry's**: it adds a
-  fourth `pi` target (#6573) and emits both `codex` and `pi` **user-global** rather than
-  repo-tracked, and both are opt-in. The active
+  `gemini` → `.gemini/commands/<name>.toml`, `codex` → `.codex/skills/<name>/SKILL.md`,
+  `pi` → `~/.pi/agent/skills/<name>/SKILL.md`. The first three are repo-tracked; **`pi` is the one
+  user-global target** — Pi has no repo-local discovery, so its artifact lands in the user's home
+  dir and is opt-in rather than a safe default. The active
   list comes from the `targets:` line in `.claude/skill-profile.md` (prompt the user if absent;
   the compiler falls back to `claude`). This is what makes a skill model-agnostic — author once,
   run under any model. The neutral arg token is `$ARGUMENTS`; the compiler maps it per agent
@@ -224,14 +224,17 @@ note in the report that hashes may be stale. Record which source you used.
    `gh api repos/blamechris/skill-templates/contents/assets/compile-skill-targets.mjs --jq '.content' | base64 -d > scripts/compile-skill-targets.mjs`.
    Write it to `scripts/` and track it in VCS so it travels with the repo. Read the `targets:` line
    from `.claude/skill-profile.md`;
-   if there is none, **ask the user** which agents to compile for (claude / gemini / codex) and
+   if there is none, **ask the user** which agents to compile for (claude / gemini / codex / pi) and
    offer to record the choice in the profile (the compiler falls back to `claude` if unset). Then
    run `node scripts/compile-skill-targets.mjs --name <name>` (it reads the profile targets), or
    `--targets <list>` to override. It writes the native artifact per target and exits non-zero on
    any emit failure — treat that as a hard gate: fix and re-run before locking. Codex emits a
-   user-global prompt at `~/.codex/prompts/<name>.md` in this repo — not a repo-tracked
-   folder — so nothing appears in the diff for that target. Same for `pi`. Keep the list of
-   `targets` you compiled with for the next step.
+   repo-tracked skill folder under `.codex/skills/` so it can be reviewed, copied into
+   `~/.codex/skills`, or used by runners that support repo-local Codex skills. **`pi` writes outside
+   the repo** (`~/.pi/agent/skills/`), so only add it when the user actually drives this repo with
+   Pi — never volunteer it into a committed `targets:` line on their behalf. The compiler prints a
+   hint if it sees `~/.pi` on the machine but `pi` is unselected; that hint is advisory and never
+   adds the target itself. Keep the list of `targets` you compiled with for the next step.
 8. **Record in the lockfile.** Only after a successful compile, create `.claude/skills.lock`
    (schema below) if absent and upsert `<name>` **atomically** with: the template `hash`; the
    `profileHash` when a `.claude/skill-profile.md` exists (so `update` can tell when the *profile*
@@ -276,9 +279,12 @@ note in the report that hashes may be stale. Record which source you used.
 Read the skill's `targets` from its `.claude/skills.lock` entry, then delete
 `.claude/commands/<name>.md`, its lock entry, and exactly the native artifacts for those targets:
 `claude` → `.claude/skills/<name>/` (dir), `gemini` → `.gemini/commands/<name>.toml`,
-`codex` → `~/.codex/prompts/<name>.md`, `pi` → `~/.pi/agent/skills/<name>/` (both user-global
-in this repo). If the lock entry has no `targets` (an older install),
-fall back to removing whichever of those three exist. Report what was removed.
+`codex` → `.codex/skills/<name>/` (dir), `pi` → `~/.pi/agent/skills/<name>/` (dir, **outside the
+repo** — remove it only when `pi` is in the lock entry's `targets`, and say so in the report since
+the user may not expect a repo command to touch their home dir). If the lock entry has no `targets`
+(an older install), fall back to removing whichever of the three **repo-local** artifacts exist —
+never probe `~/.pi` on a guess, because an unrelated Pi skill of the same name could live there.
+Report what was removed.
 
 ## Lockfile schema (`.claude/skills.lock`)
 
@@ -325,4 +331,4 @@ fall back to removing whichever of those three exist. Report what was removed.
 - **Self-contained on first use.** `/skill` needs no customization to work — it ships
   with sane registry defaults so it can bootstrap a repo that has nothing else installed.
 
-<!-- skill-templates: skill 987eb2b 2026-07-29 -->
+<!-- skill-templates: skill 7b4d37f 2026-07-30 -->

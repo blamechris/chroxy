@@ -231,4 +231,4 @@ grep 'src=' ../target/release/bundle/macos/Chroxy.app/Contents/Resources/app.htm
 10. **Clear bundle cache aggressively** — `rm -rf target/release/bundle` before `cargo tauri bundle` or stale .app is installed
 11. **Node 22 required** — use `PATH="/opt/homebrew/opt/node@22/bin:$PATH"` for all npm commands
 12. **Full PATH required** — include `/usr/bin:/bin:/usr/sbin:/sbin` so npm can find `sh`
-<!-- skill-templates: merge ebdb14e 2026-06-02 -->
+<!-- skill-templates: merge d34b05d 2026-07-30 -->

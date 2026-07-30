@@ -133,6 +133,12 @@ Launch implementation agents using the Agent tool with `isolation: "worktree"`. 
 
 **IMPORTANT:** Do NOT run agents in the background. Run them as foreground Agent calls so their output returns directly. If running more than the concurrency limit, batch them.
 
+**Delegation tiers (cost discipline — do not strip):**
+
+- **Implementers run on sonnet by default.** Well-scoped, low/medium-complexity issues are workhorse-tier work. Spawn an **opus implementer only for a non-trivial issue** — genuine design latitude, cross-cutting change surface, or a prior sonnet failure on the same issue — and note which issues got opus in the progress table.
+- **Triage/classification on haiku.** The queue triage pass (complexity read, skip-criteria checks, label classification) runs on haiku at low effort; sample-verify ~10% of its classifications with a stronger model rather than running the whole triage on an expensive tier.
+- **Fan-out budget: ~12-20 subagents per run** (implementers + reviewers + triage/verify passes across all batches). Exceeding it requires an explicit one-line justification recorded in the session summary.
+
 Each agent independently:
 1. Installs dependencies in its worktree
 2. Reads the issue and explores relevant code
@@ -393,4 +399,4 @@ This makes the skill **idempotent** — safe to re-run without duplicating work.
 13. **Comment on skips** — Every skipped issue gets a GitHub comment explaining why.
 14. **Pre-Skill Checkpoint** — Re-read CLAUDE.md and skill files before each /full-review run.
 15. **Compose existing skills** — /full-review is called as-is. Don't reinvent its logic.
-<!-- skill-templates: parallel-dev ebdb14e 2026-06-02 -->
+<!-- skill-templates: parallel-dev a9ed830 2026-07-30 -->

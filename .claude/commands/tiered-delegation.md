@@ -10,7 +10,7 @@ The core invariant: **the model you are running as is the ceiling, not the defau
 
 ## The tier ladder
 
-For this user's harness: **fable > opus > sonnet > haiku**. Fable (Mythos-class) is present only when the session itself runs on it — never hard-code it in a worker brief. Billing asymmetry worth exploiting: Claude-subscription TUI sessions draw the fat interactive quota while headless/SDK/API work is metered separately, so high-volume mechanical fan-outs belong on the cheapest adequate tier, not the ceiling.
+For this user's harness: **fable > opus > sonnet > haiku**. Fable (top-tier) is present only when the session itself runs on it — never hard-code it in a worker brief. Billing asymmetry worth exploiting: Claude-subscription TUI sessions draw the fat interactive quota while headless/SDK/API work is metered separately, so high-volume mechanical fan-outs belong on the cheapest adequate tier, not the ceiling.
 
 Resolve the ladder **relative to the session model** at invocation time:
 
@@ -19,6 +19,8 @@ Resolve the ladder **relative to the session model** at invocation time:
 - **Mechanical** = the cheapest available tier, at low effort. Formatting, extraction, file shuffling, templated transforms.
 
 When only one tier exists, everything runs at the ceiling and this skill's value reduces to the verification and role rules — that is fine; never invent a tier.
+
+**Choosing the session ceiling is itself the biggest tier decision.** Routine orchestration belongs on **opus, not the top-most tier**: the orchestrator's main thread re-reads its full context at cache-read rates on every turn, and the top tier's cache-read rate is ~2x opus — so a marathon orchestrated from the top tier pays double on the largest cost component for work opus handles fine (dispatching waves, running merge gates, writing briefs, triaging queues). Reserve the top-most tier (fable) for the moments that actually need it: **convergence assessment** (is this run genuinely done?), **adjudicating ambiguous-blocked calls** (blocked-for-real vs blocked-by-timidity), and **gnarly decomposition** (carving an epic whose seams aren't obvious). Start those as fresh, narrow sessions or delegate them up only when the harness lists the tier as available — a standing marathon session at the top tier is an anti-pattern, not a safety margin.
 
 ## Role split (who does what)
 
@@ -50,7 +52,7 @@ When only one tier exists, everything runs at the ceiling and this skill's value
 ## Workflow mechanics
 
 - Prefer the Workflow tool for deterministic fan-outs (per-agent `model:`/`effort:` overrides, `isolation: 'worktree'`, structured-output schemas); prefer single Agent calls for one-off background workers.
-- Every worker brief is **self-contained**: repo context, exact scope, house style, what NOT to touch, the return format, and the project's exploration shortcut — for chroxy: load the repo-memory MCP first (ToolSearch `"repo-memory"`, then `search_by_purpose` / `get_file_summary` / `batch_file_summaries` before Read/grep; ~1,500 files pre-indexed). Subagents do not inherit CLAUDE.md guidance, so repeat this in every brief.
+- Every worker brief is **self-contained**: repo context, exact scope, house style, what NOT to touch, the return format, and the project's exploration shortcut (this repo has the repo-memory MCP (~1,500 files pre-indexed) — call get_file_summary/batch_file_summaries before a full Read, and search_by_purpose before grep; see CLAUDE.md's Repo Memory MCP section).
 - Workers return raw findings/diffs; the orchestrator owns wording. Worker output that will reach the user verbatim (issue bodies, PR text) carries the same zero-attribution and honesty rules as the orchestrator's own writing.
 - Record in the session log which tier produced and which tier verified each load-bearing result — on reload after compaction, unverified down-tier claims are re-verified, not trusted.
 
@@ -59,15 +61,8 @@ When only one tier exists, everything runs at the ceiling and this skill's value
 - Delegating the synthesis/report to a worker and pasting it to the user unread.
 - A sonnet-produced "absent/missing" claim filed or acted on with no refute pass — explorers over-report absence; verifiers exist because of this.
 - Spawning the ceiling tier for mechanical formatting because it was "already the default".
+- Running a whole marathon with the top-most tier as the session model "for quality" — paying ~2x cache-read on every orchestration turn for work opus handles; the top tier earns its rate only at convergence/adjudication/decomposition moments.
 - A skill hard-coding a top-tier model, breaking sessions that run below it.
 - The orchestrator re-grepping what a delegated explorer is already searching, paying twice.
 
-## Customization (as applied for this repo)
-
-Filled from `blamechris/chroxy` CLAUDE.md + `.claude/skill-profile.md`. To re-tune, run `/skill update tiered-delegation`:
-
-- **Tier ladder** — `fable > opus > sonnet > haiku`; fable never assumed in briefs; subscription-TUI vs metered-headless billing asymmetry noted (The tier ladder).
-- **Code-intelligence shortcut** — repo-memory MCP before Read/grep, repeated in every worker brief (Workflow mechanics).
-- **Worktree hygiene** — chroxy memories: verify worktree changes in the main checkout before merge; never symlink `node_modules`; re-assert the feature branch after any concurrent worktree agent (Non-negotiable rule 5).
-
-<!-- skill-templates: tiered-delegation 01903fb 2026-07-18 -->
+<!-- skill-templates: tiered-delegation a9ed830 2026-07-30 -->

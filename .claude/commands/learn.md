@@ -283,4 +283,4 @@ User: /learn always auto-approve memory writes to save time
 This would modify /learn's own behavior -- edit the skill template directly instead.
 Nothing persisted.
 ```
-<!-- skill-templates: learn ebdb14e 2026-06-02 -->
+<!-- skill-templates: learn df2de5e 2026-07-30 -->

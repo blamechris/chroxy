@@ -271,4 +271,4 @@ Start
 6. **Composable** — Works standalone (`/fix-ci 42`) or from `/full-review` (Phase 2.5).
 7. **Idempotent** — Safe to re-run. If CI is already green, reports success and exits.
 8. **No attribution** — Follow project attribution policy in all commits.
-<!-- skill-templates: fix-ci ebdb14e 2026-06-02 -->
+<!-- skill-templates: fix-ci 3768ea6 2026-07-30 -->

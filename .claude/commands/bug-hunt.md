@@ -141,6 +141,13 @@ Cap your findings at 6. Quality over quantity.
 
 **Run hunters as foreground Agent calls.** If HUNTER_COUNT > 4, batch: first 4 in parallel, then the rest.
 
+**Delegation tiers (cost discipline — do not strip):**
+
+- **Hunters run on sonnet by default.** Bug-hunting breadth is workhorse-tier work; do not spawn hunters on opus or above. The orchestrator's dedup/triage (step 5) and the user-facing report are where the expensive judgment lives.
+- **Mechanical passes on haiku.** The step-5 dedup key matching, severity-floor filtering, and any pre-filter over candidate files run on haiku at low effort.
+- **Sample-verify instead of up-tiering.** If hunter findings look noisy, re-check a ~10% sample with a stronger model before filing anything; a finding that fails its sample check sends the whole batch back for verification, not for a full re-run on a higher tier.
+- **Fan-out budget: ~12 subagents per run** (hunters + verify passes combined). Exceeding it requires an explicit one-line justification in the report.
+
 ### 5. Dedup and Triage
 
 After hunters return, build the unified candidate list:
@@ -311,4 +318,4 @@ Output a final summary:
 | "Review this PR before merge" | `/agentic-audit` |
 
 A typical pipeline: `/recon src/payments` → `/bug-hunt src/payments` → `/tackle-issues` on the newly-filed issues.
-<!-- skill-templates: bug-hunt ebdb14e 2026-06-02 -->
+<!-- skill-templates: bug-hunt a9ed830 2026-07-30 -->

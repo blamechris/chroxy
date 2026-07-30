@@ -93,6 +93,13 @@ Audit this pull request from the lens of **{LENS}**.
 
 Run agents as foreground Task calls. If more than 4 agents, batch: first 4 in parallel, then the rest.
 
+**Delegation tiers (cost discipline — do not strip):**
+
+- **Panel agents run on sonnet by default.** Reading a diff through a persona lens is workhorse-tier work; do not spawn panel agents on opus or above. The orchestrator's synthesis (step 4) carries the expensive judgment.
+- **Mechanical prep on haiku.** Building the context bundle (file lists, diff chunking) and any pre-classification of changed files runs on haiku at low effort.
+- **Sample-verify instead of up-tiering.** If the panel's findings look unreliable, re-check a ~10% sample with a stronger model rather than re-running the panel on a higher tier.
+- **Fan-out budget: ~12 subagents per run** (panel + verify passes). Exceeding it requires an explicit one-line justification in the synthesis.
+
 ### 4. Synthesize and Report
 
 After all agents return, output a single synthesis directly to the user (no files written):
@@ -141,4 +148,4 @@ After presenting the synthesis, ask the user:
 | 2 | Concerning — significant issues to resolve first |
 | 1 | Do not merge — needs rework |
 
-<!-- skill-templates: agentic-audit 3f616c3 2026-06-06 -->
+<!-- skill-templates: agentic-audit a9ed830 2026-07-30 -->

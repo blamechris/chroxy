@@ -226,6 +226,13 @@ Single rating X.X/5 with one-paragraph justification.
 
 **Batching:** Launch agents in parallel batches. First batch of up to 5 agents, then remaining agents in a second batch. Do NOT run agents in the background — use foreground Task calls so output returns directly.
 
+**Delegation tiers (cost discipline — do not strip):**
+
+- **Audit agents run on sonnet by default.** Codebase exploration and per-lens reporting are workhorse-tier work; do not spawn panel agents on opus or above. The orchestrator's master assessment (step 7) is where the expensive judgment lives.
+- **Discovery pre-pass on haiku.** The step-2 profile scan's mechanical parts (file inventories, signal detection, dependency counts) can run on haiku at low effort; the orchestrator interprets the results.
+- **Sample-verify instead of up-tiering.** Before filing issues from agent recommendations (step 8), re-check a ~10% sample of the load-bearing findings with a stronger model rather than re-running agents on a higher tier.
+- **Fan-out budget: ~12 subagents per run** (panel capped at 12 already; pre-pass and verify agents count against the same budget). Exceeding it requires an explicit one-line justification in the master assessment.
+
 ### 6. Write Individual Reports
 
 After all agents return, write each report to its own file:
@@ -529,4 +536,4 @@ Create `.claude/audit-config.json` to set defaults for this project:
 /project-audit include=deployer verbosity=brief
 ```
 
-<!-- skill-templates: project-audit aae4d65 2026-06-06 -->
+<!-- skill-templates: project-audit a9ed830 2026-07-30 -->

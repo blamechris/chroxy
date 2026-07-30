@@ -103,9 +103,36 @@ Use the skeleton below. Rules:
 ```bash
 DIR="${ARG_DIR:-${CLAUDE_BRIEF_DIR:-$HOME/.claude/briefs}}"
 mkdir -p "$DIR"
-# …write the file to "$DIR/<slug>-<date>.html"…
-[ -z "$NO_OPEN" ] && open "$DIR/<slug>-<date>.html"   # macOS; skip with --no-open
+FILE="$DIR/<slug>-<date>.html"
+# …write the file to "$FILE"…
+
+# Launch the browser portably. Opening is a convenience, never a gate: if no
+# launcher exists (headless box, container, CI) we print the path and succeed.
+open_brief() {
+  if [ -n "$NO_OPEN" ]; then return 0; fi          # --no-open
+  for opener in open xdg-open wslview; do          # macOS, Linux, WSL
+    if command -v "$opener" >/dev/null 2>&1; then
+      "$opener" "$1" >/dev/null 2>&1 && return 0
+    fi
+  done
+  if command -v cmd.exe >/dev/null 2>&1; then      # Windows / Git Bash / MSYS
+    cmd.exe /c start "" "$1" >/dev/null 2>&1 && return 0
+  elif command -v start >/dev/null 2>&1; then      # "" is start's window-title arg
+    start "" "$1" >/dev/null 2>&1 && return 0
+  fi
+  # Reached both when no launcher exists and when one exists but failed — the
+  # loop above returns early only on a launcher that actually succeeded.
+  echo "no browser launcher found, or it failed — open the path printed below"
+  return 0                                         # never abort the caller
+}
+open_brief "$FILE"
+echo "$FILE"
 ```
+
+Two things that snippet is deliberately careful about — keep them if you edit it:
+`open_brief` always returns 0, so a missing or failing launcher can't kill a
+caller running under `set -e`; and it ends on `echo`, so the block's exit status
+isn't the short-circuited `--no-open` test.
 
 Report the absolute path so the user can find/link it. If `$CLAUDE_BRIEF_DIR`
 points into an Obsidian vault, mention it's now linkable there.
@@ -175,4 +202,4 @@ Component cheatsheet:
 - When a flex row needs rich body text, wrap it: `<div class="row"><div class="ic">
   …</div><div>…all the prose…</div></div>` — two flex children, not twenty.
 
-<!-- skill-templates: visual-brief a4c08cb 2026-06-10 -->
+<!-- skill-templates: visual-brief a85c799 2026-07-30 -->
