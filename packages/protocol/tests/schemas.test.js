@@ -3226,13 +3226,36 @@ describe('@chroxy/protocol schemas', () => {
       }
     })
 
-    it('the exact payload jsonl-subprocess-session.js:231 emits is wire-legal', async () => {
-      // That sender passes cost/duration/usage/sessionId all null in one object.
-      // Three were already nullable; duration was the only one that made the frame
-      // illegal, so this is the whole-frame regression guard.
+    it('CHARACTERIZATION: z.number() itself excludes non-finite values', async () => {
+      // Named honestly. This does NOT guard the `.finite()` on the field — measured on
+      // Zod 4.3.6, `z.number()` already rejects Infinity/-Infinity/NaN, so removing
+      // `.finite()` reddens nothing. What this pins is that BASELINE: if a future Zod
+      // ever loosened `z.number()`, this fails and `.finite()` stops being decorative.
+      for (const bad of [Infinity, -Infinity, Number.NaN]) {
+        const r = await parse(bad)
+        assert.equal(r.success, false, `duration: ${String(bad)} must be refused`)
+      }
+    })
+
+    it('accepts the values real senders produce today, INCLUDING the awkward ones', async () => {
+      // Deliberately built without the shared parse() helper, which fixes the other
+      // three fields — an earlier version of this test reused it and was therefore a
+      // byte-identical duplicate of the null case above, proving nothing extra.
+      //
+      // These are the values the constraints this PR did NOT apply would have broken.
+      // If someone later adds .int()/.nonnegative()/.max(), this test tells them which
+      // sender they are about to make wire-illegal.
       const { ServerResultSchema } = await import('../src/schemas/server/stream.ts')
-      const r = ServerResultSchema.safeParse({ type: 'result', cost: null, duration: null, usage: null, sessionId: null })
-      assert.ok(r.success, `the real emitted payload must parse; got ${JSON.stringify((r.error?.issues || [])[0])}`)
+      const cases = [
+        ['fractional, from a parseFloat config option (sdk-session.js:1964)', 1800000.5],
+        ['negative, from a backwards clock jump (byok-session.js:1463)', -5000],
+        ['longer than the 24h sane-duration ceiling', 24 * 60 * 60 * 1000 + 1],
+        ['zero', 0],
+      ]
+      for (const [why, duration] of cases) {
+        const r = ServerResultSchema.safeParse({ type: 'result', cost: 0.01, duration, usage: {}, sessionId: 's1' })
+        assert.ok(r.success, `${why}: duration ${duration} must still parse — see the deferred-constraint note in stream.ts`)
+      }
     })
   })
 

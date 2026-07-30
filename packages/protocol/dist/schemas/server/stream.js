@@ -264,15 +264,38 @@ export const ServerResultSchema = z.object({
     // distinct from a genuine $0 turn. Subscription runs and any turn whose model
     // pricing is unknown emit `null`; the dashboard renders "n/a" for it.
     cost: z.number().nullable().optional(),
-    // #7093: NULLABLE, like `cost` above and `sessionId` below. Four providers emit
-    // `duration: null` on every turn end — jsonl-subprocess-session.js:231 (which sends
-    // cost/duration/usage/sessionId all null in one object, three of which were already
-    // nullable), codex-session.js:638, gemini-session.js:423 and :495 — and
-    // event-normalizer.js forwards it verbatim, so null has always been on the wire.
-    // store-core already models it that way (`typeof msg.duration === 'number' ? … : null`),
-    // so the schema was the outlier. Same reasoning as `cost`: null means "unknown",
-    // which is distinct from 0.
-    duration: z.number().nullable().optional(),
+    // #7093: NULLABLE, like `cost` above and `sessionId` below. FIVE senders emit
+    // `duration: null` — codex-app-server-session.js:629 (the DEFAULT codex driver,
+    // via `turn?.durationMs ?? null`), codex-session.js:638 (the legacy
+    // CHROXY_CODEX_APPSERVER=0 path), gemini-session.js:423 and :495, and
+    // jsonl-subprocess-session.js:231, which sends cost/duration/usage/sessionId all
+    // null in one object — three of those four were already nullable, so `duration` was
+    // the only field making that frame illegal. event-normalizer.js:684 forwards it
+    // verbatim, so null has always been on the wire, and store-core already models it
+    // that way (`typeof msg.duration === 'number' ? … : null`). Same reasoning as
+    // `cost`: null means "unknown", distinct from 0.
+    //
+    // `.finite()` is carried for CONVENTION CONFORMANCE, not for protection: on Zod
+    // 4.3.6 `z.number()` already rejects Infinity/-Infinity/NaN, so it is a no-op today
+    // (measured). It is here because connection.ts's ms-field convention names it and
+    // both ms siblings in this file carry it — so a reader is not left wondering whether
+    // this field was skipped. Do not read it as hardening.
+    //
+    // The convention's other constraints are DELIBERATELY not applied
+    // yet, because each would reject a value a real sender can produce today:
+    //   - `.int()`   — sdk-session.js:1964 emits `this._streamStallTimeoutMs`, a config
+    //                  value parsed with parseFloat, so a fractional `*_MS` option lands
+    //                  here verbatim. Blocked on #7083 (integer-coerce durations at the
+    //                  config parser); adding `.int()` first would make that config
+    //                  wire-illegal rather than merely odd.
+    //   - `.nonnegative()` — byok-session.js:1463 is `Date.now() - turnStartedAt`, which
+    //                  goes NEGATIVE on a backwards clock jump. That wants a clamp at the
+    //                  sender, not a rejection at the schema.
+    //   - `.max(MAX_SANE_DURATION_MS)` — a turn legitimately longer than the 24h ceiling
+    //                  would become unrepresentable.
+    // Tracked together rather than half-applied — see #7095, which carries the ordering
+    // (#7083 before .int(), a sender-side clamp before .nonnegative()).
+    duration: z.number().finite().nullable().optional(),
     usage: z.any().optional(),
     sessionId: z.string().nullable().optional(),
     // #6627: the session's authoritative outgoing-queue length at turn end, so
