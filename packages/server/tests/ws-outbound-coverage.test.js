@@ -3,8 +3,12 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
+import { z } from 'zod'
+import * as protocol from '@chroxy/protocol'
 import {
   SCHEMA_BACKED_OUTBOUND_TYPES,
+  typeLiteralsOf,
+  looksLikeNonFrameForTests,
   NON_FRAME_SCHEMA_NAMES,
   UNREADABLE_FRAME_SCHEMA_NAMES,
   outboundSchemasForType,
@@ -32,13 +36,20 @@ const WS_SERVER = join(HERE, '..', 'src', 'ws-server.js')
  * long after the schemas landed, and nobody would notice.
  */
 
-// The 28 frames the server documents sending that have no outbound schema, measured
+/**
+ * Frames excluded from the coverage requirement because they are TRANSPORT rather than
+ * semantic frames — and the exclusion is CHECKED, not merely asserted in prose.
+ *
+ * `encrypted` is the E2E envelope. It DOES have a schema (`EncryptedEnvelopeSchema`),
+ * just under a name the registry's `Server*` filter cannot see — so it was sitting in
+ * UNSCHEMAD where the shrink guard could never fire for it: permanent rot in exactly
+ * the form that assertion is blind to.
+ */
+const TRANSPORT_FRAMES = new Map([['encrypted', 'EncryptedEnvelopeSchema']])
+
+// The 27 frames the server documents sending that have no outbound schema, measured
 // against the roster in ws-server.js. Delete entries as schemas land — the test
 // below fails if you forget.
-//
-// `encrypted` is arguably a legitimate permanent entry (it is the E2E envelope
-// wrapper, not a semantic frame) — left in the list rather than special-cased so
-// the decision is made deliberately when someone gets to it.
 const UNSCHEMAD = new Set([
   'agent_list',
   'available_permission_modes',
@@ -46,7 +57,6 @@ const UNSCHEMAD = new Set([
   'dev_preview',
   'dev_preview_stopped',
   'discovered_sessions',
-  'encrypted',
   'file_list',
   'file_listing',
   'git_commit_result',
@@ -88,12 +98,23 @@ describe('#7085 outbound schema coverage', () => {
   it('CONTROL: the registry and the roster are both non-trivially populated', () => {
     // Guards against the whole suite passing because a parse silently yielded
     // nothing — every assertion below is vacuously true on an empty set.
-    assert.ok(SCHEMA_BACKED_OUTBOUND_TYPES.length > 100, `registry looks empty: ${SCHEMA_BACKED_OUTBOUND_TYPES.length}`)
-    assert.ok(rosterTypes().length > 100, `roster parse looks empty: ${rosterTypes().length}`)
+    // Floors are TIGHT on purpose. A loose `> 100` let a roster truncation losing 72 of
+    // 177 types (41%) pass the whole suite green, and the incidental thing that saved it
+    // (two allowlist entries near the block's end tripping the stale guard) disappears
+    // precisely as UNSCHEMAD shrinks to zero — which is the plan. Raise these when the
+    // real counts grow; never lower them.
+    assert.ok(
+      SCHEMA_BACKED_OUTBOUND_TYPES.length >= 150,
+      `registry undercounts: ${SCHEMA_BACKED_OUTBOUND_TYPES.length} (expected >= 150)`,
+    )
+    assert.ok(
+      rosterTypes().length >= 175,
+      `roster parse undercounts: ${rosterTypes().length} (expected >= 175) — did the JSDoc block move or its quoting change?`,
+    )
   })
 
   it('every documented outbound type has a schema, or is a known gap', () => {
-    const gaps = rosterTypes().filter((t) => !outboundSchemasForType(t).length && !UNSCHEMAD.has(t))
+    const gaps = rosterTypes().filter((t) => !outboundSchemasForType(t).length && !UNSCHEMAD.has(t) && !TRANSPORT_FRAMES.has(t))
     assert.deepEqual(
       gaps, [],
       `new outbound frame(s) with no schema in @chroxy/protocol: ${gaps.join(', ')}. ` +
@@ -160,6 +181,34 @@ describe('#7085 outbound schema coverage', () => {
     // flagged it as an unreadable frame.
     assert.ok(NON_FRAME_SCHEMA_NAMES.includes('ServerPermissionAuditEntrySchema'))
     assert.equal(UNREADABLE_FRAME_SCHEMA_NAMES.includes('ServerPermissionAuditEntrySchema'), false)
+  })
+
+  it('a transport frame is excluded only because its schema really exists', () => {
+    for (const [type, schemaName] of TRANSPORT_FRAMES) {
+      assert.equal(typeof protocol[schemaName]?.safeParse, 'function', `${schemaName} must exist to justify excluding '${type}'`)
+      assert.equal(UNSCHEMAD.has(type), false, `'${type}' has a schema and must not also be allowlisted`)
+    }
+  })
+
+  it('a frame hidden behind a WRAPPER is reported, not silently excluded', () => {
+    // The invariant defended unions and nothing else: every other combinator
+    // (.optional/.nullable/.default/.catch/.pipe/.transform/.readonly/intersection/
+    // z.lazy) hides `.shape`, so keying "non-frame" off a missing shape filed all of
+    // them as legitimate sub-objects. Anything that is not a plain object and yields no
+    // literal is now surfaced instead.
+    const wrapped = z.object({ type: z.literal('a_wrapped_frame'), x: z.string() }).optional()
+    assert.equal(typeLiteralsOf(wrapped).size, 0, 'precondition: the wrapper hides the literal')
+    assert.equal(
+      looksLikeNonFrameForTests(wrapped), false,
+      'a wrapped schema must be reported as unreadable, not excluded as a sub-object',
+    )
+  })
+
+  it('a multi-value literal does not crash the derivation', () => {
+    // `z.literal(['a','b']).value` THROWS and the registry is built at module load, so
+    // reading `.value` before `_def.values` would have been a module-load crash.
+    const multi = z.object({ type: z.literal(['m_one', 'm_two']) })
+    assert.deepEqual([...typeLiteralsOf(multi)].sort(), ['m_one', 'm_two'])
   })
 
   describe('validateOutbound', () => {

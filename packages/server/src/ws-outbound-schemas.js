@@ -14,7 +14,7 @@
  *
  * So the registry is built by INTROSPECTION: every `Server*Schema` export whose
  * shape carries a `type: z.literal(...)` registers itself under that literal. This
- * is deliberate rather than a convenience — a hand-maintained 151-entry map is
+ * is deliberate rather than a convenience — a hand-maintained 153-entry map is
  * exactly the kind of parallel list this codebase has repeatedly watched drift out
  * of sync with its source of truth (see the BASE_SESSION_OPT_KEYS lint, the
  * protocol handler-coverage lint, and the `clampWire` caps that were retyped in
@@ -74,10 +74,22 @@ export function typeLiteralsOf(schema) {
   }
   const type = shapeOf(schema)?.type
   if (!type) return out
-  // A literal exposes `.value`; some versions expose a `values` collection instead.
-  if (typeof type.value === 'string') out.add(type.value)
+  // `values` FIRST, deliberately. On a multi-value literal (`z.literal(['a','b'])`)
+  // reading `.value` THROWS — and this runs inside a top-level buildRegistry(), so
+  // that would be a module-load crash, not a silent miss. `_def.values` is populated
+  // for the single-value case too (`z.literal('a')._def.values === ['a']`), so
+  // values-first covers both and `.value` is only a fallback for older shapes.
   const values = type?._def?.values ?? type?.options
-  if (values) for (const v of values) if (typeof v === 'string') out.add(v)
+  if (values) {
+    for (const v of values) if (typeof v === 'string') out.add(v)
+    if (out.size > 0) return out
+  }
+  try {
+    if (typeof type.value === 'string') out.add(type.value)
+  } catch {
+    // A throwing accessor means we could not read it — leave `out` empty so the
+    // caller files this under UNREADABLE rather than treating it as a non-frame.
+  }
   return out
 }
 
@@ -96,11 +108,23 @@ export function typeLiteralsOf(schema) {
 function looksLikeNonFrame(schema) {
   const arms = unionArmsOf(schema)
   if (arms) return arms.every((arm) => looksLikeNonFrame(arm))
+
+  // FAIL LOUD BY DEFAULT. Only a plain object can be a legitimate sub-object. Any
+  // other combinator — intersection, pipe, transform, catch, default, optional,
+  // nullable, readonly, lazy — hides `.shape`, so keying "non-frame" off a missing
+  // shape would file every one of them as legitimately excluded and the invariant
+  // would defend the union case and nothing else. Reporting them instead means a
+  // frame wrapped in a combinator surfaces as UNREADABLE rather than vanishing.
+  const kind = schema?._def?.type ?? schema?._def?.typeName
+  if (kind !== 'object' && kind !== 'ZodObject') return false
+
   const type = shapeOf(schema)?.type
   if (type === undefined) return true
-  const kind = type?._def?.type ?? type?._def?.typeName
-  // Only a literal (or an enum of literals) can discriminate a frame.
-  return kind !== 'literal' && kind !== 'ZodLiteral' && kind !== 'enum' && kind !== 'ZodEnum'
+  const typeKind = type?._def?.type ?? type?._def?.typeName
+  // Only a literal (or an enum of literals) can discriminate a frame; a `type` that
+  // is ordinary data (ServerPermissionAuditEntrySchema.type is z.string(), naming the
+  // audited tool) does not make its owner a frame.
+  return typeKind !== 'literal' && typeKind !== 'ZodLiteral' && typeKind !== 'enum' && typeKind !== 'ZodEnum'
 }
 
 function buildRegistry() {
@@ -125,6 +149,9 @@ function buildRegistry() {
   }
   return { byType, nonFrame, unreadable }
 }
+
+/** Exposed for the coverage test — the classifier's bias is the invariant's whole value. */
+export const looksLikeNonFrameForTests = looksLikeNonFrame
 
 const { byType: REGISTRY, nonFrame: NON_FRAME_SCHEMAS, unreadable: UNREADABLE_SCHEMAS } = buildRegistry()
 
