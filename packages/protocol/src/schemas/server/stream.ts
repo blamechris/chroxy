@@ -372,7 +372,15 @@ export const ServerAvailableModelsEntrySchema = z.object({
 export const ServerAvailableModelsSchema = z.object({
   type: z.literal('available_models'),
   models: z.array(z.unknown()).optional(),
-  defaultModel: z.string().optional(),
+  // #7089: NULLABLE, not just optional. `registry.getDefaultModelId()` returns null
+  // when no default is set, and every sender passes it straight through
+  // (ws-history.js multi/legacy/refresh, the server-cli overlay re-broadcast,
+  // session-handlers), so `defaultModel: null` is what has always been on the wire.
+  // The consumer contract already models it that way — store-core's
+  // `AvailableModelsPayload.defaultModelId` is `string | null` and `parseStringField`
+  // maps anything non-string to null — so the schema was the outlier, and this is the
+  // same reasoning `provider` below was given.
+  defaultModel: z.string().nullable().optional(),
   // #6370: every `available_models` sender tags the roster with the provider it
   // came from (ws-history multi/legacy/refresh/switch, server-cli overlay
   // re-broadcast, ws-forwarding, session-handlers) and the wire contract
