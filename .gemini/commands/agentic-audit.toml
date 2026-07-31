@@ -1,10 +1,12 @@
+description = 'Launch a panel of specialized agents to audit a pull request from multiple perspectives before merge.'
+prompt = '''
 # /agentic-audit
 
 Launch a panel of specialized agents to audit a pull request from multiple perspectives before merge.
 
 ## Arguments
 
-- `$ARGUMENTS` - PR number (optional, defaults to current branch's PR), plus optional agent count (default: 5). Examples:
+- `{{args}}` - PR number (optional, defaults to current branch's PR), plus optional agent count (default: 5). Examples:
   - `42` (PR #42, 5 agents)
   - `42 7` (PR #42, 7 agents)
   - `3` (PR #3 or 3 agents — resolved by checking if a PR with that number exists)
@@ -149,6 +151,4 @@ After presenting the synthesis, ask the user:
 | 3 | Adequate — merge with changes |
 | 2 | Concerning — significant issues to resolve first |
 | 1 | Do not merge — needs rework |
-
-
-<!-- skill-templates: agentic-audit a09dcc2 2026-07-30 -->
+'''

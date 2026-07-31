@@ -1,3 +1,5 @@
+description = 'Launch a comprehensive multi-agent audit of the entire project.'
+prompt = '''
 # /project-audit
 
 Launch a comprehensive multi-agent audit of the entire project. Agents with diverse perspectives analyze the codebase in parallel, then findings are synthesized into a master assessment with actionable recommendations.
@@ -6,7 +8,7 @@ Unlike `/swarm-audit` (which audits a specific document or topic), this skill au
 
 ## Arguments
 
-- `$ARGUMENTS` - Optional configuration. Space-separated tokens:
+- `{{args}}` - Optional configuration. Space-separated tokens:
   - `agents=N` — Number of agents (default: 6, min: 4, max: 12)
   - `focus=AREA[,AREA,...]` — Comma-separated focus areas to emphasize (e.g., `focus=security,performance`)
   - `output=DIR` — Output directory for reports (default: `docs/project-audit/`)
@@ -537,6 +539,4 @@ Create `.claude/audit-config.json` to set defaults for this project:
 /project-audit skip=scout,chronicler
 /project-audit include=deployer verbosity=brief
 ```
-
-
-<!-- skill-templates: project-audit a09dcc2 2026-07-30 -->
+'''

@@ -99,7 +99,7 @@ Run agents as foreground Task calls. If more than 4 agents, batch: first 4 in pa
 
 **Delegation tiers (cost discipline — do not strip):**
 
-Roles per `/tiered-delegation`: **workhorse** = one tier below the session ceiling, **mechanical** = cheapest available tier. Concrete model names live only in that skill's `{{CUSTOMIZE}}` ladder — never here.
+Roles per `/tiered-delegation`: **workhorse** = one tier below the session ceiling, **mechanical** = cheapest available tier. Concrete model names live only in that skill's CUSTOMIZE-marker ladder — never here.
 
 - **Panel agents run at the workhorse tier by default.** Reading a diff through a persona lens is workhorse work; do not spawn panel agents at the ceiling. The orchestrator's synthesis (step 4) carries the expensive judgment.
 - **Mechanical prep at the mechanical tier.** Building the context bundle (file lists, diff chunking) and any pre-classification of changed files runs at the mechanical tier at low effort.

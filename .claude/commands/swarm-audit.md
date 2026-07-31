@@ -89,7 +89,7 @@ Your job is to audit the following from the lens of **{LENS}**.
 
 **Delegation tiers (cost discipline — do not strip):**
 
-Roles per `/tiered-delegation`: **workhorse** = one tier below the session ceiling, **mechanical** = cheapest available tier. Concrete model names live only in that skill's `{{CUSTOMIZE}}` ladder — never here.
+Roles per `/tiered-delegation`: **workhorse** = one tier below the session ceiling, **mechanical** = cheapest available tier. Concrete model names live only in that skill's CUSTOMIZE-marker ladder — never here.
 
 - **Panel agents run at the workhorse tier by default.** Audit breadth is workhorse work. Do not spawn panel agents at the ceiling; the orchestrator's synthesis (step 6) is where the expensive judgment lives.
 - **Pre-filter at the mechanical tier.** Any triage/classification pre-pass (e.g. deciding which files or sections are in scope before the panel reads them) runs at the mechanical tier at low effort.
@@ -216,4 +216,4 @@ Output a concise summary:
 /swarm-audit "session management across server restart" 6
 ```
 
-<!-- skill-templates: swarm-audit 8196307 2026-07-30 -->
+<!-- skill-templates: swarm-audit a09dcc2 2026-07-30 -->

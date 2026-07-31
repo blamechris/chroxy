@@ -139,7 +139,7 @@ Launch implementation agents using the Agent tool with `isolation: "worktree"`. 
 
 **Delegation tiers (cost discipline — do not strip):**
 
-Roles per `/tiered-delegation`: **workhorse** = one tier below the session ceiling, **mechanical** = cheapest available tier. Concrete model names live only in that skill's `{{CUSTOMIZE}}` ladder — never here.
+Roles per `/tiered-delegation`: **workhorse** = one tier below the session ceiling, **mechanical** = cheapest available tier. Concrete model names live only in that skill's CUSTOMIZE-marker ladder — never here.
 
 - **Implementers run at the workhorse tier by default.** Well-scoped, low/medium-complexity issues are workhorse work. Spawn a **ceiling-tier implementer only for a non-trivial issue** — genuine design latitude, cross-cutting change surface, or a prior workhorse failure on the same issue — and note which issues got the ceiling tier in the progress table.
 - **Triage/classification at the mechanical tier.** The queue triage pass (complexity read, skip-criteria checks, label classification) runs at the mechanical tier at low effort.

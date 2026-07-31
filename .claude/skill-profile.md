@@ -36,6 +36,15 @@ corrupt (currently: visual-brief, decompose-issue, create-issue, skill — Claud
 get them). After editing a skill's generic source by hand, recompile:
 `node scripts/compile-skill-targets.mjs --name <name>`.
 
+## Cost Circuit Breaker (marathon skills: prime-directive, tackle-issues, autonomous-dev-flow)
+
+- **Cost source:** the harness statusline — it computes running session cost live.
+- **Per-session budget:** $150 eq. — set 2026-07, per the 2026-07 cost audit's recommendation.
+- Over budget at a wave/queue boundary → write the handoff, update the STATE header where
+  applicable, and **stop and notify** instead of starting the next wave/item. This is the
+  documented value the marathon skills' cost-circuit-breaker sections defer to; update it here
+  first if the budget changes, then re-run `/skill update` on the marathon skills to propagate.
+
 ## Repo-memory exploration protocol (cross-cutting)
 This repo has the `repo-memory` MCP (~1,500 files pre-indexed, AST summaries, warm cache via a `post-merge` hook). It is heavily underused. Any skill that **spawns code-exploring subagents or reads source heavily** must carry the exploration protocol so spawned agents (fresh context, don't inherit CLAUDE.md) actually use it:
 - Before `Read` → `get_file_summary` / `batch_file_summaries` (a fraction of a full Read).
