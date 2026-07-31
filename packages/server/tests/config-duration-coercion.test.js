@@ -108,6 +108,46 @@ describe('#7083 duration config coercion', () => {
     assert.equal(merged.worktreeGc.reapIntervalMs, 900000.5, 'nested ms is out of scope — see the comment in config.js')
   })
 
+  it('coerces the per-provider duration MAP — it outranks the global and reaches result.duration', () => {
+    // The gap review found. `providerStreamStallTimeoutMs.<id>` survives mergeConfig,
+    // draws ZERO validateConfig warnings, is kept verbatim by
+    // _sanitizeProviderTimeoutMap (isOperatorTimeoutInRange checks finite/positive/<=24h
+    // but never integrality), OUTRANKS the coerced global, and is emitted as
+    // result.duration. stream.ts records this exact field as blocked on #7083 before
+    // .int() can be added — so coercing only the flat keys would have left #7095 unsafe.
+    const merged = mergeFile({ providerStreamStallTimeoutMs: { 'claude-sdk': 1800000.5, codex: 60000 } })
+    assert.equal(merged.providerStreamStallTimeoutMs['claude-sdk'], 1800000)
+    assert.equal(merged.providerStreamStallTimeoutMs.codex, 60000, 'an already-integer entry is untouched')
+  })
+
+  it('the map coercion is ONE level deep — pricing and billing survive', () => {
+    // Depth is what turns this into the change that truncates money.
+    const merged = mergeFile({
+      providers: { anthropicCompatible: [{ id: 'x', pricing: { input: 0.6, output: 3.75 } }] },
+      billing: { monthlyCreditBudgetUsd: 12.5 },
+    })
+    assert.equal(merged.providers.anthropicCompatible[0].pricing.input, 0.6)
+    assert.equal(merged.providers.anthropicCompatible[0].pricing.output, 3.75)
+    assert.equal(merged.billing.monthlyCreditBudgetUsd, 12.5)
+  })
+
+  it('a non-object providerStreamStallTimeoutMs passes through for validateConfig to reject', () => {
+    // The wrong-type warning must still fire on the operator's raw value.
+    assert.equal(coerceDurationConfigValue('providerStreamStallTimeoutMs', 'nope'), 'nope')
+    assert.equal(coerceDurationConfigValue('providerStreamStallTimeoutMs', null), null)
+  })
+
+  it('DOCUMENTED EXCEPTION: terminalDownGraceMs has no range validation, so +/-1 is legal and unwarned', () => {
+    // Recorded rather than hidden. For the five range-checked keys, +/-1 is still below
+    // the minimum and validateConfig still warns. terminalDownGraceMs is not range-
+    // checked at all, so 0.4 becomes a legal, unwarned 1 — an invented value, tolerable
+    // only because that key never reaches the wire.
+    const merged = mergeFile({ terminalDownGraceMs: 0.4 })
+    assert.equal(merged.terminalDownGraceMs, 1)
+    const warnings = (validateConfig(merged).warnings || []).filter((w) => /terminalDownGrace/i.test(w))
+    assert.deepEqual(warnings, [], 'no warning today — this test exists so that stays a known fact')
+  })
+
   // --- boundaries and sentinels ---------------------------------------------
 
   it('truncation never pushes a legal value below its documented minimum', () => {

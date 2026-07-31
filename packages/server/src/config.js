@@ -327,10 +327,13 @@ const CONFIG_SCHEMA = {
  *
  * Deliberately NOT covered: nested ms options under `'object'`-typed keys
  * (`worktreeGc.*`, `notifications.discord.*`, `orchestration.turnTimeoutMs`,
- * `summarize.titleTimeoutMs`, `providerStreamStallTimeoutMs.<id>`). None of those
- * reach the wire, and covering them needs per-block handling — a recursive walk of the
- * merged object would destroy `providers.*.pricing.input` and
- * `billing.monthlyCreditBudgetUsd`, which are legitimately fractional.
+ * `summarize.titleTimeoutMs`). Those do not reach the wire, and covering them needs
+ * per-block handling — a recursive walk of the merged object would destroy
+ * `providers.*.pricing.input` and `billing.monthlyCreditBudgetUsd`, which are
+ * legitimately fractional.
+ *
+ * `providerStreamStallTimeoutMs` IS covered (see DURATION_MS_MAP_CONFIG_KEYS below) —
+ * an earlier revision of this comment wrongly lumped it in with the exclusions.
  */
 export const DURATION_MS_CONFIG_KEYS = Object.freeze([
   'terminalDownGraceMs',
@@ -341,6 +344,27 @@ export const DURATION_MS_CONFIG_KEYS = Object.freeze([
   'mcpToolCallTimeoutMs',
 ])
 const DURATION_MS_KEY_SET = new Set(DURATION_MS_CONFIG_KEYS)
+
+/**
+ * #7083 — config options whose value is a MAP of `<id> -> duration-ms`.
+ *
+ * `providerStreamStallTimeoutMs.<id>` is not a cosmetic omission: it OUTRANKS the
+ * coerced global (session-manager.js `_sanitizeProviderTimeoutMap` keeps it verbatim
+ * because `isOperatorTimeoutInRange` checks finite/positive/<=24h but never
+ * integrality), flows into `base-session.js`, and is emitted as `result.duration` by
+ * `sdk-session.js`. Measured: a fractional per-provider entry survives `mergeConfig`
+ * and draws ZERO validateConfig warnings.
+ *
+ * That is the exact field `stream.ts` records as blocked on THIS issue before `.int()`
+ * can be added (#7095). Coercing only the flat keys would have left the per-provider
+ * override fractional, so #7095 would then make a config that is legal today emit a
+ * wire-illegal frame.
+ *
+ * An explicit list of MAP-shaped keys, not a recursive walk — the walk is what would
+ * destroy `providers.*.pricing.input` and `billing.monthlyCreditBudgetUsd`.
+ */
+export const DURATION_MS_MAP_CONFIG_KEYS = Object.freeze(['providerStreamStallTimeoutMs'])
+const DURATION_MS_MAP_KEY_SET = new Set(DURATION_MS_MAP_CONFIG_KEYS)
 
 /**
  * #7083 — coerce a duration-ms config value to a whole number of milliseconds.
@@ -360,8 +384,14 @@ const DURATION_MS_KEY_SET = new Set(DURATION_MS_CONFIG_KEYS)
  * `streamStallTimeoutMs` and `backgroundShellHardQuiesceMs`, so a naive
  * `Math.trunc(0.4) === 0` would silently switch stall detection OFF — turning an
  * illegal value that warns today into a feature that is quietly disabled. Sub-1
- * magnitudes go to ±1 instead: still illegal, still warned about by validateConfig,
- * and never the sentinel.
+ * magnitudes go to ±1 instead, which is never the sentinel.
+ *
+ * Precise about what ±1 then means: for the five range-checked keys it is still below
+ * the documented minimum, so validateConfig still warns and nothing is silently
+ * accepted. `terminalDownGraceMs` is the exception — it has NO range validation at all,
+ * so `0.4` becomes a legal, unwarned `1`. That is an invented value, and it is
+ * tolerable only because that key never reaches the wire; it is not a general property
+ * of the guard, so do not extend the guard to a wire-bound key on that basis.
  *
  * Non-numbers pass through untouched so `parseEnvValue`'s NaN-means-keep-the-string
  * contract survives, and non-finite values pass through so the existing Infinity
@@ -372,13 +402,38 @@ const DURATION_MS_KEY_SET = new Set(DURATION_MS_CONFIG_KEYS)
  * @returns {unknown} the coerced value, or `value` unchanged
  */
 export function coerceDurationConfigValue(key, value) {
+  if (DURATION_MS_MAP_KEY_SET.has(key)) return coerceDurationMap(key, value)
   if (!DURATION_MS_KEY_SET.has(key)) return value
+  return coerceOneDuration(key, value)
+}
+
+/** @private — coerce a single duration-ms value. */
+function coerceOneDuration(label, value) {
   if (typeof value !== 'number' || !Number.isFinite(value)) return value
   if (Number.isInteger(value)) return value
   const truncated = Math.trunc(value)
   const coerced = truncated === 0 ? Math.sign(value) : truncated
-  log.warn(`Config '${key}' must be a whole number of milliseconds — coercing ${value} to ${coerced}`)
+  log.warn(`Config '${label}' must be a whole number of milliseconds — coercing ${value} to ${coerced}`)
   return coerced
+}
+
+/**
+ * @private — coerce each value of an `<id> -> ms` map, ONE level deep.
+ *
+ * Deliberately not recursive: depth is what turns this from a targeted fix into the
+ * change that truncates `providers.*.pricing.input`. Non-object inputs pass through so
+ * the existing "wrong type" validateConfig warning still fires on the raw value.
+ */
+function coerceDurationMap(key, value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value
+  let changed = false
+  const out = {}
+  for (const [id, entry] of Object.entries(value)) {
+    const coerced = coerceOneDuration(`${key}.${id}`, entry)
+    if (coerced !== entry) changed = true
+    out[id] = coerced
+  }
+  return changed ? out : value
 }
 
 /**

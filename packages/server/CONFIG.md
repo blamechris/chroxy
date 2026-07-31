@@ -458,6 +458,16 @@ from the SDK / CLI for the configured duration.
 | Soft | `resultTimeoutMs` | `CHROXY_RESULT_TIMEOUT_MS` | `1800000` (30 min) | Emits `inactivity_warning` event + push notification. Session stays alive. Clients render a "check in" chip in the activity indicator. |
 | Hard | `hardTimeoutMs` | `CHROXY_HARD_TIMEOUT_MS` | `7200000` (2 h) | Emits `permission_expired` for every outstanding permission request, force-clears busy state, aborts any in-flight SDK query, and emits a generic `error` event (`"Response timed out after <duration> of inactivity"`). Session must be re-driven by the user. |
 
+**Whole milliseconds only (#7083).** Every millisecond option — `resultTimeoutMs`,
+`hardTimeoutMs`, `streamStallTimeoutMs`, `backgroundShellHardQuiesceMs`,
+`mcpToolCallTimeoutMs`, `terminalDownGraceMs`, and each entry of
+`providerStreamStallTimeoutMs` — is truncated to an integer when the config is merged,
+from the config file and the env var alike. A fractional value logs a warning naming the
+key and the value it was changed to. They must be whole ms because they are sent on the
+wire, where the protocol schemas require an integer. Note this is truncation toward zero,
+so `30000.9` becomes `30000` — never rounded up into a range it did not qualify for. USD
+options (`costBudget`, `billing.*`, provider `pricing.*`) are deliberately untouched.
+
 Both fields share the same range (`30000`–`86400000`, 30 s – 24 h) and the
 same WS schema cap (#3768). Values outside the range emit warn-only log
 lines during validation; the runtime applies whatever was set. The
