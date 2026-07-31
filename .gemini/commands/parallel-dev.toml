@@ -1,10 +1,12 @@
+description = 'Orchestrate parallel autonomous dev sessions — dispatch multiple agents into isolated worktrees to implement GitHub issues with TDD simultaneously, then run...'
+prompt = '''
 # /parallel-dev
 
 Orchestrate parallel autonomous dev sessions — dispatch multiple agents into isolated worktrees to implement GitHub issues with TDD simultaneously, then run sequential reviews. Each agent works independently in its own worktree, eliminating branch conflicts.
 
 ## Arguments
 
-- `$ARGUMENTS` - Issue source and options. Examples:
+- `{{args}}` - Issue source and options. Examples:
   - `label:ready-to-build` (all open issues with this label)
   - `milestone:"v1.2"` (all open issues in milestone)
   - `#12 #15 #18` or `12 15 18` (specific issues by number)
@@ -26,7 +28,7 @@ BRANCH_PREFIX="feat/"
 PARALLEL=3
 ```
 
-Parse `$ARGUMENTS` to determine the issue source:
+Parse `{{args}}` to determine the issue source:
 
 - **Explicit list**: Strip `#` prefixes, run `gh issue view ${NUM} --json number,title,state,labels,body,assignees` for each
 - **Label**: `gh issue list --label "${LABEL}" --state open --json number,title,labels,assignees --limit ${MAX}`
@@ -402,5 +404,4 @@ This makes the skill **idempotent** — safe to re-run without duplicating work.
 13. **Comment on skips** — Every skipped issue gets a GitHub comment explaining why.
 14. **Pre-Skill Checkpoint** — Re-read CLAUDE.md and skill files before each /full-review run.
 15. **Compose existing skills** — /full-review is called as-is. Don't reinvent its logic.
-
-<!-- skill-templates: parallel-dev a09dcc2 2026-07-30 -->
+'''

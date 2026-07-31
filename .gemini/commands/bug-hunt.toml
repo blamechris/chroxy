@@ -1,7 +1,5 @@
----
-description: "Launch a swarm of bug-hunting agents against a target file, module, or topic."
----
-
+description = 'Launch a swarm of bug-hunting agents against a target file, module, or topic.'
+prompt = '''
 # /bug-hunt
 
 Launch a swarm of bug-hunting agents against a target file, module, or topic. Output is a **triaged candidate-issue list** ready to feed into `/create-issue` — not ratings, not architectural critique. The job is: find bugs that would make good GitHub issues.
@@ -10,7 +8,7 @@ This is the issue-filing flavor of `/swarm-audit`. Use it when your goal is "pop
 
 ## Arguments
 
-- `$ARGUMENTS` - Optional configuration. Space-separated tokens:
+- `{{args}}` - Optional configuration. Space-separated tokens:
   - First positional: target (file path, directory, or quoted topic like `"the auth flow"`). Required.
   - `hunters=N` — Number of hunter agents (default: 4, min: 3, max: 6)
   - `severity-floor=critical|major|minor` — Drop findings below this severity in the final list (default: `minor`)
@@ -324,3 +322,4 @@ Output a final summary:
 | "Review this PR before merge" | `/agentic-audit` |
 
 A typical pipeline: `/recon src/payments` → `/bug-hunt src/payments` → `/tackle-issues` on the newly-filed issues.
+'''

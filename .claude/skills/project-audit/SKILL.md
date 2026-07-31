@@ -232,7 +232,7 @@ Single rating X.X/5 with one-paragraph justification.
 
 **Delegation tiers (cost discipline — do not strip):**
 
-Roles per `/tiered-delegation`: **workhorse** = one tier below the session ceiling, **mechanical** = cheapest available tier. Concrete model names live only in that skill's `{{CUSTOMIZE}}` ladder — never here.
+Roles per `/tiered-delegation`: **workhorse** = one tier below the session ceiling, **mechanical** = cheapest available tier. Concrete model names live only in that skill's CUSTOMIZE-marker ladder — never here.
 
 - **Audit agents run at the workhorse tier by default.** Codebase exploration and per-lens reporting are workhorse work; do not spawn panel agents at the ceiling. The orchestrator's master assessment (step 7) is where the expensive judgment lives.
 - **Discovery pre-pass at the mechanical tier.** The step-2 profile scan's mechanical parts (file inventories, signal detection, dependency counts) run at the mechanical tier at low effort; the orchestrator interprets the results.

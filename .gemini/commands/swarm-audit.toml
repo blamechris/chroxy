@@ -1,14 +1,12 @@
----
-description: "Launch a swarm of specialized agents to perform a multi-perspective audit of any design document, architecture, codebase, or proposal."
----
-
+description = 'Launch a swarm of specialized agents to perform a multi-perspective audit of any design document, architecture, codebase, or proposal.'
+prompt = '''
 # /swarm-audit
 
 Launch a swarm of specialized agents to perform a multi-perspective audit of any design document, architecture, codebase, or proposal.
 
 ## Arguments
 
-- `$ARGUMENTS` - Path to the document or topic to audit, plus optional agent count (default: 6). Examples:
+- `{{args}}` - Path to the document or topic to audit, plus optional agent count (default: 6). Examples:
   - `docs/architecture/proposal.md`
   - `docs/rfc-001.md 8` (8 agents)
   - `"the authentication flow in src/auth.js" 4`
@@ -219,3 +217,4 @@ Output a concise summary:
 /swarm-audit docs/rfc-push-notifications.md
 /swarm-audit "session management across server restart" 6
 ```
+'''
