@@ -374,11 +374,13 @@ const DURATION_MS_MAP_KEY_SET = new Set(DURATION_MS_MAP_CONFIG_KEYS)
  * a fractional number with no parse step to hook. Fixing only the env parser would
  * leave the config-file case — the one named in #7083 — fully broken.
  *
- * `Math.trunc`, matching `parseInt`, which is already this repo's convention for every
- * integer config input. Truncation also cannot round an out-of-range value UP into
- * legality: `Math.round(29999.5)` would become 30000 and silently suppress a
- * below-minimum warning. And because every documented minimum is itself an integer,
- * truncation can never push a legal value below its minimum.
+ * `Math.trunc` — truncate toward zero. Chosen for two reasons, not for convention:
+ * it cannot round an out-of-range value UP into legality (`Math.round(29999.5)` would
+ * become 30000 and silently suppress a below-minimum warning), and because every
+ * documented minimum is itself an integer, truncation can never push a legal value
+ * below its minimum. It also matches the truncating `parseInt` used for integer CLI
+ * flags in `cli/shared.js` — note this module's own env parser uses `parseFloat`, which
+ * is precisely why the fractional value reaches here in the first place.
  *
  * The zero guard is load-bearing. `0` is the documented "disabled" sentinel for
  * `streamStallTimeoutMs` and `backgroundShellHardQuiesceMs`, so a naive

@@ -46,7 +46,10 @@ describe('#7083 duration config coercion', () => {
     }
   })
 
-  const mergeFile = (fileConfig) => mergeConfig({ fileConfig }).config ?? mergeConfig({ fileConfig })
+  // mergeConfig returns the merged object directly. An earlier version read `.config`
+  // with a `??` fallback, which was always undefined and therefore merged TWICE on
+  // every call — doubling the coercion warnings it was supposed to be observing.
+  const mergeFile = (fileConfig) => mergeConfig({ fileConfig })
 
   it('CONTROL: an ordinary integer duration is untouched, so the assertions below mean something', () => {
     const merged = mergeFile({ resultTimeoutMs: 1800000 })
