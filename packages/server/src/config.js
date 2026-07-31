@@ -313,6 +313,75 @@ const CONFIG_SCHEMA = {
 }
 
 /**
+ * #7083 — config options whose value is a millisecond duration, and which therefore
+ * must never be fractional: they feed `setTimeout` AND the wire, where the protocol
+ * schemas require `.int()`.
+ *
+ * An EXPLICIT allowlist rather than `key.endsWith('Ms')`, even though the suffix
+ * happens to select exactly these six today. The `'number'` branch of `parseEnvValue`
+ * is shared with `costBudget`, which is USD and legitimately fractional — so a
+ * convention-driven predicate would be correct by accident and give a future reviewer
+ * nothing to check against. `tests/config-duration-coercion.test.js` asserts this list
+ * equals every `*Ms: 'number'` key in CONFIG_SCHEMA, so adding a duration option
+ * without listing it here fails CI rather than silently opting out.
+ *
+ * Deliberately NOT covered: nested ms options under `'object'`-typed keys
+ * (`worktreeGc.*`, `notifications.discord.*`, `orchestration.turnTimeoutMs`,
+ * `summarize.titleTimeoutMs`, `providerStreamStallTimeoutMs.<id>`). None of those
+ * reach the wire, and covering them needs per-block handling — a recursive walk of the
+ * merged object would destroy `providers.*.pricing.input` and
+ * `billing.monthlyCreditBudgetUsd`, which are legitimately fractional.
+ */
+export const DURATION_MS_CONFIG_KEYS = Object.freeze([
+  'terminalDownGraceMs',
+  'resultTimeoutMs',
+  'hardTimeoutMs',
+  'streamStallTimeoutMs',
+  'backgroundShellHardQuiesceMs',
+  'mcpToolCallTimeoutMs',
+])
+const DURATION_MS_KEY_SET = new Set(DURATION_MS_CONFIG_KEYS)
+
+/**
+ * #7083 — coerce a duration-ms config value to a whole number of milliseconds.
+ *
+ * Applied at the single merge site so it covers BOTH input paths: an env var (parsed
+ * with `parseFloat`) and a `~/.chroxy/config.json` value, which is JSON and arrives as
+ * a fractional number with no parse step to hook. Fixing only the env parser would
+ * leave the config-file case — the one named in #7083 — fully broken.
+ *
+ * `Math.trunc`, matching `parseInt`, which is already this repo's convention for every
+ * integer config input. Truncation also cannot round an out-of-range value UP into
+ * legality: `Math.round(29999.5)` would become 30000 and silently suppress a
+ * below-minimum warning. And because every documented minimum is itself an integer,
+ * truncation can never push a legal value below its minimum.
+ *
+ * The zero guard is load-bearing. `0` is the documented "disabled" sentinel for
+ * `streamStallTimeoutMs` and `backgroundShellHardQuiesceMs`, so a naive
+ * `Math.trunc(0.4) === 0` would silently switch stall detection OFF — turning an
+ * illegal value that warns today into a feature that is quietly disabled. Sub-1
+ * magnitudes go to ±1 instead: still illegal, still warned about by validateConfig,
+ * and never the sentinel.
+ *
+ * Non-numbers pass through untouched so `parseEnvValue`'s NaN-means-keep-the-string
+ * contract survives, and non-finite values pass through so the existing Infinity
+ * semantics in the range checks are unchanged.
+ *
+ * @param {string} key
+ * @param {unknown} value
+ * @returns {unknown} the coerced value, or `value` unchanged
+ */
+export function coerceDurationConfigValue(key, value) {
+  if (!DURATION_MS_KEY_SET.has(key)) return value
+  if (typeof value !== 'number' || !Number.isFinite(value)) return value
+  if (Number.isInteger(value)) return value
+  const truncated = Math.trunc(value)
+  const coerced = truncated === 0 ? Math.sign(value) : truncated
+  log.warn(`Config '${key}' must be a whole number of milliseconds — coercing ${value} to ${coerced}`)
+  return coerced
+}
+
+/**
  * Config keys that should be masked in verbose output and sanitized logs.
  * `pushToken` was a dead entry — it is never a CONFIG_SCHEMA key; push tokens
  * are runtime device registrations (`prefs.devices`), masked elsewhere. The
@@ -1379,7 +1448,10 @@ export function mergeConfig({ fileConfig = {}, cliOverrides = {}, defaults = {},
 
   // Helper to set value and track source
   const setValue = (key, value, source) => {
-    merged[key] = value
+    // #7083: the single choke point for every precedence branch (CLI, env, file,
+    // defaults), so one coercion covers all of them — including the config-FILE path,
+    // which has no parse step of its own.
+    merged[key] = coerceDurationConfigValue(key, value)
     sources[key] = source
   }
 
