@@ -1660,9 +1660,13 @@ describe('BaseSession', () => {
       s = new BaseSession({ cwd: '/tmp', repoSkillsDir: null })
     })
 
+    // `once`, not `on`: the CONTRACT test below drives this helper 14 times against one
+    // instance, and with `on` those listeners accumulate — it was already tripping
+    // Node's MaxListenersExceededWarning at 11. `once` also means a stale listener from
+    // an earlier call cannot observe a later emit.
     const emitResult = (duration) => {
       let received = null
-      s.on('result', (ev) => { received = ev })
+      s.once('result', (ev) => { received = ev })
       s.emit('result', { cost: null, duration, usage: null, sessionId: 'sess_1' })
       return received
     }
@@ -1691,7 +1695,7 @@ describe('BaseSession', () => {
     it('leaves null and absent untouched — the field is nullable on the wire', () => {
       assert.equal(emitResult(null).duration, null)
       let received = null
-      s.on('result', (ev) => { received = ev })
+      s.once('result', (ev) => { received = ev })
       s.emit('result', { cost: null, usage: null, sessionId: 'sess_1' })
       assert.equal(received.duration, undefined, 'an absent duration stays absent')
     })
