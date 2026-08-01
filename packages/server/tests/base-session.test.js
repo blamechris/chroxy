@@ -1642,6 +1642,91 @@ describe('BaseSession', () => {
   // the emit() override, so EVERY `result` carries queueLength regardless of
   // which provider emits it (the direct-emit providers — CLI/exec-codex/gemini/
   // byok/stall fallbacks — bypass _emitResult but still pass through emit()).
+  // #7095 — `result.duration` is normalised on the SAME emit() override, for the same
+  // reason it stamps queueLength: it is the one method every `result` passes through,
+  // and the #6705 review already missed 3 of 8 direct-emit sites once.
+  //
+  // Three producers hand through third-party values unguarded — cli-session.js:1257
+  // (`data.duration_ms` from the CLI's stream-json), sdk-session.js:1175
+  // (`msg.duration_ms` from the Agent SDK) and codex-app-server-session.js:629
+  // (`turn?.durationMs`) — and byok-session.js:1463 computes
+  // `Date.now() - turnStartedAt`, which goes NEGATIVE on a backwards clock jump.
+  // #7083 closed only the CONFIG path (sdk-session.js:1964). Without this, adding
+  // `.int().nonnegative()` to ServerResultSchema would make a real provider frame
+  // wire-illegal.
+  describe('#7095 result.duration normalisation via emit() override', () => {
+    let s
+    beforeEach(() => {
+      s = new BaseSession({ cwd: '/tmp', repoSkillsDir: null })
+    })
+
+    const emitResult = (duration) => {
+      let received = null
+      s.on('result', (ev) => { received = ev })
+      s.emit('result', { cost: null, duration, usage: null, sessionId: 'sess_1' })
+      return received
+    }
+
+    it('CONTROL: an ordinary integer duration is passed through untouched', () => {
+      assert.equal(emitResult(1234).duration, 1234)
+      assert.equal(emitResult(0).duration, 0, 'a genuine zero-length turn survives')
+    })
+
+    it('rounds a fractional duration from a third-party provider', () => {
+      // Math.round, NOT trunc: this is a measured elapsed time, so the nearest whole
+      // ms is the faithful value. (#7083 used trunc for CONFIG values, where the
+      // concern was rounding an out-of-range value UP into legality — a different
+      // problem with a different right answer.)
+      assert.equal(emitResult(1234.7).duration, 1235)
+      assert.equal(emitResult(1234.2).duration, 1234)
+    })
+
+    it('clamps a NEGATIVE duration to 0 (backwards clock jump)', () => {
+      // byok-session.js:1463 is `Date.now() - turnStartedAt`. A negative elapsed time
+      // is meaningless; 0 is the honest floor and is what makes .nonnegative() safe.
+      assert.equal(emitResult(-5000).duration, 0)
+      assert.equal(emitResult(-0.4).duration, 0)
+    })
+
+    it('leaves null and absent untouched — the field is nullable on the wire', () => {
+      assert.equal(emitResult(null).duration, null)
+      let received = null
+      s.on('result', (ev) => { received = ev })
+      s.emit('result', { cost: null, usage: null, sessionId: 'sess_1' })
+      assert.equal(received.duration, undefined, 'an absent duration stays absent')
+    })
+
+    it('leaves a non-finite duration untouched rather than inventing a number', () => {
+      // Infinity/NaN are refused by z.number() itself, so passing them through keeps
+      // the failure visible instead of silently manufacturing a plausible value.
+      assert.equal(emitResult(Infinity).duration, Infinity)
+      assert.ok(Number.isNaN(emitResult(Number.NaN).duration))
+    })
+
+    it('CONTRACT: every emitted duration satisfies what the wire schema now requires', () => {
+      // The property ServerResultSchema enforces after #7095: integer AND >= 0. Asserted
+      // as a pure property so it runs from this worktree — a test importing
+      // @chroxy/protocol here would resolve to the MAIN checkout's copy and could not
+      // see a schema change on this branch. The schema half is proven in
+      // packages/protocol/tests/schemas.test.js, which imports ../src via tsx.
+      for (const input of [1234, 1234.7, 1234.2, 0, -5000, -0.4, 1800000.5, 24 * 60 * 60 * 1000 + 1]) {
+        const { duration } = emitResult(input)
+        assert.ok(
+          Number.isInteger(duration) && duration >= 0,
+          `emitted duration for input ${input} was ${duration} — must be a non-negative integer`,
+        )
+      }
+    })
+
+    it('does not disturb the other fields, including the queueLength stamp', () => {
+      s._outgoingQueue.push({ clientMessageId: 'uin-1' })
+      const received = emitResult(1234.7)
+      assert.equal(received.queueLength, 1, 'both normalisations apply on one pass')
+      assert.equal(received.sessionId, 'sess_1')
+      assert.equal(received.cost, null)
+    })
+  })
+
   describe('result queueLength stamping via emit() override (#6627/#6706)', () => {
     let s
     beforeEach(() => {

@@ -3237,25 +3237,42 @@ describe('@chroxy/protocol schemas', () => {
       }
     })
 
-    it('accepts the values real senders produce today, INCLUDING the awkward ones', async () => {
-      // Deliberately built without the shared parse() helper, which fixes the other
-      // three fields — an earlier version of this test reused it and was therefore a
-      // byte-identical duplicate of the null case above, proving nothing extra.
+    it('the awkward sender values are now REFUSED — and each is normalised upstream', async () => {
+      // This test previously asserted the opposite. It was written in #7093 to tell
+      // whoever added .int()/.nonnegative() which sender they were about to break, and
+      // it did exactly that. #7095 closed each blocker at the SENDER rather than
+      // loosening the schema, so the same values are now correctly refused here:
       //
-      // These are the values the constraints this PR did NOT apply would have broken.
-      // If someone later adds .int()/.nonnegative()/.max(), this test tells them which
-      // sender they are about to make wire-illegal.
+      //   1800000.5 — a parseFloat'd config value. Integer-coerced by #7083 at the
+      //               config merge site, so it can no longer reach this field.
+      //   -5000     — `Date.now() - turnStartedAt` on a backwards clock jump. Clamped
+      //               to 0 by BaseSession's emit() override (#7095).
+      //   1234.7    — a third-party `duration_ms` from the CLI / SDK / codex. Rounded
+      //               by the same override.
+      //
+      // If one of these ever reaches the wire again, the schema now catches it instead
+      // of a client silently failing to parse the whole snapshot.
       const { ServerResultSchema } = await import('../src/schemas/server/stream.ts')
-      const cases = [
-        ['fractional, from a parseFloat config option (sdk-session.js:1964)', 1800000.5],
-        ['negative, from a backwards clock jump (byok-session.js:1463)', -5000],
-        ['longer than the 24h sane-duration ceiling', 24 * 60 * 60 * 1000 + 1],
-        ['zero', 0],
-      ]
-      for (const [why, duration] of cases) {
+      for (const [why, duration] of [
+        ['fractional config value (normalised by #7083)', 1800000.5],
+        ['backwards clock jump (clamped by the emit override)', -5000],
+        ['third-party duration_ms (rounded by the emit override)', 1234.7],
+      ]) {
         const r = ServerResultSchema.safeParse({ type: 'result', cost: 0.01, duration, usage: {}, sessionId: 's1' })
-        assert.ok(r.success, `${why}: duration ${duration} must still parse — see the deferred-constraint note in stream.ts`)
+        assert.equal(r.success, false, `${why}: ${duration} must now be refused`)
       }
+    })
+
+    it('a turn longer than the 24h sane-duration ceiling is still ACCEPTED', async () => {
+      // .max(MAX_SANE_DURATION_MS) is deliberately NOT applied — unlike the other two
+      // constraints there is no sender-side normalisation that makes it safe without
+      // misreporting a real measurement. Clamping a genuine 25h turn to 24h would be a
+      // quiet lie in a field operators read.
+      const { ServerResultSchema } = await import('../src/schemas/server/stream.ts')
+      const r = ServerResultSchema.safeParse({
+        type: 'result', cost: 0.01, duration: 24 * 60 * 60 * 1000 + 1, usage: {}, sessionId: 's1',
+      })
+      assert.ok(r.success, 'a >24h turn must remain representable')
     })
   })
 
