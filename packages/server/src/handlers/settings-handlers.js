@@ -512,7 +512,17 @@ function handlePermissionResponse(ws, client, msg, ctx) {
   }
 
   if (result.kind === 'expired' || result.kind === 'not_found') {
-    ctx.transport.send(ws, { type: 'permission_expired', requestId, sessionId: originSessionId, message: 'This permission request has expired or was already handled' })
+    // #7096: OMIT sessionId when it is not a real id. `originSessionId` resolves to
+    // `client.activeSessionId`, which defaults to null (ws-server.js), so the
+    // expired/not_found branch could stamp null — and the wire field is
+    // `z.string().optional()`, where undefined is legal and null is not. This is the
+    // SECOND producer of this frame; the normalizer's mapping is the other.
+    ctx.transport.send(ws, {
+      type: 'permission_expired',
+      requestId,
+      ...(typeof originSessionId === 'string' && originSessionId.length > 0 ? { sessionId: originSessionId } : {}),
+      message: 'This permission request has expired or was already handled',
+    })
     return
   }
 

@@ -223,3 +223,29 @@ describe('#5373 invariant G — the WS unbound-subscription guard is WS-ONLY', (
     assert.equal(ws.mapStillHas, true, 'WS leaves the mapping intact for the legitimate subscribed client')
   })
 })
+
+// #7096 — the SECOND producer of `permission_expired`. The normalizer mapping was fixed
+// first; this one sends the frame directly via ctx.transport.send, so that fix never
+// touched it. `originSessionId` resolves to `client.activeSessionId`, which defaults to
+// null, and the wire field is `z.string().optional()` — undefined legal, null not.
+describe('#7096 permission_expired never carries sessionId: null', () => {
+  it('CONTROL: the expired branch really does emit the frame', () => {
+    // Without this, "no null sessionId" passes when nothing is emitted at all — which
+    // is exactly how the first version of this fix's sweep fooled itself.
+    const { expired } = runWs({ requestId: 'req-missing', decision: 'allow' })
+    assert.ok(expired, 'expected a permission_expired frame on the not_found branch')
+    assert.equal(expired.requestId, 'req-missing')
+  })
+
+  it('omits sessionId when the client has no active session', () => {
+    const { expired } = runWs({ requestId: 'req-missing', decision: 'allow', activeSessionId: null })
+    assert.equal('sessionId' in expired, false, `sessionId must be ABSENT, got ${JSON.stringify(expired.sessionId)}`)
+  })
+
+  it('still carries a real sessionId when the client has one', () => {
+    // The guard must suppress only the null case — dropping it always would cost the
+    // dashboard its routing key.
+    const { expired } = runWs({ requestId: 'req-missing', decision: 'allow', activeSessionId: 'sess-9' })
+    assert.equal(expired.sessionId, 'sess-9')
+  })
+})

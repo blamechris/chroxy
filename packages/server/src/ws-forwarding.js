@@ -78,6 +78,22 @@ function safeForward(label, fn) {
  * @param {Function} ctx.broadcast - (message, filter?) => void
  * @param {Function} ctx.broadcastToSession - (sessionId, message, filter?) => void
  */
+/**
+ * Events the LEGACY single-CLI path forwards through the normalizer.
+ *
+ * Exported so tests can iterate the real list rather than a copy — a hand-maintained
+ * duplicate in a test cannot fail when this list grows, which is exactly the false
+ * assurance #7096's first attempt shipped.
+ */
+export const FORWARDED_CLI_EVENTS = Object.freeze([
+    'ready', 'stream_start', 'stream_delta', 'stream_end',
+    'message', 'tool_start', 'tool_result', 'result', 'error',
+    'user_question', 'agent_spawned', 'agent_completed',
+    'plan_started', 'plan_ready', 'mcp_servers',
+    'permission_expired', 'skill_changed', 'skill_trust_request', 'skill_trust_granted',
+    'stopped',
+  ])
+
 export function setupForwarding(ctx) {
   const {
     normalizer,
@@ -346,14 +362,14 @@ function setupCliForwarding(normalizer, ctx) {
   // session-manager.js `_wireSessionEvents` builtinTransient) so the legacy
   // single-CLI path also surfaces the user-initiated Stop confirmation via
   // the normalizer's `session_stopped` wire message.
-  const FORWARDED_EVENTS = [
-    'ready', 'stream_start', 'stream_delta', 'stream_end',
-    'message', 'tool_start', 'tool_result', 'result', 'error',
-    'user_question', 'agent_spawned', 'agent_completed',
-    'plan_started', 'plan_ready', 'mcp_servers',
-    'permission_expired', 'skill_changed', 'skill_trust_request', 'skill_trust_granted',
-    'stopped',
-  ]
+  // #7096 HAZARD: this path normalises with `sessionId: null` (see normCtx below), and
+  // several server schemas declare `sessionId: z.string().optional()` — so `undefined`
+  // is legal but `null` is NOT. Before adding an event here, check that its normalizer
+  // mapping either omits `sessionId` when absent (the `mcp_servers` / `permission_expired`
+  // pattern) or that its schema accepts null (`result`, `skill_changed`,
+  // `skill_trust_request` do). An unguarded `sessionId: ctx.sessionId` stamp on a
+  // null-rejecting schema makes every frame on this path wire-illegal.
+  const FORWARDED_EVENTS = FORWARDED_CLI_EVENTS
   for (const event of FORWARDED_EVENTS) {
     cliSession.on(event, (data) => {
       // #5313 (WP-1.3): same crash shape as the multi-session listener — a

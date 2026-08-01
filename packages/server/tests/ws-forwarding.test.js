@@ -49,6 +49,68 @@ function makeCtx(overrides = {}) {
 }
 
 describe('setupForwarding', () => {
+
+  // #7096 — the legacy-cli forwarder normalises with `sessionId: null`, and several
+  // server schemas declare `sessionId: z.string().optional()` where `undefined` is legal
+  // but `null` is NOT. `permission_expired` stamped it unguarded, so every frame it
+  // forwarded on this path was wire-illegal.
+  //
+  // Driven through the REAL setupForwarding + EventNormalizer rather than a hand-built
+  // payload — a literal frame would prove nothing about what this path actually emits.
+  describe('#7096 forwarded frames must not carry sessionId: null', () => {
+    const driveLegacy = (event, payload) => {
+      // sessionManager MUST be null: setupForwarding wires the legacy CLI path only in
+      // the `else if (cliSession)` branch, so leaving the default manager in place
+      // silently exercises the multi-session path instead — which is what the CONTROL
+      // below caught on the first run.
+      const cliSession = new EventEmitter()
+      const ctx = makeCtx({ cliSession, sessionManager: null })
+      setupForwarding(ctx)
+      cliSession.emit(event, payload)
+      // Extract per SOURCE, not by arity. `broadcast` is (msg) or (msg, filter) and
+      // `broadcastToSession` is (sessionId, msg) — an arity test returns the FILTER
+      // function for a filtered broadcast, so a frame would be silently skipped rather
+      // than asserted on.
+      return [
+        ...ctx.broadcast.mock.calls.map((c) => c.arguments[0]),
+        ...ctx.broadcastToSession.mock.calls.map((c) => c.arguments[1]),
+      ]
+    }
+
+    it('CONTROL: the legacy path really does forward permission_expired', () => {
+      // Without this, "no null sessionId" would pass because nothing was emitted at all.
+      const frames = driveLegacy('permission_expired', { requestId: 'req-1', message: 'expired' })
+      const frame = frames.find((f) => f?.type === 'permission_expired')
+      assert.ok(frame, `expected a permission_expired frame, got ${JSON.stringify(frames.map((f) => f?.type))}`)
+      assert.equal(frame.requestId, 'req-1', 'and it carries the real payload')
+    })
+
+    it('omits sessionId rather than stamping null', () => {
+      const frame = driveLegacy('permission_expired', { requestId: 'req-1', message: 'expired' })
+        .find((f) => f?.type === 'permission_expired')
+      assert.equal('sessionId' in frame, false, `sessionId must be ABSENT, got ${JSON.stringify(frame.sessionId)}`)
+    })
+
+    it('still carries sessionId on the multi-session path (the guard is not a removal)', () => {
+      // The guard must only suppress the null case — a real session id still ships, or
+      // the dashboard loses the routing key it needs.
+      const normalizer = new EventNormalizer()
+      const out = normalizer.normalize(
+        'permission_expired',
+        { requestId: 'req-1', message: 'expired' },
+        { sessionId: 'sess-42', mode: 'multi', getSessionEntry: () => ({ session: {} }) },
+      )
+      const msg = out.messages[0].msg
+      assert.equal(msg.sessionId, 'sess-42')
+    })
+
+    // NOTE: the exhaustive sweep that used to live here has moved to
+    // event-normalizer-schema.test.js, which re-runs EVERY emitter against the real
+    // schemas under a legacy-cli context and iterates the exported FORWARDED_CLI_EVENTS.
+    // The version here iterated a hardcoded 7-event copy of that list, so it could not
+    // fail when the production list grew — it asserted protection it did not provide.
+  })
+
   describe('normalizer flush wiring', () => {
     it('wires onFlush to broadcastToSession for session deltas', () => {
       const ctx = makeCtx()
