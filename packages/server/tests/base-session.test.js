@@ -1696,11 +1696,23 @@ describe('BaseSession', () => {
       assert.equal(received.duration, undefined, 'an absent duration stays absent')
     })
 
-    it('leaves a non-finite duration untouched rather than inventing a number', () => {
-      // Infinity/NaN are refused by z.number() itself, so passing them through keeps
-      // the failure visible instead of silently manufacturing a plausible value.
-      assert.equal(emitResult(Infinity).duration, Infinity)
-      assert.ok(Number.isNaN(emitResult(Number.NaN).duration))
+    it('maps a non-finite duration to null (JSON would make it null on the wire anyway)', () => {
+      // Passing Infinity/NaN through does NOT preserve a visible failure: JSON.stringify
+      // turns both into `null` on the wire and on disk, so the in-process object would
+      // just disagree with what every consumer receives. Normalising here makes them agree.
+      assert.equal(emitResult(Infinity).duration, null)
+      assert.equal(emitResult(Number.NaN).duration, null)
+    })
+
+    it('maps a past-2^53 duration to null rather than a precise-looking lie', () => {
+      // Math.round keeps isInteger past 2^53 but NOT isSafeInteger, which is what
+      // Zod's .int() enforces — and rounding can CREATE the problem:
+      // 9007199254740991.5 rounds UP to 2^53. ~285,000 years is garbage from a broken
+      // clock or a provider bug; null is honest, a clamp would render a precise date.
+      assert.equal(emitResult(2 ** 53).duration, null)
+      assert.equal(emitResult(9007199254740991.5).duration, null)
+      assert.equal(emitResult(1e300).duration, null)
+      assert.equal(emitResult(Number.MAX_SAFE_INTEGER).duration, Number.MAX_SAFE_INTEGER, 'the boundary itself is legal')
     })
 
     it('CONTRACT: every emitted duration satisfies what the wire schema now requires', () => {
@@ -1709,11 +1721,17 @@ describe('BaseSession', () => {
       // @chroxy/protocol here would resolve to the MAIN checkout's copy and could not
       // see a schema change on this branch. The schema half is proven in
       // packages/protocol/tests/schemas.test.js, which imports ../src via tsx.
-      for (const input of [1234, 1234.7, 1234.2, 0, -5000, -0.4, 1800000.5, 24 * 60 * 60 * 1000 + 1]) {
+      for (const input of [1234, 1234.7, 1234.2, 0, -5000, -0.4, 1800000.5, 24 * 60 * 60 * 1000 + 1,
+        2 ** 53, 9007199254740991.5, 1e300, Number.MAX_VALUE, Infinity, Number.NaN]) {
         const { duration } = emitResult(input)
+        // Number.isSafeInteger, NOT Number.isInteger. Zod's .int() enforces the SAFE
+        // range, and Math.round preserves integrality past 2^53 — so the weaker
+        // assertion passed for 2^53, 1e300 and MAX_VALUE while the schema rejected
+        // every one of them. The test name promised the wire contract; only this
+        // predicate delivers it.
         assert.ok(
-          Number.isInteger(duration) && duration >= 0,
-          `emitted duration for input ${input} was ${duration} — must be a non-negative integer`,
+          duration === null || (Number.isSafeInteger(duration) && duration >= 0),
+          `emitted duration for input ${input} was ${duration} — must be null or a non-negative SAFE integer`,
         )
       }
     })

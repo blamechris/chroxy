@@ -208,9 +208,9 @@ function _coerceSessionPreambleOpt(value) {
  * ms is the faithful value. (#7083 chose truncation for CONFIG values, where the risk
  * was rounding an out-of-range value UP into legality — a different problem.)
  *
- * `null` / absent / non-finite pass through untouched. The field is nullable on the
- * wire, and manufacturing a number from `NaN`/`Infinity` would hide a real fault behind
- * a plausible value.
+ * `null` and absent pass through untouched — the field is nullable on the wire.
+ * Non-finite and past-2^53 values become `null`: both are unrepresentable, and `null`
+ * ("unknown") is honest where a clamped number would be a precise-looking lie.
  *
  * @param {unknown} payload
  * @returns {unknown} the payload, or a copy with `duration` normalised
@@ -218,10 +218,27 @@ function _coerceSessionPreambleOpt(value) {
 function normalizeResultDuration(payload) {
   if (!payload || typeof payload !== 'object') return payload
   const { duration } = payload
-  if (typeof duration !== 'number' || !Number.isFinite(duration)) return payload
-  const normalized = duration < 0 ? 0 : Math.round(duration)
-  if (normalized === duration) return payload
-  return { ...payload, duration: normalized }
+  if (typeof duration !== 'number' || !Number.isFinite(duration)) {
+    // Non-finite: emit null rather than passing through. JSON.stringify turns
+    // Infinity/NaN into `null` on the wire and on disk ANYWAY, so passing them
+    // through does not preserve a visible failure — it just leaves the in-process
+    // object disagreeing with what every consumer actually receives. Doing it here
+    // makes the two agree.
+    if (typeof duration === 'number') return { ...payload, duration: null }
+    return payload
+  }
+  if (duration < 0) return { ...payload, duration: 0 }
+  const rounded = Math.round(duration)
+  // Math.round preserves Number.isInteger but NOT Number.isSafeInteger, and Zod's
+  // `.int()` enforces the SAFE-integer range. Rounding can even manufacture the
+  // problem: 9007199254740991.5 rounds UP to 2^53, which is an integer and is
+  // wire-illegal. A duration past 2^53 ms is ~285,000 years, i.e. garbage from a
+  // broken clock or a provider bug — so null ("unknown", the field is nullable) is
+  // the honest answer. Clamping to MAX_SAFE_INTEGER would render a precise-looking
+  // 285,000-year turn, which is the #7081 lesson: an absent value beats a false one.
+  if (!Number.isSafeInteger(rounded)) return { ...payload, duration: null }
+  if (rounded === duration) return payload
+  return { ...payload, duration: rounded }
 }
 
 export class BaseSession extends EventEmitter {
