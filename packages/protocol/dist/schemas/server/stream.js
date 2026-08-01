@@ -275,27 +275,29 @@ export const ServerResultSchema = z.object({
     // that way (`typeof msg.duration === 'number' ? … : null`). Same reasoning as
     // `cost`: null means "unknown", distinct from 0.
     //
-    // `.finite()` is carried for CONVENTION CONFORMANCE, not for protection: on Zod
-    // 4.3.6 `z.number()` already rejects Infinity/-Infinity/NaN, so it is a no-op today
-    // (measured). It is here because connection.ts's ms-field convention names it and
-    // both ms siblings in this file carry it — so a reader is not left wondering whether
-    // this field was skipped. Do not read it as hardening.
+    // #7095: `.int().nonnegative()` now that every producer is normalised. This was
+    // deliberately withheld in #7093 because each constraint would then have rejected a
+    // value a real sender emits; the blockers are now closed at the SENDER rather than
+    // waved through here:
+    //   - `.int()`         — #7083 integer-coerced the CONFIG route, and BaseSession's
+    //                        emit() override now rounds the three third-party routes
+    //                        (CLI `duration_ms`, SDK `duration_ms`, codex `durationMs`).
+    //   - `.nonnegative()` — the same override clamps byok-session.js's
+    //                        `Date.now() - turnStartedAt`, which goes negative on a
+    //                        backwards clock jump, to 0.
+    // Normalising on `emit()` covers both consumers at once: the live wire path in
+    // event-normalizer.js and the persisted replay path in session-message-history.js
+    // read the same emitted object.
     //
-    // The convention's other constraints are DELIBERATELY not applied
-    // yet, because each would reject a value a real sender can produce today:
-    //   - `.int()`   — sdk-session.js:1964 emits `this._streamStallTimeoutMs`, a config
-    //                  value parsed with parseFloat, so a fractional `*_MS` option lands
-    //                  here verbatim. Blocked on #7083 (integer-coerce durations at the
-    //                  config parser); adding `.int()` first would make that config
-    //                  wire-illegal rather than merely odd.
-    //   - `.nonnegative()` — byok-session.js:1463 is `Date.now() - turnStartedAt`, which
-    //                  goes NEGATIVE on a backwards clock jump. That wants a clamp at the
-    //                  sender, not a rejection at the schema.
-    //   - `.max(MAX_SANE_DURATION_MS)` — a turn legitimately longer than the 24h ceiling
-    //                  would become unrepresentable.
-    // Tracked together rather than half-applied — see #7095, which carries the ordering
-    // (#7083 before .int(), a sender-side clamp before .nonnegative()).
-    duration: z.number().finite().nullable().optional(),
+    // `.max(MAX_SANE_DURATION_MS)` is STILL not applied, and that is not an oversight: a
+    // turn legitimately longer than 24h would become unrepresentable, and unlike the
+    // other two there is no sender-side normalisation that makes it safe without
+    // misreporting a real measurement. Clamping a genuine 25h turn to 24h would be a
+    // quiet lie in a field operators read. See #7095.
+    //
+    // `.finite()` is kept for convention conformance, not protection: on Zod 4 `z.number()`
+    // already rejects Infinity/-Infinity/NaN, so it is a no-op today (measured in #7093).
+    duration: z.number().int().nonnegative().finite().nullable().optional(),
     usage: z.any().optional(),
     sessionId: z.string().nullable().optional(),
     // #6627: the session's authoritative outgoing-queue length at turn end, so

@@ -1642,6 +1642,113 @@ describe('BaseSession', () => {
   // the emit() override, so EVERY `result` carries queueLength regardless of
   // which provider emits it (the direct-emit providers — CLI/exec-codex/gemini/
   // byok/stall fallbacks — bypass _emitResult but still pass through emit()).
+  // #7095 — `result.duration` is normalised on the SAME emit() override, for the same
+  // reason it stamps queueLength: it is the one method every `result` passes through,
+  // and the #6705 review already missed 3 of 8 direct-emit sites once.
+  //
+  // Three producers hand through third-party values unguarded — cli-session.js:1257
+  // (`data.duration_ms` from the CLI's stream-json), sdk-session.js:1175
+  // (`msg.duration_ms` from the Agent SDK) and codex-app-server-session.js:629
+  // (`turn?.durationMs`) — and byok-session.js:1463 computes
+  // `Date.now() - turnStartedAt`, which goes NEGATIVE on a backwards clock jump.
+  // #7083 closed only the CONFIG path (sdk-session.js:1964). Without this, adding
+  // `.int().nonnegative()` to ServerResultSchema would make a real provider frame
+  // wire-illegal.
+  describe('#7095 result.duration normalisation via emit() override', () => {
+    let s
+    beforeEach(() => {
+      s = new BaseSession({ cwd: '/tmp', repoSkillsDir: null })
+    })
+
+    // `once`, not `on`: the CONTRACT test below drives this helper 14 times against one
+    // instance, and with `on` those listeners accumulate — it was already tripping
+    // Node's MaxListenersExceededWarning at 11. `once` also means a stale listener from
+    // an earlier call cannot observe a later emit.
+    const emitResult = (duration) => {
+      let received = null
+      s.once('result', (ev) => { received = ev })
+      s.emit('result', { cost: null, duration, usage: null, sessionId: 'sess_1' })
+      return received
+    }
+
+    it('CONTROL: an ordinary integer duration is passed through untouched', () => {
+      assert.equal(emitResult(1234).duration, 1234)
+      assert.equal(emitResult(0).duration, 0, 'a genuine zero-length turn survives')
+    })
+
+    it('rounds a fractional duration from a third-party provider', () => {
+      // Math.round, NOT trunc: this is a measured elapsed time, so the nearest whole
+      // ms is the faithful value. (#7083 used trunc for CONFIG values, where the
+      // concern was rounding an out-of-range value UP into legality — a different
+      // problem with a different right answer.)
+      assert.equal(emitResult(1234.7).duration, 1235)
+      assert.equal(emitResult(1234.2).duration, 1234)
+    })
+
+    it('clamps a NEGATIVE duration to 0 (backwards clock jump)', () => {
+      // byok-session.js:1463 is `Date.now() - turnStartedAt`. A negative elapsed time
+      // is meaningless; 0 is the honest floor and is what makes .nonnegative() safe.
+      assert.equal(emitResult(-5000).duration, 0)
+      assert.equal(emitResult(-0.4).duration, 0)
+    })
+
+    it('leaves null and absent untouched — the field is nullable on the wire', () => {
+      assert.equal(emitResult(null).duration, null)
+      let received = null
+      s.once('result', (ev) => { received = ev })
+      s.emit('result', { cost: null, usage: null, sessionId: 'sess_1' })
+      assert.equal(received.duration, undefined, 'an absent duration stays absent')
+    })
+
+    it('maps a non-finite duration to null (JSON would make it null on the wire anyway)', () => {
+      // Passing Infinity/NaN through does NOT preserve a visible failure: JSON.stringify
+      // turns both into `null` on the wire and on disk, so the in-process object would
+      // just disagree with what every consumer receives. Normalising here makes them agree.
+      assert.equal(emitResult(Infinity).duration, null)
+      assert.equal(emitResult(Number.NaN).duration, null)
+    })
+
+    it('maps a past-2^53 duration to null rather than a precise-looking lie', () => {
+      // Math.round keeps isInteger past 2^53 but NOT isSafeInteger, which is what
+      // Zod's .int() enforces — and rounding can CREATE the problem:
+      // 9007199254740991.5 rounds UP to 2^53. ~285,000 years is garbage from a broken
+      // clock or a provider bug; null is honest, a clamp would render a precise date.
+      assert.equal(emitResult(2 ** 53).duration, null)
+      assert.equal(emitResult(9007199254740991.5).duration, null)
+      assert.equal(emitResult(1e300).duration, null)
+      assert.equal(emitResult(Number.MAX_SAFE_INTEGER).duration, Number.MAX_SAFE_INTEGER, 'the boundary itself is legal')
+    })
+
+    it('CONTRACT: every emitted duration satisfies what the wire schema now requires', () => {
+      // The property ServerResultSchema enforces after #7095: integer AND >= 0. Asserted
+      // as a pure property so it runs from this worktree — a test importing
+      // @chroxy/protocol here would resolve to the MAIN checkout's copy and could not
+      // see a schema change on this branch. The schema half is proven in
+      // packages/protocol/tests/schemas.test.js, which imports ../src via tsx.
+      for (const input of [1234, 1234.7, 1234.2, 0, -5000, -0.4, 1800000.5, 24 * 60 * 60 * 1000 + 1,
+        2 ** 53, 9007199254740991.5, 1e300, Number.MAX_VALUE, Infinity, Number.NaN]) {
+        const { duration } = emitResult(input)
+        // Number.isSafeInteger, NOT Number.isInteger. Zod's .int() enforces the SAFE
+        // range, and Math.round preserves integrality past 2^53 — so the weaker
+        // assertion passed for 2^53, 1e300 and MAX_VALUE while the schema rejected
+        // every one of them. The test name promised the wire contract; only this
+        // predicate delivers it.
+        assert.ok(
+          duration === null || (Number.isSafeInteger(duration) && duration >= 0),
+          `emitted duration for input ${input} was ${duration} — must be null or a non-negative SAFE integer`,
+        )
+      }
+    })
+
+    it('does not disturb the other fields, including the queueLength stamp', () => {
+      s._outgoingQueue.push({ clientMessageId: 'uin-1' })
+      const received = emitResult(1234.7)
+      assert.equal(received.queueLength, 1, 'both normalisations apply on one pass')
+      assert.equal(received.sessionId, 'sess_1')
+      assert.equal(received.cost, null)
+    })
+  })
+
   describe('result queueLength stamping via emit() override (#6627/#6706)', () => {
     let s
     beforeEach(() => {

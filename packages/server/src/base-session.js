@@ -184,6 +184,63 @@ function _coerceSessionPreambleOpt(value) {
   return trimmed
 }
 
+/**
+ * #7095 — normalise `result.duration` to a whole, non-negative number of milliseconds.
+ *
+ * Applied on BaseSession's `emit()` override, the one method every `result` passes
+ * through (see the override's own note: a prior review missed 3 of 8 direct-emit
+ * sites). That placement is what makes this cover BOTH consumers — the live wire path
+ * in `event-normalizer.js` and the persisted `session-message-history.js` replay path,
+ * which read the same emitted object.
+ *
+ * Needed because four producers hand through values nothing guarantees:
+ *   - cli-session.js `data.duration_ms`            (Claude CLI stream-json)
+ *   - sdk-session.js `msg.duration_ms`             (Agent SDK)
+ *   - codex-app-server-session.js `turn?.durationMs`
+ *   - byok-session.js `Date.now() - turnStartedAt` (NEGATIVE on a backwards clock jump)
+ *
+ * #7083 closed only the CONFIG route into this field (`sdk-session.js`'s stall-timeout
+ * fallback); the three third-party routes stayed open. Without this, adding
+ * `.int().nonnegative()` to `ServerResultSchema` would make a real provider frame
+ * wire-illegal — the exact trade #7093 deliberately refused to make blind.
+ *
+ * `Math.round`, not `Math.trunc`: this is a MEASURED elapsed time, so the nearest whole
+ * ms is the faithful value. (#7083 chose truncation for CONFIG values, where the risk
+ * was rounding an out-of-range value UP into legality — a different problem.)
+ *
+ * `null` and absent pass through untouched — the field is nullable on the wire.
+ * Non-finite and past-2^53 values become `null`: both are unrepresentable, and `null`
+ * ("unknown") is honest where a clamped number would be a precise-looking lie.
+ *
+ * @param {unknown} payload
+ * @returns {unknown} the payload, or a copy with `duration` normalised
+ */
+function normalizeResultDuration(payload) {
+  if (!payload || typeof payload !== 'object') return payload
+  const { duration } = payload
+  if (typeof duration !== 'number' || !Number.isFinite(duration)) {
+    // Non-finite: emit null rather than passing through. JSON.stringify turns
+    // Infinity/NaN into `null` on the wire and on disk ANYWAY, so passing them
+    // through does not preserve a visible failure — it just leaves the in-process
+    // object disagreeing with what every consumer actually receives. Doing it here
+    // makes the two agree.
+    if (typeof duration === 'number') return { ...payload, duration: null }
+    return payload
+  }
+  if (duration < 0) return { ...payload, duration: 0 }
+  const rounded = Math.round(duration)
+  // Math.round preserves Number.isInteger but NOT Number.isSafeInteger, and Zod's
+  // `.int()` enforces the SAFE-integer range. Rounding can even manufacture the
+  // problem: 9007199254740991.5 rounds UP to 2^53, which is an integer and is
+  // wire-illegal. A duration past 2^53 ms is ~285,000 years, i.e. garbage from a
+  // broken clock or a provider bug — so null ("unknown", the field is nullable) is
+  // the honest answer. Clamping to MAX_SAFE_INTEGER would render a precise-looking
+  // 285,000-year turn, which is the #7081 lesson: an absent value beats a false one.
+  if (!Number.isSafeInteger(rounded)) return { ...payload, duration: null }
+  if (rounded === duration) return payload
+  return { ...payload, duration: rounded }
+}
+
 export class BaseSession extends EventEmitter {
   /**
    * Custom event names emitted by this provider class that should be proxied
@@ -1535,10 +1592,12 @@ export class BaseSession extends EventEmitter {
    */
   emit(event, ...args) {
     if (event === 'result') {
-      const payload = args[0]
+      let payload = args[0]
       if (payload && typeof payload === 'object' && payload.queueLength === undefined) {
-        args[0] = { ...payload, queueLength: this._outgoingQueue ? this._outgoingQueue.length : 0 }
+        payload = { ...payload, queueLength: this._outgoingQueue ? this._outgoingQueue.length : 0 }
       }
+      payload = normalizeResultDuration(payload)
+      if (payload !== args[0]) args[0] = payload
     }
     return super.emit(event, ...args)
   }
