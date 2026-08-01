@@ -285,12 +285,33 @@ export class TranscriptTaskScanner {
     if (name === 'ScheduleWakeup') {
       const delaySeconds = Number(input.delaySeconds)
       if (Number.isFinite(delaySeconds) && delaySeconds >= 0) {
-        // A newer ScheduleWakeup supersedes any earlier pending one — the
-        // harness keeps at most one timer armed.
-        this._wakeup = {
-          at: startedAt + delaySeconds * 1000,
-          reason: typeof input.reason === 'string' ? input.reason : '',
-          prompt: typeof input.prompt === 'string' ? input.prompt : '',
+        const at = startedAt + delaySeconds * 1000
+        // #7084: the computed instant must be a SAFE integer, not merely finite.
+        // `delaySeconds` is model-authored tool input, so it is arbitrary JSON, and the
+        // wire schema is `z.number().int().nonnegative().finite()` — where Zod's
+        // `.int()` enforces the SAFE-integer range, not just integrality. Two reachable
+        // shapes fail it:
+        //   delaySeconds: 0.0001 -> a fractional `at`            (invalid_type)
+        //   delaySeconds: 1e15   -> an `at` past 2^53            (too_big)
+        // Measured against the built schema; 9e12 still fits, so the ceiling is real
+        // rather than theoretical.
+        //
+        // DROP the wakeup rather than clamp it. The field is optional, and clamping to
+        // MAX_SAFE_INTEGER would render "13 Sep 275760" in the UI — a precise-looking
+        // lie about when the agent will wake. A nonsense delay means the tool call is
+        // garbage, so having no scheduled wakeup is the honest state.
+        //
+        // Ignoring (rather than clearing an existing wakeup) matches what this guard
+        // already did for a NaN `delaySeconds`: invalid input leaves any previously
+        // armed wakeup alone instead of destroying it.
+        if (Number.isSafeInteger(at) && at >= 0) {
+          // A newer ScheduleWakeup supersedes any earlier pending one — the
+          // harness keeps at most one timer armed.
+          this._wakeup = {
+            at,
+            reason: typeof input.reason === 'string' ? input.reason : '',
+            prompt: typeof input.prompt === 'string' ? input.prompt : '',
+          }
         }
       }
       return
