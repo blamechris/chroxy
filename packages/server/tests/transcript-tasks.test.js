@@ -243,6 +243,37 @@ describe('TranscriptTaskScanner — ScheduleWakeup', () => {
       assert.equal(snap.scheduledWakeup?.reason, 'good', 'the valid earlier wakeup survives')
     })
 
+    it('CHARACTERIZATION: a pre-epoch wakeup never reaches the wire (via consumption)', () => {
+      // Named honestly. Review flagged that `at >= 0` had a mutation score of zero and
+      // supplied a schema-level reachability proof — but that proof does not survive the
+      // scanner's full pipeline. Measured: with the clause removed, NO input produces a
+      // negative `at` in the snapshot, because a wakeup whose instant has passed is
+      // already marked spent by the consumption path, and every negative instant is in
+      // the past. The nearest survivor is `at: 0`, which is legal anyway.
+      //
+      // So this pins the OUTCOME (a pre-epoch wakeup is never emitted), not the clause.
+      // `at >= 0` stays as defence-in-depth — see the note in transcript-tasks.js — but
+      // is not claimed as verified, which is what the earlier version of this test
+      // wrongly implied.
+      const p = writeTranscript([wakeupLine({ delaySeconds: 0, ts: '1960-01-01T00:00:00.000Z' })])
+      assert.equal(new TranscriptTaskScanner(p).scan().scheduledWakeup, null)
+    })
+
+    it('drops a background task whose startedAt is unrepresentable', () => {
+      // The ADJACENT field, two lines away in the same method, with the byte-identical
+      // wire constraint and no guard at all — the same neighbour pattern behind #7051,
+      // #7080, #7081, #7089, #7093 and #7096. The snapshot is a LIST, so one bad entry
+      // would fail the whole claude_ready frame rather than just its own row.
+      const p = writeTranscript([launchLine({ id: 'toolu_bg1', ts: '1960-01-01T00:00:00.000Z' })])
+      const snap = new TranscriptTaskScanner(p).scan()
+      assert.deepEqual(snap.backgroundTasks, [], 'a pre-epoch task must not reach the wire')
+    })
+
+    it('CONTROL: an ordinary background task still appears', () => {
+      const p = writeTranscript([launchLine({ id: 'toolu_bg1', ts: '2026-06-10T02:41:22.369Z' })])
+      assert.equal(new TranscriptTaskScanner(p).scan().backgroundTasks.length, 1)
+    })
+
     it('CONTRACT: any emitted at is a non-negative safe integer', () => {
       // The property the wire schema requires, asserted directly so it cannot drift
       // from whatever the guard happens to implement.
