@@ -43,6 +43,7 @@ import {
   ServerSessionStoppedSchema,
   ServerStdinDroppedTotalsSchema,
 } from '@chroxy/protocol'
+import { FORWARDED_CLI_EVENTS } from '../src/ws-forwarding.js'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // #6841 — event-normalizer serialization-boundary drift guard.
@@ -414,4 +415,44 @@ describe('negative meta-test: the round-trip harness catches real drift (#6892)'
         'the corrupted message; a silent pass here means the harness itself has been short-circuited',
     )
   })
+})
+
+// #7096 — the same emitters, re-run with the LEGACY-CLI context (sessionId: null).
+//
+// The existing pass above only ever sees `makeCtx()`'s hardcoded `sessionId: 'sess-1'`,
+// so a mapping that stamps `sessionId: ctx.sessionId` unguarded looked fine while
+// emitting a wire-illegal `null` on the legacy path. That is how #7096 reached main.
+//
+// Iterates the REAL exported FORWARDED_CLI_EVENTS, not a copy: a hand-maintained list
+// in a test cannot fail when the production list grows, which is the false assurance
+// the first attempt at this shipped. Adding an event to FORWARDED_CLI_EVENTS whose
+// mapping stamps sessionId unguarded now fails here automatically.
+describe('#7096 forwarded emitters under the legacy-cli context', () => {
+  const legacyCtx = (base) => ({ ...base, sessionId: null, mode: 'legacy-cli' })
+  const forwarded = new Set(FORWARDED_CLI_EVENTS)
+  const covered = FIXTURES.filter(([event]) => forwarded.has(event))
+
+  it('CONTROL: the fixture table actually covers the forwarded events', () => {
+    // Without this, the loop below could silently iterate nothing.
+    const missing = [...forwarded].filter((e) => !FIXTURES.some(([ev]) => ev === e))
+    assert.ok(
+      covered.length >= 10,
+      `expected most forwarded events to have fixtures, got ${covered.length} (missing: ${missing.join(', ')})`,
+    )
+  })
+
+  for (const [event, data, ctx] of FIXTURES) {
+    if (!forwarded.has(event)) continue
+    it(`${event}: emits wire-legal messages when sessionId is null`, () => {
+      const normalizer = new EventNormalizer({ flushIntervalMs: 10 })
+      try {
+        const result = normalizer.normalize(event, data, legacyCtx(ctx))
+        for (const entry of (result?.messages ?? [])) {
+          validateMessage(event, entry.msg)
+        }
+      } finally {
+        normalizer.destroy?.()
+      }
+    })
+  }
 })

@@ -98,40 +98,11 @@ describe('setupForwarding', () => {
       assert.equal(msg.sessionId, 'sess-42')
     })
 
-    it('a forwarded frame carries sessionId: null ONLY where its schema accepts null', () => {
-      // Not "never null" — that was too strong and this test caught it. Three frames
-      // deliberately ship null on this path and their schemas are `.nullable()` for
-      // exactly that reason (see the #3240 note in ws-forwarding.js: null means
-      // "applies to whatever CLI is connected"). Verified against the built schemas:
-      // result / skill_changed / skill_trust_request accept null; permission_expired
-      // and mcp_servers declare `z.string().optional()` and refuse it.
-      //
-      // So the invariant is conditional, and a NEW event added to FORWARDED_EVENTS whose
-      // normalizer stamps sessionId unguarded fails here unless it is listed — which
-      // forces whoever adds it to check their schema.
-      const NULL_ALLOWED = new Set(['result', 'skill_changed', 'skill_trust_request'])
-      const events = [
-        ['permission_expired', { requestId: 'r', message: 'm' }],
-        ['result', { cost: null, duration: 1, usage: null, sessionId: null }],
-        ['skill_changed', { name: 'x' }],
-        ['mcp_servers', { servers: [] }],
-        ['plan_started', {}],
-        ['stopped', {}],
-        ['skill_trust_request', { name: 'x' }],
-      ]
-      for (const [event, payload] of events) {
-        for (const frame of driveLegacy(event, payload)) {
-          if (!frame || typeof frame !== 'object' || !('sessionId' in frame)) continue
-          if (frame.sessionId !== null) continue
-          assert.ok(
-            NULL_ALLOWED.has(frame.type),
-            `${event} -> ${frame.type} ships sessionId: null, but its schema does not accept null. ` +
-            'Either omit the field when absent (the permission_expired/mcp_servers pattern) ' +
-            'or make the schema nullable and add it to NULL_ALLOWED.',
-          )
-        }
-      }
-    })
+    // NOTE: the exhaustive sweep that used to live here has moved to
+    // event-normalizer-schema.test.js, which re-runs EVERY emitter against the real
+    // schemas under a legacy-cli context and iterates the exported FORWARDED_CLI_EVENTS.
+    // The version here iterated a hardcoded 7-event copy of that list, so it could not
+    // fail when the production list grew — it asserted protection it did not provide.
   })
 
   describe('normalizer flush wiring', () => {
