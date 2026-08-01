@@ -780,7 +780,15 @@ Object.assign(EVENT_MAP, {
       msg: {
         type: 'permission_expired',
         requestId: data.requestId,
-        sessionId: ctx.sessionId,
+        // #7096: OMIT when absent — do not stamp null. The wire field is
+        // `z.string().optional()`, so `undefined` is legal and `null` is not, and the
+        // legacy-cli forwarder (ws-forwarding.js) normalises with `sessionId: null`
+        // while `permission_expired` IS in its FORWARDED_EVENTS. This mirrors the
+        // guarded stamp `mcp_servers` already uses 240 lines above; the unguarded form
+        // here was the odd one out among the frames that path can carry.
+        ...(typeof ctx.sessionId === 'string' && ctx.sessionId.length > 0
+          ? { sessionId: ctx.sessionId }
+          : {}),
         message: data.message,
       },
     }],

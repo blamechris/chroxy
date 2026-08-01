@@ -49,6 +49,91 @@ function makeCtx(overrides = {}) {
 }
 
 describe('setupForwarding', () => {
+
+  // #7096 — the legacy-cli forwarder normalises with `sessionId: null`, and several
+  // server schemas declare `sessionId: z.string().optional()` where `undefined` is legal
+  // but `null` is NOT. `permission_expired` stamped it unguarded, so every frame it
+  // forwarded on this path was wire-illegal.
+  //
+  // Driven through the REAL setupForwarding + EventNormalizer rather than a hand-built
+  // payload — a literal frame would prove nothing about what this path actually emits.
+  describe('#7096 forwarded frames must not carry sessionId: null', () => {
+    const driveLegacy = (event, payload) => {
+      // sessionManager MUST be null: setupForwarding wires the legacy CLI path only in
+      // the `else if (cliSession)` branch, so leaving the default manager in place
+      // silently exercises the multi-session path instead — which is what the CONTROL
+      // below caught on the first run.
+      const cliSession = new EventEmitter()
+      const ctx = makeCtx({ cliSession, sessionManager: null })
+      setupForwarding(ctx)
+      cliSession.emit(event, payload)
+      const calls = [...ctx.broadcast.mock.calls, ...ctx.broadcastToSession.mock.calls]
+      return calls.map((c) => (c.arguments.length > 1 ? c.arguments[1] : c.arguments[0]))
+    }
+
+    it('CONTROL: the legacy path really does forward permission_expired', () => {
+      // Without this, "no null sessionId" would pass because nothing was emitted at all.
+      const frames = driveLegacy('permission_expired', { requestId: 'req-1', message: 'expired' })
+      const frame = frames.find((f) => f?.type === 'permission_expired')
+      assert.ok(frame, `expected a permission_expired frame, got ${JSON.stringify(frames.map((f) => f?.type))}`)
+      assert.equal(frame.requestId, 'req-1', 'and it carries the real payload')
+    })
+
+    it('omits sessionId rather than stamping null', () => {
+      const frame = driveLegacy('permission_expired', { requestId: 'req-1', message: 'expired' })
+        .find((f) => f?.type === 'permission_expired')
+      assert.equal('sessionId' in frame, false, `sessionId must be ABSENT, got ${JSON.stringify(frame.sessionId)}`)
+    })
+
+    it('still carries sessionId on the multi-session path (the guard is not a removal)', () => {
+      // The guard must only suppress the null case — a real session id still ships, or
+      // the dashboard loses the routing key it needs.
+      const normalizer = new EventNormalizer()
+      const out = normalizer.normalize(
+        'permission_expired',
+        { requestId: 'req-1', message: 'expired' },
+        { sessionId: 'sess-42', mode: 'multi', getSessionEntry: () => ({ session: {} }) },
+      )
+      const msg = out.messages[0].msg
+      assert.equal(msg.sessionId, 'sess-42')
+    })
+
+    it('a forwarded frame carries sessionId: null ONLY where its schema accepts null', () => {
+      // Not "never null" — that was too strong and this test caught it. Three frames
+      // deliberately ship null on this path and their schemas are `.nullable()` for
+      // exactly that reason (see the #3240 note in ws-forwarding.js: null means
+      // "applies to whatever CLI is connected"). Verified against the built schemas:
+      // result / skill_changed / skill_trust_request accept null; permission_expired
+      // and mcp_servers declare `z.string().optional()` and refuse it.
+      //
+      // So the invariant is conditional, and a NEW event added to FORWARDED_EVENTS whose
+      // normalizer stamps sessionId unguarded fails here unless it is listed — which
+      // forces whoever adds it to check their schema.
+      const NULL_ALLOWED = new Set(['result', 'skill_changed', 'skill_trust_request'])
+      const events = [
+        ['permission_expired', { requestId: 'r', message: 'm' }],
+        ['result', { cost: null, duration: 1, usage: null, sessionId: null }],
+        ['skill_changed', { name: 'x' }],
+        ['mcp_servers', { servers: [] }],
+        ['plan_started', {}],
+        ['stopped', {}],
+        ['skill_trust_request', { name: 'x' }],
+      ]
+      for (const [event, payload] of events) {
+        for (const frame of driveLegacy(event, payload)) {
+          if (!frame || typeof frame !== 'object' || !('sessionId' in frame)) continue
+          if (frame.sessionId !== null) continue
+          assert.ok(
+            NULL_ALLOWED.has(frame.type),
+            `${event} -> ${frame.type} ships sessionId: null, but its schema does not accept null. ` +
+            'Either omit the field when absent (the permission_expired/mcp_servers pattern) ' +
+            'or make the schema nullable and add it to NULL_ALLOWED.',
+          )
+        }
+      }
+    })
+  })
+
   describe('normalizer flush wiring', () => {
     it('wires onFlush to broadcastToSession for session deltas', () => {
       const ctx = makeCtx()

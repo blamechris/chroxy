@@ -346,6 +346,13 @@ function setupCliForwarding(normalizer, ctx) {
   // session-manager.js `_wireSessionEvents` builtinTransient) so the legacy
   // single-CLI path also surfaces the user-initiated Stop confirmation via
   // the normalizer's `session_stopped` wire message.
+  // #7096 HAZARD: this path normalises with `sessionId: null` (see normCtx below), and
+  // several server schemas declare `sessionId: z.string().optional()` — so `undefined`
+  // is legal but `null` is NOT. Before adding an event here, check that its normalizer
+  // mapping either omits `sessionId` when absent (the `mcp_servers` / `permission_expired`
+  // pattern) or that its schema accepts null (`result`, `skill_changed`,
+  // `skill_trust_request` do). An unguarded `sessionId: ctx.sessionId` stamp on a
+  // null-rejecting schema makes every frame on this path wire-illegal.
   const FORWARDED_EVENTS = [
     'ready', 'stream_start', 'stream_delta', 'stream_end',
     'message', 'tool_start', 'tool_result', 'result', 'error',
