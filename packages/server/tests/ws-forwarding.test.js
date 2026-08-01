@@ -67,8 +67,14 @@ describe('setupForwarding', () => {
       const ctx = makeCtx({ cliSession, sessionManager: null })
       setupForwarding(ctx)
       cliSession.emit(event, payload)
-      const calls = [...ctx.broadcast.mock.calls, ...ctx.broadcastToSession.mock.calls]
-      return calls.map((c) => (c.arguments.length > 1 ? c.arguments[1] : c.arguments[0]))
+      // Extract per SOURCE, not by arity. `broadcast` is (msg) or (msg, filter) and
+      // `broadcastToSession` is (sessionId, msg) — an arity test returns the FILTER
+      // function for a filtered broadcast, so a frame would be silently skipped rather
+      // than asserted on.
+      return [
+        ...ctx.broadcast.mock.calls.map((c) => c.arguments[0]),
+        ...ctx.broadcastToSession.mock.calls.map((c) => c.arguments[1]),
+      ]
     }
 
     it('CONTROL: the legacy path really does forward permission_expired', () => {
