@@ -285,12 +285,39 @@ export class TranscriptTaskScanner {
     if (name === 'ScheduleWakeup') {
       const delaySeconds = Number(input.delaySeconds)
       if (Number.isFinite(delaySeconds) && delaySeconds >= 0) {
-        // A newer ScheduleWakeup supersedes any earlier pending one — the
-        // harness keeps at most one timer armed.
-        this._wakeup = {
-          at: startedAt + delaySeconds * 1000,
-          reason: typeof input.reason === 'string' ? input.reason : '',
-          prompt: typeof input.prompt === 'string' ? input.prompt : '',
+        const at = startedAt + delaySeconds * 1000
+        // #7084: the computed instant must be a SAFE integer, not merely finite.
+        // `delaySeconds` is model-authored tool input, so it is arbitrary JSON, and the
+        // wire schema is `z.number().int().nonnegative().finite()` — where Zod's
+        // `.int()` enforces the SAFE-integer range, not just integrality. Two reachable
+        // shapes fail it:
+        //   delaySeconds: 0.0001 -> a fractional `at`            (invalid_type)
+        //   delaySeconds: 1e15   -> an `at` past 2^53            (too_big)
+        // Measured against the built schema; 9e12 still fits, so the ceiling is real
+        // rather than theoretical.
+        //
+        // DROP the wakeup rather than clamp it. The field is optional, and any clamp
+        // renders a precise-looking lie about when the agent will wake — clamping to
+        // MAX_SAFE_INTEGER actually yields an Invalid Date, and to Date's own ceiling
+        // (8.64e15) yields "13 Sep 275760". Neither is a time. A nonsense delay means
+        // the tool call is garbage, so having no scheduled wakeup is the honest state.
+        //
+        // Ignoring (rather than clearing an existing wakeup) matches what this guard
+        // already did for a NaN `delaySeconds`: invalid input leaves any previously
+        // armed wakeup alone instead of destroying it.
+        // `at >= 0` is DEFENCE-IN-DEPTH, not load-bearing: measured, no input reaches
+        // the snapshot with a negative `at`, because the consumption path already treats
+        // a wakeup whose instant has passed as spent and every negative instant is past.
+        // Kept because it is free and states the wire contract at the point of
+        // construction — but do not read it as a guard with test coverage.
+        if (Number.isSafeInteger(at) && at >= 0) {
+          // A newer ScheduleWakeup supersedes any earlier pending one — the
+          // harness keeps at most one timer armed.
+          this._wakeup = {
+            at,
+            reason: typeof input.reason === 'string' ? input.reason : '',
+            prompt: typeof input.prompt === 'string' ? input.prompt : '',
+          }
         }
       }
       return
@@ -310,6 +337,14 @@ export class TranscriptTaskScanner {
       : typeof input.prompt === 'string'
         ? input.prompt.slice(0, PROMPT_DESCRIPTION_MAX)
         : ''
+    // #7084: `startedAt` carries the byte-identical wire constraint to
+    // scheduledWakeup.at — BackgroundTaskSchema.startedAt is
+    // `z.number().int().nonnegative().finite()` — and had no guard at all. It comes
+    // from Date.parse of a transcript timestamp, so a pre-epoch entry yields a negative
+    // instant (verified: 1960-01-01 -> -315619200000, which the schema refuses as
+    // too_small). Drop the task rather than emit an unrepresentable one; the snapshot
+    // is a list, so one bad entry would otherwise fail the whole claude_ready frame.
+    if (!Number.isSafeInteger(startedAt) || startedAt < 0) return
     this._tasks.set(block.id, { toolUseId: block.id, kind, description, startedAt })
   }
 

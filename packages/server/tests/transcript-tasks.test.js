@@ -192,6 +192,103 @@ describe('TranscriptTaskScanner — launch/completion pairing', () => {
 // ---------------------------------------------------------------------------
 
 describe('TranscriptTaskScanner — ScheduleWakeup', () => {
+
+  // #7084 — `delaySeconds` is MODEL-AUTHORED tool input, so `at` must be checked for
+  // range, not just finiteness. The wire schema is
+  // `z.number().int().nonnegative().finite()`, and Zod's `.int()` enforces the SAFE
+  // integer range — so both a fractional and a past-2^53 `at` are wire-illegal.
+  describe('#7084 an out-of-range wakeup is dropped, not emitted', () => {
+    const ts = '2026-06-10T02:41:22.369Z'
+
+    it('CONTROL: an ordinary delay still produces a wakeup', () => {
+      // Without this, every "is null" assertion below could pass because the scanner
+      // stopped producing wakeups at all.
+      const p = writeTranscript([wakeupLine({ delaySeconds: 90, ts })])
+      assert.equal(new TranscriptTaskScanner(p).scan().scheduledWakeup.at, Date.parse(ts) + 90_000)
+    })
+
+    it('drops a FRACTIONAL at (delaySeconds with sub-ms precision)', () => {
+      // 0.0001s -> +0.1ms -> a fractional instant. Rejected by `.int()` as invalid_type.
+      const p = writeTranscript([wakeupLine({ delaySeconds: 0.0001, ts })])
+      assert.equal(new TranscriptTaskScanner(p).scan().scheduledWakeup, null)
+    })
+
+    it('drops an at past the safe-integer range (a model-authored "never" sentinel)', () => {
+      for (const delaySeconds of [1e15, 99999999999999999, 1e300]) {
+        const p = writeTranscript([wakeupLine({ delaySeconds, ts })])
+        assert.equal(
+          new TranscriptTaskScanner(p).scan().scheduledWakeup, null,
+          `delaySeconds ${delaySeconds} must not produce a wakeup`,
+        )
+      }
+    })
+
+    it('keeps a large-but-representable delay (the guard is not over-eager)', () => {
+      // 9e12 seconds still lands inside the safe range — measured. The guard must
+      // reject only what the wire actually refuses, not everything that looks big.
+      const p = writeTranscript([wakeupLine({ delaySeconds: 9e12, ts })])
+      const snap = new TranscriptTaskScanner(p).scan()
+      assert.equal(snap.scheduledWakeup.at, Date.parse(ts) + 9e12 * 1000)
+      assert.ok(Number.isSafeInteger(snap.scheduledWakeup.at))
+    })
+
+    it('a garbage wakeup does not destroy a previously armed one', () => {
+      // Matches what this guard already did for a NaN delaySeconds: invalid input is
+      // IGNORED rather than clearing a valid pending wakeup.
+      const p = writeTranscript([
+        wakeupLine({ delaySeconds: 90, reason: 'good', ts }),
+        wakeupLine({ delaySeconds: 1e15, reason: 'garbage', ts: '2026-06-10T02:42:21.322Z' }),
+      ])
+      const snap = new TranscriptTaskScanner(p).scan()
+      assert.equal(snap.scheduledWakeup?.reason, 'good', 'the valid earlier wakeup survives')
+    })
+
+    it('CHARACTERIZATION: a pre-epoch wakeup never reaches the wire (via consumption)', () => {
+      // Named honestly. Review flagged that `at >= 0` had a mutation score of zero and
+      // supplied a schema-level reachability proof — but that proof does not survive the
+      // scanner's full pipeline. Measured: with the clause removed, NO input produces a
+      // negative `at` in the snapshot, because a wakeup whose instant has passed is
+      // already marked spent by the consumption path, and every negative instant is in
+      // the past. The nearest survivor is `at: 0`, which is legal anyway.
+      //
+      // So this pins the OUTCOME (a pre-epoch wakeup is never emitted), not the clause.
+      // `at >= 0` stays as defence-in-depth — see the note in transcript-tasks.js — but
+      // is not claimed as verified, which is what the earlier version of this test
+      // wrongly implied.
+      const p = writeTranscript([wakeupLine({ delaySeconds: 0, ts: '1960-01-01T00:00:00.000Z' })])
+      assert.equal(new TranscriptTaskScanner(p).scan().scheduledWakeup, null)
+    })
+
+    it('drops a background task whose startedAt is unrepresentable', () => {
+      // The ADJACENT field, two lines away in the same method, with the byte-identical
+      // wire constraint and no guard at all — the same neighbour pattern behind #7051,
+      // #7080, #7081, #7089, #7093 and #7096. The snapshot is a LIST, so one bad entry
+      // would fail the whole claude_ready frame rather than just its own row.
+      const p = writeTranscript([launchLine({ id: 'toolu_bg1', ts: '1960-01-01T00:00:00.000Z' })])
+      const snap = new TranscriptTaskScanner(p).scan()
+      assert.deepEqual(snap.backgroundTasks, [], 'a pre-epoch task must not reach the wire')
+    })
+
+    it('CONTROL: an ordinary background task still appears', () => {
+      const p = writeTranscript([launchLine({ id: 'toolu_bg1', ts: '2026-06-10T02:41:22.369Z' })])
+      assert.equal(new TranscriptTaskScanner(p).scan().backgroundTasks.length, 1)
+    })
+
+    it('CONTRACT: any emitted at is a non-negative safe integer', () => {
+      // The property the wire schema requires, asserted directly so it cannot drift
+      // from whatever the guard happens to implement.
+      for (const delaySeconds of [0, 90, 0.0001, 1e15, 9e12, 1e300]) {
+        const p = writeTranscript([wakeupLine({ delaySeconds, ts })])
+        const w = new TranscriptTaskScanner(p).scan().scheduledWakeup
+        if (w === null) continue
+        assert.ok(
+          Number.isSafeInteger(w.at) && w.at >= 0,
+          `delaySeconds ${delaySeconds} emitted at=${w.at}, which the wire refuses`,
+        )
+      }
+    })
+  })
+
   it('reports a pending wakeup with at = entry timestamp + delaySeconds', () => {
     const ts = '2026-06-10T02:41:22.369Z'
     const p = writeTranscript([wakeupLine({ delaySeconds: 90, ts })])
