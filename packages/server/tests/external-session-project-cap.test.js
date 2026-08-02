@@ -4,6 +4,8 @@ import { ExternalSessionEntrySchema, IngestEventSchema } from '@chroxy/protocol'
 import {
   ExternalSessionRegistry,
   MAX_EXTERNAL_PROJECT_CHARS,
+  MAX_EXTERNAL_SOURCE_CHARS,
+  MAX_EXTERNAL_SESSION_ID_CHARS,
 } from '../src/external-session-registry.js'
 
 /**
@@ -117,6 +119,38 @@ describe('#7086 external-session project/name wire cap', () => {
     const entry = entryFor(r)
     assert.equal(entry.cwd, LONG_CWD, 'cwd must not be clamped to the project cap')
     assert.equal(ExternalSessionEntrySchema.safeParse(entry).success, true)
+  })
+
+  it('a caller that bypasses ingest validation still yields a wire-legal entry', () => {
+    // The outbound `.max()` on `source`/`sessionId` is load-bearing: one
+    // over-long value rejects the WHOLE snapshot array. Those fields arrive
+    // pre-validated today, but that is a caller-side invariant this module
+    // cannot enforce — so the emitted copy is clamped rather than trusted.
+    const r = new ExternalSessionRegistry()
+    r.record('session_start', 's'.repeat(300), 'i'.repeat(900), { project: 'chroxy', cwd: null })
+    const entry = entryFor(r)
+    assert.equal(entry.source.length, MAX_EXTERNAL_SOURCE_CHARS)
+    assert.equal(entry.sessionId.length, MAX_EXTERNAL_SESSION_ID_CHARS)
+    assert.equal(
+      ExternalSessionEntrySchema.safeParse(entry).success, true,
+      'an unvalidated caller must not be able to blank the snapshot',
+    )
+  })
+
+  it('CONTROL: ordinary source/sessionId are not rewritten, and identity is preserved', () => {
+    // Guards the clamp above from being indiscriminate, and pins that clamping
+    // the EMITTED copy does not disturb the internal (source, sessionId) key —
+    // two sessions differing only past the cap must stay distinct entries.
+    const r = new ExternalSessionRegistry()
+    r.record('session_start', 'claude-hooks', 'abc123', { project: 'chroxy', cwd: null })
+    const entry = entryFor(r)
+    assert.equal(entry.source, 'claude-hooks')
+    assert.equal(entry.sessionId, 'abc123')
+
+    const long = 'i'.repeat(MAX_EXTERNAL_SESSION_ID_CHARS)
+    r.record('session_start', 'claude-hooks', `${long}A`, { project: 'a', cwd: null })
+    r.record('session_start', 'claude-hooks', `${long}B`, { project: 'b', cwd: null })
+    assert.equal(r.size, 3, 'ids differing only past the cap remain distinct entries')
   })
 
   it('the memory the registry retains is bounded, not just the emitted copy', () => {
