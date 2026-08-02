@@ -438,12 +438,12 @@ function _isSecureRequest(req) {
  *   { type: 'error', message }                          — general error message
  *   { type: 'file_list', path, files, error? }          — file listing response
  *   { type: 'git_branches_result', branches, current, error? } — git branches result
- *   { type: 'git_commit_result', success, hash?, error? }     — git commit result
+ *   { type: 'git_commit_result', hash, message, error }  — git commit result
  *   { type: 'git_create_pr_result', url, number, branch, base, error } — in-app PR creation result (#6876; dashboard-only v1)
- *   { type: 'git_stage_result', success, error? }       — git stage result
+ *   { type: 'git_stage_result', error }                  — git stage result
  *   { type: 'git_status_result', status, error? }       — git status result
- *   { type: 'git_unstage_result', success, error? }     — git unstage result
- *   { type: 'write_file_result', success, error? }      — write file result
+ *   { type: 'git_unstage_result', error }                — git unstage result
+ *   { type: 'write_file_result', path, error }           — write file result
  *   { type: 'append_memory_result', path, created, error? } — `#`-quick-append ack (#6861)
  *   { type: 'memory_stack_result', entries, memoryFile, error?, requestId? } — reply to `memory_read` (#6864, epic #6760): ordered global/project/local CLAUDE.md stack with per-file provenance (+ recursively-resolved @imports, path-confined to the session cwd + ~/.claude) plus the auto-generated MEMORY.md descriptor. Server-only for v1 — no client handler yet; the dashboard/mobile memory-panel consumers are the sibling slices #6867/#6870
  *   { type: 'log_entry', level, message, timestamp }    — server log entry for dashboard

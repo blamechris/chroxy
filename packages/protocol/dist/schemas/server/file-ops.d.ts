@@ -103,6 +103,20 @@ export declare const ServerGitCreatePrResultSchema: z.ZodObject<{
     error: z.ZodNullable<z.ZodString>;
     existingUrl: z.ZodOptional<z.ZodNullable<z.ZodString>>;
 }, z.core.$strip>;
+export declare const ServerGitCommitResultSchema: z.ZodObject<{
+    type: z.ZodLiteral<"git_commit_result">;
+    hash: z.ZodNullable<z.ZodString>;
+    message: z.ZodNullable<z.ZodString>;
+    error: z.ZodNullable<z.ZodString>;
+}, z.core.$strip>;
+export declare const ServerGitStageResultSchema: z.ZodObject<{
+    type: z.ZodLiteral<"git_stage_result">;
+    error: z.ZodNullable<z.ZodString>;
+}, z.core.$strip>;
+export declare const ServerGitUnstageResultSchema: z.ZodObject<{
+    type: z.ZodLiteral<"git_unstage_result">;
+    error: z.ZodNullable<z.ZodString>;
+}, z.core.$strip>;
 export declare const ServerWriteFileResultSchema: z.ZodObject<{
     type: z.ZodLiteral<"write_file_result">;
     path: z.ZodNullable<z.ZodString>;
