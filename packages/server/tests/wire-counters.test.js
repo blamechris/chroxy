@@ -1,7 +1,11 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { CumulativeUsageSchema, ServerMonthlyBudgetSchema } from '@chroxy/protocol'
+import { CumulativeUsageSchema } from '@chroxy/protocol'
 import { toWireCount, MAX_WIRE_COUNT } from '../src/utils/wire-counters.js'
+import { MonthlyProgrammaticBudgetManager, monthKeyUtc } from '../src/billing-budget.js'
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 /**
  * #7082 — usage counters are `z.number().int().nonnegative()` on the wire, but the
@@ -30,13 +34,6 @@ describe('#7082 toWireCount', () => {
     assert.equal(toWireCount(2 ** 53), MAX_WIRE_COUNT)
     assert.equal(toWireCount(1e300), MAX_WIRE_COUNT)
     assert.equal(toWireCount(Number.MAX_SAFE_INTEGER), MAX_WIRE_COUNT)
-  })
-
-  it('CLAMPS rather than nulls, because these fields are not nullable', () => {
-    // Unlike result.duration (#7095) or skills lastUsed (#7081), there is no "unknown"
-    // to fall back to — nulling would make the frame fail a different way.
-    assert.equal(typeof toWireCount(2 ** 53), 'number')
-    assert.notEqual(toWireCount(2 ** 53), null)
   })
 
   it('floors a negative count at 0', () => {
@@ -80,26 +77,38 @@ describe('#7082 toWireCount', () => {
     assert.equal(toWireCount(999999), 999999)
   })
 
-  it('MONEY IS NOT A COUNT: costUsd and spentUsd stay fractional and signed', () => {
-    // The most important assertion here. costUsd is `z.number().finite()` with no
-    // `.int()`, and a refund turn legitimately subtracts (#4099). Coercing either
-    // field would silently corrupt a billing figure — the costBudget trap from #7083.
+  it('MONEY IS NOT A COUNT: the real LOADERS leave costUsd and spentUsd alone', () => {
+    // Drives the actual call sites, not the schema. The first version of this test
+    // asserted only schema facts and helper facts — routing `spentUsd` through
+    // toWireCount left all 226 tests green, so the exclusion this test exists to
+    // protect was entirely unpinned.
+    const dir = mkdtempSync(join(tmpdir(), 'wc-'))
+
+    // billing-budget loader: a fractional spentUsd must survive verbatim.
+    const statePath = join(dir, 'budget.json')
+    writeFileSync(statePath, JSON.stringify({
+      month: monthKeyUtc(Date.now()), spentUsd: 12.34, turnsBilled: 5.7,
+      warnNotified: false, exceededNotified: false,
+    }))
+    const mgr = new MonthlyProgrammaticBudgetManager({ statePath })
+    assert.equal(mgr._state.spentUsd, 12.34, 'spentUsd is USD and must NOT be truncated')
+    assert.equal(mgr._state.turnsBilled, 5, 'turnsBilled IS a count and must be truncated')
+
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('MONEY IS NOT A COUNT: a negative costUsd survives restore (refunds, #4099)', () => {
+    // costUsd is `z.number().finite()` — no `.int()`, and legitimately negative for a
+    // refund / credit adjustment. Asserted against the real schema so the exclusion is
+    // justified by the contract rather than by convention.
     const usage = {
       inputTokens: 0, outputTokens: 0, cacheReadTokens: 0,
       cacheCreationTokens: 0, costUsd: -1.25, turnsBilled: 0,
     }
     assert.ok(CumulativeUsageSchema.safeParse(usage).success, 'a negative fractional costUsd is legal')
     assert.ok(CumulativeUsageSchema.safeParse({ ...usage, costUsd: 3.75 }).success)
-
-    // Field set taken from ServerMonthlyBudgetSchema itself — an invented shape would
-    // fail for reasons unrelated to spentUsd and prove nothing.
-    const budget = {
-      type: 'monthly_budget', month: '2026-08', spentUsd: 12.34, turnsBilled: 5,
-      budgetUsd: 100, warningPercent: 80, percent: 12.34, warning: false, exceeded: false,
-    }
-    assert.ok(ServerMonthlyBudgetSchema.safeParse(budget).success, 'a fractional spentUsd is legal')
-    // If either were ever routed through toWireCount, these would become 0/3/12.
-    assert.notEqual(toWireCount(-1.25), -1.25)
-    assert.notEqual(toWireCount(12.34), 12.34)
+    // And the helper would destroy both, which is why costUsd is not routed through it.
+    assert.equal(toWireCount(-1.25), 0)
+    assert.equal(toWireCount(3.75), 3)
   })
 })

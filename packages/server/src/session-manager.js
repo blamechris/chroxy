@@ -3405,7 +3405,7 @@ export class SessionManager extends EventEmitter {
     // criteria and #4088.
     //
     // Per-field coercion mirrors the restore-time clamp (restoreState's
-    // `nonNegFinite`) and CumulativeUsageSchema (@chroxy/protocol):
+    // `toWireCount`) and CumulativeUsageSchema (@chroxy/protocol):
     //   - Token fields are monotonic NON-NEGATIVE integer counters. A
     //     negative provider delta (bug) would drive them below zero and
     //     violate the schema's `.nonnegative()` contract, so drop any delta
