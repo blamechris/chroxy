@@ -37,6 +37,7 @@ import { metrics } from './metrics.js'
 import { auditShellDestroy } from './shell-audit.js'
 import { recordShell, forgetShell, reapOrphanShells } from './user-shell-registry.js'
 import { getErrorMessage } from './utils/error-message.js'
+import { toWireCount } from './utils/wire-counters.js'
 import {
   forwardPerSessionSettingsToProviderOpts,
   serializePerSessionSettings,
@@ -2645,17 +2646,21 @@ export class SessionManager extends EventEmitter {
         //   - costUsd accepts negatives per #4099 (refund / credit
         //     adjustments). Only non-finite values fall back to 0.
         const restoredEntry = this._sessions.get(sessionId)
-        const nonNegFinite = (v) => (Number.isFinite(v) && v >= 0 ? v : 0)
+        // #7082: the restore path reads ~/.chroxy/session-state.json, so a hand-edited
+        // or corrupt file can carry a fractional / past-2^53 / negative counter straight
+        // into the live snapshot. Same coercion as the accumulate path above.
         if (restoredEntry) {
           if (saved.cumulativeUsage && typeof saved.cumulativeUsage === 'object') {
             const u = saved.cumulativeUsage
             restoredEntry.cumulativeUsage = {
-              inputTokens: nonNegFinite(u.inputTokens),
-              outputTokens: nonNegFinite(u.outputTokens),
-              cacheReadTokens: nonNegFinite(u.cacheReadTokens),
-              cacheCreationTokens: nonNegFinite(u.cacheCreationTokens),
+              inputTokens: toWireCount(u.inputTokens),
+              outputTokens: toWireCount(u.outputTokens),
+              cacheReadTokens: toWireCount(u.cacheReadTokens),
+              cacheCreationTokens: toWireCount(u.cacheCreationTokens),
+              // costUsd is NOT coerced: `z.number().finite()` with no `.int()`, and
+              // legitimately negative for a refund / credit adjustment (#4099).
               costUsd: Number.isFinite(u.costUsd) ? u.costUsd : 0,
-              turnsBilled: nonNegFinite(u.turnsBilled),
+              turnsBilled: toWireCount(u.turnsBilled),
             }
           }
           if (saved.costThresholdNotified === true) {
@@ -3408,14 +3413,18 @@ export class SessionManager extends EventEmitter {
     //   - costUsd is finite but intentionally SIGNED — a refund / credit
     //     adjustment turn (#4099) legitimately subtracts — so only reject
     //     a non-finite cost.
-    const tokenDelta = (x) => (Number.isFinite(x) && x >= 0 ? x : 0)
+    // #7082: `toWireCount` adds the `.int()` half these comments always claimed to
+    // mirror — the guards enforced finite + non-negative and let a fractional or
+    // past-2^53 value through, both of which the schema refuses. Applied to the RUNNING
+    // TOTAL, not just the delta: integer deltas keep the sum integral, but a long-lived
+    // session can still accumulate past the safe-integer ceiling.
     const finiteCost = (x) => (Number.isFinite(x) ? x : 0)
-    acc.inputTokens += tokenDelta(Number(u.input_tokens))
-    acc.outputTokens += tokenDelta(Number(u.output_tokens))
-    acc.cacheReadTokens += tokenDelta(Number(u.cache_read_input_tokens))
-    acc.cacheCreationTokens += tokenDelta(Number(u.cache_creation_input_tokens))
+    acc.inputTokens = toWireCount(acc.inputTokens + toWireCount(u.input_tokens))
+    acc.outputTokens = toWireCount(acc.outputTokens + toWireCount(u.output_tokens))
+    acc.cacheReadTokens = toWireCount(acc.cacheReadTokens + toWireCount(u.cache_read_input_tokens))
+    acc.cacheCreationTokens = toWireCount(acc.cacheCreationTokens + toWireCount(u.cache_creation_input_tokens))
     acc.costUsd += finiteCost(Number(resultData?.cost))
-    acc.turnsBilled += 1
+    acc.turnsBilled = toWireCount(acc.turnsBilled + 1)
     // #5630/#5629: carry the per-session billing class on the live usage
     // event so a client that joined before the first session_list (or after a
     // mid-session era flip) labels the cost row correctly without a refetch.

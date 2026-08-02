@@ -17,6 +17,7 @@
 
 import { readFileSync, writeFileSync, renameSync, mkdirSync, rmSync } from 'node:fs'
 import { dirname } from 'node:path'
+import { toWireCount } from './utils/wire-counters.js'
 
 /** Per-tier monthly programmatic-credit caps (USD), per Anthropic's 2026-06-15 change. */
 export const CREDIT_TIER_BUDGETS_USD = Object.freeze({
@@ -101,7 +102,10 @@ export class MonthlyProgrammaticBudgetManager {
         this._state = {
           month: raw.month,
           spentUsd: Number.isFinite(raw.spentUsd) ? raw.spentUsd : 0,
-          turnsBilled: Number.isFinite(raw.turnsBilled) && raw.turnsBilled >= 0 ? raw.turnsBilled : 0,
+          // #7082: `.int().nonnegative()` on the wire — the finite+sign guard let a
+          // fractional or past-2^53 value through from a hand-edited state file.
+          // `spentUsd` above is deliberately untouched: USD, no `.int()`.
+          turnsBilled: toWireCount(raw.turnsBilled),
           warnNotified: raw.warnNotified === true,
           exceededNotified: raw.exceededNotified === true,
         }
