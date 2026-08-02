@@ -103,7 +103,11 @@ describe('#7086 external-session project/name wire cap', () => {
     const unclamped = { ...entry, project: LONG_COMPONENT, name: LONG_COMPONENT }
     assert.equal(
       ExternalSessionEntrySchema.safeParse(unclamped).success, false,
-      'the value the server used to emit must now be refused by the wire schema',
+      'the value the server used to emit must now be refused by the wire schema.\n' +
+      'If this failed with "true !== false", the resolved @chroxy/protocol predates\n' +
+      'the .max() caps — a git worktree resolves that package from the MAIN checkout,\n' +
+      'so the schema change is invisible here. Run from the main checkout or CI.\n' +
+      'Do NOT weaken this assertion to make it pass.',
     )
     assert.equal(
       ExternalSessionEntrySchema.safeParse(entry).success, true,
