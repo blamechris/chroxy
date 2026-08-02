@@ -250,15 +250,30 @@ export const ServerMailboxStatusSnapshotSchema = z.object({
 // surface 'blocked'/'failed').
 // ───────────────────────────────────────────────────────────────────────────
 
-/** One live external session (derived from the /api/events hook stream). */
+/**
+ * One live external session (derived from the /api/events hook stream).
+ *
+ * #7086: the caps mirror the INBOUND `IngestEventSchema` these entries are
+ * built from — `source` <=64, `sessionId` <=256, `project` <=256, `cwd` <=4096
+ * — so the two boundaries agree instead of the server re-emitting a value its
+ * own ingest contract would refuse. `name` is derived (project -> cwd basename
+ * -> short session id) and takes the same 256 as `project`.
+ *
+ * These caps are only safe because `external-session-registry.js` clamps to
+ * the same bound before an entry is emitted: the derived project comes from a
+ * path basename, so a wire-legal 4096-char `cwd` would otherwise produce a
+ * ~4096-char project. Capping here alone would make one over-long project
+ * reject the entire `external_sessions_snapshot`, blanking the mission-control
+ * panel for every session in it.
+ */
 export const ExternalSessionEntrySchema = z.object({
   /** Emitter source from the event envelope (e.g. 'cli', 'vscode'). */
-  source: z.string(),
-  sessionId: z.string(),
+  source: z.string().max(64),
+  sessionId: z.string().max(256),
   /** Display name: project → cwd basename → short session id. */
-  name: z.string(),
-  project: z.string().nullable(),
-  cwd: z.string().nullable(),
+  name: z.string().max(256),
+  project: z.string().max(256).nullable(),
+  cwd: z.string().max(4096).nullable(),
   status: z.enum(['running', 'idle']),
   /** Active subagent count folded from subagent_start/subagent_stop. */
   subagents: z.number().int().nonnegative(),
