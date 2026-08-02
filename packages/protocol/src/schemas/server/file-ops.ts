@@ -124,6 +124,39 @@ export const ServerGitCreatePrResultSchema = z.object({
   existingUrl: z.string().nullable().optional(),
 })
 
+// #7085 stage 2 — the three git write-op acks, previously on the outbound
+// coverage allowlist.
+//
+// Shapes taken from the PRODUCERS in ws-file-ops/git.js, not from ws-server.js's
+// roster: that roster documented all three as carrying a `success` boolean, and
+// none of them ever has. A schema written from the roster would have rejected
+// every real message once the outbound gate lands. The roster is corrected in
+// the same change.
+//
+// Every field is `null` rather than absent on the paths that don't set it — each
+// producer spells out the full shape on both the success and failure branch — so
+// these are nullable-and-required, not optional.
+export const ServerGitCommitResultSchema = z.object({
+  type: z.literal('git_commit_result'),
+  // Parsed out of `git commit`'s stdout (`[branch abc1234] …`), so it stays null
+  // when the commit succeeded but the hash could not be scraped.
+  hash: z.string().nullable(),
+  message: z.string().nullable(),
+  error: z.string().nullable(),
+})
+
+// Stage/unstage report only failure — there is no per-file result payload. Both
+// send `{ error: null }` on success, so `error` discriminates the outcome.
+export const ServerGitStageResultSchema = z.object({
+  type: z.literal('git_stage_result'),
+  error: z.string().nullable(),
+})
+
+export const ServerGitUnstageResultSchema = z.object({
+  type: z.literal('git_unstage_result'),
+  error: z.string().nullable(),
+})
+
 // `write_file` response — the wire type is `write_file_result` (NOT
 // file_write_result). Only path + error beyond type. App-only today (the
 // dashboard has no write_file handling).
