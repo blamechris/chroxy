@@ -47,7 +47,7 @@ const WS_SERVER = join(HERE, '..', 'src', 'ws-server.js')
  */
 const TRANSPORT_FRAMES = new Map([['encrypted', 'EncryptedEnvelopeSchema']])
 
-// The 27 frames the server documents sending that have no outbound schema, measured
+// The frames the server documents sending that have no outbound schema, measured
 // against the roster in ws-server.js. Delete entries as schemas land — the test
 // below fails if you forget.
 const UNSCHEMAD = new Set([
