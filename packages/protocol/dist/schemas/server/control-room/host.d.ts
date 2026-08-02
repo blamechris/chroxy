@@ -253,7 +253,22 @@ export declare const ServerMailboxStatusSnapshotSchema: z.ZodObject<{
         message: z.ZodString;
     }, z.core.$strip>>;
 }, z.core.$strip>;
-/** One live external session (derived from the /api/events hook stream). */
+/**
+ * One live external session (derived from the /api/events hook stream).
+ *
+ * #7086: the caps mirror the INBOUND `IngestEventSchema` these entries are
+ * built from — `source` <=64, `sessionId` <=256, `project` <=256, `cwd` <=4096
+ * — so the two boundaries agree instead of the server re-emitting a value its
+ * own ingest contract would refuse. `name` is derived (project -> cwd basename
+ * -> short session id) and takes the same 256 as `project`.
+ *
+ * These caps are only safe because `external-session-registry.js` clamps to
+ * the same bound before an entry is emitted: the derived project comes from a
+ * path basename, so a wire-legal 4096-char `cwd` would otherwise produce a
+ * ~4096-char project. Capping here alone would make one over-long project
+ * reject the entire `external_sessions_snapshot`, blanking the mission-control
+ * panel for every session in it.
+ */
 export declare const ExternalSessionEntrySchema: z.ZodObject<{
     source: z.ZodString;
     sessionId: z.ZodString;
