@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import {
   SCHEDULED_TASK_HEALTH_TAGS,
+  SCHEDULED_TASK_LAST_RUN_STATUSES,
   deriveScheduledTaskHealth,
   deriveScheduledTaskHealthTag,
 } from '@chroxy/protocol'
@@ -122,6 +123,82 @@ describe('scheduled-task health — only OK is healthy', () => {
   })
 })
 
+/**
+ * The `lastRun.status` values the CLI is required to declare an EXPLICIT `case`
+ * for, DERIVED from the shared status list rather than written out longhand.
+ *
+ * Derivation is the point. A status added to `SCHEDULED_TASK_LAST_RUN_STATUSES`
+ * lands in this set automatically, so the CLI cannot quietly leave it to the
+ * `default:` arm and report `ERROR` for something the dashboard reports by name.
+ *
+ * A status may be excused from an explicit CLI case for exactly ONE reason: the
+ * SHARED HELPER also routes it to `'ERROR'`, so the CLI's `default: return
+ * 'ERROR'` already agrees with it and a case would be pure noise. That is why
+ * the exemption is COMPUTED off `deriveScheduledTaskHealthTag` rather than kept
+ * as a hand-written allowlist — today it resolves to exactly `{error}`.
+ *
+ * A hand-maintained exemption list would be a hole in this guard, not a
+ * convenience. It hands a maintainer a one-line way to make a red go away
+ * WITHOUT teaching the CLI anything, and if the shared helper gives the new
+ * status its own tag, that one line reinstates #7024 verbatim — the CLI reports
+ * `ERROR` while the dashboard reports the real tag, and this guard reports
+ * green. Deriving the exemption makes that impossible to express: a status can
+ * only ride the `default:` arm when both surfaces land on the same tag anyway.
+ *
+ * ── ADDING A NEW ENGINE STATUS (e.g. #7038) ──────────────────────────────────
+ * Adding a status to `SCHEDULED_TASK_LAST_RUN_STATUSES` and giving it its own
+ * tag in `deriveScheduledTaskHealthTag` turns the parity test below RED **on
+ * purpose**, and the failure message names the missing status. There is exactly
+ * ONE correct response: teach the CLI `case '<status>': return '<TAG>'` (and add
+ * a GOLDEN row above). A status the shared helper deliberately leaves on its own
+ * `default:` arm needs no CLI change and goes green on its own — the derivation
+ * below already excuses it, so that case is not even a red.
+ */
+const CLI_DEFAULT_ARM_STATUSES = new Set(
+  [...SCHEDULED_TASK_LAST_RUN_STATUSES].filter(
+    (status) => deriveScheduledTaskHealthTag({ enabled: true, lastRun: { status } }) === 'ERROR',
+  ),
+)
+
+const CLI_REQUIRED_CASE_STATUSES = [...SCHEDULED_TASK_LAST_RUN_STATUSES]
+  .filter((status) => !CLI_DEFAULT_ARM_STATUSES.has(status))
+  .sort()
+
+/**
+ * The source scrape the parity check runs on the CLI, factored out of the test
+ * so a self-test can prove it actually DISCRIMINATES.
+ *
+ * A source-scraping guard that silently matches nothing is worse than no guard
+ * at all, and a green run cannot tell the two apart — so the extraction has to
+ * be exercised against a known-good and a known-drifted fixture, not only
+ * against whatever the real file happens to contain today.
+ *
+ * @param {string} src
+ * @returns {{found: boolean, delimited: boolean, body: string, pairs: string[][], statuses: string[], returned: Set<string>}}
+ */
+function extractHealthTagCases(src) {
+  const empty = { found: false, delimited: false, body: '', pairs: [], statuses: [], returned: new Set() }
+  const fnStart = src.indexOf('function healthTag')
+  if (fnStart === -1) return empty
+  const fn = src.slice(fnStart)
+  // A real extraction guard. `assert.ok(fn.length > 0)` could never fire (a
+  // slice from a found index is always non-empty), so it asserted nothing —
+  // this checks the thing that actually has to hold for the regexes below to
+  // mean anything: that the function body was delimited at all.
+  const bodyEnd = fn.indexOf('\n}\n')
+  if (bodyEnd <= 0) return { ...empty, found: true }
+  const body = fn.slice(0, bodyEnd + 1)
+  const pairs = [...body.matchAll(/case '([a-z]+)':\s*\n\s*return '([^']+)'/g)].map((m) => [m[1], m[2]])
+  return {
+    found: true,
+    delimited: true,
+    body,
+    pairs,
+    statuses: pairs.map(([status]) => status),
+    returned: new Set([...body.matchAll(/return '([^']+)'/g)].map((m) => m[1])),
+  }
+}
+
 describe('scheduled-task health — CLI source parity (#6868 / PR #7013)', () => {
   it('the CLI healthTag() maps the same statuses to the same tags', (t) => {
     if (!existsSync(CLI_PATH)) {
@@ -154,21 +231,11 @@ describe('scheduled-task health — CLI source parity (#6868 / PR #7013)', () =>
       return
     }
 
-    const fn = src.slice(fnStart)
-    // A real extraction guard. `assert.ok(fn.length > 0)` could never fire (a
-    // slice from a found index is always non-empty), so it asserted nothing —
-    // this checks the thing that actually has to hold for the regexes below to
-    // mean anything: that the function body was delimited at all.
-    const bodyEnd = fn.indexOf('\n}\n')
+    const { delimited, body, pairs, statuses, returned } = extractHealthTagCases(src)
     assert.ok(
-      bodyEnd > 0,
+      delimited,
       'could not find the end of the CLI healthTag() body — the status/tag extraction below would silently match nothing and pass vacuously',
     )
-    const body = fn.slice(0, bodyEnd + 1)
-
-    // Extract the tags the CLI can return, and the status→tag pairs it declares.
-    const returned = new Set([...body.matchAll(/return '([^']+)'/g)].map((m) => m[1]))
-    const pairs = [...body.matchAll(/case '([a-z]+)':\s*\n\s*return '([^']+)'/g)]
 
     // 1. The CLI's tag vocabulary must be a subset of the shared declared set —
     //    a tag the shared helper does not know about is drift.
@@ -179,9 +246,45 @@ describe('scheduled-task health — CLI source parity (#6868 / PR #7013)', () =>
       )
     }
 
-    // 2. Every status→tag case in the CLI must agree with the shared helper.
-    assert.ok(pairs.length >= 4, `expected the CLI's status switch to be parseable, got ${pairs.length} pairs`)
-    for (const [, status, tag] of pairs) {
+    // 2. The CLI must declare an explicit `case` for EXACTLY the statuses that
+    //    need one — no more, no fewer. (#7024)
+    //
+    //    `assert.ok(pairs.length >= 4)` stood here, and a count cannot express
+    //    this. It catches a MISMATCHED mapping but not an OMITTED one: swap
+    //    `case 'refused'` for a perfectly correct `case 'error'` and the count
+    //    still reads 4, every surviving pair still agrees with the shared helper
+    //    below, and the CLI silently reports ERROR for a refused task while the
+    //    dashboard reports REFUSED — exactly the one-directional drift this file
+    //    exists to catch, waved straight through.
+    //
+    //    See CLI_REQUIRED_CASE_STATUSES for what to do when this goes red after
+    //    a new engine status is added: teach the CLI a case, one line, not a
+    //    mystery failure.
+    //
+    //    A DUPLICATE case is named first and on its own. The set comparison
+    //    below sorts and compares, so a duplicate reaches it as an unreadable
+    //    array diff (`[refused, success, success, timeout]` vs the expected
+    //    four) rather than as "you declared 'success' twice" — and an assertion
+    //    that can only ever fire *after* another one has already failed is not
+    //    an assertion at all, which is exactly the `assert.ok(fn.length > 0)`
+    //    mistake this file just finished removing.
+    const duplicates = [...new Set(statuses.filter((s, i) => statuses.indexOf(s) !== i))]
+    assert.deepEqual(
+      duplicates,
+      [],
+      `the CLI's healthTag() declares duplicate case(s) for [${duplicates.join(', ')}] — the second is dead code and the switch does not mean what it reads like`,
+    )
+    assert.deepEqual(
+      [...statuses].sort(),
+      CLI_REQUIRED_CASE_STATUSES,
+      `the CLI's healthTag() must declare an explicit case for exactly [${CLI_REQUIRED_CASE_STATUSES.join(', ')}] ` +
+        `(the engine's SCHEDULED_TASK_LAST_RUN_STATUSES minus the ones routed through its default arm: ` +
+        `[${[...CLI_DEFAULT_ARM_STATUSES].join(', ')}]). A status missing here falls through to 'ERROR' while the ` +
+        `shared helper reports its own tag — silent, one-directional drift.`,
+    )
+
+    // 3. Every status→tag case in the CLI must agree with the shared helper.
+    for (const [status, tag] of pairs) {
       assert.equal(
         deriveScheduledTaskHealthTag({ enabled: true, lastRun: { status } }),
         tag,
@@ -189,11 +292,83 @@ describe('scheduled-task health — CLI source parity (#6868 / PR #7013)', () =>
       )
     }
 
-    // 3. The precedence the CLI encodes must match: paused first, then never-run.
+    // 4. The precedence the CLI encodes must match: paused first, then never-run.
     assert.match(body, /!task\.enabled\)\s*return 'PAUSED'/, "CLI must check !enabled → PAUSED first")
     assert.match(body, /!task\.lastRun\)\s*return 'NEVER RUN'/, "CLI must check !lastRun → NEVER RUN second")
 
-    // 4. The CLI's default arm must be ERROR (never a friendlier fallback).
+    // 5. The CLI's default arm must be ERROR (never a friendlier fallback).
     assert.match(body, /default:\s*\n\s*return 'ERROR'/, "CLI's default arm must be ERROR")
+  })
+
+  // POSITIVE CONTROL for the scrape above (#7024).
+  //
+  // The parity check is only as good as its extraction, and "it passed" is the
+  // same observation whether the guard verified the CLI or matched nothing at
+  // all. So run the SAME extractor over two fixtures whose verdicts must differ,
+  // and pin the difference. This is what makes the green above mean something.
+  it('the extractor discriminates: a dropped case is caught, and the old count guard would not have caught it', () => {
+    const COMPLETE = `function healthTag(task) {
+  if (!task.enabled) return 'PAUSED'
+  if (!task.lastRun) return 'NEVER RUN'
+  switch (task.lastRun.status) {
+    case 'success':
+      return 'OK'
+    case 'refused':
+      return 'REFUSED'
+    case 'skipped':
+      return 'SKIPPED'
+    case 'timeout':
+      return 'TIMEOUT'
+    default:
+      return 'ERROR'
+  }
+}
+`
+    // The drift #7024 describes, in its ONLY form that survives a count check:
+    // `refused` loses its case, and a legitimate explicit `error` case replaces
+    // it. Same number of cases, every remaining mapping correct — and a refused
+    // task now tags ERROR in the CLI while the dashboard says REFUSED.
+    const DRIFTED = COMPLETE.replace("    case 'refused':\n      return 'REFUSED'\n", "    case 'error':\n      return 'ERROR'\n")
+    assert.notEqual(DRIFTED, COMPLETE, 'the drift fixture must actually differ, or this control proves nothing')
+
+    const good = extractHealthTagCases(COMPLETE)
+    const bad = extractHealthTagCases(DRIFTED)
+
+    // (a) The extractor finds a delimited body and real cases in BOTH — it is
+    //     not silently matching nothing, which is the failure mode that would
+    //     make every assertion here vacuous.
+    assert.ok(good.delimited && bad.delimited, 'the extractor must delimit both fixtures')
+    assert.ok(good.pairs.length > 0 && bad.pairs.length > 0, 'the extractor must find cases in both fixtures')
+
+    // (b) The known-GOOD fixture satisfies the tightened assertion.
+    assert.deepEqual(
+      [...good.statuses].sort(),
+      CLI_REQUIRED_CASE_STATUSES,
+      "the known-good fixture no longer matches CLI_REQUIRED_CASE_STATUSES — if a status was just added to SCHEDULED_TASK_LAST_RUN_STATUSES, teach the COMPLETE fixture above the same `case` you are teaching the real CLI, or this control stops controlling anything",
+    )
+
+    // (c) The known-DRIFTED fixture is caught by the tightened assertion...
+    assert.notDeepEqual([...bad.statuses].sort(), CLI_REQUIRED_CASE_STATUSES)
+    assert.ok(!bad.statuses.includes('refused'), 'the drifted fixture must be missing the refused case')
+
+    // (d) ...but sails past BOTH of the checks that used to stand here: the
+    //     count is unchanged, and every declared mapping still agrees with the
+    //     shared helper. That is the whole defect, demonstrated rather than
+    //     asserted.
+    assert.equal(bad.pairs.length, good.pairs.length, 'the drift must be count-neutral, or it is not the gap #7024 describes')
+    assert.ok(bad.pairs.length >= 4, 'the old `pairs.length >= 4` guard would have passed on the drifted source')
+    for (const [status, tag] of bad.pairs) {
+      assert.equal(
+        deriveScheduledTaskHealthTag({ enabled: true, lastRun: { status } }),
+        tag,
+        `the drifted fixture's surviving mappings must all still agree with the shared helper — '${status}' does not`,
+      )
+    }
+
+    // (e) And the user-visible consequence the guard now prevents: the drifted
+    //     CLI would tag a refused task ERROR where the shared helper says
+    //     REFUSED.
+    assert.equal(deriveScheduledTaskHealthTag({ enabled: true, lastRun: { status: 'refused' } }), 'REFUSED')
+    assert.match(bad.body, /default:\s*\n\s*return 'ERROR'/, 'a refused task in the drifted CLI falls through to this ERROR arm')
   })
 })

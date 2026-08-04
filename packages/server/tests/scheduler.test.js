@@ -903,6 +903,119 @@ describe('#6865 SchedulerEngine', () => {
       assert.equal(record.lastRun.status, 'error')
       assert.match(record.lastRun.error, /interrupted/)
     })
+
+    // ── #7037: the SYMPTOM, not the proxy ────────────────────────────────────
+    //
+    // Both tests above assert `record.lastRun` is non-null by the time the fire
+    // settles. That is a good proxy for "the concurrency slot was released", but
+    // it is only a proxy: a change that settled the promise while leaving the
+    // run registered in `_running` keeps both of them green and reintroduces the
+    // reported bug verbatim.
+    //
+    // The user-visible #7009 symptom was starvation — `_running.size >=
+    // _maxConcurrentRuns` shedding every other due task with `concurrency cap
+    // reached (…)` for the whole `runTimeoutMs` window (15 min in production)
+    // after ONE denied permission. These two tests pin that directly: the first
+    // proves a second due task fires once the interrupted run settles, and the
+    // second proves the counterfactual — that it genuinely starves when the slot
+    // is not released, so the first test cannot pass for free.
+
+    it('a SECOND due task fires once the interrupted run frees the slot', async () => {
+      const sm = new FakeSessionManager({
+        permissionRequest: { requestId: 'req-1', toolName: 'Bash' },
+        interruptEmitsStopped: true,
+      })
+      const first = addTask({ prompt: 'first', cadence: { kind: 'once', at: 2000 } })
+      const second = addTask({ prompt: 'second', cadence: { kind: 'once', at: 2000 } })
+      const engine = newEngine({ sessionManager: sm, runTimeoutMs: 5_000, maxConcurrentRuns: 1 })
+      const skips = []
+      engine.on('run-skip', (e) => skips.push(e))
+      engine.start()
+
+      clock = 2000
+      await timers.tick()
+
+      // POSITIVE CONTROL. The cap really did engage on this tick, and `second`
+      // really was shed by it. Without these four assertions the test would pass
+      // for free in every world that never exercises slot RELEASE at all: a cap
+      // that was ignored, two tasks that were not due together, or a `second`
+      // that simply ran in parallel would each still leave `second.lastRun`
+      // populated at the end.
+      assert.deepEqual(skips.map((e) => e.taskId), [second.id], 'the second task must be shed by the cap on this tick')
+      assert.match(skips[0].reason, /concurrency cap reached/)
+      assert.equal(store.get(second.id).lastRun, null, 'a shed task persists nothing — it is still due')
+      assert.equal(sm.created.length, 1, 'only one session may exist under a cap of 1')
+
+      // The interrupted run settled AND gave the slot back. `armedDelay === 0`
+      // is the direct read on `_running`: while a run is still registered,
+      // _armNextTick skips the due-scan entirely and sleeps the full max-sleep
+      // (the `does not busy-spin while at capacity` test pins that behaviour).
+      assert.equal(store.get(first.id).lastRun.status, 'error')
+      assert.equal(engine.runningTaskIds.size, 0, 'the interrupted run must not stay registered as in-flight')
+      assert.equal(timers.armedDelay, 0, 'a freed slot must re-arm immediately for the still-due second task')
+
+      // THE assertion #7037 asks for: the second task actually FIRES, in the
+      // same evaluation window, rather than being shed again.
+      await timers.tick()
+
+      const secondRecord = store.get(second.id)
+      assert.ok(secondRecord.lastRun, 'the second due task must fire once the slot frees, not starve for runTimeoutMs')
+      assert.notEqual(secondRecord.lastRun.status, 'skipped', 'it must be a real run, not a persisted skip')
+      assert.ok(
+        !/concurrency cap/.test(secondRecord.lastRun.error || ''),
+        `the second task was recorded as a cap skip instead of running: ${secondRecord.lastRun.error}`,
+      )
+      // ...and it drove a turn of its very own, rather than being credited with
+      // the first task's session.
+      assert.equal(sm.created.length, 2, 'the second task must get its own session')
+      assert.deepEqual(sm.sends.map((s) => s.prompt), ['first', 'second'])
+      assert.notEqual(secondRecord.lastRun.sessionId, store.get(first.id).lastRun.sessionId)
+    })
+
+    it('...and starves indefinitely while the slot is NOT released (the counterfactual)', async () => {
+      // Hold the slot open and the second task is re-shed on every tick with
+      // `lastRun` never written — exactly the state one denied permission left
+      // the engine in before #7033, and exactly what the previous test's final
+      // assertions would be reading if the slot were not released. This is what
+      // makes that test's green mean something.
+      const first = addTask({ prompt: 'first', cadence: { kind: 'once', at: 2000 } })
+      const second = addTask({ prompt: 'second', cadence: { kind: 'once', at: 2000 } })
+      let release
+      const gate = new Promise((r) => { release = r })
+      const runTask = mockRunner(() => gate)
+      const engine = newEngine({ runTask: runTask.fn, maxConcurrentRuns: 1 })
+      const skips = []
+      engine.on('run-skip', (e) => skips.push(e.taskId))
+      engine.start()
+
+      clock = 2000
+      await timers.tick()
+      await timers.tick()
+      await timers.tick()
+
+      assert.equal(runTask.calls.length, 1, 'a held slot admits nobody else')
+      assert.deepEqual([...new Set(skips)], [second.id], 'only the second task is shed')
+      assert.ok(skips.length >= 2, `the second task must be re-shed on every tick while the slot is held (got ${skips.length})`)
+      assert.equal(store.get(second.id).lastRun, null, 'a starved task never records a run at all')
+      // ...and it is FIRST that holds it. `assert.ok(first.id)` stood here, which
+      // is true of every task the store ever returns and so could not fail — the
+      // same never-fires assertion this PR removed from the parity guard. Naming
+      // the holder is the claim actually worth pinning: it rules out the mirror
+      // world where `second` won the slot and `first` was the one shed, which
+      // every other assertion above is equally happy with.
+      assert.deepEqual([...engine.runningTaskIds], [first.id], 'the FIRST run is the one holding the only slot')
+      assert.equal(runTask.calls[0].task.id, first.id, 'and it is the run that was actually started')
+
+      // Release it and the starvation ends on the next tick — the same
+      // transition the interrupted run must make on its own.
+      release({ status: 'success' })
+      await new Promise((r) => setImmediate(r))
+      await new Promise((r) => setImmediate(r))
+      assert.equal(timers.armedDelay, 0, 'the freed slot re-arms for the still-due task')
+      await timers.tick()
+      assert.equal(runTask.calls.length, 2, 'and the second task fires the instant the slot frees')
+      assert.ok(store.get(second.id).lastRun, 'its outcome is recorded once it actually runs')
+    })
   })
 
   // ── SECURITY C2: cwd confinement is enforced ON THIS PATH ──────────────────
