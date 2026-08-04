@@ -237,7 +237,7 @@ describe('token onPersist callback (#7055)', () => {
     // daemon really runs: `onPersist: buildTokenPersistCallback({ configFile })`
     // takes every default. A typo in a default — `_write` bound to a writer that
     // skips the 0600 temp+rename, `_isKeychainAvailable` stuck at `() => true` —
-    // would leave all eleven of those tests green while the daemon persisted the
+    // would leave every one of those tests green while the daemon persisted the
     // rotated token nowhere. Swapping each default for a broken stand-in was
     // confirmed to change no result, which is exactly the false-safety #7055
     // exists to close, so these two drive the defaults directly.
