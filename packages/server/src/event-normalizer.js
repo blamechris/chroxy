@@ -1045,15 +1045,25 @@ export class EventNormalizer {
     // oldest token in a flush spent inside the server (coalescing + forwarding)
     // — a true monotonic duration, same process both ends.
     this._deltaEmitMono = new Map()
-    // #6818: key -> true when this buffer key holds THINKING deltas (reasoning
+    // #6818: key -> whether this buffer key holds THINKING deltas (reasoning
     // content) rather than response text. A thinking stream uses a DISTINCT
     // messageId (`<turnId>-thinking-<n>`, see #6756), so it never shares a key
-    // with the response text — this map simply carries the `thinking: true` flag
+    // with the response text — this map carries the `thinking: true` flag
     // alongside the coalesced text so each flushed entry can be reconstructed as
-    // a thinking stream_delta instead of a bare response delta. Only thinking
-    // keys are recorded (response keys stay absent), and it is pruned in every
+    // a thinking stream_delta instead of a bare response delta. Pruned in every
     // flush/clear path in lockstep with _deltaBuffer.
+    // #6962: response keys are recorded too, as `false`, so bufferDelta can tell
+    // "never seen" (undefined) apart from "seen as response" and DETECT a
+    // same-key flag conflict. Every flush site reads `=== true`, so a stored
+    // `false` is indistinguishable from an absent key on the wire — response
+    // entries stay byte-identical to pre-#6818.
     this._deltaThinking = new Map()
+    // #6962: one-shot latch for the key-collision WARN. A provider violating the
+    // distinct-messageId invariant would trip the guard on EVERY delta, so the
+    // WARN is deduped to once per normalizer (one per daemon in production)
+    // rather than tracked per key — a per-key Set would grow unbounded over a
+    // long-lived daemon for no extra signal.
+    this._warnedThinkingKeyCollision = false
     this._deltaFlushTimer = null
     // #5516: monotonic deadline (performance.now ms) the pending flush timer is
     // scheduled to fire at. Lets a later single-client buffer SHORTEN an
@@ -1148,10 +1158,42 @@ export class EventNormalizer {
    *   (extended-thinking) delta. Recorded per key so the flushed entry carries
    *   the `thinking` flag and the caller reconstructs a thinking stream_delta.
    *   Thinking uses a distinct messageId (#6756), so the flag is constant per
-   *   key — first-write-wins, mirroring emitMonoMs.
+   *   key. #6962: that constancy is now ENFORCED here rather than assumed — a
+   *   same-key flag conflict WARNs and splits the frame (see below).
    */
   bufferDelta(sessionId, messageId, delta, emitMonoMs, thinking) {
     const key = sessionId ? `${sessionId}:${messageId}` : messageId
+    // #6962: enforce the distinct-messageId invariant #6818 rests on. Thinking
+    // deltas and response text of the same turn must never share a buffer key —
+    // every provider today builds the thinking messageId as
+    // `<turnId>-thinking-<n>` (#6756), but that is an unenforced CROSS-FILE
+    // convention, exactly the shape of bug the BaseSession opt-forwarding trap
+    // (#4797/#5367) turned out to be. A future provider reusing the bare
+    // response messageId for a thinking delta would otherwise concatenate
+    // reasoning into the answer and ship it under one (necessarily wrong) flag,
+    // silently. So: detect the conflict BEFORE touching any buffer state, WARN
+    // once, and CONTAIN it by force-flushing what is already buffered under its
+    // ORIGINAL flag. The conflicting delta then re-buffers fresh behind it with
+    // its own flag — same order-preserving mechanism the #5555 residency caps
+    // use — so no frame ever mixes reasoning and response text. We warn rather
+    // than throw because bufferDelta runs synchronously under the provider's
+    // event emit; a throw here escapes into that emit and can take the daemon
+    // down over one malformed stream (same reasoning as the onFlush containment
+    // in _flushDeltas).
+    const isThinking = thinking === true
+    const priorThinking = this._deltaThinking.get(key)
+    if (priorThinking !== undefined && priorThinking !== isThinking) {
+      if (!this._warnedThinkingKeyCollision) {
+        this._warnedThinkingKeyCollision = true
+        log.warn(
+          `Delta buffer invariant violation (#6962): key '${key}' received a thinking=${isThinking} delta ` +
+          `after thinking=${priorThinking}. Thinking and response deltas of one turn MUST use distinct ` +
+          `messageIds (\`<turnId>-thinking-<n>\`, #6756). Splitting the frame so the coalesced text is not ` +
+          `corrupted; fix the provider emitting this messageId. Further collisions are not logged.`
+        )
+      }
+      this._forceFlushKey(key)
+    }
     // #5555: coerce a non-string delta to its string form ONCE and use that for
     // both the buffer concat AND the byte count. A bare `existing + delta` would
     // string-coerce a non-string into the buffer (real residency) while a
@@ -1166,10 +1208,12 @@ export class EventNormalizer {
       this._deltaEmitMono.set(key, emitMonoMs)
     }
     // #6818: record the thinking flag once per key (constant per key — thinking
-    // uses a distinct messageId). Only thinking keys are stored; response keys
-    // stay absent so their flushed entries are byte-identical to pre-#6818.
-    if (thinking === true && !this._deltaThinking.has(key)) {
-      this._deltaThinking.set(key, true)
+    // uses a distinct messageId). #6962: response keys are recorded as `false`
+    // instead of left absent so the conflict check above can distinguish them
+    // from an unseen key; every flush site tests `=== true`, so a stored `false`
+    // still produces an entry byte-identical to pre-#6818.
+    if (!this._deltaThinking.has(key)) {
+      this._deltaThinking.set(key, isThinking)
     }
     // #5555: maintain byte-size counters incrementally (UTF-8) — no
     // re-serialization on the hot path. `text` is the only new content, so its
