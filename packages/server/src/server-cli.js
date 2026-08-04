@@ -103,6 +103,75 @@ export function persistTokenToConfigFile(configFile, newToken, { durable = false
   }
 }
 
+/**
+ * #7055 — build the `TokenManager({ onPersist })` callback.
+ *
+ * Extracted from `startServer`'s inline closure so BOTH limbs are drivable by a
+ * test. It is load-bearing for a security guarantee (#6965 gates the revoke ack
+ * on it settling; #7045 made it rethrow so a failed write cannot masquerade as a
+ * durable revoke) yet nothing executed it: the gate tests supply a synthetic
+ * `onPersist`, and every local/CI run disables the keychain.
+ *
+ * The keychain seam matters more than it looks. `setToken()` re-checks
+ * availability itself and RETURNS SILENTLY when the keychain is unavailable — no
+ * throw, no boolean. The outer `_isKeychainAvailable()` guard is the only thing
+ * stopping that from becoming a persist that writes nothing anywhere and still
+ * reports success, i.e. a revoke acked for a write that never happened.
+ *
+ * @param {object} opts
+ * @param {string} opts.configFile - path to `~/.chroxy/config.json`
+ * @param {{ error: Function }} [opts.logger]
+ * @param {Function} [opts._isKeychainAvailable] - test seam
+ * @param {Function} [opts._setToken] - test seam
+ * @param {Function} [opts._write] - test seam, forwarded to persistTokenToConfigFile
+ * @returns {(newToken: string, ctx?: { reason?: string }) => void}
+ */
+export function buildTokenPersistCallback({
+  configFile,
+  logger = log,
+  _isKeychainAvailable = isKeychainAvailable,
+  _setToken = setToken,
+  _write = writeFileRestricted,
+} = {}) {
+  return (newToken, { reason } = {}) => {
+    // #6927 — a 'revoke' is the operator panic button (a compromised primary
+    // token killed NOW). Persist it DURABLY so a power loss within the OS
+    // writeback window can't roll config.json back to the compromised token and
+    // resurrect it on the next daemon start. A routine 'scheduled' rotation is
+    // fail-safe (the old token keeps working through its grace window), so it
+    // stays non-durable. Only the file fallback is fsync-controllable here; the
+    // keychain path's durability is the OS keychain's responsibility.
+    const durable = reason === 'revoke'
+    const persistToFile = () => persistTokenToConfigFile(configFile, newToken, { durable, _write })
+    try {
+      if (_isKeychainAvailable()) {
+        try {
+          _setToken(newToken)
+        } catch {
+          // Keychain write failed — fall back to config file
+          persistToFile()
+        }
+      } else {
+        persistToFile()
+      }
+    } catch (err) {
+      // `err?.message || String(err)` (the platform.js idiom), not `err.message`:
+      // a thrown `null`/`undefined` would make the LOG LINE throw a TypeError,
+      // which then replaces the original failure on its way to the ack gate —
+      // the operator would be told the persist failed for the wrong reason and
+      // never see a `Failed to persist token` line at all.
+      logger.error(`Failed to persist token: ${err?.message || String(err)}`)
+      // #6965 — RETHROW. The revoke ack is now gated on this callback resolving,
+      // so swallowing the error here would report a durable revoke that never
+      // reached the disk (the exact false-safety this closes). TokenManager logs
+      // the rejection too, and for a revoke WsServer sends an explicit
+      // REVOKE_NOT_DURABLE error FIRST and then the token-less revoke transition
+      // anyway — the client must still re-authenticate.
+      throw err
+    }
+  }
+}
+
 export function buildTunnelWarmingStatus({ tunnelMode, tunnelUrl, attempt, maxAttempts }) {
   const base = {
     type: 'server_status',
@@ -910,38 +979,9 @@ export async function startCliServer(config) {
   const tokenManager = NO_AUTH ? null : new TokenManager({
     token: API_TOKEN,
     tokenExpiry: config.tokenExpiry || null,
-    onPersist: (newToken, { reason } = {}) => {
-      // #6927 — a 'revoke' is the operator panic button (a compromised primary
-      // token killed NOW). Persist it DURABLY so a power loss within the OS
-      // writeback window can't roll config.json back to the compromised token and
-      // resurrect it on the next daemon start. A routine 'scheduled' rotation is
-      // fail-safe (the old token keeps working through its grace window), so it
-      // stays non-durable. Only the file fallback is fsync-controllable here; the
-      // keychain path's durability is the OS keychain's responsibility.
-      const durable = reason === 'revoke'
-      const persistToFile = () => persistTokenToConfigFile(configFile, newToken, { durable })
-      try {
-        if (isKeychainAvailable()) {
-          try {
-            setToken(newToken)
-          } catch {
-            // Keychain write failed — fall back to config file
-            persistToFile()
-          }
-        } else {
-          persistToFile()
-        }
-      } catch (err) {
-        log.error(`Failed to persist token: ${err.message}`)
-        // #6965 — RETHROW. The revoke ack is now gated on this callback resolving,
-        // so swallowing the error here would report a durable revoke that never
-        // reached the disk (the exact false-safety this closes). TokenManager logs
-        // the rejection too, and for a revoke WsServer sends an explicit
-        // REVOKE_NOT_DURABLE error FIRST and then the token-less revoke transition
-        // anyway — the client must still re-authenticate.
-        throw err
-      }
-    },
+    // #7055 — the callback body lives in `buildTokenPersistCallback` (above) so
+    // both its limbs are testable; as an inline closure nothing could drive it.
+    onPersist: buildTokenPersistCallback({ configFile }),
   })
   if (tokenManager) tokenManager.start()
 
