@@ -22,7 +22,18 @@ import { TurnDriver } from '../../src/orchestration/turn-driver.js'
 
 const KIND_RE = /kind "([a-z_]+)"/
 
-const fenced = (obj) => 'Here is my decision.\n\n```chroxy-decision\n' + JSON.stringify(obj) + '\n```'
+/** Wrap a decision object in the fenced block the turn driver parses. */
+export const fenced = (obj) => 'Here is my decision.\n\n```chroxy-decision\n' + JSON.stringify(obj) + '\n```'
+
+/** Deliver a decision for `sessionId` out of band — lets a test land a turn
+ *  result at a chosen moment (e.g. while a cancel is tearing the session down). */
+export function deliverDecision(sm, sessionId, decision, model = 'fable-hi') {
+  sm.emit('session_event', { sessionId, event: 'stream_delta', data: { messageId: 'm1', delta: fenced(decision) } })
+  sm.emit('session_event', {
+    sessionId, event: 'result',
+    data: { model, cost: 0.01, duration: 5, apiDurationMs: 4, numTurns: 1, usage: { input_tokens: 10, output_tokens: 4 } },
+  })
+}
 
 class FakeSession extends EventEmitter {
   constructor(sessionId, sm, opts, decide, model) {

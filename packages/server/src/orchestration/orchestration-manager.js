@@ -301,12 +301,28 @@ export class OrchestrationManager extends EventEmitter {
     const run = this._get(runId)
     if (run.phase !== 'created') throw new Error(`run ${runId} already started (phase ${run.phase})`)
     this._setRunStatus(run, 'planning')
+    // Announce the run the moment it starts planning. Before #7138 the first
+    // delta a new run ever produced was the epic_plan gate below — the far side
+    // of a multi-minute architect turn — which was invisible while nothing could
+    // start a run at all. Now that starts work, that gap is what the operator
+    // sees: the dashboard closes its new-run modal on the ack and waits for the
+    // list delta to bring the run in, so without this the runs list stays empty
+    // for minutes after a successful start.
+    this._emitRunDelta(run)
     let plan
     try {
       plan = await this._plan(run)
     } catch (err) {
       return this._failRun(run, `PLAN_${err instanceof DecisionParseError ? 'PARSE' : 'FAILED'}`, err)
     }
+    // A cancel that landed while this turn was in flight wins. Destroying a
+    // session normally rejects its turn (SESSION_GONE), but a plan that resolves
+    // in the window between `run.cancelled = true` and the destroy lands here
+    // instead — and journals subtasks onto a run the ledger has already recorded
+    // as cancelled. (`_setRunStatus` below would then trip the FSM guard, so the
+    // record ends up with phantom subtasks AND a rejected startRun.) `_runSubtask`
+    // makes the same re-check after its awaits.
+    if (run.cancelled) return { runId, phase: run.phase }
     // Materialize subtasks. A subtask runs 'implement' (write-capable) ONLY when
     // the architect asked for it AND the run's worker provider is
     // implement-eligible (codex, #6735) AND no preset forces audit. Otherwise it

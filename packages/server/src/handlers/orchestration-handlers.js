@@ -208,7 +208,13 @@ function orchestration_run_action(ws, client, msg, ctx) {
   Promise.resolve()
     .then(() => manager(ctx).runAction(msg.runId, msg.action))
     .then(() => sendAck(ws, ctx, msg, msg.action, msg.runId))
-    .catch((err) => orchestrationActionError(ws, ctx, msg, 'action-failed', getErrorMessage(err, `failed to ${msg.action} run`)))
+    // 'unsupported' is a PERMANENT no — this engine will never serve the action
+    // (pause/resume, #7140) — as distinct from 'action-failed', which is "not
+    // this time". A client that cannot tell them apart has to keep offering a
+    // button that can never work.
+    .catch((err) => orchestrationActionError(ws, ctx, msg,
+      err?.code === 'ACTION_UNSUPPORTED' ? 'unsupported' : 'action-failed',
+      getErrorMessage(err, `failed to ${msg.action} run`)))
 }
 
 function orchestration_run_annotate(ws, client, msg, ctx) {

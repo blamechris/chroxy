@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { orchestrationHandlers } from '../src/handlers/orchestration-handlers.js'
 import { OrchestrationManager } from '../src/orchestration/orchestration-manager.js'
 import { ServerOrchestrationRunSnapshotSchema } from '@chroxy/protocol'
-import { makeOrchestrationHarness, waitFor } from './helpers/orchestration-harness.js'
+import { makeOrchestrationHarness, waitFor, deliverDecision } from './helpers/orchestration-harness.js'
 
 // run_start's validateCwdAllowed requires the cwd to be within $HOME. Use a
 // temp "home" (config.homeOverride) with the cwd under it — hermetic, no writes
@@ -43,6 +43,12 @@ const WS = {} // opaque handle passed to ctx.transport.send
  *   'none'    — no parameters
  * 'unknown' asserts nothing: guessing there would flag correct bag-forwarding,
  * and the real-engine block below covers those call shapes directly.
+ *
+ * Deliberately shallow — it reads argument 0 only, never arity, and the `id`
+ * test is a name convention (`fooId`), so a positional `uuid` reads as an id and
+ * a plural `runIds` reads as unknown. It is a cheap tripwire over this engine's
+ * runId-first convention, not a type checker; the real-engine block is what
+ * actually proves the call shapes.
  */
 function firstParamContract(fn) {
   const src = Function.prototype.toString.call(fn)
@@ -73,7 +79,15 @@ function conformingManager(stub, violations) {
         violations.push(`manager.${name}() does not exist on OrchestrationManager`)
         return impl
       }
-      if (typeof impl !== 'function') return impl
+      if (typeof impl !== 'function') {
+        // The reverse direction, and the one that matters most: the handler
+        // reached for a method the ENGINE has but this stub does not model, so
+        // the call is about to be a TypeError the handler reports as an ordinary
+        // action failure. Without this arm the check is one-directional — which
+        // is how a run_action false green survived the first cut of this suite.
+        violations.push(`manager.${name}() exists on OrchestrationManager but the stub does not model it`)
+        return impl
+      }
       return (...args) => {
         const kind = firstParamContract(real)
         const got = args[0]
@@ -101,6 +115,7 @@ function mkManager(overrides = {}) {
     startRun: async () => ({ runId: 'run_new', phase: 'plan_review' }),
     createAndStartRun: async () => ({ runId: 'run_new' }),
     resolveGate: async () => ({ ok: true }),
+    runAction: async () => ({ ok: true }),
     cancelRun: async () => ({ ok: true }),
     annotate: async () => ({ ok: true }),
     ...overrides,
@@ -199,16 +214,19 @@ describe('orchestration handlers — actions', () => {
     assert.equal(b.sent[0].action, 'gate_response')
   })
 
-  it('run_action acks cancel/pause/resume', async () => {
+  it('run_action acks cancel', async () => {
     const { ctx, sent } = mkCtx()
     orchestrationHandlers.orchestration_run_action(WS, hostClient, { type: 'orchestration_run_action', runId: 'r1', action: 'cancel' }, ctx)
     await tick()
+    // Assert the TYPE first: makeActionError echoes `action` and `runId` onto the
+    // failure payload too, so asserting only those passes against a session_error.
+    assert.equal(sent[0].type, 'orchestration_action_ack', `expected an ack, got ${JSON.stringify(sent[0])}`)
     assert.equal(sent[0].action, 'cancel')
     assert.equal(sent[0].runId, 'r1')
   })
 
   it('surfaces ORCHESTRATION_ACTION_FAILED when the manager throws', async () => {
-    const { ctx, sent } = mkCtx({ manager: mkManager({ cancelRun: async () => { throw new Error('boom') } }) })
+    const { ctx, sent } = mkCtx({ manager: mkManager({ runAction: async () => { throw new Error('boom') } }) })
     orchestrationHandlers.orchestration_run_action(WS, hostClient, { type: 'orchestration_run_action', runId: 'r1', action: 'cancel' }, ctx)
     await tick()
     assert.equal(sent[0].code, 'ORCHESTRATION_ACTION_FAILED')
@@ -324,6 +342,81 @@ describe('#7138 orchestration handlers — driven against the REAL engine', () =
       assert.ok(ack, `expected a cancel ack, got ${JSON.stringify(sent)}`)
       const snap = mgr.getRunSnapshot(runId)
       assert.equal(snap?.run?.status, 'cancelled', 'the engine really cancelled the run')
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('pause/resume report "unsupported", not a generic failure', async () => {
+    const { mgr, cleanup } = makeOrchestrationHarness()
+    try {
+      const { ctx, sent } = mkCtx({ manager: mgr })
+      orchestrationHandlers.orchestration_run_start(WS, hostClient, { type: 'orchestration_run_start', epicPrompt: 'Audit', cwd: REAL_CWD }, ctx)
+      await tick()
+      const runId = sent[0].runId
+
+      for (const action of ['pause', 'resume']) {
+        sent.length = 0
+        orchestrationHandlers.orchestration_run_action(WS, hostClient, { type: 'orchestration_run_action', runId, action }, ctx)
+        await tick()
+        assert.equal(sent[0].type, 'session_error', `${action} must not ack an action the engine cannot serve`)
+        assert.equal(sent[0].reason, 'unsupported', `${action} is a permanent no, not a transient failure`)
+      }
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('a new run is announced at mint, not only when the plan gate opens', async () => {
+    // The dashboard closes its new-run modal on the ack and waits for the list
+    // delta; if the first delta were the epic_plan gate, the run would be
+    // invisible for the whole planning turn.
+    const { mgr, cleanup } = makeOrchestrationHarness({ decide: () => null }) // planning never answers
+    try {
+      const deltas = []
+      mgr.on('run_delta', (d) => deltas.push(d))
+      const { ctx, sent } = mkCtx({ manager: mgr })
+      orchestrationHandlers.orchestration_run_start(WS, hostClient, { type: 'orchestration_run_start', epicPrompt: 'Audit', cwd: REAL_CWD }, ctx)
+      await tick()
+      assert.equal(sent[0].type, 'orchestration_action_ack')
+      assert.ok(deltas.length >= 1, 'the run must reach clients before its planning turn resolves')
+      assert.equal(deltas[0].run?.runId ?? deltas[0].runId, sent[0].runId)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('a plan landing mid-cancel is not journaled onto the dead run', async () => {
+    // A destroyed session rejects its turn (SESSION_GONE), so the only way
+    // startRun resumes after a cancel is for the plan to arrive WHILE the cancel
+    // tears down — between `run.cancelled = true` and the destroy. Reproduced by
+    // delivering the decision from inside destroySession. Asserted against the
+    // LEDGER, not getRunSnapshot: a cancelled run answers from a cached snapshot
+    // taken before these writes, which would hide the damage.
+    const { mgr, sm, ledger, cleanup } = makeOrchestrationHarness({ decide: () => null })
+    try {
+      const origDestroy = sm.destroySession.bind(sm)
+      let delivered = false
+      sm.destroySession = (id) => {
+        if (!delivered) {
+          delivered = true
+          deliverDecision(sm, id, { kind: 'epic_plan', summary: 'late plan', subtasks: [{ title: 'PHANTOM', goal: 'g', role: 'audit' }] })
+        }
+        return origDestroy(id)
+      }
+
+      const { ctx, sent } = mkCtx({ manager: mgr })
+      orchestrationHandlers.orchestration_run_start(WS, hostClient, { type: 'orchestration_run_start', epicPrompt: 'Audit', cwd: REAL_CWD }, ctx)
+      await tick()
+      const runId = sent[0].runId
+
+      orchestrationHandlers.orchestration_run_action(WS, hostClient, { type: 'orchestration_run_action', runId, action: 'cancel' }, ctx)
+      for (let i = 0; i < 8; i++) await tick() // let the resumed startRun run out
+
+      assert.equal(delivered, true, 'positive control: the plan really was delivered mid-cancel')
+      const led = ledger.getRun(runId)
+      assert.equal(led?.status, 'cancelled', 'the cancel stands')
+      assert.deepEqual((led?.subtasks ?? []).map((s) => s.title), [], 'a cancelled run must not gain subtasks after the fact')
     } finally {
       cleanup()
     }
