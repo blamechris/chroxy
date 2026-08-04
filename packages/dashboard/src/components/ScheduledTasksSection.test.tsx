@@ -754,3 +754,229 @@ describe('ScheduledTasksSection — a failed read is visible', () => {
     expect(screen.queryByTestId('sched-read-error')).toBeNull()
   })
 })
+
+/**
+ * #7026 — a task that CANNOT FIRE must not present as if it will.
+ *
+ * The shared health derivation answers "how did the last run go?", not "will
+ * this fire?". So a task whose `lastRun.status === 'success'` rendered a green
+ * `OK` chip and a live `next: <future timestamp>` while nothing was firing at
+ * all — the red gate banner above it was the only contradicting signal, and it
+ * is the one an operator skims past.
+ *
+ * The predicate is `engineArmed`, the RUNTIME truth, NOT the persisted `enabled`
+ * flag. Keying on the saved flag would repeat the C2 mistake in miniature: with
+ * the gate saved DISABLED on a still-armed engine the tasks below ARE about to
+ * fire, and blanking their next-run time would be false in exactly the
+ * dangerous direction.
+ */
+describe('ScheduledTasksSection — a task that cannot fire never reads as live (#7026)', () => {
+  const LIVE = new Date(1900000000000).toLocaleString()
+  const GATE_SAVED_OFF_STILL_ARMED = {
+    enabled: false, engineArmed: true, restartRequired: true, source: 'config' as const,
+  }
+  const GATE_SAVED_ON_NOT_ARMED = {
+    enabled: true, engineArmed: false, restartRequired: true, source: 'config' as const,
+  }
+
+  // POSITIVE CONTROL for the whole block: on the very same task, with the engine
+  // armed, the chip IS green and the next-run cell IS the live timestamp.
+  // Without it every "not ok" / "no timestamp" assertion below would pass for
+  // free on a fixture that never took effect.
+  it('POSITIVE CONTROL: with the engine armed the same task is green with a live next-run time', () => {
+    resetStore({ selectedScheduledTaskId: 'task-1', scheduledTasks: mkSnapshot({ scheduler: GATE_ON }) })
+    render(<ScheduledTasksSection now={() => 1900000000000} />)
+    expect(screen.getByTestId('sched-health-task-1').getAttribute('data-accent')).toBe('ok')
+    expect(screen.getByTestId('sched-row-next-task-1').textContent).toContain(LIVE)
+    expect(screen.getByTestId('sched-detail-next').textContent).toContain(LIVE)
+  })
+
+  it('does not style a successful task green while no engine is armed', () => {
+    resetStore({ selectedScheduledTaskId: 'task-1', scheduledTasks: mkSnapshot({ scheduler: GATE_OFF }) })
+    render(<ScheduledTasksSection now={() => 1900000000000} />)
+    const row = screen.getByTestId('sched-health-task-1')
+    expect(row.getAttribute('data-accent')).not.toBe('ok')
+    expect(screen.getByTestId('sched-detail-health').getAttribute('data-accent')).not.toBe('ok')
+    // The CLI-identical TAG is untouched — only the styling degrades, exactly
+    // the shape quarantine already uses.
+    expect(row.textContent).toContain('OK')
+  })
+
+  it('replaces the next-run timestamp with a reason in BOTH the row and the detail', () => {
+    resetStore({ selectedScheduledTaskId: 'task-1', scheduledTasks: mkSnapshot({ scheduler: GATE_OFF }) })
+    render(<ScheduledTasksSection now={() => 1900000000000} />)
+    for (const id of ['sched-row-next-task-1', 'sched-detail-next']) {
+      const cell = screen.getByTestId(id)
+      expect(cell.textContent, id).not.toContain(LIVE)
+      expect(cell.textContent, id).toContain('—')
+      expect(cell.textContent, id).toMatch(/scheduler .*not running/i)
+    }
+  })
+
+  it('says the same thing when the gate is SAVED ON but no engine is armed yet', () => {
+    // Nothing fires until the daemon restarts, so a live timestamp is just as
+    // false here as with the flag off.
+    resetStore({ selectedScheduledTaskId: 'task-1', scheduledTasks: mkSnapshot({ scheduler: GATE_SAVED_ON_NOT_ARMED }) })
+    render(<ScheduledTasksSection now={() => 1900000000000} />)
+    expect(screen.getByTestId('sched-row-next-task-1').textContent).not.toContain(LIVE)
+    expect(screen.getByTestId('sched-health-task-1').getAttribute('data-accent')).not.toBe('ok')
+  })
+
+  it('KEEPS the live next-run time when the gate is saved OFF but the engine is STILL FIRING', () => {
+    // The dangerous state. These tasks really are about to run unattended;
+    // blanking the time (or greying the chip) would understate that.
+    resetStore({ selectedScheduledTaskId: 'task-1', scheduledTasks: mkSnapshot({ scheduler: GATE_SAVED_OFF_STILL_ARMED }) })
+    render(<ScheduledTasksSection now={() => 1900000000000} />)
+    expect(screen.getByTestId('sched-row-next-task-1').textContent).toContain(LIVE)
+    expect(screen.getByTestId('sched-detail-next').textContent).toContain(LIVE)
+    expect(screen.getByTestId('sched-health-task-1').getAttribute('data-accent')).toBe('ok')
+  })
+
+  it('a REFUSED task shows no live next-run time and no green chip, even with the engine armed', () => {
+    const refusal = "provider 'claude-tui' routes permission prompts through the permission hook…"
+    resetStore({
+      selectedScheduledTaskId: 'task-1',
+      scheduledTasks: mkSnapshot({ tasks: [mkTask({ providerRefusal: refusal })] }),
+    })
+    render(<ScheduledTasksSection now={() => 1900000000000} />)
+    expect(screen.getByTestId('sched-row-next-task-1').textContent).not.toContain(LIVE)
+    expect(screen.getByTestId('sched-row-next-task-1').textContent).toMatch(/will not fire/)
+    expect(screen.getByTestId('sched-health-task-1').getAttribute('data-accent')).not.toBe('ok')
+    expect(screen.getByTestId('sched-detail-next').textContent).toMatch(/will not fire/)
+  })
+
+  it('claims nothing about firing when the gate is UNKNOWN', () => {
+    // No snapshot gate = we have not read the daemon. Asserting "not running"
+    // here would be the same zero-data claim the banner refuses to make.
+    resetStore({ selectedScheduledTaskId: 'task-1', scheduledTasks: mkSnapshot({ scheduler: undefined }) })
+    render(<ScheduledTasksSection now={() => 1900000000000} />)
+    expect(screen.getByTestId('sched-row-next-task-1').textContent).not.toMatch(/not running/i)
+    expect(screen.getByTestId('sched-row-next-task-1').textContent).toContain(LIVE)
+  })
+
+  it('a PAUSED task still says paused (the task-level reason wins)', () => {
+    resetStore({ scheduledTasks: mkSnapshot({ scheduler: GATE_OFF, tasks: [mkTask({ enabled: false })] }) })
+    render(<ScheduledTasksSection now={() => 1900000000000} />)
+    expect(screen.getByTestId('sched-row-next-task-1').textContent).toMatch(/paused/)
+  })
+})
+
+/**
+ * #7049 — the edit form must send PATCH semantics, not a full round-trip of the
+ * snapshot it was seeded from.
+ *
+ * Two losses come out of the same shape. The store REPLACES `target` wholesale
+ * (`scheduled-task-store.js`: `if ('target' in patch) next.target = …`), so a
+ * complete `target` bag built by a form with no `permissionMode` input erased a
+ * stored one on ANY unrelated save. And every text field is seeded from the
+ * CLAMPED wire snapshot, so echoing it back persisted the shortened value.
+ *
+ * The fix is NOT a new input for `permissionMode` (that is a product decision,
+ * #6761) — it is to stop sending fields the operator did not touch.
+ */
+describe('ScheduledTasksSection — the edit form sends only what the operator changed (#7049)', () => {
+  const STORED_TARGET = { provider: 'claude-sdk', permissionMode: 'plan' }
+  const LONG_NAME = 'n'.repeat(256) // a >256-char stored name, as clampWire projects it
+
+  function openEdit(over: Record<string, unknown> = {}) {
+    resetStore({
+      selectedScheduledTaskId: 'task-1',
+      scheduledTasks: mkSnapshot({ tasks: [mkTask({ target: STORED_TARGET, ...over })] }),
+    })
+    render(<ScheduledTasksSection now={() => 1900000000000} />)
+    fireEvent.click(screen.getByTestId('sched-edit'))
+  }
+
+  const lastPatch = () => {
+    const calls = sendActionMock.mock.calls
+    const call = calls[calls.length - 1] as unknown as [string, Record<string, unknown>]
+    expect(call[0]).toBe('update')
+    return call[1].task as Record<string, unknown>
+  }
+
+  it('omits `target` entirely on an unrelated save, so a stored permissionMode survives', () => {
+    openEdit()
+    fireEvent.change(screen.getByTestId('sched-form-prompt'), { target: { value: 'a different prompt' } })
+    fireEvent.click(screen.getByTestId('sched-form-submit'))
+    const patch = lastPatch()
+    expect(patch.prompt).toBe('a different prompt')
+    expect('target' in patch).toBe(false)
+  })
+
+  it('POSITIVE CONTROL: editing a target field DOES send target, carrying permissionMode through', () => {
+    // Without this the assertion above would also pass on a form that simply
+    // never sends `target` at all — a different bug.
+    openEdit()
+    fireEvent.change(screen.getByTestId('sched-form-model'), { target: { value: 'opus' } })
+    fireEvent.click(screen.getByTestId('sched-form-submit'))
+    expect(lastPatch().target).toEqual({ provider: 'claude-sdk', model: 'opus', permissionMode: 'plan' })
+  })
+
+  it('does not write a clamped name back truncated when the operator did not touch it', () => {
+    openEdit({ name: LONG_NAME })
+    fireEvent.change(screen.getByTestId('sched-form-prompt'), { target: { value: 'p2' } })
+    fireEvent.click(screen.getByTestId('sched-form-submit'))
+    expect('name' in lastPatch()).toBe(false)
+  })
+
+  it('POSITIVE CONTROL: an edited name IS sent', () => {
+    openEdit({ name: LONG_NAME })
+    fireEvent.change(screen.getByTestId('sched-form-name'), { target: { value: 'renamed' } })
+    fireEvent.click(screen.getByTestId('sched-form-submit'))
+    expect(lastPatch().name).toBe('renamed')
+  })
+
+  it('omits an untouched prompt and an untouched cadence', () => {
+    openEdit()
+    fireEvent.change(screen.getByTestId('sched-form-name'), { target: { value: 'renamed' } })
+    fireEvent.click(screen.getByTestId('sched-form-submit'))
+    const patch = lastPatch()
+    expect('prompt' in patch).toBe(false)
+    expect('cadence' in patch).toBe(false)
+  })
+
+  it('POSITIVE CONTROL: an edited cadence IS sent', () => {
+    openEdit()
+    fireEvent.change(screen.getByTestId('sched-form-cron'), { target: { value: '30 2 * * *' } })
+    fireEvent.click(screen.getByTestId('sched-form-submit'))
+    expect(lastPatch().cadence).toEqual({ kind: 'cron', expression: '30 2 * * *' })
+  })
+
+  it('preserves an interval `anchor` the form does not own', () => {
+    // Same defect class: a field the form cannot express must not be destroyed
+    // by a save that never mentioned it.
+    openEdit({ cadence: { kind: 'interval', everyMs: 3600000, anchor: 1700000000000 } })
+    fireEvent.change(screen.getByTestId('sched-form-name'), { target: { value: 'renamed' } })
+    fireEvent.click(screen.getByTestId('sched-form-submit'))
+    expect('cadence' in lastPatch()).toBe(false)
+
+    cleanup()
+    openEdit({ cadence: { kind: 'interval', everyMs: 3600000, anchor: 1700000000000 } })
+    fireEvent.change(screen.getByTestId('sched-form-interval'), { target: { value: '15' } })
+    fireEvent.click(screen.getByTestId('sched-form-submit'))
+    expect(lastPatch().cadence).toEqual({ kind: 'interval', everyMs: 900000, anchor: 1700000000000 })
+  })
+
+  it('clearing a target field still clears it', () => {
+    openEdit()
+    fireEvent.change(screen.getByTestId('sched-form-provider'), { target: { value: '' } })
+    fireEvent.click(screen.getByTestId('sched-form-submit'))
+    expect(lastPatch().target).toEqual({ permissionMode: 'plan' })
+  })
+
+  it('CREATE is unaffected — it still sends the complete payload it composed', () => {
+    resetStore({ scheduledTasks: mkSnapshot() })
+    render(<ScheduledTasksSection now={() => 1900000000000} />)
+    fireEvent.click(screen.getByTestId('sched-new'))
+    fireEvent.change(screen.getByTestId('sched-form-prompt'), { target: { value: 'do the thing' } })
+    fireEvent.click(screen.getByTestId('sched-form-submit'))
+    expect(sendActionMock).toHaveBeenCalledWith('create', {
+      task: {
+        name: null,
+        prompt: 'do the thing',
+        cadence: { kind: 'cron', expression: '0 9 * * *' },
+        target: {},
+      },
+    })
+  })
+})

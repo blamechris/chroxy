@@ -76,7 +76,8 @@ export interface ScheduledTaskHealth {
   readonly quarantined: boolean
   /**
    * The ONLY flag a surface may treat as "this schedule is fine". True only for
-   * a successful last run on a task that is neither paused nor quarantined.
+   * a successful last run on a task that is neither paused nor quarantined, and
+   * that the caller has not reported as unable to fire (see `willNotFire`).
    */
   readonly isHealthy: boolean
 }
@@ -140,17 +141,28 @@ export function scheduledTaskHealthTone(tag: ScheduledTaskHealthTag): ScheduledT
  * task can never present as healthy even if its stored `lastRun` still says
  * `success` (the engine's best-effort quarantine write may not have landed —
  * the usual reason to quarantine is that the store is failing).
+ *
+ * `willNotFire` (#7026) is the second caller-supplied degrade, and takes the
+ * same shape for the same reason. The tag answers "how did the last run GO?",
+ * never "will this task FIRE?" — the blockers for the latter (a closed global
+ * gate / an unarmed engine, a provider the engine refuses) are ambient state
+ * this module cannot see from a task record. Left to itself the mapping
+ * therefore styles a task green while nothing on the host is firing at all, so
+ * a caller that KNOWS the task cannot fire says so and the tone degrades out of
+ * `ok`. It only ever degrades: a `bad` tag stays `bad`.
  */
 export function deriveScheduledTaskHealth(
   task: ScheduledTaskHealthInput | null | undefined,
-  options: { readonly quarantined?: boolean } = {},
+  options: { readonly quarantined?: boolean; readonly willNotFire?: boolean } = {},
 ): ScheduledTaskHealth {
   const tag = deriveScheduledTaskHealthTag(task)
   const quarantined = options.quarantined === true
+  const willNotFire = options.willNotFire === true
+  const tone = quarantined ? 'bad' : scheduledTaskHealthTone(tag)
   return {
     tag,
-    tone: quarantined ? 'bad' : scheduledTaskHealthTone(tag),
+    tone: willNotFire && tone === 'ok' ? 'warn' : tone,
     quarantined,
-    isHealthy: tag === 'OK' && !quarantined,
+    isHealthy: tag === 'OK' && !quarantined && !willNotFire,
   }
 }

@@ -18,6 +18,10 @@
  *    never fired, is paused, was refused, timed out, was skipped, or is
  *    quarantined can never render as healthy, and an unrecognized future status
  *    lands on `ERROR` rather than falling through to something friendlier.
+ *    A tag describes the last RUN, though, not whether the task will FIRE — so
+ *    a task this panel knows cannot fire (paused, refused, or no armed engine)
+ *    also loses the green tone and its next-run timestamp (#7026,
+ *    `whyTaskWillNotFire`). The tag itself stays CLI-identical.
  * 2. THE GATE IS SHOWN FIRST. Scheduled execution is OFF by default. A list of
  *    tasks presented without that fact is misleading — they are saved, and none
  *    of them will fire — so the banner is the first thing in the section, and it
@@ -40,7 +44,12 @@
  */
 import { useEffect, useMemo, useState } from 'react'
 import { useConnectionStore } from '../store/connection'
-import type { ScheduledTask, ScheduledTaskCadence, ScheduledTaskInput } from '@chroxy/protocol'
+import type {
+  ScheduledTask,
+  ScheduledTaskCadence,
+  ScheduledTaskInput,
+  SchedulerGateState,
+} from '@chroxy/protocol'
 import { deriveScheduledTaskHealth } from '@chroxy/protocol'
 import { formatGeneratedAgo } from './ControlRoomSection'
 import { Modal } from './Modal'
@@ -142,12 +151,82 @@ function describeLastRun(task: ScheduledTask): string {
 }
 
 /**
+ * #7026 — WHY this task cannot fire, or null when nothing is stopping it.
+ *
+ * The shared health derivation answers "how did the last run go?"; this answers
+ * "will it fire?", which is a different question with a different input set (the
+ * snapshot's gate, not the task record). Keeping them separate is the point: the
+ * tag stays CLI-identical while the panel stops presenting a task as live.
+ *
+ * The gate half keys on `engineArmed`, the RUNTIME truth — NOT the persisted
+ * `enabled` flag. That distinction is the same one the banner makes (#6871 C2)
+ * and it matters in both directions:
+ *
+ *   - gate saved OFF but the engine STILL ARMED → the tasks below really are
+ *     about to run unattended. Blanking their next-run time would understate
+ *     the one state that endangers the operator, so `null` is returned.
+ *   - gate saved ON but NO engine armed → nothing fires until a daemon restart,
+ *     so a live timestamp would be just as false as with the flag off.
+ *
+ * A `null` gate is UNKNOWN (not read from the daemon), and this claims nothing
+ * there — the same posture as `GateBanner`'s UNKNOWN branch.
+ *
+ * Precedence runs most-specific first: a paused/refused task stays paused/refused
+ * even once the gate is fixed, so naming the durable reason is more useful than
+ * naming the global one — which the banner states at the top of the section
+ * anyway.
+ */
+type NoFireReason = 'paused' | 'refused' | 'engine-not-armed'
+
+function whyTaskWillNotFire(
+  task: ScheduledTask,
+  gate: SchedulerGateState | null,
+): NoFireReason | null {
+  if (!task.enabled) return 'paused'
+  if (task.providerRefusal) return 'refused'
+  if (gate && !gate.engineArmed) return 'engine-not-armed'
+  return null
+}
+
+/**
+ * The next-run cell. A task that cannot fire gets an em dash plus the reason —
+ * the same treatment `paused` already had, extended to the other two ways a
+ * listed task silently never runs (#7026).
+ */
+function describeNextRun(task: ScheduledTask, reason: NoFireReason | null): string {
+  switch (reason) {
+    case 'paused':
+      return '— (paused)'
+    case 'refused':
+      return '— (will not fire)'
+    // Deliberately NOT "scheduler disabled": this also covers the gate being
+    // saved ENABLED with no armed engine, where the flag is on and nothing is
+    // running. "Not running" is true of both.
+    case 'engine-not-armed':
+      return '— (scheduler not running)'
+    default:
+      return formatEpoch(task.nextRun)
+  }
+}
+
+/**
  * The health chip. `data-accent` is driven by the shared helper's `tone`, so
  * "looks healthy" and "is healthy" are the same decision — a renderer can't
  * accidentally style a REFUSED/PAUSED/NEVER RUN task green.
+ *
+ * `willNotFire` degrades the tone (never the tag) so a task the panel already
+ * knows cannot fire is not simultaneously advertised as green (#7026).
  */
-function HealthChip({ task, place = 'row' }: { task: ScheduledTask; place?: 'row' | 'detail' }) {
-  const health = deriveScheduledTaskHealth(task, { quarantined: task.quarantined })
+function HealthChip({
+  task,
+  willNotFire = false,
+  place = 'row',
+}: {
+  task: ScheduledTask
+  willNotFire?: boolean
+  place?: 'row' | 'detail'
+}) {
+  const health = deriveScheduledTaskHealth(task, { quarantined: task.quarantined, willNotFire })
   return (
     <span
       className="cr-tag"
@@ -297,13 +376,17 @@ function GateBanner({
 /** One row in the task list. */
 function TaskRow({
   task,
+  gate,
   selected,
   onSelect,
 }: {
   task: ScheduledTask
+  /** `null` = the gate is UNKNOWN; see `whyTaskWillNotFire`. */
+  gate: SchedulerGateState | null
   selected: boolean
   onSelect: (id: string) => void
 }) {
+  const noFire = whyTaskWillNotFire(task, gate)
   return (
     <li>
       <button
@@ -316,10 +399,10 @@ function TaskRow({
         <span className="cr-sched-row-name" data-testid={`sched-row-name-${task.id}`}>
           {task.name || task.id.slice(0, 8)}
         </span>
-        <HealthChip task={task} />
+        <HealthChip task={task} willNotFire={noFire !== null} />
         <span className="cr-dim cr-sched-row-cadence">{describeCadence(task.cadence)}</span>
         <span className="cr-dim cr-sched-row-next" data-testid={`sched-row-next-${task.id}`}>
-          next: {task.enabled ? formatEpoch(task.nextRun) : '— (paused)'}
+          next: {describeNextRun(task, noFire)}
         </span>
         {task.providerRefusal && (
           <span className="cr-tag" data-accent="bad" data-testid={`sched-row-refusal-${task.id}`}>
@@ -336,7 +419,7 @@ function TaskRow({
  * verbatim (`providerRefusal`, the clamped permission mode, quarantine) rather
  * than any locally-derived judgement.
  */
-function TaskDetail({ task }: { task: ScheduledTask }) {
+function TaskDetail({ task, gate }: { task: ScheduledTask; gate: SchedulerGateState | null }) {
   const sendAction = useConnectionStore((s) => s.sendScheduledTaskAction)
   const pending = useConnectionStore((s) => s.scheduledTaskPendingActions)
   const results = useConnectionStore((s) => s.scheduledTaskActionResults)
@@ -346,7 +429,11 @@ function TaskDetail({ task }: { task: ScheduledTask }) {
   const [confirmDelete, setConfirmDelete] = useState(false)
   const inFlight = reqId != null && reqId in pending
   const result = reqId != null ? results[reqId] : undefined
-  const health = deriveScheduledTaskHealth(task, { quarantined: task.quarantined })
+  const noFire = whyTaskWillNotFire(task, gate)
+  const health = deriveScheduledTaskHealth(task, {
+    quarantined: task.quarantined,
+    willNotFire: noFire !== null,
+  })
 
   const act = (action: 'pause' | 'resume' | 'delete') => {
     const id = sendAction(action, { taskId: task.id })
@@ -360,7 +447,7 @@ function TaskDetail({ task }: { task: ScheduledTask }) {
           <h4 data-testid="sched-detail-name">{task.name || task.id}</h4>
           <span className="cr-mono cr-dim">{task.id}</span>
         </div>
-        <HealthChip task={task} place="detail" />
+        <HealthChip task={task} willNotFire={noFire !== null} place="detail" />
       </header>
 
       {task.quarantined && (
@@ -383,7 +470,7 @@ function TaskDetail({ task }: { task: ScheduledTask }) {
         <dt>Cadence</dt>
         <dd data-testid="sched-detail-cadence">{describeCadence(task.cadence)}</dd>
         <dt>Next run</dt>
-        <dd data-testid="sched-detail-next">{task.enabled ? formatEpoch(task.nextRun) : '— (paused)'}</dd>
+        <dd data-testid="sched-detail-next">{describeNextRun(task, noFire)}</dd>
         <dt>Last run</dt>
         <dd data-testid="sched-detail-last">
           [{health.tag}] {describeLastRun(task)}
@@ -481,12 +568,41 @@ function TaskDetail({ task }: { task: ScheduledTask }) {
   )
 }
 
+/** The `target` sub-fields this form has an input for. Everything else in a
+ *  stored target is carried through untouched — see `unownedTarget` below. */
+const OWNED_TARGET_KEYS = ['provider', 'model', 'cwd'] as const
+
+type FormTarget = NonNullable<ScheduledTaskInput['target']>
+
 /**
  * Create/edit form. Warns BEFORE saving when the chosen provider is one the
  * engine refuses — including the blank case, which resolves to the daemon
  * default. The refusal text comes from the server (`defaultProviderRefusal`) and
  * the supported set is the server's `schedulableProviders`; neither is computed
  * here.
+ *
+ * ── An EDIT sends a PATCH, never a round-trip of the snapshot (#7049) ─────────
+ * `create` composes the whole task; `update` sends ONLY the fields the operator
+ * actually changed. Echoing back everything the form was seeded with destroyed
+ * data twice over, and both losses were silent:
+ *
+ *  1. The store REPLACES `target` wholesale (`scheduled-task-store.js`:
+ *     `if ('target' in patch) next.target = normalizeTarget(patch.target)`), and
+ *     this form has no `permissionMode` input — so a full `target` bag deleted a
+ *     stored `permissionMode` on ANY unrelated save. (The fix is to preserve it,
+ *     NOT to add an input: whether that mode gets a control is #6761's call.)
+ *  2. Every text field is seeded from the CLAMPED wire projection
+ *     (`clampWire`, handlers/scheduler-handlers.js), so re-sending an untouched
+ *     `name` / `provider` / `model` / `cwd` persisted the shortened value. The
+ *     wire caps are the SAME numbers as the inputs' `maxLength`, so no surface
+ *     can send an over-cap value back — the only way to keep one is not to send
+ *     the field at all.
+ *
+ * "Changed" is measured against the SEED values below, not by re-deriving a
+ * payload and diffing it against the task. The difference is load-bearing for
+ * `once`: its instant round-trips through a `datetime-local` string, so a
+ * re-derived `at` can differ from the stored one with the operator having
+ * touched nothing.
  */
 function TaskFormModal({ task, onClose }: { task?: ScheduledTask; onClose: () => void }) {
   const sendAction = useConnectionStore((s) => s.sendScheduledTaskAction)
@@ -497,26 +613,38 @@ function TaskFormModal({ task, onClose }: { task?: ScheduledTask; onClose: () =>
   const inFlight = reqId != null && reqId in pending
   const result = reqId != null ? results[reqId] : undefined
 
-  const [name, setName] = useState(task?.name ?? '')
-  const [prompt, setPrompt] = useState(task?.prompt ?? '')
-  const [cadenceKind, setCadenceKind] = useState<'once' | 'interval' | 'cron'>(task?.cadence?.kind ?? 'cron')
-  const [cron, setCron] = useState(task?.cadence?.kind === 'cron' ? task.cadence.expression : '0 9 * * *')
-  const [everyMinutes, setEveryMinutes] = useState(
-    task?.cadence?.kind === 'interval' ? String(Math.round(task.cadence.everyMs / 60000)) : '60',
-  )
   // #6871 review (C3): guarded via the shared epoch guard. An out-of-Date-range
   // `at` used to throw RangeError out of this initializer and take the whole
   // dashboard down through the root error boundary.
   const storedOnceAt = task?.cadence?.kind === 'once' ? task.cadence.at : null
-  const [onceAt, setOnceAt] = useState(toDatetimeLocalValue(storedOnceAt))
+  // The SEED values: what each input starts as, captured once so "did the
+  // operator change this?" is a comparison against the same value the field was
+  // populated with (#7049 — see the block comment above).
+  const seed = {
+    name: task?.name ?? '',
+    prompt: task?.prompt ?? '',
+    cadenceKind: (task?.cadence?.kind ?? 'cron') as 'once' | 'interval' | 'cron',
+    cron: task?.cadence?.kind === 'cron' ? task.cadence.expression : '0 9 * * *',
+    everyMinutes: task?.cadence?.kind === 'interval' ? String(Math.round(task.cadence.everyMs / 60000)) : '60',
+    onceAt: toDatetimeLocalValue(storedOnceAt),
+    provider: task?.target?.provider ?? '',
+    model: task?.target?.model ?? '',
+    cwd: task?.target?.cwd ?? '',
+  }
+  const [name, setName] = useState(seed.name)
+  const [prompt, setPrompt] = useState(seed.prompt)
+  const [cadenceKind, setCadenceKind] = useState<'once' | 'interval' | 'cron'>(seed.cadenceKind)
+  const [cron, setCron] = useState(seed.cron)
+  const [everyMinutes, setEveryMinutes] = useState(seed.everyMinutes)
+  const [onceAt, setOnceAt] = useState(seed.onceAt)
   // The stored instant exists but cannot be represented — show the operator that
   // the value was dropped and must be re-entered, rather than silently
   // presenting an empty field as if the task had no scheduled time.
   const onceAtUnreadable =
     task?.cadence?.kind === 'once' && storedOnceAt != null && epochToDate(storedOnceAt) === null
-  const [provider, setProvider] = useState(task?.target?.provider ?? '')
-  const [model, setModel] = useState(task?.target?.model ?? '')
-  const [cwd, setCwd] = useState(task?.target?.cwd ?? '')
+  const [provider, setProvider] = useState(seed.provider)
+  const [model, setModel] = useState(seed.model)
+  const [cwd, setCwd] = useState(seed.cwd)
 
   // Close only once the SERVER confirmed the mutation (the re-emitted snapshot).
   useEffect(() => {
@@ -542,7 +670,15 @@ function TaskFormModal({ task, onClose }: { task?: ScheduledTask; onClose: () =>
     if (cadenceKind === 'interval') {
       const mins = Number(everyMinutes)
       if (!Number.isFinite(mins) || mins <= 0) return null
-      return { kind: 'interval', everyMs: Math.round(mins * 60000) }
+      // #7049: `anchor` is a stored phase offset this form has no input for.
+      // Rebuilding the cadence without it would delete it — the same "clobber
+      // what the form does not own" shape as the target bag below.
+      const anchor = task?.cadence?.kind === 'interval' ? task.cadence.anchor : undefined
+      return {
+        kind: 'interval',
+        everyMs: Math.round(mins * 60000),
+        ...(anchor != null ? { anchor } : {}),
+      }
     }
     const at = Date.parse(onceAt)
     if (!Number.isFinite(at)) return null
@@ -552,21 +688,57 @@ function TaskFormModal({ task, onClose }: { task?: ScheduledTask; onClose: () =>
   const cadence = buildCadence()
   const canSubmit = !inFlight && prompt.trim().length > 0 && cadence !== null
 
+  /**
+   * Everything in the stored `target` this form has no input for — today just
+   * `permissionMode`. Computed by EXCLUSION rather than by naming the fields to
+   * keep, so a target field added later is preserved by default instead of
+   * being silently dropped the next time someone saves the form.
+   */
+  const unownedTarget = Object.fromEntries(
+    Object.entries(task?.target ?? {}).filter(
+      ([k]) => !(OWNED_TARGET_KEYS as readonly string[]).includes(k),
+    ),
+  ) as FormTarget
+
   const submit = () => {
     if (!cadence) return
-    const payload: ScheduledTaskInput = {
-      name: name.trim() || null,
-      prompt: prompt.trim(),
-      cadence,
-      target: {
-        ...(provider.trim() ? { provider: provider.trim() } : {}),
-        ...(model.trim() ? { model: model.trim() } : {}),
-        ...(cwd.trim() ? { cwd: cwd.trim() } : {}),
-      },
+    const nextName = name.trim() || null
+    const nextPrompt = prompt.trim()
+    const nextTarget: FormTarget = {
+      ...unownedTarget,
+      ...(provider.trim() ? { provider: provider.trim() } : {}),
+      ...(model.trim() ? { model: model.trim() } : {}),
+      ...(cwd.trim() ? { cwd: cwd.trim() } : {}),
     }
-    const id = task
-      ? sendAction('update', { taskId: task.id, task: payload })
-      : sendAction('create', { task: payload })
+
+    if (!task) {
+      const id = sendAction('create', {
+        task: { name: nextName, prompt: nextPrompt, cadence, target: nextTarget },
+      })
+      if (id) setReqId(id)
+      return
+    }
+
+    // PATCH: only the fields whose input differs from what it was seeded with.
+    // An untouched field is left out entirely, which is the ONLY way to keep a
+    // value the wire cap cannot carry — and, for `target`, the only way to keep
+    // the sub-fields this form does not own.
+    const patch: ScheduledTaskInput = {}
+    if (name !== seed.name) patch.name = nextName
+    if (prompt !== seed.prompt) patch.prompt = nextPrompt
+    if (
+      cadenceKind !== seed.cadenceKind
+      || (cadenceKind === 'cron' && cron !== seed.cron)
+      || (cadenceKind === 'interval' && everyMinutes !== seed.everyMinutes)
+      || (cadenceKind === 'once' && onceAt !== seed.onceAt)
+    ) patch.cadence = cadence
+    if (provider !== seed.provider || model !== seed.model || cwd !== seed.cwd) {
+      patch.target = nextTarget
+    }
+    // An empty patch is still SENT: the mutation is not optimistic, so the
+    // server's echoed snapshot is what closes this modal. Not sending would
+    // leave a no-op "Save changes" click with no way out but Cancel.
+    const id = sendAction('update', { taskId: task.id, task: patch })
     if (id) setReqId(id)
   }
 
@@ -807,11 +979,11 @@ export function ScheduledTasksSection({ now = Date.now }: ScheduledTasksSectionP
         <div className="cr-sched-layout">
           <ul className="cr-sched-list" data-testid="sched-list">
             {tasks.map((t) => (
-              <TaskRow key={t.id} task={t} selected={t.id === selectedId} onSelect={(id) => selectTask(id)} />
+              <TaskRow key={t.id} task={t} gate={gate} selected={t.id === selectedId} onSelect={(id) => selectTask(id)} />
             ))}
           </ul>
           {selected ? (
-            <TaskDetail key={selected.id} task={selected} />
+            <TaskDetail key={selected.id} task={selected} gate={gate} />
           ) : (
             <p className="cr-dim" data-testid="sched-detail-empty">Select a task to inspect it.</p>
           )}
