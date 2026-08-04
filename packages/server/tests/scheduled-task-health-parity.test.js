@@ -42,6 +42,11 @@ const GOLDEN = [
   [{ enabled: true, lastRun: { status: 'skipped' } }, 'SKIPPED'],
   [{ enabled: true, lastRun: { status: 'timeout' } }, 'TIMEOUT'],
   [{ enabled: true, lastRun: { status: 'refused' } }, 'REFUSED'],
+  // #7038 — a deliberate operator Stop. Its own tag, and deliberately NOT `bad`:
+  // the whole defect was that an intentional interrupt was indistinguishable
+  // from a provider crash, and leaving it styled like ERROR reinstates that at
+  // the tone layer. It is still not healthy — only `OK` ever is.
+  [{ enabled: true, lastRun: { status: 'interrupted' } }, 'INTERRUPTED'],
   [{ enabled: true, lastRun: null }, 'NEVER RUN'],
   // Paused wins over ANY recorded run — a paused task will not fire again.
   [{ enabled: false, lastRun: { status: 'success' } }, 'PAUSED'],
@@ -60,10 +65,22 @@ describe('scheduled-task health — golden mapping', () => {
     }
   })
 
-  it('exports exactly the seven tags the surfaces render', () => {
+  it('exports exactly the eight tags the surfaces render', () => {
     assert.deepEqual(
       [...SCHEDULED_TASK_HEALTH_TAGS].sort(),
-      ['ERROR', 'NEVER RUN', 'OK', 'PAUSED', 'REFUSED', 'SKIPPED', 'TIMEOUT'],
+      ['ERROR', 'INTERRUPTED', 'NEVER RUN', 'OK', 'PAUSED', 'REFUSED', 'SKIPPED', 'TIMEOUT'],
+    )
+  })
+
+  it('an INTERRUPTED run is warn-toned, never `ok` and never styled like a crash (#7038)', () => {
+    const health = deriveScheduledTaskHealth({ enabled: true, lastRun: { status: 'interrupted' } })
+    assert.equal(health.tag, 'INTERRUPTED')
+    assert.equal(health.tone, 'warn', 'a deliberate Stop is not a fault — styling it `bad` re-merges it with a crash')
+    assert.equal(health.isHealthy, false, 'the work did not complete; only OK is healthy')
+    assert.notEqual(
+      deriveScheduledTaskHealthTag({ enabled: true, lastRun: { status: 'error' } }),
+      'INTERRUPTED',
+      'a real error must not borrow the interrupt tag',
     )
   })
 
@@ -319,6 +336,8 @@ describe('scheduled-task health — CLI source parity (#6868 / PR #7013)', () =>
       return 'SKIPPED'
     case 'timeout':
       return 'TIMEOUT'
+    case 'interrupted':
+      return 'INTERRUPTED'
     default:
       return 'ERROR'
   }

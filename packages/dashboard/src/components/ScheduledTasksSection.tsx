@@ -15,9 +15,11 @@
  *    helper in @chroxy/protocol — the SAME module the CLI's `healthTag()` uses —
  *    so the two surfaces cannot drift into disagreeing about a task. Exactly one
  *    tag (`OK`) styles as healthy, and it is asserted positively: a task that has
- *    never fired, is paused, was refused, timed out, was skipped, or is
- *    quarantined can never render as healthy, and an unrecognized future status
- *    lands on `ERROR` rather than falling through to something friendlier.
+ *    never fired, is paused, was refused, timed out, was skipped, was
+ *    deliberately interrupted, or is quarantined can never render as healthy, and
+ *    an unrecognized future status lands on `ERROR` rather than falling through
+ *    to something friendlier. Honesty runs the other way too: an `INTERRUPTED`
+ *    run (#7038 — an operator Stop) is warn-toned, not styled like a crash.
  *    A tag describes the last RUN, though, not whether the task will FIRE — so
  *    a task this panel knows cannot fire (paused, refused, quarantined, or no
  *    armed engine) also loses the green tone and its next-run timestamp (#7026,

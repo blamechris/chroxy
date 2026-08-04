@@ -562,6 +562,20 @@ describe('#6862 ScheduledTaskStore', () => {
     assert.throws(() => store.update(t.id, { lastRun: { at: 1, status: 'bogus' } }), ScheduledTaskValidationError)
   })
 
+  it('accepts every status the engine can emit, including `interrupted` (#7038)', () => {
+    // The store is the LAST gate before a run outcome is persisted, and it
+    // throws on an unknown status — which `_recordRun` turns into a QUARANTINE
+    // (scheduler.js: "its run outcome could not be recorded"). So an engine
+    // status the store has not been taught does not merely fail to persist: it
+    // permanently stops the task from firing for the rest of the process.
+    const store = newStore(() => 0)
+    for (const status of ['success', 'error', 'skipped', 'timeout', 'refused', 'interrupted']) {
+      const t = store.add({ prompt: 'p', cadence: { kind: 'interval', everyMs: HOUR } })
+      const updated = store.update(t.id, { lastRun: { at: 1, status } })
+      assert.equal(updated.lastRun.status, status, `${status} must round-trip through the store`)
+    }
+  })
+
   it('remove() deletes and persists; returns false for an unknown id', () => {
     const store = newStore()
     const t = store.add({ prompt: 'p', cadence: { kind: 'once', at: 9999 } })

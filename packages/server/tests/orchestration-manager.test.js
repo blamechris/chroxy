@@ -21,6 +21,20 @@ import { TurnDriver } from '../src/orchestration/turn-driver.js'
 
 const KIND_RE = /kind "([a-z_]+)"/
 
+/**
+ * Decider sentinel: model an operator pressing Stop on this turn. The provider
+ * emits `stopped` INSTEAD of a result/error (#4881), which TurnDriver treats as
+ * terminal and rejects as TURN_STOPPED (#7009). Distinct from the `null`
+ * sentinel below, which hangs the turn with no terminal event at all.
+ */
+const STOP_TURN = Symbol('stop-turn')
+
+/**
+ * Decider sentinel: the provider errors out mid-turn → TurnError TURN_ERROR.
+ * The counterfactual to {@link STOP_TURN}: same error class, different code.
+ */
+const ERROR_TURN = Symbol('error-turn')
+
 function fenced(obj) {
   return 'Here is my decision.\n\n```chroxy-decision\n' + JSON.stringify(obj) + '\n```'
 }
@@ -53,6 +67,14 @@ class FakeSession extends EventEmitter {
       if (this.destroyed) return
       const out = this._decide({ role: this.role, kind, prompt: String(prompt), n: this.kindCalls[kind], model: this._model })
       if (out == null) return // sentinel: hang this turn (no result emitted)
+      if (out === STOP_TURN) {
+        this._sm.emit('session_event', { sessionId: this.sessionId, event: 'stopped', data: {} })
+        return
+      }
+      if (out === ERROR_TURN) {
+        this._sm.emit('session_event', { sessionId: this.sessionId, event: 'error', data: { message: 'worker exploded' } })
+        return
+      }
       const text = typeof out === 'string' ? out : fenced(out)
       this._sm.emit('session_event', { sessionId: this.sessionId, event: 'stream_delta', data: { messageId: 'm1', delta: text } })
       this._sm.emit('session_event', {
@@ -336,6 +358,63 @@ test('unrecoverable parse failure fails the subtask', async () => {
     const record = ledger.getRun(rec.runId)
     assert.equal(record.status, 'completed')
     assert.equal(record.subtasks[0].status, 'failed')
+  } finally {
+    cleanup()
+  }
+})
+
+test('an operator Stop mid-subtask lands on `interrupted`, not `failed` (#7038)', async () => {
+  // The orchestration half of #7038. TurnDriver already gives an interrupt its
+  // OWN code (TURN_STOPPED) and run-model already declares an `interrupted`
+  // subtask state — but nothing ever wrote it: the _schedule() catch mapped
+  // EVERY thrown turn to `failed`, so a deliberate Stop was recorded exactly
+  // like a worker that blew up. `interrupted` is resumable (`interrupted ->
+  // briefing` is a legal transition); `failed` is terminal-and-final, so the
+  // mislabel also threw away the one thing that distinguishes them.
+  const decide = (ctx) => {
+    if (ctx.kind === 'epic_plan') return { kind: 'epic_plan', subtasks: [{ title: 'A', goal: 'g', role: 'audit' }] }
+    if (ctx.kind === 'plan_of_attack') return STOP_TURN
+    return happyDecider(ctx)
+  }
+  const { ledger, mgr, cleanup } = makeHarness(decide)
+  try {
+    const rec = mgr.createRun({ goal: 'Audit', cwd: '/repo', autoApprovePlan: true })
+    // The run must still REACH synthesis. `interrupted` has to count as a
+    // scheduling-terminal subtask state; if it does not, the run sits forever
+    // waiting on a subtask that will never move and this wait times out — the
+    // exact trap a partial enumeration would leave behind.
+    const done = waitFor(mgr, ['run_completed'])
+    await mgr.startRun(rec.runId)
+    await done
+    const record = ledger.getRun(rec.runId)
+    assert.equal(record.subtasks[0].status, 'interrupted', 'a Stop is an interrupt, not a failure')
+    assert.notEqual(record.subtasks[0].status, 'failed')
+    assert.equal(record.status, 'completed', 'the run still terminates rather than hanging on the interrupted subtask')
+  } finally {
+    cleanup()
+  }
+})
+
+test('a genuinely CRASHED subtask still lands on `failed` (#7038 positive control)', async () => {
+  // The counterfactual for the test above: only TURN_STOPPED gets the new
+  // state. A worker whose turn ERRORS out rejects with the same TurnError class
+  // and a different code, and must still be a failure — so the interrupt
+  // mapping cannot be a blanket re-label of the catch arm. This one passes on
+  // UNMODIFIED source, which is what makes the red above mean something.
+  const decide = (ctx) => {
+    if (ctx.kind === 'epic_plan') return { kind: 'epic_plan', subtasks: [{ title: 'A', goal: 'g', role: 'audit' }] }
+    if (ctx.kind === 'plan_of_attack') return ERROR_TURN
+    return happyDecider(ctx)
+  }
+  const { ledger, mgr, cleanup } = makeHarness(decide)
+  try {
+    const rec = mgr.createRun({ goal: 'Audit', cwd: '/repo', autoApprovePlan: true })
+    const done = waitFor(mgr, ['run_completed'])
+    await mgr.startRun(rec.runId)
+    await done
+    const record = ledger.getRun(rec.runId)
+    assert.equal(record.subtasks[0].status, 'failed', 'a crash is still a failure')
+    assert.notEqual(record.subtasks[0].status, 'interrupted')
   } finally {
     cleanup()
   }

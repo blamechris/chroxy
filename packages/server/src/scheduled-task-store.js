@@ -112,7 +112,17 @@ const MAX_EPOCH_MS = 8.64e15
 // mode it could not verify. Distinct from `error` (the run happened and failed)
 // and `skipped` (the slot passed) so a reader can tell an operator that NOTHING
 // ran and that the task definition needs fixing.
-const LAST_RUN_STATUSES = new Set(['success', 'error', 'skipped', 'timeout', 'refused'])
+// `interrupted` (#7038) = the run was deliberately STOPPED (an operator Stop, an
+// orchestration cancel) rather than failing. Distinct from `error` for the same
+// reason `refused` is: nothing is broken, so an operator must not have to read
+// the free-text message to tell an intentional interrupt from a crash.
+//
+// This set is a HARD GATE, not documentation: normalizeLastRun() throws on
+// anything outside it, and the engine turns that throw into a QUARANTINE
+// (scheduler.js `_recordRun` — "its run outcome could not be recorded"). An
+// engine status missing here therefore does not just fail to persist; it stops
+// the task firing for the rest of the process.
+const LAST_RUN_STATUSES = new Set(['success', 'error', 'skipped', 'timeout', 'refused', 'interrupted'])
 
 /**
  * Error thrown when a task submitted to add()/update() is malformed. Carries the

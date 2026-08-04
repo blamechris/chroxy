@@ -30,16 +30,17 @@
  * `healthTag()` return set exactly — adding one here without teaching the CLI
  * (or vice versa) fails the parity test.
  */
-export declare const SCHEDULED_TASK_HEALTH_TAGS: readonly ["OK", "NEVER RUN", "PAUSED", "SKIPPED", "TIMEOUT", "REFUSED", "ERROR"];
+export declare const SCHEDULED_TASK_HEALTH_TAGS: readonly ["OK", "NEVER RUN", "PAUSED", "SKIPPED", "INTERRUPTED", "TIMEOUT", "REFUSED", "ERROR"];
 export type ScheduledTaskHealthTag = (typeof SCHEDULED_TASK_HEALTH_TAGS)[number];
 /**
  * Rendering severity. `ok` is reserved for the single healthy tag; `warn` covers
- * "nothing is broken but nothing ran either" (paused / never fired / slot
- * passed); `bad` covers an actual failure or a refusal to run.
+ * "nothing is broken, but the work did not complete" (paused / never fired /
+ * slot passed / deliberately stopped); `bad` covers an actual failure or a
+ * refusal to run.
  */
 export type ScheduledTaskHealthTone = 'ok' | 'warn' | 'bad';
 /** The `lastRun.status` values the engine can persist (scheduled-task-store.js). */
-export declare const SCHEDULED_TASK_LAST_RUN_STATUSES: readonly ["success", "error", "skipped", "timeout", "refused"];
+export declare const SCHEDULED_TASK_LAST_RUN_STATUSES: readonly ["success", "error", "skipped", "timeout", "refused", "interrupted"];
 export type ScheduledTaskLastRunStatus = (typeof SCHEDULED_TASK_LAST_RUN_STATUSES)[number];
 /** The minimum shape this module needs; the full task carries much more. */
 export interface ScheduledTaskHealthInput {
@@ -73,7 +74,17 @@ export interface ScheduledTaskHealth {
  * ordering prevents.
  */
 export declare function deriveScheduledTaskHealthTag(task: ScheduledTaskHealthInput | null | undefined): ScheduledTaskHealthTag;
-/** Severity for a tag. Only `OK` is `ok`; nothing else can style as healthy. */
+/**
+ * Severity for a tag. Only `OK` is `ok`; nothing else can style as healthy.
+ *
+ * `INTERRUPTED` is `warn`, not `bad`, and that is the point of #7038 rather than
+ * an aesthetic call: the defect was that a deliberate Stop was presented as a
+ * failure. Giving it its own tag but keeping the failure styling would re-merge
+ * it with a crash at the layer an operator actually reads — the colour of the
+ * chip. Nothing is broken and nothing needs fixing; the run simply did not
+ * finish, which is the same class as `SKIPPED`. It is still never healthy:
+ * `isHealthy` is `tag === 'OK'`, so an interrupted run can't read as fine.
+ */
 export declare function scheduledTaskHealthTone(tag: ScheduledTaskHealthTag): ScheduledTaskHealthTone;
 /**
  * Full health readout for a task, including the engine's process-scoped
