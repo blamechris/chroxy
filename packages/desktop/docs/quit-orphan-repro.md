@@ -73,8 +73,7 @@ Repeat step 5 above for every quit path. The expected behaviour:
 The Node server registers a SIGTERM handler that flushes
 `session-state.json` to disk before exiting. SIGKILL bypasses that
 handler and wipes the state file, losing the user's open sessions on
-the next launch (see CLAUDE.md memory note "SIGTERM not SIGKILL for
-Chroxy"). `ServerManager::kill_child()` enforces this:
+the next launch. `ServerManager::kill_child()` enforces this:
 
 1. Send SIGTERM (`libc::kill(pid, SIGTERM)`).
 2. Poll `try_wait()` every 100ms for up to 5 seconds.
