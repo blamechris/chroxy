@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path'
 import {
   SCHEDULED_TASK_HEALTH_TAGS,
   SCHEDULED_TASK_LAST_RUN_STATUSES,
+  SCHEDULED_TASK_LAST_RUN_STATUS_VALUES,
   deriveScheduledTaskHealth,
   deriveScheduledTaskHealthTag,
 } from '@chroxy/protocol'
@@ -69,6 +70,32 @@ describe('scheduled-task health — golden mapping', () => {
     assert.deepEqual(
       [...SCHEDULED_TASK_HEALTH_TAGS].sort(),
       ['ERROR', 'INTERRUPTED', 'NEVER RUN', 'OK', 'PAUSED', 'REFUSED', 'SKIPPED', 'TIMEOUT'],
+    )
+  })
+
+  // @chroxy/protocol declares the engine's `lastRun.status` roster TWICE, in two
+  // files, and both are public exports of the package:
+  //
+  //   - `SCHEDULED_TASK_LAST_RUN_STATUSES`      (scheduled-task-health.ts)
+  //   - `SCHEDULED_TASK_LAST_RUN_STATUS_VALUES` (schemas/server/scheduler.ts)
+  //
+  // Both document themselves as mirroring `scheduled-task-store.js`'s
+  // `LAST_RUN_STATUSES`, so at most one of them can be right when they differ.
+  // Nothing imported the second one, which is exactly why it drifted unnoticed
+  // when `interrupted` was added (#7038): a roster with no consumer has no test,
+  // and a stale-but-exported constant is worse than an absent one — the next
+  // consumer to reach for it (a status filter, a `z.enum` built from it) inherits
+  // a set that silently omits a status the engine really does persist.
+  //
+  // Pin them to each other so the NEXT status cannot land in only one half. This
+  // is the same failure mode #7024/#7129 closed for the CLI, one file over.
+  it('both exported lastRun-status rosters declare the same set (#7038)', () => {
+    assert.deepEqual(
+      [...SCHEDULED_TASK_LAST_RUN_STATUS_VALUES].sort(),
+      [...SCHEDULED_TASK_LAST_RUN_STATUSES].sort(),
+      'the two exported status rosters in @chroxy/protocol have drifted — both claim to mirror ' +
+        "scheduled-task-store.js's LAST_RUN_STATUSES, so a status added to one must be added to the other " +
+        '(scheduled-task-health.ts AND schemas/server/scheduler.ts).',
     )
   })
 
