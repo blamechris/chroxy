@@ -36,6 +36,10 @@ import { createLogger } from './logger.js'
 import { RateLimiter, getRateLimitKey } from './rate-limiter.js'
 import { SubagentCounter } from './subagent-counter.js'
 import { TurnTracker } from './turn-tracker.js'
+// The cap the external-session registry already enforces on `project` (#7104).
+// Shared so the clamp at the derivation site below and the registry's own
+// defence-in-depth clamp stay one number, not two that can drift.
+import { MAX_EXTERNAL_PROJECT_CHARS } from './external-session-registry.js'
 import { IngestEventSchema } from '@chroxy/protocol'
 // deriveProjectFromCwd + the chroxy-worktree helpers moved to the shared,
 // Zod-free @chroxy/protocol/project subpath (audit P2-2, #5850) so the hook
@@ -442,8 +446,22 @@ export function handleEventIngest(server, req, res) {
       if (event.type === 'notification' && data.notificationType === 'idle_prompt') {
         mapping = INGEST_IDLE_PROMPT_MAPPING
       }
-      const project = event.project
+      // #7105: bound the derived project HERE, at the single site that mints
+      // it, rather than per-consumer. An explicit `event.project` is already
+      // wire-capped at 256 by IngestEventSchema, but the derived branch is a
+      // path BASENAME off a `cwd` capped at 4096 — so the same field arrives ~16x
+      // over its own inbound contract, and the path need not exist on disk, so
+      // NAME_MAX does not bound it either. Four consumers read this value
+      // (SubagentCounter, TurnTracker, recordExternalSessionEvent, and
+      // pushManager.send → the Discord embed title); #7104 clamped exactly one,
+      // from the inside. Clamping at the derivation site bounds all four and
+      // leaves the registry's own clamp as defence-in-depth for callers that
+      // bypass ingest validation.
+      const derivedProject = event.project
         || (typeof data.cwd === 'string' ? deriveProjectFromCwd(data.cwd) : null)
+      const project = typeof derivedProject === 'string' && derivedProject.length > MAX_EXTERNAL_PROJECT_CHARS
+        ? derivedProject.slice(0, MAX_EXTERNAL_PROJECT_CHARS)
+        : derivedProject
 
       // Server-side subagent counting (#5413 Phase 4): fold subagent_start/
       // subagent_stop into the per-(source, sessionId) aggregate (session_end

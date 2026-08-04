@@ -64,6 +64,7 @@ import {
   DEFAULT_OFFLINE_COLOR,
   isValidColor,
   escapeAndCap,
+  truncate,
   formatDuration,
   apiBase,
   fetchWithDiscordRetry,
@@ -147,6 +148,19 @@ const STATE_TITLES = {
   online: (project) => `\u{1F7E2} ${project} — Session Online`,
   offline: (project) => `\u{1F534} ${project} — Session Offline`,
 }
+
+/**
+ * Discord's hard embed-title limit (#7105).
+ *
+ * Past it the ENTIRE webhook POST/PATCH comes back 400, so the project's status
+ * embed silently stops updating — the failure is logged and invisible to the
+ * user. Every other field `_buildPayload` emits already goes through
+ * `escapeAndCap` for exactly this reason; the title did not, and it is the one
+ * that costs the whole embed rather than one field.
+ *
+ * https://discord.com/developers/docs/resources/message#embed-object-embed-limits
+ */
+export const MAX_EMBED_TITLE_CHARS = 256
 
 export class DiscordWebhookSink extends NotificationSink {
   /**
@@ -637,6 +651,21 @@ export class DiscordWebhookSink extends NotificationSink {
 
   _buildPayload(project, entry) {
     const titleFor = STATE_TITLES[entry.state] || STATE_TITLES.idle
+    // #7105: `project` is only as bounded as whoever minted it — the ingest
+    // path derives it from a path basename, and `_projectKey` sanitizes its
+    // charset, not its length. Budget the PROJECT against this state's own
+    // decoration (emoji + separator + state text, measured from the template
+    // itself so a wordier state can't silently overflow) so the state suffix —
+    // the title's entire information content — survives the truncation instead
+    // of being cut off the end. The outer cap is the belt-and-braces guarantee
+    // that whatever a title template does, the embed stays Discord-legal.
+    //
+    // `truncate`, not `escapeAndCap`: Discord does not render markdown in embed
+    // TITLES (only in descriptions and field values), so escaping here would
+    // put a visible backslash in front of every `_` — a character `_projectKey`
+    // deliberately allows in a project name. Length is the only hazard here.
+    const projectBudget = MAX_EMBED_TITLE_CHARS - titleFor('').length
+    const title = truncate(titleFor(truncate(project, projectBudget)), MAX_EMBED_TITLE_CHARS)
     const fields = []
     // Free-text user/transcript fields (#5475): escape markdown so a body like
     // `watch dist/*_test.js` renders literally. escapeAndCap truncates first,
@@ -658,7 +687,7 @@ export class DiscordWebhookSink extends NotificationSink {
     return {
       username: this._botName,
       embeds: [{
-        title: titleFor(project),
+        title,
         color: this._colorFor(project, entry.state),
         fields,
         footer: { text: `${this._botName} · ${formatDuration(elapsedSec)}` },
