@@ -582,10 +582,6 @@ test('repo-audit preset supplies the goal and forces audit role', async () => {
 
 // --- #6733: session-headroom starvation --------------------------------------
 
-// Settle the microtask + timer queues so a fully synchronous scheduler pass (and
-// anything it kicked off) has run before we assert.
-const settle = () => new Promise((r) => setTimeout(r, 20))
-
 // maxSessions 3 with a reserve of 1 means the scheduler only spawns a worker
 // while `liveSessions + 1 <= 2` — i.e. room for the architect plus exactly ONE
 // worker. Adding a single unrelated (non-run) session therefore starves the run
@@ -605,8 +601,14 @@ test('#6733: session-pool starvation surfaces resource_paused instead of a silen
     // An unrelated interactive session already holds a slot before the run starts.
     sm.createSession({ metadata: {} })
     const rec = mgr.createRun({ goal: 'Audit', cwd: '/repo', autoApprovePlan: true })
+    const stalled = waitFor(mgr, ['run_resource_paused'])
     await mgr.startRun(rec.runId)
-    await settle()
+    // Wait on the ACTUAL stall event, never a fixed sleep — a loaded CI runner
+    // can outlast any hard-coded settle time. The swallowed rejection is
+    // deliberate: on a regressed source this must still fall through to the
+    // positive controls and the status assertion below, which name WHY it
+    // failed, instead of dying on a bare `timeout waiting for ...`.
+    await stalled.catch(() => {})
 
     // POSITIVE CONTROL (passes on UNMODIFIED source): the fixture really starves
     // the scheduler — the architect planned, but no worker was ever spawned and
@@ -660,6 +662,53 @@ test('#6733: freeing a session slot clears resource_paused and the run runs to c
     assert.equal(resumes.length, 1, 'exactly one run_resource_resumed event')
     assert.equal(resumes[0].runId, rec.runId)
   } finally {
+    cleanup()
+  }
+})
+
+test('#6733: a destroy that does NOT restore headroom re-drives without re-pausing', async () => {
+  // Two unrelated sessions. Freeing ONE still leaves the run starved, so the
+  // session_destroyed re-drive lands on an already-stalled run. That re-entry is
+  // the crash path the engine's own no-op guard covers: `resource_paused ->
+  // resource_paused` is illegal by design, and _onSessionCapacityFreed schedules
+  // from inside a queueMicrotask, so a TransitionError there is an UNCAUGHT
+  // exception that takes the daemon down — not a caught, logged failure.
+  const { sm, ledger, mgr, cleanup } = makeHarness(happyDecider, { config: STARVED })
+  const stalls = []
+  const resumes = []
+  mgr.on('run_resource_paused', (p) => stalls.push(p))
+  mgr.on('run_resource_resumed', (p) => resumes.push(p))
+  const uncaught = []
+  const onUncaught = (err) => uncaught.push(err)
+  process.on('uncaughtException', onUncaught)
+  try {
+    const first = sm.createSession({ metadata: {} })
+    const second = sm.createSession({ metadata: {} })
+    const rec = mgr.createRun({ goal: 'Audit', cwd: '/repo', autoApprovePlan: true })
+    const stalled = waitFor(mgr, ['run_resource_paused'])
+    await mgr.startRun(rec.runId)
+    await stalled
+
+    // POSITIVE CONTROL (passes on UNMODIFIED source): freeing the FIRST slot
+    // really does leave the run starved — architect + `second` still fill the
+    // pool — so the re-drive below genuinely re-enters a stalled run rather
+    // than finding headroom and taking the ordinary clear path.
+    const settled = waitFor(mgr, ['run_resource_resumed'], { timeoutMs: 250 }).catch(() => null)
+    sm.destroySession(first)
+    await settled
+    assert.equal(ledger.getRun(rec.runId).status, 'resource_paused', 'still starved after the first slot frees')
+    assert.equal(resumes.length, 0, 'a re-drive with no headroom must not claim the stall cleared')
+    assert.equal(stalls.length, 1, 'and must not re-emit the stall it is already in')
+    assert.deepEqual(uncaught, [], 'the microtask re-drive must not throw an illegal self-transition')
+
+    // ...and the run is still live, not wedged: the NEXT free completes it.
+    const done = waitFor(mgr, ['run_completed'], { timeoutMs: 8000 })
+    sm.destroySession(second)
+    await done
+    assert.equal(ledger.getRun(rec.runId).status, 'completed')
+    assert.equal(resumes.length, 1, 'exactly one clear, on the free that actually restored headroom')
+  } finally {
+    process.off('uncaughtException', onUncaught)
     cleanup()
   }
 })
