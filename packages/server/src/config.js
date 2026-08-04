@@ -9,6 +9,7 @@
  */
 
 import { readFileSync, existsSync, mkdirSync, copyFileSync, constants as fsConstants } from 'fs'
+import { createHash } from 'crypto'
 import { join, dirname } from 'path'
 import { homedir } from 'os'
 import { writeFileRestricted } from './platform.js'
@@ -1916,24 +1917,38 @@ export function readReposFromConfig(configPath = DEFAULT_CONFIG_PATH) {
 }
 
 /**
- * Copy an unreadable/unparseable config aside before refusing to write over it,
- * so the operator can recover their settings by hand (#7027).
+ * Copy an unparseable config aside before refusing to write over it, so the
+ * operator can recover their settings by hand (#7027).
  *
  * Best effort by design: the REFUSAL is what protects the file, the backup is a
  * courtesy. `COPYFILE_EXCL` means an existing backup is never clobbered — that
  * would be this very bug in miniature.
  *
+ * The name is derived from the CONTENT, not the wall clock, because the refusal
+ * is per-attempt and every caller is a button the operator can press again:
+ *  - identical content collapses onto one file, so a repeatedly-retried toggle
+ *    cannot pile up an unbounded set of full copies of config.json (API token
+ *    included) in ~/.chroxy. A duplicate of content already saved carries no
+ *    extra recovery value.
+ *  - genuinely different damage still gets its own file, which a timestamp
+ *    could NOT guarantee: two different corrupt versions refused inside the
+ *    same millisecond collided, and the reported path then named a backup
+ *    holding somebody else's content.
+ * The file's mtime still carries the "when".
+ *
  * @param {string} configPath
+ * @param {string} raw - The exact bytes read back, used to key the backup.
  * @returns {string|null} the backup path, or null if none could be made.
  */
-function backUpMalformedConfig(configPath) {
-  const backup = `${configPath}.corrupt-${new Date().toISOString().replace(/[:.]/g, '-')}`
+function backUpMalformedConfig(configPath, raw) {
+  const digest = createHash('sha256').update(raw).digest('hex').slice(0, 16)
+  const backup = `${configPath}.corrupt-${digest}`
   try {
     copyFileSync(configPath, backup, fsConstants.COPYFILE_EXCL)
     return backup
   } catch (err) {
-    // EEXIST means a backup from this same millisecond is already there — still
-    // a valid recovery pointer for the operator.
+    // EEXIST means this exact content was already saved aside by an earlier
+    // attempt — that file IS the recovery pointer, so keep naming it.
     return err?.code === 'EEXIST' ? backup : null
   }
 }
@@ -1983,11 +1998,11 @@ export function readConfigForMerge(configPath) {
   try {
     parsed = JSON.parse(raw)
   } catch (err) {
-    throw refuseMalformedConfig(configPath, `it is not valid JSON (${err.message})`)
+    throw refuseMalformedConfig(configPath, `it is not valid JSON (${err.message})`, raw)
   }
   if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
     const found = parsed === null ? 'null' : (Array.isArray(parsed) ? 'an array' : `a ${typeof parsed}`)
-    throw refuseMalformedConfig(configPath, `it does not contain a JSON object (found ${found})`)
+    throw refuseMalformedConfig(configPath, `it does not contain a JSON object (found ${found})`, raw)
   }
   return parsed
 }
@@ -1997,10 +2012,11 @@ export function readConfigForMerge(configPath) {
  * backing the bad file up first (#7027).
  * @param {string} configPath
  * @param {string} reason - Why it could not be merged, in sentence-fragment form.
+ * @param {string} raw - The exact bytes read back, used to key the backup.
  * @returns {Error}
  */
-function refuseMalformedConfig(configPath, reason) {
-  const backup = backUpMalformedConfig(configPath)
+function refuseMalformedConfig(configPath, reason, raw) {
+  const backup = backUpMalformedConfig(configPath, raw)
   return new Error(
     `Refusing to overwrite ${configPath}: ${reason}. ` +
     (backup ? `A copy was saved to ${backup}. ` : '') +

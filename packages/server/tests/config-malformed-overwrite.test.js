@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, readdirSync, existsSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname, basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -115,7 +115,10 @@ describe('#7027 write*ToConfig refuses to overwrite a malformed config', () => {
         for (const bad of ['[1, 2, 3]', '"just a string"', 'null', '42']) {
           const p = join(tmp, `not-an-object-${Buffer.from(bad).toString('hex')}.json`)
           writeFileSync(p, bad)
-          assert.throws(() => write(p), undefined, `expected a refusal for ${bad}`)
+          // Pin the REFUSAL, not merely "something threw" — a bare
+          // assert.throws() here would also be satisfied by an incidental
+          // TypeError from mutating a non-object, which is not the guarantee.
+          assert.throws(() => write(p), /Refusing to overwrite/, `expected a refusal for ${bad}`)
           assert.equal(readFileSync(p, 'utf-8'), bad, `${bad} must be left untouched`)
         }
       })
@@ -147,4 +150,59 @@ describe('#7027 write*ToConfig refuses to overwrite a malformed config', () => {
       })
     })
   }
+})
+
+/** Spin to the next millisecond, so a timestamp-named backup would differ. */
+function nextMillisecond() {
+  const t = Date.now()
+  while (Date.now() === t) { /* deliberate: the clock must actually advance */ }
+}
+
+describe('#7027 the corrupt-config backup does not multiply', () => {
+  it('keeps ONE backup however many times the failing write is retried', () => {
+    writeFileSync(configPath, OPERATOR_CONFIG_WITH_TRAILING_COMMA)
+
+    // The refusal is per-ATTEMPT, and every one of these actions is a button the
+    // operator can press again while working out why it fails. A backup named by
+    // wall-clock time gave each retry its own file, so a confused operator ended
+    // up with an unbounded pile of full copies of config.json — API token and all
+    // — sitting in ~/.chroxy forever. Identical content has no extra recovery
+    // value, so it must collapse onto the one backup.
+    for (let i = 0; i < 3; i++) {
+      for (const { write } of WRITERS) assert.throws(() => write(configPath))
+      nextMillisecond()
+    }
+
+    const backups = backupsOf(configPath)
+    assert.equal(backups.length, 1, `retries must reuse the one backup, got ${JSON.stringify(backups)}`)
+    assert.equal(readFileSync(join(tmp, backups[0]), 'utf-8'), OPERATOR_CONFIG_WITH_TRAILING_COMMA)
+  })
+
+  it('still keeps a SEPARATE backup when the corrupt content actually differs', () => {
+    // Collapsing retries must not collapse genuinely different damage: the
+    // operator's half-repaired second attempt is its own recoverable content.
+    writeFileSync(configPath, OPERATOR_CONFIG_WITH_TRAILING_COMMA)
+    assert.throws(() => writeReposToConfig([{ path: '/x' }], configPath))
+
+    writeFileSync(configPath, '{ "port": 9999, "providers": ')
+    assert.throws(() => writeReposToConfig([{ path: '/x' }], configPath))
+
+    const backups = backupsOf(configPath)
+    assert.equal(backups.length, 2, `distinct content must not collapse, got ${JSON.stringify(backups)}`)
+    assert.deepEqual(
+      backups.map(f => readFileSync(join(tmp, f), 'utf-8')).sort(),
+      [OPERATOR_CONFIG_WITH_TRAILING_COMMA, '{ "port": 9999, "providers": '].sort(),
+    )
+  })
+
+  it('refuses WITHOUT inventing a backup when the config cannot be READ at all', () => {
+    // A directory where config.json should be: EISDIR, not ENOENT. There is
+    // nothing to copy aside, but "start fresh" is still wrong — this is the
+    // read-error limb, which is the one that has no backup to name.
+    const p = join(tmp, 'as-a-dir', 'config.json')
+    mkdirSync(p, { recursive: true })
+
+    assert.throws(() => writeReposToConfig([{ path: '/x' }], p), /could not be read/)
+    assert.deepEqual(backupsOf(p), [], 'an unreadable file cannot be copied aside')
+  })
 })
