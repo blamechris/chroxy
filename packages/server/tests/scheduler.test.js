@@ -14,6 +14,7 @@ import {
   listSchedulableProviders,
   SCHEDULED_PERMISSION_MODE,
   REFUSED_STATUS,
+  INTERRUPTED_STATUS,
 } from '../src/scheduler.js'
 import { validateCwdAllowed } from '../src/handler-utils.js'
 import { DEFAULT_PROVIDER } from '../src/providers.js'
@@ -820,11 +821,12 @@ describe('#6865 SchedulerEngine', () => {
       assert.match(record.lastRun.error, /permission required/)
     })
 
-    it('only the four real outcomes and `refused` survive; anything else is error', async () => {
+    it('only the four real outcomes, `refused` and `interrupted` survive; anything else is error', async () => {
       const statuses = []
       for (const outcome of [
         { status: 'success' }, { status: 'timeout' }, { status: 'skipped' },
-        { status: REFUSED_STATUS }, { status: 'weird' }, {}, null,
+        { status: REFUSED_STATUS }, { status: INTERRUPTED_STATUS },
+        { status: 'weird' }, {}, null,
       ]) {
         const task = addTask({ prompt: 'p', cadence: { kind: 'once', at: 2000 } })
         const engine = newEngine({ runTask: async () => outcome })
@@ -834,7 +836,7 @@ describe('#6865 SchedulerEngine', () => {
         statuses.push(store.get(task.id).lastRun.status)
         engine.destroy()
       }
-      assert.deepEqual(statuses, ['success', 'timeout', 'skipped', REFUSED_STATUS, 'error', 'error', 'error'])
+      assert.deepEqual(statuses, ['success', 'timeout', 'skipped', REFUSED_STATUS, INTERRUPTED_STATUS, 'error', 'error', 'error'])
     })
   })
 
@@ -879,11 +881,16 @@ describe('#6865 SchedulerEngine', () => {
       assert.equal(record.lastRun.sessionId, 'sess-1')
     })
 
-    it('an operator Stop on a scheduled run is an error, never a success', async () => {
+    it('an operator Stop on a scheduled run records `interrupted`, not a generic error (#7038)', async () => {
       // No permission prompt at all — the turn is simply interrupted (what a Stop
       // from the dashboard does). `runState.blocked` is unset here, so the outcome
       // rides entirely on TurnDriver's TURN_STOPPED rejection. If `stopped` were
       // treated as a normal completion this would read as `success`.
+      //
+      // #7038: it must also not read as `error`. A deliberate Stop and a provider
+      // crash were recorded identically — same status, and the only difference was
+      // a free-text `error` string nothing keys on — so an operator scanning the
+      // registry could not tell "I stopped this" from "this blew up".
       const sm = new FakeSessionManager({ interruptEmitsStopped: true, stopAfterSend: true })
       const task = addTask({ prompt: 'long job', cadence: { kind: 'once', at: 2000 } })
       const engine = newEngine({ sessionManager: sm, runTimeoutMs: 5_000 })
@@ -900,8 +907,38 @@ describe('#6865 SchedulerEngine', () => {
       // Belt-and-braces only (fake clock) — see the previous test.
       assert.ok(elapsedMs < 2_000, `settling must not block on runTimeoutMs (took ${elapsedMs}ms of a 5000ms window)`)
       assert.notEqual(record.lastRun.status, 'success', 'a stopped run did not do the work — never success')
-      assert.equal(record.lastRun.status, 'error')
+      assert.equal(record.lastRun.status, INTERRUPTED_STATUS, 'a deliberate Stop gets its OWN status, not the crash bucket')
+      assert.notEqual(record.lastRun.status, 'error', 'an operator Stop is not a provider failure')
       assert.match(record.lastRun.error, /interrupted/)
+    })
+
+    it('a permission-BLOCKED interrupt stays `error` — only a bare Stop is `interrupted` (#7038)', async () => {
+      // The precedence that must not invert. The engine denies an unattended
+      // permission prompt and THEN interrupts the turn, so the same TURN_STOPPED
+      // rejection arrives on both paths. That one is a real failure: the agent
+      // needed permission nobody could grant and its tool call was refused, which
+      // is the worst-outcome case this engine exists to make visible. Only a Stop
+      // with no permission activity at all (`runState.blocked` unset) is benign.
+      //
+      // If the TURN_STOPPED mapping were placed ABOVE the `runState.blocked`
+      // check, every denied-permission run would quietly re-tag itself from a
+      // `bad` ERROR to a `warn` INTERRUPTED — a strictly worse regression than
+      // the bug #7038 fixes.
+      const sm = new FakeSessionManager({
+        permissionRequest: { requestId: 'req-1', toolName: 'Bash' },
+        interruptEmitsStopped: true,
+      })
+      const task = addTask({ prompt: 'rm things', cadence: { kind: 'once', at: 2000 } })
+      const engine = newEngine({ sessionManager: sm, runTimeoutMs: 5_000 })
+      engine.start()
+      clock = 2000
+      await timers.tick()
+
+      assert.deepEqual(sm.responded, [['req-1', 'deny']])
+      const record = store.get(task.id)
+      assert.equal(record.lastRun.status, 'error', 'a denied permission is a real failure, not a benign stop')
+      assert.notEqual(record.lastRun.status, INTERRUPTED_STATUS)
+      assert.match(record.lastRun.error, /permission required for Bash/)
     })
 
     // ── #7037: the SYMPTOM, not the proxy ────────────────────────────────────

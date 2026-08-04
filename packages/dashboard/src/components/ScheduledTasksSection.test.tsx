@@ -290,6 +290,10 @@ describe('ScheduledTasksSection — honest per-task status', () => {
     ['refused', { lastRun: { at: 1, status: 'refused' } }, 'REFUSED', 'bad'],
     ['timeout', { lastRun: { at: 1, status: 'timeout' } }, 'TIMEOUT', 'bad'],
     ['skipped', { lastRun: { at: 1, status: 'skipped' } }, 'SKIPPED', 'warn'],
+    // #7038 — a deliberate operator Stop. `warn`, not `bad`: the whole point of
+    // giving it its own status is that it is NOT a crash, and a chip styled
+    // identically to ERROR would say "crash" all over again.
+    ['interrupted', { lastRun: { at: 1, status: 'interrupted' } }, 'INTERRUPTED', 'warn'],
     ['never run', { lastRun: null }, 'NEVER RUN', 'warn'],
     ['paused', { enabled: false }, 'PAUSED', 'warn'],
   ]
@@ -306,7 +310,7 @@ describe('ScheduledTasksSection — honest per-task status', () => {
       seen.add(tag)
       unmount()
     }
-    // Distinctness: 7 cases produced 7 different tags.
+    // Distinctness: every case produced a different tag.
     expect(seen.size).toBe(CASES.length)
   })
 

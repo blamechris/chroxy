@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path'
 import {
   SCHEDULED_TASK_HEALTH_TAGS,
   SCHEDULED_TASK_LAST_RUN_STATUSES,
+  SCHEDULED_TASK_LAST_RUN_STATUS_VALUES,
   deriveScheduledTaskHealth,
   deriveScheduledTaskHealthTag,
 } from '@chroxy/protocol'
@@ -42,6 +43,11 @@ const GOLDEN = [
   [{ enabled: true, lastRun: { status: 'skipped' } }, 'SKIPPED'],
   [{ enabled: true, lastRun: { status: 'timeout' } }, 'TIMEOUT'],
   [{ enabled: true, lastRun: { status: 'refused' } }, 'REFUSED'],
+  // #7038 — a deliberate operator Stop. Its own tag, and deliberately NOT `bad`:
+  // the whole defect was that an intentional interrupt was indistinguishable
+  // from a provider crash, and leaving it styled like ERROR reinstates that at
+  // the tone layer. It is still not healthy — only `OK` ever is.
+  [{ enabled: true, lastRun: { status: 'interrupted' } }, 'INTERRUPTED'],
   [{ enabled: true, lastRun: null }, 'NEVER RUN'],
   // Paused wins over ANY recorded run — a paused task will not fire again.
   [{ enabled: false, lastRun: { status: 'success' } }, 'PAUSED'],
@@ -60,10 +66,48 @@ describe('scheduled-task health — golden mapping', () => {
     }
   })
 
-  it('exports exactly the seven tags the surfaces render', () => {
+  it('exports exactly the eight tags the surfaces render', () => {
     assert.deepEqual(
       [...SCHEDULED_TASK_HEALTH_TAGS].sort(),
-      ['ERROR', 'NEVER RUN', 'OK', 'PAUSED', 'REFUSED', 'SKIPPED', 'TIMEOUT'],
+      ['ERROR', 'INTERRUPTED', 'NEVER RUN', 'OK', 'PAUSED', 'REFUSED', 'SKIPPED', 'TIMEOUT'],
+    )
+  })
+
+  // @chroxy/protocol declares the engine's `lastRun.status` roster TWICE, in two
+  // files, and both are public exports of the package:
+  //
+  //   - `SCHEDULED_TASK_LAST_RUN_STATUSES`      (scheduled-task-health.ts)
+  //   - `SCHEDULED_TASK_LAST_RUN_STATUS_VALUES` (schemas/server/scheduler.ts)
+  //
+  // Both document themselves as mirroring `scheduled-task-store.js`'s
+  // `LAST_RUN_STATUSES`, so at most one of them can be right when they differ.
+  // Nothing imported the second one, which is exactly why it drifted unnoticed
+  // when `interrupted` was added (#7038): a roster with no consumer has no test,
+  // and a stale-but-exported constant is worse than an absent one — the next
+  // consumer to reach for it (a status filter, a `z.enum` built from it) inherits
+  // a set that silently omits a status the engine really does persist.
+  //
+  // Pin them to each other so the NEXT status cannot land in only one half. This
+  // is the same failure mode #7024/#7129 closed for the CLI, one file over.
+  it('both exported lastRun-status rosters declare the same set (#7038)', () => {
+    assert.deepEqual(
+      [...SCHEDULED_TASK_LAST_RUN_STATUS_VALUES].sort(),
+      [...SCHEDULED_TASK_LAST_RUN_STATUSES].sort(),
+      'the two exported status rosters in @chroxy/protocol have drifted — both claim to mirror ' +
+        "scheduled-task-store.js's LAST_RUN_STATUSES, so a status added to one must be added to the other " +
+        '(scheduled-task-health.ts AND schemas/server/scheduler.ts).',
+    )
+  })
+
+  it('an INTERRUPTED run is warn-toned, never `ok` and never styled like a crash (#7038)', () => {
+    const health = deriveScheduledTaskHealth({ enabled: true, lastRun: { status: 'interrupted' } })
+    assert.equal(health.tag, 'INTERRUPTED')
+    assert.equal(health.tone, 'warn', 'a deliberate Stop is not a fault — styling it `bad` re-merges it with a crash')
+    assert.equal(health.isHealthy, false, 'the work did not complete; only OK is healthy')
+    assert.notEqual(
+      deriveScheduledTaskHealthTag({ enabled: true, lastRun: { status: 'error' } }),
+      'INTERRUPTED',
+      'a real error must not borrow the interrupt tag',
     )
   })
 
@@ -319,6 +363,8 @@ describe('scheduled-task health — CLI source parity (#6868 / PR #7013)', () =>
       return 'SKIPPED'
     case 'timeout':
       return 'TIMEOUT'
+    case 'interrupted':
+      return 'INTERRUPTED'
     default:
       return 'ERROR'
   }

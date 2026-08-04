@@ -35,6 +35,7 @@ export const SCHEDULED_TASK_HEALTH_TAGS = [
     'NEVER RUN',
     'PAUSED',
     'SKIPPED',
+    'INTERRUPTED',
     'TIMEOUT',
     'REFUSED',
     'ERROR',
@@ -46,6 +47,9 @@ export const SCHEDULED_TASK_LAST_RUN_STATUSES = [
     'skipped',
     'timeout',
     'refused',
+    // #7038 — a DELIBERATE stop (operator Stop / orchestration cancel), which the
+    // engine previously recorded as `error`, indistinguishable from a crash.
+    'interrupted',
 ];
 /**
  * Derive the health TAG for a task. Pure, total, and never throws — a malformed
@@ -74,6 +78,8 @@ export function deriveScheduledTaskHealthTag(task) {
             return 'SKIPPED';
         case 'timeout':
             return 'TIMEOUT';
+        case 'interrupted':
+            return 'INTERRUPTED';
         default:
             // `error` AND anything unrecognized. Falling through to the worst
             // plausible tag (never to `OK`) is what keeps a future engine status from
@@ -81,7 +87,17 @@ export function deriveScheduledTaskHealthTag(task) {
             return 'ERROR';
     }
 }
-/** Severity for a tag. Only `OK` is `ok`; nothing else can style as healthy. */
+/**
+ * Severity for a tag. Only `OK` is `ok`; nothing else can style as healthy.
+ *
+ * `INTERRUPTED` is `warn`, not `bad`, and that is the point of #7038 rather than
+ * an aesthetic call: the defect was that a deliberate Stop was presented as a
+ * failure. Giving it its own tag but keeping the failure styling would re-merge
+ * it with a crash at the layer an operator actually reads — the colour of the
+ * chip. Nothing is broken and nothing needs fixing; the run simply did not
+ * finish, which is the same class as `SKIPPED`. It is still never healthy:
+ * `isHealthy` is `tag === 'OK'`, so an interrupted run can't read as fine.
+ */
 export function scheduledTaskHealthTone(tag) {
     switch (tag) {
         case 'OK':
@@ -89,6 +105,7 @@ export function scheduledTaskHealthTone(tag) {
         case 'NEVER RUN':
         case 'PAUSED':
         case 'SKIPPED':
+        case 'INTERRUPTED':
             return 'warn';
         default:
             return 'bad';

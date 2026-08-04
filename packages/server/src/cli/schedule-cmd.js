@@ -31,9 +31,11 @@
  *
  * `list` and `last-run` render a task's `lastRun` status verbatim (never
  * papered over): `refused` and a best-effort-persisted quarantine message
- * both show up as an unhealthy `[REFUSED]`/`[ERROR]` tag, and a task that has
- * never fired is always labelled `[NEVER RUN]` rather than left blank —
- * nothing here is allowed to *look* healthy when it isn't.
+ * both show up as an unhealthy `[REFUSED]`/`[ERROR]` tag, a deliberately
+ * stopped run shows `[INTERRUPTED]` rather than borrowing the crash tag
+ * (#7038), and a task that has never fired is always labelled `[NEVER RUN]`
+ * rather than left blank — nothing here is allowed to *look* healthy when it
+ * isn't, and nothing is allowed to look BROKEN when it merely stopped.
  */
 import { existsSync, readFileSync } from 'fs'
 import { join } from 'path'
@@ -171,7 +173,12 @@ function describeCadence(cadence) {
  * `NEVER RUN` — never blank, never mistaken for healthy — and every recorded
  * `lastRun.status` maps to its own tag so `refused` (and a best-effort
  * quarantine write, which persists as `refused`) is never confused with
- * `success`.
+ * `success`, and `interrupted` (#7038 — a deliberate Stop) is never confused
+ * with `error`.
+ *
+ * Kept byte-for-byte in step with `deriveScheduledTaskHealthTag` in
+ * @chroxy/protocol; `tests/scheduled-task-health-parity.test.js` fails if a
+ * status the shared helper tags by name falls through to `default:` here.
  */
 function healthTag(task) {
   if (!task.enabled) return 'PAUSED'
@@ -185,6 +192,8 @@ function healthTag(task) {
       return 'SKIPPED'
     case 'timeout':
       return 'TIMEOUT'
+    case 'interrupted':
+      return 'INTERRUPTED'
     default:
       return 'ERROR'
   }

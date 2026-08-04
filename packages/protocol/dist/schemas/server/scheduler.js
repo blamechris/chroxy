@@ -33,6 +33,15 @@ import { z } from 'zod';
  * `LAST_RUN_STATUSES`). `refused` = the engine declined to start the run at all;
  * distinct from `error` (it ran and failed) and `skipped` (the slot passed), so a
  * reader can tell an operator that NOTHING ran and the definition needs fixing.
+ * `interrupted` (#7038) = the run was deliberately STOPPED (an operator Stop, an
+ * orchestration cancel) rather than failing — also distinct from `error`, so an
+ * operator need not read the free-text message to tell a Stop from a crash.
+ *
+ * KEEP IN SYNC with `SCHEDULED_TASK_LAST_RUN_STATUSES` in
+ * `../../scheduled-task-health.ts`. Both are public exports of this package and
+ * both claim to mirror the engine's gate, so a status added to one and not the
+ * other leaves a stale-but-exported roster for the next consumer to trust.
+ * `packages/server/tests/scheduled-task-health-parity.test.js` pins them equal.
  */
 export const SCHEDULED_TASK_LAST_RUN_STATUS_VALUES = [
     'success',
@@ -40,6 +49,7 @@ export const SCHEDULED_TASK_LAST_RUN_STATUS_VALUES = [
     'skipped',
     'timeout',
     'refused',
+    'interrupted',
 ];
 /** Cadence kinds the registry accepts (scheduled-task-store.js's `CADENCE_KINDS`). */
 export const SCHEDULED_TASK_CADENCE_KIND_VALUES = ['once', 'interval', 'cron'];

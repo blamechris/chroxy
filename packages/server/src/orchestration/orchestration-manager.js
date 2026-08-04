@@ -36,6 +36,7 @@ import {
   buildExecutePrompt, buildResultReviewPrompt, buildSynthesisPrompt,
 } from './role-prompts.js'
 import { createGitOps } from './git-ops.js'
+import { TurnError } from './turn-driver.js'
 import { recordToRunSummary, recordToRunDetail, gateToWire } from './to-wire.js'
 import { buildRunReport, renderReportMarkdown } from './run-report.js'
 
@@ -114,7 +115,13 @@ const IMPLEMENT_ELIGIBLE_PROVIDERS = new Set(['codex'])
 
 // Engine-side subtask states that end scheduling. 'escalated' is deliberately
 // excluded — it awaits a user gate, so it must block synthesis.
-const TERMINAL_SUBTASK_STATES = new Set(['done', 'failed', 'skipped'])
+//
+// 'interrupted' (#7038) IS included: nothing will re-drive a stopped subtask on
+// its own, so leaving it out would park the run forever waiting on a node that
+// can no longer move — a hang, not a status bug. It stays resumable in the
+// transition table (`interrupted -> briefing`, run-model.js); an explicit resume
+// re-enters the loop, which is what makes it different from 'failed'.
+const TERMINAL_SUBTASK_STATES = new Set(['done', 'failed', 'skipped', 'interrupted'])
 function isTerminalSubtaskState(state) { return TERMINAL_SUBTASK_STATES.has(state) }
 
 export class OrchestrationManager extends EventEmitter {
@@ -412,8 +419,17 @@ export class OrchestrationManager extends EventEmitter {
       const st = run.subtasks.get(subtaskId)
       st.state = 'active'
       this._runSubtask(run, subtaskId).catch((err) => {
-        this._log?.warn?.(`subtask ${subtaskId} crashed: ${err?.message || err}`)
-        this._finishSubtask(run, subtaskId, 'failed').catch(() => {})
+        // #7038 — a DELIBERATE stop is not a crash. TurnDriver already gives an
+        // interrupt its own code (TURN_STOPPED, #7009) and run-model already
+        // declares an `interrupted` node state; this arm mapped every thrown
+        // turn to `failed`, so nothing ever wrote it and an operator Stop was
+        // recorded exactly like a worker that blew up. `interrupted` is also the
+        // resumable one (`interrupted -> briefing`), so the mislabel discarded
+        // the only thing that distinguishes the two.
+        const interrupted = err instanceof TurnError && err.code === 'TURN_STOPPED'
+        if (interrupted) this._log?.info?.(`subtask ${subtaskId} interrupted: ${err?.message || err}`)
+        else this._log?.warn?.(`subtask ${subtaskId} crashed: ${err?.message || err}`)
+        this._finishSubtask(run, subtaskId, interrupted ? 'interrupted' : 'failed').catch(() => {})
       })
     }
   }

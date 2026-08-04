@@ -85,9 +85,11 @@
 //    clamped mode on the session and VERIFIES it by read-back. The invariant is
 //    absolute: a scheduled fire runs at the clamped mode, or it does not run.
 // 7. Every fire attempt — success, error, timeout, permission-blocked, refused,
-//    shed — is recorded into the registry so #6868/#6871 can surface it. A run
-//    the engine refused is recorded `refused` (never `success`), and a run whose
-//    tool calls were blocked is recorded `error`. NOTHING reports `success`
+//    interrupted, shed — is recorded into the registry so #6868/#6871 can surface
+//    it. A run the engine refused is recorded `refused` (never `success`), a run
+//    whose tool calls were blocked is recorded `error`, and a run someone
+//    deliberately STOPPED is recorded `interrupted` (#7038) rather than being
+//    dropped into the same bucket as a provider crash. NOTHING reports `success`
 //    unless the turn actually completed with no permission prompt raised.
 //
 // ── Resource posture (#6933 lesson) ──────────────────────────────────────────
@@ -187,8 +189,32 @@ const SCHEDULED_ALLOWED_PERMISSION_MODES = new Set([SCHEDULED_PERMISSION_MODE, '
  */
 export const REFUSED_STATUS = 'refused'
 
+/**
+ * The `lastRun.status` recorded when a run was DELIBERATELY STOPPED (#7038):
+ * someone pressed Stop on the scheduled session, or an orchestration cancel
+ * interrupted the turn. TurnDriver surfaces that as `TURN_STOPPED` (#7009), and
+ * until now this engine dropped it into the same `error` bucket as a provider
+ * crash — same status, differing only by a free-text message nothing keys on —
+ * so the registry could not distinguish "I stopped this" from "this blew up".
+ *
+ * Named `interrupted` rather than `stopped` for two reasons. It is the word the
+ * rest of the codebase already uses for this exact event — orchestration's
+ * subtask state (`run-model.js` `TERMINAL_NODE_STATUSES`) and the turn-driver's
+ * own message ('turn interrupted before completing') — so one concept keeps one
+ * name across the daemon. And `STOPPED` sitting next to `PAUSED` in a health
+ * chip reads as a statement about the SCHEDULE ("this task is stopped") rather
+ * than about the run, which is precisely the kind of honest-status ambiguity
+ * this vocabulary exists to avoid.
+ *
+ * NOT `success` (the work did not complete) and NOT `error` (nothing is broken;
+ * a human or a cancel did this on purpose). A permission-BLOCKED run that the
+ * engine denied and then interrupted stays `error` — see `_runViaSessionManager`,
+ * where the `runState.blocked` check deliberately precedes this one.
+ */
+export const INTERRUPTED_STATUS = 'interrupted'
+
 /** Statuses `_fire` passes through verbatim; everything else becomes `error`. */
-const PASSTHROUGH_STATUSES = new Set(['success', 'timeout', 'skipped', REFUSED_STATUS])
+const PASSTHROUGH_STATUSES = new Set(['success', 'timeout', 'skipped', REFUSED_STATUS, INTERRUPTED_STATUS])
 
 /**
  * Thrown internally when a run must be refused after the executor was entered
@@ -782,9 +808,22 @@ export class SchedulerEngine extends EventEmitter {
       if (runState.blocked) return this._blockedOutcome(runState, sessionId)
       return { status: 'success', sessionId }
     } catch (err) {
+      // ORDER IS LOAD-BEARING. `runState.blocked` is checked FIRST, ahead of the
+      // TURN_STOPPED arm below, because the engine's own deny path reaches this
+      // catch through exactly the same rejection: it answers `deny`, interrupts
+      // the turn, and TurnDriver rejects TURN_STOPPED (#7009). That run is a real
+      // failure — the agent asked for permission nobody could grant — and must
+      // keep the `error` status it has always had. Only an interrupt with NO
+      // permission activity is the benign operator Stop.
       if (runState.blocked) return this._blockedOutcome(runState, sessionId)
       if (err instanceof TurnError && err.code === 'TURN_TIMEOUT') {
         return { status: 'timeout', sessionId, error: `run exceeded ${ctx.runTimeoutMs}ms` }
+      }
+      if (err instanceof TurnError && err.code === 'TURN_STOPPED') {
+        // #7038 — a deliberate Stop, not a fault. Its own status so an operator
+        // reading the registry (CLI / dashboard chip) can tell it apart from a
+        // provider crash instead of having to parse the error string.
+        return { status: INTERRUPTED_STATUS, sessionId, error: err?.message || 'turn interrupted before completing' }
       }
       return { status: 'error', sessionId, error: err?.message || String(err) }
     } finally {
