@@ -155,7 +155,12 @@ export function buildTokenPersistCallback({
         persistToFile()
       }
     } catch (err) {
-      logger.error(`Failed to persist token: ${err.message}`)
+      // `err?.message || String(err)` (the platform.js idiom), not `err.message`:
+      // a thrown `null`/`undefined` would make the LOG LINE throw a TypeError,
+      // which then replaces the original failure on its way to the ack gate —
+      // the operator would be told the persist failed for the wrong reason and
+      // never see a `Failed to persist token` line at all.
+      logger.error(`Failed to persist token: ${err?.message || String(err)}`)
       // #6965 — RETHROW. The revoke ack is now gated on this callback resolving,
       // so swallowing the error here would report a durable revoke that never
       // reached the disk (the exact false-safety this closes). TokenManager logs

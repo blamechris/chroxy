@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { buildTokenPersistCallback } from '../src/server-cli.js'
@@ -15,7 +15,7 @@ import { TokenManager } from '../src/token-manager.js'
  * #6965's gate tests supply a synthetic `onPersist`, and every local/CI run sets
  * `CHROXY_CRED_DISABLE_KEYCHAIN=1`, so the keychain limb executed NOWHERE.
  *
- * Two couplings are pinned here that no other test can see:
+ * Three couplings are pinned here that no other test can see:
  *
  *   1. `reason` → durability. `'revoke'` is the operator panic button and must
  *      reach `writeFileRestricted` with `durable: true`; a routine `'scheduled'`
@@ -28,10 +28,14 @@ import { TokenManager } from '../src/token-manager.js'
  *      resolve as success: a revoke acked for a write that never happened. The
  *      keychain stub below reproduces that silent-return contract exactly, so
  *      deleting the guard makes these tests go red instead of staying green.
+ *
+ *   3. The seams' DEFAULTS. Injecting all of them pins the callback's shape and
+ *      none of the wiring `startServer` actually runs, so the last block drives
+ *      `buildTokenPersistCallback({ configFile })` with nothing injected.
  */
 
 /** Records every write the callback performs, by destination. */
-function spies({ keychainAvailable, setTokenBehaviour = 'ok', writeResult = { durabilityUnconfirmed: null }, writeThrows = null } = {}) {
+function spies({ keychainAvailable, setTokenBehaviour = 'ok', writeResult = { durabilityUnconfirmed: null }, writeThrows = null, writeThrowsRaw = null } = {}) {
   const keychainWrites = []
   const fileWrites = []
   const logged = []
@@ -53,6 +57,9 @@ function spies({ keychainAvailable, setTokenBehaviour = 'ok', writeResult = { du
         keychainWrites.push(token)
       },
       _write: (file, body, opts) => {
+        // Boxed so a FALSY non-Error (`null`, `undefined`, `''`) is expressible —
+        // those are precisely the values that break a bare `err.message`.
+        if (writeThrowsRaw) throw writeThrowsRaw.value
         if (writeThrows) throw new Error(writeThrows)
         fileWrites.push({ file, body, opts })
         return writeResult
@@ -159,6 +166,23 @@ describe('token onPersist callback (#7055)', () => {
       )
     })
 
+    it('a NON-Error failure rethrows the original value instead of a TypeError from the log line', () => {
+      // A bare `err.message` on a thrown `null`/`undefined` throws a TypeError
+      // from inside the catch: the `Failed to persist token` line never reaches
+      // the operator, and the ack gate rejects with a bogus "Cannot read
+      // properties of null" instead of the real persist failure.
+      const s = spies({ keychainAvailable: false, writeThrowsRaw: { value: null } })
+      let thrown = 'nothing was thrown'
+      try {
+        buildTokenPersistCallback({ configFile, ...s.seams })('new-token', { reason: 'revoke' })
+      } catch (err) {
+        thrown = err
+      }
+
+      assert.equal(thrown, null, 'the ORIGINAL failure must reach the revoke ack gate, not the log line’s own TypeError')
+      assert.ok(s.logged.some((m) => /Failed to persist token/.test(m)), 'and the operator still gets the line')
+    })
+
     it('a keychain fallback whose FILE write also fails throws too', () => {
       const s = spies({ keychainAvailable: true, setTokenBehaviour: 'throw', writeThrows: 'ENOSPC' })
       assert.throws(
@@ -204,6 +228,66 @@ describe('token onPersist callback (#7055)', () => {
       manager.revoke()
       await assert.rejects(events[0].persisted, /EIO/,
         'a rejected persist is what makes WsServer send REVOKE_NOT_DURABLE instead of the success ack')
+    })
+  })
+
+  describe('production defaults (the seams as `startServer` actually builds them)', () => {
+    // Every test above injects ALL of `_isKeychainAvailable`, `_setToken` and
+    // `_write`, so it pins the callback's SHAPE and nothing about the wiring the
+    // daemon really runs: `onPersist: buildTokenPersistCallback({ configFile })`
+    // takes every default. A typo in a default — `_write` bound to a writer that
+    // skips the 0600 temp+rename, `_isKeychainAvailable` stuck at `() => true` —
+    // would leave all eleven of those tests green while the daemon persisted the
+    // rotated token nowhere. Swapping each default for a broken stand-in was
+    // confirmed to change no result, which is exactly the false-safety #7055
+    // exists to close, so these two drive the defaults directly.
+    //
+    // `tests/_setup.mjs` sets `CHROXY_DISABLE_KEYCHAIN=1` process-wide and
+    // keychain.js reads it lazily; each test re-asserts it so it can never shell
+    // out to the developer's real `security`/`secret-tool` even if the harness
+    // stops setting it.
+    let restoreKeychainEnv
+    beforeEach(() => {
+      restoreKeychainEnv = process.env.CHROXY_DISABLE_KEYCHAIN
+      process.env.CHROXY_DISABLE_KEYCHAIN = '1'
+    })
+    afterEach(() => {
+      if (restoreKeychainEnv === undefined) delete process.env.CHROXY_DISABLE_KEYCHAIN
+      else process.env.CHROXY_DISABLE_KEYCHAIN = restoreKeychainEnv
+    })
+
+    it('with NO seams injected the real writer lands the token in the real config file', () => {
+      buildTokenPersistCallback({ configFile })('defaulted-token', { reason: 'revoke' })
+
+      const cfg = JSON.parse(readFileSync(configFile, 'utf-8'))
+      assert.equal(cfg.apiToken, 'defaulted-token',
+        'the daemon builds this callback with no seams at all — if the defaults are not the real keychain probe and the real restricted writer, a rotation persists nowhere')
+      assert.equal(cfg.port, 8765, 'and the rest of config.json survives the rewrite')
+      if (process.platform !== 'win32') {
+        assert.equal(statSync(configFile).mode & 0o777, 0o600,
+          'the default writer must be writeFileRestricted — config.json holds the primary bearer token')
+      }
+    })
+
+    it('a defaulted keychain limb returns SILENTLY and stores nothing when the keychain is unavailable', () => {
+      // Force the availability probe true while leaving `_setToken` defaulted:
+      // the REAL setToken re-checks availability itself and returns without
+      // throwing and without storing anything. That silent-return is the premise
+      // the stub at the top of this file encodes and the reason the outer guard
+      // exists; assert it against the real function so the stub cannot drift
+      // from it unnoticed.
+      //
+      // Honest limit: with the keychain unavailable this cannot tell the real
+      // `setToken` apart from any other silent no-op — the available branch
+      // needs an actual OS keychain, which is `keychain.test.js`'s opt-in
+      // `CHROXY_TEST_REAL_KEYCHAIN=1` territory and must never run by default
+      // (it pollutes the developer's login keychain and can pop a modal).
+      assert.doesNotThrow(
+        () => buildTokenPersistCallback({ configFile, _isKeychainAvailable: () => true })('never-stored', { reason: 'revoke' }),
+        'the real setToken does not signal failure — no throw, no boolean',
+      )
+      assert.equal(JSON.parse(readFileSync(configFile, 'utf-8')).apiToken, 'old-token',
+        'nothing reached the keychain and nothing reached the file: a revoke that would have acked a write that never happened, which is what the outer guard prevents')
     })
   })
 })
