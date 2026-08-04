@@ -198,3 +198,60 @@ describe('SubagentCounter — per-project totals (#5463)', () => {
     assert.equal(counter.getCount('claude-hooks', 'b'), 1)
   })
 })
+
+// #7103 — the THIRD aggregate keyed on (source, sessionId). turn-tracker.js and
+// external-session-registry.js were fixed with the rest of the NUL sweep; this
+// one escaped it only because its separator was written as a `\\u0000` ESCAPE
+// rather than a raw byte, so it never showed up in the search-visibility scan.
+// The aliasing defect is identical and its own header names the reason: the key
+// space is attacker-influenced via `sessionId`, which is NOT charset-restricted
+// by IngestEventSchema (only `source` is). A bare separator join is injective
+// only while no part can contain the separator, and nothing enforces that here.
+describe('SubagentCounter - composite key is unambiguous (#7103)', () => {
+  it('does not alias two (source, sessionId) pairs that share a separator-joined key', () => {
+    const counter = new SubagentCounter()
+    const NUL = String.fromCharCode(0)
+    // Under `source + NUL + sessionId` both of these flatten to "a<NUL>b<NUL>c".
+    counter.record('subagent_start', `a${NUL}b`, 'c')
+    assert.equal(counter.getCount(`a${NUL}b`, 'c'), 1, 'the recorded pair must be counted')
+    assert.equal(counter.getCount('a', `b${NUL}c`), 0, 'a DIFFERENT pair must not read its count')
+  })
+
+  it('does not alias pairs that collide on the replacement encoding either', () => {
+    const counter = new SubagentCounter()
+    // Adversarial against the length-prefixed encoding itself: both parts carry
+    // its delimiters (':' and '|') and a leading digit run.
+    counter.record('subagent_start', 'a|1:b', 'c')
+    assert.equal(counter.getCount('a|1:b', 'c'), 1)
+    assert.equal(counter.getCount('a', '1:b|c'), 0)
+    assert.equal(counter.getCount('a|1', 'b|c'), 0)
+    assert.equal(counter.size, 1)
+  })
+
+  it('keeps subagent_stop and session_end scoped to the exact pair', () => {
+    const counter = new SubagentCounter()
+    const NUL = String.fromCharCode(0)
+    counter.record('subagent_start', `a${NUL}b`, 'c')
+    counter.record('subagent_start', 'a', `b${NUL}c`)
+    assert.equal(counter.size, 2, 'the two pairs must occupy two entries')
+    // Aliased, a stop for one pair would decrement the other's count to 0.
+    counter.record('subagent_stop', 'a', `b${NUL}c`)
+    assert.equal(counter.getCount(`a${NUL}b`, 'c'), 1, 'stopping one pair must not decrement the other')
+    counter.record('session_end', 'a', `b${NUL}c`)
+    assert.equal(counter.getCount(`a${NUL}b`, 'c'), 1, 'ending one session must not evict the other')
+    assert.equal(counter.size, 1)
+  })
+
+  it('keeps two aliasing pairs out of one project total', () => {
+    const counter = new SubagentCounter()
+    const NUL = String.fromCharCode(0)
+    counter.record('subagent_start', `a${NUL}b`, 'c', 'proj1')
+    counter.record('subagent_start', 'a', `b${NUL}c`, 'proj1')
+    // Aliased, the second start lands on the first entry and the total is 2
+    // from ONE entry — right number, wrong reason, and a session_end for either
+    // pair then zeroes both. Two entries of 1 is the correct shape.
+    assert.equal(counter.getProjectTotal('proj1'), 2)
+    counter.record('session_end', 'a', `b${NUL}c`)
+    assert.equal(counter.getProjectTotal('proj1'), 1)
+  })
+})

@@ -181,3 +181,46 @@ describe('TurnTracker — per-project aggregate (#5541)', () => {
     assert.equal(tracker.anyTurnInFlight('proj1'), true)
   })
 })
+
+// #7103 — the composite Map key used to be `${source}<NUL>${sessionId}`, with a
+// LITERAL NUL byte in the source file. Two problems, both fixed by encoding the
+// key unambiguously in plain ASCII (utils/composite-key.js):
+//   1. the raw byte made turn-tracker.js invisible to every NUL-sniffing code
+//      search (grep -I and friends silently skip it)
+//   2. a bare separator only stays injective because `source` happens to be
+//      charset-restricted by IngestEventSchema — a CALLER-side invariant this
+//      module cannot enforce. Flattening two fields onto one separator-joined
+//      string aliases distinct pairs the moment a field contains the separator.
+describe('TurnTracker - composite key is unambiguous (#7103)', () => {
+  it('does not alias two (source, sessionId) pairs that share a separator-joined key', () => {
+    const tracker = new TurnTracker()
+    const NUL = String.fromCharCode(0)
+    // Under the old `source + NUL + sessionId` key both of these flatten to
+    // the identical string "a<NUL>b<NUL>c".
+    tracker.record('user_prompt_submit', `a${NUL}b`, 'c')
+    assert.equal(tracker.isInFlight(`a${NUL}b`, 'c'), true, 'the recorded pair must be in flight')
+    assert.equal(tracker.isInFlight('a', `b${NUL}c`), false, 'a DIFFERENT pair must not alias onto it')
+  })
+
+  it('does not alias pairs that collide on the replacement encoding either', () => {
+    const tracker = new TurnTracker()
+    // Adversarial against the length-prefixed encoding itself: both parts
+    // carry its delimiters (':' and '|') and a leading digit run.
+    tracker.record('user_prompt_submit', 'a|1:b', 'c')
+    assert.equal(tracker.isInFlight('a|1:b', 'c'), true)
+    assert.equal(tracker.isInFlight('a', '1:b|c'), false)
+    assert.equal(tracker.isInFlight('a|1', 'b|c'), false)
+    assert.equal(tracker.size, 1)
+  })
+
+  it('keeps stop/session_end scoped to the exact pair', () => {
+    const tracker = new TurnTracker()
+    const NUL = String.fromCharCode(0)
+    tracker.record('user_prompt_submit', `a${NUL}b`, 'c')
+    tracker.record('user_prompt_submit', 'a', `b${NUL}c`)
+    assert.equal(tracker.size, 2, 'the two pairs must occupy two entries')
+    tracker.record('stop', 'a', `b${NUL}c`)
+    assert.equal(tracker.isInFlight(`a${NUL}b`, 'c'), true, 'stopping one pair must not clear the other')
+    assert.equal(tracker.size, 1)
+  })
+})

@@ -32,6 +32,8 @@
  * project key has no source dimension either.
  */
 
+import { compositeKey } from './utils/composite-key.js'
+
 /** Default time-to-live for an untouched entry. */
 export const SUBAGENT_ENTRY_TTL_MS = 2 * 60 * 60 * 1000 // 2h
 
@@ -52,7 +54,13 @@ export class SubagentCounter {
   }
 
   _key(source, sessionId) {
-    return `${source}\u0000${sessionId}`
+    // Length-prefixed, plain-ASCII encoding (#7103), matching the two sibling
+    // aggregates (turn-tracker.js, external-session-registry.js). The previous
+    // key flattened the pair onto a single separator, which is injective only
+    // while no part can contain it -- a CALLER-side invariant this module
+    // cannot enforce, and `sessionId` (the attacker-influenced half, per the
+    // header) is NOT charset-restricted by IngestEventSchema.
+    return compositeKey(source, sessionId)
   }
 
   _sweep(force = false) {
