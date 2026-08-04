@@ -13,9 +13,10 @@
  * command this machine will run", #6974/#7001) or creating a `user-shell`
  * session: it causes future host-side execution the requester will not be
  * present to supervise. Every MUTATION here is consequently gated on the STRICT
- * PRIMARY token class (`client.isPrimaryToken === true`), not the weaker
- * "any unbound client" host-authority bar — an ordinary paired phone holds an
- * unbound linking-mode pairing token and must not be able to schedule
+ * PRIMARY token class AND on being unbound (`client.isPrimaryToken === true &&
+ * !client.boundSessionId`) — a superset of, not an alternative to, the weaker
+ * "any unbound client" host-authority bar, because an ordinary paired phone
+ * holds an unbound linking-mode pairing token and must not be able to schedule
  * unattended execution. See docs/security/bearer-token-authority.md.
  *
  * Per the #6998 house pattern there is NO shared cross-surface reject helper:
@@ -94,15 +95,28 @@ function schedulerError(ws, ctx, msg, code, message) {
  * `terminal_input`, `revoke_token`, `orchestration_run_start` and MCP config
  * writes.
  *
+ * The `boundSessionId` term keeps this gate strictly STRONGER than the read gate
+ * below (#7025). Without it the two were asymmetric in the unsafe direction: a
+ * bound + primary client was refused the harmless registry READ yet permitted
+ * every MUTATION. That combination is not reachable over the wire today —
+ * `ws-auth.js` derives `isPrimaryToken` as `!authRequired ||
+ * !pairingManager?.isSessionTokenValid(token)`, so a session-bound token always
+ * yields `false` — so this is defence in depth against a future auth change,
+ * not a live hole. It costs one conjunct and removes the trap.
+ *
+ * Both refusals share `SCHEDULER_FORBIDDEN_NON_PRIMARY_CLIENT`: it is the code
+ * the dashboard correlates a failed mutation on, and a second code for a state
+ * no wire client can reach would be untestable surface for no gain.
+ *
  * Logging uses `sessionLogger` (never `loggerForSession`, which throws on an
  * absent sessionId) because a rejected client is frequently unbound.
  *
  * @returns {boolean} true if the caller was rejected (handler must return).
  */
 function rejectSchedulerWriteUnlessPrimary(ws, client, msg, ctx, op) {
-  if (client?.isPrimaryToken === true) return false
+  if (client?.isPrimaryToken === true && !client?.boundSessionId) return false
   sessionLogger(client?.boundSessionId).warn(
-    `Client ${client?.id}${client?.boundSessionId ? ` (bound to ${client.boundSessionId})` : ' (unbound, non-primary)'} attempted ${op} — rejected (scheduled-task writes require the primary token)`,
+    `Client ${client?.id}${client?.boundSessionId ? ` (bound to ${client.boundSessionId})` : ' (unbound, non-primary)'} attempted ${op} — rejected (scheduled-task writes require an UNBOUND primary token)`,
   )
   schedulerError(
     ws, ctx, msg,
