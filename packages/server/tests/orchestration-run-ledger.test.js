@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, existsSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, rmSync, existsSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { RunLedger } from '../src/orchestration/run-ledger.js'
@@ -252,6 +252,41 @@ describe('RunLedger journal-append failure durability (#6720)', () => {
     assert.equal(snap.lastSeq, 4, 'snapshot caught up to the un-journaled event')
     assert.equal(snap.usageTotals.overall.costUsd, 0.5, 'both folds reached the durable snapshot')
     led.dispose()
+  })
+
+  // The forced flush is best-effort: _saveSnapshot swallows its own error, and
+  // only DELETES the run from _dirty on success. Because the journal-failure
+  // path never marks the run dirty in the first place, a flush that ALSO fails
+  // used to leave the fold with no retry at all — strictly worse than the
+  // pre-#6720 _scheduleSave, which at least got another attempt at shutdown.
+  it('still retries at shutdown when BOTH the journal append and the forced snapshot fail', () => {
+    const led = mkLedger({ saveDebounceMs: 60_000 })
+    const run = led.createRun({ title: 'x' })
+    led.createSubtask(run.runId, { subtaskId: 'st1', role: 'a' }) // lifecycle → flushed
+    const runDir = join(baseDir, 'runs', run.runId)
+    const snapPath = join(runDir, 'run.json')
+    const journalPath = join(runDir, 'events.jsonl')
+    const readSnap = () => JSON.parse(readFileSync(snapPath, 'utf8'))
+
+    // Break BOTH sinks for one event: a directory at the journal path (EISDIR
+    // on append) and a read-only run dir (EACCES creating the snapshot tmp).
+    rmSync(journalPath)
+    mkdirSync(journalPath)
+    chmodSync(runDir, 0o500)
+    led.recordTurnUsage(run.runId, {
+      subtaskId: 'st1', sessionId: 's1', role: 'a', data: { cost: 0.4, usage: { input_tokens: 10 } },
+    })
+    chmodSync(runDir, 0o700) // the transient failure clears
+
+    // Positive controls (both pass on unmodified source): the forced snapshot
+    // really did fail, and the fold advanced in memory anyway.
+    assert.equal(readSnap().usageTotals.overall.costUsd, 0, 'the forced snapshot did not land')
+    assert.equal(led.getRun(run.runId).lastSeq, 3, 'the event still folded in memory')
+
+    // The run must still be pending, so the shutdown flush picks it up.
+    led.dispose()
+    assert.equal(readSnap().usageTotals.overall.costUsd, 0.4, 'shutdown flush retried the un-saved fold')
+    assert.equal(readSnap().lastSeq, 3, 'shutdown flush persisted the un-journaled seq')
   })
 })
 

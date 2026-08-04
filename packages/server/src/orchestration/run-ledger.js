@@ -13,10 +13,12 @@
  *
  * Durability boundary (mirrors #5309): the journal is appended synchronously
  * per event and is the crash record; run.json is debounced for high-frequency
- * turn_usage folds and flushed (fsync) immediately on lifecycle mutations and
- * at terminal state. On boot, recoverRuns() replays journal lines with
- * seq > snapshot.lastSeq through the reducer, so a crash between an append and
- * the debounced save loses nothing.
+ * turn_usage folds and flushed (fsync) immediately on lifecycle mutations, at
+ * terminal state, AND whenever the journal append itself failed (#6720) — with
+ * no crash record, the snapshot has to be it. On boot, recoverRuns() replays
+ * journal lines with seq > snapshot.lastSeq through the reducer, so a crash
+ * between an append and the debounced save loses nothing, then re-applies the
+ * LRU bound so a maxRuns lowered between boots takes effect immediately.
  */
 
 import { EventEmitter } from 'node:events'
@@ -80,7 +82,8 @@ export class RunLedger extends EventEmitter {
 
   /**
    * Journal one event, apply it to the in-memory record, and persist. Lifecycle
-   * events flush (fsync) immediately; high-frequency folds are debounced.
+   * events flush (fsync) immediately; high-frequency folds are debounced, EXCEPT
+   * when the journal append failed, which forces the flush (#6720).
    * The journal append happens BEFORE the snapshot save so it is always the
    * furthest-ahead record.
    */
@@ -110,6 +113,12 @@ export class RunLedger extends EventEmitter {
       this._flushNow(runId)
       this._updateIndex()
     } else if (journalFailed) {
+      // Mark dirty FIRST: _flushNow is best-effort (_saveSnapshot swallows its
+      // own error and only clears the dirty flag on success), so if the snapshot
+      // write fails too the run stays queued for the debounce/shutdown flush.
+      // Without this, a double failure would drop the fold with no retry at all
+      // — strictly worse than the plain _scheduleSave it replaces.
+      this._scheduleSave(runId)
       this._flushNow(runId)
     } else {
       this._scheduleSave(runId)
