@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { EventEmitter } from 'node:events'
 
+import { RunSummarySchema } from '@chroxy/protocol'
 import { OrchestrationManager } from '../src/orchestration/orchestration-manager.js'
 import { OrchestrationPermissionGate } from '../src/orchestration/permission-gate.js'
 import { RunLedger } from '../src/orchestration/run-ledger.js'
@@ -574,6 +575,121 @@ test('repo-audit preset supplies the goal and forces audit role', async () => {
     assert.equal(record.subtasks[0].role, 'worker.audit', 'implement coerced to audit')
     // the run was created with no explicit goal — the preset supplied it
     assert.equal(record.preset, 'repo-audit')
+  } finally {
+    cleanup()
+  }
+})
+
+// --- #6733: session-headroom starvation --------------------------------------
+
+// Settle the microtask + timer queues so a fully synchronous scheduler pass (and
+// anything it kicked off) has run before we assert.
+const settle = () => new Promise((r) => setTimeout(r, 20))
+
+// maxSessions 3 with a reserve of 1 means the scheduler only spawns a worker
+// while `liveSessions + 1 <= 2` — i.e. room for the architect plus exactly ONE
+// worker. Adding a single unrelated (non-run) session therefore starves the run
+// completely, which is the production shape of #6733: a busy daemon's own
+// interactive sessions occupy the pool the orchestrator counts against.
+const STARVED = { maxSessions: 3, reserveSessions: 1 }
+
+const workerSessions = (sm) => sm.created.filter((c) => String(c.opts.metadata?.orchestrationRole ?? '').startsWith('worker'))
+
+test('#6733: session-pool starvation surfaces resource_paused instead of a silent executing hang', async () => {
+  const { sm, ledger, mgr, cleanup } = makeHarness(happyDecider, { config: STARVED })
+  const stalls = []
+  const deltas = []
+  mgr.on('run_resource_paused', (p) => stalls.push(p))
+  mgr.on('run_delta', (d) => deltas.push(d))
+  try {
+    // An unrelated interactive session already holds a slot before the run starts.
+    sm.createSession({ metadata: {} })
+    const rec = mgr.createRun({ goal: 'Audit', cwd: '/repo', autoApprovePlan: true })
+    await mgr.startRun(rec.runId)
+    await settle()
+
+    // POSITIVE CONTROL (passes on UNMODIFIED source): the fixture really starves
+    // the scheduler — the architect planned, but no worker was ever spawned and
+    // no subtask left `pending`. Without this the stall assertions below could
+    // pass for the wrong reason.
+    const record = ledger.getRun(rec.runId)
+    assert.equal(workerSessions(sm).length, 0, 'starvation fixture must block every worker spawn')
+    assert.ok(record.subtasks.length > 0, 'the architect must have produced subtasks to starve')
+    assert.ok(record.subtasks.every((s) => s.status === 'pending'), 'every subtask must still be pending')
+
+    // THE DEFECT: pre-fix the run sits in `executing` forever with no gate and no
+    // event. It must report the stall instead.
+    assert.equal(record.status, 'resource_paused', 'a run that cannot spawn any worker must not look healthy')
+    assert.equal(stalls.length, 1, 'exactly one run_resource_paused event')
+    assert.equal(stalls[0].runId, rec.runId)
+
+    // The stall must SURVIVE the wire, not just the ledger: RunSummarySchema.status
+    // is a strict z.enum, so a status missing from RUN_STATUS_VALUES makes the
+    // dashboard's safeParse drop the whole run header — the run would look frozen
+    // at its last valid status, which is the very failure this issue is about.
+    const stallDelta = deltas.at(-1)
+    assert.equal(stallDelta.run.status, 'resource_paused', 'the stall reached the wire projection')
+    const parsed = RunSummarySchema.safeParse(stallDelta.run)
+    assert.equal(parsed.success, true, `stalled RunSummary must validate: ${JSON.stringify(parsed.error?.issues ?? [])}`)
+  } finally {
+    cleanup()
+  }
+})
+
+test('#6733: freeing a session slot clears resource_paused and the run runs to completion', async () => {
+  const { sm, ledger, mgr, cleanup } = makeHarness(happyDecider, { config: STARVED })
+  const resumes = []
+  mgr.on('run_resource_resumed', (p) => resumes.push(p))
+  try {
+    const interactive = sm.createSession({ metadata: {} })
+    const rec = mgr.createRun({ goal: 'Audit', cwd: '/repo', autoApprovePlan: true })
+    const stalled = waitFor(mgr, ['run_resource_paused'])
+    await mgr.startRun(rec.runId)
+    await stalled
+    assert.equal(ledger.getRun(rec.runId).status, 'resource_paused')
+
+    // The user closes their unrelated session → capacity is back. A stall that
+    // latches is worse than none, so this must self-clear with no user action.
+    const done = waitFor(mgr, ['run_completed'], { timeoutMs: 8000 })
+    sm.destroySession(interactive)
+    await done
+
+    const record = ledger.getRun(rec.runId)
+    assert.equal(record.status, 'completed')
+    assert.ok(record.subtasks.every((s) => s.status === 'done'), 'every subtask completed after the stall cleared')
+    assert.equal(resumes.length, 1, 'exactly one run_resource_resumed event')
+    assert.equal(resumes[0].runId, rec.runId)
+  } finally {
+    cleanup()
+  }
+})
+
+test('#6733: ordinary saturation with a worker still in flight does NOT report a stall', async () => {
+  // No unrelated session: the architect + one worker exactly fill the pool, so
+  // the second subtask hits `!headroom` on every pass while the first worker
+  // runs. That is progress, not a stall — pausing here would fire on most runs
+  // and train the operator to ignore the state.
+  const { sm, ledger, mgr, cleanup } = makeHarness(happyDecider, { config: STARVED })
+  const stalls = []
+  mgr.on('run_resource_paused', (p) => stalls.push(p))
+  let peakLive = 0
+  const origCreate = sm.createSession.bind(sm)
+  sm.createSession = (opts) => {
+    const id = origCreate(opts)
+    peakLive = Math.max(peakLive, sm.listSessions().length)
+    return id
+  }
+  try {
+    const rec = mgr.createRun({ goal: 'Audit', cwd: '/repo', autoApprovePlan: true })
+    const done = waitFor(mgr, ['run_completed'])
+    await mgr.startRun(rec.runId)
+    await done
+
+    // POSITIVE CONTROL: the headroom gate really engaged — with maxParallelWorkers
+    // defaulting to 2, an ungated scheduler would have had 3 sessions live at once.
+    assert.equal(peakLive, 2, 'the headroom gate must have serialized the two workers')
+    assert.equal(ledger.getRun(rec.runId).status, 'completed')
+    assert.equal(stalls.length, 0, 'a saturated but progressing run must not report a stall')
   } finally {
     cleanup()
   }

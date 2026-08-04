@@ -16,6 +16,9 @@ describe('orchestration canonical enums', () => {
   it('expose the run/subtask/gate/verdict value arrays the engine imports', () => {
     assert.ok(RUN_STATUS_VALUES.includes('paused'))
     assert.ok(RUN_STATUS_VALUES.includes('budget_paused'))
+    // #6733 — RunSummarySchema.status is a strict z.enum, so a status the engine
+    // can journal but the enum omits makes safeParse DROP the whole summary.
+    assert.ok(RUN_STATUS_VALUES.includes('resource_paused'))
     assert.ok(RUN_STATUS_VALUES.includes('suspended'))
     assert.ok(RUN_NODE_STATUS_VALUES.includes('escalated'))
     assert.ok(RUN_NODE_STATUS_VALUES.includes('conflict_fixup'))

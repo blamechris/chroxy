@@ -28,6 +28,18 @@ describe('run transitions', () => {
     assert.equal(assertRunTransition('executing', 'cancelling'), true)
     assert.equal(assertRunTransition('planning', 'suspended'), true)
   })
+  it('#6733: allows the resource_paused stall to be entered, cleared and cancelled', () => {
+    // The guards are FAIL-CLOSED since #6732, so a state the engine can journal
+    // but the table omits throws at runtime and wedges a live run.
+    assert.equal(assertRunTransition('executing', 'resource_paused'), true)
+    assert.equal(assertRunTransition('resource_paused', 'executing'), true)
+    // a gate resolution can retire the last pending subtask while stalled
+    assert.equal(assertRunTransition('resource_paused', 'synthesizing'), true)
+    assert.equal(assertRunTransition('resource_paused', 'cancelling'), true)
+    assert.equal(assertRunTransition('suspended', 'resource_paused'), true)
+    // ...but re-pausing an already-stalled run is a bug, not a state change
+    assert.throws(() => assertRunTransition('resource_paused', 'resource_paused'), TransitionError)
+  })
   it('rejects illegal + terminal-source transitions', () => {
     assert.throws(() => assertRunTransition('created', 'completed'), TransitionError)
     assert.throws(() => assertRunTransition('completed', 'executing'), TransitionError)

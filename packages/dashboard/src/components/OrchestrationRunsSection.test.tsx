@@ -280,6 +280,25 @@ describe('OrchestrationRunsSection (#6691 S-3b)', () => {
     expect(screen.queryByTestId('orch-run-controls')).toBeNull()
   })
 
+  it('#6733: a resource_paused run renders a warn chip and NO Resume button', () => {
+    resetStore({
+      orchestrationRuns: snapshot([runSummary({ status: 'resource_paused' })]),
+      selectedRunId: 'run_1',
+      orchestrationRunDetails: { run_1: { detail: runDetail({ status: 'resource_paused' }), seq: 3 } },
+    })
+    render(<OrchestrationRunsSection />)
+    const chip = screen.getAllByTestId('orch-run-status')[0] as HTMLElement
+    // POSITIVE CONTROL: the row really rendered this status, so the accent
+    // assertion below is reading the right chip.
+    expect(chip.textContent).toBe('resource paused')
+    // a stall the operator must notice — not the neutral in-flight accent
+    expect(chip.getAttribute('data-accent')).toBe('warn')
+    // the engine clears this itself when a slot frees; a Resume button would
+    // either no-op or race it
+    expect(screen.queryByTestId('orch-action-resume')).toBeNull()
+    expect(screen.getByTestId('orch-action-cancel')).toBeTruthy()
+  })
+
   it('AnnotateForm: submits baseline + verdict quality at terminal state', () => {
     resetStore({
       orchestrationRuns: snapshot([runSummary({ status: 'completed' })]),

@@ -31,10 +31,12 @@ split the synthesized map" note still applies to whichever future PR adds the ov
 
 1. **Enums** — protocol (`schemas/server/orchestration.ts`) is the single source; the engine
    imports them. Run states: `created, planning, plan_review, executing, paused, budget_paused,
-   synthesizing, cancelling, suspended, completed, failed, cancelled` (`paused` = user-requested
-   pause via `orchestration_run_action`; distinct from `budget_paused` so the UI can render the
-   cause — without it, reconciliation 10's `resume`-from-`paused` would be unserializable in the
-   strict wire enum). Subtask states: `pending,
+   resource_paused, synthesizing, cancelling, suspended, completed, failed, cancelled` (`paused` =
+   user-requested pause via `orchestration_run_action`; distinct from `budget_paused` so the UI can
+   render the cause — without it, reconciliation 10's `resume`-from-`paused` would be unserializable
+   in the strict wire enum. `resource_paused` (#6733) = the daemon's session pool is full so the run
+   cannot spawn its next worker and has nothing in flight; engine-cleared, not user-resumed).
+   Subtask states: `pending,
    spawning, briefing, poa_review, executing, result_review, respawning, merging, conflict_fixup,
    escalated, done, skipped, failed, cancelled, interrupted`. Committee verdicts:
    `approve | revise | redelegate | escalate` (engine's `accept` renamed). (F1, F2, F10)

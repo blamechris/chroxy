@@ -16,7 +16,7 @@ import { z } from 'zod';
  * dashboard message-handler and moves them to DASHBOARD_ONLY. Mobile parity is
  * a later fast-follow.
  */
-export declare const RUN_STATUS_VALUES: readonly ["created", "planning", "plan_review", "executing", "paused", "budget_paused", "synthesizing", "cancelling", "suspended", "completed", "failed", "cancelled"];
+export declare const RUN_STATUS_VALUES: readonly ["created", "planning", "plan_review", "executing", "paused", "budget_paused", "resource_paused", "synthesizing", "cancelling", "suspended", "completed", "failed", "cancelled"];
 export declare const RUN_NODE_STATUS_VALUES: readonly ["pending", "spawning", "briefing", "poa_review", "executing", "result_review", "respawning", "merging", "conflict_fixup", "escalated", "done", "skipped", "failed", "cancelled", "interrupted"];
 export declare const RUN_GATE_KIND_VALUES: readonly ["epic_plan", "escalation", "bash_permission", "budget_overrun"];
 export declare const RUN_GATE_STATUS_VALUES: readonly ["pending", "approved", "rejected", "revise_requested", "skipped", "expired"];
@@ -178,6 +178,7 @@ export declare const RunSummarySchema: z.ZodObject<{
         executing: "executing";
         paused: "paused";
         budget_paused: "budget_paused";
+        resource_paused: "resource_paused";
         synthesizing: "synthesizing";
         cancelling: "cancelling";
         suspended: "suspended";
@@ -231,6 +232,7 @@ export declare const RunDetailSchema: z.ZodObject<{
         executing: "executing";
         paused: "paused";
         budget_paused: "budget_paused";
+        resource_paused: "resource_paused";
         synthesizing: "synthesizing";
         cancelling: "cancelling";
         suspended: "suspended";
@@ -416,6 +418,7 @@ export declare const ServerOrchestrationRunsSnapshotSchema: z.ZodObject<{
             executing: "executing";
             paused: "paused";
             budget_paused: "budget_paused";
+            resource_paused: "resource_paused";
             synthesizing: "synthesizing";
             cancelling: "cancelling";
             suspended: "suspended";
@@ -479,6 +482,7 @@ export declare const ServerOrchestrationRunSnapshotSchema: z.ZodObject<{
             executing: "executing";
             paused: "paused";
             budget_paused: "budget_paused";
+            resource_paused: "resource_paused";
             synthesizing: "synthesizing";
             cancelling: "cancelling";
             suspended: "suspended";
@@ -670,6 +674,7 @@ export declare const ServerOrchestrationRunDeltaSchema: z.ZodObject<{
             executing: "executing";
             paused: "paused";
             budget_paused: "budget_paused";
+            resource_paused: "resource_paused";
             synthesizing: "synthesizing";
             cancelling: "cancelling";
             suspended: "suspended";
