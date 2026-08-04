@@ -25,6 +25,19 @@ function singleGroup(message: ChatMessage): DisplayGroup {
   return { type: 'single', message };
 }
 
+function activityGroup(messages: ChatMessage[]): DisplayGroup {
+  return {
+    type: 'activity',
+    messages,
+    isActive: false,
+    key: `activity-${messages[0].id}`,
+  };
+}
+
+function ids(groups: DisplayGroup[]): string[] {
+  return groups.map((g) => (g.type === 'single' ? g.message.id : g.key));
+}
+
 describe('insertCompactionMarkers (#6972)', () => {
   it('returns the base groups unchanged when no message carries compactMetadata', () => {
     const messages: ChatMessage[] = [
@@ -104,5 +117,77 @@ describe('insertCompactionMarkers (#6972)', () => {
       'u1',
       'sysB',
     ]);
+  });
+
+  // #6993 — the timestamp tie-break. Placement scans for the first group
+  // whose timestamp is STRICTLY greater than the marker's, so a marker that
+  // ties with an existing row lands immediately AFTER that row. Timestamps
+  // collide in practice (same-millisecond emission), and "after" is the
+  // right answer: the compaction boundary happened once that row existed.
+  // Every other fixture in this file uses distinct timestamps, so these are
+  // the only cases pinning the `>` (rather than `>=`) comparison.
+  describe('equal timestamps (tie-break)', () => {
+    const tieMeta: ChatMessage['compactMetadata'] = {
+      trigger: 'auto',
+      preTokens: 100,
+      postTokens: 10,
+      durationMs: 50,
+    };
+
+    it('places a marker AFTER an existing row sharing its exact timestamp', () => {
+      const tied = msg({ id: 'u1', type: 'user_input', content: 'hi', timestamp: 5 });
+      const later = msg({ id: 'r1', type: 'response', content: 'hello', timestamp: 10 });
+      const marker = msg({
+        id: 'sys1',
+        type: 'system',
+        content: 'Context compacted',
+        timestamp: 5,
+        compactMetadata: tieMeta,
+      });
+      const out = insertCompactionMarkers(
+        [singleGroup(tied), singleGroup(later)],
+        [tied, marker, later],
+      );
+      // NOT ['sys1', 'u1', 'r1'] — the tied row keeps its place ahead of the marker.
+      expect(ids(out)).toEqual(['u1', 'sys1', 'r1']);
+    });
+
+    it('places a marker AFTER the last row when it ties with that row', () => {
+      const early = msg({ id: 'u1', type: 'user_input', content: 'hi', timestamp: 1 });
+      const tiedLast = msg({ id: 'r1', type: 'response', content: 'hello', timestamp: 7 });
+      const marker = msg({
+        id: 'sys1',
+        type: 'system',
+        content: 'Context compacted',
+        timestamp: 7,
+        compactMetadata: tieMeta,
+      });
+      const out = insertCompactionMarkers(
+        [singleGroup(early), singleGroup(tiedLast)],
+        [early, tiedLast, marker],
+      );
+      expect(ids(out)).toEqual(['u1', 'r1', 'sys1']);
+    });
+
+    it('ties against an activity group using its FIRST message timestamp, landing after the whole group', () => {
+      // groupTimestamp() reads messages[0] for an activity group, so a marker
+      // tying with the group's opening tool_use lands after the entire group —
+      // never spliced into the middle of a tool run.
+      const toolA = msg({ id: 't1', type: 'tool_use', content: 'Read', timestamp: 4 });
+      const toolB = msg({ id: 't2', type: 'tool_use', content: 'Grep', timestamp: 9 });
+      const later = msg({ id: 'r1', type: 'response', content: 'done', timestamp: 12 });
+      const marker = msg({
+        id: 'sys1',
+        type: 'system',
+        content: 'Context compacted',
+        timestamp: 4,
+        compactMetadata: tieMeta,
+      });
+      const out = insertCompactionMarkers(
+        [activityGroup([toolA, toolB]), singleGroup(later)],
+        [toolA, toolB, marker, later],
+      );
+      expect(ids(out)).toEqual(['activity-t1', 'sys1', 'r1']);
+    });
   });
 });
