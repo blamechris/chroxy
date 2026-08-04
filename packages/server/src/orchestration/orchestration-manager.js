@@ -29,7 +29,7 @@
 import { EventEmitter } from 'node:events'
 import { randomBytes } from 'node:crypto'
 import { extractDecision, DecisionParseError, buildRepairPrompt } from './decision-contract.js'
-import { makeGate, resolveGate as resolveGateModel, nextGateId } from './run-model.js'
+import { makeGate, resolveGate as resolveGateModel, nextGateId, assertRunTransition, assertNodeTransition } from './run-model.js'
 import {
   architectPreamble, auditWorkerPreamble, implementWorkerPreamble, presetFor,
   buildPlanPrompt, buildPoaPrompt, buildPoaReviewPrompt,
@@ -172,6 +172,42 @@ export class OrchestrationManager extends EventEmitter {
     this._gate?.dispose?.()
   }
 
+  // --- status writes: the FSM choke point (#6732) --------------------------
+  //
+  // EVERY run/subtask status the engine journals goes through one of these two
+  // methods, and nothing else in this file may call `this._ledger.setStatus` /
+  // `this._ledger.updateSubtask` directly. run-model's transition tables are the
+  // contract; before #6732 they were exported but never invoked, so an engine
+  // bug that produced e.g. `planning -> synthesizing` or `pending -> done` was
+  // journaled silently. A guard wired into only SOME write paths is worse than
+  // none — it advertises coverage it does not have — hence the single choke
+  // point (asserted by orchestration-transition-guards.test.js, which fails if a
+  // second raw call site appears).
+  //
+  // Posture is FAIL-CLOSED: an illegal transition throws TransitionError
+  // (code ILLEGAL_TRANSITION) and nothing is written. The transition tables
+  // enumerate FORWARD PROGRESS only; the error terminals (`failed`, `cancelled`,
+  // `cancelling`, `interrupted`, `suspended`) are legal from any non-terminal
+  // state, so a teardown path can never be wedged by the guard it just tripped.
+
+  /** Journal a run status change, asserting the transition first. Also advances
+   *  the engine's `run.phase` mirror so the two can't drift. */
+  _setRunStatus(run, next, reason = null) {
+    const record = this._ledger.getRun(run.runId)
+    // No record (evicted/never created) → the ledger write is a no-op, so there
+    // is no transition to validate and nothing to journal.
+    if (record) assertRunTransition(record.status, next)
+    run.phase = next
+    return this._ledger.setStatus(run.runId, next, reason)
+  }
+
+  /** Journal a subtask status change, asserting the transition first. */
+  _setSubtaskStatus(run, subtaskId, next) {
+    const st = this._ledger.getRun(run.runId)?.subtasks?.find((s) => s.subtaskId === subtaskId)
+    if (st) assertNodeTransition(st.status, next)
+    return this._ledger.updateSubtask(run.runId, subtaskId, { status: next })
+  }
+
   // --- run creation --------------------------------------------------------
 
   createRun({ title = '', goal = null, cwd, preset = null, budgetUsd = null, autoApprovePlan = false, roleOverrides = null } = {}) {
@@ -245,8 +281,7 @@ export class OrchestrationManager extends EventEmitter {
   async startRun(runId) {
     const run = this._get(runId)
     if (run.phase !== 'created') throw new Error(`run ${runId} already started (phase ${run.phase})`)
-    run.phase = 'planning'
-    this._ledger.setStatus(runId, 'planning')
+    this._setRunStatus(run, 'planning')
     let plan
     try {
       plan = await this._plan(run)
@@ -274,8 +309,7 @@ export class OrchestrationManager extends EventEmitter {
     }
     // open the epic_plan user gate — the spend gate
     const gate = this._openGate(run, { kind: 'epic_plan', summary: `Approve the ${run.subtasks.size}-subtask audit plan`, detail: plan.summary ?? null })
-    run.phase = 'plan_review'
-    this._ledger.setStatus(runId, 'plan_review')
+    this._setRunStatus(run, 'plan_review')
     this.emit('gate_opened', { runId, gate })
     this._emitRunDelta(run, { gate })
     return { runId, phase: 'plan_review', gateId: gate.gateId }
@@ -322,8 +356,7 @@ export class OrchestrationManager extends EventEmitter {
   }
 
   _beginExecuting(run) {
-    run.phase = 'executing'
-    this._ledger.setStatus(run.runId, 'executing')
+    this._setRunStatus(run, 'executing')
     this._schedule(run)
     return { runId: run.runId, phase: 'executing' }
   }
@@ -370,13 +403,14 @@ export class OrchestrationManager extends EventEmitter {
       if (st.iterations >= this._cfg.maxCommitteeIterations) {
         return this._escalateSubtask(run, subtaskId, 'committee iteration cap exceeded')
       }
-      // 1) plan-of-attack
-      this._ledger.updateSubtask(run.runId, subtaskId, { status: 'briefing' })
+      // 1) plan-of-attack. This is also the loop's re-entry point after a revise
+      // or a redelegate, so it owns the `briefing` write for every path.
+      this._setSubtaskStatus(run, subtaskId, 'briefing')
       const poa = await this._driveDecision(run, sessionId, buildPoaPrompt({ subtask: st.spec }), 'plan_of_attack', 'poa', subtaskId).then((r) => r.decision)
       st.poa = poa
       // 2) architect reviews the PoA (usage attributed to architect.review, NOT
       // the subtask cell — see _architectReview)
-      this._ledger.updateSubtask(run.runId, subtaskId, { status: 'poa_review' })
+      this._setSubtaskStatus(run, subtaskId, 'poa_review')
       const poaReview = await this._architectReview(run, buildPoaReviewPrompt({ subtask: st.spec, poa }), 'poa_review')
       this._ledger.recordCommitteeReview(run.runId, subtaskId, { phase: 'plan', verdict: poaReview.verdict, reviewerSessionId: run.architectSessionId, notes: poaReview.feedback ?? '' })
       this._appendTimeline(run, { kind: 'committee_review', nodeId: subtaskId, verdict: poaReview.verdict, summary: `plan-of-attack ${poaReview.verdict}`, detail: poaReview.feedback ?? null })
@@ -388,14 +422,14 @@ export class OrchestrationManager extends EventEmitter {
         continue
       }
       // 3) execute
-      this._ledger.updateSubtask(run.runId, subtaskId, { status: 'executing' })
+      this._setSubtaskStatus(run, subtaskId, 'executing')
       const result = await this._driveDecision(run, sessionId, buildExecutePrompt({ subtask: st.spec, feedback }), 'work_result', 'execute', subtaskId).then((r) => r.decision)
       st.result = result
       // 3b) implement subtasks: commit the worktree and compute a review diff so
       // the architect reviews the ACTUAL change, not just the worker's summary.
       const diff = st.spec.role === 'implement' ? await this._commitAndDiff(run, subtaskId, sessionId) : null
       // 4) architect reviews the result (+ diff for implement)
-      this._ledger.updateSubtask(run.runId, subtaskId, { status: 'result_review' })
+      this._setSubtaskStatus(run, subtaskId, 'result_review')
       const resultReview = await this._architectReview(run, buildResultReviewPrompt({ subtask: st.spec, result, diff }), 'result_review')
       this._ledger.recordCommitteeReview(run.runId, subtaskId, { phase: 'result', verdict: resultReview.verdict, reviewerSessionId: run.architectSessionId, notes: resultReview.feedback ?? '' })
       this._appendTimeline(run, { kind: 'committee_review', nodeId: subtaskId, verdict: resultReview.verdict, summary: `result ${resultReview.verdict}`, detail: resultReview.feedback ?? null })
@@ -417,9 +451,14 @@ export class OrchestrationManager extends EventEmitter {
   async _spawnWorker(run, subtaskId) {
     const st = run.subtasks.get(subtaskId)
     const role = st.spec.role === 'implement' ? 'implement' : 'audit'
+    // `spawning` (design §3.3: pending -> spawning -> briefing) — the worker
+    // session does not exist yet, so this state, not `briefing`, is what the
+    // subtask is actually in while createSession + worktree setup run (and it is
+    // what a SessionLimitError throw leaves behind). `briefing` is written by
+    // the committee loop's first step, immediately after this returns.
+    this._setSubtaskStatus(run, subtaskId, 'spawning')
     const sessionId = this._spawnSession(run, { role, subtaskId })
     run.ownedSessions.set(sessionId, { role, subtaskId })
-    this._ledger.updateSubtask(run.runId, subtaskId, { status: 'briefing' })
     if (role === 'implement') {
       // The write worker got an isolated worktree (worktree:true) — put it on a
       // named branch and record the branch-point so the review diff + merge are
@@ -450,7 +489,7 @@ export class OrchestrationManager extends EventEmitter {
   // redelegate: tear down the current worker and hand the subtask to a fresh one.
   async _respawnWorker(run, subtaskId, oldSessionId) {
     await this._destroySession(run, oldSessionId)
-    this._ledger.updateSubtask(run.runId, subtaskId, { status: 'respawning' })
+    this._setSubtaskStatus(run, subtaskId, 'respawning')
     return this._spawnWorker(run, subtaskId)
   }
 
@@ -466,7 +505,7 @@ export class OrchestrationManager extends EventEmitter {
     if (run.cancelled || !this._runs.has(run.runId)) return
     const st = run.subtasks.get(subtaskId)
     if (st) st.state = status
-    this._ledger.updateSubtask(run.runId, subtaskId, { status })
+    this._setSubtaskStatus(run, subtaskId, status)
     await this._releaseSubtaskSessions(run, subtaskId)
     this._schedule(run)
   }
@@ -474,7 +513,7 @@ export class OrchestrationManager extends EventEmitter {
   async _escalateSubtask(run, subtaskId, reason) {
     const st = run.subtasks.get(subtaskId)
     if (st) st.state = 'escalated'
-    this._ledger.updateSubtask(run.runId, subtaskId, { status: 'escalated' })
+    this._setSubtaskStatus(run, subtaskId, 'escalated')
     // Free this subtask's worker so a pending sibling can take the slot while
     // the user resolves the escalation gate (auto-commits implement work first).
     await this._releaseSubtaskSessions(run, subtaskId)
@@ -499,8 +538,7 @@ export class OrchestrationManager extends EventEmitter {
   }
 
   async _synthesize(run) {
-    run.phase = 'synthesizing'
-    this._ledger.setStatus(run.runId, 'synthesizing')
+    this._setRunStatus(run, 'synthesizing')
     const { decision } = await this._driveDecision(run, run.architectSessionId, buildSynthesisPrompt({ goal: run.goal, results: run.results }), 'synthesis', 'synthesis', null)
     // Keep the architect's narrative in memory (it feeds the persisted report).
     this._rememberReport(run.runId, decision.reportMarkdown)
@@ -508,8 +546,7 @@ export class OrchestrationManager extends EventEmitter {
     // Remove the integration worktree; its branch (the run's output) is kept.
     const integrationBranch = run.integration?.branch ?? null
     await this._cleanupIntegration(run)
-    run.phase = 'completed'
-    this._ledger.setStatus(run.runId, 'completed')
+    this._setRunStatus(run, 'completed')
     // M-4: derive + persist report.{json,md} (metrics report with the synthesis
     // narrative prepended) so the artifact survives restarts.
     this._buildAndPersistReport(run.runId)
@@ -560,7 +597,7 @@ export class OrchestrationManager extends EventEmitter {
   // conflict → abort + escalate (the automated fixup worker is E-3 part 3).
   async _acceptImplement(run, subtaskId, sessionId, result) {
     const st = run.subtasks.get(subtaskId)
-    this._ledger.updateSubtask(run.runId, subtaskId, { status: 'merging' })
+    this._setSubtaskStatus(run, subtaskId, 'merging')
     await this._destroySession(run, sessionId)
     if (!st.branch || !st.baseSha) return this._escalateSubtask(run, subtaskId, 'no branch/worktree to merge')
     return this._withMergeLock(run, () => this._mergeAccepted(run, subtaskId, result))
@@ -746,8 +783,7 @@ export class OrchestrationManager extends EventEmitter {
   }
 
   _pauseForBudget(run) {
-    run.phase = 'budget_paused'
-    this._ledger.setStatus(run.runId, 'budget_paused')
+    this._setRunStatus(run, 'budget_paused')
     this.emit('run_budget_paused', { runId: run.runId })
     this._emitRunDelta(run)
   }
@@ -763,8 +799,7 @@ export class OrchestrationManager extends EventEmitter {
     // terminal 'cancelled' status with 'failed' (or double-emit lifecycle
     // events) when an in-flight turn rejects SESSION_GONE on the next tick.
     if (run.cancelled || !this._runs.has(run.runId)) return { runId: run.runId, phase: run.phase }
-    run.phase = 'failed'
-    this._ledger.setStatus(run.runId, 'failed', code)
+    this._setRunStatus(run, 'failed', code)
     // tear down any owned sessions (auto-commits implement worktrees first)
     for (const sid of [...run.ownedSessions.keys()]) await this._destroySession(run, sid)
     await this._cleanupIntegration(run)
@@ -779,6 +814,14 @@ export class OrchestrationManager extends EventEmitter {
     const run = this._runs.get(runId)
     if (!run) return null
     run.cancelled = true
+    // `cancelling` is the teardown-in-progress state (design §3.2:
+    // "any state --cancelRun--> cancelling --> cancelled"). Journaling it BEFORE
+    // the awaits — rather than jumping straight to `cancelled` — is what makes
+    // the FSM's intermediate state real: an observer polling during a slow
+    // teardown (interrupt + auto-commit of every implement worktree) sees
+    // `cancelling`, and a teardown that throws leaves a truthful non-terminal
+    // status instead of a `cancelled` run that was never torn down.
+    this._setRunStatus(run, 'cancelling', reason)
     // interrupt every in-flight owned session, then release (auto-commit → destroy)
     // so no implement worker's uncommitted work is lost.
     for (const sid of [...run.ownedSessions.keys()]) {
@@ -786,7 +829,7 @@ export class OrchestrationManager extends EventEmitter {
     }
     for (const sid of [...run.ownedSessions.keys()]) await this._destroySession(run, sid)
     await this._cleanupIntegration(run)
-    this._ledger.setStatus(runId, 'cancelled', reason)
+    this._setRunStatus(run, 'cancelled', reason)
     this.emit('run_cancelled', { runId, reason })
     this._emitRunDelta(run)
     this._cacheCompletedSnapshot(run)

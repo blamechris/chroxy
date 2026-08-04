@@ -182,6 +182,14 @@ Terminal: done | skipped | failed | cancelled
 
 **Committee iteration budget**: `committee.iterations` counts every `revise` and `redelegate` across both gates for that subtask. Default cap 4. Exceeding forces `escalated` — the architect can never spin unbounded worker spend.
 
+**Enforcement (#6732)**: both diagrams above are enforced at runtime — `OrchestrationManager` journals every run/subtask status through `_setRunStatus` / `_setSubtaskStatus`, which call `assertRunTransition` / `assertNodeTransition` first and throw `TransitionError` (`ILLEGAL_TRANSITION`) rather than writing an illegal transition. Nothing else in the manager may call `ledger.setStatus` / `ledger.updateSubtask`. Three points where the shipped engine is narrower or wider than the prose above, and which the tables in `run-model.js` therefore encode:
+
+- `result_review ── revise ──▶ briefing`, not `executing`: the engine re-drives the FULL committee cycle (fresh plan-of-attack + PoA review) with the architect's feedback attached to the later execute turn, rather than re-prompting the same session in place.
+- The iteration cap is evaluated at the TOP of the committee loop, i.e. *after* a `redelegate` has already re-spawned the worker, so a forced escalation can fire from `spawning`.
+- `escalated ── retry ──▶ spawning ──▶ briefing`: a user retry hands the subtask to a fresh worker, so it re-enters through the spawn step.
+
+The error terminals (`failed`, `cancelled`, `cancelling`, `interrupted`, `suspended`) are legal from any non-terminal state and are not enumerated per row — the transition rows describe forward progress only, so a fail-closed guard can never wedge a teardown path.
+
 ---
 
 ## 4. Sessions per role and turn driving

@@ -32,9 +32,10 @@ const NODE_STATUSES = new Set(RUN_NODE_STATUS_VALUES)
 export const TERMINAL_RUN_STATUSES = new Set(['completed', 'failed', 'cancelled'])
 export const TERMINAL_NODE_STATUSES = new Set(['done', 'skipped', 'failed', 'cancelled', 'interrupted'])
 
-// Legal run-state transitions. `cancelling` and `suspended` are reachable from
-// any non-terminal state (cancel request / daemon restart), handled specially
-// in assertRunTransition rather than enumerated on every row.
+// Legal run-state transitions. `cancelling`, `suspended` and `failed` are
+// reachable from any non-terminal state (cancel request / daemon restart /
+// unrecoverable error), handled specially in assertRunTransition rather than
+// enumerated on every row. Rows therefore describe FORWARD PROGRESS only.
 const RUN_TRANSITIONS = {
   created: ['planning'],
   planning: ['plan_review', 'executing', 'failed'], // executing when autoApprovePlan skips the gate
@@ -50,19 +51,29 @@ const RUN_TRANSITIONS = {
   cancelled: [],
 }
 
-// Legal subtask transitions (the committee loop). `respawning` re-enters
-// `briefing`; a revise loops back to `briefing` (poa) or `executing` (result).
+// Legal subtask transitions (the committee loop). `cancelled`, `interrupted`
+// and `failed` are reachable from any non-terminal state and are handled
+// specially in assertNodeTransition rather than enumerated on every row.
+// `respawning` re-enters `spawning`; a revise loops back to `briefing`.
 const NODE_TRANSITIONS = {
   pending: ['spawning', 'skipped', 'cancelled'],
-  spawning: ['briefing', 'failed', 'respawning'],
+  // The committee-iteration cap is evaluated at the TOP of the loop — i.e. after
+  // a `redelegate` has already re-spawned the worker — so a forced escalation
+  // can fire while the subtask sits in `spawning`.
+  spawning: ['briefing', 'escalated', 'failed', 'respawning'],
   briefing: ['poa_review', 'failed'],
   poa_review: ['executing', 'briefing', 'respawning', 'escalated', 'failed'],
   executing: ['result_review', 'failed'],
-  result_review: ['merging', 'done', 'executing', 'respawning', 'escalated', 'failed'],
+  // `briefing`: the engine re-drives the FULL committee cycle on a result
+  // `revise` (it loops back to the top with the architect's feedback attached to
+  // the later execute turn) rather than re-prompting the same session in place.
+  result_review: ['merging', 'done', 'executing', 'briefing', 'respawning', 'escalated', 'failed'],
   respawning: ['briefing', 'spawning', 'failed'],
   merging: ['done', 'conflict_fixup', 'escalated', 'failed'],
   conflict_fixup: ['merging', 'escalated', 'failed'],
-  escalated: ['briefing', 'done', 'skipped', 'failed'],
+  // `spawning`: a user retry ("retry-with-note") hands the subtask to a FRESH
+  // worker, so it re-enters through the spawn step.
+  escalated: ['briefing', 'spawning', 'done', 'skipped', 'failed'],
   done: [],
   skipped: [],
   failed: [],
@@ -80,24 +91,30 @@ export class TransitionError extends Error {
   }
 }
 
-/** Throw unless `from -> to` is a legal RUN transition. cancelling/suspended are
- *  reachable from any non-terminal state; a self-loop on executing is allowed. */
+/** Throw unless `from -> to` is a legal RUN transition. cancelling/suspended/
+ *  failed are reachable from any non-terminal state; a self-loop on executing is
+ *  allowed. */
 export function assertRunTransition(from, to) {
   if (!RUN_STATUSES.has(from)) throw new TransitionError('run', `${from} (unknown state)`, to)
   if (!RUN_STATUSES.has(to)) throw new TransitionError('run', from, `${to} (unknown state)`)
   if (from === to && to === 'executing') return true
-  if ((to === 'cancelling' || to === 'suspended') && !TERMINAL_RUN_STATUSES.has(from)) return true
+  // `failed` is an ERROR terminal, not forward progress: an unrecoverable engine
+  // error (or a user rejecting the plan / an escalation) can end a run from any
+  // non-terminal state. Enumerating it per-row would leave whichever row was
+  // missed as a fail-closed landmine that wedges a live run.
+  if ((to === 'cancelling' || to === 'suspended' || to === 'failed') && !TERMINAL_RUN_STATUSES.has(from)) return true
   const allowed = RUN_TRANSITIONS[from]
   if (!allowed || !allowed.includes(to)) throw new TransitionError('run', from, to)
   return true
 }
 
-/** Throw unless `from -> to` is a legal SUBTASK transition. cancelled/interrupted
- *  are reachable from any non-terminal state (run cancel / restart). */
+/** Throw unless `from -> to` is a legal SUBTASK transition. cancelled/interrupted/
+ *  failed are reachable from any non-terminal state (run cancel / restart /
+ *  unrecoverable error). */
 export function assertNodeTransition(from, to) {
   if (!NODE_STATUSES.has(from)) throw new TransitionError('node', `${from} (unknown state)`, to)
   if (!NODE_STATUSES.has(to)) throw new TransitionError('node', from, `${to} (unknown state)`)
-  if ((to === 'cancelled' || to === 'interrupted') && !TERMINAL_NODE_STATUSES.has(from)) return true
+  if ((to === 'cancelled' || to === 'interrupted' || to === 'failed') && !TERMINAL_NODE_STATUSES.has(from)) return true
   const allowed = NODE_TRANSITIONS[from]
   if (!allowed || !allowed.includes(to)) throw new TransitionError('node', from, to)
   return true
