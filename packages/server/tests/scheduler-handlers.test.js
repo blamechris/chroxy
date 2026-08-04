@@ -131,6 +131,14 @@ describe('scheduler handlers — authority gates', () => {
       assert.equal(sent[0].code, 'SCHEDULER_FORBIDDEN_NON_PRIMARY_CLIENT', label)
       assert.equal(sent[0].requestId, msg.requestId, `${label}: the rejection must echo requestId`)
       assert.equal(store.list().length, 0, `${label} must never reach the registry`)
+      // The two refusals share one code, so the MESSAGE is the only thing that
+      // can describe the real bar. It must name the whole requirement (an
+      // unbound primary token) rather than only the reachable half — a bound
+      // primary told its problem is being "pairing-issued" is a dishonest status.
+      assert.match(
+        sent[0].message, /unbound primary/i,
+        `${label}: the refusal must state the actual requirement, not just the pairing case`,
+      )
     }
   })
 

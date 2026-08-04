@@ -106,7 +106,10 @@ function schedulerError(ws, ctx, msg, code, message) {
  *
  * Both refusals share `SCHEDULER_FORBIDDEN_NON_PRIMARY_CLIENT`: it is the code
  * the dashboard correlates a failed mutation on, and a second code for a state
- * no wire client can reach would be untestable surface for no gain.
+ * no wire client can reach would be untestable surface for no gain. The message
+ * text therefore states the WHOLE bar (an unbound primary token) rather than only
+ * the reachable half, so one envelope describes both refusals honestly instead of
+ * telling a bound primary that its problem is being "pairing-issued".
  *
  * Logging uses `sessionLogger` (never `loggerForSession`, which throws on an
  * absent sessionId) because a rejected client is frequently unbound.
@@ -121,7 +124,7 @@ function rejectSchedulerWriteUnlessPrimary(ws, client, msg, ctx, op) {
   schedulerError(
     ws, ctx, msg,
     'SCHEDULER_FORBIDDEN_NON_PRIMARY_CLIENT',
-    'Pairing-issued tokens cannot create, change, or delete scheduled tasks — a scheduled task makes this machine run an agent session unattended. Use the primary API token from a device with physical access to this machine.',
+    'Creating, changing, or deleting a scheduled task requires an UNBOUND primary token — neither a pairing-issued token nor a connection bound to a single shared session qualifies, because a scheduled task makes this machine run an agent session unattended. Use the primary API token from a device with physical access to this machine.',
   )
   return true
 }
