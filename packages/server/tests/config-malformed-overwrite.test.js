@@ -206,3 +206,25 @@ describe('#7027 the corrupt-config backup does not multiply', () => {
     assert.deepEqual(backupsOf(p), [], 'an unreadable file cannot be copied aside')
   })
 })
+
+describe('#7027 backup keying survives a config truncated mid-character', () => {
+  it('keeps distinct backups for byte-different configs that DECODE the same', () => {
+    // A write truncated by a crash — the scenario this refusal exists for — can
+    // cut a multi-byte UTF-8 sequence in half. Two such files differ in their
+    // bytes but both decode to the same U+FFFD replacement, so keying the
+    // backup off the DECODED text silently collapses them and the refusal then
+    // names a backup holding the other truncation's content.
+    const a = Buffer.from([0x7b, 0x22, 0x61, 0x22, 0x3a, 0xff])  // {"a": <bad>
+    const b = Buffer.from([0x7b, 0x22, 0x61, 0x22, 0x3a, 0xfe])  // {"a": <different bad>
+    assert.notDeepEqual(a, b, 'fixture must differ in bytes')
+    assert.equal(a.toString('utf-8'), b.toString('utf-8'), 'fixture must decode identically')
+
+    writeFileSync(configPath, a)
+    assert.throws(() => writeReposToConfig([{ path: '/x' }], configPath))
+    writeFileSync(configPath, b)
+    assert.throws(() => writeReposToConfig([{ path: '/x' }], configPath))
+
+    const backups = backupsOf(configPath)
+    assert.equal(backups.length, 2, `byte-distinct damage must not collapse, got ${JSON.stringify(backups)}`)
+  })
+})

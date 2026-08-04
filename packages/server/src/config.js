@@ -1937,11 +1937,11 @@ export function readReposFromConfig(configPath = DEFAULT_CONFIG_PATH) {
  * The file's mtime still carries the "when".
  *
  * @param {string} configPath
- * @param {string} raw - The exact bytes read back, used to key the backup.
+ * @param {Buffer} bytes - The raw bytes read back, used to key the backup.
  * @returns {string|null} the backup path, or null if none could be made.
  */
-function backUpMalformedConfig(configPath, raw) {
-  const digest = createHash('sha256').update(raw).digest('hex').slice(0, 16)
+function backUpMalformedConfig(configPath, bytes) {
+  const digest = createHash('sha256').update(bytes).digest('hex').slice(0, 16)
   const backup = `${configPath}.corrupt-${digest}`
   try {
     copyFileSync(configPath, backup, fsConstants.COPYFILE_EXCL)
@@ -1981,9 +1981,14 @@ function backUpMalformedConfig(configPath, raw) {
  * @throws {Error} When the file exists but cannot be read or parsed into an object.
  */
 export function readConfigForMerge(configPath) {
-  let raw
+  // Read as BYTES and decode separately: the backup is keyed off the raw bytes,
+  // and a crash-truncated config can be cut mid multi-byte character, so two
+  // byte-different files can decode to the same U+FFFD-bearing string. Keying
+  // off the decoded text would collapse those onto one backup and then name it
+  // in the refusal for the version it does NOT hold.
+  let bytes
   try {
-    raw = readFileSync(configPath, 'utf-8')
+    bytes = readFileSync(configPath)
   } catch (err) {
     // Absent → legitimately start fresh. Anything else (EACCES, EISDIR, EIO) is
     // a read we cannot trust, and overwriting on the back of it loses the file.
@@ -1996,13 +2001,13 @@ export function readConfigForMerge(configPath) {
 
   let parsed
   try {
-    parsed = JSON.parse(raw)
+    parsed = JSON.parse(bytes.toString('utf-8'))
   } catch (err) {
-    throw refuseMalformedConfig(configPath, `it is not valid JSON (${err.message})`, raw)
+    throw refuseMalformedConfig(configPath, `it is not valid JSON (${err.message})`, bytes)
   }
   if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
     const found = parsed === null ? 'null' : (Array.isArray(parsed) ? 'an array' : `a ${typeof parsed}`)
-    throw refuseMalformedConfig(configPath, `it does not contain a JSON object (found ${found})`, raw)
+    throw refuseMalformedConfig(configPath, `it does not contain a JSON object (found ${found})`, bytes)
   }
   return parsed
 }
@@ -2012,11 +2017,11 @@ export function readConfigForMerge(configPath) {
  * backing the bad file up first (#7027).
  * @param {string} configPath
  * @param {string} reason - Why it could not be merged, in sentence-fragment form.
- * @param {string} raw - The exact bytes read back, used to key the backup.
+ * @param {Buffer} bytes - The raw bytes read back, used to key the backup.
  * @returns {Error}
  */
-function refuseMalformedConfig(configPath, reason, raw) {
-  const backup = backUpMalformedConfig(configPath, raw)
+function refuseMalformedConfig(configPath, reason, bytes) {
+  const backup = backUpMalformedConfig(configPath, bytes)
   return new Error(
     `Refusing to overwrite ${configPath}: ${reason}. ` +
     (backup ? `A copy was saved to ${backup}. ` : '') +
