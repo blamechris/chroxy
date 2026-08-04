@@ -1,7 +1,8 @@
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join, basename, extname } from 'path'
-import { BaseSession, buildBaseSessionOpts } from './base-session.js'
+import { BaseSession, buildBaseSessionOpts, DEFAULT_RESULT_TIMEOUT_MS } from './base-session.js'
+import { isOperatorTimeoutInRange } from './duration.js'
 import { nonNegInt, synthesizeModelUsage } from './usage-normalize.js'
 import { CodexSession, resolveCodexSandbox } from './codex-session.js'
 import { CodexAppServerClient } from './codex-app-server-client.js'
@@ -59,15 +60,47 @@ const RECONNECT_WATCHDOG_MS = 2 * 60 * 1000
 // notification) or the turn ends. 5 min sits above codex's bounded N/5 retry
 // burst AND above the 2-min silence watchdog (so the faster silence path still
 // wins its own case), while capping the worst case 6x below the 30-min result
-// timeout. Override via `reconnectDeadlineMs` opt / CHROXY_CODEX_RECONNECT_DEADLINE_MS.
+// timeout. Override via `reconnectDeadlineMs` opt / CHROXY_CODEX_RECONNECT_DEADLINE_MS,
+// clamped to the window below (#6967) so an override can't break either invariant.
 const RECONNECT_DEADLINE_MS = 5 * 60 * 1000
 
-// #6856: resolve the reconnect-suppression deadline. Opt wins over the env var;
-// a non-finite / non-positive value (unset env → NaN, garbage → NaN, 0/negative)
-// falls back to the default. Returns ms.
-function resolveReconnectDeadlineMs(optValue) {
+// #6967: the operator override is CLAMPED to the window the #6856 design depends
+// on, not merely checked for finite/positive. Two invariants define that window:
+//
+//   FLOOR (exclusive) — the deadline must sit ABOVE the #6629 silence watchdog.
+//     Below it, the deadline would beat the silence path to every wedge and the
+//     watchdog's "codex went quiet" case could never win on its own; and above
+//     codex's bounded N/5 retry burst, a sub-watchdog deadline would kill turns
+//     codex was about to recover on its own. `CHROXY_CODEX_RECONNECT_DEADLINE_MS=1000`
+//     used to be accepted verbatim and fired near-instantly.
+//   CEILING (exclusive) — the deadline must sit BELOW the default result timeout.
+//     Its entire purpose is being a strictly-shorter bound than that timeout; at
+//     or past it the deadline is dead code (the result timeout fires first).
+//
+// `isOperatorTimeoutInRange` runs first so this shares the finite/positive/<=24h
+// guard rail (and its typo warning) with `resultTimeoutMs` & friends; the window
+// check then narrows it to this timer's own bounds.
+const RECONNECT_DEADLINE_FLOOR_MS = RECONNECT_WATCHDOG_MS
+const RECONNECT_DEADLINE_CEILING_MS = DEFAULT_RESULT_TIMEOUT_MS
+
+// #6856/#6967: resolve the reconnect-suppression deadline. The opt wins over the
+// env var, but only when it is itself VALID — an out-of-range opt falls through
+// to the env candidate rather than shadowing it. Anything outside the window
+// above (including a non-finite value: unset env → NaN, garbage → NaN, and
+// 0/negative) falls back to the default. Returns ms.
+function resolveReconnectDeadlineMs(optValue, logger = log) {
   for (const candidate of [optValue, Number(process.env.CHROXY_CODEX_RECONNECT_DEADLINE_MS)]) {
-    if (typeof candidate === 'number' && Number.isFinite(candidate) && candidate > 0) return candidate
+    if (!isOperatorTimeoutInRange(candidate, { name: 'reconnectDeadlineMs', log: logger })) continue
+    if (candidate > RECONNECT_DEADLINE_FLOOR_MS && candidate < RECONNECT_DEADLINE_CEILING_MS) return candidate
+    // Same defensive shape as isOperatorTimeoutInRange's own warn — a stubbed
+    // logger without .warn must not turn a rejected override into a throw.
+    if (logger && typeof logger.warn === 'function') {
+      logger.warn(
+        `reconnectDeadlineMs ${candidate} is outside the supported window ` +
+        `(${RECONNECT_DEADLINE_FLOOR_MS}ms < value < ${RECONNECT_DEADLINE_CEILING_MS}ms); ` +
+        `falling back to the ${RECONNECT_DEADLINE_MS}ms default`,
+      )
+    }
   }
   return RECONNECT_DEADLINE_MS
 }
@@ -159,8 +192,11 @@ export class CodexAppServerSession extends BaseSession {
     this._turnAbort = null // per-turn AbortController — cancels pending approvals
     this._reconnectWatchdog = null // #6629 — bounded backstop for a wedged reconnect
     this._reconnectDeadline = null // #6856 — one-shot hard cap on total reconnect-suppression time
-    // #6856 — configurable reconnect-suppression deadline (opt / env / default).
-    this._reconnectDeadlineMs = resolveReconnectDeadlineMs(opts.reconnectDeadlineMs)
+    // #6856/#6967 — configurable reconnect-suppression deadline (opt / env /
+    // default), clamped to the window between the #6629 silence watchdog and the
+    // default result timeout. Warns through the session logger when present so an
+    // out-of-range override is attributable to the session that set it.
+    this._reconnectDeadlineMs = resolveReconnectDeadlineMs(opts.reconnectDeadlineMs, this._log || log)
     // #6856 — injectable timer seam (defaults to node globals) so the reconnect
     // deadline is unit-testable without wall-clock waits, mirroring the #6908/#6911
     // byok-mcp-config `setTimer`/`clearTimer` pattern. Only the deadline routes
