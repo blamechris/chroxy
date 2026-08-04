@@ -19,8 +19,8 @@
  *    quarantined can never render as healthy, and an unrecognized future status
  *    lands on `ERROR` rather than falling through to something friendlier.
  *    A tag describes the last RUN, though, not whether the task will FIRE — so
- *    a task this panel knows cannot fire (paused, refused, or no armed engine)
- *    also loses the green tone and its next-run timestamp (#7026,
+ *    a task this panel knows cannot fire (paused, refused, quarantined, or no
+ *    armed engine) also loses the green tone and its next-run timestamp (#7026,
  *    `whyTaskWillNotFire`). The tag itself stays CLI-identical.
  * 2. THE GATE IS SHOWN FIRST. Scheduled execution is OFF by default. A list of
  *    tasks presented without that fact is misleading — they are saved, and none
@@ -171,12 +171,21 @@ function describeLastRun(task: ScheduledTask): string {
  * A `null` gate is UNKNOWN (not read from the daemon), and this claims nothing
  * there — the same posture as `GateBanner`'s UNKNOWN branch.
  *
- * Precedence runs most-specific first: a paused/refused task stays paused/refused
- * even once the gate is fixed, so naming the durable reason is more useful than
- * naming the global one — which the banner states at the top of the section
- * anyway.
+ * `quarantined` is the FOURTH blocker and belongs here for the same reason as the
+ * other three, even though the chip already handled it. The engine's `_tick()`
+ * skips a quarantined task until the daemon restarts, but `_quarantine()`
+ * (scheduler.js) writes only `lastRun` — the store then RECOMPUTES `nextRun` from
+ * the cadence, so the record still carries a real future instant. Reading the
+ * record alone, the task looks scheduled; only the process-scoped quarantine flag
+ * on the snapshot says otherwise.
+ *
+ * Precedence runs most-specific first, and within that, most DURABLE first: a
+ * paused/refused task stays paused/refused even once the gate is fixed, and a
+ * refusal survives the daemon restart that clears a quarantine. Naming the
+ * durable reason is more useful than naming the global one — which the banner
+ * states at the top of the section anyway.
  */
-type NoFireReason = 'paused' | 'refused' | 'engine-not-armed'
+type NoFireReason = 'paused' | 'refused' | 'quarantined' | 'engine-not-armed'
 
 function whyTaskWillNotFire(
   task: ScheduledTask,
@@ -184,13 +193,14 @@ function whyTaskWillNotFire(
 ): NoFireReason | null {
   if (!task.enabled) return 'paused'
   if (task.providerRefusal) return 'refused'
+  if (task.quarantined) return 'quarantined'
   if (gate && !gate.engineArmed) return 'engine-not-armed'
   return null
 }
 
 /**
  * The next-run cell. A task that cannot fire gets an em dash plus the reason —
- * the same treatment `paused` already had, extended to the other two ways a
+ * the same treatment `paused` already had, extended to the other three ways a
  * listed task silently never runs (#7026).
  */
 function describeNextRun(task: ScheduledTask, reason: NoFireReason | null): string {
@@ -199,6 +209,10 @@ function describeNextRun(task: ScheduledTask, reason: NoFireReason | null): stri
       return '— (paused)'
     case 'refused':
       return '— (will not fire)'
+    // The detail pane already explains quarantine at length; the row has no room,
+    // and the word alone is the searchable term that leads to that explanation.
+    case 'quarantined':
+      return '— (quarantined)'
     // Deliberately NOT "scheduler disabled": this also covers the gate being
     // saved ENABLED with no armed engine, where the flag is on and nothing is
     // running. "Not running" is true of both.
@@ -617,10 +631,20 @@ function TaskFormModal({ task, onClose }: { task?: ScheduledTask; onClose: () =>
   // `at` used to throw RangeError out of this initializer and take the whole
   // dashboard down through the root error boundary.
   const storedOnceAt = task?.cadence?.kind === 'once' ? task.cadence.at : null
-  // The SEED values: what each input starts as, captured once so "did the
-  // operator change this?" is a comparison against the same value the field was
-  // populated with (#7049 — see the block comment above).
-  const seed = {
+  // The SEED values: what each input started as, captured ONCE for the life of
+  // the modal (#7049 — see the block comment above), so "did the operator change
+  // this?" is a comparison against the value the field was actually populated
+  // with.
+  //
+  // The lazy `useState` is load-bearing, not a micro-optimisation. `task` is
+  // `tasks.find(...)` off the store snapshot, and the daemon re-emits the WHOLE
+  // snapshot after every accepted mutation from ANY client — so this component
+  // re-renders mid-edit with a fresh `task` object. A plain `const` would then
+  // re-derive the seed from the NEW server values, every field the operator never
+  // touched would differ from its seed, and the patch would grow back into the
+  // whole-bag write-back (carrying the operator's now-stale values) that this
+  // block exists to prevent.
+  const [seed] = useState(() => ({
     name: task?.name ?? '',
     prompt: task?.prompt ?? '',
     cadenceKind: (task?.cadence?.kind ?? 'cron') as 'once' | 'interval' | 'cron',
@@ -630,7 +654,7 @@ function TaskFormModal({ task, onClose }: { task?: ScheduledTask; onClose: () =>
     provider: task?.target?.provider ?? '',
     model: task?.target?.model ?? '',
     cwd: task?.target?.cwd ?? '',
-  }
+  }))
   const [name, setName] = useState(seed.name)
   const [prompt, setPrompt] = useState(seed.prompt)
   const [cadenceKind, setCadenceKind] = useState<'once' | 'interval' | 'cron'>(seed.cadenceKind)
@@ -692,7 +716,17 @@ function TaskFormModal({ task, onClose }: { task?: ScheduledTask; onClose: () =>
    * Everything in the stored `target` this form has no input for — today just
    * `permissionMode`. Computed by EXCLUSION rather than by naming the fields to
    * keep, so a target field added later is preserved by default instead of
-   * being silently dropped the next time someone saves the form.
+   * being silently dropped the next time someone saves the form. (It must also
+   * be added to `ScheduledTaskInputSchema.target`, or Zod strips it off the wire
+   * on the way back — the read and write shapes are separate objects.)
+   *
+   * Deliberately read LIVE off `task`, the opposite choice from `seed` above, and
+   * for the same underlying reason. `seed` answers "what did the operator start
+   * from?", which must not move. This answers "what does the server hold for the
+   * fields nobody here owns?", and the freshest answer is the correct one: if
+   * another client set a `permissionMode` while this modal was open, carrying
+   * that through is right and re-writing a stale one is not. Same for the
+   * interval `anchor` in `buildCadence`.
    */
   const unownedTarget = Object.fromEntries(
     Object.entries(task?.target ?? {}).filter(

@@ -859,6 +859,43 @@ describe('ScheduledTasksSection — a task that cannot fire never reads as live 
     render(<ScheduledTasksSection now={() => 1900000000000} />)
     expect(screen.getByTestId('sched-row-next-task-1').textContent).toMatch(/paused/)
   })
+
+  // The FOURTH way a listed task silently never runs, and the one the first cut
+  // of this fix missed. `_quarantine()` (scheduler.js) writes only `lastRun`; the
+  // store then RECOMPUTES `nextRun` from the cadence, so the record keeps a real
+  // future timestamp while `_tick()` skips the task on `_quarantined.has(id)`
+  // until the daemon restarts. The chip was already `bad` via the long-standing
+  // `quarantined` degrade — it is the next-run cell that kept claiming a fire
+  // time, which is precisely the presentation #7026 exists to stop.
+  it('a QUARANTINED task shows no live next-run time, in BOTH the row and the detail', () => {
+    resetStore({
+      selectedScheduledTaskId: 'task-1',
+      scheduledTasks: mkSnapshot({
+        scheduler: GATE_ON,
+        tasks: [mkTask({
+          quarantined: true,
+          lastRun: { at: 1800000000000, status: 'refused', error: 'quarantined until daemon restart: its run outcome could not be recorded' },
+        })],
+      }),
+    })
+    render(<ScheduledTasksSection now={() => 1900000000000} />)
+    // POSITIVE CONTROL: the fixture took effect — the quarantine degrade is live.
+    expect(screen.getByTestId('sched-health-task-1').getAttribute('data-accent')).toBe('bad')
+    for (const id of ['sched-row-next-task-1', 'sched-detail-next']) {
+      const cell = screen.getByTestId(id)
+      expect(cell.textContent, id).not.toContain(LIVE)
+      expect(cell.textContent, id).toMatch(/quarantined/i)
+    }
+  })
+
+  it('POSITIVE CONTROL: the same task un-quarantined keeps its live next-run time', () => {
+    resetStore({
+      selectedScheduledTaskId: 'task-1',
+      scheduledTasks: mkSnapshot({ scheduler: GATE_ON, tasks: [mkTask({ quarantined: false })] }),
+    })
+    render(<ScheduledTasksSection now={() => 1900000000000} />)
+    expect(screen.getByTestId('sched-row-next-task-1').textContent).toContain(LIVE)
+  })
 })
 
 /**
@@ -876,15 +913,27 @@ describe('ScheduledTasksSection — a task that cannot fire never reads as live 
  */
 describe('ScheduledTasksSection — the edit form sends only what the operator changed (#7049)', () => {
   const STORED_TARGET = { provider: 'claude-sdk', permissionMode: 'plan' }
-  const LONG_NAME = 'n'.repeat(256) // a >256-char stored name, as clampWire projects it
+  // Exactly the wire cap: this is what `clampWire` PROJECTS a longer stored name
+  // down to, which is what the form is seeded with. The full stored value is
+  // longer and this surface can never see it.
+  const LONG_NAME = 'n'.repeat(256)
 
   function openEdit(over: Record<string, unknown> = {}) {
     resetStore({
       selectedScheduledTaskId: 'task-1',
       scheduledTasks: mkSnapshot({ tasks: [mkTask({ target: STORED_TARGET, ...over })] }),
     })
-    render(<ScheduledTasksSection now={() => 1900000000000} />)
+    view = render(<ScheduledTasksSection now={() => 1900000000000} />)
     fireEvent.click(screen.getByTestId('sched-edit'))
+  }
+
+  // Re-render the section in place (the modal is NOT remounted), so an open form
+  // sees a refreshed `task` prop exactly as it would when the daemon re-emits the
+  // snapshot. The mocked store is a plain object, so a bare mutation of it would
+  // never reach the tree — hence the explicit rerender.
+  let view: ReturnType<typeof render> | null = null
+  const rerenderSection = () => {
+    view?.rerender(<ScheduledTasksSection now={() => 1900000000000} />)
   }
 
   const lastPatch = () => {
@@ -978,5 +1027,44 @@ describe('ScheduledTasksSection — the edit form sends only what the operator c
         target: {},
       },
     })
+  })
+
+  /**
+   * The seed must survive a SNAPSHOT REFRESH landing while the modal is open.
+   *
+   * The daemon re-emits the whole `scheduled_tasks` snapshot after every accepted
+   * mutation from ANY client, so `selected` — and therefore this modal's `task`
+   * prop — is a fresh object mid-edit. Re-deriving the seed on that render points
+   * "did the operator change this?" at the NEW server value, and every field the
+   * operator never touched then differs from its seed and is sent: the exact
+   * whole-bag write-back, with a stale value, that patch semantics exists to
+   * stop. The seed has to be captured once for the LIFE of the modal.
+   */
+  it('keeps its seed across a snapshot refresh, so an untouched field is still omitted', () => {
+    openEdit({ name: LONG_NAME })
+    fireEvent.change(screen.getByTestId('sched-form-prompt'), { target: { value: 'p2' } })
+    // Another client renames the task; the daemon re-emits the snapshot.
+    storeState.scheduledTasks = mkSnapshot({
+      tasks: [mkTask({ target: STORED_TARGET, name: 'renamed elsewhere' })],
+    })
+    rerenderSection()
+    fireEvent.click(screen.getByTestId('sched-form-submit'))
+    const patch = lastPatch()
+    // POSITIVE CONTROL: the fixture took effect — the edit the operator DID make
+    // is in the patch, so an empty/absent patch cannot be why `name` is missing.
+    expect(patch.prompt).toBe('p2')
+    expect('name' in patch).toBe(false)
+    expect('target' in patch).toBe(false)
+  })
+
+  it('POSITIVE CONTROL: the refreshed prop is genuinely delivered to the open modal', () => {
+    // Without this, the assertion above would also pass on a rerender that never
+    // reached the modal at all — a fixture that did nothing.
+    openEdit({ name: 'nightly sweep' })
+    storeState.scheduledTasks = mkSnapshot({
+      tasks: [mkTask({ target: STORED_TARGET, name: 'renamed elsewhere' })],
+    })
+    rerenderSection()
+    expect(screen.getByTestId('sched-detail-name').textContent).toBe('renamed elsewhere')
   })
 })
