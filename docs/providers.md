@@ -395,6 +395,46 @@ the requested scope. Approve grants exactly that scope for the current turn,
 sandbox escalations can never be permanently rule-whitelisted — they always
 prompt.
 
+### `CHROXY_CODEX_RECONNECT_DEADLINE_MS` env override (#6856 / #6967)
+
+When codex's response stream drops mid-turn it emits `Reconnecting... N/5`
+errors, and Chroxy keeps the turn open so codex can recover rather than failing
+on a blip. Two backstops bound that wait: a 2-minute *silence* watchdog (codex
+went quiet mid-reconnect) and a 5-minute *hard deadline* on total time spent in
+the reconnect-suppressed state (codex reconnects forever without ever
+recovering). The deadline is armed once, on entering suppression, and is
+deliberately not pushed out by later reconnect ticks; when it fires the turn
+fails with `stream_stall` so the client shows its normal retry affordance.
+
+Set `CHROXY_CODEX_RECONNECT_DEADLINE_MS` on the server process to change that
+5-minute hard deadline. The `reconnectDeadlineMs` session opt is the
+programmatic equivalent and wins over the env var — but only when the opt is
+itself in range, so a bogus opt falls through to the env value rather than
+shadowing it:
+
+| Value | Effect |
+|---|---|
+| _unset_ | Default. The deadline is 5 minutes. |
+| `120001`–`1799999` | The supported window: the deadline is set to that many ms. |
+| A number outside that window (including above the shared 24-hour sanity ceiling) | Logs a warning naming the window, then falls back to the 5-minute default. |
+| Not a positive number at all — `abc`, `5m`, `0`, `-1` | Falls back to the 5-minute default **silently, with no warning**. |
+
+That last row is worth knowing before you debug a deadline that "did not take":
+the quiet reject for unparseable input is the shared behaviour of every
+`CHROXY_*` timeout var (they all run through the same `isOperatorTimeoutInRange`
+guard, which only warns on the over-ceiling case), so a mistyped value looks
+exactly like an unset one. Note in particular that `5m` is **not** accepted here
+— this var is plain milliseconds, not one of Chroxy's duration strings. If the
+deadline is not what you set, check the spelling and units first.
+
+The window is deliberately narrow and both ends are exclusive. It must stay
+**above the 2-minute silence watchdog** — below it the deadline would beat the
+silence path to every wedge, and it would also start killing turns inside
+codex's own bounded retry burst — and **below the 30-minute default result
+timeout**, since being a strictly-shorter bound than that timeout is the whole
+point. An out-of-range value is rejected and logged rather than refusing to
+start the server (#6967).
+
 ## Gemini
 
 Google Gemini CLI.

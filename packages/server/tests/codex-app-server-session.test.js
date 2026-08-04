@@ -673,7 +673,12 @@ describe('CodexAppServerSession — reconnect suppression deadline (#6856)', () 
     const { s, cleanup } = mkSession({
       setTimer: timers.setTimer,
       clearTimer: timers.clearTimer,
-      reconnectDeadlineMs: 60_000,
+      // #6967: 3 min — a NON-default value (so these still prove the opt is what
+      // arms the timer) that sits inside the supported window (above the 2-min
+      // silence watchdog, below the 30-min result timeout). The previous 60_000
+      // is now clamped away to the default and would silently stop testing the
+      // override.
+      reconnectDeadlineMs: 180_000,
       ...extraOpts,
     })
     return { s, cleanup, timers }
@@ -694,7 +699,7 @@ describe('CodexAppServerSession — reconnect suppression deadline (#6856)', () 
     s._onNotification({ method: 'error', params: reconnectParams(2, 5) })
     assert.ok(s._reconnectDeadline, 'deadline armed on the first transient reconnect')
     assert.equal(timers.scheduled.length, 1, 'exactly one deadline timer scheduled')
-    assert.equal(timers.scheduled[0].ms, 60_000, 'armed with the configured deadline ms')
+    assert.equal(timers.scheduled[0].ms, 180_000, 'armed with the configured deadline ms')
     assert.equal(timers.scheduled[0].cleared, false, 'the deadline is pending')
     s.destroy()
     cleanup()
@@ -750,7 +755,7 @@ describe('CodexAppServerSession — reconnect suppression deadline (#6856)', () 
     timers.fire()
     const err = ev.find(([e]) => e === 'error')
     assert.ok(err, 'the deadline fails the turn')
-    assert.match(err[1].message, /reconnect exceeded 60s/i, 'a clear "codex reconnect exceeded Ns" error')
+    assert.match(err[1].message, /reconnect exceeded 180s/i, 'a clear "codex reconnect exceeded Ns" error')
     assert.equal(err[1].code, 'stream_stall', 'carries stream_stall so the client shows its retry chip')
     assert.ok(ev.some(([e, p]) => e === 'tool_result' && p.toolUseId === 'shell-1'), 'the orphan in-flight shell tool_start is swept')
     assert.equal(s._isBusy, false, 'stale working state cleared')
@@ -776,8 +781,8 @@ describe('CodexAppServerSession — reconnect suppression deadline (#6856)', () 
   })
 
   it('the deadline is configurable via the opt (with a sensible default)', () => {
-    const custom = mkSession({ reconnectDeadlineMs: 90_000 })
-    assert.equal(custom.s._reconnectDeadlineMs, 90_000, 'opt overrides the default')
+    const custom = mkSession({ reconnectDeadlineMs: 240_000 })
+    assert.equal(custom.s._reconnectDeadlineMs, 240_000, 'opt overrides the default')
     custom.s.destroy(); custom.cleanup()
 
     const def = mkSession()
@@ -792,15 +797,88 @@ describe('CodexAppServerSession — reconnect suppression deadline (#6856)', () 
 
   it('the deadline is configurable via CHROXY_CODEX_RECONNECT_DEADLINE_MS', () => {
     const prev = process.env.CHROXY_CODEX_RECONNECT_DEADLINE_MS
-    process.env.CHROXY_CODEX_RECONNECT_DEADLINE_MS = '120000'
+    process.env.CHROXY_CODEX_RECONNECT_DEADLINE_MS = '180000'
     try {
       const { s, cleanup } = mkSession()
-      assert.equal(s._reconnectDeadlineMs, 120_000, 'env var sets the deadline')
+      assert.equal(s._reconnectDeadlineMs, 180_000, 'env var sets the deadline')
       s.destroy(); cleanup()
     } finally {
       if (prev === undefined) delete process.env.CHROXY_CODEX_RECONNECT_DEADLINE_MS
       else process.env.CHROXY_CODEX_RECONNECT_DEADLINE_MS = prev
     }
+  })
+
+  // #6967 — the operator override is CLAMPED, not merely finite/positive. The
+  // whole #6856 design leans on the deadline sitting ABOVE the 2-min #6629
+  // silence watchdog (so the faster silence path still wins its own case) and
+  // BELOW the 30-min default result timeout (so it stays a strictly-shorter
+  // bound). A bespoke `> 0` check let an operator set 1000ms and fire it almost
+  // immediately, defeating both invariants.
+  describe('operator override clamping (#6967)', () => {
+    const DEFAULT = 5 * 60 * 1000
+    const WATCHDOG = 2 * 60 * 1000
+    const RESULT_TIMEOUT = 30 * 60 * 1000
+
+    const withEnv = (value, fn) => {
+      const prev = process.env.CHROXY_CODEX_RECONNECT_DEADLINE_MS
+      if (value === undefined) delete process.env.CHROXY_CODEX_RECONNECT_DEADLINE_MS
+      else process.env.CHROXY_CODEX_RECONNECT_DEADLINE_MS = value
+      try { fn() } finally {
+        if (prev === undefined) delete process.env.CHROXY_CODEX_RECONNECT_DEADLINE_MS
+        else process.env.CHROXY_CODEX_RECONNECT_DEADLINE_MS = prev
+      }
+    }
+
+    it('an opt at or below the 2-min silence watchdog falls back to the default', () => {
+      for (const tooSmall of [1000, 60_000, WATCHDOG]) {
+        const { s, cleanup } = mkSession({ reconnectDeadlineMs: tooSmall })
+        assert.equal(s._reconnectDeadlineMs, DEFAULT, `${tooSmall}ms is not above the watchdog — falls back`)
+        s.destroy(); cleanup()
+      }
+    })
+
+    it('an opt at or above the 30-min result timeout falls back to the default', () => {
+      for (const tooBig of [RESULT_TIMEOUT, 60 * 60 * 1000, 25 * 60 * 60 * 1000]) {
+        const { s, cleanup } = mkSession({ reconnectDeadlineMs: tooBig })
+        assert.equal(s._reconnectDeadlineMs, DEFAULT, `${tooBig}ms is not below the result timeout — falls back`)
+        s.destroy(); cleanup()
+      }
+    })
+
+    it('CHROXY_CODEX_RECONNECT_DEADLINE_MS below the floor falls back to the default', () => {
+      withEnv('1000', () => {
+        const { s, cleanup } = mkSession()
+        assert.equal(s._reconnectDeadlineMs, DEFAULT, 'a near-instant env deadline is rejected')
+        s.destroy(); cleanup()
+      })
+    })
+
+    it('CHROXY_CODEX_RECONNECT_DEADLINE_MS above the ceiling falls back to the default', () => {
+      withEnv(String(2 * 60 * 60 * 1000), () => {
+        const { s, cleanup } = mkSession()
+        assert.equal(s._reconnectDeadlineMs, DEFAULT, 'an env deadline past the result timeout is rejected')
+        s.destroy(); cleanup()
+      })
+    })
+
+    it('an out-of-range opt does NOT shadow an in-range env value', () => {
+      // The opt is only preferred when it is itself VALID — an operator's
+      // in-range env var must still win over a bogus programmatic opt rather
+      // than both collapsing to the default.
+      withEnv('180000', () => {
+        const { s, cleanup } = mkSession({ reconnectDeadlineMs: 1000 })
+        assert.equal(s._reconnectDeadlineMs, 180_000, 'the in-range env value is used')
+        s.destroy(); cleanup()
+      })
+    })
+
+    it('in-range values on both edges of the window are honoured', () => {
+      for (const ok of [WATCHDOG + 1, 3 * 60 * 1000, RESULT_TIMEOUT - 1]) {
+        const { s, cleanup } = mkSession({ reconnectDeadlineMs: ok })
+        assert.equal(s._reconnectDeadlineMs, ok, `${ok}ms sits inside the window and is honoured`)
+        s.destroy(); cleanup()
+      }
+    })
   })
 })
 
