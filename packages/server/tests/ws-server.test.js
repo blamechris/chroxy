@@ -1128,6 +1128,12 @@ describe('outbound message sequence numbers', () => {
     await waitForMessage(messages2, 'status')
     // Wait for client_joined on client1 from client2's connection
     await waitForMessage(messages1, 'client_joined')
+    // #5555: the connect-time auth_bootstrap burst is fire-and-forget, so it can
+    // land AFTER the broadcast. Settle it on BOTH clients first, otherwise a late
+    // burst frame lands between `discovered_sessions` and the post-broadcast ping
+    // below and the seq assertions race it.
+    await waitForMessage(messages1, 'auth_bootstrap', 1000)
+    await waitForMessage(messages2, 'auth_bootstrap', 1000)
 
     // Broadcast a message — each client gets their own seq
     server.broadcast({ type: 'discovered_sessions', tmux: [] })
@@ -1158,6 +1164,28 @@ describe('outbound message sequence numbers', () => {
       'Client 1 broadcast seq should be its own position in its own stream')
     assert.equal(disc2.seq, messages2.indexOf(disc2) + 1,
       'Client 2 broadcast seq should be its own position in its own stream')
+
+    // #7063: everything above observes the stream only UP TO the broadcast, so a
+    // regression that STAMPS seq without ADVANCING the counter (`client._seq + 1`
+    // instead of `client._seq++` in ws-client-sender.js) still produces a
+    // correct-looking broadcast seq — it only shows up as a DUPLICATE on the next
+    // frame, which nothing here was watching for. Send one more frame per client
+    // and assert the counter actually moved.
+    send(ws1, { type: 'ping' })
+    const pong1 = await waitForMessage(messages1, 'pong')
+    assert.ok(pong1.seq > disc1.seq,
+      `Client 1 seq must ADVANCE past the broadcast, not just be stamped: pong seq ${pong1.seq} vs broadcast seq ${disc1.seq}`)
+    assert.equal(pong1.seq, messages1.indexOf(pong1) + 1,
+      'Client 1 post-broadcast frame should continue its own contiguous run')
+
+    // The same client-independence invariant, verified AFTER the broadcast:
+    // client1's extra frame must not consume a seq from client2's counter.
+    send(ws2, { type: 'ping' })
+    const pong2 = await waitForMessage(messages2, 'pong')
+    assert.ok(pong2.seq > disc2.seq,
+      `Client 2 seq must ADVANCE past the broadcast, not just be stamped: pong seq ${pong2.seq} vs broadcast seq ${disc2.seq}`)
+    assert.equal(pong2.seq, messages2.indexOf(pong2) + 1,
+      'Client 2 post-broadcast frame should continue its own contiguous run')
 
     ws1.close()
     ws2.close()
