@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, rmSync, existsSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { RunLedger } from '../src/orchestration/run-ledger.js'
@@ -165,6 +165,128 @@ describe('RunLedger crash recovery', () => {
     const led = mkLedger()
     assert.deepEqual(led.recoverRuns(), [])
     led.dispose()
+  })
+
+  // #6720 (2) — recoverRuns() loads every run dir into _records; without an
+  // _updateIndex()/_gc() pass at the end, a maxRuns lowered between boots is
+  // only re-enforced on the NEXT lifecycle event, so memory (and the on-disk
+  // index) transiently exceed the cap.
+  it('re-applies the LRU bound (and rebuilds the index) at the end of recovery', () => {
+    const led = mkLedger() // default maxRuns — nothing evicted while writing
+    const ids = []
+    for (let i = 0; i < 3; i++) {
+      clock = 5000 + i
+      const run = led.createRun({ title: `r${i}` })
+      ids.push(run.runId)
+      led.setStatus(run.runId, 'completed') // terminal → eligible for eviction
+    }
+    assert.equal(led.listRuns().length, 3, 'fixture: all three runs written under the old cap')
+    led.dispose()
+
+    // Reboot with a LOWER cap, as an operator edit between boots would.
+    const led2 = mkLedger({ maxRuns: 2 })
+    const recovered = led2.recoverRuns()
+
+    // Positive control: recovery genuinely read the runs back off disk (this
+    // passes on unmodified source — it proves the fixture is wired, so the
+    // cap assertions below are not passing for free).
+    assert.equal(led2.getRun(ids[2])?.status, 'completed', 'newest run recovered from disk')
+    assert.ok(existsSync(join(baseDir, 'runs', ids[2])), 'newest run dir kept')
+
+    const remaining = led2.listRuns().map((r) => r.runId)
+    assert.equal(remaining.length, 2, 'lowered maxRuns enforced during recovery')
+    assert.ok(!remaining.includes(ids[0]), 'oldest terminal run evicted')
+    assert.ok(!existsSync(join(baseDir, 'runs', ids[0])), 'evicted run dir removed')
+    assert.deepEqual(
+      recovered.map((r) => r.runId).sort(),
+      [ids[1], ids[2]].sort(),
+      'the returned records exclude runs the GC just deleted',
+    )
+
+    const idx = JSON.parse(readFileSync(join(baseDir, 'runs-index.json'), 'utf8'))
+    assert.equal(idx.runs.length, 2, 'the on-disk index was rebuilt from the recovered set')
+    assert.ok(!idx.runs.some((r) => r.runId === ids[0]), 'evicted run dropped from the index')
+    led2.dispose()
+  })
+})
+
+describe('RunLedger journal-append failure durability (#6720)', () => {
+  it('fsyncs the snapshot when a debounced journal append fails, so the fold is not lost', () => {
+    // A long debounce means nothing reaches run.json on its own during the test.
+    const led = mkLedger({ saveDebounceMs: 60_000 })
+    const run = led.createRun({ title: 'x' })
+    led.createSubtask(run.runId, { subtaskId: 'st1', role: 'a' }) // lifecycle → flushed
+    const snapPath = join(baseDir, 'runs', run.runId, 'run.json')
+    const journalPath = join(baseDir, 'runs', run.runId, 'events.jsonl')
+    const readSnap = () => JSON.parse(readFileSync(snapPath, 'utf8'))
+
+    // Positive control: with the journal HEALTHY, a debounced turn_usage stays
+    // out of the snapshot (that is the documented durability boundary — the
+    // journal is the crash record). Passes on unmodified source, and proves the
+    // debounce fixture is live so the assertion below cannot pass for free.
+    led.recordTurnUsage(run.runId, {
+      subtaskId: 'st1', sessionId: 's1', role: 'a', data: { cost: 0.1, usage: { input_tokens: 1 } },
+    })
+    assert.equal(readSnap().usageTotals.overall.costUsd, 0, 'debounced fold is not durable yet')
+    assert.equal(readSnap().lastSeq, 2, 'snapshot still at the last lifecycle event')
+
+    // Break the journal: a directory at the journal path makes appendFileSync
+    // throw EISDIR while leaving the run dir writable for the snapshot.
+    rmSync(journalPath)
+    mkdirSync(journalPath)
+
+    led.recordTurnUsage(run.runId, {
+      subtaskId: 'st1', sessionId: 's1', role: 'a', data: { cost: 0.4, usage: { input_tokens: 10 } },
+    })
+
+    // Positive control: the append really did fail — nothing landed at the
+    // journal path, and the in-memory fold advanced anyway (the daemon must not
+    // crash on a journal write failure). Both pass on unmodified source.
+    assert.ok(statSync(journalPath).isDirectory(), 'journal path is still the broken directory')
+    assert.deepEqual(readdirSync(journalPath), [], 'no journal line was written')
+    assert.equal(led.getRun(run.runId).lastSeq, 4, 'the event still folded in memory')
+
+    // The fix: a failed append forces the fsync'd snapshot, so BOTH folds are
+    // durable instead of living only in memory until the next debounced save.
+    const snap = readSnap()
+    assert.equal(snap.lastSeq, 4, 'snapshot caught up to the un-journaled event')
+    assert.equal(snap.usageTotals.overall.costUsd, 0.5, 'both folds reached the durable snapshot')
+    led.dispose()
+  })
+
+  // The forced flush is best-effort: _saveSnapshot swallows its own error, and
+  // only DELETES the run from _dirty on success. Because the journal-failure
+  // path never marks the run dirty in the first place, a flush that ALSO fails
+  // used to leave the fold with no retry at all — strictly worse than the
+  // pre-#6720 _scheduleSave, which at least got another attempt at shutdown.
+  it('still retries at shutdown when BOTH the journal append and the forced snapshot fail', () => {
+    const led = mkLedger({ saveDebounceMs: 60_000 })
+    const run = led.createRun({ title: 'x' })
+    led.createSubtask(run.runId, { subtaskId: 'st1', role: 'a' }) // lifecycle → flushed
+    const runDir = join(baseDir, 'runs', run.runId)
+    const snapPath = join(runDir, 'run.json')
+    const journalPath = join(runDir, 'events.jsonl')
+    const readSnap = () => JSON.parse(readFileSync(snapPath, 'utf8'))
+
+    // Break BOTH sinks for one event: a directory at the journal path (EISDIR
+    // on append) and a read-only run dir (EACCES creating the snapshot tmp).
+    rmSync(journalPath)
+    mkdirSync(journalPath)
+    chmodSync(runDir, 0o500)
+    led.recordTurnUsage(run.runId, {
+      subtaskId: 'st1', sessionId: 's1', role: 'a', data: { cost: 0.4, usage: { input_tokens: 10 } },
+    })
+    chmodSync(runDir, 0o700) // the transient failure clears
+
+    // Positive controls (both pass on unmodified source): the forced snapshot
+    // really did fail, and the fold advanced in memory anyway.
+    assert.equal(readSnap().usageTotals.overall.costUsd, 0, 'the forced snapshot did not land')
+    assert.equal(led.getRun(run.runId).lastSeq, 3, 'the event still folded in memory')
+
+    // The run must still be pending, so the shutdown flush picks it up.
+    led.dispose()
+    assert.equal(readSnap().usageTotals.overall.costUsd, 0.4, 'shutdown flush retried the un-saved fold')
+    assert.equal(readSnap().lastSeq, 3, 'shutdown flush persisted the un-journaled seq')
   })
 })
 
