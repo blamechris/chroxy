@@ -390,16 +390,26 @@ Handlers are registered unconditionally (registry import) but each checks `isOrc
 
 **Public API** (consumed by `handlers/orchestration-handlers.js`):
 
+As built (this block is the CONTRACT the handlers are written against — when it and
+the class disagree, #7138 is what happens: the handler called `startRun(optionBag)`
+against `startRun(runId)`, and `runAction` existed only here):
+
 ```js
-createRun({ title, goal, cwd, preset, roleOverrides, budgetUsd, autoApprovePlan }) -> RunRecord  // throws on validation
-startRun(runId)                       // created -> planning
-approvePlan(runId, { editedSubtasks }) ; rejectPlan(runId, reason)
-resolveEscalation(runId, subtaskId, { decision, note })
-resolveGate(runId, gateId, { decision })          // permission escalations
-setRunBudget(runId, capUsd)
-resumeRun(runId) ; cancelRun(runId, { reason })
-getRunSnapshot(runId) ; listRunSummaries()        // survey pattern (1 request + 1 snapshot msg)
+createRun({ title, goal, cwd, preset, roleOverrides, budgetUsd, autoApprovePlan }) -> RunRecord  // sync; throws on validation
+startRun(runId)                                   // created -> planning; AWAITS the planning turn
+createAndStartRun({ ...createRun opts }) -> RunRecord  // the wire's entry point: mints, then drives in the
+                                                  // background — returns as soon as the run EXISTS, because
+                                                  // the ack carries the new runId and cannot wait on planning
+resolveGate(runId, gateId, { decision, note, budgetUsd })  // ONE gate path: epic_plan, budget_overrun, escalations
+runAction(runId, action)                          // 'cancel' only; pause/resume are unimplemented (#7140)
+cancelRun(runId, { reason })
+annotate(runId, { baselineSessionId, verdictQuality })
+getRunSnapshot(runId) ; listRuns()                // survey pattern (1 request + 1 snapshot msg)
 ```
+
+The design-era names `approvePlan` / `rejectPlan` / `resolveEscalation` /
+`setRunBudget` / `resumeRun` / `listRunSummaries` were never built — plan approval,
+budget raises and escalations all resolve through the single `resolveGate`.
 
 **Events emitted** (names only; protocol slice owns payload schemas, event-normalizer mapping, ws-server doc block, dist `git add -f`): `orchestration_run_updated`, `orchestration_subtask_updated`, `orchestration_committee_event` (gate verdicts + feedback for the run-tree UI), `orchestration_usage`, `orchestration_budget`, `orchestration_gate_escalation`, `orchestration_run_snapshot`. **Consumed**: SessionManager `session_event` (`stream_delta`, `message`, `result`, `error`, `permission_request`, `cost_update`), `session_created`, `session_destroyed`, `session_create_failed`.
 

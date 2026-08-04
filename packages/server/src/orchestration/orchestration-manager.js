@@ -334,6 +334,59 @@ export class OrchestrationManager extends EventEmitter {
     return { runId, phase: 'plan_review', gateId: gate.gateId }
   }
 
+  /**
+   * The WS surface's entry point (#7138): mint the run, then drive it — returning
+   * as soon as the run EXISTS, not when planning finishes.
+   *
+   * `startRun` awaits the architect's planning turn, which is a real model call
+   * measured in minutes. The surface cannot await that: the ack is documented as
+   * carrying "the newly-minted runId" (surface.md, ServerOrchestrationActionAckSchema)
+   * and the dashboard holds its pending-action spinner until the ack arrives with
+   * no timeout of its own. Everything after the mint reaches clients through the
+   * run_delta broadcasts instead.
+   *
+   * Validation therefore splits by WHEN it can be known: `createRun`'s rejections
+   * (bad cwd, no goal, a run already active) are synchronous, so the caller can
+   * report them and nothing is created. A failure once the run exists is journaled
+   * onto the run — the same path any in-flight failure takes — so a client holding
+   * the runId learns of it from the run's own status rather than from a reply it
+   * has already received.
+   */
+  createAndStartRun(opts = {}) {
+    const record = this.createRun(opts)
+    this.startRun(record.runId)
+      .catch((err) => {
+        // The run may already be gone (cancelled, or _failRun ran inside startRun).
+        const run = this._runs.get(record.runId)
+        if (!run) return null
+        return this._failRun(run, 'START_FAILED', err)
+      })
+      .catch((err) => {
+        this._log?.warn?.(`orchestration: run ${record.runId} failed to start and could not be journaled: ${err?.message || String(err)}`)
+      })
+    return record
+  }
+
+  /**
+   * Wire-level run control (`orchestration_run_action`). `cancel` is the only
+   * action this engine implements: `pause`/`resume` are on the wire schema but
+   * have no user-driven implementation — `_pauseForBudget`/`_pauseForResources`
+   * are internal stalls the scheduler clears itself, not a pause a client can
+   * hold. Fail loudly rather than acking a no-op (#7140).
+   */
+  async runAction(runId, action) {
+    if (action === 'cancel') {
+      const result = await this.cancelRun(runId, { reason: 'user' })
+      // cancelRun answers null for an unknown run; acking that would report a
+      // cancel that never happened.
+      if (!result) throw new Error(`run ${runId} not found`)
+      return result
+    }
+    const err = new Error(`run action '${action}' is not supported by this engine`)
+    err.code = 'ACTION_UNSUPPORTED'
+    throw err
+  }
+
   async _plan(run) {
     const sessionId = this._spawnSession(run, { role: 'architect' })
     run.architectSessionId = sessionId

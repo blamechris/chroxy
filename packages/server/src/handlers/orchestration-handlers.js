@@ -158,7 +158,11 @@ function orchestration_run_start(ws, client, msg, ctx) {
     return
   }
   Promise.resolve()
-    .then(() => manager(ctx).startRun({
+    // createAndStartRun, NOT startRun: the engine splits minting a run
+    // (`createRun`, which takes this bag) from driving it (`startRun(runId)`,
+    // which awaits the whole planning turn). The ack must carry the newly-minted
+    // runId without waiting for planning, so the engine composes the two (#7138).
+    .then(() => manager(ctx).createAndStartRun({
       title: msg.title ?? null,
       goal: msg.epicPrompt ?? null,
       preset: msg.preset ?? null,
