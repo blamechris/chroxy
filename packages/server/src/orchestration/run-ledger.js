@@ -90,19 +90,27 @@ export class RunLedger extends EventEmitter {
     const seq = record.lastSeq + 1
     const event = { seq, ts: this._now(), ...payload }
     const line = JSON.stringify(event) + '\n'
+    let journalFailed = false
     try {
       appendFileSync(this._journalPath(runId), line)
       this._journalBytes.set(runId, (this._journalBytes.get(runId) || 0) + Buffer.byteLength(line))
     } catch (err) {
       // A journal write failure is serious but must not crash the daemon; the
-      // in-memory record still advances so the run continues, and the next
-      // snapshot save captures state (at the cost of a recovery gap).
+      // in-memory record still advances so the run continues.
+      journalFailed = true
       log.warn(`journal append failed for ${runId} (${err?.code || err?.message})`)
     }
     applyEvent(record, event)
+    // The journal is normally the crash record, so a DEBOUNCED fold (turn_usage)
+    // may safely wait for the next save. Once the append has failed there is no
+    // crash record — the fold would live only in memory — so force the fsync'd
+    // snapshot instead, converting a silent accounting loss into a durable one
+    // (#6720). Lifecycle events already flush unconditionally.
     if (lifecycle) {
       this._flushNow(runId)
       this._updateIndex()
+    } else if (journalFailed) {
+      this._flushNow(runId)
     } else {
       this._scheduleSave(runId)
     }
@@ -407,6 +415,13 @@ export class RunLedger extends EventEmitter {
    * snapshot, then replay journal lines with seq > snapshot.lastSeq through the
    * reducer (idempotent — lastSeq gates double-folds). Returns the records so
    * the engine can decide which non-terminal runs to fail vs resume.
+   *
+   * Recovery finishes with one _updateIndex() pass so the LRU bound is re-applied
+   * immediately rather than at the next lifecycle event (#6720) — a maxRuns
+   * lowered between boots would otherwise leave memory, disk and the index over
+   * the cap for the rest of the boot. Runs the GC evicts are dropped from the
+   * returned set: their directory is gone, so the engine must not try to resume
+   * them.
    */
   recoverRuns() {
     const recovered = []
@@ -438,7 +453,8 @@ export class RunLedger extends EventEmitter {
       this._journalBytes.set(runId, journalBytes)
       recovered.push(structuredClone(record))
     }
-    return recovered
+    this._updateIndex() // rebuilds runs-index.json AND runs _gc() over the recovered set
+    return recovered.filter((r) => this._records.has(r.runId))
   }
 
   dispose() {
