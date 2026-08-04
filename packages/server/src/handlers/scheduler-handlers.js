@@ -175,7 +175,23 @@ function effectiveProvider(task, ctx) {
  * long engine error in `lastRun.error`) made the WHOLE snapshot fail the
  * dashboard's `safeParse`, so every task vanished and the tab hung on
  * "Loading…". A snapshot the contract cannot represent is worse than a
- * shortened display string, and the store keeps the full value either way.
+ * shortened display string.
+ *
+ * ── The clamp is display-only, but ONLY if every writer cooperates (#7049) ────
+ * This block used to end "and the store keeps the full value either way", which
+ * was true of the READ and false of the write-back. A surface that seeds an EDIT
+ * FORM from this projection and sends the fields back on save persists the
+ * SHORTENED value, permanently — and nothing here can prevent it, because
+ * `ScheduledTaskInputSchema`'s caps are the SAME numbers, so an over-cap value
+ * cannot be sent back even deliberately. The only thing that keeps it is not
+ * sending the field.
+ *
+ * So the dashboard's task form sends PATCH semantics on `update` — only the
+ * fields the operator actually changed (ScheduledTasksSection.tsx `submit()`) —
+ * and any NEW writer of `scheduled_task_action:update` must do the same. The
+ * store's `update()` also replaces `target` WHOLESALE, so the same rule is what
+ * keeps a `target.permissionMode` (which no form field owns) from being erased
+ * by an unrelated save.
  */
 function clampWire(value, max) {
   if (typeof value !== 'string') return value

@@ -105,14 +105,25 @@ export function scheduledTaskHealthTone(tag) {
  * task can never present as healthy even if its stored `lastRun` still says
  * `success` (the engine's best-effort quarantine write may not have landed —
  * the usual reason to quarantine is that the store is failing).
+ *
+ * `willNotFire` (#7026) is the second caller-supplied degrade, and takes the
+ * same shape for the same reason. The tag answers "how did the last run GO?",
+ * never "will this task FIRE?" — the blockers for the latter (a closed global
+ * gate / an unarmed engine, a provider the engine refuses) are ambient state
+ * this module cannot see from a task record. Left to itself the mapping
+ * therefore styles a task green while nothing on the host is firing at all, so
+ * a caller that KNOWS the task cannot fire says so and the tone degrades out of
+ * `ok`. It only ever degrades: a `bad` tag stays `bad`.
  */
 export function deriveScheduledTaskHealth(task, options = {}) {
     const tag = deriveScheduledTaskHealthTag(task);
     const quarantined = options.quarantined === true;
+    const willNotFire = options.willNotFire === true;
+    const tone = quarantined ? 'bad' : scheduledTaskHealthTone(tag);
     return {
         tag,
-        tone: quarantined ? 'bad' : scheduledTaskHealthTone(tag),
+        tone: willNotFire && tone === 'ok' ? 'warn' : tone,
         quarantined,
-        isHealthy: tag === 'OK' && !quarantined,
+        isHealthy: tag === 'OK' && !quarantined && !willNotFire,
     };
 }
