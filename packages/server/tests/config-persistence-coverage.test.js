@@ -75,11 +75,16 @@ describe('writeSessionPresetOverrideToConfig (#6201)', () => {
     assert.deepEqual(cfg.repos.find((r) => r.path === '/repo/a'), { path: '/repo/a', sessionPreset: { enabled: true } })
   })
 
-  it('starts fresh when the existing config is corrupt JSON', () => {
+  it('REFUSES to write when the existing config is corrupt JSON (#7027)', () => {
+    // Used to "start fresh", which replaced the operator's whole config with a
+    // single repos entry. The write now throws and the file is left alone; the
+    // preset handler turns that into a visible error.
     writeFileSync(configPath, '{ not valid json')
-    writeSessionPresetOverrideToConfig('/repo/a', { enabled: true }, configPath)
-    const cfg = readJson()
-    assert.deepEqual(cfg.repos, [{ path: '/repo/a', sessionPreset: { enabled: true } }])
+    assert.throws(
+      () => writeSessionPresetOverrideToConfig('/repo/a', { enabled: true }, configPath),
+      /Refusing to overwrite/,
+    )
+    assert.equal(readFileSync(configPath, 'utf-8'), '{ not valid json')
   })
 })
 
