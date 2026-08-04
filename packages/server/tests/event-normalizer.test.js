@@ -1,6 +1,7 @@
 import { describe, it, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventNormalizer, EVENT_MAP } from '../src/event-normalizer.js'
+import { getLogLevel, setLogLevel } from '../src/logger.js'
 import { ServerSkillChangedSchema, MAX_SANE_DURATION_MS } from '@chroxy/protocol'
 
 // -- Helper to create a standard multi-session context --
@@ -1584,6 +1585,22 @@ describe('EventNormalizer', () => {
   // single (wrong) flag. These pin the guard: the conflict is detected, WARNed,
   // and CONTAINED by splitting the frame so no mixed-flag frame ever ships.
   describe('thinking/response key-collision guard (#6962)', () => {
+    // Pin the log level for this block. `_logLevel` in logger.js is a module
+    // global seeded from `process.env.LOG_LEVEL`, so a runner (or a developer
+    // shell) with LOG_LEVEL=error gates `log.warn` before it ever reaches
+    // console.warn — the three WARN assertions below would go red for a reason
+    // that has nothing to do with the invariant, and worse, the "stays silent"
+    // POSITIVE CONTROL would pass for free because nothing can warn at all.
+    // Same pin as session-manager-unknown-opts.test.js (#6944).
+    let _origLevel
+    beforeEach(() => {
+      _origLevel = getLogLevel()
+      setLogLevel('debug')
+    })
+    afterEach(() => {
+      setLogLevel(_origLevel)
+    })
+
     // Capture logger WARN lines (the logger routes level=warn to console.warn).
     function withWarnCapture(fn) {
       const warnings = []
