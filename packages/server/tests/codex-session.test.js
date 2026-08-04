@@ -98,11 +98,15 @@ class ShimmedCodexSession extends CodexSession {
 
     this._process = proc
     // Same mutable per-turn context JsonlSubprocessSession.sendMessage() passes
-    // to _processJsonlLine() / _emitFallbackResult().
+    // to _processJsonlLine() / _emitFallbackResult() — including `proc`, which
+    // the base exposes "for rare edge cases". No codex handler reads it today,
+    // but omitting it is exactly the kind of harness/production drift this
+    // block was rewritten to eliminate.
     const ctx = {
       messageId: this._currentMessageId,
       didStreamStart: false,
       didEmitResult: false,
+      proc,
     }
 
     const rl = createInterface({ input: proc.stdout })
@@ -1856,6 +1860,27 @@ describe('CodexSession', () => {
         cache_read_input_tokens: 0,
         cached_input_tokens: 0,
       })
+    })
+
+    // Review (#7128): both codex `_mapUsage` implementations accept snake_case
+    // AND camelCase, and each real wire carries only one casing — so precedence
+    // is unobservable in production and free to drift. It must still be pinned:
+    // a payload carrying BOTH casings has to split identically on both drivers,
+    // or the "must stay identical" invariant is only true by luck. The
+    // app-server mirror reads camel first, so this one does too.
+    it('_mapUsage prefers camelCase over snake_case, matching the app-server mirror', () => {
+      const session = new CodexSession({ cwd: '/tmp' })
+      const mapped = session._mapUsage({
+        inputTokens: 1000, input_tokens: 10,
+        outputTokens: 42, output_tokens: 7,
+        cachedInputTokens: 600, cached_input_tokens: 2,
+      })
+      assert.deepEqual(mapped, {
+        input_tokens: 400,
+        output_tokens: 42,
+        cache_read_input_tokens: 600,
+        cached_input_tokens: 600,
+      }, 'a both-casings payload must split the same on codex-exec as on codex app-server')
     })
 
     it('the REAL turn.completed handler emits cache_read_input_tokens with a disjoint input split', () => {

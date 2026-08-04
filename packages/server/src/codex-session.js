@@ -685,13 +685,18 @@ export class CodexSession extends JsonlSubprocessSession {
   _mapUsage(usage) {
     const u = usage || {}
     // Snake_case is the `codex exec --json` wire shape; camelCase is accepted
-    // as a fallback purely so this stays interchangeable with the app-server
-    // `_mapUsage`, whose JSON-RPC wire is camel.
-    const rawInput = nonNegInt(u.input_tokens ?? u.inputTokens)
-    const cached = nonNegInt(u.cached_input_tokens ?? u.cachedInputTokens)
+    // purely so this stays interchangeable with the app-server `_mapUsage`,
+    // whose JSON-RPC wire is camel. Key PRECEDENCE is deliberately identical
+    // to the app-server mirror (camel first) rather than "native wire first":
+    // both orders behave the same on either real wire (the other casing is
+    // absent), but a payload carrying BOTH casings would otherwise be split
+    // differently by the two codex drivers — the exact divergence the
+    // "must stay identical" rule above exists to prevent.
+    const rawInput = nonNegInt(u.inputTokens ?? u.input_tokens)
+    const cached = nonNegInt(u.cachedInputTokens ?? u.cached_input_tokens)
     return {
       input_tokens: nonNegInt(rawInput - cached),
-      output_tokens: nonNegInt(u.output_tokens ?? u.outputTokens),
+      output_tokens: nonNegInt(u.outputTokens ?? u.output_tokens),
       cache_read_input_tokens: cached,
       // Deprecated duplicate of cache_read_input_tokens — mirrors the
       // app-server payload for one release so any external reader of the raw
