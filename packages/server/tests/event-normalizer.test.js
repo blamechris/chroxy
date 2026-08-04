@@ -1573,6 +1573,115 @@ describe('EventNormalizer', () => {
       assert.ok(!('thinking' in second[0]), 'stale thinking flag must not survive the flush')
     })
   })
+
+  // ---- #6962: the distinct-messageId invariant is ENFORCED, not assumed ----
+  //
+  // #6818's correctness rests on thinking deltas never sharing a buffer key with
+  // the response text of the same turn. Today that holds only by convention —
+  // every provider builds the thinking messageId as `<turnId>-thinking-<n>`
+  // (#6756). A future provider that reuses the bare response messageId for a
+  // thinking delta would silently concatenate reasoning into the answer under a
+  // single (wrong) flag. These pin the guard: the conflict is detected, WARNed,
+  // and CONTAINED by splitting the frame so no mixed-flag frame ever ships.
+  describe('thinking/response key-collision guard (#6962)', () => {
+    // Capture logger WARN lines (the logger routes level=warn to console.warn).
+    function withWarnCapture(fn) {
+      const warnings = []
+      const orig = console.warn
+      console.warn = (msg) => { warnings.push(String(msg)) }
+      try {
+        return fn(warnings)
+      } finally {
+        console.warn = orig
+      }
+    }
+
+    it('WARNs when the same key gets a response delta then a thinking delta', () => {
+      withWarnCapture((warnings) => {
+        normalizer.bufferDelta('sess-1', 'm1', 'visible answer', 1000, false)
+        normalizer.bufferDelta('sess-1', 'm1', 'reasoning', 1005, true)
+        const hit = warnings.filter((w) => /thinking/i.test(w) && /sess-1:m1/.test(w))
+        assert.equal(hit.length, 1, `expected exactly one conflict WARN naming the key, got: ${JSON.stringify(warnings)}`)
+        assert.match(hit[0], /#6962|#6818|invariant|messageId/i)
+      })
+    })
+
+    it('WARNs in the reverse direction too (thinking key reused for response text)', () => {
+      withWarnCapture((warnings) => {
+        normalizer.bufferDelta('sess-1', 'm1', 'reasoning', 1000, true)
+        normalizer.bufferDelta('sess-1', 'm1', 'visible answer', 1005, false)
+        const hit = warnings.filter((w) => /thinking/i.test(w) && /sess-1:m1/.test(w))
+        assert.equal(hit.length, 1, `expected exactly one conflict WARN naming the key, got: ${JSON.stringify(warnings)}`)
+      })
+    })
+
+    it('does NOT merge the conflicting halves into one frame — response flushes first, unflagged', () => {
+      const flushed = []
+      normalizer.onFlush = (entries) => { flushed.push(...entries) }
+      withWarnCapture(() => {
+        normalizer.bufferDelta('sess-1', 'm1', 'visible answer', 1000, false)
+        normalizer.bufferDelta('sess-1', 'm1', 'reasoning', 1005, true)
+      })
+      // The already-buffered response half goes out immediately under its own
+      // (absent) flag; the thinking half re-buffers fresh behind it.
+      assert.equal(flushed.length, 1, 'the response half force-flushes on the conflict')
+      assert.equal(flushed[0].delta, 'visible answer', 'response frame must not carry the reasoning text')
+      assert.ok(!('thinking' in flushed[0]), 'response frame must not inherit the thinking flag')
+      const rest = normalizer.flushSession('sess-1')
+      assert.equal(rest.length, 1)
+      assert.equal(rest[0].delta, 'reasoning', 'thinking frame must not carry the answer text')
+      assert.equal(rest[0].thinking, true, 'thinking frame keeps its own flag')
+    })
+
+    it('splits in the reverse direction too (thinking flushes first, flagged)', () => {
+      const flushed = []
+      normalizer.onFlush = (entries) => { flushed.push(...entries) }
+      withWarnCapture(() => {
+        normalizer.bufferDelta('sess-1', 'm1', 'reasoning', 1000, true)
+        normalizer.bufferDelta('sess-1', 'm1', 'visible answer', 1005, false)
+      })
+      assert.equal(flushed.length, 1, 'the thinking half force-flushes on the conflict')
+      assert.equal(flushed[0].delta, 'reasoning')
+      assert.equal(flushed[0].thinking, true)
+      const rest = normalizer.flushSession('sess-1')
+      assert.equal(rest.length, 1)
+      assert.equal(rest[0].delta, 'visible answer')
+      assert.ok(!('thinking' in rest[0]), 'response half must not inherit the stale thinking flag')
+    })
+
+    it('WARNs only once per normalizer even if a violating provider keeps alternating', () => {
+      withWarnCapture((warnings) => {
+        normalizer.bufferDelta('sess-1', 'm1', 'a', 1000, false)
+        normalizer.bufferDelta('sess-1', 'm1', 'b', 1001, true)
+        normalizer.bufferDelta('sess-1', 'm1', 'c', 1002, false)
+        normalizer.bufferDelta('sess-1', 'm1', 'd', 1003, true)
+        const hit = warnings.filter((w) => /thinking/i.test(w) && /sess-1:m1/.test(w))
+        assert.equal(hit.length, 1, 'the WARN is deduped — a long violating stream cannot spam the daemon log')
+      })
+    })
+
+    // Positive control for the negative assertions above: the SAME capture
+    // harness that caught a WARN in the conflict tests must stay silent here,
+    // and the coalescing must be byte-identical to pre-#6962.
+    it('stays silent and unchanged for the (universal) non-conflicting case', () => {
+      withWarnCapture((warnings) => {
+        normalizer.bufferDelta('sess-1', 'm1-thinking-0', 'Let me ', 1000, true)
+        normalizer.bufferDelta('sess-1', 'm1-thinking-0', 'reason', 1005, true)
+        normalizer.bufferDelta('sess-1', 'm1', 'answer ', 1010, false)
+        normalizer.bufferDelta('sess-1', 'm1', 'text', 1015, false)
+        normalizer.bufferDelta('sess-1', 'm2', 'no flag at all', 1020)
+        assert.deepEqual(warnings.filter((w) => /thinking/i.test(w)), [], 'no WARN for the conventional layout')
+        const entries = normalizer.flushSession('sess-1')
+        assert.equal(entries.length, 3, 'no spurious split')
+        assert.equal(entries[0].delta, 'Let me reason')
+        assert.equal(entries[0].thinking, true)
+        assert.equal(entries[1].delta, 'answer text')
+        assert.ok(!('thinking' in entries[1]))
+        assert.equal(entries[2].delta, 'no flag at all')
+        assert.ok(!('thinking' in entries[2]))
+      })
+    })
+  })
 })
 
 // ---- #5516 (epic #5514): adaptive single-client coalescing window ----
