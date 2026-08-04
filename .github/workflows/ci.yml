@@ -450,6 +450,11 @@ jobs:
     # must use design tokens, not raw color literals. Pure bash/grep — no deps,
     # so no setup-node / npm ci. The ~120 existing literal-heavy files are
     # grandfathered via scripts/no-raw-color-literals-baseline.txt.
+    #
+    # Also carries the workspace-wide source-hygiene guards that need no deps
+    # (#7103's NUL-byte check) — this is the repo's only no-setup bash-lint job,
+    # and checkout is repo-root here, so a workspace-wide scan belongs here
+    # rather than in the package-scoped lint jobs.
     needs: runner-target
     runs-on: ${{ fromJSON(needs.runner-target.outputs.runner) }}  # SELF_HOSTED_OR_HOSTED (see header)
     timeout-minutes: 2
@@ -461,6 +466,15 @@ jobs:
 
       - name: No fallback-less var(--…) to an undefined CSS custom property
         run: bash scripts/lint-undefined-css-vars.sh
+
+      - name: No literal NUL bytes in tracked source files
+        # #7103 — a raw NUL makes a text file invisible to every search layer
+        # that passes grep's -I, silently: an empty result is indistinguishable
+        # from "the string isn't there". Five files were affected, including the
+        # dashboard's central message switch, and a sweep that skipped it
+        # concluded a handler did not exist. Needs the full git index, so it
+        # must run after a normal (non-sparse) checkout.
+        run: bash scripts/lint-no-nul-bytes.sh
 
   store-core-tests:
     name: Store Core Tests
@@ -871,6 +885,9 @@ jobs:
 
       - name: Run lint-no-raw-color-literals golden test
         run: bash scripts/__tests__/lint-no-raw-color-literals.test.sh
+
+      - name: Run lint-no-nul-bytes golden test
+        run: bash scripts/__tests__/lint-no-nul-bytes.test.sh
 
       - name: Check AGENTS.md is in sync with CLAUDE.md
         # AGENTS.md is generated from CLAUDE.md (the single source of truth) so

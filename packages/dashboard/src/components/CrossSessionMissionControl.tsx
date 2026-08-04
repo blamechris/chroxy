@@ -23,6 +23,7 @@ import type { ActivityState, CrossSessionMeta, SessionDerivedStatus } from '@chr
 import { selectCrossSessionActivity } from '@chroxy/store-core'
 import type { ExternalSessionEntry } from '@chroxy/protocol'
 import { ActivityTree } from './ActivityTree'
+import { compositeKey } from '../utils/compositeKey'
 
 export interface CrossSessionMissionControlProps {
   /** Whole-store activity state (one tree per session). */
@@ -206,7 +207,7 @@ export function CrossSessionMissionControl({ activity, sessions, external = [], 
           <ul className="mission-control-session-list control-room-entry-list">
             {external.map((s) => (
               <li
-                key={`${s.source} ${s.sessionId}`}
+                key={compositeKey(s.source, s.sessionId)}
                 className="mission-control-session mission-control-external-session"
                 data-testid={`mission-control-external-${s.sessionId}`}
               >

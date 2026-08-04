@@ -165,6 +165,7 @@ import { filterThinking, nextMessageId } from './utils';
 import { calculateCost } from '../lib/model-pricing';
 import { CLIENT_ESTIMATED_COST_PROVIDERS } from '../lib/client-estimated-cost-providers';
 import { unwrapToolResultText } from '../lib/tool-result-text';
+import { compositeKey } from '../utils/compositeKey';
 import type {
   ChatMessage,
   ConnectionContext,
@@ -3978,12 +3979,20 @@ function handleBillingCanary(msg: Record<string, unknown>, get: MsgGet, set: Msg
   // differing in session/cost, and a code-only signature would mask that change
   // and leave a dismissed banner stale (#5829 / review). Serialize each warning's
   // identifying fields, order-independent.
+  // #7103: the field join and the across-warnings join were LITERAL control
+  // bytes (NUL and U+0001) written into this file. The NUL hid the dashboard's
+  // central message switch from every NUL-sniffing code search — a sweep for
+  // "every handler of X" silently skipped this file and concluded the handler
+  // did not exist (#7086). compositeKey() is a length-prefixed plain-ASCII
+  // encoding with the same collision-safety and no control characters, and
+  // JSON.stringify keeps the sorted list unambiguous across warnings.
   const sig = (s: typeof snapshot | null) =>
     s
-      ? s.warnings
-          .map((w) => `${w.code} ${w.sessionId ?? ''} ${w.costUsd ?? ''} ${w.message}`)
-          .sort()
-          .join('')
+      ? JSON.stringify(
+          s.warnings
+            .map((w) => compositeKey(w.code, w.sessionId ?? '', w.costUsd ?? '', w.message))
+            .sort(),
+        )
       : '';
   const changed = sig(prev) !== sig(snapshot);
   set(changed ? { billingCanary: snapshot, billingBannerDismissed: false } : { billingCanary: snapshot });

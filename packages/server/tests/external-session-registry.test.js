@@ -140,3 +140,34 @@ describe('ExternalSessionRegistry', () => {
     assert.equal(EXTERNAL_SESSION_MAX_ENTRIES, 1000)
   })
 })
+
+// #7103 — see the matching block in turn-tracker.test.js. The registry's key is
+// built the same way and carries the same aliasing hazard; its own header even
+// notes the key space is attacker-influenced via `sessionId`.
+describe('ExternalSessionRegistry - composite key is unambiguous (#7103)', () => {
+  it('does not alias two (source, sessionId) pairs that share a separator-joined key', () => {
+    const r = new ExternalSessionRegistry()
+    const NUL = String.fromCharCode(0)
+    r.record('session_start', `a${NUL}b`, 'c', {})
+    r.record('session_start', 'a', `b${NUL}c`, {})
+    assert.equal(r.size, 2, 'two distinct pairs must occupy two entries')
+  })
+
+  it('does not alias pairs that collide on the replacement encoding either', () => {
+    const r = new ExternalSessionRegistry()
+    r.record('session_start', 'a|1:b', 'c', {})
+    r.record('session_start', 'a', '1:b|c', {})
+    r.record('session_start', 'a|1', 'b|c', {})
+    assert.equal(r.size, 3)
+  })
+
+  it('keeps session_end scoped to the exact pair', () => {
+    const r = new ExternalSessionRegistry()
+    const NUL = String.fromCharCode(0)
+    r.record('session_start', `a${NUL}b`, 'c', {})
+    r.record('session_start', 'a', `b${NUL}c`, {})
+    r.record('session_end', 'a', `b${NUL}c`, {})
+    assert.equal(r.size, 1, 'ending one session must not evict the other')
+    assert.equal(r.getSessions()[0].source, `a${NUL}b`)
+  })
+})
