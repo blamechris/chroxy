@@ -84,7 +84,16 @@ rm -f "$SCAN/src/icon.png"
 printf "const k = 'bad.\\\\u0000nul'\n" > "$SCAN/src/escaped.js"
 check "the \\u0000 escape passes (file is plain ASCII)" 0 "$(run_lint "$SCAN")"
 
-# Case 6 — production invocation over the real git index stays green.
+# Case 6 — EXTS must cover every tracked text type, not just the ones #7103
+# happened to hit. `.swift` is real tracked source
+# (packages/desktop/src-tauri/swift/speech-helper.swift); a type missing from
+# EXTS is skipped SILENTLY, which is the very failure shape the guard exists to
+# prevent. This case pins the audited list against a partial one.
+nul_file "$SCAN/src/helper.swift"
+check "NUL in a .swift source file fails (EXTS covers every tracked text type)" 1 "$(run_lint "$SCAN")"
+rm -f "$SCAN/src/helper.swift"
+
+# Case 7 — production invocation over the real git index stays green.
 bash "$LINT" >/dev/null 2>&1
 check "default invocation (whole git index) green" 0 "$?"
 

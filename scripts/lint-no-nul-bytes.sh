@@ -46,7 +46,19 @@ command -v perl >/dev/null 2>&1 || {
 # …) are out of scope by OMISSION rather than by an exclude list, so a new
 # binary asset type can never accidentally fail this lint. Add an extension
 # here when a new text file type lands in the repo.
-EXTS='ts|tsx|js|jsx|mjs|cjs|json|md|sh|bash|zsh|yml|yaml|toml|css|scss|html|rs|py|txt|sql|lock'
+#
+# The list must cover EVERY tracked text type, not just the ones #7103 happened
+# to hit: a language the guard does not know about is skipped SILENTLY, which is
+# the same failure shape the guard exists to prevent. Audited against
+# `git ls-files` — `swift` (packages/desktop/src-tauri/swift/), `jsonl`
+# (docs/empirical/) and `plist` (src-tauri, all XML today) were tracked text
+# types the first cut missed; `mts`/`cts` are here ahead of their first file.
+# Extensionless tracked files stay OUT deliberately: that set includes a
+# compiled binary (packages/desktop/src-tauri/swift/speech-helper) alongside
+# Dockerfile/LICENSE, so it cannot be matched by absence-of-extension alone.
+# A binary .plist (Apple's bplist) would trip this — that is a loud failure with
+# an ALLOW-list escape hatch, which beats a silent skip.
+EXTS='ts|tsx|mts|cts|js|jsx|mjs|cjs|json|jsonl|md|sh|bash|zsh|yml|yaml|toml|css|scss|html|rs|py|swift|plist|txt|sql|lock'
 
 # Grandfathered allowance: EMPTY by design. #7103 rebuilt the one legitimate
 # NUL (a NUL-in-filename attachment fixture in
