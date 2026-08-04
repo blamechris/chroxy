@@ -104,6 +104,69 @@ describe('scheduler handlers — authority gates', () => {
     assert.equal(sent[0].code, 'SCHEDULER_FORBIDDEN_BOUND_CLIENT')
   })
 
+  // #7025 — the MUTATION gate must be strictly STRONGER than the READ gate.
+  // It used to be weaker in exactly the unsafe direction: a bound + primary
+  // client was refused the harmless registry read (the test above) yet was
+  // permitted every mutation, because the write gate returned early on
+  // `isPrimaryToken === true` without ever looking at `boundSessionId`.
+  it('a bound client is refused EVERY mutation even when it holds the primary token', () => {
+    // The six mutations enumerated from the handler map: the five
+    // `scheduled_task_action` verbs plus the persisted global gate flip.
+    const mutations = [
+      action({ action: 'create', task: goodTask() }),
+      action({ action: 'update', taskId: 't1', task: { prompt: 'x' } }),
+      action({ action: 'pause', taskId: 't1' }),
+      action({ action: 'resume', taskId: 't1' }),
+      action({ action: 'delete', taskId: 't1' }),
+      { type: 'set_scheduler_enabled', enabled: true, requestId: 'g-1' },
+    ]
+    assert.equal(mutations.length, 6, 'all six scheduler mutations must be covered')
+
+    for (const msg of mutations) {
+      const label = `${msg.type}${msg.action ? `/${msg.action}` : ''}`
+      const { ctx, sent, store } = mkCtx()
+      schedulerHandlers[msg.type](WS, boundPrimaryClient, msg, ctx)
+      assert.equal(sent.length, 1, `${label} should send exactly one reply`)
+      assert.equal(sent[0].type, 'session_error', label)
+      assert.equal(sent[0].code, 'SCHEDULER_FORBIDDEN_NON_PRIMARY_CLIENT', label)
+      assert.equal(sent[0].requestId, msg.requestId, `${label}: the rejection must echo requestId`)
+      assert.equal(store.list().length, 0, `${label} must never reach the registry`)
+      // The two refusals share one code, so the MESSAGE is the only thing that
+      // can describe the real bar. It must name the whole requirement (an
+      // unbound primary token) rather than only the reachable half — a bound
+      // primary told its problem is being "pairing-issued" is a dishonest status.
+      assert.match(
+        sent[0].message, /unbound primary/i,
+        `${label}: the refusal must state the actual requirement, not just the pairing case`,
+      )
+    }
+  })
+
+  // POSITIVE CONTROL for the loop above: the SAME messages, from an UNBOUND
+  // primary, still clear the authority gate. Without this the loop could pass
+  // for free on a fixture that never reached a handler at all.
+  //
+  // `set_scheduler_enabled` is deliberately absent here: it is the one mutation
+  // that persists to the real config.json once past the gate, and this suite
+  // must not write outside its temp dir.
+  it('the same mutations from an UNBOUND primary still clear the authority gate', () => {
+    for (const msg of [
+      action({ action: 'create', task: goodTask() }),
+      action({ action: 'update', taskId: 't1', task: { prompt: 'x' } }),
+      action({ action: 'pause', taskId: 't1' }),
+      action({ action: 'resume', taskId: 't1' }),
+      action({ action: 'delete', taskId: 't1' }),
+    ]) {
+      const { ctx, sent } = mkCtx()
+      schedulerHandlers.scheduled_task_action(WS, primaryClient, msg, ctx)
+      assert.equal(sent.length, 1, `scheduled_task_action/${msg.action} should send exactly one reply`)
+      assert.notEqual(
+        sent[0].code, 'SCHEDULER_FORBIDDEN_NON_PRIMARY_CLIENT',
+        `scheduled_task_action/${msg.action} must pass the authority gate for an unbound primary`,
+      )
+    }
+  })
+
   it('the primary token is allowed to read and mutate', () => {
     const { ctx, sent, store } = mkCtx()
     schedulerHandlers.scheduled_task_action(

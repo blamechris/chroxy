@@ -426,9 +426,12 @@ export const ScheduledTaskInputSchema = z.object({
 });
 // Mutate the registry. ONE message for all five verbs so the authority gate has
 // exactly one entry point — creating a scheduled task is arranging UNATTENDED
-// agent execution on this machine, so the whole surface is strict-primary gated
-// (see handlers/scheduler-handlers.js), matching the tier #6998 set for MCP
-// config writes ("a configured server is a command this machine will spawn").
+// agent execution on this machine, so the whole surface is gated on an UNBOUND
+// STRICT-PRIMARY token (`client.isPrimaryToken === true && !client.boundSessionId`,
+// see handlers/scheduler-handlers.js): the tier #6998 set for MCP config writes
+// ("a configured server is a command this machine will spawn"), plus the unbound
+// term that keeps the mutation gate strictly stronger than the registry read's
+// host-level bar rather than accidentally weaker than it (#7025).
 //
 // `create` requires `task` (with prompt + cadence); `update` requires `taskId`
 // + `task`; `pause` / `resume` / `delete` require only `taskId`. The handler
@@ -442,7 +445,7 @@ export const ScheduledTaskActionSchema = z.object({
     requestId: z.string().max(128).optional(),
 });
 // Flip the PERSISTED global enable gate (`features.scheduler` in config.json).
-// Strict-primary gated for the same reason as the mutations above, and MORE so:
+// Unbound-strict-primary gated for the same reason as the mutations above, and MORE so:
 // this is the switch that decides whether the daemon runs agent sessions with
 // nobody watching at all.
 //
