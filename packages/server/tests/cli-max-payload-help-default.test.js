@@ -76,7 +76,9 @@ describe('--max-payload advertised default (#7011)', () => {
 
   it('the advertised default equals the cap WsServer falls back to', () => {
     const opt = maxPayloadOption()
-    const advertised = Number(/\(default:\s*(\d+)\)/.exec(opt.description)[1])
+    const match = /\(default:\s*(\d+)\)/.exec(opt.description)
+    assert.ok(match, `--max-payload help must advertise its default in bytes, got: ${opt.description}`)
+    const advertised = Number(match[1])
     const effective = runtimeFallbackMaxPayload()
     assert.equal(
       advertised,
