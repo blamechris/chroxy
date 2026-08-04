@@ -9,6 +9,7 @@ import {
   getRatchetCap,
   maybeRatchetContextWindow,
 } from './utils/context-window-learn.js'
+import { nonNegInt } from './usage-normalize.js'
 import { BILLING_CLASSES } from './billing-class.js'
 import { hasCodexOAuthCreds } from './auth-probes.js'
 import {
@@ -36,6 +37,10 @@ import {
  *   tool_start   { messageId, toolUseId, tool, input }
  *   tool_result  { toolUseId, result }
  *   result       { cost, duration, usage, sessionId }
+ *                usage is the DISJOINT split (#6718): the wire's
+ *                `cached_input_tokens` is a subset of `input_tokens`, so it is
+ *                re-emitted as `cache_read_input_tokens` with input reduced by
+ *                that amount. See _mapUsage().
  *   error        { message }
  */
 
@@ -614,8 +619,12 @@ export class CodexSession extends JsonlSubprocessSession {
           ctx.didStreamStart = false
         }
         const usage = event.usage || {}
-        const inputTokens = usage.input_tokens || 0
-        const outputTokens = usage.output_tokens || 0
+        // #6718: the ratchet below keys off the INCLUSIVE prompt size — codex
+        // reports `input_tokens` as the whole prompt with `cached_input_tokens`
+        // as a SUBSET of it, and a cache-heavy turn still occupies that much
+        // context window. The emitted usage uses the DISJOINT split instead
+        // (see _mapUsage); the two must not be conflated.
+        const inputTokens = nonNegInt(usage.input_tokens)
         // #3857 learn-loop: when Codex reports an `input_tokens` value that
         // exceeds the registered context window for the active model, the
         // static window is stale (this is exactly how we found the original
@@ -636,10 +645,7 @@ export class CodexSession extends JsonlSubprocessSession {
         this.emit('result', {
           cost: null,
           duration: null,
-          usage: {
-            input_tokens: inputTokens,
-            output_tokens: outputTokens,
-          },
+          usage: this._mapUsage(usage),
           sessionId: this.resumeSessionId,
         })
         break
@@ -647,6 +653,50 @@ export class CodexSession extends JsonlSubprocessSession {
 
       default:
         break
+    }
+  }
+
+  /**
+   * #6718 — map a `turn.completed` usage payload onto chroxy's accounting keys.
+   *
+   * Codex reports cached tokens as a SUBSET of `input_tokens` (OpenAI's
+   * `prompt_tokens_details` convention; corroborated in-repo by the context
+   * ratchet above, which treats `input_tokens` as the full prompt). Chroxy's
+   * accumulator keys are ADDITIVE (Anthropic shape: input EXCLUDES cache
+   * reads), so split into uncached input + cache_read. The subtraction is
+   * clamped, so a future codex build that switched to additive reporting would
+   * undercount input rather than go negative.
+   *
+   * Before this fix the exec path emitted only `input_tokens`/`output_tokens`
+   * and dropped the cached count entirely — session-manager `_trackUsage`
+   * reads `cache_read_input_tokens`, so codex-exec cache tokens never reached
+   * `cumulativeUsage`. The app-server path got the same fix in #6717/#6692;
+   * this is the deliberate mirror of `CodexAppServerSession._mapUsage`, and
+   * the two splits must stay identical — a divergent split between the default
+   * and the `CHROXY_CODEX_APPSERVER=0` opt-out is worse than no split at all.
+   *
+   * Extracted as a method (rather than inlined) so the mapping is directly
+   * unit-testable without spawning a subprocess — the reason #6717 could not
+   * safely fix this path (the old shim harness reimplemented the parse loop).
+   *
+   * @param {object} usage  raw `turn.completed` usage object (may be empty)
+   * @returns {{input_tokens:number,output_tokens:number,cache_read_input_tokens:number,cached_input_tokens:number}}
+   */
+  _mapUsage(usage) {
+    const u = usage || {}
+    // Snake_case is the `codex exec --json` wire shape; camelCase is accepted
+    // as a fallback purely so this stays interchangeable with the app-server
+    // `_mapUsage`, whose JSON-RPC wire is camel.
+    const rawInput = nonNegInt(u.input_tokens ?? u.inputTokens)
+    const cached = nonNegInt(u.cached_input_tokens ?? u.cachedInputTokens)
+    return {
+      input_tokens: nonNegInt(rawInput - cached),
+      output_tokens: nonNegInt(u.output_tokens ?? u.outputTokens),
+      cache_read_input_tokens: cached,
+      // Deprecated duplicate of cache_read_input_tokens — mirrors the
+      // app-server payload for one release so any external reader of the raw
+      // result sees the same shape on both codex paths (#6692).
+      cached_input_tokens: cached,
     }
   }
 }

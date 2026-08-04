@@ -59,8 +59,19 @@ function cleanupShim() {
 
 /**
  * Subclass of CodexSession that uses a shim binary instead of the real
- * `codex` CLI.  It mirrors the sendMessage() logic exactly so that the full
- * readline → event pipeline is exercised without needing the real binary.
+ * `codex` CLI, so the full spawn → readline → event pipeline is exercised
+ * without needing the real binary.
+ *
+ * #6718: `sendMessage()` here used to REIMPLEMENT the per-line switch inline —
+ * a hand-copied clone of `CodexSession._processJsonlLine()`. That made every
+ * test in this block assert against the copy, not against production: the copy
+ * silently drifted (it emitted `sessionId: null` where the real handler emits
+ * the captured thread id, and it never ran the context-window ratchet), and it
+ * is the documented reason #6717 could not safely land the codex-exec
+ * cache-token fix. The spawn/lifecycle scaffolding below is still local
+ * (that is the point of the harness), but EVERY parsed line is now handed to
+ * the REAL `_processJsonlLine()` with the same mutable `ctx` shape
+ * `JsonlSubprocessSession.sendMessage()` builds. Do not reintroduce a copy.
  */
 class ShimmedCodexSession extends CodexSession {
   constructor(opts, shimBin) {
@@ -86,63 +97,21 @@ class ShimmedCodexSession extends CodexSession {
     })
 
     this._process = proc
-    let didStreamStart = false
-    let didEmitResult = false
+    // Same mutable per-turn context JsonlSubprocessSession.sendMessage() passes
+    // to _processJsonlLine() / _emitFallbackResult().
+    const ctx = {
+      messageId: this._currentMessageId,
+      didStreamStart: false,
+      didEmitResult: false,
+    }
 
     const rl = createInterface({ input: proc.stdout })
 
     rl.on('line', (line) => {
       if (this._destroying) return
       const event = this._parseJsonLine(line)
-      if (!event || !event.type) return
-
-      switch (event.type) {
-        case 'item.completed': {
-          const item = event.item
-          if (!item) break
-          if (item.type === 'agent_message' && item.text) {
-            if (!didStreamStart) {
-              this.emit('stream_start', { messageId: this._currentMessageId })
-              didStreamStart = true
-            }
-            this.emit('stream_delta', { messageId: this._currentMessageId, delta: item.text })
-          } else if (item.type === 'tool_call') {
-            const toolMessageId = `codex-tool-${++this._messageCounter}`
-            this.emit('tool_start', {
-              messageId: toolMessageId,
-              toolUseId: item.id || toolMessageId,
-              tool: item.name || 'unknown',
-              input: item.arguments || item.input || {},
-            })
-          } else if (item.type === 'tool_output') {
-            this.emit('tool_result', {
-              toolUseId: item.call_id || item.id || `codex-tool-${this._messageCounter}`,
-              result: item.output || item.text || '',
-            })
-          }
-          break
-        }
-        case 'turn.completed': {
-          didEmitResult = true
-          if (didStreamStart) {
-            this.emit('stream_end', { messageId: this._currentMessageId })
-            didStreamStart = false
-          }
-          const usage = event.usage || {}
-          this.emit('result', {
-            cost: null,
-            duration: null,
-            usage: {
-              input_tokens: usage.input_tokens || 0,
-              output_tokens: usage.output_tokens || 0,
-            },
-            sessionId: null,
-          })
-          break
-        }
-        default:
-          break
-      }
+      if (!event) return
+      this._processJsonlLine(event, ctx)
     })
 
     proc.stderr.on('data', () => {})
@@ -151,13 +120,13 @@ class ShimmedCodexSession extends CodexSession {
       this._process = null
       this._isBusy = false
       if (this._destroying) return
-      if (didStreamStart) {
-        this.emit('stream_end', { messageId: this._currentMessageId })
+      if (ctx.didStreamStart) {
+        this.emit('stream_end', { messageId: ctx.messageId })
       }
       if (code !== 0 && code !== null) {
         this.emit('error', { message: `Codex process exited with code ${code}` })
       }
-      if (!didEmitResult) {
+      if (!ctx.didEmitResult) {
         this.emit('result', { cost: null, duration: null, usage: null, sessionId: null })
       }
     })
@@ -1475,6 +1444,31 @@ describe('CodexSession', () => {
       assert.equal(result.usage.output_tokens, 4)
     })
 
+    // #6718 — the same disjoint split the direct-handler tests pin, but proved
+    // through the REAL spawn → readline → _processJsonlLine pipeline, so a
+    // future refactor that reroutes stdout parsing can't silently drop cache
+    // tokens again.
+    it('#6718: cache tokens survive the full spawn pipeline as cache_read_input_tokens', async () => {
+      writeBaseShimJsonl([
+        { type: 'turn.completed', usage: { input_tokens: 1000, output_tokens: 42, cached_input_tokens: 600 } },
+      ])
+
+      const session = makeSession()
+      session._processReady = true
+      const results = []
+      session.on('result', (d) => results.push(d))
+
+      await session.sendMessage('hello')
+      await waitFor(() => results.length >= 1, { label: 'result event' })
+
+      // positive control — passes on unmodified source: the shim's usage
+      // payload really did reach the handler through the spawn pipeline.
+      assert.equal(results[0].usage.output_tokens, 42)
+      // the #6718 regression
+      assert.equal(results[0].usage.cache_read_input_tokens, 600)
+      assert.equal(results[0].usage.input_tokens, 400)
+    })
+
     it('abort mid-stream: interrupt() kills the subprocess and clears busy', async () => {
       // Long-lived shim — emits one chunk then sleeps so we have time to interrupt.
       writeBaseShim([
@@ -1813,5 +1807,164 @@ describe('CodexSession', () => {
         assert.equal(emitted.length, 0)
       })
     }
+  })
+
+  // ---------------------------------------------------------------------------
+  // #6718 — cache-token accounting on the LEGACY `codex exec` path
+  // (CHROXY_CODEX_APPSERVER=0). The app-server path got this in #6717/#6692;
+  // this path emitted only `input_tokens`/`output_tokens` and dropped the
+  // cached count entirely, so codex-exec cache tokens never reached
+  // `cumulativeUsage` (session-manager `_trackUsage` reads only
+  // `cache_read_input_tokens`).
+  //
+  // Every test here drives the REAL `CodexSession._processJsonlLine()` — NOT
+  // the `ShimmedCodexSession` copy of the parse loop above. A test through a
+  // reimplemented handler proves nothing about production (that is precisely
+  // why #6717 left this path unfixed).
+  // ---------------------------------------------------------------------------
+  describe('#6718 turn.completed usage mapping (legacy codex exec)', () => {
+    function freshCtx() {
+      return { messageId: 'codex-msg-x-1', didStreamStart: false, didEmitResult: false }
+    }
+
+    it('_mapUsage splits subset-cached input into uncached input + cache_read', () => {
+      const session = new CodexSession({ cwd: '/tmp' })
+      assert.deepEqual(
+        session._mapUsage({ input_tokens: 1000, output_tokens: 42, cached_input_tokens: 600 }),
+        {
+          input_tokens: 400,
+          output_tokens: 42,
+          cache_read_input_tokens: 600,
+          cached_input_tokens: 600, // deprecated duplicate, one release (#6692)
+        },
+        'must match the app-server _mapUsage split exactly — a divergent split is worse than none',
+      )
+    })
+
+    it('_mapUsage clamps instead of going negative when cached exceeds input', () => {
+      const session = new CodexSession({ cwd: '/tmp' })
+      const mapped = session._mapUsage({ input_tokens: 100, output_tokens: 1, cached_input_tokens: 600 })
+      assert.equal(mapped.input_tokens, 0, 'a future additive-reporting codex undercounts, never goes negative')
+      assert.equal(mapped.cache_read_input_tokens, 600)
+    })
+
+    it('_mapUsage zero-fills a usage-less turn (unchanged pre-#6718 behavior)', () => {
+      const session = new CodexSession({ cwd: '/tmp' })
+      assert.deepEqual(session._mapUsage({}), {
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_input_tokens: 0,
+        cached_input_tokens: 0,
+      })
+    })
+
+    it('the REAL turn.completed handler emits cache_read_input_tokens with a disjoint input split', () => {
+      const session = new CodexSession({ cwd: '/tmp' })
+      session.resumeSessionId = 't-cache'
+      const results = []
+      session.on('result', (d) => results.push(d))
+
+      const ctx = freshCtx()
+      session._processJsonlLine(
+        { type: 'turn.completed', usage: { input_tokens: 1000, output_tokens: 42, cached_input_tokens: 600 } },
+        ctx,
+      )
+
+      // --- positive control: these pass on UNMODIFIED source, proving the
+      // fixture actually reached the real handler (not a silently-skipped test).
+      assert.equal(results.length, 1, 'positive control: real handler emitted exactly one result')
+      assert.equal(ctx.didEmitResult, true, 'positive control: real handler flipped ctx.didEmitResult')
+      assert.equal(results[0].output_tokens, undefined, 'positive control: tokens live under result.usage')
+      assert.equal(results[0].usage.output_tokens, 42, 'positive control: fixture usage reached the handler')
+      assert.equal(results[0].sessionId, 't-cache', 'positive control: handler read the live resumeSessionId')
+
+      // --- the #6718 regression
+      assert.equal(results[0].usage.cache_read_input_tokens, 600,
+        'codex-exec cache tokens must be emitted under the key _trackUsage reads')
+      assert.equal(results[0].usage.input_tokens, 400,
+        'input must be the DISJOINT remainder (total - cached), matching the app-server path')
+    })
+
+    it('the ratchet still keys off the INCLUSIVE input, not the disjoint split', () => {
+      // gpt-5-codex ships a 400k window. A 500k turn that was 450k cache reads
+      // still occupied 500k of context — the disjoint 50k must not be what the
+      // learn-loop sees, or a cache-heavy session would never ratchet.
+      const tmpDir = mkdtempSync(join(tmpdir(), 'chroxy-codex-6718-ratchet-'))
+      const savedConfigDir = process.env.CHROXY_CONFIG_DIR
+      process.env.CHROXY_CONFIG_DIR = tmpDir
+      try {
+        const registry = getRegistryForProvider('codex')
+        registry.resetModels()
+
+        const session = new CodexSession({ cwd: '/tmp', model: 'gpt-5-codex' })
+        const updates = []
+        session.on('models_updated', (d) => updates.push(d))
+        session.on('result', () => {})
+
+        session._processJsonlLine(
+          { type: 'turn.completed', usage: { input_tokens: 500_000, output_tokens: 10, cached_input_tokens: 450_000 } },
+          freshCtx(),
+        )
+
+        assert.equal(updates.length, 1, 'a 500k inclusive prompt must ratchet the 400k window')
+        const m = registry.getModels().find((x) => x.fullId === 'gpt-5-codex')
+        assert.ok(m.contextWindow >= 500_000 * CODEX_CONTEXT_WINDOW_HEADROOM,
+          `expected the ratchet to key off the inclusive 500k, got window ${m.contextWindow}`)
+      } finally {
+        if (savedConfigDir === undefined) delete process.env.CHROXY_CONFIG_DIR
+        else process.env.CHROXY_CONFIG_DIR = savedConfigDir
+        getRegistryForProvider('codex').resetModels()
+        try { rmSync(tmpDir, { recursive: true, force: true }) } catch { /* best effort */ }
+      }
+    })
+
+    it('codex-exec cache tokens land in cumulativeUsage (end-to-end through SessionManager)', async () => {
+      const { SessionManager } = await import('../src/session-manager.js')
+      const tmpDir = mkdtempSync(join(tmpdir(), 'chroxy-codex-6718-sm-'))
+      const mgr = new SessionManager({
+        skipPreflight: true,
+        maxSessions: 5,
+        stateFilePath: join(tmpDir, 'session-state.json'),
+      })
+      try {
+        // A REAL CodexSession wired into the manager the way createSession does,
+        // so the whole chain under test is production code: codex JSONL →
+        // CodexSession._processJsonlLine → `result` → _trackUsage → cumulativeUsage.
+        const session = new CodexSession({ cwd: '/tmp' })
+        session.resumeSessionId = 't-sm'
+        mgr._sessions.set('s-codex', {
+          session,
+          name: 'Codex',
+          cwd: '/tmp',
+          provider: 'codex',
+          createdAt: Date.now(),
+          cumulativeUsage: {
+            inputTokens: 0,
+            outputTokens: 0,
+            cacheReadTokens: 0,
+            cacheCreationTokens: 0,
+            costUsd: 0,
+            turnsBilled: 0,
+          },
+        })
+        mgr._wireSessionEvents('s-codex', session)
+
+        session._processJsonlLine(
+          { type: 'turn.completed', usage: { input_tokens: 1000, output_tokens: 42, cached_input_tokens: 600 } },
+          freshCtx(),
+        )
+
+        const acc = mgr.getCumulativeUsage('s-codex')
+        // positive control — passes on unmodified source: the wiring is live.
+        assert.equal(acc.turnsBilled, 1, 'positive control: the result reached _trackUsage')
+        assert.equal(acc.outputTokens, 42, 'positive control: token deltas accumulated')
+        // the #6718 regression
+        assert.equal(acc.cacheReadTokens, 600, 'codex-exec cache reads must reach cumulativeUsage')
+        assert.equal(acc.inputTokens, 400, 'input accumulates the disjoint remainder')
+      } finally {
+        try { mgr.destroyAll() } catch { /* best effort */ }
+        try { rmSync(tmpDir, { recursive: true, force: true }) } catch { /* best effort */ }
+      }
+    })
   })
 })
