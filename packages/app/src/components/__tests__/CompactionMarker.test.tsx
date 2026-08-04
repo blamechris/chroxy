@@ -73,8 +73,11 @@ describe('CompactionMarker (#6972)', () => {
     const text = collectVisibleText(tree.root);
     expect(text).toContain('Context compacted');
     // Locale-agnostic — assert against the runtime's own toLocaleString()
-    // rather than a hard-coded "128,000" (a prior PR was bitten by this,
-    // see CLAUDE.md's "Numbers" testing convention).
+    // rather than a hard-coded "128,000" (grouping separators vary by
+    // locale: comma in en-US, period in de-DE, space in fr-FR). Mirrors the
+    // `localeNum` helper in the dashboard sibling,
+    // packages/dashboard/src/components/CompactionMarker.test.tsx, which was
+    // bitten by exactly this hard-coded assumption during #6970.
     expect(text).toContain(`${(128_000).toLocaleString()} → ${(12_000).toLocaleString()} tokens`);
     expect(text).toContain('2s');
     expect(text).toContain('auto');
