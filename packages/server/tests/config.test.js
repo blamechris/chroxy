@@ -734,12 +734,15 @@ describe('writeReposToConfig', () => {
     assert.deepEqual(result.repos, [{ path: '/tmp' }])
   })
 
-  it('handles malformed existing config gracefully', () => {
+  it('refuses to overwrite a malformed existing config (#7027)', () => {
+    // Previously "handled gracefully" by discarding it: the operator's tunnel
+    // config, providers and permission rules were replaced by a lone repos key
+    // because of one bad character. The add/remove-repo handlers surface the
+    // throw as `Failed to add repo: …`.
     const configPath = join(tempDir, 'config.json')
     writeFileSync(configPath, 'NOT JSON')
-    writeReposToConfig([{ path: '/tmp' }], configPath)
-    const result = JSON.parse(readFileSync(configPath, 'utf-8'))
-    assert.deepEqual(result.repos, [{ path: '/tmp' }])
+    assert.throws(() => writeReposToConfig([{ path: '/tmp' }], configPath), /Refusing to overwrite/)
+    assert.equal(readFileSync(configPath, 'utf-8'), 'NOT JSON')
   })
 })
 

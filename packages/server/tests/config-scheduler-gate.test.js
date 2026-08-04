@@ -69,11 +69,14 @@ describe('#6871 writeSchedulerEnabledToConfig', () => {
     }
   })
 
-  it('starts fresh on unparseable JSON instead of throwing', () => {
+  it('THROWS on unparseable JSON instead of starting fresh (#7027)', () => {
+    // "Start fresh" here meant replacing the operator's entire config with
+    // `{ features: { scheduler: true } }`. The handler reports the throw as
+    // SCHEDULER_GATE_FAILED rather than silently destroying the file.
     const p = cfgPath()
     writeFileSync(p, '{ not json')
-    writeSchedulerEnabledToConfig(true, p)
-    assert.equal(read(p).features.scheduler, true)
+    assert.throws(() => writeSchedulerEnabledToConfig(true, p), /Refusing to overwrite/)
+    assert.equal(readFileSync(p, 'utf-8'), '{ not json')
   })
 
   it('writes with restricted (0600) permissions', () => {

@@ -8,7 +8,8 @@
  * 4. Defaults
  */
 
-import { readFileSync, existsSync, mkdirSync } from 'fs'
+import { readFileSync, existsSync, mkdirSync, copyFileSync, constants as fsConstants } from 'fs'
+import { createHash } from 'crypto'
 import { join, dirname } from 'path'
 import { homedir } from 'os'
 import { writeFileRestricted } from './platform.js'
@@ -1916,19 +1917,129 @@ export function readReposFromConfig(configPath = DEFAULT_CONFIG_PATH) {
 }
 
 /**
+ * Copy an unparseable config aside before refusing to write over it, so the
+ * operator can recover their settings by hand (#7027).
+ *
+ * Best effort by design: the REFUSAL is what protects the file, the backup is a
+ * courtesy. `COPYFILE_EXCL` means an existing backup is never clobbered — that
+ * would be this very bug in miniature.
+ *
+ * The name is derived from the CONTENT, not the wall clock, because the refusal
+ * is per-attempt and every caller is a button the operator can press again:
+ *  - identical content collapses onto one file, so a repeatedly-retried toggle
+ *    cannot pile up an unbounded set of full copies of config.json (API token
+ *    included) in ~/.chroxy. A duplicate of content already saved carries no
+ *    extra recovery value.
+ *  - genuinely different damage still gets its own file, which a timestamp
+ *    could NOT guarantee: two different corrupt versions refused inside the
+ *    same millisecond collided, and the reported path then named a backup
+ *    holding somebody else's content.
+ * The file's mtime still carries the "when".
+ *
+ * @param {string} configPath
+ * @param {Buffer} bytes - The raw bytes read back, used to key the backup.
+ * @returns {string|null} the backup path, or null if none could be made.
+ */
+function backUpMalformedConfig(configPath, bytes) {
+  const digest = createHash('sha256').update(bytes).digest('hex').slice(0, 16)
+  const backup = `${configPath}.corrupt-${digest}`
+  try {
+    copyFileSync(configPath, backup, fsConstants.COPYFILE_EXCL)
+    return backup
+  } catch (err) {
+    // EEXIST means this exact content was already saved aside by an earlier
+    // attempt — that file IS the recovery pointer, so keep naming it.
+    return err?.code === 'EEXIST' ? backup : null
+  }
+}
+
+/**
+ * Read an existing config.json for a read-modify-write, refusing to continue on
+ * anything that would silently destroy it (#7027).
+ *
+ * Every `write*ToConfig` helper below is a read-modify-write over the operator's
+ * ENTIRE config, and its next act is
+ * `writeFileRestricted(configPath, JSON.stringify(existing))`. These all used to
+ * open with `try { ... } catch { /* start fresh *\/ }`, so a config.json with a
+ * hand-edited trailing comma, one truncated by an earlier crash, or one hit by a
+ * transient read error turned an unrelated Control Room toggle into a WHOLESALE
+ * overwrite: tunnel config, providers, features and permission rules replaced by
+ * a single-key object, with no warning to the operator.
+ *
+ * So only ONE case starts fresh — the file genuinely not existing, which is the
+ * legitimate first-run path. Every other outcome throws, and all three callers
+ * already have an honest failure path for it (repo-handlers' `Failed to
+ * add/remove repo`, the preset drawer's write-failure error, and the scheduler
+ * handler's `SCHEDULER_GATE_FAILED`).
+ *
+ * A file that PARSES but is not a plain object (`null`, an array, a bare string)
+ * is refused the same way: coercing it to `{}` and writing is the same wholesale
+ * replacement wearing a different hat.
+ *
+ * @param {string} configPath - Path to config.json.
+ * @returns {object} The parsed config object, or `{}` when the file is absent.
+ * @throws {Error} When the file exists but cannot be read or parsed into an object.
+ */
+export function readConfigForMerge(configPath) {
+  // Read as BYTES and decode separately: the backup is keyed off the raw bytes,
+  // and a crash-truncated config can be cut mid multi-byte character, so two
+  // byte-different files can decode to the same U+FFFD-bearing string. Keying
+  // off the decoded text would collapse those onto one backup and then name it
+  // in the refusal for the version it does NOT hold.
+  let bytes
+  try {
+    bytes = readFileSync(configPath)
+  } catch (err) {
+    // Absent → legitimately start fresh. Anything else (EACCES, EISDIR, EIO) is
+    // a read we cannot trust, and overwriting on the back of it loses the file.
+    if (err?.code === 'ENOENT') return {}
+    throw new Error(
+      `Refusing to write ${configPath}: the existing config could not be read (${err.message}). ` +
+      'Overwriting it would discard every other setting.',
+    )
+  }
+
+  let parsed
+  try {
+    parsed = JSON.parse(bytes.toString('utf-8'))
+  } catch (err) {
+    throw refuseMalformedConfig(configPath, `it is not valid JSON (${err.message})`, bytes)
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    const found = parsed === null ? 'null' : (Array.isArray(parsed) ? 'an array' : `a ${typeof parsed}`)
+    throw refuseMalformedConfig(configPath, `it does not contain a JSON object (found ${found})`, bytes)
+  }
+  return parsed
+}
+
+/**
+ * Build the refusal for a config.json that exists but cannot be merged into,
+ * backing the bad file up first (#7027).
+ * @param {string} configPath
+ * @param {string} reason - Why it could not be merged, in sentence-fragment form.
+ * @param {Buffer} bytes - The raw bytes read back, used to key the backup.
+ * @returns {Error}
+ */
+function refuseMalformedConfig(configPath, reason, bytes) {
+  const backup = backUpMalformedConfig(configPath, bytes)
+  return new Error(
+    `Refusing to overwrite ${configPath}: ${reason}. ` +
+    (backup ? `A copy was saved to ${backup}. ` : '') +
+    'Repair or move the file and retry — writing would have replaced every other setting.',
+  )
+}
+
+/**
  * Write the repos array to a config file, preserving other fields.
+ *
+ * Throws rather than starting fresh when an existing config.json is unreadable
+ * or malformed (#7027) — see readConfigForMerge.
+ *
  * @param {Array<{ path: string, name?: string }>} repos - Repos array to write.
  * @param {string} [configPath] - Path to config.json. Defaults to ~/.chroxy/config.json.
  */
 export function writeReposToConfig(repos, configPath = DEFAULT_CONFIG_PATH) {
-  let existing = {}
-  try {
-    if (existsSync(configPath)) {
-      existing = JSON.parse(readFileSync(configPath, 'utf-8'))
-    }
-  } catch {
-    // Start fresh if parse fails
-  }
+  const existing = readConfigForMerge(configPath)
   existing.repos = repos
   const dir = dirname(configPath)
   mkdirSync(dir, { recursive: true })
@@ -1943,20 +2054,15 @@ export function writeReposToConfig(repos, configPath = DEFAULT_CONFIG_PATH) {
  * the operator can configure an override for a repo that isn't otherwise
  * registered. Other config fields and repo entries are preserved.
  *
+ * Throws rather than starting fresh when an existing config.json is unreadable
+ * or malformed (#7027) — see readConfigForMerge.
+ *
  * @param {string} repoPath - The repo path to key the override by.
  * @param {object|null} preset - The preset object ({ preamble?, seed?, enabled? }) or null to clear.
  * @param {string} [configPath] - Path to config.json. Defaults to ~/.chroxy/config.json.
  */
 export function writeSessionPresetOverrideToConfig(repoPath, preset, configPath = DEFAULT_CONFIG_PATH) {
-  let existing = {}
-  try {
-    if (existsSync(configPath)) {
-      existing = JSON.parse(readFileSync(configPath, 'utf-8'))
-    }
-  } catch {
-    // Start fresh if parse fails
-  }
-  if (!existing || typeof existing !== 'object') existing = {}
+  const existing = readConfigForMerge(configPath)
   if (!Array.isArray(existing.repos)) existing.repos = []
 
   const idx = existing.repos.findIndex(
@@ -1999,19 +2105,18 @@ export function writeSessionPresetOverrideToConfig(repoPath, preset, configPath 
  * checks the env first), so writing `false` while that env var is set leaves the
  * gate open; the handler refuses that combination instead of writing a lie.
  *
+ * Throws rather than starting fresh when an existing config.json is unreadable
+ * or malformed (#7027) — see readConfigForMerge. The handler already reports
+ * that as SCHEDULER_GATE_FAILED.
+ *
  * @param {boolean} enabled - the new gate value.
  * @param {string} [configPath] - Path to config.json. Defaults to ~/.chroxy/config.json.
  */
 export function writeSchedulerEnabledToConfig(enabled, configPath = DEFAULT_CONFIG_PATH) {
-  let existing = {}
-  try {
-    if (existsSync(configPath)) {
-      existing = JSON.parse(readFileSync(configPath, 'utf-8'))
-    }
-  } catch {
-    // Start fresh if parse fails
-  }
-  if (!existing || typeof existing !== 'object') existing = {}
+  const existing = readConfigForMerge(configPath)
+  // A non-object `features` is a single stray FIELD, not the whole config, so it
+  // is repaired in place rather than refused — the operator's other settings
+  // still survive the write.
   if (!existing.features || typeof existing.features !== 'object' || Array.isArray(existing.features)) {
     existing.features = {}
   }
@@ -2039,18 +2144,15 @@ export function readControlRoomRootFromConfig(configPath = DEFAULT_CONFIG_PATH) 
 /**
  * Write the Control Room discovery root to a config file, preserving other
  * fields (#5172).
+ *
+ * Throws rather than starting fresh when an existing config.json is unreadable
+ * or malformed (#7027) — see readConfigForMerge.
+ *
  * @param {string} root - Absolute path to the discovery root.
  * @param {string} [configPath] - Path to config.json. Defaults to ~/.chroxy/config.json.
  */
 export function writeControlRoomRootToConfig(root, configPath = DEFAULT_CONFIG_PATH) {
-  let existing = {}
-  try {
-    if (existsSync(configPath)) {
-      existing = JSON.parse(readFileSync(configPath, 'utf-8'))
-    }
-  } catch {
-    // Start fresh if parse fails
-  }
+  const existing = readConfigForMerge(configPath)
   existing.controlRoomRoot = root
   const dir = dirname(configPath)
   mkdirSync(dir, { recursive: true })
