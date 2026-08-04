@@ -8,7 +8,7 @@ import { existsSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
 import readline from 'readline'
-import { validateConfig, mergeConfig, isFatalConfigWarning } from '../config.js'
+import { validateConfig, mergeConfig, isFatalConfigWarning, DEFAULT_MAX_PAYLOAD_BYTES } from '../config.js'
 
 export const CONFIG_DIR = join(homedir(), '.chroxy')
 export const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
@@ -47,7 +47,10 @@ export function addServerOptions(cmd) {
     .option('--legacy-cli', 'Use legacy CLI process mode instead of Agent SDK')
     .option('--provider <name>', 'Session provider to use (e.g. claude-sdk, claude-cli)')
     .option('--max-messages <count>', 'Max messages retained per session (FIFO eviction, default: 1000)')
-    .option('--max-payload <bytes>', 'WebSocket max message size in bytes (default: 1048576)')
+    // #7011 — interpolated, never hand-copied: Commander gets no defaultValue for
+    // this option, so --help is the only place the default is advertised, and a
+    // literal here drifted 10x from the WsServer fallback.
+    .option('--max-payload <bytes>', `WebSocket max message size in bytes (default: ${DEFAULT_MAX_PAYLOAD_BYTES})`)
     .option('--max-tool-input <bytes>', 'Maximum tool input size in bytes (default: 262144)')
     .option('--session-timeout <duration>', 'Idle session timeout (e.g. 2h, 30m). Disabled by default')
     .option('--cost-budget <dollars>', 'Per-session cost budget in dollars (e.g., 5.00)')
