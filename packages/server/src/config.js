@@ -1104,6 +1104,23 @@ export function isFatalConfigWarning(warning) {
 }
 
 /**
+ * Effective default for `maxPayload` — the WebSocket max message size applied
+ * when nothing sets it (config file, `CHROXY_MAX_PAYLOAD`, or `--max-payload`).
+ * 10 MB, wide enough for image / document attachments.
+ *
+ * #7011: it lives here, in the module that already owns maxPayload's numeric
+ * contract (see NUMERIC_RANGE_CHECKS below), because THREE consumers must agree
+ * on it — the WsServer fallback, the `--max-payload` help text, and CONFIG.md.
+ * It used to be a bare literal in ws-server.js while the help string hand-copied
+ * a stale 1 MB value, and the two drifted 10x apart. config.js is the only shared
+ * dependency of all three that is cheap to import: cli/shared.js loads on EVERY
+ * `chroxy` invocation, whereas ws-server.js sits behind a deliberately lazy
+ * `await import('../server-cli.js')` in cli/server-cmd.js — so the constant must
+ * not live on the ws-server side of that boundary.
+ */
+export const DEFAULT_MAX_PAYLOAD_BYTES = 10 * 1024 * 1024
+
+/**
  * Declarative range checks for the simple numeric config fields (audit P2-6).
  * Each entry replaces a hand-rolled `if (Number.isFinite(value) ...)` block that
  * was copy-pasted ~6 times — a shape where a forgotten `Number.isFinite` guard,

@@ -22,7 +22,7 @@ import { handleAuthMessage, handlePairMessage, handlePairRequestMessage, handleK
 import { postPairLinkToDiscord } from './discord-pair-delivery.js'
 import { sendPostAuthInfo, replayHistory, flushPostAuthQueue, sendSessionInfo } from './ws-history.js'
 import { createDevicePreferences } from './device-preferences.js'
-import { isUserShellEnabled, isIdeFeatureEnabled, isOrchestrationEnabled } from './config.js'
+import { isUserShellEnabled, isIdeFeatureEnabled, isOrchestrationEnabled, DEFAULT_MAX_PAYLOAD_BYTES } from './config.js'
 import { createHttpHandler } from './http-routes.js'
 import { setMcpOAuthCallbackBase } from './byok-mcp-oauth.js'
 import { CheckpointManager } from './checkpoint-manager.js'
@@ -589,7 +589,9 @@ export class WsServer {
     // can read settings (e.g. workspaceRoots for cwd allowlist) at
     // message time. May be null in tests that don't pass it through.
     this.config = config || null
-    this._maxPayload = maxPayload || 10 * 1024 * 1024 // default 10MB (supports image/doc attachments)
+    // #7011 — default comes from config.js so the `--max-payload` help text and
+    // CONFIG.md quote the same number this fallback applies.
+    this._maxPayload = maxPayload || DEFAULT_MAX_PAYLOAD_BYTES
     this.authRequired = authRequired
     this._encryptionEnabled = !noEncrypt
     this._keyExchangeTimeoutMs = keyExchangeTimeoutMs ?? 10_000
