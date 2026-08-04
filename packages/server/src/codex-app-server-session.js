@@ -194,9 +194,12 @@ export class CodexAppServerSession extends BaseSession {
     this._reconnectDeadline = null // #6856 — one-shot hard cap on total reconnect-suppression time
     // #6856/#6967 — configurable reconnect-suppression deadline (opt / env /
     // default), clamped to the window between the #6629 silence watchdog and the
-    // default result timeout. Warns through the session logger when present so an
-    // out-of-range override is attributable to the session that set it.
-    this._reconnectDeadlineMs = resolveReconnectDeadlineMs(opts.reconnectDeadlineMs, this._log || log)
+    // default result timeout. The out-of-range warning goes to the MODULE logger,
+    // not the usual `this._log || log`: `this._log` is the thread-scoped logger
+    // built in start() (it needs a thread id, which does not exist yet), so at
+    // construction that expression is unconditionally `log` and writing it would
+    // only imply a session scoping this warn can never have.
+    this._reconnectDeadlineMs = resolveReconnectDeadlineMs(opts.reconnectDeadlineMs)
     // #6856 — injectable timer seam (defaults to node globals) so the reconnect
     // deadline is unit-testable without wall-clock waits, mirroring the #6908/#6911
     // byok-mcp-config `setTimer`/`clearTimer` pattern. Only the deadline routes
