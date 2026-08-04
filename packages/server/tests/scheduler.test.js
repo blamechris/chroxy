@@ -997,8 +997,14 @@ describe('#6865 SchedulerEngine', () => {
       assert.deepEqual([...new Set(skips)], [second.id], 'only the second task is shed')
       assert.ok(skips.length >= 2, `the second task must be re-shed on every tick while the slot is held (got ${skips.length})`)
       assert.equal(store.get(second.id).lastRun, null, 'a starved task never records a run at all')
-      assert.equal(engine.runningTaskIds.size, 1, 'the first run is still holding the only slot')
-      assert.ok(first.id)
+      // ...and it is FIRST that holds it. `assert.ok(first.id)` stood here, which
+      // is true of every task the store ever returns and so could not fail — the
+      // same never-fires assertion this PR removed from the parity guard. Naming
+      // the holder is the claim actually worth pinning: it rules out the mirror
+      // world where `second` won the slot and `first` was the one shed, which
+      // every other assertion above is equally happy with.
+      assert.deepEqual([...engine.runningTaskIds], [first.id], 'the FIRST run is the one holding the only slot')
+      assert.equal(runTask.calls[0].task.id, first.id, 'and it is the run that was actually started')
 
       // Release it and the starvation ends on the next tick — the same
       // transition the interrupted run must make on its own.

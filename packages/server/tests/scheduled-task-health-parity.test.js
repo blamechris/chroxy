@@ -131,26 +131,34 @@ describe('scheduled-task health — only OK is healthy', () => {
  * lands in this set automatically, so the CLI cannot quietly leave it to the
  * `default:` arm and report `ERROR` for something the dashboard reports by name.
  *
- * `error` is the ONE deliberate exception: the CLI routes it through `default:`,
- * which returns `'ERROR'` anyway, so declaring a case for it would be noise.
+ * A status may be excused from an explicit CLI case for exactly ONE reason: the
+ * SHARED HELPER also routes it to `'ERROR'`, so the CLI's `default: return
+ * 'ERROR'` already agrees with it and a case would be pure noise. That is why
+ * the exemption is COMPUTED off `deriveScheduledTaskHealthTag` rather than kept
+ * as a hand-written allowlist — today it resolves to exactly `{error}`.
+ *
+ * A hand-maintained exemption list would be a hole in this guard, not a
+ * convenience. It hands a maintainer a one-line way to make a red go away
+ * WITHOUT teaching the CLI anything, and if the shared helper gives the new
+ * status its own tag, that one line reinstates #7024 verbatim — the CLI reports
+ * `ERROR` while the dashboard reports the real tag, and this guard reports
+ * green. Deriving the exemption makes that impossible to express: a status can
+ * only ride the `default:` arm when both surfaces land on the same tag anyway.
  *
  * ── ADDING A NEW ENGINE STATUS (e.g. #7038) ──────────────────────────────────
- * Adding a status to `SCHEDULED_TASK_LAST_RUN_STATUSES` will turn the parity
- * test below RED **on purpose**, and the failure message names the missing
- * status. There are exactly two correct responses, both one-line and both
- * deliberate:
- *   1. Teach the CLI `case '<status>': return '<TAG>'` (and add a GOLDEN row
- *      above) — the normal case for a status that deserves its own tag; or
- *   2. Add the status to `CLI_DEFAULT_ARM_STATUSES` below, with a comment
- *      saying why it rides the `default:` arm.
- * Neither is a mystery failure: the red is the guard asking which of the two you
- * meant, which is precisely the decision #7024 wanted put on the record instead
- * of left to an omission nobody notices.
+ * Adding a status to `SCHEDULED_TASK_LAST_RUN_STATUSES` and giving it its own
+ * tag in `deriveScheduledTaskHealthTag` turns the parity test below RED **on
+ * purpose**, and the failure message names the missing status. There is exactly
+ * ONE correct response: teach the CLI `case '<status>': return '<TAG>'` (and add
+ * a GOLDEN row above). A status the shared helper deliberately leaves on its own
+ * `default:` arm needs no CLI change and goes green on its own — the derivation
+ * below already excuses it, so that case is not even a red.
  */
-const CLI_DEFAULT_ARM_STATUSES = new Set([
-  // Handled by the CLI's `default: return 'ERROR'` — same tag, no case needed.
-  'error',
-])
+const CLI_DEFAULT_ARM_STATUSES = new Set(
+  [...SCHEDULED_TASK_LAST_RUN_STATUSES].filter(
+    (status) => deriveScheduledTaskHealthTag({ enabled: true, lastRun: { status } }) === 'ERROR',
+  ),
+)
 
 const CLI_REQUIRED_CASE_STATUSES = [...SCHEDULED_TASK_LAST_RUN_STATUSES]
   .filter((status) => !CLI_DEFAULT_ARM_STATUSES.has(status))
@@ -250,8 +258,22 @@ describe('scheduled-task health — CLI source parity (#6868 / PR #7013)', () =>
     //    exists to catch, waved straight through.
     //
     //    See CLI_REQUIRED_CASE_STATUSES for what to do when this goes red after
-    //    a new engine status is added: it is a two-option, one-line decision,
-    //    not a mystery failure.
+    //    a new engine status is added: teach the CLI a case, one line, not a
+    //    mystery failure.
+    //
+    //    A DUPLICATE case is named first and on its own. The set comparison
+    //    below sorts and compares, so a duplicate reaches it as an unreadable
+    //    array diff (`[refused, success, success, timeout]` vs the expected
+    //    four) rather than as "you declared 'success' twice" — and an assertion
+    //    that can only ever fire *after* another one has already failed is not
+    //    an assertion at all, which is exactly the `assert.ok(fn.length > 0)`
+    //    mistake this file just finished removing.
+    const duplicates = [...new Set(statuses.filter((s, i) => statuses.indexOf(s) !== i))]
+    assert.deepEqual(
+      duplicates,
+      [],
+      `the CLI's healthTag() declares duplicate case(s) for [${duplicates.join(', ')}] — the second is dead code and the switch does not mean what it reads like`,
+    )
     assert.deepEqual(
       [...statuses].sort(),
       CLI_REQUIRED_CASE_STATUSES,
@@ -259,11 +281,6 @@ describe('scheduled-task health — CLI source parity (#6868 / PR #7013)', () =>
         `(the engine's SCHEDULED_TASK_LAST_RUN_STATUSES minus the ones routed through its default arm: ` +
         `[${[...CLI_DEFAULT_ARM_STATUSES].join(', ')}]). A status missing here falls through to 'ERROR' while the ` +
         `shared helper reports its own tag — silent, one-directional drift.`,
-    )
-    assert.equal(
-      pairs.length,
-      CLI_REQUIRED_CASE_STATUSES.length,
-      `expected exactly ${CLI_REQUIRED_CASE_STATUSES.length} status cases in the CLI switch, got ${pairs.length} (a duplicate case?)`,
     )
 
     // 3. Every status→tag case in the CLI must agree with the shared helper.
@@ -324,7 +341,11 @@ describe('scheduled-task health — CLI source parity (#6868 / PR #7013)', () =>
     assert.ok(good.pairs.length > 0 && bad.pairs.length > 0, 'the extractor must find cases in both fixtures')
 
     // (b) The known-GOOD fixture satisfies the tightened assertion.
-    assert.deepEqual([...good.statuses].sort(), CLI_REQUIRED_CASE_STATUSES)
+    assert.deepEqual(
+      [...good.statuses].sort(),
+      CLI_REQUIRED_CASE_STATUSES,
+      "the known-good fixture no longer matches CLI_REQUIRED_CASE_STATUSES — if a status was just added to SCHEDULED_TASK_LAST_RUN_STATUSES, teach the COMPLETE fixture above the same `case` you are teaching the real CLI, or this control stops controlling anything",
+    )
 
     // (c) The known-DRIFTED fixture is caught by the tightened assertion...
     assert.notDeepEqual([...bad.statuses].sort(), CLI_REQUIRED_CASE_STATUSES)
