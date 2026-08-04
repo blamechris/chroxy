@@ -265,6 +265,72 @@ test('#6732 cancelRun journals only legal run transitions', async () => {
   }
 })
 
+// The two remaining table reconciliations (`result_review -> briefing` on a
+// result revise, `escalated -> spawning` on a user retry) are LOAD-BEARING under
+// the fail-closed posture: drop either row and the corresponding live run dies
+// with a TransitionError mid-flight. Neither is reachable from the happy path,
+// the redelegate loop or the cancel path above, so each gets its own driven run
+// — otherwise the whole suite stays green while the row rots.
+
+test('#6732 a result-review revise re-drives briefing and journals only legal subtask transitions', async () => {
+  // First result_review comes back `revise`, so the committee loop returns to
+  // the TOP of the cycle (fresh plan-of-attack) rather than re-prompting in
+  // place: result_review -> briefing. Second time it approves so the run ends.
+  const decide = ({ role, kind, n }) => {
+    if (role === 'architect' && kind === 'result_review' && n === 1) {
+      return { kind: 'result_review', verdict: 'revise', feedback: 'tighten it' }
+    }
+    return happyDecider({ role, kind })
+  }
+  const { mgr, cleanup, nodeTrace } = makeHarness(decide)
+  try {
+    const rec = mgr.createRun({ goal: 'Audit', cwd: '/repo', autoApprovePlan: true })
+    const done = waitFor(mgr, ['run_completed'])
+    await mgr.startRun(rec.runId)
+    await done
+
+    // POSITIVE CONTROL: the revise really re-entered briefing from result_review.
+    const pairs = nodeTrace.map((s) => `${s.from} -> ${s.to}`)
+    assert.ok(pairs.includes('result_review -> briefing'), `expected a result_review -> briefing write, got:\n${pairs.join('\n')}`)
+
+    const bad = firstIllegal(nodeTrace, assertNodeTransition)
+    assert.equal(bad, null, `engine journaled an illegal NODE transition: ${bad?.err?.message}`)
+  } finally {
+    cleanup()
+  }
+})
+
+test('#6732 an escalation retry re-spawns from escalated and journals only legal subtask transitions', async () => {
+  // First poa_review escalates; the user approves the escalation gate, which
+  // hands the subtask to a FRESH worker — so it re-enters through the spawn
+  // step: escalated -> spawning. Second poa_review approves so the run ends.
+  const decide = ({ role, kind, n }) => {
+    if (role === 'architect' && kind === 'poa_review' && n === 1) {
+      return { kind: 'poa_review', verdict: 'escalate', feedback: 'needs a human' }
+    }
+    return happyDecider({ role, kind })
+  }
+  const { mgr, cleanup, nodeTrace } = makeHarness(decide)
+  try {
+    const rec = mgr.createRun({ goal: 'Audit', cwd: '/repo', autoApprovePlan: true })
+    const gated = waitFor(mgr, ['gate_opened'])
+    await mgr.startRun(rec.runId)
+    const { payload } = await gated
+    const done = waitFor(mgr, ['run_completed'])
+    await mgr.resolveGate(rec.runId, payload.gate.gateId, { decision: 'approve' })
+    await done
+
+    // POSITIVE CONTROL: the retry really re-spawned out of `escalated`.
+    const pairs = nodeTrace.map((s) => `${s.from} -> ${s.to}`)
+    assert.ok(pairs.includes('escalated -> spawning'), `expected an escalated -> spawning write, got:\n${pairs.join('\n')}`)
+
+    const bad = firstIllegal(nodeTrace, assertNodeTransition)
+    assert.equal(bad, null, `engine journaled an illegal NODE transition: ${bad?.err?.message}`)
+  } finally {
+    cleanup()
+  }
+})
+
 // --- 2. wiring (fail-closed) ------------------------------------------------
 
 test('#6732 an illegal RUN transition is rejected fail-closed and never journaled', async () => {

@@ -188,7 +188,10 @@ Terminal: done | skipped | failed | cancelled
 - The iteration cap is evaluated at the TOP of the committee loop, i.e. *after* a `redelegate` has already re-spawned the worker, so a forced escalation can fire from `spawning`.
 - `escalated ── retry ──▶ spawning ──▶ briefing`: a user retry hands the subtask to a fresh worker, so it re-enters through the spawn step.
 
-The error terminals (`failed`, `cancelled`, `cancelling`, `interrupted`, `suspended`) are legal from any non-terminal state and are not enumerated per row — the transition rows describe forward progress only, so a fail-closed guard can never wedge a teardown path.
+The transition rows describe FORWARD PROGRESS only; the error/teardown targets below are legal from any non-terminal state and are not enumerated per row, so a fail-closed guard can never wedge a teardown path. The two machines have different vocabularies, and the escape hatch is per-machine — `cancelling`/`suspended` are run statuses only, `interrupted` is a subtask status only:
+
+- **run** (`assertRunTransition`): `cancelling`, `suspended`, `failed`. Note `cancelled` is NOT in this set — a run reaches it only via `cancelling`, which is exactly why `cancelRun` journals the intermediate state.
+- **subtask** (`assertNodeTransition`): `cancelled`, `interrupted`, `failed`.
 
 ---
 
