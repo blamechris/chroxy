@@ -40,11 +40,17 @@ const RUN_TRANSITIONS = {
   created: ['planning'],
   planning: ['plan_review', 'executing', 'failed'], // executing when autoApprovePlan skips the gate
   plan_review: ['executing', 'cancelled'],
-  executing: ['plan_review', 'paused', 'budget_paused', 'synthesizing', 'executing', 'failed'],
+  executing: ['plan_review', 'paused', 'budget_paused', 'resource_paused', 'synthesizing', 'executing', 'failed'],
   paused: ['executing', 'cancelling'],
   budget_paused: ['executing', 'synthesizing', 'cancelling'],
+  // #6733 — session-pool starvation. Shaped exactly like budget_paused: the run
+  // resumes into `executing` when a slot frees, or goes straight to
+  // `synthesizing` if a gate resolution retired the last pending subtask while it
+  // was stalled. It is NOT self-looping: the engine no-ops a re-pause, so a
+  // resource_paused -> resource_paused write is a real bug and stays illegal.
+  resource_paused: ['executing', 'synthesizing', 'cancelling'],
   synthesizing: ['completed', 'failed'],
-  suspended: ['planning', 'plan_review', 'executing', 'budget_paused', 'paused', 'synthesizing', 'cancelled', 'failed'],
+  suspended: ['planning', 'plan_review', 'executing', 'budget_paused', 'resource_paused', 'paused', 'synthesizing', 'cancelled', 'failed'],
   cancelling: ['cancelled'],
   completed: [],
   failed: [],

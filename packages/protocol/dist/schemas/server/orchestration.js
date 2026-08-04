@@ -18,11 +18,14 @@ import { z } from 'zod';
  */
 // --- canonical enums (engine imports these) --------------------------------
 // Run lifecycle. `paused` = user-requested pause (orchestration_run_action),
-// distinct from `budget_paused` so the UI can render the cause; `suspended` =
-// interrupted by a daemon restart and not yet resumed.
+// distinct from `budget_paused` so the UI can render the cause; `resource_paused`
+// (#6733) = the daemon's session pool is full, so the run cannot spawn its next
+// worker and has NOTHING in flight — it clears itself the moment a slot frees;
+// `suspended` = interrupted by a daemon restart and not yet resumed.
 export const RUN_STATUS_VALUES = [
     'created', 'planning', 'plan_review', 'executing', 'paused', 'budget_paused',
-    'synthesizing', 'cancelling', 'suspended', 'completed', 'failed', 'cancelled',
+    'resource_paused', 'synthesizing', 'cancelling', 'suspended', 'completed',
+    'failed', 'cancelled',
 ];
 // Subtask ("node") lifecycle incl. the committee gates.
 export const RUN_NODE_STATUS_VALUES = [

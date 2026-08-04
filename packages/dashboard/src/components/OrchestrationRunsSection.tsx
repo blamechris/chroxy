@@ -40,7 +40,10 @@ const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled'])
 function statusAccent(status: string): string {
   if (status === 'completed') return 'ok'
   if (status === 'failed' || status === 'cancelled') return 'bad'
-  if (status === 'plan_review' || status === 'budget_paused' || status === 'paused' || status === 'suspended') return 'warn'
+  if (
+    status === 'plan_review' || status === 'budget_paused' || status === 'resource_paused'
+    || status === 'paused' || status === 'suspended'
+  ) return 'warn'
   return 'neutral'
 }
 
@@ -302,6 +305,10 @@ function RunControls({ run }: { run: RunDetail }) {
     if (id) setReqId(id)
   }
   const canPause = run.status === 'executing'
+  // `resource_paused` (#6733) is deliberately absent: the engine clears that
+  // stall itself the moment a session slot frees, so a Resume button would
+  // either no-op or race the engine. The warn-accented chip is the whole
+  // affordance — the operator's lever is closing a session, not this control.
   const canResume = run.status === 'paused' || run.status === 'budget_paused' || run.status === 'suspended'
   return (
     <div className="cr-orch-run-controls" data-testid="orch-run-controls">

@@ -155,6 +155,15 @@ export class OrchestrationManager extends EventEmitter {
     this._maxCompletedSnapshots = 32
     this._maxSessions = Number.isFinite(config.maxSessions) ? config.maxSessions : 5
 
+    // #6733: a run stalled on session capacity has NOTHING in flight, so no
+    // internal event will ever re-drive its scheduler. Subscribe unconditionally
+    // (rather than arming on the first stall and disarming on recovery) — the
+    // handler is a no-op walk of `_runs` when nothing is stalled, and arm/disarm
+    // bookkeeping is exactly how a stall state latches. Removed in dispose().
+    this._disposed = false
+    this._onSessionFreed = () => this._onSessionCapacityFreed()
+    if (typeof sessionManager.on === 'function') sessionManager.on('session_destroyed', this._onSessionFreed)
+
     // Owned-session registry drives the permission gate (answers ONLY our sessions).
     if (permissionGateFactory) {
       this._gate = permissionGateFactory({
@@ -169,6 +178,9 @@ export class OrchestrationManager extends EventEmitter {
   }
 
   dispose() {
+    this._disposed = true
+    if (this._onSessionFreed && typeof this._sm.off === 'function') this._sm.off('session_destroyed', this._onSessionFreed)
+    this._onSessionFreed = null
     this._gate?.dispose?.()
   }
 
@@ -364,7 +376,13 @@ export class OrchestrationManager extends EventEmitter {
   // --- scheduler -----------------------------------------------------------
 
   _schedule(run) {
-    if (run.cancelled || run.phase !== 'executing') return
+    if (run.cancelled) return
+    // `resource_paused` (#6733) is a STALL, not a stop — the scheduler MUST be
+    // able to re-enter it, both when a freed session slot re-arms it and when a
+    // gate resolution retires the last pending subtask while it is stalled.
+    // Early-returning on it instead would latch the pause: with zero workers in
+    // flight there is no other event that ever re-drives this run.
+    if (run.phase !== 'executing' && run.phase !== 'resource_paused') return
     const all = [...run.subtasks.values()]
     // Ready to synthesize only when EVERY subtask is terminal. 'escalated' is
     // NOT terminal — it blocks synthesis until the user resolves its gate, so a
@@ -376,7 +394,19 @@ export class OrchestrationManager extends EventEmitter {
     const pending = [...run.subtasks.entries()].filter(([, s]) => s.state === 'pending')
     for (const [subtaskId] of pending) {
       if (this._activeWorkerCount(run) >= this._cfg.maxParallelWorkers) break
-      if (!this._sessionHeadroom()) break
+      if (!this._sessionHeadroom()) {
+        // #6733 — a stall needs ALL THREE: pending work (we are inside the
+        // pending loop, and this subtask is still `pending`), ZERO workers in
+        // flight, and no headroom. With a worker still running this is ordinary
+        // saturation — its completion re-enters _schedule — and pausing there
+        // would fire on most runs and train the operator to ignore the state.
+        if (this._activeWorkerCount(run) === 0) this._pauseForResources(run)
+        break
+      }
+      // Headroom is back, so the stall condition no longer holds. Clear it
+      // BEFORE any other pause/spawn decision so the state never lies and the
+      // next status write (a budget pause, say) starts from `executing`.
+      this._clearResourcePause(run)
       const budget = this._ledger.evaluateBudget(run.runId, { role: 'worker.audit' })
       if (budget && budget.ok === false) { this._pauseForBudget(run); break }
       const st = run.subtasks.get(subtaskId)
@@ -788,6 +818,62 @@ export class OrchestrationManager extends EventEmitter {
     this._emitRunDelta(run)
   }
 
+  // --- #6733: session-pool starvation --------------------------------------
+  //
+  // `_sessionHeadroom()` counts the daemon's TOTAL live sessions, not this run's
+  // own, so unrelated interactive sessions can leave a run unable to spawn ANY
+  // worker. Before this, `_schedule` just `break`ed: the run stayed in
+  // `executing` with pending subtasks, zero workers, and no gate — healthy-
+  // looking and permanently stuck. It now reports the stall, and — because
+  // nothing internal will ever re-drive a run with no work in flight — it
+  // re-checks on the only signal that capacity came back: a session going away.
+
+  /** Enter the stall. Callers must have established all three conditions. */
+  _pauseForResources(run) {
+    // No self-loop: a second pause while already stalled is not a state change
+    // (and `resource_paused -> resource_paused` is illegal by design).
+    if (run.phase === 'resource_paused') return
+    const live = this._liveSessionCount()
+    const detail = `${live}/${this._maxSessions} daemon sessions live (${this._cfg.reserveSessions} reserved) — no slot for the next worker`
+    this._setRunStatus(run, 'resource_paused', 'SESSION_POOL_EXHAUSTED')
+    this._appendTimeline(run, { kind: 'resource_paused', summary: 'waiting for session capacity', detail })
+    this.emit('run_resource_paused', {
+      runId: run.runId,
+      liveSessions: live,
+      maxSessions: this._maxSessions,
+      reserveSessions: this._cfg.reserveSessions,
+    })
+    this._emitRunDelta(run)
+  }
+
+  /** Leave the stall. No-op unless the run is actually stalled. */
+  _clearResourcePause(run) {
+    if (run.phase !== 'resource_paused') return
+    this._setRunStatus(run, 'executing')
+    this._appendTimeline(run, { kind: 'resource_resumed', summary: 'session capacity available — resuming' })
+    this.emit('run_resource_resumed', { runId: run.runId, liveSessions: this._liveSessionCount() })
+    this._emitRunDelta(run)
+  }
+
+  // A session — anyone's — went away, so the pool may have room again. Re-drive
+  // every stalled run's scheduler; `_schedule` re-checks headroom itself and
+  // clears the pause only if it can actually spawn.
+  //
+  // Deferred to a microtask because `session_destroyed` is emitted from INSIDE
+  // SessionManager.destroySession: scheduling synchronously would call
+  // createSession from within a teardown that has not finished its own
+  // bookkeeping. The defer also means the headroom read sees the completed
+  // destroy, never a half-torn-down pool.
+  _onSessionCapacityFreed() {
+    queueMicrotask(() => {
+      if (this._disposed) return
+      for (const run of [...this._runs.values()]) {
+        if (run.cancelled || run.phase !== 'resource_paused') continue
+        this._schedule(run)
+      }
+    })
+  }
+
   _onPermissionEscalation(info) {
     const run = this._runForSession(info.sessionId)
     if (!run) return
@@ -879,8 +965,15 @@ export class OrchestrationManager extends EventEmitter {
     for (const s of run.subtasks.values()) if (s.state === 'active') n += 1
     return n
   }
+  _liveSessionCount() {
+    return typeof this._sm.listSessions === 'function' ? this._sm.listSessions().length : this._sm._sessions?.size ?? 0
+  }
   _sessionHeadroom() {
-    const size = typeof this._sm.listSessions === 'function' ? this._sm.listSessions().length : this._sm._sessions?.size ?? 0
+    // NOTE: this is the daemon's TOTAL live session count, not the run's own —
+    // unrelated sessions can starve a run, which is why #6733 exists. Reserving
+    // orchestration capacity up front (counting only owned sessions) is the other
+    // half of that issue and is deliberately not done here.
+    const size = this._liveSessionCount()
     // Room to spawn ONE more session while still leaving reserveSessions slots
     // free — strict, so the reserve is preserved AFTER the new session exists.
     return size + 1 <= this._maxSessions - this._cfg.reserveSessions
