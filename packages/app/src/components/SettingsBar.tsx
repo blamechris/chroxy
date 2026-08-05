@@ -1373,7 +1373,8 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   // #4893 — bump minHeight from 32 → 44 so the copy-to-clipboard row clears
-  // the Apple HIG / CLAUDE.md 44pt minimum tappable target. Sibling fix to
+  // the 44pt minimum tappable target (Apple HIG; CLAUDE.md "Tap targets"
+  // under Code Style, which documents the repo-wide rule). Sibling fix to
   // #4892 (which used hitSlop for the compact header badges); here the row
   // already has horizontal whitespace in the expanded panel, so growing the
   // visible row by 12pt is preferable to a hitSlop hack.

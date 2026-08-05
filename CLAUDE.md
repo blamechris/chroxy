@@ -228,6 +228,29 @@ When `gh pr merge` fails with "not mergeable" or "base branch policy prohibits t
 - Zustand for state management
 - React Navigation for routing
 
+### Tap targets — 44pt minimum (#3751 / #3914 / #4876 / #4893 / #5634)
+
+Every interactive control (button, toggle, tab, tappable row or badge) must present at least a
+**44×44 pt** hit area. This is the Apple HIG minimum for iOS and WCAG 2.1 SC 2.5.5 (Target Size,
+AAA) for the web dashboard — WCAG 2.2's AA floor is only 24×24, but we hold the stricter 44 as
+the floor on every surface. Android is stricter still: Material's minimum is 48dp, so prefer 48
+in `packages/app` wherever the layout allows.
+
+Two ways to satisfy it, in order of preference:
+
+1. **Grow the visible control** — `minHeight: 44` / `minWidth: 44` (RN), `min-height: 44px` /
+   `min-width: 44px` (dashboard CSS). Prefer this whenever the layout has the room; the target
+   then matches what the user sees. This is what #4893 did for `conversationIdRow` (32 → 44) and
+   #5634 for the permission Approve/Deny buttons.
+2. **`hitSlop`** — for compact, information-dense rows where growing the visible element would
+   break the layout (#4876's session-header badges, #3914's CheckInChip). Mobile app only:
+   `hitSlop` is a React Native prop and does **not** exist in the dashboard, which must use
+   padding or spacing instead.
+
+A control whose visible box is smaller than 44pt and which has no `hitSlop` is a bug, not a style
+preference — all five issues above were filed and fixed as such. When you shrink a control's
+padding or font size, re-check the resulting box.
+
 ## Testing Conventions
 
 ### Server tests must not touch real user state (#4633)
