@@ -232,8 +232,9 @@ When `gh pr merge` fails with "not mergeable" or "base branch policy prohibits t
 
 Every interactive control (button, toggle, tab, tappable row or badge) must present at least a
 **44×44 pt** hit area. This is the Apple HIG minimum for iOS and WCAG 2.1 SC 2.5.5 (Target Size,
-AAA) for the web dashboard — WCAG 2.2's AA floor is only 24×24, but we hold the stricter 44
-everywhere so one number covers both surfaces.
+AAA) for the web dashboard — WCAG 2.2's AA floor is only 24×24, but we hold the stricter 44 as
+the floor on every surface. Android is stricter still: Material's minimum is 48dp, so prefer 48
+in `packages/app` wherever the layout allows.
 
 Two ways to satisfy it, in order of preference:
 
@@ -243,8 +244,8 @@ Two ways to satisfy it, in order of preference:
    #5634 for the permission Approve/Deny buttons.
 2. **`hitSlop`** — for compact, information-dense rows where growing the visible element would
    break the layout (#4876's session-header badges, #3914's CheckInChip). Mobile app only:
-   `hitSlop` is a React Native
-   prop and does **not** exist in the dashboard, which must use padding or spacing instead.
+   `hitSlop` is a React Native prop and does **not** exist in the dashboard, which must use
+   padding or spacing instead.
 
 A control whose visible box is smaller than 44pt and which has no `hitSlop` is a bug, not a style
 preference — all five issues above were filed and fixed as such. When you shrink a control's
