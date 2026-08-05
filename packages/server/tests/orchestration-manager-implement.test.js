@@ -159,6 +159,32 @@ function implementDecider(planRole = 'implement') {
   }
 }
 
+/**
+ * Drive an implement run to a live worker WITHOUT a sleep. The fake gitOps'
+ * `createBranch` is called from inside `_spawnWorker` AFTER the session is
+ * registered in `run.ownedSessions` and after `st.worktreePath` is recorded, so
+ * it is a precise seam for "a worker now owns a worktree" — the state a cancel
+ * has to tear down. The architect hangs at poa_review so the run stays mid-flight.
+ */
+function atLiveImplementWorker() {
+  const decide = ({ role, kind, n }) => {
+    if (role === 'architect' && kind === 'epic_plan') return { kind: 'epic_plan', subtasks: [{ title: 'A', goal: 'g', role: 'implement' }] }
+    if (role === 'architect' && kind === 'poa_review') return null // hang mid-committee
+    return implementDecider()({ role, kind, n })
+  }
+  const h = harness(decide)
+  let spawned
+  const atWorker = new Promise((resolve) => { spawned = resolve })
+  const origCreateBranch = h.gitOps.createBranch
+  h.gitOps.createBranch = async (worktreePath, branchName) => {
+    spawned()
+    return origCreateBranch(worktreePath, branchName)
+  }
+  const rec = h.mgr.createRun({ goal: 'Implement', cwd: '/repo', autoApprovePlan: true })
+  const startP = h.mgr.startRun(rec.runId)
+  return { ...h, rec, startP, atWorker }
+}
+
 // --- tests -----------------------------------------------------------------
 
 test('read API (getRunSnapshot/listRuns) returns schema-valid wire shapes, live and terminal', async () => {
@@ -578,6 +604,104 @@ test('cancel during an implement run auto-commits the worker worktree before tea
     assert.equal(failed, false, 'no run_failed after cancel')
     // the implement worker's worktree was auto-committed before teardown
     assert.ok(gitOps.calls.some((c) => c.name === 'autoCommit'), 'auto-commit before destroy on cancel')
+  } finally {
+    cleanup()
+  }
+})
+
+test('#7132 a concurrent double cancel tears the worktrees down exactly once', async () => {
+  // The half of #7132 the status trace cannot see: an unguarded second cancel
+  // re-runs the teardown BODY. Both copies snapshot `ownedSessions` before
+  // either has deleted from it, and both clear `run.integration` only after
+  // their own await — so the implement worktree is auto-committed twice and the
+  // integration worktree is `git worktree remove`d twice, on the same paths.
+  const { mgr, gitOps, rec, startP, atWorker, cleanup } = atLiveImplementWorker()
+  try {
+    await atWorker
+    // Arm the integration-cleanup path too. A live run reaches this shape only
+    // after a subtask has merged; seeding the record the manager itself builds
+    // is how this test gets both teardown limbs in one cancel.
+    mgr._runs.get(rec.runId).integration = { worktreePath: `/wt/${rec.runId}/integration`, branch: 'chroxy/orch/int', merged: [] }
+
+    // No sleep: `cancelRun` is synchronous up to its first await, so the second
+    // call lands inside the first one's teardown window by construction.
+    const settled = await Promise.allSettled([mgr.cancelRun(rec.runId), mgr.cancelRun(rec.runId)])
+    await startP
+
+    const rejected = settled.filter((s) => s.status === 'rejected')
+    assert.equal(rejected.length, 0, `both cancels must settle; got: ${rejected.map((r) => r.reason?.message).join(' | ')}`)
+
+    const named = (n) => gitOps.calls.filter((c) => c.name === n)
+    // POSITIVE CONTROL: the teardown really ran (not vacuously zero on both counts).
+    assert.equal(named('autoCommit').length, 1, `the worker worktree must be auto-committed exactly once, got ${named('autoCommit').length}`)
+    assert.equal(named('removeWorktree').length, 1, `the integration worktree must be removed exactly once, got ${named('removeWorktree').length}`)
+    assert.equal(named('pruneWorktrees').length, 1, `worktrees pruned exactly once, got ${named('pruneWorktrees').length}`)
+  } finally {
+    cleanup()
+  }
+})
+
+test('#7141 cancel broadcasts a `cancelling` delta that leads the teardown', async () => {
+  // The status write was journaled but never emitted, so `cancelling` reached a
+  // poller and nobody else. The dashboard hides RunControls on `cancelling`
+  // (OrchestrationRunsSection), so without the delta it keeps offering Cancel
+  // for the whole teardown — interrupt + auto-commit of every implement
+  // worktree — and only catches up at `cancelled`. Ordering is the assertion:
+  // a delta emitted after the awaits would be indistinguishable from `cancelled`.
+  const { mgr, gitOps, rec, startP, atWorker, cleanup } = atLiveImplementWorker()
+  try {
+    await atWorker
+    const log = []
+    const deltas = []
+    mgr.on('run_delta', (d) => { deltas.push(d); log.push(`delta:${d.run.status}`) })
+    const origAutoCommit = gitOps.autoCommit
+    gitOps.autoCommit = async (a) => { log.push('teardown:autoCommit'); return origAutoCommit(a) }
+
+    await mgr.cancelRun(rec.runId)
+    await startP
+
+    const iCancelling = log.indexOf('delta:cancelling')
+    const iTeardown = log.indexOf('teardown:autoCommit')
+    const iCancelled = log.indexOf('delta:cancelled')
+    // POSITIVE CONTROL: the teardown really ran, so "leads it" is a real ordering.
+    assert.ok(iTeardown >= 0, `expected the teardown to auto-commit, got:\n${log.join('\n')}`)
+    assert.ok(iCancelling >= 0, `cancel must broadcast a cancelling delta, got:\n${log.join('\n')}`)
+    assert.ok(iCancelling < iTeardown, `the cancelling delta must LEAD the teardown, got:\n${log.join('\n')}`)
+    assert.ok(iCancelled > iCancelling, `the cancelled delta must follow it, got:\n${log.join('\n')}`)
+
+    const cancelling = deltas.find((d) => d.run.status === 'cancelling')
+    assert.equal(ServerOrchestrationRunDeltaSchema.safeParse(cancelling).success, true, 'the cancelling delta is schema-valid')
+    assert.equal(cancelling.runId, rec.runId)
+    let prev = 0
+    for (const d of deltas) { assert.ok(d.seq > prev, `seq strictly increasing (${d.seq} > ${prev})`); prev = d.seq }
+  } finally {
+    cleanup()
+  }
+})
+
+test('#7141 a backgrounded startRun failure is journaled onto the run as START_FAILED', async () => {
+  // `createAndStartRun` returns at the MINT and drives the rest in the
+  // background, so a failure after that point can never reach the caller's ack
+  // — the run's own status is the only channel left. The engine-side half of
+  // that contract had no test: orchestration-handlers.test.js exercises it
+  // against a fake manager, which cannot fail the way the real one does.
+  const { mgr, ledger, cleanup } = harness(implementDecider())
+  try {
+    // Break subtask journaling so startRun rejects OUTSIDE its own `_plan`
+    // try/catch — i.e. through the `.catch` chain, not the PLAN_FAILED path.
+    ledger.createSubtask = () => { throw new Error('ledger is wedged') }
+    const failed = waitFor(mgr, ['run_failed'])
+    const rec = mgr.createAndStartRun({ goal: 'Implement', cwd: '/repo', autoApprovePlan: true })
+    // POSITIVE CONTROL: the mint is synchronous, which is the whole point of the
+    // split — the ack carries a runId even though the drive has not finished.
+    assert.ok(rec.runId, 'createAndStartRun returns the minted record synchronously')
+
+    const { payload } = await failed
+    assert.equal(payload.runId, rec.runId)
+    assert.equal(payload.code, 'START_FAILED', 'a post-mint failure is journaled as START_FAILED')
+    assert.equal(ledger.getRun(rec.runId).status, 'failed')
+    // and it is served from the terminal cache, like any other finished run
+    assert.equal(mgr.getRunSnapshot(rec.runId).run.status, 'failed')
   } finally {
     cleanup()
   }

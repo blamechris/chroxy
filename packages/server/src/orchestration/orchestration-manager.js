@@ -301,12 +301,28 @@ export class OrchestrationManager extends EventEmitter {
     const run = this._get(runId)
     if (run.phase !== 'created') throw new Error(`run ${runId} already started (phase ${run.phase})`)
     this._setRunStatus(run, 'planning')
+    // Announce the run the moment it starts planning. Before #7138 the first
+    // delta a new run ever produced was the epic_plan gate below — the far side
+    // of a multi-minute architect turn — which was invisible while nothing could
+    // start a run at all. Now that starts work, that gap is what the operator
+    // sees: the dashboard closes its new-run modal on the ack and waits for the
+    // list delta to bring the run in, so without this the runs list stays empty
+    // for minutes after a successful start.
+    this._emitRunDelta(run)
     let plan
     try {
       plan = await this._plan(run)
     } catch (err) {
       return this._failRun(run, `PLAN_${err instanceof DecisionParseError ? 'PARSE' : 'FAILED'}`, err)
     }
+    // A cancel that landed while this turn was in flight wins. Destroying a
+    // session normally rejects its turn (SESSION_GONE), but a plan that resolves
+    // in the window between `run.cancelled = true` and the destroy lands here
+    // instead — and journals subtasks onto a run the ledger has already recorded
+    // as cancelled. (`_setRunStatus` below would then trip the FSM guard, so the
+    // record ends up with phantom subtasks AND a rejected startRun.) `_runSubtask`
+    // makes the same re-check after its awaits.
+    if (run.cancelled) return { runId, phase: run.phase }
     // Materialize subtasks. A subtask runs 'implement' (write-capable) ONLY when
     // the architect asked for it AND the run's worker provider is
     // implement-eligible (codex, #6735) AND no preset forces audit. Otherwise it
@@ -332,6 +348,59 @@ export class OrchestrationManager extends EventEmitter {
     this.emit('gate_opened', { runId, gate })
     this._emitRunDelta(run, { gate })
     return { runId, phase: 'plan_review', gateId: gate.gateId }
+  }
+
+  /**
+   * The WS surface's entry point (#7138): mint the run, then drive it — returning
+   * as soon as the run EXISTS, not when planning finishes.
+   *
+   * `startRun` awaits the architect's planning turn, which is a real model call
+   * measured in minutes. The surface cannot await that: the ack is documented as
+   * carrying "the newly-minted runId" (surface.md, ServerOrchestrationActionAckSchema)
+   * and the dashboard holds its pending-action spinner until the ack arrives with
+   * no timeout of its own. Everything after the mint reaches clients through the
+   * run_delta broadcasts instead.
+   *
+   * Validation therefore splits by WHEN it can be known: `createRun`'s rejections
+   * (bad cwd, no goal, a run already active) are synchronous, so the caller can
+   * report them and nothing is created. A failure once the run exists is journaled
+   * onto the run — the same path any in-flight failure takes — so a client holding
+   * the runId learns of it from the run's own status rather than from a reply it
+   * has already received.
+   */
+  createAndStartRun(opts = {}) {
+    const record = this.createRun(opts)
+    this.startRun(record.runId)
+      .catch((err) => {
+        // The run may already be gone (cancelled, or _failRun ran inside startRun).
+        const run = this._runs.get(record.runId)
+        if (!run) return null
+        return this._failRun(run, 'START_FAILED', err)
+      })
+      .catch((err) => {
+        this._log?.warn?.(`orchestration: run ${record.runId} failed to start and could not be journaled: ${err?.message || String(err)}`)
+      })
+    return record
+  }
+
+  /**
+   * Wire-level run control (`orchestration_run_action`). `cancel` is the only
+   * action this engine implements: `pause`/`resume` are on the wire schema but
+   * have no user-driven implementation — `_pauseForBudget`/`_pauseForResources`
+   * are internal stalls the scheduler clears itself, not a pause a client can
+   * hold. Fail loudly rather than acking a no-op (#7140).
+   */
+  async runAction(runId, action) {
+    if (action === 'cancel') {
+      const result = await this.cancelRun(runId, { reason: 'user' })
+      // cancelRun answers null for an unknown run; acking that would report a
+      // cancel that never happened.
+      if (!result) throw new Error(`run ${runId} not found`)
+      return result
+    }
+    const err = new Error(`run action '${action}' is not supported by this engine`)
+    err.code = 'ACTION_UNSUPPORTED'
+    throw err
   }
 
   async _plan(run) {
@@ -915,6 +984,23 @@ export class OrchestrationManager extends EventEmitter {
   async cancelRun(runId, { reason = 'user' } = {}) {
     const run = this._runs.get(runId)
     if (!run) return null
+    // #7132 — a cancel already in flight OWNS the teardown; a second one is a
+    // no-op ack, not a second teardown. Nothing downstream stops it otherwise:
+    // `cancelling -> cancelling` is a LEGAL transition (the run-model treats the
+    // cancel/suspend/fail terminals as reachable from any non-terminal state), so
+    // a concurrent cancel re-runs the whole body — auto-committing every
+    // implement worktree twice and `git worktree remove`-ing the integration
+    // worktree twice, both racing on the same paths. Worse, the loser then
+    // reaches the `cancelled` write below with the ledger already `cancelled` —
+    // a TERMINAL source, so the guard throws ILLEGAL_TRANSITION and the WS
+    // surface reports ORCHESTRATION_ACTION_FAILED for a cancel that succeeded.
+    // Now that `cancel` is reachable over the wire (#7138) a double-click does
+    // exactly this, so the guard lands with the surface that exposes it.
+    //
+    // `phase` is the engine's own mirror, written synchronously by
+    // `_setRunStatus` before this method's first `await` — so a re-entrant call
+    // always observes it, without depending on the ledger having flushed.
+    if (run.phase === 'cancelling' || run.phase === 'cancelled') return { runId, phase: run.phase }
     run.cancelled = true
     // `cancelling` is the teardown-in-progress state (design §3.2:
     // "any state --cancelRun--> cancelling --> cancelled"). Journaling it BEFORE
@@ -924,6 +1010,15 @@ export class OrchestrationManager extends EventEmitter {
     // `cancelling`, and a teardown that throws leaves a truthful non-terminal
     // status instead of a `cancelled` run that was never torn down.
     this._setRunStatus(run, 'cancelling', reason)
+    // ...and BROADCAST it. Journaling alone makes the intermediate state visible
+    // only to a poller; every other status write in this class emits a delta
+    // immediately after, and this one was the exception. Without it the teardown
+    // below — interrupt + auto-commit of every implement worktree, then the
+    // integration cleanup — is silent on the wire, so the dashboard sits on the
+    // pre-cancel status and keeps offering the Cancel button (RunControls hides
+    // itself on `cancelling`) for the whole duration. Emitting BEFORE the awaits
+    // is the point: the delta has to lead the teardown, not trail it.
+    this._emitRunDelta(run)
     // interrupt every in-flight owned session, then release (auto-commit → destroy)
     // so no implement worker's uncommitted work is lost.
     for (const sid of [...run.ownedSessions.keys()]) {

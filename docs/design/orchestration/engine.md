@@ -337,7 +337,7 @@ Policy per role:
 | Worker/architect turn `error` | TurnDriver reject `TURN_ERROR` | One same-session retry for transient codes (stream stall emits `result` with null cost — sdk-session.js:1631 — treated as empty-text turn → retry); else counts as committee iteration → revise/redelegate path |
 | Turn watchdog | `TURN_TIMEOUT` | `session.interrupt()`, mark turn failed, same retry ladder |
 | Daemon restart mid-run | boot reconcile: `runStore.loadAll()` after `sessionManager.restoreState()` | Sessions restore **idle** (no turn resumes — verified). Any run in active state → `suspended`; subtasks that were mid-turn → `interrupted`. Owned sessionIds are re-validated against the restored session map (restore preserves ids via `preserveId`); missing sessions marked for respawn. `autoResumeAfterRestart:false` (default) ⇒ user must resume (no silent spend after restart). Resume: re-drive interrupted turns — claude-family sessions carry `resumeSessionId` context; the re-prompt says "repeat your last chroxy-decision block" (idempotent); non-resumable providers get a fresh worker (redelegate, iteration NOT counted). |
-| Cancel run | `cancelRun(runId, {reason})` | state `cancelling`: stop scheduler; `interrupt()` every in-flight owned session; wait ≤10s for `result`/quiesce; **auto-commit dirty implement worktrees**; `destroySession` all owned sessions (worktrees removed, branches survive); integration worktree removed; run `cancelled`, `flushSync()` |
+| Cancel run | `cancelRun(runId, {reason})` | state `cancelling` (**broadcast**, not just journaled — the teardown is slow and clients hide their cancel control on it); stop scheduler; `interrupt()` every in-flight owned session; wait ≤10s for `result`/quiesce; **auto-commit dirty implement worktrees**; `destroySession` all owned sessions (worktrees removed, branches survive); integration worktree removed; run `cancelled`, `flushSync()`. **Idempotent** (#7132): a cancel arriving while one is already in flight is a no-op ack — the teardown is not re-entrant (it would double auto-commit and double-remove the same worktrees) and `cancelling -> cancelling` is legal, so the FSM cannot catch it |
 | Orphaned sessions/worktrees | boot reconcile | Owned sessions whose run is terminal/unknown → destroy. `~/.chroxy/orchestration/<runId>/` dirs with no active run → remove. Complements existing worktree GC (`sweepOrphanChroxyWorktrees`) which already covers `~/.chroxy/worktrees/<sessionId>`. |
 | Budget cap crossed | §11 | `budget_paused`, no kills |
 | Session pool full, nothing in flight | `_sessionHeadroom()` false with pending subtasks and 0 active workers | `resource_paused` + `run_resource_paused` (#6733). Cleared by the scheduler on the next `session_destroyed`; never wedges silently in `executing` |
@@ -390,18 +390,29 @@ Handlers are registered unconditionally (registry import) but each checks `isOrc
 
 **Public API** (consumed by `handlers/orchestration-handlers.js`):
 
+As built (this block is the CONTRACT the handlers are written against — when it and
+the class disagree, #7138 is what happens: the handler called `startRun(optionBag)`
+against `startRun(runId)`, and `runAction` existed only here):
+
 ```js
-createRun({ title, goal, cwd, preset, roleOverrides, budgetUsd, autoApprovePlan }) -> RunRecord  // throws on validation
-startRun(runId)                       // created -> planning
-approvePlan(runId, { editedSubtasks }) ; rejectPlan(runId, reason)
-resolveEscalation(runId, subtaskId, { decision, note })
-resolveGate(runId, gateId, { decision })          // permission escalations
-setRunBudget(runId, capUsd)
-resumeRun(runId) ; cancelRun(runId, { reason })
-getRunSnapshot(runId) ; listRunSummaries()        // survey pattern (1 request + 1 snapshot msg)
+createRun({ title, goal, cwd, preset, roleOverrides, budgetUsd, autoApprovePlan }) -> RunRecord  // sync; throws on validation
+startRun(runId)                                   // created -> planning; AWAITS the planning turn
+createAndStartRun({ ...createRun opts }) -> RunRecord  // the wire's entry point: mints, then drives in the
+                                                  // background — returns as soon as the run EXISTS, because
+                                                  // the ack carries the new runId and cannot wait on planning
+resolveGate(runId, gateId, { decision, note, budgetUsd })  // ONE gate path: epic_plan, budget_overrun, escalations
+runAction(runId, action)                          // 'cancel' only; pause/resume are unimplemented (#7140)
+cancelRun(runId, { reason })                      // idempotent: a cancel already in flight owns the teardown,
+                                                  // so a second one acks without re-running it (#7132)
+annotate(runId, { baselineSessionId, verdictQuality })
+getRunSnapshot(runId) ; listRuns()                // survey pattern (1 request + 1 snapshot msg)
 ```
 
-**Events emitted** (names only; protocol slice owns payload schemas, event-normalizer mapping, ws-server doc block, dist `git add -f`): `orchestration_run_updated`, `orchestration_subtask_updated`, `orchestration_committee_event` (gate verdicts + feedback for the run-tree UI), `orchestration_usage`, `orchestration_budget`, `orchestration_gate_escalation`, `orchestration_run_snapshot`. **Consumed**: SessionManager `session_event` (`stream_delta`, `message`, `result`, `error`, `permission_request`, `cost_update`), `session_created`, `session_destroyed`, `session_create_failed`.
+The design-era names `approvePlan` / `rejectPlan` / `resolveEscalation` /
+`setRunBudget` / `resumeRun` / `listRunSummaries` were never built — plan approval,
+budget raises and escalations all resolve through the single `resolveGate`.
+
+**Events emitted**, as built (names only; protocol slice owns payload schemas, event-normalizer mapping, ws-server doc block, dist `git add -f`): `run_delta` (the single wire-facing upsert — run summary, optionally a node/gate/timeline entry — carrying the per-run `wireSeq`), `gate_opened`, `gate_resolved`, `run_failed`, `run_cancelled`, `run_completed`, `run_budget_paused`, `run_resource_paused`, `run_resource_resumed`, `permission_escalation`. The design-era names `orchestration_run_updated` / `orchestration_subtask_updated` / `orchestration_committee_event` / `orchestration_usage` / `orchestration_budget` / `orchestration_gate_escalation` / `orchestration_run_snapshot` were never emitted — subtask, usage, budget and committee changes all ride `run_delta`. **Consumed**: SessionManager `session_event` (`stream_delta`, `message`, `result`, `error`, `permission_request`, `cost_update`), `session_created`, `session_destroyed`, `session_create_failed`.
 
 ## 13. Repo-audit preset (v1 dogfood, `role-prompts.js`)
 
