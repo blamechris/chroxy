@@ -265,6 +265,74 @@ test('#6732 cancelRun journals only legal run transitions', async () => {
   }
 })
 
+test('#7132 a concurrent double cancel acks twice and journals one cancelling + one cancelled', async () => {
+  // The FSM cannot catch this one: `cancelling -> cancelling` is LEGAL (the
+  // cancel/suspend/fail terminals are reachable from any non-terminal state), so
+  // an unguarded second cancel re-runs the whole teardown and only trips the
+  // guard at the very END, on `cancelled -> cancelled`. That throw reaches the
+  // wire as ORCHESTRATION_ACTION_FAILED for a cancel that in fact succeeded —
+  // which is why this lands with the surface that first exposes `cancel` (#7138).
+  const { mgr, ledger, cleanup, runTrace } = makeHarness(happyDecider)
+  try {
+    const rec = mgr.createRun({ goal: 'Audit', cwd: '/repo', autoApprovePlan: false })
+    const gated = waitFor(mgr, ['gate_opened'])
+    await mgr.startRun(rec.runId)
+    await gated // deterministic mid-flight state: live at plan_review, architect session owned
+
+    let cancelledEvents = 0
+    mgr.on('run_cancelled', () => { cancelledEvents += 1 })
+
+    // Deterministic overlap, no sleep: `cancelRun` runs synchronously up to its
+    // first `await`, so issuing the second call before awaiting the first puts it
+    // squarely inside the window the guard has to close. This is the double-click
+    // shape exactly. Driven through `runAction` — the wire entry point — because
+    // the user-visible half of the bug is its ack, not the engine state.
+    const first = mgr.runAction(rec.runId, 'cancel')
+    const second = mgr.runAction(rec.runId, 'cancel')
+    const settled = await Promise.allSettled([first, second])
+
+    const rejected = settled.filter((s) => s.status === 'rejected')
+    assert.equal(rejected.length, 0, `both cancels must ack; got: ${rejected.map((r) => r.reason?.message).join(' | ')}`)
+    for (const [i, s] of settled.entries()) {
+      assert.ok(s.value, `cancel #${i + 1} must resolve truthy — runAction throws "not found" on a falsy result`)
+      assert.equal(s.value.runId, rec.runId)
+    }
+
+    // POSITIVE CONTROL: the trace wrapper really observed the cancel writes.
+    const pairs = runTrace.map((s) => `${s.from} -> ${s.to}`)
+    assert.ok(pairs.includes('plan_review -> cancelling'), `expected the cancel to start from plan_review, got:\n${pairs.join('\n')}`)
+
+    // The teardown ran ONCE: one `cancelling` write, one `cancelled` write, one event.
+    assert.equal(runTrace.filter((s) => s.to === 'cancelling').length, 1, `exactly one cancelling write, got:\n${pairs.join('\n')}`)
+    assert.equal(runTrace.filter((s) => s.to === 'cancelled').length, 1, `exactly one cancelled write, got:\n${pairs.join('\n')}`)
+    assert.equal(cancelledEvents, 1, 'exactly one run_cancelled event')
+    assert.equal(ledger.getRun(rec.runId).status, 'cancelled')
+
+    const bad = firstIllegal(runTrace, assertRunTransition)
+    assert.equal(bad, null, `engine journaled an illegal RUN transition: ${bad?.err?.message}`)
+  } finally {
+    cleanup()
+  }
+})
+
+test('#7132 cancelling a run that already reached a terminal cancel is a no-op ack', async () => {
+  // The sequential sibling of the race above: the run is gone from `_runs`, so
+  // this exercises the "unknown run" answer rather than the guard. `runAction`
+  // must surface it as a failure (a cancel for a run this engine has no record
+  // of is not something to ack silently), while `cancelRun` itself answers null.
+  const { mgr, cleanup } = makeHarness(happyDecider)
+  try {
+    const rec = mgr.createRun({ goal: 'Audit', cwd: '/repo', autoApprovePlan: false })
+    const gated = waitFor(mgr, ['gate_opened'])
+    await mgr.startRun(rec.runId)
+    await gated
+    assert.equal((await mgr.cancelRun(rec.runId)).phase, 'cancelled')
+    assert.equal(await mgr.cancelRun(rec.runId), null, 'a retired run is unknown, not cancellable')
+  } finally {
+    cleanup()
+  }
+})
+
 // The two remaining table reconciliations (`result_review -> briefing` on a
 // result revise, `escalated -> spawning` on a user retry) are LOAD-BEARING under
 // the fail-closed posture: drop either row and the corresponding live run dies

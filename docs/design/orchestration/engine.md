@@ -337,7 +337,7 @@ Policy per role:
 | Worker/architect turn `error` | TurnDriver reject `TURN_ERROR` | One same-session retry for transient codes (stream stall emits `result` with null cost — sdk-session.js:1631 — treated as empty-text turn → retry); else counts as committee iteration → revise/redelegate path |
 | Turn watchdog | `TURN_TIMEOUT` | `session.interrupt()`, mark turn failed, same retry ladder |
 | Daemon restart mid-run | boot reconcile: `runStore.loadAll()` after `sessionManager.restoreState()` | Sessions restore **idle** (no turn resumes — verified). Any run in active state → `suspended`; subtasks that were mid-turn → `interrupted`. Owned sessionIds are re-validated against the restored session map (restore preserves ids via `preserveId`); missing sessions marked for respawn. `autoResumeAfterRestart:false` (default) ⇒ user must resume (no silent spend after restart). Resume: re-drive interrupted turns — claude-family sessions carry `resumeSessionId` context; the re-prompt says "repeat your last chroxy-decision block" (idempotent); non-resumable providers get a fresh worker (redelegate, iteration NOT counted). |
-| Cancel run | `cancelRun(runId, {reason})` | state `cancelling`: stop scheduler; `interrupt()` every in-flight owned session; wait ≤10s for `result`/quiesce; **auto-commit dirty implement worktrees**; `destroySession` all owned sessions (worktrees removed, branches survive); integration worktree removed; run `cancelled`, `flushSync()` |
+| Cancel run | `cancelRun(runId, {reason})` | state `cancelling` (**broadcast**, not just journaled — the teardown is slow and clients hide their cancel control on it); stop scheduler; `interrupt()` every in-flight owned session; wait ≤10s for `result`/quiesce; **auto-commit dirty implement worktrees**; `destroySession` all owned sessions (worktrees removed, branches survive); integration worktree removed; run `cancelled`, `flushSync()`. **Idempotent** (#7132): a cancel arriving while one is already in flight is a no-op ack — the teardown is not re-entrant (it would double auto-commit and double-remove the same worktrees) and `cancelling -> cancelling` is legal, so the FSM cannot catch it |
 | Orphaned sessions/worktrees | boot reconcile | Owned sessions whose run is terminal/unknown → destroy. `~/.chroxy/orchestration/<runId>/` dirs with no active run → remove. Complements existing worktree GC (`sweepOrphanChroxyWorktrees`) which already covers `~/.chroxy/worktrees/<sessionId>`. |
 | Budget cap crossed | §11 | `budget_paused`, no kills |
 | Session pool full, nothing in flight | `_sessionHeadroom()` false with pending subtasks and 0 active workers | `resource_paused` + `run_resource_paused` (#6733). Cleared by the scheduler on the next `session_destroyed`; never wedges silently in `executing` |
@@ -402,7 +402,8 @@ createAndStartRun({ ...createRun opts }) -> RunRecord  // the wire's entry point
                                                   // the ack carries the new runId and cannot wait on planning
 resolveGate(runId, gateId, { decision, note, budgetUsd })  // ONE gate path: epic_plan, budget_overrun, escalations
 runAction(runId, action)                          // 'cancel' only; pause/resume are unimplemented (#7140)
-cancelRun(runId, { reason })
+cancelRun(runId, { reason })                      // idempotent: a cancel already in flight owns the teardown,
+                                                  // so a second one acks without re-running it (#7132)
 annotate(runId, { baselineSessionId, verdictQuality })
 getRunSnapshot(runId) ; listRuns()                // survey pattern (1 request + 1 snapshot msg)
 ```

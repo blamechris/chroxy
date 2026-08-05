@@ -984,6 +984,23 @@ export class OrchestrationManager extends EventEmitter {
   async cancelRun(runId, { reason = 'user' } = {}) {
     const run = this._runs.get(runId)
     if (!run) return null
+    // #7132 — a cancel already in flight OWNS the teardown; a second one is a
+    // no-op ack, not a second teardown. Nothing downstream stops it otherwise:
+    // `cancelling -> cancelling` is a LEGAL transition (the run-model treats the
+    // cancel/suspend/fail terminals as reachable from any non-terminal state), so
+    // a concurrent cancel re-runs the whole body — auto-committing every
+    // implement worktree twice and `git worktree remove`-ing the integration
+    // worktree twice, both racing on the same paths. Worse, the loser then
+    // reaches the `cancelled` write below with the ledger already `cancelled` —
+    // a TERMINAL source, so the guard throws ILLEGAL_TRANSITION and the WS
+    // surface reports ORCHESTRATION_ACTION_FAILED for a cancel that succeeded.
+    // Now that `cancel` is reachable over the wire (#7138) a double-click does
+    // exactly this, so the guard lands with the surface that exposes it.
+    //
+    // `phase` is the engine's own mirror, written synchronously by
+    // `_setRunStatus` before this method's first `await` — so a re-entrant call
+    // always observes it, without depending on the ledger having flushed.
+    if (run.phase === 'cancelling' || run.phase === 'cancelled') return { runId, phase: run.phase }
     run.cancelled = true
     // `cancelling` is the teardown-in-progress state (design §3.2:
     // "any state --cancelRun--> cancelling --> cancelled"). Journaling it BEFORE
@@ -993,6 +1010,15 @@ export class OrchestrationManager extends EventEmitter {
     // `cancelling`, and a teardown that throws leaves a truthful non-terminal
     // status instead of a `cancelled` run that was never torn down.
     this._setRunStatus(run, 'cancelling', reason)
+    // ...and BROADCAST it. Journaling alone makes the intermediate state visible
+    // only to a poller; every other status write in this class emits a delta
+    // immediately after, and this one was the exception. Without it the teardown
+    // below — interrupt + auto-commit of every implement worktree, then the
+    // integration cleanup — is silent on the wire, so the dashboard sits on the
+    // pre-cancel status and keeps offering the Cancel button (RunControls hides
+    // itself on `cancelling`) for the whole duration. Emitting BEFORE the awaits
+    // is the point: the delta has to lead the teardown, not trail it.
+    this._emitRunDelta(run)
     // interrupt every in-flight owned session, then release (auto-commit → destroy)
     // so no implement worker's uncommitted work is lost.
     for (const sid of [...run.ownedSessions.keys()]) {
