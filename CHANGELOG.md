@@ -7,8 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.10.0] - 2026-07-05
-
 The **Codex-controllable-like-Claude** release. Codex now flows through Chroxy's
 permission pipeline **by default** — you approve/deny its commands and file edits,
 switch permission modes, and send it image attachments, exactly the way you do
