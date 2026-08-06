@@ -14,7 +14,7 @@ with Claude. Plus device-friendly **persistent pairing tokens** and two claude-t
 reliability fixes.
 
 > This release also ships the previously-unreleased **0.9.47** "model-serving
-> freshness + operator-security" changes (see the [0.9.47] section) — v0.9.47 was
+> freshness + operator-security" changes (folded in below) — v0.9.47 was
 > prepared but never tagged, so everything since v0.9.46 lands here.
 
 ### Added
@@ -54,8 +54,6 @@ reliability fixes.
 - **claude-tui readiness via PTY-output quiescence (#6601).** Detect readiness from
   the PTY output settling instead of the dropped status field, cutting
   first-message readiness from a ~15s degraded wait to ~1s.
-
-## [0.9.47] - 2026-06-25
 
 A **model-serving freshness** release with **operator-security hardening**. The headline: you no longer need to release a new build to **call, add, or re-price a model** the provider's API already exposes — across the whole provider matrix. Alongside that: a **host-local user-shell approval** control, completion of the **#6201 Open/Closed catalog** refactor, an **OpenAI-compatible provider**, a **mobile mission-control** read-only slice, a deep **store-core/protocol contract-typing** wave, and broad reliability/UX polish.
 
