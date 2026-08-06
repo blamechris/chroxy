@@ -2,10 +2,10 @@
 
 > Control your AI coding agents from anywhere — monitor sessions, approve permissions, and orchestrate Claude Code, Gemini, and Codex remotely.
 
-[![CI](https://github.com/blamechris/chroxy/actions/workflows/ci.yml/badge.svg)](https://github.com/blamechris/chroxy/actions/workflows/ci.yml)
+[![CI](https://github.com/blamechris/chroxy/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/blamechris/chroxy/actions/workflows/ci.yml?query=branch%3Amain)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Release](https://img.shields.io/github/v/release/blamechris/chroxy)](https://github.com/blamechris/chroxy/releases/latest)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](http://makeapullrequest.com)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://makeapullrequest.com)
 
 <p align="center">
   <img src="docs/assets/chat-session-todolist.png" alt="Chroxy mobile chat view rendering an agent session as structured cards: a TodoWrite tool call expanded into a three-item to-do list with completed, in-progress, and pending states" width="340">
