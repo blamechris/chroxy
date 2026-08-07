@@ -26,13 +26,18 @@ concurrency:
 jobs:
   notify:
     runs-on: ubuntu-latest
+    # Cap hung runs: the concurrency group serializes runs, so an unbounded
+    # hang would queue later notifications behind it for up to the 6h default
+    timeout-minutes: 10
     # Least-privilege token: piggyback review detection reads the pulls and
     # issues APIs; an explicit block zeroes every unlisted scope
     permissions:
       contents: read
       pull-requests: read
       issues: read
-    # Skip bots (prevent cascades) and fork PRs (no secrets access)
+    # Skip this workflow's own actor (prevent self-trigger cascades) and
+    # fork PRs (no secrets access). Other bots (dependabot, Copilot) relay
+    # on purpose — their activity belongs in the channel.
     if: >-
       github.actor != 'github-actions[bot]' &&
       (github.event_name != 'pull_request' ||
