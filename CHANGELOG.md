@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-08-15
+
 The **Codex-controllable-like-Claude** release. Codex now flows through Chroxy's
 permission pipeline **by default** — you approve/deny its commands and file edits,
 switch permission modes, and send it image attachments, exactly the way you do
@@ -16,6 +18,15 @@ reliability fixes.
 > This release also ships the previously-unreleased **0.9.47** "model-serving
 > freshness + operator-security" changes (folded in below) — v0.9.47 was
 > prepared but never tagged, so everything since v0.9.46 lands here.
+>
+> **Why 0.11.0 and not 0.10.0.** The packages carried a `0.10.0` version for
+> two months without a matching tag, and a `@chroxy/server@0.10.0` was
+> published to npm on 2026-07-06 from a build ~463 commits behind this one.
+> npm does not permit republishing a version, so `0.10.0` is unusable as a
+> release number. This release takes the next clean version instead, so the
+> git tag, the package versions, and the npm artifact agree from here on.
+> There is no `0.10.0` entry in this changelog because no `0.10.0` release
+> was ever cut.
 
 ### Added
 
