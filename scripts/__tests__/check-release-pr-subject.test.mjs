@@ -155,6 +155,22 @@ function runGuard({ dir, base }, title, number) {
   repo.cleanup()
 }
 
+
+// --- argument validation (fail-closed) ---------------------------------------
+//
+// A flag with a missing value must not read as "provided". Treating it as an
+// empty title would let the guard pass a release PR it never checked.
+{
+  const repo = makeRepo({ rootVersionFrom: '0.10.0', rootVersionTo: '0.11.0' })
+  const raw = (extra) => spawnSync(process.execPath, [SCRIPT, ...extra], { cwd: repo.dir, encoding: 'utf8' })
+
+  check('--title with no value exits 2', raw(['--title']).status === 2)
+  check('--title followed by another flag exits 2', raw(['--title', '--number', '5']).status === 2)
+  check('an empty --title exits 2', raw(['--title', '   ']).status === 2)
+  check('a missing --title exits 2', raw(['--base', 'HEAD~1']).status === 2)
+  repo.cleanup()
+}
+
 console.log('\ncheck-release-pr-subject.mjs')
 console.log(results.join('\n'))
 console.log(`\nResults: ${passed} passed, ${failed} failed\n`)

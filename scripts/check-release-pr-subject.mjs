@@ -32,9 +32,19 @@
 import { execFileSync } from 'node:child_process'
 
 const args = process.argv.slice(2)
+// A flag with a missing value (`--title` last, or `--title --number 5`) must
+// not read as "provided". Silently treating that as an empty title would let
+// the guard pass a release PR it never actually checked — a fail-open, which
+// is the one outcome a guard must never have.
 const arg = (name, fallback = null) => {
   const i = args.indexOf(`--${name}`)
-  return i === -1 ? fallback : args[i + 1]
+  if (i === -1) return fallback
+  const value = args[i + 1]
+  if (value === undefined || value.startsWith('--')) {
+    console.error(`Error: --${name} was given without a value`)
+    process.exit(2)
+  }
+  return value
 }
 
 const title = arg('title')
@@ -42,8 +52,8 @@ const number = arg('number')
 const base = arg('base', 'origin/main')
 const head = arg('head', 'HEAD')
 
-if (title === null) {
-  console.error('Error: --title is required')
+if (title === null || title.trim() === '') {
+  console.error('Error: --title is required and must not be empty')
   process.exit(2)
 }
 
