@@ -1051,15 +1051,16 @@ export async function getFullServiceStatus(options = {}) {
     }
   }
 
-  // Read recent log lines. #7162: two files carry the daemon's recent
-  // activity and NEITHER alone is sufficient — chroxy.log is written only by
-  // the forked server child, while the supervisor's lifecycle lines (crash
-  // loops, restart backoff) exist only in the service-manager capture, along
-  // with warn/error and crash traces. Merge both tails by timestamp so a
-  // crash-looping daemon's restart lines surface next to the child's last
-  // words, and a stale file on either side loses to fresher lines naturally.
+  // Read recent log lines. #7162: three files carry the daemon's recent
+  // activity and NONE alone is sufficient — chroxy.log is written only by
+  // the forked server child; the supervisor's lifecycle lines (crash loops,
+  // restart backoff) exist only in the stdout capture; and the supervisor's
+  // warn/error plus hard-crash traces land only in the stderr capture (the
+  // supervisor process has no file log). Merge all three tails by timestamp
+  // so a crash-looping daemon's restart lines and last error surface next to
+  // the child's last words, and stale files lose to fresher lines naturally.
   const tails = []
-  for (const name of ['chroxy.log', 'chroxy-stdout.log']) {
+  for (const name of ['chroxy.log', 'chroxy-stdout.log', 'chroxy-stderr.log']) {
     const logFile = join(configDir, 'logs', name)
     if (!existsSync(logFile)) continue
     try {

@@ -814,10 +814,14 @@ describe('service', () => {
           + '2026-08-15T02:00:01.000Z [INFO] [supervisor] Child ran for 2s | total restarts: 7 | next backoff: 8000ms\n'
           + 'stack trace line without a timestamp\n'
           + '2026-08-15T02:00:09.000Z [INFO] [supervisor] Starting server child (attempt 8)\n')
+        // The stderr capture is the third merge source: the supervisor's
+        // console.error lines exist only there (Copilot review on PR #7175).
+        writeFileSync(join(logDir, 'chroxy-stderr.log'),
+          '2026-08-15T02:00:10.000Z [ERROR] [supervisor] Giving up after 8 attempts\n')
         const status = await getFullServiceStatus({ configDir: dir })
         assert.equal(status.recentLogs.length, 5)
-        assert.ok(status.recentLogs[0].includes('Tunnel up'),
-          'stale child lines sort before the newer supervisor lines')
+        assert.ok(status.recentLogs.at(-1).includes('Giving up after 8 attempts'),
+          'stderr capture lines join the merge and the newest line wins the tail')
         assert.ok(status.recentLogs.some(l => l.includes('total restarts: 7')),
           'supervisor crash-loop diagnostics must be visible')
         const traceIdx = status.recentLogs.findIndex(l => l.includes('stack trace'))
