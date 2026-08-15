@@ -52,6 +52,21 @@ export function registerServerCommands(program) {
           return
         }
       }
+      // #7162: bound the service-manager capture files exactly once per
+      // service boot — here, in the process the service manager spawned,
+      // BEFORE any supervisor fork. This is the only point where the capture
+      // fd offset is guaranteed ~0 on the non-append platform (systemd
+      // `file:`); a supervised child restart must never re-truncate under
+      // the supervisor's live fd (capStdioCaptureLogs itself excludes
+      // win32 — the .cmd wrapper rotates before the redirect opens). The
+      // notice lands at the top of the freshly truncated capture.
+      if (process.env.CHROXY_DAEMON === '1' && process.env.CHROXY_SUPERVISED !== '1') {
+        const { capStdioCaptureLogs } = await import('../logger.js')
+        for (const { file, archive, preservedBytes } of capStdioCaptureLogs()) {
+          console.log(`[chroxy] capped oversized capture log ${file} (last ${preservedBytes} bytes preserved to ${archive})`)
+        }
+      }
+
       const useSupervisor = !!parsedTunnel
         && !config.noAuth
         && !config.externalUrl

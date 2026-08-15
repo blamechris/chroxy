@@ -249,8 +249,16 @@ export function getAuditLogPath() {
  * (and this process, as fd 1/2) holds an open descriptor on the inode, so a
  * rename would silently divert the live stream into the archive until the next
  * restart. launchd opens the capture with O_APPEND, so writes after the
- * truncate land at the new end; boot-time-only invocation keeps the non-append
- * platforms (systemd `file:`) safe too, since their fd offset is ~0 at boot.
+ * truncate land at the new end. On systemd (`file:` — non-append fd) the
+ * truncate is safe ONLY while the fd offset is ~0, which is why the single
+ * call site is the `start` command (server-cmd.js), in the process the
+ * service manager spawned, BEFORE any supervisor fork — a supervised child
+ * restart re-entering this would truncate under the supervisor's live
+ * offset. Windows is excluded outright: the Task Scheduler wrapper redirects
+ * with cmd `>>`, whose handle does not have POSIX append semantics, and the
+ * next write would re-extend the file with a NUL-padded gap — the generated
+ * .cmd wrapper rotates the captures itself before the redirect handle exists
+ * (see generateWindowsServiceWrapper).
  *
  * @param {object} [options]
  * @param {string} [options.logDir] - defaults to DEFAULT_LOG_DIR: the capture
@@ -267,6 +275,7 @@ export function capStdioCaptureLogs({
   maxSize = STDIO_CAPTURE_MAX_SIZE,
   tailKeep = STDIO_CAPTURE_TAIL_KEEP,
 } = {}) {
+  if (process.platform === 'win32') return []
   const dir = logDir || DEFAULT_LOG_DIR
   const capped = []
   for (const name of ['chroxy-stdout.log', 'chroxy-stderr.log']) {
@@ -277,15 +286,23 @@ export function capStdioCaptureLogs({
       const archive = filePath.replace(/\.log$/, '.old.log')
       const keep = Math.min(tailKeep, stats.size)
       const fd = openSync(filePath, 'r')
+      let tail
       try {
         const buf = Buffer.alloc(keep)
         const read = readSync(fd, buf, 0, keep, stats.size - keep)
-        writeFileSync(archive, buf.subarray(0, read))
+        tail = buf.subarray(0, read)
       } finally {
         closeSync(fd)
       }
+      // Start the archive on a whole line when the tail begins mid-line
+      // (when keep < size, byte 0 is almost certainly a truncated line).
+      if (keep < stats.size) {
+        const nl = tail.indexOf(0x0a)
+        if (nl !== -1 && nl < tail.length - 1) tail = tail.subarray(nl + 1)
+      }
+      writeFileSync(archive, tail)
       truncateSync(filePath, 0)
-      capped.push({ file: filePath, archive, preservedBytes: keep })
+      capped.push({ file: filePath, archive, preservedBytes: tail.length })
     } catch {
       // Capture file absent, or unreadable — nothing to bound. Never let a
       // capping failure interfere with boot (#746 spirit).
@@ -323,9 +340,13 @@ function _maybeRotateAt(logPath, maxSize, maxFiles) {
     return
   }
 
+  // #7162: anchored to the FINAL '.log' — a first-occurrence string replace
+  // would rewrite a '.log' embedded in the directory path (e.g. a log dir
+  // named 'my.logs'), aiming every rename at a nonexistent sibling dir and
+  // silently disabling rotation (the ENOENT is swallowed below by design).
   for (let i = maxFiles; i >= 1; i--) {
-    const from = i === 1 ? logPath : logPath.replace('.log', `.${i - 1}.log`)
-    const to = logPath.replace('.log', `.${i}.log`)
+    const from = i === 1 ? logPath : logPath.replace(/\.log$/, `.${i - 1}.log`)
+    const to = logPath.replace(/\.log$/, `.${i}.log`)
     try {
       renameSync(from, to)
     } catch (err) {
@@ -382,14 +403,34 @@ export function createLogger(component, context = {}) {
       ? JSON.stringify({ ts: timestamp, level, component, msg: safeMsg })
       : `${timestamp} [${level.toUpperCase()}] [${component}] ${safeMsg}`
 
+    // #7162: the file write happens FIRST so console quieting can key on this
+    // line's ACTUAL fate rather than on configuration: a quieted line whose
+    // file append fails (disk full, permissions) falls back to the console
+    // mirror, so no line — audit lines above all — is ever lost to both
+    // sinks at once.
+    let fileWriteOk = false
+    if (_logToFile && _logPath) {
+      try {
+        appendFileSync(_logPath, line + '\n')
+        fileWriteOk = true
+        _writeCount++
+        if (_writeCount % ROTATION_CHECK_INTERVAL === 0) {
+          _maybeRotate()
+        }
+      } catch {
+        // Silently ignore write failures (disk full, permission denied, etc.)
+        // to prevent logging errors from crashing the server (#746).
+        // fileWriteOk stays false, which re-enables the console mirror below.
+      }
+    }
+
     // Write to console (for foreground mode). #6566: `toConsole:false` suppresses
     // the console write while keeping the file + listener paths — used by the
     // supervisor to log a REDACTED connect-block line to disk while printing the
     // un-redacted line to the operator's terminal separately under --show-token.
-    // #7162: daemon-mode quieting drops info/debug/audit console mirrors (the
-    // line still reaches the file log below — quiet is a no-op unless file
-    // logging is live, so a line is never lost to both sinks at once).
-    const quieted = _quietConsole && _logToFile && _logPath
+    // #7162: daemon-mode quieting drops info/debug/audit console mirrors, but
+    // only for a line the file log verifiably recorded (fileWriteOk).
+    const quieted = _quietConsole && fileWriteOk
       && level !== 'warn' && level !== 'error'
     if (toConsole && !quieted) {
       if (level === 'error') console.error(line)
@@ -410,28 +451,17 @@ export function createLogger(component, context = {}) {
       }
     }
 
-    // Write to file in daemon mode
-    if (_logToFile && _logPath) {
-      try {
-        appendFileSync(_logPath, line + '\n')
-        _writeCount++
-        if (_writeCount % ROTATION_CHECK_INTERVAL === 0) {
-          _maybeRotate()
-        }
-      } catch {
-        // Silently ignore write failures (disk full, permission denied, etc.)
-        // to prevent logging errors from crashing the server (#746)
-      }
-    }
-
-    // #7162: [AUDIT] lines additionally land in the dedicated audit log — the
-    // §9.1 retention floor. Rotation is size-checked on every audit write
-    // (audit volume is rate-ceiling-bounded, so the per-write stat is cheap).
-    // The line stays in chroxy.log above ("in the daemon log", §9.1); this
-    // copy is the one whose retention noise can't touch. Kept fire-and-forget
-    // here — #7169's fail-closed audit writer layers its success-reporting on
-    // top of this sink rather than replacing the level-independent path.
-    if (always && _logToFile && _auditLogPath) {
+    // #7162: audit lines additionally land in the dedicated audit log — the
+    // §9.1 retention floor. Gated on the level itself (only audit() produces
+    // it), NOT on `always`, so a future caller passing {always:true} to
+    // info()/warn() cannot write non-audit content into the forensic file.
+    // Rotation is size-checked on every audit write (audit volume is
+    // rate-ceiling-bounded, so the per-write stat is cheap). The line stays
+    // in chroxy.log above ("in the daemon log", §9.1); this copy is the one
+    // whose retention noise can't touch. Kept fire-and-forget here — #7169's
+    // fail-closed audit writer layers its success-reporting on top of this
+    // sink rather than replacing the level-independent path.
+    if (level === 'audit' && _logToFile && _auditLogPath) {
       try {
         appendFileSync(_auditLogPath, line + '\n')
         _maybeRotateAt(_auditLogPath, MAX_AUDIT_LOG_SIZE, MAX_AUDIT_LOG_FILES)

@@ -383,6 +383,23 @@ describe('service', () => {
       assert.ok(w.includes('\r\n'), 'CRLF line endings for a generated .cmd')
       assert.doesNotMatch(w, /[^\x00-\x7F]/, 'ASCII-only (cmd.exe OEM code page renders non-ASCII as garbage)')
     })
+
+    it('generateWindowsServiceWrapper rotates oversized captures before the redirect opens (#7162)', () => {
+      const w = generateWindowsServiceWrapper({
+        nodePath: 'C:\\nodejs\\node.exe',
+        chroxyBin: 'C:\\chroxy\\cli.js',
+        logDir: 'C:\\logs',
+      })
+      for (const stream of ['stdout', 'stderr']) {
+        assert.match(w, new RegExp(
+          `if exist "C:\\\\logs\\\\chroxy-${stream}\\.log" for %%A in \\("C:\\\\logs\\\\chroxy-${stream}\\.log"\\) do if %%~zA gtr 5242880 move /y "C:\\\\logs\\\\chroxy-${stream}\\.log" "C:\\\\logs\\\\chroxy-${stream}\\.old\\.log"`),
+          `${stream} capture rotation line present`)
+      }
+      // The rotation must precede the redirect line — after `>>` opens the
+      // handle, a rename no longer bounds what the handle writes to.
+      assert.ok(w.indexOf('gtr 5242880') < w.indexOf('start >>'),
+        'rotation lines come before the redirect')
+    })
   })
 
   describe('resolveNode22Path()', () => {
@@ -780,24 +797,49 @@ describe('service', () => {
       }
     })
 
-    it('prefers chroxy.log over the stdout capture, and skips it when empty (#7162)', async () => {
+    it('merges chroxy.log and the stdout capture by timestamp (#7162)', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'chroxy-full-'))
       try {
         saveServiceState({ installed: true, type: 'launchd' }, dir)
         const logDir = join(dir, 'logs')
         mkdirSync(logDir, { recursive: true })
-        writeFileSync(join(logDir, 'chroxy.log'), 'rotated1\nrotated2\n')
-        writeFileSync(join(logDir, 'chroxy-stdout.log'), 'captured1\n')
-        let status = await getFullServiceStatus({ configDir: dir })
-        assert.deepEqual(status.recentLogs, ['rotated1', 'rotated2'],
-          'the rotated daemon log wins when it has content')
+        // The panel-review scenario: the child's chroxy.log holds stale boot
+        // chatter, while the supervisor's crash-loop lines (which only ever
+        // reach the capture) are newer. The merge must surface the crash loop.
+        writeFileSync(join(logDir, 'chroxy.log'),
+          '2026-08-15T01:00:00.000Z [INFO] [cli] Server ready\n'
+          + '2026-08-15T01:00:01.000Z [INFO] [cli] Tunnel up\n')
+        writeFileSync(join(logDir, 'chroxy-stdout.log'),
+          '2026-08-15T02:00:00.000Z [INFO] [supervisor] Server child exited (code 1, signal null)\n'
+          + '2026-08-15T02:00:01.000Z [INFO] [supervisor] Child ran for 2s | total restarts: 7 | next backoff: 8000ms\n'
+          + 'stack trace line without a timestamp\n'
+          + '2026-08-15T02:00:09.000Z [INFO] [supervisor] Starting server child (attempt 8)\n')
+        const status = await getFullServiceStatus({ configDir: dir })
+        assert.equal(status.recentLogs.length, 5)
+        assert.ok(status.recentLogs[0].includes('Tunnel up'),
+          'stale child lines sort before the newer supervisor lines')
+        assert.ok(status.recentLogs.some(l => l.includes('total restarts: 7')),
+          'supervisor crash-loop diagnostics must be visible')
+        const traceIdx = status.recentLogs.findIndex(l => l.includes('stack trace'))
+        assert.ok(traceIdx > 0
+          && status.recentLogs[traceIdx - 1].includes('total restarts'),
+          'unstamped lines stay attached to their preceding stamped line')
+      } finally {
+        rmSync(dir, { recursive: true })
+      }
+    })
 
-        // A stale empty chroxy.log must fall through to the capture, not
-        // shadow it (a file-logging-off daemon still gets recent logs).
+    it('an empty or stale chroxy.log cannot shadow the live capture (#7162)', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'chroxy-full-'))
+      try {
+        saveServiceState({ installed: true, type: 'launchd' }, dir)
+        const logDir = join(dir, 'logs')
+        mkdirSync(logDir, { recursive: true })
         writeFileSync(join(logDir, 'chroxy.log'), '')
-        status = await getFullServiceStatus({ configDir: dir })
+        writeFileSync(join(logDir, 'chroxy-stdout.log'), 'captured1\n')
+        const status = await getFullServiceStatus({ configDir: dir })
         assert.deepEqual(status.recentLogs, ['captured1'],
-          'empty chroxy.log falls back to the stdout capture')
+          'a file-logging-off daemon still gets recent logs from the capture')
       } finally {
         rmSync(dir, { recursive: true })
       }

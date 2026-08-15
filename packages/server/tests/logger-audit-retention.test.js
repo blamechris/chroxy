@@ -5,11 +5,11 @@
 
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync, statSync } from 'fs'
+import { mkdtempSync, mkdirSync, rmSync, readFileSync, existsSync, writeFileSync, statSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import {
-  createLogger, initFileLogging, closeFileLogging,
+  createLogger, initFileLogging, closeFileLogging, setJsonMode,
   setConsoleQuiet, capStdioCaptureLogs, getAuditLogPath,
 } from '../src/logger.js'
 
@@ -63,6 +63,28 @@ describe('audit dual-write (#7162)', () => {
 
     assert.ok(!existsSync(join(logDir, 'chroxy-audit.log')),
       'audit log should not exist when only non-audit lines were written')
+  })
+
+  it('a level bypass via {always:true} does not reach the audit file — the gate keys on the audit level', () => {
+    initFileLogging({ logDir })
+    const log = createLogger('comp')
+    log.info('level-bypassed but not audit', { always: true })
+    closeFileLogging()
+    assert.ok(!existsSync(join(logDir, 'chroxy-audit.log')),
+      'only audit() may write the forensic file')
+  })
+
+  it('JSON-mode audit lines dual-write with level "audit" (the tag lives in the level field)', () => {
+    initFileLogging({ logDir })
+    setJsonMode(true)
+    const log = createLogger('discord-audit')
+    log.audit('json audit line')
+    setJsonMode(false)
+    closeFileLogging()
+    const auditRaw = readFileSync(join(logDir, 'chroxy-audit.log'), 'utf8').trim()
+    const entry = JSON.parse(auditRaw)
+    assert.equal(entry.level, 'audit')
+    assert.equal(entry.msg, 'json audit line')
   })
 
   it('getAuditLogPath reflects file-logging state (the §9.1 enable precondition)', () => {
@@ -181,6 +203,20 @@ describe('daemon-mode console quieting (#7162)', () => {
     setConsoleQuiet(false)
   })
 
+  it('falls back to the console when the file append FAILS, even with file logging configured', () => {
+    initFileLogging({ logDir })
+    // Make the append fail deterministically: a directory where the log file
+    // should be gives appendFileSync EISDIR on every write.
+    mkdirSync(join(logDir, 'chroxy.log'))
+    setConsoleQuiet(true)
+    const log = createLogger('comp')
+    log.info('must not vanish')
+    log.audit('audit must not vanish')
+    assert.equal(calls.log, 2,
+      'quieting keys on the actual write outcome, not on configuration — '
+      + 'a failed append re-enables the console mirror (both lines printed)')
+  })
+
   it('closeFileLogging resets the quiet flag', () => {
     initFileLogging({ logDir })
     setConsoleQuiet(true)
@@ -213,10 +249,29 @@ describe('capStdioCaptureLogs (#7162)', () => {
     assert.equal(capped.length, 1)
     assert.equal(capped[0].file, stdoutLog)
     assert.equal(capped[0].preservedBytes, 100)
-    assert.equal(statSync(stdoutLog).size, 0, 'live capture truncated in place (same inode)')
+    assert.equal(statSync(stdoutLog).size, 0, 'live capture truncated in place')
     const old = readFileSync(join(logDir, 'chroxy-stdout.old.log'), 'utf8')
     assert.equal(old.length, 100)
     assert.equal(old, 'TAIL'.repeat(25), 'archive holds exactly the tail')
+  })
+
+  it('capping preserves the inode — the service manager keeps writing to the same file', () => {
+    if (process.platform === 'win32') return
+    const stdoutLog = join(logDir, 'chroxy-stdout.log')
+    writeFileSync(stdoutLog, 'X'.repeat(1000))
+    const inoBefore = statSync(stdoutLog).ino
+    capStdioCaptureLogs({ logDir, maxSize: 500, tailKeep: 100 })
+    assert.equal(statSync(stdoutLog).ino, inoBefore,
+      'truncate-in-place, never a rename — an fd held on this inode stays live')
+  })
+
+  it('archive starts on a whole line when the tail begins mid-line', () => {
+    const stdoutLog = join(logDir, 'chroxy-stdout.log')
+    writeFileSync(stdoutLog, 'A'.repeat(950) + '\nline-two\nline-three\n') // tail cut lands mid "A" run
+    const capped = capStdioCaptureLogs({ logDir, maxSize: 500, tailKeep: 30 })
+    const old = readFileSync(join(logDir, 'chroxy-stdout.old.log'), 'utf8')
+    assert.equal(old, 'line-two\nline-three\n', 'partial leading line dropped')
+    assert.equal(capped[0].preservedBytes, old.length)
   })
 
   it('caps stdout and stderr independently, leaves under-cap files untouched', () => {
