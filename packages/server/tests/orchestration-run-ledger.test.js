@@ -260,10 +260,12 @@ describe('RunLedger journal-append failure durability (#6720)', () => {
   // path never marks the run dirty in the first place, a flush that ALSO fails
   // used to leave the fold with no retry at all — strictly worse than the
   // pre-#6720 _scheduleSave, which at least got another attempt at shutdown.
-  // Skipped as root: the EACCES half of this fixture is staged with
-  // `chmodSync(runDir, 0o500)`, and root bypasses Unix mode bits, so the
-  // forced snapshot succeeds and the positive control below fires instead
-  // (`the forced snapshot did not land`, 0.4 !== 0). See #6075.
+  // Skipped wherever POSIX mode bits can't deny a write — as root, which
+  // bypasses them, and on Windows, whose ACLs don't map to chmod at all.
+  // The EACCES half of this fixture is staged with `chmodSync(runDir, 0o500)`,
+  // so in both environments the forced snapshot succeeds and the positive
+  // control below fires instead (`the forced snapshot did not land`,
+  // 0.4 !== 0). POSIX_PERM_SKIP carries the reason string for each. See #6075.
   it('still retries at shutdown when BOTH the journal append and the forced snapshot fail', { skip: POSIX_PERM_SKIP }, () => {
     const led = mkLedger({ saveDebounceMs: 60_000 })
     const run = led.createRun({ title: 'x' })
