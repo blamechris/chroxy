@@ -91,3 +91,6 @@ autonomous-session-*.md
 
 # Generated visual-review / brief artifacts (never commit)
 .visual-review/
+
+# store-core publish staging dir (npm run build:publish)
+packages/store-core/publish/

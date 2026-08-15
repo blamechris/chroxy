@@ -1,7 +1,6 @@
 {
   "name": "@chroxy/store-core",
   "version": "0.11.0",
-  "private": true,
   "description": "Shared store logic for Chroxy app and dashboard",
   "type": "module",
   "main": "src/index.ts",
@@ -18,10 +17,11 @@
     "build:crypto": "tsc src/crypto.ts --outDir dist --module ESNext --target ES2022 --declaration --moduleResolution node --esModuleInterop --skipLibCheck && node scripts/postbuild-crypto.mjs",
     "prepare": "npm run build:crypto",
     "pretest": "npm run build:crypto",
-    "test": "vitest run"
+    "test": "vitest run",
+    "build:publish": "node scripts/build-publish-dir.mjs"
   },
   "dependencies": {
-    "@chroxy/protocol": "*",
+    "@chroxy/protocol": "^0.11.0",
     "tweetnacl": "^1.0.3",
     "tweetnacl-util": "^0.15.1"
   },

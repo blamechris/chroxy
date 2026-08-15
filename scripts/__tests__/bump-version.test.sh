@@ -651,6 +651,40 @@ test_lockfile_uses_cargo_when_on_path() {
   ' "$lock" | grep -qx "0.2.0"
 }
 
+
+# --- workspace @chroxy/* dependency ranges (#7187) ---------------------------
+
+# The ranges are bounded (^X.Y.Z) so a PUBLISHED package can never acquire a
+# breaking sibling. That bound is only safe if the bump moves it: a package
+# left at the previous minor stops matching its sibling in the workspace, and
+# npm silently resolves it from the registry instead of linking locally.
+test_bumps_workspace_chroxy_dep_ranges() {
+  local dir
+  dir=$(mktemp -d)
+  trap "rm -rf '$dir'" RETURN
+  build_fake_repo "$dir" "0.5.7"
+  install_bump_script "$dir"
+  write_changelog "$dir/CHANGELOG.md" "0.5.7" "### Fixed
+
+- A real fix (#42)"
+
+  # server depends on two siblings at the CURRENT version, plus a third-party
+  # dep that must be left alone (the negative control).
+  printf '{"name":"server","version":"0.5.7","dependencies":{"@chroxy/protocol":"^0.5.7","commander":"^12.1.0"},"devDependencies":{"@chroxy/store-core":"^0.5.7"}}\n' \
+    > "$dir/packages/server/package.json"
+
+  (cd "$dir" && PATH="$NOCARGO_PATH" ./scripts/bump-version.sh 0.6.0) > /dev/null 2>&1 || return 1
+
+  # Both @chroxy/* ranges moved to the new version, in BOTH dependency fields.
+  grep -q '"@chroxy/protocol": "\^0.6.0"' "$dir/packages/server/package.json" || return 1
+  grep -q '"@chroxy/store-core": "\^0.6.0"' "$dir/packages/server/package.json" || return 1
+  # Negative control: a third-party range is untouched. Without this, a rewrite
+  # that clobbered every dependency would pass the assertions above.
+  grep -q '"commander": "\^12.1.0"' "$dir/packages/server/package.json" || return 1
+  # And the stale range is gone entirely.
+  ! grep -q '0.5.7' "$dir/packages/server/package.json" || return 1
+}
+
 # --- runner ------------------------------------------------------------------
 
 echo "Running bump-version.sh tests"
@@ -683,6 +717,8 @@ run_test "Cargo.lock verify aborts when chroxy-desktop stanza is missing" \
   test_lockfile_verify_fails_when_stanza_missing
 run_test "Cargo.lock sync uses cargo when on PATH (no awk fallthrough)" \
   test_lockfile_uses_cargo_when_on_path
+run_test "bumps workspace @chroxy/* dependency ranges with the version" \
+  test_bumps_workspace_chroxy_dep_ranges
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
