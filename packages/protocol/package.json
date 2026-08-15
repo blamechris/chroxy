@@ -1,7 +1,9 @@
 {
   "name": "@chroxy/protocol",
   "version": "0.11.0",
-  "private": true,
+  "files": [
+    "dist"
+  ],
   "description": "Shared WebSocket protocol constants and types for Chroxy",
   "type": "module",
   "main": "./dist/index.js",
