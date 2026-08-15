@@ -11,7 +11,7 @@ Named Tunnels give you a **stable URL** that never changes. Scan the QR code onc
 ## Quick Setup (Interactive)
 
 ```bash
-npx chroxy tunnel setup
+chroxy tunnel setup
 ```
 
 This walks you through:
@@ -65,19 +65,19 @@ Edit `~/.chroxy/config.json`:
 Or use CLI flags:
 
 ```bash
-npx chroxy start --tunnel named --tunnel-name chroxy --tunnel-hostname chroxy.example.com
+chroxy start --tunnel named --tunnel-name chroxy --tunnel-hostname chroxy.example.com
 ```
 
 Or environment variables:
 
 ```bash
-CHROXY_TUNNEL=named CHROXY_TUNNEL_NAME=chroxy CHROXY_TUNNEL_HOSTNAME=chroxy.example.com npx chroxy start
+CHROXY_TUNNEL=named CHROXY_TUNNEL_NAME=chroxy CHROXY_TUNNEL_HOSTNAME=chroxy.example.com chroxy start
 ```
 
 ### 5. Start the Server
 
 ```bash
-npx chroxy start
+chroxy start
 ```
 
 The QR code and connection URL will always be the same.

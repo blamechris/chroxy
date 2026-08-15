@@ -47,7 +47,7 @@ export function registerServerCommands(program) {
           for (const f of failures) {
             console.error(`  ✗ ${f.name}: ${f.message}`)
           }
-          console.error('\nRun `npx chroxy doctor` for details, or `--skip-checks` to bypass.\n')
+          console.error('\nRun `chroxy doctor` for details, or `--skip-checks` to bypass.\n')
           process.exitCode = 1
           return
         }

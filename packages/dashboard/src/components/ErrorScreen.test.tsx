@@ -47,11 +47,11 @@ describe('ErrorScreen', () => {
       <ErrorScreen
         title="Error"
         message="Server failed"
-        details="Try starting manually: npx chroxy start"
+        details="Try starting manually: chroxy start"
         onRetry={vi.fn()}
       />,
     )
-    expect(screen.getByText(/npx chroxy start/)).toBeInTheDocument()
+    expect(screen.getByText(/chroxy start/)).toBeInTheDocument()
   })
 
   it('does not render details section when not provided', () => {

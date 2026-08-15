@@ -96,6 +96,6 @@ async function setupCloudflare() {
   console.log(`   HTTP:      https://${hostname}`)
   console.log(`   WebSocket: wss://${hostname}`)
   console.log('')
-  console.log('Run \'npx chroxy start\' to launch with your Named Tunnel.')
+  console.log('Run \'chroxy start\' to launch with your Named Tunnel.')
   console.log('The QR code will always be the same — scan it once, connect forever.\n')
 }

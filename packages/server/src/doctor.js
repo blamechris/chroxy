@@ -365,7 +365,7 @@ export async function runDoctorChecks({ port, providers, verbose: _verbose, pkgD
       }
     }
   } else {
-    configCheck = { name: 'Config', status: 'warn', message: `Not found — run 'npx chroxy init' to create` }
+    configCheck = { name: 'Config', status: 'warn', message: `Not found — run 'chroxy init' to create` }
   }
 
   // 4. Provider-specific checks. Each configured provider contributes its

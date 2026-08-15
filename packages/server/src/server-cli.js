@@ -601,7 +601,7 @@ export async function startCliServer(config) {
   }
 
   if (!NO_AUTH && !API_TOKEN) {
-    console.error('[!] No API token configured. Run \'npx chroxy init\' first.') // intentional user-facing output
+    console.error('[!] No API token configured. Run \'chroxy init\' first.') // intentional user-facing output
     process.exit(1)
   }
 

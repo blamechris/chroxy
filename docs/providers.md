@@ -85,7 +85,7 @@ The SDK provider (`claude-sdk`) does not shell out to the `claude` binary for me
 ### Verify
 
 ```bash
-npx chroxy doctor
+chroxy doctor
 ```
 
 Expected output includes:
@@ -152,7 +152,7 @@ It is read from the **daemon process environment** at request time. Set it where
 the daemon is launched, e.g. exported in the shell that runs `chroxy start`:
 
 ```bash
-CHROXY_TUI_MULTISELECT_REINJECT=1 npx chroxy start --provider claude-tui
+CHROXY_TUI_MULTISELECT_REINJECT=1 chroxy start --provider claude-tui
 ```
 
 or, for a launchd-started daemon, in the plist's `EnvironmentVariables`
@@ -250,7 +250,7 @@ The provider hard-fails at `start()` with `OPENAI_API_KEY environment variable i
 codex exec "hello" --json
 
 # Start Chroxy with the codex provider
-OPENAI_API_KEY=sk-... npx chroxy start --provider codex
+OPENAI_API_KEY=sk-... chroxy start --provider codex
 ```
 
 `chroxy doctor` does **not** currently probe for `codex` or `gemini` binaries — it only checks `node`, `cloudflared`, and `claude`. Verify third-party binaries manually.
@@ -461,7 +461,7 @@ The provider hard-fails at `start()` only if **neither** a key (`GEMINI_API_KEY`
 ```bash
 gemini -p "hello" --output-format stream-json -y
 
-GEMINI_API_KEY=... npx chroxy start --provider gemini
+GEMINI_API_KEY=... chroxy start --provider gemini
 ```
 
 ### Common pitfalls
@@ -486,8 +486,8 @@ ollama --version              # must be >= 0.14.0
 ### Use
 
 ```bash
-npx chroxy start --provider ollama                       # default model: qwen3-coder
-npx chroxy start --provider ollama --model glm-4.7       # any locally pulled model id
+chroxy start --provider ollama                       # default model: qwen3-coder
+chroxy start --provider ollama --model glm-4.7       # any locally pulled model id
 ```
 
 There is **no model allow-list**: whatever `ollama list` shows is valid. The dashboard picker seeds Ollama's recommended coder models (`qwen3-coder`, `glm-4.7`, `minimax-m2.1`); type any other pulled model id freely. An unknown id surfaces as Ollama's own error on the first message.
@@ -497,7 +497,7 @@ There is **no model allow-list**: whatever `ollama list` shows is valid. The das
 Resolution order: `CHROXY_OLLAMA_BASE_URL` (full URL) → `OLLAMA_HOST` (Ollama's own convention; bare `host:port` is normalized to `http://`) → `http://localhost:11434`.
 
 ```bash
-CHROXY_OLLAMA_BASE_URL=http://gpu-box:11434 npx chroxy start --provider ollama
+CHROXY_OLLAMA_BASE_URL=http://gpu-box:11434 chroxy start --provider ollama
 ```
 
 ### Common pitfalls
@@ -575,8 +575,8 @@ For **OpenRouter** — which accepts the Anthropic format for *every* model on t
 ### Use
 
 ```bash
-ZAI_API_KEY=... npx chroxy start --provider zai-glm
-npx chroxy start --provider lm-studio
+ZAI_API_KEY=... chroxy start --provider zai-glm
+chroxy start --provider lm-studio
 ```
 
 ### Caveats
@@ -592,7 +592,7 @@ npx chroxy start --provider lm-studio
 ### Preset
 
 ```bash
-npx chroxy providers add openrouter
+chroxy providers add openrouter
 ```
 
 This writes the `providers.anthropicCompatible` entry for you — `baseUrl https://openrouter.ai/api`, the `OPENROUTER_API_KEY` env seam (or the `openrouterApiKey` field in `~/.chroxy/credentials.json`, mode `0600`), a sensible default model, and the `modelDiscovery` block. It's **idempotent**: re-running leaves an existing entry untouched (`--force` rewrites it to the current preset).
@@ -601,7 +601,7 @@ Then provide your key and start:
 
 ```bash
 export OPENROUTER_API_KEY=sk-or-...           # or save it as "openrouterApiKey" in ~/.chroxy/credentials.json (0600)
-npx chroxy start --provider openrouter
+chroxy start --provider openrouter
 ```
 
 ### Model discovery
@@ -693,8 +693,8 @@ No `apiKeyEnv` / `credentialsKey` → no credential gate (a placeholder key is s
 ### Use
 
 ```bash
-OPENROUTER_API_KEY=sk-or-... npx chroxy start --provider openrouter-oai
-npx chroxy start --provider lm-studio-oai
+OPENROUTER_API_KEY=sk-or-... chroxy start --provider openrouter-oai
+chroxy start --provider lm-studio-oai
 ```
 
 ### Caveats
@@ -738,15 +738,15 @@ Precedence (highest first): CLI flag > environment variable > config file > defa
 ### CLI flag
 
 ```bash
-npx chroxy start --provider claude-cli
-npx chroxy start --provider gemini
-npx chroxy start --provider codex
+chroxy start --provider claude-cli
+chroxy start --provider gemini
+chroxy start --provider codex
 ```
 
 ### Environment variable
 
 ```bash
-CHROXY_PROVIDER=gemini npx chroxy start
+CHROXY_PROVIDER=gemini chroxy start
 ```
 
 ### Config file

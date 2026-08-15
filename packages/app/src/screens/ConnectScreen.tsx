@@ -96,11 +96,11 @@ export function parseChroxyUrl(raw: string): ParseResult {
 const QR_ERROR_MESSAGES: Record<string, { title: string; message: string }> = {
   not_chroxy: {
     title: 'Not a Chroxy QR Code',
-    message: 'This QR code is not from Chroxy. Scan the QR code shown by "npx chroxy start" on your computer.',
+    message: 'This QR code is not from Chroxy. Scan the QR code shown by "chroxy start" on your computer.',
   },
   missing_token: {
     title: 'Missing Auth Token',
-    message: 'This Chroxy QR code is missing the authentication token. Try restarting the server with "npx chroxy start".',
+    message: 'This Chroxy QR code is missing the authentication token. Try restarting the server with "chroxy start".',
   },
   invalid_url: {
     title: 'Invalid QR Code',
@@ -483,7 +483,7 @@ export function ConnectScreen() {
         <Icon name="satellite" size={48} color={COLORS.accentBlue} />
         <Text style={styles.title}>Connect to Chroxy</Text>
         <Text style={styles.subtitle}>
-          Run 'npx chroxy start' on your Mac, then scan the QR code
+          Run 'chroxy start' on your Mac, then scan the QR code
         </Text>
       </View>
 

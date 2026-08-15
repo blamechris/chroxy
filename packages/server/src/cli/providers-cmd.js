@@ -107,11 +107,11 @@ export function runProvidersAddOpenRouter(options = {}, deps = {}) {
     } catch (err) {
       logFn(`❌ Config file contains invalid JSON: ${configFilePath}`)
       logFn(`   ${err.message}`)
-      logFn(`   Fix the file or run 'npx chroxy init' to recreate it.`)
+      logFn(`   Fix the file or run 'chroxy init' to recreate it.`)
       return { status: 'invalid-json', written: false, configFilePath }
     }
   } else {
-    logFn(`❌ No config found at ${configFilePath}. Run 'npx chroxy init' first.`)
+    logFn(`❌ No config found at ${configFilePath}. Run 'chroxy init' first.`)
     return { status: 'no-config', written: false, configFilePath }
   }
 
@@ -137,7 +137,7 @@ export function runProvidersAddOpenRouter(options = {}, deps = {}) {
   logFn(`       export ${OPENROUTER_PRESET.apiKeyEnv}=sk-or-...`)
   logFn(`     or save it as "${OPENROUTER_PRESET.credentialsKey}" in ~/.chroxy/credentials.json (mode 0600)`)
   logFn('  2. Start with OpenRouter as the active provider:')
-  logFn(`       npx chroxy start --provider ${OPENROUTER_PRESET.id}`)
+  logFn(`       chroxy start --provider ${OPENROUTER_PRESET.id}`)
   logFn('')
   logFn('  The model picker fills from OpenRouter\'s live catalog and per-model')
   logFn('  pricing is applied automatically — sessions report real cost.')

@@ -9,7 +9,7 @@ const STEPS = [
   },
   {
     title: 'Set Up the Server',
-    body: 'On your dev machine, install and start the Chroxy server:\n\nnpx chroxy start\n\nThis starts a daemon with a secure Cloudflare tunnel and displays a QR code.',
+    body: 'On your dev machine, install and start the Chroxy server:\n\nchroxy start\n\nThis starts a daemon with a secure Cloudflare tunnel and displays a QR code.',
   },
   {
     title: 'Connect',
