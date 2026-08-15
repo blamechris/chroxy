@@ -55,6 +55,7 @@ STORE_CORE_PKG="$ROOT/packages/store-core/package.json"
 DASHBOARD_PKG="$ROOT/packages/dashboard/package.json"
 CLAUDE_HOOKS_PKG="$ROOT/packages/claude-hooks/package.json"
 DESIGN_TOKENS_PKG="$ROOT/packages/design-tokens/package.json"
+CLAUDE_MD="$ROOT/CLAUDE.md"
 TAURI_CONF="$ROOT/packages/desktop/src-tauri/tauri.conf.json"
 CARGO_TOML="$ROOT/packages/desktop/src-tauri/Cargo.toml"
 ROOT_LOCK="$ROOT/package-lock.json"
@@ -220,6 +221,56 @@ node -e "
   }
   console.log('  workspace @chroxy/* dependency ranges -> ' + range + ' (' + n + ' updated)');
 "
+
+# Update the two version references in CLAUDE.md's prose, then regenerate
+# AGENTS.md from it (#7183).
+#
+# These are the first thing a session reads about "what version is this", and
+# they were wrong immediately after every release: at the 0.10.0 -> 0.11.0 bump
+# the header still said v0.10.0 and the footer still said 0.9.47 — two releases
+# stale, drifting silently because nothing rewrote them.
+#
+# Only touched when the file is present, so the script still runs against a
+# minimal tree (the bump-version test fixtures build one).
+if [ -f "$CLAUDE_MD" ]; then
+  node -e "
+    const fs = require('fs');
+    const file = '$CLAUDE_MD';
+    const version = '$NEW_VERSION';
+    let src = fs.readFileSync(file, 'utf-8');
+    const edits = [
+      // '**Current Status (v0.11.0):**' in the Project Overview
+      [/(\*\*Current Status \(v)\d+\.\d+\.\d+(\):\*\*)/, version],
+      // '*Version: 0.11.0*' in the footer
+      [/(^\*Version: )\d+\.\d+\.\d+(\*\$)/m, version],
+    ];
+    let changed = 0;
+    for (const [re, v] of edits) {
+      if (!re.test(src)) continue;
+      src = src.replace(re, (_m, a, b) => a + v + b);
+      changed++;
+    }
+    fs.writeFileSync(file, src);
+    // Verify after write, mirroring the Cargo.toml handling: a silently-missed
+    // rewrite here is exactly the drift this closes.
+    const after = fs.readFileSync(file, 'utf-8');
+    for (const [re] of edits) {
+      const m = after.match(re);
+      if (m && !m[0].includes(version)) {
+        console.error('Error: failed to update a version reference in ' + file);
+        process.exit(1);
+      }
+    }
+    console.log('  CLAUDE.md version references -> ' + version + ' (' + changed + ' line(s))');
+  "
+
+  # AGENTS.md is generated from CLAUDE.md and CI (Scripts Tests) fails on drift,
+  # so regenerating here is not optional.
+  if [ -f "$ROOT/scripts/gen-agents-md.mjs" ]; then
+    node "$ROOT/scripts/gen-agents-md.mjs" >/dev/null
+    echo "  AGENTS.md regenerated from CLAUDE.md"
+  fi
+fi
 
 # Update tauri.conf.json
 node -e "

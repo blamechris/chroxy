@@ -685,6 +685,61 @@ test_bumps_workspace_chroxy_dep_ranges() {
   ! grep -q '0.5.7' "$dir/packages/server/package.json" || return 1
 }
 
+
+# --- CLAUDE.md / AGENTS.md version references (#7183) ------------------------
+
+# These two lines are the first thing a session reads about "what version is
+# this". Nothing rewrote them, so at the 0.10.0 -> 0.11.0 bump the header still
+# said v0.10.0 and the footer still said 0.9.47 — two releases stale.
+test_bumps_claude_md_version_references() {
+  local dir
+  dir=$(mktemp -d)
+  trap "rm -rf '$dir'" RETURN
+  build_fake_repo "$dir" "0.5.7"
+  install_bump_script "$dir"
+  write_changelog "$dir/CHANGELOG.md" "0.5.7" "### Fixed
+
+- A real fix (#42)"
+
+  cat > "$dir/CLAUDE.md" <<'CLAUDEMD'
+# Claude Development Notes
+
+**Current Status (v0.5.7):**
+- stuff works
+
+---
+
+*Last Updated: 2026-01-01*
+*Version: 0.5.7*
+CLAUDEMD
+
+  (cd "$dir" && PATH="$NOCARGO_PATH" ./scripts/bump-version.sh 0.6.0) > /dev/null 2>&1 || return 1
+
+  grep -q '^\*\*Current Status (v0.6.0):\*\*' "$dir/CLAUDE.md" || return 1
+  grep -q '^\*Version: 0.6.0\*$' "$dir/CLAUDE.md" || return 1
+  # Negative control: an unrelated version-shaped line is untouched. Without
+  # this, a rewrite that clobbered every semver in the file would pass above.
+  grep -q '^\*Last Updated: 2026-01-01\*$' "$dir/CLAUDE.md" || return 1
+  ! grep -q '0\.5\.7' "$dir/CLAUDE.md" || return 1
+}
+
+# The script must still run against a tree with no CLAUDE.md — the other
+# fixtures build exactly that, and a hard failure here would break them all.
+test_bump_survives_missing_claude_md() {
+  local dir
+  dir=$(mktemp -d)
+  trap "rm -rf '$dir'" RETURN
+  build_fake_repo "$dir" "0.5.7"
+  install_bump_script "$dir"
+  write_changelog "$dir/CHANGELOG.md" "0.5.7" "### Fixed
+
+- A real fix (#42)"
+  rm -f "$dir/CLAUDE.md"
+
+  (cd "$dir" && PATH="$NOCARGO_PATH" ./scripts/bump-version.sh 0.6.0) > /dev/null 2>&1 || return 1
+  grep -qE '"version":\s*"0.6.0"' "$dir/packages/server/package.json" || return 1
+}
+
 # --- runner ------------------------------------------------------------------
 
 echo "Running bump-version.sh tests"
@@ -719,6 +774,10 @@ run_test "Cargo.lock sync uses cargo when on PATH (no awk fallthrough)" \
   test_lockfile_uses_cargo_when_on_path
 run_test "bumps workspace @chroxy/* dependency ranges with the version" \
   test_bumps_workspace_chroxy_dep_ranges
+run_test "bumps the version references in CLAUDE.md" \
+  test_bumps_claude_md_version_references
+run_test "bump still succeeds when CLAUDE.md is absent" \
+  test_bump_survives_missing_claude_md
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
