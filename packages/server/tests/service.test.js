@@ -780,6 +780,29 @@ describe('service', () => {
       }
     })
 
+    it('prefers chroxy.log over the stdout capture, and skips it when empty (#7162)', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'chroxy-full-'))
+      try {
+        saveServiceState({ installed: true, type: 'launchd' }, dir)
+        const logDir = join(dir, 'logs')
+        mkdirSync(logDir, { recursive: true })
+        writeFileSync(join(logDir, 'chroxy.log'), 'rotated1\nrotated2\n')
+        writeFileSync(join(logDir, 'chroxy-stdout.log'), 'captured1\n')
+        let status = await getFullServiceStatus({ configDir: dir })
+        assert.deepEqual(status.recentLogs, ['rotated1', 'rotated2'],
+          'the rotated daemon log wins when it has content')
+
+        // A stale empty chroxy.log must fall through to the capture, not
+        // shadow it (a file-logging-off daemon still gets recent logs).
+        writeFileSync(join(logDir, 'chroxy.log'), '')
+        status = await getFullServiceStatus({ configDir: dir })
+        assert.deepEqual(status.recentLogs, ['captured1'],
+          'empty chroxy.log falls back to the stdout capture')
+      } finally {
+        rmSync(dir, { recursive: true })
+      }
+    })
+
     it('handles fewer than 5 log lines', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'chroxy-full-'))
       try {

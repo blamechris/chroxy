@@ -1041,15 +1041,20 @@ export async function getFullServiceStatus(options = {}) {
     }
   }
 
-  // Read recent log lines
-  const logFile = join(configDir, 'logs', 'chroxy-stdout.log')
-  if (existsSync(logFile)) {
+  // Read recent log lines. #7162: the daemon's rotated file log is the
+  // authoritative record (daemon-mode console quieting leaves the stdout
+  // capture near-empty); the capture stays as a fallback for pre-quieting
+  // installs and file-logging-off daemons.
+  for (const name of ['chroxy.log', 'chroxy-stdout.log']) {
+    const logFile = join(configDir, 'logs', name)
+    if (!existsSync(logFile)) continue
     try {
-      const content = readFileSync(logFile, 'utf-8')
-      const lines = content.trim().split('\n')
-      result.recentLogs = lines.slice(-5)
+      const content = readFileSync(logFile, 'utf-8').trim()
+      if (!content) continue // stale empty file — try the next candidate
+      result.recentLogs = content.split('\n').slice(-5)
+      break
     } catch {
-      // Ignore read errors
+      // Ignore read errors and try the next candidate
     }
   }
 

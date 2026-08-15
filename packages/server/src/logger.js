@@ -15,7 +15,10 @@
  *   // => 2026-02-22T12:34:56.789Z [INFO] [supervisor] Server ready
  */
 
-import { appendFileSync, statSync, renameSync, mkdirSync, chmodSync } from 'fs'
+import {
+  appendFileSync, statSync, renameSync, mkdirSync, chmodSync,
+  openSync, readSync, closeSync, writeFileSync, truncateSync,
+} from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
 import { SENSITIVE_PATTERNS, API_KEY_PATTERNS, redactValue } from './redaction.js'
@@ -24,6 +27,22 @@ const DEFAULT_LOG_DIR = join(homedir(), '.chroxy', 'logs')
 const MAX_LOG_SIZE = 5 * 1024 * 1024  // 5MB
 const MAX_LOG_FILES = 3
 const ROTATION_CHECK_INTERVAL = 100  // check every N writes
+
+// #7162: audit retention floor (discord-return-path.md §9.1). [AUDIT] lines are
+// dual-written to a dedicated chroxy-audit.log with its own rotation budget, so
+// the audit trail's lifetime is bounded by AUDIT volume alone — a noisy debug
+// period churning chroxy.log through its 5MB×3 cascade can never displace an
+// audit line. Budget: 10MB live + 4 archives ≈ 50MB ceiling; §9.1's rate
+// ceilings and reject-collapse bound audit volume, so this is years of trail.
+const AUDIT_LOG_NAME = 'chroxy-audit.log'
+const MAX_AUDIT_LOG_SIZE = 10 * 1024 * 1024  // 10MB
+const MAX_AUDIT_LOG_FILES = 4
+
+// #7162: bounds for the service-manager stdout/stderr capture files
+// (launchd StandardOutPath / systemd StandardOutput=file: / cmd `>>`), which
+// no service manager rotates. Capped at daemon boot by capStdioCaptureLogs().
+const STDIO_CAPTURE_MAX_SIZE = 5 * 1024 * 1024   // 5MB
+const STDIO_CAPTURE_TAIL_KEEP = 1 * 1024 * 1024  // preserved to *.old.log
 
 const LOG_LEVELS = { debug: 0, info: 1, warn: 2, error: 3 }
 
@@ -112,7 +131,9 @@ let _jsonMode = false
 let _logToFile = false
 let _logDir = DEFAULT_LOG_DIR
 let _logPath = null
+let _auditLogPath = null
 let _writeCount = 0
+let _quietConsole = false
 
 /** Set of callbacks for broadcasting log entries (supports multiple WsServer instances) */
 const _logListeners = new Set()
@@ -179,6 +200,24 @@ export function initFileLogging({ level = 'info', logDir } = {}) {
     // we keep going. The mkdir mode bit covers fresh-create.
   }
   _logPath = join(_logDir, 'chroxy.log')
+  _auditLogPath = join(_logDir, AUDIT_LOG_NAME)
+}
+
+/**
+ * #7162: quiet the console mirror in daemon mode. Under a service manager the
+ * console streams are captured to chroxy-stdout/stderr.log, which nothing
+ * rotates — mirroring every file-logged line there is how the capture reached
+ * 32MB in a month. When quiet, info/debug/audit lines skip the console (the
+ * rotated file log is authoritative); warn/error still print, so crash-adjacent
+ * output keeps landing in chroxy-stderr.log.
+ *
+ * Fail-safe: quieting only ever suppresses a line that was ALSO written to the
+ * file log — if file logging is off or the path is unset, the console mirror
+ * stays on regardless of this flag (see write()).
+ * @param {boolean} enabled
+ */
+export function setConsoleQuiet(enabled) {
+  _quietConsole = !!enabled
 }
 
 /**
@@ -192,6 +231,70 @@ export function getLogPath() {
 }
 
 /**
+ * Return the on-disk audit log path (#7162), or `null` if file logging is
+ * disabled. #7169's fail-closed audit writer gates on this being non-null —
+ * it is the "file-backed logging" precondition §9.1 requires `enable` to check.
+ * @returns {string|null}
+ */
+export function getAuditLogPath() {
+  return _logToFile ? _auditLogPath : null
+}
+
+/**
+ * #7162: bound the service-manager capture files (launchd StandardOutPath /
+ * systemd StandardOutput=file: / the Windows wrapper's `>>`), which no service
+ * manager rotates. Called once at daemon boot.
+ *
+ * Mechanics are copy-tail-then-truncate, NEVER rename: the service manager
+ * (and this process, as fd 1/2) holds an open descriptor on the inode, so a
+ * rename would silently divert the live stream into the archive until the next
+ * restart. launchd opens the capture with O_APPEND, so writes after the
+ * truncate land at the new end; boot-time-only invocation keeps the non-append
+ * platforms (systemd `file:`) safe too, since their fd offset is ~0 at boot.
+ *
+ * @param {object} [options]
+ * @param {string} [options.logDir] - defaults to DEFAULT_LOG_DIR: the capture
+ *   location is baked into the plist/unit by `service install` (always
+ *   `~/.chroxy/logs`), so it deliberately does NOT follow a custom
+ *   CHROXY_LOG_DIR, which only moves the logger's own files
+ * @param {number} [options.maxSize] - cap before truncation kicks in
+ * @param {number} [options.tailKeep] - bytes preserved to `<name>.old.log`
+ * @returns {Array<{file: string, archive: string, preservedBytes: number}>}
+ *   one entry per file that was capped (empty when nothing exceeded the cap)
+ */
+export function capStdioCaptureLogs({
+  logDir,
+  maxSize = STDIO_CAPTURE_MAX_SIZE,
+  tailKeep = STDIO_CAPTURE_TAIL_KEEP,
+} = {}) {
+  const dir = logDir || DEFAULT_LOG_DIR
+  const capped = []
+  for (const name of ['chroxy-stdout.log', 'chroxy-stderr.log']) {
+    const filePath = join(dir, name)
+    try {
+      const stats = statSync(filePath)
+      if (stats.size <= maxSize) continue
+      const archive = filePath.replace(/\.log$/, '.old.log')
+      const keep = Math.min(tailKeep, stats.size)
+      const fd = openSync(filePath, 'r')
+      try {
+        const buf = Buffer.alloc(keep)
+        const read = readSync(fd, buf, 0, keep, stats.size - keep)
+        writeFileSync(archive, buf.subarray(0, read))
+      } finally {
+        closeSync(fd)
+      }
+      truncateSync(filePath, 0)
+      capped.push({ file: filePath, archive, preservedBytes: keep })
+    } catch {
+      // Capture file absent, or unreadable — nothing to bound. Never let a
+      // capping failure interfere with boot (#746 spirit).
+    }
+  }
+  return capped
+}
+
+/**
  * Close file logging. Used in tests for cleanup.
  */
 export function closeFileLogging() {
@@ -200,30 +303,39 @@ export function closeFileLogging() {
   _logLevel = LOG_LEVELS.info
   _logDir = DEFAULT_LOG_DIR
   _logPath = null
+  _auditLogPath = null
   _writeCount = 0
+  _quietConsole = false
   _logListeners.clear()
 }
 
-function _maybeRotate() {
-  if (!_logPath) return
+/**
+ * Size-gated rename-cascade rotation, shared by the main log and the audit log.
+ * Rotate: base.N.log (overwritten) <- ... <- base.1.log <- base.log
+ */
+function _maybeRotateAt(logPath, maxSize, maxFiles) {
+  if (!logPath) return
   try {
-    const stats = statSync(_logPath)
-    if (stats.size < MAX_LOG_SIZE) return
+    const stats = statSync(logPath)
+    if (stats.size < maxSize) return
   } catch (err) {
     if (err?.code !== 'ENOENT') console.error('[logger] stat failed:', err?.message)
     return
   }
 
-  // Rotate: chroxy.3.log (overwritten) <- chroxy.2.log <- chroxy.1.log <- chroxy.log
-  for (let i = MAX_LOG_FILES; i >= 1; i--) {
-    const from = i === 1 ? _logPath : _logPath.replace('.log', `.${i - 1}.log`)
-    const to = _logPath.replace('.log', `.${i}.log`)
+  for (let i = maxFiles; i >= 1; i--) {
+    const from = i === 1 ? logPath : logPath.replace('.log', `.${i - 1}.log`)
+    const to = logPath.replace('.log', `.${i}.log`)
     try {
       renameSync(from, to)
     } catch (err) {
       if (err?.code !== 'ENOENT') console.error('[logger] rename failed:', err?.message)
     }
   }
+}
+
+function _maybeRotate() {
+  _maybeRotateAt(_logPath, MAX_LOG_SIZE, MAX_LOG_FILES)
 }
 
 /**
@@ -274,7 +386,12 @@ export function createLogger(component, context = {}) {
     // the console write while keeping the file + listener paths — used by the
     // supervisor to log a REDACTED connect-block line to disk while printing the
     // un-redacted line to the operator's terminal separately under --show-token.
-    if (toConsole) {
+    // #7162: daemon-mode quieting drops info/debug/audit console mirrors (the
+    // line still reaches the file log below — quiet is a no-op unless file
+    // logging is live, so a line is never lost to both sinks at once).
+    const quieted = _quietConsole && _logToFile && _logPath
+      && level !== 'warn' && level !== 'error'
+    if (toConsole && !quieted) {
       if (level === 'error') console.error(line)
       else if (level === 'warn') console.warn(line)
       else console.log(line)
@@ -304,6 +421,22 @@ export function createLogger(component, context = {}) {
       } catch {
         // Silently ignore write failures (disk full, permission denied, etc.)
         // to prevent logging errors from crashing the server (#746)
+      }
+    }
+
+    // #7162: [AUDIT] lines additionally land in the dedicated audit log — the
+    // §9.1 retention floor. Rotation is size-checked on every audit write
+    // (audit volume is rate-ceiling-bounded, so the per-write stat is cheap).
+    // The line stays in chroxy.log above ("in the daemon log", §9.1); this
+    // copy is the one whose retention noise can't touch. Kept fire-and-forget
+    // here — #7169's fail-closed audit writer layers its success-reporting on
+    // top of this sink rather than replacing the level-independent path.
+    if (always && _logToFile && _auditLogPath) {
+      try {
+        appendFileSync(_auditLogPath, line + '\n')
+        _maybeRotateAt(_auditLogPath, MAX_AUDIT_LOG_SIZE, MAX_AUDIT_LOG_FILES)
+      } catch {
+        // Same #746 rationale as above.
       }
     }
   }
