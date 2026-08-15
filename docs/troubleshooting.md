@@ -140,8 +140,8 @@ curl -s -H "Authorization: Bearer $TOKEN" -H "Accept: text/plain" \
 
 **Fix:**
 ```bash
-npx chroxy init     # Interactive setup — generates token and config
-npx chroxy start    # Now starts successfully
+chroxy init     # Interactive setup — generates token and config
+chroxy start    # Now starts successfully
 ```
 
 Or set the token manually in `~/.chroxy/config.json`:
@@ -202,7 +202,7 @@ curl -s https://your-tunnel-url.trycloudflare.com
 ```bash
 node --version                    # Check current version
 brew install node@22              # Install Node 22
-PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy start
+PATH="/opt/homebrew/opt/node@22/bin:$PATH" chroxy start
 ```
 
 ## 6. App shows "server restarting" loop
@@ -216,7 +216,7 @@ PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy start
 **Fixes:**
 - Check server terminal for error messages
 - Ensure Claude Code CLI is installed and working: `claude --version`
-- Increase max restarts if needed: `npx chroxy start --max-restarts 20`
+- Increase max restarts if needed: `chroxy start --max-restarts 20`
 
 ## 7. QR code won't scan
 
@@ -227,7 +227,7 @@ PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy start
 
 **Fixes:**
 - Increase terminal font size for a larger QR code
-- Use `npx chroxy pair-code` to re-print the current pairing code + connection URL for the running daemon (or `npx chroxy status` for the tunnel URL / port / uptime) without restarting
+- Use `chroxy pair-code` to re-print the current pairing code + connection URL for the running daemon (or `chroxy status` for the tunnel URL / port / uptime) without restarting
 
 ## 8. E2E encryption errors ("decrypt failed")
 
@@ -246,7 +246,7 @@ PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy start
 **Cause:** Either the session-idle timeout fired, or the per-turn `RESULT_TIMEOUT` watchdog (5 min by default) fired.
 
 **Fixes:**
-- For the idle timeout: increase it with `npx chroxy start --session-timeout 4h`, or disable it by not setting `--session-timeout` / `CHROXY_SESSION_TIMEOUT`. The app sends keep-alive pings, but only while it's in the foreground.
+- For the idle timeout: increase it with `chroxy start --session-timeout 4h`, or disable it by not setting `--session-timeout` / `CHROXY_SESSION_TIMEOUT`. The app sends keep-alive pings, but only while it's in the foreground.
 - For the per-turn `RESULT_TIMEOUT`: capture a [`/diagnostics`](#0-diagnostics-endpoint-triaging-stuck-sessions) snapshot **before restarting** so you can see whether the session was wedged on a pending permission, an upstream provider call, or a leaked timer. Restarting wipes every flag.
 
 ## 10. Gemini provider errors (`--provider gemini`)
@@ -258,7 +258,7 @@ See [docs/providers.md](providers.md) for Gemini CLI installation and supported 
 - Or export it before launching Chroxy (an exported env var takes precedence over a stored value):
   ```bash
   export GEMINI_API_KEY=your-key-here
-  npx chroxy start --provider gemini
+  chroxy start --provider gemini
   ```
 
 **Symptom:** `gemini: command not found` / `ENOENT`
@@ -278,7 +278,7 @@ See [docs/providers.md](providers.md) for Codex CLI installation and supported m
 - Or export it before launching Chroxy (an exported env var takes precedence over a stored value):
   ```bash
   export OPENAI_API_KEY=your-key-here
-  npx chroxy start --provider codex
+  chroxy start --provider codex
   ```
 
 **Symptom:** `codex: command not found` / `ENOENT`

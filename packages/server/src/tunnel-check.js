@@ -77,7 +77,7 @@ export async function waitForTunnel(httpUrl, { maxAttempts = 20, initialInterval
     `Tunnel failed to become routable after ${maxAttempts} attempts (${elapsed}s). ` +
     `${lastFailure ? `Last failure: ${lastFailure}. ` : ''}` +
     'This usually means your network is blocking Cloudflare, or DNS has not propagated yet. ' +
-    'Try a named tunnel (--tunnel named) or run `npx chroxy doctor` for diagnostics.'
+    'Try a named tunnel (--tunnel named) or run `chroxy doctor` for diagnostics.'
   )
   err.code = 'TUNNEL_NOT_ROUTABLE'
   throw err

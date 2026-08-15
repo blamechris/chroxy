@@ -264,7 +264,7 @@ export class Supervisor extends EventEmitter {
 
   async start() {
     if (!this._apiToken) {
-      process.stderr.write('[!] No API token configured. Run \'npx chroxy init\' first.\n')
+      process.stderr.write('[!] No API token configured. Run \'chroxy init\' first.\n')
       this._exit(1)
       return
     }

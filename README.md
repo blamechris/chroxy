@@ -111,7 +111,7 @@ export GEMINI_API_KEY=...
 Or pass them inline when starting the server:
 
 ```bash
-OPENAI_API_KEY=sk-... PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy start
+OPENAI_API_KEY=sk-... PATH="/opt/homebrew/opt/node@22/bin:$PATH" chroxy start
 ```
 
 **Running without Claude installed?** The daemon defaults to the `claude-tui` provider, so a bare `chroxy start` expects a `claude` binary. To run a Codex- or Gemini-only machine (no `claude` at all), make a non-Claude provider the default. The cleanest way is to set it in `~/.chroxy/config.json`, because both the daemon **and** `chroxy doctor` read `config.provider`:
@@ -124,42 +124,58 @@ OPENAI_API_KEY=sk-... PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy star
 ```bash
 # Codex-only — no `claude` binary required. doctor honors config.provider too,
 # so it preflights Codex (not claude) and won't complain about a missing binary.
-OPENAI_API_KEY=sk-... npx chroxy start
+OPENAI_API_KEY=sk-... chroxy start
 ```
 
-`CHROXY_PROVIDER=codex npx chroxy start` also works to set the daemon's start-time default, but `chroxy doctor` reads `config.provider` from `~/.chroxy/config.json` rather than the env var — so setting it in the config file is what keeps *both* commands claude-free. Any client can still switch providers per session on session create (`--provider gemini`, or the provider picker in the app/dashboard).
+`CHROXY_PROVIDER=codex chroxy start` also works to set the daemon's start-time default, but `chroxy doctor` reads `config.provider` from `~/.chroxy/config.json` rather than the env var — so setting it in the config file is what keeps *both* commands claude-free. Any client can still switch providers per session on session create (`--provider gemini`, or the provider picker in the app/dashboard).
 
 If you create a session for a provider whose key isn't set, the server returns a clear error (e.g. *"Codex: required credential not set — OPENAI_API_KEY"*). See [docs/providers.md](docs/providers.md) for per-provider capabilities and full env var reference.
 
 ### Server (on your dev machine)
 
-Chroxy is not published to npm yet, so `npx chroxy` resolves from your local clone. Clone the repo and install dependencies first:
+Chroxy is published to npm as **[`@chroxy/server`](https://www.npmjs.com/package/@chroxy/server)**. Install it globally — that puts a `chroxy` command on your `PATH`:
+
+```bash
+npm i -g @chroxy/server
+
+# Install and configure
+chroxy init
+
+# Start the server
+chroxy start
+```
+
+> **Install the scoped name, not the bare one.** `@chroxy/server` is this project. The unscoped `chroxy` package on npm belongs to someone else and is unrelated — `npm i -g chroxy` or `npx chroxy` **outside a clone of this repo** installs that package, not this one.
+
+Node 22 is the minimum. On macOS with Homebrew's `node@22` not on your default `PATH`:
+
+```bash
+PATH="/opt/homebrew/opt/node@22/bin:$PATH" chroxy start
+```
+
+On Windows PowerShell:
+
+```powershell
+npm i -g @chroxy/server
+chroxy init
+chroxy start
+```
+
+<details>
+<summary><b>From a clone instead (contributors)</b></summary>
+
+Inside a clone, `npx chroxy` resolves to the workspace binary, so the bare name is safe there:
 
 ```bash
 git clone https://github.com/blamechris/chroxy.git
 cd chroxy
 npm install
 
-# Install and configure
 PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy init
-
-# Start the server
 PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy start
 ```
 
-On Windows PowerShell:
-
-```powershell
-git clone https://github.com/blamechris/chroxy.git
-cd chroxy
-npm install
-
-# Install and configure
-npx chroxy init
-
-# Start the server
-npx chroxy start
-```
+</details>
 
 The server prints a QR code. Scan it with the Chroxy mobile app, or open the dashboard URL in your browser.
 
@@ -180,14 +196,14 @@ Or connect manually:
    Dashboard: https://<random>.trycloudflare.com/dashboard (use --show-token to see full URL)
 ```
 
-If something looks off, `npx chroxy doctor` reports which dependencies are missing or misconfigured.
+If something looks off, `chroxy doctor` reports which dependencies are missing or misconfigured.
 
 ### Development mode
 
 Use `chroxy dev` when iterating on Chroxy itself. It forces supervisor mode (auto-restart on crash) and requires a tunnel (quick or named):
 
 ```bash
-PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy dev
+PATH="/opt/homebrew/opt/node@22/bin:$PATH" chroxy dev
 ```
 
 ### Local WiFi (same network)
@@ -195,13 +211,13 @@ PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy dev
 If your phone and dev machine are on the same WiFi, connect directly without the tunnel. Start the server with `--tunnel none` to skip the tunnel entirely:
 
 ```bash
-PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy start --tunnel none
+PATH="/opt/homebrew/opt/node@22/bin:$PATH" chroxy start --tunnel none
 ```
 
 On Windows PowerShell:
 
 ```powershell
-npx chroxy start --tunnel none
+chroxy start --tunnel none
 ```
 
 Then:
@@ -230,7 +246,7 @@ Then:
 | Named Tunnel | `--tunnel named` | Stable URL that survives restarts. Requires Cloudflare account + domain. |
 | No Tunnel | `--tunnel none` | Local only. Use with `--no-auth` for development. |
 
-> **Quick Tunnel security note.** The tunnel URL is randomized, but anyone with both your tunnel URL *and* your API token can connect. The token is the actual secret — protect it, rotate it if leaked (`npx chroxy init` regenerates), and prefer a Named Tunnel + IP allowlist for anything production-shaped.
+> **Quick Tunnel security note.** The tunnel URL is randomized, but anyone with both your tunnel URL *and* your API token can connect. The token is the actual secret — protect it, rotate it if leaked (`chroxy init` regenerates), and prefer a Named Tunnel + IP allowlist for anything production-shaped.
 
 ### Mobile App
 
@@ -305,9 +321,9 @@ winget install Git.Git
 git clone https://github.com/blamechris/chroxy
 cd chroxy
 npm install          # no Visual Studio / node-gyp needed — node-pty ships prebuilt Windows binaries
-npx chroxy doctor    # verify Node, cloudflared, and the port are ready
-npx chroxy init
-npx chroxy start
+chroxy doctor    # verify Node, cloudflared, and the port are ready
+chroxy init
+chroxy start
 ```
 
 Same QR-code / manual-entry connection flow as macOS. All session features (model switching, files, git, plan mode, agents) work identically.
@@ -315,10 +331,10 @@ Same QR-code / manual-entry connection flow as macOS. All session features (mode
 **Quickest start — local/LAN, no Cloudflare account, no tunnel:**
 
 ```powershell
-npx chroxy start --tunnel none --host 127.0.0.1 --show-token
+chroxy start --tunnel none --host 127.0.0.1 --show-token
 ```
 
-This binds the server locally and prints a **token-gated dashboard URL**. With `--show-token` the printed URL includes the `?token=…`, so you can open it directly in any Windows browser for the full chat/terminal UI — no desktop app needed. (Without the flag the URL and token are masked in the output; add `--show-token`, or append the token yourself.) Drop `--host 127.0.0.1` (the default is `0.0.0.0`) to also reach it from your phone over the LAN. Plain `npx chroxy start` (a Cloudflare Quick Tunnel) works too; if the edge isn't routable yet it degrades to local/LAN instead of aborting — pass `--tunnel named` for a stable remote URL.
+This binds the server locally and prints a **token-gated dashboard URL**. With `--show-token` the printed URL includes the `?token=…`, so you can open it directly in any Windows browser for the full chat/terminal UI — no desktop app needed. (Without the flag the URL and token are masked in the output; add `--show-token`, or append the token yourself.) Drop `--host 127.0.0.1` (the default is `0.0.0.0`) to also reach it from your phone over the LAN. Plain `chroxy start` (a Cloudflare Quick Tunnel) works too; if the edge isn't routable yet it degrades to local/LAN instead of aborting — pass `--tunnel named` for a stable remote URL.
 
 **Run at startup:** native Windows service install is not supported by the CLI. Pick one of:
 - **Task Scheduler** — schedule `node <chroxy-path> start` at logon
@@ -361,11 +377,11 @@ If you want the exact Linux runtime, run the daemon inside WSL2 instead of the n
 # Inside WSL2 (Ubuntu) — clone NATIVELY (not under /mnt/c; see the note below)
 git clone https://github.com/blamechris/chroxy && cd chroxy
 npm install                       # a native Linux install — node-pty needs its Linux prebuild
-npx chroxy start --host 0.0.0.0   # 0.0.0.0 is required to reach it from Windows
+chroxy start --host 0.0.0.0   # 0.0.0.0 is required to reach it from Windows
 ```
 
 - **Reaching it from Windows:** WSL2's localhost-forwarding only forwards to a **`0.0.0.0`-bound** server, so `http://localhost:8765` works from a Windows browser. A `--host 127.0.0.1` bind is **not** forwarded and silently isolates the daemon inside WSL — use `--host 0.0.0.0` (chroxy's default) here.
-- **Phone / remote access:** WSL2 sits behind NAT, so run the Cloudflare tunnel **inside** WSL2 (its outbound connection traverses the NAT cleanly): install `cloudflared` in the distro, then plain `npx chroxy start`. Exposing a WSL2 port inbound instead would need a Windows-side `netsh interface portproxy` rule.
+- **Phone / remote access:** WSL2 sits behind NAT, so run the Cloudflare tunnel **inside** WSL2 (its outbound connection traverses the NAT cleanly): install `cloudflared` in the distro, then plain `chroxy start`. Exposing a WSL2 port inbound instead would need a Windows-side `netsh interface portproxy` rule.
 - **Clone natively, not from `/mnt/c`:** a Windows checkout mounted at `/mnt/c` carries two hazards — node-pty's Windows prebuilds don't load under Linux (hence the native `npm install`), and `.sh` scripts a Windows checkout wrote with `core.autocrlf` have CRLF endings that break `./script.sh` (`bash script.sh` tolerates it). The repo stores every script LF (`.gitattributes`), so a native WSL clone is clean.
 
 ## Features
@@ -450,7 +466,7 @@ cd chroxy
 npm install
 
 # Terminal 1: Start the server (Node 22 required)
-PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy start
+PATH="/opt/homebrew/opt/node@22/bin:$PATH" chroxy start
 
 # Terminal 2: Start Expo dev server (for mobile hot-reload)
 cd packages/app

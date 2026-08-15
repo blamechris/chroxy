@@ -149,7 +149,7 @@ export function registerDeployCommand(program) {
 
         if (isWindows) {
           console.error('[deploy] Deploy restart via SIGUSR2 is not supported on Windows.')
-          console.error('   Restart the server manually: npx chroxy start')
+          console.error('   Restart the server manually: chroxy start')
           process.exitCode = 1
           return
         }

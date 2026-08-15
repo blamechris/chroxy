@@ -102,7 +102,7 @@ export function loadAndMergeConfig(options, extraOverrides = {}) {
       if (err instanceof SyntaxError) {
         console.error(`❌ Config file contains invalid JSON: ${options.config}`)
         console.error(`   ${err.message}`)
-        console.error(`   Fix the file or delete it and run 'npx chroxy init' to recreate.`)
+        console.error(`   Fix the file or delete it and run 'chroxy init' to recreate.`)
         process.exit(1)
       }
       throw err
@@ -111,7 +111,7 @@ export function loadAndMergeConfig(options, extraOverrides = {}) {
     console.error(`❌ Config file not found: ${options.config}`)
     process.exit(1)
   } else {
-    console.error('❌ No config found. Run \'npx chroxy init\' first.')
+    console.error('❌ No config found. Run \'chroxy init\' first.')
     process.exit(1)
   }
 

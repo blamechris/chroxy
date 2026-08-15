@@ -187,4 +187,4 @@ Check the server logs for crash reasons. The supervisor backs off from 2s to 10s
 
 - Claude Code not installed or not authenticated (`claude --version`)
 - Permission issues accessing the working directory
-- Missing `~/.chroxy/config.json` (run `npx chroxy init`)
+- Missing `~/.chroxy/config.json` (run `chroxy init`)

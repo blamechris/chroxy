@@ -66,14 +66,14 @@ logs clean during auto-accept sessions with heavy permission traffic.
 To enable the full correlation trail, restart the server with
 `LOG_LEVEL=debug`:
 
-**CLI (default `npx chroxy start`):**
+**CLI (default `chroxy start`):**
 ```bash
-LOG_LEVEL=debug PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy start
+LOG_LEVEL=debug PATH="/opt/homebrew/opt/node@22/bin:$PATH" chroxy start
 ```
 
 **Supervisor mode (`--tunnel named`):**
 ```bash
-LOG_LEVEL=debug npx chroxy start --tunnel named
+LOG_LEVEL=debug chroxy start --tunnel named
 ```
 The supervisor passes its environment through to each child respawn, so
 setting it once on the supervisor process is sufficient.

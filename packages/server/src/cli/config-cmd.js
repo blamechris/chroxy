@@ -10,7 +10,7 @@ export function registerConfigCommand(program) {
     .description('Show current configuration')
     .action(() => {
       if (!existsSync(CONFIG_FILE)) {
-        console.log('No config found. Run \'npx chroxy init\' first.')
+        console.log('No config found. Run \'chroxy init\' first.')
         process.exit(1)
       }
 
@@ -29,6 +29,6 @@ export function registerConfigCommand(program) {
       }
       console.log(`   API token: ${config.apiToken}`)
       console.log('\nNote: CLI flags and environment variables can override these values.')
-      console.log('Run \'npx chroxy start --verbose\' to see full config resolution.\n')
+      console.log('Run \'chroxy start --verbose\' to see full config resolution.\n')
     })
 }

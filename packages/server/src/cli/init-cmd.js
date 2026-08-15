@@ -191,7 +191,7 @@ export async function runInitCmd(deps = {}) {
 
   logFn('\n📱 Your API token (keep this secret):')
   logFn(`   ${apiToken}`)
-  logFn('\n🚀 Run \'npx chroxy start\' to launch the server')
+  logFn('\n🚀 Run \'chroxy start\' to launch the server')
   logFn('')
 
   return { written: true, config, apiToken }

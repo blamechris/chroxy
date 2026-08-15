@@ -58,7 +58,7 @@ Docker providers are opt-in. You must enable environments *and* have Docker avai
 **CLI flag:**
 
 ```bash
-npx chroxy start --environments --provider docker-sdk
+chroxy start --environments --provider docker-sdk
 ```
 
 **Config file** (`~/.chroxy/config.json`):
@@ -73,7 +73,7 @@ npx chroxy start --environments --provider docker-sdk
 **Environment variable:**
 
 ```bash
-CHROXY_PROVIDER=docker-sdk npx chroxy start --environments
+CHROXY_PROVIDER=docker-sdk chroxy start --environments
 ```
 
 The `--environments` flag triggers Docker availability detection at startup. If `docker info` fails, the docker providers are silently skipped and the server falls back to the default provider.
@@ -98,7 +98,7 @@ Sandbox settings are passed directly to the Agent SDK. No Docker required.
 **Environment variable:**
 
 ```bash
-CHROXY_SANDBOX='{"type":"container","network":false}' npx chroxy start
+CHROXY_SANDBOX='{"type":"container","network":false}' chroxy start
 ```
 
 ### Per-Session Provider Selection
@@ -193,7 +193,7 @@ You can snapshot a running environment at any point using `docker commit`. Snaps
 
 ```bash
 # Start server with environments enabled
-npx chroxy start --environments --provider docker-sdk
+chroxy start --environments --provider docker-sdk
 ```
 
 ### When to Use
