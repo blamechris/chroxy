@@ -17,7 +17,8 @@
     "build:crypto": "tsc src/crypto.ts --outDir dist --module ESNext --target ES2022 --declaration --moduleResolution node --esModuleInterop --skipLibCheck && node scripts/postbuild-crypto.mjs",
     "prepare": "npm run build:crypto",
     "pretest": "npm run build:crypto",
-    "test": "vitest run"
+    "test": "vitest run",
+    "build:publish": "node scripts/build-publish-dir.mjs"
   },
   "dependencies": {
     "@chroxy/protocol": ">=0.11.0",
