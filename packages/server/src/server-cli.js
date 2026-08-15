@@ -22,7 +22,7 @@ import { hostname, homedir } from 'os'
 import { readFileSync, existsSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { dirname, join, relative, sep } from 'path'
-import { createLogger, setJsonMode, initFileLogging } from './logger.js'
+import { createLogger, setJsonMode, initFileLogging, setConsoleQuiet } from './logger.js'
 
 const log = createLogger('cli')
 // #5368 slice (b): QRCode + writeConnectionInfo moved to startup-display.js with
@@ -547,7 +547,22 @@ export async function startCliServer(config) {
     setJsonMode(true)
   }
 
-  initFileLoggingFromConfig(config)
+  const fileLogging = initFileLoggingFromConfig(config)
+
+  // #7162: under a service manager (CHROXY_DAEMON=1) the console streams are
+  // captured to files nothing rotates (launchd StandardOutPath et al); the
+  // logger's console mirror is how the stdout capture reached 32MB in a
+  // month. With the file log live it is authoritative, so quiet the
+  // info/debug/audit mirror — warn/error keep flowing to chroxy-stderr.log,
+  // and write() falls back to the console for any line whose file append
+  // fails. Only when file logging actually initialized: with no file log,
+  // the capture is the only record and must stay verbose. Capture BOUNDING
+  // deliberately does NOT happen here — startCliServer re-runs in every
+  // supervised child restart, and the cap is safe exactly once per service
+  // boot (see the `start` action in cli/server-cmd.js).
+  if (process.env.CHROXY_DAEMON === '1' && fileLogging.enabled) {
+    setConsoleQuiet(true)
+  }
 
   // #6633: publish Chroxy's host identity into this process's environment so the
   // in-process SDK provider's Bash tools inherit it (subprocess providers get it
