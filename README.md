@@ -147,9 +147,10 @@ chroxy start
 
 > **Install the scoped name, not the bare one.** `@chroxy/server` is this project. The unscoped `chroxy` package on npm belongs to someone else and is unrelated — `npm i -g chroxy` or `npx chroxy` **outside a clone of this repo** installs that package, not this one.
 
-Node 22 is the minimum. On macOS with Homebrew's `node@22` not on your default `PATH`:
+Node 22 is the minimum. The `chroxy` binary runs under `#!/usr/bin/env node`, so if Homebrew's `node@22` isn't on your default `PATH`, prefix **every** `chroxy` command — not just `start`:
 
 ```bash
+PATH="/opt/homebrew/opt/node@22/bin:$PATH" chroxy init
 PATH="/opt/homebrew/opt/node@22/bin:$PATH" chroxy start
 ```
 
