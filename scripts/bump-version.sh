@@ -188,6 +188,39 @@ node -e "
   fs.writeFileSync('$DESIGN_TOKENS_PKG', JSON.stringify(pkg, null, 2) + '\n');
 "
 
+# Re-point every workspace-internal @chroxy/* dependency range at the new
+# version. These MUST move with the version: the ranges are bounded (^X.Y.Z),
+# so a package left pointing at the previous minor no longer matches its
+# sibling in the workspace, and npm silently resolves it from the REGISTRY
+# instead of linking locally — a stale published copy shadowing the source
+# tree, which is exactly the mismatch #7187 shipped to npm.
+#
+# The bound is deliberate. An open "*" (what these were) resolves to whatever
+# is newest on npm, so a published server can acquire a breaking sibling long
+# after release. A bound without this rewrite would break local linking on
+# the next bump. Both halves are required; neither works alone.
+node -e "
+  const fs = require('fs');
+  const files = [$(printf "'%s'," "$ROOT_PKG" "$SERVER_PKG" "$APP_PKG" "$DESKTOP_PKG" "$PROTOCOL_PKG" "$STORE_CORE_PKG" "$DASHBOARD_PKG" "$CLAUDE_HOOKS_PKG" "$DESIGN_TOKENS_PKG")];
+  const range = '^$NEW_VERSION';
+  let n = 0;
+  for (const f of files) {
+    if (!fs.existsSync(f)) continue;
+    const pkg = JSON.parse(fs.readFileSync(f, 'utf-8'));
+    let changed = false;
+    for (const field of ['dependencies', 'devDependencies', 'peerDependencies']) {
+      for (const dep of Object.keys(pkg[field] || {})) {
+        if (!dep.startsWith('@chroxy/')) continue;
+        if (pkg[field][dep] === range) continue;
+        pkg[field][dep] = range;
+        changed = true; n++;
+      }
+    }
+    if (changed) fs.writeFileSync(f, JSON.stringify(pkg, null, 2) + '\n');
+  }
+  console.log('  workspace @chroxy/* dependency ranges -> ' + range + ' (' + n + ' updated)');
+"
+
 # Update tauri.conf.json
 node -e "
   const fs = require('fs');
