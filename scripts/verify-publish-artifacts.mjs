@@ -32,7 +32,7 @@
 // Exit code 0 = the artifacts are safe to publish. Non-zero = do not publish.
 
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync, existsSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, existsSync, writeFileSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -50,15 +50,26 @@ const PACKAGES = [
   { name: '@chroxy/server', packFrom: null },
 ]
 
-// Every entry point the published manifests promise. A missing one is the
-// exact shape of failure this script exists to catch, so they are asserted
-// individually rather than inferred from "the CLI started".
-const ENTRY_POINTS = [
-  '@chroxy/protocol',
-  '@chroxy/protocol/project',
-  '@chroxy/store-core',
-  '@chroxy/store-core/crypto',
-]
+// Every entry point the published manifests promise, DERIVED from the manifests
+// rather than listed here. A hardcoded list is the same defect class this script
+// exists to catch: it silently stops covering an export the moment someone adds
+// one, so the gate keeps reporting full coverage it no longer has. (The first
+// draft of this file hardcoded four and missed @chroxy/protocol/schemas and
+// /handler-coverage — caught in review, hence this.)
+//
+// `packFrom` matters here: store-core's PUBLISHED manifest lives in its staging
+// dir and differs from the in-repo one, so the exports are read from whichever
+// manifest actually ships.
+function entryPointsFor(pkg) {
+  const manifestDir = pkg.packFrom ? join(ROOT, pkg.packFrom) : join(ROOT, 'packages', pkg.name.split('/')[1])
+  const manifest = JSON.parse(readFileSync(join(manifestDir, 'package.json'), 'utf8'))
+  const exportsField = manifest.exports
+  // No exports map means the single `main` entry, addressed by bare name.
+  if (!exportsField || typeof exportsField === 'string') return [pkg.name]
+  return Object.keys(exportsField)
+    .filter((k) => k.startsWith('.'))
+    .map((k) => (k === '.' ? pkg.name : `${pkg.name}/${k.replace(/^\.\//, '')}`))
+}
 
 const log = (m) => console.log(m)
 const run = (cmd, args, opts = {}) =>
@@ -144,7 +155,11 @@ try {
   writeFileSync(join(consumer, 'package.json'), JSON.stringify({ name: 'verify-consumer', version: '1.0.0', private: true, type: 'module' }, null, 2))
   const libs = tarballs.filter((t) => !t.includes('chroxy-server-'))
   run('npm', ['install', ...libs], { cwd: consumer, env, stdio: 'ignore' })
-  for (const spec of ENTRY_POINTS) {
+  const entryPoints = PACKAGES
+    .filter((p) => p.name !== '@chroxy/server') // a bin, not a library — covered by step 5
+    .flatMap(entryPointsFor)
+  log(`  (derived from the published manifests: ${entryPoints.join(', ')})`)
+  for (const spec of entryPoints) {
     try {
       const n = run('node', ['--input-type=module', '-e',
         `import(${JSON.stringify(spec)}).then(m => console.log(Object.keys(m).length))`,

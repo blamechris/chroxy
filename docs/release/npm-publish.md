@@ -49,9 +49,11 @@ clean `HOME`, and asserts:
 - no test files ride along in any tarball (the `files` allowlist has not drifted)
 - `chroxy --version` reports the expected version
 - `chroxy doctor` comes up clean
-- every declared entry point imports from a from-scratch consumer project —
-  `@chroxy/protocol`, `@chroxy/protocol/project`, `@chroxy/store-core`,
-  `@chroxy/store-core/crypto`
+- every declared entry point imports from a from-scratch consumer project.
+  The list is **derived from the published manifests' `exports` maps**, not
+  hardcoded, so adding an export cannot silently fall outside the gate.
+  Currently that resolves to `@chroxy/protocol`, `/schemas`, `/project`,
+  `/handler-coverage`, `@chroxy/store-core`, and `/crypto`.
 
 Non-zero exit means **do not publish**. npm does not allow republishing a
 version, and unpublishing is barred after 72 hours, so a bad publish is
