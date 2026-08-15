@@ -22,7 +22,7 @@ The server is the user's own machine (see [`encryption-threat-model.md` §2](enc
 > **A fifth class is designed but not yet implemented:** the **discord-return command
 > secret** (gateway→daemon, epic #7165) — minted by `chroxy discord-return enable`,
 > stored file-only at `~/.chroxy/discord-return-secret` (the ingest-secret posture),
-> scoped to `POST /api/discord/interject` + `GET /api/discord/status`, no fallback in
+> scoped to `POST /api/discord/interject` + `POST /api/discord/status`, no fallback in
 > either direction. Its full specification lives in
 > [`discord-return-path.md`](discord-return-path.md) §3; it becomes a row in this table
 > (and a §9 checklist entry) when #7168 lands the class in code.

@@ -45,7 +45,7 @@ second by side effect.
 |---|---|---|
 | Guild members / channel content | **Untrusted.** A Discord channel, thread, message, or embed is never an authority — only the authenticated interaction user ID is examined, and only against the allowlist. | nothing |
 | Discord infra | Trusted for transport and for **authenticating which user ID invoked an interaction** (assumption A1). Not trusted with any chroxy credential, and not trusted for content: everything in the payload except the user ID is treated as attacker-influenceable text. | nothing of chroxy's |
-| Gateway bot process/host | **Semi-trusted.** Holds two secrets — the Discord bot token and the discord-return command secret — plus, transiently, every interjection's plaintext and a UX copy of nothing (v1 gives the bot no allowlist, §5.1). Its compromise is a *designed* blast radius (§7) — never host authority. | bot token, command secret |
+| Gateway bot process/host | **Semi-trusted.** Holds two secrets — the Discord bot token and the discord-return command secret — plus, transiently, every interjection's plaintext; it holds no copy of the allowlist (v1 gives the bot none, §5.1). Its compromise is a *designed* blast radius (§7) — never host authority. | bot token, command secret |
 | Daemon host (hub Mac) | Trusted — the operator's own machine, per [`encryption-threat-model.md` §2](encryption-threat-model.md#2-trust-boundaries). | everything |
 
 **Assumption ledger** (what breaks if each fails):
@@ -125,7 +125,7 @@ update land with #7168, when the class exists in code):
 |---|---|
 | Issued by | `chroxy discord-return enable` — `randomBytes(32).toString('base64url')`. `enable` mints **only when no secret exists**; re-enabling after a kill reuses the provisioned secret, and `chroxy discord-return rotate` is the explicit re-mint |
 | Stored where | `~/.chroxy/discord-return-secret`, mode 0600, atomic write (`CHROXY_CONFIG_DIR` honored) — **exactly the ingest-secret posture**, and the only source: no env var, no `credentials.json` field, no keychain in v1 (`keychain.js` set/delete are hardcoded to the `api-token` account; a keychain move is its own change). The gateway reads the same file on the hub, or receives the value per §2.2 on a non-hub node |
-| Scope | Exactly two routes: `POST /api/discord/interject`, `GET /api/discord/status` |
+| Scope | Exactly two routes: `POST /api/discord/interject`, `POST /api/discord/status` |
 | Used on | `Authorization: Bearer …` from the gateway process, over loopback or tailnet |
 
 Discipline (each rule mirrors one the ingest secret already established in
@@ -139,7 +139,11 @@ stated here so #7168 can be reviewed against this list):
 - **Constant-time validation** (`safeTokenCompare`), token never logged, `maskToken()`
   on any diagnostic surface (the bot token has its own masking helper, §8 — one helper
   per secret, never shared format assumptions).
-- **Fail closed, in gate order: rate limit → auth → enabled → allowlist → target.**
+- **Fail closed, in gate order:** `rate-limit(global) → auth → enabled →
+  per-user rate-limit → freshness → dedupe → allowlist → guild → target → sanitize →
+  audit(attempt) → deliver/enqueue → audit(outcome)`. This chain is the authoritative
+  order — §5.1's numbered steps group the same gates thematically, and dedupe runs
+  **before** any effect so a replay can never re-enqueue.
   Missing/invalid auth → `401`, empty body. Secret file unreadable/missing → every
   request rejected (this doubles as the durable kill backstop, §9.2). Disabled or
   killed → `503 { "disabled": true }` — *after* auth, so an unauthenticated prober
@@ -265,15 +269,16 @@ security-relevant step:
    check validates attacker-supplied input — there the ceiling (§3) and the fence
    (step 4) are the boundary, and the allowlist bounds *Discord-side* actors only.
    `guildId` must equal the configured guild (Discord's user-installable apps can carry
-   a command into foreign guilds and DMs; those are rejected and audited with their
-   origin). v1 allowlist = the owner only.
+   a command into foreign guilds and DMs; those are rejected as
+   `rejected:foreign-guild` and audited with their origin). v1 allowlist = the owner
+   only.
 2. **Targeting — a resolver #7168 builds.** No project→session registry exists today
    (the outbound embed's store is keyed by a lossy notification-payload string and holds
    no session IDs). #7168 builds one: source of truth is **SessionManager's live
    sessions** and their derived project names; matching is **exact-byte on
    NFC-normalized input** (no case folding, no fuzzy match — confusable and NFD
    near-miss strings must not resolve). One live session → target it, and **bind the
-   queue entry to that `sessionId`** — never to the project string (§ step 4). Several
+   queue entry to that `sessionId`** — never to the project string (step 4). Several
    live sessions for one project → reject `ambiguous` (the ack says to check
    `/status`, which lists sessions per project). Ack and audit echo the **resolved**
    registry name, never the submitted string. The project string is never interpolated
@@ -289,7 +294,7 @@ security-relevant step:
      because a literal "C0 and C1" reading has counterexamples that each defeat the
      provenance label: U+007F DEL is neither C0 nor C1 and backspaces the label off the
      line in most line editors; `Cf` covers the bidi overrides/isolates
-     (U+202A–U+202E, U+2066–2069 — Trojan-Source reordering of the rendered line in
+     (U+202A–U+202E, U+2066–U+2069 — Trojan-Source reordering of the rendered line in
      every bidi-aware surface including the transcript and the daemon log),
      zero-width/joiner characters (U+200B–U+200D, U+2060, U+FEFF) and soft hyphen;
      U+2028/U+2029 are line terminators in JS-side renderers and break "single-line by
@@ -341,15 +346,22 @@ security-relevant step:
    to report on; expiry is audited and visible in `/status` queue depth). Entries are
    dropped — each with an audit line — on session end, daemon restart, kill (§9.2), and
    user revocation. Drain trigger is the session's turn-finish event plus a fence
-   re-check; delivered entries get their own audit line (§9.1).
+   re-check; delivered entries get their own audit line (§9.1). A drain that loses the
+   race — `sendMessage()` returns `{ ok: false }` — **re-enqueues the entry with its
+   TTL preserved** (audited as a retry), never drops it; note `sendMessage()` also
+   emits a client-visible `error` on its busy path, a cosmetic side effect #7168
+   suppresses or tolerates.
 5. **Idempotency + freshness, coupled.** Freshness: the interaction snowflake encodes
    creation time — reject anything older than 5 minutes. Dedupe: a **TTL map** keyed by
    `interactionId`, retention 10 minutes (2× the freshness window — a count-bounded LRU
    is flushable by issuing distinct interactions, re-opening replay inside the
    freshness window), memoizing the outcome string, which a duplicate gets **replayed
    verbatim**. The map's size is naturally bounded by the rate ceiling × retention.
-6. **Audit** (§9.1) on every outcome — enqueue, delivery, expiry, drop, and each
-   rejection.
+6. **Audit** (§9.1) — a pre-effect **attempt** line before any enqueue or delivery
+   (the fail-closed gate binds here: no attempt line written, no effect), then an
+   **outcome** line per transition — enqueue, delivery, expiry, drop, and each
+   rejection. (These numbered steps are thematic; §3's gate-order chain is the
+   authoritative sequence.)
 
 **Rejection acks are two-tier by design.** A **non-allowlisted** caller gets one opaque
 ack — `not accepted` — for *every* failure, at uniform latency (allowlist is checked
@@ -365,6 +377,7 @@ get specific acks (the owner needs usable errors). The catalog:
 | `rejected:ambiguous` | `<project> has several live sessions — check /status` |
 | `rejected:not-interjectable` | `<project>'s session can't take interjections` |
 | `rejected:queue-full` | `queue full for <project> (3) — try /status` |
+| `rejected:foreign-guild` | `wrong guild or DM — use the operator guild` (allowlist precedes guild in §3's chain, so an allowlisted owner off-guild gets this specific ack; non-allowlisted callers get the opaque one as always) |
 | `rejected:invalid-text` | `text rejected (control chars / reserved framing / too long)` |
 | `rejected:duplicate` | *(the memoized original ack, verbatim)* |
 | `rejected:stale` | `interaction too old` |
@@ -383,8 +396,10 @@ commands the daemon never vetted; the human is the retry loop.
 
 Same envelope, same daemon-side allowlist check as `/interject` (a reconnaissance
 surface open to any secret-holder would undercut §6's first row), rate-limited tighter
-(6/min per user, §3). Fleet-wide by default with an optional project filter; response
-array capped at 32 entries.
+(6/min per user, §3). **Both routes are `POST`:** the shared JSON envelope rides the
+same pre-parse body cap and dedupe key on both, and a query-string form would put
+Discord user and interaction IDs into URL-logging surfaces. Fleet-wide by default with
+an optional project filter; response array capped at 32 entries.
 
 The response is a **closed field allowlist**, populated from the daemon's **live
 session view** (the same source targeting resolves against — not the embed store), per
@@ -417,8 +432,12 @@ what contains the §4.1 timing composition.
 }
 ```
 
-Top-level `discordReturn`, **with a `CONFIG_SCHEMA` entry** — an unknown key is
-warn-ignored by `validateConfig`, which would silently disable every gate above.
+Top-level `discordReturn`, **with a `CONFIG_SCHEMA` entry** — not because the block
+would otherwise be dropped (`validateConfig` only pushes a warning and is not in the
+load path; the key is read regardless, and a missing block fails **closed** to
+`enabled: false`), but because the entry buys the type/range validation below and
+silences a spurious `Unknown config key: 'discordReturn' (will be ignored)` warning
+that misdescribes a security-relevant block.
 Validation at load: `enabled` boolean (default **false** — the entire return path is
 opt-in, §9.2); `allowedUsers` a map of ≤ 16 entries, keys numeric snowflake strings,
 values (the provenance labels of §5.1) matching `^[a-z0-9_-]{1,32}$` and unique —
@@ -535,10 +554,18 @@ even if the §5.1 strip ever regresses. The composed line still passes
 logs no keystrokes): this text is remote-channel input whose forensic value *is* the
 content, and it is already destined for a session transcript via the provenance label —
 the prefix makes the audit line self-contained, the hash binds it to the full text in
-the transcript. Never logged: tokens of any class, raw pre-sanitization bytes.
+the transcript. Never logged: tokens of any class, raw pre-sanitization bytes. One
+deliberate exception shape: a `rejected:invalid-text` body was never sanitized, so its
+line carries **no prefix** — it records a SHA-256 of the raw body plus the failing rule
+(`control-char | reserved-sigil | codepoint-bound | byte-bound | combining-run |
+empty-after-strip`), enough to correlate repeat attempts without placing attacker bytes
+in the operator's log.
 
-**Fail-closed — with the plumbing to make it real.** If the audit line cannot be
-written, the command is **rejected** (the rejection itself attempted best-effort). This
+**Fail-closed — with the plumbing to make it real.** The gate binds the **pre-effect
+attempt line** (§5.1 step 6): if it cannot be written, the command is **rejected**
+before any enqueue or PTY write (the rejection itself attempted best-effort) — and a
+dequeue-time `delivered` line that cannot be written **drops the entry** rather than
+delivering, since a post-effect line cannot fail closed. This
 deliberately diverges from `shell-audit`, which observes but never gates — that trail
 records a *local, operator-authorized* capability; this log is the accountability for a
 *remote* channel, and an unauditable remote command must not execute. Two
@@ -566,7 +593,8 @@ rotation policy's, and #7162 must treat `[AUDIT]`-tagged lines as the retention 
   Mechanism: a **strict-primary-gated** `POST /api/discord/kill` on the main port
   (`client.isPrimaryToken`-equivalent HTTP gate `_validatePrimaryBearerAuth`; explicitly
   **outside** the fifth token class — the channel must not be able to operate its own
-  brakes, and per the §9 checklist a host-level mutation takes the primary bar). The
+  brakes, and per [`bearer-token-authority.md` §9](bearer-token-authority.md#9-adding-a-new-endpoint-or-message-type--checklist)
+  a host-level mutation takes the primary bar). The
   CLI calls it over loopback with the local primary token; with no daemon running, the
   CLI persists `enabled: false` directly and says so.
 - **Order of operations:** flip in-memory (both routes answer
@@ -603,8 +631,8 @@ in the same PR; #7168's route is incorrect without it.
 | Sub-issue | Owns | The contract lines it is reviewed against |
 |---|---|---|
 | #7167 — gateway | The bot process | Outbound gateway WS only (§2.1); resident process, local secret custody, never CI secrets (§2.2, §8); **no bot-side allowlist or validation** beyond the 16 KB body guard and `max_length: 2000` option UX (§5.1); defer-then-follow-up ack, ephemeral responses, the §5.1 ack catalog including `disabled` vs `unreachable` (§6, §9.2); no store-and-forward (§5.1); forwards `{interactionId, guildId, channelId, discordUserId, project, text}` verbatim; no message intents (§8.1) |
-| #7168 — daemon API + mailbox | The boundary | The two routes + fifth token class, no-fallback both directions, gate order, body cap, non-per-IP rate limits (§3); enable/boot preconditions (bind — §2 A3; file logging — §9.1); daemon-side allowlist with per-request read + revocation purge, guildId check (§5.1); **builds** the project→session resolver, exact-byte NFC matching, ambiguity rejection (§5.1); sanitization classes `Cc`+`Cf`+U+2028/9, sigil rejection, bounds, label map + load-time validation (§5.1, §5.3); the **delivery fence** (`_isBusy` + no pending permission + clean composer), `sendMessage()`/throttled-writer delivery, `isClaudeTui` fence (§5.1); the dedicated queue (cap 3, TTL 15 min, session-bound, non-durable, drop-audited) (§5.1); coupled freshness + TTL dedupe with memoized acks (§5.1); status schema, live-session source, quantized elapsed, allowlist + tighter limit (§5.2); config schema entry (§5.3); extends `bearer-token-authority.md` §2 table + §9 checklist **including the user-shell-scoped-PTY-bar carve-out note** (§3) |
-| #7169 — audit + kill | The brakes | `discord-audit` component, per-event lines incl. queue transitions, field list, hash + escaped-prefix-last rule, fail-closed gate **+ the success-reporting audit writer**, reject-collapse counter lines (§9.1); the kill route + primary gate, CLI, three-leg order (memory → drain → persist), secret-deletion backstop on persist failure (§9.2); enable preconditions (§9.2); **blocked by / lands with #7162's retention decision** (§9.1) |
+| #7168 — daemon API + mailbox | The boundary | The two routes + fifth token class, no-fallback both directions, gate order, body cap, non-per-IP rate limits (§3); the daemon **boot re-check** of the enable preconditions (bind — §2 A3; file logging — §9.1); `enable`/`rotate` themselves — the `randomBytes(32)` mint, 0600 atomic file custody, and reuse-not-remint semantics (§3); daemon-side allowlist with per-request read + revocation purge, guildId check (§5.1); **builds** the project→session resolver, exact-byte NFC matching, ambiguity rejection (§5.1); sanitization classes `Cc`+`Cf`+U+2028/9, sigil rejection, bounds, label map + load-time validation (§5.1, §5.3); the **delivery fence** (`_isBusy` + no pending permission + clean composer), `sendMessage()`/throttled-writer delivery, `isClaudeTui` fence (§5.1); the dedicated queue (cap 3, TTL 15 min, session-bound, non-durable, drop-audited) (§5.1); coupled freshness + TTL dedupe with memoized acks (§5.1); status schema, live-session source, quantized elapsed, allowlist + tighter limit (§5.2); config schema entry (§5.3); extends `bearer-token-authority.md` §2 table + §9 checklist **including the user-shell-scoped-PTY-bar carve-out note** (§3) |
+| #7169 — audit + kill | The brakes | `discord-audit` component, per-event lines incl. queue transitions, field list, hash + escaped-prefix-last rule, fail-closed gate **+ the success-reporting audit writer**, reject-collapse counter lines (§9.1); the kill route + primary gate, CLI, three-leg order (memory → drain → persist), secret-deletion backstop on persist failure (§9.2); the **CLI-side** `enable` refusal when the §9.2 preconditions fail; **blocked by / lands with #7162's retention decision** (§9.1) |
 | #7170 — v1.1 | Reply-UX | Thread context selects target only, never authority (§6); everything else unchanged |
 
 Cross-cutting: inbound envelopes inherit the project-derivation clamp (#7123); audit
@@ -629,7 +657,12 @@ retention depends on log rotation (#7162 — see §9.1's blocking note).
   type into the channel; nothing chroxy-side echoes more than the §5.1 ack catalog.
 - **Availability.** A Discord outage takes the return path with it; the dashboard and
   app remain the primary control surfaces. No SLA is inherited from this feature.
-- **The status channel's read-side disclosure is unchanged** (§5.2's metadata-only test
-  keeps `/status` at or below what the embed already publishes) — the *write*-side
-  widening is the third bullet, stated separately because §5.2's test does not cover
-  it.
+- **`/status` widens read-side disclosure too — acceptedly.** Responses are ephemeral,
+  so nothing new posts to the channel; but `/status` is sourced from the live-session
+  view (§5.2), so it covers sessions that never produced an embed (unmapped
+  notification categories), bypasses the operator's category mutes and quiet hours,
+  and adds two fields with no embed analog (`interjectable`, queue depth). §5.2's
+  metadata-only and quantized-bucket tests bound *what* is disclosed per session, not
+  *which* sessions are visible. Accepted because the reader is the allowlisted owner
+  behind auth + allowlist, and the write-side widening (previous bullet) is the larger
+  of the two.
