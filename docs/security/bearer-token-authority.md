@@ -19,6 +19,14 @@ The server is the user's own machine (see [`encryption-threat-model.md` §2](enc
 | **Per-session hook secret** | `CliSession` constructor — `randomBytes(32).toString('hex')` | In-process only; passed to the `claude` CLI via `CHROXY_HOOK_SECRET` env var | Single session **and** two endpoints (`POST /permission`, `POST /permission-floor`) | Permission-hook callbacks from the spawned CLI subprocess only |
 | **Daemon-level ingest secret** (#5413) | Server startup — `randomBytes(32).toString('base64url')`, created once | `~/.chroxy/ingest-secret`, mode 0600 (`CHROXY_CONFIG_DIR` honored) — readable by same-user hook emitters | `POST /api/events` (notifications only) + `POST /api/mailbox*` (notification + a bounded, fixed-string wakeup into an idle claude-tui recipient — see §6); no reads | External Claude Code hook emitters (sessions chroxy did NOT launch) + the `agent-comm-system` mailbox emit hook |
 
+> **A fifth class is designed but not yet implemented:** the **discord-return command
+> secret** (gateway→daemon, epic #7165) — minted by `chroxy discord-return enable`,
+> stored file-only at `~/.chroxy/discord-return-secret` (the ingest-secret posture),
+> scoped to `POST /api/discord/interject` + `POST /api/discord/status`, no fallback in
+> either direction. Its full specification lives in
+> [`discord-return-path.md`](discord-return-path.md) §3; it becomes a row in this table
+> (and a §9 checklist entry) when #7168 lands the class in code.
+
 The implementation files are:
 
 - Primary token: [`packages/server/src/config.js`](../../packages/server/src/config.js), [`packages/server/src/token-manager.js`](../../packages/server/src/token-manager.js), [`packages/server/src/token-compare.js`](../../packages/server/src/token-compare.js)
