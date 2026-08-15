@@ -740,6 +740,39 @@ test_bump_survives_missing_claude_md() {
   grep -qE '"version":\s*"0.6.0"' "$dir/packages/server/package.json" || return 1
 }
 
+
+# A reworded CLAUDE.md must ABORT, not silently skip. Skipping is a fail-open
+# on the exact drift this closes: the rewrite does nothing, the script reports
+# success, and the version goes stale again unnoticed.
+test_aborts_when_claude_md_format_changed() {
+  local dir
+  dir=$(mktemp -d)
+  trap "rm -rf '$dir'" RETURN
+  build_fake_repo "$dir" "0.5.7"
+  install_bump_script "$dir"
+  write_changelog "$dir/CHANGELOG.md" "0.5.7" "### Fixed
+
+- A real fix (#42)"
+
+  # Both markers reworded — the format drift the guard must catch.
+  cat > "$dir/CLAUDE.md" <<'CLAUDEMD'
+# Claude Development Notes
+
+**Status as of v0.5.7:**
+- stuff works
+
+*Release: 0.5.7*
+CLAUDEMD
+
+  # Must fail...
+  (cd "$dir" && PATH="$NOCARGO_PATH" ./scripts/bump-version.sh 0.6.0) > /dev/null 2>&1 && return 1
+  # ...and say why.
+  local out
+  out=$( (cd "$dir" && PATH="$NOCARGO_PATH" ./scripts/bump-version.sh 0.6.0) 2>&1 || true )
+  echo "$out" | grep -q "does not contain the expected version reference" || return 1
+  return 0
+}
+
 # --- runner ------------------------------------------------------------------
 
 echo "Running bump-version.sh tests"
@@ -778,6 +811,8 @@ run_test "bumps the version references in CLAUDE.md" \
   test_bumps_claude_md_version_references
 run_test "bump still succeeds when CLAUDE.md is absent" \
   test_bump_survives_missing_claude_md
+run_test "aborts when CLAUDE.md's version line format changed" \
+  test_aborts_when_claude_md_format_changed
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

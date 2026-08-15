@@ -240,28 +240,34 @@ if [ -f "$CLAUDE_MD" ]; then
     let src = fs.readFileSync(file, 'utf-8');
     const edits = [
       // '**Current Status (v0.11.0):**' in the Project Overview
-      [/(\*\*Current Status \(v)\d+\.\d+\.\d+(\):\*\*)/, version],
+      [/(\*\*Current Status \(v)\d+\.\d+\.\d+(\):\*\*)/, version, 'the Current Status header'],
       // '*Version: 0.11.0*' in the footer
-      [/(^\*Version: )\d+\.\d+\.\d+(\*\$)/m, version],
+      [/(^\*Version: )\d+\.\d+\.\d+(\*\$)/m, version, 'the Version footer'],
     ];
-    let changed = 0;
-    for (const [re, v] of edits) {
-      if (!re.test(src)) continue;
-      src = src.replace(re, (_m, a, b) => a + v + b);
-      changed++;
+    // A pattern that matches NOTHING must fail, not be skipped. Skipping is a
+    // fail-open on the exact scenario this guards: if CLAUDE.md's line format
+    // is reworded, the rewrite quietly does nothing, the script reports
+    // success, and the version silently drifts again — which is how these two
+    // lines got two releases stale in the first place.
+    const missing = edits.filter(([re]) => !re.test(src)).map(([, , label]) => label);
+    if (missing.length) {
+      console.error('Error: ' + file + ' does not contain the expected version reference(s): ' + missing.join(', '));
+      console.error('       The line format changed. Update the patterns in scripts/bump-version.sh');
+      console.error('       rather than letting the version drift silently (#7183).');
+      process.exit(1);
     }
+    for (const [re, v] of edits) src = src.replace(re, (_m, a, b) => a + v + b);
     fs.writeFileSync(file, src);
-    // Verify after write, mirroring the Cargo.toml handling: a silently-missed
-    // rewrite here is exactly the drift this closes.
+    // Verify after write, mirroring the Cargo.toml handling.
     const after = fs.readFileSync(file, 'utf-8');
-    for (const [re] of edits) {
+    for (const [re, , label] of edits) {
       const m = after.match(re);
-      if (m && !m[0].includes(version)) {
-        console.error('Error: failed to update a version reference in ' + file);
+      if (!m || !m[0].includes(version)) {
+        console.error('Error: failed to update ' + label + ' in ' + file);
         process.exit(1);
       }
     }
-    console.log('  CLAUDE.md version references -> ' + version + ' (' + changed + ' line(s))');
+    console.log('  CLAUDE.md version references -> ' + version + ' (' + edits.length + ' line(s))');
   "
 
   # AGENTS.md is generated from CLAUDE.md and CI (Scripts Tests) fails on drift,
