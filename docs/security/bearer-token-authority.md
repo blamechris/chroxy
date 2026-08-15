@@ -26,6 +26,12 @@ The implementation files are:
 - Hook secrets: [`packages/server/src/cli-session.js`](../../packages/server/src/cli-session.js) (creation), [`packages/server/src/ws-server.js`](../../packages/server/src/ws-server.js) (`_validateHookAuth`)
 - Ingest secret: [`packages/server/src/event-ingest.js`](../../packages/server/src/event-ingest.js) (creation + validation + route handler)
 
+> **A fifth class is designed but not yet implemented:** the **discord-return command
+> secret** (gateway→daemon, epic #7165) — scoped to `POST /api/discord/interject` +
+> `GET /api/discord/status`, no fallback in either direction. Its full specification
+> lives in [`discord-return-path.md`](discord-return-path.md) §3; it becomes a row in
+> this table (and a §9 checklist entry) when #7168 lands the class in code.
+
 ## 3. Primary API Token — Full Session Authority
 
 `_validateBearerAuth` (`ws-server.js`) and the WS auth handler (`ws-auth.js`) both call `_isTokenValid(token)`, which is a constant-time comparison against `this.apiToken` (plus any active rotation grace token, see §7). There is **no session scoping at this layer**. A request that presents a valid primary token can:
