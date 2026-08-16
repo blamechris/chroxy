@@ -95,6 +95,37 @@ jobs:
         run: npm test
         working-directory: packages/app
 
+  # #7189 — the artifact gate. Every other job here tests the SOURCE TREE; this
+  # one packs the tarballs npm would actually receive, installs them into a
+  # throwaway prefix, and runs them. Three defects reached the edge of an
+  # irreversible publish in one day (#7187) while unit tests, lint, typecheck
+  # and CI were all green, because each one only broke the packed artifact:
+  # "*" sibling ranges resolving a stale published protocol, @chroxy/protocol
+  # shipping zero dist/*.js (no `files` field -> npm fell back to .gitignore,
+  # which ignores dist/), and @chroxy/store-core shipping raw *.test.ts with a
+  # root export Node cannot load. All three installed fine and failed on first
+  # import. npm forbids republishing a version, so this runs on the tag, before
+  # any publish, rather than after.
+  verify-artifacts:
+    name: Verify Publish Artifacts
+    needs: test
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Pack, install into a clean prefix, and run
+        run: node scripts/verify-publish-artifacts.mjs
+
   docker:
     name: Docker Image
     needs: test
@@ -405,7 +436,11 @@ jobs:
 
   github-release:
     name: GitHub Release
-    needs: [validate, docker, desktop-macos, desktop-windows]
+    # verify-artifacts gates this deliberately: the npm publish is a manual step
+    # that happens AFTER this release exists, so if the packed tarballs are
+    # broken the release should not be declared good and then quietly followed
+    # by an irreversible bad publish (#7189).
+    needs: [validate, docker, desktop-macos, desktop-windows, verify-artifacts]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
     permissions:
