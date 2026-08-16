@@ -814,6 +814,128 @@ run_test "bump still succeeds when CLAUDE.md is absent" \
 run_test "aborts when CLAUDE.md's version line format changed" \
   test_aborts_when_claude_md_format_changed
 
+# --- AGENTS.md regeneration is VERIFIED, not announced (#7227) ---------------
+#
+# Before this, bump-version.sh printed "AGENTS.md regenerated from CLAUDE.md"
+# on the generator merely having been invoked. `set -euo pipefail` catches a
+# NON-ZERO exit; this whole defect class (#7198 / #7214) is exit ZERO having
+# done nothing, so the release printed a false success and carried a stale
+# AGENTS.md into the CI drift gate.
+#
+# The generator is stubbed rather than copied. What is under test is the
+# CALLER's ability to distinguish "regenerated" from "silently skipped", and a
+# stub can produce the skipped shape on demand — which the real generator, now
+# that #7224 fixed it, no longer can.
+#
+#   healthy — writes AGENTS.md, and --check confirms with the real generator's
+#             wording
+#   quiet   — the authentic #7198 shape: BOTH invocations return without doing
+#             anything, exit 0, print nothing. This is the case an exit-code
+#             check cannot see, because --check is skipped too.
+#   nowrite — the write is skipped but --check still works, so it reports drift
+#             on stderr and exits 1
+install_gen_agents_stub() {
+  local dir="$1" mode="$2"
+  mkdir -p "$dir/scripts"
+  cat > "$dir/scripts/gen-agents-md.mjs" <<STUB
+import { readFileSync, writeFileSync, existsSync } from 'node:fs'
+const mode = '$mode'
+const check = process.argv.includes('--check')
+// 'quiet' is the silent no-op: no output, exit 0, for BOTH invocations.
+if (mode === 'quiet') process.exit(0)
+if (mode === 'nowrite' && !check) process.exit(0)
+const claude = existsSync('CLAUDE.md') ? readFileSync('CLAUDE.md', 'utf8') : ''
+const want = 'GENERATED\n' + claude
+if (check) {
+  const have = existsSync('AGENTS.md') ? readFileSync('AGENTS.md', 'utf8') : ''
+  if (have !== want) {
+    console.error('::error::AGENTS.md is out of sync with CLAUDE.md.')
+    process.exit(1)
+  }
+  console.log('AGENTS.md is in sync with CLAUDE.md.')
+} else {
+  writeFileSync('AGENTS.md', want)
+}
+STUB
+}
+
+# Shared fixture for the three cases below.
+setup_agents_case() {
+  local dir="$1" mode="$2"
+  build_fake_repo "$dir" "0.5.7"
+  install_bump_script "$dir"
+  install_gen_agents_stub "$dir" "$mode"
+  write_changelog "$dir/CHANGELOG.md" "0.5.7" "### Fixed
+
+- A real fix (#42)"
+  cat > "$dir/CLAUDE.md" <<'CLAUDEMD'
+# Claude Development Notes
+
+**Current Status (v0.5.7):**
+- stuff works
+
+---
+
+*Last Updated: 2026-01-01*
+*Version: 0.5.7*
+CLAUDEMD
+  printf 'STALE\n' > "$dir/AGENTS.md"
+}
+
+# Positive control. Without it, a check that rejected EVERY generator would
+# pass the two failure cases below and look like a working guard.
+test_agents_md_regeneration_succeeds() {
+  local dir
+  dir=$(mktemp -d)
+  trap "rm -rf '$dir'" RETURN
+  setup_agents_case "$dir" "healthy"
+
+  local out
+  out=$( (cd "$dir" && PATH="$NOCARGO_PATH" ./scripts/bump-version.sh 0.6.0) 2>&1 ) || return 1
+  printf '%s' "$out" | grep -q 'AGENTS.md regenerated from CLAUDE.md' || return 1
+  # ...and it actually wrote, rather than the message being decorative again.
+  grep -q '^GENERATED$' "$dir/AGENTS.md" || return 1
+  ! grep -q '^STALE$' "$dir/AGENTS.md" || return 1
+}
+
+# The authentic #7198 shape, and the one an exit-code-only check misses: the
+# entry-point guard reads false, so the write AND --check are both skipped,
+# both exit 0, and --check prints nothing.
+test_agents_md_silent_noop_fails_the_bump() {
+  local dir
+  dir=$(mktemp -d)
+  trap "rm -rf '$dir'" RETURN
+  setup_agents_case "$dir" "quiet"
+
+  local out rc=0
+  out=$( (cd "$dir" && PATH="$NOCARGO_PATH" ./scripts/bump-version.sh 0.6.0) 2>&1 ) || rc=$?
+  [ "$rc" -ne 0 ] || return 1
+  printf '%s' "$out" | grep -q 'could not confirm AGENTS.md is in sync' || return 1
+  # The false success must NOT also have been printed.
+  ! printf '%s' "$out" | grep -q 'AGENTS.md regenerated from CLAUDE.md' || return 1
+}
+
+# The write is skipped but --check still runs, so it reports drift and exits 1.
+test_agents_md_stale_after_regeneration_fails_the_bump() {
+  local dir
+  dir=$(mktemp -d)
+  trap "rm -rf '$dir'" RETURN
+  setup_agents_case "$dir" "nowrite"
+
+  local out rc=0
+  out=$( (cd "$dir" && PATH="$NOCARGO_PATH" ./scripts/bump-version.sh 0.6.0) 2>&1 ) || rc=$?
+  [ "$rc" -ne 0 ] || return 1
+  printf '%s' "$out" | grep -q 'could not confirm AGENTS.md is in sync' || return 1
+  ! printf '%s' "$out" | grep -q 'AGENTS.md regenerated from CLAUDE.md' || return 1
+}
+
+run_test "AGENTS.md regeneration reports success when it really regenerated" \
+  test_agents_md_regeneration_succeeds
+run_test "a generator that silently no-ops fails the bump (#7198 shape)" \
+  test_agents_md_silent_noop_fails_the_bump
+run_test "a stale AGENTS.md after regeneration fails the bump" \
+  test_agents_md_stale_after_regeneration_fails_the_bump
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 if [ "$FAIL" -gt 0 ]; then
