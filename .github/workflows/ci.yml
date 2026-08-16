@@ -906,7 +906,11 @@ jobs:
           # is cached — the staleness that motivated pinning came from an
           # UNPINNED spec silently reusing whatever the cache held.
           cache: npm
-          cache-dependency-path: package-lock.json
+          # Glob, not the bare root lockfile: this monorepo has three
+          # (root, packages/server, packages/server/sidecar) and the cache key
+          # must cover all of them. packages/server/tests/ci-cache-key.test.js
+          # enforces this for every job in this file.
+          cache-dependency-path: '**/package-lock.json'
 
       - name: Validate renovate.json
         env:
