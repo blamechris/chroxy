@@ -3,7 +3,10 @@
 > A guard that cannot fail is worse than no guard. No guard leaves you cautious;
 > a green one that never checks anything makes you confident and wrong.
 
-Seven of these were found and fixed in a single day (2026-08-15). Every one had
+Seven of these were found in a single day (2026-08-15). **Five are fixed and
+merged; two are not** — entry 6 (`#7210`, fix in PR `#7212`) and the sweep in
+entry 7 (`#7213`, fix in PR `#7217`) still have their fixes in open PRs, so
+those two bugs are live on `main` as this is written. Every one of the seven had
 passed unit tests, lint, typecheck, and CI continuously — in some cases for
 months — because **the defect is invisible to any check that only asks "did it
 report success?"**
@@ -96,18 +99,55 @@ Run through macOS's `/tmp` → `/private/tmp` symlink and the guard reads false,
 across three spellings — including the `pathToFileURL` form, which *looks* more
 careful than the others and is equally broken.
 
-## Near-miss: the key that was silently ignored
+## The one that got me while writing this
 
-Not one of the seven, but the same family. A Maestro `repeat` was written with
-`maxRuns: 3`. `YamlRepeatCommand` has no such field — `javap` shows
-`times`/`while`/`commands`/`label`/`optional`. The expectation was a parse
-error. **Unknown keys are silently ignored**, so the flow ran, passed three
-verification runs, and was bounded only by `while` — an unbounded retry that
-looked exactly like a bounded one. A parse error would have been the safer
-outcome.
+A Maestro `repeat` was written with `maxRuns: 3`. `YamlRepeatCommand` has no
+such field — `javap` shows `times`/`while`/`commands`/`label`/`optional`. The
+flow was then run three times to verify the fix, each checked with:
 
-The lesson generalises: *"it would have failed loudly"* is an assumption, not a
-finding. Check.
+```bash
+maestro test … diff-comment.yaml 2>&1 | grep -c "FAILED"
+# 0
+```
+
+Zero failures, three times. Except the flow never ran at all:
+
+```
+$ maestro test … /tmp/mr.yaml; echo "exit=$?"
+Unknown Property: maxRuns at /tmp/mr.yaml:11:1
+exit=1
+$ maestro test … /tmp/mr.yaml 2>&1 | grep -c FAILED
+0
+```
+
+Maestro **rejects** the unknown key and exits 1. But a parse error emits no
+per-step `FAILED` lines, so `grep -c FAILED` reports `0` — indistinguishable
+from a clean run. The verification was itself a false-safety guard: it could
+report success while the thing it verified had not executed.
+
+This is the highest-value entry in this document, for three reasons.
+
+**The tool was not at fault.** Maestro did exactly the right thing — failed
+loudly, at parse time, with the offending key and its line number. Every layer
+worked except the one checking it.
+
+**It happened to someone who had just written the rest of this page.** The rule
+"check the exit code, not the output" is stated below and was still violated,
+in the act of verifying a fix for this exact class. Knowing the pattern is not
+protection.
+
+**The wrong conclusion survived review.** From "the flow passed three times",
+the mechanism was inferred to be *"unknown keys are silently ignored, so the
+loop was unbounded"* — plausible, internally consistent, and wrong. It was
+written into a PR description, a commit message that is now in `main`'s
+history, and an earlier draft of this page, before a reviewer reproduced it and
+found the opposite. A false-safety guard does not just hide a bug; it
+manufactures a confident explanation for the wrong thing.
+
+The generalisable rule: **`grep` on output is not a test result.** `grep`'s exit
+status is its own, and absence of a failure string is not evidence of success —
+a crash, a parse error, or a tool that never started all produce the same empty
+match.
 
 ## Detection: mutation testing is the only reliable method
 
