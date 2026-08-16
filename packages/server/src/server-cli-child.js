@@ -15,7 +15,7 @@
 import { existsSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
-import { pathToFileURL } from 'url'
+import { isEntryPoint } from './utils/is-entry-point.js'
 import { mergeConfig } from './config.js'
 import { createLogger } from './logger.js'
 
@@ -162,9 +162,11 @@ async function handleDrain(timeout) {
 // entry point. When imported (e.g. unit tests of flushAndDestroy) these side
 // effects must NOT fire — registering crash handlers or starting the server on
 // import would corrupt the test runner. #5308 / WP-0.2.
-const isEntryPoint = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href
+// Shared helper: a symlinked invocation path made every hand-rolled
+// version of this comparison read false (#7213).
+const isModuleEntryPoint = isEntryPoint(import.meta.url)
 
-if (isEntryPoint) {
+if (isModuleEntryPoint) {
   // Listen for IPC messages from supervisor
   if (process.send) {
     process.on('message', async (msg) => {

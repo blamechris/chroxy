@@ -31,7 +31,7 @@
  * bridge (#3954) replaces this with a Unix socket driven solely by the session.
  */
 import { createServer } from 'http'
-import { pathToFileURL } from 'url'
+import { isEntryPoint } from '../utils/is-entry-point.js'
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
@@ -238,8 +238,7 @@ export async function main() {
 // against pathToFileURL(process.argv[1]) — argv[1] can be a RELATIVE path (e.g.
 // `node ./chroxy-channel-server.js`), so a naive `file://${argv[1]}` would never
 // match the absolute `import.meta.url` and main() would silently never run.
-const isDirectRun = process.argv[1] &&
-  import.meta.url === pathToFileURL(process.argv[1]).href
+const isDirectRun = isEntryPoint(import.meta.url)
 if (isDirectRun) {
   main().catch(err => {
     console.error('[chroxy-channel] fatal:', err)
