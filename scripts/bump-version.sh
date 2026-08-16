@@ -18,7 +18,10 @@
 #
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# -P on both: bash's logical `pwd` retains symlink components, which is the
+# non-canonical-path shape #7198 was about. Canonical here means every path
+# derived from ROOT is canonical too.
+ROOT="$(cd -P "$(dirname "$0")/.." && pwd -P)"
 
 SKIP_CHANGELOG=0
 POSITIONAL=()
@@ -274,7 +277,20 @@ if [ -f "$CLAUDE_MD" ]; then
   # so regenerating here is not optional.
   if [ -f "$ROOT/scripts/gen-agents-md.mjs" ]; then
     node "$ROOT/scripts/gen-agents-md.mjs" >/dev/null
-    echo "  AGENTS.md regenerated from CLAUDE.md"
+    # Verify the postcondition instead of announcing it. `set -euo pipefail`
+    # only catches a NON-ZERO exit, and the defect class this regeneration
+    # exists to survive (#7198, #7214) is exit ZERO having done nothing — so in
+    # precisely the failure mode worth worrying about, an unconditional echo
+    # prints a success that is false and the release ships a stale AGENTS.md.
+    # --check re-derives from CLAUDE.md and exits 1 on drift, so it cannot be
+    # satisfied by the generator having skipped itself.
+    if node "$ROOT/scripts/gen-agents-md.mjs" --check >/dev/null 2>&1; then
+      echo "  AGENTS.md regenerated from CLAUDE.md"
+    else
+      echo "  ERROR: AGENTS.md is still out of sync with CLAUDE.md after regeneration" >&2
+      echo "  (the generator exited 0 without writing — see #7198 / #7214)" >&2
+      exit 1
+    fi
   fi
 fi
 
