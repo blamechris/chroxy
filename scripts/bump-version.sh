@@ -330,6 +330,17 @@ if [ -f "$CLAUDE_MD" ]; then
       import { join } from "node:path"
       import { pathToFileURL } from "node:url"
       const root = process.env.CHROXY_BUMP_ROOT
+      // Not reachable from this script, which always sets it on the command
+      // itself — but every failure in here is a DIAGNOSTIC, and join(undefined)
+      // throws a TypeError that says nothing about what went wrong. The three
+      // defensive branches in this program (this, the renderAgentsMd typeof
+      // check, and the ENOENT catch) are all message quality rather than
+      // safety: the sentinel gate below means anything that ends the program
+      // early prints no AGENTS_IN_SYNC and therefore already fails closed.
+      if (!root) {
+        console.error("CHROXY_BUMP_ROOT is unset — the verifier has no tree to check")
+        process.exit(1)
+      }
       const claudePath = join(root, "CLAUDE.md")
       const agentsPath = join(root, "AGENTS.md")
       const generator = pathToFileURL(join(root, "scripts", "gen-agents-md.mjs")).href
