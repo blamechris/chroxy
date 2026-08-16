@@ -31,8 +31,10 @@
 
 import { execFileSync } from 'node:child_process'
 import { cpSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs'
-import { fileURLToPath, pathToFileURL } from 'node:url'
-import { dirname, join, resolve, sep } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { dirname, join, resolve } from 'node:path'
+
+import { declaredTargets, needsJsonAttribute, resolveExportTarget } from './lib/export-targets.mjs'
 
 // The source imports siblings without a file extension (`from './types'`), which
 // tsconfig's `moduleResolution: "bundler"` allows and Metro/Vite resolve happily.
@@ -140,121 +142,33 @@ writeFileSync(join(outDir, 'package.json'), JSON.stringify(out, null, 2) + '\n')
 //    for the npm consumer, who resolves through `exports` (#7197). Reading the
 //    manifest also means a newly-added export is covered automatically instead
 //    of silently falling outside the check.
+// The derivation lives in ./lib/export-targets.mjs so it can be unit-tested:
+// this file runs tsc at module scope, so importing it to exercise the logic
+// would rebuild the package as a side effect. Four consecutive PRs fixed a
+// "check reports success without actually checking" defect in that derivation
+// (#7197, #7210, #7212, #7225), every one caught by hand in a PR description
+// rather than by a test, which is what #7220 is about.
 const manifest = JSON.parse(readFileSync(join(outDir, 'package.json'), 'utf8'))
-// Collect EVERY string leaf under an export's condition object, not just
-// `.import`. A condition map can nest arbitrarily ({ node: { import: … },
-// default: … }), and reading one known key meant a `require`-only or nested
-// entry contributed no targets and was quietly dropped from `declared` — the
-// same silent-skip this check exists to prevent, one level down (#7210).
-//
-// Not reachable with the manifest this script generates today, which only
-// emits { types, import }. It is guarded anyway because the failure mode is
-// invisible: the build exits 0 and simply never mentions the export.
-// `types` is skipped deliberately: it is a TypeScript-only condition that Node
-// never resolves at runtime. Importing a .d.ts "succeeds" and yields zero
-// exports, so checking it would add a ✓ that means nothing — and a genuinely
-// broken .d.ts would still pass it. Runtime conditions only.
-const TYPE_ONLY_CONDITIONS = new Set(['types', 'typings'])
-
-// Arrays ARE valid here — Node treats them as a fallback list and resolves the
-// first entry whose conditions match (verified against Node 22, both a
-// single-entry array and a condition-fallback array resolve). They fall through
-// to the object branch below via Object.entries, which collects every string
-// leaf.
-//
-// Known over-strictness: for a genuine fallback array, Node needs only ONE
-// entry to resolve, whereas this collects all of them and would fail the build
-// if any were missing. Left as-is deliberately — this script GENERATES the
-// manifest it checks and only ever emits { types, import }, so an array cannot
-// occur without someone editing the generator, at which point the over-strict
-// failure is a loud prompt to revisit this rather than a silent wrong answer.
-function exportTargets(spec) {
-  if (typeof spec === 'string') return [spec]
-  if (spec && typeof spec === 'object') {
-    return Object.entries(spec)
-      .filter(([condition]) => !TYPE_ONLY_CONDITIONS.has(condition))
-      .flatMap(([, value]) => exportTargets(value))
-  }
-  return []
-}
-
-const declared = Object.entries(manifest.exports).flatMap(([label, spec]) => {
-  // `null` is Node's documented way to BLOCK a subpath, not a shape we failed
-  // to read. npm accepts the manifest and Node refuses the path at resolution
-  // (ERR_PACKAGE_PATH_NOT_EXPORTED), so there is genuinely nothing to import
-  // and nothing is wrong. Throwing here would fail the build on a valid
-  // manifest — and `build:publish` runs in release.yml's verify-artifacts job
-  // on every v* tag, so that would block a release rather than catch a bug.
-  if (spec === null) return []
-
-  const targets = [...new Set(exportTargets(spec))]
-  // An export that yields no target at all is a shape this script cannot
-  // check. Throw rather than filter it away — being unable to verify an
-  // export is not the same as there being nothing to verify, and conflating
-  // them is how the original bug read as success.
-  if (!targets.length) {
-    throw new Error(
-      `manifest exports "${label}" in a shape with no resolvable target ` +
-      `(${JSON.stringify(spec)}) — build-publish-dir cannot verify it`,
-    )
-  }
-  return targets.map((target) => [label, target])
-})
+const declared = declaredTargets(manifest.exports)
 
 if (!declared.length) throw new Error('generated manifest declares no exports — nothing to verify')
 
 for (const [label, target] of declared) {
-  // `target` is manifest-relative ('./dist/index.js'), resolved against the
-  // staging dir — the same base a consumer resolves it against. pathToFileURL
-  // rather than a `file://` template: the template mangles Windows paths (drive
-  // letters, backslashes) and anything needing percent-encoding, and this repo
-  // runs Windows CI.
-  //
-  // The `join(outDir, '/')` is load-bearing, not decorative. WHATWG URL
-  // resolution reads a base's trailing slash as the directory/file boundary: a
-  // relative reference APPENDS to a base ending in '/', and REPLACES the last
-  // segment otherwise. Drop it and every target resolves one level up:
-  //
-  //   base .../store-core/publish/  + ./dist/index.js -> .../publish/dist/index.js
-  //   base .../store-core/publish   + ./dist/index.js -> .../store-core/dist/index.js
-  //
-  // That second path is packages/store-core/dist — the tree step 1 rebuilds,
-  // mostly gitignored (.gitignore keeps only crypto.js and crypto.d.ts). It is
-  // a real directory of real files, so existsSync is satisfied and the check
-  // proceeds against the wrong tree entirely.
-  //
-  // How loudly that fails depends on WHICH export is checked, which is the
-  // whole problem:
-  //
-  //   "."       throws. addExtensions() rewrites only the STAGED copy, so
-  //             dist/index.js keeps its extensionless specifiers and Node
-  //             rejects it with ERR_UNSUPPORTED_DIR_IMPORT — blaming the
-  //             published entry point rather than the wrong base URL.
-  //   "./crypto" passes. dist/crypto.js has no relative specifiers at all, so
-  //             the staged copy is byte-identical and it imports cleanly.
-  //
-  // So the mistake is caught today only because "." happens to be checked
-  // first and happens to throw. For "./crypto" it is already a silent pass
-  // against the wrong tree. Neither of those is a property of this check —
-  // reorder the exports, or regenerate dist with extensions, and the whole
-  // thing goes green having verified nothing this script produced (#7211).
-  const file = new URL(target, pathToFileURL(join(outDir, '/')))
-
-  // So assert it rather than trusting the comment. A comment cannot fail; this
-  // turns "simplified the base URL" from a silent wrong answer into a loud one.
-  const filePath = fileURLToPath(file)
-  if (!filePath.startsWith(outDir + sep)) {
-    throw new Error(
-      `manifest exports "${label}" -> ${target} resolved to ${filePath}, which is OUTSIDE the staging dir ` +
-      `(${outDir}). The base URL must keep its trailing separator, or the self-check verifies the wrong files.`,
-    )
-  }
+  // Resolved against the staging dir, the same base a consumer resolves it
+  // against, and refused if it escapes — see resolveExportTarget for why the
+  // base URL's trailing separator is load-bearing (#7211 / #7225 / #7230).
+  const file = resolveExportTarget(outDir, label, target)
 
   if (!existsSync(file)) {
     throw new Error(`manifest exports "${label}" -> ${target}, which does not exist in the package`)
   }
   try {
-    await import(file.href)
+    // A `.json` target needs an import attribute; without one, dynamic import
+    // throws `needs an import attribute of "type: json"` and a perfectly valid
+    // entry point is reported as broken (#7220).
+    await (needsJsonAttribute(target)
+      ? import(file.href, { with: { type: 'json' } })
+      : import(file.href))
     console.log(`  ✓ "${label}" -> ${target} imports under Node`)
   } catch (err) {
     throw new Error(`published "${label}" entry (${target}) fails to import: ${err.message}`)
