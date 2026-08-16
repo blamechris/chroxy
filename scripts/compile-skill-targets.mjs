@@ -20,10 +20,11 @@
 //        [--repo <root>] [--dry-run]
 //
 // Exit non-zero on emit failure so /skill and CI can gate on it.
-import { readdirSync, readFileSync, writeFileSync, mkdirSync, existsSync, rmSync, realpathSync } from 'node:fs'
-import { join, dirname, resolve } from 'node:path'
+import { readdirSync, readFileSync, writeFileSync, mkdirSync, existsSync, rmSync } from 'node:fs'
+import { join, dirname } from 'node:path'
 import { homedir } from 'node:os'
-import { fileURLToPath } from 'node:url'
+
+import { isEntryPoint } from './lib/is-entry-point.mjs'
 
 export const ALL_TARGETS = ['claude', 'gemini', 'codex', 'pi']
 
@@ -347,39 +348,13 @@ function main() {
 
 // Run the CLI only when invoked directly (`node compile-skill-targets.mjs`), not
 // when a test imports this module for unit coverage of deriveDescription().
-// Both sides realpath'd. Node's ESM loader resolves symlinks in
-// `import.meta.url` but leaves argv[1] as typed, and `resolve()` does not
-// follow symlinks — so on macOS, where /tmp is a symlink to /private/tmp,
-// this compared '/private/tmp/…' against '/tmp/…', read false, and the script
-// exited 0 having compiled nothing (#7213, same bug as #7198).
 //
-// packages/server/src/utils/is-entry-point.js is the shared implementation;
-// scripts/ is outside that package's scope, so the logic is duplicated here
-// deliberately rather than reaching across packages for six lines.
-const invokedDirectly = (() => {
-  if (!process.argv[1]) return false
-  // The plain comparison runs first and is conclusive on its own: identical
-  // paths mean this IS the entry point, decided without touching the
-  // filesystem. Consulting realpath first and reading a failure as false lets
-  // an EACCES on a parent directory (or a script unlinked after launch) turn a
-  // direct run into a silent exit-0 no-op — the exact class this guard exists
-  // to remove (#7217 review). Realpath is only needed when the paths differ,
-  // where a symlink is the sole thing that can still make them one file.
-  const self = fileURLToPath(import.meta.url)
-  const invoked = resolve(process.argv[1])
-  if (self === invoked) return true
-  const real = (p) => {
-    try {
-      return realpathSync(p)
-    } catch {
-      return null
-    }
-  }
-  const realSelf = real(self)
-  const realInvoked = real(invoked)
-  return realSelf !== null && realSelf === realInvoked
-})()
-
-if (invokedDirectly) {
+// The guard lives in scripts/lib/is-entry-point.mjs. It used to be inlined
+// here AND in gen-agents-md.mjs — two hand-maintained copies of the same
+// fifteen lines, which is the duplication #7213 was filed to remove, recreated
+// one directory down (#7222). Without it, invoking this through a symlinked
+// path on macOS read false and the script exited 0 having compiled nothing
+// (#7198 / #7213).
+if (isEntryPoint(import.meta.url)) {
   main()
 }

@@ -941,6 +941,11 @@ jobs:
       - name: Run compile-skill-targets.mjs tests
         run: node scripts/__tests__/compile-skill-targets.test.mjs
 
+      - name: Run is-entry-point.mjs tests
+        # Also the drift gate for the guard's three un-shareable copies
+        # (scripts/lib, packages/server/src/utils, sidecar/agent.js) — #7222.
+        run: node scripts/__tests__/is-entry-point.test.mjs
+
       - name: Run lint-no-raw-color-literals golden test
         run: bash scripts/__tests__/lint-no-raw-color-literals.test.sh
 
