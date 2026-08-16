@@ -900,6 +900,13 @@ jobs:
           # something a validation gate should be built on. Bump alongside
           # RENOVATE_VERSION below.
           node-version: 24
+          # Reuse ~/.npm across runs so the validator's dependency tree is not
+          # re-downloaded cold every time. Safe alongside the pin below: npx
+          # resolves an explicit `renovate@<version>` spec regardless of what
+          # is cached — the staleness that motivated pinning came from an
+          # UNPINNED spec silently reusing whatever the cache held.
+          cache: npm
+          cache-dependency-path: package-lock.json
 
       - name: Validate renovate.json
         env:
