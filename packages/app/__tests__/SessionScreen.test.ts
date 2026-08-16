@@ -151,7 +151,21 @@ describe('SessionScreen component structure', () => {
     test('system messages are still filtered inline, separately from the compact predicate', () => {
       // #6882: system filtering stays inline — isHiddenInCompactMode is
       // specifically the compact-hide rule, not a catch-all message filter.
-      expect(src).toMatch(/if \(m\.type === 'system'\) return false;/)
+      expect(src).toMatch(/if \(m\.type === 'system'\) return m\.compactMetadata != null;/)
+    })
+
+    test('compaction markers survive the system filter so ChatView can reinsert them (#7186)', () => {
+      // The system filter used to be a flat `return false`, which meant
+      // ChatView's insertCompactionMarkers — which reads the SAME array it is
+      // handed — filtered a list that could never contain a system message.
+      // The marker was unreachable on mobile entirely.
+      //
+      // Asserted as source text because this predicate is a plain filter inside
+      // a useMemo with no exported seam; the behavioural proof is the
+      // compaction-marker.yaml Maestro flow, which fails at
+      // `compaction-marker is visible` when this line reverts to `return false`.
+      expect(src).toMatch(/m\.compactMetadata != null/)
+      expect(src).not.toMatch(/if \(m\.type === 'system'\) return false;/)
     })
   })
 })

@@ -58,13 +58,26 @@ name: ChatView compaction marker rendering
 # no-break space) instead of "128,000". `.?` matches any single separator
 # character (or none), while the pinned digit groups still fail the
 # assertion if the wrong NUMBER renders.
+# Wildcards, not an exact match: CompactionMarker nests its segments inside one
+# parent <Text>, and RN flattens an accessible container's children into a
+# single node — the real node reads
+# "Context compacted · 128,000 → 12,000 tokens · 2s · auto", so an exact
+# "Context compacted" can never match it. (Same reason the token assertion
+# below is already wildcarded; this line was simply missed.)
 - assertVisible:
-    text: "Context compacted"
-- assertVisible:
-    id: "compaction-marker-tokens"
+    text: ".*Context compacted.*"
+# The token/duration/trigger segments are nested <Text> inside the marker's
+# single accessible parent, so RN flattens them away — their testIDs are NOT
+# reachable as separate nodes here, only their text is. Those testIDs are
+# already asserted by CompactionMarker.test.tsx via react-test-renderer, where
+# flattening does not apply, so pinning them again here would be both
+# impossible and redundant. What this flow uniquely proves is that the marker
+# reached a real screen with the right CONTENT.
 - assertVisible:
     text: ".*128.?000.*12.?000.*tokens.*"
+# The trigger segment, same flattened node. `auto` is what the mock fixture
+# pins; a manual compaction would render `manual`.
 - assertVisible:
-    id: "compaction-marker-trigger"
+    text: ".*Context compacted.*auto.*"
 
 - takeScreenshot: compaction-marker-inline
