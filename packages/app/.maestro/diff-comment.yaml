@@ -86,7 +86,12 @@ name: DiffViewer inline comment submit
 # hideKeyboard would be the direct fix but is broken on the current Maestro
 # CLI (#6089).
 - repeat:
-    maxRuns: 3
+    # `times`, not `maxRuns`. YamlRepeatCommand exposes times/while/commands/
+    # label/optional and nothing else (javap on maestro-orchestra.jar), and an
+    # unknown key here is silently IGNORED rather than rejected — so `maxRuns`
+    # parsed fine and left the loop bounded only by `while`, i.e. unbounded if
+    # the save genuinely broke. Caught in review on #7202.
+    times: 3
     while:
       notVisible:
         id: "diff-submit-comments"
