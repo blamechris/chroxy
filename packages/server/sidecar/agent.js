@@ -13,9 +13,9 @@ import { createServer } from 'node:http'
 import { createInterface } from 'node:readline'
 import { spawn as nodeSpawn } from 'node:child_process'
 import { timingSafeEqual, randomUUID } from 'node:crypto'
-import { readFileSync } from 'node:fs'
+import { readFileSync, realpathSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { Transform } from 'node:stream'
 import { WebSocketServer } from 'ws'
 
@@ -1274,7 +1274,37 @@ export class PodAgent {
 // Entrypoint — only runs when executed directly, not when imported in tests.
 // ---------------------------------------------------------------------------
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+// Realpath both sides. Node's ESM loader resolves symlinks in
+// `import.meta.url` while argv[1] is whatever the caller typed, so a raw
+// comparison also breaks on any relative invocation (`node ./agent.js`).
+// This is a standalone in-pod bundle with its own package.json, so it cannot
+// import packages/server/src/utils/is-entry-point.js — duplicated on purpose
+// (#7213).
+const invokedDirectly = (() => {
+  if (!process.argv[1]) return false
+  // The plain comparison runs first and is conclusive on its own: identical
+  // paths mean this IS the entry point, decided without touching the
+  // filesystem. Consulting realpath first and reading a failure as false lets
+  // an EACCES on a parent directory (or a script unlinked after launch) turn a
+  // direct run into a silent exit-0 no-op — the exact class this guard exists
+  // to remove (#7217 review). Realpath is only needed when the paths differ,
+  // where a symlink is the sole thing that can still make them one file.
+  const self = fileURLToPath(import.meta.url)
+  const invoked = resolve(process.argv[1])
+  if (self === invoked) return true
+  const real = (p) => {
+    try {
+      return realpathSync(p)
+    } catch {
+      return null
+    }
+  }
+  const realSelf = real(self)
+  const realInvoked = real(invoked)
+  return realSelf !== null && realSelf === realInvoked
+})()
+
+if (invokedDirectly) {
   const agent = new PodAgent()
   agent.listen(PORT).catch((err) => {
     console.error('[chroxy-pod-agent] Failed to start:', err)
