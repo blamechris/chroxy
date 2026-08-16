@@ -31,7 +31,7 @@
 
 import { execFileSync } from 'node:child_process'
 import { cpSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join, resolve } from 'node:path'
 
 // The source imports siblings without a file extension (`from './types'`), which
@@ -128,17 +128,40 @@ for (const k of Object.keys(out)) if (out[k] === undefined) delete out[k]
 // is wanted: a stray `files` here would be one more thing to keep in sync.
 writeFileSync(join(outDir, 'package.json'), JSON.stringify(out, null, 2) + '\n')
 
-// 3. Prove both declared entry points actually load under Node before anyone
-//    publishes. This is the check whose absence let 0.11.0's packaging break
-//    silently: the tarball installed fine and only failed on first import.
-//    Resolved against the real dist so a missing extension or a bad crypto
-//    rewrite fails the build, not the user.
-for (const [label, entry] of [['.', 'dist/index.js'], ['./crypto', 'dist/crypto.js']]) {
+// 3. Prove every entry point the generated manifest DECLARES actually loads
+//    under Node before anyone publishes. This is the check whose absence let
+//    0.11.0's packaging break silently: the tarball installed fine and only
+//    failed on first import.
+//
+//    The targets are read back OUT of the manifest just written, not listed
+//    here. A hardcoded literal list would import the known-good file directly
+//    and print ✓ even when `exports` points somewhere wrong — so a typo or a
+//    stale path after a refactor would sail through this check and fail only
+//    for the npm consumer, who resolves through `exports` (#7197). Reading the
+//    manifest also means a newly-added export is covered automatically instead
+//    of silently falling outside the check.
+const manifest = JSON.parse(readFileSync(join(outDir, 'package.json'), 'utf8'))
+const declared = Object.entries(manifest.exports)
+  .map(([label, spec]) => [label, typeof spec === 'string' ? spec : spec.import])
+  .filter(([, target]) => target)
+
+if (!declared.length) throw new Error('generated manifest declares no exports — nothing to verify')
+
+for (const [label, target] of declared) {
+  // `target` is manifest-relative ('./dist/index.js'), resolved against the
+  // staging dir — the same base a consumer resolves it against. pathToFileURL
+  // rather than a `file://` template: the template mangles Windows paths (drive
+  // letters, backslashes) and anything needing percent-encoding, and this repo
+  // runs Windows CI.
+  const file = new URL(target, pathToFileURL(join(outDir, '/')))
+  if (!existsSync(file)) {
+    throw new Error(`manifest exports "${label}" -> ${target}, which does not exist in the package`)
+  }
   try {
-    await import(new URL(`publish/${entry}`, `file://${pkgDir}/`).href)
-    console.log(`  ✓ "${label}" entry imports under Node`)
+    await import(file.href)
+    console.log(`  ✓ "${label}" -> ${target} imports under Node`)
   } catch (err) {
-    throw new Error(`published "${label}" entry (${entry}) fails to import: ${err.message}`)
+    throw new Error(`published "${label}" entry (${target}) fails to import: ${err.message}`)
   }
 }
 
