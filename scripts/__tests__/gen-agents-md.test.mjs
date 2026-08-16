@@ -155,6 +155,14 @@ export async function load (url, context, nextLoad) {
   // BREAK_ON is the last module the entry script pulls in, so every import has
   // resolved by the time this fires; BREAK_DIR is passed in rather than derived
   // from the module path, so the hook does not encode the staged layout.
+  // Unset, endsWith(undefined) coerces to the literal "undefined", the hook
+  // never fires, realpath is never broken — and --check then legitimately
+  // detects the stale AGENTS.md and prints the drift message, so the assertion
+  // cannot tell the difference. Deleting the env line left 8/8 green. Fail
+  // loudly instead of testing nothing.
+  if (!process.env.CHROXY_BREAK_ON) {
+    throw new Error('CHROXY_BREAK_ON is unset — the break would never fire and the test would pass vacuously')
+  }
   if (url.endsWith(process.env.CHROXY_BREAK_ON)) {
     if (process.env.CHROXY_BREAK === 'unlink') unlinkSync(process.env.CHROXY_BREAK_FILE)
     else if (process.env.CHROXY_BREAK === 'eacces') chmodSync(process.env.CHROXY_BREAK_DIR, 0o000)

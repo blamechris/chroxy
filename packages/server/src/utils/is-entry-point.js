@@ -112,34 +112,26 @@ export function isEntryPoint(importMetaUrl) {
   const realInvoked = real(invoked)
   if (realSelf !== null && realInvoked !== null) return realSelf === realInvoked
 
-  // At least one side would not resolve, so the answer is `false` either way.
-  // Whether that `false` is DECIDED or merely UNKNOWN is a different question,
-  // and only the unknown one is worth a diagnostic (#7226). The two sides are
-  // not symmetric:
+  // Reaching here means realpath could not answer for at least one side, so
+  // whether a symlink still joins the two paths is unknowable and `false` is
+  // the only defensible return. It is not, however, an excuse for silence —
+  // that combination is what made #7198 and #7214 expensive (#7226).
   //
-  //   `self`    node LOADED this module, so its path resolved moments ago. If
-  //             it does not resolve now the ground moved underneath us — a
-  //             symlinked invocation whose target was unlinked, a directory
-  //             that lost its permissions — and whether a symlink still joins
-  //             the two paths is genuinely unknowable. Always warn.
-  //   `invoked` just a string the caller supplied. ENOENT/ENOTDIR means it
-  //             definitively does not exist, and a path that does not exist
-  //             cannot be the file we were loaded from — that is a DECIDED
-  //             false. Warning on it would fire on ordinary imports, where
-  //             argv[1] is some other script entirely, and a warning that
-  //             cries wolf on every import is worse than no warning at all.
-  //             Any other errno (EACCES, ELOOP, …) means the filesystem
-  //             refused to answer rather than answered "no", so it could still
-  //             be an inaccessible symlink to this very file: unknown, warn.
-  const unknowable = realSelf === null ||
-    failures.some(({ code }) => code !== 'ENOENT' && code !== 'ENOTDIR')
-  if (unknowable) {
-    const why = failures.map(({ path, code }) => `${path}: ${code}`).join('; ')
-    console.warn(
-      `[is-entry-point] ${basename(self)}: cannot determine whether this module was run ` +
-      `directly — realpath failed (${why}). Assuming it was imported, so its command-line ` +
-      'behaviour did NOT run. If you invoked it directly, it did nothing.',
-    )
-  }
+  // An earlier version of this warned only when the errno was something other
+  // than ENOENT, on the theory that a non-existent argv[1] was a DECIDED false
+  // and warning on it would cry wolf during ordinary imports. Both halves were
+  // wrong. An ordinary import never reaches this line at all — argv[1] is the
+  // script node is running, so it exists, both realpaths succeed, and the
+  // comparison above returns. And ENOENT is not decided: argv[1] existed at
+  // exec time by construction, so ENOENT means it was REMOVED SINCE. Swap a
+  // `current -> releases-v1` symlink mid-run and you get exactly that — self
+  // resolves, invoked is ENOENT, and the module genuinely IS the entry point.
+  // The carve-out bought nothing and hid that case.
+  const why = failures.map(({ path, code }) => `${path}: ${code}`).join('; ')
+  console.warn(
+    `[is-entry-point] ${basename(self)}: cannot determine whether this module was run ` +
+    `directly — realpath failed (${why}). Assuming it was imported, so its command-line ` +
+    'behaviour did NOT run. If you invoked it directly, it did nothing.',
+  )
   return false
 }

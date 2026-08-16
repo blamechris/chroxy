@@ -21,6 +21,7 @@ let dir
 let realDir
 let linkDir
 let realScript
+let siblingScript
 let linkedScript
 
 before(() => {
@@ -33,6 +34,13 @@ before(() => {
   mkdirSync(realDir)
   realScript = join(realDir, 'probe.js')
   writeFileSync(realScript, 'export const x = 1\n')
+  // A real, EXISTING sibling. argv[1] pointing at a path that was never created
+  // looks like "some other script" but behaves nothing like one: realpath fails
+  // and the case short-circuits before the guard's main comparison. That gap let
+  // `return realSelf === realInvoked` be hardwired to `return true` — every
+  // ordinary import running main() — with the whole suite still green.
+  siblingScript = join(realDir, 'sibling.js')
+  writeFileSync(siblingScript, 'export const y = 2\n')
   symlinkSync(realDir, linkDir, 'dir')
   linkedScript = join(linkDir, 'probe.js')
 })
@@ -74,9 +82,20 @@ describe('isEntryPoint', () => {
   })
 
   it('is false when the module is merely imported', () => {
-    withArgv1(join(realDir, 'other.js'), () => {
+    withArgv1(siblingScript, () => {
       assert.equal(isEntryPoint(pathToFileURL(realScript).href), false)
     })
+  })
+
+  // The negative control for the guard's MAIN comparison: both paths exist and
+  // realpath cleanly, so the answer comes from `realSelf === realInvoked`
+  // rather than from a short-circuit. Without it, hardwiring that line to
+  // `return true` passed every test in this file.
+  it('is false when argv[1] is a DIFFERENT file that EXISTS', () => {
+    const { value, lines } = capturingWarnings(() =>
+      withArgv1(siblingScript, () => isEntryPoint(pathToFileURL(realScript).href)))
+    assert.equal(value, false, 'an ordinary import must not be treated as the entry point')
+    assert.deepEqual(lines, [], 'ordinary imports must stay silent')
   })
 
   // The original bug (#7198). Node's ESM loader resolves symlinks in
@@ -115,9 +134,10 @@ describe('isEntryPoint', () => {
   // become a blanket "true", or the assertion above would pass for the wrong
   // reason.
   it('is false for DIFFERING paths that cannot be realpath\'d', () => {
-    withArgv1(join(dir, 'nowhere', 'a.js'), () => {
-      assert.equal(isEntryPoint(pathToFileURL(join(dir, 'nowhere', 'b.js')).href), false)
-    })
+    const { value } = capturingWarnings(() =>
+      withArgv1(join(dir, 'nowhere', 'a.js'), () =>
+        isEntryPoint(pathToFileURL(join(dir, 'nowhere', 'b.js')).href)))
+    assert.equal(value, false)
   })
 
   it('is false when there is no invoked script (node -e, REPL)', () => {
@@ -152,8 +172,9 @@ describe('isEntryPoint', () => {
           isEntryPoint(pathToFileURL(join(dir, 'nowhere', 'b.js')).href)))
       assert.equal(value, false, 'undecidable must still answer false')
       assert.equal(lines.length, 1, `expected exactly one warning, got ${JSON.stringify(lines)}`)
-      assert.match(lines[0], /\[is-entry-point]/)
-      assert.match(lines[0], /b\.js/)
+      // Anchored to the PREFIX: the path list in the reason also contains
+      // 'b.js', so a bare /b\.js/ passed even with basename(self) emptied.
+      assert.match(lines[0], /^\[is-entry-point] b\.js:/)
       // The reason, not just the fact: a bare "could not determine" sends the
       // reader back to reproducing it; the errno says which path broke and how.
       assert.match(lines[0], /ENOENT|EACCES/)
@@ -167,8 +188,7 @@ describe('isEntryPoint', () => {
     // the suite and the real signal would stop being read.
     it('stays silent for the ordinary imported-not-run false', () => {
       const { value, lines } = capturingWarnings(() =>
-        withArgv1(join(realDir, 'other.js'), () =>
-          isEntryPoint(pathToFileURL(realScript).href)))
+        withArgv1(siblingScript, () => isEntryPoint(pathToFileURL(realScript).href)))
       assert.equal(value, false)
       assert.deepEqual(lines, [], 'an imported module must not warn')
     })

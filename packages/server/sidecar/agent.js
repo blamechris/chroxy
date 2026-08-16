@@ -1311,19 +1311,15 @@ const invokedDirectly = (() => {
 
   // Undecidable, but not silent (#7226): in a pod, an agent that starts and
   // does nothing is indistinguishable from one that is merely idle, so the
-  // reason has to reach the container log. Only the genuinely UNKNOWN case
-  // warrants it — see the twin in packages/server/src/utils/is-entry-point.js
-  // for why `self` and `invoked` are not symmetric here.
-  const unknowable = realSelf === null ||
-    failures.some(({ code }) => code !== 'ENOENT' && code !== 'ENOTDIR')
-  if (unknowable) {
-    const why = failures.map(({ path, code }) => `${path}: ${code}`).join('; ')
-    console.warn(
-      `[is-entry-point] ${basename(self)}: cannot determine whether this module was run ` +
-      `directly — realpath failed (${why}). Assuming it was imported, so its command-line ` +
-      'behaviour did NOT run. If you invoked it directly, it did nothing.',
-    )
-  }
+  // reason has to reach the container log. See the twin in
+  // packages/server/src/utils/is-entry-point.js for why this warns on ANY
+  // realpath failure rather than carving out ENOENT.
+  const why = failures.map(({ path, code }) => `${path}: ${code}`).join('; ')
+  console.warn(
+    `[is-entry-point] ${basename(self)}: cannot determine whether this module was run ` +
+    `directly — realpath failed (${why}). Assuming it was imported, so its command-line ` +
+    'behaviour did NOT run. If you invoked it directly, it did nothing.',
+  )
   return false
 })()
 
