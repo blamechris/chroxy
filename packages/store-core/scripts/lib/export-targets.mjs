@@ -84,6 +84,40 @@ export function declaredTargets(exportsMap) {
 }
 
 /**
+ * True when `filePath` sits strictly inside `outDir`.
+ *
+ * `relative()` rather than `startsWith(outDir + sep)`. The two halves of this
+ * guard have to agree about outDir's shape: `join(outDir, '/')` in the caller is
+ * idempotent — same base whether or not outDir already ends in a separator — but
+ * `startsWith(outDir + sep)` is not, and rejected a correctly-resolved target
+ * whenever outDir carried a trailing separator (#7230). This form tolerates
+ * both, and is case-insensitive on win32 into the bargain (which is correct
+ * here: filePath always inherits outDir's exact case through URL resolution, so
+ * a case-divergent input genuinely IS the same directory on that platform).
+ *
+ * `pathImpl` exists so the win32 branches are reachable from a Linux test run.
+ * Two of the four clauses — `isAbsolute(rel)`, which is what catches a
+ * cross-drive `D:\evil.js`, and the UNC handling — are dead on POSIX and
+ * Store Core Tests is Linux-only, so without an injectable path module they
+ * could only be reasoned about, never executed. Deleting `isAbsolute(rel)` used
+ * to leave the whole suite green.
+ *
+ * @param {string} outDir
+ * @param {string} filePath
+ * @param {{ relative: Function, isAbsolute: Function, sep: string }} [pathImpl]
+ * @returns {boolean}
+ */
+export function isContained(outDir, filePath, pathImpl = { relative, isAbsolute, sep }) {
+  const rel = pathImpl.relative(outDir, filePath)
+  return !(
+    rel === '' ||
+    rel === '..' ||
+    rel.startsWith('..' + pathImpl.sep) ||
+    pathImpl.isAbsolute(rel)
+  )
+}
+
+/**
  * Resolve a manifest-relative target against the staging dir, as a consumer
  * would, and refuse anything that escapes it.
  *
@@ -115,32 +149,32 @@ export function resolveExportTarget(outDir, label, target) {
 
   // A target fileURLToPath cannot convert used to die there with a bare Node
   // TypeError and a stack trace (#7230). The exit code was right either way;
-  // what was lost was the diagnosis, so this refuses it first — and checking
-  // the PROTOCOL alone is not enough, because two different shapes get there:
+  // what was lost was the diagnosis.
+  //
+  // Ask fileURLToPath rather than trying to predict it. Enumerating the bad
+  // shapes was the first attempt here and it kept coming up short — there are
+  // at least three ways in, not the two the issue listed:
   //
   //   'https://evil.example/x.js' -> https://evil.example/x.js -> ERR_INVALID_URL_SCHEME
-  //   '//host/x.js'               -> file://host/x.js         -> ERR_INVALID_FILE_URL_HOST
+  //   '//host/x.js'               -> file://host/x.js          -> ERR_INVALID_FILE_URL_HOST
+  //   './dist%2Findex.js'         -> file:///…/dist%2Findex.js -> ERR_INVALID_FILE_URL_PATH
   //
-  // The second is a protocol-RELATIVE reference: it inherits the base's scheme,
-  // so its protocol IS 'file:' and only the host distinguishes it. A local path
-  // has an empty host; fileURLToPath additionally tolerates 'localhost'.
-  const localHost = file.hostname === '' || file.hostname === 'localhost'
-  if (file.protocol !== 'file:' || !localHost) {
+  // and a host check tuned to the second REJECTS A VALID TARGET when outDir is
+  // itself a UNC path on win32 (base host 'server', so a perfectly ordinary
+  // './dist/index.js' inherits it and looks non-local). Failing a valid release
+  // is the direction declaredTargets' own null-handling argues hardest against.
+  // Catching the conversion covers every shape, present and future, and makes
+  // no assumption about outDir at all.
+  let filePath
+  try {
+    filePath = fileURLToPath(file)
+  } catch (err) {
     throw new Error(
       `manifest exports "${label}" -> ${target} does not resolve to a file path ` +
-      `(${file.href}) — build-publish-dir can only verify local files`,
+      `(${file.href}: ${err.code || err.message}) — build-publish-dir can only verify local files`,
     )
   }
-
-  const filePath = fileURLToPath(file)
-  // `relative()` rather than `startsWith(outDir + sep)`. The two halves of this
-  // guard have to agree about outDir's shape: `join(outDir, '/')` above is
-  // idempotent — same base whether or not outDir already ends in a separator —
-  // but `startsWith(outDir + sep)` is not, and rejected a correctly-resolved
-  // target whenever outDir carried a trailing separator (#7230). This form
-  // tolerates both, and is case-insensitive on win32 into the bargain.
-  const rel = relative(outDir, filePath)
-  if (rel === '' || rel === '..' || rel.startsWith('..' + sep) || isAbsolute(rel)) {
+  if (!isContained(outDir, filePath)) {
     throw new Error(
       `manifest exports "${label}" -> ${target} resolved to ${filePath}, which is OUTSIDE ` +
       `the staging dir (${outDir}). The base URL must keep its trailing separator, or the ` +
@@ -159,7 +193,13 @@ export function resolveExportTarget(outDir, label, target) {
  * `await import()` in the self-check would throw
  * `TypeError: … needs an import attribute of "type: json"` — reporting a broken
  * entry point for a perfectly valid one (#7220).
+ *
+ * The query/fragment strip and the lowercase are not hypothetical tidiness:
+ * `./q.json?v=1` fails with ERR_IMPORT_ATTRIBUTE_MISSING and `./B.JSON` with
+ * ERR_UNKNOWN_FILE_EXTENSION under a plain import, both of which are the same
+ * "valid entry point reported as broken" this exists to prevent. `.json5` is
+ * deliberately NOT matched — it is not JSON to Node either way.
  */
 export function needsJsonAttribute(target) {
-  return target.endsWith('.json')
+  return target.replace(/[?#].*$/, '').toLowerCase().endsWith('.json')
 }

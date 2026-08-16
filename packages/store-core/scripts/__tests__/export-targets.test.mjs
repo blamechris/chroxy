@@ -19,9 +19,12 @@ import { tmpdir } from 'node:os'
 import { join, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
+import { posix, win32 } from 'node:path'
+
 import {
   declaredTargets,
   exportTargets,
+  isContained,
   needsJsonAttribute,
   resolveExportTarget,
 } from '../lib/export-targets.mjs'
@@ -144,6 +147,14 @@ describe('resolveExportTarget', () => {
     expect(() => resolveExportTarget(outDir, '.', '.')).toThrow(/OUTSIDE the staging dir/)
   })
 
+  // `relative()` returns exactly '..' for the parent — neither '', nor
+  // '../'-prefixed, nor absolute — so without its own clause the parent
+  // directory reads as CONTAINED. Deleting `rel === '..' ||` used to leave the
+  // whole suite green.
+  it('refuses a target that resolves to the staging dir PARENT', () => {
+    expect(() => resolveExportTarget(outDir, '.', '..')).toThrow(/OUTSIDE the staging dir/)
+  })
+
   // #7230 item 1. These used to reach fileURLToPath and die there with a bare
   // Node TypeError and a stack trace — ERR_INVALID_URL_SCHEME /
   // ERR_INVALID_FILE_URL_HOST. The exit code was right either way; the loss was
@@ -155,6 +166,27 @@ describe('resolveExportTarget', () => {
 
   it('gives its own error for a protocol-relative target', () => {
     expect(() => resolveExportTarget(outDir, '.', '//host/x.js'))
+      .toThrow(/does not resolve to a file path/)
+  })
+
+  // The shapes the enumerate-the-bad-cases approach kept missing. Each of these
+  // has an EMPTY host, so a host check alone lets it through to fileURLToPath
+  // and the raw Node TypeError #7230 is about comes straight back:
+  //
+  //   data:/node:  ERR_INVALID_URL_SCHEME     (non-file scheme, no host)
+  //   %2F          ERR_INVALID_FILE_URL_PATH  (encoded separator)
+  //
+  // 'C:foo' is here because on a POSIX parse it is a drive-relative reference
+  // read as scheme 'c:' — the shape a Windows-authored manifest would carry.
+  it('gives its own error for non-file: shapes with an EMPTY host', () => {
+    for (const target of ['data:text/javascript,export default 1', 'node:fs', 'C:foo']) {
+      expect(() => resolveExportTarget(outDir, '.', target), target)
+        .toThrow(/does not resolve to a file path/)
+    }
+  })
+
+  it('gives its own error for an encoded path separator', () => {
+    expect(() => resolveExportTarget(outDir, '.', './dist%2Findex.js'))
       .toThrow(/does not resolve to a file path/)
   })
 
@@ -173,6 +205,54 @@ describe('resolveExportTarget', () => {
   })
 })
 
+// Store Core Tests runs on Linux only, so without an injectable path module
+// these clauses could never execute — `isAbsolute(rel)` in particular is
+// unreachable on POSIX (relative() never returns an absolute path when both
+// operands share a root) and is the ONLY thing catching a cross-drive escape.
+// The repo runs Windows CI elsewhere, so "unreachable here" is not the same as
+// "unreachable".
+describe('isContained under win32 semantics', () => {
+  it('accepts an ordinary target inside the staging dir', () => {
+    expect(isContained('C:\\repo\\publish', 'C:\\repo\\publish\\dist\\index.js', win32)).toBe(true)
+  })
+
+  // The cross-drive escape. relative() cannot express it as a traversal, so it
+  // returns an absolute path — caught only by the isAbsolute clause.
+  it('refuses a target on a DIFFERENT DRIVE', () => {
+    expect(isContained('C:\\repo\\publish', 'D:\\evil.js', win32)).toBe(false)
+  })
+
+  it('refuses a traversal out of the staging dir', () => {
+    expect(isContained('C:\\repo\\publish', 'C:\\repo\\dist\\index.js', win32)).toBe(false)
+  })
+
+  // A UNC staging dir is a legitimate Windows checkout location. A host-based
+  // rejection tuned to '//host/x.js' failed this — the direction that fails a
+  // VALID release rather than catching a bad one.
+  it('accepts a UNC staging dir with an ordinary target', () => {
+    expect(isContained(
+      '\\\\server\\share\\repo\\publish',
+      '\\\\server\\share\\repo\\publish\\dist\\index.js',
+      win32,
+    )).toBe(true)
+  })
+
+  it('refuses a target on a different UNC share', () => {
+    expect(isContained(
+      '\\\\server\\share\\repo\\publish',
+      '\\\\evil\\share\\x.js',
+      win32,
+    )).toBe(false)
+  })
+
+  // Case-insensitivity is correct on win32 and WRONG on posix; pinning both
+  // directions stops a "simplification" that hardcodes one platform's rules.
+  it('treats case as insignificant on win32 and significant on posix', () => {
+    expect(isContained('C:\\repo\\publish', 'C:\\REPO\\PUBLISH\\dist\\x.js', win32)).toBe(true)
+    expect(isContained('/repo/publish', '/REPO/PUBLISH/dist/x.js', posix)).toBe(false)
+  })
+})
+
 describe('needsJsonAttribute', () => {
   // #7220 item 2. `"./package.json": "./package.json"` is a common npm idiom
   // for version detection. It is not in store-core's manifest today, but if it
@@ -186,6 +266,21 @@ describe('needsJsonAttribute', () => {
     expect(needsJsonAttribute('./dist/index.js')).toBe(false)
     expect(needsJsonAttribute('./dist/index.cjs')).toBe(false)
     expect(needsJsonAttribute('./dist/index.mjs')).toBe(false)
+  })
+
+  // Both of these fail under a plain import — ERR_UNKNOWN_FILE_EXTENSION and
+  // ERR_IMPORT_ATTRIBUTE_MISSING respectively — so a case- or query-sensitive
+  // check reports a valid entry point as broken, the very thing the attribute
+  // exists to prevent.
+  it('is true for an uppercase or query-suffixed .json target', () => {
+    expect(needsJsonAttribute('./B.JSON')).toBe(true)
+    expect(needsJsonAttribute('./q.json?v=1')).toBe(true)
+    expect(needsJsonAttribute('./q.json#frag')).toBe(true)
+  })
+
+  // Not JSON to Node either way, so the attribute would not help.
+  it('is false for .json5', () => {
+    expect(needsJsonAttribute('./tsconfig.json5')).toBe(false)
   })
 
   // The behaviour that motivates the flag. If a future Node makes the attribute
