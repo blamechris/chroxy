@@ -29,7 +29,7 @@ function check(name, cond) {
 // Build a throwaway repo with a base commit and a head commit whose diff we
 // control, so the content-detection half is exercised for real rather than
 // stubbed.
-function makeRepo({ rootVersionFrom, rootVersionTo, changelogHeading, otherChange }) {
+function makeRepo({ rootVersionFrom, rootVersionTo, changelogHeading, otherChange, headSubject, extraCommit }) {
   const dir = mkdtempSync(join(tmpdir(), 'relsubj-'))
   const git = (...a) => execFileSync('git', a, { cwd: dir, encoding: 'utf8' })
   git('init', '-q', '-b', 'main')
@@ -58,7 +58,9 @@ function makeRepo({ rootVersionFrom, rootVersionTo, changelogHeading, otherChang
   // --allow-empty: some fixtures deliberately change nothing (the "ordinary PR"
   // cases), and a fixture builder that throws on those would silently remove
   // the negative controls.
-  git('commit', '-q', '--allow-empty', '-m', 'head')
+  git('commit', '-q', '--allow-empty', '-m', headSubject || 'head')
+  // A second commit flips GitHub from the commit subject to the PR title.
+  if (extraCommit) git('commit', '-q', '--allow-empty', '-m', extraCommit)
   return { dir, base, cleanup: () => rmSync(dir, { recursive: true, force: true }) }
 }
 
@@ -70,28 +72,48 @@ function runGuard({ dir, base }, title, number) {
 }
 
 // --- release PRs -------------------------------------------------------------
+//
+// Each case gets its own repo with the commit subject matching the title under
+// test. That models a real single-commit release PR — #7180 was exactly this —
+// where GitHub squashes under the COMMIT subject, so both places carry the same
+// text and either one being wrong is the failure.
+const releaseRepo = (subject) => makeRepo({
+  rootVersionFrom: '0.10.0', rootVersionTo: '0.11.0', changelogHeading: '0.11.0',
+  headSubject: subject,
+})
 
 {
-  const repo = makeRepo({ rootVersionFrom: '0.10.0', rootVersionTo: '0.11.0', changelogHeading: '0.11.0' })
-
+  const repo = releaseRepo('chore(release): cut v0.11.0')
   const good = runGuard(repo, 'chore(release): cut v0.11.0', 7180)
   check('release PR with the correct subject passes', good.code === 0)
   check('  …and says the tag will fire', /will fire and push v0\.11\.0/.test(good.out))
+  check('the checked subject includes the (#N) squash suffix', /cut v0\.11\.0 \(#7180\)/.test(good.out))
+  repo.cleanup()
+}
 
+{
   // The real 0.10.0 subject. This is the regression this guard exists for.
+  const repo = releaseRepo('chore(release): 0.10.0 — codex controllable like Claude by default')
   const lost = runGuard(repo, 'chore(release): 0.10.0 — codex controllable like Claude by default', 6619)
   check('release PR with the real 0.10.0 subject FAILS', lost.code === 1)
   check('  …and names the auto-tag workflow', /auto-tag-on-release\.yml/.test(lost.out))
+  repo.cleanup()
+}
 
+{
   // The near-miss from #7180 before it was retitled.
-  const nearMiss = runGuard(repo, 'chore(cli): cut the 0.11.0 release', 7180)
-  check('release PR titled chore(cli) FAILS', nearMiss.code === 1)
+  const repo = releaseRepo('chore(cli): cut the 0.11.0 release')
+  check('release PR titled chore(cli) FAILS',
+    runGuard(repo, 'chore(cli): cut the 0.11.0 release', 7180).code === 1)
+  repo.cleanup()
+}
 
-  // Right shape, wrong scope — `cut v` is present but the subject does not
-  // start with it, so auto-tag's anchored parser will not match.
-  const notAnchored = runGuard(repo, 'fix: revert chore(release): cut v0.11.0', 7180)
-  check('subject where the pattern is not at line start FAILS', notAnchored.code === 1)
-
+{
+  // Right shape, wrong anchoring — `cut v` is present but not at line start, so
+  // auto-tag's anchored parser will not match.
+  const repo = releaseRepo('fix: revert chore(release): cut v0.11.0')
+  check('subject where the pattern is not at line start FAILS',
+    runGuard(repo, 'fix: revert chore(release): cut v0.11.0', 7180).code === 1)
   repo.cleanup()
 }
 
@@ -134,17 +156,6 @@ function runGuard({ dir, base }, title, number) {
   repo.cleanup()
 }
 
-// --- the (#N) suffix ---------------------------------------------------------
-//
-// The squash subject carries ` (#N)`. A guard that checks the bare title would
-// pass a subject the real merge then fails on, so the suffix is asserted.
-{
-  const repo = makeRepo({ rootVersionFrom: '0.10.0', rootVersionTo: '0.11.0' })
-  const r = runGuard(repo, 'chore(release): cut v0.11.0', 7180)
-  check('the checked subject includes the (#N) squash suffix', /cut v0\.11\.0 \(#7180\)/.test(r.out))
-  repo.cleanup()
-}
-
 // --- fail-closed on a broken base ref ---------------------------------------
 //
 // A shallow clone must not silently turn the guard into a no-op.
@@ -168,6 +179,51 @@ function runGuard({ dir, base }, title, number) {
   check('--title followed by another flag exits 2', raw(['--title', '--number', '5']).status === 2)
   check('an empty --title exits 2', raw(['--title', '   ']).status === 2)
   check('a missing --title exits 2', raw(['--base', 'HEAD~1']).status === 2)
+  repo.cleanup()
+}
+
+
+// --- squash subject source: commit vs PR title (#7193 review, Critical 1) -----
+//
+// This repo sets squash_merge_commit_title = COMMIT_OR_PR_TITLE, which GitHub
+// resolves to the COMMIT's subject for a single-commit PR and the PR title only
+// when there are 2+. #7180 — the real v0.11.0 release — was single-commit, so
+// this is the repo's actual pattern. Predicting from the PR title alone made
+// the guard pass a release that would not have tagged.
+{
+  // Single commit, PR title right, commit subject WRONG -> must FAIL.
+  const repo = makeRepo({
+    rootVersionFrom: '0.10.0', rootVersionTo: '0.11.0',
+    headSubject: 'wip: bump some versions',
+  })
+  const r = runGuard(repo, 'chore(release): cut v0.11.0', 7180)
+  check('single-commit PR with a good title but bad COMMIT subject FAILS', r.code === 1)
+  check('  …and checks the commit subject, not the title', /from the sole commit's subject/.test(r.out))
+  check('  …and says to amend the commit, not retitle', /amend the COMMIT message/.test(r.out))
+  repo.cleanup()
+}
+
+{
+  // Single commit, commit subject right, PR title wrong -> must PASS (the
+  // commit is what GitHub uses) but say the two differ.
+  const repo = makeRepo({
+    rootVersionFrom: '0.10.0', rootVersionTo: '0.11.0',
+    headSubject: 'chore(release): cut v0.11.0',
+  })
+  const r = runGuard(repo, 'some unrelated PR title', 7180)
+  check('single-commit PR with a good COMMIT subject passes', r.code === 0)
+  check('  …and flags that the title and commit differ', /the PR title and the commit subject differ/.test(r.out))
+  repo.cleanup()
+}
+
+{
+  // Two commits -> GitHub uses the PR title, so a bad commit subject is fine.
+  const repo = makeRepo({
+    rootVersionFrom: '0.10.0', rootVersionTo: '0.11.0',
+    headSubject: 'wip', extraCommit: 'fixup',
+  })
+  const r = runGuard(repo, 'chore(release): cut v0.11.0', 7180)
+  check('multi-commit PR is checked against the PR title', r.code === 0 && /from the PR title \(2 commits\)/.test(r.out))
   repo.cleanup()
 }
 

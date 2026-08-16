@@ -110,8 +110,48 @@ for (const r of reasons) console.log(`  - ${r}`)
 const AUTO_TAG_RE = /^chore\(release\): cut v\d+\.\d+\.\d+(\s|$)/
 const GUARD_SUBSTRING = 'chore(release): cut v' // auto-tag's `if:` contains() test
 
-const squashSubject = number ? `${title} (#${number})` : title
-console.log(`\nSquash-merge subject would be:\n  ${squashSubject}`)
+// Which subject GitHub actually uses depends on the commit count. This repo is
+// set to `squash_merge_commit_title: COMMIT_OR_PR_TITLE`, which per GitHub's
+// REST docs defaults to "the commit's title (if only one commit) or the pull
+// request's title (when more than one commit)".
+//
+// So predicting from --title alone is wrong for the SINGLE-COMMIT case — and
+// that is this repo's actual release pattern, not an edge case: #7180, the real
+// v0.11.0 release, was a single-commit PR. It tagged correctly only because its
+// commit message and PR title happened to be identical. Nothing enforced that,
+// and a guard that checked only the PR title would have called a mismatched
+// pair "OK" and then watched the tag job not run — the precise failure this
+// exists to prevent.
+let commitSubjects = []
+try {
+  commitSubjects = git('log', '--format=%s', `${base}..${head}`).split('\n').filter(Boolean)
+} catch {
+  console.error(`Error: could not list commits in ${base}..${head}.`)
+  process.exit(2)
+}
+
+let subjectSource
+let baseSubject
+if (commitSubjects.length === 1) {
+  subjectSource = "the sole commit's subject (GitHub uses it for single-commit squashes)"
+  baseSubject = commitSubjects[0]
+} else {
+  subjectSource = `the PR title (${commitSubjects.length} commits)`
+  baseSubject = title
+}
+
+const squashSubject = number ? `${baseSubject} (#${number})` : baseSubject
+console.log(`\nSquash-merge subject would be — from ${subjectSource}:\n  ${squashSubject}`)
+
+// A single-commit PR whose two subjects disagree is a live footgun even when
+// the one that counts is correct: editing either, or pushing a second commit,
+// silently swaps which one GitHub uses.
+if (commitSubjects.length === 1 && commitSubjects[0] !== title) {
+  console.log(`\nNote: the PR title and the commit subject differ.`)
+  console.log(`  PR title:       ${title}`)
+  console.log(`  commit subject: ${commitSubjects[0]}`)
+  console.log(`  GitHub squashes single-commit PRs under the COMMIT subject, so that is what is checked.`)
+}
 
 const matchesParser = AUTO_TAG_RE.test(squashSubject)
 const matchesGuard = squashSubject.includes(GUARD_SUBSTRING)
@@ -133,9 +173,23 @@ If this merges as-is, the tag job silently does not run: no tag, no GitHub
 release, no Docker or desktop artifacts — and a green check mark. That is
 exactly how 0.10.0 was lost (#7176) and #4627 before it.
 
-Fix: retitle the PR to
+Fix: ${
+  commitSubjects.length === 1
+    ? `amend the COMMIT message to
 
   chore(release): cut vX.Y.Z
+
+  Retitling the PR is NOT enough here. This PR has one commit, and GitHub
+  squashes single-commit PRs under the commit's own subject
+  (squash_merge_commit_title = COMMIT_OR_PR_TITLE). Keep the PR title in
+  sync too, since pushing a second commit would swap which one is used.`
+    : `retitle the PR to
+
+  chore(release): cut vX.Y.Z
+
+  This PR has ${commitSubjects.length} commits, so GitHub squashes under the
+  PR title.`
+}
 
 If this is genuinely NOT a release PR, it changed the root package.json version
 or promoted a CHANGELOG version heading, which is what release PRs do — say so
