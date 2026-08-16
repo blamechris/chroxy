@@ -15,7 +15,7 @@ import { spawn as nodeSpawn } from 'node:child_process'
 import { timingSafeEqual, randomUUID } from 'node:crypto'
 import { readFileSync, realpathSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { Transform } from 'node:stream'
 import { WebSocketServer } from 'ws'
 
@@ -1279,7 +1279,11 @@ export class PodAgent {
 // comparison also breaks on any relative invocation (`node ./agent.js`).
 // This is a standalone in-pod bundle with its own package.json, so it cannot
 // import packages/server/src/utils/is-entry-point.js — duplicated on purpose
-// (#7213).
+// (#7213). The body below runs the same code as that file and as
+// scripts/lib/is-entry-point.mjs — inlined as an IIFE, so it reads
+// `import.meta.url` directly rather than taking it as a parameter. The drift
+// gate in scripts/__tests__/is-entry-point.test.mjs compares all three with
+// comments stripped and fails if they diverge; change one, change all (#7222).
 const invokedDirectly = (() => {
   if (!process.argv[1]) return false
   // The plain comparison runs first and is conclusive on its own: identical
@@ -1292,16 +1296,35 @@ const invokedDirectly = (() => {
   const self = fileURLToPath(import.meta.url)
   const invoked = resolve(process.argv[1])
   if (self === invoked) return true
+  const failures = []
   const real = (p) => {
     try {
       return realpathSync(p)
-    } catch {
+    } catch (err) {
+      failures.push({ path: p, code: err.code || err.message })
       return null
     }
   }
   const realSelf = real(self)
   const realInvoked = real(invoked)
-  return realSelf !== null && realSelf === realInvoked
+  if (realSelf !== null && realInvoked !== null) return realSelf === realInvoked
+
+  // Undecidable, but not silent (#7226): in a pod, an agent that starts and
+  // does nothing is indistinguishable from one that is merely idle, so the
+  // reason has to reach the container log. Only the genuinely UNKNOWN case
+  // warrants it — see the twin in packages/server/src/utils/is-entry-point.js
+  // for why `self` and `invoked` are not symmetric here.
+  const unknowable = realSelf === null ||
+    failures.some(({ code }) => code !== 'ENOENT' && code !== 'ENOTDIR')
+  if (unknowable) {
+    const why = failures.map(({ path, code }) => `${path}: ${code}`).join('; ')
+    console.warn(
+      `[is-entry-point] ${basename(self)}: cannot determine whether this module was run ` +
+      `directly — realpath failed (${why}). Assuming it was imported, so its command-line ` +
+      'behaviour did NOT run. If you invoked it directly, it did nothing.',
+    )
+  }
+  return false
 })()
 
 if (invokedDirectly) {

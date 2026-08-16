@@ -10,7 +10,7 @@
 // restores it afterwards.
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -48,6 +48,21 @@ const withArgv1 = (value, fn) => {
     return fn()
   } finally {
     process.argv[1] = saved
+  }
+}
+
+// The #7226 warning is captured rather than left to scroll past: a test that
+// only checked the boolean would pass identically whether the diagnostic was
+// printed or not, which is the same "assert the observable, not the intent"
+// reasoning as the rest of this file.
+const capturingWarnings = (fn) => {
+  const saved = console.warn
+  const lines = []
+  console.warn = (...args) => lines.push(args.join(' '))
+  try {
+    return { value: fn(), lines }
+  } finally {
+    console.warn = saved
   }
 }
 
@@ -121,5 +136,80 @@ describe('isEntryPoint', () => {
     } finally {
       process.chdir(saved)
     }
+  })
+
+  // --- #7226: undecidable must not also mean silent -------------------------
+  //
+  // `false` stays the right answer when the paths differ and cannot be
+  // resolved — but returning it without a word is the property that made #7198
+  // and #7214 expensive to find. These cases mirror
+  // scripts/__tests__/is-entry-point.test.mjs, which pins the scripts/ copy of
+  // this same guard; keep the two tables in step (#7222).
+  describe('the undecidable case warns (#7226)', () => {
+    it('warns when it returns false because realpath failed', () => {
+      const { value, lines } = capturingWarnings(() =>
+        withArgv1(join(dir, 'nowhere', 'a.js'), () =>
+          isEntryPoint(pathToFileURL(join(dir, 'nowhere', 'b.js')).href)))
+      assert.equal(value, false, 'undecidable must still answer false')
+      assert.equal(lines.length, 1, `expected exactly one warning, got ${JSON.stringify(lines)}`)
+      assert.match(lines[0], /\[is-entry-point]/)
+      assert.match(lines[0], /b\.js/)
+      // The reason, not just the fact: a bare "could not determine" sends the
+      // reader back to reproducing it; the errno says which path broke and how.
+      assert.match(lines[0], /ENOENT|EACCES/)
+    })
+
+    // The other half of the acceptance criteria, and the one that keeps this
+    // from becoming noise. `self` and `invoked` are not symmetric: argv[1]
+    // pointing at a file that does not exist is a DECIDED false (it cannot be
+    // the module we were loaded from), and it is also what every ordinary
+    // import looks like. Warning there would fire on every guarded import in
+    // the suite and the real signal would stop being read.
+    it('stays silent for the ordinary imported-not-run false', () => {
+      const { value, lines } = capturingWarnings(() =>
+        withArgv1(join(realDir, 'other.js'), () =>
+          isEntryPoint(pathToFileURL(realScript).href)))
+      assert.equal(value, false)
+      assert.deepEqual(lines, [], 'an imported module must not warn')
+    })
+
+    it('stays silent when there is no invoked script (node -e, REPL)', () => {
+      const { value, lines } = capturingWarnings(() =>
+        withArgv1(undefined, () => isEntryPoint(pathToFileURL(realScript).href)))
+      assert.equal(value, false)
+      assert.deepEqual(lines, [])
+    })
+
+    it('stays silent on the happy path', () => {
+      const { value, lines } = capturingWarnings(() =>
+        withArgv1(realScript, () => isEntryPoint(pathToFileURL(realScript).href)))
+      assert.equal(value, true)
+      assert.deepEqual(lines, [])
+    })
+
+    // The boundary between the two cases above, and the only one that tells
+    // "argv[1] is absent" apart from "the filesystem refused to say". Both
+    // answer false; only this one is unknowable, because an unreadable path
+    // could still be a symlink to this very module. Without it, collapsing the
+    // rule back to "warn on any realpath failure" would pass every other test.
+    //
+    // chmod 0000 does not deny root, so this would exercise nothing as root.
+    const asRoot = typeof process.getuid === 'function' && process.getuid() === 0
+    it('warns when argv[1] is UNREADABLE rather than absent', { skip: asRoot && 'running as root' }, () => {
+      const locked = join(dir, 'locked')
+      mkdirSync(locked, { recursive: true })
+      writeFileSync(join(locked, 'entry.js'), '\n')
+      chmodSync(locked, 0o000)
+      try {
+        const { value, lines } = capturingWarnings(() =>
+          withArgv1(join(locked, 'entry.js'), () =>
+            isEntryPoint(pathToFileURL(realScript).href)))
+        assert.equal(value, false)
+        assert.equal(lines.length, 1, `EACCES is unknowable, not decided: ${JSON.stringify(lines)}`)
+        assert.match(lines[0], /EACCES/)
+      } finally {
+        chmodSync(locked, 0o755)
+      }
+    })
   })
 })

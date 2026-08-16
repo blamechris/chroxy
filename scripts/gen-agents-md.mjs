@@ -12,9 +12,11 @@
 // Keeping CLAUDE.md as the ONE source and generating AGENTS.md means the two can
 // never drift and a convention can never be silently dropped from the mirror.
 
-import { readFileSync, writeFileSync, realpathSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, join } from 'node:path'
+
+import { isEntryPoint } from './lib/is-entry-point.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const CLAUDE_PATH = join(ROOT, 'CLAUDE.md')
@@ -63,46 +65,18 @@ export function readAgentsMd() {
 
 // Only run the CLI side-effects when invoked directly (not when imported by tests).
 //
-// Both sides are realpath'd, not just `resolve`d. Node's ESM loader resolves
-// symlinks in `import.meta.url`, but `process.argv[1]` is left exactly as the
-// caller typed it, and `resolve()` does not follow symlinks — so on macOS,
-// where /tmp is a symlink to /private/tmp, invoking this as
-// `node /tmp/…/gen-agents-md.mjs` gave '/private/tmp/…' on one side and
-// '/tmp/…' on the other. The guard was false, the CLI branch never ran, and
-// the script exited 0 having done nothing (#7198).
+// The guard lives in scripts/lib/is-entry-point.mjs — this file used to carry
+// its own copy of the same realpath comparison, and so did
+// compile-skill-targets.mjs, which is the "one bug, N copies" shape #7213 was
+// filed to remove, recreated one directory down (#7222).
 //
-// That silence is the dangerous part: bump-version.sh calls this and trusts
-// the exit code, so a release could regenerate nothing and still report
-// success — the same shape as every other guard-that-quietly-no-ops fixed
-// this cycle. realpathSync is wrapped because argv[1] need not exist (an
-// `-e` eval, a deleted script); an unresolvable path simply is not this file.
-const invokedDirectly = (() => {
-  if (!process.argv[1]) return false
-  // The plain comparison runs first and is conclusive on its own: identical
-  // paths mean this IS the entry point, decided without touching the
-  // filesystem. Consulting realpath first and reading a failure as false let an
-  // EACCES on a parent directory (or a script unlinked after launch) turn a
-  // direct run into a silent exit-0 no-op — the same shape as #7198, reached
-  // through a different trigger (#7214). Realpath is only needed once the paths
-  // differ, where a symlink is the only thing that still makes them one file —
-  // the same wording as the canonical copy in
-  // packages/server/src/utils/is-entry-point.js, deliberately.
-  const self = fileURLToPath(import.meta.url)
-  const argv = resolve(process.argv[1])
-  if (self === argv) return true
-  const realpathOrNull = (p) => {
-    try {
-      return realpathSync(p)
-    } catch {
-      return null
-    }
-  }
-  const realSelf = realpathOrNull(self)
-  const realArgv = realpathOrNull(argv)
-  return realSelf !== null && realSelf === realArgv
-})()
-
-if (invokedDirectly) {
+// Why the guard is not a one-liner, in short: Node's ESM loader resolves
+// symlinks in `import.meta.url` but leaves argv[1] as the caller typed it, so
+// invoking this through /tmp on macOS compared '/private/tmp/…' against
+// '/tmp/…', read false, and exited 0 having regenerated NOTHING (#7198). That
+// silence is the dangerous part — bump-version.sh calls this during a release
+// and cannot see the difference between "in sync" and "never ran".
+if (isEntryPoint(import.meta.url)) {
   const expected = renderAgentsMd(readClaudeMd())
   if (process.argv.includes('--check')) {
     if (readAgentsMd() !== expected) {

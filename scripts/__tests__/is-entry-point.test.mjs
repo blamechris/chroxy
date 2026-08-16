@@ -1,0 +1,310 @@
+#!/usr/bin/env node
+/**
+ * is-entry-point.test.mjs — pins scripts/lib/is-entry-point.mjs (#7222, #7226).
+ *
+ * The guard's failure mode is SILENCE: it returns false, the CLI branch never
+ * runs, and the process exits 0. Nothing observable distinguishes that from a
+ * clean no-op, which is how the bug survived in four files (#7198, #7213,
+ * #7214). So every case here asserts the boolean directly rather than any
+ * downstream side effect.
+ *
+ * The case table below is deliberately the same one as
+ * packages/server/tests/is-entry-point.test.js. That file cannot be shared —
+ * `scripts/` is outside every workspace package and imports nothing from
+ * `packages/*​/src` — so the two copies of the guard are held equal by testing
+ * both against equivalent tables rather than by a single import. If you add a
+ * case to one, add it to the other.
+ *
+ * `process.argv[1]` is read at call time, which is what makes these tests
+ * possible in-process: each one points argv[1] at a path it controls and
+ * restores it afterwards.
+ *
+ * No external test framework. Run from repo root:
+ *   node scripts/__tests__/is-entry-point.test.mjs
+ */
+
+import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+
+import { isEntryPoint } from '../lib/is-entry-point.mjs'
+
+const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
+
+let pass = 0
+let fail = 0
+const failures = []
+
+const test = (name, fn) => {
+  try {
+    fn()
+    pass++
+    process.stdout.write(`  ok ${name}\n`)
+  } catch (err) {
+    fail++
+    failures.push({ name, err })
+    process.stdout.write(`  FAIL ${name}: ${err.message}\n`)
+  }
+}
+
+const assert = (cond, msg) => {
+  if (!cond) throw new Error(msg || 'assertion failed')
+}
+
+// The base is deliberately NOT realpath'd. On macOS os.tmpdir() is under /var,
+// itself a symlink to /private/var — so these paths carry a real unresolved
+// symlink, the same shape as the /tmp case that started this.
+const dir = mkdtempSync(join(tmpdir(), 'chroxy-entry-'))
+const realDir = join(dir, 'real')
+const linkDir = join(dir, 'link')
+mkdirSync(realDir)
+const realScript = join(realDir, 'probe.js')
+writeFileSync(realScript, 'export const x = 1\n')
+symlinkSync(realDir, linkDir, 'dir')
+const linkedScript = join(linkDir, 'probe.js')
+
+const withArgv1 = (value, fn) => {
+  const saved = process.argv[1]
+  process.argv[1] = value
+  try {
+    return fn()
+  } finally {
+    process.argv[1] = saved
+  }
+}
+
+// The warning is the whole point of #7226, so it is captured rather than left
+// to scroll past: a test that only checked the boolean would pass identically
+// whether the diagnostic was printed or not.
+const capturingWarnings = (fn) => {
+  const saved = console.warn
+  const lines = []
+  console.warn = (...args) => lines.push(args.join(' '))
+  try {
+    return { value: fn(), lines }
+  } finally {
+    console.warn = saved
+  }
+}
+
+try {
+  test('is true when the module IS the invoked script', () => {
+    withArgv1(realScript, () => {
+      assert(isEntryPoint(pathToFileURL(realScript).href) === true)
+    })
+  })
+
+  test('is false when the module is merely imported', () => {
+    withArgv1(join(realDir, 'other.js'), () => {
+      assert(isEntryPoint(pathToFileURL(realScript).href) === false)
+    })
+  })
+
+  // The original bug (#7198). Node's ESM loader resolves symlinks in
+  // import.meta.url; argv[1] is whatever the caller typed. Every hand-rolled
+  // guard compared one against the other and read false.
+  test('is true when invoked through a symlinked directory', () => {
+    withArgv1(linkedScript, () => {
+      assert(isEntryPoint(pathToFileURL(realScript).href) === true)
+    })
+  })
+
+  test('is true when import.meta.url is the symlinked side', () => {
+    withArgv1(realScript, () => {
+      assert(isEntryPoint(pathToFileURL(linkedScript).href) === true)
+    })
+  })
+
+  // The #7217 review finding, and the reason the plain comparison runs first.
+  // A path that cannot be realpath'd stands in for the EACCES / unlinked-script
+  // cases that are not portable to construct: ENOENT takes the identical branch.
+  //
+  // Mutation check: put the realpath comparison back in front of the plain one
+  // and this is the assertion that goes red.
+  test("is true for identical paths even when they cannot be realpath'd", () => {
+    const ghost = join(dir, 'does-not-exist', 'probe.js')
+    withArgv1(ghost, () => {
+      assert(isEntryPoint(pathToFileURL(ghost).href) === true)
+    })
+  })
+
+  // Negative control for the case above: the un-realpath-able path must not
+  // become a blanket "true", or the assertion above would pass for the wrong
+  // reason.
+  test("is false for DIFFERING paths that cannot be realpath'd", () => {
+    withArgv1(join(dir, 'nowhere', 'a.js'), () => {
+      assert(isEntryPoint(pathToFileURL(join(dir, 'nowhere', 'b.js')).href) === false)
+    })
+  })
+
+  test('is false when there is no invoked script (node -e, REPL)', () => {
+    withArgv1(undefined, () => {
+      assert(isEntryPoint(pathToFileURL(realScript).href) === false)
+    })
+  })
+
+  test('resolves a relative argv[1] before comparing', () => {
+    const saved = process.cwd()
+    process.chdir(realDir)
+    try {
+      withArgv1('./probe.js', () => {
+        assert(isEntryPoint(pathToFileURL(realScript).href) === true)
+      })
+    } finally {
+      process.chdir(saved)
+    }
+  })
+
+  // --- #7226: undecidable must not also mean silent ------------------------
+  //
+  // "Undecidable" is the honest answer for differing paths that cannot be
+  // realpath'd, and `false` stays the right return. What was wrong was that
+  // nothing was printed: a human running the script directly saw an exit-0
+  // no-op with no output, which is the property that made #7198 and #7214
+  // expensive to find.
+  test('warns when it returns false because realpath FAILED (#7226)', () => {
+    const { value, lines } = capturingWarnings(() =>
+      withArgv1(join(dir, 'nowhere', 'a.js'), () =>
+        isEntryPoint(pathToFileURL(join(dir, 'nowhere', 'b.js')).href)))
+    assert(value === false, 'undecidable must still answer false')
+    assert(lines.length === 1, `expected exactly one warning, got ${lines.length}: ${JSON.stringify(lines)}`)
+    assert(lines[0].includes('[is-entry-point]'), 'warning must be attributable to this guard')
+    assert(lines[0].includes('b.js'), "warning must name the module that could not decide")
+    // The reason, not just the fact. A bare "could not determine" sends the
+    // reader back to reproducing it; the errno says which path broke and how.
+    assert(/ENOENT|EACCES/.test(lines[0]), `warning must carry the realpath errno: ${lines[0]}`)
+  })
+
+  // The other half of the acceptance criteria, and the one that keeps this
+  // from becoming noise: the ORDINARY false — "this module was imported" —
+  // must stay quiet, or every test run that imports a guarded module prints a
+  // spurious warning and the real one stops being noticed.
+  test('stays SILENT for the ordinary imported-not-run false (#7226)', () => {
+    const { value, lines } = capturingWarnings(() =>
+      withArgv1(join(realDir, 'other.js'), () =>
+        isEntryPoint(pathToFileURL(realScript).href)))
+    assert(value === false)
+    assert(lines.length === 0, `imported-module case must not warn, got: ${JSON.stringify(lines)}`)
+  })
+
+  // The boundary of the rule above, and the only case that distinguishes
+  // "argv[1] does not exist" from "the filesystem refused to say". Both make
+  // realpath return null and both answer false; only this one is UNKNOWABLE,
+  // because an unreadable path could still be a symlink to this very module.
+  // Without this case the ENOENT/EACCES split is asserted in only one
+  // direction, and collapsing it back to "warn on any failure" would go
+  // undetected by every other test here.
+  //
+  // chmod 0000 does not deny root, so as root this would exercise nothing.
+  // Skipped rather than silently weakened.
+  if (typeof process.getuid === 'function' && process.getuid() === 0) {
+    process.stdout.write('  skip warns when argv[1] is unreadable rather than absent (#7226): running as root\n')
+  } else {
+    test('warns when argv[1] is UNREADABLE rather than absent (#7226)', () => {
+      const locked = join(dir, 'locked')
+      mkdirSync(locked)
+      writeFileSync(join(locked, 'entry.js'), '\n')
+      chmodSync(locked, 0o000)
+      try {
+        const { value, lines } = capturingWarnings(() =>
+          withArgv1(join(locked, 'entry.js'), () =>
+            isEntryPoint(pathToFileURL(realScript).href)))
+        assert(value === false)
+        assert(lines.length === 1, `EACCES on argv[1] is unknowable, not decided: ${JSON.stringify(lines)}`)
+        assert(/EACCES/.test(lines[0]), `warning must carry the errno: ${lines[0]}`)
+      } finally {
+        chmodSync(locked, 0o755)
+      }
+    })
+  }
+
+  test('stays SILENT when there is no invoked script at all (#7226)', () => {
+    const { value, lines } = capturingWarnings(() =>
+      withArgv1(undefined, () => isEntryPoint(pathToFileURL(realScript).href)))
+    assert(value === false)
+    assert(lines.length === 0, `node -e / REPL must not warn, got: ${JSON.stringify(lines)}`)
+  })
+
+  test('stays SILENT on the happy path (#7226)', () => {
+    const { value, lines } = capturingWarnings(() =>
+      withArgv1(realScript, () => isEntryPoint(pathToFileURL(realScript).href)))
+    assert(value === true)
+    assert(lines.length === 0, `direct invocation must not warn, got: ${JSON.stringify(lines)}`)
+  })
+
+  // --- #7222: the drift gate ------------------------------------------------
+  //
+  // This guard exists in three places and cannot be reduced to one. `scripts/`
+  // imports nothing from `packages/*​/src`, and sidecar/agent.js ships as a
+  // standalone in-pod bundle whose Dockerfile COPYs only agent.js and its
+  // package.json — so neither can import the other.
+  //
+  // "Keep them in sync by hand" is exactly the arrangement that produced #7198:
+  // one guard was fixed, three were not, and nothing said so because the
+  // failure mode is silence. Comments asking the next person to remember do not
+  // fail a build. This does.
+  //
+  // Comments are stripped before comparing because they legitimately differ —
+  // the sidecar's talk about pods — and `import.meta.url` is normalised to the
+  // parameter name because the sidecar is an inline IIFE rather than a function
+  // taking the URL as an argument. Everything else must match exactly.
+  const GUARD_COPIES = [
+    'scripts/lib/is-entry-point.mjs',
+    'packages/server/src/utils/is-entry-point.js',
+    'packages/server/sidecar/agent.js',
+  ]
+
+  const extractGuard = (relPath) => {
+    const lines = readFileSync(join(REPO, relPath), 'utf8').split('\n')
+    const start = lines.findIndex((l) => l.includes('if (!process.argv[1]) return false'))
+    if (start === -1) throw new Error(`${relPath}: could not find the start of the guard`)
+    const end = lines.indexOf('  return false', start)
+    if (end === -1) throw new Error(`${relPath}: could not find the end of the guard`)
+    return lines
+      .slice(start, end + 1)
+      .map((l) => l.replace(/\s+$/, ''))
+      .filter((l) => l.trim() !== '' && !l.trim().startsWith('//'))
+      .join('\n')
+      .replace(/import\.meta\.url/g, 'importMetaUrl')
+  }
+
+  // Positive control. Every assertion below compares extracted text, so an
+  // extraction that silently returned '' — a renamed variable, a reformatted
+  // line, a moved guard — would make all three compare equal and the gate would
+  // report success having compared nothing. That is the same vacuous-pass shape
+  // the rest of this file is written against, so prove the extraction found
+  // real code before trusting any comparison of it.
+  test('the guard extraction finds real code in every copy (positive control)', () => {
+    for (const relPath of GUARD_COPIES) {
+      const body = extractGuard(relPath)
+      const count = body.split('\n').length
+      assert(count >= 20, `${relPath}: extracted only ${count} line(s) — the gate below would be vacuous`)
+      assert(body.includes('realpathSync'), `${relPath}: extract is missing the realpath call`)
+      assert(body.includes('unknowable'), `${relPath}: extract is missing the #7226 decision`)
+    }
+  })
+
+  test('all three copies of the guard are identical (#7222 drift gate)', () => {
+    const [reference, ...rest] = GUARD_COPIES.map((p) => [p, extractGuard(p)])
+    for (const [relPath, body] of rest) {
+      assert(
+        body === reference[1],
+        `${relPath} has drifted from ${reference[0]}.\n` +
+        'These three copies must stay in step — see the header of scripts/lib/is-entry-point.mjs.\n' +
+        `--- ${reference[0]}\n${reference[1]}\n--- ${relPath}\n${body}`,
+      )
+    }
+  })
+} finally {
+  rmSync(dir, { recursive: true, force: true })
+}
+
+process.stdout.write(`\n${pass} passed, ${fail} failed\n`)
+if (fail > 0) {
+  for (const f of failures) {
+    process.stderr.write(`\n[FAIL] ${f.name}\n${f.err.stack || f.err.message}\n`)
+  }
+  process.exit(1)
+}
+process.exit(0)

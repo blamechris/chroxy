@@ -20,8 +20,22 @@ import { fileURLToPath } from 'node:url'
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 const scriptPath = resolve(__dirname, '..', 'gen-agents-md.mjs')
+const libDir = resolve(__dirname, '..', 'lib')
 
 const { renderAgentsMd, readClaudeMd, readAgentsMd } = await import(scriptPath)
+
+// The subprocess fixtures below run the generator out of a temp tree, so they
+// have to stage everything it imports, not just the file itself. Copying the
+// whole scripts/lib directory rather than naming is-entry-point.mjs means the
+// next sibling helper is staged automatically — when the entry-point guard was
+// extracted there (#7222), a fixture that copied only gen-agents-md.mjs failed
+// with ERR_MODULE_NOT_FOUND, and a fixture that hardcodes one filename would
+// fail the same way on the next extraction.
+const stageGenerator = (scriptsDir) => {
+  mkdirSync(scriptsDir, { recursive: true })
+  cpSync(scriptPath, join(scriptsDir, 'gen-agents-md.mjs'))
+  cpSync(libDir, join(scriptsDir, 'lib'), { recursive: true })
+}
 
 let pass = 0
 let fail = 0
@@ -87,10 +101,9 @@ await test('runs through a symlinked invocation path (#7198)', async () => {
     // relative to its own parent directory, i.e. the repo root.
     const root = join(dir, 'root')
     const link = join(dir, 'link')
-    mkdirSync(join(root, 'scripts'), { recursive: true })
+    stageGenerator(join(root, 'scripts'))
     symlinkSync(root, link)
 
-    cpSync(scriptPath, join(root, 'scripts', 'gen-agents-md.mjs'))
     cpSync(resolve(__dirname, '..', '..', 'CLAUDE.md'), join(root, 'CLAUDE.md'))
     writeFileSync(join(root, 'AGENTS.md'), 'STALE\n')
 
@@ -121,16 +134,30 @@ await test('runs through a symlinked invocation path (#7198)', async () => {
 // read the script and BEFORE the module body evaluates, which is where the
 // guard runs. A `module.register` load hook sits exactly in that window: node
 // only has to LOAD the file, not keep it readable afterwards.
+//
+// "After node has read the script" means after it has read the WHOLE GRAPH,
+// not just the entry file — and that distinction became load-bearing when the
+// guard moved to scripts/lib/is-entry-point.mjs (#7222). Node links the graph
+// before evaluating any of it, so a hook that chmods the scripts directory on
+// the load of gen-agents-md.mjs fires while its `./lib/…` import is still
+// unresolved: the import then dies with EACCES and node exits 1 on the
+// uncaught error. That still satisfied a bare `status === 1`, so this test
+// went on passing while testing nothing — the vacuous-pass shape the positive
+// control below exists to catch, arriving through a door the control did not
+// cover. Hence both changes here: break on the LAST module in the graph, and
+// assert the drift MESSAGE rather than just the exit code, so a crash can
+// never again be mistaken for a detection.
 const HOOKS = `
 import { unlinkSync, chmodSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { dirname } from 'node:path'
 export async function load (url, context, nextLoad) {
   const result = await nextLoad(url, context)
-  if (url.endsWith('/gen-agents-md.mjs')) {
-    const p = fileURLToPath(url)
-    if (process.env.CHROXY_BREAK === 'unlink') unlinkSync(p)
-    else if (process.env.CHROXY_BREAK === 'eacces') chmodSync(dirname(p), 0o000)
+  // BREAK_ON is the last module the entry script pulls in, so every import has
+  // resolved by the time this fires; BREAK_DIR is passed in rather than derived
+  // from the module path, so the hook does not encode the staged layout.
+  if (url.endsWith(process.env.CHROXY_BREAK_ON)) {
+    if (process.env.CHROXY_BREAK === 'unlink') unlinkSync(process.env.CHROXY_BREAK_FILE)
+    else if (process.env.CHROXY_BREAK === 'eacces') chmodSync(process.env.CHROXY_BREAK_DIR, 0o000)
   }
   return result
 }
@@ -148,8 +175,7 @@ const withBrokenRealpath = (breakMode, fn) => {
   const dir = mkdtempSync(join(realpathSync(tmpdir()), 'genagents-7214-'))
   const scriptsDir = join(dir, 'root', 'scripts')
   try {
-    mkdirSync(scriptsDir, { recursive: true })
-    cpSync(scriptPath, join(scriptsDir, 'gen-agents-md.mjs'))
+    stageGenerator(scriptsDir)
     cpSync(resolve(__dirname, '..', '..', 'CLAUDE.md'), join(dir, 'root', 'CLAUDE.md'))
     writeFileSync(join(dir, 'root', 'AGENTS.md'), 'STALE\n')
     writeFileSync(join(dir, 'hooks.mjs'), HOOKS)
@@ -157,12 +183,37 @@ const withBrokenRealpath = (breakMode, fn) => {
     fn(spawnSync(
       process.execPath,
       ['--import', join(dir, 'register.mjs'), join(scriptsDir, 'gen-agents-md.mjs'), '--check'],
-      { encoding: 'utf8', env: { ...process.env, CHROXY_BREAK: breakMode } },
+      {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          CHROXY_BREAK: breakMode,
+          CHROXY_BREAK_ON: '/lib/is-entry-point.mjs',
+          CHROXY_BREAK_FILE: join(scriptsDir, 'gen-agents-md.mjs'),
+          CHROXY_BREAK_DIR: scriptsDir,
+        },
+      },
     ))
   } finally {
     chmodSync(scriptsDir, 0o755)
     rmSync(dir, { recursive: true, force: true })
   }
+}
+
+// Both #7214 cases assert on this, not on the exit code alone. `node` exits 1
+// for an uncaught module-load error too, so `status === 1` cannot distinguish
+// "the guard held and --check reported drift" from "the script never ran".
+// Requiring the generator's own message means only the first satisfies it.
+const DRIFT_MESSAGE = '::error::AGENTS.md is out of sync with CLAUDE.md'
+const assertDetectedDrift = (run) => {
+  assert(
+    run.status === 1,
+    `--check must exit 1 on drift; got ${run.status} (0 = the silent no-op this guards)\n${run.stderr}`,
+  )
+  assert(
+    run.stderr.includes(DRIFT_MESSAGE),
+    `exit 1 came from something other than drift detection — the generator never ran.\n${run.stderr}`,
+  )
 }
 
 // Positive control for the two tests below. If the hook does NOT actually break
@@ -177,11 +228,17 @@ await test('the load hook genuinely breaks realpath (positive control)', async (
   try {
     const probe = join(dir, 'probe.mjs')
     writeFileSync(probe, 'process.exit(0)\n')
-    writeFileSync(join(dir, 'hooks.mjs'), HOOKS.replace(/gen-agents-md\.mjs/g, 'probe.mjs'))
+    writeFileSync(join(dir, 'hooks.mjs'), HOOKS)
     writeFileSync(join(dir, 'register.mjs'), REGISTER)
     spawnSync(process.execPath, ['--import', join(dir, 'register.mjs'), probe], {
       encoding: 'utf8',
-      env: { ...process.env, CHROXY_BREAK: 'unlink' },
+      env: {
+        ...process.env,
+        CHROXY_BREAK: 'unlink',
+        CHROXY_BREAK_ON: '/probe.mjs',
+        CHROXY_BREAK_FILE: probe,
+        CHROXY_BREAK_DIR: dir,
+      },
     })
     let threw = false
     try {
@@ -196,8 +253,7 @@ await test('the load hook genuinely breaks realpath (positive control)', async (
 })
 
 await test('--check detects drift when the script is unlinked after launch (#7214)', async () => {
-  withBrokenRealpath('unlink', (run) =>
-    assert(run.status === 1, `--check must exit 1 on drift; got ${run.status} (0 = the silent no-op this guards)`))
+  withBrokenRealpath('unlink', assertDetectedDrift)
 })
 
 // chmod 0000 does not deny root, so as root realpath would succeed and this
@@ -207,8 +263,81 @@ if (typeof process.getuid === 'function' && process.getuid() === 0) {
   process.stdout.write('  skip --check detects drift when realpath fails with EACCES (#7214): running as root\n')
 } else {
   await test('--check detects drift when realpath fails with EACCES (#7214)', async () => {
-    withBrokenRealpath('eacces', (run) =>
-      assert(run.status === 1, `--check must exit 1 on drift; got ${run.status} (0 = the silent no-op this guards)`))
+    withBrokenRealpath('eacces', assertDetectedDrift)
+  })
+}
+
+// --- #7226: the residual undecidable case must say so ----------------------
+//
+// Everything above pins a case the guard can DECIDE. This is the one it
+// cannot: a direct invocation through a symlink whose realpath ALSO fails.
+// #7224 named it honestly as the residual, and `false` remains the only
+// defensible answer — whether a symlink still joins the two paths is not
+// knowable without the call that just failed.
+//
+// What was wrong was that it was also SILENT. The generator exited 0, wrote
+// nothing, and printed nothing; bump-version.sh calls this during a release and
+// could not tell that apart from success. So this test asserts the shape that
+// remains — still exit 0, still no regeneration — AND that the reason now
+// reaches stderr. It is the only test here that expects a no-op, which is
+// exactly why it has to prove the no-op announced itself.
+if (typeof process.getuid === 'function' && process.getuid() === 0) {
+  process.stdout.write('  skip the undecidable case warns instead of silently no-opping (#7226): running as root\n')
+} else {
+  await test('the undecidable case warns instead of silently no-opping (#7226)', async () => {
+    const dir = mkdtempSync(join(realpathSync(tmpdir()), 'genagents-7226-'))
+    const root = join(dir, 'root')
+    const scriptsDir = join(root, 'scripts')
+    const link = join(dir, 'link')
+    try {
+      stageGenerator(scriptsDir)
+      cpSync(resolve(__dirname, '..', '..', 'CLAUDE.md'), join(root, 'CLAUDE.md'))
+      writeFileSync(join(root, 'AGENTS.md'), 'STALE\n')
+      writeFileSync(join(dir, 'hooks.mjs'), HOOKS)
+      writeFileSync(join(dir, 'register.mjs'), REGISTER)
+      // Both triggers at once, which is what makes the case undecidable:
+      // invoked through the symlink so the paths differ (#7198's shape), with
+      // realpath broken so neither side can be resolved (#7214's shape).
+      symlinkSync(root, link)
+
+      const run = spawnSync(
+        process.execPath,
+        ['--import', join(dir, 'register.mjs'), join(link, 'scripts', 'gen-agents-md.mjs')],
+        {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            CHROXY_BREAK: 'eacces',
+            CHROXY_BREAK_ON: '/lib/is-entry-point.mjs',
+            CHROXY_BREAK_FILE: join(scriptsDir, 'gen-agents-md.mjs'),
+            CHROXY_BREAK_DIR: scriptsDir,
+          },
+        },
+      )
+
+      // The answer is still false, so the generator still declines to run.
+      // That part is correct and is NOT what this test is complaining about.
+      assert(run.status === 0, `expected the undecidable case to exit 0, got ${run.status}: ${run.stderr}`)
+      chmodSync(scriptsDir, 0o755)
+      assert(
+        readFileSync(join(root, 'AGENTS.md'), 'utf8') === 'STALE\n',
+        'the undecidable case must not regenerate — it cannot know it is the entry point',
+      )
+
+      // ...but it must no longer do that silently. Without this assertion the
+      // test above is satisfied by the exact bug #7226 was filed about.
+      assert(
+        run.stderr.includes('[is-entry-point]'),
+        `the guard declined silently — nothing on stderr explains the no-op:\n${JSON.stringify(run.stderr)}`,
+      )
+      assert(
+        /EACCES/.test(run.stderr),
+        `the warning must carry the reason, not just the fact:\n${run.stderr}`,
+      )
+    } finally {
+      chmodSync(scriptsDir, 0o755)
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 }
 
