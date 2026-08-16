@@ -3,13 +3,13 @@
 > A guard that cannot fail is worse than no guard. No guard leaves you cautious;
 > a green one that never checks anything makes you confident and wrong.
 
-Seven of these were found in a single day (2026-08-15). **Five are fixed and
-merged; two are not** — entry 6 (`#7210`, fix in PR `#7212`) and the sweep in
-entry 7 (`#7213`, fix in PR `#7217`) still have their fixes in open PRs, so
-those two bugs are live on `main` as this is written. Every one of the seven had
-passed unit tests, lint, typecheck, and CI continuously — in some cases for
-months — because **the defect is invisible to any check that only asks "did it
-report success?"**
+Seven of these were found in a single day (2026-08-15). Every one had passed
+unit tests, lint, typecheck, and CI continuously — in some cases for months —
+because **the defect is invisible to any check that only asks "did it report
+success?"**
+
+Each entry below cites its issue, and the fix is the PR that closes it; consult
+those rather than a tally here, which would be stale the moment one merges.
 
 This document exists because the seventh was found inside the fix for the sixth.
 The pattern recurs faster than it gets recognised, so it is written down.
@@ -226,6 +226,7 @@ was checked against `--help` on the pinned version for exactly this reason.
 - `scripts/verify-publish-artifacts.mjs` — packs, installs, and runs; derives
   its entry points from the published manifests
 - `scripts/check-release-pr-subject.mjs` — content-triggered, fails closed
-- `packages/server/src/utils/is-entry-point.js` — the one implementation of the
-  entry-point guard (lands with `#7217`; until then the four call sites still
-  carry their own copies)
+- `packages/server/src/utils/is-entry-point.js` — the entry-point guard, and
+  the only copy of it that is unit-tested (`packages/server/tests/is-entry-point.test.js`).
+  Sites outside that package cannot import it and carry their own copies;
+  `#7222` tracks collapsing them onto one implementation.
