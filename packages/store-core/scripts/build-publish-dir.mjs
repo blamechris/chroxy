@@ -141,9 +141,45 @@ writeFileSync(join(outDir, 'package.json'), JSON.stringify(out, null, 2) + '\n')
 //    manifest also means a newly-added export is covered automatically instead
 //    of silently falling outside the check.
 const manifest = JSON.parse(readFileSync(join(outDir, 'package.json'), 'utf8'))
-const declared = Object.entries(manifest.exports)
-  .map(([label, spec]) => [label, typeof spec === 'string' ? spec : spec.import])
-  .filter(([, target]) => target)
+// Collect EVERY string leaf under an export's condition object, not just
+// `.import`. A condition map can nest arbitrarily ({ node: { import: … },
+// default: … }), and reading one known key meant a `require`-only or nested
+// entry contributed no targets and was quietly dropped from `declared` — the
+// same silent-skip this check exists to prevent, one level down (#7210).
+//
+// Not reachable with the manifest this script generates today, which only
+// emits { types, import }. It is guarded anyway because the failure mode is
+// invisible: the build exits 0 and simply never mentions the export.
+// `types` is skipped deliberately: it is a TypeScript-only condition that Node
+// never resolves at runtime. Importing a .d.ts "succeeds" and yields zero
+// exports, so checking it would add a ✓ that means nothing — and a genuinely
+// broken .d.ts would still pass it. Runtime conditions only.
+const TYPE_ONLY_CONDITIONS = new Set(['types', 'typings'])
+
+function exportTargets(spec) {
+  if (typeof spec === 'string') return [spec]
+  if (spec && typeof spec === 'object') {
+    return Object.entries(spec)
+      .filter(([condition]) => !TYPE_ONLY_CONDITIONS.has(condition))
+      .flatMap(([, value]) => exportTargets(value))
+  }
+  return []
+}
+
+const declared = Object.entries(manifest.exports).flatMap(([label, spec]) => {
+  const targets = [...new Set(exportTargets(spec))]
+  // An export that yields no target at all is a shape this script cannot
+  // check. Throw rather than filter it away — being unable to verify an
+  // export is not the same as there being nothing to verify, and conflating
+  // them is how the original bug read as success.
+  if (!targets.length) {
+    throw new Error(
+      `manifest exports "${label}" in a shape with no resolvable target ` +
+      `(${JSON.stringify(spec)}) — build-publish-dir cannot verify it`,
+    )
+  }
+  return targets.map((target) => [label, target])
+})
 
 if (!declared.length) throw new Error('generated manifest declares no exports — nothing to verify')
 
