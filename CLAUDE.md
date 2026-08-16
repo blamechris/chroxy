@@ -253,6 +253,26 @@ padding or font size, re-check the resulting box.
 
 ## Testing Conventions
 
+### Every guard must be proven to fail — see [`docs/false-safety-guards.md`](docs/false-safety-guards.md)
+
+**When you add or change a check, break the thing it protects and confirm it goes
+red.** If you cannot make it fail, it is not a guard.
+
+Seven guards in this repo reported success without checking anything, and all
+seven passed unit tests, lint, typecheck, and CI — for months in some cases.
+Test suites cannot find this class, because the guard's *output* is correct and
+its *coverage* is what is wrong. The recurring causes:
+
+- a hardcoded list next to a set that grows (`#7192`, `#7197`)
+- "cannot check this" silently treated as "nothing to check" (`#7195`, `#7210`)
+- a precondition that is false, so the body never runs and the job is green
+  (`#7184`, `#7198`)
+- testing the source tree when the artifact is what ships (`#7189`)
+
+Check the **exit code**, not the output — and note `cmd | grep -c FAIL` reports
+`grep`'s status, not the script's. Restore mutations with `cp` from a backup,
+never `git checkout --`, which eats unrelated uncommitted work.
+
 ### Server tests must not touch real user state (#4633)
 
 Every test that constructs a `SessionManager` **must** pass `stateFilePath` pointing at a temp file. Otherwise the manager defaults to `~/.chroxy/session-state.json` and the test silently clobbers your live state (this happened on 2026-05-30 — see `feedback_test_state_contamination.md`).
