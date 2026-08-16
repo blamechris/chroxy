@@ -177,11 +177,12 @@ STUB
 
 # Copy the real gen-agents-md.mjs into a fake repo, plus anything it imports.
 #
-# Copying scripts/lib wholesale rather than naming a file: the generator's
-# entry-point guard was extracted to scripts/lib/is-entry-point.mjs (#7222), and
-# a fixture that stages only gen-agents-md.mjs dies with ERR_MODULE_NOT_FOUND
-# the moment it gains a sibling import. This way the next extraction is staged
-# automatically instead of breaking the fixture.
+# Copying scripts/lib wholesale rather than naming a file. The directory does
+# not exist on this branch; #7222 proposes extracting the entry-point guard
+# there, and a fixture that stages only gen-agents-md.mjs dies with
+# ERR_MODULE_NOT_FOUND the moment the generator gains a sibling import. The
+# `[ -d ]` guard below means this works either way, before or after that lands,
+# and stages the NEXT extraction automatically too.
 install_agents_generator() {
   local dir="$1"
   mkdir -p "$dir/scripts"
@@ -885,6 +886,55 @@ test_agents_md_fails_when_generator_writes_to_another_tree() {
   return 0
 }
 
+# The regression the first cut of #7231 introduced, and the reason the check is
+# gated on a sentinel LINE rather than on node's exit code.
+#
+# The verifier imports the generator into its own process. A generator that
+# declines to run via a MODULE-SCOPE `process.exit(0)` therefore ends the
+# VERIFIER with status 0 — `if node …; then` takes the success branch, the
+# reassuring line prints, and the mirror is left stale. `origin/main` caught this
+# because it required --check's confirmation line; the exit-code-only version did
+# not, which made it strictly weaker than what it replaced against the very
+# defect class it exists to close.
+#
+# `if (!invokedDirectly) process.exit(0)` is not a contrived stub — it is a
+# plausible way to write the guard, and #7222 is currently rewriting exactly that
+# guard.
+test_agents_md_fails_when_generator_exits_during_import() {
+  local dir
+  dir=$(mktemp -d)
+  trap "rm -rf '$dir'" RETURN
+  build_fake_repo "$dir" "0.5.7"
+  install_bump_script "$dir"
+  write_changelog "$dir/CHANGELOG.md" "0.5.7" "### Fixed
+
+- A real fix (#42)"
+  write_claude_md "$dir/CLAUDE.md" "0.5.7"
+  printf 'STALE\n' > "$dir/AGENTS.md"
+
+  mkdir -p "$dir/scripts"
+  cat > "$dir/scripts/gen-agents-md.mjs" <<'STUB'
+// Declines at MODULE SCOPE rather than by guarding a block. Running this as a
+// CLI is a clean exit-0 no-op; IMPORTING it terminates the importing process.
+const invokedDirectly = Boolean(process.argv[1] && process.argv[1].endsWith('gen-agents-md.mjs'))
+if (!invokedDirectly) process.exit(0)
+export function renderAgentsMd (claudeContents) {
+  return '<!-- AUTO-GENERATED FROM CLAUDE.md -->\n\n' + claudeContents
+}
+STUB
+
+  # Must fail...
+  local out rc=0
+  out=$( (cd "$dir" && PATH="$NOCARGO_PATH" ./scripts/bump-version.sh 0.6.0) 2>&1 ) || rc=$?
+  [ "$rc" -ne 0 ] || return 1
+  # ...must NOT have printed the false success...
+  ! printf '%s' "$out" | grep -q 'AGENTS.md regenerated from CLAUDE.md' || return 1
+  # ...and must name the actual cause rather than blaming drift.
+  printf '%s' "$out" | grep -q 'produced no output at all' || return 1
+  grep -q '^STALE$' "$dir/AGENTS.md" || return 1
+  return 0
+}
+
 # A missing mirror is a distinct failure from a stale one, and reading ENOENT as
 # "nothing to compare" would fail open on a tree that never generated AGENTS.md
 # at all.
@@ -1088,6 +1138,8 @@ run_test "a generator writing to ANOTHER tree fails the bump (#7231)" \
   test_agents_md_fails_when_generator_writes_to_another_tree
 run_test "an absent AGENTS.md fails the bump rather than reading as nothing-to-compare" \
   test_agents_md_fails_when_mirror_is_absent
+run_test "a generator that exits during IMPORT fails the bump (#7231 regression)" \
+  test_agents_md_fails_when_generator_exits_during_import
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
