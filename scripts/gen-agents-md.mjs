@@ -12,7 +12,7 @@
 // Keeping CLAUDE.md as the ONE source and generating AGENTS.md means the two can
 // never drift and a convention can never be silently dropped from the mirror.
 
-import { readFileSync, writeFileSync } from 'node:fs'
+import { readFileSync, writeFileSync, realpathSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join, resolve } from 'node:path'
 
@@ -62,9 +62,35 @@ export function readAgentsMd() {
 }
 
 // Only run the CLI side-effects when invoked directly (not when imported by tests).
-// Normalize both sides: process.argv[1] may be relative depending on how node was
-// invoked, while fileURLToPath(import.meta.url) is absolute.
-if (process.argv[1] && resolve(fileURLToPath(import.meta.url)) === resolve(process.argv[1])) {
+//
+// Both sides are realpath'd, not just `resolve`d. Node's ESM loader resolves
+// symlinks in `import.meta.url`, but `process.argv[1]` is left exactly as the
+// caller typed it, and `resolve()` does not follow symlinks — so on macOS,
+// where /tmp is a symlink to /private/tmp, invoking this as
+// `node /tmp/…/gen-agents-md.mjs` gave '/private/tmp/…' on one side and
+// '/tmp/…' on the other. The guard was false, the CLI branch never ran, and
+// the script exited 0 having done nothing (#7198).
+//
+// That silence is the dangerous part: bump-version.sh calls this and trusts
+// the exit code, so a release could regenerate nothing and still report
+// success — the same shape as every other guard-that-quietly-no-ops fixed
+// this cycle. realpathSync is wrapped because argv[1] need not exist (an
+// `-e` eval, a deleted script); an unresolvable path simply is not this file.
+const invokedDirectly = (() => {
+  if (!process.argv[1]) return false
+  const realpathOrNull = (p) => {
+    try {
+      return realpathSync(p)
+    } catch {
+      return null
+    }
+  }
+  const self = realpathOrNull(fileURLToPath(import.meta.url))
+  const argv = realpathOrNull(resolve(process.argv[1]))
+  return self !== null && self === argv
+})()
+
+if (invokedDirectly) {
   const expected = renderAgentsMd(readClaudeMd())
   if (process.argv.includes('--check')) {
     if (readAgentsMd() !== expected) {
