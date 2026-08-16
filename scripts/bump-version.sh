@@ -277,36 +277,111 @@ if [ -f "$CLAUDE_MD" ]; then
   # so regenerating here is not optional.
   if [ -f "$ROOT/scripts/gen-agents-md.mjs" ]; then
     node "$ROOT/scripts/gen-agents-md.mjs" >/dev/null
-    # Verify the postcondition instead of announcing it. `set -euo pipefail`
-    # catches only a NON-ZERO exit, and the defect class this regeneration
-    # exists to survive (#7198, #7214) is exit ZERO having done nothing — so in
-    # precisely the failure mode worth worrying about, an unconditional echo
-    # prints a success that is false and the release ships a stale AGENTS.md.
+    # Verify the postcondition instead of announcing it, and verify it in THIS
+    # script's frame of reference.
     #
-    # --check's EXIT CODE is not sufficient on its own, and assuming it was is
-    # how the first version of this check missed the very defect it names.
-    # --check exits 0 in two unrelated situations:
+    # `set -euo pipefail` catches only a NON-ZERO exit, and the defect class
+    # this regeneration exists to survive (#7198, #7214) is exit ZERO having
+    # done nothing — so in precisely the failure mode worth worrying about, an
+    # unconditional echo prints a success that is false and the release ships a
+    # stale AGENTS.md.
     #
-    #   in sync           -> prints "AGENTS.md is in sync with CLAUDE.md."
-    #   never ran at all  -> prints NOTHING
+    # Re-running the generator with --check does not close that, and believing
+    # it did is #7231. The generator derives its own ROOT from import.meta.url,
+    # not from anything this script passes, so --check reports on THE
+    # GENERATOR'S AGENTS.md — never "$ROOT/AGENTS.md", the file this script
+    # actually cares about. Write and check are then self-consistent by
+    # construction: they agree with each other whether or not the caller's
+    # mirror was touched. Demonstrated with the generator resolving to a
+    # different tree than $ROOT, the bump rewrote that tree's mirror, printed
+    # the success line, and exited 0 with $ROOT/AGENTS.md still stale.
     #
-    # The second is the authentic #7198 shape: the entry-point guard reads
-    # false and skips this invocation exactly as it skipped the write above.
-    # Both exit 0, so only the confirmation LINE tells them apart. Requiring
-    # the line means a generator that silently declines to run cannot satisfy
-    # this check by staying quiet.
-    agents_check_out="$(node "$ROOT/scripts/gen-agents-md.mjs" --check 2>&1)" || true
-    case "$agents_check_out" in
-      *"is in sync with CLAUDE.md"*)
+    # So compare here rather than asking the generator to grade itself: import
+    # the pure renderer, read BOTH files by absolute path under $ROOT, and diff
+    # them. Importing a module never runs its CLI branch, so the entry-point
+    # guard is not consulted at all — this cannot be defeated by that guard
+    # reading false, which is why it SUBSUMES the old exit-code/output check
+    # rather than stacking on it.
+    #
+    # $ROOT reaches node through the environment and is never interpolated into
+    # the -e source: a path containing a quote or a backslash would otherwise be
+    # spliced into the program text.
+    #
+    # The verification is gated on a SENTINEL LINE, not on the exit code, and
+    # that is not belt-and-braces — it is the only thing that makes this
+    # genuinely subsume the --check it replaced.
+    #
+    # The verifier `await import()`s the generator INTO ITS OWN PROCESS. A
+    # generator that declines to run via a module-scope `process.exit(0)` —
+    # `if (!isEntryPoint(import.meta.url)) process.exit(0)` is a perfectly
+    # plausible way to write the guard — therefore terminates THE VERIFIER with
+    # status 0. `if node …; then` takes the success branch, the reassuring line
+    # prints, and $ROOT/AGENTS.md is left stale: the exact false success this
+    # block exists to prevent, arriving through the import that was supposed to
+    # make it impossible.
+    #
+    # Requiring output the program can only produce by reaching its own last
+    # line closes it, because a process that exited early printed nothing. This
+    # is the same discriminator #7229 established for --check, kept rather than
+    # discarded — the first version of this fix dropped it, and #7234's review
+    # demonstrated the regression end-to-end against main.
+    agents_verify_out="$(CHROXY_BUMP_ROOT="$ROOT" node --input-type=module -e '
+      import { readFileSync } from "node:fs"
+      import { join } from "node:path"
+      import { pathToFileURL } from "node:url"
+      const root = process.env.CHROXY_BUMP_ROOT
+      // Not reachable from this script, which always sets it on the command
+      // itself — but every failure in here is a DIAGNOSTIC, and join(undefined)
+      // throws a TypeError that says nothing about what went wrong. The three
+      // defensive branches in this program (this, the renderAgentsMd typeof
+      // check, and the ENOENT catch) are all message quality rather than
+      // safety: the sentinel gate below means anything that ends the program
+      // early prints no AGENTS_IN_SYNC and therefore already fails closed.
+      if (!root) {
+        console.error("CHROXY_BUMP_ROOT is unset — the verifier has no tree to check")
+        process.exit(1)
+      }
+      const claudePath = join(root, "CLAUDE.md")
+      const agentsPath = join(root, "AGENTS.md")
+      const generator = pathToFileURL(join(root, "scripts", "gen-agents-md.mjs")).href
+      const { renderAgentsMd } = await import(generator)
+      if (typeof renderAgentsMd !== "function") {
+        console.error("gen-agents-md.mjs does not export renderAgentsMd")
+        process.exit(1)
+      }
+      const expected = renderAgentsMd(readFileSync(claudePath, "utf8"))
+      let actual
+      try {
+        actual = readFileSync(agentsPath, "utf8")
+      } catch (err) {
+        console.error(agentsPath + ": " + (err.code || err.message))
+        process.exit(1)
+      }
+      if (actual !== expected) {
+        console.error(agentsPath + " is not the render of " + claudePath)
+        process.exit(1)
+      }
+      console.log("AGENTS_IN_SYNC")
+    ' 2>&1)" || true
+    case "$agents_verify_out" in
+      *AGENTS_IN_SYNC*)
         echo "  AGENTS.md regenerated from CLAUDE.md"
         ;;
       *)
-        echo "  ERROR: could not confirm AGENTS.md is in sync with CLAUDE.md" >&2
-        if [ -n "$agents_check_out" ]; then
-          echo "  generator said: $agents_check_out" >&2
+        echo "  ERROR: $ROOT/AGENTS.md is not in sync with $ROOT/CLAUDE.md" >&2
+        # Distinguish the three ways to get here, because they need different
+        # fixes and the previous wording blamed drift for all of them — a node
+        # syntax error, a missing module and an OOM all printed "the mirror did
+        # not end up regenerated".
+        if [ -z "$agents_verify_out" ]; then
+          echo "  The verifier produced no output at all — the generator ended the" >&2
+          echo "  process during import (a module-scope exit), so nothing was" >&2
+          echo "  compared (#7198 / #7214 / #7231)." >&2
         else
-          echo "  the generator produced no output — it exited 0 without running (#7198 / #7214)" >&2
+          echo "  verifier said: $agents_verify_out" >&2
         fi
+        echo "  Regenerate with:" >&2
+        echo "    node $ROOT/scripts/gen-agents-md.mjs" >&2
         exit 1
         ;;
     esac
