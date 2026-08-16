@@ -186,9 +186,19 @@ export function SessionScreen() {
   // Filter messages: exclude system (separate tab) and, in compact mode, whatever
   // the shared #6880 predicate hides (tool_use/thinking today). `system` stays a
   // separate inline check — isHiddenInCompactMode is specifically the compact-hide rule.
+  //
+  // EXCEPT compaction markers (#6972). ChatView reinserts `compactMetadata`-
+  // carrying system messages inline via insertCompactionMarkers, because mobile
+  // has no System tab to send them to. That reinsertion reads the SAME
+  // `messages` array it is handed, so dropping them here left it filtering a
+  // list that could never contain one — dead code, and the marker was
+  // unreachable on mobile entirely. They still never reach the rendered groups
+  // through the normal path: buildChatViewMessages filters `type: 'system'`
+  // (buildChatViewMessages.ts:258) exactly as before, so this only makes them
+  // available to the reinsertion step.
   const chatMessages = useMemo(
     () => allMessages.filter((m) => {
-      if (m.type === 'system') return false;
+      if (m.type === 'system') return m.compactMetadata != null;
       if (chatFilterCompact && isHiddenInCompactMode(m.type)) return false;
       return true;
     }),
