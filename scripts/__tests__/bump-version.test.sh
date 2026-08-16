@@ -177,12 +177,13 @@ STUB
 
 # Copy the real gen-agents-md.mjs into a fake repo, plus anything it imports.
 #
-# Copying scripts/lib wholesale rather than naming a file. The directory does
-# not exist on this branch; #7222 proposes extracting the entry-point guard
-# there, and a fixture that stages only gen-agents-md.mjs dies with
-# ERR_MODULE_NOT_FOUND the moment the generator gains a sibling import. The
-# `[ -d ]` guard below means this works either way, before or after that lands,
-# and stages the NEXT extraction automatically too.
+# Copying scripts/lib wholesale rather than naming a file. #7222 extracted the
+# entry-point guard to scripts/lib/is-entry-point.mjs, and a fixture that stages
+# only gen-agents-md.mjs dies with ERR_MODULE_NOT_FOUND the moment the generator
+# gains a sibling import — which is exactly what happened when that extraction
+# landed. Copying the directory means the NEXT sibling helper is staged
+# automatically; the `[ -d ]` guard keeps it working against a tree that has no
+# scripts/lib at all.
 install_agents_generator() {
   local dir="$1"
   mkdir -p "$dir/scripts"
