@@ -31,7 +31,7 @@
 
 import { execFileSync } from 'node:child_process'
 import { cpSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join, resolve } from 'node:path'
 
 // The source imports siblings without a file extension (`from './types'`), which
@@ -149,8 +149,11 @@ if (!declared.length) throw new Error('generated manifest declares no exports �
 
 for (const [label, target] of declared) {
   // `target` is manifest-relative ('./dist/index.js'), resolved against the
-  // staging dir — the same base a consumer resolves it against.
-  const file = new URL(target, `file://${outDir}/`)
+  // staging dir — the same base a consumer resolves it against. pathToFileURL
+  // rather than a `file://` template: the template mangles Windows paths (drive
+  // letters, backslashes) and anything needing percent-encoding, and this repo
+  // runs Windows CI.
+  const file = new URL(target, pathToFileURL(join(outDir, '/')))
   if (!existsSync(file)) {
     throw new Error(`manifest exports "${label}" -> ${target}, which does not exist in the package`)
   }
