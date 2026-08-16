@@ -63,10 +63,10 @@ outside the gate, and the gate reported full coverage.
 
 ### 4. The rewrite that skipped what it could not find — `#7195`
 
-`bump-version.sh` rewrote two version references in `CLAUDE.md`, and `continue`d
-past any pattern that did not match. Reword either line and the rewrite becomes
-a no-op that still exits 0 — a fail-open on precisely the drift it was added to
-prevent.
+`bump-version.sh` rewrote two version references in `CLAUDE.md`, and used
+`continue` to skip past any pattern that did not match. Reword either line and
+the rewrite becomes a no-op that still exits 0 — a fail-open on precisely the
+drift it was added to prevent.
 
 ### 5. The self-check that imported known-good paths — `#7197`
 
