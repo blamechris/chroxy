@@ -65,8 +65,35 @@ name: DiffViewer inline comment submit
 - tapOn:
     id: "diff-comment-input"
 - inputText: "prefer a named constant"
-- tapOn:
-    id: "diff-comment-save"
+
+# Tap "Add comment" until the comment is actually queued.
+#
+# This is NOT flake-papering. With the keyboard up, the FIRST tap outside the
+# focused TextInput is consumed by the keyboard dismiss / blur and never
+# reaches the TouchableOpacity — Maestro still reports it COMPLETED, so the
+# failure surfaced two steps later as "diff-submit-comments is not visible"
+# and read like a product bug for a month (#7185). It is not: tapping the same
+# button a second time, on the same state, saves the comment normally.
+#
+# Ruled out first, each on-device: the save button is at y=322-358, well clear
+# of the keyboard, so it is not covered; `diff-action-bar` renders, so
+# showActionBar is true; and a plain wait after inputText does NOT help, so it
+# is a swallowed tap rather than a slow re-render.
+#
+# `repeat` rather than a bare double-tap: once the comment saves the editor
+# closes and `diff-comment-save` no longer exists, so a second unconditional
+# tapOn would fail to find it. This stops as soon as the submit control shows.
+# hideKeyboard would be the direct fix but is broken on the current Maestro
+# CLI (#6089).
+- repeat:
+    maxRuns: 3
+    while:
+      notVisible:
+        id: "diff-submit-comments"
+    commands:
+      - tapOn:
+          id: "diff-comment-save"
+      - waitForAnimationToEnd
 
 # The bottom action bar's Submit control appears once ≥1 comment is queued.
 - extendedWaitUntil:
