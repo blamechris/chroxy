@@ -895,6 +895,51 @@ jobs:
         # changed without regenerating, or if AGENTS.md was hand-edited.
         run: node scripts/__tests__/gen-agents-md.test.mjs
 
+      - name: Run check-release-pr-subject.mjs tests
+        run: node scripts/__tests__/check-release-pr-subject.test.mjs
+
+  release-pr-subject:
+    name: Release PR Subject
+    # #7184 — auto-tag-on-release.yml only fires on a merge subject matching
+    # `^chore\(release\): cut vX.Y.Z`. A release PR merged under any other
+    # subject silently skips the tag job: no tag, no release, no artifacts, and
+    # a green check mark. That has cost two releases (#4627, and 0.10.0 which
+    # produced the 463-commit gap in #7176).
+    #
+    # Content-triggered on purpose. Keying this to the subject would be
+    # circular — the failure IS a wrong subject — so it asks "does this diff
+    # look like a release?" (root version bump / CHANGELOG version heading) and
+    # only then demands a subject that will tag.
+    if: github.event_name == 'pull_request'
+    needs: runner-target
+    runs-on: ${{ fromJSON(needs.runner-target.outputs.runner) }}  # SELF_HOSTED_OR_HOSTED (see header)
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          # The check diffs against the base branch; a shallow clone would make
+          # that diff unavailable and the script fails closed (exit 2) rather
+          # than silently passing.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: Would this PR's subject fire the auto-tag workflow?
+        env:
+          # Via env, not inline `${{ }}`, so a title containing shell
+          # metacharacters cannot be interpolated into the command.
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          node scripts/check-release-pr-subject.mjs \
+            --title "$PR_TITLE" \
+            --number "$PR_NUMBER" \
+            --base "$BASE_SHA" \
+            --head HEAD
+
   dashboard-smoke:
     name: Dashboard Smoke (Playwright)
     # #6315: a UI-regression gate. Runs the Playwright dashboard smoke
