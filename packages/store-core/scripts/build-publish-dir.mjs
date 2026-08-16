@@ -156,6 +156,18 @@ const manifest = JSON.parse(readFileSync(join(outDir, 'package.json'), 'utf8'))
 // broken .d.ts would still pass it. Runtime conditions only.
 const TYPE_ONLY_CONDITIONS = new Set(['types', 'typings'])
 
+// Arrays ARE valid here — Node treats them as a fallback list and resolves the
+// first entry whose conditions match (verified against Node 22, both a
+// single-entry array and a condition-fallback array resolve). They fall through
+// to the object branch below via Object.entries, which collects every string
+// leaf.
+//
+// Known over-strictness: for a genuine fallback array, Node needs only ONE
+// entry to resolve, whereas this collects all of them and would fail the build
+// if any were missing. Left as-is deliberately — this script GENERATES the
+// manifest it checks and only ever emits { types, import }, so an array cannot
+// occur without someone editing the generator, at which point the over-strict
+// failure is a loud prompt to revisit this rather than a silent wrong answer.
 function exportTargets(spec) {
   if (typeof spec === 'string') return [spec]
   if (spec && typeof spec === 'object') {
