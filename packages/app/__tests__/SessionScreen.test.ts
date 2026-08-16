@@ -176,16 +176,20 @@ describe('SessionScreen component structure', () => {
       // handed — filtered a list that could never contain a system message.
       // The marker was unreachable on mobile entirely.
       //
-      // Asserted as source text because this predicate is a plain filter inside
-      // a useMemo with no exported seam; the behavioural proof is the
-      // compaction-marker.yaml Maestro flow, which fails at
-      // `compaction-marker is visible` when this line reverts to `return false`.
-      // The predicate itself now lives in selectChatMessages.ts and is covered
-      // behaviourally by selectChatMessages.test.ts (#7201). All this file
-      // should assert is that SessionScreen still delegates to it rather than
-      // reintroducing an inline copy.
+      // The predicate now lives in selectChatMessages.ts and is covered
+      // behaviourally by selectChatMessages.test.ts (#7201). The only thing
+      // left for THIS file to assert is that SessionScreen still delegates
+      // rather than growing an inline copy back — which the import below plus
+      // the call-site assertion above both catch.
+      //
+      // There used to be a `not.toMatch(/if \(m\.type === 'system'\) return
+      // false;/)` here. It was inert: the predicate moved out of this file, so
+      // that string can no longer appear in `src` under any edit, and a
+      // reverting mutation failed zero assertions in this file (#7228). Nor can
+      // it be widened — `m.type === 'system'` legitimately appears twice in
+      // SessionScreen.tsx, deriving the System tab, so a broader negative would
+      // fail on correct code. Removed rather than left looking like cover.
       expect(src).toMatch(/from '\.\/selectChatMessages'/)
-      expect(src).not.toMatch(/if \(m\.type === 'system'\) return false;/)
     })
   })
 })
