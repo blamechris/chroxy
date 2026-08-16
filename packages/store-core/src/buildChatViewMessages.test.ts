@@ -55,6 +55,41 @@ describe('buildChatViewMessages', () => {
     expect(groupIds).toEqual(['u1', 'r1'])
   })
 
+  // #7201 — the system filter must stay UNCONDITIONAL, including for messages
+  // carrying compactMetadata.
+  //
+  // Mobile reinserts compaction markers inline via ChatView's
+  // insertCompactionMarkers, because a compaction boundary is positional. The
+  // dashboard runs this same pipeline across both its Chat and System tabs. If
+  // this filter ever gained a compactMetadata exemption — e.g.
+  // `if (m.type === 'system' && m.compactMetadata == null) return false` — the
+  // marker would reach chatMessages/displayGroups directly AND be reinserted,
+  // double-rendering on the dashboard.
+  //
+  // The pre-existing system-filter test above uses a fixture with no
+  // compactMetadata, so it cannot catch that regression. This one can.
+  it('filters out `system` events even when they carry compactMetadata (#7201)', () => {
+    const messages = [
+      msg({ id: 'u1', type: 'user_input', content: 'hi' }),
+      msg({
+        id: 'compact1',
+        type: 'system',
+        content: 'Context compacted (auto): 128,000 → 12,000 tokens',
+        compactMetadata: { trigger: 'auto', preTokens: 128_000, postTokens: 12_000, durationMs: 2_500 },
+      }),
+      msg({ id: 'r1', type: 'response', content: 'hello' }),
+    ]
+    const out = buildChatViewMessages(messages, null)
+
+    expect(out.chatMessages.map(m => m.id)).toEqual(['u1', 'r1'])
+    const groupIds = out.displayGroups.flatMap(g =>
+      g.type === 'single' ? [g.message.id] : g.messages.map(m => m.id),
+    )
+    expect(groupIds).toEqual(['u1', 'r1'])
+    // Explicit: the marker must not appear by ANY route through this pipeline.
+    expect(groupIds).not.toContain('compact1')
+  })
+
   it('passes singleton tool_use through as `tool_use`, not collapsed', () => {
     const messages = [
       msg({ id: 'u1', type: 'user_input', content: 'do a thing' }),
