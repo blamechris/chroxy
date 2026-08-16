@@ -135,23 +135,39 @@ describe('SessionScreen component structure', () => {
     })
 
     test('the compact filter calls the shared predicate, not a hand-rolled duplicate', () => {
-      expect(src).toMatch(
+      // #7201 moved the predicate into src/screens/selectChatMessages.ts so its
+      // invariants could be tested behaviourally. #6882's rule is unchanged —
+      // it just applies there now, so this reads that file.
+      const selector = fs.readFileSync(
+        path.resolve(__dirname, '../src/screens/selectChatMessages.ts'),
+        'utf-8',
+      )
+      expect(selector).toMatch(
         /chatFilterCompact\s*&&\s*isHiddenInCompactMode\(m\.type\)/,
       )
+      // SessionScreen must delegate rather than keep its own copy.
+      expect(src).toMatch(
+        /selectChatMessages\(\s*allMessages\s*,\s*\{\s*chatFilterCompact\s*,\s*isHiddenInCompactMode\s*,?\s*\}\s*,?\s*\)/,
+      )
+      expect(src).not.toMatch(/chatFilterCompact\s*&&\s*isHiddenInCompactMode/)
       // The old hard-coded duplicate must be gone — this is the exact string
       // #6882 was filed to remove (drift risk vs. the store-core predicate).
       // Whitespace-tolerant: catches the duplicate regardless of spacing
       // around `===`/`||` (e.g. `m.type==='tool_use'`), without matching the
       // legitimate isHiddenInCompactMode(m.type) call.
-      expect(src).not.toMatch(
+      expect(selector).not.toMatch(
         /chatFilterCompact\s*&&\s*\(\s*m\.type\s*===\s*'tool_use'\s*\|\|\s*m\.type\s*===\s*'thinking'\s*\)/,
       )
     })
 
-    test('system messages are still filtered inline, separately from the compact predicate', () => {
-      // #6882: system filtering stays inline — isHiddenInCompactMode is
-      // specifically the compact-hide rule, not a catch-all message filter.
-      expect(src).toMatch(/if \(m\.type === 'system'\) return m\.compactMetadata != null;/)
+    test('system filtering is delegated to selectChatMessages, not the compact predicate', () => {
+      // #6882: system filtering is its own rule — isHiddenInCompactMode is
+      // specifically the compact-hide predicate, not a catch-all message
+      // filter. It moved out of SessionScreen into selectChatMessages (#7201);
+      // what matters is that the two stay separate, not where they live.
+      expect(src).toMatch(
+        /selectChatMessages\(\s*allMessages\s*,\s*\{\s*chatFilterCompact\s*,\s*isHiddenInCompactMode\s*,?\s*\}\s*,?\s*\)/,
+      )
     })
 
     test('compaction markers survive the system filter so ChatView can reinsert them (#7186)', () => {
@@ -160,12 +176,20 @@ describe('SessionScreen component structure', () => {
       // handed — filtered a list that could never contain a system message.
       // The marker was unreachable on mobile entirely.
       //
-      // Asserted as source text because this predicate is a plain filter inside
-      // a useMemo with no exported seam; the behavioural proof is the
-      // compaction-marker.yaml Maestro flow, which fails at
-      // `compaction-marker is visible` when this line reverts to `return false`.
-      expect(src).toMatch(/m\.compactMetadata != null/)
-      expect(src).not.toMatch(/if \(m\.type === 'system'\) return false;/)
+      // The predicate now lives in selectChatMessages.ts and is covered
+      // behaviourally by selectChatMessages.test.ts (#7201). The only thing
+      // left for THIS file to assert is that SessionScreen still delegates
+      // rather than growing an inline copy back — which the import below plus
+      // the call-site assertion above both catch.
+      //
+      // There used to be a `not.toMatch(/if \(m\.type === 'system'\) return
+      // false;/)` here. It was inert: the predicate moved out of this file, so
+      // that string can no longer appear in `src` under any edit, and a
+      // reverting mutation failed zero assertions in this file (#7228). Nor can
+      // it be widened — `m.type === 'system'` legitimately appears twice in
+      // SessionScreen.tsx, deriving the System tab, so a broader negative would
+      // fail on correct code. Removed rather than left looking like cover.
+      expect(src).toMatch(/from '\.\/selectChatMessages'/)
     })
   })
 })

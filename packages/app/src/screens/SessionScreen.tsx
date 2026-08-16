@@ -70,6 +70,7 @@ import { runQueuedEdit } from '../utils/edit-queued';
 import { formatPasteMarker, expandPasteMarkers, parseMemoryAppend } from '@chroxy/store-core';
 import { PastedTextModal } from '../components/PastedTextModal';
 import { disconnectWithQueueGuard } from '../store/disconnectWithQueueGuard';
+import { selectChatMessages } from './selectChatMessages';
 
 
 // Stable empty arrays to avoid new-reference-per-render in Zustand selectors
@@ -183,33 +184,12 @@ export function SessionScreen() {
     closeGitView,
   } = useSessionViewState({ activeSessionId });
 
-  // Filter messages: exclude system (separate tab) and, in compact mode, whatever
-  // the shared #6880 predicate hides (tool_use/thinking today). `system` stays a
-  // separate inline check — isHiddenInCompactMode is specifically the compact-hide rule.
-  //
-  // EXCEPT compaction markers (#6972). A compaction boundary is positional —
-  // it means "context was dropped HERE", between these two turns — so it has
-  // to sit inline in the chat flow. Reaching it on the System tab (which mobile
-  // does have, `viewMode === 'system'` below) is not equivalent: the marker
-  // separated from the messages it sits between conveys nothing.
-  //
-  // ChatView reinserts the `compactMetadata`-carrying subset via
-  // insertCompactionMarkers, and that reinsertion reads the SAME `messages`
-  // array it is handed — so dropping them here left it filtering a list that
-  // could never contain one. Dead code, and the marker was unreachable in the
-  // chat flow entirely (#7186).
-  //
-  // They still never reach the rendered groups through the normal path:
-  // buildChatViewMessages filters `type: 'system'` (buildChatViewMessages.ts:258)
-  // exactly as before, so this only makes them available to the reinsertion
-  // step. `systemMessages` below is unchanged, so they also still appear on the
-  // System tab.
+  // Which messages reach the Chat tab. The predicate and the two invariants it
+  // upholds (compaction markers survive compact mode; every other system event
+  // goes to the System tab) live in selectChatMessages.ts with their tests —
+  // deliberately NOT restated here, so there is one description to keep true.
   const chatMessages = useMemo(
-    () => allMessages.filter((m) => {
-      if (m.type === 'system') return m.compactMetadata != null;
-      if (chatFilterCompact && isHiddenInCompactMode(m.type)) return false;
-      return true;
-    }),
+    () => selectChatMessages(allMessages, { chatFilterCompact, isHiddenInCompactMode }),
     [allMessages, chatFilterCompact, isHiddenInCompactMode],
   );
   const systemMessages = useMemo(
