@@ -167,6 +167,14 @@ function exportTargets(spec) {
 }
 
 const declared = Object.entries(manifest.exports).flatMap(([label, spec]) => {
+  // `null` is Node's documented way to BLOCK a subpath, not a shape we failed
+  // to read. npm accepts the manifest and Node refuses the path at resolution
+  // (ERR_PACKAGE_PATH_NOT_EXPORTED), so there is genuinely nothing to import
+  // and nothing is wrong. Throwing here would fail the build on a valid
+  // manifest — and `build:publish` runs in release.yml's verify-artifacts job
+  // on every v* tag, so that would block a release rather than catch a bug.
+  if (spec === null) return []
+
   const targets = [...new Set(exportTargets(spec))]
   // An export that yields no target at all is a shape this script cannot
   // check. Throw rather than filter it away — being unable to verify an
