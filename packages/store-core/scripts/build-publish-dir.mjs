@@ -218,17 +218,26 @@ for (const [label, target] of declared) {
   //   base .../store-core/publish/  + ./dist/index.js -> .../publish/dist/index.js
   //   base .../store-core/publish   + ./dist/index.js -> .../store-core/dist/index.js
   //
-  // That second path is the COMMITTED dist — a real directory of real files,
-  // so existsSync is satisfied and the check proceeds against the wrong tree
-  // entirely.
+  // That second path is packages/store-core/dist — the tree step 1 rebuilds,
+  // mostly gitignored (.gitignore keeps only crypto.js and crypto.d.ts). It is
+  // a real directory of real files, so existsSync is satisfied and the check
+  // proceeds against the wrong tree entirely.
   //
-  // Today it then fails at the import, because addExtensions() rewrites only
-  // the STAGED copy, so the committed dist still carries extensionless
-  // specifiers and Node rejects it with ERR_UNSUPPORTED_DIR_IMPORT. That is
-  // luck, not a guarantee, and the error blames the published entry point
-  // rather than the wrong base URL. Regenerate that dist with extensions and
-  // the same mistake resolves, imports, and goes green having verified nothing
-  // this script produced (#7211).
+  // How loudly that fails depends on WHICH export is checked, which is the
+  // whole problem:
+  //
+  //   "."       throws. addExtensions() rewrites only the STAGED copy, so
+  //             dist/index.js keeps its extensionless specifiers and Node
+  //             rejects it with ERR_UNSUPPORTED_DIR_IMPORT — blaming the
+  //             published entry point rather than the wrong base URL.
+  //   "./crypto" passes. dist/crypto.js has no relative specifiers at all, so
+  //             the staged copy is byte-identical and it imports cleanly.
+  //
+  // So the mistake is caught today only because "." happens to be checked
+  // first and happens to throw. For "./crypto" it is already a silent pass
+  // against the wrong tree. Neither of those is a property of this check —
+  // reorder the exports, or regenerate dist with extensions, and the whole
+  // thing goes green having verified nothing this script produced (#7211).
   const file = new URL(target, pathToFileURL(join(outDir, '/')))
 
   // So assert it rather than trusting the comment. A comment cannot fail; this
