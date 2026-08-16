@@ -175,6 +175,38 @@ STUB
   echo "$stubdir"
 }
 
+# Copy the real gen-agents-md.mjs into a fake repo, plus anything it imports.
+#
+# Copying scripts/lib wholesale rather than naming a file: the generator's
+# entry-point guard was extracted to scripts/lib/is-entry-point.mjs (#7222), and
+# a fixture that stages only gen-agents-md.mjs dies with ERR_MODULE_NOT_FOUND
+# the moment it gains a sibling import. This way the next extraction is staged
+# automatically instead of breaking the fixture.
+install_agents_generator() {
+  local dir="$1"
+  mkdir -p "$dir/scripts"
+  cp "$REPO_ROOT/scripts/gen-agents-md.mjs" "$dir/scripts/gen-agents-md.mjs"
+  if [ -d "$REPO_ROOT/scripts/lib" ]; then
+    cp -R "$REPO_ROOT/scripts/lib" "$dir/scripts/lib"
+  fi
+}
+
+# A CLAUDE.md carrying both version markers the bump rewrites. Without them the
+# bump aborts before it ever reaches the AGENTS.md block (#7183).
+write_claude_md() {
+  cat > "$1" <<CLAUDEMD
+# Claude Development Notes
+
+**Current Status (v$2):**
+- stuff works
+
+---
+
+*Last Updated: 2026-01-01*
+*Version: $2*
+CLAUDEMD
+}
+
 # Write a minimal CHANGELOG.md (header + one prior section).
 write_changelog() {
   local file="$1"
@@ -773,6 +805,112 @@ CLAUDEMD
   return 0
 }
 
+# --- AGENTS.md verified in the caller's frame (#7231) ------------------------
+#
+# bump-version.sh regenerates AGENTS.md and then has to prove it worked. It used
+# to prove it by re-invoking the same program whose reliability is in question
+# — and that program resolves its own paths from import.meta.url, so `--check`
+# graded THE GENERATOR'S AGENTS.md, never "$ROOT/AGENTS.md". Write and check
+# were self-consistent by construction and agreed with each other whether or not
+# the caller's mirror was ever touched.
+#
+# The three cases below are one positive control and two independent routes to
+# the same false success. Without the control, both failure tests would pass on
+# a fixture where the bump aborts for some unrelated reason.
+
+# POSITIVE CONTROL. With the real generator and a well-formed tree, the bump
+# must SUCCEED and $ROOT/AGENTS.md must actually be the render of the
+# POST-bump CLAUDE.md — not the pre-bump one, which is what a check running
+# before the version rewrite would accept.
+test_agents_md_regenerated_and_verified_in_root_frame() {
+  local dir
+  dir=$(mktemp -d)
+  trap "rm -rf '$dir'" RETURN
+  build_fake_repo "$dir" "0.5.7"
+  install_bump_script "$dir"
+  install_agents_generator "$dir"
+  write_changelog "$dir/CHANGELOG.md" "0.5.7" "### Fixed
+
+- A real fix (#42)"
+  write_claude_md "$dir/CLAUDE.md" "0.5.7"
+  printf 'STALE\n' > "$dir/AGENTS.md"
+
+  local out
+  out=$( (cd "$dir" && PATH="$NOCARGO_PATH" ./scripts/bump-version.sh 0.6.0) 2>&1 ) || return 1
+  echo "$out" | grep -q "AGENTS.md regenerated from CLAUDE.md" || return 1
+
+  # The mirror really moved...
+  ! grep -q '^STALE$' "$dir/AGENTS.md" || return 1
+  # ...and carries the BUMPED version, so the regeneration happened after the
+  # CLAUDE.md rewrite rather than before it.
+  grep -q '^\*Version: 0.6.0\*$' "$dir/AGENTS.md" || return 1
+  grep -q 'AUTO-GENERATED FROM CLAUDE.md' "$dir/AGENTS.md" || return 1
+}
+
+# The #7231 case proper — the generator resolves to a DIFFERENT TREE. $ROOT/scripts/
+# gen-agents-md.mjs is a symlink, so node resolves import.meta.url to the other
+# tree and the CLI writes THAT tree's AGENTS.md. Under the old check the bump
+# printed its success line and exited 0 with $ROOT/AGENTS.md untouched.
+test_agents_md_fails_when_generator_writes_to_another_tree() {
+  local dir other
+  dir=$(mktemp -d)
+  other=$(mktemp -d)
+  trap "rm -rf '$dir' '$other'" RETURN
+  build_fake_repo "$dir" "0.5.7"
+  install_bump_script "$dir"
+  write_changelog "$dir/CHANGELOG.md" "0.5.7" "### Fixed
+
+- A real fix (#42)"
+  write_claude_md "$dir/CLAUDE.md" "0.5.7"
+  printf 'STALE\n' > "$dir/AGENTS.md"
+
+  # The other tree is a complete, self-consistent repo root: it has its own
+  # CLAUDE.md, so the generator running in ITS frame succeeds and exits 0.
+  install_agents_generator "$other"
+  write_claude_md "$other/CLAUDE.md" "9.9.9"
+  mkdir -p "$dir/scripts"
+  ln -sf "$other/scripts/gen-agents-md.mjs" "$dir/scripts/gen-agents-md.mjs"
+
+  # Must fail...
+  (cd "$dir" && PATH="$NOCARGO_PATH" ./scripts/bump-version.sh 0.6.0) > /dev/null 2>&1 && return 1
+  # ...and say which tree it is complaining about.
+  local out
+  out=$( (cd "$dir" && PATH="$NOCARGO_PATH" ./scripts/bump-version.sh 0.6.0) 2>&1 || true )
+  echo "$out" | grep -q "not in sync" || return 1
+
+  # The evidence the old check could not see: the caller's mirror is still
+  # stale, while the generator's own tree was regenerated quite happily.
+  grep -q '^STALE$' "$dir/AGENTS.md" || return 1
+  [ -f "$other/AGENTS.md" ] || return 1
+  return 0
+}
+
+# A missing mirror is a distinct failure from a stale one, and reading ENOENT as
+# "nothing to compare" would fail open on a tree that never generated AGENTS.md
+# at all.
+test_agents_md_fails_when_mirror_is_absent() {
+  local dir
+  dir=$(mktemp -d)
+  trap "rm -rf '$dir'" RETURN
+  build_fake_repo "$dir" "0.5.7"
+  install_bump_script "$dir"
+  write_changelog "$dir/CHANGELOG.md" "0.5.7" "### Fixed
+
+- A real fix (#42)"
+  write_claude_md "$dir/CLAUDE.md" "0.5.7"
+
+  mkdir -p "$dir/scripts"
+  cat > "$dir/scripts/gen-agents-md.mjs" <<'STUB'
+export function renderAgentsMd (claudeContents) {
+  return "<!-- AUTO-GENERATED FROM CLAUDE.md -->\n\n" + claudeContents
+}
+STUB
+
+  (cd "$dir" && PATH="$NOCARGO_PATH" ./scripts/bump-version.sh 0.6.0) > /dev/null 2>&1 && return 1
+  [ ! -f "$dir/AGENTS.md" ] || return 1
+  return 0
+}
+
 # --- runner ------------------------------------------------------------------
 
 echo "Running bump-version.sh tests"
@@ -840,21 +978,40 @@ install_gen_agents_stub() {
   cat > "$dir/scripts/gen-agents-md.mjs" <<STUB
 import { readFileSync, writeFileSync, existsSync } from 'node:fs'
 const mode = '$mode'
-const check = process.argv.includes('--check')
-// 'quiet' is the silent no-op: no output, exit 0, for BOTH invocations.
-if (mode === 'quiet') process.exit(0)
-if (mode === 'nowrite' && !check) process.exit(0)
-const claude = existsSync('CLAUDE.md') ? readFileSync('CLAUDE.md', 'utf8') : ''
-const want = 'GENERATED\n' + claude
-if (check) {
-  const have = existsSync('AGENTS.md') ? readFileSync('AGENTS.md', 'utf8') : ''
-  if (have !== want) {
-    console.error('::error::AGENTS.md is out of sync with CLAUDE.md.')
-    process.exit(1)
+
+// The pure renderer, exported the way the real generator exports it. Since
+// #7231 this is what bump-version.sh imports to verify in its OWN frame, so it
+// has to be reachable WITHOUT running the CLI.
+export function renderAgentsMd (claudeContents) {
+  return 'GENERATED\n' + claudeContents
+}
+
+// Stands in for the real entry-point guard, and the reason the module-scope
+// \`process.exit(0)\` these stubs used to open with had to go: that exit fired
+// during the verifier's \`await import()\` too, killing the verifying process
+// with status 0 — which the shell would have read as a PASS. A generator whose
+// guard reads false does not exit, it simply declines to run, and a stub that
+// models it any other way tests the stub instead of the script.
+const invokedDirectly = Boolean(process.argv[1] && process.argv[1].endsWith('gen-agents-md.mjs'))
+if (invokedDirectly) {
+  const check = process.argv.includes('--check')
+  // 'quiet' is the silent no-op: no output, exit 0, for BOTH invocations.
+  // 'nowrite' skips only the write, so a --check invocation still reports drift.
+  const skip = mode === 'quiet' || (mode === 'nowrite' && !check)
+  if (!skip) {
+    const claude = existsSync('CLAUDE.md') ? readFileSync('CLAUDE.md', 'utf8') : ''
+    const want = renderAgentsMd(claude)
+    if (check) {
+      const have = existsSync('AGENTS.md') ? readFileSync('AGENTS.md', 'utf8') : ''
+      if (have !== want) {
+        console.error('::error::AGENTS.md is out of sync with CLAUDE.md.')
+        process.exit(1)
+      }
+      console.log('AGENTS.md is in sync with CLAUDE.md.')
+    } else {
+      writeFileSync('AGENTS.md', want)
+    }
   }
-  console.log('AGENTS.md is in sync with CLAUDE.md.')
-} else {
-  writeFileSync('AGENTS.md', want)
 }
 STUB
 }
@@ -868,17 +1025,7 @@ setup_agents_case() {
   write_changelog "$dir/CHANGELOG.md" "0.5.7" "### Fixed
 
 - A real fix (#42)"
-  cat > "$dir/CLAUDE.md" <<'CLAUDEMD'
-# Claude Development Notes
-
-**Current Status (v0.5.7):**
-- stuff works
-
----
-
-*Last Updated: 2026-01-01*
-*Version: 0.5.7*
-CLAUDEMD
+  write_claude_md "$dir/CLAUDE.md" "0.5.7"
   printf 'STALE\n' > "$dir/AGENTS.md"
 }
 
@@ -910,7 +1057,7 @@ test_agents_md_silent_noop_fails_the_bump() {
   local out rc=0
   out=$( (cd "$dir" && PATH="$NOCARGO_PATH" ./scripts/bump-version.sh 0.6.0) 2>&1 ) || rc=$?
   [ "$rc" -ne 0 ] || return 1
-  printf '%s' "$out" | grep -q 'could not confirm AGENTS.md is in sync' || return 1
+  printf '%s' "$out" | grep -q 'is not in sync with' || return 1
   # The false success must NOT also have been printed.
   ! printf '%s' "$out" | grep -q 'AGENTS.md regenerated from CLAUDE.md' || return 1
 }
@@ -925,7 +1072,7 @@ test_agents_md_stale_after_regeneration_fails_the_bump() {
   local out rc=0
   out=$( (cd "$dir" && PATH="$NOCARGO_PATH" ./scripts/bump-version.sh 0.6.0) 2>&1 ) || rc=$?
   [ "$rc" -ne 0 ] || return 1
-  printf '%s' "$out" | grep -q 'could not confirm AGENTS.md is in sync' || return 1
+  printf '%s' "$out" | grep -q 'is not in sync with' || return 1
   ! printf '%s' "$out" | grep -q 'AGENTS.md regenerated from CLAUDE.md' || return 1
 }
 
@@ -935,6 +1082,12 @@ run_test "a generator that silently no-ops fails the bump (#7198 shape)" \
   test_agents_md_silent_noop_fails_the_bump
 run_test "a stale AGENTS.md after regeneration fails the bump" \
   test_agents_md_stale_after_regeneration_fails_the_bump
+run_test "AGENTS.md is verified against \$ROOT, with the real generator (#7231)" \
+  test_agents_md_regenerated_and_verified_in_root_frame
+run_test "a generator writing to ANOTHER tree fails the bump (#7231)" \
+  test_agents_md_fails_when_generator_writes_to_another_tree
+run_test "an absent AGENTS.md fails the bump rather than reading as nothing-to-compare" \
+  test_agents_md_fails_when_mirror_is_absent
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
