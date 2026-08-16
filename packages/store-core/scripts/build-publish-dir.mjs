@@ -32,7 +32,7 @@
 import { execFileSync } from 'node:child_process'
 import { cpSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, join, resolve, sep } from 'node:path'
 
 // The source imports siblings without a file extension (`from './types'`), which
 // tsconfig's `moduleResolution: "bundler"` allows and Metro/Vite resolve happily.
@@ -209,7 +209,47 @@ for (const [label, target] of declared) {
   // rather than a `file://` template: the template mangles Windows paths (drive
   // letters, backslashes) and anything needing percent-encoding, and this repo
   // runs Windows CI.
+  //
+  // The `join(outDir, '/')` is load-bearing, not decorative. WHATWG URL
+  // resolution reads a base's trailing slash as the directory/file boundary: a
+  // relative reference APPENDS to a base ending in '/', and REPLACES the last
+  // segment otherwise. Drop it and every target resolves one level up:
+  //
+  //   base .../store-core/publish/  + ./dist/index.js -> .../publish/dist/index.js
+  //   base .../store-core/publish   + ./dist/index.js -> .../store-core/dist/index.js
+  //
+  // That second path is packages/store-core/dist — the tree step 1 rebuilds,
+  // mostly gitignored (.gitignore keeps only crypto.js and crypto.d.ts). It is
+  // a real directory of real files, so existsSync is satisfied and the check
+  // proceeds against the wrong tree entirely.
+  //
+  // How loudly that fails depends on WHICH export is checked, which is the
+  // whole problem:
+  //
+  //   "."       throws. addExtensions() rewrites only the STAGED copy, so
+  //             dist/index.js keeps its extensionless specifiers and Node
+  //             rejects it with ERR_UNSUPPORTED_DIR_IMPORT — blaming the
+  //             published entry point rather than the wrong base URL.
+  //   "./crypto" passes. dist/crypto.js has no relative specifiers at all, so
+  //             the staged copy is byte-identical and it imports cleanly.
+  //
+  // So the mistake is caught today only because "." happens to be checked
+  // first and happens to throw. For "./crypto" it is already a silent pass
+  // against the wrong tree. Neither of those is a property of this check —
+  // reorder the exports, or regenerate dist with extensions, and the whole
+  // thing goes green having verified nothing this script produced (#7211).
   const file = new URL(target, pathToFileURL(join(outDir, '/')))
+
+  // So assert it rather than trusting the comment. A comment cannot fail; this
+  // turns "simplified the base URL" from a silent wrong answer into a loud one.
+  const filePath = fileURLToPath(file)
+  if (!filePath.startsWith(outDir + sep)) {
+    throw new Error(
+      `manifest exports "${label}" -> ${target} resolved to ${filePath}, which is OUTSIDE the staging dir ` +
+      `(${outDir}). The base URL must keep its trailing separator, or the self-check verifies the wrong files.`,
+    )
+  }
+
   if (!existsSync(file)) {
     throw new Error(`manifest exports "${label}" -> ${target}, which does not exist in the package`)
   }
