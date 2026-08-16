@@ -254,8 +254,21 @@ function FileDiffView({
           </Text>
         </View>
       </View>
-      <ScrollView style={styles.diffScroll} contentContainerStyle={styles.diffScrollContent}>
-        <ScrollView horizontal showsHorizontalScrollIndicator>
+      {/* keyboardShouldPersistTaps on BOTH: the inline comment editor's Save /
+          Cancel buttons live inside these scroll views, and the comment input
+          autofocuses — so with RN's default of 'never', the first tap after
+          typing is consumed by the keyboard dismiss and never reaches the
+          button. The user taps "Add comment", nothing happens, and only a
+          second tap works (#7203; surfaced by the Maestro flow in #7185).
+          The prop is per-ScrollView, so setting it only on the outer one
+          leaves the inner one still swallowing the tap. 'handled' rather than
+          'always' keeps tap-to-dismiss working everywhere else in the diff. */}
+      <ScrollView
+        style={styles.diffScroll}
+        contentContainerStyle={styles.diffScrollContent}
+        keyboardShouldPersistTaps="handled"
+      >
+        <ScrollView horizontal showsHorizontalScrollIndicator keyboardShouldPersistTaps="handled">
           <View>
             {file.hunks.map((hunk, i) => (
               <DiffHunkView key={i} hunk={hunk} filePath={file.path} hunkIndex={i} commentApi={commentApi} />
