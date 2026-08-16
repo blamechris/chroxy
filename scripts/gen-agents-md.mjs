@@ -78,6 +78,16 @@ export function readAgentsMd() {
 // `-e` eval, a deleted script); an unresolvable path simply is not this file.
 const invokedDirectly = (() => {
   if (!process.argv[1]) return false
+  // The plain comparison runs first and is conclusive on its own: identical
+  // paths mean this IS the entry point, decided without touching the
+  // filesystem. Consulting realpath first and reading a failure as false let an
+  // EACCES on a parent directory (or a script unlinked after launch) turn a
+  // direct run into a silent exit-0 no-op — the same shape as #7198, reached
+  // through a different trigger (#7214). Realpath is only needed once the paths
+  // differ, where a symlink is the sole thing that can still make them one file.
+  const self = fileURLToPath(import.meta.url)
+  const argv = resolve(process.argv[1])
+  if (self === argv) return true
   const realpathOrNull = (p) => {
     try {
       return realpathSync(p)
@@ -85,9 +95,9 @@ const invokedDirectly = (() => {
       return null
     }
   }
-  const self = realpathOrNull(fileURLToPath(import.meta.url))
-  const argv = realpathOrNull(resolve(process.argv[1]))
-  return self !== null && self === argv
+  const realSelf = realpathOrNull(self)
+  const realArgv = realpathOrNull(argv)
+  return realSelf !== null && realSelf === realArgv
 })()
 
 if (invokedDirectly) {
