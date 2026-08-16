@@ -278,19 +278,38 @@ if [ -f "$CLAUDE_MD" ]; then
   if [ -f "$ROOT/scripts/gen-agents-md.mjs" ]; then
     node "$ROOT/scripts/gen-agents-md.mjs" >/dev/null
     # Verify the postcondition instead of announcing it. `set -euo pipefail`
-    # only catches a NON-ZERO exit, and the defect class this regeneration
+    # catches only a NON-ZERO exit, and the defect class this regeneration
     # exists to survive (#7198, #7214) is exit ZERO having done nothing — so in
     # precisely the failure mode worth worrying about, an unconditional echo
     # prints a success that is false and the release ships a stale AGENTS.md.
-    # --check re-derives from CLAUDE.md and exits 1 on drift, so it cannot be
-    # satisfied by the generator having skipped itself.
-    if node "$ROOT/scripts/gen-agents-md.mjs" --check >/dev/null 2>&1; then
-      echo "  AGENTS.md regenerated from CLAUDE.md"
-    else
-      echo "  ERROR: AGENTS.md is still out of sync with CLAUDE.md after regeneration" >&2
-      echo "  (the generator exited 0 without writing — see #7198 / #7214)" >&2
-      exit 1
-    fi
+    #
+    # --check's EXIT CODE is not sufficient on its own, and assuming it was is
+    # how the first version of this check missed the very defect it names.
+    # --check exits 0 in two unrelated situations:
+    #
+    #   in sync           -> prints "AGENTS.md is in sync with CLAUDE.md."
+    #   never ran at all  -> prints NOTHING
+    #
+    # The second is the authentic #7198 shape: the entry-point guard reads
+    # false and skips this invocation exactly as it skipped the write above.
+    # Both exit 0, so only the confirmation LINE tells them apart. Requiring
+    # the line means a generator that silently declines to run cannot satisfy
+    # this check by staying quiet.
+    agents_check_out="$(node "$ROOT/scripts/gen-agents-md.mjs" --check 2>&1)" || true
+    case "$agents_check_out" in
+      *"is in sync with CLAUDE.md"*)
+        echo "  AGENTS.md regenerated from CLAUDE.md"
+        ;;
+      *)
+        echo "  ERROR: could not confirm AGENTS.md is in sync with CLAUDE.md" >&2
+        if [ -n "$agents_check_out" ]; then
+          echo "  generator said: $agents_check_out" >&2
+        else
+          echo "  the generator produced no output — it exited 0 without running (#7198 / #7214)" >&2
+        fi
+        exit 1
+        ;;
+    esac
   fi
 fi
 
