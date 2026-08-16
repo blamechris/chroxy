@@ -34,19 +34,42 @@ import { fileURLToPath } from 'node:url'
 /**
  * True when `importMetaUrl`'s module is the script node was invoked with.
  *
- * Both sides are realpath'd so a symlinked invocation path still matches.
- * Anything that cannot be resolved to a real file — argv[1] absent (an `-e`
- * eval, a REPL), a deleted script, a path we lack permission to stat — is
- * simply not this module, so the guard is false and the caller behaves as if
- * imported. That is the safe direction: a missed CLI run is loud (nothing
- * happens and the user notices), whereas side effects firing during an import
- * would corrupt a test run.
+ * Order matters. The plain (non-realpath) comparison runs FIRST and is
+ * conclusive on its own: if the two paths are already identical, this module
+ * is the entry point and no filesystem access is needed to say so. Only when
+ * they differ is realpath consulted, because the sole reason they can differ
+ * while still naming the same file is a symlink somewhere in the invocation
+ * path.
+ *
+ * That ordering is the point, not an optimisation. Reaching for realpath
+ * first and treating a failure as `false` recreates the very bug this module
+ * exists to remove: an `EACCES` on some parent directory, or a script
+ * unlinked after launch, would make a direct `node foo.js` evaluate false,
+ * `main()` would never run, and the process would exit 0 having done nothing
+ * (#7217 review). Doing the cheap comparison first means no filesystem error
+ * can reach the common case at all.
+ *
+ * The one genuinely undecidable case is left: paths that differ AND cannot be
+ * realpath'd. Whether a symlink joins them is unknowable without the
+ * filesystem call that just failed, and `false` is the only defensible answer
+ * — it is also strictly better than the pre-#7213 behaviour, which got that
+ * case wrong even when realpath would have succeeded.
+ *
+ * argv[1] absent (an `-e` eval, a REPL) means there is no invoked script, so
+ * nothing can be the entry point.
  *
  * @param {string} importMetaUrl - the calling module's `import.meta.url`
  * @returns {boolean}
  */
 export function isEntryPoint(importMetaUrl) {
   if (!process.argv[1]) return false
+
+  const self = fileURLToPath(importMetaUrl)
+  const invoked = resolve(process.argv[1])
+  if (self === invoked) return true
+
+  // Paths differ — a symlink is the only thing that still makes them the same
+  // file, so this is where realpath earns its keep.
   const real = (p) => {
     try {
       return realpathSync(p)
@@ -54,7 +77,7 @@ export function isEntryPoint(importMetaUrl) {
       return null
     }
   }
-  const self = real(fileURLToPath(importMetaUrl))
-  const invoked = real(resolve(process.argv[1]))
-  return self !== null && self === invoked
+  const realSelf = real(self)
+  const realInvoked = real(invoked)
+  return realSelf !== null && realSelf === realInvoked
 }
