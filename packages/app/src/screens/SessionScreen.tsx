@@ -187,15 +187,23 @@ export function SessionScreen() {
   // the shared #6880 predicate hides (tool_use/thinking today). `system` stays a
   // separate inline check — isHiddenInCompactMode is specifically the compact-hide rule.
   //
-  // EXCEPT compaction markers (#6972). ChatView reinserts `compactMetadata`-
-  // carrying system messages inline via insertCompactionMarkers, because mobile
-  // has no System tab to send them to. That reinsertion reads the SAME
-  // `messages` array it is handed, so dropping them here left it filtering a
-  // list that could never contain one — dead code, and the marker was
-  // unreachable on mobile entirely. They still never reach the rendered groups
-  // through the normal path: buildChatViewMessages filters `type: 'system'`
-  // (buildChatViewMessages.ts:258) exactly as before, so this only makes them
-  // available to the reinsertion step.
+  // EXCEPT compaction markers (#6972). A compaction boundary is positional —
+  // it means "context was dropped HERE", between these two turns — so it has
+  // to sit inline in the chat flow. Reaching it on the System tab (which mobile
+  // does have, `viewMode === 'system'` below) is not equivalent: the marker
+  // separated from the messages it sits between conveys nothing.
+  //
+  // ChatView reinserts the `compactMetadata`-carrying subset via
+  // insertCompactionMarkers, and that reinsertion reads the SAME `messages`
+  // array it is handed — so dropping them here left it filtering a list that
+  // could never contain one. Dead code, and the marker was unreachable in the
+  // chat flow entirely (#7186).
+  //
+  // They still never reach the rendered groups through the normal path:
+  // buildChatViewMessages filters `type: 'system'` (buildChatViewMessages.ts:258)
+  // exactly as before, so this only makes them available to the reinsertion
+  // step. `systemMessages` below is unchanged, so they also still appear on the
+  // System tab.
   const chatMessages = useMemo(
     () => allMessages.filter((m) => {
       if (m.type === 'system') return m.compactMetadata != null;

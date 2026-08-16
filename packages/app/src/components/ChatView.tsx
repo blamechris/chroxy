@@ -349,11 +349,17 @@ export function ChatView({
     [messages, streamingMessageId],
   );
 
-  // #6972 — mobile parity: buildChatViewMessages filters `type: 'system'`
-  // off the Chat tab entirely (they're meant for the dashboard's System
-  // tab, which mobile has no equivalent of). Reinsert only the
-  // `compactMetadata`-carrying subset inline, in timestamp order, so the
-  // "Context compacted" marker is reachable at all on mobile. See
+  // #6972 — mobile parity: buildChatViewMessages filters `type: 'system'` off
+  // the Chat tab entirely (they belong on the System tab, which mobile DOES
+  // have — SessionScreen's `viewMode === 'system'`; an earlier version of this
+  // comment claimed otherwise). Compaction boundaries still have to be
+  // reinserted here because they are positional: "context was dropped HERE",
+  // between these two turns. On the System tab, separated from the messages it
+  // sits between, the marker conveys nothing.
+  //
+  // Reinsert only the `compactMetadata`-carrying subset, in timestamp order.
+  // This reads the same `messages` array the component is handed, so SessionScreen
+  // must let those through its own filter for any of it to run (#7186). See
   // insertCompactionMarkers's doc comment for the full placement rationale.
   const displayGroups = useMemo(
     () => insertCompactionMarkers(baseDisplayGroups, messages),
