@@ -84,8 +84,9 @@ const invokedDirectly = (() => {
   // EACCES on a parent directory (or a script unlinked after launch) turn a
   // direct run into a silent exit-0 no-op — the same shape as #7198, reached
   // through a different trigger (#7214). Realpath is only needed once the paths
-  // differ — via a symlink, or via case normalisation on a case-insensitive
-  // filesystem (default APFS/NTFS), both of which it resolves.
+  // differ, where a symlink is the only thing that still makes them one file —
+  // the same wording as the canonical copy in
+  // packages/server/src/utils/is-entry-point.js, deliberately.
   const self = fileURLToPath(import.meta.url)
   const argv = resolve(process.argv[1])
   if (self === argv) return true
