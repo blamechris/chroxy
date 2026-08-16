@@ -218,9 +218,17 @@ for (const [label, target] of declared) {
   //   base .../store-core/publish/  + ./dist/index.js -> .../publish/dist/index.js
   //   base .../store-core/publish   + ./dist/index.js -> .../store-core/dist/index.js
   //
-  // That second path is the COMMITTED dist — it exists, it imports, and the
-  // self-check goes green having verified the wrong artifact entirely, which is
-  // the same false-safety bug #7205 removed wearing a different hat (#7211).
+  // That second path is the COMMITTED dist — a real directory of real files,
+  // so existsSync is satisfied and the check proceeds against the wrong tree
+  // entirely.
+  //
+  // Today it then fails at the import, because addExtensions() rewrites only
+  // the STAGED copy, so the committed dist still carries extensionless
+  // specifiers and Node rejects it with ERR_UNSUPPORTED_DIR_IMPORT. That is
+  // luck, not a guarantee, and the error blames the published entry point
+  // rather than the wrong base URL. Regenerate that dist with extensions and
+  // the same mistake resolves, imports, and goes green having verified nothing
+  // this script produced (#7211).
   const file = new URL(target, pathToFileURL(join(outDir, '/')))
 
   // So assert it rather than trusting the comment. A comment cannot fail; this
