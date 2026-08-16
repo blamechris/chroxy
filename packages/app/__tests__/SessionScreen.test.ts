@@ -146,7 +146,9 @@ describe('SessionScreen component structure', () => {
         /chatFilterCompact\s*&&\s*isHiddenInCompactMode\(m\.type\)/,
       )
       // SessionScreen must delegate rather than keep its own copy.
-      expect(src).toMatch(/selectChatMessages\(allMessages, \{ chatFilterCompact, isHiddenInCompactMode \}\)/)
+      expect(src).toMatch(
+        /selectChatMessages\(\s*allMessages\s*,\s*\{\s*chatFilterCompact\s*,\s*isHiddenInCompactMode\s*,?\s*\}\s*,?\s*\)/,
+      )
       expect(src).not.toMatch(/chatFilterCompact\s*&&\s*isHiddenInCompactMode/)
       // The old hard-coded duplicate must be gone — this is the exact string
       // #6882 was filed to remove (drift risk vs. the store-core predicate).
@@ -158,10 +160,14 @@ describe('SessionScreen component structure', () => {
       )
     })
 
-    test('system messages are still filtered inline, separately from the compact predicate', () => {
-      // #6882: system filtering stays inline — isHiddenInCompactMode is
-      // specifically the compact-hide rule, not a catch-all message filter.
-      expect(src).toMatch(/selectChatMessages\(allMessages, \{ chatFilterCompact, isHiddenInCompactMode \}\)/)
+    test('system filtering is delegated to selectChatMessages, not the compact predicate', () => {
+      // #6882: system filtering is its own rule — isHiddenInCompactMode is
+      // specifically the compact-hide predicate, not a catch-all message
+      // filter. It moved out of SessionScreen into selectChatMessages (#7201);
+      // what matters is that the two stay separate, not where they live.
+      expect(src).toMatch(
+        /selectChatMessages\(\s*allMessages\s*,\s*\{\s*chatFilterCompact\s*,\s*isHiddenInCompactMode\s*,?\s*\}\s*,?\s*\)/,
+      )
     })
 
     test('compaction markers survive the system filter so ChatView can reinsert them (#7186)', () => {
