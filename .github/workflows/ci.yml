@@ -178,6 +178,7 @@ jobs:
       pull-requests: read
     outputs:
       platform: ${{ steps.filter.outputs.platform }}
+      renovate: ${{ steps.filter.outputs.renovate }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -198,6 +199,13 @@ jobs:
               - 'packages/server/tests/platform*.test.js'
               # Workflow itself — so edits to this gating logic always
               # exercise the gated job on the same PR.
+              - '.github/workflows/ci.yml'
+            renovate:
+              # #7196 — renovate.json is exercised by nothing else in CI, so an
+              # edit can reintroduce invalid or deprecated syntax with nothing
+              # catching it before merge. That is exactly how it accumulated the
+              # deprecated regexManagers/fileMatch spelling #7191 had to fix.
+              - 'renovate.json'
               - '.github/workflows/ci.yml'
 
   server-tests-windows:
@@ -861,6 +869,56 @@ jobs:
 
       - name: Run desktop tests
         run: cargo test --locked
+
+  renovate-config:
+    name: Renovate Config
+    # #7196 — validate renovate.json against a PINNED renovate.
+    #
+    # The version pin is the point. `npx --package renovate` with no version
+    # reuses whatever is already in the local ~/.npm/_npx cache rather than
+    # necessarily re-resolving, so the same command can validate against a
+    # months-old renovate and reject a correct config — which is exactly what
+    # happened while reviewing #7191 (a cached 37.x rejected the current
+    # `managerFilePatterns` spelling). A gate that fails on correct input, or
+    # passes on stale rules, is worse than no gate.
+    #
+    # Bumping this pin is deliberate work: renovate's schema moves, and the
+    # bump should be the change that surfaces any migration, not a silent
+    # drift underneath an unpinned command.
+    needs: [runner-target, changes]
+    if: needs.changes.outputs.renovate == 'true'
+    runs-on: ${{ fromJSON(needs.runner-target.outputs.runner) }}  # SELF_HOSTED_OR_HOSTED (see header)
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          # 24, not the repo's usual 22: renovate 44.x declares
+          # `engines.node: ^24.11.0`, and running it under 22 only produces an
+          # EBADENGINE warning today — an unsupported-engine combination is not
+          # something a validation gate should be built on. Bump alongside
+          # RENOVATE_VERSION below.
+          node-version: 24
+          # Reuse ~/.npm across runs so the validator's dependency tree is not
+          # re-downloaded cold every time. Safe alongside the pin below: npx
+          # resolves an explicit `renovate@<version>` spec regardless of what
+          # is cached — the staleness that motivated pinning came from an
+          # UNPINNED spec silently reusing whatever the cache held.
+          cache: npm
+          # Glob, not the bare root lockfile: this monorepo has three
+          # (root, packages/server, packages/server/sidecar) and the cache key
+          # must cover all of them. packages/server/tests/ci-cache-key.test.js
+          # enforces this for every job in this file.
+          cache-dependency-path: '**/package-lock.json'
+
+      - name: Validate renovate.json
+        env:
+          # Keep in sync deliberately; see the note above before changing.
+          RENOVATE_VERSION: 44.30.3
+        run: |
+          npx --yes --package "renovate@${RENOVATE_VERSION}" -- \
+            renovate-config-validator --strict renovate.json
 
   scripts-tests:
     name: Scripts Tests
