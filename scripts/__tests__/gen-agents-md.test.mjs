@@ -11,7 +11,10 @@
  *   node scripts/__tests__/gen-agents-md.test.mjs
  */
 
-import { dirname, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
 const __filename = fileURLToPath(import.meta.url)
@@ -65,6 +68,46 @@ await test('committed AGENTS.md is in sync with CLAUDE.md (drift gate)', async (
     committed === expected,
     'AGENTS.md is stale — run `node scripts/gen-agents-md.mjs` and commit AGENTS.md'
   )
+})
+
+
+// #7198 — the entry-point guard must survive a symlinked invocation path.
+//
+// Node's ESM loader resolves symlinks in `import.meta.url` but leaves
+// `process.argv[1]` as the caller typed it, and `resolve()` does not follow
+// symlinks. On macOS /tmp is a symlink to /private/tmp, so invoking
+// `node /tmp/…/gen-agents-md.mjs` compared '/private/tmp/…' against '/tmp/…',
+// the guard was false, and the script exited 0 having regenerated NOTHING.
+// bump-version.sh calls this and trusts the exit code, so a release could
+// silently skip the regeneration and still report success.
+await test('runs through a symlinked invocation path (#7198)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'genagents-'))
+  try {
+    // Mirror the real layout: the generator resolves CLAUDE.md / AGENTS.md
+    // relative to its own parent directory, i.e. the repo root.
+    const root = join(dir, 'root')
+    const link = join(dir, 'link')
+    mkdirSync(join(root, 'scripts'), { recursive: true })
+    symlinkSync(root, link)
+
+    cpSync(scriptPath, join(root, 'scripts', 'gen-agents-md.mjs'))
+    cpSync(resolve(__dirname, '..', '..', 'CLAUDE.md'), join(root, 'CLAUDE.md'))
+    writeFileSync(join(root, 'AGENTS.md'), 'STALE\n')
+
+    const run = spawnSync(process.execPath, [join(link, 'scripts', 'gen-agents-md.mjs')], { encoding: 'utf8' })
+    assert(run.status === 0, `expected exit 0, got ${run.status}: ${run.stderr}`)
+    assert(
+      readFileSync(join(root, 'AGENTS.md'), 'utf8') !== 'STALE\n',
+      'generator silently no-opped when invoked through a symlinked path'
+    )
+
+    // --check must FAIL on drift through that same path, not pass silently.
+    writeFileSync(join(root, 'AGENTS.md'), 'STALE\n')
+    const checked = spawnSync(process.execPath, [join(link, 'scripts', 'gen-agents-md.mjs'), '--check'], { encoding: 'utf8' })
+    assert(checked.status === 1, `--check should exit 1 on drift, got ${checked.status}`)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 // --- summary --------------------------------------------------------------
