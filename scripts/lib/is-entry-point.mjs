@@ -1,55 +1,38 @@
-// is-entry-point.js — "was this module run directly, or imported?"
+// is-entry-point.mjs — "was this module run directly, or imported?"
 //
-// Every hand-rolled version of this check in the repo was wrong the same way,
-// so there is one implementation per reachable scope now (#7213, after #7198).
-// Two other copies exist and cannot import this one:
+// The one implementation for `scripts/`. It is a deliberate second copy of
+// packages/server/src/utils/is-entry-point.js: `scripts/` sits outside every
+// workspace package, and no script in this directory reaches into
+// `packages/*/src` for anything (#7217). A third copy is inlined in
+// packages/server/sidecar/agent.js, which ships as a standalone in-pod bundle
+// and cannot import either of the other two.
 //
-//   scripts/lib/is-entry-point.mjs  — `scripts/` is outside every workspace
-//                                     package and reaches into none of them
-//   packages/server/sidecar/agent.js — a standalone in-pod bundle; the
-//                                     Dockerfile COPYs only agent.js and its
-//                                     package.json, so src/ is unreachable
+// Three copies of one guard is the shape #7213 was filed to remove, so the
+// thing that keeps them honest is not a convention but a test: the drift gate
+// in scripts/__tests__/is-entry-point.test.mjs extracts the guard from all
+// three files, strips comments, and fails if any has diverged. Change one,
+// change the others — and if you forget, that test says which (#7222).
 //
-// This file and scripts/lib/is-entry-point.mjs are byte-identical from the
-// `if (!process.argv[1])` line down. sidecar/agent.js runs the same code as an
-// inline IIFE, so it reads `import.meta.url` directly instead of taking it as a
-// parameter and its comments are pod-specific — everything else matches.
+// Why this is not `import.meta.main` (#7222). Node 22.18.0 shipped that as a
+// native, symlink-correct replacement for the whole comparison below, and it
+// would delete every copy of this. It is unusable here: the declared floor is
+// `"node": ">=22"`, and on Node 22.0–22.17 `import.meta.main` is plain
+// `undefined`. A falsy guard on an older-but-supported runtime is exactly the
+// silent exit-0 no-op this module exists to prevent, reintroduced as a version
+// skew that no CI job pinned to `node-version: 22` would ever show. Revisit
+// when the engines floor moves to >=22.18.
 //
-// That is not a convention anyone has to remember: the drift gate in
-// scripts/__tests__/is-entry-point.test.mjs extracts the guard from all three
-// files, strips comments, and fails if they diverge. Change one, change the
-// others, and the test will tell you if you missed one (#7222).
-//
-// Why this is not `import.meta.main`. Node 22.18.0 shipped that as a native,
-// symlink-correct replacement that would delete all three copies. It is
-// unusable here: the declared floor is `"node": ">=22"`, and on Node
-// 22.0–22.17 `import.meta.main` is plain `undefined`. A falsy guard on an
-// older-but-supported runtime is exactly the silent exit-0 no-op this module
-// exists to prevent, reintroduced as a version skew no CI job pinned to
-// `node-version: 22` would ever show. Revisit when the floor moves to >=22.18.
-//
-// The trap: Node's ESM loader RESOLVES SYMLINKS in `import.meta.url`, but
-// `process.argv[1]` is whatever the caller typed. Neither `resolve()` nor
-// `pathToFileURL()` follows symlinks, so every one of these compares a
-// realpath against a non-realpath:
-//
-//   resolve(fileURLToPath(import.meta.url)) === resolve(process.argv[1])
-//   import.meta.url === pathToFileURL(process.argv[1]).href
-//   process.argv[1] === fileURLToPath(import.meta.url)
-//
-// On macOS /tmp is a symlink to /private/tmp, so running a script by a /tmp
-// path gives 'file:///private/tmp/x.mjs' on one side and 'file:///tmp/x.mjs'
-// on the other. The guard reads false, main() never runs, and the process
-// exits 0 having done nothing — the failure is silence, which is why it
-// survived in four separate files.
-//
-// Demonstrated:
-//   import.meta.url        : file:///private/tmp/ptfu/probe.mjs
-//   pathToFileURL(argv[1]) : file:///tmp/ptfu/probe.mjs
-//   guard would be         : false
+// The trap this replaces: Node's ESM loader RESOLVES SYMLINKS in
+// `import.meta.url`, but `process.argv[1]` is whatever the caller typed, and
+// neither `resolve()` nor `pathToFileURL()` follows symlinks. On macOS /tmp is
+// a symlink to /private/tmp, so running a script by a /tmp path gives
+// 'file:///private/tmp/x.mjs' on one side and 'file:///tmp/x.mjs' on the other.
+// The guard reads false, main() never runs, and the process exits 0 having done
+// nothing — the failure is silence, which is why it survived in four files
+// (#7198, #7213).
 //
 // Usage:
-//   import { isEntryPoint } from './utils/is-entry-point.js'
+//   import { isEntryPoint } from './lib/is-entry-point.mjs'
 //   if (isEntryPoint(import.meta.url)) { main() }
 
 import { realpathSync } from 'node:fs'
@@ -71,18 +54,16 @@ import { fileURLToPath } from 'node:url'
  * exists to remove: an `EACCES` on some parent directory, or a script
  * unlinked after launch, would make a direct `node foo.js` evaluate false,
  * `main()` would never run, and the process would exit 0 having done nothing
- * (#7217 review). Doing the cheap comparison first means no filesystem error
- * can reach the common case at all.
+ * (#7214). Doing the cheap comparison first means no filesystem error can
+ * reach the common case at all.
  *
  * The one genuinely undecidable case is left: paths that differ AND cannot be
  * realpath'd. Whether a symlink joins them is unknowable without the
- * filesystem call that just failed, and `false` is the only defensible answer
- * — it is also strictly better than the pre-#7213 behaviour, which got that
- * case wrong even when realpath would have succeeded. Undecidable does not
- * have to mean quiet, though — that combination is what made #7198 and #7214
- * expensive to find — so that branch warns on stderr before returning (#7226).
- * The ordinary "this module was imported" answer stays silent; only the branch
- * that could not tell says anything.
+ * filesystem call that just failed, and `false` is the only defensible answer.
+ * Undecidable does not have to mean quiet, though — that combination is what
+ * made #7198 and #7214 expensive to find — so that branch warns on stderr
+ * before returning (#7226). The ordinary "this module was imported" answer
+ * stays silent; only the branch that could not tell says anything.
  *
  * argv[1] absent (an `-e` eval, a REPL) means there is no invoked script, so
  * nothing can be the entry point.
