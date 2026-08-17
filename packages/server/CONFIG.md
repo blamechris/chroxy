@@ -31,7 +31,10 @@ Three properties are worth knowing before you set it:
   filesystem call, resolving a relative value would scatter `credentials.json`,
   the identity key and the trust ledgers into whatever directory the daemon
   happened to be launched from — a git working tree, if you ran `chroxy start`
-  from a repo.
+  from a repo. Absoluteness is Node's `path.isAbsolute()`, which on **Windows**
+  also accepts a root-relative `\data` or `/data` (no drive letter needed); the
+  desktop app matches that rule deliberately rather than using Rust's stricter
+  one, since the two disagreeing is itself a split-brain (#7241).
 - **It is env-only, and read directly** rather than through the merge layer
   (see [Environment variable names](#environment-variable-names)). It cannot be a
   `config.json` key, because it is what locates `config.json` in the first place.

@@ -28,6 +28,46 @@ fn default_port() -> u16 {
 /// daemon's `warnedRelative` in `config-dir.js`.
 static WARNED_RELATIVE: AtomicBool = AtomicBool::new(false);
 
+/// Is `p` absolute by the same rule the **daemon** applies?
+///
+/// Deliberately NOT `Path::is_absolute()`, because that diverges from Node's
+/// `path.isAbsolute()` on Windows and the two halves have to agree on one answer:
+///
+/// | value    | Node win32 | Rust `is_absolute()` |
+/// |----------|-----------|----------------------|
+/// | `C:\x`   | true      | true                 |
+/// | `/x`     | **true**  | **false**            |
+/// | `\x`     | **true**  | **false**            |
+/// | `x`      | false     | false                |
+///
+/// Rust requires a drive prefix *and* a root on Windows; Node accepts a bare
+/// root-relative path. Using Rust's rule would make the desktop **refuse a value
+/// the daemon accepts**, so `CHROXY_CONFIG_DIR=/data` on Windows would relocate
+/// the server while the tray kept reading `~/.chroxy` — the #7239 split-brain
+/// this resolver exists to remove, reappearing on one platform only and invisible
+/// from a macOS dev machine.
+///
+/// On Unix the two rules already coincide (`is_absolute` ⇔ starts with `/`), and
+/// `\x` is correctly non-absolute there under both.
+fn is_absolute_like_node(p: &str) -> bool {
+    #[cfg(windows)]
+    {
+        let b = p.as_bytes();
+        match b {
+            [] => false,
+            // A leading separator — Node's win32 rule accepts it.
+            [b'/', ..] | [b'\\', ..] => true,
+            // `X:/…` or `X:\…` (a bare `X:` is drive-RELATIVE, so it is not).
+            [d, b':', s, ..] => d.is_ascii_alphabetic() && (*s == b'/' || *s == b'\\'),
+            _ => false,
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        Path::new(p).is_absolute()
+    }
+}
+
 /// Resolve the config root from a raw `CHROXY_CONFIG_DIR` value and a home dir.
 ///
 /// Split out from [`config_dir`] and kept **pure** so the tests never touch the
@@ -37,13 +77,13 @@ static WARNED_RELATIVE: AtomicBool = AtomicBool::new(false);
 /// lives in the thin wrapper instead.
 ///
 /// Semantics match [`packages/server/src/config-dir.js`] exactly, because the two
-/// halves must agree — see [`config_dir`].
+/// halves must agree — see [`config_dir`] and [`is_absolute_like_node`].
 fn resolve_config_dir(raw: Option<&str>, home: Option<PathBuf>) -> Option<PathBuf> {
     match raw {
         // An empty value falls through to the default, matching the `||`
         // semantics of the daemon's resolver (`if (!raw) return default`).
         Some(r) if !r.is_empty() => {
-            if Path::new(r).is_absolute() {
+            if is_absolute_like_node(r) {
                 return Some(PathBuf::from(r));
             }
             // Refused, not resolved — a relative value would otherwise land
@@ -270,6 +310,17 @@ mod tests {
         Some(PathBuf::from("/home/u"))
     }
 
+    /// An absolute path *for the host platform*.
+    ///
+    /// A Unix literal like `/mnt/state` is NOT absolute under Rust's Windows rule
+    /// (no drive prefix), so hardcoding one made three of these tests fail on the
+    /// `Desktop Rust Tests (Windows)` job while passing everywhere else — a
+    /// platform divergence a macOS-only run cannot see.
+    #[cfg(windows)]
+    const ABS: &str = r"C:\chroxy-test-root";
+    #[cfg(not(windows))]
+    const ABS: &str = "/mnt/chroxy-test-root";
+
     #[test]
     fn resolve_config_dir_unset_uses_home_default() {
         assert_eq!(
@@ -280,9 +331,50 @@ mod tests {
 
     #[test]
     fn resolve_config_dir_absolute_override_wins() {
+        assert_eq!(resolve_config_dir(Some(ABS), home()), Some(PathBuf::from(ABS)));
+    }
+
+    #[test]
+    fn absoluteness_matches_the_daemons_rule_not_rusts() {
+        // The daemon uses Node's `path.isAbsolute`. On Windows that accepts a
+        // root-relative path while Rust's `Path::is_absolute` rejects it, and
+        // disagreeing here re-splits the two halves (#7241 / #7239).
+        assert!(is_absolute_like_node(ABS));
+        assert!(!is_absolute_like_node("state"));
+        assert!(!is_absolute_like_node("./state"));
+        assert!(!is_absolute_like_node(""));
+
+        #[cfg(windows)]
+        {
+            // Node says true for both of these; Rust's own rule says false.
+            assert!(is_absolute_like_node("/data"));
+            assert!(is_absolute_like_node(r"\data"));
+            assert!(is_absolute_like_node(r"C:/data"));
+            // A bare drive letter is drive-RELATIVE, not absolute.
+            assert!(!is_absolute_like_node("C:data"));
+            assert!(!is_absolute_like_node("C:"));
+        }
+        #[cfg(not(windows))]
+        {
+            assert!(is_absolute_like_node("/data"));
+            // Not a separator on Unix — matches Node's posix rule.
+            assert!(!is_absolute_like_node(r"\data"));
+        }
+    }
+
+    #[test]
+    fn resolve_config_dir_accepts_a_root_relative_value_on_windows() {
+        // Regression guard for the divergence above, at the resolver level: a
+        // value the daemon would accept must not fall back to the home default.
+        #[cfg(windows)]
         assert_eq!(
-            resolve_config_dir(Some("/mnt/state"), home()),
-            Some(PathBuf::from("/mnt/state"))
+            resolve_config_dir(Some("/data"), home()),
+            Some(PathBuf::from("/data"))
+        );
+        #[cfg(not(windows))]
+        assert_eq!(
+            resolve_config_dir(Some("/data"), home()),
+            Some(PathBuf::from("/data"))
         );
     }
 
@@ -315,10 +407,7 @@ mod tests {
     fn resolve_config_dir_absolute_override_works_without_home() {
         // A GUI launch may have no resolvable home; an absolute override is
         // still usable, and must not be discarded along with it.
-        assert_eq!(
-            resolve_config_dir(Some("/mnt/state"), None),
-            Some(PathBuf::from("/mnt/state"))
-        );
+        assert_eq!(resolve_config_dir(Some(ABS), None), Some(PathBuf::from(ABS)));
     }
 
     #[test]
@@ -347,8 +436,11 @@ mod tests {
         // passes every other test in the crate.
         let _guard = env_lock();
         let previous = std::env::var("CHROXY_CONFIG_DIR").ok();
-        std::env::set_var("CHROXY_CONFIG_DIR", "/tmp/chroxy-relocated-test-root");
-        let expected = PathBuf::from("/tmp/chroxy-relocated-test-root");
+        // ABS, not a Unix literal — see its doc comment; a `/tmp/...` value is
+        // not absolute on Windows and this test then asserted the home default
+        // against the relocated root, failing the Windows job only.
+        std::env::set_var("CHROXY_CONFIG_DIR", ABS);
+        let expected = PathBuf::from(ABS);
 
         let observed = (
             config_path(),
