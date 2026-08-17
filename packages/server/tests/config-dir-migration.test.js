@@ -1,4 +1,5 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
+import { spawnSync } from 'node:child_process'
 import assert from 'node:assert/strict'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -231,6 +232,55 @@ describe('formatStrandedWarning', () => {
     write(source, 'push-tokens.json')
     const without = formatStrandedWarning(detectStrandedState({ source, target })).join('\n')
     assert.doesNotMatch(without, /chroxy init/, 'init advice is scoped to the case it applies to')
+  })
+
+  it('shell-quotes both paths in the cp hint', () => {
+    // The hint is a command a human copies and runs. Unquoted, a path with a
+    // space becomes a DIFFERENT command — `cp -a /srv/my state/. /dst/` copies
+    // two wrong sources — and a metacharacter is worse than wrong.
+    const spaced = join(tmpRoot, 'dir with spaces')
+    mkdirSync(spaced, { recursive: true })
+    write(spaced, 'config.json')
+
+    const text = formatStrandedWarning(detectStrandedState({ source: spaced, target })).join('\n')
+    const cp = text.split('\n').find((l) => l.includes('cp -a'))
+
+    assert.ok(cp.includes(`'${spaced}/.'`), `source not quoted in: ${cp}`)
+    assert.ok(cp.includes(`'${target}/'`), `target not quoted in: ${cp}`)
+  })
+
+  it('escapes an embedded single quote rather than breaking out of the quoting', () => {
+    const tricky = join(tmpRoot, "o'brien")
+    mkdirSync(tricky, { recursive: true })
+    write(tricky, 'config.json')
+
+    const text = formatStrandedWarning(detectStrandedState({ source: tricky, target })).join('\n')
+    const cp = text.split('\n').find((l) => l.includes('cp -a'))
+
+    // The close-escape-reopen idiom, not a raw quote that would terminate the
+    // string. The opening quote sits at the head of the whole path, not next to
+    // the `o`, so match only the escape itself.
+    assert.match(cp, /o'\\''brien\/\.'/)
+  })
+
+  it('the printed cp command actually runs, for a path with a space and a quote', () => {
+    // Pattern-matching the quoting only proves it looks right. A naive
+    // "quote count must be even" check is itself wrong here — `'a'\''b'` is
+    // valid POSIX with five quotes — so the only honest assertion is to hand
+    // the produced command to a real shell and see what it does.
+    const nasty = join(tmpRoot, "weird 'dir' name")
+    mkdirSync(nasty, { recursive: true })
+    write(nasty, 'config.json', 'PAYLOAD')
+    mkdirSync(target, { recursive: true })
+
+    const text = formatStrandedWarning(detectStrandedState({ source: nasty, target })).join('\n')
+    const cp = text.split('\n').find((l) => l.includes('cp -a')).replace(/^\s*or:\s*/, '').trim()
+
+    const res = spawnSync('sh', ['-c', cp], { encoding: 'utf8' })
+
+    assert.equal(res.status, 0, `command failed: ${cp}\n${res.stderr}`)
+    assert.equal(readFileSync(join(target, 'config.json'), 'utf-8'), 'PAYLOAD',
+      'the copy-pasteable hint must copy the right thing')
   })
 
   it('calls out the identity-key MITM consequence when server-identity.json is stranded', () => {

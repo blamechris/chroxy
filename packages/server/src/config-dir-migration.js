@@ -140,6 +140,19 @@ export function detectStrandedState({ source = defaultConfigDir(), target = conf
 }
 
 /**
+ * POSIX-quote a path for a shell command we print for the operator to paste.
+ *
+ * The `cp -a` hint below is a command a human copies and runs, so an unquoted
+ * path with a space runs a DIFFERENT command — `cp -a /srv/my state/. /dst/`
+ * copies two wrong sources — and one with a shell metacharacter is worse.
+ * Single-quoting is the only form that neutralises everything; an embedded
+ * single quote is closed, escaped and reopened, which is the standard idiom.
+ */
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, "'\\''")}'`
+}
+
+/**
  * Build the startup / doctor warning for a detection result.
  *
  * @param {StrandedState} detection
@@ -174,7 +187,7 @@ export function formatStrandedWarning(detection) {
 
   lines.push('')
   lines.push('Copy them once:  chroxy config-dir migrate')
-  lines.push(`             or: cp -a ${source}/. ${target}/`)
+  lines.push(`             or: cp -a ${shellQuote(`${source}/.`)} ${shellQuote(`${target}/`)}`)
   return lines
 }
 
