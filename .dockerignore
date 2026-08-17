@@ -15,3 +15,9 @@
 packages/server/node_modules
 packages/server/tests
 packages/server/coverage
+# Dev-only lints. They are never run in the image, and lint-entry-point-guard.mjs
+# imports repo-root scripts/lib/, which the image does not copy — so shipping
+# them would put a module with an unresolvable import inside the container
+# (inert, but pointless). fix-node-pty-helper.js is the one the build needs.
+packages/server/scripts/lint-*
+packages/server/scripts/lib

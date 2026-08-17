@@ -29,6 +29,7 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { isEntryPoint } from '../lib/is-entry-point.mjs'
+import { GUARD_COPIES } from '../lib/entry-point-guard-copies.mjs'
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 
@@ -307,11 +308,12 @@ try {
   // the sidecar's talk about pods — and `import.meta.url` is normalised to the
   // parameter name because the sidecar is an inline IIFE rather than a function
   // taking the URL as an argument. Everything else must match exactly.
-  const GUARD_COPIES = [
-    'scripts/lib/is-entry-point.mjs',
-    'packages/server/src/utils/is-entry-point.js',
-    'packages/server/sidecar/agent.js',
-  ]
+  //
+  // This gate keeps the copies EQUAL; it cannot see a FOURTH one appear, because
+  // it iterates a list (#7235). That half is lint-entry-point-guard.mjs, which
+  // walks the repo and fails on anything outside the same list — imported from
+  // ../lib/entry-point-guard-copies.mjs so the two gates cannot disagree about
+  // which files they are talking about.
 
   const extractGuard = (relPath) => {
     const lines = readFileSync(join(REPO, relPath), 'utf8').split('\n')
