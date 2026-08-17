@@ -3,8 +3,8 @@ use std::fs;
 use std::path::PathBuf;
 
 /// Desktop-specific settings persisted to `desktop-settings.json` in the daemon's
-/// config root (`~/.chroxy/desktop-settings.json` unless `CHROXY_CONFIG_DIR`
-/// relocates it — see [`DesktopSettings::path`]).
+/// config root — `~/.chroxy/desktop-settings.json` unless `CHROXY_CONFIG_DIR`
+/// relocates it. See [`DesktopSettings::path`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DesktopSettings {

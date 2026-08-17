@@ -76,8 +76,10 @@ fn is_absolute_like_node(p: &str) -> bool {
 /// (and `config_path_returns_some` below asserts on the default). The env read
 /// lives in the thin wrapper instead.
 ///
-/// Semantics match [`packages/server/src/config-dir.js`] exactly, because the two
+/// Semantics match `packages/server/src/config-dir.js` exactly, because the two
 /// halves must agree — see [`config_dir`] and [`is_absolute_like_node`].
+/// (Plain backticks, not brackets: a file path is not a Rust item, so `[...]`
+/// around it renders as literal brackets rather than a link.)
 fn resolve_config_dir(raw: Option<&str>, home: Option<PathBuf>) -> Option<PathBuf> {
     match raw {
         // An empty value falls through to the default, matching the `||`
@@ -90,13 +92,28 @@ fn resolve_config_dir(raw: Option<&str>, home: Option<PathBuf>) -> Option<PathBu
             // desktop state wherever the app happened to be launched from. The
             // daemon refuses it identically, so both halves stay on the default
             // rather than diverging.
+            let fallback = home.map(|h| h.join(".chroxy"));
             if !WARNED_RELATIVE.swap(true, Ordering::Relaxed) {
-                eprintln!(
-                    "[config] ignoring CHROXY_CONFIG_DIR={:?}: not an absolute path. Using the default ~/.chroxy instead.",
-                    r
-                );
+                // The message names the directory actually being used, and says
+                // so only when there IS one: with no resolvable home there is no
+                // default to fall back to, and claiming "~/.chroxy" then would
+                // send the operator looking for state in a directory nothing
+                // wrote to. Mirrors the daemon, which interpolates
+                // `defaultConfigDir()` for the same reason.
+                match &fallback {
+                    Some(dir) => eprintln!(
+                        "[config] ignoring CHROXY_CONFIG_DIR={:?}: not an absolute path. Using {} instead.",
+                        r,
+                        dir.display()
+                    ),
+                    None => eprintln!(
+                        "[config] ignoring CHROXY_CONFIG_DIR={:?}: not an absolute path, and no home \
+                         directory could be resolved — no config directory is available.",
+                        r
+                    ),
+                }
             }
-            home.map(|h| h.join(".chroxy"))
+            fallback
         }
         _ => home.map(|h| h.join(".chroxy")),
     }
