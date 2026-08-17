@@ -33,7 +33,16 @@ import { readFileSync, readdirSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { stripComments } from './lib/strip-comments.mjs'
+// Dynamic, so a missing/unloadable stripper exits 2 ("the lint could not run")
+// rather than crashing out as 1 ("a subclass is missing the flag"). A static
+// import cannot be caught, and an uncaught ESM resolution error exits 1.
+let stripComments
+try {
+  ({ stripComments } = await import('./lib/strip-comments.mjs'))
+} catch (err) {
+  console.error(`lint-claude-family-explicit: cannot load the comment stripper: ${err.message}`)
+  process.exit(2)
+}
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
@@ -127,7 +136,7 @@ function main() {
     // Scan comment-stripped text (indices preserved) so a subclass declaration
     // inside a comment isn't matched. `static claudeFamily = …` is real code and
     // survives stripping intact.
-    const src = stripComments(raw)
+    const src = stripComments(raw, file)
     SUBCLASS_RE.lastIndex = 0
     let m
     while ((m = SUBCLASS_RE.exec(src)) !== null) {

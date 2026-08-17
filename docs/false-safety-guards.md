@@ -242,6 +242,8 @@ was checked against `--help` on the pinned version for exactly this reason.
   (`scripts/lib/entry-point-guard-copies.mjs` is the list, and says why), and
   two gates hold it: `scripts/__tests__/is-entry-point.test.mjs` fails if the
   three diverge (`#7222`), and
-  `packages/server/scripts/lint-entry-point-guard.mjs` walks the repo and fails
-  if a fourth appears (`#7235`). Both copies are unit-tested; the server's own
-  suite is `packages/server/tests/is-entry-point.test.js`.
+  `packages/server/scripts/lint-entry-point-guard.mjs` walks the tree and fails
+  if a fourth appears (`#7235`). The two importable copies each have their own
+  suite — `packages/server/tests/is-entry-point.test.js` and
+  `scripts/__tests__/is-entry-point.test.mjs`; the sidecar's inline third copy
+  is held only by the drift gate, since it cannot be imported to be tested.

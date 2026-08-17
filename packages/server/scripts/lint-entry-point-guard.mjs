@@ -5,8 +5,10 @@
  *
  * ## Why this exists
  *
- * #7198 was the same guard hand-rolled in four files, three of which were
- * WRONG. Its failure mode is silence: the guard reads false, `main()` never
+ * #7198 and the #7213 sweep found the same guard hand-rolled in four files,
+ * across three spellings, and ALL FOUR were wrong the same way — including the
+ * `pathToFileURL` form, which looks more careful than the others and is equally
+ * broken. Its failure mode is silence: the guard reads false, `main()` never
  * runs, the process exits 0, and nothing distinguishes that from a clean no-op.
  * #7213 removed the copies; #7222 added a drift gate
  * (`scripts/__tests__/is-entry-point.test.mjs`) keeping the three that cannot be
@@ -110,6 +112,9 @@
  *                       it at a fixture tree so production and test run the
  *                       SAME walk rather than two implementations of one.
  *   --allow <relpath>   Replace the sanctioned allowlist. REPEATABLE.
+ *   --guard-copy <rel>  Which sanctioned files are guard COPIES, subject to the
+ *                       equal-site-count check. REPEATABLE. Defaults to
+ *                       GUARD_COPIES; empty when --allow is given alone.
  *   --min-files <n>     Exit 2 if fewer than n files were walked. A FLOOR, not a
  *                       count — it only ever fails closed.
  *   --dry-run           Print offenders without failing the exit code.
@@ -121,7 +126,6 @@ import { readFileSync, readdirSync, existsSync } from 'node:fs'
 import { dirname, join, resolve, relative, sep as pathSep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { stripComments } from './lib/strip-comments.mjs'
 // The repo-root module, not a local copy: the drift gate in
 // scripts/__tests__/is-entry-point.test.mjs imports the same list, so the two
 // gates cannot end up talking about different sets of files. See its header.
@@ -130,7 +134,7 @@ import { GUARD_COPIES } from '../../../scripts/lib/entry-point-guard-copies.mjs'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = resolve(__dirname, '..', '..', '..')
 
-const SCANNED_EXTENSIONS = ['.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx']
+const SCANNED_EXTENSIONS = ['.js', '.mjs', '.cjs', '.ts', '.mts', '.cts', '.tsx', '.jsx']
 const IGNORE_MARKER = 'lint-ignore-entry-point-guard'
 
 // Directories the walk never descends into. Over-denying is caught by
@@ -170,8 +174,19 @@ function usageError(message) {
   process.exit(2)
 }
 
+// Dynamic, so an unloadable stripper exits 2 ("the guard broke") rather than
+// crashing out as 1 ("a hand-rolled guard was found"). A static import cannot be
+// caught, and an uncaught ESM resolution error exits 1 — which the CI step would
+// report as dirty code.
+let stripComments
+try {
+  ({ stripComments } = await import('./lib/strip-comments.mjs'))
+} catch (err) {
+  usageError(`cannot load the comment stripper: ${err.message}`)
+}
+
 function parseArgs(argv) {
-  const out = { repoRoot: null, allow: [], minFiles: null, dryRun: false }
+  const out = { repoRoot: null, allow: [], guardCopies: [], minFiles: null, dryRun: false }
   const needsValue = (flag, value) => {
     if (value === undefined) usageError(`${flag} requires a value`)
     return value
@@ -180,6 +195,7 @@ function parseArgs(argv) {
     const arg = argv[i]
     if (arg === '--repo-root') out.repoRoot = needsValue(arg, argv[++i])
     else if (arg === '--allow') out.allow.push(needsValue(arg, argv[++i]))
+    else if (arg === '--guard-copy') out.guardCopies.push(needsValue(arg, argv[++i]))
     else if (arg === '--min-files') out.minFiles = Number(needsValue(arg, argv[++i]))
     else if (arg === '--dry-run') out.dryRun = true
     // An unknown flag must never be silently ignored: a typo'd --repo-root would
@@ -212,33 +228,63 @@ function walk(dir, out = []) {
 // without the substring while the stripped text still matches a rule, so the
 // file is skipped and the lint reports clean. That is "silently skipped an
 // input", the fourth false-safety mode in docs/false-safety-guards.md. It bought
-// 260ms on a 1900-file walk (0.14s vs 0.40s), which is not a price worth paying
-// for a gate that runs once per push. Strip everything, match everything.
+// 260ms on a 1900-file walk, which is not a price worth paying for a gate that
+// runs once per push. Strip everything, match everything.
 
-// Every rule matches against comment-stripped source, and `\s*` spans newlines,
-// so a shape broken across lines is caught the same as a one-liner.
+// Every rule anchors on the IDENTIFIER `argv`, never on `process.argv`.
+//
+// The first draft required the literal `process` before it, and #7247's review
+// proved that hole live: `import { argv } from 'node:process'` is Node's own
+// documented named-export idiom, and TWO scripts in this repo already use it
+// (scripts/merge-updater-feeds.mjs, packages/server/scripts/spike-mcp-elicitation-shim.mjs).
+// Both are executable and guard-less today, so the next guard written in either
+// one would have been written as `argv[1]` — invisible to a `process.`-anchored
+// rule, and wrong in the #7198 way. Anchoring on `argv` also picks up
+// `globalThis.process.argv[1]`, `process?.argv[1]`, and any aliased holder for
+// free, because none of them change the identifier.
+//
+// `\s*` spans newlines, so a shape broken across lines is caught the same as a
+// one-liner. `(?:\?\.)?` covers the optional-chaining spellings.
 const RULES = [
   {
     kind: 'argv1-index',
-    re: /\bprocess\s*\.\s*argv\s*\[\s*1\s*\]/g,
+    re: /\bargv\s*(?:\?\.)?\s*\[\s*1\s*\]/g,
     hint: 'reads the script slot directly',
   },
   {
     kind: 'argv1-at',
-    re: /\bprocess\s*\.\s*argv\s*\.\s*at\s*\(\s*1\s*\)/g,
+    re: /\bargv\s*\??\s*\.\s*at\s*\(\s*1\s*\)/g,
     hint: 'reads the script slot via .at(1)',
   },
   {
     kind: 'import-meta-main',
-    re: /\bimport\s*\.\s*meta\s*\.\s*main\b/g,
+    re: /\bimport\s*\.\s*meta\s*\??\.\s*main\b/g,
     hint: 'is `undefined` on Node 22.0-22.17, which this package still supports',
   },
 ]
 
 // `const [, script] = process.argv` binds the script slot without naming an
 // index, so no amount of index-matching finds it. Captured as the bracket body
-// and decided by position below.
-const DESTRUCTURE_RE = /\b(?:const|let|var)\s*\[([^\]]*)\]\s*=\s*process\s*\.\s*argv\b/g
+// and decided by position below. The optional `<holder>.` covers `= process.argv`
+// and `= argv` alike.
+const DESTRUCTURE_RE = /\b(?:const|let|var)\s*\[([^\]]*)\]\s*=\s*(?:[\w$]+\s*\??\.\s*)*\bargv\b/g
+
+// Names bound to the argv array, so `const a = process.argv` … `a[1]` is caught
+// too. This mirrors `homeBoundVarsIn` in lint-config-dir.mjs, which exists
+// because the same two-statement split defeated a single-line rule there.
+const ARGV_ALIAS_RE = /\b(?:const|let|var)\s+([\w$]+)\s*=\s*(?:[\w$]+\s*\??\.\s*)*\bargv\b\s*(?![.[])/g
+const ARGV_IMPORT_ALIAS_RE = /\bargv\s+as\s+([\w$]+)/g
+
+/** Local names that hold the argv array itself. */
+function argvAliasesIn(code) {
+  const names = new Set()
+  for (const re of [ARGV_ALIAS_RE, ARGV_IMPORT_ALIAS_RE]) {
+    re.lastIndex = 0
+    let m
+    while ((m = re.exec(code)) !== null) names.add(m[1])
+  }
+  return names
+}
 
 /**
  * Does an array-destructuring pattern bind position 1 to a plain name?
@@ -253,9 +299,18 @@ function bindsScriptSlot(bracketBody) {
   return atOne !== '' && !atOne.startsWith('...')
 }
 
-/** Is the marker a real directive on this line, rather than prose mentioning it? */
-function isIgnoreDirective(rawLine) {
-  return new RegExp(`^\\s*(?://|\\*|/\\*)\\s*${IGNORE_MARKER}\\b`).test(rawLine)
+/**
+ * Is the marker a real directive on this line, rather than prose mentioning it?
+ *
+ * Two conditions, and the second is not redundant. The regex alone reads the RAW
+ * line, so the marker written as ordinary text inside a template literal —
+ * `` `// lint-ignore-entry-point-guard` `` on its own line — satisfies it while
+ * being a string, not a comment. Requiring the stripper to have blanked that
+ * line proves it really was one.
+ */
+function isIgnoreDirective(rawLine, codeLine) {
+  if (!new RegExp(`^\\s*(?://|\\*|/\\*)\\s*${IGNORE_MARKER}\\b`).test(rawLine)) return false
+  return codeLine !== undefined && codeLine.trim() === ''
 }
 
 /** 1-based line number of `index` within `text`. */
@@ -266,16 +321,37 @@ function lineOf(text, index) {
 }
 
 function findInFile(file, rel) {
-  const raw = readFileSync(file, 'utf8')
-  const code = stripComments(raw)
+  let raw
+  try {
+    raw = readFileSync(file, 'utf8')
+  } catch (err) {
+    // An unreadable file is "could not check", never "nothing to check". Without
+    // this the EACCES escapes uncaught, node exits 1, and the CI step reports it
+    // as a hand-rolled guard that does not exist.
+    usageError(`cannot read ${rel}: ${err.message}`)
+  }
+
+  let code
+  try {
+    code = stripComments(raw, file)
+  } catch (err) {
+    usageError(`cannot strip comments from ${rel}: ${err.message}`)
+  }
+
   const rawLines = raw.split('\n')
+  const codeLines = code.split('\n')
   const hits = []
+  const seenIndex = new Set()
 
   const record = (kind, index, hint) => {
+    // Several rules can match the same site (an alias whose name is `argv`, say).
+    // Report it once.
+    if (seenIndex.has(index)) return
+    seenIndex.add(index)
     const line = lineOf(code, index)
     // The marker sits on the line ABOVE the offending site, matching the
     // convention the other lints use.
-    if (line > 1 && isIgnoreDirective(rawLines[line - 2])) return
+    if (line > 1 && isIgnoreDirective(rawLines[line - 2], codeLines[line - 2])) return
     hits.push({ file: rel, line, kind, hint, text: (rawLines[line - 1] || '').trim() })
   }
 
@@ -290,6 +366,16 @@ function findInFile(file, rel) {
   while ((d = DESTRUCTURE_RE.exec(code)) !== null) {
     if (bindsScriptSlot(d[1])) {
       record('argv1-destructure', d.index, 'binds the script slot by position')
+    }
+  }
+
+  // `const a = process.argv` … `a[1]`, which no rule above can see because the
+  // read never names `argv`.
+  for (const alias of argvAliasesIn(code)) {
+    const aliasRe = new RegExp(`\\b${alias}\\s*(?:\\?\\.)?\\s*\\[\\s*1\\s*\\]`, 'g')
+    let a
+    while ((a = aliasRe.exec(code)) !== null) {
+      record('argv1-alias', a.index, `\`${alias}\` holds the argv array`)
     }
   }
 
@@ -333,6 +419,16 @@ if (args.minFiles !== null && files.length < args.minFiles) {
 const exempt = new Set(sanctioned)
 const offenders = []
 const guardedSanctioned = new Set()
+const hitCountByGuardCopy = new Map()
+// Which of the sanctioned files are guard COPIES (subject to the count check
+// below) rather than tests. Explicit rather than "the first N of --allow", so a
+// caller pointing the lint at a fixture tree says what it means.
+const guardCopySet = new Set(
+  args.guardCopies.length ? args.guardCopies : (args.allow.length ? [] : GUARD_COPIES),
+)
+for (const rel of guardCopySet) {
+  if (!exempt.has(rel)) usageError(`--guard-copy ${rel} is not in the sanctioned set`)
+}
 
 for (const file of files) {
   const rel = relative(root, file).split(pathSep).join('/')
@@ -340,10 +436,26 @@ for (const file of files) {
   if (!hits.length) continue
   if (exempt.has(rel)) {
     guardedSanctioned.add(rel)
+    if (guardCopySet.has(rel)) hitCountByGuardCopy.set(rel, hits.length)
     continue
   }
   offenders.push(...hits)
 }
+
+// The exemption above is WHOLE-FILE, which #7247's review showed is a hole:
+// sidecar/agent.js is 1339 lines of in-pod application that merely CONTAINS the
+// guard, and a second, hand-rolled guard added anywhere else in it would be
+// exempt from this walk and invisible to the drift gate, which only extracts the
+// one body. So the three guard copies are held to the same COUNT.
+//
+// No hardcoded number is needed, which is the point: the drift gate already
+// proves the three bodies are character-for-character identical, so they must
+// contain the same number of sites. If one grows an extra, it stops matching its
+// siblings — and if the guard itself changes, all three move together and this
+// stays quiet. A ratchet that maintains itself.
+const guardCounts = [...hitCountByGuardCopy.entries()]
+const countMismatch = guardCounts.length > 1
+  && new Set(guardCounts.map(([, n]) => n)).size > 1
 
 // The other direction of the ratchet: an exemption nothing needs is an
 // exemption the next regression hides behind.
@@ -356,15 +468,15 @@ if (offenders.length) {
   console.error('')
   console.error(`${offenders.length} hand-rolled entry-point determination(s) outside the ${sanctioned.length} sanctioned file(s).`)
   console.error('')
-  console.error('Deciding "was this module run directly?" by hand is #7198: three of the four')
-  console.error('copies were wrong, and the failure is SILENT — the guard reads false, main()')
-  console.error('never runs, and the process exits 0. Import the shared guard instead:')
+  console.error('Deciding "was this module run directly?" by hand is #7198: it was written in')
+  console.error('four files, ALL FOUR were wrong, and the failure is SILENT — the guard reads')
+  console.error('false, main() never runs, and the process exits 0. Import the shared guard:')
   console.error('')
   console.error("  server sources:  import { isEntryPoint } from './utils/is-entry-point.js'")
   console.error("  repo scripts:    import { isEntryPoint } from './lib/is-entry-point.mjs'")
   console.error('')
-  console.error(`If a site genuinely needs argv[1] for something else, put a \`// ${IGNORE_MARKER}\``)
-  console.error('comment on the line above it and say why.')
+  console.error(`If a site genuinely needs the interpreter's script path for something else,`)
+  console.error(`put a \`// ${IGNORE_MARKER}\` comment on the line above it and say why.`)
 }
 
 for (const rel of staleAllowlist) {
@@ -377,7 +489,17 @@ if (staleAllowlist.length) {
   console.error('lands in that file next.')
 }
 
-const failed = offenders.length > 0 || staleAllowlist.length > 0
+if (countMismatch) {
+  console.error('')
+  for (const [rel, n] of guardCounts) console.error(`  ${rel}: ${n} site(s)`)
+  console.error('')
+  console.error('The sanctioned guard copies disagree on how many sites they contain, but the')
+  console.error('drift gate holds their bodies identical — so the copy with more has picked up')
+  console.error('a SECOND, hand-rolled determination outside the shared body. The whole-file')
+  console.error('exemption would otherwise hide it. Remove the extra site.')
+}
+
+const failed = offenders.length > 0 || staleAllowlist.length > 0 || countMismatch
 if (!failed) {
   console.log(`OK: ${files.length} file(s) walked; entry-point-ness is decided in ${sanctioned.length} sanctioned file(s) only.`)
 }

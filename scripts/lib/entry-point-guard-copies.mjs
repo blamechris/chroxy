@@ -26,8 +26,9 @@
 //   packages/server/src/utils/is-entry-point.js — the server's copy, the one
 //     ordinary server modules import.
 //   packages/server/sidecar/agent.js           — ships as a standalone in-pod
-//     bundle whose Dockerfile COPYs only agent.js and its package.json, so it
-//     can import neither of the others.
+//     bundle. Its Dockerfile copies in only `package.json package-lock.json`
+//     and `agent.js`; neither packages/server/src nor scripts/lib is ever in
+//     the image, so it can import neither of the others.
 //
 // If you are here because you want a fourth: check first whether the file can
 // import one of the three. That has been the answer every time so far.

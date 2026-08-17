@@ -27,7 +27,7 @@
  */
 import { test, describe, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync, chmodSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -417,13 +417,184 @@ describe('lint-entry-point-guard', () => {
 
     // The floor the CI wrapper passes must actually be clearable, or Server Lint
     // fails on exit 2 for a reason that has nothing to do with the code.
-    test('the wrapper\'s --min-files floor is not stale', () => {
-      const res = spawnSync(
-        process.execPath,
-        [LINT_SCRIPT, '--min-files', '1500'],
-        { encoding: 'utf8' },
-      )
-      assert.equal(res.status, 0, `${res.stdout}\n${res.stderr}`)
+    //
+    // The floor is PARSED OUT of the wrapper rather than repeated here. The
+    // first version hardcoded '1500', and mutation proved it blind: setting the
+    // wrapper to `--min-files 99999` made the real CI step exit 2 while this
+    // test stayed green. Two hardcoded copies of one value is this file's own
+    // subject matter, one level down.
+    test("the wrapper's --min-files floor is clearable by the real walk", () => {
+      const wrapper = readFileSync(resolve(__dirname, '..', 'scripts', 'lint-entry-point-guard.sh'), 'utf8')
+      const m = /--min-files\s+(\d+)/.exec(wrapper)
+      assert.ok(m, 'could not find --min-files in the wrapper — this test is checking nothing')
+      const res = spawnSync(process.execPath, [LINT_SCRIPT, '--min-files', m[1]], { encoding: 'utf8' })
+      assert.equal(res.status, 0, `floor ${m[1]} from the wrapper is not clearable:\n${res.stdout}\n${res.stderr}`)
     })
   })
+
+  // --- #7247 review: the identifier, not the `process.` prefix ---------------
+  //
+  // The first version of every rule required the literal `process` before
+  // `.argv`. Review proved that hole live: `import { argv } from 'node:process'`
+  // is Node's own documented idiom and TWO scripts in this repo already use it
+  // (scripts/merge-updater-feeds.mjs,
+  // packages/server/scripts/spike-mcp-elicitation-shim.mjs), both executable and
+  // guard-less. The next guard written in either would have been spelled
+  // `argv[1]` and been invisible.
+  describe('spellings that never name `process`', () => {
+    const CAUGHT = {
+      'bare argv from node:process': "import { argv } from 'node:process'\nif (argv[1] === __filename) main()\n",
+      'destructured from process': 'const { argv } = process\nif (argv[1] === __filename) main()\n',
+      'aliased holder': 'const a = process.argv\nif (a[1] === __filename) main()\n',
+      'renamed import': "import { argv as av } from 'node:process'\nif (av[1] === __filename) main()\n",
+      'optional chain on the index': 'if (process.argv?.[1] === __filename) main()\n',
+      'optional chain on process': 'if (process?.argv[1] === __filename) main()\n',
+      'globalThis reach': 'if (globalThis.process.argv[1] === __filename) main()\n',
+      'bare argv .at(1)': "import { argv } from 'node:process'\nif (argv.at(1) === __filename) main()\n",
+      'optional import.meta?.main': 'if (import.meta?.main) main()\n',
+    }
+    for (const [name, source] of Object.entries(CAUGHT)) {
+      test(`catches ${name}`, () => {
+        assert.equal(runLint({ 'src/thing.js': source }).status, 1)
+      })
+    }
+
+    // The boundary: `argv` is only banned when index 1 is actually read. A yargs
+    // -style parsed object called `argv` is ordinary code, and flagging it would
+    // put a false positive in a required check.
+    test('leaves a parsed `argv` object alone when index 1 is never read', () => {
+      const { status } = runLint({
+        'src/thing.js': 'const argv = parse(process.argv.slice(2))\nconsole.log(argv.verbose, argv[0], argv.at(2))\n',
+      })
+      assert.equal(status, 0)
+    })
+
+    test('positive control: the same file reading index 1 does fail', () => {
+      const { status } = runLint({
+        'src/thing.js': 'const argv = parse(process.argv.slice(2))\nconsole.log(argv[1])\n',
+      })
+      assert.equal(status, 1)
+    })
+  })
+
+  // --- #7247 review: the stripper must not be fooled by a regex literal ------
+  //
+  // The hand-written stripper this lint shipped with could not tell a regex
+  // literal from a comment delimiter, and was unsound in BOTH directions on real
+  // files. Measured over the 1903 files this lint walks: 83 differed from the
+  // truth, 40 hiding real code and 51 leaking comment text. These two tests are
+  // one of each; either regresses the moment the stripper stops using a parser.
+  describe('regex literals do not desync the comment stripper', () => {
+    // `\/` leaves a `/`, the next char is `*`, and a character scanner reads
+    // `/*` as a BLOCK COMMENT OPEN — blanking the guard below it into silence.
+    test('a guard below a trailing-slash regex is still found', () => {
+      const { status } = runLint({
+        'src/thing.js': "export function n (u) { return u.replace(/\\/*$/, '') }\n"
+          + 'if (import.meta.url === p(process.argv[1]).href) main()\n',
+      })
+      assert.equal(status, 1)
+    })
+
+    // The mirror image: a quote inside a character class put the scanner into a
+    // phantom STRING state, so it stopped blanking comments and ordinary prose
+    // read as code — a spurious red in a required check.
+    test('prose below a quote-bearing regex is still a comment', () => {
+      const { status } = runLint({
+        'src/thing.js': 'const M = /(["])/g\n'
+          + '// prose mentioning process.argv[1] in an ordinary comment\n'
+          + 'export const x = 1\n',
+      })
+      assert.equal(status, 0)
+    })
+
+    test('positive control: the same prose as CODE still fails', () => {
+      const { status } = runLint({
+        'src/thing.js': 'const M = /(["])/g\nconst me = process.argv[1]\n',
+      })
+      assert.equal(status, 1)
+    })
+  })
+
+  describe('the sanctioned files are exempt, but not unconditionally', () => {
+    // The whole-file exemption is a hole: sidecar/agent.js is 1339 lines of
+    // in-pod application that merely CONTAINS the guard, so a SECOND hand-rolled
+    // guard anywhere else in it would be exempt here and invisible to the drift
+    // gate, which only extracts the one body. The three copies are therefore
+    // held to the same site COUNT — no hardcoded number, because the drift gate
+    // already proves the bodies identical.
+    test('a second guard inside a sanctioned copy breaks the count', () => {
+      const extra = SANCTIONED_GUARD + '\nif (process.argv[1] === __filename) diagnostics()\n'
+      const { status, stderr } = runLint(
+        { 'lib/a.mjs': SANCTIONED_GUARD, 'lib/b.mjs': extra },
+        {
+          withGuard: false,
+          allow: ['lib/a.mjs', 'lib/b.mjs'],
+          extraArgs: ['--guard-copy', 'lib/a.mjs', '--guard-copy', 'lib/b.mjs'],
+        },
+      )
+      assert.equal(status, 1)
+      assert.match(stderr, /disagree on how many sites/)
+    })
+
+    test('positive control: identical copies pass the count check', () => {
+      const { status } = runLint(
+        { 'lib/a.mjs': SANCTIONED_GUARD, 'lib/b.mjs': SANCTIONED_GUARD },
+        {
+          withGuard: false,
+          allow: ['lib/a.mjs', 'lib/b.mjs'],
+          extraArgs: ['--guard-copy', 'lib/a.mjs', '--guard-copy', 'lib/b.mjs'],
+        },
+      )
+      assert.equal(status, 0)
+    })
+
+    test('a --guard-copy outside the sanctioned set exits 2', () => {
+      const { status } = runLint({}, { extraArgs: ['--guard-copy', 'lib/nope.mjs'] })
+      assert.equal(status, 2)
+    })
+  })
+
+  describe('more ways to fail closed', () => {
+    // The marker must be a real comment, not text that merely looks like one.
+    // Written inside a template literal it satisfies the raw-line regex while
+    // being a string, so the stripper has to confirm the line was blanked.
+    test('a marker faked inside a template literal does not exempt', () => {
+      const { status } = runLint({
+        'src/thing.js': 'const s = `\n// lint-ignore-entry-point-guard\n${process.argv[1]}`\n',
+      })
+      assert.equal(status, 1)
+    })
+
+    // An unreadable file is "could not check", never "nothing to check". Before
+    // this the EACCES escaped uncaught, node exited 1, and the CI step reported
+    // a hand-rolled guard that did not exist.
+    test('an unreadable file exits 2, not 1', { skip: process.getuid?.() === 0 && 'running as root' }, () => {
+      const root = mkdtempSync(join(tmpdir(), 'chroxy-lint-entrypoint-eacces-'))
+      tmpRoots.push(root)
+      mkdirSync(join(root, 'lib'), { recursive: true })
+      writeFileSync(join(root, 'lib', 'guard.mjs'), SANCTIONED_GUARD)
+      const locked = join(root, 'src', 'locked.js')
+      mkdirSync(join(root, 'src'), { recursive: true })
+      writeFileSync(locked, 'export const x = 1\n')
+      chmodSync(locked, 0o000)
+      try {
+        const res = spawnSync(
+          process.execPath,
+          [LINT_SCRIPT, '--repo-root', root, '--allow', 'lib/guard.mjs'],
+          { encoding: 'utf8' },
+        )
+        assert.equal(res.status, 2, `${res.stdout}\n${res.stderr}`)
+      } finally {
+        chmodSync(locked, 0o644)
+      }
+    })
+
+    test('.mts and .cts are walked', () => {
+      for (const rel of ['src/tool.mts', 'src/tool.cts']) {
+        const { status } = runLint({ [rel]: 'if (process.argv[1]) main()\n' })
+        assert.equal(status, 1, `not walked: ${rel}`)
+      }
+    })
+  })
+
 })
