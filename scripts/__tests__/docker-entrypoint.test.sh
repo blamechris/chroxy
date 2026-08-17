@@ -130,8 +130,18 @@ tmp="$(mktemp -d)"
   export CHROXY_CONFIG_DIR="$tmp/relocated"
   bash "$ENTRYPOINT" start >/dev/null 2>&1
 )
-mode="$(stat -f '%Lp' "$tmp/relocated/config.json" 2>/dev/null \
-     || stat -c '%a' "$tmp/relocated/config.json" 2>/dev/null)"
+# GNU and BSD stat disagree, and the obvious `stat -f … || stat -c …` is WRONG
+# on Linux: GNU's `-f` is --file-system, so it does not fail — it prints a
+# filesystem block, and the fallback then appends the real mode to it. Probe
+# with the flag itself, discarding output, and only then read the value.
+file_mode() {
+  if stat -c '%a' "$1" >/dev/null 2>&1; then
+    stat -c '%a' "$1"        # GNU coreutils
+  else
+    stat -f '%Lp' "$1"       # BSD / macOS
+  fi
+}
+mode="$(file_mode "$tmp/relocated/config.json" 2>/dev/null)"
 if [ "$mode" = "600" ]; then
   pass "the relocated config.json is chmod 600"
 else
