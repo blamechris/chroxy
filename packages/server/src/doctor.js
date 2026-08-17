@@ -23,7 +23,7 @@ import {
   PROGRAMMATIC_CREDIT_ERA_START,
 } from './billing-class.js'
 import { checkDependencies } from './utils/check-dependencies.js'
-import { configPath, configDir } from './config-dir.js'
+import { configPath } from './config-dir.js'
 import { detectStrandedState } from './config-dir-migration.js'
 
 // Resolve the server package root (the directory containing package.json
@@ -415,10 +415,14 @@ export async function runDoctorChecks({ port, providers, verbose: _verbose, pkgD
         }
       }
     } else {
+      // Read the root off the detection, NOT from configDir()/process.env
+      // directly: the detection is injectable, and a branch that bypasses the
+      // seam reports something the caller did not ask about — which also makes
+      // this message the one branch a test cannot pin.
       strandedCheck = {
         name: 'Config/state root',
         status: 'pass',
-        message: `${configDir()}${process.env.CHROXY_CONFIG_DIR ? ' (from CHROXY_CONFIG_DIR)' : ''}`,
+        message: `${stranded.target}${stranded.relocated ? ' (from CHROXY_CONFIG_DIR)' : ''}`,
       }
     }
   } catch (err) {

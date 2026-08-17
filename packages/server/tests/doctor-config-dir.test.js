@@ -45,12 +45,19 @@ const runWith = async (detectStranded) => {
 describe('doctor — Config/state root (#7240)', () => {
   it('passes and names the root when nothing is stranded', async () => {
     const { root } = await runWith(stub())
+
     assert.equal(root.status, 'pass')
+    // Pinned to the INJECTED root. This branch used to read configDir() and
+    // process.env directly, which meant it reported something the caller never
+    // asked about and no test could pin it.
+    assert.equal(root.message, '/home/u/.chroxy')
   })
 
   it('passes when the root is relocated but already fully migrated', async () => {
     const { root } = await runWith(relocatedWith([]))
+
     assert.equal(root.status, 'pass')
+    assert.equal(root.message, '/srv/chroxy-state (from CHROXY_CONFIG_DIR)')
   })
 
   it('warns and names the stranded entries, both roots, and the remedy', async () => {

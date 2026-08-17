@@ -7,6 +7,24 @@ import { join, isAbsolute } from 'path'
 let warnedRelative = false
 
 /**
+ * The root as it resolves with NO override — always `~/.chroxy`.
+ *
+ * Exported because #7240 needs to compare the resolved root against the default
+ * one to find state stranded by a relocation, and that comparison is the single
+ * legitimate reason to want the un-overridden path. Keeping it here means
+ * `join(homedir(), '.chroxy')` still appears in exactly one module, so
+ * `lint-config-dir.mjs` keeps exempting exactly one file and the ratchet stays
+ * honest — a second exemption is how that guard would start to rot.
+ *
+ * Callers who want the root the daemon actually READS want {@link configDir}.
+ *
+ * @returns {string} Absolute path to the default config/state root.
+ */
+export function defaultConfigDir() {
+  return join(homedir(), '.chroxy')
+}
+
+/**
  * The daemon's config/state root — the single resolver for `~/.chroxy`.
  *
  * **This is a function, and that is the whole point (#7052).** The obvious
@@ -40,24 +58,6 @@ let warnedRelative = false
  *
  * @returns {string} Absolute path to the config/state root.
  */
-/**
- * The root as it resolves with NO override — always `~/.chroxy`.
- *
- * Exported because #7240 needs to compare the resolved root against the default
- * one to find state stranded by a relocation, and that comparison is the single
- * legitimate reason to want the un-overridden path. Keeping it here means
- * `join(homedir(), '.chroxy')` still appears in exactly one module, so
- * `lint-config-dir.mjs` keeps exempting exactly one file and the ratchet stays
- * honest — a second exemption is how that guard would start to rot.
- *
- * Callers who want the root the daemon actually reads want {@link configDir}.
- *
- * @returns {string} Absolute path to the default config/state root.
- */
-export function defaultConfigDir() {
-  return join(homedir(), '.chroxy')
-}
-
 export function configDir() {
   const raw = process.env.CHROXY_CONFIG_DIR
   if (!raw) return defaultConfigDir()
