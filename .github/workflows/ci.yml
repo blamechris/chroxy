@@ -388,6 +388,22 @@ jobs:
             exit 1
           fi
 
+      - name: Check ~/.chroxy resolves through config-dir.js
+        run: |
+          # Issue #7052 — CHROXY_CONFIG_DIR must relocate ALL daemon state. It
+          # relocated only half of it, because a `const` freezes at import: 16
+          # module-scope constants stayed home-rooted, and 16 other modules grew
+          # their own inline `process.env.CHROXY_CONFIG_DIR || …` copy to work
+          # around that. Both shapes are banned; configDir()/configPath() read
+          # the env per call. The lint is ratcheted by file — see
+          # scripts/lint-config-dir-baseline.txt, which may shrink, never grow.
+          if scripts/lint-config-dir.sh; then
+            echo "OK — ~/.chroxy resolves through src/config-dir.js"
+          else
+            echo "::error::A file resolves ~/.chroxy outside src/config-dir.js, or a baseline entry is stale. See packages/server/scripts/lint-config-dir.sh."
+            exit 1
+          fi
+
   dashboard-tests:
     name: Dashboard Tests
     needs: runner-target

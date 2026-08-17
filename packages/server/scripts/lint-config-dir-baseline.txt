@@ -1,0 +1,43 @@
+# Files that still resolve ~/.chroxy without going through src/config-dir.js.
+# Ratchet (#7052): a file may LEAVE this list, never join it.
+# Regenerate with: node scripts/lint-config-dir.mjs --write-baseline
+anthropic-compatible-session.js
+auth-probes.js
+binary-provenance-trust.js
+byok-compose-state.js
+byok-credentials.js
+byok-mcp-oauth-store.js
+byok-mcp-trust.js
+byok-session.js
+checkpoint-manager.js
+cli/shared.js
+cli/tokens-cmd.js
+config.js
+connection-info.js
+credential-store.js
+deepseek-credentials.js
+device-preferences.js
+discord-credentials.js
+docker-byok-session.js
+doctor.js
+environment-manager.js
+event-ingest.js
+logger.js
+models.js
+notification-prefs.js
+notifications/discord-billing-sink.js
+notifications/discord-webhook-sink.js
+orchestration/git-ops.js
+server-cli-child.js
+server-cli.js
+server-identity.js
+service.js
+session-manager.js
+session-preset.js
+shell-approval-info.js
+skills-loader.js
+skills-trust.js
+skills-usage.js
+snapshots-store.js
+supervisor.js
+ws-server.js
