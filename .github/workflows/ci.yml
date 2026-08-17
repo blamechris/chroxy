@@ -421,6 +421,40 @@ jobs:
             exit 1
           fi
 
+      - name: Check no hand-rolled entry-point guard exists (whole repo, JS/TS only)
+        run: |
+          # Issue #7235 — #7198 was one guard hand-rolled in four files, three
+          # of them wrong, and its failure mode is SILENCE: the guard reads
+          # false, main() never runs, the process exits 0. #7222 added a drift
+          # gate keeping the three surviving copies identical, but that gate
+          # iterates a hardcoded three-element list, so a FOURTH copy is
+          # invisible to it. This lint is the other half: it walks the repo and
+          # fails on any entry-point determination outside the sanctioned set.
+          #
+          # Deliberately REPO-WIDE and not packages/server: two of the three
+          # sanctioned copies live outside it, and so could a fourth. The step
+          # name says what is actually covered — .js/.mjs/.cjs/.ts/.tsx/.jsx.
+          # Shell is NOT walked (docker-entrypoint.sh's `node -e` uses the same
+          # argv slot for a config path), and neither is generated dist/.
+          #
+          # Exit 2 means the lint could not do its job (bad flags, a sanctioned
+          # path that vanished, or it walked fewer files than its floor) and is
+          # reported separately from exit 1 — "the guard broke" must never be
+          # shown as "the guard passed", nor as "the code is dirty".
+          set +e
+          scripts/lint-entry-point-guard.sh
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "OK — entry-point-ness is decided in the sanctioned files only"
+          elif [ "$rc" -eq 2 ]; then
+            echo "::error::lint-entry-point-guard could not run (bad flags, a stale allowlist entry, or it walked fewer files than --min-files). The GUARD is broken, not necessarily the code. See packages/server/scripts/lint-entry-point-guard.mjs."
+            exit 1
+          else
+            echo "::error::A file decides 'was this module run directly?' by hand, or a sanctioned-copy allowlist entry is stale. Import isEntryPoint instead. See packages/server/scripts/lint-entry-point-guard.sh."
+            exit 1
+          fi
+
   dashboard-tests:
     name: Dashboard Tests
     needs: runner-target

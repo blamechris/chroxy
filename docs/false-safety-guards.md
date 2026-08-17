@@ -188,6 +188,17 @@ fixes.
 targets from the config, flows from the runner's own inventory. A hardcoded
 list is correct exactly once (`#7192`, `#7197`).
 
+**When the set genuinely cannot be derived, invert the list instead.** Some sets
+have no manifest to read — the entry-point guard exists in three files that
+cannot import one another, and nothing in the repo declares that. A list of
+things to CHECK fails silently when it falls behind; a list of things EXEMPT
+from a walk over everything fails loudly, because the walk hits the missing
+entry and complains. Same data structure, opposite failure direction. `#7222`
+kept its three copies identical by iterating a hardcoded list, and `#7235` added
+the walk that says there are only three — the second is what makes the first's
+list safe to hardcode, and both now read the same list so they cannot disagree
+about which files they mean.
+
 **Not-checkable must be an error, not a skip.** "I cannot verify this shape" and
 "there is nothing to verify" are different outcomes. Conflating them is how
 `#7195`, `#7210`, and `#7198` all read as success. Throw, and name what could
@@ -226,7 +237,11 @@ was checked against `--help` on the pinned version for exactly this reason.
 - `scripts/verify-publish-artifacts.mjs` — packs, installs, and runs; derives
   its entry points from the published manifests
 - `scripts/check-release-pr-subject.mjs` — content-triggered, fails closed
-- `packages/server/src/utils/is-entry-point.js` — the entry-point guard, and
-  the only copy of it that is unit-tested (`packages/server/tests/is-entry-point.test.js`).
-  Sites outside that package cannot import it and carry their own copies;
-  `#7222` tracks collapsing them onto one implementation.
+- `packages/server/src/utils/is-entry-point.js` — the entry-point guard. It
+  exists in three files that cannot import one another
+  (`scripts/lib/entry-point-guard-copies.mjs` is the list, and says why), and
+  two gates hold it: `scripts/__tests__/is-entry-point.test.mjs` fails if the
+  three diverge (`#7222`), and
+  `packages/server/scripts/lint-entry-point-guard.mjs` walks the repo and fails
+  if a fourth appears (`#7235`). Both copies are unit-tested; the server's own
+  suite is `packages/server/tests/is-entry-point.test.js`.
