@@ -1,7 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-CONFIG_DIR="$HOME/.chroxy"
+# #7239 — honour the override the daemon itself honours. This was
+# `CONFIG_DIR="$HOME/.chroxy"`, so `docker run -e CHROXY_CONFIG_DIR=/data` split
+# the container in two: the entrypoint wrote config.json to ~/.chroxy (the
+# mounted `chroxy-data` volume) while the daemon read /data for everything.
+#
+# The token survived that split by accident — the entrypoint exports API_TOKEN
+# and server-cli falls back to it — so the failure looked like nothing was
+# wrong. What actually broke is everything else: server-identity.json,
+# credentials.json, session-state.json, scheduled-tasks.json and the trust
+# ledgers all landed in an UNMOUNTED container path and were destroyed on every
+# restart, while the volume sat mounted where nothing wrote to it. A regenerated
+# identity key is the sharp end of that — pinned clients report it as a possible
+# MITM.
+CONFIG_DIR="${CHROXY_CONFIG_DIR:-$HOME/.chroxy}"
 CONFIG_FILE="$CONFIG_DIR/config.json"
 
 # --- Helper: prepare config for server start ---

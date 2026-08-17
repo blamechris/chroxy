@@ -388,7 +388,7 @@ jobs:
             exit 1
           fi
 
-      - name: Check ~/.chroxy resolves through config-dir.js
+      - name: Check ~/.chroxy resolves through config-dir.js (server + claude-hooks JS)
         run: |
           # Issue #7052 — CHROXY_CONFIG_DIR must relocate ALL daemon state. It
           # relocated only half of it, because a `const` freezes at import: 16
@@ -397,8 +397,25 @@ jobs:
           # around that. Both shapes are banned; configDir()/configPath() read
           # the env per call. The lint is ratcheted by file — see
           # scripts/lint-config-dir-baseline.txt, which may shrink, never grow.
-          if scripts/lint-config-dir.sh; then
+          #
+          # #7239 — the step name says what is actually covered. The walk is
+          # packages/server/src + packages/claude-hooks/src, .js/.mjs/.cjs.
+          # Shell resolvers (scripts/docker-entrypoint.sh) and .ts sources are
+          # NOT covered by this gate; the old name implied the whole repo was.
+          #
+          # Exit 2 means the lint could not do its job (bad flags, or it scanned
+          # fewer files than its floor) and is reported separately from exit 1
+          # — "the guard broke" must never be shown as "the code is dirty", and
+          # must never be silently green.
+          set +e
+          scripts/lint-config-dir.sh
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
             echo "OK — ~/.chroxy resolves through src/config-dir.js"
+          elif [ "$rc" -eq 2 ]; then
+            echo "::error::lint-config-dir could not run (bad flags, or it scanned fewer files than --min-files). The GUARD is broken, not necessarily the code. See packages/server/scripts/lint-config-dir.mjs."
+            exit 1
           else
             echo "::error::A file resolves ~/.chroxy outside src/config-dir.js, or a baseline entry is stale. See packages/server/scripts/lint-config-dir.sh."
             exit 1
@@ -950,6 +967,13 @@ jobs:
 
       - name: Run bump-version.sh tests
         run: bash scripts/__tests__/bump-version.test.sh
+
+      - name: Run docker-entrypoint.sh tests
+        # #7239 — the entrypoint hardcoded $HOME/.chroxy while the daemon
+        # honours CHROXY_CONFIG_DIR, so a relocated container wrote config to
+        # the mounted volume and read state from an unmounted path. Silent,
+        # because the token survived via the exported API_TOKEN.
+        run: bash scripts/__tests__/docker-entrypoint.test.sh
 
       - name: Run flush-and-exit.mjs tests
         run: node scripts/__tests__/flush-and-exit.test.mjs
