@@ -7,6 +7,10 @@ import { settingsHandlers } from '../src/handlers/settings-handlers.js'
 import { getStoredCredential, setStoredCredential } from '../src/credential-store.js'
 import { nsCtx } from './test-helpers.js'
 
+// #7052 — the sandbox config dir this process started with. Tests below
+// relocate it alongside HOME and restore it here on teardown.
+const __sandboxConfigDir = process.env.CHROXY_CONFIG_DIR
+
 /**
  * #3855: WS handler tests for the Provider Credentials messages.
  *   - get_credentials_status: returns masked status, never a raw value
@@ -55,6 +59,7 @@ describe('credential WS handlers (#3855)', () => {
     tmpHome = mkdtempSync(join(tmpdir(), 'chroxy-cred-handlers-test-'))
     originalHome = process.env.HOME
     process.env.HOME = tmpHome
+    process.env.CHROXY_CONFIG_DIR = join(tmpHome, '.chroxy')
     for (const k of CRED_ENV_VARS) {
       savedEnv[k] = process.env[k]
       delete process.env[k]
@@ -64,6 +69,7 @@ describe('credential WS handlers (#3855)', () => {
   afterEach(() => {
     if (originalHome) process.env.HOME = originalHome
     else delete process.env.HOME
+    process.env.CHROXY_CONFIG_DIR = __sandboxConfigDir
     for (const k of CRED_ENV_VARS) {
       if (savedEnv[k] === undefined) delete process.env[k]
       else process.env[k] = savedEnv[k]

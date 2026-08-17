@@ -6,6 +6,10 @@ import { join } from 'path'
 import { settingsHandlers } from '../../src/handlers/settings-handlers.js'
 import { createSpy, nsCtx } from '../test-helpers.js'
 
+// #7052 — the sandbox config dir this process started with. Tests below
+// relocate it alongside HOME and restore it here on teardown.
+const __sandboxConfigDir = process.env.CHROXY_CONFIG_DIR
+
 /**
  * Tests for the BYOK credentials WS handlers (#4052):
  *   - byok_get_credentials_status
@@ -52,12 +56,14 @@ describe('byok credentials handlers (#4052)', () => {
     originalHome = process.env.HOME
     originalApiKey = process.env.ANTHROPIC_API_KEY
     process.env.HOME = tmpHome
+    process.env.CHROXY_CONFIG_DIR = join(tmpHome, '.chroxy')
     delete process.env.ANTHROPIC_API_KEY
   })
 
   afterEach(() => {
     if (originalHome) process.env.HOME = originalHome
     else delete process.env.HOME
+    process.env.CHROXY_CONFIG_DIR = __sandboxConfigDir
     if (originalApiKey) process.env.ANTHROPIC_API_KEY = originalApiKey
     else delete process.env.ANTHROPIC_API_KEY
     rmSync(tmpHome, { recursive: true, force: true })

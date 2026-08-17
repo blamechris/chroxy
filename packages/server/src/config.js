@@ -1930,7 +1930,7 @@ function defaultConfigPath() {
  * @param {string} [configPath] - Path to config.json. Defaults to ~/.chroxy/config.json.
  * @returns {Array<{ path: string, name?: string }>} Repos array, or [] if missing/invalid.
  */
-export function readReposFromConfig(configPath = defaultConfigPath) {
+export function readReposFromConfig(configPath = defaultConfigPath()) {
   try {
     if (!existsSync(configPath)) return []
     const raw = JSON.parse(readFileSync(configPath, 'utf-8'))
@@ -2062,7 +2062,7 @@ function refuseMalformedConfig(configPath, reason, bytes) {
  * @param {Array<{ path: string, name?: string }>} repos - Repos array to write.
  * @param {string} [configPath] - Path to config.json. Defaults to ~/.chroxy/config.json.
  */
-export function writeReposToConfig(repos, configPath = defaultConfigPath) {
+export function writeReposToConfig(repos, configPath = defaultConfigPath()) {
   const existing = readConfigForMerge(configPath)
   existing.repos = repos
   const dir = dirname(configPath)
@@ -2085,7 +2085,7 @@ export function writeReposToConfig(repos, configPath = defaultConfigPath) {
  * @param {object|null} preset - The preset object ({ preamble?, seed?, enabled? }) or null to clear.
  * @param {string} [configPath] - Path to config.json. Defaults to ~/.chroxy/config.json.
  */
-export function writeSessionPresetOverrideToConfig(repoPath, preset, configPath = defaultConfigPath) {
+export function writeSessionPresetOverrideToConfig(repoPath, preset, configPath = defaultConfigPath()) {
   const existing = readConfigForMerge(configPath)
   if (!Array.isArray(existing.repos)) existing.repos = []
 
@@ -2136,7 +2136,7 @@ export function writeSessionPresetOverrideToConfig(repoPath, preset, configPath 
  * @param {boolean} enabled - the new gate value.
  * @param {string} [configPath] - Path to config.json. Defaults to ~/.chroxy/config.json.
  */
-export function writeSchedulerEnabledToConfig(enabled, configPath = defaultConfigPath) {
+export function writeSchedulerEnabledToConfig(enabled, configPath = defaultConfigPath()) {
   const existing = readConfigForMerge(configPath)
   // A non-object `features` is a single stray FIELD, not the whole config, so it
   // is repaired in place rather than refused — the operator's other settings
@@ -2155,7 +2155,7 @@ export function writeSchedulerEnabledToConfig(enabled, configPath = defaultConfi
  * @param {string} [configPath] - Path to config.json. Defaults to ~/.chroxy/config.json.
  * @returns {string|undefined} The configured root, or undefined if missing/invalid.
  */
-export function readControlRoomRootFromConfig(configPath = defaultConfigPath) {
+export function readControlRoomRootFromConfig(configPath = defaultConfigPath()) {
   try {
     if (!existsSync(configPath)) return undefined
     const raw = JSON.parse(readFileSync(configPath, 'utf-8'))
@@ -2175,7 +2175,7 @@ export function readControlRoomRootFromConfig(configPath = defaultConfigPath) {
  * @param {string} root - Absolute path to the discovery root.
  * @param {string} [configPath] - Path to config.json. Defaults to ~/.chroxy/config.json.
  */
-export function writeControlRoomRootToConfig(root, configPath = defaultConfigPath) {
+export function writeControlRoomRootToConfig(root, configPath = defaultConfigPath()) {
   const existing = readConfigForMerge(configPath)
   existing.controlRoomRoot = root
   const dir = dirname(configPath)

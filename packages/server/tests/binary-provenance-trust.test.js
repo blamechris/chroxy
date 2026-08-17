@@ -34,8 +34,22 @@ describe('BinaryProvenanceLedger (#6858)', () => {
     rmSync(dir, { recursive: true, force: true })
   })
 
-  it('defaults its file to ~/.chroxy/binary-trust.json', () => {
-    assert.match(defaultBinaryTrustFile(), /\.chroxy[/\\]binary-trust\.json$/)
+  it('defaults its file to <config dir>/binary-trust.json', () => {
+    // #7052 — CHROXY_CONFIG_DIR-rooted, so this is only `.chroxy/...` when the
+    // override is unset (tests/_setup.mjs sets it suite-wide).
+    assert.equal(defaultBinaryTrustFile(), join(process.env.CHROXY_CONFIG_DIR, 'binary-trust.json'))
+  })
+
+  it('falls back to ~/.chroxy/binary-trust.json when CHROXY_CONFIG_DIR is unset', () => {
+    // Positive control: without this, the assertion above would also pass for a
+    // resolver that had stopped consulting the home fallback entirely.
+    const prev = process.env.CHROXY_CONFIG_DIR
+    try {
+      delete process.env.CHROXY_CONFIG_DIR
+      assert.match(defaultBinaryTrustFile(), /\.chroxy[/\\]binary-trust\.json$/)
+    } finally {
+      process.env.CHROXY_CONFIG_DIR = prev
+    }
   })
 
   it('pins on approve and reports the record as trusted', () => {

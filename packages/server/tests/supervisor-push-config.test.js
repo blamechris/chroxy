@@ -98,12 +98,12 @@ if (typeof mock.module !== 'function') {
 
       // statePath must match the child server's default so message-id
       // convergence keeps working (both processes edit the same embed).
-      assert.equal(opts.discord?.statePath, join(homedir(), '.chroxy', 'discord-webhook-state.json'))
+      assert.equal(opts.discord?.statePath, join(process.env.CHROXY_CONFIG_DIR, 'discord-webhook-state.json'))
 
       // prefsPath must mirror server-cli.js too — otherwise the per-send
       // manager runs with default prefs and supervisor notifications ignore
       // the operator's category mutes / quiet hours (both sinks gate on prefs).
-      assert.equal(opts.prefsPath, join(homedir(), '.chroxy', 'notification-prefs.json'))
+      assert.equal(opts.prefsPath, join(process.env.CHROXY_CONFIG_DIR, 'notification-prefs.json'))
 
       assert.deepEqual(sendCalls, [
         { category: 'activity_error', title: 'Chroxy server is down', body: 'body' },
@@ -136,7 +136,7 @@ if (typeof mock.module !== 'function') {
 
       assert.equal(constructions.length, 1)
       const { opts } = constructions[0]
-      assert.equal(opts.discord?.statePath, join(homedir(), '.chroxy', 'discord-webhook-state.json'))
+      assert.equal(opts.discord?.statePath, join(process.env.CHROXY_CONFIG_DIR, 'discord-webhook-state.json'))
     })
 
     it('destroys the per-send PushManager even when send() rejects', async () => {

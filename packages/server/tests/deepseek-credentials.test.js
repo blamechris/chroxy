@@ -5,6 +5,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { resolveDeepSeekApiKey, maskApiKey } from '../src/deepseek-credentials.js'
 
+// #7052 — the sandbox config dir this process started with. Tests below
+// relocate it alongside HOME and restore it here on teardown.
+const __sandboxConfigDir = process.env.CHROXY_CONFIG_DIR
+
 /**
  * Tests for deepseek-credentials.js (#4656) — env-var precedence,
  * file-fallback, 0600 permission enforcement, key masking re-export.
@@ -25,6 +29,7 @@ describe('deepseek-credentials', () => {
     originalApiKey = process.env.DEEPSEEK_API_KEY
     originalAnthropicKey = process.env.ANTHROPIC_API_KEY
     process.env.HOME = tmpHome
+    process.env.CHROXY_CONFIG_DIR = join(tmpHome, '.chroxy')
     delete process.env.DEEPSEEK_API_KEY
     // Defensive: a bleed-through ANTHROPIC_API_KEY must not poison this
     // resolver — the two paths are independent. Confirms isolation.
@@ -34,6 +39,7 @@ describe('deepseek-credentials', () => {
   afterEach(() => {
     if (originalHome) process.env.HOME = originalHome
     else delete process.env.HOME
+    process.env.CHROXY_CONFIG_DIR = __sandboxConfigDir
     if (originalApiKey) process.env.DEEPSEEK_API_KEY = originalApiKey
     else delete process.env.DEEPSEEK_API_KEY
     if (originalAnthropicKey) process.env.ANTHROPIC_API_KEY = originalAnthropicKey

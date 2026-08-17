@@ -3,6 +3,10 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+
+// #7052 — the sandbox config dir this process started with. Tests below
+// relocate it alongside HOME and restore it here on teardown.
+const __sandboxConfigDir = process.env.CHROXY_CONFIG_DIR
 import {
   hasClaudeOAuthCreds,
   hasCodexOAuthCreds,
@@ -284,6 +288,7 @@ describe('auth-probes module (#4769)', () => {
         const tmp = mkdtempSync(join(tmpdir(), 'auth-probes-byok-noent-'))
         const savedHome = process.env.HOME
         process.env.HOME = tmp
+        process.env.CHROXY_CONFIG_DIR = join(tmp, '.chroxy')
         try {
           let called = 0
           const r = cachedResolveCredentialFile('byok', undefined, () => {
@@ -298,6 +303,7 @@ describe('auth-probes module (#4769)', () => {
         } finally {
           if (savedHome === undefined) delete process.env.HOME
           else process.env.HOME = savedHome
+          process.env.CHROXY_CONFIG_DIR = __sandboxConfigDir
           rmSync(tmp, { recursive: true, force: true })
         }
       })
@@ -337,6 +343,7 @@ describe('auth-probes module (#4769)', () => {
         const tmp = mkdtempSync(join(tmpdir(), 'auth-probes-dyn-noent-'))
         const savedHome = process.env.HOME
         process.env.HOME = tmp
+        process.env.CHROXY_CONFIG_DIR = join(tmp, '.chroxy')
         try {
           let called = 0
           const r = cachedResolveCredentialFile('compat:ZAI_API_KEY:zaiApiKey', undefined, () => {
@@ -350,6 +357,7 @@ describe('auth-probes module (#4769)', () => {
         } finally {
           if (savedHome === undefined) delete process.env.HOME
           else process.env.HOME = savedHome
+          process.env.CHROXY_CONFIG_DIR = __sandboxConfigDir
           rmSync(tmp, { recursive: true, force: true })
         }
       })
@@ -361,6 +369,7 @@ describe('auth-probes module (#4769)', () => {
         const tmp = mkdtempSync(join(tmpdir(), 'auth-probes-dyn-noent-'))
         const savedHome = process.env.HOME
         process.env.HOME = tmp
+        process.env.CHROXY_CONFIG_DIR = join(tmp, '.chroxy')
         try {
           const r = cachedResolveCredentialFile('compat::zaiApiKey', undefined, () => ({ key: null }), null)
           assert.equal(r.key, null)
@@ -370,6 +379,7 @@ describe('auth-probes module (#4769)', () => {
         } finally {
           if (savedHome === undefined) delete process.env.HOME
           else process.env.HOME = savedHome
+          process.env.CHROXY_CONFIG_DIR = __sandboxConfigDir
           rmSync(tmp, { recursive: true, force: true })
         }
       })
@@ -381,6 +391,7 @@ describe('auth-probes module (#4769)', () => {
         const tmp = mkdtempSync(join(tmpdir(), 'auth-probes-ds-noent-'))
         const savedHome = process.env.HOME
         process.env.HOME = tmp
+        process.env.CHROXY_CONFIG_DIR = join(tmp, '.chroxy')
         try {
           const r = cachedResolveCredentialFile('deepseek', undefined, () => ({ key: null }))
           assert.equal(r.source, 'none')
@@ -388,6 +399,7 @@ describe('auth-probes module (#4769)', () => {
         } finally {
           if (savedHome === undefined) delete process.env.HOME
           else process.env.HOME = savedHome
+          process.env.CHROXY_CONFIG_DIR = __sandboxConfigDir
           rmSync(tmp, { recursive: true, force: true })
         }
       })

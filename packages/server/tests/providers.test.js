@@ -10,6 +10,10 @@ import { CodexSession } from '../src/codex-session.js'
 import { CodexAppServerSession } from '../src/codex-app-server-session.js'
 import { GeminiSession } from '../src/gemini-session.js'
 
+// #7052 — the sandbox config dir this process started with. Tests below
+// relocate it alongside HOME and restore it here on teardown.
+const __sandboxConfigDir = process.env.CHROXY_CONFIG_DIR
+
 describe('Provider Registry', () => {
   it('has claude-cli and claude-sdk pre-registered', () => {
     const cli = getProvider('claude-cli')
@@ -688,6 +692,7 @@ describe('Provider Registry', () => {
       try {
         clearKeys()
         process.env.HOME = tmpFsHome
+        process.env.CHROXY_CONFIG_DIR = join(tmpFsHome, '.chroxy')
         mkdirSync(join(tmpFsHome, '.chroxy'), { recursive: true })
         const credPath = join(tmpFsHome, '.chroxy', 'credentials.json')
         writeFileSync(credPath, JSON.stringify({ deepseekApiKey: 'sk-from-file' }))
@@ -705,6 +710,7 @@ describe('Provider Registry', () => {
       } finally {
         if (savedHome) process.env.HOME = savedHome
         else delete process.env.HOME
+        process.env.CHROXY_CONFIG_DIR = __sandboxConfigDir
         rmSync(tmpFsHome, { recursive: true, force: true })
         restoreKeys()
       }
@@ -1212,6 +1218,7 @@ describe('listProviders credential-file caching (#4658)', () => {
     }
     tmpHome = mkdtempSync(join(tmpdir(), 'chroxy-cred-cache-test-'))
     process.env.HOME = tmpHome
+    process.env.CHROXY_CONFIG_DIR = join(tmpHome, '.chroxy')
     mkdirSync(join(tmpHome, '.chroxy'), { recursive: true, mode: 0o700 })
 
     // #3674-style isolation for the OAuth probes so they don't accidentally

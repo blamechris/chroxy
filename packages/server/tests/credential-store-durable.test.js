@@ -9,6 +9,10 @@ import { credentialHandlers } from '../src/handlers/credential-handlers.js'
 import { WEBHOOK_SECRET_FIELD } from '../src/github-webhook.js'
 import { nsCtx } from './test-helpers.js'
 
+// #7052 — the sandbox config dir this process started with. Tests below
+// relocate it alongside HOME and restore it here on teardown.
+const __sandboxConfigDir = process.env.CHROXY_CONFIG_DIR
+
 /**
  * #6964 — the credential store's durable-write seam.
  *
@@ -95,6 +99,7 @@ describe('credential-store durable-write seam (#6964)', () => {
     tmpHome = mkdtempSync(join(tmpdir(), 'chroxy-cred-durable-'))
     originalHome = process.env.HOME
     process.env.HOME = tmpHome
+    process.env.CHROXY_CONFIG_DIR = join(tmpHome, '.chroxy')
     savedEnvSecret = process.env.GITHUB_WEBHOOK_SECRET
     delete process.env.GITHUB_WEBHOOK_SECRET
     credDir = join(tmpHome, '.chroxy')
@@ -119,6 +124,7 @@ describe('credential-store durable-write seam (#6964)', () => {
     }
     if (originalHome) process.env.HOME = originalHome
     else delete process.env.HOME
+    process.env.CHROXY_CONFIG_DIR = __sandboxConfigDir
     if (savedEnvSecret === undefined) delete process.env.GITHUB_WEBHOOK_SECRET
     else process.env.GITHUB_WEBHOOK_SECRET = savedEnvSecret
     try { rmSync(tmpHome, { recursive: true, force: true }) } catch { /* */ }

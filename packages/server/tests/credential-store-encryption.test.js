@@ -13,6 +13,10 @@ import {
 } from '../src/credential-store.js'
 import { isEncryptedEnvelope } from '../src/credential-cipher.js'
 
+// #7052 — the sandbox config dir this process started with. Tests below
+// relocate it alongside HOME and restore it here on teardown.
+const __sandboxConfigDir = process.env.CHROXY_CONFIG_DIR
+
 /**
  * Encrypted-path tests for the credential store (#5154). An in-memory keychain
  * fake drives the encrypted branch; HOME points at a tmpdir so the real
@@ -44,6 +48,7 @@ describe('credential-store at-rest encryption (#5154)', () => {
     tmpHome = mkdtempSync(join(tmpdir(), 'chroxy-cred-enc-test-'))
     originalHome = process.env.HOME
     process.env.HOME = tmpHome
+    process.env.CHROXY_CONFIG_DIR = join(tmpHome, '.chroxy')
     for (const k of CRED_ENV_VARS) {
       savedEnv[k] = process.env[k]
       delete process.env[k]
@@ -58,6 +63,7 @@ describe('credential-store at-rest encryption (#5154)', () => {
     _setCredentialKeychainForTests(null)
     if (originalHome) process.env.HOME = originalHome
     else delete process.env.HOME
+    process.env.CHROXY_CONFIG_DIR = __sandboxConfigDir
     for (const k of CRED_ENV_VARS) {
       if (savedEnv[k] === undefined) delete process.env[k]
       else process.env[k] = savedEnv[k]

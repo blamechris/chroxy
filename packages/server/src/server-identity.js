@@ -118,7 +118,7 @@ function secretKeyFromStored(storedB64) {
  * @param {string} [opts.filePath] - fallback file path (defaults to ~/.chroxy/server-identity.json)
  * @returns {{ publicKey: string, secretKey: Uint8Array }|null}
  */
-export function loadServerIdentity({ keychain = realKeychain, filePath = defaultIdentityFile } = {}) {
+export function loadServerIdentity({ keychain = realKeychain, filePath = defaultIdentityFile() } = {}) {
   // Keychain first (when available). #5615: distinguish a genuine "absent" from a
   // READ FAILURE (locked / interaction-not-allowed). On a read failure we MUST
   // NOT fall through to the file / minting path — that would silently rotate the
@@ -256,7 +256,7 @@ export function persistServerIdentity(keyPair, {
  * @returns {{ publicKey: string, secretKey: Uint8Array, created: boolean, backend: 'keychain'|'file' }}
  * @throws {IdentityUnavailableError} when the keychain read failed (case b)
  */
-export function getOrCreateServerIdentity({ keychain = realKeychain, filePath = defaultIdentityFile } = {}) {
+export function getOrCreateServerIdentity({ keychain = realKeychain, filePath = defaultIdentityFile() } = {}) {
   // NB: a keychain read failure throws IdentityUnavailableError here — let it
   // propagate. Catching it would re-enable the silent-rotation bug (#5615).
   const existing = loadServerIdentity({ keychain, filePath })
@@ -285,7 +285,7 @@ export function getOrCreateServerIdentity({ keychain = realKeychain, filePath = 
  * @param {string} [opts.rotationFilePath]
  * @returns {{ newIdentityKey: string, rotationCert: string, previousPublicKey: string }|null}
  */
-export function loadServerRotationCert({ rotationFilePath = defaultIdentityRotationFile } = {}) {
+export function loadServerRotationCert({ rotationFilePath = defaultIdentityRotationFile() } = {}) {
   try {
     const parsed = JSON.parse(readFileSync(rotationFilePath, 'utf-8'))
     const { newIdentityKey, rotationCert, previousPublicKey } = parsed ?? {}
@@ -312,7 +312,7 @@ export function loadServerRotationCert({ rotationFilePath = defaultIdentityRotat
  * @param {string} [opts.rotationFilePath]
  * @returns {{ rotationCert: string, previousPublicKey: string }|null}
  */
-export function resolveServerRotationCert(currentIdentityPublicKey, { rotationFilePath = defaultIdentityRotationFile } = {}) {
+export function resolveServerRotationCert(currentIdentityPublicKey, { rotationFilePath = defaultIdentityRotationFile() } = {}) {
   const sidecar = loadServerRotationCert({ rotationFilePath })
   if (!sidecar) return null
   if (sidecar.newIdentityKey !== currentIdentityPublicKey) {

@@ -16,6 +16,10 @@ import { createBrowserOps } from '../src/ws-file-ops/browser.js'
 import { ClaudeByokSession } from '../src/byok-session.js'
 import { recordTrust } from '../src/byok-mcp-trust.js'
 
+// #7052 — the sandbox config dir this process started with. Tests below
+// relocate it alongside HOME and restore it here on teardown.
+const __sandboxConfigDir = process.env.CHROXY_CONFIG_DIR
+
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const STUB = join(__dirname, 'fixtures', 'mcp-stub.mjs')
 
@@ -411,6 +415,7 @@ describe('ClaudeByokSession MCP prompts/resources (#6823)', () => {
     originalApiKey = process.env.ANTHROPIC_API_KEY
     originalMcpTrustPath = process.env.CHROXY_MCP_TRUST_PATH
     process.env.HOME = tmpHome
+    process.env.CHROXY_CONFIG_DIR = join(tmpHome, '.chroxy')
     process.env.ANTHROPIC_API_KEY = 'sk-ant-test-key-fixture'
     process.env.CHROXY_MCP_TRUST_PATH = join(tmpHome, 'mcp-trust.json')
   })

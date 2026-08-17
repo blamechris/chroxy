@@ -508,7 +508,7 @@ exec ${sh(nodePath)} ${sh(chroxyBin)} start
  * @param {string} [configDir] - Override config directory (for testing)
  * @returns {object|null}
  */
-export function loadServiceState(configDir = defaultConfigDir) {
+export function loadServiceState(configDir = defaultConfigDir()) {
   const statePath = join(configDir, 'service.json')
   if (!existsSync(statePath)) {
     return null
@@ -525,7 +525,7 @@ export function loadServiceState(configDir = defaultConfigDir) {
  * @param {object} state
  * @param {string} [configDir] - Override config directory (for testing)
  */
-export function saveServiceState(state, configDir = defaultConfigDir) {
+export function saveServiceState(state, configDir = defaultConfigDir()) {
   if (!existsSync(configDir)) {
     mkdirSync(configDir, { recursive: true })
   }

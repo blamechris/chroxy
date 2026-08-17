@@ -8,6 +8,10 @@ import { readStoredField, setStoredField } from '../src/credential-store.js'
 import { WebhookDeliveryRing, WEBHOOK_SECRET_FIELD } from '../src/github-webhook.js'
 import { nsCtx } from './test-helpers.js'
 
+// #7052 — the sandbox config dir this process started with. Tests below
+// relocate it alongside HOME and restore it here on teardown.
+const __sandboxConfigDir = process.env.CHROXY_CONFIG_DIR
+
 /**
  * #6540 (item 3 of #6536): WS handler tests for the repo-events webhook-secret
  * config surface. Guards:
@@ -60,6 +64,7 @@ describe('github webhook-secret WS handlers (#6540)', () => {
     tmpHome = mkdtempSync(join(tmpdir(), 'chroxy-webhook-handlers-'))
     originalHome = process.env.HOME
     process.env.HOME = tmpHome
+    process.env.CHROXY_CONFIG_DIR = join(tmpHome, '.chroxy')
     savedEnv = process.env.GITHUB_WEBHOOK_SECRET
     delete process.env.GITHUB_WEBHOOK_SECRET
   })
@@ -67,6 +72,7 @@ describe('github webhook-secret WS handlers (#6540)', () => {
   afterEach(() => {
     if (originalHome) process.env.HOME = originalHome
     else delete process.env.HOME
+    process.env.CHROXY_CONFIG_DIR = __sandboxConfigDir
     if (savedEnv === undefined) delete process.env.GITHUB_WEBHOOK_SECRET
     else process.env.GITHUB_WEBHOOK_SECRET = savedEnv
     try { rmSync(tmpHome, { recursive: true, force: true }) } catch { /* */ }

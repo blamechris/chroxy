@@ -9,6 +9,10 @@ import { DockerByokSession, remapToContainerPath, CONTAINER_WORKSPACE } from '..
 import { ClaudeByokSession } from '../src/byok-session.js'
 import { registerDockerProvider, getProvider } from '../src/providers.js'
 
+// #7052 — the sandbox config dir this process started with. Tests below
+// relocate it alongside HOME and restore it here on teardown.
+const __sandboxConfigDir = process.env.CHROXY_CONFIG_DIR
+
 /**
  * Tests for the docker-byok provider (#4053).
  *
@@ -85,6 +89,7 @@ beforeEach(() => {
   originalApiKey = process.env.ANTHROPIC_API_KEY
   originalMcpTrustPath = process.env.CHROXY_MCP_TRUST_PATH
   process.env.HOME = tmpHome
+  process.env.CHROXY_CONFIG_DIR = join(tmpHome, '.chroxy')
   process.env.ANTHROPIC_API_KEY = 'sk-ant-test-key-fixture'
   process.env.CHROXY_MCP_TRUST_PATH = join(tmpHome, 'mcp-trust.json')
 })
@@ -92,6 +97,7 @@ beforeEach(() => {
 afterEach(() => {
   if (originalHome) process.env.HOME = originalHome
   else delete process.env.HOME
+  process.env.CHROXY_CONFIG_DIR = __sandboxConfigDir
   if (originalApiKey) process.env.ANTHROPIC_API_KEY = originalApiKey
   else delete process.env.ANTHROPIC_API_KEY
   if (originalMcpTrustPath) process.env.CHROXY_MCP_TRUST_PATH = originalMcpTrustPath

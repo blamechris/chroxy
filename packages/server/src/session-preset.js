@@ -326,7 +326,7 @@ export function readRepoPresetFile(absPath) {
  * @param {string} [configPath]
  * @returns {object|null}
  */
-export function _findRepoConfigEntry(repoPath, configPath = defaultConfigPath) {
+export function _findRepoConfigEntry(repoPath, configPath = defaultConfigPath()) {
   if (!repoPath || typeof repoPath !== 'string') return null
   let raw
   try {
@@ -356,7 +356,7 @@ function _resolveSafe(p) {
  * @param {string} [configPath]
  * @returns {null | ReturnType<typeof validatePreset>}
  */
-export function readDaemonOverride(repoPath, configPath = defaultConfigPath) {
+export function readDaemonOverride(repoPath, configPath = defaultConfigPath()) {
   const entry = _findRepoConfigEntry(repoPath, configPath)
   if (!entry || !entry.sessionPreset) return null
   return validatePreset(entry.sessionPreset)

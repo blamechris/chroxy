@@ -6,6 +6,10 @@ import { join } from 'node:path'
 import { buildSpawnEnv } from '../src/utils/spawn-env.js'
 import { setStoredCredential } from '../src/credential-store.js'
 
+// #7052 — the sandbox config dir this process started with. Tests below
+// relocate it alongside HOME and restore it here on teardown.
+const __sandboxConfigDir = process.env.CHROXY_CONFIG_DIR
+
 /**
  * #3855: verify that buildSpawnEnv injects stored credentials when the
  * operator's shell has NOT exported the env var — the Tauri/launchd GUI-launch
@@ -23,6 +27,7 @@ describe('buildSpawnEnv — credential-store fallback (#3855)', () => {
     tmpHome = mkdtempSync(join(tmpdir(), 'chroxy-spawn-cred-test-'))
     originalHome = process.env.HOME
     process.env.HOME = tmpHome
+    process.env.CHROXY_CONFIG_DIR = join(tmpHome, '.chroxy')
     for (const k of CRED_ENV_VARS) {
       savedEnv[k] = process.env[k]
       delete process.env[k]
@@ -32,6 +37,7 @@ describe('buildSpawnEnv — credential-store fallback (#3855)', () => {
   afterEach(() => {
     if (originalHome) process.env.HOME = originalHome
     else delete process.env.HOME
+    process.env.CHROXY_CONFIG_DIR = __sandboxConfigDir
     for (const k of CRED_ENV_VARS) {
       if (savedEnv[k] === undefined) delete process.env[k]
       else process.env[k] = savedEnv[k]
