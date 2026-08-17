@@ -18,7 +18,7 @@
  */
 import { test, describe, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -461,6 +461,271 @@ export function get() { return NAME }
       )
       assert.equal(res.status, 0)
       assert.match(res.stderr, /offender\.js:5/)
+    })
+  })
+
+  /**
+   * #7239 — shapes that EVADED the line-oriented rules.
+   *
+   * Each of these passed the lint before the fix, so each is a fixture proving
+   * a real hole is closed rather than a restatement of an existing rule. The
+   * `CLEAN` counterpart is included where the evasion is a spelling of an
+   * already-banned shape, so a rule that simply matched everything would not
+   * satisfy the pair.
+   */
+  describe('anti-evasion (#7239)', () => {
+    test('two-step: const home = homedir() then join(home, .chroxy)', () => {
+      // The idiom is already live in the tree (ws-file-ops/browser.js,
+      // devcontainer-config.js) — neither is a chroxy path today, which is
+      // exactly why this needed closing before one becomes one.
+      const r = runLint({
+        'two-step.js': `
+import { homedir } from 'os'
+import { join } from 'path'
+const home = homedir()
+export function statePath() {
+  return join(home, '.chroxy', 'session-state.json')
+}
+`,
+      })
+      assert.equal(r.status, 1, r.stdout)
+      assert.match(r.stderr, /two-step\.js:6\s+\[hardcoded-home-path\]/)
+    })
+
+    test('two-step does NOT fire on a home var with no .chroxy segment', () => {
+      // The other half of the pair: `const home = homedir()` is a perfectly
+      // ordinary line, and flagging it everywhere would make the rule useless.
+      const r = runLint({
+        'unrelated-home.js': `
+import { homedir } from 'os'
+import { join } from 'path'
+const home = homedir()
+export function sshDir() {
+  return join(home, '.ssh', 'config')
+}
+`,
+      })
+      assert.equal(r.status, 0, r.stderr)
+    })
+
+    test('template literal: `${homedir()}/.chroxy/x`', () => {
+      const r = runLint({
+        'tpl.js': `
+import { homedir } from 'os'
+export function statePath() {
+  return \`\${homedir()}/.chroxy/session-state.json\`
+}
+`,
+      })
+      assert.equal(r.status, 1, r.stdout)
+      assert.match(r.stderr, /tpl\.js:4\s+\[hardcoded-home-path\]/)
+    })
+
+    test('combined segment: join(homedir(), ".chroxy/logs/x")', () => {
+      const r = runLint({
+        'combined.js': `
+import { homedir } from 'os'
+import { join } from 'path'
+export function logPath() {
+  return join(homedir(), '.chroxy/logs/chroxy.log')
+}
+`,
+      })
+      assert.equal(r.status, 1, r.stdout)
+      assert.match(r.stderr, /combined\.js:5\s+\[hardcoded-home-path\]/)
+    })
+
+    test('process.env.HOME instead of homedir()', () => {
+      const r = runLint({
+        'env-home.js': `
+import { join } from 'path'
+export function statePath() {
+  return join(process.env.HOME, '.chroxy', 'session-state.json')
+}
+`,
+      })
+      assert.equal(r.status, 1, r.stdout)
+      assert.match(r.stderr, /env-home\.js:4\s+\[hardcoded-home-path\]/)
+    })
+
+    test('.mjs and .cjs sources are scanned', () => {
+      // packages/server/scripts/ is entirely .mjs, so a whole class of file was
+      // invisible to a walk that filtered on `.js`.
+      const mjs = runLint({ 'tool.mjs': HARDCODED })
+      assert.equal(mjs.status, 1, mjs.stdout)
+      assert.match(mjs.stderr, /tool\.mjs:5/)
+
+      const cjs = runLint({ 'tool.cjs': HARDCODED })
+      assert.equal(cjs.status, 1, cjs.stdout)
+      assert.match(cjs.stderr, /tool\.cjs:5/)
+    })
+
+    test('a comment merely MENTIONING the marker does not exempt the next line', () => {
+      // The marker was matched as a substring of the raw previous line, so prose
+      // about the lint silently disabled it. This lint's own docstring mentions
+      // the marker several times.
+      const r = runLint({
+        'prose.js': `
+import { homedir } from 'os'
+import { join } from 'path'
+export function statePath() {
+  // Historically this needed a lint-ignore-config-dir directive, but not now.
+  return join(homedir(), '.chroxy', 'session-state.json')
+}
+`,
+      })
+      assert.equal(r.status, 1, r.stdout)
+      assert.match(r.stderr, /prose\.js:6/)
+    })
+
+    test('POSITIVE CONTROL: a real directive on the previous line still exempts', () => {
+      // Proves the test above failed because of the prose/directive distinction,
+      // not because the ignore mechanism was broken outright.
+      const r = runLint({
+        'directive.js': `
+import { homedir } from 'os'
+import { join } from 'path'
+export function statePath() {
+  // lint-ignore-config-dir
+  return join(homedir(), '.chroxy', 'session-state.json')
+}
+`,
+      })
+      assert.equal(r.status, 0, r.stderr)
+    })
+  })
+
+  /**
+   * #7239 — the lint failing to RUN must be distinguishable from the tree being
+   * clean. All of these exit 2: not 0 (a false pass) and not 1 (which would
+   * blame the code for a broken guard).
+   */
+  describe('the guard cannot silently no-op (#7239)', () => {
+    const runRaw = (args) =>
+      spawnSync(process.execPath, [LINT_SCRIPT, ...args], { encoding: 'utf8' })
+
+    const fixtureRoot = (files) => {
+      const root = mkdtempSync(join(tmpdir(), 'chroxy-lint-configdir-noop-'))
+      tmpRoots.push(root)
+      const srcDir = join(root, 'src')
+      mkdirSync(srcDir, { recursive: true })
+      for (const [rel, source] of Object.entries(files)) {
+        const full = join(srcDir, rel)
+        mkdirSync(dirname(full), { recursive: true })
+        writeFileSync(full, source)
+      }
+      return { root, srcDir, baseline: join(root, 'none.txt') }
+    }
+
+    test('an unknown flag is rejected, not ignored', () => {
+      // `--srcdir` (a typo for --src-dir) used to be dropped on the floor, so
+      // the lint scanned the REAL src/ and reported OK — a green run that never
+      // looked at what the caller asked about.
+      const { srcDir } = fixtureRoot({ 'offender.js': HARDCODED })
+      const res = runRaw(['--srcdir', srcDir])
+      assert.equal(res.status, 2)
+      assert.match(res.stderr, /unknown argument/)
+    })
+
+    test('a flag missing its value is rejected', () => {
+      const res = runRaw(['--src-dir'])
+      assert.equal(res.status, 2)
+      assert.match(res.stderr, /requires a value/)
+    })
+
+    test('scanning zero files fails instead of reporting clean', () => {
+      const { srcDir, baseline } = fixtureRoot({})
+      const res = runRaw(['--src-dir', srcDir, '--baseline', baseline])
+      assert.equal(res.status, 2)
+      assert.match(res.stderr, /scanned 0 files/)
+    })
+
+    test('a nonexistent src dir fails instead of reporting clean', () => {
+      const { root, baseline } = fixtureRoot({})
+      const res = runRaw(['--src-dir', join(root, 'nope'), '--baseline', baseline])
+      assert.equal(res.status, 2)
+      assert.match(res.stderr, /does not exist/)
+    })
+
+    test('--min-files fails when the walk returns fewer files than the floor', () => {
+      const { srcDir, baseline } = fixtureRoot({ 'a.js': CLEAN })
+      const res = runRaw(['--src-dir', srcDir, '--baseline', baseline, '--min-files', '10'])
+      assert.equal(res.status, 2)
+      assert.match(res.stderr, /scanned only 1 file/)
+    })
+
+    test('POSITIVE CONTROL: the same tree passes under a floor it meets', () => {
+      // Proves the failure above came from the floor, not from the fixture
+      // being broken in some other way.
+      const { srcDir, baseline } = fixtureRoot({ 'a.js': CLEAN })
+      const res = runRaw(['--src-dir', srcDir, '--baseline', baseline, '--min-files', '1'])
+      assert.equal(res.status, 0, res.stderr)
+    })
+
+    test('--min-files rejects a non-integer', () => {
+      const { srcDir } = fixtureRoot({ 'a.js': CLEAN })
+      const res = runRaw(['--src-dir', srcDir, '--min-files', 'lots'])
+      assert.equal(res.status, 2)
+    })
+  })
+
+  /**
+   * #7239 — "a file may leave the baseline, never join it" was a review-time
+   * convention, so `--write-baseline` would happily re-add whatever it found.
+   */
+  describe('the ratchet is enforced, not just documented (#7239)', () => {
+    const writeBaselineRun = (extraArgs) => {
+      const root = mkdtempSync(join(tmpdir(), 'chroxy-lint-configdir-ratchet-'))
+      tmpRoots.push(root)
+      const srcDir = join(root, 'src')
+      mkdirSync(srcDir, { recursive: true })
+      writeFileSync(join(srcDir, 'offender.js'), HARDCODED)
+      const baseline = join(root, 'baseline.txt')
+      writeFileSync(baseline, '# empty\n')
+
+      const res = spawnSync(
+        process.execPath,
+        [LINT_SCRIPT, '--src-dir', srcDir, '--baseline', baseline, '--write-baseline', ...extraArgs],
+        { encoding: 'utf8' }
+      )
+      return { res, baseline }
+    }
+
+    test('--write-baseline refuses to ADD a file', () => {
+      const { res, baseline } = writeBaselineRun([])
+      assert.equal(res.status, 2)
+      assert.match(res.stderr, /Refusing to grow the baseline/)
+      assert.match(readFileSync(baseline, 'utf8'), /^# empty$/m)
+      assert.doesNotMatch(readFileSync(baseline, 'utf8'), /offender\.js/)
+    })
+
+    test('POSITIVE CONTROL: --allow-baseline-growth permits it', () => {
+      // Proves the refusal is the ratchet and not --write-baseline being broken.
+      const { res, baseline } = writeBaselineRun(['--allow-baseline-growth'])
+      assert.equal(res.status, 0, res.stderr)
+      assert.match(readFileSync(baseline, 'utf8'), /offender\.js/)
+    })
+  })
+
+  describe('multiple scan roots (#7239)', () => {
+    test('every --src-dir is walked, and keys are relative to the first', () => {
+      const root = mkdtempSync(join(tmpdir(), 'chroxy-lint-configdir-multi-'))
+      tmpRoots.push(root)
+      const a = join(root, 'a')
+      const b = join(root, 'b')
+      mkdirSync(a, { recursive: true })
+      mkdirSync(b, { recursive: true })
+      writeFileSync(join(a, 'clean.js'), CLEAN)
+      writeFileSync(join(b, 'offender.js'), HARDCODED)
+
+      const res = spawnSync(
+        process.execPath,
+        [LINT_SCRIPT, '--src-dir', a, '--src-dir', b, '--baseline', join(root, 'none.txt')],
+        { encoding: 'utf8' }
+      )
+      assert.equal(res.status, 1)
+      // The second root is genuinely walked — this is the whole point of #7239.
+      assert.match(res.stderr, /\.\.\/b\/offender\.js:5/)
     })
   })
 })

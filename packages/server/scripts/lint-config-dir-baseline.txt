@@ -1,4 +1,17 @@
 # Files that still resolve ~/.chroxy without going through src/config-dir.js.
-# Ratchet (#7052): a file may LEAVE this list, never join it.
+# Ratchet (#7052): a file may LEAVE this list, never join it. Since #7239 that
+# is enforced — `--write-baseline` refuses to add an entry without
+# --allow-baseline-growth.
 # Regenerate with: node scripts/lint-config-dir.mjs --write-baseline
+#
+# packages/claude-hooks/src/config.js — a DELIBERATE, permanent exception, not
+# an unmigrated file. claude-hooks is zero-runtime-dep by design (#5885) so that
+# the hook emitters can run inside a plain Claude Code session with nothing
+# installed; it therefore cannot import the server's accessor, and its resolver
+# has to stay hand-rolled. It is correct today (it reads CHROXY_CONFIG_DIR and
+# falls back to ~/.chroxy). It is listed here rather than left unscanned so that
+# a SECOND copy appearing in that package is caught — the whole argument of this
+# lint is that each copy is correct in isolation and each one is a place the
+# convention can drift.
 
+packages/claude-hooks/src/config.js

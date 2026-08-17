@@ -36,6 +36,11 @@ services:
       - CHROXY_TUNNEL_NAME         # for named tunnel
       - CHROXY_TUNNEL_HOSTNAME     # for named tunnel
     volumes:
+      # #7239 — CHROXY_CONFIG_DIR is deliberately NOT passed through above. If
+      # you add it, you MUST move this mount to the same path: the daemon reads
+      # ALL of its state from that root (#7052), so leaving the volume here
+      # sends identity keys, credentials and session state to an unmounted path
+      # that is destroyed on every restart.
       - chroxy-data:/home/chroxy/.chroxy      # config + session state
       - chroxy-claude:/home/chroxy/.claude     # Claude settings
       - ${WORKSPACE_PATH:-.}:/workspace       # project files to work on

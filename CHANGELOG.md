@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Docker: `CHROXY_CONFIG_DIR` is now honoured by the entrypoint (#7239).**
+  `scripts/docker-entrypoint.sh` hardcoded `$HOME/.chroxy` while the daemon
+  honours the override, so `docker run -e CHROXY_CONFIG_DIR=/data` split the
+  container in two — the entrypoint wrote `config.json` to `~/.chroxy` (the
+  mounted `chroxy-data` volume) while the daemon read `/data` for everything
+  else.
+
+  This was silent because the API token survived it by accident: the entrypoint
+  exports `API_TOKEN` and the daemon falls back to that. What actually broke was
+  everything else — `server-identity.json`, `credentials.json`,
+  `session-state.json`, `scheduled-tasks.json` and the trust ledgers landed in an
+  **unmounted** container path and were destroyed on every restart, while the
+  volume sat mounted where nothing wrote to it. A regenerated identity key is the
+  sharp end: pinned clients report it as a possible MITM.
+
+  If you run the container **without** `CHROXY_CONFIG_DIR`, nothing changes.
+
 ### Changed
 
 - **`CHROXY_CONFIG_DIR` now relocates ALL daemon state (#7052).** It previously
