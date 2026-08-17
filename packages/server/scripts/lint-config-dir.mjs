@@ -116,7 +116,41 @@ const CHROXY_SEGMENT = /['"`]\.chroxy['"`]/
 // A module-scope binding whose initializer calls the accessor. Column-0 means
 // top level: anything inside a function or class body is indented.
 const MODULE_SCOPE_DECL = /^(?:export\s+)?(?:const|let|var)\s+[A-Za-z_$][\w$]*\s*=/
-const CALLS_ACCESSOR = /\b(?:configDir|configPath)\s*\(/
+
+// Matching only `configDir(` / `configPath(` was not enough. logger.js froze its
+// log directory as `let _logDir = defaultLogDir()`, where `defaultLogDir()` is a
+// same-file one-line wrapper around `configPath('logs')` — the exact shape this
+// rule exists to catch, one level of indirection out of its reach. The
+// migration had *replaced* a form rule 1 caught with a form nothing caught, and
+// the lint then declared the tree clean.
+//
+// So the wrapper set is derived from the file rather than hardcoded: any
+// same-file function whose body calls the accessor counts as the accessor. The
+// `defaultX()` naming convention this issue established for these resolvers is
+// included too, so a wrapper defined elsewhere and imported is still caught.
+const ACCESSOR_NAMES = ['configDir', 'configPath']
+const CALLS_ACCESSOR_DIRECTLY = /\b(?:configDir|configPath)\s*\(/
+
+/** Names of same-file functions that (transitively) resolve through the accessor. */
+function accessorWrappersIn(codeLines) {
+  const names = new Set(ACCESSOR_NAMES)
+  // Two passes so a wrapper-of-a-wrapper is caught regardless of definition order.
+  for (let pass = 0; pass < 2; pass++) {
+    for (let i = 0; i < codeLines.length; i++) {
+      const decl = /^(?:export\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/.exec(codeLines[i])
+      if (!decl) continue
+      // Scan the body until the closing brace at column 0.
+      for (let j = i + 1; j < codeLines.length; j++) {
+        if (/^\}/.test(codeLines[j])) break
+        if ([...names].some((n) => new RegExp(`\\b${n}\\s*\\(`).test(codeLines[j]))) {
+          names.add(decl[1])
+          break
+        }
+      }
+    }
+  }
+  return names
+}
 
 function findOffenders(srcDir) {
   const offenders = []
@@ -127,6 +161,11 @@ function findOffenders(srcDir) {
     const source = readFileSync(file, 'utf8')
     const rawLines = source.split('\n')
     const code = stripComments(source)
+    const wrappers = accessorWrappersIn(code)
+    const callsAccessor = (text) =>
+      CALLS_ACCESSOR_DIRECTLY.test(text)
+      || [...wrappers].some((n) => new RegExp(`\\b${n}\\s*\\(`).test(text))
+      || /\bdefault[A-Z][\w$]*\s*\(/.test(text)
 
     code.forEach((line, idx) => {
       const prev = idx > 0 ? rawLines[idx - 1] : ''
@@ -151,7 +190,7 @@ function findOffenders(srcDir) {
       // this whole issue is made of.
       if (!MODULE_SCOPE_DECL.test(line)) return
       const initializer = /=\s*$/.test(line.trimEnd()) ? line + (code[idx + 1] ?? '') : line
-      if (CALLS_ACCESSOR.test(initializer)) push('module-scope-capture')
+      if (callsAccessor(initializer)) push('module-scope-capture')
     })
   }
   return offenders

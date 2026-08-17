@@ -1092,6 +1092,12 @@ export async function startCliServer(config) {
   // #6598 — persist paired tokens across restarts (encrypted at rest). Honour a
   // CHROXY_CONFIG_DIR override so it sits next to config.json / credentials.json.
   const chroxyDir = configDir()
+  // #7052 — state the resolved root once at startup. Every persistent path the
+  // daemon touches now hangs off it, so when an operator relocates the dir and
+  // finds empty trust stores or a missing token, this line is the one thing
+  // that tells them WHICH root the daemon actually opened. Logged
+  // unconditionally: knowing it is `~/.chroxy` is exactly as useful.
+  log.info(`Config/state root: ${chroxyDir}${process.env.CHROXY_CONFIG_DIR ? ' (from CHROXY_CONFIG_DIR)' : ''}`)
   const pairingManager = NO_AUTH ? null : new PairingManager({
     ttlMs: 60_000,
     autoRefresh: true,

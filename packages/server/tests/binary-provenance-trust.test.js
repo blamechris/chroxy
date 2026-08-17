@@ -1,7 +1,7 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, statSync } from 'fs'
-import { tmpdir } from 'os'
+import { tmpdir, homedir } from 'os'
 import { join } from 'path'
 import { createHash } from 'crypto'
 import {
@@ -46,7 +46,10 @@ describe('BinaryProvenanceLedger (#6858)', () => {
     const prev = process.env.CHROXY_CONFIG_DIR
     try {
       delete process.env.CHROXY_CONFIG_DIR
-      assert.match(defaultBinaryTrustFile(), /\.chroxy[/\\]binary-trust\.json$/)
+      // Pinned to the actual home root, not just "some directory named
+      // .chroxy" — a regex alone still matches `/tmp/anything/.chroxy/...`, so
+      // it could not tell a real home fallback from a lost one.
+      assert.equal(defaultBinaryTrustFile(), join(homedir(), '.chroxy', 'binary-trust.json'))
     } finally {
       process.env.CHROXY_CONFIG_DIR = prev
     }

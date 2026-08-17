@@ -425,6 +425,7 @@ describe('ClaudeByokSession MCP prompts/resources (#6823)', () => {
     else delete process.env.ANTHROPIC_API_KEY
     if (originalMcpTrustPath) process.env.CHROXY_MCP_TRUST_PATH = originalMcpTrustPath
     else delete process.env.CHROXY_MCP_TRUST_PATH
+    process.env.CHROXY_CONFIG_DIR = __sandboxConfigDir
     rmSync(tmpHome, { recursive: true, force: true })
   })
 

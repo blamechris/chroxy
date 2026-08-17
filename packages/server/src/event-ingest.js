@@ -27,7 +27,7 @@
 
 import { randomBytes } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, openSync, writeSync, closeSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname } from 'node:path'
 import { safeTokenCompare } from './token-compare.js'
 import { sendOversizeResponse } from './http-oversize.js'
 import { writeFileRestricted } from './platform.js'

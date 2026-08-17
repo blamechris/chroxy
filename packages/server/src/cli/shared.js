@@ -5,7 +5,6 @@
  * config loading, and helper functions.
  */
 import { existsSync, readFileSync } from 'fs'
-import { join } from 'path'
 import readline from 'readline'
 import { validateConfig, mergeConfig, isFatalConfigWarning, DEFAULT_MAX_PAYLOAD_BYTES } from '../config.js'
 import { configDir, configPath } from '../config-dir.js'

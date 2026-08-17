@@ -75,6 +75,28 @@ export function getServicePaths(plat = platform()) {
 /**
  * Generate a macOS launchd plist XML string.
  */
+/**
+ * The config root to bake into a generated service definition, or null.
+ *
+ * launchd's `EnvironmentVariables` dict and systemd's `Environment=` lines are
+ * the daemon's ENTIRE environment — neither inherits the shell that ran
+ * `chroxy service install`. Since #7052 every path the installer resolves
+ * (logDir, service.json, the wrapper) follows CHROXY_CONFIG_DIR, so omitting it
+ * here would start a daemon whose logs land in the relocated root while its
+ * state goes to ~/.chroxy: the same split-brain #7052 exists to remove, moved
+ * to the service boundary, and one the operator cannot fix from their shell.
+ *
+ * Emitted only when set, so a default install produces a byte-identical
+ * definition to before. Injectable for tests.
+ *
+ * @param {object} config
+ * @returns {string|null}
+ */
+function serviceConfigDirEnv(config) {
+  const raw = config?.configDirEnv !== undefined ? config.configDirEnv : process.env.CHROXY_CONFIG_DIR
+  return typeof raw === 'string' && raw.trim() ? raw : null
+}
+
 export function generateLaunchdPlist(config) {
   const {
     nodePath,
@@ -85,6 +107,7 @@ export function generateLaunchdPlist(config) {
     startAtLogin = false,
     logDir = configPath('logs'),
   } = config
+  const configDirEnv = serviceConfigDirEnv(config)
 
   // Bake a PATH that includes the node and claude bin dirs so the daemon's
   // preflight finds both under launchd's bare default PATH (#5491).
@@ -123,7 +146,9 @@ ${programArgs}
     <key>PATH</key>
     <string>${escapeXml(pathValue)}</string>
     <key>CHROXY_DAEMON</key>
-    <string>1</string>
+    <string>1</string>${configDirEnv ? `
+    <key>CHROXY_CONFIG_DIR</key>
+    <string>${escapeXml(configDirEnv)}</string>` : ''}
   </dict>
 </dict>
 </plist>
@@ -142,6 +167,7 @@ export function generateSystemdUnit(config) {
     cwd = homedir(),
     logDir = configPath('logs'),
   } = config
+  const configDirEnv = serviceConfigDirEnv(config)
 
   // Bake a PATH that includes the node and claude bin dirs for parity with the
   // launchd plist (#5491).
@@ -163,7 +189,8 @@ WorkingDirectory=${cwd}
 Restart=on-failure
 RestartSec=5
 Environment=PATH=${pathValue}
-Environment=CHROXY_DAEMON=1
+Environment=CHROXY_DAEMON=1${configDirEnv ? `
+Environment=CHROXY_CONFIG_DIR=${configDirEnv}` : ''}
 StandardOutput=file:${join(logDir, 'chroxy-stdout.log')}
 StandardError=file:${join(logDir, 'chroxy-stderr.log')}
 
@@ -228,6 +255,7 @@ export function generateWindowsServiceWrapper(config) {
     cwd = homedir(),
     logDir = configPath('logs'),
   } = config
+  const configDirEnv = serviceConfigDirEnv(config)
 
   // Use Windows path semantics regardless of host so the generated batch is
   // correct even when this runs on a POSIX CI runner under test (#6647).
@@ -255,6 +283,7 @@ export function generateWindowsServiceWrapper(config) {
     'rem `service install`; edits are lost.',
     `set "PATH=${pathPrepend};%PATH%"`,
     'set "CHROXY_DAEMON=1"',
+    ...(configDirEnv ? [`set "CHROXY_CONFIG_DIR=${configDirEnv}"`] : []),
     `cd /d "${cwd}"`,
     rotateCapture(stdoutLog, pathWin32.join(logDir, 'chroxy-stdout.old.log')),
     rotateCapture(stderrLog, pathWin32.join(logDir, 'chroxy-stderr.old.log')),
@@ -478,6 +507,7 @@ export function buildServicePath({ nodePath, claudeBin }) {
  */
 export function generateServiceWrapper(config) {
   const { nodePath, chroxyBin, pathValue } = config
+  const configDirEnv = serviceConfigDirEnv(config)
 
   const sh = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`
   const keychainBlock = ({ service, account, env }) => `
@@ -495,7 +525,8 @@ fi`
 set -e
 
 export PATH=${sh(pathValue)}
-export CHROXY_DAEMON=1
+export CHROXY_DAEMON=1${configDirEnv ? `
+export CHROXY_CONFIG_DIR=${sh(configDirEnv)}` : ''}
 ${keychainBlock(KEYCHAIN_API_TOKEN)}
 ${keychainBlock(KEYCHAIN_DISCORD_WEBHOOK)}
 

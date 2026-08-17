@@ -204,7 +204,12 @@ describe('chroxy schedule — CLI wiring (#6868)', () => {
     try {
       const created = await runCli(
         ['schedule', 'create', '--prompt', 'x', '--cron', '0 9 * * *', '--name', 'HomeProbe'],
-        { home },
+        // `null` UNSETS it. The spawn helper sandboxes CHROXY_CONFIG_DIR by
+        // default, so without this the child would still have it pointed at
+        // $HOME/.chroxy and the home-fallback branch would never execute —
+        // the test would pass against a resolver that had dropped the fallback
+        // entirely, which is exactly what this control exists to catch.
+        { home, env: { CHROXY_CONFIG_DIR: null } },
       )
       assert.equal(created.code, 0, `stderr: ${created.stderr}`)
       assert.ok(

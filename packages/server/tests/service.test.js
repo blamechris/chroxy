@@ -108,6 +108,66 @@ describe('service', () => {
       }
     })
 
+    // #7052 — launchd's EnvironmentVariables dict and systemd's Environment=
+    // lines ARE the daemon's whole environment; neither inherits the installing
+    // shell. Since the installer now resolves logDir/service.json/the wrapper
+    // through CHROXY_CONFIG_DIR, omitting it from the generated definition
+    // would start a daemon logging to the relocated root while its state went
+    // to ~/.chroxy — the same split-brain this issue removes, at the service
+    // boundary, and unfixable from the operator's shell.
+    describe('CHROXY_CONFIG_DIR propagation into service definitions', () => {
+      const cfg = {
+        nodePath: '/opt/node/bin/node',
+        chroxyBin: '/lib/chroxy/cli.js',
+        pathValue: '/opt/node/bin:/usr/bin',
+        cwd: '/work',
+        logDir: '/relocated/logs',
+      }
+      const generators = [
+        ['launchd plist', (c) => generateLaunchdPlist(c), '<key>CHROXY_CONFIG_DIR</key>'],
+        ['systemd unit', (c) => generateSystemdUnit(c), 'Environment=CHROXY_CONFIG_DIR=/relocated'],
+        ['POSIX wrapper', (c) => generateServiceWrapper(c), 'export CHROXY_CONFIG_DIR='],
+        ['Windows .cmd', (c) => generateWindowsServiceWrapper(c), 'set "CHROXY_CONFIG_DIR=/relocated"'],
+      ]
+
+      for (const [name, gen, marker] of generators) {
+        it(`${name} carries CHROXY_CONFIG_DIR when it is set at install time`, () => {
+          const out = gen({ ...cfg, configDirEnv: '/relocated' })
+          assert.ok(out.includes(marker), `${name} must bake in the config dir\n${out}`)
+          assert.ok(out.includes('/relocated'), `${name} must name the relocated root`)
+        })
+
+        it(`${name} omits it entirely on a default install`, () => {
+          // POSITIVE CONTROL for the case above, and the compatibility promise:
+          // an install with nothing relocated must produce the same definition
+          // it always did, with no empty/dangling entry.
+          const out = gen({ ...cfg, configDirEnv: '' })
+          assert.ok(!out.includes('CHROXY_CONFIG_DIR'), `${name} must not emit an empty entry\n${out}`)
+        })
+      }
+
+      it('the plist stays well-formed XML with the entry present', () => {
+        const plist = generateLaunchdPlist({ ...cfg, configDirEnv: '/relocated' })
+        // Every <key> in the dict must be followed by a <string> value.
+        const envBlock = plist.split('<key>EnvironmentVariables</key>')[1].split('</dict>')[0]
+        const keys = (envBlock.match(/<key>/g) || []).length
+        const strings = (envBlock.match(/<string>/g) || []).length
+        assert.equal(keys, strings, `unbalanced key/string pairs in EnvironmentVariables:\n${envBlock}`)
+        assert.equal(keys, 3, 'expected PATH, CHROXY_DAEMON and CHROXY_CONFIG_DIR')
+      })
+
+      it('escapes an XML-hostile path in the plist', () => {
+        const plist = generateLaunchdPlist({ ...cfg, configDirEnv: '/tmp/a&b' })
+        assert.ok(plist.includes('/tmp/a&amp;b'), 'the config dir must go through escapeXml')
+        assert.ok(!plist.includes('<string>/tmp/a&b</string>'), 'raw ampersand would break the plist')
+      })
+
+      it('shell-quotes the path in the POSIX wrapper', () => {
+        const wrapper = generateServiceWrapper({ ...cfg, configDirEnv: "/tmp/it's here" })
+        assert.match(wrapper, /export CHROXY_CONFIG_DIR='\/tmp\/it'/, 'must reuse the wrapper quoting helper')
+      })
+    })
+
     it('log dir falls back to ~/.chroxy/logs when CHROXY_CONFIG_DIR is unset', () => {
       // The positive control for the case above: without it, "the log dir
       // equals <relocated>/logs" would also pass for a resolver that had

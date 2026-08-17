@@ -9,6 +9,7 @@ import { statSync, realpathSync, readFileSync } from 'fs'
 import { homedir } from 'os'
 import { resolve, relative, sep } from 'path'
 import { createLogger } from './logger.js'
+import { configDir } from './config-dir.js'
 
 const log = createLogger('handler-utils')
 
@@ -317,6 +318,40 @@ function pathTouchesForbiddenSubdir(absPath, home) {
 }
 
 /**
+ * Returns true if `absPath` is the daemon's own config/state root, or inside it.
+ *
+ * `FORBIDDEN_HOME_SUBDIRS` alone cannot express this (#7052). That set is a
+ * list of literal FIRST SEGMENTS relative to `$HOME`, so it protects
+ * `~/.chroxy` and nothing else — but since #7052 the state root follows
+ * `CHROXY_CONFIG_DIR` and may be named anything (`$HOME/.local/state/chroxy`,
+ * the XDG-correct location and a leading reason to set the var at all) or live
+ * outside `$HOME` entirely, where a `$HOME`-relative check cannot reach.
+ *
+ * Left unguarded, an authenticated client could open a session with its cwd set
+ * to the relocated root and then read `credentials.json`, `config.json` (which
+ * carries the raw primary apiToken on hosts without a keychain — see
+ * docs/security/bearer-token-authority.md), or `server-identity.json`; or write
+ * `known-good-ref` to poison the supervisor's crash-rollback target, which is
+ * the exact A9 attack the `.chroxy` entry was added for on 2026-04-11. Writing
+ * the trust ledgers would pre-seed trust and turn the binary-provenance and
+ * skill-trust gates into no-ops.
+ *
+ * Resolved per call, and derived from `configDir()` rather than a second copy
+ * of the path — the whole point of #7052 is that there is one resolver.
+ */
+function pathTouchesConfigDir(absPath) {
+  let realConfigDir
+  try {
+    realConfigDir = realpathSync(configDir())
+  } catch {
+    // The root does not exist yet. `absPath` already resolved through
+    // realpathSync, so it cannot be inside a directory that is not there.
+    return false
+  }
+  return isPathWithin(absPath, realConfigDir)
+}
+
+/**
  * Validate that a cwd path is allowed as a session working directory.
  *
  * Layers (each must pass):
@@ -368,6 +403,12 @@ export function validateCwdAllowed(cwd, config = null) {
     : homedir()
   if (pathTouchesForbiddenSubdir(realCwd, home)) {
     return 'Directory is not allowed: credential/config directories under $HOME are blocked for security'
+  }
+  // Layer 2b: the daemon's OWN state root, wherever CHROXY_CONFIG_DIR put it.
+  // Separate from the set above because that one matches literal first segments
+  // under $HOME and cannot follow a relocated root (#7052).
+  if (pathTouchesConfigDir(realCwd)) {
+    return 'Directory is not allowed: the chroxy config/state directory is blocked for security'
   }
 
   // Layer 3: explicit allowlist (opt-in, strict)

@@ -830,9 +830,13 @@ export class Supervisor extends EventEmitter {
    *
    * Two layers of defense now close this:
    *
-   * 1. `~/.chroxy` is in FORBIDDEN_HOME_SUBDIRS, so sessions can no
-   *    longer create a cwd inside it — the attacker can't reach
-   *    `known-good-ref` via `write_file`.
+   * 1. `validateCwdAllowed` refuses a session cwd inside the config/state
+   *    root, so the attacker can't reach `known-good-ref` via `write_file`.
+   *    Two checks back that: `~/.chroxy` is in FORBIDDEN_HOME_SUBDIRS by
+   *    name, AND the resolved `configDir()` is denied outright. The second
+   *    is what keeps this true once CHROXY_CONFIG_DIR relocates the root
+   *    (#7052) — the name-based set alone would then be guarding an empty
+   *    directory while the real one sat open.
    *
    * 2. This function validates that the ref resolves to the SAME
    *    commit as an existing `known-good-*` git tag. The tag is

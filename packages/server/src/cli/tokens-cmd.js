@@ -14,8 +14,8 @@
 import { createSessionTokenStore } from '../session-token-store.js'
 import { configDir } from '../config-dir.js'
 
-/** Resolve the chroxy config dir the same way server-cli does. */
-function resolveChroxyDir(env = process.env) {
+/** Resolve the chroxy config dir the same way server-cli does (#7052: one resolver). */
+function resolveChroxyDir() {
   return configDir()
 }
 

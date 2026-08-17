@@ -695,6 +695,85 @@ describe('validateCwdAllowed — credential-directory deny-list (2026-04-11 audi
     assert.match(err, /credential.config directories/)
   })
 
+  // #7052 — FORBIDDEN_HOME_SUBDIRS is a list of literal FIRST SEGMENTS under
+  // $HOME, so it protects `~/.chroxy` and nothing else. Once CHROXY_CONFIG_DIR
+  // relocates the state root, that set guards an empty directory while the real
+  // one — credentials.json, config.json (raw apiToken on keychain-less hosts),
+  // server-identity.json, all four trust ledgers — becomes an ordinary
+  // directory a client may open a session in. That reopens the very A9 attack
+  // the `.chroxy` entry above was added for, so the root is denied by
+  // resolution, not by name.
+  describe('relocated config dir (#7052)', () => {
+    let relocated
+    let originalConfigDir
+
+    before(() => {
+      originalConfigDir = process.env.CHROXY_CONFIG_DIR
+      // Deliberately NOT named `.chroxy`, and NOT a first-level child of the
+      // fake home — the shape the literal deny-list cannot express.
+      relocated = join(fakeHome, '.local', 'state', 'chroxy')
+      mkdirSync(join(relocated, 'nested'), { recursive: true })
+    })
+    after(() => {
+      if (originalConfigDir === undefined) delete process.env.CHROXY_CONFIG_DIR
+      else process.env.CHROXY_CONFIG_DIR = originalConfigDir
+    })
+
+    it('rejects the relocated config root itself', () => {
+      process.env.CHROXY_CONFIG_DIR = relocated
+      const err = validateCwdAllowed(relocated, { homeOverride: fakeHome })
+      assert.ok(err, 'the relocated state root must not be usable as a session cwd')
+      assert.match(err, /chroxy config.state directory/)
+    })
+
+    it('rejects a subdirectory of the relocated config root', () => {
+      process.env.CHROXY_CONFIG_DIR = relocated
+      const err = validateCwdAllowed(join(relocated, 'nested'), { homeOverride: fakeHome })
+      assert.ok(err, 'nested paths under the state root must be rejected too')
+    })
+
+    it('POSITIVE CONTROL: the identical directory is allowed when the env is unset', () => {
+      // Without this, the two cases above would also pass if the directory were
+      // being rejected for some unrelated reason (its name, its depth, the
+      // home-fallback layer) rather than because it IS the config root.
+      delete process.env.CHROXY_CONFIG_DIR
+      assert.equal(
+        validateCwdAllowed(relocated, { homeOverride: fakeHome }),
+        null,
+        'with nothing relocating the config dir this is just an ordinary directory',
+      )
+    })
+
+    it('POSITIVE CONTROL: an ordinary sibling stays allowed while the env IS set', () => {
+      // Proves the new layer denies the config root specifically, and has not
+      // become a blanket denial of everything under the fake home.
+      process.env.CHROXY_CONFIG_DIR = relocated
+      assert.equal(
+        validateCwdAllowed(join(fakeHome, 'ordinary-project'), { homeOverride: fakeHome }),
+        null,
+        'an unrelated project directory must remain usable',
+      )
+    })
+
+    it('still rejects ~/.chroxy by name when the env points elsewhere', () => {
+      // The literal deny-list entry is not redundant: the default location must
+      // stay blocked even for a daemon whose state now lives somewhere else.
+      process.env.CHROXY_CONFIG_DIR = relocated
+      const err = validateCwdAllowed(join(fakeHome, '.chroxy'), { homeOverride: fakeHome })
+      assert.ok(err, '~/.chroxy must stay blocked regardless of CHROXY_CONFIG_DIR')
+      assert.match(err, /credential.config directories/)
+    })
+
+    it('does not throw when the configured root does not exist on disk', () => {
+      process.env.CHROXY_CONFIG_DIR = join(fakeHome, 'does-not-exist-at-all')
+      assert.equal(
+        validateCwdAllowed(join(fakeHome, 'ordinary-project'), { homeOverride: fakeHome }),
+        null,
+        'an unresolvable config root must not break cwd validation',
+      )
+    })
+  })
+
   it('rejects a subdirectory of a forbidden entry (~/.config/gcloud)', () => {
     const err = validateCwdAllowed(join(fakeHome, '.config', 'gcloud'), { homeOverride: fakeHome })
     assert.ok(err, 'must reject .config/gcloud subdirectory')

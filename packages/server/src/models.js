@@ -1,5 +1,5 @@
 import { readFileSync, mkdirSync, watch as fsWatch } from 'fs'
-import { basename, dirname, join } from 'path'
+import { basename, dirname } from 'path'
 import { writeFileRestricted } from './platform.js'
 import { createLogger } from './logger.js'
 import { configPath } from './config-dir.js'

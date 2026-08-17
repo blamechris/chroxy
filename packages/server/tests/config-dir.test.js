@@ -36,6 +36,28 @@ describe('config-dir', () => {
       assert.equal(configDir(), join(homedir(), '.chroxy'))
     })
 
+    it('refuses a relative value and falls back to ~/.chroxy', () => {
+      // #7052 review — the read is per call, so a relative value would resolve
+      // against process.cwd() at each fs operation, scattering credentials and
+      // the daemon identity key into whatever directory the daemon was launched
+      // from. Refusing keeps secrets in one predictable place.
+      process.env.CHROXY_CONFIG_DIR = 'relative-state-dir'
+      assert.equal(configDir(), join(homedir(), '.chroxy'))
+      assert.equal(configPath('credentials.json'), join(homedir(), '.chroxy', 'credentials.json'))
+    })
+
+    it('refuses a whitespace-only value', () => {
+      process.env.CHROXY_CONFIG_DIR = '   '
+      assert.equal(configDir(), join(homedir(), '.chroxy'))
+    })
+
+    it('POSITIVE CONTROL: an absolute value IS honored', () => {
+      // Without this, the two cases above would also pass against a configDir()
+      // that had stopped reading the environment altogether.
+      process.env.CHROXY_CONFIG_DIR = '/tmp/absolute-state-dir'
+      assert.equal(configDir(), '/tmp/absolute-state-dir')
+    })
+
     it('falls back to ~/.chroxy when set to the empty string', () => {
       // Matches the `||` semantics of the 16 inline copies this replaces, so
       // migrating an already-correct site is a true no-op.

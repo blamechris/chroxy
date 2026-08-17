@@ -335,6 +335,117 @@ export function p() {
     })
   })
 
+  // Rule 3 shipped with NO tests. Deleting its body left the suite 25/25 green,
+  // which is the false-safety pattern this repo has hit seven times — a guard
+  // whose output is correct and whose coverage is what is wrong. Worse, the
+  // migration then created a live evader it could not see (logger.js's
+  // `let _logDir = defaultLogDir()`), so the lint reported the tree clean while
+  // half the defect survived. These are the tests that were missing.
+  describe('module-scope capture (rule 3)', () => {
+    const WRAPPER = `
+import { configPath } from './config-dir.js'
+function defaultLogDir() {
+  return configPath('logs')
+}
+`
+    test('a module-scope const initialized from configPath() fails', () => {
+      const r = runLint({
+        'frozen.js': `
+import { configPath } from './config-dir.js'
+const STATE = configPath('session-state.json')
+export function p() { return STATE }
+`,
+      })
+      assert.equal(r.status, 1)
+      assert.match(r.stderr, /frozen\.js:3\s+\[module-scope-capture\]/)
+    })
+
+    test('an EXPORTED module-scope const fails too', () => {
+      const r = runLint({
+        'frozen.js': `
+import { configDir } from './config-dir.js'
+export const ROOT = configDir()
+`,
+      })
+      assert.equal(r.status, 1)
+      assert.match(r.stderr, /\[module-scope-capture\]/)
+    })
+
+    test('`let` and `var` are caught, not just `const`', () => {
+      for (const kw of ['let', 'var']) {
+        const r = runLint({
+          'frozen.js': `
+import { configPath } from './config-dir.js'
+${kw} p = configPath('x.json')
+export function get() { return p }
+`,
+        })
+        assert.equal(r.status, 1, `${kw} declaration should be caught`)
+      }
+    })
+
+    test('an initializer on the following line is caught', () => {
+      const r = runLint({
+        'frozen.js': `
+import { configPath } from './config-dir.js'
+const STATE =
+  configPath('session-state.json')
+`,
+      })
+      assert.equal(r.status, 1)
+    })
+
+    test('capture through a same-file wrapper is caught (the logger.js regression)', () => {
+      // The shape that evaded the first version of this rule: the initializer
+      // calls a local one-liner that calls the accessor, so matching the
+      // accessor name alone missed it — and the migration had just replaced a
+      // detectable `join(homedir(), …)` const with exactly this.
+      const r = runLint({ 'logger.js': `${WRAPPER}let _logDir = defaultLogDir()\n` })
+      assert.equal(r.status, 1)
+      assert.match(r.stderr, /logger\.js:6\s+\[module-scope-capture\]/)
+    })
+
+    test('POSITIVE CONTROL: the same wrapper resolved lazily is clean', () => {
+      // Proves the case above is flagged for WHERE the call happens, not merely
+      // for the wrapper existing in the file.
+      const r = runLint({
+        'logger.js': `${WRAPPER}let _logDir = null
+export function init(dir) {
+  _logDir = dir || defaultLogDir()
+  return _logDir
+}
+`,
+      })
+      assert.equal(r.status, 0, r.stderr)
+    })
+
+    test('POSITIVE CONTROL: the identical call inside a function is clean', () => {
+      // Indentation is the signal for "not module scope". Without this control,
+      // the rule could be matching the accessor call anywhere in the file.
+      const r = runLint({
+        'fine.js': `
+import { configPath } from './config-dir.js'
+export function statePath() {
+  const p = configPath('session-state.json')
+  return p
+}
+`,
+      })
+      assert.equal(r.status, 0, r.stderr)
+    })
+
+    test('a module-scope binding NOT calling the accessor is clean', () => {
+      const r = runLint({
+        'fine.js': `
+const MAX = 50
+const NAME = 'chroxy'
+export function get() { return NAME }
+`,
+      })
+      assert.equal(r.status, 0, r.stderr)
+    })
+  })
+
   describe('--dry-run', () => {
     test('reports offenders but exits 0', () => {
       const root = mkdtempSync(join(tmpdir(), 'chroxy-lint-configdir-dry-'))

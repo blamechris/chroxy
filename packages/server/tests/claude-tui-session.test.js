@@ -87,6 +87,7 @@ describe('ClaudeTuiSession', () => {
       if (session) { try { await session.destroy() } catch { /* ignore */ } session = null }
       ClaudeTuiSession.prototype._spawnPty = origSpawnPty
       if (process.env._ORIG_HOME) { process.env.HOME = process.env._ORIG_HOME; delete process.env._ORIG_HOME }
+      process.env.CHROXY_CONFIG_DIR = __sandboxConfigDir
       if (fakeHome) rmSync(fakeHome, { recursive: true, force: true })
     })
 
@@ -253,7 +254,7 @@ describe('ClaudeTuiSession', () => {
       ClaudeTuiSession.prototype._spawnPty = origSpawnPty
       if (process.env._ORIG_HOME) {
         process.env.HOME = process.env._ORIG_HOME
-        process.env.CHROXY_CONFIG_DIR = join(process.env._ORIG_HOME, '.chroxy')
+        process.env.CHROXY_CONFIG_DIR = __sandboxConfigDir
         delete process.env._ORIG_HOME
       }
       if (fakeHome) rmSync(fakeHome, { recursive: true, force: true })
@@ -6752,7 +6753,7 @@ describe('ClaudeTuiSession', () => {
       ClaudeTuiSession.prototype._spawnPty = origSpawnPty
       if (process.env._ORIG_HOME) {
         process.env.HOME = process.env._ORIG_HOME
-        process.env.CHROXY_CONFIG_DIR = join(process.env._ORIG_HOME, '.chroxy')
+        process.env.CHROXY_CONFIG_DIR = __sandboxConfigDir
         delete process.env._ORIG_HOME
       }
       if (fakeHome) rmSync(fakeHome, { recursive: true, force: true })
@@ -7040,6 +7041,7 @@ describe('ClaudeTuiSession — atomic permission-mode sidecar write (#5334)', ()
     if (session) { try { await session.destroy() } catch { /* ignore */ } session = null }
     ClaudeTuiSession.prototype._spawnPty = origSpawnPty
     if (process.env._ORIG_HOME) { process.env.HOME = process.env._ORIG_HOME; delete process.env._ORIG_HOME }
+    process.env.CHROXY_CONFIG_DIR = __sandboxConfigDir
     rmSync(dir, { recursive: true, force: true })
     rmSync(skillsDir, { recursive: true, force: true })
     rmSync(fakeHome, { recursive: true, force: true })

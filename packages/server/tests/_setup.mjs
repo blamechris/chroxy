@@ -23,9 +23,19 @@
  * validation helpers (`validateCwdAllowed`, `listFiles` home-fallback,
  * environment manager workspaceRoots) that compare against the live
  * `os.homedir()`. Rerouting HOME up-front breaks those tests in a way
- * that's unrelated to the bug class we're fixing. A bare
- * `new SessionManager()` is still caught — its first `writeFileSync` for
- * the default `~/.chroxy/session-state.json` trips the guard.
+ * that's unrelated to the bug class we're fixing.
+ *
+ * NOTE (#7052): this block used to add "a bare `new SessionManager()` is still
+ * caught — its first `writeFileSync` for the default
+ * `~/.chroxy/session-state.json` trips the guard". That is no longer true, and
+ * saying so would be a false-safety claim. `defaultStateFile()` is now
+ * `configPath('session-state.json')`, which follows the CHROXY_CONFIG_DIR
+ * redirect installed below, so the write lands in this process's tmp dir and
+ * the guard never fires. The same applies to binary-trust.json, checkpoints and
+ * the permission rules. The OUTCOME is still safe — those writes go to a temp
+ * directory, not the developer's home — but this guard no longer NAMES the
+ * offending test. `scripts/lint-tests-state-file-path.sh` is now the check that
+ * catches a missing `stateFilePath`, and it reports the call site.
  *
  * Tests that need to mutate `process.env.HOME` for their own purposes
  * (e.g. `claude-tui-session.test.js`, `byok-credentials.test.js`) are fine

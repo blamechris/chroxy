@@ -1,5 +1,10 @@
 import { homedir } from 'os'
-import { join } from 'path'
+import { join, isAbsolute } from 'path'
+
+// Warn once per process, not per call — this is on the hot path for every path
+// resolution in the daemon. `console.warn` rather than the logger because
+// logger.js imports THIS module for its own log directory.
+let warnedRelative = false
 
 /**
  * The daemon's config/state root — the single resolver for `~/.chroxy`.
@@ -36,7 +41,35 @@ import { join } from 'path'
  * @returns {string} Absolute path to the config/state root.
  */
 export function configDir() {
-  return process.env.CHROXY_CONFIG_DIR || join(homedir(), '.chroxy')
+  const raw = process.env.CHROXY_CONFIG_DIR
+  if (!raw) return join(homedir(), '.chroxy')
+
+  // A relative value is REFUSED rather than resolved. Resolving it would only
+  // make the existing hazard explicit: because the read is per call, every fs
+  // operation would resolve it against `process.cwd()` at that moment, so
+  // `CHROXY_CONFIG_DIR=state` scatters credentials.json, the daemon identity
+  // key and the trust ledgers into whatever directory the daemon happened to be
+  // launched from — a git working tree, if `chroxy start` was run from a repo.
+  // Falling back to the known-safe default keeps secrets in one predictable
+  // place, and matches how @chroxy/protocol's project.ts already treats a
+  // relative CHROXY_WORKTREES_ROOT.
+  if (!isAbsolute(raw)) {
+    if (!warnedRelative) {
+      warnedRelative = true
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[config-dir] ignoring CHROXY_CONFIG_DIR=${JSON.stringify(raw)}: not an absolute path. `
+        + `Using ${join(homedir(), '.chroxy')} instead.`,
+      )
+    }
+    return join(homedir(), '.chroxy')
+  }
+  return raw
+}
+
+/** Test seam: reset the once-per-process relative-path warning. */
+export function _resetConfigDirWarningForTest() {
+  warnedRelative = false
 }
 
 /**
