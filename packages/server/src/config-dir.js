@@ -22,8 +22,8 @@ import { join } from 'path'
  *
  * The subtle case is a default parameter:
  *
- *     export function readRepos(configPath = DEFAULT_CONFIG_PATH) {}   // frozen
- *     export function readRepos(configPath = defaultConfigPath()) {}   // live
+ *     export function readRepos(p = DEFAULT_CONFIG_PATH) {}   // frozen
+ *     export function readRepos(p = defaultConfigPath()) {}   // live
  *
  * The default *expression* is evaluated per call either way — but in the first
  * form all it does is re-read a binding that was assigned once. Only the second

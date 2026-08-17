@@ -1,20 +1,16 @@
-import { homedir } from 'os'
 import { join } from 'path'
 import { existsSync, readFileSync, unlinkSync, mkdirSync } from 'fs'
 import { writeFileRestricted } from './platform.js'
-
-function getConfigDir() {
-  return process.env.CHROXY_CONFIG_DIR || join(homedir(), '.chroxy')
-}
+import { configDir, configPath } from './config-dir.js'
 
 export function getConnectionInfoPath() {
-  return join(getConfigDir(), 'connection.json')
+  return configPath('connection.json')
 }
 
 export function writeConnectionInfo(info) {
-  const configDir = getConfigDir()
-  mkdirSync(configDir, { recursive: true })
-  writeFileRestricted(join(configDir, 'connection.json'), JSON.stringify(info, null, 2))
+  const dir = configDir()
+  mkdirSync(dir, { recursive: true })
+  writeFileRestricted(join(dir, 'connection.json'), JSON.stringify(info, null, 2))
 }
 
 export function readConnectionInfo() {

@@ -2,12 +2,12 @@ import { EventEmitter } from 'events'
 import { randomUUID } from 'crypto'
 import { existsSync, mkdirSync, readFileSync, unlinkSync } from 'fs'
 import { join } from 'path'
-import { homedir } from 'os'
 import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
 import { writeFileRestricted } from './platform.js'
 import { GIT } from './git.js'
 import { createLogger } from './logger.js'
+import { configPath } from './config-dir.js'
 
 const log = createLogger('checkpoint')
 
@@ -17,8 +17,7 @@ const execFileAsync = promisify(execFileCb)
 // CHROXY_CONFIG_DIR in beforeEach are respected. Mirrors models.js and
 // connection-info.js (#4633).
 function defaultCheckpointsDir() {
-  const configDir = process.env.CHROXY_CONFIG_DIR || join(homedir(), '.chroxy')
-  return join(configDir, 'checkpoints')
+  return configPath('checkpoints')
 }
 const MAX_CHECKPOINTS_PER_SESSION = 50
 

@@ -4,9 +4,12 @@ import { existsSync, readFileSync, mkdirSync, unlinkSync, readdirSync, writeFile
 import { writeFileRestricted, isWindows } from './platform.js'
 import { execFileSync } from 'child_process'
 import { fileURLToPath } from 'url'
+import { configDir, configPath } from './config-dir.js'
 
 const SERVICE_LABEL = 'com.chroxy.server'
-const DEFAULT_CONFIG_DIR = join(homedir(), '.chroxy')
+function defaultConfigDir() {
+  return configDir()
+}
 const WRAPPER_NAME = 'service-wrapper.sh'
 // Windows Task Scheduler autostart (#6647). The task name the daemon registers
 // under, and the .cmd wrapper it runs (the Windows analogue of WRAPPER_NAME).
@@ -41,7 +44,7 @@ function escapeXml(str) {
  * @param {string} [plat] - Override platform (defaults to process.platform)
  */
 export function getServicePaths(plat = platform()) {
-  const logDir = join(homedir(), '.chroxy', 'logs')
+  const logDir = configPath('logs')
 
   if (plat === 'darwin') {
     return {
@@ -80,7 +83,7 @@ export function generateLaunchdPlist(config) {
     wrapperPath,
     cwd = homedir(),
     startAtLogin = false,
-    logDir = join(homedir(), '.chroxy', 'logs'),
+    logDir = configPath('logs'),
   } = config
 
   // Bake a PATH that includes the node and claude bin dirs so the daemon's
@@ -137,7 +140,7 @@ export function generateSystemdUnit(config) {
     claudeBin,
     wrapperPath,
     cwd = homedir(),
-    logDir = join(homedir(), '.chroxy', 'logs'),
+    logDir = configPath('logs'),
   } = config
 
   // Bake a PATH that includes the node and claude bin dirs for parity with the
@@ -223,7 +226,7 @@ export function generateWindowsServiceWrapper(config) {
     chroxyBin,
     claudeBin,
     cwd = homedir(),
-    logDir = join(homedir(), '.chroxy', 'logs'),
+    logDir = configPath('logs'),
   } = config
 
   // Use Windows path semantics regardless of host so the generated batch is
@@ -505,7 +508,7 @@ exec ${sh(nodePath)} ${sh(chroxyBin)} start
  * @param {string} [configDir] - Override config directory (for testing)
  * @returns {object|null}
  */
-export function loadServiceState(configDir = DEFAULT_CONFIG_DIR) {
+export function loadServiceState(configDir = defaultConfigDir) {
   const statePath = join(configDir, 'service.json')
   if (!existsSync(statePath)) {
     return null
@@ -522,7 +525,7 @@ export function loadServiceState(configDir = DEFAULT_CONFIG_DIR) {
  * @param {object} state
  * @param {string} [configDir] - Override config directory (for testing)
  */
-export function saveServiceState(state, configDir = DEFAULT_CONFIG_DIR) {
+export function saveServiceState(state, configDir = defaultConfigDir) {
   if (!existsSync(configDir)) {
     mkdirSync(configDir, { recursive: true })
   }
@@ -580,7 +583,7 @@ export function installService(config) {
 
   const servicePath = config._servicePath || (plat === 'darwin' ? paths.plistPath : paths.unitPath)
   const logDir = config._logDir || paths.logDir
-  const stateDir = config._stateDir || DEFAULT_CONFIG_DIR
+  const stateDir = config._stateDir || defaultConfigDir()
   const wrapperPath = config._wrapperPath || join(stateDir, WRAPPER_NAME)
 
   // Bake the resolved binary locations into the service PATH so the daemon's
@@ -682,7 +685,7 @@ export function installService(config) {
  * @returns {{ installed: true, platform: 'win32', taskName: string, wrapperPath: string }}
  */
 function installWindowsService(config, paths) {
-  const stateDir = config._stateDir || DEFAULT_CONFIG_DIR
+  const stateDir = config._stateDir || defaultConfigDir()
   const logDir = config._logDir || paths.logDir
   const wrapperPath = config._wrapperPath || join(stateDir, WINDOWS_WRAPPER_NAME)
   const taskName = config._taskName || WINDOWS_TASK_NAME
@@ -784,7 +787,7 @@ export function getWindowsTaskStatus(options = {}) {
  *   Injectable exec for testing (defaults to execFileSync).
  */
 export function uninstallService(options = {}) {
-  const stateDir = options._stateDir || DEFAULT_CONFIG_DIR
+  const stateDir = options._stateDir || defaultConfigDir()
   const state = loadServiceState(stateDir)
 
   if (!state) {
@@ -838,7 +841,7 @@ export function uninstallService(options = {}) {
 export function startService(options = {}) {
   const plat = options._platform || platform()
   const paths = getServicePaths(plat)
-  const stateDir = options._stateDir || DEFAULT_CONFIG_DIR
+  const stateDir = options._stateDir || defaultConfigDir()
   const exec = options._exec || execFileSync
 
   if (plat === 'win32') {
@@ -960,7 +963,7 @@ export function stopService(options = {}) {
  * @returns {{ installed: boolean, running: boolean, pid: number|null, stale: boolean }}
  */
 export function getServiceStatus(options = {}) {
-  const configDir = options.configDir || DEFAULT_CONFIG_DIR
+  const configDir = options.configDir || defaultConfigDir()
   const state = loadServiceState(configDir)
 
   if (!state) {
@@ -1010,7 +1013,7 @@ export function getServiceStatus(options = {}) {
  * @returns {Promise<object>} Full status including health, connection info, etc.
  */
 export async function getFullServiceStatus(options = {}) {
-  const configDir = options.configDir || DEFAULT_CONFIG_DIR
+  const configDir = options.configDir || defaultConfigDir()
   const status = getServiceStatus({ configDir })
   const result = { ...status }
 

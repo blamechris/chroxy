@@ -39,7 +39,7 @@
  */
 import { existsSync, readFileSync } from 'fs'
 import { join } from 'path'
-import { CONFIG_DIR, CONFIG_FILE } from './shared.js'
+import { configDir, configFile } from './shared.js'
 import {
   ScheduledTaskStore,
   ScheduledTaskValidationError,
@@ -64,42 +64,43 @@ function readConfigSoft(configPath) {
 /**
  * The registry file THIS DAEMON would load — a sibling of session-state.json.
  *
- * Deliberately rooted at `homedir()/.chroxy` (shared.js's `CONFIG_DIR`) and
- * deliberately NOT at `$CHROXY_CONFIG_DIR`, because the daemon's own registry
- * path is home-rooted at every hop:
+ * Rooted at `configDir()` (shared.js), which is `$CHROXY_CONFIG_DIR` when set
+ * and `~/.chroxy` otherwise — because that is what the daemon's own registry
+ * path now resolves to at every hop:
  *
  *   1. `server-cli.js` constructs its `SessionManager` withOUT a
  *      `stateFilePath` (the string does not appear in that file at all), so the
- *      manager falls back to `session-manager.js`'s `DEFAULT_STATE_FILE` =
- *      `join(homedir(), '.chroxy', 'session-state.json')`.
+ *      manager falls back to `session-manager.js`'s `defaultStateFile()` =
+ *      `configPath('session-state.json')`.
  *   2. `session-manager.js` then derives `this.scheduledTaskStore` from that
  *      path via `defaultScheduledTasksPath()` — i.e. the live scheduler
- *      (#6865) reads `~/.chroxy/scheduled-tasks.json`.
+ *      (#6865) reads `<config dir>/scheduled-tasks.json`.
  *
- * Neither hop consults `CHROXY_CONFIG_DIR`. Plenty of OTHER subsystems do
- * (models.js, connection-info.js, doctor.js, device-preferences.js, …), so the
- * convention genuinely is inconsistent — that split is tracked in #7052, and
- * fixing it means moving the WRITERS, not just this reader. Honouring the env var *here*
- * would point this CLI at a file the running scheduler never opens, and
- * `schedule create` would print "Created scheduled task …" for a task that can
- * never fire while `schedule list` showed an empty registry. That is precisely
- * the report-success-while-silently-wrong failure this module's doc block
- * exists to prevent, so matching the daemon beats matching the convention.
+ * The rule this resolver actually obeys is *match the daemon*, not *match the
+ * convention*. Those pointed in opposite directions until #7052: the
+ * session-state family was hardcoded to `~/.chroxy` while models.js,
+ * connection-info.js and doctor.js honoured the env var, and following the
+ * convention here would have aimed the CLI at a file the running scheduler
+ * never opens — `schedule create` printing "Created scheduled task …" for a
+ * task that can never fire, while `schedule list` showed an empty registry.
+ * #7052 moved the WRITERS onto `configDir()`, so the two agree now and this
+ * resolver follows the daemon by following the env var. If they ever diverge
+ * again, the daemon wins.
  *
- * The same reasoning applies to `CONFIG_FILE` below: `server-cli-child.js`
- * reads `join(homedir(), '.chroxy', 'config.json')`, so reading config from the
- * home-rooted path is what makes `config.provider` / `features.scheduler` here
- * agree with what the daemon resolved.
+ * The same reasoning applies to `configFile()` below: `server-cli-child.js`
+ * reads `configPath('config.json')`, so resolving config the same way is what
+ * makes `config.provider` / `features.scheduler` here agree with what the
+ * daemon resolved.
  *
- * Pinned from both sides by tests: a spawn test asserts the registry does NOT
- * follow `CHROXY_CONFIG_DIR` (tests/cli/schedule-cmd.test.js), and a drift
- * guard asserts the daemon-side path this mirrors is still home-rooted
- * (tests/schedule-cli.test.js). If the session-state family is ever migrated
- * onto `CHROXY_CONFIG_DIR` (#7052), the drift guard goes red and this resolver
- * must move with it.
+ * Pinned from both sides by tests: a spawn test asserts the registry follows
+ * `CHROXY_CONFIG_DIR` end-to-end and falls back to `$HOME/.chroxy` without it
+ * (tests/cli/schedule-cmd.test.js), and a drift guard asserts the CLI and
+ * `defaultStateFile()` land on the same registry under a relocated root
+ * (tests/schedule-cli.test.js). If the daemon's resolution moves again, the
+ * drift guard goes red and this resolver must move with it.
  */
 export function defaultScheduleRegistryPath() {
-  return defaultScheduledTasksPath(join(CONFIG_DIR, 'session-state.json'))
+  return defaultScheduledTasksPath(join(configDir(), 'session-state.json'))
 }
 
 function getDefaultStore() {
@@ -115,7 +116,7 @@ function getDefaultStore() {
  * see tests/schedule-cli.test.js.
  */
 function buildDeps(overrides = {}) {
-  const config = readConfigSoft(CONFIG_FILE)
+  const config = readConfigSoft(configFile())
   return {
     store: overrides.store || getDefaultStore(),
     write: overrides.write || console.log,

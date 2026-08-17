@@ -1,8 +1,8 @@
 import { readFileSync, mkdirSync, watch as fsWatch } from 'fs'
-import { homedir } from 'os'
 import { basename, dirname, join } from 'path'
 import { writeFileRestricted } from './platform.js'
 import { createLogger } from './logger.js'
+import { configPath } from './config-dir.js'
 import {
   DEFAULT_CONTEXT_WINDOW,
   ONE_M_SUFFIX,
@@ -163,8 +163,7 @@ export function computePromptCostUsd(usage, pricing) {
 }
 
 function getDefaultCachePath() {
-  const configDir = process.env.CHROXY_CONFIG_DIR || join(homedir(), '.chroxy')
-  return join(configDir, 'models-cache.json')
+  return configPath('models-cache.json')
 }
 
 /**
@@ -175,8 +174,7 @@ function getDefaultCachePath() {
  * the static table doesn't carry — all without a code change.
  */
 function getDefaultOverlayPath() {
-  const configDir = process.env.CHROXY_CONFIG_DIR || join(homedir(), '.chroxy')
-  return join(configDir, 'models.json')
+  return configPath('models.json')
 }
 
 /**
@@ -312,9 +310,8 @@ let providerOverlays = _bootOverlayResult.byProvider
  * @returns {string}
  */
 function getProviderCachePath(providerName) {
-  const configDir = process.env.CHROXY_CONFIG_DIR || join(homedir(), '.chroxy')
   const safe = String(providerName).replace(/[^a-zA-Z0-9_-]/g, '_')
-  return join(configDir, `models-cache.${safe}.json`)
+  return configPath(`models-cache.${safe}.json`)
 }
 
 /**

@@ -55,8 +55,8 @@
  */
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, chmodSync, unlinkSync } from 'node:fs'
-import { homedir } from 'node:os'
-import { join, dirname } from 'node:path'
+import { dirname } from 'node:path'
+import { configPath } from './config-dir.js'
 
 /**
  * Authoritative category list. MUST stay in sync with the keys of
@@ -147,7 +147,7 @@ const _ALL_CATEGORIES_SET = new Set(ALL_CATEGORIES)
 const _HHMM_RE = /^(?:[01]\d|2[0-3]):[0-5]\d$/
 
 export function defaultNotificationPrefsPath() {
-  return process.env.CHROXY_NOTIFICATION_PREFS_PATH || join(homedir(), '.chroxy', 'notification-prefs.json')
+  return process.env.CHROXY_NOTIFICATION_PREFS_PATH || configPath('notification-prefs.json')
 }
 
 /**

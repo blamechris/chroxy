@@ -33,14 +33,15 @@
  * spawning — provenance is a defence-in-depth layer, not a hard dependency).
  */
 import { existsSync } from 'fs'
-import { homedir } from 'os'
-import { join } from 'path'
 import { createLogger } from './logger.js'
 import { PathHashTrustLedger } from './path-hash-trust-ledger.js'
+import { configPath } from './config-dir.js'
 
 const log = createLogger('binary-provenance-trust')
 
-export const DEFAULT_BINARY_TRUST_FILE = join(homedir(), '.chroxy', 'binary-trust.json')
+export function defaultBinaryTrustFile() {
+  return configPath('binary-trust.json')
+}
 
 /**
  * Normalise a ledger key for storage / lookup. On case-insensitive filesystems
@@ -72,7 +73,7 @@ export class BinaryProvenanceLedger extends PathHashTrustLedger {
    */
   constructor({ filePath } = {}) {
     super({
-      filePath: filePath || DEFAULT_BINARY_TRUST_FILE,
+      filePath: filePath || defaultBinaryTrustFile(),
       log,
       normalizeKey: _normalizeKey,
       approvalField: 'approvedAt',

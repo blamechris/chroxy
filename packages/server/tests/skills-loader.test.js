@@ -192,7 +192,7 @@ describe('skills-loader', () => {
     // ---------------------------------------------------------------------
     // #3088: walk-up must not return ~/.chroxy/skills (the global tier) as
     // a repo overlay. We point HOME at a temp dir and re-import the module
-    // with a unique query string so DEFAULT_SKILLS_DIR / homedir() pick up
+    // with a unique query string so defaultSkillsDir() / homedir() pick up
     // the fake home.
     // ---------------------------------------------------------------------
     describe('home-directory boundary (#3088)', () => {
@@ -224,8 +224,8 @@ describe('skills-loader', () => {
         // evaluation against the patched HOME env var.
         const mod = await import(`../src/skills-loader.js?home=${encodeURIComponent(fakeHome)}`)
 
-        // Sanity: DEFAULT_SKILLS_DIR should now resolve under fakeHome.
-        assert.equal(mod.DEFAULT_SKILLS_DIR, join(fakeHome, '.chroxy', 'skills'))
+        // Sanity: defaultSkillsDir() should now resolve under fakeHome.
+        assert.equal(mod.defaultSkillsDir(), join(fakeHome, '.chroxy', 'skills'))
 
         // Session cwd is under $HOME but in a directory with no repo overlay.
         const sessionCwd = join(fakeHome, 'scratch', 'project')
@@ -250,7 +250,7 @@ describe('skills-loader', () => {
         )
       })
 
-      it('refuses to return DEFAULT_SKILLS_DIR even when cwd is exactly $HOME', async () => {
+      it('refuses to return defaultSkillsDir() even when cwd is exactly $HOME', async () => {
         mkdirSync(join(fakeHome, '.chroxy', 'skills'), { recursive: true })
         const mod = await import(`../src/skills-loader.js?home3=${encodeURIComponent(fakeHome)}`)
 

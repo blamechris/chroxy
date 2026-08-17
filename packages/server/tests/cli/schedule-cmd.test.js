@@ -149,17 +149,19 @@ describe('chroxy schedule — CLI wiring (#6868)', () => {
     })
   })
 
-  // #7015 — `chroxy schedule` must read/write the registry the RUNNING daemon
-  // reads. That path is home-rooted at every hop: server-cli.js constructs its
-  // SessionManager with no stateFilePath, so the manager falls back to
-  // ~/.chroxy/session-state.json and derives ~/.chroxy/scheduled-tasks.json
-  // from it. Neither hop consults CHROXY_CONFIG_DIR, even though other
-  // subsystems (models.js, doctor.js, connection-info.js) do. If this CLI
-  // followed the env var instead, `create` would report "Created scheduled
-  // task" into a file the scheduler never opens and `list` would come back
-  // empty — a task that silently never fires. Point CHROXY_CONFIG_DIR at a
-  // DIFFERENT directory and prove the registry stays where the daemon looks.
-  it('keeps the registry under $HOME/.chroxy when CHROXY_CONFIG_DIR points elsewhere', async () => {
+  // #7015 / #7052 — `chroxy schedule` must read/write the registry the RUNNING
+  // daemon reads. The invariant is that the CLI and the daemon agree; if they
+  // ever diverge, `create` reports "Created scheduled task" into a file the
+  // scheduler never opens and `list` comes back empty — a task that silently
+  // never fires.
+  //
+  // Until #7052 they agreed on a home-rooted path, because neither hop consulted
+  // CHROXY_CONFIG_DIR, and this test pinned that by proving the registry stayed
+  // under $HOME even when the env var pointed elsewhere. #7052 moved the
+  // WRITERS: SessionManager's default state file is now configPath(...), so both
+  // hops follow the env var and the agreement holds at the relocated root
+  // instead. Same invariant, other side of the migration.
+  it('puts the registry under CHROXY_CONFIG_DIR, and create/list agree there', async () => {
     const { home, cleanup } = makeTempHome()
     const elsewhere = mkdtempSync(join(tmpdir(), 'chroxy-cfgdir-'))
     try {
@@ -170,12 +172,12 @@ describe('chroxy schedule — CLI wiring (#6868)', () => {
       assert.equal(created.code, 0, `stderr: ${created.stderr}`)
 
       assert.ok(
-        existsSync(join(home, '.chroxy', 'scheduled-tasks.json')),
-        'registry must land beside the session-state file the daemon actually loads',
+        existsSync(join(elsewhere, 'scheduled-tasks.json')),
+        'registry must follow CHROXY_CONFIG_DIR — that is where the daemon now loads session-state from',
       )
       assert.ok(
-        !existsSync(join(elsewhere, 'scheduled-tasks.json')),
-        'registry must NOT follow CHROXY_CONFIG_DIR — the daemon scheduler never reads it there',
+        !existsSync(join(home, '.chroxy', 'scheduled-tasks.json')),
+        'registry must not stay home-rooted once CHROXY_CONFIG_DIR relocates the daemon state',
       )
 
       // Same resolution on the read side, so create and list can't disagree.
@@ -189,6 +191,27 @@ describe('chroxy schedule — CLI wiring (#6868)', () => {
       assert.equal(tasks[0].name, 'EnvProbe')
     } finally {
       rmSync(elsewhere, { recursive: true, force: true })
+      cleanup()
+    }
+  })
+
+  // The positive control for the case above: with CHROXY_CONFIG_DIR unset the
+  // registry must fall back to $HOME/.chroxy. Without this, "it landed in the
+  // relocated dir" would also be satisfied by a CLI that had simply stopped
+  // writing under $HOME for some unrelated reason.
+  it('falls back to $HOME/.chroxy when CHROXY_CONFIG_DIR is unset', async () => {
+    const { home, cleanup } = makeTempHome()
+    try {
+      const created = await runCli(
+        ['schedule', 'create', '--prompt', 'x', '--cron', '0 9 * * *', '--name', 'HomeProbe'],
+        { home },
+      )
+      assert.equal(created.code, 0, `stderr: ${created.stderr}`)
+      assert.ok(
+        existsSync(join(home, '.chroxy', 'scheduled-tasks.json')),
+        'registry must be home-rooted when nothing relocates it',
+      )
+    } finally {
       cleanup()
     }
   })

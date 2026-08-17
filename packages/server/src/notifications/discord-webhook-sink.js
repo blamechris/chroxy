@@ -42,12 +42,12 @@
  */
 
 import { readFileSync, mkdirSync } from 'node:fs'
-import { dirname, join } from 'node:path'
-import { homedir } from 'node:os'
+import { dirname } from 'node:path'
 import { writeFileRestricted } from '../platform.js'
 import { createLogger } from '../logger.js'
 import { sleep } from '../utils/sleep.js'
 import { NotificationSink } from './sink.js'
+import { configPath } from '../config-dir.js'
 import {
   cachedResolveDiscordWebhookUrl,
   isValidDiscordWebhookUrl,
@@ -279,7 +279,7 @@ export class DiscordWebhookSink extends NotificationSink {
   _resolvedStatePath() {
     // Lazy like discord-credentials.credentialsFilePath so tests that mutate
     // HOME (and the sandbox guard) see the current home, not a frozen one.
-    return this._statePath || join(homedir(), '.chroxy', 'discord-webhook-state.json')
+    return this._statePath || configPath('discord-webhook-state.json')
   }
 
   /**

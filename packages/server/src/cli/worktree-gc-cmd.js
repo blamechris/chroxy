@@ -11,7 +11,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { resolve, basename } from 'node:path'
-import { CONFIG_FILE } from './shared.js'
+import { configFile } from './shared.js'
 import { resolveRepoSet } from '../control-room/repo-set.js'
 import { planRepoGc, applyPlan } from '../worktree-gc.js'
 
@@ -52,7 +52,7 @@ function humanSize(kib) {
  */
 export function collectWorktreeGc(options = {}, deps = {}) {
   const {
-    configPath = CONFIG_FILE,
+    configPath = configFile(),
     plan = planRepoGc,
     sizeOf = (p) => dirSizeKib(p, deps),
     withSizes = true,

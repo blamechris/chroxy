@@ -839,7 +839,7 @@ describe('checkTunnelRoutability (#5328 WP-5.6)', () => {
   it('runDoctorChecks fires the probe for a configured named tunnel, incl. the cloudflare:named alias', async () => {
     const { writeFileSync, rmSync } = await import('node:fs')
     // _setup.mjs points CHROXY_CONFIG_DIR at a writable tmp dir and doctor's
-    // CONFIG_FILE now honors it (the hermeticity fix), so this lands in the
+    // configFile() now honors it (the hermeticity fix), so this lands in the
     // sandbox, not the real ~/.chroxy.
     const cfgPath = join(process.env.CHROXY_CONFIG_DIR, 'config.json')
     writeFileSync(cfgPath, JSON.stringify({ tunnel: 'cloudflare:named', tunnelHostname: 'chroxy.example.com' }))

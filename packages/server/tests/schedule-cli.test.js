@@ -12,6 +12,7 @@ import { join } from 'path'
 import { fileURLToPath } from 'url'
 import { tmpdir, homedir } from 'os'
 import { ScheduledTaskStore, defaultScheduledTasksPath } from '../src/scheduled-task-store.js'
+import { defaultStateFile } from '../src/session-manager.js'
 import {
   runScheduleCreate,
   runScheduleList,
@@ -576,25 +577,48 @@ describe('chroxy schedule — id / id-prefix resolution (#6868)', () => {
   })
 })
 
-// #7015 — the registry file this CLI touches must be the one the RUNNING daemon
-// reads. `getDefaultStore()` was flagged in review for not honouring
-// `CHROXY_CONFIG_DIR` "like the rest of the server"; the daemon's registry path
-// is in fact home-rooted at every hop, so following the env var here would aim
-// the CLI at a file the scheduler never opens — `create` would report success
-// for a task that can never fire. These tests pin the agreement AND the premise
-// it rests on: if the session-state family is ever migrated onto
-// `CHROXY_CONFIG_DIR`, the premise checks fail loudly here rather than letting
-// the CLI silently desync. The behavioural half (registry does not follow the
-// env var end-to-end) lives in tests/cli/schedule-cmd.test.js.
-describe('chroxy schedule — registry path agrees with the daemon, not with CHROXY_CONFIG_DIR (#7015)', () => {
+// #7015 / #7052 — the registry file this CLI touches must be the one the RUNNING
+// daemon reads. The invariant is AGREEMENT between the two; which root they
+// agree on is a detail that has now changed once.
+//
+// Until #7052 both were home-rooted, and this guard pinned that: it asserted
+// SessionManager's default state file ignored `CHROXY_CONFIG_DIR`, and said in
+// as many words that if the session-state family were ever migrated onto the
+// env var, the premise check would go red and schedule-cmd.js must move with
+// it. That is exactly what happened — `defaultStateFile()` is now
+// `configPath('session-state.json')` and the CLI resolver follows through
+// `configDir()`. The guard did its job; this is the other side of it.
+//
+// The premises are now asserted BEHAVIOURALLY rather than by grepping
+// session-manager.js's source. A source-grep guard pins a spelling, so it goes
+// red on a harmless rename and — worse — goes green if the code moves somewhere
+// the regex still matches. Relocating the env var and observing where both
+// resolvers actually land tests the thing the CLI depends on. The end-to-end
+// half (a spawned CLI and the daemon reading the same file) lives in
+// tests/cli/schedule-cmd.test.js.
+describe('chroxy schedule — registry path agrees with the daemon (#7015, #7052)', () => {
   const srcDir = fileURLToPath(new URL('../src/', import.meta.url))
   const readSrc = (rel) => readFileSync(join(srcDir, rel), 'utf-8')
 
-  it('resolves to the daemon-derived, home-rooted sibling of session-state.json', () => {
-    assert.equal(
-      defaultScheduleRegistryPath(),
-      defaultScheduledTasksPath(join(homedir(), '.chroxy', 'session-state.json')),
-    )
+  const withConfigDir = async (dir, fn) => {
+    const prev = process.env.CHROXY_CONFIG_DIR
+    if (dir === undefined) delete process.env.CHROXY_CONFIG_DIR
+    else process.env.CHROXY_CONFIG_DIR = dir
+    try {
+      return await fn()
+    } finally {
+      if (prev === undefined) delete process.env.CHROXY_CONFIG_DIR
+      else process.env.CHROXY_CONFIG_DIR = prev
+    }
+  }
+
+  it('resolves to the daemon-derived sibling of session-state.json', async () => {
+    await withConfigDir(undefined, () => {
+      assert.equal(
+        defaultScheduleRegistryPath(),
+        defaultScheduledTasksPath(join(homedir(), '.chroxy', 'session-state.json')),
+      )
+    })
   })
 
   it('premise 1: server-cli.js passes no stateFilePath, so SessionManager falls back to its default', () => {
@@ -604,19 +628,35 @@ describe('chroxy schedule — registry path agrees with the daemon, not with CHR
     )
   })
 
-  it('premise 2: SessionManager\'s default state file is home-rooted, ignoring CHROXY_CONFIG_DIR', () => {
-    const sm = readSrc('session-manager.js')
-    assert.match(
-      sm,
-      /const DEFAULT_STATE_FILE = join\(homedir\(\), '\.chroxy', 'session-state\.json'\)/,
-      'DEFAULT_STATE_FILE moved or changed shape — defaultScheduleRegistryPath() must follow it',
-    )
-    assert.doesNotMatch(
-      sm,
-      /DEFAULT_STATE_FILE\s*=[^\n]*CHROXY_CONFIG_DIR/,
-      'DEFAULT_STATE_FILE now honours CHROXY_CONFIG_DIR — schedule-cmd.js must honour it too, or the CLI '
-        + 'and the daemon scheduler will read different registries',
-    )
+  it('premise 2: the CLI and SessionManager land on the same registry when CHROXY_CONFIG_DIR moves', async () => {
+    // `defaultStateFile()` is the daemon's fallback — server-cli.js injects no
+    // stateFilePath (premise 1), so this IS the path the live scheduler opens.
+    // Asserted directly rather than by constructing a SessionManager, which
+    // would need a stateFilePath of its own and defeat the point.
+    const relocated = join(tmpdir(), 'chroxy-sched-envdir-fixture')
+    await withConfigDir(relocated, () => {
+      assert.equal(
+        defaultScheduleRegistryPath(),
+        defaultScheduledTasksPath(defaultStateFile()),
+        'the CLI and the daemon derive different registries under CHROXY_CONFIG_DIR — '
+          + '`schedule create` would report success for a task that can never fire',
+      )
+      assert.ok(
+        defaultScheduleRegistryPath().startsWith(relocated),
+        'the registry did not follow CHROXY_CONFIG_DIR',
+      )
+    })
+  })
+
+  it('premise 2b: with CHROXY_CONFIG_DIR unset, both fall back to $HOME/.chroxy', async () => {
+    // The positive control for the case above: without it, "both agree" would
+    // also be satisfied by two resolvers that each ignore the env var.
+    await withConfigDir(undefined, () => {
+      assert.ok(
+        defaultScheduleRegistryPath().startsWith(join(homedir(), '.chroxy')),
+        'the home fallback no longer applies',
+      )
+    })
   })
 
   it('premise 3: SessionManager derives its registry from that state file', () => {

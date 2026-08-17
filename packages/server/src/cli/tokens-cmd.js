@@ -11,13 +11,12 @@
 // Revoke targets a token by a unique handle PREFIX (from `tokens list`); the full
 // token is never printed. `--all` is the panic button and requires `--yes`.
 
-import { homedir } from 'os'
-import { join } from 'path'
 import { createSessionTokenStore } from '../session-token-store.js'
+import { configDir } from '../config-dir.js'
 
 /** Resolve the chroxy config dir the same way server-cli does. */
 function resolveChroxyDir(env = process.env) {
-  return env.CHROXY_CONFIG_DIR || join(homedir(), '.chroxy')
+  return configDir()
 }
 
 /** Human-readable age string; 'unknown' when the caller passes a non-finite age. */

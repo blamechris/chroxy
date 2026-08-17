@@ -15,8 +15,6 @@
  */
 
 import Anthropic, { APIUserAbortError } from '@anthropic-ai/sdk'
-import { join } from 'path'
-import { homedir } from 'os'
 import { performance } from 'node:perf_hooks'
 import { BaseSession, buildBaseSessionOpts } from './base-session.js'
 import { synthesizeModelUsage } from './usage-normalize.js'
@@ -53,6 +51,7 @@ import {
   withTrustStoreLock,
 } from './byok-mcp-trust.js'
 import { getSubagentProfile, SUBAGENT_PROFILE_NAMES } from './byok-subagent-profiles.js'
+import { configPath } from './config-dir.js'
 
 const log = createLogger('byok-session')
 
@@ -237,7 +236,7 @@ export class ClaudeByokSession extends BaseSession {
       label: 'Claude (BYOK)',
       credentials: {
         envVars: ['ANTHROPIC_API_KEY'],
-        hint: `set ANTHROPIC_API_KEY or save it in ${join(homedir(), '.chroxy', 'credentials.json')} (mode 0600)`,
+        hint: `set ANTHROPIC_API_KEY or save it in ${configPath('credentials.json')} (mode 0600)`,
         optional: false,
       },
     }

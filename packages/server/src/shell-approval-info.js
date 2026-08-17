@@ -1,7 +1,7 @@
-import { homedir } from 'os'
 import { join } from 'path'
 import { existsSync, readFileSync, unlinkSync, mkdirSync } from 'fs'
 import { writeFileRestricted } from './platform.js'
+import { configDir } from './config-dir.js'
 
 // #6277 — discovery for the host-local user-shell approval listener.
 //
@@ -17,7 +17,7 @@ import { writeFileRestricted } from './platform.js'
 // connection.json for the primary token.
 
 function getConfigDir() {
-  return process.env.CHROXY_CONFIG_DIR || join(homedir(), '.chroxy')
+  return configDir()
 }
 
 export function getShellApprovalInfoPath() {

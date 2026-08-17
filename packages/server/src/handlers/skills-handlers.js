@@ -16,7 +16,7 @@ import {
   loadActiveSkillsLayered,
   findRepoSkillsDir,
   findSkillForRetrust,
-  DEFAULT_SKILLS_DIR,
+  defaultSkillsDir,
   _isCommunityNamespace,
 } from '../skills-loader.js'
 import { realpathSync, readdirSync, statSync } from 'fs'
@@ -94,7 +94,7 @@ function handleListSkills(ws, client, msg, ctx) {
   // override per-session). Fall back to the defaults / cwd-walk only
   // when the session doesn't expose these — typically because no
   // session is bound (the no-session path scans the global tier).
-  const sessionSkillsDir = entry?.session?._skillsDir || DEFAULT_SKILLS_DIR
+  const sessionSkillsDir = entry?.session?._skillsDir || defaultSkillsDir()
   const sessionRepoDir = entry?.session
     ? (entry.session._repoSkillsDir !== undefined
       ? entry.session._repoSkillsDir
@@ -358,7 +358,7 @@ function handleSkillTrustAccept(ws, client, msg, ctx) {
     resolvedBody = loaded.body
   } else {
     // Block-mode recovery path: scan the session's skill dirs directly.
-    const sessionGlobalDir = entry?.session?._skillsDir || DEFAULT_SKILLS_DIR
+    const sessionGlobalDir = entry?.session?._skillsDir || defaultSkillsDir()
     const sessionRepoDir = entry?.session?._repoSkillsDir !== undefined
       ? entry.session._repoSkillsDir
       : (entry?.session?.cwd ? findRepoSkillsDir(entry.session.cwd) : null)
@@ -543,7 +543,7 @@ function handleSkillTrustGrant(ws, client, msg, ctx) {
 
   // Resolve the skill path. Community skills are absent from _getSkills()
   // while pending trust, so we scan the community dirs directly.
-  const sessionGlobalDir = entry?.session?._skillsDir || DEFAULT_SKILLS_DIR
+  const sessionGlobalDir = entry?.session?._skillsDir || defaultSkillsDir()
   const sessionRepoDir = entry?.session?._repoSkillsDir !== undefined
     ? entry.session._repoSkillsDir
     : (entry?.session?.cwd ? findRepoSkillsDir(entry.session.cwd) : null)

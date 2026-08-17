@@ -37,8 +37,6 @@
  */
 
 import { readCredentialJsonField } from './credentials-file.js'
-import { join } from 'path'
-import { homedir } from 'os'
 import Anthropic from '@anthropic-ai/sdk'
 import { ClaudeByokSession } from './byok-session.js'
 import { validateAnthropicCompatibleProviders } from './anthropic-compatible-config.js'
@@ -48,6 +46,7 @@ import { refreshDiscoveredModels } from './model-discovery.js'
 import { cachedResolveCredentialFile } from './auth-probes.js'
 import { createLogger } from './logger.js'
 import { BILLING_CLASSES } from './billing-class.js'
+import { configPath } from './config-dir.js'
 
 const log = createLogger('anthropic-compatible')
 
@@ -65,7 +64,7 @@ const ZERO_PRICING = Object.freeze({ input: 0, output: 0, cacheRead: 0, cacheWri
 // Lazy-resolved per call so tests that mutate process.env.HOME between
 // cases pick up the new home (same rationale as deepseek-credentials.js).
 function credentialsFilePath() {
-  return join(homedir(), '.chroxy', 'credentials.json')
+  return configPath('credentials.json')
 }
 
 /**

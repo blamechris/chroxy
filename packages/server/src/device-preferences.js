@@ -30,16 +30,16 @@
  * harmless (we fall back to `firstSessionId`).
  */
 
-import { homedir } from 'os'
 import { join } from 'path'
 import { existsSync, readFileSync, mkdirSync } from 'fs'
 import { writeFileRestricted } from './platform.js'
 import { createLogger } from './logger.js'
+import { configDir } from './config-dir.js'
 
 const log = createLogger('device-prefs')
 
 function getConfigDir() {
-  return process.env.CHROXY_CONFIG_DIR || join(homedir(), '.chroxy')
+  return configDir()
 }
 
 export function getDevicePreferencesPath() {

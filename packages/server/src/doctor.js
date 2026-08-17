@@ -23,6 +23,7 @@ import {
   PROGRAMMATIC_CREDIT_ERA_START,
 } from './billing-class.js'
 import { checkDependencies } from './utils/check-dependencies.js'
+import { configPath } from './config-dir.js'
 
 // Resolve the server package root (the directory containing package.json
 // and node_modules) so dependency checks work regardless of where the
@@ -38,7 +39,9 @@ const SERVER_PKG_DIR = dirname(dirname(__filename))
 // tests/_setup.mjs redirecting CHROXY_CONFIG_DIR to a tmp dir — which would let
 // the named-tunnel routability probe (#5328) fire a live network request from
 // a maintainer's real config during the suite.
-const CONFIG_FILE = join(process.env.CHROXY_CONFIG_DIR || join(homedir(), '.chroxy'), 'config.json')
+function configFile() {
+  return configPath('config.json')
+}
 
 /**
  * Parse the leading `major.minor.patch` semver out of an arbitrary version
@@ -324,9 +327,9 @@ export async function runDoctorChecks({ port, providers, verbose: _verbose, pkgD
   // #5328 (WP-5.6): named-tunnel coordinates for the routability probe (step 5.6).
   let tunnelMode = null
   let tunnelHostname = null
-  if (existsSync(CONFIG_FILE)) {
+  if (existsSync(configFile())) {
     try {
-      const config = JSON.parse(readFileSync(CONFIG_FILE, 'utf-8'))
+      const config = JSON.parse(readFileSync(configFile(), 'utf-8'))
       if (typeof config.provider === 'string') configProvider = config.provider
       // Normalize the tunnel mode through parseTunnelArg so aliases resolve —
       // e.g. `cloudflare:named` (a documented --tunnel form persisted verbatim)
@@ -353,15 +356,15 @@ export async function runDoctorChecks({ port, providers, verbose: _verbose, pkgD
       registerOpenAiCompatibleProviders(config)
       const { valid, warnings } = validateConfig(config)
       if (valid) {
-        configCheck = { name: 'Config', status: 'pass', message: CONFIG_FILE }
+        configCheck = { name: 'Config', status: 'pass', message: configFile() }
       } else {
-        configCheck = { name: 'Config', status: 'warn', message: `${CONFIG_FILE} — ${warnings.join('; ')}` }
+        configCheck = { name: 'Config', status: 'warn', message: `${configFile()} — ${warnings.join('; ')}` }
       }
     } catch (err) {
       if (err instanceof SyntaxError) {
-        configCheck = { name: 'Config', status: 'fail', message: `${CONFIG_FILE} — invalid JSON: ${err.message}` }
+        configCheck = { name: 'Config', status: 'fail', message: `${configFile()} — invalid JSON: ${err.message}` }
       } else {
-        configCheck = { name: 'Config', status: 'fail', message: `${CONFIG_FILE} — ${err.message}` }
+        configCheck = { name: 'Config', status: 'fail', message: `${configFile()} — ${err.message}` }
       }
     }
   } else {

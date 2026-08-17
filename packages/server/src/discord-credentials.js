@@ -29,11 +29,10 @@
  * URLs (token part is the secret); masking at the use site via
  * maskWebhookUrl is the second layer.
  */
-import { join } from 'path'
-import { homedir } from 'os'
 import { cachedResolveCredentialFile } from './auth-probes.js'
 import { readStoredField } from './credential-store.js'
 import { getToken } from './keychain.js'
+import { configPath } from './config-dir.js'
 
 // #5493: the launchd cutover (#5439) stores the webhook in the OS keychain under
 // this service/account and relies on ~/.chroxy/service-wrapper.sh to export it as
@@ -46,7 +45,7 @@ const DISCORD_WEBHOOK_KEYCHAIN_ACCOUNT = 'webhook-url'
 // Lazy-resolved per call so tests that mutate process.env.HOME between
 // cases pick up the new home (same rationale as byok-credentials.js).
 function credentialsFilePath() {
-  return join(homedir(), '.chroxy', 'credentials.json')
+  return configPath('credentials.json')
 }
 
 // Accepted webhook URL shapes. discordapp.com is the legacy domain Discord

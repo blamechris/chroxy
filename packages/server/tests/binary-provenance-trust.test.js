@@ -6,7 +6,7 @@ import { join } from 'path'
 import { createHash } from 'crypto'
 import {
   BinaryProvenanceLedger,
-  DEFAULT_BINARY_TRUST_FILE,
+  defaultBinaryTrustFile,
   binaryTrustFileExists,
 } from '../src/binary-provenance-trust.js'
 
@@ -35,7 +35,7 @@ describe('BinaryProvenanceLedger (#6858)', () => {
   })
 
   it('defaults its file to ~/.chroxy/binary-trust.json', () => {
-    assert.match(DEFAULT_BINARY_TRUST_FILE, /\.chroxy[/\\]binary-trust\.json$/)
+    assert.match(defaultBinaryTrustFile(), /\.chroxy[/\\]binary-trust\.json$/)
   })
 
   it('pins on approve and reports the record as trusted', () => {

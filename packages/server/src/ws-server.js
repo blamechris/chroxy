@@ -5,7 +5,6 @@ import { WebSocketServer } from 'ws'
 import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { dirname, join } from 'path'
-import { homedir } from 'os'
 import { PagesStore } from './pages-store.js'
 import { ShellApprovalStore } from './shell-approval-store.js'
 import { finalizeShellCreate } from './handlers/session-handlers.js'
@@ -42,6 +41,7 @@ import { isLoopbackHost } from './bind-host.js'
 import { getLanIp } from './lan-ip.js'
 import { deriveWebhookPayloadUrl } from './github-webhook.js'
 import { isLocalOrLanPeer } from './connection-locality.js'
+import { configPath } from './config-dir.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -643,7 +643,7 @@ export class WsServer {
       ? pagesRateLimiter
       : new RateLimiter({ name: 'pages', windowMs: 60_000, maxMessages: 120, burst: 30 })
     this.pagesStore = pagesStore || new PagesStore({
-      pagesDir: join(process.env.CHROXY_CONFIG_DIR || join(homedir(), '.chroxy'), 'pages'),
+      pagesDir: configPath('pages'),
     })
     // #6277: host-local user-shell approval store. The create gate holds a spawn
     // here when userShell.requireApproval is on; the host operator approves it

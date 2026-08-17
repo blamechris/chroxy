@@ -45,7 +45,7 @@
 
 import { readFileSync } from 'fs'
 import { join, dirname } from 'path'
-import { loadActiveSkills, findRepoSkillsDir, DEFAULT_SKILLS_DIR } from '../skills-loader.js'
+import { loadActiveSkills, findRepoSkillsDir, defaultSkillsDir } from '../skills-loader.js'
 import { DEFAULT_CONCURRENCY } from './constants.js'
 import { isoFromEpochMs } from '../utils/iso-datetime.js'
 
@@ -249,7 +249,7 @@ function failureReason(err) {
  */
 export async function surveySkillsInventory(repoSet, opts = {}) {
   const {
-    globalDir = DEFAULT_SKILLS_DIR,
+    globalDir = defaultSkillsDir(),
     root = '',
     usage = null,
     concurrency = DEFAULT_CONCURRENCY,

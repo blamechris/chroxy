@@ -113,6 +113,11 @@ function stripComments(source) {
 const RAW_HOME_ROOTED = /homedir\s*\(\s*\)/
 const CHROXY_SEGMENT = /['"`]\.chroxy['"`]/
 
+// A module-scope binding whose initializer calls the accessor. Column-0 means
+// top level: anything inside a function or class body is indented.
+const MODULE_SCOPE_DECL = /^(?:export\s+)?(?:const|let|var)\s+[A-Za-z_$][\w$]*\s*=/
+const CALLS_ACCESSOR = /\b(?:configDir|configPath)\s*\(/
+
 function findOffenders(srcDir) {
   const offenders = []
   for (const file of listJsFiles(srcDir)) {
@@ -124,18 +129,29 @@ function findOffenders(srcDir) {
     const code = stripComments(source)
 
     code.forEach((line, idx) => {
-      if (!RAW_HOME_ROOTED.test(line) || !CHROXY_SEGMENT.test(line)) return
       const prev = idx > 0 ? rawLines[idx - 1] : ''
       if (prev.includes(IGNORE_MARKER)) return
-      // `env.CHROXY_CONFIG_DIR` too, not just `process.env.…` — cli/tokens-cmd.js
-      // destructures `env` from its opts, and it is an inline copy all the same.
-      const inlineResolver = /\benv\.CHROXY_CONFIG_DIR/.test(line)
-      offenders.push({
-        file: rel,
-        line: idx + 1,
-        kind: inlineResolver ? 'inline-resolver-copy' : 'hardcoded-home-path',
-        text: rawLines[idx].trim(),
-      })
+      const push = (kind) =>
+        offenders.push({ file: rel, line: idx + 1, kind, text: rawLines[idx].trim() })
+
+      if (RAW_HOME_ROOTED.test(line) && CHROXY_SEGMENT.test(line)) {
+        // `env.CHROXY_CONFIG_DIR` too, not just `process.env.…` — cli/tokens-cmd.js
+        // destructures `env` from its opts, and it is an inline copy all the same.
+        const inlineResolver = /\benv\.CHROXY_CONFIG_DIR/.test(line)
+        push(inlineResolver ? 'inline-resolver-copy' : 'hardcoded-home-path')
+        return
+      }
+
+      // Calling the accessor is not enough — WHERE you call it decides whether
+      // the env is read at the moment that matters. A module-scope
+      // `const P = configPath('session-state.json')` is exactly as frozen as
+      // the `join(homedir(), …)` it replaced: it evaluates once, at import,
+      // and no later `beforeEach` can move it. The migration would otherwise
+      // look complete while half the defect survived, which is the failure
+      // this whole issue is made of.
+      if (!MODULE_SCOPE_DECL.test(line)) return
+      const initializer = /=\s*$/.test(line.trimEnd()) ? line + (code[idx + 1] ?? '') : line
+      if (CALLS_ACCESSOR.test(initializer)) push('module-scope-capture')
     })
   }
   return offenders

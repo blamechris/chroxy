@@ -3,7 +3,7 @@
  */
 import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync } from 'fs'
 import { join } from 'path'
-import { CONFIG_DIR } from './shared.js'
+import { configDir } from './shared.js'
 import { isWindows } from '../platform.js'
 
 export function registerDeployCommand(program) {
@@ -15,9 +15,9 @@ export function registerDeployCommand(program) {
     .action(async (options) => {
       const { execFileSync } = await import('child_process')
 
-      const PID_FILE = join(CONFIG_DIR, 'supervisor.pid')
-      const LOCK_FILE = join(CONFIG_DIR, 'update.lock')
-      const KNOWN_GOOD_FILE = join(CONFIG_DIR, 'known-good-ref')
+      const PID_FILE = join(configDir(), 'supervisor.pid')
+      const LOCK_FILE = join(configDir(), 'update.lock')
+      const KNOWN_GOOD_FILE = join(configDir(), 'known-good-ref')
 
       let lockAcquired = false
       try {
@@ -44,7 +44,7 @@ export function registerDeployCommand(program) {
           }
         }
 
-        if (!existsSync(CONFIG_DIR)) mkdirSync(CONFIG_DIR, { recursive: true })
+        if (!existsSync(configDir())) mkdirSync(configDir(), { recursive: true })
         writeFileSync(LOCK_FILE, String(process.pid))
         lockAcquired = true
 

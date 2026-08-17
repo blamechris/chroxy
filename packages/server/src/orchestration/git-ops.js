@@ -27,9 +27,9 @@
 import { execFile as execFileCb } from 'node:child_process'
 import { promisify } from 'node:util'
 import { join, resolve, sep } from 'node:path'
-import { homedir } from 'node:os'
 import { rmSync, mkdirSync, existsSync } from 'node:fs'
 import { GIT } from '../git.js'
+import { configDir } from '../config-dir.js'
 
 const execFileAsync = promisify(execFileCb)
 
@@ -64,10 +64,10 @@ function byteSliceUtf8(str, maxBytes) {
 // written to any user config.
 const ORCH_IDENTITY = { name: 'chroxy-orch', email: 'orch@chroxy.local' }
 
-/** ~/.chroxy (honoring CHROXY_CONFIG_DIR), matching the rest of the daemon. */
-export function configDir() {
-  return process.env.CHROXY_CONFIG_DIR || join(homedir(), '.chroxy')
-}
+// Re-exported for the orchestration tests, which resolve the root the same way
+// the provisioner does. The resolver itself lives in config-dir.js (#7052) —
+// this module used to carry its own copy.
+export { configDir }
 
 /** The root the orphan sweep and the provisioner MUST agree on. Never `runs/`. */
 export function defaultWorktreesRoot() {

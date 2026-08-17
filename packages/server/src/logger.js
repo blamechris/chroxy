@@ -20,10 +20,12 @@ import {
   openSync, readSync, closeSync, writeFileSync, truncateSync,
 } from 'fs'
 import { join } from 'path'
-import { homedir } from 'os'
 import { SENSITIVE_PATTERNS, API_KEY_PATTERNS, redactValue } from './redaction.js'
+import { configPath } from './config-dir.js'
 
-const DEFAULT_LOG_DIR = join(homedir(), '.chroxy', 'logs')
+function defaultLogDir() {
+  return configPath('logs')
+}
 const MAX_LOG_SIZE = 5 * 1024 * 1024  // 5MB
 const MAX_LOG_FILES = 3
 const ROTATION_CHECK_INTERVAL = 100  // check every N writes
@@ -129,7 +131,7 @@ export function redactSensitivePreservingEscapes(s) {
 let _logLevel = LOG_LEVELS[process.env.LOG_LEVEL] ?? LOG_LEVELS.info
 let _jsonMode = false
 let _logToFile = false
-let _logDir = DEFAULT_LOG_DIR
+let _logDir = defaultLogDir()
 let _logPath = null
 let _auditLogPath = null
 let _writeCount = 0
@@ -261,7 +263,7 @@ export function getAuditLogPath() {
  * (see generateWindowsServiceWrapper).
  *
  * @param {object} [options]
- * @param {string} [options.logDir] - defaults to DEFAULT_LOG_DIR: the capture
+ * @param {string} [options.logDir] - defaults to defaultLogDir(): the capture
  *   location is baked into the plist/unit by `service install` (always
  *   `~/.chroxy/logs`), so it deliberately does NOT follow a custom
  *   CHROXY_LOG_DIR, which only moves the logger's own files
@@ -276,7 +278,7 @@ export function capStdioCaptureLogs({
   tailKeep = STDIO_CAPTURE_TAIL_KEEP,
 } = {}) {
   if (process.platform === 'win32') return []
-  const dir = logDir || DEFAULT_LOG_DIR
+  const dir = logDir || defaultLogDir()
   const capped = []
   for (const name of ['chroxy-stdout.log', 'chroxy-stderr.log']) {
     const filePath = join(dir, name)
@@ -318,7 +320,7 @@ export function closeFileLogging() {
   _logToFile = false
   _jsonMode = false
   _logLevel = LOG_LEVELS.info
-  _logDir = DEFAULT_LOG_DIR
+  _logDir = defaultLogDir()
   _logPath = null
   _auditLogPath = null
   _writeCount = 0

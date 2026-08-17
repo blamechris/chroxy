@@ -13,15 +13,16 @@
  *   { type: 'drain', timeout } — Drain in-flight work, serialize state, then ack
  */
 import { existsSync, readFileSync } from 'fs'
-import { join } from 'path'
-import { homedir } from 'os'
 import { isEntryPoint } from './utils/is-entry-point.js'
 import { mergeConfig } from './config.js'
 import { createLogger } from './logger.js'
+import { configPath } from './config-dir.js'
 
 const log = createLogger('child')
 
-const CONFIG_FILE = join(homedir(), '.chroxy', 'config.json')
+function configFile() {
+  return configPath('config.json')
+}
 
 // Module-level references for drain handler access
 let _sessionManager = null
@@ -82,8 +83,8 @@ function gracefulExit(code, reason) {
 async function main() {
   // Load config (same as cli.js start command)
   let fileConfig = {}
-  if (existsSync(CONFIG_FILE)) {
-    fileConfig = JSON.parse(readFileSync(CONFIG_FILE, 'utf-8'))
+  if (existsSync(configFile())) {
+    fileConfig = JSON.parse(readFileSync(configFile(), 'utf-8'))
   }
 
   const defaults = {

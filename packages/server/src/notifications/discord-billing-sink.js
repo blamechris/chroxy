@@ -37,12 +37,12 @@
  */
 
 import { readFileSync, mkdirSync } from 'node:fs'
-import { dirname, join } from 'node:path'
-import { homedir } from 'node:os'
+import { dirname } from 'node:path'
 import { writeFileRestricted } from '../platform.js'
 import { createLogger } from '../logger.js'
 import { sleep } from '../utils/sleep.js'
 import { NotificationSink } from './sink.js'
+import { configPath } from '../config-dir.js'
 import {
   cachedResolveDiscordWebhookUrl,
   isValidDiscordWebhookUrl,
@@ -124,7 +124,7 @@ export class DiscordBillingSink extends NotificationSink {
   // -- State persistence ----------------------------------------------------
 
   _resolvedStatePath() {
-    return this._statePath || join(homedir(), '.chroxy', 'discord-billing-state.json')
+    return this._statePath || configPath('discord-billing-state.json')
   }
 
   /** Load the single-message store fresh from disk (read-per-send). */

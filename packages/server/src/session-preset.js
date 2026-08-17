@@ -39,6 +39,7 @@ import { dirname, join, resolve, basename } from 'path'
 import { homedir } from 'os'
 import { createHash } from 'crypto'
 import { createLogger } from './logger.js'
+import { configPath } from './config-dir.js'
 
 const log = createLogger('session-preset')
 
@@ -63,8 +64,12 @@ const MAX_PRESET_FILE_BYTES = 64 * 1024
 // Cap walk-up iterations — a safety belt; real repos are nowhere near this deep.
 const REPO_DISCOVERY_MAX_DEPTH = 100
 
-export const DEFAULT_CONFIG_PATH = join(homedir(), '.chroxy', 'config.json')
-export const DEFAULT_PRESET_TRUST_FILE = join(homedir(), '.chroxy', 'session-preset-trust.json')
+export function defaultConfigPath() {
+  return configPath('config.json')
+}
+export function defaultPresetTrustFile() {
+  return configPath('session-preset-trust.json')
+}
 
 const _PATH_COMPARE_CASE_INSENSITIVE =
   process.platform === 'darwin' || process.platform === 'win32'
@@ -321,7 +326,7 @@ export function readRepoPresetFile(absPath) {
  * @param {string} [configPath]
  * @returns {object|null}
  */
-export function _findRepoConfigEntry(repoPath, configPath = DEFAULT_CONFIG_PATH) {
+export function _findRepoConfigEntry(repoPath, configPath = defaultConfigPath) {
   if (!repoPath || typeof repoPath !== 'string') return null
   let raw
   try {
@@ -351,7 +356,7 @@ function _resolveSafe(p) {
  * @param {string} [configPath]
  * @returns {null | ReturnType<typeof validatePreset>}
  */
-export function readDaemonOverride(repoPath, configPath = DEFAULT_CONFIG_PATH) {
+export function readDaemonOverride(repoPath, configPath = defaultConfigPath) {
   const entry = _findRepoConfigEntry(repoPath, configPath)
   if (!entry || !entry.sessionPreset) return null
   return validatePreset(entry.sessionPreset)
@@ -393,7 +398,7 @@ export function readDaemonOverride(repoPath, configPath = DEFAULT_CONFIG_PATH) {
  */
 export function resolveSessionPreset(cwd, opts = {}) {
   const trustStore = opts.trustStore || null
-  const configPath = opts.configPath || DEFAULT_CONFIG_PATH
+  const configPath = opts.configPath || defaultConfigPath()
 
   // 1. Locate the repo root (the dir holding `.chroxy/session.json`) via the
   //    walk-up. We need it for BOTH the repo-file read and the daemon override

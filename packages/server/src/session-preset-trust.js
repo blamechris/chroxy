@@ -38,11 +38,11 @@
 import { existsSync } from 'fs'
 import { createLogger } from './logger.js'
 import { PathHashTrustLedger } from './path-hash-trust-ledger.js'
-import { DEFAULT_PRESET_TRUST_FILE, _normalizePathKey } from './session-preset.js'
+import { defaultPresetTrustFile, _normalizePathKey } from './session-preset.js'
 
 const log = createLogger('session-preset-trust')
 
-export { DEFAULT_PRESET_TRUST_FILE }
+export { defaultPresetTrustFile }
 
 /**
  * In-memory + on-disk trust ledger for repo-local session presets. One
@@ -55,7 +55,7 @@ export class SessionPresetTrustStore extends PathHashTrustLedger {
    */
   constructor({ filePath } = {}) {
     super({
-      filePath: filePath || DEFAULT_PRESET_TRUST_FILE,
+      filePath: filePath || defaultPresetTrustFile(),
       log,
       normalizeKey: _normalizePathKey,
       approvalField: 'approvedAt',
