@@ -5,9 +5,15 @@ use std::fs;
 use std::io;
 use uuid::Uuid;
 
-/// First-run setup: if no ~/.chroxy/config.json exists, generate one with defaults.
+/// First-run setup: if no `config.json` exists in the daemon's config root,
+/// generate one with defaults.
 /// Uses create_new(true) for atomic creation — no TOCTOU race between exists() and open().
 /// Returns true if a new config was created.
+///
+/// Inherits `CHROXY_CONFIG_DIR` via `config::config_path()` (#7241) — important
+/// here specifically, because minting a fresh token into the wrong root is how a
+/// relocated install ends up with the desktop and the daemon holding different
+/// ones.
 pub fn ensure_config() -> bool {
     let path = match config::config_path() {
         Some(p) => p,

@@ -94,13 +94,28 @@ pub fn build_qr_popup_html(svg: &str, connection_url: &str) -> String {
     )
 }
 
-/// Read the connection info from ~/.chroxy/connection.json.
+/// Path to `connection.json` inside the daemon's config root.
+///
+/// Split from [`read_connection_info`] so the path resolution is assertable
+/// without touching the filesystem — the regression this guards against is one
+/// site drifting back to a hardcoded `~/.chroxy` while the others follow the
+/// override, which is invisible unless the paths themselves are compared.
+pub fn connection_info_path() -> Option<std::path::PathBuf> {
+    crate::config::config_dir().map(|d| d.join("connection.json"))
+}
+
+/// Read the connection info from `connection.json` in the daemon's config root
+/// (`~/.chroxy/connection.json` with no override).
 /// The server writes fields: connectionUrl, wsUrl, httpUrl, apiToken, tunnelMode.
 /// Returns (hostname, token) or an error.
+///
+/// Resolved through `config::config_dir()` so it follows `CHROXY_CONFIG_DIR`
+/// (#7241). This is the site with the sharpest failure: the *server* writes
+/// `connection.json` into its own (possibly relocated) root, so reading it from a
+/// hardcoded `~/.chroxy` hands the user a QR code encoding a stale URL and token
+/// — silently, because a stale file still parses.
 pub fn read_connection_info() -> Result<(String, String), String> {
-    let path = dirs::home_dir()
-        .ok_or("Cannot determine home directory")?
-        .join(".chroxy/connection.json");
+    let path = connection_info_path().ok_or("Cannot determine the chroxy config directory")?;
 
     let contents = std::fs::read_to_string(&path)
         .map_err(|e| format!("Cannot read {}: {}", path.display(), e))?;

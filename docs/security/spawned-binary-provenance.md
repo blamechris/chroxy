@@ -213,6 +213,15 @@ by one.
   inherited, not an explicitly restricted one. The ledger is only as
   trustworthy as the account that owns `~/.chroxy` — protecting that account is
   part of this gate's threat model, not an orthogonal concern.
+- **`CHROXY_CONFIG_DIR` moves the ledger, and moves that argument with it.**
+  `~/.chroxy` is the default root, not a fixed one (#7052 — see
+  [`CONFIG.md`](../../packages/server/CONFIG.md#the-config-root-chroxy_config_dir)),
+  so every path in this document resolves under `$CHROXY_CONFIG_DIR` when it is
+  set. Because the paragraph above reduces the ledger's integrity to *the
+  directory's* ACL, relocating the root onto anything writable by another
+  principal — a shared volume, a group-writable mount, a bind-mounted container
+  path — makes the pin ledger poisonable and the gate cosmetic. If you relocate,
+  the new root needs the same owner-only protection `$HOME` gave it.
 
 ### Configuration
 

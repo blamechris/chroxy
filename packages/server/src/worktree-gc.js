@@ -259,7 +259,8 @@ function isClean(git, worktreePath) {
  * #5859 (audit P1-7): boot-time sweep of ORPHANED chroxy session worktrees.
  *
  * Unlike the agent worktrees this module's reaper handles, chroxy's OWN session
- * worktrees (`~/.chroxy/worktrees/<sessionId>`, created `git worktree add
+ * worktrees (`<configDir>/worktrees/<sessionId>` — `~/.chroxy/worktrees/<id>` by
+ * default, relocated by `CHROXY_CONFIG_DIR`; created `git worktree add
  * --detach`, NO lock) are never reclaimed by the lock/dead-pid reaper. When a
  * session vanishes without a clean destroy (SIGKILL, crash, or a dropped
  * state file) its worktree dir leaks forever.
@@ -276,7 +277,11 @@ function isClean(git, worktreePath) {
  * Pure + dependency-injected.
  *
  * @param {object} args
- * @param {string} args.worktreeBase - e.g. ~/.chroxy/worktrees
+ * @param {string} args.worktreeBase - the session-worktree root, e.g.
+ *   `configPath('worktrees')` (`~/.chroxy/worktrees` with no override). Injected
+ *   rather than resolved here, so a caller must not hardcode a home-rooted path:
+ *   `defaultWorktreeBase()` in session-manager.js is the production resolver and
+ *   it goes through `configPath` (#7052).
  * @param {Set<string>} args.liveSessionIds - currently-live session ids (off-limits)
  * @param {object} [args.deps] - { git, readdir, exists }
  * @returns {{ removed: string[], skippedDirty: object[], skippedError: object[], scanned: number }}

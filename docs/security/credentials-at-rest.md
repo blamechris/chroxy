@@ -4,6 +4,8 @@ How Chroxy stores provider credentials on disk, and what that encryption does �
 
 This is distinct from the [transport-layer model](./encryption-threat-model.md), which covers data **in transit** through the Cloudflare tunnel. This document covers data **at rest** in `~/.chroxy/credentials.json`.
 
+> **`~/.chroxy` is the default root, not a fixed one.** `CHROXY_CONFIG_DIR` relocates all of it (#7052), so every path below resolves under `$CHROXY_CONFIG_DIR` when set — see [`CONFIG.md` — The config root](../../packages/server/CONFIG.md#the-config-root-chroxy_config_dir). This interacts directly with §3: "a misconfigured sync tool" stops being a mishap and becomes the configuration if you point the root *into* a synced or shared directory (Dropbox/iCloud/OneDrive, a network share, a bind-mounted container volume). The encryption still helps there — the data key stays in the OS keychain, which does not sync — but the `0600` mode may not survive the trip, and a relocation does **not** move the old file: `chroxy config-dir status` reports what is still sitting at `~/.chroxy` (#7240).
+
 ## 1. What is stored
 
 `~/.chroxy/credentials.json` holds the highest-value secrets Chroxy persists:

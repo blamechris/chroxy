@@ -498,7 +498,8 @@ fn set_summon_hotkey(app: tauri::AppHandle, accelerator: Option<String>) -> Resu
     Ok(())
 }
 
-/// Read `allowAutoPermissionMode` from `~/.chroxy/config.json`.
+/// Read `allowAutoPermissionMode` from the daemon's `config.json`
+/// (`~/.chroxy/config.json` unless `CHROXY_CONFIG_DIR` relocates the root).
 /// Returns `false` if the config file doesn't exist, is empty/whitespace-only,
 /// or the key is missing. Surfaces parse errors so the UI can show a meaningful
 /// message instead of silently presenting the wrong toggle state.
@@ -525,7 +526,7 @@ fn get_allow_auto_permission_mode() -> Result<bool, String> {
         .unwrap_or(false))
 }
 
-/// Write `allowAutoPermissionMode` to `~/.chroxy/config.json`, preserving
+/// Write `allowAutoPermissionMode` to the daemon's `config.json`, preserving
 /// other keys and 0o600 permissions. Creates the file (and parent dir) if
 /// missing. The server picks up the new value on next restart.
 #[tauri::command]
@@ -2304,16 +2305,19 @@ fn handle_set_tunnel_mode(app: &tauri::AppHandle, mode: &str) {
     );
 }
 
-/// #4942 — Open `~/.chroxy/` in Finder so the user can inspect server
-/// config / logs without leaving the app. macOS-only: gated alongside
+/// #4942 — Open the daemon's config root in Finder so the user can inspect
+/// server config / logs without leaving the app. macOS-only: gated alongside
 /// the app-menu Shell submenu (which is only built on macOS today).
+///
+/// Resolves through `config::config_path()`, so it reveals the **relocated**
+/// root when `CHROXY_CONFIG_DIR` is set rather than an empty `~/.chroxy` (#7241).
 #[cfg(target_os = "macos")]
 fn handle_open_config_in_finder(app: &tauri::AppHandle) {
     let Some(config_path) = config::config_path() else {
         send_notification(
             app,
             "Open in Finder",
-            "Could not determine ~/.chroxy/ location.",
+            "Could not determine the chroxy config directory.",
         );
         return;
     };
