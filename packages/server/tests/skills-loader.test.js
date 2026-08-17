@@ -199,13 +199,21 @@ describe('skills-loader', () => {
       let fakeHome
       let originalHome
       let originalUserprofile
+      let originalConfigDir
 
       beforeEach(() => {
         fakeHome = mkdtempSync(join(tmpdir(), 'chroxy-home-'))
         originalHome = process.env.HOME
         originalUserprofile = process.env.USERPROFILE
+        originalConfigDir = process.env.CHROXY_CONFIG_DIR
         process.env.HOME = fakeHome
         process.env.USERPROFILE = fakeHome
+        // Since #7052 the GLOBAL skills dir is `configPath('skills')`, i.e.
+        // CHROXY_CONFIG_DIR-rooted rather than always `~/.chroxy/skills`. The
+        // suite-wide sandbox (tests/_setup.mjs) points that at its own tmp dir,
+        // so patching HOME alone no longer moves the global dir — point both at
+        // the fake home, which is what "the global dir lives here" now means.
+        process.env.CHROXY_CONFIG_DIR = join(fakeHome, '.chroxy')
       })
 
       afterEach(() => {
@@ -213,6 +221,8 @@ describe('skills-loader', () => {
         else process.env.HOME = originalHome
         if (originalUserprofile === undefined) delete process.env.USERPROFILE
         else process.env.USERPROFILE = originalUserprofile
+        if (originalConfigDir === undefined) delete process.env.CHROXY_CONFIG_DIR
+        else process.env.CHROXY_CONFIG_DIR = originalConfigDir
         rmSync(fakeHome, { recursive: true, force: true })
       })
 

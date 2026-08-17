@@ -2,7 +2,7 @@ import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, readFileSync, existsSync, mkdirSync, writeFileSync } from 'fs'
 import { join } from 'path'
-import { tmpdir } from 'os'
+import { tmpdir, homedir } from 'os'
 import { execFileSync } from 'child_process'
 import { fileURLToPath } from 'url'
 import {
@@ -60,12 +60,18 @@ describe('service', () => {
   })
 
   describe('getServicePaths()', () => {
+    // Since #7052 the log dir is `configPath('logs')`, so it follows
+    // CHROXY_CONFIG_DIR — which the suite-wide sandbox (tests/_setup.mjs)
+    // points at a tmp dir. Derived from the env here rather than hardcoded to
+    // `.chroxy/logs`, which only held while the path ignored the override.
+    const expectedLogDir = () => join(process.env.CHROXY_CONFIG_DIR, 'logs')
+
     it('returns launchd paths on darwin', { skip: posixOnly }, () => {
       const paths = getServicePaths('darwin')
       assert.equal(paths.type, 'launchd')
       assert.ok(paths.plistPath.includes('LaunchAgents'))
       assert.ok(paths.plistPath.includes('com.chroxy.server.plist'))
-      assert.ok(paths.logDir.includes('.chroxy/logs'))
+      assert.equal(paths.logDir, expectedLogDir())
     })
 
     it('returns systemd paths on linux', { skip: posixOnly }, () => {
@@ -73,19 +79,46 @@ describe('service', () => {
       assert.equal(paths.type, 'systemd')
       assert.ok(paths.unitPath.includes('systemd/user'))
       assert.ok(paths.unitPath.includes('chroxy.service'))
-      assert.ok(paths.logDir.includes('.chroxy/logs'))
+      assert.equal(paths.logDir, expectedLogDir())
     })
 
     it('returns windows info on win32', () => {
       const paths = getServicePaths('win32')
       assert.equal(paths.type, 'windows')
-      assert.ok(paths.logDir.includes('.chroxy'))
+      assert.equal(paths.logDir, expectedLogDir())
     })
 
     it('throws on unsupported platform', () => {
       assert.throws(() => getServicePaths('freebsd'), {
         message: /not supported/i,
       })
+    })
+
+    // #7052 — an installed service writes its logs under the config dir the
+    // operator chose. Before the migration this was hardcoded to ~/.chroxy/logs,
+    // so a relocated daemon logged somewhere its own config dir did not mention.
+    it('log dir follows CHROXY_CONFIG_DIR', () => {
+      const prev = process.env.CHROXY_CONFIG_DIR
+      const relocated = join(tmpdir(), 'chroxy-svc-logdir-fixture')
+      try {
+        process.env.CHROXY_CONFIG_DIR = relocated
+        assert.equal(getServicePaths('darwin').logDir, join(relocated, 'logs'))
+      } finally {
+        process.env.CHROXY_CONFIG_DIR = prev
+      }
+    })
+
+    it('log dir falls back to ~/.chroxy/logs when CHROXY_CONFIG_DIR is unset', () => {
+      // The positive control for the case above: without it, "the log dir
+      // equals <relocated>/logs" would also pass for a resolver that had
+      // stopped consulting the home fallback entirely.
+      const prev = process.env.CHROXY_CONFIG_DIR
+      try {
+        delete process.env.CHROXY_CONFIG_DIR
+        assert.equal(getServicePaths('darwin').logDir, join(homedir(), '.chroxy', 'logs'))
+      } finally {
+        process.env.CHROXY_CONFIG_DIR = prev
+      }
     })
   })
 
