@@ -24,6 +24,7 @@ import { fileURLToPath } from 'url'
 import { dirname, join, relative, sep } from 'path'
 import { createLogger, setJsonMode, initFileLogging, setConsoleQuiet } from './logger.js'
 import { configDir, configPath } from './config-dir.js'
+import { detectStrandedState, formatStrandedWarning } from './config-dir-migration.js'
 
 const log = createLogger('cli')
 // #5368 slice (b): QRCode + writeConnectionInfo moved to startup-display.js with
@@ -571,6 +572,26 @@ export async function startCliServer(config) {
   // $CHROXY_HOST_VERSION / _GIT_SHA / _CHANNEL to confirm the exact running build.
   Object.assign(process.env, getChroxyHostEnv())
 
+  // #7240 — state stranded at ~/.chroxy by a CHROXY_CONFIG_DIR relocation.
+  //
+  // This runs HERE, near the top of startCliServer, and the placement is the
+  // point. #7052 logs the resolved root, but that line sits ~500 lines further
+  // down — past the `No API token configured` exit below. In the sharpest
+  // failure (stranded config.json on a keychain-less host) the daemon exits
+  // before it ever says which root it opened, so the operator sees a token
+  // error with no hint that a relocation caused it. Warning first is what makes
+  // the diagnosis reachable.
+  //
+  // Detection only — the copy is opt-in via `chroxy config-dir migrate`.
+  // Best-effort, like maybeEncryptCredentialsAtRest: never blocks boot.
+  let strandedState = null
+  try {
+    strandedState = detectStrandedState()
+    for (const line of formatStrandedWarning(strandedState)) log.warn(line)
+  } catch (err) {
+    log.warn(`Stranded config-dir state check failed: ${err.message}`)
+  }
+
   const PORT = config.port || parseInt(process.env.PORT || '8765', 10)
   const NO_AUTH = !!config.noAuth
 
@@ -602,7 +623,17 @@ export async function startCliServer(config) {
   }
 
   if (!NO_AUTH && !API_TOKEN) {
-    console.error('[!] No API token configured. Run \'chroxy init\' first.') // intentional user-facing output
+    // #7240 — when config.json is sitting at ~/.chroxy and the daemon is reading
+    // a relocated root, `chroxy init` is the WRONG advice: it mints a brand new
+    // token and forces every paired device to re-pair. Name the real cause.
+    if (strandedState?.highConsequence.includes('config.json')) {
+      console.error('[!] No API token configured — but config.json is still at ' // intentional user-facing output
+        + `${strandedState.source} while the daemon is reading ${strandedState.target}.`)
+      console.error('    Do NOT run \'chroxy init\' — it mints a fresh token and forces every device to re-pair.')
+      console.error('    Move your existing state instead:  chroxy config-dir migrate')
+    } else {
+      console.error('[!] No API token configured. Run \'chroxy init\' first.') // intentional user-facing output
+    }
     process.exit(1)
   }
 

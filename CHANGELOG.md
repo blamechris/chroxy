@@ -32,6 +32,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   ```bash
   # with CHROXY_CONFIG_DIR set to your chosen directory
+  chroxy config-dir migrate --yes
+  ```
+
+  or by hand, which does the same thing:
+
+  ```bash
   mkdir -p "$CHROXY_CONFIG_DIR"
   cp -a ~/.chroxy/. "$CHROXY_CONFIG_DIR"/
   ```
@@ -56,6 +62,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `chroxy service install` now bakes `CHROXY_CONFIG_DIR` into the generated
   launchd plist / systemd unit / Windows wrapper when it is set, so the
   installed service and your shell agree on one root.
+
+### Added
+
+- **Stranded state is now detected and reported, and `chroxy config-dir`
+  migrates it (#7240).** The relocation above is silent by construction: the
+  daemon simply reads a different directory and finds nothing. Three things now
+  surface it.
+
+  The daemon **warns at startup**, naming every entry still at `~/.chroxy` and
+  the remedy. The warning is emitted before the token check, which matters: with
+  a stranded `config.json` on a keychain-less host the daemon exits at that check,
+  and the "config/state root" line added in #7052 comes later in startup — so the
+  operator previously saw `Run 'chroxy init' first` with no indication that a
+  relocation caused it. That message now names the real cause and, in this case,
+  explicitly says not to run `chroxy init`.
+
+  **`chroxy doctor`** gains a `Config/state root` check reporting the resolved
+  root and anything stranded. Its `Config` check no longer answers a missing
+  `config.json` with "run `chroxy init` to create" when the file is merely
+  stranded — that advice mints a fresh token and forces every device to re-pair.
+
+  **`chroxy config-dir status`** lists what is stranded; **`chroxy config-dir
+  migrate --yes`** copies it forward, preserving `0600` file and `0700` directory
+  modes, never overwriting anything already in the destination, and leaving the
+  originals in place.
+
+  The migration is **opt-in rather than automatic, deliberately.** The daemon
+  cannot distinguish "operator just relocated and wants their state" from
+  "operator pointed at a deliberately clean root" — a container, a per-project
+  directory — and copying an identity key and credentials into a directory that
+  may be shared, synced or bind-mounted is the operator's security decision to
+  make, not a side effect of an upgrade.
+
+  What is reported as stranded is **computed** — every entry present at
+  `~/.chroxy` and absent at the resolved root — rather than compared against a
+  list of known state files, so a state file added later is covered without
+  anything to update. Runtime-ephemeral entries (`supervisor.pid`,
+  `update.lock`) are excluded from both the report and the copy.
 
 ## [0.11.0] - 2026-08-15
 

@@ -24,6 +24,7 @@ import {
 } from './billing-class.js'
 import { checkDependencies } from './utils/check-dependencies.js'
 import { configPath } from './config-dir.js'
+import { detectStrandedState } from './config-dir-migration.js'
 
 // Resolve the server package root (the directory containing package.json
 // and node_modules) so dependency checks work regardless of where the
@@ -295,7 +296,7 @@ export async function checkTunnelRoutability(deps = {}) {
  *   tests can point the check at a temp directory without mutating process.cwd().
  * @returns {{ checks: Array<{ name: string, status: 'pass'|'warn'|'fail', message: string, provider?: string }>, passed: boolean, providers: string[] }}
  */
-export async function runDoctorChecks({ port, providers, verbose: _verbose, pkgDir = SERVER_PKG_DIR, now = Date.now(), tunnelProbe } = {}) {
+export async function runDoctorChecks({ port, providers, verbose: _verbose, pkgDir = SERVER_PKG_DIR, now = Date.now(), tunnelProbe, detectStranded = detectStrandedState } = {}) {
   const checks = []
 
   // 1. Node.js version
@@ -371,6 +372,63 @@ export async function runDoctorChecks({ port, providers, verbose: _verbose, pkgD
     configCheck = { name: 'Config', status: 'warn', message: `Not found — run 'chroxy init' to create` }
   }
 
+  // #7240 — state stranded at ~/.chroxy by a CHROXY_CONFIG_DIR relocation.
+  // Computed before the Config check is pushed so the "Not found" branch above
+  // can be corrected: recommending `chroxy init` when the real cause is an
+  // unmoved config.json mints a fresh token and forces every device to re-pair,
+  // which is strictly worse than the problem it purports to fix.
+  let strandedCheck = null
+  try {
+    const stranded = detectStranded()
+    if (stranded.unreadable) {
+      strandedCheck = {
+        name: 'Config/state root',
+        status: 'warn',
+        message: `${stranded.target} — could not check ${stranded.source} for stranded state: ${stranded.unreadable}`,
+      }
+    } else if (stranded.stranded.length > 0) {
+      const sharp = stranded.highConsequence.length > 0
+        ? ` (including ${stranded.highConsequence.join(', ')})`
+        : ''
+      // Bounded: a relocated root can strand an arbitrary number of entries and
+      // doctor output is a single line per check. The high-consequence ones are
+      // named separately above, so the truncated tail never hides the sharp cases.
+      const MAX_NAMED = 8
+      const named = stranded.stranded.slice(0, MAX_NAMED).join(', ')
+      const rest = stranded.stranded.length - MAX_NAMED
+      strandedCheck = {
+        name: 'Config/state root',
+        status: 'warn',
+        message: `${stranded.target} (from CHROXY_CONFIG_DIR) — ${stranded.stranded.length} `
+          + `state ${stranded.stranded.length === 1 ? 'entry is' : 'entries are'} still at `
+          + `${stranded.source}${sharp}: ${named}${rest > 0 ? `, and ${rest} more` : ''} `
+          + `— fix: chroxy config-dir migrate`,
+      }
+      if (stranded.highConsequence.includes('config.json')) {
+        configCheck = {
+          name: 'Config',
+          status: 'fail',
+          message: `Not found at ${configPath('config.json')} — it is still at `
+            + `${join(stranded.source, 'config.json')}. Do NOT run 'chroxy init' `
+            + `(it mints a fresh token and forces every device to re-pair) — `
+            + `run 'chroxy config-dir migrate' instead`,
+        }
+      }
+    } else {
+      // Read the root off the detection, NOT from configDir()/process.env
+      // directly: the detection is injectable, and a branch that bypasses the
+      // seam reports something the caller did not ask about — which also makes
+      // this message the one branch a test cannot pin.
+      strandedCheck = {
+        name: 'Config/state root',
+        status: 'pass',
+        message: `${stranded.target}${stranded.relocated ? ' (from CHROXY_CONFIG_DIR)' : ''}`,
+      }
+    }
+  } catch (err) {
+    strandedCheck = { name: 'Config/state root', status: 'warn', message: `Check failed: ${err.message}` }
+  }
+
   // 4. Provider-specific checks. Each configured provider contributes its
   // own binary and credential checks. Providers not in the user's config
   // are skipped entirely — a Gemini-only install does NOT fail because
@@ -384,6 +442,8 @@ export async function runDoctorChecks({ port, providers, verbose: _verbose, pkgD
   // 5. Config check — appended after provider checks so per-provider
   // sections group together in the output report.
   checks.push(configCheck)
+  // #7240 — immediately after Config: the root is the context that explains it.
+  if (strandedCheck) checks.push(strandedCheck)
 
   // Credential storage (#6236). Surface WHERE the API token + credentials
   // actually live and whether the OS keychain is healthy — the #6235 fallback to

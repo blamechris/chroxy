@@ -12,6 +12,7 @@ import { createRequire } from 'module'
 import { registerInitCommand } from './cli/init-cmd.js'
 import { registerServerCommands } from './cli/server-cmd.js'
 import { registerConfigCommand } from './cli/config-cmd.js'
+import { registerConfigDirCommand } from './cli/config-dir-cmd.js'
 import { registerTunnelCommand } from './cli/tunnel-cmd.js'
 import { registerDoctorCommand } from './cli/doctor-cmd.js'
 import { registerDeployCommand } from './cli/deploy-cmd.js'
@@ -43,6 +44,7 @@ program
 registerInitCommand(program)
 registerServerCommands(program)
 registerConfigCommand(program)
+registerConfigDirCommand(program)
 registerTunnelCommand(program)
 registerDoctorCommand(program)
 registerDeployCommand(program)

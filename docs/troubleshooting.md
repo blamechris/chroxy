@@ -149,6 +149,26 @@ Or set the token manually in `~/.chroxy/config.json`:
 { "apiToken": "your-token-here" }
 ```
 
+**First, check whether you set `CHROXY_CONFIG_DIR`.** If you did, `chroxy init`
+is the wrong fix and will cost you every paired device: it mints a *brand new*
+token, and the old one is what your devices are paired with. Since #7052 the
+variable relocates all daemon state, so a `config.json` still sitting at
+`~/.chroxy` is simply not read, and on a host without an OS keychain that reads
+as "no token configured".
+
+The daemon names this case explicitly in the error, and `chroxy doctor` reports
+it as a `Config/state root` warning. To confirm and fix:
+
+```bash
+chroxy config-dir status         # what is stranded, and where
+chroxy config-dir migrate --yes  # copy it forward (never overwrites)
+```
+
+The same relocation silently strands `server-identity.json`. On a keychain-less
+host that makes the daemon mint a **new identity key**, which pinned clients
+report as a possible MITM — migrating before first start avoids it; if you have
+already hit it, re-pair.
+
 ## 2. App can't connect (timeout or "connection failed")
 
 **Diagnostic steps:**
