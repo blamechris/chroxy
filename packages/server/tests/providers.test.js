@@ -10,6 +10,10 @@ import { CodexSession } from '../src/codex-session.js'
 import { CodexAppServerSession } from '../src/codex-app-server-session.js'
 import { GeminiSession } from '../src/gemini-session.js'
 
+// #7052 — the sandbox config dir this process started with. Tests below
+// relocate it alongside HOME and restore it here on teardown.
+const __sandboxConfigDir = process.env.CHROXY_CONFIG_DIR
+
 describe('Provider Registry', () => {
   it('has claude-cli and claude-sdk pre-registered', () => {
     const cli = getProvider('claude-cli')
@@ -232,7 +236,7 @@ describe('Provider Registry', () => {
   // so the dashboard can grey-out unusable providers and show a billing-
   // identity confidence panel without making the user run `chroxy doctor`.
   describe('auth status (#3404 audit)', () => {
-    const ENV_KEYS = ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY', 'DEEPSEEK_API_KEY', 'CHROXY_CLAUDE_HOME', 'CHROXY_CLAUDE_CONFIG', 'CHROXY_CODEX_HOME', 'CHROXY_GEMINI_HOME']
+    const ENV_KEYS = ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY', 'DEEPSEEK_API_KEY', 'CHROXY_CLAUDE_HOME', 'CHROXY_CLAUDE_CONFIG', 'CHROXY_CODEX_HOME', 'CHROXY_GEMINI_HOME', 'CHROXY_CONFIG_DIR']
     const saved = {}
     let _tmpClaudeHome = null
     let _tmpCodexHome = null
@@ -688,6 +692,7 @@ describe('Provider Registry', () => {
       try {
         clearKeys()
         process.env.HOME = tmpFsHome
+        process.env.CHROXY_CONFIG_DIR = join(tmpFsHome, '.chroxy')
         mkdirSync(join(tmpFsHome, '.chroxy'), { recursive: true })
         const credPath = join(tmpFsHome, '.chroxy', 'credentials.json')
         writeFileSync(credPath, JSON.stringify({ deepseekApiKey: 'sk-from-file' }))
@@ -705,6 +710,7 @@ describe('Provider Registry', () => {
       } finally {
         if (savedHome) process.env.HOME = savedHome
         else delete process.env.HOME
+        process.env.CHROXY_CONFIG_DIR = __sandboxConfigDir
         rmSync(tmpFsHome, { recursive: true, force: true })
         restoreKeys()
       }
@@ -1197,7 +1203,7 @@ describe('listProviders credential-file caching (#4658)', () => {
   // Env vars the cache key is sensitive to. Saved/restored per test so a
   // stray ANTHROPIC_API_KEY in the developer env doesn't suppress the file
   // path under test.
-  const ENV_KEYS = ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'DEEPSEEK_API_KEY', 'HOME', 'CHROXY_CLAUDE_HOME', 'CHROXY_CLAUDE_CONFIG', 'CHROXY_CODEX_HOME', 'CHROXY_GEMINI_HOME']
+  const ENV_KEYS = ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'DEEPSEEK_API_KEY', 'HOME', 'CHROXY_CLAUDE_HOME', 'CHROXY_CLAUDE_CONFIG', 'CHROXY_CODEX_HOME', 'CHROXY_GEMINI_HOME', 'CHROXY_CONFIG_DIR']
   let saved
   let tmpHome
   let _tmpClaudeHome
@@ -1212,6 +1218,7 @@ describe('listProviders credential-file caching (#4658)', () => {
     }
     tmpHome = mkdtempSync(join(tmpdir(), 'chroxy-cred-cache-test-'))
     process.env.HOME = tmpHome
+    process.env.CHROXY_CONFIG_DIR = join(tmpHome, '.chroxy')
     mkdirSync(join(tmpHome, '.chroxy'), { recursive: true, mode: 0o700 })
 
     // #3674-style isolation for the OAuth probes so they don't accidentally

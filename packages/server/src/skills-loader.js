@@ -67,10 +67,13 @@ import { dirname, join, relative, resolve, sep } from 'path'
 import { homedir } from 'os'
 import { createLogger } from './logger.js'
 import { getErrorMessage } from './utils/error-message.js'
+import { configPath } from './config-dir.js'
 
 const log = createLogger('skills-loader')
 
-export const DEFAULT_SKILLS_DIR = join(homedir(), '.chroxy', 'skills')
+export function defaultSkillsDir() {
+  return configPath('skills')
+}
 
 // Cap walk-up iterations as a safety belt; real repos are nowhere near this deep.
 const REPO_DISCOVERY_MAX_DEPTH = 100
@@ -1448,7 +1451,7 @@ export function findRepoSkillsDir(cwd) {
       if (statSync(candidate).isDirectory()) {
         // Defensive: the user's global skills dir is never a repo overlay.
         // Even if we somehow walk up to it, refuse to claim it as repo-scoped.
-        if (_sameAbsolutePath(candidate, DEFAULT_SKILLS_DIR)) return null
+        if (_sameAbsolutePath(candidate, defaultSkillsDir())) return null
         return candidate
       }
     } catch {
@@ -1772,7 +1775,7 @@ export const SKILLS_PROMPT_HEADER = [
  *
  * @param {object} args
  * @param {string} args.skillName - The skill's display name (no extension).
- * @param {string} [args.globalDir] - Defaults to DEFAULT_SKILLS_DIR.
+ * @param {string} [args.globalDir] - Defaults to defaultSkillsDir().
  * @param {string|null} [args.repoDir] - Optional repo overlay dir.
  * @param {string[]} [args.allowedExtensions] - Defaults to DEFAULT_ALLOWED_EXTENSIONS.
  * @returns {{ realPath: string, body: string } | null}
@@ -1793,7 +1796,7 @@ export function findSkillForRetrust({
   if (repoDir) dirs.push({ dir: repoDir, source: 'repo' })
   if (globalDir) dirs.push({ dir: globalDir, source: 'global' })
   if (dirs.length === 0) {
-    dirs.push({ dir: DEFAULT_SKILLS_DIR, source: 'global' })
+    dirs.push({ dir: defaultSkillsDir(), source: 'global' })
   }
 
   for (const { dir } of dirs) {

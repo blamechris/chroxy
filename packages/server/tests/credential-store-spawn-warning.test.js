@@ -14,6 +14,10 @@ import {
 } from '../src/credential-store.js'
 import { CRED_KEY_SERVICE } from '../src/credential-cipher.js'
 
+// #7052 — the sandbox config dir this process started with. Tests below
+// relocate it alongside HOME and restore it here on teardown.
+const __sandboxConfigDir = process.env.CHROXY_CONFIG_DIR
+
 /**
  * #5242 — the spawn path must not SILENTLY resolve an encrypted credential to
  * null when the keychain data key is momentarily unavailable (locked keychain,
@@ -51,6 +55,7 @@ describe('credential-store — encrypted-keychain-unavailable warning (#5242)', 
     tmpHome = mkdtempSync(join(tmpdir(), 'chroxy-cred-warn-'))
     originalHome = process.env.HOME
     process.env.HOME = tmpHome
+    process.env.CHROXY_CONFIG_DIR = join(tmpHome, '.chroxy')
     for (const k of CRED_ENV_VARS) { savedEnv[k] = process.env[k]; delete process.env[k] }
     logger = capturingLogger()
     _setCredentialLoggerForTests(logger)
@@ -63,6 +68,7 @@ describe('credential-store — encrypted-keychain-unavailable warning (#5242)', 
     _resetKeychainWarningsForTests()
     if (originalHome) process.env.HOME = originalHome
     else delete process.env.HOME
+    process.env.CHROXY_CONFIG_DIR = __sandboxConfigDir
     for (const k of CRED_ENV_VARS) { if (savedEnv[k] === undefined) delete process.env[k]; else process.env[k] = savedEnv[k] }
     try { rmSync(tmpHome, { recursive: true, force: true }) } catch { /* */ }
   })

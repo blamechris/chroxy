@@ -10,8 +10,7 @@
 
 import { readFileSync, existsSync, mkdirSync, copyFileSync, constants as fsConstants } from 'fs'
 import { createHash } from 'crypto'
-import { join, dirname } from 'path'
-import { homedir } from 'os'
+import { dirname } from 'path'
 import { writeFileRestricted } from './platform.js'
 import { parseDuration } from './duration.js'
 import { createLogger } from './logger.js'
@@ -23,6 +22,7 @@ import { validateProvidersConfigBlock } from './anthropic-compatible-config.js'
 // Imported from the pure title module (no provider/SDK deps) so config load stays
 // lightweight.
 import { DEFAULT_SEMANTIC_TITLE_MODEL, DEFAULT_SEMANTIC_TITLE_TIMEOUT_MS } from './session-title.js'
+import { configPath } from './config-dir.js'
 
 const log = createLogger('config')
 
@@ -1921,14 +1921,16 @@ export async function buildEnvironmentBackend(config, { _execFile, _loadBackends
   return { backend, type }
 }
 
-const DEFAULT_CONFIG_PATH = join(homedir(), '.chroxy', 'config.json')
+function defaultConfigPath() {
+  return configPath('config.json')
+}
 
 /**
  * Read the repos array from a config file.
  * @param {string} [configPath] - Path to config.json. Defaults to ~/.chroxy/config.json.
  * @returns {Array<{ path: string, name?: string }>} Repos array, or [] if missing/invalid.
  */
-export function readReposFromConfig(configPath = DEFAULT_CONFIG_PATH) {
+export function readReposFromConfig(configPath = defaultConfigPath()) {
   try {
     if (!existsSync(configPath)) return []
     const raw = JSON.parse(readFileSync(configPath, 'utf-8'))
@@ -2060,7 +2062,7 @@ function refuseMalformedConfig(configPath, reason, bytes) {
  * @param {Array<{ path: string, name?: string }>} repos - Repos array to write.
  * @param {string} [configPath] - Path to config.json. Defaults to ~/.chroxy/config.json.
  */
-export function writeReposToConfig(repos, configPath = DEFAULT_CONFIG_PATH) {
+export function writeReposToConfig(repos, configPath = defaultConfigPath()) {
   const existing = readConfigForMerge(configPath)
   existing.repos = repos
   const dir = dirname(configPath)
@@ -2083,7 +2085,7 @@ export function writeReposToConfig(repos, configPath = DEFAULT_CONFIG_PATH) {
  * @param {object|null} preset - The preset object ({ preamble?, seed?, enabled? }) or null to clear.
  * @param {string} [configPath] - Path to config.json. Defaults to ~/.chroxy/config.json.
  */
-export function writeSessionPresetOverrideToConfig(repoPath, preset, configPath = DEFAULT_CONFIG_PATH) {
+export function writeSessionPresetOverrideToConfig(repoPath, preset, configPath = defaultConfigPath()) {
   const existing = readConfigForMerge(configPath)
   if (!Array.isArray(existing.repos)) existing.repos = []
 
@@ -2134,7 +2136,7 @@ export function writeSessionPresetOverrideToConfig(repoPath, preset, configPath 
  * @param {boolean} enabled - the new gate value.
  * @param {string} [configPath] - Path to config.json. Defaults to ~/.chroxy/config.json.
  */
-export function writeSchedulerEnabledToConfig(enabled, configPath = DEFAULT_CONFIG_PATH) {
+export function writeSchedulerEnabledToConfig(enabled, configPath = defaultConfigPath()) {
   const existing = readConfigForMerge(configPath)
   // A non-object `features` is a single stray FIELD, not the whole config, so it
   // is repaired in place rather than refused — the operator's other settings
@@ -2153,7 +2155,7 @@ export function writeSchedulerEnabledToConfig(enabled, configPath = DEFAULT_CONF
  * @param {string} [configPath] - Path to config.json. Defaults to ~/.chroxy/config.json.
  * @returns {string|undefined} The configured root, or undefined if missing/invalid.
  */
-export function readControlRoomRootFromConfig(configPath = DEFAULT_CONFIG_PATH) {
+export function readControlRoomRootFromConfig(configPath = defaultConfigPath()) {
   try {
     if (!existsSync(configPath)) return undefined
     const raw = JSON.parse(readFileSync(configPath, 'utf-8'))
@@ -2173,7 +2175,7 @@ export function readControlRoomRootFromConfig(configPath = DEFAULT_CONFIG_PATH) 
  * @param {string} root - Absolute path to the discovery root.
  * @param {string} [configPath] - Path to config.json. Defaults to ~/.chroxy/config.json.
  */
-export function writeControlRoomRootToConfig(root, configPath = DEFAULT_CONFIG_PATH) {
+export function writeControlRoomRootToConfig(root, configPath = defaultConfigPath()) {
   const existing = readConfigForMerge(configPath)
   existing.controlRoomRoot = root
   const dir = dirname(configPath)

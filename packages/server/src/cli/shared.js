@@ -5,13 +5,17 @@
  * config loading, and helper functions.
  */
 import { existsSync, readFileSync } from 'fs'
-import { join } from 'path'
-import { homedir } from 'os'
 import readline from 'readline'
 import { validateConfig, mergeConfig, isFatalConfigWarning, DEFAULT_MAX_PAYLOAD_BYTES } from '../config.js'
+import { configDir, configPath } from '../config-dir.js'
 
-export const CONFIG_DIR = join(homedir(), '.chroxy')
-export const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
+// Re-exported so CLI command modules keep importing their paths from one place.
+export { configDir }
+
+/** `<config dir>/config.json`, resolved per call so CHROXY_CONFIG_DIR is honored (#7052). */
+export function configFile() {
+  return configPath('config.json')
+}
 
 /**
  * Interactive prompt helper
@@ -35,7 +39,7 @@ export function prompt(question) {
  */
 export function addServerOptions(cmd) {
   return cmd
-    .option('-c, --config <path>', 'Path to config file', CONFIG_FILE)
+    .option('-c, --config <path>', 'Path to config file', configFile())
     .option('--host <address>', 'Bind address (default: 0.0.0.0; use 127.0.0.1 for loopback-only). Auth stays enabled.')
     .option('--cwd <path>', 'Working directory for Claude')
     .option('--model <model>', 'Model to use')
@@ -107,7 +111,7 @@ export function loadAndMergeConfig(options, extraOverrides = {}) {
       }
       throw err
     }
-  } else if (options.config !== CONFIG_FILE) {
+  } else if (options.config !== configFile()) {
     console.error(`❌ Config file not found: ${options.config}`)
     process.exit(1)
   } else {

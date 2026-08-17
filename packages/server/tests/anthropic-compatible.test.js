@@ -20,6 +20,10 @@ import { OllamaSession } from '../src/ollama-session.js'
 import { validateConfig } from '../src/config.js'
 import { resetCachesForTest } from '../src/auth-probes.js'
 
+// #7052 — the sandbox config dir this process started with. Tests below
+// relocate it alongside HOME and restore it here on teardown.
+const __sandboxConfigDir = process.env.CHROXY_CONFIG_DIR
+
 /**
  * Tests for config-driven Anthropic-compatible provider endpoints
  * (#5419) — `providers.anthropicCompatible` in config.json.
@@ -538,6 +542,7 @@ describe('credential resolution', () => {
     tmpHome = mkdtempSync(join(tmpdir(), 'chroxy-compat-cred-test-'))
     originalHome = process.env.HOME
     process.env.HOME = tmpHome
+    process.env.CHROXY_CONFIG_DIR = join(tmpHome, '.chroxy')
     delete process.env[ENV_VAR]
     resetCachesForTest()
   })
@@ -545,6 +550,7 @@ describe('credential resolution', () => {
   afterEach(() => {
     if (originalHome) process.env.HOME = originalHome
     else delete process.env.HOME
+    process.env.CHROXY_CONFIG_DIR = __sandboxConfigDir
     delete process.env[ENV_VAR]
     rmSync(tmpHome, { recursive: true, force: true })
     resetCachesForTest()
@@ -628,6 +634,7 @@ describe('credential file read caching (#5461)', () => {
     tmpHome = mkdtempSync(join(tmpdir(), 'chroxy-compat-cache-test-'))
     originalHome = process.env.HOME
     process.env.HOME = tmpHome
+    process.env.CHROXY_CONFIG_DIR = join(tmpHome, '.chroxy')
     delete process.env[ENV_VAR]
     resetCachesForTest()
   })
@@ -635,6 +642,7 @@ describe('credential file read caching (#5461)', () => {
   afterEach(() => {
     if (originalHome) process.env.HOME = originalHome
     else delete process.env.HOME
+    process.env.CHROXY_CONFIG_DIR = __sandboxConfigDir
     delete process.env[ENV_VAR]
     rmSync(tmpHome, { recursive: true, force: true })
     resetCachesForTest()

@@ -85,6 +85,16 @@ export function runCli(args, opts = {}) {
     ...(opts.env || {}),
   }
 
+  // A caller can UNSET a sandboxed var by passing null, which the spread alone
+  // cannot express. Needed to exercise a home fallback: the sandbox sets
+  // CHROXY_CONFIG_DIR unconditionally, so a test asserting "falls back to
+  // $HOME/.chroxy when the var is unset" would otherwise never run the fallback
+  // branch and would pass against a resolver that had dropped it entirely.
+  // HOME is still isolated, so this stays hermetic.
+  for (const [k, v] of Object.entries(env)) {
+    if (v === null || v === undefined) delete env[k]
+  }
+
   return new Promise((resolvePromise) => {
     const child = spawn(process.execPath, [CLI_PATH, ...args], {
       env,

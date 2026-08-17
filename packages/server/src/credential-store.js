@@ -42,13 +42,13 @@
  * docs/security/credentials-at-rest.md for the full threat model.
  */
 import { readFileSync, statSync, writeFileSync, chmodSync, renameSync, mkdirSync, unlinkSync, existsSync } from 'fs'
-import { join, dirname } from 'path'
-import { homedir } from 'os'
+import { dirname } from 'path'
 import { randomBytes } from 'crypto'
 import { maskApiKey } from './byok-credentials.js'
 import * as realKeychain from './keychain.js'
 import { createLogger } from './logger.js'
 import { fsyncForDurability, confirmRenameDurable } from './platform.js'
+import { configPath } from './config-dir.js'
 import {
   CRED_KEY_SERVICE,
   isEncryptedEnvelope,
@@ -215,7 +215,7 @@ export function isKnownCredentialKey(key) {
 // Lazy-resolved per call so tests that mutate process.env.HOME between cases
 // pick up the new home; if captured at module load it would freeze on first import.
 function credentialsFilePath() {
-  return join(homedir(), '.chroxy', 'credentials.json')
+  return configPath('credentials.json')
 }
 
 /**

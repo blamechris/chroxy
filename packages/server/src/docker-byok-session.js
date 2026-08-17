@@ -123,7 +123,7 @@
 import { execFile } from 'child_process'
 import { mkdirSync, writeFileSync, unlinkSync } from 'fs'
 import { createHash, randomBytes } from 'crypto'
-import { homedir, tmpdir } from 'os'
+import { tmpdir } from 'os'
 import { isAbsolute, join, posix, resolve, sep } from 'path'
 import { ClaudeByokSession } from './byok-session.js'
 import {
@@ -147,6 +147,7 @@ import {
 import { isOperatorTimeoutInRange } from './duration.js'
 import { getErrorMessage } from './utils/error-message.js'
 import { VALID_USERNAME_RE } from './utils/validation-patterns.js'
+import { configPath } from './config-dir.js'
 
 const log = createLogger('docker-byok')
 
@@ -566,7 +567,7 @@ export class DockerByokSession extends ClaudeByokSession {
       : null
     this._snapshotsDir = typeof opts.snapshotsDir === 'string' && opts.snapshotsDir.trim().length > 0
       ? opts.snapshotsDir.trim()
-      : join(process.env.CHROXY_CONFIG_DIR || join(homedir(), '.chroxy'), 'snapshots')
+      : configPath('snapshots')
     this._sourceSessionId = typeof opts.sourceSessionId === 'string' && opts.sourceSessionId.trim().length > 0
       ? opts.sourceSessionId.trim()
       : null

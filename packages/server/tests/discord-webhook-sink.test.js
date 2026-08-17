@@ -53,17 +53,37 @@ function inMemoryKeychain() {
 let originalFetch
 let originalHome
 let originalEnvUrl
+let originalConfigDir
+
+/**
+ * Point the daemon's config dir at a fresh temp home and return it.
+ *
+ * Since #7052 the credentials file is `configPath('credentials.json')`, so it
+ * follows CHROXY_CONFIG_DIR rather than always sitting at `~/.chroxy`. Setting
+ * HOME alone no longer moves it — the suite-wide sandbox (tests/_setup.mjs)
+ * pins CHROXY_CONFIG_DIR to its own tmp dir, which would win. These tests write
+ * a fixture to `<home>/.chroxy/credentials.json` and expect the resolver to
+ * read it, so both have to point at the same place.
+ */
+function useTempHome(home = mkdtempSync(join(tmpdir(), 'discord-home-'))) {
+  process.env.HOME = home
+  process.env.CHROXY_CONFIG_DIR = join(home, '.chroxy')
+  return home
+}
 
 beforeEach(() => {
   originalFetch = globalThis.fetch
   originalHome = process.env.HOME
   originalEnvUrl = process.env.CHROXY_DISCORD_WEBHOOK_URL
+  originalConfigDir = process.env.CHROXY_CONFIG_DIR
   delete process.env.CHROXY_DISCORD_WEBHOOK_URL
 })
 
 afterEach(() => {
   globalThis.fetch = originalFetch
   process.env.HOME = originalHome
+  if (originalConfigDir === undefined) delete process.env.CHROXY_CONFIG_DIR
+  else process.env.CHROXY_CONFIG_DIR = originalConfigDir
   if (originalEnvUrl === undefined) delete process.env.CHROXY_DISCORD_WEBHOOK_URL
   else process.env.CHROXY_DISCORD_WEBHOOK_URL = originalEnvUrl
   mock.restoreAll()
@@ -135,7 +155,7 @@ const errored = (data = {}) => ({
 describe('discord-credentials — webhook URL sourcing', () => {
   it('env var wins over the credentials file', () => {
     const home = mkdtempSync(join(tmpdir(), 'discord-home-'))
-    process.env.HOME = home
+    useTempHome(home)
     mkdirSync(join(home, '.chroxy'), { recursive: true })
     const file = join(home, '.chroxy', 'credentials.json')
     writeFileSync(file, JSON.stringify({ discordWebhookUrl: 'https://discord.com/api/webhooks/1/file-token-aaaaaaaaaaaaaaaaaaaa' }), { mode: 0o600 })
@@ -149,7 +169,7 @@ describe('discord-credentials — webhook URL sourcing', () => {
   it('reads discordWebhookUrl from a 0600 credentials.json', () => {
     // Temp home — the #4633 sandbox guard only protects the REAL home.
     const home = mkdtempSync(join(tmpdir(), 'discord-home-'))
-    process.env.HOME = home
+    useTempHome(home)
     const dir = join(home, '.chroxy')
     const file = join(dir, 'credentials.json')
     mkdirSync(dir, { recursive: true })
@@ -162,7 +182,7 @@ describe('discord-credentials — webhook URL sourcing', () => {
 
   it('refuses a credentials file that is not 0600', () => {
     const home = mkdtempSync(join(tmpdir(), 'discord-home-'))
-    process.env.HOME = home
+    useTempHome(home)
     mkdirSync(join(home, '.chroxy'), { recursive: true })
     const file = join(home, '.chroxy', 'credentials.json')
     writeFileSync(file, JSON.stringify({ discordWebhookUrl: WEBHOOK }))
@@ -173,7 +193,7 @@ describe('discord-credentials — webhook URL sourcing', () => {
   })
 
   it('resolves to none when neither env nor file is present', () => {
-    process.env.HOME = mkdtempSync(join(tmpdir(), 'discord-home-'))
+    useTempHome()
     const r = resolveDiscordWebhookUrl()
     assert.equal(r.url, null)
     assert.equal(r.source, 'none')
@@ -183,7 +203,7 @@ describe('discord-credentials — webhook URL sourcing', () => {
   // var, and credentials.json is the encrypted BYOK envelope — so the webhook
   // must be readable straight from the OS keychain as a third source.
   it('falls back to the keychain when env and file are both absent (#5493)', () => {
-    process.env.HOME = mkdtempSync(join(tmpdir(), 'discord-home-'))
+    useTempHome()
     const r = resolveDiscordWebhookUrl({
       keychainGet: (service, account) =>
         service === 'chroxy-discord-webhook' && account === 'webhook-url' ? WEBHOOK : null,
@@ -193,7 +213,7 @@ describe('discord-credentials — webhook URL sourcing', () => {
   })
 
   it('env var wins over the keychain (#5493)', () => {
-    process.env.HOME = mkdtempSync(join(tmpdir(), 'discord-home-'))
+    useTempHome()
     process.env.CHROXY_DISCORD_WEBHOOK_URL = WEBHOOK
     const r = resolveDiscordWebhookUrl({ keychainGet: () => 'https://discord.com/api/webhooks/9/keychain-token-zzzzzzzzzzzzzzzzzzzz' })
     assert.equal(r.source, 'env')
@@ -202,7 +222,7 @@ describe('discord-credentials — webhook URL sourcing', () => {
 
   it('the credentials file wins over the keychain (#5493)', () => {
     const home = mkdtempSync(join(tmpdir(), 'discord-home-'))
-    process.env.HOME = home
+    useTempHome(home)
     const dir = join(home, '.chroxy')
     mkdirSync(dir, { recursive: true })
     const file = join(dir, 'credentials.json')
@@ -214,7 +234,7 @@ describe('discord-credentials — webhook URL sourcing', () => {
   })
 
   it('keychain miss leaves source none with a reason noting the keychain was checked (#5493)', () => {
-    process.env.HOME = mkdtempSync(join(tmpdir(), 'discord-home-'))
+    useTempHome()
     const r = resolveDiscordWebhookUrl({ keychainGet: () => null })
     assert.equal(r.url, null)
     assert.equal(r.source, 'none')
@@ -230,7 +250,7 @@ describe('discord-credentials — webhook URL sourcing', () => {
   it('non-ENOENT stat failure (EACCES) surfaces the real error, not "does not exist" (#5523)', () => {
     if (process.getuid && process.getuid() === 0) return // root bypasses dir perms
     const home = mkdtempSync(join(tmpdir(), 'discord-home-'))
-    process.env.HOME = home
+    useTempHome(home)
     const dir = join(home, '.chroxy')
     const file = join(dir, 'credentials.json')
     mkdirSync(dir, { recursive: true })
@@ -255,7 +275,7 @@ describe('discord-credentials — webhook URL sourcing', () => {
 
   it('missing-field reason is value-free and stable on a plaintext file', () => {
     const home = mkdtempSync(join(tmpdir(), 'discord-home-'))
-    process.env.HOME = home
+    useTempHome(home)
     const dir = join(home, '.chroxy')
     mkdirSync(dir, { recursive: true })
     const file = join(dir, 'credentials.json')
@@ -274,7 +294,7 @@ describe('discord-credentials — webhook URL sourcing', () => {
   // unconfigured. The resolver must decrypt via the keychain-backed key.
   it('reads discordWebhookUrl from an ENCRYPTED credentials.json (#5490)', () => {
     const home = mkdtempSync(join(tmpdir(), 'discord-home-'))
-    process.env.HOME = home
+    useTempHome(home)
     const dir = join(home, '.chroxy')
     mkdirSync(dir, { recursive: true })
     const file = join(dir, 'credentials.json')
@@ -306,7 +326,7 @@ describe('discord-credentials — webhook URL sourcing', () => {
 
   it('encrypted file + unavailable keychain → none with a value-free reason (#5490)', () => {
     const home = mkdtempSync(join(tmpdir(), 'discord-home-'))
-    process.env.HOME = home
+    useTempHome(home)
     const dir = join(home, '.chroxy')
     mkdirSync(dir, { recursive: true })
     const file = join(dir, 'credentials.json')
@@ -338,7 +358,7 @@ describe('discord-credentials — webhook URL sourcing', () => {
 
   it('cachedResolveDiscordWebhookUrl composes with decryption (#5490)', () => {
     const home = mkdtempSync(join(tmpdir(), 'discord-home-'))
-    process.env.HOME = home
+    useTempHome(home)
     const dir = join(home, '.chroxy')
     mkdirSync(dir, { recursive: true })
     const file = join(dir, 'credentials.json')

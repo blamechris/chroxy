@@ -2,12 +2,12 @@ import { EventEmitter } from 'events'
 import { randomBytes } from 'crypto'
 import { execFile } from 'child_process'
 import { existsSync, readFileSync, mkdirSync } from 'fs'
-import { dirname, join } from 'path'
-import { homedir } from 'os'
+import { dirname } from 'path'
 import { writeFileRestricted } from './platform.js'
 import { createLogger } from './logger.js'
 import { VALID_USERNAME_RE } from './utils/validation-patterns.js'
 import { DockerBackend } from './environments/backends/docker.js'
+import { configPath } from './config-dir.js'
 import {
   parseDevContainer,
   validateMounts,
@@ -16,7 +16,9 @@ import {
 
 const log = createLogger('environment-manager')
 
-const DEFAULT_STATE_PATH = join(homedir(), '.chroxy', 'environments.json')
+function defaultStatePath() {
+  return configPath('environments.json')
+}
 const DEFAULT_IMAGE = 'node:22-slim'
 const DEFAULT_MEMORY_LIMIT = '2g'
 const DEFAULT_CPU_LIMIT = '2'
@@ -57,7 +59,7 @@ export class EnvironmentManager extends EventEmitter {
    */
   constructor({ statePath, _execFile, backend, workspacePVCDefault } = {}) {
     super()
-    this._statePath = statePath || DEFAULT_STATE_PATH
+    this._statePath = statePath || defaultStatePath()
     this._environments = new Map()
     // Per-environment mutex: Map<envId, Promise> — serializes operations
     this._locks = new Map()

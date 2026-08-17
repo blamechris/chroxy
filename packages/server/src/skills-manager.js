@@ -24,7 +24,7 @@ import {
   formatSkillsForPrompt,
   groupSkillsByInjectionMode,
   findRepoSkillsDir,
-  DEFAULT_SKILLS_DIR,
+  defaultSkillsDir,
 } from './skills-loader.js'
 import { SkillsTrustStore } from './skills-trust.js'
 
@@ -90,7 +90,7 @@ export class SkillsManager {
 
     // Cache the immutable load-time inputs so the runtime toggle path (#3209)
     // can rebuild layerOpts without re-parsing constructor args.
-    this._skillsDir = skillsDir || DEFAULT_SKILLS_DIR
+    this._skillsDir = skillsDir || defaultSkillsDir()
     this._repoSkillsDir = repoSkillsDir !== undefined
       ? repoSkillsDir
       : findRepoSkillsDir(cwd)

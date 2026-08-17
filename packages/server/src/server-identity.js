@@ -32,13 +32,13 @@
  * path is overridable so tests never touch the real ~/.chroxy/ tree.
  */
 import { readFileSync, mkdirSync } from 'node:fs'
-import { join, dirname } from 'node:path'
-import { homedir } from 'node:os'
+import { dirname } from 'node:path'
 import { createSigningKeyPair, signIdentityRotation } from '@chroxy/store-core/crypto'
 import nacl from 'tweetnacl'
 import * as realKeychain from './keychain.js'
 import { writeFileRestricted } from './platform.js'
 import { createLogger } from './logger.js'
+import { configPath } from './config-dir.js'
 
 const log = createLogger('identity')
 
@@ -68,7 +68,9 @@ export class IdentityUnavailableError extends Error {
 }
 
 /** Default on-disk fallback location. Overridable for tests. */
-export const DEFAULT_IDENTITY_FILE = join(homedir(), '.chroxy', 'server-identity.json')
+export function defaultIdentityFile() {
+  return configPath('server-identity.json')
+}
 
 /**
  * #5616/#5976 — the identity-rotation continuity-cert sidecar. PUBLIC data only
@@ -78,7 +80,9 @@ export const DEFAULT_IDENTITY_FILE = join(homedir(), '.chroxy', 'server-identity
  * only the most-recent `prev → current` cert. A client pinned ≥2 rotations back
  * has no chain to follow and correctly falls back to manual re-pair.
  */
-export const DEFAULT_IDENTITY_ROTATION_FILE = join(homedir(), '.chroxy', 'server-identity-rotation.json')
+export function defaultIdentityRotationFile() {
+  return configPath('server-identity-rotation.json')
+}
 
 const SECRET_KEY_BYTES = nacl.sign.secretKeyLength // 64
 
@@ -114,7 +118,7 @@ function secretKeyFromStored(storedB64) {
  * @param {string} [opts.filePath] - fallback file path (defaults to ~/.chroxy/server-identity.json)
  * @returns {{ publicKey: string, secretKey: Uint8Array }|null}
  */
-export function loadServerIdentity({ keychain = realKeychain, filePath = DEFAULT_IDENTITY_FILE } = {}) {
+export function loadServerIdentity({ keychain = realKeychain, filePath = defaultIdentityFile() } = {}) {
   // Keychain first (when available). #5615: distinguish a genuine "absent" from a
   // READ FAILURE (locked / interaction-not-allowed). On a read failure we MUST
   // NOT fall through to the file / minting path — that would silently rotate the
@@ -202,7 +206,7 @@ function readIdentityFromKeychain(keychain) {
  */
 export function persistServerIdentity(keyPair, {
   keychain = realKeychain,
-  filePath = DEFAULT_IDENTITY_FILE,
+  filePath = defaultIdentityFile(),
   durable = false,
   _write = writeFileRestricted,
 } = {}) {
@@ -252,7 +256,7 @@ export function persistServerIdentity(keyPair, {
  * @returns {{ publicKey: string, secretKey: Uint8Array, created: boolean, backend: 'keychain'|'file' }}
  * @throws {IdentityUnavailableError} when the keychain read failed (case b)
  */
-export function getOrCreateServerIdentity({ keychain = realKeychain, filePath = DEFAULT_IDENTITY_FILE } = {}) {
+export function getOrCreateServerIdentity({ keychain = realKeychain, filePath = defaultIdentityFile() } = {}) {
   // NB: a keychain read failure throws IdentityUnavailableError here — let it
   // propagate. Catching it would re-enable the silent-rotation bug (#5615).
   const existing = loadServerIdentity({ keychain, filePath })
@@ -281,7 +285,7 @@ export function getOrCreateServerIdentity({ keychain = realKeychain, filePath = 
  * @param {string} [opts.rotationFilePath]
  * @returns {{ newIdentityKey: string, rotationCert: string, previousPublicKey: string }|null}
  */
-export function loadServerRotationCert({ rotationFilePath = DEFAULT_IDENTITY_ROTATION_FILE } = {}) {
+export function loadServerRotationCert({ rotationFilePath = defaultIdentityRotationFile() } = {}) {
   try {
     const parsed = JSON.parse(readFileSync(rotationFilePath, 'utf-8'))
     const { newIdentityKey, rotationCert, previousPublicKey } = parsed ?? {}
@@ -308,7 +312,7 @@ export function loadServerRotationCert({ rotationFilePath = DEFAULT_IDENTITY_ROT
  * @param {string} [opts.rotationFilePath]
  * @returns {{ rotationCert: string, previousPublicKey: string }|null}
  */
-export function resolveServerRotationCert(currentIdentityPublicKey, { rotationFilePath = DEFAULT_IDENTITY_ROTATION_FILE } = {}) {
+export function resolveServerRotationCert(currentIdentityPublicKey, { rotationFilePath = defaultIdentityRotationFile() } = {}) {
   const sidecar = loadServerRotationCert({ rotationFilePath })
   if (!sidecar) return null
   if (sidecar.newIdentityKey !== currentIdentityPublicKey) {
@@ -347,8 +351,8 @@ export function resolveServerRotationCert(currentIdentityPublicKey, { rotationFi
  */
 export function rotateServerIdentity({
   keychain = realKeychain,
-  filePath = DEFAULT_IDENTITY_FILE,
-  rotationFilePath = DEFAULT_IDENTITY_ROTATION_FILE,
+  filePath = defaultIdentityFile(),
+  rotationFilePath = defaultIdentityRotationFile(),
   _write = writeFileRestricted,
 } = {}) {
   const current = loadServerIdentity({ keychain, filePath })

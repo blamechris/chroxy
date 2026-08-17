@@ -73,8 +73,8 @@
 
 import { createHash } from 'node:crypto'
 import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, chmodSync, unlinkSync } from 'node:fs'
-import { homedir } from 'node:os'
-import { join, dirname } from 'node:path'
+import { dirname } from 'node:path'
+import { configPath } from './config-dir.js'
 
 /**
  * On-disk trust-record version. Bumped to 2 by #7001 (partial tuple → full
@@ -131,7 +131,7 @@ export async function withTrustStoreLock(filePath, critical) {
 }
 
 export function defaultTrustStorePath() {
-  return process.env.CHROXY_MCP_TRUST_PATH || join(homedir(), '.chroxy', 'mcp-trust.json')
+  return process.env.CHROXY_MCP_TRUST_PATH || configPath('mcp-trust.json')
 }
 
 /**

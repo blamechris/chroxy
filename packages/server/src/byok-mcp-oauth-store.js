@@ -23,11 +23,11 @@
  * key and NEVER touch the real OS keychain.
  */
 import { readFileSync, statSync, writeFileSync, chmodSync, renameSync, mkdirSync, unlinkSync, existsSync } from 'node:fs'
-import { join, dirname } from 'node:path'
-import { homedir } from 'node:os'
+import { dirname } from 'node:path'
 import { randomBytes } from 'node:crypto'
 import * as realKeychain from './keychain.js'
 import { createLogger } from './logger.js'
+import { configPath } from './config-dir.js'
 import {
   isEncryptedEnvelope,
   decryptEnvelope,
@@ -118,7 +118,7 @@ export function _setMcpOAuthKeychainForTests(keychain) {
 // up the new home (frozen-at-import would break the CHROXY_*_HOME isolation the
 // provider-oauth-test-isolation memory prescribes).
 function tokensFilePath() {
-  return process.env.CHROXY_MCP_OAUTH_TOKENS_PATH || join(homedir(), '.chroxy', 'mcp-oauth-tokens.json')
+  return process.env.CHROXY_MCP_OAUTH_TOKENS_PATH || configPath('mcp-oauth-tokens.json')
 }
 
 /**

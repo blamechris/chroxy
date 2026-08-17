@@ -7,6 +7,10 @@ import { createFileOps } from '../src/ws-file-ops/index.js'
 import { encodeProjectPath } from '../src/jsonl-reader.js'
 import { resolveSessionCwd } from '../src/ws-file-ops/common.js'
 
+// #7052 — the sandbox config dir this process started with. Tests below
+// relocate it alongside HOME and restore it here on teardown.
+const __sandboxConfigDir = process.env.CHROXY_CONFIG_DIR
+
 /**
  * `readMemory` op (#6864, epic #6760) — server read of the effective merged
  * CLAUDE.md memory stack (global/project/local + @imports) plus the project's
@@ -37,11 +41,13 @@ describe('memory_read (readMemory) handler', () => {
   after(() => {
     if (originalHome) process.env.HOME = originalHome
     else delete process.env.HOME
+    process.env.CHROXY_CONFIG_DIR = __sandboxConfigDir
   })
 
   beforeEach(async () => {
     fakeHome = await mkdtemp(join(tmpdir(), 'chroxy-memhome-'))
     process.env.HOME = fakeHome
+    process.env.CHROXY_CONFIG_DIR = join(fakeHome, '.chroxy')
     responses.length = 0
   })
 

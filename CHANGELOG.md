@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`CHROXY_CONFIG_DIR` now relocates ALL daemon state (#7052).** It previously
+  moved only about half of it: `models.json`, `connection.json`, `pages/`,
+  `snapshots/`, `checkpoints/`, `ingest-secret` and the session-token store
+  followed it, while roughly twenty other files stayed pinned to `~/.chroxy`
+  regardless. Every path now resolves through one accessor that reads the
+  variable per call.
+
+  **If you do not set `CHROXY_CONFIG_DIR`, nothing changes** — the default is
+  still `~/.chroxy` and every path resolves exactly as before.
+
+  **If you DO set it**, the following move out of `~/.chroxy` on upgrade and the
+  daemon will not find your existing files there: `config.json`,
+  `credentials.json`, `session-state.json`, `scheduled-tasks.json`,
+  `server-identity.json`, `server-identity-rotation.json`, `environments.json`,
+  `notification-prefs.json`, `push-tokens.json`, `discord-webhook-state.json`,
+  `discord-billing-state.json`, `binary-trust.json`, `skills-trust.json`,
+  `session-preset-trust.json`, `supervisor.pid`, `known-good-ref`, `skills/`,
+  `worktrees/` and `logs/`.
+
+  Move them once, before starting the upgraded daemon:
+
+  ```bash
+  # with CHROXY_CONFIG_DIR set to your chosen directory
+  mkdir -p "$CHROXY_CONFIG_DIR"
+  cp -a ~/.chroxy/. "$CHROXY_CONFIG_DIR"/
+  ```
+
+  Two consequences are worth calling out because they are easy to misread:
+
+  - **Do NOT run `chroxy init` to fix a "No API token configured" error.** On a
+    host without an OS keychain the token lives in `config.json`; if that file
+    has not been moved the daemon exits with `Run 'chroxy init' first`, but
+    `init` mints a *brand new* token and every paired device has to re-pair.
+    Move `config.json` instead.
+  - On a host without an OS keychain, an unmoved `server-identity.json` makes
+    the daemon mint a **new identity key**, which pinned clients report as a
+    possible MITM. Moving the file avoids it; if you have already hit this, the
+    fix is to re-pair.
+
+  The daemon now logs its resolved config/state root at startup, so you can
+  confirm which directory it actually opened. A relative `CHROXY_CONFIG_DIR` is
+  now refused (with a warning) and falls back to `~/.chroxy`, rather than
+  scattering credentials into whatever directory the daemon was launched from.
+
+  `chroxy service install` now bakes `CHROXY_CONFIG_DIR` into the generated
+  launchd plist / systemd unit / Windows wrapper when it is set, so the
+  installed service and your shell agree on one root.
+
 ## [0.11.0] - 2026-08-15
 
 The **Codex-controllable-like-Claude** release. Codex now flows through Chroxy's

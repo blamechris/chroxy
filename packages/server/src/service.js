@@ -4,9 +4,12 @@ import { existsSync, readFileSync, mkdirSync, unlinkSync, readdirSync, writeFile
 import { writeFileRestricted, isWindows } from './platform.js'
 import { execFileSync } from 'child_process'
 import { fileURLToPath } from 'url'
+import { configDir, configPath } from './config-dir.js'
 
 const SERVICE_LABEL = 'com.chroxy.server'
-const DEFAULT_CONFIG_DIR = join(homedir(), '.chroxy')
+function defaultConfigDir() {
+  return configDir()
+}
 const WRAPPER_NAME = 'service-wrapper.sh'
 // Windows Task Scheduler autostart (#6647). The task name the daemon registers
 // under, and the .cmd wrapper it runs (the Windows analogue of WRAPPER_NAME).
@@ -41,7 +44,7 @@ function escapeXml(str) {
  * @param {string} [plat] - Override platform (defaults to process.platform)
  */
 export function getServicePaths(plat = platform()) {
-  const logDir = join(homedir(), '.chroxy', 'logs')
+  const logDir = configPath('logs')
 
   if (plat === 'darwin') {
     return {
@@ -72,6 +75,28 @@ export function getServicePaths(plat = platform()) {
 /**
  * Generate a macOS launchd plist XML string.
  */
+/**
+ * The config root to bake into a generated service definition, or null.
+ *
+ * launchd's `EnvironmentVariables` dict and systemd's `Environment=` lines are
+ * the daemon's ENTIRE environment — neither inherits the shell that ran
+ * `chroxy service install`. Since #7052 every path the installer resolves
+ * (logDir, service.json, the wrapper) follows CHROXY_CONFIG_DIR, so omitting it
+ * here would start a daemon whose logs land in the relocated root while its
+ * state goes to ~/.chroxy: the same split-brain #7052 exists to remove, moved
+ * to the service boundary, and one the operator cannot fix from their shell.
+ *
+ * Emitted only when set, so a default install produces a byte-identical
+ * definition to before. Injectable for tests.
+ *
+ * @param {object} config
+ * @returns {string|null}
+ */
+function serviceConfigDirEnv(config) {
+  const raw = config?.configDirEnv !== undefined ? config.configDirEnv : process.env.CHROXY_CONFIG_DIR
+  return typeof raw === 'string' && raw.trim() ? raw : null
+}
+
 export function generateLaunchdPlist(config) {
   const {
     nodePath,
@@ -80,8 +105,9 @@ export function generateLaunchdPlist(config) {
     wrapperPath,
     cwd = homedir(),
     startAtLogin = false,
-    logDir = join(homedir(), '.chroxy', 'logs'),
+    logDir = configPath('logs'),
   } = config
+  const configDirEnv = serviceConfigDirEnv(config)
 
   // Bake a PATH that includes the node and claude bin dirs so the daemon's
   // preflight finds both under launchd's bare default PATH (#5491).
@@ -120,7 +146,9 @@ ${programArgs}
     <key>PATH</key>
     <string>${escapeXml(pathValue)}</string>
     <key>CHROXY_DAEMON</key>
-    <string>1</string>
+    <string>1</string>${configDirEnv ? `
+    <key>CHROXY_CONFIG_DIR</key>
+    <string>${escapeXml(configDirEnv)}</string>` : ''}
   </dict>
 </dict>
 </plist>
@@ -137,8 +165,9 @@ export function generateSystemdUnit(config) {
     claudeBin,
     wrapperPath,
     cwd = homedir(),
-    logDir = join(homedir(), '.chroxy', 'logs'),
+    logDir = configPath('logs'),
   } = config
+  const configDirEnv = serviceConfigDirEnv(config)
 
   // Bake a PATH that includes the node and claude bin dirs for parity with the
   // launchd plist (#5491).
@@ -160,7 +189,8 @@ WorkingDirectory=${cwd}
 Restart=on-failure
 RestartSec=5
 Environment=PATH=${pathValue}
-Environment=CHROXY_DAEMON=1
+Environment=CHROXY_DAEMON=1${configDirEnv ? `
+Environment=CHROXY_CONFIG_DIR=${configDirEnv}` : ''}
 StandardOutput=file:${join(logDir, 'chroxy-stdout.log')}
 StandardError=file:${join(logDir, 'chroxy-stderr.log')}
 
@@ -223,8 +253,9 @@ export function generateWindowsServiceWrapper(config) {
     chroxyBin,
     claudeBin,
     cwd = homedir(),
-    logDir = join(homedir(), '.chroxy', 'logs'),
+    logDir = configPath('logs'),
   } = config
+  const configDirEnv = serviceConfigDirEnv(config)
 
   // Use Windows path semantics regardless of host so the generated batch is
   // correct even when this runs on a POSIX CI runner under test (#6647).
@@ -252,6 +283,7 @@ export function generateWindowsServiceWrapper(config) {
     'rem `service install`; edits are lost.',
     `set "PATH=${pathPrepend};%PATH%"`,
     'set "CHROXY_DAEMON=1"',
+    ...(configDirEnv ? [`set "CHROXY_CONFIG_DIR=${configDirEnv}"`] : []),
     `cd /d "${cwd}"`,
     rotateCapture(stdoutLog, pathWin32.join(logDir, 'chroxy-stdout.old.log')),
     rotateCapture(stderrLog, pathWin32.join(logDir, 'chroxy-stderr.old.log')),
@@ -475,6 +507,7 @@ export function buildServicePath({ nodePath, claudeBin }) {
  */
 export function generateServiceWrapper(config) {
   const { nodePath, chroxyBin, pathValue } = config
+  const configDirEnv = serviceConfigDirEnv(config)
 
   const sh = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`
   const keychainBlock = ({ service, account, env }) => `
@@ -492,7 +525,8 @@ fi`
 set -e
 
 export PATH=${sh(pathValue)}
-export CHROXY_DAEMON=1
+export CHROXY_DAEMON=1${configDirEnv ? `
+export CHROXY_CONFIG_DIR=${sh(configDirEnv)}` : ''}
 ${keychainBlock(KEYCHAIN_API_TOKEN)}
 ${keychainBlock(KEYCHAIN_DISCORD_WEBHOOK)}
 
@@ -505,7 +539,7 @@ exec ${sh(nodePath)} ${sh(chroxyBin)} start
  * @param {string} [configDir] - Override config directory (for testing)
  * @returns {object|null}
  */
-export function loadServiceState(configDir = DEFAULT_CONFIG_DIR) {
+export function loadServiceState(configDir = defaultConfigDir()) {
   const statePath = join(configDir, 'service.json')
   if (!existsSync(statePath)) {
     return null
@@ -522,7 +556,7 @@ export function loadServiceState(configDir = DEFAULT_CONFIG_DIR) {
  * @param {object} state
  * @param {string} [configDir] - Override config directory (for testing)
  */
-export function saveServiceState(state, configDir = DEFAULT_CONFIG_DIR) {
+export function saveServiceState(state, configDir = defaultConfigDir()) {
   if (!existsSync(configDir)) {
     mkdirSync(configDir, { recursive: true })
   }
@@ -580,7 +614,7 @@ export function installService(config) {
 
   const servicePath = config._servicePath || (plat === 'darwin' ? paths.plistPath : paths.unitPath)
   const logDir = config._logDir || paths.logDir
-  const stateDir = config._stateDir || DEFAULT_CONFIG_DIR
+  const stateDir = config._stateDir || defaultConfigDir()
   const wrapperPath = config._wrapperPath || join(stateDir, WRAPPER_NAME)
 
   // Bake the resolved binary locations into the service PATH so the daemon's
@@ -682,7 +716,7 @@ export function installService(config) {
  * @returns {{ installed: true, platform: 'win32', taskName: string, wrapperPath: string }}
  */
 function installWindowsService(config, paths) {
-  const stateDir = config._stateDir || DEFAULT_CONFIG_DIR
+  const stateDir = config._stateDir || defaultConfigDir()
   const logDir = config._logDir || paths.logDir
   const wrapperPath = config._wrapperPath || join(stateDir, WINDOWS_WRAPPER_NAME)
   const taskName = config._taskName || WINDOWS_TASK_NAME
@@ -784,7 +818,7 @@ export function getWindowsTaskStatus(options = {}) {
  *   Injectable exec for testing (defaults to execFileSync).
  */
 export function uninstallService(options = {}) {
-  const stateDir = options._stateDir || DEFAULT_CONFIG_DIR
+  const stateDir = options._stateDir || defaultConfigDir()
   const state = loadServiceState(stateDir)
 
   if (!state) {
@@ -838,7 +872,7 @@ export function uninstallService(options = {}) {
 export function startService(options = {}) {
   const plat = options._platform || platform()
   const paths = getServicePaths(plat)
-  const stateDir = options._stateDir || DEFAULT_CONFIG_DIR
+  const stateDir = options._stateDir || defaultConfigDir()
   const exec = options._exec || execFileSync
 
   if (plat === 'win32') {
@@ -960,7 +994,7 @@ export function stopService(options = {}) {
  * @returns {{ installed: boolean, running: boolean, pid: number|null, stale: boolean }}
  */
 export function getServiceStatus(options = {}) {
-  const configDir = options.configDir || DEFAULT_CONFIG_DIR
+  const configDir = options.configDir || defaultConfigDir()
   const state = loadServiceState(configDir)
 
   if (!state) {
@@ -1010,7 +1044,7 @@ export function getServiceStatus(options = {}) {
  * @returns {Promise<object>} Full status including health, connection info, etc.
  */
 export async function getFullServiceStatus(options = {}) {
-  const configDir = options.configDir || DEFAULT_CONFIG_DIR
+  const configDir = options.configDir || defaultConfigDir()
   const status = getServiceStatus({ configDir })
   const result = { ...status }
 

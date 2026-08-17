@@ -23,8 +23,8 @@
  */
 
 import { existsSync, readFileSync, mkdirSync } from 'node:fs'
-import { dirname, join } from 'node:path'
-import { homedir } from 'node:os'
+import { dirname } from 'node:path'
+import { configPath } from './config-dir.js'
 
 import { writeFileRestricted } from './platform.js'
 
@@ -62,10 +62,9 @@ function cloneComposeFile(composeFile) {
  * `~/.chroxy/environments.json`. Honors CHROXY_CONFIG_DIR like the rest of
  * the docker-byok stack does.
  */
-export const DEFAULT_BYOK_COMPOSE_STATE_PATH = join(
-  process.env.CHROXY_CONFIG_DIR || join(homedir(), '.chroxy'),
-  'byok-compose-state.json',
-)
+export function defaultByokComposeStatePath() {
+  return configPath('byok-compose-state.json')
+}
 
 /**
  * Synchronous, crash-durable store of live compose project ids.
@@ -80,7 +79,7 @@ export class ByokComposeStateStore {
    * @param {string} [opts.statePath] - On-disk path for byok-compose-state.json.
    */
   constructor({ statePath } = {}) {
-    this._statePath = statePath || DEFAULT_BYOK_COMPOSE_STATE_PATH
+    this._statePath = statePath || defaultByokComposeStatePath()
     // Map<projectId, entry> so record() on an existing id replaces in place
     // and forget() is O(1). Insertion order is preserved by Map iteration.
     this._stacks = new Map()

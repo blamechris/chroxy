@@ -27,8 +27,7 @@
 
 import { randomBytes } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, openSync, writeSync, closeSync } from 'node:fs'
-import { dirname, join } from 'node:path'
-import { homedir } from 'node:os'
+import { dirname } from 'node:path'
 import { safeTokenCompare } from './token-compare.js'
 import { sendOversizeResponse } from './http-oversize.js'
 import { writeFileRestricted } from './platform.js'
@@ -45,6 +44,7 @@ import { IngestEventSchema } from '@chroxy/protocol'
 // Zod-free @chroxy/protocol/project subpath (audit P2-2, #5850) so the hook
 // (packages/claude-hooks/src/project.js) and this server fallback can't drift.
 import { deriveProjectFromCwd } from '@chroxy/protocol/project'
+import { configPath } from './config-dir.js'
 
 const log = createLogger('ingest')
 
@@ -163,8 +163,7 @@ export const INGEST_IDLE_PROMPT_MAPPING = {
 
 /** Default on-disk location for the ingest secret (0600, same-user reads). */
 export function defaultIngestSecretPath() {
-  const configDir = process.env.CHROXY_CONFIG_DIR || join(homedir(), '.chroxy')
-  return join(configDir, 'ingest-secret')
+  return configPath('ingest-secret')
 }
 
 // Synchronous millisecond sleep (Atomics.wait on a throwaway SharedArrayBuffer) —

@@ -14,7 +14,7 @@
  */
 import { existsSync, readFileSync } from 'fs'
 import { writeFileRestricted } from '../platform.js'
-import { CONFIG_FILE } from './shared.js'
+import { configFile } from './shared.js'
 
 // The OpenRouter preset, in one place so the CLI and any future dashboard
 // affordance write an identical entry. baseUrl is the Anthropic-compat root
@@ -98,7 +98,7 @@ export function runProvidersAddOpenRouter(options = {}, deps = {}) {
   const writeFileFn = deps.writeFileFn || writeFileRestricted
   const existsFn = deps.existsFn || existsSync
   const readFileFn = deps.readFileFn || ((p) => readFileSync(p, 'utf-8'))
-  const configFilePath = deps.configFilePath || options.config || CONFIG_FILE
+  const configFilePath = deps.configFilePath || options.config || configFile()
 
   let fileConfig = {}
   if (existsFn(configFilePath)) {
@@ -157,7 +157,7 @@ export function registerProvidersCommand(program) {
   add
     .command('openrouter')
     .description('Add the OpenRouter Anthropic-compatible provider (baseUrl + key seam + model discovery + pricing autofill)')
-    .option('-c, --config <path>', 'Path to config file', CONFIG_FILE)
+    .option('-c, --config <path>', 'Path to config file', configFile())
     .option('--force', 'Overwrite an existing openrouter entry with the current preset')
     .action((options) => {
       const result = runProvidersAddOpenRouter(options)

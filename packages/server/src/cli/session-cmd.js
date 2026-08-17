@@ -3,14 +3,14 @@
  */
 import { existsSync, readFileSync } from 'fs'
 import { join } from 'path'
-import { CONFIG_DIR } from './shared.js'
+import { configDir } from './shared.js'
 
 export function registerSessionCommands(program) {
   program
     .command('sessions')
     .description('List saved sessions with conversation IDs for terminal handoff')
     .action(() => {
-      const stateFile = join(CONFIG_DIR, 'session-state.json')
+      const stateFile = join(configDir(), 'session-state.json')
 
       if (!existsSync(stateFile)) {
         console.log('\nNo saved sessions found.')
@@ -59,7 +59,7 @@ export function registerSessionCommands(program) {
     .option('--dangerously-skip-permissions', 'Pass --dangerously-skip-permissions to claude')
     .action(async (sessionArg, options) => {
       const { execFileSync } = await import('child_process')
-      const stateFile = join(CONFIG_DIR, 'session-state.json')
+      const stateFile = join(configDir(), 'session-state.json')
 
       if (!existsSync(stateFile)) {
         console.error('No saved sessions found. Start the server first.')

@@ -192,20 +192,28 @@ describe('skills-loader', () => {
     // ---------------------------------------------------------------------
     // #3088: walk-up must not return ~/.chroxy/skills (the global tier) as
     // a repo overlay. We point HOME at a temp dir and re-import the module
-    // with a unique query string so DEFAULT_SKILLS_DIR / homedir() pick up
+    // with a unique query string so defaultSkillsDir() / homedir() pick up
     // the fake home.
     // ---------------------------------------------------------------------
     describe('home-directory boundary (#3088)', () => {
       let fakeHome
       let originalHome
       let originalUserprofile
+      let originalConfigDir
 
       beforeEach(() => {
         fakeHome = mkdtempSync(join(tmpdir(), 'chroxy-home-'))
         originalHome = process.env.HOME
         originalUserprofile = process.env.USERPROFILE
+        originalConfigDir = process.env.CHROXY_CONFIG_DIR
         process.env.HOME = fakeHome
         process.env.USERPROFILE = fakeHome
+        // Since #7052 the GLOBAL skills dir is `configPath('skills')`, i.e.
+        // CHROXY_CONFIG_DIR-rooted rather than always `~/.chroxy/skills`. The
+        // suite-wide sandbox (tests/_setup.mjs) points that at its own tmp dir,
+        // so patching HOME alone no longer moves the global dir — point both at
+        // the fake home, which is what "the global dir lives here" now means.
+        process.env.CHROXY_CONFIG_DIR = join(fakeHome, '.chroxy')
       })
 
       afterEach(() => {
@@ -213,6 +221,8 @@ describe('skills-loader', () => {
         else process.env.HOME = originalHome
         if (originalUserprofile === undefined) delete process.env.USERPROFILE
         else process.env.USERPROFILE = originalUserprofile
+        if (originalConfigDir === undefined) delete process.env.CHROXY_CONFIG_DIR
+        else process.env.CHROXY_CONFIG_DIR = originalConfigDir
         rmSync(fakeHome, { recursive: true, force: true })
       })
 
@@ -224,8 +234,8 @@ describe('skills-loader', () => {
         // evaluation against the patched HOME env var.
         const mod = await import(`../src/skills-loader.js?home=${encodeURIComponent(fakeHome)}`)
 
-        // Sanity: DEFAULT_SKILLS_DIR should now resolve under fakeHome.
-        assert.equal(mod.DEFAULT_SKILLS_DIR, join(fakeHome, '.chroxy', 'skills'))
+        // Sanity: defaultSkillsDir() should now resolve under fakeHome.
+        assert.equal(mod.defaultSkillsDir(), join(fakeHome, '.chroxy', 'skills'))
 
         // Session cwd is under $HOME but in a directory with no repo overlay.
         const sessionCwd = join(fakeHome, 'scratch', 'project')
@@ -250,7 +260,7 @@ describe('skills-loader', () => {
         )
       })
 
-      it('refuses to return DEFAULT_SKILLS_DIR even when cwd is exactly $HOME', async () => {
+      it('refuses to return defaultSkillsDir() even when cwd is exactly $HOME', async () => {
         mkdirSync(join(fakeHome, '.chroxy', 'skills'), { recursive: true })
         const mod = await import(`../src/skills-loader.js?home3=${encodeURIComponent(fakeHome)}`)
 

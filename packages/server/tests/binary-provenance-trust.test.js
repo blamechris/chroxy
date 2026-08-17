@@ -1,12 +1,12 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, statSync } from 'fs'
-import { tmpdir } from 'os'
+import { tmpdir, homedir } from 'os'
 import { join } from 'path'
 import { createHash } from 'crypto'
 import {
   BinaryProvenanceLedger,
-  DEFAULT_BINARY_TRUST_FILE,
+  defaultBinaryTrustFile,
   binaryTrustFileExists,
 } from '../src/binary-provenance-trust.js'
 
@@ -34,8 +34,25 @@ describe('BinaryProvenanceLedger (#6858)', () => {
     rmSync(dir, { recursive: true, force: true })
   })
 
-  it('defaults its file to ~/.chroxy/binary-trust.json', () => {
-    assert.match(DEFAULT_BINARY_TRUST_FILE, /\.chroxy[/\\]binary-trust\.json$/)
+  it('defaults its file to <config dir>/binary-trust.json', () => {
+    // #7052 — CHROXY_CONFIG_DIR-rooted, so this is only `.chroxy/...` when the
+    // override is unset (tests/_setup.mjs sets it suite-wide).
+    assert.equal(defaultBinaryTrustFile(), join(process.env.CHROXY_CONFIG_DIR, 'binary-trust.json'))
+  })
+
+  it('falls back to ~/.chroxy/binary-trust.json when CHROXY_CONFIG_DIR is unset', () => {
+    // Positive control: without this, the assertion above would also pass for a
+    // resolver that had stopped consulting the home fallback entirely.
+    const prev = process.env.CHROXY_CONFIG_DIR
+    try {
+      delete process.env.CHROXY_CONFIG_DIR
+      // Pinned to the actual home root, not just "some directory named
+      // .chroxy" — a regex alone still matches `/tmp/anything/.chroxy/...`, so
+      // it could not tell a real home fallback from a lost one.
+      assert.equal(defaultBinaryTrustFile(), join(homedir(), '.chroxy', 'binary-trust.json'))
+    } finally {
+      process.env.CHROXY_CONFIG_DIR = prev
+    }
   })
 
   it('pins on approve and reports the record as trusted', () => {

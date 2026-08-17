@@ -100,16 +100,17 @@
  */
 import { existsSync } from 'fs'
 import { basename } from 'path'
-import { homedir } from 'os'
-import { join } from 'path'
 import { createHash } from 'crypto'
 import { createLogger } from './logger.js'
 import { PathHashTrustLedger } from './path-hash-trust-ledger.js'
 import { HEX64 } from './utils/validation-patterns.js'
+import { configPath } from './config-dir.js'
 
 const log = createLogger('skills-trust')
 
-export const DEFAULT_TRUST_FILE = join(homedir(), '.chroxy', 'skills-trust.json')
+export function defaultTrustFile() {
+  return configPath('skills-trust.json')
+}
 
 export const TRUST_MODE_WARN = 'warn'
 export const TRUST_MODE_BLOCK = 'block'
@@ -201,7 +202,7 @@ export class SkillsTrustStore extends PathHashTrustLedger {
    */
   constructor({ filePath, mode, verifyThrottleMs } = {}) {
     super({
-      filePath: filePath || DEFAULT_TRUST_FILE,
+      filePath: filePath || defaultTrustFile(),
       log,
       normalizeKey: _normalizePathKey,
       approvalField: 'lastVerified',

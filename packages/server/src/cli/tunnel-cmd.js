@@ -4,7 +4,7 @@
 import { existsSync, mkdirSync, readFileSync } from 'fs'
 import { CloudflareTunnelAdapter } from '../tunnel/index.js'
 import { writeFileRestricted } from '../platform.js'
-import { CONFIG_DIR, CONFIG_FILE, prompt } from './shared.js'
+import { configDir, configFile, prompt } from './shared.js'
 
 export function registerTunnelCommand(program) {
   const tunnelCmd = program
@@ -75,22 +75,22 @@ async function setupCloudflare() {
 
   console.log('\nStep 4: Saving configuration\n')
 
-  if (!existsSync(CONFIG_DIR)) {
-    mkdirSync(CONFIG_DIR, { recursive: true })
+  if (!existsSync(configDir())) {
+    mkdirSync(configDir(), { recursive: true })
   }
 
   let config = {}
-  if (existsSync(CONFIG_FILE)) {
-    config = JSON.parse(readFileSync(CONFIG_FILE, 'utf-8'))
+  if (existsSync(configFile())) {
+    config = JSON.parse(readFileSync(configFile(), 'utf-8'))
   }
 
   config.tunnel = 'named'
   config.tunnelName = tunnelName
   config.tunnelHostname = hostname
 
-  writeFileRestricted(CONFIG_FILE, JSON.stringify(config, null, 2))
+  writeFileRestricted(configFile(), JSON.stringify(config, null, 2))
 
-  console.log('✅ Configuration saved to:', CONFIG_FILE)
+  console.log('✅ Configuration saved to:', configFile())
   console.log('')
   console.log('Your stable URLs:')
   console.log(`   HTTP:      https://${hostname}`)

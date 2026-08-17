@@ -53,6 +53,10 @@ import { join } from 'node:path'
 import '../src/claude-tui-session.js'
 import { ensureCwdTrusted } from '../src/claude-tui/pty-driver.js'
 
+// #7052 — the sandbox config dir this process started with. Tests below
+// relocate it alongside HOME and restore it here on teardown.
+const __sandboxConfigDir = process.env.CHROXY_CONFIG_DIR
+
 let dir
 let fakeHome
 let dotfilesDir
@@ -77,11 +81,13 @@ beforeEach(() => {
   targetPath = join(dotfilesDir, 'claude.json')
   origHome = process.env.HOME
   process.env.HOME = fakeHome
+  process.env.CHROXY_CONFIG_DIR = join(fakeHome, '.chroxy')
 })
 
 afterEach(() => {
   if (origHome === undefined) delete process.env.HOME
   else process.env.HOME = origHome
+  process.env.CHROXY_CONFIG_DIR = __sandboxConfigDir
   try { rmSync(dir, { recursive: true, force: true }) } catch { /* best effort */ }
 })
 

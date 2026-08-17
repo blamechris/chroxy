@@ -135,6 +135,19 @@ function chroxyWorktreesRoot(env: ProjectEnv = defaultEnv()): string | null {
   if (override.length > 0 && isAbsolute(override)) {
     return realResolve(override)
   }
+  // #7052 — the daemon creates worktrees at `configPath('worktrees')`, which
+  // follows CHROXY_CONFIG_DIR. Resolving `$HOME/.chroxy/worktrees` here instead
+  // would put this module and session-manager.js on different roots the moment
+  // the var is set, and `classifyNonProjectCwd` would stop recognising a chroxy
+  // worktree — restoring the #5464 regression, where a session in one mints a
+  // Discord status embed named after its opaque hex id instead of being
+  // suppressed. Read off `env` rather than `process.env` so the hook side
+  // (claude-hooks, which injects its own env) stays hermetic.
+  const rawConfigDir = typeof env?.CHROXY_CONFIG_DIR === 'string' ? env.CHROXY_CONFIG_DIR.trim() : ''
+  const configDir = rawConfigDir.replace(/[/\\]+$/, '')
+  if (configDir.length > 0 && isAbsolute(configDir)) {
+    return realResolve(join(configDir, 'worktrees'))
+  }
   const home = typeof env?.HOME === 'string' && env.HOME.length > 0 ? env.HOME : homedir()
   if (!home) return null
   return realResolve(join(home, '.chroxy', 'worktrees'))

@@ -23,6 +23,7 @@ import { readFileSync, existsSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { dirname, join, relative, sep } from 'path'
 import { createLogger, setJsonMode, initFileLogging, setConsoleQuiet } from './logger.js'
+import { configDir, configPath } from './config-dir.js'
 
 const log = createLogger('cli')
 // #5368 slice (b): QRCode + writeConnectionInfo moved to startup-display.js with
@@ -578,7 +579,7 @@ export async function startCliServer(config) {
 
   // Migrate plaintext token to keychain and remove from config file
   if (!NO_AUTH && config.apiToken && isKeychainAvailable()) {
-    const configFile = join(homedir(), '.chroxy', 'config.json')
+    const configFile = configPath('config.json')
     const { migrated } = migrateToken(config)
     // Remove plaintext token from config file (whether newly migrated or already in keychain)
     const keychainToken = getToken()
@@ -951,10 +952,10 @@ export async function startCliServer(config) {
 
   // 3. Create push notification manager, token manager, and WebSocket server
   const pushManager = new PushManager({
-    storagePath: join(homedir(), '.chroxy', 'push-tokens.json'),
+    storagePath: configPath('push-tokens.json'),
     // #4541: notification preferences persistence. Co-located in
     // ~/.chroxy alongside push-tokens.json so cleanup is one step.
-    prefsPath: join(homedir(), '.chroxy', 'notification-prefs.json'),
+    prefsPath: configPath('notification-prefs.json'),
     // #5413 Phase 2: Discord status-embed sink. Off by default — only
     // active when a webhook URL resolves from CHROXY_DISCORD_WEBHOOK_URL
     // or ~/.chroxy/credentials.json (0600). Non-secret knobs (bot name,
@@ -963,10 +964,10 @@ export async function startCliServer(config) {
     // (message ids, current state) persists alongside the other
     // notification state in ~/.chroxy.
     discord: {
-      statePath: join(homedir(), '.chroxy', 'discord-webhook-state.json'),
+      statePath: configPath('discord-webhook-state.json'),
       // #5828: the billing-alert sink keeps its own state file, separate from
       // the per-project status store above.
-      billingStatePath: join(homedir(), '.chroxy', 'discord-billing-state.json'),
+      billingStatePath: configPath('discord-billing-state.json'),
       ...(config.notifications?.discord || {}),
     },
   })
@@ -990,7 +991,7 @@ export async function startCliServer(config) {
   })
   pushNotificationHandler.start()
 
-  const configFile = join(homedir(), '.chroxy', 'config.json')
+  const configFile = configPath('config.json')
   const tokenManager = NO_AUTH ? null : new TokenManager({
     token: API_TOKEN,
     tokenExpiry: config.tokenExpiry || null,
@@ -1090,7 +1091,13 @@ export async function startCliServer(config) {
   )
   // #6598 — persist paired tokens across restarts (encrypted at rest). Honour a
   // CHROXY_CONFIG_DIR override so it sits next to config.json / credentials.json.
-  const chroxyDir = process.env.CHROXY_CONFIG_DIR || join(homedir(), '.chroxy')
+  const chroxyDir = configDir()
+  // #7052 — state the resolved root once at startup. Every persistent path the
+  // daemon touches now hangs off it, so when an operator relocates the dir and
+  // finds empty trust stores or a missing token, this line is the one thing
+  // that tells them WHICH root the daemon actually opened. Logged
+  // unconditionally: knowing it is `~/.chroxy` is exactly as useful.
+  log.info(`Config/state root: ${chroxyDir}${process.env.CHROXY_CONFIG_DIR ? ' (from CHROXY_CONFIG_DIR)' : ''}`)
   const pairingManager = NO_AUTH ? null : new PairingManager({
     ttlMs: 60_000,
     autoRefresh: true,

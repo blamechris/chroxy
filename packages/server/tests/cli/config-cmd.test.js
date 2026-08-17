@@ -5,8 +5,10 @@
  * config` just prints the resolved config — so we exercise both the
  * "no config" error path and the happy "config exists" path.
  *
- * NB: The shared.js CONFIG_FILE is resolved from os.homedir() at module
- * load time, so we exercise the path via the spawn helper which sets HOME.
+ * NB: shared.js's configFile() resolves per call since #7052, so an in-process
+ * env change would now be honored. These cases still go through the spawn
+ * helper because they assert the CLI's stdout and exit code, not the path — and
+ * a child process is the only way to observe those.
  */
 import { describe, it, after, before } from 'node:test'
 import assert from 'node:assert/strict'

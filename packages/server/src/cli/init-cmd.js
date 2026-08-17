@@ -3,7 +3,7 @@
  */
 import { existsSync, mkdirSync } from 'fs'
 import { randomBytes } from 'crypto'
-import { CONFIG_DIR, CONFIG_FILE, prompt } from './shared.js'
+import { configDir, configFile, prompt } from './shared.js'
 import { writeFileRestricted } from '../platform.js'
 import { setToken, isKeychainAvailable } from '../keychain.js'
 
@@ -114,8 +114,8 @@ export async function runInitCmd(deps = {}) {
   const ensureDirFn = deps.ensureDirFn || ((p) => mkdirSync(p, { recursive: true }))
   const isKeychainAvailableFn = deps.isKeychainAvailableFn || isKeychainAvailable
   const setTokenFn = deps.setTokenFn || setToken
-  const configFilePath = deps.configFilePath || CONFIG_FILE
-  const configDirPath = deps.configDirPath || CONFIG_DIR
+  const configFilePath = deps.configFilePath || configFile()
+  const configDirPath = deps.configDirPath || configDir()
   const generateTokenFn =
     deps.generateTokenFn || (() => randomBytes(32).toString('base64url'))
 

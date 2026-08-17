@@ -2,7 +2,6 @@ import { EventEmitter } from 'events'
 import { randomBytes } from 'crypto'
 import { statSync, mkdirSync, rmSync } from 'fs'
 import { join, resolve, dirname } from 'path'
-import { homedir } from 'os'
 import { execFileSync } from 'child_process'
 import { getProvider, getProviderAuthInfo, DEFAULT_PROVIDER } from './providers.js'
 import { isClaudeProvider } from './models.js'
@@ -38,6 +37,7 @@ import { auditShellDestroy } from './shell-audit.js'
 import { recordShell, forgetShell, reapOrphanShells } from './user-shell-registry.js'
 import { getErrorMessage } from './utils/error-message.js'
 import { toWireCount } from './utils/wire-counters.js'
+import { configPath } from './config-dir.js'
 import {
   forwardPerSessionSettingsToProviderOpts,
   serializePerSessionSettings,
@@ -45,7 +45,18 @@ import {
 } from './per-session-settings.js'
 
 const log = createLogger('session-manager')
-const DEFAULT_STATE_FILE = join(homedir(), '.chroxy', 'session-state.json')
+/**
+ * The state file a SessionManager falls back to when no `stateFilePath` is
+ * injected — i.e. what the running daemon uses (server-cli.js passes none).
+ *
+ * Exported so the schedule CLI's drift guard can assert that its registry and
+ * the daemon's resolve to the same place without constructing a SessionManager
+ * (tests/schedule-cli.test.js). A `const` here would be frozen at import; see
+ * config-dir.js for why that is the whole of #7052.
+ */
+export function defaultStateFile() {
+  return configPath('session-state.json')
+}
 // #5982 — grace before auto-removing an exited user-shell session, so a live
 // viewer sees the "[shell exited]" marker before the session vanishes.
 const AUTO_REMOVE_ON_EXIT_DELAY_MS = 1500
@@ -147,7 +158,9 @@ export class ProviderModelNotSupportedError extends SessionError {
  * Default base directory for session worktrees.
  * @type {string}
  */
-const DEFAULT_WORKTREE_BASE = join(homedir(), '.chroxy', 'worktrees')
+function defaultWorktreeBase() {
+  return configPath('worktrees')
+}
 
 /**
  * Manages the lifecycle of multiple CLI sessions.
@@ -615,7 +628,7 @@ export class SessionManager extends EventEmitter {
 
     // State persistence (delegated to SessionStatePersistence)
     this._persistence = new SessionStatePersistence({
-      stateFilePath: stateFilePath || DEFAULT_STATE_FILE,
+      stateFilePath: stateFilePath || defaultStateFile(),
       stateTtlMs,
       persistDebounceMs,
     })
@@ -660,7 +673,7 @@ export class SessionManager extends EventEmitter {
     this.binaryProvenanceLedger = binaryProvenanceLedger
       || new BinaryProvenanceLedger({ filePath: join(dirname(this._stateFilePath), 'binary-trust.json') })
     // Config path the preset resolver reads the daemon override map from.
-    // Defaults to undefined → resolveSessionPreset uses its own DEFAULT_CONFIG_PATH.
+    // Defaults to undefined → resolveSessionPreset uses its own defaultConfigPath().
     this.presetConfigPath = typeof presetConfigPath === 'string' ? presetConfigPath : null
     // #6771: durable per-project permission rule store. Same temp-redirect logic
     // as the sidecars above — the default file sits next to the session-state
@@ -1142,7 +1155,7 @@ export class SessionManager extends EventEmitter {
       // restored path that doesn't resolve to exactly that is rejected: we
       // safe-degrade to a non-worktree session (worktreePath stays null ⇒ no
       // deletion target) and log loudly, rather than rebind an unsafe path.
-      const expectedWorktreeDir = resolve(join(this._worktreeBase || DEFAULT_WORKTREE_BASE, sessionId))
+      const expectedWorktreeDir = resolve(join(this._worktreeBase || defaultWorktreeBase(), sessionId))
       if (resolve(restoreWorktreePath) === expectedWorktreeDir) {
         worktreePath = restoreWorktreePath
         worktreeRepoDir = restoreWorktreeRepoDir || null
@@ -1162,7 +1175,7 @@ export class SessionManager extends EventEmitter {
       }
 
       // Create worktree directory
-      const worktreeBase = this._worktreeBase || DEFAULT_WORKTREE_BASE
+      const worktreeBase = this._worktreeBase || defaultWorktreeBase()
       const worktreeDir = join(worktreeBase, sessionId)
       mkdirSync(worktreeBase, { recursive: true })
 
@@ -2760,7 +2773,7 @@ export class SessionManager extends EventEmitter {
         // retained sessions are ever swept.
         const liveSessionIds = new Set([...this._sessions.keys(), ...this._failedRestores.keys()])
         const report = sweepOrphanChroxyWorktrees({
-          worktreeBase: this._worktreeBase || DEFAULT_WORKTREE_BASE,
+          worktreeBase: this._worktreeBase || defaultWorktreeBase(),
           liveSessionIds,
         })
         if (report.removed.length || report.skippedDirty.length || report.skippedError.length) {

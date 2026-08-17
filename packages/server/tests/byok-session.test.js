@@ -10,6 +10,10 @@ import { BUILTIN_TOOLS } from '../src/byok-tools.js'
 import { MCP_STATES } from '../src/byok-mcp-client.js'
 import { recordTrust } from '../src/byok-mcp-trust.js'
 
+// #7052 — the sandbox config dir this process started with. Tests below
+// relocate it alongside HOME and restore it here on teardown.
+const __sandboxConfigDir = process.env.CHROXY_CONFIG_DIR
+
 /**
  * Pre-trust the stub MCP server so the fleet's trust gate doesn't sit waiting on
  * a prompt nobody answers.
@@ -138,6 +142,7 @@ describe('ClaudeByokSession', () => {
     originalApiKey = process.env.ANTHROPIC_API_KEY
     originalMcpTrustPath = process.env.CHROXY_MCP_TRUST_PATH
     process.env.HOME = tmpHome
+    process.env.CHROXY_CONFIG_DIR = join(tmpHome, '.chroxy')
     process.env.ANTHROPIC_API_KEY = 'sk-ant-test-key-fixture'
     // #4457: per-test isolated trust store so spawning the MCP stub
     // doesn't pollute the developer's real ~/.chroxy/mcp-trust.json,
@@ -148,6 +153,7 @@ describe('ClaudeByokSession', () => {
   afterEach(() => {
     if (originalHome) process.env.HOME = originalHome
     else delete process.env.HOME
+    process.env.CHROXY_CONFIG_DIR = __sandboxConfigDir
     if (originalApiKey) process.env.ANTHROPIC_API_KEY = originalApiKey
     else delete process.env.ANTHROPIC_API_KEY
     if (originalMcpTrustPath) process.env.CHROXY_MCP_TRUST_PATH = originalMcpTrustPath

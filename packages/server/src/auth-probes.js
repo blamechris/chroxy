@@ -30,6 +30,7 @@
 import { existsSync, readFileSync, statSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
+import { configPath } from './config-dir.js'
 
 /**
  * Best-effort probe for `claude login` OAuth state on disk (#3674).
@@ -218,7 +219,7 @@ const _SLOT_ENV_VAR = {
  */
 export function cachedResolveCredentialFile(slot, envValue, resolve, envVarName) {
   const entry = _credFileCache[slot] || _EMPTY_CRED_FILE_SLOT
-  const credPath = join(homedir(), '.chroxy', 'credentials.json')
+  const credPath = configPath('credentials.json')
 
   if (typeof envValue === 'string' && envValue.length > 0) {
     if (entry.envValue === envValue && entry.path === null && entry.result) {

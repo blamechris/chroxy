@@ -20,10 +20,12 @@ import {
   openSync, readSync, closeSync, writeFileSync, truncateSync,
 } from 'fs'
 import { join } from 'path'
-import { homedir } from 'os'
 import { SENSITIVE_PATTERNS, API_KEY_PATTERNS, redactValue } from './redaction.js'
+import { configPath } from './config-dir.js'
 
-const DEFAULT_LOG_DIR = join(homedir(), '.chroxy', 'logs')
+function defaultLogDir() {
+  return configPath('logs')
+}
 const MAX_LOG_SIZE = 5 * 1024 * 1024  // 5MB
 const MAX_LOG_FILES = 3
 const ROTATION_CHECK_INTERVAL = 100  // check every N writes
@@ -129,7 +131,14 @@ export function redactSensitivePreservingEscapes(s) {
 let _logLevel = LOG_LEVELS[process.env.LOG_LEVEL] ?? LOG_LEVELS.info
 let _jsonMode = false
 let _logToFile = false
-let _logDir = DEFAULT_LOG_DIR
+// #7052 — deliberately NOT `defaultLogDir()` here. A module-scope initializer
+// runs at import, so it would freeze the log directory against whatever
+// CHROXY_CONFIG_DIR happened to be when the module graph was first walked —
+// the exact defect config-dir.js exists to prevent, one level of indirection
+// away from where the lint could see it. Resolved lazily in initFileLogging()
+// instead, so a test that relocates the config dir in a `beforeEach` is
+// honored (#4633).
+let _logDir = null
 let _logPath = null
 let _auditLogPath = null
 let _writeCount = 0
@@ -183,7 +192,9 @@ export function initFileLogging({ level = 'info', logDir } = {}) {
   _logLevel = LOG_LEVELS[level] ?? LOG_LEVELS.info
   _logToFile = true
   _writeCount = 0
-  if (logDir) _logDir = logDir
+  // Resolve per call, not at import (#7052): an explicit logDir wins, otherwise
+  // ask config-dir.js now so CHROXY_CONFIG_DIR is read at the moment it matters.
+  _logDir = logDir || defaultLogDir()
   // #3734 review (Copilot): create the log directory at mode 0700, and
   // chmod existing dirs the same way. Logs may contain sensitive data
   // (tool inputs, tokens that slip past the redactor), so they must not
@@ -261,10 +272,12 @@ export function getAuditLogPath() {
  * (see generateWindowsServiceWrapper).
  *
  * @param {object} [options]
- * @param {string} [options.logDir] - defaults to DEFAULT_LOG_DIR: the capture
- *   location is baked into the plist/unit by `service install` (always
- *   `~/.chroxy/logs`), so it deliberately does NOT follow a custom
- *   CHROXY_LOG_DIR, which only moves the logger's own files
+ * @param {string} [options.logDir] - defaults to defaultLogDir(), i.e.
+ *   `<config dir>/logs`, which follows CHROXY_CONFIG_DIR since #7052. The
+ *   capture location is baked into the plist/unit by `service install`, which
+ *   now propagates CHROXY_CONFIG_DIR so both halves agree. Still deliberately
+ *   does NOT follow a custom CHROXY_LOG_DIR, which only moves the logger's own
+ *   files
  * @param {number} [options.maxSize] - cap before truncation kicks in
  * @param {number} [options.tailKeep] - bytes preserved to `<name>.old.log`
  * @returns {Array<{file: string, archive: string, preservedBytes: number}>}
@@ -276,7 +289,7 @@ export function capStdioCaptureLogs({
   tailKeep = STDIO_CAPTURE_TAIL_KEEP,
 } = {}) {
   if (process.platform === 'win32') return []
-  const dir = logDir || DEFAULT_LOG_DIR
+  const dir = logDir || defaultLogDir()
   const capped = []
   for (const name of ['chroxy-stdout.log', 'chroxy-stderr.log']) {
     const filePath = join(dir, name)
@@ -318,7 +331,7 @@ export function closeFileLogging() {
   _logToFile = false
   _jsonMode = false
   _logLevel = LOG_LEVELS.info
-  _logDir = DEFAULT_LOG_DIR
+  _logDir = defaultLogDir()
   _logPath = null
   _auditLogPath = null
   _writeCount = 0

@@ -3,6 +3,10 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync, chmodSync, mkdirSync, rmSync, existsSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+
+// #7052 — the sandbox config dir this process started with. Tests below
+// relocate it alongside HOME and restore it here on teardown.
+const __sandboxConfigDir = process.env.CHROXY_CONFIG_DIR
 import {
   resolveAnthropicApiKey,
   maskApiKey,
@@ -37,6 +41,7 @@ describe('byok-credentials', () => {
     originalHome = process.env.HOME
     originalApiKey = process.env.ANTHROPIC_API_KEY
     process.env.HOME = tmpHome
+    process.env.CHROXY_CONFIG_DIR = join(tmpHome, '.chroxy')
     delete process.env.ANTHROPIC_API_KEY
   })
 
@@ -44,6 +49,7 @@ describe('byok-credentials', () => {
     _setCredentialKeychainForTests(null)
     if (originalHome) process.env.HOME = originalHome
     else delete process.env.HOME
+    process.env.CHROXY_CONFIG_DIR = __sandboxConfigDir
     if (originalApiKey) process.env.ANTHROPIC_API_KEY = originalApiKey
     else delete process.env.ANTHROPIC_API_KEY
     rmSync(tmpHome, { recursive: true, force: true })

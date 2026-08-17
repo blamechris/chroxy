@@ -3,6 +3,10 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, statSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+
+// #7052 — the sandbox config dir this process started with. Tests below
+// relocate it alongside HOME and restore it here on teardown.
+const __sandboxConfigDir = process.env.CHROXY_CONFIG_DIR
 import {
   setStoredField,
   deleteStoredField,
@@ -27,10 +31,12 @@ describe('setStoredField / deleteStoredField (#6540)', () => {
     tmpHome = mkdtempSync(join(tmpdir(), 'chroxy-cred-field-'))
     originalHome = process.env.HOME
     process.env.HOME = tmpHome
+    process.env.CHROXY_CONFIG_DIR = join(tmpHome, '.chroxy')
   })
   afterEach(() => {
     if (originalHome) process.env.HOME = originalHome
     else delete process.env.HOME
+    process.env.CHROXY_CONFIG_DIR = __sandboxConfigDir
     try { rmSync(tmpHome, { recursive: true, force: true }) } catch { /* */ }
   })
 

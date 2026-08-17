@@ -5,6 +5,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ClaudeByokSession } from '../src/byok-session.js'
 
+// #7052 — the sandbox config dir this process started with. Tests below
+// relocate it alongside HOME and restore it here on teardown.
+const __sandboxConfigDir = process.env.CHROXY_CONFIG_DIR
+
 /**
  * #6756 — ClaudeByokSession forwards the already-translated `thinking_delta`
  * instead of dropping it at `default: break`.
@@ -66,12 +70,14 @@ describe('ClaudeByokSession — thinking content forwarding (#6756)', () => {
     originalHome = process.env.HOME
     originalApiKey = process.env.ANTHROPIC_API_KEY
     process.env.HOME = tmpHome
+    process.env.CHROXY_CONFIG_DIR = join(tmpHome, '.chroxy')
     process.env.ANTHROPIC_API_KEY = 'sk-ant-test-key-fixture'
   })
 
   afterEach(() => {
     if (originalHome) process.env.HOME = originalHome
     else delete process.env.HOME
+    process.env.CHROXY_CONFIG_DIR = __sandboxConfigDir
     if (originalApiKey) process.env.ANTHROPIC_API_KEY = originalApiKey
     else delete process.env.ANTHROPIC_API_KEY
     rmSync(tmpHome, { recursive: true, force: true })

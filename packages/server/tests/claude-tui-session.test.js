@@ -7,6 +7,10 @@ import { ClaudeTuiSession, withHookFsTimeout } from '../src/claude-tui-session.j
 import { RespawnRateLimiter } from '../src/utils/respawn-rate-limiter.js'
 import { addLogListener, removeLogListener } from '../src/logger.js'
 
+// #7052 — the sandbox config dir this process started with. Tests below
+// relocate it alongside HOME and restore it here on teardown.
+const __sandboxConfigDir = process.env.CHROXY_CONFIG_DIR
+
 describe('ClaudeTuiSession', () => {
   let emptySkillsDir
   let session
@@ -67,6 +71,7 @@ describe('ClaudeTuiSession', () => {
       writeFileSync(join(fakeHome, '.claude.json'), JSON.stringify({ projects: {} }))
       process.env._ORIG_HOME = process.env.HOME
       process.env.HOME = fakeHome
+      process.env.CHROXY_CONFIG_DIR = join(fakeHome, '.chroxy')
       capturedArgs = null
       origSpawnPty = ClaudeTuiSession.prototype._spawnPty
       ClaudeTuiSession.prototype._spawnPty = async function () {
@@ -82,6 +87,7 @@ describe('ClaudeTuiSession', () => {
       if (session) { try { await session.destroy() } catch { /* ignore */ } session = null }
       ClaudeTuiSession.prototype._spawnPty = origSpawnPty
       if (process.env._ORIG_HOME) { process.env.HOME = process.env._ORIG_HOME; delete process.env._ORIG_HOME }
+      process.env.CHROXY_CONFIG_DIR = __sandboxConfigDir
       if (fakeHome) rmSync(fakeHome, { recursive: true, force: true })
     })
 
@@ -229,6 +235,7 @@ describe('ClaudeTuiSession', () => {
       writeFileSync(join(fakeHome, '.claude.json'), JSON.stringify({ projects: {} }))
       process.env._ORIG_HOME = process.env.HOME
       process.env.HOME = fakeHome
+      process.env.CHROXY_CONFIG_DIR = join(fakeHome, '.chroxy')
 
       // Stub _spawnPty on the prototype so start() doesn't actually fork claude.
       // Sets a fake term so subsequent state assertions don't trip on null.
@@ -247,6 +254,7 @@ describe('ClaudeTuiSession', () => {
       ClaudeTuiSession.prototype._spawnPty = origSpawnPty
       if (process.env._ORIG_HOME) {
         process.env.HOME = process.env._ORIG_HOME
+        process.env.CHROXY_CONFIG_DIR = __sandboxConfigDir
         delete process.env._ORIG_HOME
       }
       if (fakeHome) rmSync(fakeHome, { recursive: true, force: true })
@@ -1286,6 +1294,7 @@ describe('ClaudeTuiSession', () => {
       const fakeHome = mkdtempSync(join(tmpdir(), 'chroxy-tui-6576a-'))
       writeFileSync(join(fakeHome, '.claude.json'), JSON.stringify({ projects: {} }))
       process.env.HOME = fakeHome
+      process.env.CHROXY_CONFIG_DIR = join(fakeHome, '.chroxy')
       try {
         session = new ClaudeTuiSession({ cwd: '/tmp', port: 12345, skillsDir: emptySkillsDir, repoSkillsDir: null, resumeSessionId: 'ghost-uuid-0001' })
         session._spawnPty = async function () {
@@ -1322,6 +1331,7 @@ describe('ClaudeTuiSession', () => {
         assert.equal(session._processReady, true, 'session ready after inline recovery')
       } finally {
         if (prevHome === undefined) delete process.env.HOME; else process.env.HOME = prevHome
+        process.env.CHROXY_CONFIG_DIR = __sandboxConfigDir
         try { rmSync(fakeHome, { recursive: true, force: true }) } catch { /* best effort */ }
       }
     })
@@ -1658,6 +1668,7 @@ describe('ClaudeTuiSession', () => {
       mkdirSync(join(fakeHome, '.claude', 'sessions'), { recursive: true })
       origHome = process.env.HOME
       process.env.HOME = fakeHome
+      process.env.CHROXY_CONFIG_DIR = join(fakeHome, '.chroxy')
       // node-pty assigns pids as kernel pids; for tests any positive
       // integer suffices, the probe only uses it to build the file path.
       fakePid = 9999
@@ -1666,6 +1677,7 @@ describe('ClaudeTuiSession', () => {
     afterEach(() => {
       if (origHome !== undefined) process.env.HOME = origHome
       else delete process.env.HOME
+      process.env.CHROXY_CONFIG_DIR = __sandboxConfigDir
       if (fakeHome) rmSync(fakeHome, { recursive: true, force: true })
     })
 
@@ -2352,12 +2364,14 @@ describe('ClaudeTuiSession', () => {
       mkdirSync(join(fakeHome, '.claude', 'sessions'), { recursive: true })
       origHome = process.env.HOME
       process.env.HOME = fakeHome
+      process.env.CHROXY_CONFIG_DIR = join(fakeHome, '.chroxy')
       fakePid = 8765
     })
 
     afterEach(() => {
       if (origHome !== undefined) process.env.HOME = origHome
       else delete process.env.HOME
+      process.env.CHROXY_CONFIG_DIR = __sandboxConfigDir
       if (fakeHome) rmSync(fakeHome, { recursive: true, force: true })
     })
 
@@ -3459,6 +3473,7 @@ describe('ClaudeTuiSession', () => {
       writeFileSync(join(home, '.claude.json'), JSON.stringify({ projects: {} }))
       const origHome = process.env.HOME
       process.env.HOME = home
+      process.env.CHROXY_CONFIG_DIR = join(home, '.chroxy')
       const origSpawn = ClaudeTuiSession.prototype._spawnPty
       ClaudeTuiSession.prototype._spawnPty = async function () {
         this._term = { write: () => {}, kill: () => {}, onData: () => {}, onExit: () => {} }
@@ -3478,6 +3493,7 @@ describe('ClaudeTuiSession', () => {
       } finally {
         ClaudeTuiSession.prototype._spawnPty = origSpawn
         process.env.HOME = origHome
+        process.env.CHROXY_CONFIG_DIR = __sandboxConfigDir
         rmSync(home, { recursive: true, force: true })
       }
     })
@@ -3487,6 +3503,7 @@ describe('ClaudeTuiSession', () => {
       writeFileSync(join(home, '.claude.json'), JSON.stringify({ projects: {} }))
       const origHome = process.env.HOME
       process.env.HOME = home
+      process.env.CHROXY_CONFIG_DIR = join(home, '.chroxy')
       const origSpawn = ClaudeTuiSession.prototype._spawnPty
       ClaudeTuiSession.prototype._spawnPty = async function () {
         this._term = { write: () => {}, kill: () => {}, onData: () => {}, onExit: () => {} }
@@ -3500,6 +3517,7 @@ describe('ClaudeTuiSession', () => {
       } finally {
         ClaudeTuiSession.prototype._spawnPty = origSpawn
         process.env.HOME = origHome
+        process.env.CHROXY_CONFIG_DIR = __sandboxConfigDir
         rmSync(home, { recursive: true, force: true })
       }
     })
@@ -3552,6 +3570,7 @@ describe('ClaudeTuiSession', () => {
       writeFileSync(join(home, '.claude.json'), JSON.stringify({ projects: {} }))
       const origHome = process.env.HOME
       process.env.HOME = home
+      process.env.CHROXY_CONFIG_DIR = join(home, '.chroxy')
       const origSpawn = ClaudeTuiSession.prototype._spawnPty
       let capturedEnv = null
       ClaudeTuiSession.prototype._spawnPty = async function (permissionsEnabled) {
@@ -3584,6 +3603,7 @@ describe('ClaudeTuiSession', () => {
       } finally {
         ClaudeTuiSession.prototype._spawnPty = origSpawn
         process.env.HOME = origHome
+        process.env.CHROXY_CONFIG_DIR = __sandboxConfigDir
         rmSync(home, { recursive: true, force: true })
       }
     })
@@ -6701,6 +6721,7 @@ describe('ClaudeTuiSession', () => {
       writeFileSync(join(fakeHome, '.claude.json'), JSON.stringify({ projects: {} }))
       process.env._ORIG_HOME = process.env.HOME
       process.env.HOME = fakeHome
+      process.env.CHROXY_CONFIG_DIR = join(fakeHome, '.chroxy')
 
       capturedPermissionsEnabled = null
       capturedArgs = null
@@ -6732,6 +6753,7 @@ describe('ClaudeTuiSession', () => {
       ClaudeTuiSession.prototype._spawnPty = origSpawnPty
       if (process.env._ORIG_HOME) {
         process.env.HOME = process.env._ORIG_HOME
+        process.env.CHROXY_CONFIG_DIR = __sandboxConfigDir
         delete process.env._ORIG_HOME
       }
       if (fakeHome) rmSync(fakeHome, { recursive: true, force: true })
@@ -7008,6 +7030,7 @@ describe('ClaudeTuiSession — atomic permission-mode sidecar write (#5334)', ()
     writeFileSync(join(fakeHome, '.claude.json'), JSON.stringify({ projects: {} }))
     process.env._ORIG_HOME = process.env.HOME
     process.env.HOME = fakeHome
+    process.env.CHROXY_CONFIG_DIR = join(fakeHome, '.chroxy')
     // Stub the PTY spawn so start() doesn't launch real node-pty/claude.
     origSpawnPty = ClaudeTuiSession.prototype._spawnPty
     ClaudeTuiSession.prototype._spawnPty = async function () {
@@ -7018,6 +7041,7 @@ describe('ClaudeTuiSession — atomic permission-mode sidecar write (#5334)', ()
     if (session) { try { await session.destroy() } catch { /* ignore */ } session = null }
     ClaudeTuiSession.prototype._spawnPty = origSpawnPty
     if (process.env._ORIG_HOME) { process.env.HOME = process.env._ORIG_HOME; delete process.env._ORIG_HOME }
+    process.env.CHROXY_CONFIG_DIR = __sandboxConfigDir
     rmSync(dir, { recursive: true, force: true })
     rmSync(skillsDir, { recursive: true, force: true })
     rmSync(fakeHome, { recursive: true, force: true })

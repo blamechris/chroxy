@@ -18,15 +18,14 @@
  * patterns before any log line lands on disk.
  */
 import { existsSync } from 'fs'
-import { join } from 'path'
-import { homedir } from 'os'
 import { resolveStoredCredentialWithMeta } from './credential-store.js'
+import { configPath } from './config-dir.js'
 
 // Lazy-resolved per call so tests that mutate process.env.HOME between
 // cases pick up the new home; if this were captured at module load, the
 // path would freeze at the first import.
 function credentialsFilePath() {
-  return join(homedir(), '.chroxy', 'credentials.json')
+  return configPath('credentials.json')
 }
 
 /**

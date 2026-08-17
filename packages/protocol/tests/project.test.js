@@ -102,6 +102,63 @@ describe('deriveProjectFromCwd (server surface)', () => {
     assert.equal(deriveProjectFromCwd(orphan, { CHROXY_WORKTREES_ROOT: root }), null)
     assert.ok(home && id) // fixture sanity
   })
+
+  // #7052 — session-manager.js creates worktrees at `configPath('worktrees')`,
+  // which follows CHROXY_CONFIG_DIR. If this module kept resolving
+  // `$HOME/.chroxy/worktrees`, the two would sit on different roots the moment
+  // the var is set and a chroxy worktree would stop being recognised — the
+  // #5464 regression, where the session mints a status embed named after its
+  // opaque hex id instead of the owning repo.
+  describe('CHROXY_CONFIG_DIR relocation (#7052)', () => {
+    /** Same shape as chroxyWorktreeFixture, but rooted at an arbitrary config dir. */
+    function relocatedFixture(repoName = 'coolproj') {
+      const home = realpathSync(mkdtempSync(join(tmpdir(), 'home-')))
+      const configDir = join(home, '.local', 'state', 'chroxy')
+      const root = join(configDir, 'worktrees')
+      const id = 'cafebabecafebabecafebabecafebabe'
+      const wt = join(root, id)
+      mkdirSync(wt, { recursive: true })
+      const repoRoot = join(home, 'projects', repoName)
+      mkdirSync(join(repoRoot, '.git', 'worktrees', id), { recursive: true })
+      writeFileSync(join(wt, '.git'), `gitdir: ${join(repoRoot, '.git', 'worktrees', id)}\n`)
+      return { home, configDir, root, id, wt, repoName }
+    }
+
+    it('resolves a worktree under a relocated config dir to its owning repo', () => {
+      const { home, configDir, wt, id, repoName } = relocatedFixture()
+      const project = deriveProjectFromCwd(wt, { HOME: home, CHROXY_CONFIG_DIR: configDir })
+      assert.equal(project, repoName)
+      assert.notEqual(project, id, 'must not fall back to the opaque worktree id')
+    })
+
+    it('POSITIVE CONTROL: without the var the same worktree is unrecognised', () => {
+      // Proves the case above passes because CHROXY_CONFIG_DIR was consulted,
+      // not because the path happens to be classifiable some other way.
+      const { home, wt, repoName } = relocatedFixture()
+      assert.notEqual(
+        deriveProjectFromCwd(wt, { HOME: home }),
+        repoName,
+        'a relocated worktree must not resolve while the config dir is unset',
+      )
+    })
+
+    it('the explicit worktrees-root override still wins over CHROXY_CONFIG_DIR', () => {
+      const { home, configDir, root, wt, repoName } = relocatedFixture()
+      assert.equal(
+        deriveProjectFromCwd(wt, { HOME: home, CHROXY_CONFIG_DIR: '/nowhere', CHROXY_WORKTREES_ROOT: root }),
+        repoName,
+      )
+      assert.ok(configDir) // fixture sanity
+    })
+
+    it('a relative CHROXY_CONFIG_DIR is ignored in favour of the home default', () => {
+      // A non-absolute value cannot name a real root, so it falls through to
+      // $HOME/.chroxy/worktrees — matching how the existing
+      // CHROXY_WORKTREES_ROOT override already treats a relative value.
+      const { home, wt, repoName } = chroxyWorktreeFixture()
+      assert.equal(deriveProjectFromCwd(wt, { HOME: home, CHROXY_CONFIG_DIR: 'relative/path' }), repoName)
+    })
+  })
 })
 
 describe('deriveProject (hook surface)', () => {

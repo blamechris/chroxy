@@ -3,6 +3,10 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync, chmodSync, mkdirSync, rmSync, statSync, readFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+
+// #7052 — the sandbox config dir this process started with. Tests below
+// relocate it alongside HOME and restore it here on teardown.
+const __sandboxConfigDir = process.env.CHROXY_CONFIG_DIR
 import {
   KNOWN_CREDENTIALS,
   isKnownCredentialKey,
@@ -31,6 +35,7 @@ describe('credential-store', () => {
     tmpHome = mkdtempSync(join(tmpdir(), 'chroxy-cred-store-test-'))
     originalHome = process.env.HOME
     process.env.HOME = tmpHome
+    process.env.CHROXY_CONFIG_DIR = join(tmpHome, '.chroxy')
     for (const k of CRED_ENV_VARS) {
       savedEnv[k] = process.env[k]
       delete process.env[k]
@@ -40,6 +45,7 @@ describe('credential-store', () => {
   afterEach(() => {
     if (originalHome) process.env.HOME = originalHome
     else delete process.env.HOME
+    process.env.CHROXY_CONFIG_DIR = __sandboxConfigDir
     for (const k of CRED_ENV_VARS) {
       if (savedEnv[k] === undefined) delete process.env[k]
       else process.env[k] = savedEnv[k]

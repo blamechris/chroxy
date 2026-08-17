@@ -23,6 +23,10 @@ import {
 } from '../src/github-webhook.js'
 import { setStoredField } from '../src/credential-store.js'
 
+// #7052 — the sandbox config dir this process started with. Tests below
+// relocate it alongside HOME and restore it here on teardown.
+const __sandboxConfigDir = process.env.CHROXY_CONFIG_DIR
+
 const SECRET = 'whsec_test_secret'
 const sign = (body, secret = SECRET) => `sha256=${createHmac('sha256', secret).update(body).digest('hex')}`
 
@@ -157,12 +161,14 @@ describe('handleGithubWebhook()', () => {
     tmpHome = mkdtempSync(join(tmpdir(), 'chroxy-webhook-deliver-'))
     originalHome = process.env.HOME
     process.env.HOME = tmpHome
+    process.env.CHROXY_CONFIG_DIR = join(tmpHome, '.chroxy')
   })
   afterEach(() => {
     if (savedEnv === undefined) delete process.env.GITHUB_WEBHOOK_SECRET
     else process.env.GITHUB_WEBHOOK_SECRET = savedEnv
     if (originalHome) process.env.HOME = originalHome
     else delete process.env.HOME
+    process.env.CHROXY_CONFIG_DIR = __sandboxConfigDir
     try { rmSync(tmpHome, { recursive: true, force: true }) } catch { /* */ }
   })
 
@@ -408,12 +414,14 @@ describe('webhookSecretSource / resolveWebhookSecret precedence (#6540)', () => 
     tmpHome = mkdtempSync(join(tmpdir(), 'chroxy-webhook-source-'))
     originalHome = process.env.HOME
     process.env.HOME = tmpHome
+    process.env.CHROXY_CONFIG_DIR = join(tmpHome, '.chroxy')
     savedEnv = process.env.GITHUB_WEBHOOK_SECRET
     delete process.env.GITHUB_WEBHOOK_SECRET
   })
   afterEach(() => {
     if (originalHome) process.env.HOME = originalHome
     else delete process.env.HOME
+    process.env.CHROXY_CONFIG_DIR = __sandboxConfigDir
     if (savedEnv === undefined) delete process.env.GITHUB_WEBHOOK_SECRET
     else process.env.GITHUB_WEBHOOK_SECRET = savedEnv
     try { rmSync(tmpHome, { recursive: true, force: true }) } catch { /* */ }

@@ -5,7 +5,6 @@ import { dirname, resolve, join } from 'path'
 import { createInterface } from 'readline'
 import { fileURLToPath } from 'url'
 import { writeFileSync, readFileSync, unlinkSync, existsSync, mkdirSync } from 'fs'
-import { homedir } from 'os'
 import { EventEmitter } from 'events'
 import { createTunnel, parseTunnelArg } from './tunnel/index.js'
 import { QUICK_TUNNEL_DNS_SETTLE_MS, waitForTunnel } from './tunnel-check.js'
@@ -13,6 +12,7 @@ import { createLogger } from './logger.js'
 import QRCode from 'qrcode'
 import { writeConnectionInfo, removeConnectionInfo } from './connection-info.js'
 import { PushManager } from './push.js'
+import { configPath } from './config-dir.js'
 
 function maskToken(token) {
   if (!token) return ''
@@ -34,7 +34,9 @@ const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 const packageJson = JSON.parse(readFileSync(join(__dirname, '../package.json'), 'utf-8'))
 const SUPERVISOR_VERSION = packageJson.version
-const DEFAULT_PID_FILE = join(homedir(), '.chroxy', 'supervisor.pid')
+function defaultPidFile() {
+  return configPath('supervisor.pid')
+}
 
 const DRAIN_TIMEOUT = 30000
 const RESTART_BACKOFFS = [2000, 2000, 3000, 3000, 5000, 5000, 8000, 8000, 10000, 10000]
@@ -62,8 +64,8 @@ export class Supervisor extends EventEmitter {
     this._port = config.port || parseInt(process.env.PORT || '8765', 10)
     this._apiToken = config.apiToken || process.env.API_TOKEN
     this._tunnelMode = config.tunnel || 'quick'
-    this._pidFilePath = config.pidFilePath || DEFAULT_PID_FILE
-    this._knownGoodFile = config.knownGoodFile || join(homedir(), '.chroxy', 'known-good-ref')
+    this._pidFilePath = config.pidFilePath || defaultPidFile()
+    this._knownGoodFile = config.knownGoodFile || configPath('known-good-ref')
     this._maxRestarts = (typeof config.maxRestarts === 'number' && config.maxRestarts >= 0)
       ? config.maxRestarts
       : 10
@@ -118,7 +120,7 @@ export class Supervisor extends EventEmitter {
       lastBackoffMs: 0,
     }
 
-    this._pushStoragePath = config.pushStoragePath || join(homedir(), '.chroxy', 'push-tokens.json')
+    this._pushStoragePath = config.pushStoragePath || configPath('push-tokens.json')
   }
 
   /** Override point: fork a child process */
@@ -205,9 +207,9 @@ export class Supervisor extends EventEmitter {
     // picks up prefs the child persisted after startup, same as the tokens.
     const push = new PushManager({
       storagePath: this._pushStoragePath,
-      prefsPath: join(homedir(), '.chroxy', 'notification-prefs.json'),
+      prefsPath: configPath('notification-prefs.json'),
       discord: {
-        statePath: join(homedir(), '.chroxy', 'discord-webhook-state.json'),
+        statePath: configPath('discord-webhook-state.json'),
         ...(this.config.notifications?.discord || {}),
       },
     })
@@ -828,9 +830,13 @@ export class Supervisor extends EventEmitter {
    *
    * Two layers of defense now close this:
    *
-   * 1. `~/.chroxy` is in FORBIDDEN_HOME_SUBDIRS, so sessions can no
-   *    longer create a cwd inside it — the attacker can't reach
-   *    `known-good-ref` via `write_file`.
+   * 1. `validateCwdAllowed` refuses a session cwd inside the config/state
+   *    root, so the attacker can't reach `known-good-ref` via `write_file`.
+   *    Two checks back that: `~/.chroxy` is in FORBIDDEN_HOME_SUBDIRS by
+   *    name, AND the resolved `configDir()` is denied outright. The second
+   *    is what keeps this true once CHROXY_CONFIG_DIR relocates the root
+   *    (#7052) — the name-based set alone would then be guarding an empty
+   *    directory while the real one sat open.
    *
    * 2. This function validates that the ref resolves to the SAME
    *    commit as an existing `known-good-*` git tag. The tag is

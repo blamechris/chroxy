@@ -47,8 +47,8 @@
 
 import { readdirSync, readFileSync, existsSync, unlinkSync } from 'fs'
 import { join } from 'path'
-import { homedir } from 'os'
 import { createLogger } from './logger.js'
+import { configPath } from './config-dir.js'
 
 const log = createLogger('snapshots')
 
@@ -62,8 +62,7 @@ const log = createLogger('snapshots')
  * @returns {string}
  */
 export function getSnapshotsDir() {
-  const configDir = process.env.CHROXY_CONFIG_DIR || join(homedir(), '.chroxy')
-  return join(configDir, 'snapshots')
+  return configPath('snapshots')
 }
 
 /**

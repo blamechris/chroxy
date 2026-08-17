@@ -41,18 +41,17 @@
  * aggregates (count / lastUsed / repos); the raw entries never cross the wire.
  */
 
-import { homedir } from 'node:os'
-import { join } from 'node:path'
 import { createLogger } from './logger.js'
 import { loadJsonState, saveJsonState } from './json-state-file.js'
 import { getErrorMessage } from './utils/error-message.js'
 import { MAX_WIRE_DATETIME_MS } from './utils/iso-datetime.js'
+import { configPath } from './config-dir.js'
 
 const log = createLogger('skills-usage')
 
 /** Default on-disk location for the usage log. */
 export function defaultSkillsUsagePath() {
-  return join(homedir(), '.chroxy', 'skills-usage.json')
+  return configPath('skills-usage.json')
 }
 
 /** Ring-buffer cap on the raw entries kept on disk. */

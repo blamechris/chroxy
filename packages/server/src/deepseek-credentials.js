@@ -19,15 +19,14 @@
  * DeepSeek `sk-` prefix overlaps with many other key formats so it isn't
  * special-cased there — masking at the use site is the defense.
  */
-import { join } from 'path'
-import { homedir } from 'os'
 import { maskApiKey } from './byok-credentials.js'
 import { readCredentialJsonField } from './credentials-file.js'
+import { configPath } from './config-dir.js'
 
 // Lazy-resolved per call so tests that mutate process.env.HOME between
 // cases pick up the new home (same rationale as byok-credentials.js).
 function credentialsFilePath() {
-  return join(homedir(), '.chroxy', 'credentials.json')
+  return configPath('credentials.json')
 }
 
 /**

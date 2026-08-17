@@ -1,0 +1,4 @@
+# Files that still resolve ~/.chroxy without going through src/config-dir.js.
+# Ratchet (#7052): a file may LEAVE this list, never join it.
+# Regenerate with: node scripts/lint-config-dir.mjs --write-baseline
+
