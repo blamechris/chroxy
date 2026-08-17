@@ -2,7 +2,9 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
-/// Desktop-specific settings persisted to ~/.chroxy/desktop-settings.json.
+/// Desktop-specific settings persisted to `desktop-settings.json` in the daemon's
+/// config root — `~/.chroxy/desktop-settings.json` unless `CHROXY_CONFIG_DIR`
+/// relocates it. See [`DesktopSettings::path`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DesktopSettings {
@@ -63,9 +65,16 @@ impl Default for DesktopSettings {
 }
 
 impl DesktopSettings {
-    /// Path to the settings file.
+    /// Path to the settings file, inside the daemon's config root
+    /// (`~/.chroxy/desktop-settings.json` with no override).
+    ///
+    /// Goes through `config::config_dir()` rather than `dirs::home_dir()` so a
+    /// `CHROXY_CONFIG_DIR` relocation moves this file with the rest of the state
+    /// (#7241). These settings are desktop-owned, but they live in the shared
+    /// root, so resolving them differently from `config.json` is what split the
+    /// two halves apart.
     pub fn path() -> Option<PathBuf> {
-        dirs::home_dir().map(|h| h.join(".chroxy/desktop-settings.json"))
+        crate::config::config_dir().map(|d| d.join("desktop-settings.json"))
     }
 
     /// Load settings from disk, or return defaults.
@@ -85,9 +94,9 @@ impl DesktopSettings {
 
     /// Save settings to disk.
     pub fn save(&self) -> Result<(), String> {
-        let path = Self::path().ok_or("Could not determine home directory")?;
+        let path = Self::path().ok_or("Could not determine the chroxy config directory")?;
 
-        // Ensure ~/.chroxy/ exists
+        // Ensure the config root exists
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
                 .map_err(|e| format!("Failed to create config dir: {}", e))?;
@@ -233,9 +242,20 @@ mod tests {
 
     #[test]
     fn settings_path_returns_some() {
+        // Shares the config-dir env lock: this asserts on a resolved path, so it
+        // must not run alongside the test that relocates the root.
+        let _guard = crate::config::env_lock();
         let path = DesktopSettings::path();
         assert!(path.is_some());
         let p = path.unwrap();
-        assert!(p.ends_with(".chroxy/desktop-settings.json"));
+        // Compared against the resolved config root, not a hardcoded ".chroxy",
+        // so the assertion holds under a CHROXY_CONFIG_DIR relocation (#7241).
+        assert_eq!(
+            p,
+            crate::config::config_dir()
+                .unwrap()
+                .join("desktop-settings.json")
+        );
+        assert!(p.ends_with("desktop-settings.json"));
     }
 }

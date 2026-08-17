@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Desktop: the tray app now honours `CHROXY_CONFIG_DIR` (#7241).** `config.rs`,
+  `settings.rs`, `qrcode.rs` and the "Reveal in Finder" action each resolved
+  `~/.chroxy` from `dirs::home_dir()` and never read the override, so a relocated
+  install split the desktop app from its own daemon. All four now go through a
+  single `config::config_dir()` resolver mirroring the server's `config-dir.js`
+  (read per call, absolute-only, relative values refused — not resolved).
+
+  The autostart path was affected too, and not in the way it looked: `server.rs`
+  never cleared `CHROXY_CONFIG_DIR` from the spawn environment, so the embedded
+  server **inherited** it and read the relocated root while the tray kept reading
+  `~/.chroxy`. Silent for the same reason as #7239 — `API_TOKEN` is passed
+  explicitly in the spawn env, so the token survived and only the rest of the
+  state diverged. Sharpest visible symptom: the QR code encoded a stale
+  `connection.json`, because a stale file still parses.
+
+  If you do not set `CHROXY_CONFIG_DIR`, nothing changes.
+
 - **Docker: `CHROXY_CONFIG_DIR` is now honoured by the entrypoint (#7239).**
   `scripts/docker-entrypoint.sh` hardcoded `$HOME/.chroxy` while the daemon
   honours the override, so `docker run -e CHROXY_CONFIG_DIR=/data` split the

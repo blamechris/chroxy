@@ -17,7 +17,7 @@ The server is the user's own machine (see [`encryption-threat-model.md` §2](enc
 | **Primary API token** | `chroxy init` (or rotation via `TokenManager`) | OS keychain when available (server auto-migrates out of `~/.chroxy/config.json` on first boot — `server-cli.js` ~line 321); falls back to `~/.chroxy/config.json` on systems without keychain support; `expo-secure-store` on the app | Full session authority — no session scoping | WS `auth` message, HTTP `Authorization: Bearer ...`, dashboard cookie/query |
 | **Pairing-bound session token** | `PairingManager.validatePairing()` on consumption of a one-shot pairing ID | Persisted **encrypted at rest** (`~/.chroxy/session-tokens.json`, 0600 — #6598); `expo-secure-store` on the app. Configurable **sliding** TTL (`sessionTokenTtl`, default 30d) that refreshes on each connect | Bound to exactly one `sessionId`; rejected by every session-scoped handler if the target session differs | Same wire paths as primary token; server distinguishes via `pairingManager.getSessionIdForToken()` |
 | **Per-session hook secret** | `CliSession` constructor — `randomBytes(32).toString('hex')` | In-process only; passed to the `claude` CLI via `CHROXY_HOOK_SECRET` env var | Single session **and** two endpoints (`POST /permission`, `POST /permission-floor`) | Permission-hook callbacks from the spawned CLI subprocess only |
-| **Daemon-level ingest secret** (#5413) | Server startup — `randomBytes(32).toString('base64url')`, created once | `~/.chroxy/ingest-secret`, mode 0600 (`CHROXY_CONFIG_DIR` honored) — readable by same-user hook emitters | `POST /api/events` (notifications only) + `POST /api/mailbox*` (notification + a bounded, fixed-string wakeup into an idle claude-tui recipient — see §6); no reads | External Claude Code hook emitters (sessions chroxy did NOT launch) + the `agent-comm-system` mailbox emit hook |
+| **Daemon-level ingest secret** (#5413) | Server startup — `randomBytes(32).toString('base64url')`, created once | `~/.chroxy/ingest-secret`, mode 0600 — readable by same-user hook emitters | `POST /api/events` (notifications only) + `POST /api/mailbox*` (notification + a bounded, fixed-string wakeup into an idle claude-tui recipient — see §6); no reads | External Claude Code hook emitters (sessions chroxy did NOT launch) + the `agent-comm-system` mailbox emit hook |
 
 > **A fifth class is designed but not yet implemented:** the **discord-return command
 > secret** (gateway→daemon, epic #7165) — minted by `chroxy discord-return enable`,
@@ -26,6 +26,31 @@ The server is the user's own machine (see [`encryption-threat-model.md` §2](enc
 > either direction. Its full specification lives in
 > [`discord-return-path.md`](discord-return-path.md) §3; it becomes a row in this table
 > (and a §9 checklist entry) when #7168 lands the class in code.
+
+> **On-disk paths in this document.** `~/.chroxy` is the **default** config/state
+> root, not a fixed one. `CHROXY_CONFIG_DIR` relocates **all** of it (#7052), so
+> every `~/.chroxy/…` path here — `config.json`, `session-tokens.json`,
+> `ingest-secret`, `discord-return-secret`, `pages/<slug>/` — resolves under
+> `$CHROXY_CONFIG_DIR` when that variable is set. This qualifier used to sit on the
+> ingest-secret row alone, which read as though the other paths were *not*
+> relocatable. Two consequences are security-relevant and easy to miss:
+>
+> - **The 0600 mode is a property of the file, not of the root, and the daemon
+>   does not check it uniformly.** Relocating onto a filesystem that cannot
+>   express POSIX modes (a mounted share, an exFAT/FAT volume, some bind-mounted
+>   container volumes) is therefore not uniformly detected.
+>   `session-tokens.json` **fails closed** — `session-token-store.js` refuses to
+>   read a non-0600 file and logs `devices will re-pair`, so the symptom is
+>   visible. `ingest-secret` sets `0600` at exclusive create
+>   (`event-ingest.js`, `openSync(…, 'ax', 0o600)`) but **never re-checks the mode
+>   on read**, so a root that silently widens it is read anyway. Prefer a local,
+>   user-owned directory on a POSIX filesystem.
+> - **Relocating does not move existing secrets.** The old root keeps its copies
+>   until you remove them — `chroxy config-dir status` reports what was left behind
+>   (#7240). A stale `~/.chroxy/session-tokens.json` still grants its sessions'
+>   authority to anyone who reads it.
+>
+> See [`CONFIG.md` — The config root](../../packages/server/CONFIG.md#the-config-root-chroxy_config_dir).
 
 The implementation files are:
 

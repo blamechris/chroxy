@@ -35,16 +35,25 @@ Everything resolves automatically from the chroxy daemon's config; env vars over
 
 | Env var | Default |
 |---|---|
-| `CHROXY_INGEST_URL` | `http://127.0.0.1:<port>/api/events` (`port` from `~/.chroxy/config.json`, else 8765) |
-| `CHROXY_INGEST_SECRET` | contents of `~/.chroxy/ingest-secret` (provisioned by the daemon at startup) |
-| `CHROXY_CONFIG_DIR` | `~/.chroxy` |
-| `CHROXY_HOOKS_SETTINGS_PATH` | `~/.claude/settings.json` (install/uninstall target) |
+| `CHROXY_CONFIG_DIR` | `~/.chroxy` — the daemon's config/state root. **The three defaults below marked `<configDir>` derive from this**, so relocating the root moves them too; it must be absolute or it is ignored ([CONFIG.md](../server/CONFIG.md#the-config-root-chroxy_config_dir)) |
+| `CHROXY_INGEST_URL` | `http://127.0.0.1:<port>/api/events` (`port` from `<configDir>/config.json`, else 8765) |
+| `CHROXY_INGEST_SECRET` | contents of `<configDir>/ingest-secret` (provisioned by the daemon at startup) |
+| `CHROXY_HOOKS_CHROXY_WORKTREES_ROOT` | `<configDir>/worktrees` (chroxy session-worktree root; test-surface override) |
+| `CHROXY_HOOKS_SETTINGS_PATH` | `~/.claude/settings.json` (install/uninstall target — Claude Code's own root, **not** chroxy's, and unaffected by `CHROXY_CONFIG_DIR`) |
 | `CHROXY_HOOKS_DEBUG=1` | stderr diagnostics from `emit` (silent otherwise) |
 | `CHROXY_HOOKS_SKIP_CWD_FILTER=1` | bypass the non-project cwd filter (tests/debugging) |
-| `CHROXY_HOOKS_CHROXY_WORKTREES_ROOT` | `~/.chroxy/worktrees` (chroxy session-worktree root; test-surface override) |
+
+The emitters must agree with the daemon on where that root is: a hook that resolved
+`$HOME/.chroxy/worktrees` while the daemon used a relocated root would stop recognising a
+chroxy session worktree and mint a Discord embed named after its opaque hex id instead of
+suppressing it (the #5464 regression — see the `#7052` note in
+[`protocol/src/project.ts`](../protocol/src/project.ts)). This package is deliberately
+zero-runtime-dependency and so cannot import the server's `configPath()`; it carries one
+reviewed copy of the same `||` fallback, and `packages/server/scripts/lint-config-dir.mjs`
+now scans this tree so a **second** copy is caught (#7239).
 
 `project` is derived hook-side (worktree-parent remap for `.claude/worktrees/*` checkouts
-and for chroxy session worktrees under `~/.chroxy/worktrees/<id>` — parsed back to the
+and for chroxy session worktrees under `<configDir>/worktrees/<id>` — parsed back to the
 parent repo via the worktree `.git` file's `gitdir:` since the id basename is opaque —
 then cwd → nearest `.git`, then `$CLAUDE_PROJECT_DIR`) and sent explicitly; the server's
 cwd derivation is fallback only.

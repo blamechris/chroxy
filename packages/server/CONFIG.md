@@ -11,6 +11,58 @@ Configuration values are resolved in the following order (highest priority first
 3. **Config file** - `~/.chroxy/config.json` (created with `npx chroxy init`)
 4. **Defaults** - Built-in default values
 
+## The config root (`CHROXY_CONFIG_DIR`)
+
+`~/.chroxy` is the **default** config/state root, not a fixed one.
+`CHROXY_CONFIG_DIR` relocates the **entire** root, so **every `~/.chroxy/…` path
+in this document — and in every other doc — means `$CHROXY_CONFIG_DIR/…` when the
+variable is set.** That covers `config.json`, `credentials.json`, the daemon
+identity key, `session-state.json`, `logs/`, `pages/`, `worktrees/`,
+`snapshots/`, and the trust ledgers.
+
+```bash
+CHROXY_CONFIG_DIR=/mnt/state npx chroxy start   # reads /mnt/state/config.json
+```
+
+Three properties are worth knowing before you set it:
+
+- **It must be an absolute path.** A relative value is **refused**, not resolved:
+  the daemon warns and falls back to `~/.chroxy`. Because the root is read per
+  filesystem call, resolving a relative value would scatter `credentials.json`,
+  the identity key and the trust ledgers into whatever directory the daemon
+  happened to be launched from — a git working tree, if you ran `chroxy start`
+  from a repo. Absoluteness is Node's `path.isAbsolute()`, which on **Windows**
+  also accepts a root-relative `\data` or `/data` (no drive letter needed); the
+  desktop app matches that rule deliberately rather than using Rust's stricter
+  one, since the two disagreeing is itself a split-brain (#7241).
+- **It is env-only, and read directly** rather than through the merge layer
+  (see [Environment variable names](#environment-variable-names)). It cannot be a
+  `config.json` key, because it is what locates `config.json` in the first place.
+- **Relocating an existing install does not move your state.** The daemon warns
+  at startup, `chroxy doctor` reports it, and the copy is opt-in:
+
+  ```bash
+  chroxy config-dir status          # resolved root + anything stranded at ~/.chroxy
+  chroxy config-dir migrate --yes   # copy the stranded state forward (never overwrites)
+  ```
+
+  The copy is deliberately opt-in: the daemon cannot tell "just relocated, wants
+  their state" from "deliberately clean root", and copying an identity key into a
+  possibly shared, synced or bind-mounted volume is the operator's call (#7240).
+
+Internally the root has exactly one resolver — `configDir()` / `configPath()` in
+[`src/config-dir.js`](src/config-dir.js) — and both read the environment **per
+call**, because a module-scope `const` freezes at import and silently ignores the
+override. That is not hypothetical: it relocated only half the daemon's state for
+as long as the copies existed (#7052). A CI lint
+(`scripts/lint-config-dir.mjs`) keeps it to one resolver.
+
+Two live resolvers sit outside that lint's walk by design, and both honour the
+variable: [`packages/protocol/src/project.ts`](../protocol/src/project.ts) (the
+worktrees root) and [`scripts/docker-entrypoint.sh`](../../scripts/docker-entrypoint.sh).
+`packages/claude-hooks` is zero-runtime-dependency and cannot import the server's
+accessor, so it carries one reviewed copy of the same `||` fallback.
+
 ## Configuration Keys
 
 Every key below is a real entry in `CONFIG_SCHEMA`
@@ -138,6 +190,7 @@ of `~/.chroxy/config.json` regardless of which group it appears in.
 
 | Key | Type | CLI Flag | Environment Variable | Description |
 |-----|------|----------|---------------------|-------------|
+| _(env-only)_ | string | - | `CHROXY_CONFIG_DIR` | Absolute path to the config/state root, replacing the `~/.chroxy` default for **all** daemon state — see [The config root](#the-config-root-chroxy_config_dir). Cannot be a `config.json` key: it is what locates `config.json`. A **relative** value is refused with a warning and falls back to the default, rather than being resolved against the daemon's cwd. Relocating an existing install leaves state behind at `~/.chroxy`; `chroxy config-dir status` reports it and `chroxy config-dir migrate --yes` copies it forward. |
 | _(env-only)_ | number | - | `CHROXY_DIAGNOSTICS_RATE_LIMIT` | Per-source-IP request cap on `GET /diagnostics` over a 60 s sliding window (#3737). The endpoint reads the on-disk log tail and iterates every session per call, so it is rate-limited to protect against a stolen-token tight loop. Default `12` requests/min with a 4-request burst. Set the env var to an **integer ≥ 1** to raise or lower that per-window cap (the rate limiter's own `maxMessages` option — unrelated to the `maxMessages` config key above); the burst auto-derives as `max(1, floor(N/3))`. Invalid values (non-integer, < 1, NaN) silently fall through to the default — including sub-integer values like `0.5`, which are rejected outright (truncating to `0` would otherwise raise the limit via RateLimiter's `\|\|` fallback). No `config.json` key is exposed; this setting is intentionally env-only. Overshoot returns `429` with a `Retry-After` header and a JSON body `{ "error": "rate limited", "retryAfterMs": <ms> }`. |
 
 ### Environment variable names
@@ -160,6 +213,11 @@ helper that consumes them, bypassing the merge layer entirely:
 `summarize` on the title path only — they are not a general override for the
 `summarize` object), and `CHROXY_BINARY_PROVENANCE` /
 `CHROXY_BINARY_SIGNATURE_GATE` (`binaryProvenance`).
+
+`CHROXY_CONFIG_DIR` is a direct read too, and necessarily so — the merge layer
+reads `config.json`, and this variable is what decides which `config.json` that
+is. It is read **per filesystem call** rather than once at import, for the reason
+given in [The config root](#the-config-root-chroxy_config_dir).
 
 **The naive fallback.** 16 schema keys have no explicit `envKeyForConfig` entry,
 so their *merge-layer* lookup falls back to a bare `key.toUpperCase()` — which

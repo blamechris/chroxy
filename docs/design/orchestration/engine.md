@@ -1,7 +1,25 @@
 > Provenance: authored 2026-07-15 during epic #6691 design; all cited file:line facts were
 > verified against the then-current tree and drift over time — re-verify before load-bearing use.
 
-Key confirmations/corrections found while verifying: `PermissionManager` rules API is `setRules()` (exposed per-session as `session.setPermissionRules(rules)`, wire precedent in `settings-handlers.js:715`); `ELIGIBLE_TOOLS` excludes Bash (`NEVER_AUTO_ALLOW = Bash/Task/WebFetch/WebSearch/shell`); `permissionMode:'auto'` short-circuit-approves everything (permission-manager.js:220); streamed SDK text arrives ONLY via `stream_delta` (sdk-session.js:832 — `message {type:'response'}` is the non-streamed fallback at :848); history ring buffer coalesces deltas into a `message` entry at `stream_end` but truncates over `_maxPendingStreamSize`; `restoreState()` recreates sessions idle (no turn resumes); `destroySession` removes worker worktrees (branch refs survive); `~/.chroxy` is NOT in `FORBIDDEN_HOME_SUBDIRS`; server package has zod ^4.3.6.
+Key confirmations/corrections found while verifying: `PermissionManager` rules API is `setRules()` (exposed per-session as `session.setPermissionRules(rules)`, wire precedent in `settings-handlers.js:715`); `ELIGIBLE_TOOLS` excludes Bash (`NEVER_AUTO_ALLOW = Bash/Task/WebFetch/WebSearch/shell`); `permissionMode:'auto'` short-circuit-approves everything (permission-manager.js:220); streamed SDK text arrives ONLY via `stream_delta` (sdk-session.js:832 — `message {type:'response'}` is the non-streamed fallback at :848); history ring buffer coalesces deltas into a `message` entry at `stream_end` but truncates over `_maxPendingStreamSize`; `restoreState()` recreates sessions idle (no turn resumes); `destroySession` removes worker worktrees (branch refs survive); ~~`~/.chroxy` is NOT in `FORBIDDEN_HOME_SUBDIRS`~~ **— this was false; see the correction below**; server package has zod ^4.3.6.
+
+> **Correction (#7241): `.chroxy` IS in `FORBIDDEN_HOME_SUBDIRS`** —
+> [`handler-utils.js:218`](../../../packages/server/src/handler-utils.js), where it has sat
+> since `d70954431` (2026-04-12, adversary finding A9) precisely so an authenticated client
+> cannot open a session with `cwd=~/.chroxy` and write the supervisor's `known-good-ref` to
+> poison its crash-rollback target.
+>
+> The provenance header above offers "drift over time" as the reason a cited fact might be
+> wrong. That is not the reason here: the entry predates this document by three months, so
+> the claim was **wrong when written** and inverted a live security control. It is called out
+> rather than quietly deleted because it appeared in a list captioned "confirmations found
+> while verifying", which is the strongest claim to a reader that someone checked — and it was
+> load-bearing for the cwd deny-list gap PR #7238 went on to fix.
+>
+> Re-derive the rest of this section before relying on it. Any orchestration design that
+> assumes a worker session can be given a cwd inside the config root is wrong twice over: the
+> deny-list refuses it, and `CHROXY_CONFIG_DIR` means the root is not necessarily `~/.chroxy`
+> in the first place ([`CONFIG.md`](../../../packages/server/CONFIG.md#the-config-root-chroxy_config_dir)).
 
 ---
 
@@ -45,8 +63,27 @@ Key confirmations/corrections found while verifying: `PermissionManager` rules A
 
 ### 1.2 Run-store interface consumed (ledger agent owns internals)
 
+> **SUPERSEDED — do not implement this interface.**
+> [`verification-consistency.md` F4](verification-consistency.md) adjudicated the two
+> incompatible run stores in favour of metering's `RunLedger`: "RunLedger wins
+> (journal+snapshot+durable-report is strictly better); engine §1.2/§12 rewritten to consume
+> the RunLedger API … **Delete `run-store.js`**." That rewrite has not been applied to this
+> section yet, so §1.2 and §12 still describe `createRunStore`. Build against
+> [`metering.md` §2](metering.md) instead; `run-store.js` does not exist and is not to be
+> created.
+>
+> The snippets below are kept for the interface-mapping record (`upsert` → `setStatus` +
+> `createSubtask` + granular mutators, `recordUsage` → `recordTurnUsage`, boot reconcile →
+> `ledger.recoverRuns()`). Their **paths** have been corrected in place: as written they
+> hardcoded `join(homedir(), '.chroxy', …)`, a shape `packages/server/scripts/lint-config-dir.mjs`
+> now **fails CI on** (#7052/#7239), so an implementer following them literally wrote code the
+> gate rejects. Use `configPath(...)` from
+> [`src/config-dir.js`](../../../packages/server/src/config-dir.js) — it reads
+> `CHROXY_CONFIG_DIR` per call. Metering already honours the override
+> ([`metering.md` §2.2](metering.md)); this section was the half that did not.
+
 ```js
-// orchestration/run-store.js — separate file ~/.chroxy/orchestration-runs.json
+// orchestration/run-store.js — separate file at configPath('orchestration-runs.json')
 // (session-state.json is an overwrite snapshot; runs need their own store —
 // follow skills-usage.js: durable aggregates + debounced atomic save via json-state-file.js)
 createRunStore({ filePath }) -> {
@@ -377,7 +414,9 @@ This is what makes the dogfood comparison (delegation cost vs monolithic frontie
 if (isOrchestrationEnabled(config)) {
   const orchestrationManager = new OrchestrationManager({
     sessionManager, config,
-    runStore: createRunStore({ filePath: join(homedir(), '.chroxy', 'orchestration-runs.json') }),
+    // configPath() reads CHROXY_CONFIG_DIR per call; join(homedir(), '.chroxy', …) fails the
+    // config-dir lint (#7052). See the SUPERSEDED note in §1.2 — RunLedger is the real target.
+    runStore: createRunStore({ filePath: configPath('orchestration-runs.json') }),
     validateCwd: (cwd) => validateCwdAllowed(cwd, config),
     log,
   })
