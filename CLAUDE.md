@@ -122,6 +122,17 @@ unaware machine's `~/.codex` or `~/.pi`). With no `targets:` line the compiler f
 `claude` only and `/skill` prompts you. After editing a skill's generic source by hand, recompile:
 `node scripts/compile-skill-targets.mjs --name <name>` (`--dry-run` to preview).
 
+**Forgetting to recompile is a CI failure, not a silent one (#7253).** `Scripts Tests` runs
+`node scripts/compile-skill-targets.mjs --check`, which compiles the repo-local targets in memory
+and compares them against what is committed — the same shape as the AGENTS.md gate. It fails on an
+artifact whose bytes differ from its source, one that was never compiled, one left behind for a
+target that now skips the skill, one whose source was deleted, and on a repo-local target that has
+committed artifacts but is not being checked. It writes nothing, and it refuses `codex`/`pi`
+outright: those compile into `~/.codex` and `~/.pi`, which are per-machine and must never be
+touched by CI. This matters more than the AGENTS.md mirror does — `.claude/skills/<name>/SKILL.md`
+is what Claude actually *loads*, so a stale artifact means the skill you edited is not the skill
+that runs.
+
 This repo carries `.claude/skill-profile.md` (the customization profile + `targets:`) and
 `.claude/skills.lock` (what's installed, at which template hash). Maintainers edit templates in
 the registry's `generic/` and run its `scripts/build-index.sh`; consumers pick changes up on the

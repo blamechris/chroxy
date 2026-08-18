@@ -1045,6 +1045,20 @@ jobs:
       - name: Run lint-no-nul-bytes golden test
         run: bash scripts/__tests__/lint-no-nul-bytes.test.sh
 
+      - name: Check compiled skill artifacts are in sync with .claude/commands
+        # #7253 — .claude/commands/<name>.md is the neutral source, but
+        # .claude/skills/<name>/SKILL.md is what Claude actually LOADS (the
+        # legacy .claude/commands/ discovery is broken — anthropics/claude-code#31846)
+        # and .gemini/commands/<name>.toml is Gemini's. A stale artifact means the
+        # skill you edited is not the skill that runs. Nothing gated that, and 11
+        # had drifted on main while `catchup` had never been compiled at all.
+        #
+        # The script resolves its targets from .claude/skill-profile.md and gates
+        # only the repo-local ones. codex and pi compile into ~/.codex and ~/.pi:
+        # per-machine, opt-in, not version-controlled, and never touched by CI.
+        # --check is read-only and refuses those targets outright.
+        run: node scripts/compile-skill-targets.mjs --check
+
       - name: Check AGENTS.md is in sync with CLAUDE.md
         # AGENTS.md is generated from CLAUDE.md (the single source of truth) so
         # non-Claude agents get the same guidance. This gate fails if CLAUDE.md
