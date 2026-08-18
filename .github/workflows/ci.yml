@@ -421,7 +421,7 @@ jobs:
             exit 1
           fi
 
-      - name: Check no hand-rolled entry-point guard exists (JS/TS sources, excluding generated dist/)
+      - name: Check no hand-rolled entry-point guard exists (JS/TS sources in the repository)
         run: |
           # Issue #7235 — #7198 and the #7213 sweep found one guard hand-rolled
           # in four files, and ALL FOUR were wrong. Its failure mode is SILENCE:
@@ -436,9 +436,12 @@ jobs:
           # sanctioned copies live outside it, and so could a fourth. The step
           # name says what is actually covered, because a gate that overclaims
           # in its own title is #7239 — walked are
-          # .js/.mjs/.cjs/.ts/.mts/.cts/.tsx/.jsx; NOT walked are shell
-          # (docker-entrypoint.sh's `node -e` uses the same argv slot for a
-          # config path) and the 65 committed files under generated dist/.
+          # .js/.mjs/.cjs/.ts/.mts/.cts/.tsx/.jsx that git considers part of the
+          # repository. NOT walked: shell (docker-entrypoint.sh's `node -e` uses
+          # the same argv slot for a config path), the 65 committed files under
+          # generated dist/, and anything gitignored — notably
+          # packages/desktop/src-tauri/server-bundle/, a generated copy of the
+          # server that lags its source and still holds pre-#7217 guards.
           #
           # Exit 2 means the lint could not do its job (bad flags, a sanctioned
           # path that vanished, or it walked fewer files than its floor) and is
