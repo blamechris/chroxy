@@ -3,10 +3,10 @@
 > A guard that cannot fail is worse than no guard. No guard leaves you cautious;
 > a green one that never checks anything makes you confident and wrong.
 
-Seven of these were found in a single day (2026-08-15). Every one had passed
-unit tests, lint, typecheck, and CI continuously — in some cases for months —
-because **the defect is invisible to any check that only asks "did it report
-success?"**
+Seven of these were found in a single day (2026-08-15), and the catalogue has
+kept growing since. Every one had passed unit tests, lint, typecheck, and CI
+continuously — in some cases for months — because **the defect is invisible to
+any check that only asks "did it report success?"**
 
 Each entry below cites its issue, and the fix is the PR that closes it; consult
 those rather than a tally here, which would be stale the moment one merges.
@@ -25,11 +25,16 @@ observable outcome**. Four ways that happens:
 | **Checked the wrong thing** | It verifies something already known good, not the artifact that can break. |
 | **Checked a subset** | It iterates a hardcoded list while the real set grows past it. |
 | **Silently skipped an input** | An unrecognised shape is filtered out instead of raising. |
+| **Never reached** | The guard is correct, but only some callers route through it. It passes every input it sees, and never sees the rest. |
 
-In all four, the check *emits* success. Nothing distinguishes "verified" from
+In all five, the check *emits* success. Nothing distinguishes "verified" from
 "declined to verify".
 
-## The seven
+The fifth is the hardest to see, because the guard itself is not wrong — you can
+read it line by line and find no defect. What is wrong is the wiring between it
+and the callers it is supposed to cover, which is not visible from either end.
+
+## The catalogue
 
 ### 1. The gate that never ran — `#7184`
 
@@ -99,6 +104,50 @@ Run through macOS's `/tmp` → `/private/tmp` symlink and the guard reads false,
 across three spellings — including the `pathToFileURL` form, which *looks* more
 careful than the others and is equally broken.
 
+### 8. The sandbox that guarded two of four import forms — `#7262`
+
+`packages/server/tests/_setup.mjs` patches the write-side of `node:fs` so a test
+that forgets a temp path fails loudly instead of clobbering the developer's real
+`~/.chroxy` (`#4633`). It patches the live CJS `module.exports`, and a comment
+asserted that named importers therefore see the patch too. Measured under the
+real harness, they did not:
+
+```
+CJS require        : patchedWriteFileSync
+ESM default import : patchedWriteFileSync
+ESM namespace      : writeFileSync      <-- UNPATCHED
+ESM named import   : writeFileSync      <-- UNPATCHED
+```
+
+Node builds the `node:fs` synthetic ESM module lazily, snapshotting its named
+exports off `module.exports` at the first ESM import of it. `_setup.mjs` opened
+with `import { mkdtempSync } from 'node:fs'` — and ESM imports evaluate before
+the module body, so that one line took the snapshot from the unpatched object
+before the body could patch anything. **The guard disarmed itself, in its own
+first line, for the 41 modules under `src/` that import a write-side `fs`
+function by name.**
+
+Nothing could see it. The guard still fired correctly for every caller that
+reached it, so its output was right; only its reach was wrong. `node:fs/promises`
+is the control that proves the mechanism — a separate synthetic module,
+never ESM-imported by `_setup.mjs`, and all four of *its* binding forms were
+guarded the whole time.
+
+What the reach was hiding: `tests/http-routes.test.js` renamed the developer's
+real `~/.chroxy/connection.json` aside in a `before` hook and moved it back in
+`after` — so a crash, a test timeout, or a SIGKILL between the two left a
+running daemon's connection info stranded under a `.test-backup` suffix. It had
+also been unnecessary for some time, since `readConnectionInfo()` now resolves
+through the `CHROXY_CONFIG_DIR` redirect that `_setup.mjs` already points at a
+tmp dir. Arming the guard surfaced it on the first run.
+
+Two lessons specific to this mode. **A binding is not a value**: patching an
+object only reaches consumers who read through that object, and in ESM the
+consumer's import form decides that — invisibly, at link time, from a different
+file. And **the probe must use the same binding form as the code it vouches
+for**: the first check of this sandbox during `#7254` used a default import,
+reported the guard working, and was right about the only form it tested.
+
 ## The one that got me while writing this
 
 A Maestro `repeat` was written with `maxRuns: 3`. `YamlRepeatCommand` has no
@@ -151,7 +200,7 @@ match.
 
 ## Detection: mutation testing is the only reliable method
 
-**Every one of the seven passed all existing tests.** Test suites, lint,
+**Every one of these passed all existing tests.** Test suites, lint,
 typecheck, and CI cannot find this class, because the guard's output is correct
 — it is the guard's *coverage* that is wrong.
 
