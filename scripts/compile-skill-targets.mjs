@@ -22,7 +22,7 @@
 //                                                        # artifact is stale (CI gate)
 //
 // Exit non-zero on emit failure so /skill and CI can gate on it.
-import { readdirSync, readFileSync, writeFileSync, mkdirSync, existsSync, rmSync } from 'node:fs'
+import { readdirSync, readFileSync, writeFileSync, mkdirSync, existsSync, rmSync, statSync } from 'node:fs'
 import { join, dirname, relative } from 'node:path'
 import { homedir } from 'node:os'
 
@@ -71,6 +71,16 @@ function parseArgs(argv) {
     else if (a === '--repo') out.repo = need(i++, a)
     else if (a === '--dry-run') out.dryRun = true
     else if (a === '--check') out.check = true
+    // An UNRECOGNISED argument is fatal, not ignorable. Ignoring it meant one
+    // fat-fingered flag silently changed what the program does: `--chekc` fell
+    // through to the COMPILE path, rewrote every artifact in the checked-out
+    // tree, printed "Done." and exited 0 — a CI step that verified nothing,
+    // mutated the workspace, and reported success. "Never ran" must not be
+    // indistinguishable from "passed" (docs/false-safety-guards.md).
+    else {
+      console.error(`Unknown argument: ${a}. Known: --name <name>, --targets <list>, --repo <root>, --dry-run, --check.`)
+      process.exit(1)
+    }
   }
   return out
 }
@@ -167,17 +177,24 @@ function yamlDq(s) {
 // `dir` is the artifact root, repo-relative. `artifact` maps a skill name to its
 // repo-relative path; `nameOf` is the inverse over a direct child of `dir`,
 // returning null for anything that is not one of this target's artifacts.
+// `nameOf` takes the entry name and its RESOLVED kind ('dir' | 'file' | null),
+// resolved through symlinks by the caller. It must not re-derive the kind from a
+// readdirSync Dirent: a Dirent reports the link itself, so a committed symlink
+// (git mode 120000) is neither isFile() nor isDirectory() and an entry filtered
+// on those reads as "not an artifact" — while Claude's loader follows it happily.
+// A symlinked orphan therefore loaded as a skill with the gate reporting full
+// sync, and the UNGATED backstop inherited the same blindness.
 const CLAUDE_LAYOUT = {
   dir: '.claude/skills',
   artifact: (name) => join('.claude/skills', name, 'SKILL.md'),
   // A skill is a DIRECTORY here; a dir with no SKILL.md is separately reported
   // as MISSING when it has a source, and as an ORPHAN when it does not.
-  nameOf: (entry) => (entry.isDirectory() ? entry.name : null),
+  nameOf: (name, kind) => (kind === 'dir' ? name : null),
 }
 const GEMINI_LAYOUT = {
   dir: '.gemini/commands',
   artifact: (name) => join('.gemini/commands', `${name}.toml`),
-  nameOf: (entry) => (entry.isFile() && entry.name.endsWith('.toml') ? entry.name.slice(0, -'.toml'.length) : null),
+  nameOf: (name, kind) => (kind === 'file' && name.endsWith('.toml') ? name.slice(0, -'.toml'.length) : null),
 }
 
 // ---- emitters: (name, body, description, repo) -> { path, content } ----
@@ -339,15 +356,32 @@ export function listSkillNames(cmdDir) {
 // Every artifact currently on disk for a repo-local target, as { name, file }
 // (file is repo-relative). Uses the target's own layout, so it stays the inverse
 // of what the emitter writes.
-function listArtifacts(repo, target) {
+export function listArtifacts(repo, target) {
   const { layout } = TARGETS[target]
-  if (!layout) return []
+  // A repo-local target with no layout would silently return [], switching OFF
+  // both the ORPHAN scan and the UNGATED backstop for it while its STALE/MISSING
+  // checks kept passing — half-gated, and looking fully gated. Refuse instead:
+  // "cannot enumerate this" must never read as "there was nothing to enumerate".
+  if (!layout) {
+    throw new Error(`listArtifacts: repo-local target "${target}" has no layout, so its artifacts cannot be enumerated. Every repo-local target needs one.`)
+  }
   const dir = join(repo, layout.dir)
   if (!existsSync(dir)) return []
   const out = []
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    const name = layout.nameOf(entry)
-    if (name) out.push({ name, file: layout.artifact(name) })
+  for (const name of readdirSync(dir)) {
+    // statSync FOLLOWS symlinks; a readdirSync Dirent describes the link itself.
+    // Resolving here is what lets a symlinked artifact be seen at all (see the
+    // layout comments). A broken link or an unreadable entry resolves to null and
+    // is skipped — it cannot load as a skill either, so it is not drift.
+    let kind = null
+    try {
+      const st = statSync(join(dir, name))
+      kind = st.isDirectory() ? 'dir' : st.isFile() ? 'file' : null
+    } catch {
+      kind = null
+    }
+    const artifactName = layout.nameOf(name, kind)
+    if (artifactName) out.push({ name: artifactName, file: layout.artifact(artifactName) })
   }
   return out
 }
@@ -369,7 +403,7 @@ function listArtifacts(repo, target) {
  * only the obvious one (the bytes differ) is how a gate of this shape would
  * still have missed `catchup`, which had a source and no artifact whatsoever.
  *
- * @returns {{names: string[], targets: string[], compared: number, problems: object[]}}
+ * @returns {{names: string[], targets: string[], compared: number, skipped: number, problems: object[]}}
  */
 export function checkDrift(repo, targets) {
   const rejected = targets.filter((t) => !TARGETS[t] || !TARGETS[t].repoLocal)
@@ -381,6 +415,7 @@ export function checkDrift(repo, targets) {
   const known = new Set(names)
   const problems = []
   let compared = 0
+  let skipped = 0
 
   for (const name of names) {
     const body = stripStamp(readFileSync(join(cmdDir, `${name}.md`), 'utf8'))
@@ -388,8 +423,11 @@ export function checkDrift(repo, targets) {
     for (const target of targets) {
       const { path, content, skip } = TARGETS[target].emit(name, body, description, repo)
       const file = relative(repo, path)
-      compared++
       if (skip) {
+        // Counted separately: this pair was never byte-compared, and folding it
+        // into `compared` overstated the gate's own coverage self-report by
+        // exactly the 5 Gemini-unsafe skills.
+        skipped++
         // The compile path DELETES a leftover artifact here (compileOne's
         // removeStale). --check writes nothing, so it has to report the same
         // condition instead — otherwise an artifact from before the skill became
@@ -397,6 +435,7 @@ export function checkDrift(repo, targets) {
         if (existsSync(path)) problems.push({ kind: 'unexpected', target, name, file, detail: skip })
         continue
       }
+      compared++
       if (!existsSync(path)) {
         problems.push({ kind: 'missing', target, name, file })
         continue
@@ -428,7 +467,7 @@ export function checkDrift(repo, targets) {
     }
   }
 
-  return { names, targets, compared, problems }
+  return { names, targets, compared, skipped, problems }
 }
 
 const PROBLEM_DETAIL = {
@@ -439,6 +478,19 @@ const PROBLEM_DETAIL = {
   ungated: (p) => `${p.count} committed artifact(s) present but "${p.target}" is not in the checked targets`,
 }
 
+// What the developer should DO, per kind. One generic "recompile and commit"
+// line is a no-op for three of the five: recompiling cannot clear an ORPHAN
+// (there is no source to compile), and it cannot clear an UNGATED (the cause is
+// the target list, not the artifacts). A remediation that does not remediate is
+// worse than none — it reads as "the gate is broken" rather than "here is the fix".
+const PROBLEM_FIX = {
+  missing: (targets) => `Run \`node scripts/compile-skill-targets.mjs --targets ${targets.join(',')}\` and commit the result.`,
+  stale: (targets) => `Run \`node scripts/compile-skill-targets.mjs --targets ${targets.join(',')}\` and commit the result.`,
+  unexpected: (targets) => `Delete the leftover artifact(s) above — or run \`node scripts/compile-skill-targets.mjs --targets ${targets.join(',')}\`, which removes them.`,
+  orphan: () => 'Delete the artifact(s) above, or restore the deleted .claude/commands/<name>.md.',
+  ungated: () => 'Fix the `targets:` line in .claude/skill-profile.md so the target is checked — or, if it is genuinely retired, delete its committed artifacts.',
+}
+
 // Run the gate and report. Returns the process exit code (0 in sync, 1 on drift
 // or on a condition that would make the gate vacuous).
 function runCheck(repo, targets) {
@@ -446,7 +498,7 @@ function runCheck(repo, targets) {
     console.error('::error::--check: no repo-local targets to check. Nothing would be verified.')
     return 1
   }
-  const { names, compared, problems } = checkDrift(repo, targets)
+  const { names, compared, skipped, problems } = checkDrift(repo, targets)
   // A gate that checked nothing must never report success. An empty
   // .claude/commands/ makes every loop below a no-op and every artifact an
   // ORPHAN, so say so plainly rather than emitting a wall of orphans.
@@ -454,15 +506,28 @@ function runCheck(repo, targets) {
     console.error(`::error::--check found no skill sources in ${join(repo, '.claude/commands')} — the gate would pass without checking anything.`)
     return 1
   }
+  // The gate's own accounting, checked. Every (source, target) pair must have
+  // been either byte-compared or explicitly skipped; anything else means a loop
+  // exited early and the "in sync" below would cover fewer artifacts than it
+  // claims. This is the one arithmetic the gate cannot get wrong silently.
+  const expected = names.length * targets.length
+  if (compared + skipped !== expected) {
+    console.error(`::error::--check accounting is wrong: ${compared} compared + ${skipped} skipped != ${expected} expected (${names.length} skill(s) x ${targets.length} target(s)). The target loop did not run to completion.`)
+    return 1
+  }
   if (problems.length) {
     console.error(`::error::Compiled skill artifacts are out of sync with .claude/commands/ (${problems.length} problem(s)).`)
     for (const p of problems) {
       console.error(`  ${p.kind.toUpperCase().padEnd(10)} [${p.target}] ${p.file} — ${PROBLEM_DETAIL[p.kind](p)}`)
     }
-    console.error(`\nRun \`node scripts/compile-skill-targets.mjs --targets ${targets.join(',')}\` and commit the result (deleting any ORPHAN/leftover artifact by hand).`)
+    // One line per kind PRESENT, so the fix shown is one that actually applies.
+    console.error('')
+    for (const kind of [...new Set(problems.map((p) => p.kind))]) {
+      console.error(`  ${kind.toUpperCase()}: ${PROBLEM_FIX[kind](targets)}`)
+    }
     return 1
   }
-  console.log(`Compiled skill artifacts are in sync: ${names.length} skill(s) x ${targets.length} target(s) [${targets.join(', ')}] — ${compared} artifact(s) compared.`)
+  console.log(`Compiled skill artifacts are in sync: ${names.length} skill(s) x ${targets.length} target(s) [${targets.join(', ')}] — ${compared} artifact(s) compared${skipped ? `, ${skipped} not emittable for their target (verified absent)` : ''}.`)
   return 0
 }
 

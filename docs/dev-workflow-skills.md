@@ -53,7 +53,7 @@ With no `targets:` line the compiler falls back to `claude` only. After editing 
 
 ### The drift gate (`--check`)
 
-Forgetting that recompile used to be invisible: on `origin/main` 11 compiled artifacts differed from their sources, and `catchup` had a source with no artifact at all — so it was not loadable (#7253). `.claude/skills/<name>/SKILL.md` is what Claude actually **loads**, so a stale artifact means the skill you edited is not the skill that runs.
+Forgetting that recompile used to be invisible: on `origin/main` the gate reported 11 problems — 10 artifacts whose bytes differed from their sources, plus `catchup`, which had a source and no compiled artifact at all, so that skill was not loadable (#7253). `.claude/skills/<name>/SKILL.md` is what Claude actually **loads**, so a stale artifact means the skill you edited is not the skill that runs.
 
 ```bash
 node scripts/compile-skill-targets.mjs --check
@@ -69,7 +69,9 @@ Compiles the repo-local targets in memory and compares them against what is comm
 | `ORPHAN` | an artifact whose `.claude/commands/<name>.md` is gone — it still loads as a skill |
 | `UNGATED` | a repo-local target has committed artifacts but is not among the checked targets (a mangled `targets:` line degrades to `claude`, which would leave every `.gemini/commands/*.toml` unchecked) |
 
-`--check` is strictly read-only, is a repo-wide gate (so it refuses `--name`), and refuses `codex`/`pi` outright: those compile into `~/.codex` and `~/.pi`, which are per-machine, opt-in, and deliberately not version-controlled, so there is no committed state to compare against and CI must never touch them.
+`--check` is strictly read-only and is a repo-wide gate, so it refuses `--name` (under which every artifact for a non-selected skill would read as an `ORPHAN`). It also refuses an unrecognised argument rather than ignoring it — a typo'd `--chekc` used to fall through to the **compile** path, rewriting every artifact and exiting 0.
+
+It never touches `codex`/`pi`, which compile into `~/.codex` and `~/.pi`: per-machine, opt-in, and deliberately not version-controlled, so there is no committed state to compare against. Naming one in `--targets` is an **error**; inheriting one from the profile's `targets:` line **drops it with a logged note**, and if that leaves no repo-local target at all the gate refuses rather than reporting "in sync" over nothing.
 
 ### Discoverability hint
 
