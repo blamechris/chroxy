@@ -98,6 +98,17 @@ import { readFileSync, writeFileSync, existsSync, readdirSync, statSync } from '
 import { dirname, join, resolve, relative, sep as pathSep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+// Dynamic, so an unloadable stripper exits 2 ("the lint could not run") rather
+// than 1 ("the tree is dirty"). A static import cannot be caught, and an
+// uncaught ESM resolution error exits 1.
+let stripComments
+try {
+  ({ stripComments } = await import('./lib/strip-comments.mjs'))
+} catch (err) {
+  console.error(`lint-config-dir: cannot load the comment stripper: ${err.message}`)
+  process.exit(2)
+}
+
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = resolve(__dirname, '..', '..', '..')
 
@@ -160,32 +171,21 @@ function listSourceFiles(dir) {
   return out.sort()
 }
 
-/**
- * Blank out comment spans so a doc block that *quotes* the banned pattern is
- * not itself an offender. Returns a line array of the same length, with
- * commented regions replaced by spaces (line numbers stay accurate).
- */
-function stripComments(source) {
-  const out = []
-  let inBlock = false
-  for (const line of source.split('\n')) {
-    let kept = ''
-    let i = 0
-    while (i < line.length) {
-      if (inBlock) {
-        const end = line.indexOf('*/', i)
-        if (end === -1) { i = line.length } else { inBlock = false; i = end + 2 }
-        continue
-      }
-      if (line.startsWith('//', i)) break
-      if (line.startsWith('/*', i)) { inBlock = true; i += 2; continue }
-      kept += line[i]
-      i++
-    }
-    out.push(kept)
-  }
-  return out
-}
+// Comment stripping lives in ./lib/strip-comments.mjs (#7248). This file used
+// to carry its own line-array version, and it was NOT string-aware: a `//`
+// inside a string literal started a "comment", so everything after it on that
+// line was blanked. Measured over the 307 files it scans, real code was hidden
+// on 47 of them — `must use http://` in a template literal truncated the rest of
+// the statement, for one. (The stripped output differs on more files than that,
+// but only in whitespace padding; 47 is the count where non-whitespace code went
+// missing, which is the number this sentence is about.) The shared implementation asks a parser, so a `//`
+// inside a string is a string.
+//
+// The old signature returned an ARRAY of lines. That stayed a caller concern
+// rather than becoming an option on the shared module: the shared stripper
+// preserves offsets and newlines exactly, so `.split('\n')` reproduces the
+// array with identical indices, and an option would have been a second code
+// path to keep honest for no gain.
 
 // A home-root expression. `process.env.HOME` is the same thing by another
 // spelling (tests/smoke-test.mjs uses it) and evaded a `homedir()`-only rule.
@@ -281,7 +281,16 @@ function findOffenders(srcDirs, ownerPaths, keyRoot) {
 
       const source = readFileSync(file, 'utf8')
       const rawLines = source.split('\n')
-      const code = stripComments(source)
+      // A stripper throw is "the lint could not read this file", not "the tree
+      // is dirty" — it must not escape as an uncaught exception, which exits 1
+      // and this file documents 1 as an offender. Same reasoning as the guarded
+      // import above (#7248 review).
+      let code
+      try {
+        code = stripComments(source, file).split('\n')
+      } catch (err) {
+        usageError(`cannot strip comments from ${rel}: ${err.message}`)
+      }
       const wrappers = accessorWrappersIn(code)
       const homeVars = homeBoundVarsIn(code)
       const callsAccessor = (text) =>

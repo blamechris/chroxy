@@ -56,6 +56,29 @@ import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+// Dynamic, so an unloadable stripper exits 2 ("the lint could not run") rather
+// than 1 ("a subclass drops an opt").
+let stripComments
+try {
+  ({ stripComments } = await import('./lib/strip-comments.mjs'))
+} catch (err) {
+  console.error(`lint-session-opt-forwarding: cannot load the comment stripper: ${err.message}`)
+  process.exit(2)
+}
+
+// A stripper throw is "the lint could not read this file", not "a subclass drops
+// an opt" — it must not escape as an uncaught exception, which exits 1 and this
+// lint reserves 1 for the latter. Four call sites, so the guard is the wrapper
+// rather than four try/catch blocks (#7248 review).
+function strip(src, fileName) {
+  try {
+    return stripComments(src, fileName)
+  } catch (err) {
+    console.error(`lint-session-opt-forwarding: cannot strip comments from ${fileName}: ${err.message}`)
+    process.exit(2)
+  }
+}
+
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
 function parseFlags(argv) {
@@ -108,47 +131,21 @@ function findMatchingBracket(src, openIdx, open, close) {
   return -1
 }
 
-function stripComments(src) {
-  // Strip // line comments and /* block */ comments. Keeps newlines so
-  // line-number math downstream still tracks the original source.
-  let out = ''
-  let i = 0
-  let inStr = null
-  while (i < src.length) {
-    const ch = src[i]
-    const prev = src[i - 1]
-    if (inStr) {
-      out += ch
-      if (ch === inStr && prev !== '\\') inStr = null
-      i++
-      continue
-    }
-    if (ch === '"' || ch === "'" || ch === '`') {
-      inStr = ch
-      out += ch
-      i++
-      continue
-    }
-    if (ch === '/' && src[i + 1] === '/') {
-      const nl = src.indexOf('\n', i)
-      if (nl === -1) { i = src.length; continue }
-      i = nl
-      continue
-    }
-    if (ch === '/' && src[i + 1] === '*') {
-      const end = src.indexOf('*/', i + 2)
-      if (end === -1) { i = src.length; continue }
-      // Preserve newlines so any downstream line-counting stays sane.
-      const block = src.slice(i, end + 2)
-      for (const c of block) if (c === '\n') out += '\n'
-      i = end + 2
-      continue
-    }
-    out += ch
-    i++
-  }
-  return out
-}
+// Comment stripping lives in ./lib/strip-comments.mjs (#7248). This file used to
+// carry its own scanner. It was string-aware but not REGEX-aware, so a regex
+// literal containing a quote — `/(["])/g` — put it into a phantom string state
+// and it stopped stripping, so comment text survived as if it were code. The
+// other direction is worse and is what the test suite pins: in `/\/*$/` the
+// `\/` leaves a `/` and the next character is `*`, so the scanner reads a BLOCK
+// COMMENT OPEN and blanks to EOF — a real offending subclass below such a line
+// became invisible and this lint reported "0 session subclass(es)". Both are the
+// same defect #7249 fixed in the entry-point lint, and the reason a character
+// scanner cannot do this job: telling a regex literal from division needs the
+// grammar.
+//
+// The shared implementation blanks comments while preserving every offset, which
+// is strictly stronger than what this file needs — `lineOf` below only requires
+// line numbers to line up.
 
 // Extract the set of destructure keys from a `{ ... }` block. Handles
 // trailing commas, default values (`= foo`), rename (`a: b` — rare here),
@@ -214,7 +211,7 @@ function extractObjectKeys(block) {
 
 function parseBaseSessionOpts(baseSessionPath) {
   const src = readFileSync(baseSessionPath, 'utf8')
-  const stripped = stripComments(src)
+  const stripped = strip(src, baseSessionPath)
   // Anchor on `export class BaseSession` (the class we care about — the
   // file may export helpers and constants too).
   const classIdx = stripped.indexOf('export class BaseSession')
@@ -250,7 +247,7 @@ function parseBaseSessionOpts(baseSessionPath) {
 // Returns { keys: Set<string>, order: string[] }.
 function parseBaseSessionOptKeysArray(baseSessionPath) {
   const src = readFileSync(baseSessionPath, 'utf8')
-  const stripped = stripComments(src)
+  const stripped = strip(src, baseSessionPath)
   const declIdx = stripped.indexOf('BASE_SESSION_OPT_KEYS')
   if (declIdx === -1) {
     throw new Error(`Could not find "BASE_SESSION_OPT_KEYS" in ${baseSessionPath}`)
@@ -542,7 +539,7 @@ function main() {
   // (roots + every transitive subclass → the scan matcher picks up direct AND
   // second-tier subclasses) and the picker-ban set (every transitive descendant
   // of a forbidden ancestor, ancestor itself exempt).
-  const classEdges = collectClassEdges(allFiles.map(f => stripComments(readFileSync(f, 'utf8'))))
+  const classEdges = collectClassEdges(allFiles.map(f => strip(readFileSync(f, 'utf8'), f)))
   const sessionBases = descendantClosure(classEdges, ROOT_SESSION_BASES, { includeSeeds: true })
   const pickerForbidden = descendantClosure(classEdges, PICKER_FORBIDDEN_ANCESTORS, { includeSeeds: false })
   const classRe = buildSessionClassRegex(sessionBases)
@@ -555,7 +552,7 @@ function main() {
     const origSrc = readFileSync(file, 'utf8')
     if (!classRe.test(origSrc)) continue
     classRe.lastIndex = 0
-    const strippedSrc = stripComments(origSrc)
+    const strippedSrc = strip(origSrc, file)
     let m
     while ((m = classRe.exec(strippedSrc)) !== null) {
       const className = m[1]

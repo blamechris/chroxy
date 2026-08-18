@@ -728,4 +728,42 @@ export function statePath() {
       assert.match(res.stderr, /\.\.\/b\/offender\.js:5/)
     })
   })
+
+  // --- #7248: the stripper was hiding real offenders ----------------------
+  //
+  // This lint used to carry its own comment stripper, and it was not
+  // string-aware: `line.startsWith('//', i)` fired on the `//` inside
+  // `https://`, so everything after a URL string on that line was blanked and
+  // never matched. Measured across the 307 files it scans, real code was hidden
+  // on 47 of them.
+  //
+  // Note the scope: the old stripper was LINE-based and reset at every newline,
+  // so only a SAME-LINE offender was ever hidden. A test putting the offender on
+  // a later line would pass against the old lint too — vacuous — so there isn't
+  // one here. The consequence was not cosmetic — it printed
+  // "OK: ~/.chroxy resolves through the owner module" for a file that hardcodes
+  // join(homedir(), '.chroxy'), which is the exact pattern it exists to find.
+  describe('a URL string does not hide the rest of the line (#7248)', () => {
+    test('an offender after a url:// string on the same line is caught', () => {
+      const { status } = runLint({
+        'thing.js': "import { homedir } from 'node:os'\n"
+          + "import { join } from 'node:path'\n"
+          + "export const p = () => { const u = 'https://x.test/a'; return join(homedir(), '.chroxy', 's.json') }\n",
+      })
+      assert.equal(status, 1)
+    })
+
+    // Negative control for the pair above: the string-awareness must not have
+    // been bought by treating everything as code. A `//` comment still hides
+    // its own content.
+    test('a real comment mentioning the pattern is still not an offender', () => {
+      const { status } = runLint({
+        'thing.js': "const u = 'https://x.test/a'\n"
+          + "// see join(homedir(), '.chroxy') — prose, not code\n"
+          + 'export const x = 1\n',
+      })
+      assert.equal(status, 0)
+    })
+  })
+
 })

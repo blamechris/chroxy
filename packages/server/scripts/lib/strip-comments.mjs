@@ -43,9 +43,12 @@
  * still see. A caller that needs strings blanked too should say so explicitly
  * rather than assume it.
  *
- * `lint-config-dir.mjs` and `lint-session-opt-forwarding.mjs` still carry their
- * own hand-written strippers, with different signatures and the same regex
- * blindness. Migrating them is #7248.
+ * Every lint in `packages/server/scripts/` uses this one as of #7248 — there is
+ * no other implementation in the repo. Both of the copies this replaced were
+ * regex-blind in the way described above, in opposite directions:
+ * `lint-config-dir.mjs`'s was not string-aware and HID code after a URL literal;
+ * `lint-session-opt-forwarding.mjs`'s desynced on a quote inside a character
+ * class and LEAKED comment text as code.
  */
 
 import ts from 'typescript'
