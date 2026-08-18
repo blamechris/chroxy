@@ -12,30 +12,25 @@
  */
 
 import { dirname, join, resolve } from 'node:path'
-import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, cpSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
+import { stageScript } from './helpers/stage-script.mjs'
+
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 const scriptPath = resolve(__dirname, '..', 'gen-agents-md.mjs')
-const libDir = resolve(__dirname, '..', 'lib')
 
 const { renderAgentsMd, readClaudeMd, readAgentsMd } = await import(scriptPath)
 
 // The subprocess fixtures below run the generator out of a temp tree, so they
-// have to stage everything it imports, not just the file itself. Copying the
-// whole scripts/lib directory rather than naming is-entry-point.mjs means the
-// next sibling helper is staged automatically — when the entry-point guard was
-// extracted there (#7222), a fixture that copied only gen-agents-md.mjs failed
-// with ERR_MODULE_NOT_FOUND, and a fixture that hardcodes one filename would
-// fail the same way on the next extraction.
-const stageGenerator = (scriptsDir) => {
-  mkdirSync(scriptsDir, { recursive: true })
-  cpSync(scriptPath, join(scriptsDir, 'gen-agents-md.mjs'))
-  cpSync(libDir, join(scriptsDir, 'lib'), { recursive: true })
-}
+// have to stage everything it imports, not just the file itself. stageScript
+// copies the whole sibling scripts/lib directory — see its header for why
+// naming individual helpers breaks on the next extraction. It is shared with
+// compile-skill-targets.test.mjs, which needed the identical staging (#7236).
+const stageGenerator = (scriptsDir) => stageScript(scriptPath, scriptsDir)
 
 let pass = 0
 let fail = 0
