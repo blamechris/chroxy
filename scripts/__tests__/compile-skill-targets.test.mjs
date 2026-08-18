@@ -275,9 +275,17 @@ await test('detectUncompiledAgents flags an installed-but-unselected pi (~/.pi)'
 import { existsSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
-import { stageScript } from './lib/stage-script.mjs'
+import { stageScript } from './helpers/stage-script.mjs'
 
-const SKILL_BODY = '# Demo skill\n\nCompiles a demo skill for the entry-point fixture.\n'
+// Carries a registry stamp and an arg token on purpose. A bare heading plus one
+// sentence exercises none of the emitter transformations, and `stripStamp`,
+// `emitClaude` and `emitGemini` are NOT exported — these subprocess tests are
+// their only coverage anywhere in the repo, so the fixture has to be rich enough
+// to catch a mutation in them. 28 of the 31 real sources in .claude/commands/
+// carry a stamp, so a stripStamp regression would ship install metadata as skill
+// content in almost every artifact.
+const SKILL_STAMP = '<!-- skill-templates: demo@1.2.3 -->'
+const SKILL_BODY = `${SKILL_STAMP}\n# Demo skill\n\nCompiles a demo skill for the entry-point fixture. Takes $ARGUMENTS.\n`
 
 /**
  * A fixture repo holding the staged compiler plus one source skill.
@@ -298,7 +306,19 @@ const withFixture = (fn) => {
     const script = stageScript(helperPath, pjoin(root, 'scripts'))
     mkdirSync(pjoin(root, '.claude', 'commands'), { recursive: true })
     writeFileSync(pjoin(root, '.claude', 'commands', 'demo.md'), SKILL_BODY)
-    fn({ dir, root, home, script })
+    const returned = fn({ dir, root, home, script })
+    // Sync-only, and said out loud. An async callback returns a pending promise
+    // that nothing awaits: the `finally` below removes the fixture out from
+    // under it, everything after the first `await` runs against a deleted tree,
+    // and the assertion counter is already satisfied by the synchronous prefix —
+    // so the test reports `ok` having skipped the rest of its body. Verified:
+    // making the --dry-run callback async and awaiting once before its positive
+    // control left the suite 23/23 green with the control never executed. The
+    // 18 unit tests above all use async callbacks that the harness awaits, so
+    // async is this file's ambient habit and only these callbacks are not.
+    if (returned && typeof returned.then === 'function') {
+      throw new Error('withFixture: the callback must be synchronous — the fixture is removed before an async body finishes')
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -359,16 +379,32 @@ await test('invoked directly, it compiles a real skill and writes every target a
       `and main() never ran (#7198/#7236). stdout: ${JSON.stringify(run.stdout)}`,
     )
     const emitted = readFileSync(skillMd, 'utf8')
-    assert(emitted.startsWith('---\ndescription: "'), `missing description frontmatter:\n${emitted}`)
-    assert(emitted.includes(SKILL_BODY.trimEnd()), `the source body must pass through verbatim:\n${emitted}`)
+    // Pin the WHOLE frontmatter block, not just its opening. A `startsWith`
+    // check still passes on output whose closing `---` was dropped, which
+    // Claude cannot parse; this also pins that the description is non-empty and
+    // really derived rather than defaulted.
+    assert(
+      /^---\ndescription: "[^\n]+"\n---\n\n/.test(emitted),
+      `frontmatter is not a complete, non-empty block:\n${emitted}`,
+    )
+    assert(emitted.includes('# Demo skill'), `the source body must pass through:\n${emitted}`)
+    assert(
+      !emitted.includes('skill-templates:'),
+      `the registry stamp is install metadata, not skill content — stripStamp did not run:\n${emitted}`,
+    )
 
     // A second target, so the assertion covers the emitter LOOP rather than one
     // lucky write: a main() that emitted only its first target would pass above.
     const geminiToml = pjoin(root, '.gemini', 'commands', 'demo.toml')
     assert(existsSync(geminiToml), 'the second target was not emitted — the emitter loop stopped after one')
+    const gemini = readFileSync(geminiToml, 'utf8')
+    assert(gemini.includes('# Demo skill'), `the gemini artifact must carry the skill body:\n${gemini}`)
+    // $ARGUMENTS is the neutral arg token; Gemini's is {{args}}. Without this,
+    // deleting the substitution silently strips argument passing from every
+    // compiled Gemini command and nothing notices.
     assert(
-      readFileSync(geminiToml, 'utf8').includes('# Demo skill'),
-      'the gemini artifact must carry the skill body',
+      gemini.includes('{{args}}') && !gemini.includes('$ARGUMENTS'),
+      `gemini must rewrite $ARGUMENTS to {{args}}:\n${gemini}`,
     )
   })
 })
@@ -432,31 +468,37 @@ await test('exits 1 with a diagnostic when the repo has no .claude/commands (#72
 await test('importing the module does NOT run its CLI (the other direction, #7236)', () => {
   withFixture(({ root, home, script }) => {
     // Everything above faces one way: a guard stuck FALSE compiles nothing.
-    // Stuck TRUE is the other failure, and it is invisible from that side -
-    // hardwiring the guard to `true` leaves all of the above at 22/22 green,
-    // because main() then runs during THIS FILE's own `await import(...)` at
-    // the top, quietly compiling whatever repo the suite was invoked from and
-    // rewriting its committed artifacts. Testing only the direction the bug
-    // arrived from is how #7250's stripper shipped a worse hole than the one
-    // it fixed, so this faces the other way.
+    // Stuck TRUE is the other failure, and it is invisible from that side —
+    // hardwiring the guard to `true` leaves all of the above green, because
+    // main() then runs during THIS FILE's own `await import(...)` at the top,
+    // compiling whatever repo the suite was invoked from and rewriting its
+    // committed artifacts. Testing only the direction the bug arrived from is
+    // how #7250 shipped a worse hole than the one it fixed, so this faces the
+    // other way.
     //
-    // `-e` leaves argv[1] undefined, which is a legitimate "there is no invoked
-    // script" case the guard must answer false for; the fixture root supplies a
-    // real .claude/commands, so a guard that answered true would have something
-    // to compile and would visibly do it.
-    const run = spawnSync(
-      process.execPath,
-      ['--input-type=module', '-e', `await import(${JSON.stringify(pathToFileURL(script).href)})`],
-      { encoding: 'utf8', cwd: root, env: { ...process.env, HOME: home, USERPROFILE: home } },
-    )
+    // The importer is a STAGED FILE, not `node -e`. Under `-e` there is no
+    // argv[1], so isEntryPoint returns at its first line and never reaches the
+    // path comparison — the test would pass without exercising the branch that
+    // actually decides this. Verified: inverting `self === invoked` to `!==` in
+    // the guard left an `-e` version of this test at 23/23 green while the
+    // suite's own import wrote 12 files into the invoking checkout. A real
+    // argv[1] that is a DIFFERENT existing file is the configuration this suite
+    // genuinely imports under when CI runs it.
+    const importer = pjoin(root, 'importer.mjs')
+    writeFileSync(importer, `await import(${JSON.stringify(pathToFileURL(script).href)})\n`)
+    const run = spawnSync(process.execPath, [importer], {
+      encoding: 'utf8',
+      cwd: root,
+      env: { ...process.env, HOME: home, USERPROFILE: home },
+    })
     assert(run.status === 0, `importing the module should exit 0, got ${run.status}: ${run.stderr}`)
     assert(
       !/Compiling/.test(run.stdout),
-      `main() ran on import - the guard reads true when it is not the entry point:\n${run.stdout}`,
+      `main() ran on import — the guard reads true when it is not the entry point:\n${run.stdout}`,
     )
     assert(
       !existsSync(pjoin(root, '.claude', 'skills', 'demo', 'SKILL.md')),
-      'importing the module compiled a skill - any test that imports it would rewrite the real repo',
+      'importing the module compiled a skill — any test that imports it would rewrite the real repo',
     )
   })
 })

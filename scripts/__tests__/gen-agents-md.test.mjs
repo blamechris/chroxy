@@ -17,7 +17,7 @@ import { tmpdir } from 'node:os'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
-import { stageScript } from './lib/stage-script.mjs'
+import { stageScript } from './helpers/stage-script.mjs'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)

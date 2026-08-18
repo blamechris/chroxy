@@ -9,10 +9,18 @@
 // single filename would die the same way on the next helper to be extracted.
 // Copying the whole directory stages the next sibling automatically.
 //
-// This is the ONE implementation. gen-agents-md.test.mjs grew it first and
-// compile-skill-targets.test.mjs needed the identical thing (#7236); a second
-// hand-maintained copy of it is the shape #7213/#7222 were filed to remove,
-// recreated one directory down.
+// This is the one implementation FOR THE .mjs TEST FILES. gen-agents-md.test.mjs
+// grew it first and compile-skill-targets.test.mjs needed the identical thing
+// (#7236); a second hand-maintained copy of it is the shape #7213/#7222 were
+// filed to remove, recreated one directory down.
+//
+// It is deliberately not the only one in this directory: bump-version.test.sh's
+// `install_agents_generator()` stages the same script from shell and cannot
+// import this module. That copy also DISAGREES about the missing-lib case — it
+// skips the copy when scripts/lib is absent, where this one refuses — which is
+// the "'cannot check this' treated as 'nothing to check'" shape from
+// docs/false-safety-guards.md. Reconciling them is tracked separately rather
+// than smuggled into a test-coverage change.
 
 import { cpSync, existsSync, mkdirSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
