@@ -594,4 +594,28 @@ export class TestStubSession extends BaseSession {
     const { code, stdout, stderr } = runLint(srcDir)
     assert.equal(code, 0, `allowlist should suppress streamStallTimeoutMs\nstdout:\n${stdout}\nstderr:\n${stderr}`)
   })
+
+  // --- #7248: why there is no behaviour test for the stripper swap here -----
+  //
+  // This lint's own comment stripper was replaced with ./lib/strip-comments.mjs.
+  // The old one was string-aware but not REGEX-aware, so `/(["])/g` put it into
+  // a phantom string state and it stopped stripping — on 24 of the files this
+  // lint reads, JSDoc bodies survived as if they were code. That difference is
+  // real and is pinned in tests/strip-comments.test.js, which fails against the
+  // old scanner.
+  //
+  // What is NOT pinned here is an end-to-end change to THIS lint's verdict,
+  // because I could not produce one. A commented-out `class X extends
+  // BaseSession` placed below such a regex survives stripping under the old
+  // scanner — verified directly — and the lint still reports
+  // "0 session subclass(es)": its class detection never picks the text up. So a
+  // test asserting the verdict would pass for a reason unrelated to the
+  // stripper, which is the vacuous-guard shape this repo keeps finding.
+  //
+  // Recorded rather than left silent so the next person knows it was checked
+  // and what the answer was. For this lint the swap is a robustness fix that
+  // removes a latent false-positive surface, not a behaviour change today —
+  // unlike lint-config-dir, where the same swap turned a missed offender into a
+  // caught one (see its suite).
+
 })

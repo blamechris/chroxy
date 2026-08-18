@@ -728,4 +728,50 @@ export function statePath() {
       assert.match(res.stderr, /\.\.\/b\/offender\.js:5/)
     })
   })
+
+  // --- #7248: the stripper was hiding real offenders ----------------------
+  //
+  // This lint used to carry its own comment stripper, and it was not
+  // string-aware: `line.startsWith('//', i)` fired on the `//` inside
+  // `https://`, so everything after a URL string on that line was blanked and
+  // never matched. Measured across the 307 files it scans, 89 differed from the
+  // truth. The consequence was not cosmetic — it printed
+  // "OK: ~/.chroxy resolves through the owner module" for a file that hardcodes
+  // join(homedir(), '.chroxy'), which is the exact pattern it exists to find.
+  describe('a URL string does not hide the rest of the line (#7248)', () => {
+    const AFTER_URL = `
+import { homedir } from 'node:os'
+import { join } from 'node:path'
+export function statePath () {
+  const docs = 'https://example.com/docs'
+  return join(homedir(), '.chroxy', 'session-state.json') || docs
+}
+`
+    test('an offender after a url:// string on the same line is caught', () => {
+      const { status } = runLint({
+        'thing.js': "import { homedir } from 'node:os'\n"
+          + "import { join } from 'node:path'\n"
+          + "export const p = () => { const u = 'https://x.test/a'; return join(homedir(), '.chroxy', 's.json') }\n",
+      })
+      assert.equal(status, 1)
+    })
+
+    test('an offender on a later line after a url:// string is caught', () => {
+      const { status } = runLint({ 'thing.js': AFTER_URL })
+      assert.equal(status, 1)
+    })
+
+    // Negative control for the pair above: the string-awareness must not have
+    // been bought by treating everything as code. A `//` comment still hides
+    // its own content.
+    test('a real comment mentioning the pattern is still not an offender', () => {
+      const { status } = runLint({
+        'thing.js': "const u = 'https://x.test/a'\n"
+          + "// see join(homedir(), '.chroxy') — prose, not code\n"
+          + 'export const x = 1\n',
+      })
+      assert.equal(status, 0)
+    })
+  })
+
 })
