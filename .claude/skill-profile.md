@@ -32,8 +32,9 @@ The neutral arg token is `$ARGUMENTS`; emitters map it per agent. Two Gemini cav
 compiler handles automatically: positional `$1`/`$2` have no Gemini equivalent (it warns),
 and a body containing active template sequences (`{{…}}`, `!{…}`, `@{…}` — e.g. an HTML
 template's `{{TITLE}}` or `{{CUSTOMIZE}}` docs) is **skipped** for Gemini rather than emitted
-corrupt (currently: visual-brief, decompose-issue, create-issue, skill — Claude/Codex still
-get them). After editing a skill's generic source by hand, recompile:
+corrupt (Claude/Codex still get them). The compiler logs which skills those are on every run,
+and `--check` reports the count — this used to name them inline and had already gone stale by
+one, which is why it no longer does. After editing a skill's generic source by hand, recompile:
 `node scripts/compile-skill-targets.mjs --name <name>`.
 
 ## Cost Circuit Breaker (marathon skills: prime-directive, tackle-issues, autonomous-dev-flow)

@@ -51,6 +51,28 @@ Codex reads these from `~/.codex/prompts/` and you invoke them as `/prompts:<nam
 
 With no `targets:` line the compiler falls back to `claude` only. After editing a skill's neutral source by hand, recompile: `node scripts/compile-skill-targets.mjs --name <name>` (`--dry-run` to preview).
 
+### The drift gate (`--check`)
+
+Forgetting that recompile used to be invisible: on `origin/main` the gate reported 11 problems — 10 artifacts whose bytes differed from their sources, plus `catchup`, which had a source and no compiled artifact at all, so that skill was not loadable (#7253). `.claude/skills/<name>/SKILL.md` is what Claude actually **loads**, so a stale artifact means the skill you edited is not the skill that runs.
+
+```bash
+node scripts/compile-skill-targets.mjs --check
+```
+
+Compiles the repo-local targets in memory and compares them against what is committed, exiting 1 and naming every offender. `Scripts Tests` runs it on every PR. It reports five conditions, because "do the bytes match?" alone would have passed `catchup`:
+
+| | |
+|---|---|
+| `STALE` | the artifact differs from its source — recompile |
+| `MISSING` | the source was never compiled |
+| `UNEXPECTED` | an artifact exists for a target that now **skips** this skill (the compile path deletes these; `--check` only reports) |
+| `ORPHAN` | an artifact whose `.claude/commands/<name>.md` is gone — it still loads as a skill |
+| `UNGATED` | a repo-local target has committed artifacts but is not among the checked targets (a mangled `targets:` line degrades to `claude`, which would leave every `.gemini/commands/*.toml` unchecked) |
+
+`--check` is strictly read-only and is a repo-wide gate, so it refuses `--name` (under which every artifact for a non-selected skill would read as an `ORPHAN`). It also refuses an unrecognised argument rather than ignoring it — a typo'd `--chekc` used to fall through to the **compile** path, rewriting every artifact and exiting 0.
+
+It never touches `codex`/`pi`, which compile into `~/.codex` and `~/.pi`: per-machine, opt-in, and deliberately not version-controlled, so there is no committed state to compare against. Naming one in `--targets` is an **error**; inheriting one from the profile's `targets:` line **drops it with a logged note**, and if that leaves no repo-local target at all the gate refuses rather than reporting "in sync" over nothing.
+
 ### Discoverability hint
 
 When you compile, `compile-skill-targets.mjs` prints a one-line hint if it detects an agent's home directory (`~/.codex`, `~/.gemini`) whose target you did **not** select — a nudge so a Codex or Gemini user doesn't silently miss the skills. It never adds the target for you (that would write to a home dir you didn't ask about); it just tells you the flag to pass.

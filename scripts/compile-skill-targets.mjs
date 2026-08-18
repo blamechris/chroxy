@@ -18,15 +18,15 @@
 // Usage:
 //   node scripts/compile-skill-targets.mjs [--name <name>] [--targets claude,gemini]
 //        [--repo <root>] [--dry-run]
+//   node scripts/compile-skill-targets.mjs --check       # exit 1 if a committed
+//                                                        # artifact is stale (CI gate)
 //
 // Exit non-zero on emit failure so /skill and CI can gate on it.
-import { readdirSync, readFileSync, writeFileSync, mkdirSync, existsSync, rmSync } from 'node:fs'
-import { join, dirname } from 'node:path'
+import { readdirSync, readFileSync, writeFileSync, mkdirSync, existsSync, rmSync, statSync } from 'node:fs'
+import { join, dirname, relative } from 'node:path'
 import { homedir } from 'node:os'
 
 import { isEntryPoint } from './lib/is-entry-point.mjs'
-
-export const ALL_TARGETS = ['claude', 'gemini', 'codex', 'pi']
 
 // #6571 — home-dir marker(s) for coding agents whose skills are USER-GLOBAL and
 // OPT-IN. `codex` (`~/.codex/prompts/`) and `pi` (`~/.pi/agent/skills/`, #6573)
@@ -70,6 +70,17 @@ function parseArgs(argv) {
     else if (a === '--targets') out.targets = need(i++, a).split(',').map((s) => s.trim()).filter(Boolean)
     else if (a === '--repo') out.repo = need(i++, a)
     else if (a === '--dry-run') out.dryRun = true
+    else if (a === '--check') out.check = true
+    // An UNRECOGNISED argument is fatal, not ignorable. Ignoring it meant one
+    // fat-fingered flag silently changed what the program does: `--chekc` fell
+    // through to the COMPILE path, rewrote every artifact in the checked-out
+    // tree, printed "Done." and exited 0 — a CI step that verified nothing,
+    // mutated the workspace, and reported success. "Never ran" must not be
+    // indistinguishable from "passed" (docs/false-safety-guards.md).
+    else {
+      console.error(`Unknown argument: ${a}. Known: --name <name>, --targets <list>, --repo <root>, --dry-run, --check.`)
+      process.exit(1)
+    }
   }
   return out
 }
@@ -153,11 +164,44 @@ function yamlDq(s) {
   return '"' + dqEscape(s) + '"'
 }
 
+// ---- repo-local artifact layout ------------------------------------------
+//
+// ONE encoding of where each REPO-LOCAL target's artifact lives, shared by the
+// emitter (which writes it) and by --check (which has to enumerate what is on
+// disk to spot an ORPHAN — an artifact whose source was deleted, which keeps
+// loading as a skill). A second, hand-maintained copy of these paths beside the
+// emitters is exactly the "hardcoded list next to a set that grows" shape that
+// docs/false-safety-guards.md names as this repo's recurring cause of guards
+// that silently check nothing (#7192, #7197).
+//
+// `dir` is the artifact root, repo-relative. `artifact` maps a skill name to its
+// repo-relative path; `nameOf` is the inverse over a direct child of `dir`,
+// returning null for anything that is not one of this target's artifacts.
+// `nameOf` takes the entry name and its RESOLVED kind ('dir' | 'file' | null),
+// resolved through symlinks by the caller. It must not re-derive the kind from a
+// readdirSync Dirent: a Dirent reports the link itself, so a committed symlink
+// (git mode 120000) is neither isFile() nor isDirectory() and an entry filtered
+// on those reads as "not an artifact" — while Claude's loader follows it happily.
+// A symlinked orphan therefore loaded as a skill with the gate reporting full
+// sync, and the UNGATED backstop inherited the same blindness.
+const CLAUDE_LAYOUT = {
+  dir: '.claude/skills',
+  artifact: (name) => join('.claude/skills', name, 'SKILL.md'),
+  // A skill is a DIRECTORY here; a dir with no SKILL.md is separately reported
+  // as MISSING when it has a source, and as an ORPHAN when it does not.
+  nameOf: (name, kind) => (kind === 'dir' ? name : null),
+}
+const GEMINI_LAYOUT = {
+  dir: '.gemini/commands',
+  artifact: (name) => join('.gemini/commands', `${name}.toml`),
+  nameOf: (name, kind) => (kind === 'file' && name.endsWith('.toml') ? name.slice(0, -'.toml'.length) : null),
+}
+
 // ---- emitters: (name, body, description, repo) -> { path, content } ----
 
 function emitClaude(name, body, description, repo) {
   return {
-    path: join(repo, '.claude/skills', name, 'SKILL.md'),
+    path: join(repo, CLAUDE_LAYOUT.artifact(name)),
     content: `---\ndescription: ${yamlDq(description)}\n---\n\n${body}`,
   }
 }
@@ -165,7 +209,7 @@ function emitClaude(name, body, description, repo) {
 function emitGemini(name, body, description, repo) {
   // Always report the path (even on skip) so the caller can clean up a stale
   // artifact from a previous compile.
-  const path = join(repo, '.gemini/commands', `${name}.toml`)
+  const path = join(repo, GEMINI_LAYOUT.artifact(name))
   // $ARGUMENTS is the neutral arg token; Gemini uses {{args}}.
   const prompt = body.replace(/\$ARGUMENTS\b/g, '{{args}}')
   // Gemini's prompt engine is active: it interprets {{...}}, !{...} (shell), and
@@ -244,7 +288,28 @@ export function emitPi(name, body, description) {
   }
 }
 
-const EMITTERS = { claude: emitClaude, gemini: emitGemini, codex: emitCodex, pi: emitPi }
+// ---- the target table ----------------------------------------------------
+//
+// The ONE place a target is declared. `repoLocal` says whether the target's
+// artifacts are version-controlled inside the repo (claude, gemini) or written
+// into a per-machine, opt-in home dir (codex -> ~/.codex, pi -> ~/.pi). --check
+// gates only the repo-local ones and must never so much as look at the others:
+// a home dir is not part of the commit, so "drift" there is meaningless, and CI
+// touching it would be a bug in its own right.
+//
+// ALL_TARGETS and REPO_LOCAL_TARGETS are DERIVED from this table rather than
+// written out again, so adding a target cannot leave a stale list behind.
+const TARGETS = {
+  claude: { emit: emitClaude, repoLocal: true, layout: CLAUDE_LAYOUT },
+  gemini: { emit: emitGemini, repoLocal: true, layout: GEMINI_LAYOUT },
+  codex: { emit: emitCodex, repoLocal: false },
+  pi: { emit: emitPi, repoLocal: false },
+}
+
+export const ALL_TARGETS = Object.keys(TARGETS)
+export const REPO_LOCAL_TARGETS = ALL_TARGETS.filter((t) => TARGETS[t].repoLocal)
+
+const EMITTERS = Object.fromEntries(ALL_TARGETS.map((t) => [t, TARGETS[t].emit]))
 
 function compileOne(name, srcPath, targets, repo, dryRun) {
   const raw = readFileSync(srcPath, 'utf8')
@@ -278,6 +343,194 @@ function compileOne(name, srcPath, targets, repo, dryRun) {
   return { name, description, results }
 }
 
+// The skill sources, from the ONE directory that defines them. Shared by the
+// compile path and by --check so the two can never disagree about what a source
+// is (a `--check` that enumerated sources differently would report phantom
+// ORPHANs, or miss a source entirely and pass).
+export function listSkillNames(cmdDir) {
+  return readdirSync(cmdDir)
+    .filter((f) => f.endsWith('.md'))
+    .map((f) => f.replace(/\.md$/, ''))
+}
+
+// Every artifact currently on disk for a repo-local target, as { name, file }
+// (file is repo-relative). Uses the target's own layout, so it stays the inverse
+// of what the emitter writes.
+export function listArtifacts(repo, target) {
+  const { layout } = TARGETS[target]
+  // A repo-local target with no layout would silently return [], switching OFF
+  // both the ORPHAN scan and the UNGATED backstop for it while its STALE/MISSING
+  // checks kept passing — half-gated, and looking fully gated. Refuse instead:
+  // "cannot enumerate this" must never read as "there was nothing to enumerate".
+  if (!layout) {
+    throw new Error(`listArtifacts: repo-local target "${target}" has no layout, so its artifacts cannot be enumerated. Every repo-local target needs one.`)
+  }
+  const dir = join(repo, layout.dir)
+  if (!existsSync(dir)) return []
+  const out = []
+  for (const name of readdirSync(dir)) {
+    // statSync FOLLOWS symlinks; a readdirSync Dirent describes the link itself.
+    // Resolving here is what lets a symlinked artifact be seen at all (see the
+    // layout comments). A broken link or an unreadable entry resolves to null and
+    // is skipped — it cannot load as a skill either, so it is not drift.
+    let kind = null
+    try {
+      const st = statSync(join(dir, name))
+      kind = st.isDirectory() ? 'dir' : st.isFile() ? 'file' : null
+    } catch {
+      kind = null
+    }
+    const artifactName = layout.nameOf(name, kind)
+    if (artifactName) out.push({ name: artifactName, file: layout.artifact(artifactName) })
+  }
+  return out
+}
+
+/**
+ * #7253 — the drift gate. Compare the COMMITTED artifacts of the repo-local
+ * targets against what this compiler produces from `.claude/commands/`.
+ *
+ * Strictly READ-ONLY: it never writes, never removes a stale artifact, and never
+ * resolves a path under `homedir()`. That is not incidental tidiness — codex and
+ * pi compile into `~/.codex` and `~/.pi`, which are per-machine, opt-in and not
+ * version-controlled, so CI must not touch them at all. It is also why a
+ * non-repo-local target is a THROW rather than a filter: main() already refuses
+ * one, but this is exported, and a caller that passed `['codex']` would have
+ * emitCodex resolve real `~/.codex` paths behind a function documented never to.
+ *
+ * Reports four ways an ARTIFACT can be wrong — stale, missing, should-not-exist,
+ * source-deleted — plus one way the GATE itself can be, in `ungated`. Checking
+ * only the obvious one (the bytes differ) is how a gate of this shape would
+ * still have missed `catchup`, which had a source and no artifact whatsoever.
+ *
+ * @returns {{names: string[], targets: string[], compared: number, skipped: number, problems: object[]}}
+ */
+export function checkDrift(repo, targets) {
+  const rejected = targets.filter((t) => !TARGETS[t] || !TARGETS[t].repoLocal)
+  if (rejected.length) {
+    throw new Error(`checkDrift: not a repo-local target: ${rejected.join(', ')}. Known repo-local targets: ${REPO_LOCAL_TARGETS.join(', ')}.`)
+  }
+  const cmdDir = join(repo, '.claude/commands')
+  const names = listSkillNames(cmdDir)
+  const known = new Set(names)
+  const problems = []
+  let compared = 0
+  let skipped = 0
+
+  for (const name of names) {
+    const body = stripStamp(readFileSync(join(cmdDir, `${name}.md`), 'utf8'))
+    const description = deriveDescription(body, name)
+    for (const target of targets) {
+      const { path, content, skip } = TARGETS[target].emit(name, body, description, repo)
+      const file = relative(repo, path)
+      if (skip) {
+        // Counted separately: this pair was never byte-compared, and folding it
+        // into `compared` overstated the gate's own coverage self-report by
+        // exactly the 5 Gemini-unsafe skills.
+        skipped++
+        // The compile path DELETES a leftover artifact here (compileOne's
+        // removeStale). --check writes nothing, so it has to report the same
+        // condition instead — otherwise an artifact from before the skill became
+        // un-emittable keeps loading forever, and the gate says everything is fine.
+        if (existsSync(path)) problems.push({ kind: 'unexpected', target, name, file, detail: skip })
+        continue
+      }
+      compared++
+      if (!existsSync(path)) {
+        problems.push({ kind: 'missing', target, name, file })
+        continue
+      }
+      if (readFileSync(path, 'utf8') !== content) problems.push({ kind: 'stale', target, name, file })
+    }
+  }
+
+  // An artifact whose source is gone still loads as a skill. `/skill remove`
+  // deletes both, so this is a half-run removal or a hand-deleted source.
+  for (const target of targets) {
+    for (const { name, file } of listArtifacts(repo, target)) {
+      if (!known.has(name)) problems.push({ kind: 'orphan', target, name, file })
+    }
+  }
+
+  // A repo-local target that is NOT being checked but DOES have committed
+  // artifacts is a hole in the gate, not a non-event. `targetsFromProfile`
+  // returns null whenever the `targets:` line fails to match, and main() then
+  // falls back to ['claude'] — so a mangled profile line would leave every
+  // committed .gemini/commands/*.toml ungated while --check still exited 0.
+  // "Cannot check this" must not read as "there was nothing to check"
+  // (docs/false-safety-guards.md).
+  for (const target of REPO_LOCAL_TARGETS) {
+    if (targets.includes(target)) continue
+    const present = listArtifacts(repo, target)
+    if (present.length) {
+      problems.push({ kind: 'ungated', target, count: present.length, file: TARGETS[target].layout.dir })
+    }
+  }
+
+  return { names, targets, compared, skipped, problems }
+}
+
+const PROBLEM_DETAIL = {
+  missing: (p) => `never compiled from .claude/commands/${p.name}.md`,
+  stale: (p) => `differs from .claude/commands/${p.name}.md`,
+  unexpected: (p) => `not emittable for this target (${p.detail}) — the artifact is a leftover and must be deleted`,
+  orphan: (p) => `no .claude/commands/${p.name}.md — delete the artifact or restore the source`,
+  ungated: (p) => `${p.count} committed artifact(s) present but "${p.target}" is not in the checked targets`,
+}
+
+// What the developer should DO, per kind. One generic "recompile and commit"
+// line is a no-op for three of the five: recompiling cannot clear an ORPHAN
+// (there is no source to compile), and it cannot clear an UNGATED (the cause is
+// the target list, not the artifacts). A remediation that does not remediate is
+// worse than none — it reads as "the gate is broken" rather than "here is the fix".
+const PROBLEM_FIX = {
+  missing: (targets) => `Run \`node scripts/compile-skill-targets.mjs --targets ${targets.join(',')}\` and commit the result.`,
+  stale: (targets) => `Run \`node scripts/compile-skill-targets.mjs --targets ${targets.join(',')}\` and commit the result.`,
+  unexpected: (targets) => `Delete the leftover artifact(s) above — or run \`node scripts/compile-skill-targets.mjs --targets ${targets.join(',')}\`, which removes them.`,
+  orphan: () => 'Delete the artifact(s) above, or restore the deleted .claude/commands/<name>.md.',
+  ungated: () => 'Fix the `targets:` line in .claude/skill-profile.md so the target is checked — or, if it is genuinely retired, delete its committed artifacts.',
+}
+
+// Run the gate and report. Returns the process exit code (0 in sync, 1 on drift
+// or on a condition that would make the gate vacuous).
+function runCheck(repo, targets) {
+  if (!targets.length) {
+    console.error('::error::--check: no repo-local targets to check. Nothing would be verified.')
+    return 1
+  }
+  const { names, compared, skipped, problems } = checkDrift(repo, targets)
+  // A gate that checked nothing must never report success. An empty
+  // .claude/commands/ makes every loop below a no-op and every artifact an
+  // ORPHAN, so say so plainly rather than emitting a wall of orphans.
+  if (!names.length) {
+    console.error(`::error::--check found no skill sources in ${join(repo, '.claude/commands')} — the gate would pass without checking anything.`)
+    return 1
+  }
+  // The gate's own accounting, checked. Every (source, target) pair must have
+  // been either byte-compared or explicitly skipped; anything else means a loop
+  // exited early and the "in sync" below would cover fewer artifacts than it
+  // claims. This is the one arithmetic the gate cannot get wrong silently.
+  const expected = names.length * targets.length
+  if (compared + skipped !== expected) {
+    console.error(`::error::--check accounting is wrong: ${compared} compared + ${skipped} skipped != ${expected} expected (${names.length} skill(s) x ${targets.length} target(s)). The target loop did not run to completion.`)
+    return 1
+  }
+  if (problems.length) {
+    console.error(`::error::Compiled skill artifacts are out of sync with .claude/commands/ (${problems.length} problem(s)).`)
+    for (const p of problems) {
+      console.error(`  ${p.kind.toUpperCase().padEnd(10)} [${p.target}] ${p.file} — ${PROBLEM_DETAIL[p.kind](p)}`)
+    }
+    // One line per kind PRESENT, so the fix shown is one that actually applies.
+    console.error('')
+    for (const kind of [...new Set(problems.map((p) => p.kind))]) {
+      console.error(`  ${kind.toUpperCase()}: ${PROBLEM_FIX[kind](targets)}`)
+    }
+    return 1
+  }
+  console.log(`Compiled skill artifacts are in sync: ${names.length} skill(s) x ${targets.length} target(s) [${targets.join(', ')}] — ${compared} artifact(s) compared${skipped ? `, ${skipped} not emittable for their target (verified absent)` : ''}.`)
+  return 0
+}
+
 function main() {
   const args = parseArgs(process.argv.slice(2))
   const repo = args.repo
@@ -293,6 +546,31 @@ function main() {
     process.exit(1)
   }
 
+  // #7253 — the drift gate. It answers a different question from the compile
+  // path ("does the commit already contain what the compiler produces?"), so it
+  // returns here rather than falling through into the writing loop below.
+  if (args.check) {
+    // --check is a repo-WIDE gate: it has to see every source to tell an orphan
+    // artifact from one whose source simply was not selected. Under --name every
+    // other committed artifact would be reported as an orphan.
+    if (args.name) {
+      console.error('::error::--check is a repo-wide gate and cannot be combined with --name.')
+      process.exit(1)
+    }
+    const nonLocal = targets.filter((t) => !TARGETS[t].repoLocal)
+    // Asked for explicitly -> refuse. codex/pi artifacts live in ~/.codex and
+    // ~/.pi: per-machine, opt-in, and deliberately not version-controlled, so
+    // there is no committed state for a gate to compare against.
+    if (args.targets && nonLocal.length) {
+      console.error(`::error::--check applies only to the repo-local targets (${REPO_LOCAL_TARGETS.join(', ')}). ${nonLocal.map((t) => `${t} -> ${AGENT_SKILL_DIRS[t]}`).join(', ')} — user-global, per-machine opt-in, and not version-controlled, so there is no committed state to compare against.`)
+      process.exit(1)
+    }
+    // Inherited from the profile -> drop them, but say so. Silence here would be
+    // indistinguishable from having checked them.
+    if (nonLocal.length) console.log(`--check: skipping ${nonLocal.join(', ')} (user-global, not version-controlled).`)
+    process.exit(runCheck(repo, targets.filter((t) => TARGETS[t].repoLocal)))
+  }
+
   // #6571 — nudge if a coding agent is installed but its target isn't selected.
   const uncompiled = detectUncompiledAgents(targets)
   if (uncompiled.length) {
@@ -304,7 +582,7 @@ function main() {
     console.log(`Hint: ${dirs} present but ${uncompiled.join(', ')} not a selected target — pass --targets ${[...targets, ...uncompiled].join(',')} to also compile into ${skillDirs} (see docs/dev-workflow-skills.md).`)
   }
 
-  const names = args.name ? [args.name] : readdirSync(cmdDir).filter((f) => f.endsWith('.md')).map((f) => f.replace(/\.md$/, ''))
+  const names = args.name ? [args.name] : listSkillNames(cmdDir)
   // `--name` is user-facing; a name with a path separator or `..` would let the
   // emitters write outside the intended dirs (incl. ~/.codex). Reject up front.
   const unsafe = names.filter((n) => /[/\\]/.test(n) || n.split(/[/\\]/).includes('..') || n.includes('..'))

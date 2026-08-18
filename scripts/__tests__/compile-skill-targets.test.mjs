@@ -27,7 +27,8 @@ const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 const helperPath = resolve(__dirname, '..', 'compile-skill-targets.mjs')
 
-const { deriveDescription, detectUncompiledAgents, emitPi, ALL_TARGETS } = await import(helperPath)
+const { deriveDescription, detectUncompiledAgents, emitPi, ALL_TARGETS, REPO_LOCAL_TARGETS, checkDrift, listArtifacts } =
+  await import(helperPath)
 
 let pass = 0
 let fail = 0
@@ -272,7 +273,7 @@ await test('detectUncompiledAgents flags an installed-but-unselected pi (~/.pi)'
 // from "never ran": both are 0. The sibling coverage for the other consumer of
 // the shared guard is in gen-agents-md.test.mjs.
 
-import { existsSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
 import { stageScript } from './helpers/stage-script.mjs'
@@ -503,7 +504,489 @@ await test('importing the module does NOT run its CLI (the other direction, #723
   })
 })
 
+// --- #7253: the drift gate -------------------------------------------------
+//
+// `.claude/commands/<name>.md` is the neutral SOURCE; `.claude/skills/<name>/SKILL.md`
+// is what Claude actually LOADS (the legacy `.claude/commands/` discovery is
+// broken — anthropics/claude-code#31846) and `.gemini/commands/<name>.toml` is
+// Gemini's. A stale artifact therefore means the skill you edited is not the
+// skill that runs. Nothing gated that: on pristine main 11 artifacts differed
+// from what the compiler produces, and `catchup` had a source with no compiled
+// artifact at all, so that skill was not loadable.
+//
+// AGENTS.md — a generated mirror of the same class, and strictly less
+// load-bearing since it changes no agent's behaviour — has had this gate since
+// #6491. These are its counterpart.
+//
+// Four of the tests below cover a way an artifact can be wrong that a naive
+// "do the bytes match?" check passes silently: an artifact that does not exist
+// (`catchup`), one that should not exist, one whose source is gone, and a whole
+// target that is not being checked at all.
+
+// A source Gemini CANNOT take: `{{` is an active sequence in its prompt engine,
+// so emitGemini refuses and the compiler emits no .toml. It is the only way to
+// reach the "an artifact exists that SHOULD NOT" branch, and it is not a
+// hypothetical shape — 5 of the repo's 31 real sources sit in exactly this
+// position.
+const GEMINI_UNSAFE_BODY = '# Unsafe skill\n\nCarries a literal {{TEMPLATE}} token that Gemini would interpret.\n'
+const KEEPER_BODY = '# Keeper skill\n\nA second source so a test can delete the first one.\n'
+
+// The fixture ships ONE source, which is not enough here: deleting it to make an
+// orphan also empties .claude/commands, and the "checked nothing" refusal then
+// fires before the orphan report. A second source keeps each test to ONE
+// condition.
+const addSource = (root, name, body) =>
+  writeFileSync(pjoin(root, '.claude', 'commands', `${name}.md`), body)
+
+const runCheck = (script, args, home, cwd) => runCompiler(script, ['--check', ...args], home, cwd)
+
+// A content-addressed snapshot of a tree: every path, plus every file's bytes.
+// Deliberately NOT mtime-based — its granularity is coarse enough that a
+// same-second rewrite reads as unchanged, which is the one thing a "wrote
+// nothing" assertion must never miss.
+const snapshot = (dir) => {
+  const out = []
+  const walk = (d, rel) => {
+    for (const e of readdirSync(d, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1))) {
+      const r = rel ? `${rel}/${e.name}` : e.name
+      if (e.isDirectory()) {
+        out.push(`d ${r}`)
+        walk(pjoin(d, e.name), r)
+      } else if (e.isFile()) {
+        out.push(`f ${r}\n${readFileSync(pjoin(d, e.name), 'utf8')}`)
+      } else {
+        out.push(`? ${r}`)
+      }
+    }
+  }
+  walk(dir, '')
+  return out.join('\n ')
+}
+
+// Compile the fixture and assert the gate is GREEN on the result. Every drift
+// test below mutates from this state, so a fixture that was already red would
+// make all of them pass for the wrong reason.
+const compileThenCheck = (ctx, targets = 'claude,gemini') => {
+  const built = runCompiler(ctx.script, ['--repo', ctx.root, '--targets', targets], ctx.home, ctx.dir)
+  assert(built.status === 0, `fixture compile failed (${built.status}): ${built.stderr}`)
+  const clean = runCheck(ctx.script, ['--repo', ctx.root, '--targets', targets], ctx.home, ctx.dir)
+  assert(
+    clean.status === 0,
+    `--check must be green on a freshly compiled tree, got ${clean.status}:\n${clean.stdout}${clean.stderr}`,
+  )
+  return clean
+}
+
+// Every drift test asserts the MESSAGE, never the exit code alone. `node` exits
+// 1 for an uncaught module-load error too, and a guard reading false exits 0
+// having done nothing — so a bare status check cannot tell "the gate detected
+// drift" from "the gate never ran". Same reasoning as gen-agents-md.test.mjs's
+// assertDetectedDrift, arrived at the same way (#7214).
+const assertDetected = (run, kind, file) => {
+  assert(
+    run.status === 1,
+    `--check must exit 1 on drift, got ${run.status} (0 = the gate never ran)\n${run.stdout}${run.stderr}`,
+  )
+  assert(
+    run.stderr.includes('::error::Compiled skill artifacts are out of sync'),
+    `exit 1 came from something other than drift detection:\n${run.stderr}`,
+  )
+  const line = run.stderr.split('\n').find((l) => l.includes(file))
+  assert(line, `nothing in the report mentions ${file}:\n${run.stderr}`)
+  assert(line.includes(kind), `${file} was reported, but not as ${kind}:\n${line}`)
+}
+
+// --- the real repo ---------------------------------------------------------
+await test('committed skill artifacts are in sync with .claude/commands (drift gate, #7253)', () => {
+  const repoRoot = resolve(__dirname, '..', '..')
+  const { names, compared, skipped, problems } = checkDrift(repoRoot, REPO_LOCAL_TARGETS)
+  // Both counters are the same refusal the CLI applies, asserted here so this
+  // test cannot go vacuous if the source directory is ever moved out from under
+  // it: with no sources there is nothing to compare and `problems` is empty,
+  // which would otherwise read as a pass.
+  assert(names.length > 0, `no skill sources under ${repoRoot}/.claude/commands — this test checked NOTHING`)
+  // Every (source, target) pair must be accounted for as either byte-compared or
+  // explicitly skipped. Asserting `compared === names x targets` instead would be
+  // WRONG the moment a target legitimately skips a skill — and it was: the gemini
+  // emitter refuses 5 of the 31 real sources, so the equality only held because
+  // `compared` was counting skips it had never compared, overstating the gate's own
+  // coverage self-report by exactly those 5.
+  assert(
+    compared + skipped === names.length * REPO_LOCAL_TARGETS.length,
+    `${compared} compared + ${skipped} skipped != ${names.length} source(s) x ${REPO_LOCAL_TARGETS.length} target(s) — the target loop did not run to completion`,
+  )
+  // Pin that the skip path is genuinely exercised by the real repo, so the sum
+  // above cannot silently degenerate into the old equality.
+  assert(skipped > 0, 'no source was skipped for any target — the skip accounting is untested by the real repo')
+  assert(compared > 0, 'nothing was byte-compared — the gate would be vacuous')
+  assert(
+    problems.length === 0,
+    'compiled skill artifacts are stale — run `node scripts/compile-skill-targets.mjs --targets ' +
+      `${REPO_LOCAL_TARGETS.join(',')}\` and commit the result:\n` +
+      problems.map((p) => `  ${p.kind.toUpperCase()} [${p.target}] ${p.file}`).join('\n'),
+  )
+})
+
+// --- the gate, end to end --------------------------------------------------
+await test('--check is green on a freshly compiled tree, and its accounting adds up (#7253)', () => {
+  withFixture((ctx) => {
+    addSource(ctx.root, 'keeper', KEEPER_BODY)
+    addSource(ctx.root, 'unsafe', GEMINI_UNSAFE_BODY)
+    const clean = compileThenCheck(ctx)
+    // "in sync" with a zero count is the vacuous pass this gate must never
+    // report, so pin the NUMBERS, not the word — and pin them end to end through
+    // the CLI, which is the only place the arithmetic is visible to a human.
+    //
+    // 3 sources x 2 targets = 6 pairs. gemini refuses `unsafe`, so exactly 5 were
+    // byte-compared and 1 was skipped (and verified absent). Counting the skip as
+    // a comparison — which it was, until the review — overstates the gate's own
+    // coverage, which is the one number a gate must not inflate.
+    assert(
+      /in sync: 3 skill\(s\) x 2 target\(s\)/.test(clean.stdout),
+      `the gate must report the breadth it checked:\n${clean.stdout}`,
+    )
+    assert(
+      /5 artifact\(s\) compared, 1 not emittable/.test(clean.stdout),
+      `compared/skipped must be reported separately and add to 6:\n${clean.stdout}`,
+    )
+  })
+})
+
+await test('--check goes red when a source is edited without recompiling (#7253)', () => {
+  withFixture((ctx) => {
+    compileThenCheck(ctx)
+    // The exact mistake the gate exists to catch, and the one that drifted 11
+    // artifacts on main: edit the neutral source, ship without recompiling.
+    writeFileSync(
+      pjoin(ctx.root, '.claude', 'commands', 'demo.md'),
+      `${SKILL_BODY}\nA line the committed artifacts do not carry.\n`,
+    )
+    const run = runCheck(ctx.script, ['--repo', ctx.root, '--targets', 'claude,gemini'], ctx.home, ctx.dir)
+    assertDetected(run, 'STALE', '.claude/skills/demo/SKILL.md')
+    // Both targets, so a gate that stopped after the first one is red too.
+    assertDetected(run, 'STALE', '.gemini/commands/demo.toml')
+  })
+})
+
+await test('--check goes red when a source was never compiled at all (#7253)', () => {
+  withFixture((ctx) => {
+    addSource(ctx.root, 'keeper', KEEPER_BODY)
+    compileThenCheck(ctx)
+    // `catchup` on main: a source with no artifact whatsoever. A gate that only
+    // diffed the files it FOUND would pass this, which is why it is its own case.
+    rmSync(pjoin(ctx.root, '.claude', 'skills', 'demo', 'SKILL.md'))
+    const run = runCheck(ctx.script, ['--repo', ctx.root, '--targets', 'claude,gemini'], ctx.home, ctx.dir)
+    assertDetected(run, 'MISSING', '.claude/skills/demo/SKILL.md')
+  })
+})
+
+await test('--check goes red when a source is deleted but its artifacts remain (#7253)', () => {
+  withFixture((ctx) => {
+    addSource(ctx.root, 'keeper', KEEPER_BODY)
+    compileThenCheck(ctx)
+    // A half-run `/skill remove`. The artifact keeps LOADING as a skill, with no
+    // source left to review it against — the most invisible of the four.
+    rmSync(pjoin(ctx.root, '.claude', 'commands', 'demo.md'))
+    const run = runCheck(ctx.script, ['--repo', ctx.root, '--targets', 'claude,gemini'], ctx.home, ctx.dir)
+    assertDetected(run, 'ORPHAN', '.claude/skills/demo/SKILL.md')
+    assertDetected(run, 'ORPHAN', '.gemini/commands/demo.toml')
+  })
+})
+
+await test('--check goes red on a leftover artifact for a target that skips the skill (#7253)', () => {
+  withFixture((ctx) => {
+    addSource(ctx.root, 'unsafe', GEMINI_UNSAFE_BODY)
+    compileThenCheck(ctx)
+    const leftover = pjoin(ctx.root, '.gemini', 'commands', 'unsafe.toml')
+    // Positive control for the fixture itself: if the compiler DID emit a Gemini
+    // artifact here, the file written below would be legitimate output and the
+    // test would be asserting on a condition it manufactured.
+    assert(!existsSync(leftover), 'the compiler emitted a Gemini artifact for a body Gemini cannot take')
+    // The compile path DELETES this on its next run (compileOne's removeStale);
+    // --check writes nothing, so it has to REPORT it or the leftover keeps
+    // loading forever.
+    writeFileSync(leftover, "description = 'stale'\nprompt = '''\nleft over from before the skill became unsafe\n'''\n")
+    const run = runCheck(ctx.script, ['--repo', ctx.root, '--targets', 'claude,gemini'], ctx.home, ctx.dir)
+    assertDetected(run, 'UNEXPECTED', '.gemini/commands/unsafe.toml')
+  })
+})
+
+await test('--check goes red when a repo-local target has committed artifacts but is not checked (#7253)', () => {
+  withFixture((ctx) => {
+    compileThenCheck(ctx)
+    // targetsFromProfile() returns null for ANY `targets:` line it fails to
+    // match, and main() then falls back to ['claude'] — so one mangled character
+    // in .claude/skill-profile.md would leave every committed
+    // .gemini/commands/*.toml unchecked while the gate still exited 0. "Cannot
+    // check this" must not read as "there was nothing to check".
+    const run = runCheck(ctx.script, ['--repo', ctx.root, '--targets', 'claude'], ctx.home, ctx.dir)
+    assertDetected(run, 'UNGATED', '.gemini/commands')
+  })
+})
+
+await test('--check detects drift through a symlinked invocation path (#7198 at this call site)', () => {
+  withFixture((ctx) => {
+    addSource(ctx.root, 'keeper', KEEPER_BODY)
+    compileThenCheck(ctx)
+    writeFileSync(pjoin(ctx.root, '.claude', 'commands', 'demo.md'), `${SKILL_BODY}\ndrifted\n`)
+    // node realpaths import.meta.url but leaves argv[1] as typed, so through a
+    // symlink the two differ. Before #7213 that read false and the process
+    // exited 0 — here that means a CI gate reporting "in sync" having compared
+    // nothing, which is strictly worse than the compile path's no-op.
+    const link = pjoin(ctx.dir, 'link')
+    symlinkSync(ctx.root, link)
+    const run = runCheck(
+      pjoin(link, 'scripts', 'compile-skill-targets.mjs'),
+      ['--repo', ctx.root, '--targets', 'claude,gemini'],
+      ctx.home,
+      ctx.dir,
+    )
+    assertDetected(run, 'STALE', '.claude/skills/demo/SKILL.md')
+  })
+})
+
+// --- the gate's own refusals -----------------------------------------------
+await test('--check refuses an empty .claude/commands rather than reporting success (#7253)', () => {
+  withFixture((ctx) => {
+    rmSync(pjoin(ctx.root, '.claude', 'commands', 'demo.md'))
+    const run = runCheck(ctx.script, ['--repo', ctx.root, '--targets', 'claude,gemini'], ctx.home, ctx.dir)
+    assert(run.status === 1, `a gate with nothing to check must not exit 0, got ${run.status}:\n${run.stdout}`)
+    assert(
+      /found no skill sources/.test(run.stderr),
+      `exit 1 must name the reason, not just happen:\n${run.stderr}`,
+    )
+  })
+})
+
+await test('--check refuses --name, which would report every other artifact as an orphan (#7253)', () => {
+  withFixture((ctx) => {
+    const run = runCheck(
+      ctx.script,
+      ['--repo', ctx.root, '--targets', 'claude', '--name', 'demo'],
+      ctx.home,
+      ctx.dir,
+    )
+    assert(run.status === 1, `--check --name must be refused, got ${run.status}:\n${run.stdout}`)
+    assert(/repo-wide gate/.test(run.stderr), `the refusal must say why:\n${run.stderr}`)
+  })
+})
+
+await test('--check refuses every non-repo-local target and creates no agent home dir (#7253)', () => {
+  withFixture((ctx) => {
+    const userGlobal = ALL_TARGETS.filter((t) => !REPO_LOCAL_TARGETS.includes(t))
+    // Derived, not listed: a target added to the table is covered here the day
+    // it lands, which a hardcoded ['codex', 'pi'] would not be.
+    assert(userGlobal.length > 0, 'precondition: there is at least one user-global target to refuse')
+    for (const target of userGlobal) {
+      const run = runCheck(ctx.script, ['--repo', ctx.root, '--targets', target], ctx.home, ctx.dir)
+      assert(run.status === 1, `--check --targets ${target} must be refused, got ${run.status}:\n${run.stdout}`)
+      assert(
+        /applies only to the repo-local targets/.test(run.stderr),
+        `the refusal must say why:\n${run.stderr}`,
+      )
+    }
+    assert(
+      readdirSync(ctx.home).length === 0,
+      `--check wrote into a user-global agent home dir: ${readdirSync(ctx.home).join(', ')}`,
+    )
+  })
+})
+
+await test('--check never writes — not to the repo, not to a home dir (#7253)', () => {
+  withFixture((ctx) => {
+    addSource(ctx.root, 'keeper', KEEPER_BODY)
+    compileThenCheck(ctx)
+    writeFileSync(pjoin(ctx.root, '.claude', 'commands', 'demo.md'), `${SKILL_BODY}\ndrifted\n`)
+    const before = snapshot(ctx.root)
+    const run = runCheck(ctx.script, ['--repo', ctx.root, '--targets', 'claude,gemini'], ctx.home, ctx.dir)
+    // The drifted state matters: it is the reporting path, where the compile
+    // path would rewrite artifacts and delete leftovers. A green run proves
+    // nothing about whether the gate writes.
+    assert(run.status === 1, `precondition: the tree must be drifted so the gate takes its reporting path (${run.status})`)
+    assert(
+      snapshot(ctx.root) === before,
+      '--check modified the repo — it is a gate, and a gate that fixes the thing it measures can never fail',
+    )
+    assert(
+      readdirSync(ctx.home).length === 0,
+      `--check wrote into the home dir: ${readdirSync(ctx.home).join(', ')} — codex/pi artifacts are per-machine and CI must never touch them`,
+    )
+  })
+})
+
+await test('every target is classified, and the classification matches where the compiler writes (#7253)', () => {
+  withFixture((ctx) => {
+    // --check gates the repo-local targets and refuses the rest, so this
+    // classification decides both what is protected and what CI may touch. A
+    // table that said "repo-local" about a target writing into $HOME would point
+    // the gate at a path it must never read; one that said "user-global" about a
+    // committed target would leave those artifacts silently ungated. Assert it
+    // against where the compiler ACTUALLY writes rather than trusting the flag.
+    assert(ALL_TARGETS.length > 0 && REPO_LOCAL_TARGETS.length > 0, 'precondition: both target lists are non-empty')
+    for (const target of ALL_TARGETS) {
+      const home = pjoin(ctx.dir, `home-${target}`)
+      mkdirSync(home, { recursive: true })
+      const repoBefore = snapshot(ctx.root)
+      const run = runCompiler(ctx.script, ['--repo', ctx.root, '--targets', target], home, ctx.dir)
+      assert(run.status === 0, `compiling --targets ${target} failed (${run.status}): ${run.stderr}`)
+      const repoChanged = snapshot(ctx.root) !== repoBefore
+      const wroteHome = readdirSync(home).length > 0
+      if (REPO_LOCAL_TARGETS.includes(target)) {
+        assert(repoChanged, `${target} is classified repo-local but wrote nothing into the repo`)
+        assert(!wroteHome, `${target} is classified repo-local but wrote into $HOME — --check would reach a path CI must never touch`)
+      } else {
+        assert(wroteHome, `${target} is classified user-global but wrote nothing into $HOME`)
+        assert(!repoChanged, `${target} is classified user-global but wrote into the repo — those artifacts are committed and --check skips them`)
+      }
+    }
+  })
+})
+
+await test('checkDrift throws on a non-repo-local target rather than reaching into $HOME (#7253)', () => {
+  // main() refuses these, but checkDrift is EXPORTED: a caller passing ['codex']
+  // would have emitCodex resolve real ~/.codex paths inside a function whose
+  // contract says it never touches a home dir. Derived from the table, so a new
+  // user-global target is covered the day it lands.
+  const repoRoot = resolve(__dirname, '..', '..')
+  const userGlobal = ALL_TARGETS.filter((t) => !REPO_LOCAL_TARGETS.includes(t))
+  assert(userGlobal.length > 0, 'precondition: there is at least one user-global target')
+  for (const target of [...userGlobal, 'not-a-target']) {
+    let threw = null
+    try {
+      checkDrift(repoRoot, [target])
+    } catch (err) {
+      threw = err
+    }
+    assert(threw, `checkDrift accepted ${target} — it would resolve paths outside the repo`)
+    assert(
+      /not a repo-local target/.test(threw.message),
+      `checkDrift(${target}) threw for the wrong reason: ${threw.message}`,
+    )
+  }
+})
+
+await test('--check sees a SYMLINKED orphan, which a dirent-typed scan drops (#7253)', () => {
+  withFixture((ctx) => {
+    addSource(ctx.root, 'keeper', KEEPER_BODY)
+    compileThenCheck(ctx)
+    // git stores symlinks (mode 120000), so this state is committable, and
+    // Claude's loader follows the link — the skill LOADS. But a readdirSync
+    // Dirent describes the link itself, so isDirectory()/isFile() are both false
+    // and an entry filtered on those vanishes from the orphan scan while the gate
+    // reports full sync. The `ungated` backstop calls the same enumeration, so it
+    // went blind too: the guard that exists to stop "cannot check this" reading as
+    // "nothing to check" fell to that exact shape.
+    symlinkSync(pjoin(ctx.root, '.claude', 'skills', 'demo'), pjoin(ctx.root, '.claude', 'skills', 'sym-orphan'))
+    symlinkSync(pjoin(ctx.root, '.gemini', 'commands', 'demo.toml'), pjoin(ctx.root, '.gemini', 'commands', 'sym-orphan.toml'))
+    // Positive control: the loader really can reach a SKILL.md through the link,
+    // so this is a skill that runs — not an inert file the gate may ignore.
+    assert(
+      existsSync(pjoin(ctx.root, '.claude', 'skills', 'sym-orphan', 'SKILL.md')),
+      'precondition: the symlinked skill must be loadable, or this tests nothing',
+    )
+    const run = runCheck(ctx.script, ['--repo', ctx.root, '--targets', 'claude,gemini'], ctx.home, ctx.dir)
+    assertDetected(run, 'ORPHAN', '.claude/skills/sym-orphan/SKILL.md')
+    assertDetected(run, 'ORPHAN', '.gemini/commands/sym-orphan.toml')
+  })
+})
+
+await test('--check with no --targets reads the profile — the way CI invokes it (#7253)', () => {
+  withFixture((ctx) => {
+    writeFileSync(pjoin(ctx.root, '.claude', 'skill-profile.md'), 'targets: claude, gemini\n')
+    const built = runCompiler(ctx.script, ['--repo', ctx.root, '--targets', 'claude,gemini'], ctx.home, ctx.dir)
+    assert(built.status === 0, `fixture compile failed: ${built.stderr}`)
+    // Every other test here passes --targets explicitly. Without this one,
+    // targetsFromProfile is executed by NO test at all — and it is the only thing
+    // that decides what the CI step actually checks (ci.yml runs `--check` bare).
+    const run = runCheck(ctx.script, ['--repo', ctx.root], ctx.home, ctx.dir)
+    assert(run.status === 0, `expected 0, got ${run.status}:\n${run.stdout}${run.stderr}`)
+    assert(
+      /2 target\(s\) \[claude, gemini\]/.test(run.stdout),
+      `the profile's targets must be the ones checked:\n${run.stdout}`,
+    )
+  })
+})
+
+await test('--check refuses when the profile leaves no repo-local target to check (#7253)', () => {
+  withFixture((ctx) => {
+    writeFileSync(pjoin(ctx.root, '.claude', 'skill-profile.md'), 'targets: codex, pi\n')
+    // Both are dropped as user-global, leaving an EMPTY target list. Without the
+    // refusal the gate prints "in sync — 0 artifact(s) compared" and exits 0: the
+    // vacuous pass in its purest form, on the exact bare-`--check` path CI takes.
+    const run = runCheck(ctx.script, ['--repo', ctx.root], ctx.home, ctx.dir)
+    assert(run.status === 1, `expected a refusal, got ${run.status}:\n${run.stdout}`)
+    assert(
+      /no repo-local targets to check/.test(run.stderr),
+      `exit 1 must name the reason:\n${run.stderr}`,
+    )
+    assert(readdirSync(ctx.home).length === 0, 'refusing still created a user-global agent dir')
+  })
+})
+
+await test('an unrecognised argument is fatal and compiles nothing (#7253)', () => {
+  withFixture((ctx) => {
+    const before = snapshot(ctx.root)
+    // Silently ignoring it meant one fat-fingered flag changed what the program
+    // DOES: `--chekc` fell through to the COMPILE path, rewrote every artifact in
+    // the checked-out tree, printed "Done." and exited 0 — a CI step that verified
+    // nothing, mutated the workspace, and reported success.
+    const run = runCompiler(ctx.script, ['--repo', ctx.root, '--targets', 'claude', '--chekc'], ctx.home, ctx.dir)
+    assert(run.status === 1, `an unknown argument must be fatal, got ${run.status}:\n${run.stdout}`)
+    assert(/Unknown argument: --chekc/.test(run.stderr), `the refusal must name the argument:\n${run.stderr}`)
+    assert(!/Compiling/.test(run.stdout), `it took the COMPILE path anyway:\n${run.stdout}`)
+    assert(snapshot(ctx.root) === before, 'a run refused for an unknown argument still mutated the repo')
+  })
+})
+
+await test('the remediation printed matches the problem kind (#7253)', () => {
+  withFixture((ctx) => {
+    addSource(ctx.root, 'keeper', KEEPER_BODY)
+    compileThenCheck(ctx)
+    rmSync(pjoin(ctx.root, '.claude', 'commands', 'demo.md'))
+    const run = runCheck(ctx.script, ['--repo', ctx.root, '--targets', 'claude,gemini'], ctx.home, ctx.dir)
+    assertDetected(run, 'ORPHAN', '.claude/skills/demo/SKILL.md')
+    // Recompiling cannot clear an ORPHAN — there is no source left to compile
+    // from. A remediation that does not remediate reads as "the gate is broken"
+    // rather than "here is the fix", which is how a real gate gets disabled.
+    const fix = run.stderr.split('\n').find((l) => l.trim().startsWith('ORPHAN:'))
+    assert(fix, `no ORPHAN remediation line:\n${run.stderr}`)
+    assert(/Delete the artifact/.test(fix), `the ORPHAN fix must say delete, not recompile: ${fix}`)
+    assert(!/--targets/.test(fix), `the ORPHAN fix names a recompile that cannot help: ${fix}`)
+  })
+})
+
+await test('listArtifacts refuses a target it cannot enumerate instead of returning [] (#7253)', () => {
+  // The ORPHAN scan and the UNGATED backstop are both built on this enumeration.
+  // Returning [] for a target with no layout would switch BOTH off for that target
+  // while its STALE/MISSING checks kept passing — half-gated, and indistinguishable
+  // from fully gated. "Cannot enumerate this" must not read as "there was nothing
+  // to enumerate" (docs/false-safety-guards.md).
+  //
+  // Reached without mutating the target table: codex and pi are real entries that
+  // carry no layout, because their artifacts live outside the repo entirely.
+  const repoRoot = resolve(__dirname, '..', '..')
+  const noLayout = ALL_TARGETS.filter((t) => !REPO_LOCAL_TARGETS.includes(t))
+  assert(noLayout.length > 0, 'precondition: at least one target has no repo-local layout')
+  for (const target of noLayout) {
+    let threw = null
+    try {
+      listArtifacts(repoRoot, target)
+    } catch (err) {
+      threw = err
+    }
+    assert(threw, `listArtifacts('${target}') returned instead of refusing — orphan detection would silently do nothing`)
+    assert(/has no layout/.test(threw.message), `refused for the wrong reason: ${threw.message}`)
+  }
+  // Positive control: the same call DOES enumerate for a target that has a layout,
+  // so the assertions above cannot be satisfied by a function that always throws.
+  for (const target of REPO_LOCAL_TARGETS) {
+    const found = listArtifacts(repoRoot, target)
+    assert(found.length > 0, `listArtifacts('${target}') found no artifacts in the real repo — the enumeration is broken`)
+  }
+})
+
 // --- summary --------------------------------------------------------------
+
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`)
 if (fail > 0) {
   for (const f of failures) {
