@@ -279,7 +279,16 @@ function findOffenders(srcDirs, ownerPaths, keyRoot) {
 
       const source = readFileSync(file, 'utf8')
       const rawLines = source.split('\n')
-      const code = stripComments(source, file).split('\n')
+      // A stripper throw is "the lint could not read this file", not "the tree
+      // is dirty" — it must not escape as an uncaught exception, which exits 1
+      // and this file documents 1 as an offender. Same reasoning as the guarded
+      // import above (#7248 review).
+      let code
+      try {
+        code = stripComments(source, file).split('\n')
+      } catch (err) {
+        usageError(`cannot strip comments from ${rel}: ${err.message}`)
+      }
       const wrappers = accessorWrappersIn(code)
       const homeVars = homeBoundVarsIn(code)
       const callsAccessor = (text) =>

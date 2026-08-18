@@ -66,6 +66,19 @@ try {
   process.exit(2)
 }
 
+// A stripper throw is "the lint could not read this file", not "a subclass drops
+// an opt" — it must not escape as an uncaught exception, which exits 1 and this
+// lint reserves 1 for the latter. Four call sites, so the guard is the wrapper
+// rather than four try/catch blocks (#7248 review).
+function strip(src, fileName) {
+  try {
+    return stripComments(src, fileName)
+  } catch (err) {
+    console.error(`lint-session-opt-forwarding: cannot strip comments from ${fileName}: ${err.message}`)
+    process.exit(2)
+  }
+}
+
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
 function parseFlags(argv) {
@@ -195,7 +208,7 @@ function extractObjectKeys(block) {
 
 function parseBaseSessionOpts(baseSessionPath) {
   const src = readFileSync(baseSessionPath, 'utf8')
-  const stripped = stripComments(src, baseSessionPath)
+  const stripped = strip(src, baseSessionPath)
   // Anchor on `export class BaseSession` (the class we care about — the
   // file may export helpers and constants too).
   const classIdx = stripped.indexOf('export class BaseSession')
@@ -231,7 +244,7 @@ function parseBaseSessionOpts(baseSessionPath) {
 // Returns { keys: Set<string>, order: string[] }.
 function parseBaseSessionOptKeysArray(baseSessionPath) {
   const src = readFileSync(baseSessionPath, 'utf8')
-  const stripped = stripComments(src, baseSessionPath)
+  const stripped = strip(src, baseSessionPath)
   const declIdx = stripped.indexOf('BASE_SESSION_OPT_KEYS')
   if (declIdx === -1) {
     throw new Error(`Could not find "BASE_SESSION_OPT_KEYS" in ${baseSessionPath}`)
@@ -523,7 +536,7 @@ function main() {
   // (roots + every transitive subclass → the scan matcher picks up direct AND
   // second-tier subclasses) and the picker-ban set (every transitive descendant
   // of a forbidden ancestor, ancestor itself exempt).
-  const classEdges = collectClassEdges(allFiles.map(f => stripComments(readFileSync(f, 'utf8'), f)))
+  const classEdges = collectClassEdges(allFiles.map(f => strip(readFileSync(f, 'utf8'), f)))
   const sessionBases = descendantClosure(classEdges, ROOT_SESSION_BASES, { includeSeeds: true })
   const pickerForbidden = descendantClosure(classEdges, PICKER_FORBIDDEN_ANCESTORS, { includeSeeds: false })
   const classRe = buildSessionClassRegex(sessionBases)
@@ -536,7 +549,7 @@ function main() {
     const origSrc = readFileSync(file, 'utf8')
     if (!classRe.test(origSrc)) continue
     classRe.lastIndex = 0
-    const strippedSrc = stripComments(origSrc, file)
+    const strippedSrc = strip(origSrc, file)
     let m
     while ((m = classRe.exec(strippedSrc)) !== null) {
       const className = m[1]
