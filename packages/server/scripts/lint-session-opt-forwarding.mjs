@@ -134,8 +134,11 @@ function findMatchingBracket(src, openIdx, open, close) {
 // Comment stripping lives in ./lib/strip-comments.mjs (#7248). This file used to
 // carry its own scanner. It was string-aware but not REGEX-aware, so a regex
 // literal containing a quote — `/(["])/g` — put it into a phantom string state
-// and it stopped stripping: on 24 of the files this lint reads, JSDoc bodies
-// survived as if they were code. That is the false-POSITIVE direction of the
+// and it stopped stripping, so comment text survived as if it were code. The
+// other direction is worse and is what the test suite pins: in `/\/*$/` the
+// `\/` leaves a `/` and the next character is `*`, so the scanner reads a BLOCK
+// COMMENT OPEN and blanks to EOF — a real offending subclass below such a line
+// became invisible and this lint reported "0 session subclass(es)". Both are the
 // same defect #7249 fixed in the entry-point lint, and the reason a character
 // scanner cannot do this job: telling a regex literal from division needs the
 // grammar.

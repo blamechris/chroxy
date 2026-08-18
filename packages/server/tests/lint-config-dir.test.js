@@ -734,30 +734,22 @@ export function statePath() {
   // This lint used to carry its own comment stripper, and it was not
   // string-aware: `line.startsWith('//', i)` fired on the `//` inside
   // `https://`, so everything after a URL string on that line was blanked and
-  // never matched. Measured across the 307 files it scans, 89 differed from the
-  // truth. The consequence was not cosmetic — it printed
+  // never matched. Measured across the 307 files it scans, real code was hidden
+  // on 47 of them.
+  //
+  // Note the scope: the old stripper was LINE-based and reset at every newline,
+  // so only a SAME-LINE offender was ever hidden. A test putting the offender on
+  // a later line would pass against the old lint too — vacuous — so there isn't
+  // one here. The consequence was not cosmetic — it printed
   // "OK: ~/.chroxy resolves through the owner module" for a file that hardcodes
   // join(homedir(), '.chroxy'), which is the exact pattern it exists to find.
   describe('a URL string does not hide the rest of the line (#7248)', () => {
-    const AFTER_URL = `
-import { homedir } from 'node:os'
-import { join } from 'node:path'
-export function statePath () {
-  const docs = 'https://example.com/docs'
-  return join(homedir(), '.chroxy', 'session-state.json') || docs
-}
-`
     test('an offender after a url:// string on the same line is caught', () => {
       const { status } = runLint({
         'thing.js': "import { homedir } from 'node:os'\n"
           + "import { join } from 'node:path'\n"
           + "export const p = () => { const u = 'https://x.test/a'; return join(homedir(), '.chroxy', 's.json') }\n",
       })
-      assert.equal(status, 1)
-    })
-
-    test('an offender on a later line after a url:// string is caught', () => {
-      const { status } = runLint({ 'thing.js': AFTER_URL })
       assert.equal(status, 1)
     })
 

@@ -595,27 +595,75 @@ export class TestStubSession extends BaseSession {
     assert.equal(code, 0, `allowlist should suppress streamStallTimeoutMs\nstdout:\n${stdout}\nstderr:\n${stderr}`)
   })
 
-  // --- #7248: why there is no behaviour test for the stripper swap here -----
+  // --- #7248: a regex literal must not blank real code -----------------------
   //
   // This lint's own comment stripper was replaced with ./lib/strip-comments.mjs.
-  // The old one was string-aware but not REGEX-aware, so `/(["])/g` put it into
-  // a phantom string state and it stopped stripping — on 24 of the files this
-  // lint reads, JSDoc bodies survived as if they were code. That difference is
-  // real and is pinned in tests/strip-comments.test.js, which fails against the
-  // old scanner.
+  // The old one could not tell a regex literal from a comment delimiter, and the
+  // dangerous direction is the one that HIDES code: in `u.replace(/\/*$/, '')`
+  // the `\/` leaves a `/`, the next character is `*`, and a character scanner
+  // reads `/*` as a BLOCK COMMENT OPEN — blanking everything to EOF. A real
+  // offending subclass below such a line becomes invisible, this lint reports
+  // "0 session subclass(es)", and the REQUIRED Server Lint job goes green on the
+  // exact middle-layer trap (#3224, #3231, #4790) the lint exists to catch.
   //
-  // What is NOT pinned here is an end-to-end change to THIS lint's verdict,
-  // because I could not produce one. A commented-out `class X extends
-  // BaseSession` placed below such a regex survives stripping under the old
-  // scanner — verified directly — and the lint still reports
-  // "0 session subclass(es)": its class detection never picks the text up. So a
-  // test asserting the verdict would pass for a reason unrelated to the
-  // stripper, which is the vacuous-guard shape this repo keeps finding.
-  //
-  // Recorded rather than left silent so the next person knows it was checked
-  // and what the answer was. For this lint the swap is a robustness fix that
-  // removes a latent false-positive surface, not a behaviour change today —
-  // unlike lint-config-dir, where the same swap turned a missed offender into a
-  // caught one (see its suite).
+  // An earlier revision of this PR removed this test on the mistaken belief that
+  // no fixture could move the verdict. That was tested in one direction only —
+  // a commented-out class LEAKING through — which is genuinely inert here, and
+  // for a reason worth recording: `buildSessionClassRegex` is unanchored and DOES
+  // match inside `// export class Ghost extends BaseSession {`, but
+  // `findMatchingBracket` does its own `//`-to-newline skipping, never finds the
+  // class body's closing brace, and the class is dropped. The code-hiding
+  // direction below is the one that matters, and it flips the verdict.
+  describe('a regex literal does not blank a real offender (#7248)', () => {
+    const TRIM_AND_OFFENDER = `
+import { BaseSession } from './base-session.js'
+
+export function trimSlash (u) {
+  return u.replace(/\\/*$/, '')
+}
+
+export class TrimSession extends BaseSession {
+  constructor({ cwd } = {}) {
+    super({ cwd })
+  }
+}
+`
+    test('an offender below a trailing-slash regex is still caught', () => {
+      const { dir, srcDir } = setupFixtureTree({ 'trim.js': TRIM_AND_OFFENDER })
+      cleanups.push(dir)
+      const { code, stdout, stderr } = runLint(srcDir)
+      assert.equal(code, 1, `the offender was invisible:\n${stdout}\n${stderr}`)
+      assert.match(stdout + stderr, /TrimSession/)
+    })
+
+    // Positive control: the verdict must come from the class being an offender,
+    // not from the regex line doing something incidental.
+    test('control: the same offender with no regex above it is caught', () => {
+      const { dir, srcDir } = setupFixtureTree({
+        'trim.js': TRIM_AND_OFFENDER.replace("export function trimSlash (u) {\n  return u.replace(/\\/*$/, '')\n}\n", ''),
+      })
+      cleanups.push(dir)
+      const { code } = runLint(srcDir)
+      assert.equal(code, 1)
+    })
+
+    // Negative control: a correctly-forwarding subclass below the same regex
+    // must still pass, or the test above could be passing because the regex line
+    // makes everything fail.
+    test('control: a correct subclass below the same regex still passes', () => {
+      const { dir, srcDir } = setupFixtureTree({
+        'trim.js': TRIM_AND_OFFENDER.replace(
+          'constructor({ cwd } = {}) {\n    super({ cwd })\n  }',
+          'constructor(opts = {}) {\n    super(buildBaseSessionOpts(opts))\n  }',
+        ).replace(
+          "import { BaseSession } from './base-session.js'",
+          "import { BaseSession, buildBaseSessionOpts } from './base-session.js'",
+        ),
+      })
+      cleanups.push(dir)
+      const { code, stdout, stderr } = runLint(srcDir)
+      assert.equal(code, 0, `${stdout}\n${stderr}`)
+    })
+  })
 
 })

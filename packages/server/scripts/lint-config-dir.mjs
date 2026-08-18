@@ -174,9 +174,11 @@ function listSourceFiles(dir) {
 // Comment stripping lives in ./lib/strip-comments.mjs (#7248). This file used
 // to carry its own line-array version, and it was NOT string-aware: a `//`
 // inside a string literal started a "comment", so everything after it on that
-// line was blanked. Real code was being hidden from this lint on 89 of the 307
-// files it scans — `must use http://` in a template literal truncated the rest
-// of the statement, for one. The shared implementation asks a parser, so a `//`
+// line was blanked. Measured over the 307 files it scans, real code was hidden
+// on 47 of them — `must use http://` in a template literal truncated the rest of
+// the statement, for one. (The stripped output differs on more files than that,
+// but only in whitespace padding; 47 is the count where non-whitespace code went
+// missing, which is the number this sentence is about.) The shared implementation asks a parser, so a `//`
 // inside a string is a string.
 //
 // The old signature returned an ARRAY of lines. That stayed a caller concern
