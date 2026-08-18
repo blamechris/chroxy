@@ -38,14 +38,20 @@
  * file that touches the modules only through `fork`/`spawn` is what lets the
  * stuck-TRUE direction fail as a NAMED assertion instead.
  *
- * ── Why nothing here asserts on exit status ────────────────────────────────
+ * ── Why exit status is never the primary evidence ──────────────────────────
  *
  * The failure this whole area exists to catch (#7198) is a guard that reads
  * false: the module body never runs, so the process exits 0 having done
- * nothing. Exit 0 is what the bug looks like AND what success looks like. Every
- * assertion below is therefore an OBSERVABLE SIDE EFFECT — a bound port, an IPC
- * frame, a JSON-RPC notification on stdout — each of which is absent when the
- * body did not run.
+ * nothing. Exit 0 is what the bug looks like AND what success looks like, so on
+ * its own it distinguishes nothing. What each test below turns on is therefore
+ * an OBSERVABLE SIDE EFFECT — a bound port, an IPC frame, a JSON-RPC
+ * notification on stdout — each of which is absent when the body did not run.
+ *
+ * Exit status is asserted too, but always as a bounded secondary check and
+ * never as the thing that decides a test. In the stuck-TRUE direction it is
+ * genuinely informative rather than redundant: an importer that started a
+ * server never exits, so a clean exit within a deadline is a third independent
+ * symptom alongside "nothing bound" and "no ready frame".
  *
  * ── Why each negative assertion is paired with a positive control ──────────
  *

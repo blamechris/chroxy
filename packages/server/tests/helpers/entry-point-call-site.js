@@ -8,13 +8,19 @@
  * really does reach `main()`, and that importing the same module really does
  * not.
  *
- * Why every assertion built on these is about an OBSERVABLE SIDE EFFECT and
- * never about exit status: the failure this area exists to catch (#7198) is a
- * guard that reads false, so the module body never runs and the process exits
- * 0 having done nothing. Exit 0 is what the bug looks like AND what success
- * looks like, so a test that checks it distinguishes nothing. A bound port, an
+ * Why the PRIMARY evidence in every test built on these is an OBSERVABLE SIDE
+ * EFFECT rather than exit status: the failure this area exists to catch (#7198)
+ * is a guard that reads false, so the module body never runs and the process
+ * exits 0 having done nothing. Exit 0 is what the bug looks like AND what
+ * success looks like, so on its own it distinguishes nothing. A bound port, an
  * IPC message, a JSON-RPC frame on stdout — those are absent when the body did
  * not run.
+ *
+ * Exit status IS asserted, but only ever as a bounded SECONDARY check — that is
+ * what {@link exitCodeWithin} is for. In the stuck-TRUE direction it carries
+ * real information rather than restating the side-effect assertions: an
+ * importer that started a server does not exit at all, so "did it exit, and
+ * cleanly, within a deadline?" is a third independent symptom.
  *
  * Both directions need covering, and they fail differently:
  *   - stuck FALSE: `node <module>` does nothing. Caught by waiting for the side
