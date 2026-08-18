@@ -673,6 +673,57 @@ describe('lint-entry-point-guard', () => {
       assert.equal(res.status, 1, `${res.stdout}\n${res.stderr}`)
     })
 
+    // The floor must count what was actually CHECKED, not what was walked.
+    // The header claims this, the code does it, and nothing pinned it: moving
+    // the filter below the floor check left all 60 tests green. It is
+    // load-bearing — a tree with a lot of generated output could clear the floor
+    // on ignored files while the scanned set had collapsed, which is the exact
+    // failure --min-files exists to prevent.
+    test('--min-files counts the filtered set, not the raw walk', () => {
+      const root = mkdtempSync(join(tmpdir(), 'chroxy-lint-entrypoint-floor-'))
+      tmpRoots.push(root)
+      const run = (...a) => spawnSync('git', ['-C', root, ...a], { encoding: 'utf8' })
+      run('init', '-q')
+      run('config', 'gc.auto', '0')
+      writeFileSync(join(root, '.gitignore'), 'generated/\n')
+      mkdirSync(join(root, 'lib'), { recursive: true })
+      writeFileSync(join(root, 'lib', 'guard.mjs'), SANCTIONED_GUARD)
+      mkdirSync(join(root, 'generated'), { recursive: true })
+      for (let i = 0; i < 5; i++) writeFileSync(join(root, 'generated', `g${i}.js`), 'export const x = 1\n')
+      // Walked: 6. Checked after filtering: 1. A floor of 3 must fail.
+      const res = spawnSync(
+        process.execPath,
+        [LINT_SCRIPT, '--repo-root', root, '--allow', 'lib/guard.mjs', '--min-files', '3'],
+        { encoding: 'utf8' },
+      )
+      assert.equal(res.status, 2, `${res.stdout}\n${res.stderr}`)
+      assert.match(res.stderr, /walked only 1 file/)
+    })
+
+    // macOS git precomposes to NFC while readdirSync returns the on-disk bytes,
+    // so a file created in NFD compares unequal and is dropped — a guard inside
+    // it goes unreported. Linux git does not precompose, so CI cannot show this.
+    test('a guard in an NFD-named file is still reported', () => {
+      const root = mkdtempSync(join(tmpdir(), 'chroxy-lint-entrypoint-nfd-'))
+      tmpRoots.push(root)
+      const run = (...a) => spawnSync('git', ['-C', root, ...a], { encoding: 'utf8' })
+      run('init', '-q')
+      run('config', 'gc.auto', '0')
+      mkdirSync(join(root, 'lib'), { recursive: true })
+      writeFileSync(join(root, 'lib', 'guard.mjs'), SANCTIONED_GUARD)
+      // "café.js" with a COMBINING acute — decomposed on disk.
+      const nfd = 'café.js'
+      writeFileSync(join(root, nfd), GUARD)
+      run('add', '-A')
+      run('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'x')
+      const res = spawnSync(
+        process.execPath,
+        [LINT_SCRIPT, '--repo-root', root, '--allow', 'lib/guard.mjs'],
+        { encoding: 'utf8' },
+      )
+      assert.equal(res.status, 1, `a committed guard in an NFD path went unreported:\n${res.stdout}\n${res.stderr}`)
+    })
+
     // Every other test in this file points --repo-root at a plain temp dir that
     // is NOT a repo. They all pass, which is this assertion's real proof: when
     // git cannot answer, nothing is filtered and coverage only widens. Stated

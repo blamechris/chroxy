@@ -65,7 +65,9 @@
  *     entirely. Shell is not scanned and this file's name does not claim it is
  *     (#7239's lesson: a gate must not overclaim in its own title).
  *   - Anything git does not consider part of the repository — gitignored build
- *     output, local scratch files. A guard has to be COMMITTED to matter, and
+ *     output and ignored local scratch files. An untracked file that is NOT
+ *     ignored is still scanned, deliberately: it is on its way to being
+ *     committed. A guard has to be COMMITTED to matter, and
  *     `packages/desktop/src-tauri/server-bundle/` is a generated copy of the
  *     whole server that lags the source by however long since it was last built.
  *     See `gitKnownFiles`.
@@ -245,8 +247,35 @@ function gitKnownFiles(root) {
     ['-C', root, 'ls-files', '--cached', '--others', '--exclude-standard', '-z'],
     { encoding: 'utf8', maxBuffer: 128 * 1024 * 1024 },
   )
-  if (res.error || res.status !== 0) return null
-  return new Set(res.stdout.split('\0').filter(Boolean))
+  if (res.error || res.status !== 0) {
+    // Fail-open, but never SILENTLY. Without this line the only difference
+    // between "filtered" and "git could not answer" is a file count the reader
+    // has no baseline for — and on a checkout git refuses to read (the
+    // "dubious ownership" safe.directory error is the common one on self-hosted
+    // runners and in containers) the developer gets the exact #7247 red back
+    // with nothing pointing at the cause.
+    console.error(
+      'lint-entry-point-guard: git could not list the repository '
+      + `(${res.error ? res.error.message : `exit ${res.status}`}); `
+      + 'scanning the whole walk unfiltered, so generated output may be reported.',
+    )
+    return null
+  }
+  // Normalised to NFC because the two sides are produced by different things.
+  // macOS git defaults to core.precomposeunicode=true and emits NFC, while
+  // readdirSync returns the on-disk bytes, which for a file created in NFD stay
+  // NFD. A raw === between them fails, the file is dropped, and a hand-rolled
+  // guard inside it goes UNREPORTED — the silently-skipped-an-input mode this
+  // file's header rejects the cheap prefilter for. Linux git does not
+  // precompose, so this divergence is macOS-only and CI would never show it.
+  //
+  // Case is NOT folded. On a case-insensitive filesystem an unrecorded
+  // case-only rename (plain `mv Thing.js thing.js`, which leaves `git status`
+  // clean) still drops the file locally. Folding case would be wrong on the
+  // case-sensitive filesystems CI runs on, where two such paths are genuinely
+  // different files, so the divergence is left to CI — which is case-sensitive
+  // and does catch it.
+  return new Set(res.stdout.split('\0').filter(Boolean).map((f) => f.normalize('NFC')))
 }
 
 function walk(dir, out = []) {
@@ -450,7 +479,7 @@ try {
 // filtered, which only ever widens coverage.
 const known = gitKnownFiles(root)
 if (known) {
-  files = files.filter((f) => known.has(relative(root, f).split(pathSep).join('/')))
+  files = files.filter((f) => known.has(relative(root, f).split(pathSep).join('/').normalize('NFC')))
 }
 
 // "Walked zero files" and "walked 1963 clean files" must not be the same
