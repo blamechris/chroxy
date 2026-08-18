@@ -102,7 +102,7 @@ const stageDir = (prefix) => {
 // isEntryPoint returns false on its very first line and never reaches the path
 // comparison that actually decides this — the test would pass without
 // exercising the branch it exists to cover (#7236).
-const stageScript = (dir, name, source) => {
+const writeStagedScript = (dir, name, source) => {
   const file = join(dir, name)
   writeFileSync(file, source)
   return file
@@ -131,7 +131,13 @@ describe('entry-point call site: chroxy-channel-server.js (#7254)', () => {
         `stderr: ${JSON.stringify(stderr())}\nstdout: ${JSON.stringify(stdout())}`,
       )
 
-      const res = await fetch(`http://127.0.0.1:${port}/probe`, { method: 'POST', body: 'call-site-probe' })
+      // Bounded: a child that binds but wedges before res.end() must fail this
+      // test, not hang the suite.
+      const res = await fetch(`http://127.0.0.1:${port}/probe`, {
+        method: 'POST',
+        body: 'call-site-probe',
+        signal: AbortSignal.timeout(10000),
+      })
       assert.equal(res.status, 200)
       assert.equal(await res.text(), 'ok')
 
@@ -161,17 +167,23 @@ describe('entry-point call site: chroxy-channel-server.js (#7254)', () => {
     const port = await allocatePort()
     // Deliberately calls main() itself. `main` is exported by this module, so
     // the control invokes exactly what the guard would have invoked.
-    const control = stageScript(
+    const control = writeStagedScript(
       dir,
       'control.mjs',
       `const m = await import(${moduleUrl(CHANNEL_SERVER)})\nawait m.main()\n`,
     )
     const { child, stdout, stderr } = launch(control, port)
     try {
+      // Short timeout: this binds in well under a second, and the 15s default
+      // only ever delays a diagnosis. If the guard is stuck TRUE the import
+      // already bound the port and this explicit main() then dies on
+      // EADDRINUSE, so a failure here usually means the stuck-TRUE test below
+      // is the one worth reading.
       assert.ok(
-        await waitForListening(port),
-        `the control did not bind 127.0.0.1:${port}, so the import test below cannot distinguish anything.\n` +
-        `stderr: ${JSON.stringify(stderr())}\nstdout: ${JSON.stringify(stdout())}`,
+        await waitForListening(port, { timeoutMs: 5000 }),
+        `the control did not bind 127.0.0.1:${port}, so the import test below cannot distinguish anything ` +
+        '(or the module auto-ran on import and this second main() hit EADDRINUSE — read the stuck-TRUE ' +
+        `result first).\nstderr: ${JSON.stringify(stderr())}\nstdout: ${JSON.stringify(stdout())}`,
       )
     } finally {
       await terminate(child)
@@ -181,7 +193,7 @@ describe('entry-point call site: chroxy-channel-server.js (#7254)', () => {
   it('importing the module does NOT run main() (the stuck-TRUE direction)', async () => {
     const dir = stageDir('chroxy-channel-import-')
     const port = await allocatePort()
-    const importer = stageScript(
+    const importer = writeStagedScript(
       dir,
       'importer.mjs',
       `await import(${moduleUrl(CHANNEL_SERVER)})\nconsole.log('IMPORTED-OK')\n`,
@@ -189,8 +201,19 @@ describe('entry-point call site: chroxy-channel-server.js (#7254)', () => {
 
     const { child, stdout, stderr, exited } = launch(importer, port)
     try {
+      // Positive control FIRST, for two reasons. The negative assertions are
+      // only evidence of quiet behaviour if the import actually happened — a
+      // typo'd URL or a module that threw on load leaves the port just as
+      // unbound. And waiting for it here means the window below is measured
+      // from AFTER the import resolves, which is the moment main() would have
+      // run, rather than from spawn (node startup plus resolving the MCP SDK
+      // would otherwise eat most of it).
       assert.ok(
-        await expectNeverListening(port),
+        await waitForOutput(stdout, (t) => t.includes('IMPORTED-OK'), { timeoutMs: 30000 }),
+        `the importer never got past its import, so the assertions below prove nothing:\n${JSON.stringify(stderr())}`,
+      )
+      assert.ok(
+        await expectNeverListening(port, { windowMs: 3000 }),
         'importing the module bound the control surface — the guard reads true when it is not the entry ' +
         'point, so merely running the unit suite would start a server and a stdio transport.\n' +
         `stderr: ${JSON.stringify(stderr())}`,
@@ -199,18 +222,11 @@ describe('entry-point call site: chroxy-channel-server.js (#7254)', () => {
         !stderr().includes('HTTP control surface listening'),
         `main() announced itself on import:\n${JSON.stringify(stderr())}`,
       )
-      assert.ok(
-        !stdout().includes(CHANNEL_NOTIFICATION_METHOD),
-        `the module connected a channel transport on import:\n${JSON.stringify(stdout())}`,
-      )
-      // Positive control for all three assertions above: they are only evidence
-      // of quiet behaviour if the import actually happened. Printed AFTER the
-      // import resolves, so a typo'd URL or a module that threw on load cannot
-      // masquerade as "imported it and it stayed quiet".
-      assert.ok(
-        stdout().includes('IMPORTED-OK'),
-        `the importer never got past its import, so the assertions above prove nothing:\n${JSON.stringify(stderr())}`,
-      )
+      // NOTE: there is deliberately no assertion that stdout carries no channel
+      // notification. StdioServerTransport writes nothing on connect() — it only
+      // answers inbound stdin frames — and this test never POSTs, so the child's
+      // stdout is empty whether or not main() ran. Such an assertion cannot
+      // fail, and in a file about vacuous checks that is worse than absent.
       // Bounded, and captured at spawn time. A guard stuck true turns this
       // importer into a live server that never exits, and an unbounded await
       // would hang the suite instead of failing it.
@@ -279,17 +295,26 @@ describe('entry-point call site: server-cli-child.js (#7254)', () => {
       CHROXY_DISABLE_KEYCHAIN: '1',
       CHROXY_CRED_DISABLE_KEYCHAIN: '1',
       // PATH points at an EMPTY directory, which is the only way to suppress
-      // the one subprocess this startup path still makes: wsServer.start() runs
-      // `claude --help` unconditionally for feature detection, with no config
-      // knob. Verified by putting a recording shim named `claude` on PATH and
-      // watching it log `--help`; with PATH empty, nothing is recorded and the
-      // child still reaches ready. The ollama provider needs no external binary,
-      // so nothing else on this path wants PATH.
+      // the subprocesses this startup path makes with no config knob at all:
+      // wsServer.start() runs `claude --help` for feature detection, and the
+      // WsServer constructor runs `git rev-parse` twice via getGitInfo().
+      // Verified by putting a recording shim named `claude` on PATH and
+      // watching it log `--help`; with PATH empty nothing is recorded, the
+      // child has no descendants at all, and it still reaches ready. The
+      // ollama provider needs no external binary, so nothing on this path
+      // legitimately wants PATH.
       PATH: emptyBin,
       // Point the ollama client at a dead port. Nothing on the startup path
       // makes a request, but a developer running a real Ollama on the default
       // port should not be able to change what this test observes.
       CHROXY_OLLAMA_BASE_URL: 'http://127.0.0.1:1',
+      // The WsServer constructor fires a background fetch of
+      // registry.npmjs.org unless NODE_ENV === 'test' (ws-server.js:1281).
+      // Nothing in this harness sets NODE_ENV, so without this the forked
+      // child opens a real outbound HTTPS connection — confirmed with lsof —
+      // and on an egress-restricted runner adds a pending socket and a 5s
+      // timer to a test whose whole point is bounded, hermetic behaviour.
+      NODE_ENV: 'test',
     }
     // An inherited API_TOKEN would change the auth branch the child takes; the
     // config file is the only thing that should decide that here.
@@ -317,8 +342,8 @@ describe('entry-point call site: server-cli-child.js (#7254)', () => {
       const ready = await waitUntil(() => sawReady(messages), { timeoutMs: 30000 })
       assert.ok(
         ready,
-        'no {type:"ready"} IPC frame — main() never ran, so the entry-point guard read false and the ' +
-        'supervised daemon started and did nothing.\n' +
+        'no {type:"ready"} IPC frame — either main() never ran (the entry-point guard read false, and the ' +
+        'supervised daemon started and did nothing), or startup failed. stderr below distinguishes them.\n' +
         `stdout: ${JSON.stringify(stdout().slice(-2000))}\nstderr: ${JSON.stringify(stderr().slice(-2000))}`,
       )
 
@@ -334,8 +359,16 @@ describe('entry-point call site: server-cli-child.js (#7254)', () => {
       // calling main(), so exercise that half too — `shutdown` is the
       // supervisor's stop path and is handled ONLY inside the guard.
       child.send({ type: 'shutdown' })
-      const [code] = await exited
-      assert.equal(code, 0, `graceful shutdown should exit 0, got ${code}: ${stderr().slice(-2000)}`)
+      // Bounded like every other wait here. This one was not, and that was a
+      // real hole: break the shutdown handler and an unbounded await turns a
+      // failing test into a hung job that also orphans the forked daemon,
+      // because `finally` never runs. exitCodeWithin yields 'TIMEOUT', so the
+      // assertion names the hang instead of becoming one.
+      assert.equal(
+        await exitCodeWithin(exited),
+        0,
+        `graceful shutdown should exit 0: ${stderr().slice(-2000)}`,
+      )
     } finally {
       await terminate(child)
     }
@@ -343,7 +376,7 @@ describe('entry-point call site: server-cli-child.js (#7254)', () => {
 
   it('importing the module does NOT start a server (the stuck-TRUE direction)', async () => {
     const staged = await stage()
-    const importer = stageScript(
+    const importer = writeStagedScript(
       staged.dir,
       'importer.mjs',
       `await import(${moduleUrl(SUPERVISED_CHILD)})\nconsole.log('IMPORTED-OK')\n`,
@@ -371,8 +404,14 @@ describe('entry-point call site: server-cli-child.js (#7254)', () => {
       // The port window comes before the IPC check because it WAITS: `ready` is
       // sent ~250ms after startup, so sampling messages the instant the import
       // resolves would miss it and report a false all-clear.
+      // 3000ms, measured from after IMPORTED-OK. A full daemon boot is ~270ms
+      // here, but on a loaded 2-core runner it can be slower, and if the bind
+      // lands outside this window both named assertions pass and the mutation
+      // is caught only by the exitCodeWithin bound below — still red, but with
+      // a worse diagnostic. Widen this before trusting the ordering rationale
+      // above on a slow host.
       assert.ok(
-        await expectNeverListening(staged.port),
+        await expectNeverListening(staged.port, { windowMs: 3000 }),
         `importing the module bound 127.0.0.1:${staged.port} — merely running the unit suite would start a server.`,
       )
       assert.ok(
