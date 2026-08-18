@@ -65,3 +65,5 @@ git commit -m "feat(ws): add model switching protocol
 
 Support set_model client message and model_changed broadcast"
 ```
+
+A deliberate edit to prove the drift gate turns CI red. Reverted immediately.
