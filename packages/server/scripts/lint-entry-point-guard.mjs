@@ -64,6 +64,11 @@
  *     first argument to `node -e`, where argv index 1 means something else
  *     entirely. Shell is not scanned and this file's name does not claim it is
  *     (#7239's lesson: a gate must not overclaim in its own title).
+ *   - Anything git does not consider part of the repository — gitignored build
+ *     output, local scratch files. A guard has to be COMMITTED to matter, and
+ *     `packages/desktop/src-tauri/server-bundle/` is a generated copy of the
+ *     whole server that lags the source by however long since it was last built.
+ *     See `gitKnownFiles`.
  *   - Anything inside a `//` or block comment. This matters — every copy of the
  *     guard, and this file, discuss the banned shapes in prose.
  *
@@ -116,13 +121,16 @@
  *                       equal-site-count check. REPEATABLE. Defaults to
  *                       GUARD_COPIES; empty when --allow is given alone.
  *   --min-files <n>     Exit 2 if fewer than n files were walked. A FLOOR, not a
- *                       count — it only ever fails closed.
+ *                       count — it only ever fails closed. Counted AFTER the
+ *                       gitignore filter, so it tracks what was actually checked.
  *   --dry-run           Print offenders without failing the exit code.
  *
- * Issue: #7235. Background: #7198, #7213, #7222, #7226.
+ * Issue: #7235, and #7247's review + post-merge fix. Background: #7198, #7213,
+ * #7222, #7226.
  */
 
 import { readFileSync, readdirSync, existsSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import { dirname, join, resolve, relative, sep as pathSep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -207,6 +215,38 @@ function parseArgs(argv) {
     usageError('--min-files requires a non-negative integer')
   }
   return out
+}
+
+/**
+ * The set of repo-relative paths git considers part of the repository —
+ * tracked, plus untracked files that are not ignored.
+ *
+ * The walk alone is not the right set. `packages/desktop/src-tauri/server-bundle/`
+ * is GENERATED (gitignored at .gitignore:60) and holds a stale, pre-#7217 copy
+ * of the whole server — including two of the original buggy guards. A fresh CI
+ * checkout has no bundle, so CI stayed green while every developer who had built
+ * the desktop app got a red Server Lint from files they never wrote. That is a
+ * false positive in a required check, coming from output that cannot contain a
+ * fourth guard in any meaningful sense: a guard has to be COMMITTED to matter.
+ *
+ * A name in SKIP_DIRS would have fixed this one directory and left the next
+ * generated tree to rediscover it — the hardcoded-list failure this whole lint
+ * exists to prevent. Asking git is the actual rule.
+ *
+ * Returns null when git cannot answer (not a repository, git absent), in which
+ * case nothing is filtered. That direction is deliberate: no filter means
+ * scanning MORE files, never fewer, so an unavailable git cannot hide a guard.
+ * It is also what lets the tests point --repo-root at a plain fixture tree and
+ * still exercise this exact code path.
+ */
+function gitKnownFiles(root) {
+  const res = spawnSync(
+    'git',
+    ['-C', root, 'ls-files', '--cached', '--others', '--exclude-standard', '-z'],
+    { encoding: 'utf8', maxBuffer: 128 * 1024 * 1024 },
+  )
+  if (res.error || res.status !== 0) return null
+  return new Set(res.stdout.split('\0').filter(Boolean))
 }
 
 function walk(dir, out = []) {
@@ -403,6 +443,14 @@ try {
   files = walk(root).sort()
 } catch (err) {
   usageError(`cannot walk ${root}: ${err.message}`)
+}
+
+// Drop generated output git does not consider part of the repository. See
+// gitKnownFiles: a null return means git could not answer, and nothing is
+// filtered, which only ever widens coverage.
+const known = gitKnownFiles(root)
+if (known) {
+  files = files.filter((f) => known.has(relative(root, f).split(pathSep).join('/')))
 }
 
 // "Walked zero files" and "walked 1963 clean files" must not be the same
