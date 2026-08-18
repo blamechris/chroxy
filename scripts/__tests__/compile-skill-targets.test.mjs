@@ -1,7 +1,14 @@
 #!/usr/bin/env node
 /**
- * compile-skill-targets.test.mjs — node test harness for deriveDescription()
- * in scripts/compile-skill-targets.mjs.
+ * compile-skill-targets.test.mjs — node test harness for
+ * scripts/compile-skill-targets.mjs.
+ *
+ * Two layers, and both are needed. The unit tests import the module and call
+ * its exported pieces (deriveDescription, detectUncompiledAgents, emitPi). The
+ * subprocess tests at the bottom run the script for real and assert on what it
+ * WROTE, because importing a module proves nothing about whether its CLI still
+ * runs — #7236, where hardwiring the entry-point guard to false left this file
+ * fully green while the script compiled nothing.
  *
  * No external test framework. Each `test()` block runs in series and pushes
  * pass/fail into a counter. Exit status is 0 if all pass, 1 otherwise.
@@ -245,6 +252,150 @@ await test('detectUncompiledAgents flags an installed-but-unselected pi (~/.pi)'
   } finally {
     rmSync(home, { recursive: true, force: true })
   }
+})
+
+// --- entry-point call site (#7236) -----------------------------------------
+//
+// Every test above IMPORTS this module and calls an exported function, which
+// says nothing about whether `node scripts/compile-skill-targets.mjs` still
+// compiles anything. Hardwiring the module's `if (isEntryPoint(import.meta.url))`
+// to `false` left this file at 18/18 green: the script would exit 0 having
+// emitted nothing — the same silent no-op class as #7198/#7214, and the reason
+// that bug survived in four files at once. The failure is SILENCE, not a crash.
+//
+// So the tests below run the script for real, out of a temp fixture, and assert
+// on the ARTIFACT it wrote. Exit status alone cannot tell "compiled everything"
+// from "never ran": both are 0. The sibling coverage for the other consumer of
+// the shared guard is in gen-agents-md.test.mjs.
+
+import { existsSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { stageScript } from './lib/stage-script.mjs'
+
+const SKILL_BODY = '# Demo skill\n\nCompiles a demo skill for the entry-point fixture.\n'
+
+/**
+ * A fixture repo holding the staged compiler plus one source skill.
+ *
+ * The tmpdir is realpath'd first. On macOS `os.tmpdir()` is /var/folders/…, a
+ * symlink to /private/var/…, so a fixture built on the raw path would put every
+ * run through a symlinked prefix — the direct-invocation test would silently
+ * become a second copy of the symlink test, and only on macOS. Canonicalising
+ * here means the only symlink in play is the one a test creates on purpose.
+ */
+const withFixture = (fn) => {
+  const dir = mkdtempSync(pjoin(realpathSync(tmpdir()), 'compile-skill-'))
+  try {
+    const root = pjoin(dir, 'root')
+    const home = pjoin(dir, 'home')
+    mkdirSync(home, { recursive: true })
+    const script = stageScript(helperPath, pjoin(root, 'scripts'))
+    mkdirSync(pjoin(root, '.claude', 'commands'), { recursive: true })
+    writeFileSync(pjoin(root, '.claude', 'commands', 'demo.md'), SKILL_BODY)
+    fn({ dir, root, home, script })
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+/**
+ * Run the staged compiler with a throwaway HOME.
+ *
+ * Safety first: the `codex` and `pi` emitters write into ~/.codex and ~/.pi, so
+ * a fixture that ever reached them would write to the developer's real home.
+ * That is also why every run below passes --targets explicitly instead of
+ * trusting the profile fallback — the fallback is `['claude']` today, and a
+ * test should not be the thing that notices if that changes.
+ *
+ * Determinism second: main()'s "installed but not selected" hint fires off
+ * `homedir()`, so on a machine with ~/.codex present the child's stdout would
+ * differ from CI's.
+ */
+const runCompiler = (scriptPath, args, home) =>
+  spawnSync(process.execPath, [scriptPath, ...args], {
+    encoding: 'utf8',
+    env: { ...process.env, HOME: home, USERPROFILE: home },
+  })
+
+await test('invoked directly, it compiles a real skill and writes every target artifact (#7236)', () => {
+  withFixture(({ root, home, script }) => {
+    const run = runCompiler(script, ['--repo', root, '--targets', 'claude,gemini'], home)
+    assert(run.status === 0, `expected exit 0, got ${run.status}: ${run.stderr}`)
+
+    const skillMd = pjoin(root, '.claude', 'skills', 'demo', 'SKILL.md')
+    assert(
+      existsSync(skillMd),
+      'the compiler exited 0 having emitted NOTHING — the entry-point guard read false ' +
+      `and main() never ran (#7198/#7236). stdout: ${JSON.stringify(run.stdout)}`,
+    )
+    const emitted = readFileSync(skillMd, 'utf8')
+    assert(emitted.startsWith('---\ndescription: "'), `missing description frontmatter:\n${emitted}`)
+    assert(emitted.includes(SKILL_BODY.trimEnd()), `the source body must pass through verbatim:\n${emitted}`)
+
+    // A second target, so the assertion covers the emitter LOOP rather than one
+    // lucky write: a main() that emitted only its first target would pass above.
+    const geminiToml = pjoin(root, '.gemini', 'commands', 'demo.toml')
+    assert(existsSync(geminiToml), 'the second target was not emitted — the emitter loop stopped after one')
+    assert(
+      readFileSync(geminiToml, 'utf8').includes('# Demo skill'),
+      'the gemini artifact must carry the skill body',
+    )
+  })
+})
+
+await test('invoked through a symlinked path, it still compiles (#7198 at this call site)', () => {
+  withFixture(({ dir, root, home }) => {
+    const link = pjoin(dir, 'link')
+    symlinkSync(root, link)
+    // Through the symlink, node realpaths `import.meta.url` to …/root/… while
+    // `process.argv[1]` stays …/link/… as typed. Comparing those two directly —
+    // which is what this script did before #7213 — reads false, so main() never
+    // runs and the process exits 0 having compiled nothing.
+    const run = runCompiler(
+      pjoin(link, 'scripts', 'compile-skill-targets.mjs'),
+      ['--repo', root, '--targets', 'claude'],
+      home,
+    )
+    assert(run.status === 0, `expected exit 0, got ${run.status}: ${run.stderr}`)
+    assert(
+      existsSync(pjoin(root, '.claude', 'skills', 'demo', 'SKILL.md')),
+      'compiled nothing through a symlinked invocation path — the #7198 silent no-op',
+    )
+  })
+})
+
+await test('--dry-run emits nothing, and the identical run without it does (#7236)', () => {
+  withFixture(({ root, home, script }) => {
+    const skillMd = pjoin(root, '.claude', 'skills', 'demo', 'SKILL.md')
+
+    const dry = runCompiler(script, ['--repo', root, '--targets', 'claude', '--dry-run'], home)
+    assert(dry.status === 0, `--dry-run should exit 0, got ${dry.status}: ${dry.stderr}`)
+    assert(!existsSync(skillMd), '--dry-run wrote an artifact')
+
+    // The positive control, and the reason this is one test and not two: "no
+    // file" is equally what a guard that never fired produces, so the assertion
+    // above proves nothing on its own. Same fixture, same flags minus
+    // --dry-run, must now write.
+    const wet = runCompiler(script, ['--repo', root, '--targets', 'claude'], home)
+    assert(wet.status === 0, `expected exit 0, got ${wet.status}: ${wet.stderr}`)
+    assert(existsSync(skillMd), 'the control run emitted nothing either — the no-op above was vacuous')
+  })
+})
+
+await test('exits 1 with a diagnostic when the repo has no .claude/commands (#7236)', () => {
+  withFixture(({ dir, home, script }) => {
+    const empty = pjoin(dir, 'empty')
+    mkdirSync(empty, { recursive: true })
+    const run = runCompiler(script, ['--repo', empty, '--targets', 'claude'], home)
+    // A detector for the same mutation that does not depend on a file: with the
+    // entry-point guard hardwired false, main() never runs, so the process exits
+    // 0 with an empty stderr where it owes a 1 and a reason.
+    assert(run.status === 1, `expected exit 1, got ${run.status} (0 = main() never ran)`)
+    assert(
+      /No \.claude\/commands/.test(run.stderr),
+      `exit 1 came from something other than the missing-commands check:\n${JSON.stringify(run.stderr)}`,
+    )
+  })
 })
 
 // --- summary --------------------------------------------------------------
