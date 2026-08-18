@@ -40,10 +40,11 @@ every skill into every repo, a repo pulls a skill the moment it needs one and th
 - **Targets** — the coding agents a skill is compiled for. `.claude/commands/<name>.md`
   (the customized install) is the provider-NEUTRAL source; `scripts/compile-skill-targets.mjs`
   emits each agent's NATIVE custom-command format: `claude` → `.claude/skills/<name>/SKILL.md`,
-  `gemini` → `.gemini/commands/<name>.toml`, `codex` → `.codex/skills/<name>/SKILL.md`,
-  `pi` → `~/.pi/agent/skills/<name>/SKILL.md`. The first three are repo-tracked; **`pi` is the one
-  user-global target** — Pi has no repo-local discovery, so its artifact lands in the user's home
-  dir and is opt-in rather than a safe default. The active
+  `gemini` → `.gemini/commands/<name>.toml`, `codex` → `~/.codex/prompts/<name>.md`,
+  `pi` → `~/.pi/agent/skills/<name>/SKILL.md`. The first TWO are repo-tracked; **`codex` and `pi`
+  are both user-global** — neither has a repo-local discovery path, so their artifacts land in the
+  user's home dir and both are opt-in rather than safe defaults. Only the repo-tracked pair is
+  gated by `compile-skill-targets.mjs --check` (#7253); a home dir is not part of any commit. The active
   list comes from the `targets:` line in `.claude/skill-profile.md` (prompt the user if absent;
   the compiler falls back to `claude`). This is what makes a skill model-agnostic — author once,
   run under any model. The neutral arg token is `$ARGUMENTS`; the compiler maps it per agent
@@ -228,11 +229,11 @@ note in the report that hashes may be stale. Record which source you used.
    offer to record the choice in the profile (the compiler falls back to `claude` if unset). Then
    run `node scripts/compile-skill-targets.mjs --name <name>` (it reads the profile targets), or
    `--targets <list>` to override. It writes the native artifact per target and exits non-zero on
-   any emit failure — treat that as a hard gate: fix and re-run before locking. Codex emits a
-   repo-tracked skill folder under `.codex/skills/` so it can be reviewed, copied into
-   `~/.codex/skills`, or used by runners that support repo-local Codex skills. **`pi` writes outside
-   the repo** (`~/.pi/agent/skills/`), so only add it when the user actually drives this repo with
-   Pi — never volunteer it into a committed `targets:` line on their behalf. The compiler prints a
+   any emit failure — treat that as a hard gate: fix and re-run before locking. **`codex` and `pi`
+   both write OUTSIDE the repo** (`~/.codex/prompts/<name>.md`, invoked `/prompts:<name>`; and
+   `~/.pi/agent/skills/`), so add either only when the user actually drives this repo with that
+   agent — never volunteer one into a committed `targets:` line on their behalf, and never expect
+   their output in a diff. The compiler prints a
    hint if it sees `~/.pi` on the machine but `pi` is unselected; that hint is advisory and never
    adds the target itself. Keep the list of `targets` you compiled with for the next step.
 8. **Record in the lockfile.** Only after a successful compile, create `.claude/skills.lock`
@@ -279,11 +280,12 @@ note in the report that hashes may be stale. Record which source you used.
 Read the skill's `targets` from its `.claude/skills.lock` entry, then delete
 `.claude/commands/<name>.md`, its lock entry, and exactly the native artifacts for those targets:
 `claude` → `.claude/skills/<name>/` (dir), `gemini` → `.gemini/commands/<name>.toml`,
-`codex` → `.codex/skills/<name>/` (dir), `pi` → `~/.pi/agent/skills/<name>/` (dir, **outside the
-repo** — remove it only when `pi` is in the lock entry's `targets`, and say so in the report since
-the user may not expect a repo command to touch their home dir). If the lock entry has no `targets`
-(an older install), fall back to removing whichever of the three **repo-local** artifacts exist —
-never probe `~/.pi` on a guess, because an unrelated Pi skill of the same name could live there.
+`codex` → `~/.codex/prompts/<name>.md` (file), `pi` → `~/.pi/agent/skills/<name>/` (dir). The last
+two are **outside the repo** — remove either only when it is in the lock entry's `targets`, and say
+so in the report, since the user may not expect a repo command to touch their home dir. If the lock
+entry has no `targets` (an older install), fall back to removing whichever of the two **repo-local**
+artifacts exist — never probe `~/.codex` or `~/.pi` on a guess, because an unrelated skill of the
+same name could live there.
 Report what was removed.
 
 ## Lockfile schema (`.claude/skills.lock`)
