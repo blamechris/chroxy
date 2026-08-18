@@ -48,7 +48,6 @@
  */
 
 import { createRequire } from 'node:module'
-import { mkdtempSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -56,15 +55,31 @@ import { fileURLToPath } from 'node:url'
 // CRITICAL: Patch `node:fs` via the CJS object obtained from `createRequire`,
 // NOT via an ESM default import. ESM `import fs from 'node:fs'` returns a
 // Module Namespace Exotic Object whose property writes do NOT propagate to
-// later `import { writeFileSync } from 'node:fs'` consumers — those bindings
-// are snapshotted at link-time from the CJS module's original exports.
-// `createRequire('node:fs')` gives us the live CJS `module.exports`; any
-// production code that does `import { writeFileSync } from 'fs'` then sees
-// our patched value because the ESM named exports are derived from this same
-// object at link time. This must run BEFORE any other module imports `node:fs`
-// — Node's `--import` flag in `package.json` enforces that ordering.
+// later `import { writeFileSync } from 'node:fs'` consumers.
+// `createRequire('node:fs')` gives us the live CJS `module.exports` — the
+// object the default import also resolves to, so patching it covers both.
+//
+// Named and namespace importers (`import { writeFileSync } from 'fs'`,
+// `import * as fs from 'fs'`) are covered for a DIFFERENT and more fragile
+// reason: Node builds the `node:fs` synthetic ESM module LAZILY, snapshotting
+// its named exports off `module.exports` the first time some ESM module
+// imports it. As long as that first link happens AFTER this file's body runs,
+// the snapshot is taken from the already-patched object and every binding form
+// sees the guard. Node's `--import` flag orders this file ahead of the test's
+// own graph, which is what makes that hold.
+//
+// #7262: THIS FILE MUST NEVER `import` FROM `node:fs`. ESM imports are
+// evaluated before the module body, so a single `import { mkdtempSync } from
+// 'node:fs'` up top links the synthetic module against the UNPATCHED exports —
+// and named/namespace consumers (41 modules under `src/` at the time of
+// writing) silently bypass the sandbox while it still reports success for CJS
+// and default importers. That line lived here for months. Take what you need
+// off the `fs` object below instead, as `mkdtempSync` now does.
+// `tests/setup-sandbox-binding-forms.test.js` pins all four binding forms and
+// fails if this is undone.
 const require = createRequire(import.meta.url)
 const fs = require('node:fs')
+const { mkdtempSync } = fs
 
 // --- Redirect CHROXY_CONFIG_DIR to a per-process tmp dir ----------------------
 // Production helpers (models.js, connection-info.js, checkpoint-manager.js)
