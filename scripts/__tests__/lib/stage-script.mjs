@@ -31,6 +31,12 @@ import { basename, dirname, join } from 'node:path'
  * @returns {string} the staged script's path
  */
 export function stageScript(scriptPath, destScriptsDir) {
+  // mkdir FIRST, before anything that can throw. Callers wrap this in a
+  // try/finally that chmods and removes the fixture dir, so throwing before the
+  // directory exists makes their `chmodSync(scriptsDir)` fail with ENOENT — which
+  // masks the diagnostic below AND skips the rmSync, leaking the temp tree. The
+  // check reads more naturally above this line and is deliberately not there.
+  mkdirSync(destScriptsDir, { recursive: true })
   const libDir = join(dirname(scriptPath), 'lib')
   if (!existsSync(libDir)) {
     throw new Error(
@@ -39,7 +45,6 @@ export function stageScript(scriptPath, destScriptsDir) {
       'bare ERR_MODULE_NOT_FOUND naming a temp path.',
     )
   }
-  mkdirSync(destScriptsDir, { recursive: true })
   const staged = join(destScriptsDir, basename(scriptPath))
   cpSync(scriptPath, staged)
   cpSync(libDir, join(destScriptsDir, 'lib'), { recursive: true })

@@ -45,7 +45,11 @@ const test = async (name, fn) => {
   }
 }
 
+// Counted, so withFixture below can prove its callback actually checked
+// something rather than trusting that it was called.
+let assertions = 0
 const assert = (cond, msg) => {
+  assertions++
   if (!cond) throw new Error(msg || 'assertion failed')
 }
 
@@ -270,6 +274,7 @@ await test('detectUncompiledAgents flags an installed-but-unselected pi (~/.pi)'
 
 import { existsSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
+import { pathToFileURL } from 'node:url'
 import { stageScript } from './lib/stage-script.mjs'
 
 const SKILL_BODY = '# Demo skill\n\nCompiles a demo skill for the entry-point fixture.\n'
@@ -285,6 +290,7 @@ const SKILL_BODY = '# Demo skill\n\nCompiles a demo skill for the entry-point fi
  */
 const withFixture = (fn) => {
   const dir = mkdtempSync(pjoin(realpathSync(tmpdir()), 'compile-skill-'))
+  const before = assertions
   try {
     const root = pjoin(dir, 'root')
     const home = pjoin(dir, 'home')
@@ -295,6 +301,22 @@ const withFixture = (fn) => {
     fn({ dir, root, home, script })
   } finally {
     rmSync(dir, { recursive: true, force: true })
+  }
+  // Proof of WORK, not proof of call. Every assertion in this section lives
+  // inside `fn`, and the harness counts a test as `ok` whenever it does not
+  // throw — so a `withFixture` that quietly failed to call `fn` would report
+  // every test here as passing having checked nothing. That is the same
+  // false-safety shape this whole section exists to catch, one level up in the
+  // scaffolding.
+  //
+  // A `ran = true` after the call does NOT close it: the obvious mutation makes
+  // the CALL conditional and still falls through to the flag, which is exactly
+  // how the first version of this line passed a mutant that skipped `fn`
+  // entirely. Counting assertions cannot be dodged that way, and it also
+  // catches the weaker case of a callback that runs but checks nothing.
+  // Unreachable when `fn` throws, since the exception propagates past it.
+  if (assertions === before) {
+    throw new Error('withFixture: the callback made no assertions — this test checked NOTHING')
   }
 }
 
@@ -310,16 +332,24 @@ const withFixture = (fn) => {
  * Determinism second: main()'s "installed but not selected" hint fires off
  * `homedir()`, so on a machine with ~/.codex present the child's stdout would
  * differ from CI's.
+ *
+ * `cwd` is pinned to the fixture for the same reason. Every call passes --repo
+ * explicitly, so it should never matter — but `repo` DEFAULTS to
+ * `process.cwd()`, and the suite is normally invoked from the repo root. If
+ * --repo handling ever regressed, an unpinned child would compile the real
+ * checkout and rewrite its committed artifacts instead of failing. Pointing it
+ * at a directory with no .claude/commands turns that regression red.
  */
-const runCompiler = (scriptPath, args, home) =>
+const runCompiler = (scriptPath, args, home, cwd) =>
   spawnSync(process.execPath, [scriptPath, ...args], {
     encoding: 'utf8',
+    cwd,
     env: { ...process.env, HOME: home, USERPROFILE: home },
   })
 
 await test('invoked directly, it compiles a real skill and writes every target artifact (#7236)', () => {
-  withFixture(({ root, home, script }) => {
-    const run = runCompiler(script, ['--repo', root, '--targets', 'claude,gemini'], home)
+  withFixture(({ dir, root, home, script }) => {
+    const run = runCompiler(script, ['--repo', root, '--targets', 'claude,gemini'], home, dir)
     assert(run.status === 0, `expected exit 0, got ${run.status}: ${run.stderr}`)
 
     const skillMd = pjoin(root, '.claude', 'skills', 'demo', 'SKILL.md')
@@ -355,6 +385,7 @@ await test('invoked through a symlinked path, it still compiles (#7198 at this c
       pjoin(link, 'scripts', 'compile-skill-targets.mjs'),
       ['--repo', root, '--targets', 'claude'],
       home,
+      dir,
     )
     assert(run.status === 0, `expected exit 0, got ${run.status}: ${run.stderr}`)
     assert(
@@ -365,10 +396,10 @@ await test('invoked through a symlinked path, it still compiles (#7198 at this c
 })
 
 await test('--dry-run emits nothing, and the identical run without it does (#7236)', () => {
-  withFixture(({ root, home, script }) => {
+  withFixture(({ dir, root, home, script }) => {
     const skillMd = pjoin(root, '.claude', 'skills', 'demo', 'SKILL.md')
 
-    const dry = runCompiler(script, ['--repo', root, '--targets', 'claude', '--dry-run'], home)
+    const dry = runCompiler(script, ['--repo', root, '--targets', 'claude', '--dry-run'], home, dir)
     assert(dry.status === 0, `--dry-run should exit 0, got ${dry.status}: ${dry.stderr}`)
     assert(!existsSync(skillMd), '--dry-run wrote an artifact')
 
@@ -376,7 +407,7 @@ await test('--dry-run emits nothing, and the identical run without it does (#723
     // file" is equally what a guard that never fired produces, so the assertion
     // above proves nothing on its own. Same fixture, same flags minus
     // --dry-run, must now write.
-    const wet = runCompiler(script, ['--repo', root, '--targets', 'claude'], home)
+    const wet = runCompiler(script, ['--repo', root, '--targets', 'claude'], home, dir)
     assert(wet.status === 0, `expected exit 0, got ${wet.status}: ${wet.stderr}`)
     assert(existsSync(skillMd), 'the control run emitted nothing either — the no-op above was vacuous')
   })
@@ -386,7 +417,7 @@ await test('exits 1 with a diagnostic when the repo has no .claude/commands (#72
   withFixture(({ dir, home, script }) => {
     const empty = pjoin(dir, 'empty')
     mkdirSync(empty, { recursive: true })
-    const run = runCompiler(script, ['--repo', empty, '--targets', 'claude'], home)
+    const run = runCompiler(script, ['--repo', empty, '--targets', 'claude'], home, dir)
     // A detector for the same mutation that does not depend on a file: with the
     // entry-point guard hardwired false, main() never runs, so the process exits
     // 0 with an empty stderr where it owes a 1 and a reason.
@@ -394,6 +425,38 @@ await test('exits 1 with a diagnostic when the repo has no .claude/commands (#72
     assert(
       /No \.claude\/commands/.test(run.stderr),
       `exit 1 came from something other than the missing-commands check:\n${JSON.stringify(run.stderr)}`,
+    )
+  })
+})
+
+await test('importing the module does NOT run its CLI (the other direction, #7236)', () => {
+  withFixture(({ root, home, script }) => {
+    // Everything above faces one way: a guard stuck FALSE compiles nothing.
+    // Stuck TRUE is the other failure, and it is invisible from that side -
+    // hardwiring the guard to `true` leaves all of the above at 22/22 green,
+    // because main() then runs during THIS FILE's own `await import(...)` at
+    // the top, quietly compiling whatever repo the suite was invoked from and
+    // rewriting its committed artifacts. Testing only the direction the bug
+    // arrived from is how #7250's stripper shipped a worse hole than the one
+    // it fixed, so this faces the other way.
+    //
+    // `-e` leaves argv[1] undefined, which is a legitimate "there is no invoked
+    // script" case the guard must answer false for; the fixture root supplies a
+    // real .claude/commands, so a guard that answered true would have something
+    // to compile and would visibly do it.
+    const run = spawnSync(
+      process.execPath,
+      ['--input-type=module', '-e', `await import(${JSON.stringify(pathToFileURL(script).href)})`],
+      { encoding: 'utf8', cwd: root, env: { ...process.env, HOME: home, USERPROFILE: home } },
+    )
+    assert(run.status === 0, `importing the module should exit 0, got ${run.status}: ${run.stderr}`)
+    assert(
+      !/Compiling/.test(run.stdout),
+      `main() ran on import - the guard reads true when it is not the entry point:\n${run.stdout}`,
+    )
+    assert(
+      !existsSync(pjoin(root, '.claude', 'skills', 'demo', 'SKILL.md')),
+      'importing the module compiled a skill - any test that imports it would rewrite the real repo',
     )
   })
 })
