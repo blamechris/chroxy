@@ -10,7 +10,7 @@
  *   CJS require          patched      import * as fs from 'fs'     UNPATCHED
  *   import fs from 'fs'  patched      import { writeFileSync }     UNPATCHED
  *
- * 41 modules under `src/` import a write-side `fs` function by name, so for all
+ * 45 modules under `src/` import a write-side `fs` function by name, so for all
  * of them the guard was not armed while still reporting success for everything
  * else — the `docs/false-safety-guards.md` shape exactly.
  *
@@ -25,7 +25,7 @@
  *
  * That makes the fix invisible and trivially reversible: re-adding any innocuous
  * `import { … } from 'node:fs'` to `_setup.mjs` silently disarms the sandbox for
- * 41 modules again, and every other test in this suite still passes. This file
+ * 45 modules again, and every other test in this suite still passes. This file
  * is the only thing standing between that edit and a repeat of #4633.
  *
  * ── How these assertions avoid writing to the real home ────────────────────
@@ -77,6 +77,11 @@ import {
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+// The repo's single comment stripper (#7248). Importing it from `scripts/lib`
+// rather than re-implementing one here is deliberate: #7250 consolidated four
+// hand-rolled strippers into this one after two of them were measured wrong in
+// opposite directions on real files in this repo.
+import { stripComments } from '../scripts/lib/strip-comments.mjs'
 
 const require = createRequire(import.meta.url)
 const fsCjs = require('node:fs')
@@ -101,14 +106,38 @@ function classify(err) {
 
 function probeSync(fn, ...args) {
   try {
-    const ret = fn(...args)
-    // `createWriteStream` does not throw synchronously; it defers to an 'error'
-    // event. Returning a stream here means the guard did not fire.
-    if (ret && typeof ret.destroy === 'function') ret.destroy()
+    fn(...args)
     return classify(null)
   } catch (err) {
     return classify(err)
   }
+}
+
+// `createWriteStream` is the one probe whose BYPASS path is asynchronous: the
+// guard throws synchronously, but a bypassed call returns a live stream and
+// reports ENOENT later on an 'error' event. `probeSync` would classify that as
+// "the call SUCCEEDED" — wrong — and the unhandled 'error' would then surface
+// as an uncaughtException after the test had already ended, turning a clean
+// assertion failure into noise that hides which assertion failed.
+function probeStream(fn, target) {
+  return new Promise((resolve) => {
+    let stream
+    try {
+      stream = fn(target)
+    } catch (err) {
+      resolve(classify(err))
+      return
+    }
+    // No synchronous throw means the guard was bypassed and we are now holding
+    // a real stream aimed at a real path. Attach the handler before yielding.
+    stream.once('error', (err) => resolve(classify(err)))
+    stream.once('open', () => {
+      // It actually opened, so a real file exists under the protected root.
+      stream.destroy()
+      try { namedRmSync(target, { force: true }) } catch { /* best effort */ }
+      resolve(classify(null))
+    })
+  })
 }
 
 async function probeAsync(fn, ...args) {
@@ -170,17 +199,33 @@ describe('write sandbox: all four fs binding forms are guarded (#7262)', () => {
     })
   }
 
-  assert.strictEqual(
-    fsCjs.promises, fspCjs,
-    'node:fs/promises is expected to BE fs.promises — the sandbox patches the ' +
-    'latter and relies on that identity to cover the former.',
-  )
+  // This must be a test(), not a bare assert in the describe() body. A throw
+  // during collection CANCELS the sibling tests rather than failing one, and
+  // node:test reports cancelled subtests with `# fail 0` — a green-looking
+  // summary for a suite that never ran. That is the false-safety shape this
+  // whole file exists to prevent, so it must not appear in the file itself.
+  test('node:fs/promises IS fs.promises, which is why patching the latter covers it', () => {
+    assert.strictEqual(
+      fsCjs.promises, fspCjs,
+      'node:fs/promises is expected to BE fs.promises — the sandbox patches the ' +
+      'latter and relies on that identity to cover the former.',
+    )
+  })
 })
 
 describe('write sandbox: every patched method is armed for named imports', () => {
   // The other axis: each method is a separate monkey-patch in `_setup.mjs` and
   // could individually be missed. Driven through the NAMED form because that is
-  // the form #7262 left unguarded and the one 41 modules under `src/` use.
+  // the form #7262 left unguarded and the one 45 modules under `src/` use.
+  //
+  // KNOWN GAP (#7267): this list is hand-maintained alongside the patch list in
+  // `_setup.mjs`, under a suite titled "every patched method" — a hardcoded list
+  // beside a set that can grow, which is `docs/false-safety-guards.md` cause #1.
+  // It cannot currently claim "every": the sandbox patches no delete or copy
+  // API, so `unlinkSync`, `rmSync`, `cpSync` and friends are absent here because
+  // they are absent there. #7267 closes both halves by deriving the two lists
+  // from one exported array; until then, read this suite as "every method
+  // `_setup.mjs` claims to patch", and check that claim against #7267's table.
   const syncMethods = [
     ['writeFileSync',     () => probeSync(namedWriteFileSync, protectedTarget, 'probe')],
     // NOTE: this one is guarded even when its own binding is stale, so unlike
@@ -199,7 +244,6 @@ describe('write sandbox: every patched method is armed for named imports', () =>
     // Deliberately NOT `{ recursive: true }`: recursive would create real
     // directories under ~/.chroxy if the guard were bypassed.
     ['mkdirSync',         () => probeSync(namedMkdirSync, protectedTarget)],
-    ['createWriteStream', () => probeSync(namedCreateWriteStream, protectedTarget)],
     ['openSync',          () => probeSync(namedOpenSync, protectedTarget, 'w')],
   ]
 
@@ -208,6 +252,14 @@ describe('write sandbox: every patched method is armed for named imports', () =>
       assert.strictEqual(run(), GUARDED, `${label} bypassed the sandbox.`)
     })
   }
+
+  test('createWriteStream is guarded via named import', async () => {
+    assert.strictEqual(
+      await probeStream(namedCreateWriteStream, protectedTarget),
+      GUARDED,
+      'createWriteStream bypassed the sandbox.',
+    )
+  })
 
   const asyncMethods = [
     ['promises.writeFile',   () => probeAsync(namedWriteFile, protectedTarget, 'probe')],
@@ -268,18 +320,46 @@ describe('write sandbox: the cause is pinned structurally too (#7262)', () => {
   test('tests/_setup.mjs contains no ESM import from node:fs', () => {
     const setupPath = fileURLToPath(new URL('./_setup.mjs', import.meta.url))
     const source = namedReadFileSync(setupPath, 'utf8')
-    const offending = source
-      .split('\n')
-      .map((line, i) => [i + 1, line])
-      .filter(([, line]) => /^\s*import\s.*\sfrom\s+['"](node:)?fs(\/promises)?['"]/.test(line))
+
+    // Comments must be blanked first, and with the repo's ONE stripper
+    // (`scripts/lib/strip-comments.mjs`, #7248) rather than a second local
+    // regex. `_setup.mjs` deliberately quotes `import { mkdtempSync } from
+    // 'node:fs'` in its own header to explain the bug, so a check that reads
+    // raw source flags the very comment warning against the thing. Measured:
+    // 1 match raw, 0 stripped. The stripper preserves offsets, so line numbers
+    // computed here are valid against the original file.
+    const blanked = stripComments(source, '_setup.mjs')
+
+    // Deliberately NOT line-anchored on `... from ...`. Three forms disarm the
+    // sandbox and the narrow version caught only the first, which meant the
+    // check that exists to NAME the cause stayed green for two of the three
+    // ways the cause comes back. All three are measured, not assumed:
+    //
+    //   import { mkdtempSync } from 'node:fs'   single line   -> 9 tests fail
+    //   import 'node:fs'                        bare          -> 8 tests fail
+    //   import {\n  mkdtempSync,\n} from 'node:fs'  multi-line
+    //
+    // `node:fs/promises` is included because it is a separate synthetic module
+    // with the same lazy-link behaviour: importing it here snapshots ITS named
+    // exports early and disarms the promises half of the guard (measured: 9
+    // tests fail).
+    const IMPORT_OF_FS = /(^|\n)[ \t]*import\s+(?:[\s\S]*?\sfrom\s+)?['"](node:)?fs(\/promises)?['"]/g
+    const offending = [...blanked.matchAll(IMPORT_OF_FS)].map((m) => {
+      const at = m.index + (m[0].startsWith('\n') ? 1 : 0)
+      return {
+        line: source.slice(0, at).split('\n').length,
+        statement: source.slice(at, at + m[0].length).trim(),
+      }
+    })
 
     assert.deepStrictEqual(
       offending, [],
-      'tests/_setup.mjs must reach node:fs ONLY through createRequire. An ESM ' +
-      'import here is evaluated before the file body and snapshots the ' +
-      'synthetic module\'s named exports from the UNPATCHED object, silently ' +
-      'disarming the sandbox for every named/namespace consumer (#7262). ' +
-      'Destructure what you need off the `fs` object instead.',
+      'tests/_setup.mjs must reach node:fs ONLY through createRequire. Any ESM ' +
+      'import of it here — named, namespace, or bare side-effect — is evaluated ' +
+      'before the file body and snapshots the synthetic module\'s named exports ' +
+      'from the UNPATCHED object, silently disarming the sandbox for every ' +
+      'named/namespace consumer (#7262). Destructure what you need off the ' +
+      '`fs` object instead.',
     )
   })
 })

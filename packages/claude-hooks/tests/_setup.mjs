@@ -11,11 +11,36 @@
  *      braces against env leaking out of a spawned process)
  */
 
-import fs from 'node:fs'
-import { mkdtempSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { tmpdir, homedir } from 'node:os'
 import { join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
+
+// #7262: reach `node:fs` through `createRequire`, NEVER an ESM import.
+//
+// This file previously opened with `import fs from 'node:fs'` plus
+// `import { mkdtempSync } from 'node:fs'`. Both are ESM imports, and ESM
+// imports are evaluated before the module body — which links the `node:fs`
+// synthetic module and snapshots its named exports off the UNPATCHED
+// `module.exports`. The patches below then landed on an object that named and
+// namespace importers no longer read, so the guard covered exactly two of the
+// four binding forms:
+//
+//   require / default import  -> guarded      namespace / named import -> NOT
+//
+// Measured on this package before the fix, writing to the real
+// `~/.chroxy`: cjs GUARDED, default GUARDED, namespace ENOENT, named ENOENT.
+// The default import was the patch TARGET and still did not save the other
+// two, because linking is what does the damage, not which form you patch.
+//
+// `createRequire` gives the live CJS `module.exports` without linking the
+// synthetic module, so the snapshot is taken later, already patched. The
+// server's sandbox carries the same rule and the reasoning in full
+// (`packages/server/tests/_setup.mjs`), pinned there by
+// `tests/setup-sandbox-binding-forms.test.js`.
+const require = createRequire(import.meta.url)
+const fs = require('node:fs')
+const { mkdtempSync } = fs
 
 const REAL_HOME = homedir()
 const GUARDED_ROOTS = [join(REAL_HOME, '.chroxy'), join(REAL_HOME, '.claude')]

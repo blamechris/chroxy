@@ -17,7 +17,7 @@ The pattern recurs faster than it gets recognised, so it is written down.
 ## The shape
 
 A guard exhibits false safety when **success and not-checking are the same
-observable outcome**. Four ways that happens:
+observable outcome**. Five ways that happens:
 
 | mode | what it looks like |
 |---|---|
@@ -124,7 +124,7 @@ exports off `module.exports` at the first ESM import of it. `_setup.mjs` opened
 with `import { mkdtempSync } from 'node:fs'` — and ESM imports evaluate before
 the module body, so that one line took the snapshot from the unpatched object
 before the body could patch anything. **The guard disarmed itself, in its own
-first line, for the 41 modules under `src/` that import a write-side `fs`
+first line, for the 45 modules under `src/` that import a write-side `fs`
 function by name.**
 
 Nothing could see it. The guard still fired correctly for every caller that

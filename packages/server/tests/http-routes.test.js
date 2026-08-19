@@ -321,7 +321,7 @@ describe('http-routes', () => {
       assert.equal(res.status, 403)
     })
 
-    it('GET /connect passes the primary token (404 here since conn info is hidden in this suite)', async () => {
+    it('GET /connect passes the primary token (404 here since the harness config dir has no connection info)', async () => {
       const mock = createMockServer()
       await startWith(mock)
       const res = await globalThis.fetch(`http://127.0.0.1:${port}/connect`, {

@@ -11,11 +11,27 @@
  * trees, so the next forgetter fails LOUDLY at the offending call site
  * instead of silently corrupting the developer's live state 76 days later.
  *
- * The guard monkey-patches the write-side of `fs` (sync + promises): any
- * call whose resolved path falls under the real `~/.chroxy/` or `~/.claude/`
- * throws `CHROXY_TEST_SANDBOX` with a stack trace pointing at the caller.
- * Read-side fs calls are untouched, so tests that legitimately *read* the
- * developer's real config (e.g. provider detection in
+ * The guard monkey-patches a NAMED LIST of `fs` functions: any call whose
+ * resolved path falls under the real `~/.chroxy/` or `~/.claude/` throws
+ * `CHROXY_TEST_SANDBOX` with a stack trace pointing at the caller. The list is
+ *
+ *   sync      writeFileSync appendFileSync renameSync mkdirSync
+ *             createWriteStream openSync
+ *   promises  writeFile appendFile rename mkdir open
+ *
+ * and it is a LIST, not a category. Saying "the write-side of fs" — as this
+ * comment used to — reads as a guarantee the code does not make. Measured
+ * under this harness, these reach the real tree unimpeded: `unlinkSync`,
+ * `rmSync`, `rmdirSync`, `cpSync`, `copyFileSync`, `symlinkSync`, `linkSync`,
+ * `chmodSync`, and the `promises` forms of the same. Two of them are not even
+ * destructive-only — `cpSync` and `copyFileSync` were observed CREATING a real
+ * file inside the developer's live `~/.chroxy`. `truncateSync` is covered, but
+ * only incidentally, because it opens with `r+` and trips `openSync`.
+ * Closing that gap is #7267; until it lands, do not read this guard as
+ * covering deletes or copies.
+ *
+ * Read-side fs calls are untouched by design, so tests that legitimately
+ * *read* the developer's real config (e.g. provider detection in
  * `providers.test.js`) keep working.
  *
  * We deliberately do NOT override `process.env.HOME` globally. Several
@@ -68,15 +84,26 @@ import { fileURLToPath } from 'node:url'
 // sees the guard. Node's `--import` flag orders this file ahead of the test's
 // own graph, which is what makes that hold.
 //
-// #7262: THIS FILE MUST NEVER `import` FROM `node:fs`. ESM imports are
-// evaluated before the module body, so a single `import { mkdtempSync } from
-// 'node:fs'` up top links the synthetic module against the UNPATCHED exports —
-// and named/namespace consumers (41 modules under `src/` at the time of
-// writing) silently bypass the sandbox while it still reports success for CJS
-// and default importers. That line lived here for months. Take what you need
-// off the `fs` object below instead, as `mkdtempSync` now does.
-// `tests/setup-sandbox-binding-forms.test.js` pins all four binding forms and
-// fails if this is undone.
+// #7262: NOTHING EVALUATED BEFORE THIS FILE'S BODY MAY ESM-IMPORT `node:fs`.
+// In practice that means this file must not import it — but the condition is
+// wider than this file, and stating it as "never import fs here" would be too
+// narrow: a transitive import through any module this file pulls in, or an
+// earlier `--import` hook, disarms the guard identically. This file has no
+// local imports, which is what keeps the wider condition satisfied; adding one
+// re-opens the question.
+//
+// ESM imports are evaluated before the module body, so a single
+// `import { mkdtempSync } from 'node:fs'` up top links the synthetic module
+// against the UNPATCHED exports — and named/namespace consumers (45 modules
+// under `src/` at the time of writing) silently bypass the sandbox while it
+// still reports success for CJS and default importers. That line lived here
+// for months. Take what you need off the `fs` object below instead, as
+// `mkdtempSync` now does. The same applies to `node:fs/promises`: it is a
+// separate synthetic module with the same lazy-link behaviour, and importing
+// it here disarms the promises half (measured).
+//
+// `tests/setup-sandbox-binding-forms.test.js` pins every binding form
+// behaviourally and fails if any of this is undone.
 const require = createRequire(import.meta.url)
 const fs = require('node:fs')
 const { mkdtempSync } = fs

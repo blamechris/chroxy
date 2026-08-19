@@ -278,10 +278,12 @@ describe('entry-point call site: server-cli-child.js (#7254)', () => {
   // passes process.execArgv through, so the forked daemon boots under the same
   // `--import` guard this process runs under. That is worth knowing but is not
   // worth relying on, for two reasons. It only holds for `fork` (the `spawn`ed
-  // channel-server child above gets no execArgv), and the guard does not cover
-  // named or namespace ESM `fs` imports at all — see #7262, which this work
-  // turned up. Redirecting the roots is the protection; the sandbox is a
-  // backstop that may or may not be armed for a given module.
+  // channel-server child above gets no execArgv), and the sandbox patches a
+  // named list of `fs` functions rather than every way to write — deletes and
+  // copies are outside it (#7267). The binding-form hole this comment used to
+  // cite — named and namespace ESM `fs` imports bypassing the guard entirely —
+  // was #7262 and is fixed. Redirecting the roots is still the protection here;
+  // the sandbox is a backstop.
   const boot = (entry, { cfgDir, home, emptyBin, port }) => {
     const env = {
       ...process.env,
