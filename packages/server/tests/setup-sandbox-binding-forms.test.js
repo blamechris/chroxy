@@ -10,9 +10,12 @@
  *   CJS require          patched      import * as fs from 'fs'     UNPATCHED
  *   import fs from 'fs'  patched      import { writeFileSync }     UNPATCHED
  *
- * 45 modules under `src/` import a write-side `fs` function by name, so for all
- * of them the guard was not armed while still reporting success for everything
- * else — the `docs/false-safety-guards.md` shape exactly.
+ * 45 modules under `src/` import, BY NAME, one of the six write-side `fs`
+ * functions the guard named at the time — so for all of them it was not armed
+ * while still reporting success for everything else, the
+ * `docs/false-safety-guards.md` shape exactly. (That figure is specific to the
+ * old, narrow list, which is what makes it the right measure of what #7262
+ * exposed. Against the surface #7267 now guards it is 53.)
  *
  * This file owns ONE axis: is the patch VISIBLE, whichever way `fs` was
  * imported. Whether it is WIDE ENOUGH — which methods are patched at all — is
@@ -233,7 +236,17 @@ describe('write sandbox: the cause is pinned structurally too (#7262)', () => {
   // header of `_setup.mjs` always stated the wider condition; this now checks
   // it instead of asking the next reader to remember it.
 
-  const ESM_IMPORT = /(^|\n)[ \t]*(?:import|export)\s+(?:[\s\S]*?\sfrom\s+)?['"]([^'"]+)['"]/g
+  // Static `import`/`export … from`, including the no-space form (`}from'x'`),
+  // which the first version of this pattern let through.
+  const ESM_IMPORT = /(^|\n)[ \t]*(?:import|export)\s+(?:[\s\S]*?\bfrom\s*)?['"]([^'"]+)['"]/g
+  // `import('x')` is an edge too. A top-level `await import('node:fs')` disarms
+  // the guard exactly as a static import does — it links the synthetic module —
+  // and the static pattern above produces NO match for it, so the check that
+  // exists to name the cause reported the cause absent.
+  const DYNAMIC_IMPORT_LITERAL = /\bimport\s*\(\s*['"]([^'"]+)['"]\s*\)/g
+  // A dynamic import whose specifier is NOT a literal cannot be followed at
+  // all, and must be reported rather than skipped.
+  const DYNAMIC_IMPORT_ANY = /\bimport\s*\(/g
   const IS_FS = /^(node:)?fs(\/promises)?$/
 
   function scan (fileUrl) {
@@ -248,13 +261,21 @@ describe('write sandbox: the cause is pinned structurally too (#7262)', () => {
     // computed here stay valid against the original file.
     const blanked = stripComments(source, path)
     const found = []
-    for (const m of blanked.matchAll(ESM_IMPORT)) {
-      const at = m.index + (m[0].startsWith('\n') ? 1 : 0)
+    const record = (index, length, specifier) => {
+      const at = index + (source.slice(index, index + 1) === '\n' ? 1 : 0)
       found.push({
-        specifier: m[2],
+        specifier,
         line: source.slice(0, at).split('\n').length,
-        statement: source.slice(at, at + m[0].length).trim(),
+        statement: source.slice(at, at + length).trim(),
       })
+    }
+    for (const m of blanked.matchAll(ESM_IMPORT)) record(m.index, m[0].length, m[2])
+    for (const m of blanked.matchAll(DYNAMIC_IMPORT_LITERAL)) record(m.index, m[0].length, m[1])
+
+    const literalDynamic = [...blanked.matchAll(DYNAMIC_IMPORT_LITERAL)].length
+    const allDynamic = [...blanked.matchAll(DYNAMIC_IMPORT_ANY)].length
+    for (let i = 0; i < allDynamic - literalDynamic; i++) {
+      found.push({ specifier: '<computed dynamic import>', line: 0, statement: 'import(<expression>)' })
     }
     return found
   }
@@ -277,7 +298,7 @@ describe('write sandbox: the cause is pinned structurally too (#7262)', () => {
           queue.push(new URL(imp.specifier, url).href)
         } else if (!imp.specifier.startsWith('node:')) {
           // "Cannot check this" must never be recorded as "nothing to check" —
-          // that is `docs/false-safety-guards.md` cause #2, and it is how a
+          // that is `docs/false-safety-guards.md` the "Silently skipped an input" mode, and it is how a
           // guard reports success over a file it never opened. A bare package
           // specifier is unresolvable here, so it FAILS rather than being
           // skipped: whatever it pulls in is exactly the transitive `node:fs`

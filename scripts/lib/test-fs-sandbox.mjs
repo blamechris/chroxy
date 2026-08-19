@@ -93,7 +93,7 @@ export const FS_STREAM_MUTATORS = [{ name: 'createWriteStream', paths: 1 }]
  * the reason it needs no guard.
  *
  * This exists so the guard is a CATEGORY and not a list. `docs/false-safety-guards.md`
- * cause #1 is "a hardcoded list next to a set that grows" — and `fs` grows. A
+ * the "Checked a subset" mode is "a hardcoded list next to a set that grows" — and `fs` grows. A
  * test asserts that GUARDED ∪ EXEMPT covers the live `fs` surface exactly, so a
  * Node upgrade that adds a path-taking mutator turns the suite RED and forces a
  * classification, instead of quietly widening the hole.
@@ -106,6 +106,19 @@ export const FS_STREAM_MUTATORS = [{ name: 'createWriteStream', paths: 1 }]
  *             protected path can only have come from `open`/`openSync`, which
  *             IS guarded for write-intent flags, so the check happens one step
  *             earlier and this surface needs no path check of its own.
+ *             Measured, not assumed: on a read-only fd `writeSync` gives EBADF
+ *             and `ftruncateSync` gives EINVAL.
+ *   'fd-metadata-known-residual'
+ *           — the same, EXCEPT that these gate on OWNERSHIP rather than write
+ *             access, so they succeed on the read-only fd the guard
+ *             deliberately allows. Measured on darwin: `openSync(cred, 'r')`
+ *             then `fchmodSync(fd, 0)` changed a real file's mode 600 -> 0, and
+ *             `futimesSync` reset its mtime. A path-based guard cannot see this
+ *             — by the time the fd exists there is no path to check — so
+ *             closing it needs fd bookkeeping in the sandbox. It is named here
+ *             rather than hidden under 'fd', because the 'fd' rationale would
+ *             otherwise be a guarantee this code does not make. Tracked
+ *             separately; no call site in this repo does it.
  */
 export const FS_EXEMPTIONS = {
   // Constructors. `createWriteStream` is the documented entry point and is
@@ -134,13 +147,13 @@ export const FS_EXEMPTIONS = {
   createReadStream: 'read',
 
   close: 'fd', closeSync: 'fd',
-  fchmod: 'fd', fchmodSync: 'fd',
-  fchown: 'fd', fchownSync: 'fd',
+  fchmod: 'fd-metadata-known-residual', fchmodSync: 'fd-metadata-known-residual',
+  fchown: 'fd-metadata-known-residual', fchownSync: 'fd-metadata-known-residual',
   fdatasync: 'fd', fdatasyncSync: 'fd',
   fstat: 'fd', fstatSync: 'fd',
   fsync: 'fd', fsyncSync: 'fd',
   ftruncate: 'fd', ftruncateSync: 'fd',
-  futimes: 'fd', futimesSync: 'fd',
+  futimes: 'fd-metadata-known-residual', futimesSync: 'fd-metadata-known-residual',
   write: 'fd', writeSync: 'fd',
   writev: 'fd', writevSync: 'fd',
 
@@ -159,17 +172,28 @@ export const SANDBOX_ERROR_CODE = 'CHROXY_TEST_SANDBOX'
 /** Marks a patched function so a test can enumerate what was ACTUALLY installed. */
 export const SANDBOX_MARKER = Symbol.for('chroxy.testFsSandbox')
 
+// The write-intent mask, taken from THIS runtime's `fs.constants` rather than
+// written down. The literals are not portable and the old ones were Linux's:
+// `O_CREAT` is 64 on Linux but 512 on macOS and 256 on Windows, so a hardcoded
+// `flags & 64` classified `openSync(p, O_CREAT)` as a READ on every platform
+// this repo actually develops on. `O_TRUNC` was not in the mask at all.
+// Measured on darwin before the fix: `openSync('<protected>/state.json',
+// O_TRUNC)` emptied a real file with the sandbox armed and silent.
+const WRITE_INTENT_MASK =
+  require('node:fs').constants.O_WRONLY |
+  require('node:fs').constants.O_RDWR |
+  require('node:fs').constants.O_CREAT |
+  require('node:fs').constants.O_TRUNC |
+  require('node:fs').constants.O_APPEND
+
 /**
  * `true` when `flags` requests write access. `flags` is a string ('w', 'a',
  * 'r+', 'wx'…) or a number of OR'd O_* constants.
  */
 export function isWriteIntent (flags) {
   if (typeof flags === 'string') return /[wa+]/.test(flags)
-  if (typeof flags === 'number') {
-    // O_WRONLY = 1, O_RDWR = 2, O_CREAT = 64
-    return (flags & 1) !== 0 || (flags & 2) !== 0 || (flags & 64) !== 0
-  }
-  // `undefined` defaults to 'r' — a read.
+  if (typeof flags === 'number') return (flags & WRITE_INTENT_MASK) !== 0
+  // `undefined` defaults to 'r' — a read, which is allowed by design.
   return false
 }
 
@@ -204,14 +228,32 @@ export function guardedMethodNames () {
 export function installFsWriteSandbox ({ protectedRoots, protectedFiles = [], allowEnv, message }) {
   const fs = require('node:fs')
 
-  const roots = protectedRoots.map((r) => resolve(r))
-  const files = new Set(protectedFiles.map((f) => resolve(f)))
+  // macOS (APFS/HFS+ by default) and Windows resolve paths case-insensitively,
+  // so `~/.Chroxy/session-state.json` addresses the same real file as
+  // `~/.chroxy/...` — and a case-sensitive comparison does not match it. Both
+  // platforms run this sandbox in CI. Folding case there can only ever produce
+  // a false POSITIVE (a loud refusal on a path that differs from the real home
+  // by case alone), which is the safe direction for a guard.
+  const FOLD_CASE = process.platform === 'darwin' || process.platform === 'win32'
+  const norm = (p) => (FOLD_CASE ? p.toLowerCase() : p)
+
+  const roots = protectedRoots.map((r) => norm(resolve(r)))
+  const files = new Set(protectedFiles.map((f) => norm(resolve(f))))
 
   function isProtected (rawPath) {
     if (allowEnv && process.env[allowEnv] === '1') return false
-    if (typeof rawPath !== 'string' && !(rawPath instanceof URL) && !(rawPath instanceof Buffer)) {
-      return false
-    }
+    // `createWriteStream(null, { fd })` and `open`'s fd forms pass no path.
+    if (rawPath === null || rawPath === undefined) return false
+    // Node accepts a bare Uint8Array as a path and it is NOT `instanceof
+    // Buffer`, so the old type test let one through unexamined.
+    const isPathLike = typeof rawPath === 'string' ||
+      rawPath instanceof URL ||
+      rawPath instanceof Uint8Array
+    // FAIL CLOSED. Returning `false` for a shape we do not recognise is
+    // "silently skipped an input" — a guard reporting success over something it
+    // declined to look at. A false positive here is a loud test failure with
+    // the value in hand; a false negative is #4633.
+    if (!isPathLike) return true
     let p
     try {
       // `fileURLToPath` (not `.pathname`) handles the cross-platform quirks:
@@ -219,11 +261,12 @@ export function installFsWriteSandbox ({ protectedRoots, protectedFiles = [], al
       // decoded. `.pathname` would leave a leading slash on Windows and never
       // match an `os.homedir()`-derived path.
       if (rawPath instanceof URL) p = fileURLToPath(rawPath)
-      else if (rawPath instanceof Buffer) p = rawPath.toString('utf8')
+      else if (rawPath instanceof Uint8Array) p = Buffer.from(rawPath).toString('utf8')
       else p = rawPath
-      p = resolve(p)
+      p = norm(resolve(p))
     } catch {
-      return false
+      // Undecodable: fail closed for the same reason as above.
+      return true
     }
     if (files.has(p)) return true
     for (const root of roots) {

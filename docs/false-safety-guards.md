@@ -133,6 +133,21 @@ is the control that proves the mechanism — a separate synthetic module,
 never ESM-imported by `_setup.mjs`, and all four of *its* binding forms were
 guarded the whole time.
 
+What the reach was hiding: `tests/http-routes.test.js` renamed the developer's
+real `~/.chroxy/connection.json` aside in a `before` hook and moved it back in
+`after` — so a crash, a test timeout, or a SIGKILL between the two left a
+running daemon's connection info stranded under a `.test-backup` suffix. It had
+also been unnecessary for some time, since `readConnectionInfo()` now resolves
+through the `CHROXY_CONFIG_DIR` redirect that `_setup.mjs` already points at a
+tmp dir. Arming the guard surfaced it on the first run.
+
+Two lessons specific to this mode. **A binding is not a value**: patching an
+object only reaches consumers who read through that object, and in ESM the
+consumer's import form decides that — invisibly, at link time, from a different
+file. And **the probe must use the same binding form as the code it vouches
+for**: the first check of this sandbox during `#7254` used a default import,
+reported the guard working, and was right about the only form it tested.
+
 ### 9. The sandbox that guarded a named list, not a category — `#7267`
 
 Found inside the fix for the eighth, which is how this document started.
@@ -147,8 +162,8 @@ outside it. Measured under the real harness, against the developer's live
 writeFileSync mkdirSync openSync   GUARDED
 truncateSync                       GUARDED — but only because it opens 'r+'
                                              and trips openSync
-unlinkSync rmSync rmdirSync        unguarded   (52 unlinkSync call sites in src/,
-chmodSync symlinkSync linkSync     unguarded    more than openSync has)
+unlinkSync rmSync rmdirSync        unguarded   (34 unlinkSync call sites in src/,
+chmodSync symlinkSync linkSync     unguarded    more than openSync's 14)
 cpSync copyFileSync                unguarded — and these CREATE
 fs.writeFile(path, data, cb)       unguarded — the whole callback surface
 ```
@@ -175,22 +190,6 @@ the probe that would have caught it — and the suite stays green while
 run, and it passed. Which arguments are paths is therefore stated a second time,
 deliberately, as a specification with a reason per row; it is the only thing in
 the change written twice.
-
-
-What the reach was hiding: `tests/http-routes.test.js` renamed the developer's
-real `~/.chroxy/connection.json` aside in a `before` hook and moved it back in
-`after` — so a crash, a test timeout, or a SIGKILL between the two left a
-running daemon's connection info stranded under a `.test-backup` suffix. It had
-also been unnecessary for some time, since `readConnectionInfo()` now resolves
-through the `CHROXY_CONFIG_DIR` redirect that `_setup.mjs` already points at a
-tmp dir. Arming the guard surfaced it on the first run.
-
-Two lessons specific to this mode. **A binding is not a value**: patching an
-object only reaches consumers who read through that object, and in ESM the
-consumer's import form decides that — invisibly, at link time, from a different
-file. And **the probe must use the same binding form as the code it vouches
-for**: the first check of this sandbox during `#7254` used a default import,
-reported the guard working, and was right about the only form it tested.
 
 ## The one that got me while writing this
 

@@ -89,6 +89,22 @@ export const PROBE_EXTRA_ARGS = {
 export function probePlans ({ protectedPath, spare, absentSource }) {
   const plans = []
 
+  // A mutator row with no recipe here must FAIL, not silently produce an
+  // unprobed guard. The comment above used to promise this without any code
+  // behind it, which is the shape this whole change is about.
+  function requireRecipe (base) {
+    const recipe = PROBE_EXTRA_ARGS[base]
+    if (typeof recipe !== 'function') {
+      throw new Error(
+        `no probe recipe for '${base}'. Every row in FS_PATH_MUTATORS / ` +
+        `FS_STREAM_MUTATORS needs an entry in PROBE_EXTRA_ARGS giving the ` +
+        `arguments that follow its path argument(s), or its guard is installed ` +
+        `and never proven.`,
+      )
+    }
+    return recipe
+  }
+
   const positions = (paths) => (paths === 1
     ? [{ suffix: '', args: [protectedPath] }]
     : [
@@ -97,9 +113,9 @@ export function probePlans ({ protectedPath, spare, absentSource }) {
       ])
 
   for (const { base, paths } of FS_PATH_MUTATORS) {
-    const recipe = PROBE_EXTRA_ARGS[base]
+    const recipe = requireRecipe(base)
     for (const { suffix, args } of positions(paths)) {
-      const extra = recipe ? recipe() : null
+      const extra = recipe()
       plans.push({ base, surface: 'sync', method: `${base}Sync`, label: `${base}Sync${suffix}`, args, extra })
       plans.push({ base, surface: 'callback', method: base, label: `${base} (callback)${suffix}`, args, extra })
       plans.push({ base, surface: 'promises', method: base, label: `promises.${base}${suffix}`, args, extra })
@@ -107,13 +123,48 @@ export function probePlans ({ protectedPath, spare, absentSource }) {
   }
 
   for (const { name, paths } of FS_STREAM_MUTATORS) {
-    const recipe = PROBE_EXTRA_ARGS[name]
+    const recipe = requireRecipe(name)
     for (const { suffix, args } of positions(paths)) {
-      plans.push({ base: name, surface: 'stream', method: name, label: `${name}${suffix}`, args, extra: recipe ? recipe() : null })
+      plans.push({ base: name, surface: 'stream', method: name, label: `${name}${suffix}`, args, extra: recipe() })
     }
   }
 
   return plans
+}
+
+/**
+ * Split plans into the ones this platform can actually run and the ones whose
+ * method does not exist here.
+ *
+ * `lchmod`/`lchmodSync` are macOS-only — Node does not define them on Linux, so
+ * a probe built from the table alone calls `undefined` and reports
+ * "fn is not a function". That is a test defect, not a guard failure, and it is
+ * exactly what CI caught: the whole table was probed on a platform that lacks
+ * two of its entries.
+ *
+ * Dropping a probe is the dangerous half of this, because "cannot run this"
+ * must never quietly become "nothing to check" (docs/false-safety-guards.md
+ * the "Silently skipped an input" mode). So this only PARTITIONS — the caller is expected to assert that
+ * every unavailable plan is corroborated by the installer having skipped the
+ * same method for the same reason, and the category-completeness test remains
+ * the backstop: it enumerates the LIVE `fs` object, so a method missing from
+ * this platform is a method with nothing to guard.
+ */
+export function partitionByAvailability (plans, { fs, promises }) {
+  const runnable = []
+  const unavailable = []
+  for (const plan of plans) {
+    const host = plan.surface === 'promises' ? promises : fs
+    ;(typeof host[plan.method] === 'function' ? runnable : unavailable).push(plan)
+  }
+  return { runnable, unavailable }
+}
+
+/** The guard label the installer would report for a plan. */
+export function planLabel (plan) {
+  if (plan.surface === 'promises') return `promises.${plan.method}`
+  if (plan.surface === 'callback') return `${plan.method} (callback)`
+  return plan.method
 }
 
 export function probeSync (fn, args) {

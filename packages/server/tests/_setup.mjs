@@ -21,7 +21,7 @@
  *
  * It was a hand-written list until #7267, and the list was the bug. Measured
  * under this harness before that change, these reached the real tree
- * unimpeded: `unlinkSync` (52 call sites under `src/`, more than `openSync`),
+ * unimpeded: `unlinkSync` (34 call sites under `src/`, more than `openSync`),
  * `rmSync`, `rmdirSync`, `cpSync`, `copyFileSync`, `symlinkSync`, `linkSync`,
  * `chmodSync`, the whole `promises` half of the same, and — worst — the entire
  * CALLBACK surface including plain `fs.writeFile(path, data, cb)`. `cpSync`
@@ -32,8 +32,8 @@
  *
  * "Category" is enforced, not asserted: `FS_EXEMPTIONS` in the shared module
  * classifies every remaining `fs` function with a reason, and
- * `tests/setup-sandbox-binding-forms.test.js` fails if their union stops
- * covering the live `fs` surface. A Node upgrade that adds a path-taking
+ * `tests/setup-sandbox-coverage.test.js` fails if their union stops covering
+ * the live `fs` surface. A Node upgrade that adds a path-taking
  * mutator turns the suite red instead of quietly widening the hole.
  *
  * Read-side fs calls are untouched by design, so tests that legitimately
@@ -131,7 +131,11 @@ const fs = require('node:fs')
 // `byok-credentials.test.js`) neither widen nor narrow it.
 const REAL_HOME = homedir()
 
-export const { installed: SANDBOX_INSTALLED, skipped: SANDBOX_SKIPPED } = installFsWriteSandbox({
+export const {
+  installed: SANDBOX_INSTALLED,
+  skipped: SANDBOX_SKIPPED,
+  isProtected: SANDBOX_IS_PROTECTED,
+} = installFsWriteSandbox({
   protectedRoots: [resolve(REAL_HOME, '.chroxy'), resolve(REAL_HOME, '.claude')],
   // Bare files that live NEXT TO the protected dirs (`~/.claude.json` from
   // byok-mcp-config) rather than inside them.

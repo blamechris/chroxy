@@ -5,11 +5,12 @@
  * VISIBLE?" — the #7262 axis, how `fs` was imported. This file answers the
  * other question: "is the patch WIDE ENOUGH?"
  *
- * Until #7267 the answer was no, and the shape was `docs/false-safety-guards.md`
- * cause #1 — a hardcoded list next to a set that grows. The sandbox named seven
+ * Until #7267 the answer was no, and the shape was the
+ * "Checked a subset" mode in `docs/false-safety-guards.md` — a hardcoded list
+ * next to a set that grows. The sandbox named seven
  * sync methods and five `promises` methods, so everything that deletes, copies,
  * links or chmods reached the developer's real `~/.chroxy` unimpeded, including
- * `unlinkSync` (52 call sites under `src/`, more than `openSync` has) and the
+ * `unlinkSync` (34 call sites under `src/`, more than `openSync`'s 14) and the
  * whole CALLBACK surface down to plain `fs.writeFile(path, data, cb)`. The
  * guard reported success the entire time, because every method it did name
  * worked perfectly.
@@ -40,9 +41,17 @@ import assert from 'node:assert'
 
 import * as fsNamespace from 'node:fs'
 import * as fspNamespace from 'node:fs/promises'
-import { writeFileSync as namedWriteFileSync, existsSync as namedExistsSync, rmSync as namedRmSync } from 'node:fs'
+import {
+  writeFileSync as namedWriteFileSync,
+  existsSync as namedExistsSync,
+  rmSync as namedRmSync,
+  renameSync as namedRenameSync,
+  openSync as namedOpenSync,
+  constants as fsConstants,
+} from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
+import { join, sep } from 'node:path'
 
 // The guard's own record of what it installed — read from the SAME module the
 // harness ran, not re-derived. `--import ./tests/_setup.mjs` has already
@@ -57,13 +66,20 @@ import {
   SANDBOX_MARKER,
   guardedMethodNames,
 } from '../../../scripts/lib/test-fs-sandbox.mjs'
-import { probePlans, runProbe, PROBE_EXTRA_ARGS, GUARDED, REACHED_REAL_FS } from '../../../scripts/lib/test-fs-sandbox-probes.mjs'
+import {
+  probePlans, runProbe, partitionByAvailability, planLabel,
+  PROBE_EXTRA_ARGS, GUARDED, REACHED_REAL_FS,
+} from '../../../scripts/lib/test-fs-sandbox-probes.mjs'
 
 // A dedicated root under the REAL protected tree. Nothing below it is ever
 // created by a PASSING run — the guard throws before the syscall — and the last
 // suite asserts that a failing one created nothing either.
 const PROBE_ROOT = join(homedir(), '.chroxy', `__chroxy-sandbox-coverage-${process.pid}`)
 const protectedPath = join(PROBE_ROOT, 'd', 'probe.tmp')
+// The OTHER protected root. `_setup.mjs` hands the guard both, and until this
+// existed every probe aimed at `.chroxy` — so shrinking `protectedRoots` to one
+// entry was an unobserved change.
+const claudeProbe = join(homedir(), '.claude', `__chroxy-sandbox-coverage-${process.pid}`, 'probe.tmp')
 const spare = join(tmpdir(), `chroxy-sandbox-coverage-${process.pid}`, 'spare.tmp')
 const absentSource = join(tmpdir(), `chroxy-sandbox-coverage-absent-${process.pid}`)
 
@@ -74,7 +90,10 @@ const absentSource = join(tmpdir(), `chroxy-sandbox-coverage-absent-${process.pi
 function removeProbeRoot () {
   const prev = process.env.CHROXY_TEST_ALLOW_REAL_HOME_WRITES
   process.env.CHROXY_TEST_ALLOW_REAL_HOME_WRITES = '1'
-  try { namedRmSync(PROBE_ROOT, { recursive: true, force: true }) } finally {
+  try {
+    namedRmSync(PROBE_ROOT, { recursive: true, force: true })
+    namedRmSync(join(homedir(), '.claude', `__chroxy-sandbox-coverage-${process.pid}`), { recursive: true, force: true })
+  } finally {
     if (prev === undefined) delete process.env.CHROXY_TEST_ALLOW_REAL_HOME_WRITES
     else process.env.CHROXY_TEST_ALLOW_REAL_HOME_WRITES = prev
   }
@@ -85,7 +104,21 @@ after(() => {
   namedRmSync(join(tmpdir(), `chroxy-sandbox-coverage-${process.pid}`), { recursive: true, force: true })
 })
 
-const plans = probePlans({ protectedPath, spare, absentSource })
+// Probe what this platform actually has. `lchmod`/`lchmodSync` are macOS-only,
+// and probing them on Linux calls `undefined` — a test defect that says nothing
+// about the guard. The dropped plans are NOT forgotten: the suite below requires
+// the installer to have skipped the same methods for the same reason, so
+// "cannot run this" cannot quietly become "nothing to check".
+// Returns the error code a call produced, or 'no-error' if it succeeded.
+function probeSyncLocal (fn) {
+  try { fn(); return 'no-error' } catch (err) { return err.code || err.message }
+}
+
+const allPlans = probePlans({ protectedPath, spare, absentSource })
+const { runnable: plans, unavailable } = partitionByAvailability(allPlans, {
+  fs: fsNamespace,
+  promises: fspNamespace,
+})
 
 describe('write sandbox: every guarded fs method refuses the real home (#7267)', () => {
   for (const plan of plans) {
@@ -118,11 +151,7 @@ describe('write sandbox: every guarded fs method refuses the real home (#7267)',
 })
 
 describe('write sandbox: the probe list and the patch list cannot drift (#7267)', () => {
-  const probed = new Set(plans.map((p) => {
-    if (p.surface === 'promises') return `promises.${p.method}`
-    if (p.surface === 'callback') return `${p.method} (callback)`
-    return p.method
-  }))
+  const probed = new Set(plans.map(planLabel))
 
   test('every method the guard installed is probed', () => {
     const unprobed = SANDBOX_INSTALLED.filter((name) => !probed.has(name))
@@ -140,6 +169,28 @@ describe('write sandbox: the probe list and the patch list cannot drift (#7267)'
       missing, [],
       'These probes target methods the sandbox did not install, so they can only ' +
       'be passing for some other reason.',
+    )
+  })
+
+  test('every probe this platform cannot run was skipped by the installer too', () => {
+    // The dangerous direction. A plan dropped here is a method nobody proves,
+    // so it must be corroborated INDEPENDENTLY — by the installer having
+    // recorded the same method as absent. Two separate readings of the same
+    // platform fact, from two different code paths.
+    const skipped = new Set(SANDBOX_SKIPPED.map((s) => s.name))
+    const uncorroborated = unavailable
+      .map(planLabel)
+      .filter((label) => !skipped.has(label))
+    assert.deepStrictEqual(
+      uncorroborated, [],
+      'These probes were dropped as "the platform lacks this method", but the ' +
+      'sandbox installed a guard for them anyway — so the method exists and the ' +
+      'probe was skipped for the wrong reason. That is a silently unproven guard.',
+    )
+    assert.ok(
+      plans.length > unavailable.length,
+      `Only ${plans.length} of ${allPlans.length} probes ran. A filter that drops ` +
+      `most of the suite is a broken filter, not a platform difference.`,
     )
   })
 
@@ -220,7 +271,9 @@ describe('write sandbox: two-path operations guard BOTH paths (#7267)', () => {
     ]) {
       for (const surface of ['sync', 'callback', 'promises']) {
         const method = surface === 'sync' ? `${base}Sync` : base
-        const label = surface === 'promises' ? `promises.${base}` : surface === 'callback' ? `${base} (callback)` : `${base}Sync`
+        const label = planLabel({ surface, method })
+        const host = surface === 'promises' ? fspNamespace : fsNamespace
+        if (typeof host[method] !== 'function') continue
         test(`${label} guards its ${position} path argument`, async () => {
           const verdict = await runProbe(
             { base, surface, method, args, extra: PROBE_EXTRA_ARGS[base]() },
@@ -271,7 +324,10 @@ describe('write sandbox: the guard is a category, not a list (#7267)', () => {
   })
 
   test('the exemptions are not a dumping ground — every reason is one of the known kinds', () => {
-    const KNOWN = new Set(['read', 'fd', 'class', 'class-known-residual', 'internal'])
+    const KNOWN = new Set([
+      'read', 'fd', 'fd-metadata-known-residual',
+      'class', 'class-known-residual', 'internal',
+    ])
     const odd = Object.entries({ ...FS_EXEMPTIONS, ...FS_PROMISES_EXEMPTIONS })
       .filter(([, reason]) => !KNOWN.has(reason))
     assert.deepStrictEqual(odd, [], 'Unknown exemption reason — see the header of test-fs-sandbox.mjs.')
@@ -285,6 +341,143 @@ describe('write sandbox: the guard is a category, not a list (#7267)', () => {
     )
     const streams = FS_STREAM_MUTATORS.map((m) => m.name)
     assert.deepStrictEqual(streams.filter((s, i) => streams.indexOf(s) !== i), [])
+  })
+})
+
+describe('write sandbox: the mutator table is complete (#7267)', () => {
+  // S2's axis. Every FIELD of a spec row is pinned — arity by
+  // TWO_PATH_OPERATIONS, a deleted row by the category check, a silent install
+  // skip by probed<->installed. What was NOT pinned is whether a row belongs in
+  // the table at all: MOVING one into FS_EXEMPTIONS deletes the guard AND its
+  // probe AND satisfies the category check, all at once. Measured: relocating
+  // `rmdir` that way left the suite green while `rmdirSync` removed a real
+  // directory under the protected root.
+  //
+  // So the roster is stated independently. It is the answer to "which fs
+  // operations mutate a path", which is a fact about Node, not about this code.
+  const MUST_BE_GUARDED = [
+    'appendFile', 'chmod', 'chown', 'copyFile', 'cp', 'lchmod', 'lchown', 'link',
+    'lutimes', 'mkdir', 'mkdtemp', 'open', 'rename', 'rm', 'rmdir', 'symlink',
+    'truncate', 'unlink', 'utimes', 'writeFile',
+  ]
+
+  test('every path-mutating fs operation is in the table, and nothing else is', () => {
+    assert.deepStrictEqual(
+      FS_PATH_MUTATORS.map((m) => m.base).sort(), [...MUST_BE_GUARDED].sort(),
+      'The mutator table and the roster disagree. If Node gained or lost an ' +
+      'operation, update BOTH — the point of the second list is that moving a ' +
+      'row into FS_EXEMPTIONS can otherwise delete a guard, its probe, and the ' +
+      'category check\'s objection to it in one edit.',
+    )
+    assert.deepStrictEqual(FS_STREAM_MUTATORS.map((m) => m.name), ['createWriteStream'])
+  })
+})
+
+describe('write sandbox: open is gated by write intent, both directions (#7267)', () => {
+  // `open` is the only row whose decision is not purely path-based, which makes
+  // it the one carrying the most logic and — until this suite — the least
+  // coverage. Its numeric branch was measurably wrong: the mask was written as
+  // literals from Linux, where O_CREAT is 64, while on darwin it is 512 and on
+  // Windows 256. `openSync(protected, O_TRUNC)` emptied a real file through an
+  // armed sandbox.
+  const NUMERIC_WRITE_FLAGS = ['O_WRONLY', 'O_RDWR', 'O_CREAT', 'O_TRUNC', 'O_APPEND']
+
+  for (const flag of NUMERIC_WRITE_FLAGS) {
+    test(`openSync with numeric ${flag} is guarded`, () => {
+      assert.strictEqual(
+        probeSyncLocal(() => namedOpenSync(protectedPath, fsConstants[flag])),
+        'CHROXY_TEST_SANDBOX',
+        `A numeric ${flag} (${fsConstants[flag]} on ${process.platform}) was read as a ` +
+        `non-write open. Derive the mask from fs.constants, never from literals.`,
+      )
+    })
+  }
+
+  // The ALLOW direction, which no assertion covered: `isWriteIntent -> true`
+  // left the suite fully green, and would have started throwing inside
+  // skills-loader.js and jsonl-reader.js — which openSync(path, 'r') the
+  // developer's real config on purpose — with nothing naming the cause.
+  test('a READ open of a protected path is allowed through', () => {
+    assert.strictEqual(
+      probeSyncLocal(() => namedOpenSync(protectedPath, 'r')), 'ENOENT',
+      'Reads of the real home are deliberately permitted (providers.test.js and ' +
+      'skills-loader depend on it). A guarded read means isWriteIntent is ' +
+      'answering true for everything.',
+    )
+    assert.strictEqual(probeSyncLocal(() => namedOpenSync(protectedPath, fsConstants.O_RDONLY)), 'ENOENT')
+  })
+})
+
+describe('write sandbox: every path TYPE Node accepts is checked (#7267)', () => {
+  // `isProtected` decodes three shapes and used to return false — unprotected —
+  // for anything else. Node also accepts a bare Uint8Array as a path, and a
+  // Uint8Array is not `instanceof Buffer`, so one went through unexamined.
+  // "Unrecognised shape filtered out instead of raising" is a false-safety mode
+  // in its own right, so unknown shapes now fail CLOSED.
+  const shapes = [
+    ['string', () => protectedPath],
+    ['URL', () => pathToFileURL(protectedPath)],
+    ['Buffer', () => Buffer.from(protectedPath)],
+    ['Uint8Array', () => new Uint8Array(Buffer.from(protectedPath))],
+  ]
+  for (const [label, build] of shapes) {
+    test(`a protected path passed as a ${label} is guarded`, () => {
+      assert.strictEqual(
+        probeSyncLocal(() => namedWriteFileSync(build(), 'probe')), 'CHROXY_TEST_SANDBOX',
+        `A ${label} path bypassed the guard.`,
+      )
+    })
+  }
+
+  test('a case-variant of the protected root is guarded where the fs is case-insensitive', () => {
+    // On APFS and NTFS `~/.Chroxy/x` IS `~/.chroxy/x`. A case-sensitive compare
+    // does not match it, so the guard would wave through a path that resolves to
+    // real user state. Both platforms this repo's CI runs on are affected.
+    const variant = protectedPath.replace(`${sep}.chroxy${sep}`, `${sep}.Chroxy${sep}`)
+    assert.notStrictEqual(variant, protectedPath, 'the probe did not actually change case')
+    const expected = (process.platform === 'darwin' || process.platform === 'win32')
+      ? 'CHROXY_TEST_SANDBOX'
+      : 'ENOENT'
+    assert.strictEqual(
+      probeSyncLocal(() => namedWriteFileSync(variant, 'probe')), expected,
+      process.platform === 'linux'
+        ? 'On a case-sensitive fs .Chroxy is a genuinely different directory and must NOT be guarded.'
+        : 'A case-variant of the protected root reached the real filesystem.',
+    )
+  })
+
+  test('an unrecognised path shape fails CLOSED', () => {
+    assert.strictEqual(
+      probeSyncLocal(() => namedWriteFileSync({ toString: () => protectedPath }, 'probe')),
+      'CHROXY_TEST_SANDBOX',
+      'A shape the guard cannot decode must be refused, not waved through. A ' +
+      'false positive here is a loud failure with the value in hand; a false ' +
+      'negative is #4633.',
+    )
+  })
+
+  test('the same shapes are NOT guarded when the path is unprotected', () => {
+    // Otherwise the four assertions above would pass for a guard that refuses
+    // every non-string argument.
+    //
+    // The control path is built as a STRING and then encoded — never by
+    // `.toString()`-ing the shape. A Uint8Array stringifies to its decimal bytes
+    // ("47,85,115,…"), which is a RELATIVE path: the first version of this test
+    // wrote three junk files into packages/server/ instead of tmpdir.
+    const controlPath = join(tmpdir(), `chroxy-shape-${process.pid}`, 'probe.tmp')
+    const encode = {
+      string: (str) => str,
+      URL: (str) => pathToFileURL(str),
+      Buffer: (str) => Buffer.from(str),
+      Uint8Array: (str) => new Uint8Array(Buffer.from(str)),
+    }
+    for (const [label] of shapes) {
+      assert.strictEqual(
+        probeSyncLocal(() => namedWriteFileSync(encode[label](controlPath), 'probe')),
+        'ENOENT',
+        `${label} control: an unprotected path of this shape must reach the real fs.`,
+      )
+    }
   })
 })
 
@@ -328,12 +521,54 @@ describe('write sandbox: controls (#7267)', () => {
     }
   })
 
+  test('the bare protected FILE ~/.claude.json is guarded, and only that exact path', () => {
+    // `protectedFiles` is a separate mechanism from `protectedRoots`: ~/.claude.json
+    // sits NEXT TO the protected dirs, not inside them, so the root prefix check
+    // never sees it. Nothing proved it until a mutation removed the entry and the
+    // whole suite stayed green — the #7267 defect, in the #7267 fix.
+    // `renameSync(<absent source>, target)`, NOT writeFileSync. ~/.claude.json's
+    // parent is $HOME, which EXISTS — so a plain write probe would overwrite the
+    // developer's real 168KB file the moment the guard regressed, which is the
+    // one scenario this assertion is for. With an absent source, a bypass fails
+    // on the source before it touches the destination (measured), so a failing
+    // run is inert.
+    assert.strictEqual(
+      probeSyncLocal(() => namedRenameSync(absentSource, join(homedir(), '.claude.json'))),
+      'CHROXY_TEST_SANDBOX',
+      'byok-mcp-config writes ~/.claude.json; the guard must refuse it.',
+    )
+    // Discrimination: the guard matches that exact path, not the basename.
+    assert.strictEqual(
+      probeSyncLocal(() => namedRenameSync(absentSource, join(tmpdir(), '.claude.json'))),
+      'ENOENT',
+      'The guard matched on the file NAME rather than the full path.',
+    )
+  })
+
+  test('the OTHER protected root, ~/.claude, is guarded too', () => {
+    assert.strictEqual(
+      probeSyncLocal(() => namedWriteFileSync(claudeProbe, 'probe')), 'CHROXY_TEST_SANDBOX',
+      '_setup.mjs passes both ~/.chroxy and ~/.claude as protected roots; every ' +
+      'other probe here aims at the first, so the second was unobserved.',
+    )
+  })
+
   test('reads of the real home are still allowed', () => {
     // Deliberate: `providers.test.js` and friends legitimately read the
     // developer's real config. A guard that blocked reads would be "safer" and
     // would break the suite, so the exemption is pinned, not assumed.
-    assert.doesNotThrow(() => fsNamespace.existsSync(join(homedir(), '.chroxy')))
-    assert.doesNotThrow(() => fsNamespace.readdirSync(homedir()))
+    //
+    // These are PATCHED functions asked to do a read-shaped thing. `existsSync`
+    // and `readdirSync` used to stand here and could not fail: both are in
+    // FS_EXEMPTIONS, so the guard never wrapped them and the test observed
+    // nothing. `openSync(..., 'r')` goes through the wrapper and out the other
+    // side, which is the property that actually matters.
+    assert.strictEqual(probeSyncLocal(() => namedOpenSync(protectedPath, 'r')), 'ENOENT')
+    // A read that reaches the real fs and is refused BY THE KERNEL, not by us.
+    assert.strictEqual(
+      probeSyncLocal(() => fsNamespace.readFileSync(join(homedir(), '.chroxy', 'no-such-file'), 'utf8')),
+      'ENOENT',
+    )
   })
 })
 
@@ -343,8 +578,9 @@ describe('write sandbox: the probes created nothing under the real home (#7267)'
   // fails, so a probe aimed at a NON-EXISTENT path under ~/.chroxy left a real
   // directory there — through an armed sandbox — while every other probe in
   // this file is safe by construction. This assertion runs last on purpose.
-  test('no probe root exists under ~/.chroxy', () => {
-    const leaked = namedExistsSync(PROBE_ROOT)
+  test('no probe root exists under ~/.chroxy or ~/.claude', () => {
+    const roots = [PROBE_ROOT, join(homedir(), '.claude', `__chroxy-sandbox-coverage-${process.pid}`)]
+    const leaked = roots.some((r) => namedExistsSync(r))
     if (leaked) removeProbeRoot()
     assert.strictEqual(
       leaked, false,

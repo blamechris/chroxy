@@ -14,15 +14,26 @@
  *
  * Layer 2 was a hand-written list here and a different hand-written list in the
  * server's `_setup.mjs`, and they drifted in both directions. This file patched
- * `rmSync`/`unlinkSync` that the server did not; the server patched
- * `openSync`, `appendFileSync` and four `promises` methods that this file did
- * not. `openSync` was the load-bearing omission: `installer.js` writes
- * atomically as `openSync -> writeSync -> fsyncSync -> renameSync`, so only the
- * final `renameSync` was intercepted and a partial write that never reached the
- * rename went straight to the real `~/.claude`. The errors also carried no
- * `code`, only a message prefix, so a caller matching `err.code` — including a
- * probe written against the server's convention — read a FIRED guard as an
- * unrelated failure.
+ * `rmSync`/`unlinkSync` that the server did not; the server patched `openSync`,
+ * `appendFileSync`, `chmodSync` and four `promises` methods that this file did
+ * not.
+ *
+ * The `openSync` gap was LATENT, not reachable through `installHooks` — and the
+ * distinction matters, because #7268 originally claimed otherwise and the claim
+ * was wrong. `installer.js` writes atomically as
+ * `mkdirSync -> openSync -> writeSync -> fsyncSync -> chmodSync -> renameSync`,
+ * and `mkdirSync` WAS on this file's list, so the sequence aborted at step one.
+ * Measured against a fake protected home with exactly the old list installed:
+ * the guard fired once, on `mkdirSync`, and no directory, temp file or partial
+ * write was produced. `openSync` was covered the way `truncateSync` was covered
+ * on the server side — by accident, through a neighbour — which is precisely the
+ * kind of coverage #7267 replaces with the deliberate kind.
+ *
+ * The error shape was the half that HAD already cost something: these threw a
+ * plain `Error` with the token only in the message and no `code`, so a caller
+ * matching `err.code` — including a probe written against the server's
+ * convention — read a FIRED guard as an unrelated failure. That produced a
+ * false "unguarded" reading during the #7266 review.
  *
  * Both halves are gone: the list, the installer and the error shape all come
  * from `scripts/lib/test-fs-sandbox.mjs` now, which is the same code the server
@@ -47,8 +58,16 @@
  *
  * The rule now covers `scripts/lib/test-fs-sandbox.mjs` too — it is linked as
  * part of this file's graph, so an ESM `node:fs` import there would disarm the
- * guard identically. It uses `createRequire` for that reason, and
- * `tests/sandbox.test.js` walks the graph rather than trusting this comment.
+ * guard identically. It uses `createRequire` for that reason.
+ *
+ * The STRUCTURAL check on that rule lives only in the server package
+ * (`setup-sandbox-binding-forms.test.js`), which walks the shared module — the
+ * file both packages depend on. There is deliberately none here, and this file
+ * is therefore the one residual edge: reaching the server's comment stripper
+ * from this package would couple two packages' test trees to buy a better error
+ * message. What catches a regression here instead is behavioural — every probe
+ * in `tests/sandbox.test.js` fails at once — and that suite's failure message
+ * names this cause explicitly.
  */
 
 import { tmpdir, homedir } from 'node:os'
@@ -64,7 +83,11 @@ const fs = require('node:fs')
 // developer's actual home, not the throwaway one.
 const REAL_HOME = homedir()
 
-export const { installed: SANDBOX_INSTALLED, skipped: SANDBOX_SKIPPED } = installFsWriteSandbox({
+export const {
+  installed: SANDBOX_INSTALLED,
+  skipped: SANDBOX_SKIPPED,
+  isProtected: SANDBOX_IS_PROTECTED,
+} = installFsWriteSandbox({
   protectedRoots: [resolve(REAL_HOME, '.chroxy'), resolve(REAL_HOME, '.claude')],
   protectedFiles: [resolve(REAL_HOME, '.claude.json')],
   // Same opt-out name the server uses, so one escape hatch is documented once.
