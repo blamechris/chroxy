@@ -148,6 +148,49 @@ file. And **the probe must use the same binding form as the code it vouches
 for**: the first check of this sandbox during `#7254` used a default import,
 reported the guard working, and was right about the only form it tested.
 
+### 9. The sandbox that guarded a named list, not a category — `#7267`
+
+Found inside the fix for the eighth, which is how this document started.
+
+Making the guard visible to named importers (`#7262`) turned its *reach* into
+its only remaining problem — and its reach was a hand-written list of twelve
+method names. Everything that deletes, copies, links or changes a mode was
+outside it. Measured under the real harness, against the developer's live
+`~/.chroxy`:
+
+```
+writeFileSync mkdirSync openSync   GUARDED
+truncateSync                       GUARDED — but only because it opens 'r+'
+                                             and trips openSync
+unlinkSync rmSync rmdirSync        unguarded   (34 unlinkSync call sites in src/,
+chmodSync symlinkSync linkSync     unguarded    more than openSync's 14)
+cpSync copyFileSync                unguarded — and these CREATE
+fs.writeFile(path, data, cb)       unguarded — the whole callback surface
+```
+
+`cpSync` is the one worth remembering. A probe aimed at a path whose parent
+directory did **not** exist — chosen precisely so a failing measurement could
+create nothing — left a real directory tree inside the developer's live
+`~/.chroxy`, because `cpSync` creates the destination's parents before it fails.
+The safety argument was sound for every other API and wrong for that one, and
+nothing in the guard, the suite, lint or CI said a word.
+
+The fix is one exported array (`scripts/lib/test-fs-sandbox.mjs`) that expands
+to the patch list *and* to the probes asserting each patch fires, plus a
+complement (`FS_EXEMPTIONS`) that classifies every remaining `fs` function with
+a reason — so `GUARDED ∪ EXEMPT` must cover the live surface exactly, and a Node
+release that adds a path-taking mutator turns the suite red instead of widening
+the hole.
+
+**The part that is not obvious: a derived assertion cannot test the parameter it
+derives from.** Both lists expand from rows like `{ base: 'rename', paths: 2 }`,
+so narrowing one to `paths: 1` deletes the guard on the second argument *and*
+the probe that would have caught it — and the suite stays green while
+`rename(tmp, '~/.chroxy/session-state.json')` walks through. That mutation was
+run, and it passed. Which arguments are paths is therefore stated a second time,
+deliberately, as a specification with a reason per row; it is the only thing in
+the change written twice.
+
 ## The one that got me while writing this
 
 A Maestro `repeat` was written with `maxRuns: 3`. `YamlRepeatCommand` has no
