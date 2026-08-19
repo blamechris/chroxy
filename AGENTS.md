@@ -288,8 +288,8 @@ padding or font size, re-check the resulting box.
 **When you add or change a check, break the thing it protects and confirm it goes
 red.** If you cannot make it fail, it is not a guard.
 
-Seven guards in this repo reported success without checking anything, and all
-seven passed unit tests, lint, typecheck, and CI — for months in some cases.
+Eight guards in this repo reported success without checking anything, and all
+eight passed unit tests, lint, typecheck, and CI — for months in some cases.
 Test suites cannot find this class, because the guard's *output* is correct and
 its *coverage* is what is wrong. The recurring causes:
 
@@ -298,6 +298,8 @@ its *coverage* is what is wrong. The recurring causes:
 - a precondition that is false, so the body never runs and the job is green
   (`#7184`, `#7198`)
 - testing the source tree when the artifact is what ships (`#7189`)
+- a guard wired to only some of its callers, correct for every input it sees
+  and never reached by the rest (`#7262`)
 
 Check the **exit code**, not the output — and note `cmd | grep -c FAIL` reports
 `grep`'s status, not the script's. Restore mutations with `cp` from a backup,

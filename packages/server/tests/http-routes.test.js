@@ -1,20 +1,31 @@
-import { describe, it, afterEach, before, after, beforeEach } from 'node:test'
+import { describe, it, afterEach, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { once } from 'node:events'
-import { existsSync, renameSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
-import { homedir, tmpdir } from 'node:os'
+import { tmpdir } from 'node:os'
 import { createHttpHandler, resolveRemoveImage, _resetSnapshotBackendCacheForTests } from '../src/http-routes.js'
 import { registerOAuthCallback, _clearOAuthCallbacksForTests } from '../src/byok-mcp-oauth.js'
 import { PairingManager } from '../src/pairing.js'
 
-// The QR endpoint falls back to reading ~/.chroxy/connection.json from disk.
-// If a Chroxy server is running (or left a stale file), the test gets 200 instead of 503.
-// Temporarily hide the file during this test suite.
-const connInfoPath = join(homedir(), '.chroxy', 'connection.json')
-const connInfoBackup = connInfoPath + '.test-backup'
-let connInfoHidden = false
+// The QR endpoint falls back to reading connection info from disk, and the
+// 503 case below needs that read to come up empty.
+//
+// This suite used to guarantee that by renaming the developer's REAL
+// ~/.chroxy/connection.json aside in `before` and moving it back in `after`
+// (#7262). That was a genuine #4633 hazard — a crash, a `--test-timeout`, or a
+// SIGKILL between the two hooks left the running daemon's connection info
+// stranded under a `.test-backup` suffix — and the sandbox in `tests/_setup.mjs`
+// could not see it, because this file imports `renameSync` by name and named
+// imports bypassed the guard.
+//
+// It was also unnecessary by then. `readConnectionInfo()` resolves through
+// `configPath('connection.json')` (src/connection-info.js), which follows the
+// CHROXY_CONFIG_DIR redirect that `_setup.mjs` points at a per-process tmp dir.
+// The real file is already invisible to this suite; nothing needs to be moved.
+// Same shape as the #7052 note in `_setup.mjs`: a workaround that outlived the
+// path resolution it was written for.
 
 function createMockServer(overrides = {}) {
   return {
@@ -84,20 +95,6 @@ function createMockServer(overrides = {}) {
 describe('http-routes', () => {
   let httpServer
   let port
-
-  before(() => {
-    if (existsSync(connInfoPath)) {
-      renameSync(connInfoPath, connInfoBackup)
-      connInfoHidden = true
-    }
-  })
-
-  after(() => {
-    if (connInfoHidden && existsSync(connInfoBackup)) {
-      renameSync(connInfoBackup, connInfoPath)
-      connInfoHidden = false
-    }
-  })
 
   async function startWith(mockServer) {
     const handler = createHttpHandler(mockServer)
@@ -324,7 +321,7 @@ describe('http-routes', () => {
       assert.equal(res.status, 403)
     })
 
-    it('GET /connect passes the primary token (404 here since conn info is hidden in this suite)', async () => {
+    it('GET /connect passes the primary token (404 here since the harness config dir has no connection info)', async () => {
       const mock = createMockServer()
       await startWith(mock)
       const res = await globalThis.fetch(`http://127.0.0.1:${port}/connect`, {
