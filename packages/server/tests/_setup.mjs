@@ -11,24 +11,30 @@
  * trees, so the next forgetter fails LOUDLY at the offending call site
  * instead of silently corrupting the developer's live state 76 days later.
  *
- * The guard monkey-patches a NAMED LIST of `fs` functions: any call whose
- * resolved path falls under the real `~/.chroxy/` or `~/.claude/` throws
- * `CHROXY_TEST_SANDBOX` with a stack trace pointing at the caller. The list is
+ * The guard monkey-patches every `fs` function that takes a PATH and mutates
+ * the filesystem: any call whose resolved path falls under the real
+ * `~/.chroxy/` or `~/.claude/` throws `CHROXY_TEST_SANDBOX` with a stack trace
+ * pointing at the caller. It is a CATEGORY now, not a list (#7267) — 61 methods
+ * across the sync, callback and `promises` surfaces, all expanded from the one
+ * table in `scripts/lib/test-fs-sandbox.mjs`, which
+ * `packages/claude-hooks/tests/_setup.mjs` installs from too.
  *
- *   sync      writeFileSync appendFileSync renameSync mkdirSync
- *             createWriteStream openSync
- *   promises  writeFile appendFile rename mkdir open
- *
- * and it is a LIST, not a category. Saying "the write-side of fs" — as this
- * comment used to — reads as a guarantee the code does not make. Measured
- * under this harness, these reach the real tree unimpeded: `unlinkSync`,
+ * It was a hand-written list until #7267, and the list was the bug. Measured
+ * under this harness before that change, these reached the real tree
+ * unimpeded: `unlinkSync` (52 call sites under `src/`, more than `openSync`),
  * `rmSync`, `rmdirSync`, `cpSync`, `copyFileSync`, `symlinkSync`, `linkSync`,
- * `chmodSync`, and the `promises` forms of the same. Two of them are not even
- * destructive-only — `cpSync` and `copyFileSync` were observed CREATING a real
- * file inside the developer's live `~/.chroxy`. `truncateSync` is covered, but
- * only incidentally, because it opens with `r+` and trips `openSync`.
- * Closing that gap is #7267; until it lands, do not read this guard as
- * covering deletes or copies.
+ * `chmodSync`, the whole `promises` half of the same, and — worst — the entire
+ * CALLBACK surface including plain `fs.writeFile(path, data, cb)`. `cpSync`
+ * does not merely bypass the guard: it creates the destination's parent
+ * directories, so a probe aimed at a NON-EXISTENT path under `~/.chroxy` left a
+ * real directory in the developer's live config dir. `truncateSync` read as
+ * covered, but only incidentally — it opens with `r+` and tripped `openSync`.
+ *
+ * "Category" is enforced, not asserted: `FS_EXEMPTIONS` in the shared module
+ * classifies every remaining `fs` function with a reason, and
+ * `tests/setup-sandbox-binding-forms.test.js` fails if their union stops
+ * covering the live `fs` surface. A Node upgrade that adds a path-taking
+ * mutator turns the suite red instead of quietly widening the hole.
  *
  * Read-side fs calls are untouched by design, so tests that legitimately
  * *read* the developer's real config (e.g. provider detection in
@@ -65,8 +71,9 @@
 
 import { createRequire } from 'node:module'
 import { homedir, tmpdir } from 'node:os'
-import { join, resolve, sep } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { join, resolve } from 'node:path'
+
+import { installFsWriteSandbox } from '../../../scripts/lib/test-fs-sandbox.mjs'
 
 // CRITICAL: Patch `node:fs` via the CJS object obtained from `createRequire`,
 // NOT via an ESM default import. ESM `import fs from 'node:fs'` returns a
@@ -88,25 +95,55 @@ import { fileURLToPath } from 'node:url'
 // In practice that means this file must not import it — but the condition is
 // wider than this file, and stating it as "never import fs here" would be too
 // narrow: a transitive import through any module this file pulls in, or an
-// earlier `--import` hook, disarms the guard identically. This file has no
-// local imports, which is what keeps the wider condition satisfied; adding one
-// re-opens the question.
+// earlier `--import` hook, disarms the guard identically. This file's ONE local
+// import — `scripts/lib/test-fs-sandbox.mjs` — is held to the same rule and
+// reaches `fs` through its own `createRequire`; every further import added here
+// inherits the obligation, transitively.
 //
 // ESM imports are evaluated before the module body, so a single
 // `import { mkdtempSync } from 'node:fs'` up top links the synthetic module
 // against the UNPATCHED exports — and named/namespace consumers (45 modules
 // under `src/` at the time of writing) silently bypass the sandbox while it
 // still reports success for CJS and default importers. That line lived here
-// for months. Take what you need off the `fs` object below instead, as
-// `mkdtempSync` now does. The same applies to `node:fs/promises`: it is a
+// for months. Take what you need off the `fs` object below instead — the tmp
+// config dir is created with `fs.mkdtempSync` for exactly this reason. The same
+// applies to `node:fs/promises`: it is a
 // separate synthetic module with the same lazy-link behaviour, and importing
 // it here disarms the promises half (measured).
+//
+// The rule extends to `scripts/lib/test-fs-sandbox.mjs`, imported below: it is
+// linked as part of THIS file's graph, so an ESM `node:fs` import there would
+// disarm the sandbox identically. It reaches `fs` through its own
+// `createRequire` for that reason, and the structural check in
+// `tests/setup-sandbox-binding-forms.test.js` walks the graph rather than
+// trusting either comment.
 //
 // `tests/setup-sandbox-binding-forms.test.js` pins every binding form
 // behaviourally and fails if any of this is undone.
 const require = createRequire(import.meta.url)
 const fs = require('node:fs')
-const { mkdtempSync } = fs
+
+// --- Capture the real home and arm the guard ---------------------------------
+// Order matters: the guard is installed BEFORE the tmp config dir is created,
+// so even this bootstrap's own `mkdtempSync` runs through it. `homedir()` is
+// read here, at process startup, and the guard locks onto THAT — tests that
+// mutate `process.env.HOME` for their own purposes (`claude-tui-session.test.js`,
+// `byok-credentials.test.js`) neither widen nor narrow it.
+const REAL_HOME = homedir()
+
+export const { installed: SANDBOX_INSTALLED, skipped: SANDBOX_SKIPPED } = installFsWriteSandbox({
+  protectedRoots: [resolve(REAL_HOME, '.chroxy'), resolve(REAL_HOME, '.claude')],
+  // Bare files that live NEXT TO the protected dirs (`~/.claude.json` from
+  // byok-mcp-config) rather than inside them.
+  protectedFiles: [resolve(REAL_HOME, '.claude.json')],
+  allowEnv: 'CHROXY_TEST_ALLOW_REAL_HOME_WRITES',
+  message: (method, target) =>
+    `[chroxy-test-sandbox] BLOCKED ${method} to real user-state path: ${target}\n` +
+    `  This test attempted to write to (or move from/to) the developer's actual ~/.chroxy or ~/.claude tree.\n` +
+    `  Pass a temp path explicitly (e.g. stateFilePath: tmpStateFile()) or set\n` +
+    `  process.env.CHROXY_TEST_ALLOW_REAL_HOME_WRITES = '1' if the write is intentional.\n` +
+    `  See packages/server/tests/_setup.mjs and issue #4633.`,
+})
 
 // --- Redirect CHROXY_CONFIG_DIR to a per-process tmp dir ----------------------
 // Production helpers (models.js, connection-info.js, checkpoint-manager.js)
@@ -117,152 +154,7 @@ const { mkdtempSync } = fs
 // still set it in their own beforeEach and restore in afterEach — Node's
 // env reads are dynamic.
 if (!process.env.CHROXY_CONFIG_DIR) {
-  process.env.CHROXY_CONFIG_DIR = mkdtempSync(join(tmpdir(), 'chroxy-test-cfg-'))
-}
-
-// --- Capture the real home for the guard --------------------------------------
-const REAL_HOME = homedir()
-const PROTECTED_ROOTS = [
-  resolve(REAL_HOME, '.chroxy') + sep,
-  resolve(REAL_HOME, '.claude') + sep,
-]
-// Also guard the bare files (e.g. `~/.claude.json` from byok-mcp-config)
-// because they live next to the dirs we protect.
-const PROTECTED_FILES = new Set([
-  resolve(REAL_HOME, '.claude.json'),
-])
-
-// --- Sandbox guard ------------------------------------------------------------
-function isProtected(rawPath) {
-  if (process.env.CHROXY_TEST_ALLOW_REAL_HOME_WRITES === '1') return false
-  if (typeof rawPath !== 'string' && !(rawPath instanceof URL) && !(rawPath instanceof Buffer)) {
-    return false
-  }
-  let p
-  try {
-    // `fileURLToPath` handles cross-platform quirks (Windows `file:///C:/...`
-    // yields `C:\...`, percent-encoded segments are decoded). Falling back to
-    // `.pathname` would leave a leading slash on Windows and break comparison
-    // against `os.homedir()`-derived paths.
-    if (rawPath instanceof URL) p = fileURLToPath(rawPath)
-    else if (rawPath instanceof Buffer) p = rawPath.toString('utf8')
-    else p = rawPath
-    p = resolve(p)
-  } catch {
-    return false
-  }
-  if (PROTECTED_FILES.has(p)) return true
-  for (const root of PROTECTED_ROOTS) {
-    if (p === root.slice(0, -1) || p.startsWith(root)) return true
-  }
-  return false
-}
-
-function makeGuardError(method, target) {
-  const err = new Error(
-    `[chroxy-test-sandbox] BLOCKED ${method} to real user-state path: ${target}\n` +
-    `  This test attempted to write to (or move from/to) the developer's actual ~/.chroxy or ~/.claude tree.\n` +
-    `  Pass a temp path explicitly (e.g. stateFilePath: tmpStateFile()) or set\n` +
-    `  process.env.CHROXY_TEST_ALLOW_REAL_HOME_WRITES = '1' if the write is intentional.\n` +
-    `  See packages/server/tests/_setup.mjs and issue #4633.`,
-  )
-  err.code = 'CHROXY_TEST_SANDBOX'
-  return err
-}
-
-const origWriteFileSync = fs.writeFileSync
-fs.writeFileSync = function patchedWriteFileSync(target, ...rest) {
-  if (isProtected(target)) throw makeGuardError('writeFileSync', String(target))
-  return origWriteFileSync.call(this, target, ...rest)
-}
-
-const origAppendFileSync = fs.appendFileSync
-fs.appendFileSync = function patchedAppendFileSync(target, ...rest) {
-  if (isProtected(target)) throw makeGuardError('appendFileSync', String(target))
-  return origAppendFileSync.call(this, target, ...rest)
-}
-
-const origRenameSync = fs.renameSync
-fs.renameSync = function patchedRenameSync(oldPath, newPath) {
-  // Check BOTH paths: a `renameSync('~/.chroxy/session-state.json', '/tmp/x')`
-  // would silently relocate real user state without tripping a newPath-only
-  // guard. The whole point of the sandbox is to prevent that.
-  if (isProtected(oldPath) || isProtected(newPath)) {
-    throw makeGuardError('renameSync', `${String(oldPath)} -> ${String(newPath)}`)
-  }
-  return origRenameSync.call(this, oldPath, newPath)
-}
-
-const origMkdirSync = fs.mkdirSync
-fs.mkdirSync = function patchedMkdirSync(target, ...rest) {
-  // Blocks any new directory under the real ~/.chroxy or ~/.claude. The
-  // top-level dirs themselves (PROTECTED_ROOTS) already exist, so a
-  // `mkdirSync('~/.chroxy', { recursive: true })` no-ops in practice —
-  // but we still flag it to surface unexpected callers in tests.
-  if (isProtected(target)) throw makeGuardError('mkdirSync', String(target))
-  return origMkdirSync.call(this, target, ...rest)
-}
-
-const origCreateWriteStream = fs.createWriteStream
-fs.createWriteStream = function patchedCreateWriteStream(target, ...rest) {
-  if (isProtected(target)) throw makeGuardError('createWriteStream', String(target))
-  return origCreateWriteStream.call(this, target, ...rest)
-}
-
-const origOpenSync = fs.openSync
-fs.openSync = function patchedOpenSync(target, flags, ...rest) {
-  // `flags` can be a string ('w', 'a', 'wx', 'w+', 'a+', 'ax') or a number
-  // (constants OR'd together: O_WRONLY=1, O_RDWR=2, O_CREAT=64, O_APPEND=1024…).
-  // We only block when the open is for writing; pure reads are fine.
-  let isWrite = false
-  if (typeof flags === 'string') {
-    isWrite = /[wa+]/.test(flags)
-  } else if (typeof flags === 'number') {
-    // O_WRONLY = 1, O_RDWR = 2, O_CREAT = 64, O_APPEND = 1024, O_TRUNC = 512
-    isWrite = (flags & 1) !== 0 || (flags & 2) !== 0 || (flags & 64) !== 0
-  }
-  if (isWrite && isProtected(target)) throw makeGuardError('openSync', String(target))
-  return origOpenSync.call(this, target, flags, ...rest)
-}
-
-if (fs.promises) {
-  const origWriteFile = fs.promises.writeFile
-  fs.promises.writeFile = function patchedWriteFile(target, ...rest) {
-    if (isProtected(target)) return Promise.reject(makeGuardError('promises.writeFile', String(target)))
-    return origWriteFile.call(this, target, ...rest)
-  }
-
-  const origAppendFile = fs.promises.appendFile
-  fs.promises.appendFile = function patchedAppendFile(target, ...rest) {
-    if (isProtected(target)) return Promise.reject(makeGuardError('promises.appendFile', String(target)))
-    return origAppendFile.call(this, target, ...rest)
-  }
-
-  const origRename = fs.promises.rename
-  fs.promises.rename = function patchedRename(oldPath, newPath) {
-    // Mirror the sync guard: a rename OUT of ~/.chroxy is still data loss.
-    if (isProtected(oldPath) || isProtected(newPath)) {
-      return Promise.reject(makeGuardError('promises.rename', `${String(oldPath)} -> ${String(newPath)}`))
-    }
-    return origRename.call(this, oldPath, newPath)
-  }
-
-  const origMkdir = fs.promises.mkdir
-  fs.promises.mkdir = function patchedMkdir(target, ...rest) {
-    if (isProtected(target)) return Promise.reject(makeGuardError('promises.mkdir', String(target)))
-    return origMkdir.call(this, target, ...rest)
-  }
-
-  const origOpen = fs.promises.open
-  fs.promises.open = function patchedOpen(target, flags, ...rest) {
-    let isWrite = false
-    if (typeof flags === 'string') isWrite = /[wa+]/.test(flags)
-    else if (typeof flags === 'number') isWrite = (flags & 1) !== 0 || (flags & 2) !== 0 || (flags & 64) !== 0
-    if (isWrite && isProtected(target)) {
-      return Promise.reject(makeGuardError('promises.open', String(target)))
-    }
-    return origOpen.call(this, target, flags, ...rest)
-  }
+  process.env.CHROXY_CONFIG_DIR = fs.mkdtempSync(join(tmpdir(), 'chroxy-test-cfg-'))
 }
 
 // --- Default the credential-store to "no keychain" ----------------------------

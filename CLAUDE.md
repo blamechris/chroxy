@@ -292,7 +292,9 @@ Every test that constructs a `SessionManager` **must** pass `stateFilePath` poin
 
 Two layers of defence are wired up:
 
-1. **Sandbox guard** (`packages/server/tests/_setup.mjs`, loaded via `node --import`) — monkey-patches `fs.writeFileSync`/`promises.writeFile`/`renameSync`/`mkdirSync`/`createWriteStream`/`openSync(w*)` to throw `CHROXY_TEST_SANDBOX` if any test writes to the real `~/.chroxy/` or `~/.claude/` tree. The error includes the call site, so the next bare `new SessionManager()` fails loudly at the offending test.
+1. **Sandbox guard** (`packages/server/tests/_setup.mjs`, loaded via `node --import`) — monkey-patches every `fs` function that takes a path and mutates the filesystem, across the sync, callback and `promises` surfaces, so any test write to the real `~/.chroxy/` or `~/.claude/` tree throws `CHROXY_TEST_SANDBOX`. The error includes the call site, so the next bare `new SessionManager()` fails loudly at the offending test.
+
+   The method list is NOT written here, and not written in `_setup.mjs` either: it expands from the one table in `scripts/lib/test-fs-sandbox.mjs`, which `packages/claude-hooks/tests/_setup.mjs` installs from too (the two guards were separate hand-written lists that had drifted in both directions — #7267, #7268). Adding a row there installs the guard AND its proof; `tests/setup-sandbox-coverage.test.js` fails if `GUARDED ∪ EXEMPT` stops covering the live `fs` surface, so a Node upgrade that adds a path-taking mutator goes red rather than quietly widening the hole. Reads are deliberately untouched — tests legitimately read the developer's real config.
 2. **CI lint** (`packages/server/scripts/lint-tests-state-file-path.sh`) — fails the build if any `new SessionManager(...)` in `tests/` is missing `stateFilePath`. Run locally with `cd packages/server && ./scripts/lint-tests-state-file-path.sh`.
 
 If you need to write to the real home for a legitimate reason (no current test does), set `process.env.CHROXY_TEST_ALLOW_REAL_HOME_WRITES = '1'` scoped to the test and restore it after. The sandbox guard MUST stay enabled in `package.json`.
