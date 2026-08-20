@@ -28,7 +28,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { spawnSync } from 'node:child_process'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -58,7 +58,11 @@ function fixture ({ files, manifest, mustRun = [], reasons = null, maxRatio = nu
   const body = [
     reasons
       ? `export const EXEMPT_REASONS = ${JSON.stringify(reasons, null, 2)}`
-      : `export { EXEMPT_REASONS } from ${JSON.stringify(LIB)}`,
+      // pathToFileURL: a bare absolute path is not a valid ESM specifier on
+      // Windows — 'A:\\...' is read as protocol 'a:' and the loader refuses it.
+      // This fixture is itself in the derived Windows run set, so it has to be
+      // portable; measured failing on the real host before this line existed.
+      : `export { EXEMPT_REASONS } from ${JSON.stringify(pathToFileURL(LIB).href)}`,
     `export const WINDOWS_EXEMPT = ${JSON.stringify(manifest, null, 2)}`,
     `export const MUST_RUN_ON_WINDOWS = ${JSON.stringify(mustRun, null, 2)}`,
     maxRatio !== null ? `export const MAX_EXEMPT_RATIO = ${maxRatio}` : '',
