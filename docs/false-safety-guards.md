@@ -191,6 +191,44 @@ run, and it passed. Which arguments are paths is therefore stated a second time,
 deliberately, as a specification with a reason per row; it is the only thing in
 the change written twice.
 
+### 10. The list that lived in CI config — `#7270`
+
+`Server Windows Tests` passed an explicit list of **eight** test files to
+`node --test` while `packages/server/tests/` grew to **553**. The list was
+curated on purpose — much of the suite needs node-pty or POSIX signals — but a
+newly added, genuinely cross-platform test was never run on Windows and nobody
+was told. `#7266` added `setup-sandbox-binding-forms.test.js`, which is entirely
+about path handling and errno behaviour and is exactly what Windows coverage is
+for; the job passed in 58 seconds without executing it.
+
+Mode (3), "checked a subset" — but this is the first entry where the list lives
+in **CI configuration** rather than in a script, which is why no test, lint or
+review of the code could have found it. The green came from a job that was
+working perfectly on everything it was pointed at.
+
+The fix inverts it, per this document's own guidance: walk every `*.test.js`,
+subtract a manifest of exemptions each carrying a reason category and a measured
+symptom, run the rest. Coverage went from 8 files / 193 tests to 480 / 10,929.
+There is no "unclassified" state to detect afterwards — an unclassified
+POSIX-only file makes the job red in its own TAP output, naming itself.
+
+**Two things it taught that the earlier entries did not.**
+
+The measurement had to come first. Seeding the exemption list by grep would have
+been wrong in *both* directions: `built-in-tools/bash-exec.test.js` contains no
+`spawn(` at all while the module it tests spawns `bash -c`, and all 46 files
+matching `/docker/i` drive fakes and pass fine. Every row was seeded from
+running that file on a real Windows host.
+
+And the fix's first real run contained the next instance, one level down. The
+runner counted `# fail` and not `# cancelled`, and Windows reported **`# fail 0`
+alongside `# cancelled 33`** — a cancelled test produced no result at all, so
+"33 tests never ran" and "everything passed" were the same observable outcome.
+That is now checked, along with a non-zero child exit the TAP summary cannot
+account for. Note `assert-test-count.mjs` parses only `# tests` and `# fail`
+too; it propagates node's exit code, so it is not necessarily blind, but it
+cannot itself tell a cancelled test from a passing one.
+
 ## The one that got me while writing this
 
 A Maestro `repeat` was written with `maxRuns: 3`. `YamlRepeatCommand` has no

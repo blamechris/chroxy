@@ -568,7 +568,16 @@ describe('BaseSession', () => {
       // toggle warms, second toggle is the steady-state target.
       // Loose threshold (50ms) for CI variance — the goal is to
       // catch order-of-magnitude regressions, not micro-benchmark.
-      it('100-skill toggle stays well under regression threshold', () => {
+      // Skipped on Windows (#7270): this is a WALL-CLOCK assertion, and the
+      // Windows job runs ~480 files concurrently on a single self-hosted box.
+      // Measured there at 154ms against the 50ms threshold — which is CI
+      // variance on a loaded machine, not the order-of-magnitude regression
+      // this test exists to catch (its own comment above says so). The ubuntu
+      // job remains the enforcing one. Same idiom as service.test.js's
+      // skipRealPortOnWin (#6651).
+      it('100-skill toggle stays well under regression threshold', {
+        skip: process.platform === 'win32',
+      }, () => {
         const big = mkdtempSync(join(tmpdir(), 'chroxy-3248-big-'))
         try {
           // Create 100 manual skills (off by default).
