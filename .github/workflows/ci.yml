@@ -159,7 +159,8 @@ jobs:
     # platform-tests job (#5002) — `windows-latest` is billed at a 5x
     # multiplier vs `ubuntu-24.04`, so we only fire it on PRs that touch
     # the files it actually covers. Pushes to `main` skip this job and
-    # always run the Windows suite (see `server-tests-windows.if`).
+    # always run the Windows suite (the `server-tests-windows` job carries no
+    # `if:` of its own — it runs on every same-repo event).
     needs: runner-target
     runs-on: ${{ fromJSON(needs.runner-target.outputs.runner) }}  # SELF_HOSTED_OR_HOSTED (see header)
     timeout-minutes: 2
@@ -216,16 +217,25 @@ jobs:
     # fork PRs (untrusted code never touches the self-hosted box) — see the
     # `winrunner` output on `runner-target`.
     #
-    # Scope is the Windows-RELEVANT suites, not the full server set: much of the
-    # suite depends on node-pty / POSIX signals / shell scripts with no Windows
-    # analogue, so the ubuntu `server-tests` job stays the source of truth for
-    # the rest. `service.test.js` runs here too since #6651 (its POSIX/darwin/
-    # linux-only assertions are now guarded with a win32 skip). Now that this runs
-    # on the free self-hosted box it fires on every same-repo push/PR (the old
-    # platform-changed-only gate existed only to spare windows-latest minutes).
+    # Scope is DERIVED, not curated (#7270): every packages/server/tests/**.test.js
+    # runs here except the rows in WINDOWS_EXEMPT
+    # (packages/server/scripts/lib/windows-test-set.mjs), each of which carries a
+    # reason category and a measured symptom. A new test file is therefore covered
+    # by default. The ubuntu `server-tests` job remains the coverage source of
+    # truth (c8 runs there, not here). Now that this runs on the free self-hosted
+    # box it fires on every same-repo push/PR (the old platform-changed-only gate
+    # existed only to spare windows-latest minutes).
+    #
+    # The manifest itself is gated in `Server Lint`, which is a REQUIRED status
+    # check — this job is not one, so a manifest defect has to be caught
+    # somewhere that actually blocks a merge.
     needs: runner-target
     runs-on: ${{ fromJSON(needs.runner-target.outputs.winrunner) }}
-    timeout-minutes: 15
+    # 15 was sized for EIGHT files (~4s of test time). The derived set is 482.
+    # Measured end-to-end on the chroxy-win box at 4 concurrency; raised with
+    # headroom because a timeout kill is indistinguishable from a hang. Reset
+    # this from the observed runtime once a few real runs have landed.
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: packages/server
@@ -253,24 +263,44 @@ jobs:
         run: npm run build
         working-directory: packages/protocol
 
-      - name: Run Windows-relevant server tests
-        # node's built-in test runner directly, mirroring `npm test`'s flags
-        # (sandbox guard via `--import ./tests/_setup.mjs`,
-        # `--experimental-test-module-mocks`) but scoped to the Windows-relevant
-        # suites. `c8` is omitted — the ubuntu job is the coverage source of
-        # truth. All of these are green on a real Windows host (verified
-        # locally); `service.test.js`'s POSIX/darwin/linux-only tests are win32-
-        # guarded (#6651) so it runs here too.
-        run: >-
-          node --import ./tests/_setup.mjs --experimental-test-module-mocks --test
-          ./tests/platform.test.js
-          ./tests/platform-windows.test.js
-          ./tests/win-spawn.test.js
-          ./tests/windows-cmd-routing.test.js
-          ./tests/resolve-binary.test.js
-          ./tests/control-room-wsl.test.js
-          ./tests/keychain-windows.test.js
-          ./tests/service.test.js
+      - name: Run the derived Windows server test set
+        # #7270 — this step used to name EIGHT test files by hand while
+        # packages/server/tests/ grew to 553. Anything added after that list was
+        # written was never run on Windows and nobody was told; the job went
+        # green in 58s and its green said nothing about the file. That is
+        # docs/false-safety-guards.md's "Checked a subset" mode, in CI config.
+        #
+        # The list is INVERTED now: the runner walks every *.test.js, subtracts
+        # WINDOWS_EXEMPT, and runs the rest — so a new test file is covered here
+        # BY DEFAULT and a POSIX-only one has to be classified out, loudly.
+        # Measured on a real Windows host: 482 of 554 files run, 10,964 tests
+        # against the 193 this step used to run.
+        #
+        # ONE native command on purpose. The file list never crosses a command
+        # line: the runner builds each batch's argv in-process and spawns with
+        # shell:false, so neither CreateProcessW's 32,767-char cap nor cmd.exe's
+        # 8,191 (which any .cmd shim — npm/npx/c8 — would impose) can apply.
+        # $LASTEXITCODE is read on the very next statement and every branch
+        # exits explicitly, so the "only the last exit code is checked" trap
+        # cannot arise.
+        #
+        # Exit 2 means the runner could not do its job (a stale manifest, a
+        # broken walk, an empty set) and is reported separately from exit 1:
+        # "the guard broke" must not read as "the guard passed", nor as "the
+        # code is dirty".
+        run: |
+          node ./scripts/run-windows-tests.mjs
+          $rc = $LASTEXITCODE
+          if ($rc -eq 0) {
+            Write-Host "OK - the derived Windows test set ran clean"
+            exit 0
+          } elseif ($rc -eq 2) {
+            Write-Host "::error::run-windows-tests could not run (stale or invalid WINDOWS_EXEMPT manifest, a broken walk, an empty run set, or a child that failed to spawn). The GUARD is broken, not necessarily the code."
+            exit 1
+          } else {
+            Write-Host "::error::A server test failed on Windows. Fix it, or add a row to WINDOWS_EXEMPT in packages/server/scripts/lib/windows-test-set.mjs with a reason category, the measured symptom, and (for windows-defect / windows-slow) an issue number."
+            exit 1
+          }
 
   server-lint:
     name: Server Lint
@@ -299,6 +329,41 @@ jobs:
 
       - name: Lint
         run: npm run lint
+
+      - name: Check the Windows test-exemption manifest is honest
+        # #7270 — the Windows job used to run eight hardcoded test files out of
+        # 553. The list is inverted now: every *.test.js runs on Windows unless
+        # WINDOWS_EXEMPT classifies it out.
+        #
+        # This is the half that runs HERE, on Linux, in a REQUIRED check.
+        # `Server Windows Tests` is NOT a required context, so a red Windows job
+        # does not block a merge; if the only check on this manifest lived
+        # inside that job the whole thing would be advisory —
+        # docs/false-safety-guards.md's "Never reached" mode.
+        #
+        # It checks the MANIFEST, not the tests: stale rows, unknown reason
+        # categories, tracked-debt rows with no issue, missing measured
+        # symptoms, duplicates, an exempt ratio above the ceiling, and any
+        # MUST_RUN_ON_WINDOWS suite relocated into the exempt list. Linux is
+        # also the stricter host for the stale-row direction, because NTFS is
+        # case-insensitive and would match a row that is stale everywhere else.
+        #
+        # Exit 2 ("the gate could not run") is surfaced separately from exit 1
+        # ("the manifest is wrong").
+        run: |
+          set +e
+          scripts/lint-windows-test-exemptions.sh
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "OK - every server test file either runs on Windows or is exempt with a machine-checked reason"
+          elif [ "$rc" -eq 2 ]; then
+            echo "::error::lint-windows-test-exemptions could not run (bad flags, an exempt row pointing at a missing file, or a walk below --min-files). The GUARD is broken, not necessarily the code."
+            exit 1
+          else
+            echo "::error::The Windows exemption manifest is stale, over-broad, or exempts a must-run suite. See packages/server/scripts/lib/windows-test-set.mjs."
+            exit 1
+          fi
 
       - name: Check server lockfile freshness
         run: |

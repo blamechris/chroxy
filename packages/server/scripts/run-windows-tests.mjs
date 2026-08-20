@@ -1,0 +1,248 @@
+#!/usr/bin/env node
+/**
+ * Runs the DERIVED Windows server test set (#7270).
+ *
+ * The Windows job used to name eight test files by hand while
+ * `packages/server/tests/` grew to 553, so a new cross-platform test was never
+ * run there and nobody was told. This runner walks every `*.test.js`, subtracts
+ * `WINDOWS_EXEMPT`, and runs the rest — a new file is covered by default.
+ *
+ * ── Why it spawns `node --test` rather than using node:test's run() ─────────
+ *
+ * `run({ files, execArgv })` works (verified on 22.x) and would sidestep argv
+ * limits for free. It is still the wrong choice here: it is a SECOND runner
+ * path, and a second execution path is the same defect as a second enumeration
+ * path one level up. The ubuntu job runs
+ * `node --import ./tests/_setup.mjs --experimental-test-module-mocks --test <glob>`;
+ * spawning that exact argv means a Windows-vs-Linux difference can never be
+ * blamed on the runner. It also reuses the TAP-summary parsing that
+ * `assert-test-count.mjs` already ships, instead of hand-rolling a reporter and
+ * an exit code — which is precisely where a false-safety bug would live.
+ *
+ * ── Why the list never crosses a command line as text ──────────────────────
+ *
+ * We spawn `process.execPath` with an argv ARRAY and `shell: false`, so:
+ *   * CreateProcessW's 32,767-char cap applies only to what we batch (measured
+ *     20,515 chars for all 553 paths — 63% — so the ceiling is real but far),
+ *     and BATCHING removes it permanently rather than deferring it;
+ *   * cmd.exe's much lower 8,191 cap can never apply, because we never route
+ *     through a `.cmd` shim. That rules out `npm run` / `npx` / `c8` on this
+ *     job — assert-test-count.mjs sets `shell: true` on win32 precisely because
+ *     `c8` IS a `.cmd`, and the 553-path argv would blow that cap 2.5x over.
+ *
+ * Exit codes:
+ *   0 — every file in the derived set ran and passed
+ *   1 — a test failed, or the run was truncated / unreportable
+ *   2 — the runner could not do its job (stale manifest, broken walk, empty
+ *       set, spawn failure). "The guard broke" must not read as "the guard
+ *       passed", nor as "the code is dirty".
+ */
+
+import { spawn } from 'node:child_process'
+import { readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { resolve, dirname, join, relative } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+
+const HERE = dirname(fileURLToPath(import.meta.url))
+const SERVER_ROOT = resolve(HERE, '..')
+
+// Conservative against CreateProcessW's 32,767. Leaves room for the node path,
+// the flags, and growth inside a single batch.
+const DEFAULT_MAX_ARGV_BYTES = 24000
+
+function usageError(message) {
+  console.error(`[run-windows-tests] ${message}`)
+  process.exit(2)
+}
+
+const args = process.argv.slice(2)
+let printPlan = false
+let maxArgvBytes = DEFAULT_MAX_ARGV_BYTES
+let concurrency = null
+let testsRoot = null
+
+for (let i = 0; i < args.length; i++) {
+  const a = args[i]
+  if (a === '--print-plan') printPlan = true
+  else if (a === '--max-argv-bytes') maxArgvBytes = Number(args[++i])
+  else if (a === '--test-concurrency') concurrency = args[++i]
+  else if (a === '--tests-root') testsRoot = args[++i]
+  else usageError(`unknown argument ${JSON.stringify(a)}`)
+}
+
+if (!Number.isInteger(maxArgvBytes) || maxArgvBytes < 200) {
+  usageError(`--max-argv-bytes must be an integer >= 200, got ${maxArgvBytes}`)
+}
+
+testsRoot = testsRoot ? resolve(testsRoot) : join(SERVER_ROOT, 'tests')
+
+let lib
+try {
+  lib = await import(join(HERE, 'lib', 'windows-test-set.mjs'))
+} catch (err) {
+  usageError(`could not load lib/windows-test-set.mjs: ${err && err.message}`)
+}
+
+const { all, exempt, run, problems } = lib.resolveWindowsTestSet({ testsRoot })
+
+// The runner refuses on ANY problem — including a merely-wrong manifest. The
+// Server Lint gate is where a manifest defect gets its own precise verdict;
+// here it means the set we are about to run is not trustworthy.
+if (problems.length > 0) {
+  for (const p of problems) console.error(`  ${p.message}`)
+  usageError(
+    `${problems.length} problem(s) resolving the Windows test set — refusing to run. ` +
+    'Fix packages/server/scripts/lib/windows-test-set.mjs (see Server Lint for the itemised verdict).',
+  )
+}
+
+// Batch so no single command line can approach the OS cap.
+const batches = []
+let current = []
+let currentBytes = 0
+for (const f of run) {
+  const cost = f.length + 3
+  if (current.length > 0 && currentBytes + cost > maxArgvBytes) {
+    batches.push(current)
+    current = []
+    currentBytes = 0
+  }
+  current.push(f)
+  currentBytes += cost
+}
+if (current.length > 0) batches.push(current)
+
+if (printPlan) {
+  console.log(JSON.stringify({
+    all: all.length,
+    exempt: exempt.length,
+    run: run.length,
+    batches: batches.map((b) => b.length),
+    maxArgvBytes,
+  }, null, 2))
+  process.exit(0)
+}
+
+const REPORTER = join(HERE, 'lib', 'windows-test-file-reporter.mjs')
+
+const lastNumber = (text, label) => {
+  const re = new RegExp(`^# ${label} (\\d+)`, 'gm')
+  let m
+  let val = null
+  while ((m = re.exec(text)) !== null) val = Number(m[1])
+  return val
+}
+
+let totalTests = 0
+let totalFail = 0
+const filesExecuted = new Set()
+
+for (let b = 0; b < batches.length; b++) {
+  const batch = batches[b]
+  // A per-batch destination for the file reporter. It cannot share stdout
+  // (that is TAP) and must not share stderr (that is diagnostics), so it gets
+  // its own file, which we read back below.
+  const manifestOut = join(tmpdir(), `chroxy-win-testfiles-${process.pid}-${b}.txt`)
+  const argv = [
+    '--import', './tests/_setup.mjs',
+    '--experimental-test-module-mocks',
+    '--test-reporter=tap', '--test-reporter-destination=stdout',
+    `--test-reporter=${pathToFileURL(REPORTER).href}`, `--test-reporter-destination=${manifestOut}`,
+  ]
+  if (concurrency) argv.push(`--test-concurrency=${concurrency}`)
+  argv.push('--test', ...batch.map((f) => `./${f}`))
+
+  const captured = await new Promise((res, rej) => {
+    let out = ''
+    const child = spawn(process.execPath, argv, {
+      cwd: SERVER_ROOT,
+      stdio: ['inherit', 'pipe', 'inherit'],
+      shell: false,
+    })
+    child.stdout.on('data', (chunk) => {
+      out += chunk
+      process.stdout.write(chunk)
+    })
+    child.on('error', (err) => rej(err))
+    child.on('close', (code, signal) => res({ out, code, signal }))
+  }).catch((err) => {
+    usageError(`failed to spawn the test runner for batch ${b + 1}/${batches.length}: ${err && err.message}`)
+  })
+
+  if (captured.signal) {
+    console.error(`\n[run-windows-tests] FAIL: batch ${b + 1} was killed by signal ${captured.signal}.`)
+    process.exit(1)
+  }
+
+  const tests = lastNumber(captured.out, 'tests')
+  const fail = lastNumber(captured.out, 'fail')
+  if (tests === null || fail === null) {
+    console.error(
+      `\n[run-windows-tests] FAIL: batch ${b + 1}/${batches.length} produced no TAP summary ` +
+      '(`# tests` / `# fail`). The runner died before reporting — treat as a truncated run, not a pass.',
+    )
+    process.exit(1)
+  }
+
+  // "Cannot tell which files ran" is not "all the files ran".
+  let reported
+  try {
+    reported = readFileSync(manifestOut, 'utf8')
+  } catch (err) {
+    console.error(
+      `\n[run-windows-tests] FAIL: batch ${b + 1} produced no file manifest at ${manifestOut} ` +
+      `(${err && err.message}). Cannot verify which files ran, so this run cannot be called green.`,
+    )
+    process.exit(1)
+  }
+  for (const line of reported.split('\n')) {
+    const t = line.trim()
+    if (t) filesExecuted.add(t)
+  }
+  try { rmSync(manifestOut, { force: true }) } catch { /* best effort */ }
+
+  totalTests += tests
+  totalFail += fail
+}
+
+if (totalTests === 0) {
+  console.error('\n[run-windows-tests] FAIL: 0 tests ran across the whole derived set — refusing to report a pass.')
+  process.exit(1)
+}
+
+// The self-maintaining check: compare the IDENTITY of what ran against what was
+// asked for, not a count and not a magic number. Nothing here drifts as the
+// suite grows.
+const expected = new Set(run.map((f) => resolve(SERVER_ROOT, f)))
+const missing = [...expected].filter((f) => !filesExecuted.has(f))
+const unexpected = [...filesExecuted].filter((f) => !expected.has(f))
+if (missing.length > 0 || unexpected.length > 0) {
+  console.error(`\n[run-windows-tests] FAIL: the set of files that RAN does not match the derived set.`)
+  if (missing.length > 0) {
+    console.error(`  ${missing.length} file(s) were in the derived set but never reported running:`)
+    for (const f of missing.slice(0, 20)) console.error(`    ${relative(SERVER_ROOT, f)}`)
+    if (missing.length > 20) console.error(`    … and ${missing.length - 20} more`)
+  }
+  if (unexpected.length > 0) {
+    console.error(`  ${unexpected.length} file(s) ran that were NOT in the derived set:`)
+    for (const f of unexpected.slice(0, 20)) console.error(`    ${relative(SERVER_ROOT, f)}`)
+  }
+  console.error('\n  A run that skipped files must not report success.')
+  process.exit(1)
+}
+
+if (totalFail > 0) {
+  console.error(`\n[run-windows-tests] FAIL: ${totalFail} test(s) failed on Windows (see the TAP output above).`)
+  console.error(
+    '\nFix it, or — if the file depends on POSIX semantics with no Windows analogue — add a row to\n' +
+    'WINDOWS_EXEMPT in packages/server/scripts/lib/windows-test-set.mjs with a reason category, the\n' +
+    'measured symptom, and (for windows-defect / windows-slow) an issue number.',
+  )
+  process.exit(1)
+}
+
+console.log(
+  `\n[run-windows-tests] OK: ${run.length} file(s) in the derived Windows set ` +
+  `(${all.length} total, ${exempt.length} exempt), ${batches.length} batch(es), ${totalTests} tests, 0 failed.`,
+)
