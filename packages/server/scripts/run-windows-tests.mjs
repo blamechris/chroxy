@@ -41,7 +41,7 @@
  */
 
 import { spawn } from 'node:child_process'
-import { readFileSync, rmSync } from 'node:fs'
+import { readFileSync, rmSync, existsSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve, dirname, join, relative, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -71,6 +71,7 @@ let printPlan = false
 let maxArgvBytes = DEFAULT_MAX_ARGV_BYTES
 let concurrency = null
 let testsRoot = null
+let manifestPath = null
 
 // A value-taking flag with no value must NOT fall back to the default.
 // `run-windows-tests.mjs --tests-root` (flag last) makes args[++i] undefined,
@@ -90,6 +91,7 @@ for (let i = 0; i < args.length; i++) {
   else if (a === '--max-argv-bytes') { maxArgvBytes = Number(valueFor(a, i)); i++ }
   else if (a === '--test-concurrency') { concurrency = valueFor(a, i); i++ }
   else if (a === '--tests-root') { testsRoot = valueFor(a, i); i++ }
+  else if (a === '--manifest') { manifestPath = valueFor(a, i); i++ }
   else if (a === '--min-files') { minFiles = Number(valueFor(a, i)); i++ }
   else usageError(`unknown argument ${JSON.stringify(a)}`)
 }
@@ -103,6 +105,12 @@ if (!Number.isInteger(maxArgvBytes) || maxArgvBytes < 200) {
 }
 
 testsRoot = testsRoot ? resolve(testsRoot) : join(SERVER_ROOT, 'tests')
+// Spawn relative to whatever tree we were pointed at, not to this script's own
+// package. With --tests-root this is the fixture; without it, packages/server.
+// Before this, everything below the derivation ran ONLY inside the Windows job
+// and had no test that could go red — which is how a temporal-dead-zone
+// reference to executedOriginal reached CI.
+const PKG_ROOT = resolve(testsRoot, '..')
 
 let lib
 try {
@@ -113,7 +121,33 @@ try {
   usageError(`could not load lib/windows-test-set.mjs: ${err && err.message}`)
 }
 
-const { all, exempt, run, problems } = lib.resolveWindowsTestSet({ testsRoot, minFiles })
+// --manifest exists so the EXECUTION path can be exercised against a fixture
+// tree on Linux, inside a required check. Without it the runner could only ever
+// be run against the real manifest, i.e. only from the Windows job.
+let manifest = lib.WINDOWS_EXEMPT
+let mustRun = lib.MUST_RUN_ON_WINDOWS
+let minMustRun = lib.MIN_MUST_RUN_ON_WINDOWS
+if (manifestPath) {
+  try {
+    const mod = await import(pathToFileURL(resolve(manifestPath)).href)
+    if (!Array.isArray(mod.WINDOWS_EXEMPT)) usageError(`${manifestPath} does not export a WINDOWS_EXEMPT array`)
+    manifest = mod.WINDOWS_EXEMPT
+    if (Array.isArray(mod.MUST_RUN_ON_WINDOWS)) mustRun = mod.MUST_RUN_ON_WINDOWS
+    if (typeof mod.MIN_MUST_RUN_ON_WINDOWS === 'number') minMustRun = mod.MIN_MUST_RUN_ON_WINDOWS
+  } catch (err) {
+    usageError(`could not load --manifest ${manifestPath}: ${err && err.message}`)
+  }
+}
+
+const { all, exempt, run, problems } = lib.resolveWindowsTestSet({
+  testsRoot, minFiles, manifest, mustRun, minMustRun,
+})
+
+// tests/_setup.mjs arms the fs write sandbox. A fixture tree has none, so only
+// require it where it exists — its absence must not be silently ignored in the
+// real tree, so this checks rather than assumes.
+const SETUP = join(testsRoot, '_setup.mjs')
+const hasSetup = existsSync(SETUP)
 
 // The runner refuses on ANY problem — including a merely-wrong manifest. The
 // Server Lint gate is where a manifest defect gets its own precise verdict;
@@ -165,7 +199,23 @@ const REPORTER = join(HERE, 'lib', 'windows-test-file-reporter.mjs')
 // at once — a mass failure with a baffling message. Case-fold on win32 ONLY:
 // POSIX paths are case-SENSITIVE and folding them there would let two genuinely
 // different files collide.
-const pathKey = (p) => (process.platform === 'win32' ? resolve(p).toLowerCase() : resolve(p))
+// Both sides must also agree about SYMLINKS. node reports a test file by its
+// REAL path, while the derived set is composed from the root we were handed —
+// so on any host where the tests live under a symlinked prefix (macOS's
+// /var -> /private/var is the everyday case) every file reads as both missing
+// AND unexpected at once. That is docs/false-safety-guards.md entry 7, the same
+// realpath asymmetry that defeated the entry-point guard.
+//
+// realpathSync throws for a path that does not exist; fall back to resolve()
+// there, because a non-existent path is exactly what the caller wants reported.
+const realOrResolved = (p) => {
+  try {
+    return realpathSync(resolve(p))
+  } catch {
+    return resolve(p)
+  }
+}
+const pathKey = (p) => (process.platform === 'win32' ? realOrResolved(p).toLowerCase() : realOrResolved(p))
 
 const lastNumber = (text, label) => {
   const re = new RegExp(`^# ${label} (\\d+)`, 'gm')
@@ -180,6 +230,10 @@ let totalFail = 0
 let totalCancelled = 0
 let worstExit = 0
 const filesExecuted = new Set()
+// The ORIGINAL spelling for every executed path, so a diagnostic never prints
+// the case-folded, backslash-separated key — that is a third spelling, matching
+// neither the on-disk name nor the manifest's.
+const executedOriginal = new Map()
 // Top-level TAP entries that did not pass. node's TAP carries no file paths, so
 // these suite names are the only handle on WHICH work went wrong — without them
 // a cancellation says "33 tests were cancelled" and leaves you grepping 96,000
@@ -193,7 +247,7 @@ for (let b = 0; b < batches.length; b++) {
   // its own file, which we read back below.
   const manifestOut = join(tmpdir(), `chroxy-win-testfiles-${process.pid}-${b}.txt`)
   const argv = [
-    '--import', './tests/_setup.mjs',
+    ...(hasSetup ? ['--import', pathToFileURL(SETUP).href] : []),
     '--experimental-test-module-mocks',
     '--test-reporter=tap', '--test-reporter-destination=stdout',
     `--test-reporter=${pathToFileURL(REPORTER).href}`, `--test-reporter-destination=${manifestOut}`,
@@ -204,7 +258,7 @@ for (let b = 0; b < batches.length; b++) {
   const captured = await new Promise((res, rej) => {
     let out = ''
     const child = spawn(process.execPath, argv, {
-      cwd: SERVER_ROOT,
+      cwd: PKG_ROOT,
       stdio: ['inherit', 'pipe', 'inherit'],
       shell: false,
     })
@@ -263,7 +317,7 @@ for (let b = 0; b < batches.length; b++) {
     if (t) {
       const k = pathKey(t)
       filesExecuted.add(k)
-      if (!executedOriginal.has(k)) executedOriginal.set(k, relative(SERVER_ROOT, t).split(sep).join('/'))
+      if (!executedOriginal.has(k)) executedOriginal.set(k, relative(PKG_ROOT, t).split(sep).join('/'))
     }
   }
   try { rmSync(manifestOut, { force: true }) } catch { /* best effort */ }
@@ -294,12 +348,7 @@ if (totalTests === 0) {
 // The self-maintaining check: compare the IDENTITY of what ran against what was
 // asked for, not a count and not a magic number. Nothing here drifts as the
 // suite grows.
-const expected = new Map(run.map((f) => [pathKey(join(SERVER_ROOT, f)), f]))
-// Keep the ORIGINAL spelling for every key so a diagnostic never prints the
-// case-folded, backslash-separated form — that is a third spelling, matching
-// neither the on-disk name nor the manifest's, and pasting it into
-// WINDOWS_EXEMPT produces an unrelated-looking exit 2.
-const executedOriginal = new Map()
+const expected = new Map(run.map((f) => [pathKey(join(PKG_ROOT, f)), f]))
 const missing = [...expected.keys()].filter((k) => !filesExecuted.has(k))
 const unexpected = [...filesExecuted].filter((k) => !expected.has(k))
 if (missing.length > 0 || unexpected.length > 0) {
