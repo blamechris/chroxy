@@ -113,7 +113,7 @@ describe('realpathOfDeepestAncestor', () => {
       assert.equal(valid, true)
     })
 
-    it('propagates ENAMETOOLONG from the depth-ceiling fail-closed path', async () => {
+    it('propagates ENAMETOOLONG from the depth-ceiling fail-closed path', { skip: SKIP_NO_SYMLINK }, async () => {
       // Ensure the helper's throw reaches the caller rather than being
       // swallowed somewhere. (validatePathWithinCwd does not try/catch
       // the helper, so the rejection should escape cleanly.)

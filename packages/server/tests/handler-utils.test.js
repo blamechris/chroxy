@@ -17,6 +17,7 @@ import { isPathWithin } from '../src/utils/path-containment.js'
 import { nsCtx } from './test-helpers.js'
 import { createClientSender } from '../src/ws-client-sender.js'
 import { createKeyPair, deriveSharedKey, decrypt, DIRECTION_SERVER } from '@chroxy/store-core/crypto'
+import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
 import {
   validateAttachments,
   resolveFileRefAttachments,
@@ -529,19 +530,15 @@ describe('resolveFileRefAttachments — containment (#7273)', () => {
     assert.match(decoded, /cannot read file outside project/)
   })
 
-  it('fails CLOSED when the containment check cannot be answered', () => {
+  it('fails CLOSED when the containment check cannot be answered', { skip: SKIP_NO_SYMLINK }, () => {
     // A symlink cycle makes realpathSync throw ELOOP, so the post-realpath
     // containment check never runs. That branch used to be a bare `catch {}`
     // that fell through to readFileSync — "could not check" reading as
     // "nothing to check". It must report a containment refusal, not a read error.
     const a = join(testDir, 'loop-a')
     const b = join(testDir, 'loop-b')
-    try {
-      symlinkSync(b, a)
-      symlinkSync(a, b)
-    } catch {
-      return // no symlink privilege on this host
-    }
+    symlinkSync(b, a)
+    symlinkSync(a, b)
     const [out] = resolveFileRefAttachments(
       [{ type: 'file_ref', path: 'loop-a', name: 'loop-a' }],
       testDir
@@ -553,14 +550,9 @@ describe('resolveFileRefAttachments — containment (#7273)', () => {
 })
 
 describe('resolveFileRefAttachments — symlink escape detection', () => {
-  it('blocks symlink that resolves outside project directory', () => {
+  it('blocks symlink that resolves outside project directory', { skip: SKIP_NO_SYMLINK }, () => {
     const linkPath = join(testDir, 'src', 'escape-link')
-    try {
-      symlinkSync(OUTSIDE_HOME_FILE, linkPath)
-    } catch {
-      // Skip if symlinks not supported
-      return
-    }
+    symlinkSync(OUTSIDE_HOME_FILE, linkPath)
     const result = resolveFileRefAttachments(
       [{ type: 'file_ref', path: 'src/escape-link' }],
       testDir
@@ -569,13 +561,9 @@ describe('resolveFileRefAttachments — symlink escape detection', () => {
     assert.match(decoded, /cannot read file outside project/)
   })
 
-  it('blocks symlink to parent directory', () => {
+  it('blocks symlink to parent directory', { skip: SKIP_NO_SYMLINK }, () => {
     const linkPath = join(testDir, 'parent-link')
-    try {
-      symlinkSync('..', linkPath)
-    } catch {
-      return
-    }
+    symlinkSync('..', linkPath)
     const result = resolveFileRefAttachments(
       [{ type: 'file_ref', path: 'parent-link' }],
       testDir
@@ -586,13 +574,9 @@ describe('resolveFileRefAttachments — symlink escape detection', () => {
     assert.match(decoded, /cannot read file outside project|Error/)
   })
 
-  it('allows symlink that stays within project directory', () => {
+  it('allows symlink that stays within project directory', { skip: SKIP_NO_SYMLINK }, () => {
     const linkPath = join(testDir, 'internal-link')
-    try {
-      symlinkSync(join(testDir, 'readme.md'), linkPath)
-    } catch {
-      return
-    }
+    symlinkSync(join(testDir, 'readme.md'), linkPath)
     const result = resolveFileRefAttachments(
       [{ type: 'file_ref', path: 'internal-link' }],
       testDir
@@ -602,15 +586,11 @@ describe('resolveFileRefAttachments — symlink escape detection', () => {
     assert.strictEqual(decoded, '# Project\n')
   })
 
-  it('blocks chain of symlinks that eventually escape', () => {
+  it('blocks chain of symlinks that eventually escape', { skip: SKIP_NO_SYMLINK }, () => {
     const link1 = join(testDir, 'link-chain-1')
     const link2 = join(testDir, 'link-chain-2')
-    try {
-      symlinkSync('/tmp', link1)
-      symlinkSync(link1, link2)
-    } catch {
-      return
-    }
+    symlinkSync('/tmp', link1)
+    symlinkSync(link1, link2)
     const result = resolveFileRefAttachments(
       [{ type: 'file_ref', path: 'link-chain-2' }],
       testDir
@@ -756,13 +736,9 @@ describe('validateCwdWithinHome', () => {
     assert.match(err, /Not a directory/)
   })
 
-  it('rejects symlink to directory outside home', () => {
+  it('rejects symlink to directory outside home', { skip: SKIP_NO_SYMLINK }, () => {
     const linkPath = join(testDir, 'etc-link')
-    try {
-      symlinkSync(OUTSIDE_HOME_DIR, linkPath)
-    } catch {
-      return
-    }
+    symlinkSync(OUTSIDE_HOME_DIR, linkPath)
     const err = validateCwdWithinHome(linkPath)
     assert.ok(err)
     assert.match(err, /within your home directory/)
