@@ -149,6 +149,11 @@ let totalFail = 0
 let totalCancelled = 0
 let worstExit = 0
 const filesExecuted = new Set()
+// Top-level TAP entries that did not pass. node's TAP carries no file paths, so
+// these suite names are the only handle on WHICH work went wrong — without them
+// a cancellation says "33 tests were cancelled" and leaves you grepping 96,000
+// lines of log to find out where.
+const failedTopLevel = []
 
 for (let b = 0; b < batches.length; b++) {
   const batch = batches[b]
@@ -222,9 +227,22 @@ for (let b = 0; b < batches.length; b++) {
   }
   try { rmSync(manifestOut, { force: true }) } catch { /* best effort */ }
 
+  for (const m of captured.out.matchAll(/^not ok \d+ - (.+)$/gm)) failedTopLevel.push(m[1].trim())
+
   totalTests += tests
   totalFail += fail
   totalCancelled += cancelled ?? 0
+}
+
+// Naming what went wrong is not optional: "cannot tell you which" and "there
+// were none" must not read the same.
+const nameTopLevel = () => {
+  if (failedTopLevel.length === 0) {
+    return '  (could not identify which suites from the TAP output — see the full log above)'
+  }
+  const shown = failedTopLevel.slice(0, 25).map((n) => `    ${n}`).join('\n')
+  const more = failedTopLevel.length > 25 ? `\n    … and ${failedTopLevel.length - 25} more` : ''
+  return `  Top-level suites that did not pass:\n${shown}${more}`
 }
 
 if (totalTests === 0) {
@@ -256,8 +274,9 @@ if (missing.length > 0 || unexpected.length > 0) {
 if (totalCancelled > 0) {
   console.error(
     `\n[run-windows-tests] FAIL: ${totalCancelled} test(s) were CANCELLED and never completed ` +
-    '(node reports these separately from failures — grep the TAP output above for cancelledByParent).\n' +
-    '  A cancelled test produced no result. It is not a pass.',
+    '(node reports these separately from failures — look for cancelledByParent above).\n' +
+    '  A cancelled test produced no result. It is not a pass.\n' +
+    nameTopLevel(),
   )
   process.exit(1)
 }
@@ -275,7 +294,10 @@ if (worstExit !== 0 && totalFail === 0) {
 }
 
 if (totalFail > 0) {
-  console.error(`\n[run-windows-tests] FAIL: ${totalFail} test(s) failed on Windows (see the TAP output above).`)
+  console.error(
+    `\n[run-windows-tests] FAIL: ${totalFail} test(s) failed on Windows (see the TAP output above).\n` +
+    nameTopLevel(),
+  )
   console.error(
     '\nFix it, or — if the file depends on POSIX semantics with no Windows analogue — add a row to\n' +
     'WINDOWS_EXEMPT in packages/server/scripts/lib/windows-test-set.mjs with a reason category, the\n' +

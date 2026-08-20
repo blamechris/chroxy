@@ -357,7 +357,7 @@ export const WINDOWS_EXEMPT = [
     file: 'tests/is-entry-point.test.js',
     reason: 'posix-perm-denied',
     symptom: 'fail',
-    note: 'chmods argv[1] unreadable to reach the undecidable-case warning (#7226); Windows still reads it',
+    note: 'chmods the invoked script path unreadable to reach the undecidable-case warning (#7226); Windows still reads it',
   },
   {
     file: 'tests/lint-entry-point-guard.test.js',
@@ -432,6 +432,29 @@ export const WINDOWS_EXEMPT = [
     reason: 'posix-abs-path',
     symptom: 'fail',
     note: 'asserts PATH and HOME are preserved by comparing against literal \'/usr/bin\'',
+  },
+  // ── windows-slow: completes in isolation, cancelled under the full concurrent
+  //    run ON THE CI RUNNER specifically (3)
+  {
+    file: 'tests/ide-search.test.js',
+    reason: 'windows-slow',
+    symptom: 'timeout',
+    note: 'searchContent/findReferences walk the tree; cancelledByParent on the runner though they pass in isolation and on another clone of the same commit',
+    issue: 7276,
+  },
+  {
+    file: 'tests/ide-symbols.test.js',
+    reason: 'windows-slow',
+    symptom: 'timeout',
+    note: 'collectWorkspaceSymbols and resolveSymbol walk the tree behind the #6499 TTL cache; cancelledByParent on the runner only',
+    issue: 7276,
+  },
+  {
+    file: 'tests/ws-file-ops-cache.test.js',
+    reason: 'windows-slow',
+    symptom: 'timeout',
+    note: 'the #1931 CWD realpath TTL cache test is time-based and is cancelled before it finishes on the runner',
+    issue: 7276,
   },
   // ── TRACKED DEBT — not a POSIX mechanism; should pass on Windows (26)
   {
