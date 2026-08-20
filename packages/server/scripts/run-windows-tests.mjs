@@ -128,6 +128,14 @@ if (printPlan) {
 
 const REPORTER = join(HERE, 'lib', 'windows-test-file-reporter.mjs')
 
+// NTFS is case-insensitive, so the same file can be spelled with a different
+// drive-letter or directory case by the reporter than by resolve(). Comparing
+// those as strings would report every file as both "missing" and "unexpected"
+// at once — a mass failure with a baffling message. Case-fold on win32 ONLY:
+// POSIX paths are case-SENSITIVE and folding them there would let two genuinely
+// different files collide.
+const pathKey = (p) => (process.platform === 'win32' ? resolve(p).toLowerCase() : resolve(p))
+
 const lastNumber = (text, label) => {
   const re = new RegExp(`^# ${label} (\\d+)`, 'gm')
   let m
@@ -210,7 +218,7 @@ for (let b = 0; b < batches.length; b++) {
   }
   for (const line of reported.split('\n')) {
     const t = line.trim()
-    if (t) filesExecuted.add(t)
+    if (t) filesExecuted.add(pathKey(t))
   }
   try { rmSync(manifestOut, { force: true }) } catch { /* best effort */ }
 
@@ -227,19 +235,19 @@ if (totalTests === 0) {
 // The self-maintaining check: compare the IDENTITY of what ran against what was
 // asked for, not a count and not a magic number. Nothing here drifts as the
 // suite grows.
-const expected = new Set(run.map((f) => resolve(SERVER_ROOT, f)))
-const missing = [...expected].filter((f) => !filesExecuted.has(f))
-const unexpected = [...filesExecuted].filter((f) => !expected.has(f))
+const expected = new Map(run.map((f) => [pathKey(join(SERVER_ROOT, f)), f]))
+const missing = [...expected.keys()].filter((k) => !filesExecuted.has(k))
+const unexpected = [...filesExecuted].filter((k) => !expected.has(k))
 if (missing.length > 0 || unexpected.length > 0) {
   console.error(`\n[run-windows-tests] FAIL: the set of files that RAN does not match the derived set.`)
   if (missing.length > 0) {
     console.error(`  ${missing.length} file(s) were in the derived set but never reported running:`)
-    for (const f of missing.slice(0, 20)) console.error(`    ${relative(SERVER_ROOT, f)}`)
+    for (const k of missing.slice(0, 20)) console.error(`    ${expected.get(k)}`)
     if (missing.length > 20) console.error(`    … and ${missing.length - 20} more`)
   }
   if (unexpected.length > 0) {
     console.error(`  ${unexpected.length} file(s) ran that were NOT in the derived set:`)
-    for (const f of unexpected.slice(0, 20)) console.error(`    ${relative(SERVER_ROOT, f)}`)
+    for (const k of unexpected.slice(0, 20)) console.error(`    ${relative(SERVER_ROOT, k)}`)
   }
   console.error('\n  A run that skipped files must not report success.')
   process.exit(1)
