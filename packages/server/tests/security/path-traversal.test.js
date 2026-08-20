@@ -4,6 +4,7 @@ import { mkdtemp, rm, symlink, mkdir, writeFile } from 'fs/promises'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { createFileOps } from '../../src/ws-file-ops/index.js'
+import { SKIP_NO_SYMLINK } from '../helpers/symlink-support.js'
 
 describe('security: path traversal', () => {
   let tmpDir
@@ -63,7 +64,7 @@ describe('security: path traversal', () => {
     })
   })
 
-  describe('symlink escape prevention', () => {
+  describe('symlink escape prevention', { skip: SKIP_NO_SYMLINK }, () => {
     let outsideDir
 
     before(async () => {

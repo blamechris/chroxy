@@ -4,6 +4,7 @@ import { mkdtemp, rm, readFile, writeFile, symlink } from 'fs/promises'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { createFileOps } from '../src/ws-file-ops/index.js'
+import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
 
 /**
  * `appendMemory` op (#6861, epic #6760) — the `#`-prefix composer quick-append.
@@ -124,7 +125,7 @@ describe('appendMemory handler', () => {
     assert.match(responses[0].error, /long|max|characters/i)
   })
 
-  it('blocks appending through a CLAUDE.md symlink that escapes the workspace', async () => {
+  it('blocks appending through a CLAUDE.md symlink that escapes the workspace', { skip: SKIP_NO_SYMLINK }, async () => {
     responses.length = 0
     const outsideDir = await mkdtemp(join(tmpdir(), 'chroxy-memory-outside-'))
     const dir = await mkdtemp(join(tmpdir(), 'chroxy-memory-escape-'))

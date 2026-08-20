@@ -4,6 +4,7 @@ import { mkdtemp, rm, mkdir, symlink } from 'fs/promises'
 import { join, sep } from 'path'
 import { tmpdir } from 'os'
 import { realpathOfDeepestAncestor, validatePathWithinCwd } from '../src/ws-file-ops/common.js'
+import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
 
 /**
  * Direct unit tests for the helpers in ws-file-ops/common.js — especially
@@ -44,7 +45,7 @@ describe('realpathOfDeepestAncestor', () => {
     assert.ok(resolved.endsWith(sep + 'does-not-exist.txt'))
   })
 
-  it('walks up through a symlinked parent to reveal an escape', async () => {
+  it('walks up through a symlinked parent to reveal an escape', { skip: SKIP_NO_SYMLINK }, async () => {
     // `escape-parent` is a symlink pointing OUT of tmpDir. The walker
     // should realpath `escape-parent` to the outside location and
     // reconstruct `<outside>/future-leaf.sh`.
@@ -63,7 +64,7 @@ describe('realpathOfDeepestAncestor', () => {
     }
   })
 
-  it('fails closed (throws ENAMETOOLONG) when the depth ceiling is hit (Copilot review on PR #2807)', async () => {
+  it('fails closed (throws ENAMETOOLONG) when the depth ceiling is hit (Copilot review on PR #2807)', { skip: SKIP_NO_SYMLINK }, async () => {
     // An attacker crafts a path with 300+ non-existent tail components
     // under a symlinked parent. The depth ceiling (256) would otherwise
     // bail out with the lexical path — which the old version of the fix
