@@ -229,6 +229,64 @@ account for. Note `assert-test-count.mjs` parses only `# tests` and `# fail`
 too; it propagates node's exit code, so it is not necessarily blind, but it
 cannot itself tell a cancelled test from a passing one.
 
+### 11. The deny-everything check whose negative tests all passed — `#7273`
+
+`validatePathWithinCwd` asked "is this path inside the project?" with
+`realAbsPath.startsWith(cwdReal + '/')`. On Windows every path `realpath()`
+returns is backslash-separated, so the prefix never matched and the answer was
+**always no**. 63 assertions across 15 server test files failed with variants of
+`Access denied: ... restricted to the project directory` for paths plainly
+inside the project.
+
+That part was noisy, and noisy bugs get fixed. The false safety is what the
+noise hid.
+
+A containment check that denies *everything* also denies traversal. So every
+NEGATIVE test — the ones asserting that `../../etc/passwd` is refused, that a
+symlink escaping the workspace is refused, that an out-of-home directory is
+refused — **passed on Windows, for the wrong reason, and would have kept passing
+with the check deleted outright**. `tests/ws-file-ops-git-paths.test.js` is the
+clearest case: every negative assertion in it was green on Windows while the
+function it tests was incapable of returning `true`.
+
+This is mode (1), "reported success without checking", inverted: the guard was
+so broken it satisfied its own adversarial tests. The tell is that the positive
+and negative cases were not independent — one bug flipped both, and only one of
+them complained.
+
+**What it cost to find.** The direction is the whole finding, and grep cannot
+give you it. Fixing the separator turned `rejects symlink inside home that points
+outside home (#662)` from green to red — which read as a regression and was not
+one: `os.tmpdir()` on Windows is `C:\Users\<u>\AppData\Local\Temp`, i.e.
+INSIDE `os.homedir()`, so that fixture's "outside home" target had never been
+outside home. The test had been asserting a true conclusion from a false premise,
+and only a working containment check could reveal it (`#7285`).
+
+**And the same expression failed OPEN elsewhere.** The `relative()`-based
+spelling of the same question — `rel.startsWith('..')`, used for `file_ref`
+attachment containment — is not merely wrong on Windows, it is exploitable.
+`path.win32.relative()` returns a `..`-prefixed path only when both sides share
+a ROOT; across roots it hands back the target verbatim, which does not start with
+`..`. So `D:\secrets\x`, `\\host\share\x` and `\\?\C:\Users\<u>\.ssh\id_rsa`
+all read as "inside the project". The paired round-trip guard,
+`resolve(cwd, rel) !== absPath`, is a tautology for exactly those inputs and
+caught nothing. **No test failed** — that seam is silent, not noisy, so it was
+not among the 15 red files and no fixture ever asked the question.
+
+The fix is one root-aware predicate — `packages/server/src/utils/path-containment.js`
+— replacing six hand-rolled copies in three different spellings. Its test binds
+the shipping implementation to `path.win32` and `path.posix` in turn, so a
+POSIX-only CI run catches a Windows regression; that matters because
+`Server Windows Tests` runs on a single self-hosted box, and a guard that can
+only go red on one machine will eventually go quiet. All four historical
+spellings were mutation-proved to fail it.
+
+**The trap in the obvious fix.** `root + sep` — the one-character correction —
+is also wrong, on both platforms: `'C:\Documents'.startsWith('C:\' + '\')` and
+`'/tmp'.startsWith('/' + '/')` are both false, so any root that already ends in
+a separator denies everything. Two of the six copies had already "fixed" it that
+way.
+
 ## The one that got me while writing this
 
 A Maestro `repeat` was written with `maxRuns: 3`. `YamlRepeatCommand` has no

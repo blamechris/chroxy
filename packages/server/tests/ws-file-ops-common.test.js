@@ -1,7 +1,7 @@
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtemp, rm, mkdir, symlink } from 'fs/promises'
-import { join } from 'path'
+import { join, sep } from 'path'
 import { tmpdir } from 'os'
 import { realpathOfDeepestAncestor, validatePathWithinCwd } from '../src/ws-file-ops/common.js'
 
@@ -36,12 +36,12 @@ describe('realpathOfDeepestAncestor', () => {
     const resolved = await realpathOfDeepestAncestor(sub)
     // On macOS /tmp may resolve to /private/tmp; just assert it ends with
     // the last segment since the prefix may be mangled by the OS.
-    assert.ok(resolved.endsWith('/existing-sub'))
+    assert.ok(resolved.endsWith(sep + 'existing-sub'))
   })
 
   it('resolves a non-existent leaf by realpath-ing its parent and appending the leaf', async () => {
     const resolved = await realpathOfDeepestAncestor(join(tmpDir, 'does-not-exist.txt'))
-    assert.ok(resolved.endsWith('/does-not-exist.txt'))
+    assert.ok(resolved.endsWith(sep + 'does-not-exist.txt'))
   })
 
   it('walks up through a symlinked parent to reveal an escape', async () => {
@@ -55,7 +55,7 @@ describe('realpathOfDeepestAncestor', () => {
       const resolved = await realpathOfDeepestAncestor(join(escapeParent, 'future-leaf.sh'))
       // The resolved path must point into outsideDir, not tmpDir — that's
       // the symlink being correctly chased.
-      assert.ok(resolved.endsWith('/future-leaf.sh'))
+      assert.ok(resolved.endsWith(sep + 'future-leaf.sh'))
       assert.ok(!resolved.includes('escape-parent-unit'),
         'walker must have replaced the symlink name with its target')
     } finally {

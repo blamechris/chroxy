@@ -127,7 +127,7 @@ describe('memory_read (readMemory) handler', () => {
     assert.equal(importEntry.content, 'imported content')
     assert.equal(importEntry.exists, true)
     assert.equal(importEntry.skipped, false)
-    assert.match(importEntry.path, /docs\/extra\.md$/)
+    assert.match(importEntry.path, /docs[\\/]extra\.md$/)
     assert.equal(importEntry.importedFrom, projectEntry.path)
 
     await rm(dir, { recursive: true, force: true })
