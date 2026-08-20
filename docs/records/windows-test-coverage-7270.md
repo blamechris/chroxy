@@ -1,8 +1,17 @@
 # Windows test coverage measurement — #7270
 
 Provenance for the `WINDOWS_EXEMPT` manifest in
-`packages/server/scripts/lib/windows-test-set.mjs`. Every row in that manifest
-was seeded from this measurement, not from grep.
+`packages/server/scripts/lib/windows-test-set.mjs`. No row in that manifest was
+seeded from grep.
+
+**This survey accounts for 72 of the manifest's 75 rows.** The other three —
+`ide-search.test.js`, `ide-symbols.test.js`, `ws-file-ops-cache.test.js`, the
+`windows-slow` rows — are not here because this survey **passed** them. They
+were added later from a different measurement: the CI runner itself, where they
+report `cancelledByParent` while passing in isolation and in a full concurrent
+run on another clone of the same commit on the same physical machine. That is
+recorded on #7276. Two measurements, not one, which is why this document's
+totals are smaller than the manifest's.
 
 ## Method
 

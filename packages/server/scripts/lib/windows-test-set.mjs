@@ -129,52 +129,44 @@ export const EXEMPT_SYMPTOMS = new Set(['fail', 'timeout', 'load-error'])
 // Ceiling on how much of the suite may be exempt. Exempting in BULK is how
 // #7270 happened in the first place, and no per-row check can see it: every
 // individual row can be impeccable while the aggregate quietly becomes "most of
-// the suite". Measured at 13.0% (72/553) when this landed; the ceiling is set
+// the suite". Measured at 13.5% (75 of 555) when this landed; the ceiling is set
 // with headroom for honest growth and nowhere near a doubling.
 export const MAX_EXEMPT_RATIO = 0.20
 
 // ── The manifest ────────────────────────────────────────────────────────────
 //
-// Every row was seeded from a measured run of that file, in isolation, on a
-// real Windows host with the flags the CI job uses. 481 of the 553 files pass
-// unmodified; these 72 do not. Per-file verdicts and durations are recorded in
-// docs/records/windows-test-coverage-7270.md.
+// Rows are seeded from MEASURED behaviour, never from grep. 72 of them come
+// from the survey in docs/records/windows-test-coverage-7270.md, which ran all
+// 553 files of that commit in isolation on a real Windows host with the flags
+// the CI job uses — 481 passed unmodified. The other 3 (the windows-slow rows)
+// came later and from the CI runner itself: they PASS in isolation and in a
+// full concurrent run on a different clone, and are cancelled only in the
+// runner's own working directory. Both are measurements; they are not the SAME
+// measurement, which is why the record's totals and this file's differ.
 //
-// A category may currently classify zero rows. That is not dead weight: it
-// means every file using that mechanism already guards its POSIX-only tests
-// with `{ skip: process.platform === 'win32' }`, which is the PREFERRED fix and
-// the reason those files run here at all. Exempting a whole file is the blunt
+// A category may currently classify zero rows. That is not dead weight, but the
+// reason varies and it is worth being exact: either the file guards its
+// POSIX-only tests with `{ skip: process.platform === 'win32' }` — the
+// PREFERRED fix, and why service.test.js runs here at all (#6651) — or the
+// mechanism turns out not to be load-bearing on Windows. `shebang-exec` is the
+// second kind: tests/jsonl-subprocess-session.test.js writes a
+// `#!/usr/bin/env node` shim and chmods it 0o755 with no win32 guard anywhere,
+// and passes because the shim is invoked as `node <shim>`, so the shebang never
+// decides anything. Exempting a whole file is the blunt
 // instrument — most rows below fail only a handful of their tests (measured:
 // tests/permission-manager.test.js fails 1 of 96, tests/discord-webhook-sink.test.js
-// 2 of 114), so ~1,967 passing tests sit inside these 72 files and are not run
-// on Windows. Reclaiming them by guarding the individual tests is #7273/#7274.
+// 2 of 114), so ~1,967 passing tests sit inside the exempt files and are not
+// run on Windows. Reclaiming them by guarding the individual tests is
+// #7273 / #7274, and #7276 for the three cancelled on the runner.
 export const WINDOWS_EXEMPT = [
-  // ── node-pty / ConPTY (3)
-  {
-    file: 'tests/claude-tui-attachments.test.js',
-    reason: 'node-pty',
-    symptom: 'fail',
-    note: 'numbers PTY-delivered attachments sequentially against POSIX temp paths',
-  },
+  // ── node-pty / ConPTY (1)
   {
     file: 'tests/claude-tui-session.test.js',
     reason: 'node-pty',
     symptom: 'timeout',
     note: 'drives a real PTY for the claude TUI trust dialog; on Windows the ConPTY session never reaches the expected state and the file does not terminate',
   },
-  {
-    file: 'tests/user-shell-session.test.js',
-    reason: 'node-pty',
-    symptom: 'fail',
-    note: 'asserts the primary API_TOKEN is stripped from the shell PTY env, over a real PTY',
-  },
-  // ── spawns a POSIX shell or a .sh script (8)
-  {
-    file: 'tests/node-version-check.test.js',
-    reason: 'posix-shell-spawn',
-    symptom: 'fail',
-    note: 'spawns the version-check through a POSIX shell and asserts on its stderr',
-  },
+  // ── spawns a POSIX shell or a .sh script (7)
   {
     file: 'tests/permission-hook-failclosed.test.js',
     reason: 'posix-shell-spawn',
@@ -334,13 +326,7 @@ export const WINDOWS_EXEMPT = [
     symptom: 'fail',
     note: 'asserts the ingest secret is created 0600 with base64url content',
   },
-  // ── stages EACCES with chmod, which Windows ACLs do not honour (5)
-  {
-    file: 'tests/append-memory.test.js',
-    reason: 'posix-perm-denied',
-    symptom: 'fail',
-    note: 'stages an unwritable CLAUDE.md by chmod to prove the error path; Windows never denies, so the write succeeds and the assertion inverts',
-  },
+  // ── stages EACCES with chmod, which Windows ACLs do not honour (4)
   {
     file: 'tests/checkpoint-manager.test.js',
     reason: 'posix-perm-denied',
@@ -365,19 +351,7 @@ export const WINDOWS_EXEMPT = [
     symptom: 'fail',
     note: 'stages an unreadable file to prove the lint exits 2 rather than 1; Windows reads it and the fail-closed path is never taken',
   },
-  // ── needs symlink creation privilege (6)
-  {
-    file: 'tests/control-room-reindex.test.js',
-    reason: 'symlink-create',
-    symptom: 'fail',
-    note: 'accepts a symlink that realpaths to a surveyed repo and runs against the canonical path',
-  },
-  {
-    file: 'tests/control-room-rerun.test.js',
-    reason: 'symlink-create',
-    symptom: 'fail',
-    note: 'runs against the canonical realpath for a symlinked repo path',
-  },
+  // ── needs symlink creation privilege (3)
   {
     file: 'tests/file-ref-attachments.test.js',
     reason: 'symlink-create',
@@ -391,23 +365,29 @@ export const WINDOWS_EXEMPT = [
     note: 'the #6921 PoC needs a real symlink to prove the floor blocks the escape; without it the raw write lands on the fixture, not the target',
   },
   {
-    file: 'tests/security/path-traversal.test.js',
-    reason: 'symlink-create',
-    symptom: 'fail',
-    note: 'the unicode-normalisation and percent-encoding cases are staged through symlinks that cannot be created unprivileged',
-  },
-  {
     file: 'tests/ws-file-ops-raw-path-symlink-evasion.test.js',
     reason: 'symlink-create',
     symptom: 'fail',
     note: 'the raw-path PoC needs work -> .claude/worktrees to be a real symlink to resolve out of the project',
   },
-  // ── hardcodes a rooted POSIX path as the expected value (5)
+  // ── hardcodes a rooted POSIX path as the expected value (6)
   {
     file: 'tests/config-dir.test.js',
     reason: 'posix-abs-path',
     symptom: 'fail',
     note: 'expects configPath() to return \'/tmp/relocated-chroxy\'; Windows correctly yields the same path drive-rooted',
+  },
+  {
+    file: 'tests/control-room-reindex.test.js',
+    reason: 'posix-abs-path',
+    symptom: 'fail',
+    note: 'stubs realpath rather than creating a symlink; the failure is drive translation of the hardcoded rooted POSIX repo paths',
+  },
+  {
+    file: 'tests/control-room-rerun.test.js',
+    reason: 'posix-abs-path',
+    symptom: 'fail',
+    note: 'stubs realpath rather than creating a symlink; the failure is drive translation of the hardcoded rooted POSIX repo paths',
   },
   {
     file: 'tests/scheduled-task-store.test.js',
@@ -427,14 +407,7 @@ export const WINDOWS_EXEMPT = [
     symptom: 'fail',
     note: 'expects the CHROXY_CONFIG_DIR override to yield \'/tmp/chroxy-test-config-x/snapshots\' as a literal POSIX string',
   },
-  {
-    file: 'tests/spawn-env.test.js',
-    reason: 'posix-abs-path',
-    symptom: 'fail',
-    note: 'asserts PATH and HOME are preserved by comparing against literal \'/usr/bin\'',
-  },
-  // ── windows-slow: completes in isolation, cancelled under the full concurrent
-  //    run ON THE CI RUNNER specifically (3)
+  // ── completes in isolation, cancelled under the full concurrent run ON THE CI RUNNER (3)
   {
     file: 'tests/ide-search.test.js',
     reason: 'windows-slow',
@@ -456,7 +429,21 @@ export const WINDOWS_EXEMPT = [
     note: 'the #1931 CWD realpath TTL cache test is time-based and is cancelled before it finishes on the runner',
     issue: 7276,
   },
-  // ── TRACKED DEBT — not a POSIX mechanism; should pass on Windows (26)
+  // ── TRACKED DEBT — not a POSIX mechanism; should pass on Windows (32)
+  {
+    file: 'tests/append-memory.test.js',
+    reason: 'windows-defect',
+    symptom: 'fail',
+    note: 'the file contains no chmod at all; the failures are the "Access denied" project-containment seam on a plain in-project write',
+    issue: 7273,
+  },
+  {
+    file: 'tests/claude-tui-attachments.test.js',
+    reason: 'windows-defect',
+    symptom: 'fail',
+    note: 'no PTY is involved — the failing assertions are attachment numbering, and the only PTY mentions are comments about newline handling',
+    issue: 7273,
+  },
   {
     file: 'tests/control-room-integrations.test.js',
     reason: 'windows-defect',
@@ -535,6 +522,13 @@ export const WINDOWS_EXEMPT = [
     issue: 7273,
   },
   {
+    file: 'tests/node-version-check.test.js',
+    reason: 'windows-defect',
+    symptom: 'fail',
+    note: 'spawns process.execPath with --input-type=module, not a POSIX shell; the version message never reaches stderr on Windows',
+    issue: 7274,
+  },
+  {
     file: 'tests/orchestration-git-ops.test.js',
     reason: 'windows-defect',
     symptom: 'fail',
@@ -577,6 +571,13 @@ export const WINDOWS_EXEMPT = [
     issue: 7274,
   },
   {
+    file: 'tests/security/path-traversal.test.js',
+    reason: 'windows-defect',
+    symptom: 'fail',
+    note: 'the single failing case is percent-encoded dots treated as literal filename characters, which is path parsing rather than the symlink staging elsewhere in the file',
+    issue: 7273,
+  },
+  {
     file: 'tests/skills-trust.test.js',
     reason: 'windows-defect',
     symptom: 'fail',
@@ -588,6 +589,20 @@ export const WINDOWS_EXEMPT = [
     reason: 'windows-defect',
     symptom: 'fail',
     note: 'a corrupt usage file does not degrade to an empty store',
+    issue: 7274,
+  },
+  {
+    file: 'tests/spawn-env.test.js',
+    reason: 'windows-defect',
+    symptom: 'fail',
+    note: 'buildSpawnEnv does not preserve PATH/HOME on Windows, most likely env-key casing (Path vs PATH); the POSIX-looking values are plain strings, not filesystem targets',
+    issue: 7274,
+  },
+  {
+    file: 'tests/user-shell-session.test.js',
+    reason: 'windows-defect',
+    symptom: 'fail',
+    note: 'the PTY here is a fake injected as _term; the failing assertion is API_TOKEN stripping from the spawn env, the same env seam as spawn-env',
     issue: 7274,
   },
   {
@@ -655,6 +670,10 @@ export const WINDOWS_EXEMPT = [
 // as the suite grows — accepted, because it can only ever ADD failures. It can
 // never make this gate report false success. MAX_EXEMPT_RATIO covers bulk
 // drift; this covers the single-file relocation of a security boundary.
+// The roster's collapse floor, stated beside it. Deliberately below today's 10
+// so a genuine removal is possible, high enough that gutting the roster is not.
+export const MIN_MUST_RUN_ON_WINDOWS = 6
+
 export const MUST_RUN_ON_WINDOWS = [
   // The two suites #7270 was filed about: entirely path-handling and errno
   // behaviour, i.e. exactly what Windows coverage is for.
@@ -708,6 +727,7 @@ export function resolveWindowsTestSet({
   reasons = EXEMPT_REASONS,
   maxExemptRatio = MAX_EXEMPT_RATIO,
   minFiles = 0,
+  minMustRun = MIN_MUST_RUN_ON_WINDOWS,
 } = {}) {
   const problems = []
   const broken = (message) => problems.push({ severity: 'broken', message })
@@ -761,7 +781,13 @@ export function resolveWindowsTestSet({
       continue
     }
 
-    const reason = reasons[row.reason]
+    // Object.hasOwn, not a bare index: `reasons['toString']` resolves up the
+    // prototype chain and returns a function, so 'toString', 'constructor' and
+    // '__proto__' would all pass as valid reason categories — and then read
+    // `.kind` off Function.prototype, which is undefined, skipping BOTH
+    // issue-number checks below. A "closed set" that accepts Object.prototype's
+    // keys is not closed.
+    const reason = Object.hasOwn(reasons, row.reason) ? reasons[row.reason] : null
     if (!reason) {
       manifestErr(
         `${row.file}: unknown reason ${JSON.stringify(row.reason)}. Reasons are a closed set — ` +
@@ -784,12 +810,37 @@ export function resolveWindowsTestSet({
       )
     }
 
+    // `kind` decides whether an issue number is required, and it is compared
+    // against two string literals below. A category whose kind is missing,
+    // misspelled or differently-cased ('Debt') matches NEITHER branch, so both
+    // checks fall through and every row in that category is accepted with no
+    // issue and no complaint. Validate membership before relying on it.
+    if (reason.kind !== 'permanent' && reason.kind !== 'debt') {
+      manifestErr(
+        `${row.file}: reason ${JSON.stringify(row.reason)} has kind ${JSON.stringify(reason.kind)}, ` +
+        "which is neither 'permanent' nor 'debt'. That is not a harmless typo: the issue-number rules " +
+        'are keyed on this value, so an unrecognised kind silently exempts the row from both of them.',
+      )
+      exempt.push(row)
+      continue
+    }
+
     if (reason.kind === 'debt' && !row.issue) {
       manifestErr(
         `${row.file}: reason ${JSON.stringify(row.reason)} is TRACKED DEBT and requires an issue number. ` +
         'A defect with no issue is a permanent exemption wearing a temporary label.',
       )
     }
+    // Truthiness is not an issue number: `true`, 'TBD', 'later', -1 and {} all
+    // satisfied `!row.issue` being false, so "tracked debt carries an issue"
+    // was really "carries any truthy value".
+    if (row.issue !== undefined && !(Number.isInteger(row.issue) && row.issue > 0)) {
+      manifestErr(
+        `${row.file}: issue must be a positive integer issue NUMBER, got ${JSON.stringify(row.issue)}. ` +
+        'A placeholder is not a tracked issue.',
+      )
+    }
+
     if (reason.kind === 'permanent' && row.issue) {
       manifestErr(
         `${row.file}: reason ${JSON.stringify(row.reason)} is permanent but carries issue ${row.issue}. ` +
@@ -798,6 +849,24 @@ export function resolveWindowsTestSet({
     }
 
     exempt.push(row)
+  }
+
+  // The roster's own floor. Its comment argues it is safe because it "can only
+  // ever ADD failures" — true per ENTRY, false of its CARDINALITY: an empty
+  // array iterates zero times, raises nothing, and exits 0, which silently
+  // deletes the only check that catches a load-bearing suite being relocated
+  // into WINDOWS_EXEMPT. This function already refuses a zero-length walk and a
+  // zero-length run set for exactly this reason; the roster is the third
+  // derived set here and was the only one whose emptiness was silent. There is
+  // benign pressure toward shrinking it, too: renaming a roster file exits 2
+  // with "the roster is stale", and DELETING the entry clears that just as well
+  // as updating it.
+  if (mustRun.length < minMustRun) {
+    broken(
+      `MUST_RUN_ON_WINDOWS has ${mustRun.length} entr(ies), below the floor of ${minMustRun}. ` +
+      'Emptying or gutting the roster removes the only objection to relocating a load-bearing suite into ' +
+      'WINDOWS_EXEMPT — refusing to report a clean manifest.',
+    )
   }
 
   // The independently-stated roster (see MUST_RUN_ON_WINDOWS above).

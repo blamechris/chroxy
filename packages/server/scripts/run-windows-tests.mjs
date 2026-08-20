@@ -15,9 +15,11 @@
  * path one level up. The ubuntu job runs
  * `node --import ./tests/_setup.mjs --experimental-test-module-mocks --test <glob>`;
  * spawning that exact argv means a Windows-vs-Linux difference can never be
- * blamed on the runner. It also reuses the TAP-summary parsing that
- * `assert-test-count.mjs` already ships, instead of hand-rolling a reporter and
- * an exit code — which is precisely where a false-safety bug would live.
+ * blamed on the runner. The TAP-summary parsing below mirrors
+ * `assert-test-count.mjs`'s (that script exports nothing, so it cannot be
+ * imported); the file reporter and the exit policy are new here, and are the
+ * parts most worth reading twice — an exit policy is precisely where a
+ * false-safety bug lives.
  *
  * ── Why the list never crosses a command line as text ──────────────────────
  *
@@ -41,7 +43,7 @@
 import { spawn } from 'node:child_process'
 import { readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { resolve, dirname, join, relative } from 'node:path'
+import { resolve, dirname, join, relative, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -50,6 +52,14 @@ const SERVER_ROOT = resolve(HERE, '..')
 // Conservative against CreateProcessW's 32,767. Leaves room for the node path,
 // the flags, and growth inside a single batch.
 const DEFAULT_MAX_ARGV_BYTES = 24000
+
+// The collapse floor, on the side that actually EXECUTES the tests. The Linux
+// gate carries one via its .sh wrapper, but that wrapper cannot run on the
+// Windows job — so without this the runner would happily report
+// "OK: 3 file(s) ... 0 failed" after a broken walk, and 3 clean files would be
+// indistinguishable from 480. Same value and same reasoning as the wrapper's.
+const DEFAULT_MIN_FILES = 500
+let minFiles = DEFAULT_MIN_FILES
 
 function usageError(message) {
   console.error(`[run-windows-tests] ${message}`)
@@ -62,13 +72,30 @@ let maxArgvBytes = DEFAULT_MAX_ARGV_BYTES
 let concurrency = null
 let testsRoot = null
 
+// A value-taking flag with no value must NOT fall back to the default.
+// `run-windows-tests.mjs --tests-root` (flag last) makes args[++i] undefined,
+// and silently running against the REAL tree is precisely the fail-open this
+// script refuses everywhere else. A following flag is not a value either.
+const valueFor = (flag, i) => {
+  const v = args[i + 1]
+  if (v === undefined || v.startsWith('--')) {
+    usageError(`${flag} requires a value`)
+  }
+  return v
+}
+
 for (let i = 0; i < args.length; i++) {
   const a = args[i]
   if (a === '--print-plan') printPlan = true
-  else if (a === '--max-argv-bytes') maxArgvBytes = Number(args[++i])
-  else if (a === '--test-concurrency') concurrency = args[++i]
-  else if (a === '--tests-root') testsRoot = args[++i]
+  else if (a === '--max-argv-bytes') { maxArgvBytes = Number(valueFor(a, i)); i++ }
+  else if (a === '--test-concurrency') { concurrency = valueFor(a, i); i++ }
+  else if (a === '--tests-root') { testsRoot = valueFor(a, i); i++ }
+  else if (a === '--min-files') { minFiles = Number(valueFor(a, i)); i++ }
   else usageError(`unknown argument ${JSON.stringify(a)}`)
+}
+
+if (!Number.isInteger(minFiles) || minFiles < 0) {
+  usageError(`--min-files must be a non-negative integer, got ${minFiles}`)
 }
 
 if (!Number.isInteger(maxArgvBytes) || maxArgvBytes < 200) {
@@ -86,7 +113,7 @@ try {
   usageError(`could not load lib/windows-test-set.mjs: ${err && err.message}`)
 }
 
-const { all, exempt, run, problems } = lib.resolveWindowsTestSet({ testsRoot })
+const { all, exempt, run, problems } = lib.resolveWindowsTestSet({ testsRoot, minFiles })
 
 // The runner refuses on ANY problem — including a merely-wrong manifest. The
 // Server Lint gate is where a manifest defect gets its own precise verdict;
@@ -116,11 +143,15 @@ for (const f of run) {
 if (current.length > 0) batches.push(current)
 
 if (printPlan) {
+  // batchFiles carries the actual partition, not just its shape: a test that
+  // only compares COUNTS cannot tell a correct partition from one that dropped
+  // a file and duplicated another.
   console.log(JSON.stringify({
     all: all.length,
     exempt: exempt.length,
     run: run.length,
     batches: batches.map((b) => b.length),
+    batchFiles: batches,
     maxArgvBytes,
   }, null, 2))
   process.exit(0)
@@ -177,6 +208,12 @@ for (let b = 0; b < batches.length; b++) {
       stdio: ['inherit', 'pipe', 'inherit'],
       shell: false,
     })
+    // Decode as UTF-8 across chunk boundaries. `out += chunk` calls
+    // Buffer.toString() per chunk, so a multi-byte sequence straddling a 64KB
+    // boundary decodes as U+FFFD on both sides — harmless for the ASCII TAP
+    // numbers, but it corrupts the suite NAMES that are the only diagnostic a
+    // cancellation gives you.
+    child.stdout.setEncoding('utf8')
     child.stdout.on('data', (chunk) => {
       out += chunk
       process.stdout.write(chunk)
@@ -223,7 +260,11 @@ for (let b = 0; b < batches.length; b++) {
   }
   for (const line of reported.split('\n')) {
     const t = line.trim()
-    if (t) filesExecuted.add(pathKey(t))
+    if (t) {
+      const k = pathKey(t)
+      filesExecuted.add(k)
+      if (!executedOriginal.has(k)) executedOriginal.set(k, relative(SERVER_ROOT, t).split(sep).join('/'))
+    }
   }
   try { rmSync(manifestOut, { force: true }) } catch { /* best effort */ }
 
@@ -254,6 +295,11 @@ if (totalTests === 0) {
 // asked for, not a count and not a magic number. Nothing here drifts as the
 // suite grows.
 const expected = new Map(run.map((f) => [pathKey(join(SERVER_ROOT, f)), f]))
+// Keep the ORIGINAL spelling for every key so a diagnostic never prints the
+// case-folded, backslash-separated form — that is a third spelling, matching
+// neither the on-disk name nor the manifest's, and pasting it into
+// WINDOWS_EXEMPT produces an unrelated-looking exit 2.
+const executedOriginal = new Map()
 const missing = [...expected.keys()].filter((k) => !filesExecuted.has(k))
 const unexpected = [...filesExecuted].filter((k) => !expected.has(k))
 if (missing.length > 0 || unexpected.length > 0) {
@@ -265,7 +311,7 @@ if (missing.length > 0 || unexpected.length > 0) {
   }
   if (unexpected.length > 0) {
     console.error(`  ${unexpected.length} file(s) ran that were NOT in the derived set:`)
-    for (const k of unexpected.slice(0, 20)) console.error(`    ${relative(SERVER_ROOT, k)}`)
+    for (const k of unexpected.slice(0, 20)) console.error(`    ${executedOriginal.get(k) ?? k}`)
   }
   console.error('\n  A run that skipped files must not report success.')
   process.exit(1)

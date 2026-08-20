@@ -276,7 +276,7 @@ jobs:
         # The list is INVERTED now: the runner walks every *.test.js, subtracts
         # WINDOWS_EXEMPT, and runs the rest — so a new test file is covered here
         # BY DEFAULT and a POSIX-only one has to be classified out, loudly.
-        # Measured on a real Windows host: 482 of 554 files run, 10,964 tests
+        # Measured on the chroxy-win runner: 480 of 555 files run, 10,929 tests,
         # against the 193 this step used to run.
         #
         # ONE native command on purpose. The file list never crosses a command
@@ -301,7 +301,7 @@ jobs:
             Write-Host "::error::run-windows-tests could not run (stale or invalid WINDOWS_EXEMPT manifest, a broken walk, an empty run set, or a child that failed to spawn). The GUARD is broken, not necessarily the code."
             exit 1
           } else {
-            Write-Host "::error::A server test failed on Windows. Fix it, or add a row to WINDOWS_EXEMPT in packages/server/scripts/lib/windows-test-set.mjs with a reason category, the measured symptom, and (for windows-defect / windows-slow) an issue number."
+            Write-Host "::error::The derived Windows test set did not pass. If a TEST failed: fix it, or add a row to WINDOWS_EXEMPT in packages/server/scripts/lib/windows-test-set.mjs with a reason category, the measured symptom, and (for windows-defect / windows-slow) an issue number. If the run was UNREPORTABLE — no TAP summary, no file manifest, zero tests, cancelled tests, or a file set that does not match the derived set — the cause is printed immediately above and exempting a file is the wrong remedy."
             exit 1
           }
 

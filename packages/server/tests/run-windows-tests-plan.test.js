@@ -20,7 +20,7 @@ import { spawnSync } from 'node:child_process'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const RUNNER = resolve(__dirname, '..', 'scripts', 'run-windows-tests.mjs')
 
-function plan (extra = []) {
+function plan(extra = []) {
   const r = spawnSync(process.execPath, [RUNNER, '--print-plan', ...extra], { encoding: 'utf8' })
   return { status: r.status, json: r.status === 0 ? JSON.parse(r.stdout) : null, stderr: r.stderr }
 }
@@ -39,9 +39,36 @@ describe('run-windows-tests: the derived plan (#7270)', () => {
     const { status, json, stderr } = plan(['--max-argv-bytes', '400'])
     assert.equal(status, 0, `--print-plan failed:\n${stderr}`)
     assert.ok(json.batches.length > 1, 'the tiny budget did not actually force multiple batches — this test is checking nothing')
-    const summed = json.batches.reduce((a, b) => a + b, 0)
-    assert.equal(summed, json.run, 'batching lost or duplicated files')
     assert.ok(json.batches.every((n) => n > 0), 'an empty batch would spawn a runner with no files, which globs the cwd')
+
+    // Compare the FILES, not the counts. A partition that drops one file and
+    // duplicates another sums correctly and is still wrong.
+    const flat = json.batchFiles.flat()
+    assert.equal(flat.length, json.run, 'batching lost or duplicated files')
+    assert.equal(new Set(flat).size, json.run, 'a file appears in more than one batch')
+
+    // …and the partition must be of the SAME set the single-batch plan derives.
+    const whole = plan().json.batchFiles.flat()
+    assert.deepEqual([...flat].sort(), [...whole].sort(), 'the batched partition is not the derived run set')
+  })
+
+  test('the runner carries its own collapse floor, since the .sh wrapper cannot run on Windows', () => {
+    // The Linux gate gets its floor from the wrapper. The Windows job invokes
+    // the runner directly, so "walked 3 files, all clean" must not read the
+    // same as "walked 480".
+    assert.equal(plan(['--min-files', '99999']).status, 2)
+    // POSITIVE CONTROL: a floor the real tree clears.
+    assert.equal(plan(['--min-files', '1']).status, 0, 'control failed')
+  })
+
+  test('a value-taking flag with no value exits 2 instead of silently using the default', () => {
+    for (const argv of [['--tests-root'], ['--max-argv-bytes'], ['--test-concurrency'], ['--min-files']]) {
+      const r = spawnSync(process.execPath, [RUNNER, '--print-plan', ...argv], { encoding: 'utf8' })
+      assert.equal(r.status, 2, `argv ${JSON.stringify(argv)} must fail closed`)
+    }
+    // A following FLAG is not a value either.
+    const r = spawnSync(process.execPath, [RUNNER, '--tests-root', '--min-files', '1'], { encoding: 'utf8' })
+    assert.equal(r.status, 2)
   })
 
   test('the default budget keeps every batch under the Windows command-line cap', () => {

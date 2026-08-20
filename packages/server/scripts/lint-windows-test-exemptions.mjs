@@ -50,11 +50,21 @@ let testsRoot = null
 let manifestPath = null
 let minFiles = 0
 
+// A value-taking flag with no value must NOT fall back to the default.
+// `lint-windows-test-exemptions.mjs --tests-root` (flag last) makes args[++i]
+// undefined and would silently lint the REAL tree — the same fail-open the
+// unknown-flag check below exists to prevent. A following flag is not a value.
+const valueFor = (flag, i) => {
+  const v = args[i + 1]
+  if (v === undefined || v.startsWith('--')) usageError(`${flag} requires a value`)
+  return v
+}
+
 for (let i = 0; i < args.length; i++) {
   const a = args[i]
-  if (a === '--tests-root') testsRoot = args[++i]
-  else if (a === '--manifest') manifestPath = args[++i]
-  else if (a === '--min-files') minFiles = Number(args[++i])
+  if (a === '--tests-root') { testsRoot = valueFor(a, i); i++ }
+  else if (a === '--manifest') { manifestPath = valueFor(a, i); i++ }
+  else if (a === '--min-files') { minFiles = Number(valueFor(a, i)); i++ }
   else if (a === '--help' || a === '-h') {
     console.log('usage: lint-windows-test-exemptions.mjs [--tests-root DIR] [--manifest FILE] [--min-files N]')
     process.exit(0)
@@ -66,7 +76,7 @@ for (let i = 0; i < args.length; i++) {
   }
 }
 
-if (minFiles !== 0 && (!Number.isInteger(minFiles) || minFiles < 0)) {
+if (!Number.isInteger(minFiles) || minFiles < 0) {
   usageError(`--min-files must be a non-negative integer, got ${JSON.stringify(args[args.indexOf('--min-files') + 1])}`)
 }
 
@@ -88,6 +98,7 @@ let manifest = lib.WINDOWS_EXEMPT
 let mustRun = lib.MUST_RUN_ON_WINDOWS
 let reasons = lib.EXEMPT_REASONS
 let maxRatio = lib.MAX_EXEMPT_RATIO
+let minMustRun = lib.MIN_MUST_RUN_ON_WINDOWS
 if (manifestPath) {
   try {
     const mod = await import(pathToFileURL(resolve(manifestPath)).href)
@@ -98,6 +109,7 @@ if (manifestPath) {
     if (Array.isArray(mod.MUST_RUN_ON_WINDOWS)) mustRun = mod.MUST_RUN_ON_WINDOWS
     if (mod.EXEMPT_REASONS) reasons = mod.EXEMPT_REASONS
     if (typeof mod.MAX_EXEMPT_RATIO === 'number') maxRatio = mod.MAX_EXEMPT_RATIO
+    if (typeof mod.MIN_MUST_RUN_ON_WINDOWS === 'number') minMustRun = mod.MIN_MUST_RUN_ON_WINDOWS
   } catch (err) {
     usageError(`could not load --manifest ${manifestPath}: ${err && err.message}`)
   }
@@ -110,6 +122,7 @@ const { all, exempt, run, problems } = lib.resolveWindowsTestSet({
   reasons,
   maxExemptRatio: maxRatio,
   minFiles,
+  minMustRun,
 })
 
 const brokenProblems = problems.filter((p) => p.severity === 'broken')

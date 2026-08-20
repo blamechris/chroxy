@@ -47,7 +47,7 @@ after(() => {
  * Build a fixture package: <root>/tests/*.test.js plus a manifest module.
  * `files` are paths relative to the package root (e.g. 'tests/a.test.js').
  */
-function fixture ({ files, manifest, mustRun = [], reasons = null, maxRatio = null }) {
+function fixture({ files, manifest, mustRun = ['tests/f9.test.js'], reasons = null, maxRatio = null, minMustRun = 1 }) {
   const root = mkdtempSync(join(tmpdir(), 'chroxy-win-exempt-'))
   tmpRoots.push(root)
   for (const f of files) {
@@ -66,13 +66,14 @@ function fixture ({ files, manifest, mustRun = [], reasons = null, maxRatio = nu
     `export const WINDOWS_EXEMPT = ${JSON.stringify(manifest, null, 2)}`,
     `export const MUST_RUN_ON_WINDOWS = ${JSON.stringify(mustRun, null, 2)}`,
     maxRatio !== null ? `export const MAX_EXEMPT_RATIO = ${maxRatio}` : '',
+    `export const MIN_MUST_RUN_ON_WINDOWS = ${minMustRun}`,
   ].join('\n')
   const manifestPath = join(root, 'manifest.mjs')
   writeFileSync(manifestPath, body + '\n')
   return { root, testsRoot: join(root, 'tests'), manifestPath }
 }
 
-function runGate ({ testsRoot, manifestPath, extra = [] }) {
+function runGate({ testsRoot, manifestPath, extra = [] }) {
   const r = spawnSync(process.execPath, [
     GATE, '--tests-root', testsRoot, '--manifest', manifestPath, ...extra,
   ], { encoding: 'utf8' })
@@ -257,6 +258,98 @@ describe('lint-windows-test-exemptions: the manifest cannot rot silently (#7270)
     const f = fixture({ files: TEN, manifest: [] })
     const r = spawnSync(process.execPath, [GATE, '--tests-rooot', f.testsRoot], { encoding: 'utf8' })
     assert.equal(r.status, 2)
+  })
+
+  test('a reason from Object.prototype is NOT a valid category', () => {
+    // `reasons['toString']` resolves up the prototype chain and returns a
+    // function, so a bare index read accepts it as a category and then reads
+    // `.kind` off Function.prototype — undefined — skipping BOTH issue-number
+    // checks. A closed set that admits Object.prototype's keys is not closed.
+    for (const reason of ['toString', 'constructor', 'hasOwnProperty', 'valueOf']) {
+      const bad = fixture({
+        files: TEN,
+        manifest: [{ ...goodRow('tests/f0.test.js'), reason }],
+      })
+      assert.equal(runGate(bad).status, 1, `reason ${JSON.stringify(reason)} must be rejected`)
+    }
+    // POSITIVE CONTROL: a real category on the same fixture -> clean.
+    const good = fixture({ files: TEN, manifest: [goodRow('tests/f0.test.js')] })
+    assert.equal(runGate(good).status, 0, 'control failed')
+  })
+
+  test("a category whose kind is missing or misspelled exits 1 rather than skipping both issue checks", () => {
+    for (const kind of [undefined, 'permament', 'Debt', 'DEBT', '']) {
+      const bad = fixture({
+        files: TEN,
+        manifest: [{ ...goodRow('tests/f0.test.js'), reason: 'made-up' }],
+        reasons: { 'made-up': { kind, why: 'x' } },
+      })
+      assert.equal(runGate(bad).status, 1, `kind ${JSON.stringify(kind)} must be rejected`)
+    }
+    // POSITIVE CONTROL: the SAME custom category with a valid kind -> clean.
+    const good = fixture({
+      files: TEN,
+      manifest: [{ ...goodRow('tests/f0.test.js'), reason: 'made-up' }],
+      reasons: { 'made-up': { kind: 'permanent', why: 'x' } },
+    })
+    assert.equal(runGate(good).status, 0, 'control failed')
+  })
+
+  test('a placeholder issue value is not an issue number', () => {
+    const base = {
+      file: 'tests/f0.test.js',
+      reason: 'windows-defect',
+      symptom: 'fail',
+      note: 'a genuine cross-platform defect, not a POSIX dependency',
+    }
+    for (const issue of [true, 'TBD', 'later', -1, 0, 1.5]) {
+      const bad = fixture({ files: TEN, manifest: [{ ...base, issue }] })
+      assert.equal(runGate(bad).status, 1, `issue ${JSON.stringify(issue)} must be rejected`)
+    }
+    // POSITIVE CONTROL: a real number on the same row -> clean.
+    assert.equal(runGate(fixture({ files: TEN, manifest: [{ ...base, issue: 7999 }] })).status, 0, 'control failed')
+  })
+
+  test('gutting MUST_RUN_ON_WINDOWS exits 2 — the roster cannot be silently emptied', () => {
+    // The roster is the only check that catches a load-bearing suite being
+    // MOVED into the exempt list, and every other check derives from the exempt
+    // list. An empty roster iterates zero times and used to raise nothing.
+    const bad = fixture({ files: TEN, manifest: [goodRow('tests/f0.test.js')], mustRun: [], minMustRun: 6 })
+    assert.equal(runGate(bad).status, 2)
+
+    // POSITIVE CONTROL: the same fixture with a roster above the floor -> clean.
+    const good = fixture({
+      files: TEN,
+      manifest: [goodRow('tests/f0.test.js')],
+      mustRun: TEN.slice(1, 8),
+      minMustRun: 6,
+    })
+    assert.equal(runGate(good).status, 0, 'control failed')
+  })
+
+  test('a value-taking flag with no value exits 2 instead of silently using the default', () => {
+    // `--tests-root` with nothing after it made args[++i] undefined and fell
+    // back to the REAL tree — linting something nobody asked about, cleanly.
+    for (const argv of [['--tests-root'], ['--manifest'], ['--min-files'], ['--tests-root', '--min-files', '1']]) {
+      const r = spawnSync(process.execPath, [GATE, ...argv], { encoding: 'utf8' })
+      assert.equal(r.status, 2, `argv ${JSON.stringify(argv)} must fail closed`)
+    }
+  })
+
+  test('an empty run set exits 2 — every file exempt is not a green run', () => {
+    // Reachable only with a ratio ceiling that admits total exemption, which is
+    // why the ratio check alone cannot stand in for this one.
+    const bad = fixture({ files: TEN, manifest: TEN.map(goodRow), mustRun: [], maxRatio: 1.0 })
+    assert.equal(runGate(bad).status, 2)
+
+    // POSITIVE CONTROL: leave ONE file unexempted under the same ceiling -> clean.
+    const good = fixture({
+      files: TEN,
+      manifest: TEN.slice(0, 9).map(goodRow),
+      mustRun: TEN.slice(9),
+      maxRatio: 1.0,
+    })
+    assert.equal(runGate(good).status, 0, 'control failed')
   })
 
   test('an unloadable manifest exits 2, not 1 — "the gate broke" is not "the code is dirty"', () => {
