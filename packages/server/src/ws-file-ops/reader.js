@@ -5,6 +5,7 @@ import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
 import { parseDiff } from '../diff-parser.js'
 import { GIT } from '../git.js'
+import { isPathWithin } from '../utils/path-containment.js'
 
 const execFileAsync = promisify(execFileCb)
 
@@ -85,7 +86,7 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
           // A nonexistent path outside the root must return Access denied to
           // avoid leaking filesystem existence information as an oracle.
           const cwdReal = await resolveSessionCwd(sessionCwd)
-          const lexicallyWithinCwd = absPath.startsWith(cwdReal + '/') || absPath === cwdReal
+          const lexicallyWithinCwd = isPathWithin(absPath, cwdReal)
           if (!lexicallyWithinCwd) {
             send({
               type: 'file_content',

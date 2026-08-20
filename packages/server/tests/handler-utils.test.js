@@ -13,9 +13,11 @@ import {
 } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir, homedir } from 'node:os'
+import { isPathWithin } from '../src/utils/path-containment.js'
 import { nsCtx } from './test-helpers.js'
 import { createClientSender } from '../src/ws-client-sender.js'
 import { createKeyPair, deriveSharedKey, decrypt, DIRECTION_SERVER } from '@chroxy/store-core/crypto'
+import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
 import {
   validateAttachments,
   resolveFileRefAttachments,
@@ -40,6 +42,25 @@ import {
   isSessionViewer,
   terminalMirrorRecipient,
 } from '../src/handler-utils.js'
+
+// #7273 — a directory, and a file, that are genuinely OUTSIDE $HOME on THIS
+// platform. Both of the obvious POSIX choices are wrong on Windows: `/etc` does
+// not exist at all, and `os.tmpdir()` is INSIDE the user profile there
+// (`C:\\Users\\x\\AppData\\Local\\Temp`), so a fixture built on either tests
+// nothing — it fails on a missing path rather than on the containment rule it
+// means to exercise. %SystemRoot% is outside the profile on every Windows
+// install, and ships the hosts file at a stable location.
+//
+// Using a real out-of-home path rather than skipping keeps these assertions
+// LOAD-BEARING on Windows, which is the point: three of them previously passed
+// on Windows only because the containment check denied everything, and would
+// have kept passing had the check been removed entirely.
+const OUTSIDE_HOME_DIR = process.platform === 'win32'
+  ? (process.env.SystemRoot || 'C:\\Windows')
+  : '/etc'
+const OUTSIDE_HOME_FILE = process.platform === 'win32'
+  ? join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'drivers', 'etc', 'hosts')
+  : '/etc/hosts'
 
 // audit P1-2: the live-terminal mirror recipient predicate. The delivery filter
 // (ws-forwarding) and the coalescer gate (ws-server) must use this same function
@@ -134,21 +155,59 @@ describe('validateAttachments — path traversal prevention', () => {
     assert.strictEqual(err, null)
   })
 
-  it('rejects backslash traversal (..\\)', () => {
-    // On Unix, backslash is a valid filename char — but split('/') won't catch it.
-    // The validation uses split('/').includes('..'), so ..\ as a single segment
-    // would not match '..'. This test documents the current behavior.
+  it('rejects backslash traversal (..\\) on EVERY platform', () => {
+    // #7273 — this assertion used to be platform-conditional: rejected on
+    // Windows, ALLOWED on POSIX, on the reasoning that a backslash is a legal
+    // filename character there. Two things were wrong with that.
+    //
+    // First, it was aspirational on the half that mattered. The check was
+    // `split('/').includes('..')`, which never sees a backslash-separated
+    // segment — so `..\..\etc\passwd` was allowed on Windows too, where it IS
+    // traversal. Measured on a real Windows host, this test failed with
+    // "backslash traversal should be caught on Windows".
+    //
+    // Second, the security answer must not depend on which OS the DAEMON runs.
+    // A Windows client can talk to a POSIX daemon and vice versa; making the
+    // verdict a property of the host turns a client-supplied path into a
+    // platform-dependent capability. So the rule is now uniform: a `..` segment
+    // under either separator is traversal, everywhere.
+    //
+    // The cost is that a POSIX file literally named `..\..\etc\passwd` can no
+    // longer be attached by file_ref. That filename is pathological and the
+    // trade is plainly worth it.
     const err = validateAttachments([
       { type: 'file_ref', path: '..\\..\\etc\\passwd', name: 'passwd' }
     ])
-    // On Unix: '..\\..\\etc\\passwd' is one path component with backslashes in name,
-    // split('/') yields ['..\\..\\etc\\passwd'], which doesn't include '..'
-    // This is acceptable on Unix since resolve() treats it as a literal filename.
-    // The test documents this known platform behavior.
-    if (process.platform === 'win32') {
-      assert.ok(err, 'backslash traversal should be caught on Windows')
-    } else {
-      assert.strictEqual(err, null, 'backslash is a valid filename char on Unix — not traversal')
+    assert.ok(err, 'backslash traversal is caught on every platform')
+    assert.match(err, /traversal/)
+  })
+
+  it('rejects Windows-absolute file_ref paths on EVERY platform', () => {
+    // #7273 — `startsWith('/')` was the whole absolute-path test, so every
+    // Windows spelling of "absolute" sailed through: a drive path, a UNC share
+    // (which also makes the daemon open an outbound SMB connection to an
+    // attacker-chosen host), and the \\?\ device namespace.
+    for (const p of [
+      'C:\\Users\\dev\\.ssh\\id_rsa',
+      'C:/Users/dev/.ssh/id_rsa',
+      'D:\\secrets\\prod.env',
+      '\\\\attacker.example\\share\\x.txt',
+      '\\\\127.0.0.1\\C$\\Users\\dev\\.ssh\\id_rsa',
+      '\\\\?\\C:\\Users\\dev\\.ssh\\id_rsa',
+    ]) {
+      const err = validateAttachments([{ type: 'file_ref', path: p, name: 'x' }])
+      assert.ok(err, `must reject absolute path ${p}`)
+      assert.match(err, /must not be absolute/, `wrong rejection reason for ${p}`)
+    }
+  })
+
+  it('still accepts ordinary relative file_ref paths', () => {
+    // The control for the two tests above: the tightened rules must not have
+    // made every path invalid, which would let both of them pass for free.
+    for (const p of ['src/app.js', 'src\\app.js', 'a/b/c.txt', 'file.txt', 'src/..hidden/f.js']) {
+      assert.strictEqual(
+        validateAttachments([{ type: 'file_ref', path: p, name: 'x' }]), null,
+        `must accept relative path ${p}`)
     }
   })
 
@@ -430,15 +489,70 @@ describe('resolveFileRefAttachments — path traversal at resolve level', () => 
   })
 })
 
+describe('resolveFileRefAttachments — containment (#7273)', () => {
+  // These exist because the #7273 review proved the containment fix in
+  // resolveFileRefAttachments could be reverted to its pre-PR spelling with the
+  // ENTIRE server suite still green — 361 tests across every file that mentions
+  // file_ref, all passing against the reintroduced bug. A security fix nothing
+  // can fail for is not a fix; it is a comment.
+  //
+  // The Windows fail-open itself (cross-root: D:\, UNC, \\?\) is proved in
+  // path-containment.test.js, which binds the shipping predicate to path.win32.
+  // What is proved HERE is that resolveFileRefAttachments actually ROUTES
+  // through that predicate — which needs an input where the old and new
+  // spellings disagree ON THIS PLATFORM.
+
+  it('reads a file under a top-level directory whose name starts with two dots', () => {
+    // The disagreement. relative() returns '..hidden/f.txt', so the old
+    // `rel.startsWith('..')` rejected it as traversal; it is not traversal, it
+    // is a directory called '..hidden'. validateAttachments has always allowed
+    // this shape, so the two layers actively contradicted each other.
+    mkdirSync(join(testDir, '..hidden'), { recursive: true })
+    writeFileSync(join(testDir, '..hidden', 'f.txt'), 'in-project content')
+
+    const [out] = resolveFileRefAttachments(
+      [{ type: 'file_ref', path: '..hidden/f.txt', name: 'f.txt' }],
+      testDir
+    )
+    const decoded = Buffer.from(out.data, 'base64').toString('utf-8')
+    assert.strictEqual(decoded, 'in-project content',
+      'a top-level ..hidden directory is inside the project and must be readable')
+  })
+
+  it('CONTROL: real traversal out of the project is still refused', () => {
+    // Without this, the test above could pass because containment stopped
+    // working altogether — which is exactly how the bug it guards went unnoticed.
+    const [out] = resolveFileRefAttachments(
+      [{ type: 'file_ref', path: '../../../etc/hosts', name: 'hosts' }],
+      testDir
+    )
+    const decoded = Buffer.from(out.data, 'base64').toString('utf-8')
+    assert.match(decoded, /cannot read file outside project/)
+  })
+
+  it('fails CLOSED when the containment check cannot be answered', { skip: SKIP_NO_SYMLINK }, () => {
+    // A symlink cycle makes realpathSync throw ELOOP, so the post-realpath
+    // containment check never runs. That branch used to be a bare `catch {}`
+    // that fell through to readFileSync — "could not check" reading as
+    // "nothing to check". It must report a containment refusal, not a read error.
+    const a = join(testDir, 'loop-a')
+    const b = join(testDir, 'loop-b')
+    symlinkSync(b, a)
+    symlinkSync(a, b)
+    const [out] = resolveFileRefAttachments(
+      [{ type: 'file_ref', path: 'loop-a', name: 'loop-a' }],
+      testDir
+    )
+    const decoded = Buffer.from(out.data, 'base64').toString('utf-8')
+    assert.match(decoded, /cannot read file outside project/,
+      'an unanswerable containment check must refuse, not fall through to the read')
+  })
+})
+
 describe('resolveFileRefAttachments — symlink escape detection', () => {
-  it('blocks symlink that resolves outside project directory', () => {
+  it('blocks symlink that resolves outside project directory', { skip: SKIP_NO_SYMLINK }, () => {
     const linkPath = join(testDir, 'src', 'escape-link')
-    try {
-      symlinkSync('/etc/hosts', linkPath)
-    } catch {
-      // Skip if symlinks not supported
-      return
-    }
+    symlinkSync(OUTSIDE_HOME_FILE, linkPath)
     const result = resolveFileRefAttachments(
       [{ type: 'file_ref', path: 'src/escape-link' }],
       testDir
@@ -447,13 +561,9 @@ describe('resolveFileRefAttachments — symlink escape detection', () => {
     assert.match(decoded, /cannot read file outside project/)
   })
 
-  it('blocks symlink to parent directory', () => {
+  it('blocks symlink to parent directory', { skip: SKIP_NO_SYMLINK }, () => {
     const linkPath = join(testDir, 'parent-link')
-    try {
-      symlinkSync('..', linkPath)
-    } catch {
-      return
-    }
+    symlinkSync('..', linkPath)
     const result = resolveFileRefAttachments(
       [{ type: 'file_ref', path: 'parent-link' }],
       testDir
@@ -464,13 +574,9 @@ describe('resolveFileRefAttachments — symlink escape detection', () => {
     assert.match(decoded, /cannot read file outside project|Error/)
   })
 
-  it('allows symlink that stays within project directory', () => {
+  it('allows symlink that stays within project directory', { skip: SKIP_NO_SYMLINK }, () => {
     const linkPath = join(testDir, 'internal-link')
-    try {
-      symlinkSync(join(testDir, 'readme.md'), linkPath)
-    } catch {
-      return
-    }
+    symlinkSync(join(testDir, 'readme.md'), linkPath)
     const result = resolveFileRefAttachments(
       [{ type: 'file_ref', path: 'internal-link' }],
       testDir
@@ -480,15 +586,11 @@ describe('resolveFileRefAttachments — symlink escape detection', () => {
     assert.strictEqual(decoded, '# Project\n')
   })
 
-  it('blocks chain of symlinks that eventually escape', () => {
+  it('blocks chain of symlinks that eventually escape', { skip: SKIP_NO_SYMLINK }, () => {
     const link1 = join(testDir, 'link-chain-1')
     const link2 = join(testDir, 'link-chain-2')
-    try {
-      symlinkSync('/tmp', link1)
-      symlinkSync(link1, link2)
-    } catch {
-      return
-    }
+    symlinkSync('/tmp', link1)
+    symlinkSync(link1, link2)
     const result = resolveFileRefAttachments(
       [{ type: 'file_ref', path: 'link-chain-2' }],
       testDir
@@ -602,19 +704,21 @@ describe('validateCwdWithinHome', () => {
     assert.match(err, /within your home directory/)
   })
 
-  it('rejects /tmp (outside home)', () => {
-    // /tmp is typically NOT within home directory
-    const realTmp = realpathSync('/tmp')
-    const home = homedir()
-    if (!realTmp.startsWith(home + '/') && realTmp !== home) {
-      const err = validateCwdWithinHome('/tmp')
-      assert.ok(err)
-      assert.match(err, /within your home directory/)
-    }
+  it('rejects the platform temp dir when it is outside home', () => {
+    // #7273 — was hardcoded to '/tmp' with a `realTmp.startsWith(home + '/')`
+    // guard, which is the very spelling this PR removed everywhere else. On
+    // Windows os.tmpdir() is C:\Users\<u>\AppData\Local\Temp — INSIDE home —
+    // so the guard is doing real work here, not just guarding a POSIX literal.
+    const realTmp = realpathSync(tmpdir())
+    const home = realpathSync(homedir())
+    if (isPathWithin(realTmp, home)) return   // legitimately inside home (Windows)
+    const err = validateCwdWithinHome(realTmp)
+    assert.ok(err)
+    assert.match(err, /within your home directory/)
   })
 
-  it('rejects /etc directory', () => {
-    const err = validateCwdWithinHome('/etc')
+  it('rejects a directory outside home', () => {
+    const err = validateCwdWithinHome(OUTSIDE_HOME_DIR)
     assert.ok(err)
     assert.match(err, /within your home directory/)
   })
@@ -632,13 +736,9 @@ describe('validateCwdWithinHome', () => {
     assert.match(err, /Not a directory/)
   })
 
-  it('rejects symlink to directory outside home', () => {
+  it('rejects symlink to directory outside home', { skip: SKIP_NO_SYMLINK }, () => {
     const linkPath = join(testDir, 'etc-link')
-    try {
-      symlinkSync('/etc', linkPath)
-    } catch {
-      return
-    }
+    symlinkSync(OUTSIDE_HOME_DIR, linkPath)
     const err = validateCwdWithinHome(linkPath)
     assert.ok(err)
     assert.match(err, /within your home directory/)
@@ -966,7 +1066,7 @@ describe('validateCwdWithinHome — back-compat alias', () => {
   it('delegates to validateCwdAllowed with no config', () => {
     // The legacy function name should still work and still produce
     // the same "within your home directory" errors as before.
-    const err = validateCwdWithinHome('/etc')
+    const err = validateCwdWithinHome(OUTSIDE_HOME_DIR)
     assert.ok(err)
     assert.match(err, /within your home directory/)
   })

@@ -27,6 +27,7 @@
  * can already read the files directly. The check exists specifically
  * to shrink the blast radius of a compromised pairing token.
  */
+import { isAbsolute } from 'path'
 import { isPathWithin } from './handler-utils.js'
 
 /**
@@ -44,9 +45,15 @@ export function scopeConversationsToClient(conversations, client, ctx) {
   // Bound-but-cwd-missing: fail closed. A bound client should not see
   // *any* conversation if we can't confidently scope the result.
   if (!allowedCwd || typeof allowedCwd !== 'string') return []
+  // #7273 — `isPathWithin` REFUSES a non-absolute argument rather than silently
+  // resolving it against the server process's cwd. `conv.cwd` is read out of a
+  // JSONL record on disk and `allowedCwd` off a session, so neither is
+  // guaranteed well-formed here. Fail CLOSED on anything unusable: a
+  // conversation we cannot confidently place is one a bound client must not see.
+  if (!isAbsolute(allowedCwd)) return []
   return conversations.filter((conv) => {
     const cwd = conv?.cwd
-    if (!cwd || typeof cwd !== 'string') return false
-    return cwd === allowedCwd || isPathWithin(cwd, allowedCwd)
+    if (!cwd || typeof cwd !== 'string' || !isAbsolute(cwd)) return false
+    return isPathWithin(cwd, allowedCwd)
   })
 }

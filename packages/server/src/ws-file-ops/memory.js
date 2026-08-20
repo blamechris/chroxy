@@ -1,8 +1,9 @@
 import { stat, open } from 'fs/promises'
 import { constants as fsConstants } from 'fs'
-import { resolve, dirname, normalize, sep, extname } from 'path'
+import { resolve, dirname, normalize, extname } from 'path'
 import { homedir } from 'os'
 import { realpathOfDeepestAncestor } from './common.js'
+import { isPathWithin } from '../utils/path-containment.js'
 import { encodeProjectPath } from '../jsonl-reader.js'
 
 /** stat-size ceiling before attempting a read (matches readFileContent) */
@@ -142,7 +143,7 @@ async function resolveConfinedMemoryPath(lexicalAbsPath, allowedRoots, { require
     return { resolvedPath: null, skipEntry: { ...base, skipped: true, error: MEMORY_SKIP_ERROR } }
   }
 
-  const withinRoot = allowedRoots.some((root) => resolvedPath === root || resolvedPath.startsWith(root + sep))
+  const withinRoot = allowedRoots.some((root) => isPathWithin(resolvedPath, root))
   if (!withinRoot) {
     // Outside every allowed root — reject WITHOUT stat'ing (no existence oracle).
     // Echo the LEXICAL request path (base.path), NOT the realpath-resolved path,

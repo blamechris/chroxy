@@ -1,6 +1,7 @@
 import { realpath } from 'fs/promises'
-import { resolve, dirname, basename, join, isAbsolute, sep } from 'path'
+import { resolve, dirname, basename, join, isAbsolute } from 'path'
 import { resolveTargetComponentwiseAsync } from '../utils/componentwise-resolver.js'
+import { isPathWithin } from '../utils/path-containment.js'
 
 /**
  * Shared utilities for file operations: CWD resolution, path validation, exec helpers.
@@ -155,7 +156,7 @@ export { resolveTargetComponentwiseAsync }
 export async function validateRawPathWithinCwd(rawTarget, sessionCwd, cwdRealCache, cwdCacheTtl) {
   const cwdReal = await resolveSessionCwd(sessionCwd, cwdRealCache, cwdCacheTtl)
   const realPath = await resolveTargetComponentwiseAsync(cwdReal, rawTarget)
-  const valid = realPath.startsWith(cwdReal + sep) || realPath === cwdReal
+  const valid = isPathWithin(realPath, cwdReal)
   return { valid, realPath, cwdReal }
 }
 
@@ -186,7 +187,7 @@ export async function validateRawPathWithinCwd(rawTarget, sessionCwd, cwdRealCac
 export async function validatePathWithinCwd(absPath, sessionCwd, cwdRealCache, cwdCacheTtl) {
   const cwdReal = await resolveSessionCwd(sessionCwd, cwdRealCache, cwdCacheTtl)
   const realAbsPath = await realpathOfDeepestAncestor(absPath)
-  const valid = realAbsPath.startsWith(cwdReal + '/') || realAbsPath === cwdReal
+  const valid = isPathWithin(realAbsPath, cwdReal)
   return { valid, realPath: realAbsPath, cwdReal }
 }
 
@@ -220,7 +221,7 @@ export async function validateGitPath(repoPath, workspaceRoot) {
   // two functions share the exact same pattern 20 lines apart.
   const absRepoPath = resolve(repoPath)
   const resolvedRepo = await realpathOfDeepestAncestor(absRepoPath)
-  if (!resolvedRepo.startsWith(resolvedRoot + '/') && resolvedRepo !== resolvedRoot) {
+  if (!isPathWithin(resolvedRepo, resolvedRoot)) {
     throw Object.assign(
       new Error(`Access denied: git operations are restricted to the workspace directory`),
       { code: 'EACCES' }

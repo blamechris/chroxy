@@ -1,6 +1,6 @@
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
-import { join, basename, extname } from 'path'
+import { join, basename, extname, posix as posixPath, win32 as win32Path } from 'path'
 import { BaseSession, buildBaseSessionOpts, DEFAULT_RESULT_TIMEOUT_MS } from './base-session.js'
 import { isOperatorTimeoutInRange } from './duration.js'
 import { nonNegInt, synthesizeModelUsage } from './usage-normalize.js'
@@ -385,7 +385,10 @@ export class CodexAppServerSession extends BaseSession {
         // + warn on an absolute or parent-traversing path.
         const fileRefs = attachments.filter((a) => {
           if (!a || a.type !== 'file_ref' || typeof a.path !== 'string') return false
-          if (a.path.startsWith('/') || a.path.split(/[/\\]/).includes('..')) {
+          // #7273 — `startsWith('/')` missed every Windows absolute spelling
+          // (`C:\\x`, `\\\\host\\share\\x`, `\\\\?\\C:\\x`). The `..` half already split on
+          // both separators; the absolute half now tests both namespaces to match.
+          if (posixPath.isAbsolute(a.path) || win32Path.isAbsolute(a.path) || a.path.split(/[/\\]/).includes('..')) {
             ;(this._log || log).warn(`codex attachment: skipping non-relative file_ref path "${a.path}"`)
             return false
           }

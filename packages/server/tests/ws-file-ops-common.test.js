@@ -1,9 +1,10 @@
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtemp, rm, mkdir, symlink } from 'fs/promises'
-import { join } from 'path'
+import { join, sep } from 'path'
 import { tmpdir } from 'os'
 import { realpathOfDeepestAncestor, validatePathWithinCwd } from '../src/ws-file-ops/common.js'
+import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
 
 /**
  * Direct unit tests for the helpers in ws-file-ops/common.js — especially
@@ -36,15 +37,15 @@ describe('realpathOfDeepestAncestor', () => {
     const resolved = await realpathOfDeepestAncestor(sub)
     // On macOS /tmp may resolve to /private/tmp; just assert it ends with
     // the last segment since the prefix may be mangled by the OS.
-    assert.ok(resolved.endsWith('/existing-sub'))
+    assert.ok(resolved.endsWith(sep + 'existing-sub'))
   })
 
   it('resolves a non-existent leaf by realpath-ing its parent and appending the leaf', async () => {
     const resolved = await realpathOfDeepestAncestor(join(tmpDir, 'does-not-exist.txt'))
-    assert.ok(resolved.endsWith('/does-not-exist.txt'))
+    assert.ok(resolved.endsWith(sep + 'does-not-exist.txt'))
   })
 
-  it('walks up through a symlinked parent to reveal an escape', async () => {
+  it('walks up through a symlinked parent to reveal an escape', { skip: SKIP_NO_SYMLINK }, async () => {
     // `escape-parent` is a symlink pointing OUT of tmpDir. The walker
     // should realpath `escape-parent` to the outside location and
     // reconstruct `<outside>/future-leaf.sh`.
@@ -55,7 +56,7 @@ describe('realpathOfDeepestAncestor', () => {
       const resolved = await realpathOfDeepestAncestor(join(escapeParent, 'future-leaf.sh'))
       // The resolved path must point into outsideDir, not tmpDir — that's
       // the symlink being correctly chased.
-      assert.ok(resolved.endsWith('/future-leaf.sh'))
+      assert.ok(resolved.endsWith(sep + 'future-leaf.sh'))
       assert.ok(!resolved.includes('escape-parent-unit'),
         'walker must have replaced the symlink name with its target')
     } finally {
@@ -63,7 +64,7 @@ describe('realpathOfDeepestAncestor', () => {
     }
   })
 
-  it('fails closed (throws ENAMETOOLONG) when the depth ceiling is hit (Copilot review on PR #2807)', async () => {
+  it('fails closed (throws ENAMETOOLONG) when the depth ceiling is hit (Copilot review on PR #2807)', { skip: SKIP_NO_SYMLINK }, async () => {
     // An attacker crafts a path with 300+ non-existent tail components
     // under a symlinked parent. The depth ceiling (256) would otherwise
     // bail out with the lexical path — which the old version of the fix
@@ -112,7 +113,7 @@ describe('realpathOfDeepestAncestor', () => {
       assert.equal(valid, true)
     })
 
-    it('propagates ENAMETOOLONG from the depth-ceiling fail-closed path', async () => {
+    it('propagates ENAMETOOLONG from the depth-ceiling fail-closed path', { skip: SKIP_NO_SYMLINK }, async () => {
       // Ensure the helper's throw reaches the caller rather than being
       // swallowed somewhere. (validatePathWithinCwd does not try/catch
       // the helper, so the rejection should escape cleanly.)

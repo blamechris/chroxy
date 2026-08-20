@@ -2,7 +2,7 @@ import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, chmodSync, rmSync, readFileSync, existsSync, readdirSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
-import { join } from 'path'
+import { join, basename, dirname } from 'path'
 import { materializeAttachments, buildAttachmentsPromptSuffix } from '../src/claude-tui-attachments.js'
 
 describe('claude-tui-attachments', () => {
@@ -56,8 +56,10 @@ describe('claude-tui-attachments', () => {
       ]
       const out = materializeAttachments(atts, dir, 'msg-1')
       assert.equal(out.length, 2)
-      assert.ok(out[0].path.endsWith('/att-1.png'), `expected att-1.png, got ${out[0].path}`)
-      assert.ok(out[1].path.endsWith('/att-2.png'), `expected att-2.png, got ${out[1].path}`)
+      assert.equal(basename(out[0].path), 'att-1.png', `expected att-1.png, got ${out[0].path}`)
+      assert.equal(basename(dirname(out[0].path)), 'msg-1', 'file must live in the per-turn subdir')
+      assert.equal(basename(out[1].path), 'att-2.png', `expected att-2.png, got ${out[1].path}`)
+      assert.equal(basename(dirname(out[1].path)), 'msg-1', 'file must live in the per-turn subdir')
     })
 
     it('picks the extension from the original filename when present', () => {
@@ -241,8 +243,10 @@ describe('claude-tui-attachments', () => {
       ]
       const out = materializeAttachments(atts, dir, 'msg-skip-seq')
       assert.equal(out.length, 2)
-      assert.ok(out[0].path.endsWith('/att-1.png'), `expected att-1.png, got ${out[0].path}`)
-      assert.ok(out[1].path.endsWith('/att-2.png'), `expected att-2.png, got ${out[1].path}`)
+      assert.equal(basename(out[0].path), 'att-1.png', `expected att-1.png, got ${out[0].path}`)
+      assert.equal(basename(dirname(out[0].path)), 'msg-skip-seq', 'file must live in the per-turn subdir')
+      assert.equal(basename(out[1].path), 'att-2.png', `expected att-2.png, got ${out[1].path}`)
+      assert.equal(basename(dirname(out[1].path)), 'msg-skip-seq', 'file must live in the per-turn subdir')
       // And on disk: exactly att-1.png and att-2.png, no gaps.
       const files = readdirSync(join(dir, 'msg-skip-seq')).sort()
       assert.deepEqual(files, ['att-1.png', 'att-2.png'])

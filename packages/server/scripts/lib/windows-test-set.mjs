@@ -129,16 +129,20 @@ export const EXEMPT_SYMPTOMS = new Set(['fail', 'timeout', 'load-error'])
 // Ceiling on how much of the suite may be exempt. Exempting in BULK is how
 // #7270 happened in the first place, and no per-row check can see it: every
 // individual row can be impeccable while the aggregate quietly becomes "most of
-// the suite". Measured at 13.5% (75 of 555) when this landed; the ceiling is set
-// with headroom for honest growth and nowhere near a doubling.
+// the suite". Measured at 13.5% (75 of 555) when this landed, and 11.8%
+// (66 of 557) after #7273 un-exempted nine files; the ceiling is set with
+// headroom for honest growth and nowhere near a doubling.
 export const MAX_EXEMPT_RATIO = 0.20
 
 // ── The manifest ────────────────────────────────────────────────────────────
 //
-// Rows are seeded from MEASURED behaviour, never from grep. 72 of them come
-// from the survey in docs/records/windows-test-coverage-7270.md, which ran all
-// 553 files of that commit in isolation on a real Windows host with the flags
-// the CI job uses — 481 passed unmodified. The other 3 (the windows-slow rows)
+// Rows are seeded from MEASURED behaviour, never from grep. They came from the
+// survey in docs/records/windows-test-coverage-7270.md, which ran all 553 files
+// of that commit in isolation on a real Windows host with the flags the CI job
+// uses — 481 passed unmodified. #7273 then re-measured the 15 rows it owned and
+// removed nine (docs/records/windows-path-containment-7273.md), so the survey no
+// longer accounts for every row one-to-one; read the two records together. The
+// windows-slow rows
 // came later and from the CI runner itself: they PASS in isolation and in a
 // full concurrent run on a different clone, and are cancelled only in the
 // runner's own working directory. Both are measurements; they are not the SAME
@@ -156,8 +160,10 @@ export const MAX_EXEMPT_RATIO = 0.20
 // instrument — most rows below fail only a handful of their tests (measured:
 // tests/permission-manager.test.js fails 1 of 96, tests/discord-webhook-sink.test.js
 // 2 of 114), so ~1,967 passing tests sit inside the exempt files and are not
-// run on Windows. Reclaiming them by guarding the individual tests is
-// #7273 / #7274, and #7276 for the three cancelled on the runner.
+// run on Windows. Reclaiming them by guarding the individual tests is #7274,
+// and #7276 for the three cancelled on the runner. #7273 is DONE — it fixed the
+// containment seam rather than guarding tests, which is why nine whole files
+// came off rather than individual assertions being skipped.
 export const WINDOWS_EXEMPT = [
   // ── node-pty / ConPTY (1)
   {
@@ -429,21 +435,7 @@ export const WINDOWS_EXEMPT = [
     note: 'the #1931 CWD realpath TTL cache test is time-based and is cancelled before it finishes on the runner',
     issue: 7276,
   },
-  // ── TRACKED DEBT — not a POSIX mechanism; should pass on Windows (32)
-  {
-    file: 'tests/append-memory.test.js',
-    reason: 'windows-defect',
-    symptom: 'fail',
-    note: 'the file contains no chmod at all; the failures are the "Access denied" project-containment seam on a plain in-project write',
-    issue: 7273,
-  },
-  {
-    file: 'tests/claude-tui-attachments.test.js',
-    reason: 'windows-defect',
-    symptom: 'fail',
-    note: 'no PTY is involved — the failing assertions are attachment numbering, and the only PTY mentions are comments about newline handling',
-    issue: 7273,
-  },
+  // ── TRACKED DEBT — not a POSIX mechanism; should pass on Windows (23)
   {
     file: 'tests/control-room-integrations.test.js',
     reason: 'windows-defect',
@@ -466,46 +458,18 @@ export const WINDOWS_EXEMPT = [
     issue: 7274,
   },
   {
-    file: 'tests/conversation-scope.test.js',
-    reason: 'windows-defect',
-    symptom: 'fail',
-    note: 'cwd exact-match and subdirectory filtering does not match on Windows paths',
-    issue: 7273,
-  },
-  {
-    file: 'tests/git-stage-commit.test.js',
-    reason: 'windows-defect',
-    symptom: 'fail',
-    note: 'staging an in-project file is refused: \'Access denied: path outside project directory\'',
-    issue: 7273,
-  },
-  {
-    file: 'tests/handler-utils.test.js',
-    reason: 'windows-defect',
-    symptom: 'fail',
-    note: 'backslash traversal (..\\) is not caught on Windows, where it IS a real separator — security-relevant',
-    issue: 7273,
-  },
-  {
     file: 'tests/handlers/checkpoint-handlers.test.js',
     reason: 'windows-defect',
     symptom: 'fail',
-    note: 'the \'files\' restore mode does not revert the real working tree on Windows',
-    issue: 7273,
-  },
-  {
-    file: 'tests/handlers/conversation-handlers.test.js',
-    reason: 'windows-defect',
-    symptom: 'fail',
-    note: 'a spoofed client-supplied cwd hint is honoured instead of the recorded cwd — security-relevant',
-    issue: 7273,
+    note: 'the containment seam is fixed (#7273); what remains is the core.autocrlf setting in git handing back state-A\r\n where the fixture wrote state-A\n',
+    issue: 7285,
   },
   {
     file: 'tests/list-files.test.js',
     reason: 'windows-defect',
     symptom: 'fail',
-    note: 'recursive depth counting is wrong, most likely counting separators',
-    issue: 7273,
+    note: 'the containment seam is fixed (#7273); what remains is listFiles emitting backslash-separated relative paths on the wire, which also stops the gitignore matcher from splitting them into segments',
+    issue: 7282,
   },
   {
     file: 'tests/logger-audit-retention.test.js',
@@ -518,8 +482,8 @@ export const WINDOWS_EXEMPT = [
     file: 'tests/memory-read.test.js',
     reason: 'windows-defect',
     symptom: 'fail',
-    note: 'CLAUDE.md precedence and @import resolution fail on Windows path composition',
-    issue: 7273,
+    note: 'the containment seam is fixed (#7273); what remains is encodeProjectPath leaving backslashes and the drive letter in the projects-dir key, plus global CLAUDE.md discovery under USERPROFILE',
+    issue: 7283,
   },
   {
     file: 'tests/node-version-check.test.js',
@@ -571,13 +535,6 @@ export const WINDOWS_EXEMPT = [
     issue: 7274,
   },
   {
-    file: 'tests/security/path-traversal.test.js',
-    reason: 'windows-defect',
-    symptom: 'fail',
-    note: 'the single failing case is percent-encoded dots treated as literal filename characters, which is path parsing rather than the symlink staging elsewhere in the file',
-    issue: 7273,
-  },
-  {
     file: 'tests/skills-trust.test.js',
     reason: 'windows-defect',
     symptom: 'fail',
@@ -616,29 +573,15 @@ export const WINDOWS_EXEMPT = [
     file: 'tests/write-file.test.js',
     reason: 'windows-defect',
     symptom: 'fail',
-    note: 'a plain in-project write is refused with \'Access denied: file writing is restricted to the project directory\'',
-    issue: 7273,
-  },
-  {
-    file: 'tests/ws-file-ops-common.test.js',
-    reason: 'windows-defect',
-    symptom: 'fail',
-    note: 'realpath resolution of existing and non-existent leaves disagrees with the POSIX result',
-    issue: 7273,
+    note: 'the containment seam is fixed (#7273); what remains is open(O_WRONLY|O_TRUNC) failing EINVAL on Windows, which the Access-denied failure was masking',
+    issue: 7284,
   },
   {
     file: 'tests/ws-file-ops-error-paths.test.js',
     reason: 'windows-defect',
     symptom: 'fail',
-    note: 'ENOTDIR and not-found paths surface as \'Access denied\' instead of their real errors',
-    issue: 7273,
-  },
-  {
-    file: 'tests/ws-file-ops-git-paths.test.js',
-    reason: 'windows-defect',
-    symptom: 'fail',
-    note: 'gitStage rejects valid relative paths within CWD as outside the workspace',
-    issue: 7273,
+    note: 'the containment seam is fixed (#7273); what remains is ENOTDIR surfacing as Directory not found rather than Not a directory',
+    issue: 7284,
   },
   {
     file: 'tests/ws-git-result-schemas.test.js',
@@ -651,8 +594,8 @@ export const WINDOWS_EXEMPT = [
     file: 'tests/ws-server-file-ops.test.js',
     reason: 'windows-defect',
     symptom: 'fail',
-    note: 'browse/read reject in-project paths with \'Access denied: directory listing is restricted\'',
-    issue: 7273,
+    note: 'the containment seam is fixed (#7273) — 17 of 18 failures gone; the last one is the premise of the fixture itself: os.tmpdir() is INSIDE os.homedir() on Windows, so its outside-home symlink target is not outside home',
+    issue: 7285,
   },
 ]
 
