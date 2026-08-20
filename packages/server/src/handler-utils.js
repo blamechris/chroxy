@@ -7,9 +7,10 @@
  */
 import { statSync, realpathSync, readFileSync } from 'fs'
 import { homedir } from 'os'
-import { resolve, relative, sep } from 'path'
+import { resolve, relative, sep, posix as posixPath, win32 as win32Path } from 'path'
 import { createLogger } from './logger.js'
 import { configDir } from './config-dir.js'
+import { isPathWithin as isPathWithinCanonical } from './utils/path-containment.js'
 
 const log = createLogger('handler-utils')
 
@@ -87,10 +88,17 @@ export function validateAttachments(attachments) {
       if (typeof att.path !== 'string' || !att.path.trim()) {
         return `attachment[${i}]: file_ref requires a non-empty path`
       }
-      if (att.path.startsWith('/')) {
+      // #7273 — test BOTH path namespaces, not just the host's. `startsWith('/')`
+      // missed every Windows absolute spelling (`C:\\x`, `\\\\server\\share\\x`,
+      // `\\\\?\\C:\\x`), and `split('/')` missed `..\\..\\etc\\passwd` because on
+      // Windows the separator is a backslash. Checking win32 AND posix means the
+      // answer does not depend on which OS the daemon happens to run, and a
+      // POSIX daemon rejecting `C:\\x` costs nothing — it is not a path it could
+      // usefully serve anyway.
+      if (posixPath.isAbsolute(att.path) || win32Path.isAbsolute(att.path)) {
         return `attachment[${i}]: file_ref path must not be absolute`
       }
-      if (att.path.split('/').includes('..')) {
+      if (att.path.split(/[\\/]/).includes('..')) {
         return `attachment[${i}]: file_ref path must not contain traversal (..)`
       }
       continue
@@ -132,17 +140,26 @@ export function resolveFileRefAttachments(attachments, cwd) {
   return attachments.map(att => {
     if (att.type !== 'file_ref') return att
     const absPath = resolve(cwd, att.path)
-    // Security: ensure resolved path is within cwd
-    const rel = relative(cwd, absPath)
-    if (rel.startsWith('..') || resolve(cwd, rel) !== absPath) {
+    // Security: ensure resolved path is within cwd.
+    //
+    // #7273 — this was `rel.startsWith('..') || resolve(cwd, rel) !== absPath`,
+    // which FAILS OPEN on Windows. `path.win32.relative()` only emits a
+    // `..`-prefixed path when both sides share a root; across roots it returns
+    // the target verbatim, so `D:\\secrets\\x`, `\\\\host\\share\\x` and
+    // `\\\\?\\C:\\Users\\dev\\.ssh\\id_rsa` all passed. The round-trip half was a
+    // tautology for exactly those inputs (`resolve(cwd, absTarget) === absTarget`),
+    // so it caught nothing either. `isPathWithin` is root-aware.
+    const cwdAbs = resolve(cwd)
+    if (!isPathWithin(absPath, cwdAbs)) {
       return { type: 'document', mediaType: 'text/plain', data: Buffer.from(`[Error: cannot read file outside project: ${att.path}]`).toString('base64'), name: att.name || att.path }
     }
     // Security: verify after symlink resolution to prevent symlink escape
     try {
       const realAbs = realpathSync(absPath)
       const realCwd = realpathSync(cwd)
-      const realRel = relative(realCwd, realAbs)
-      if (realRel.startsWith('..')) {
+      // Same root-awareness fix as layer 2 — this re-check repeated the flaw
+      // verbatim, so it could not catch what layer 2 let through.
+      if (!isPathWithin(realAbs, realCwd)) {
         return { type: 'document', mediaType: 'text/plain', data: Buffer.from(`[Error: cannot read file outside project: ${att.path}]`).toString('base64'), name: att.name || att.path }
       }
     } catch {
@@ -282,18 +299,20 @@ export function terminalMirrorRecipient(client, sid) {
     isSessionViewer(client, sid)
 }
 
-export function isPathWithin(absPath, baseDir) {
-  if (absPath === baseDir) return true
-  // Normalize: strip a trailing separator so filesystem root and
-  // drive roots work correctly. After this, baseDir is never
-  // '/' or 'C:\\' — it's '' or 'C:'. We then append sep before the
-  // prefix match so we still require a separator boundary.
-  const normalized = baseDir.endsWith(sep) ? baseDir.slice(0, -1) : baseDir
-  // If the normalization drove baseDir to an empty string, the
-  // original was '/' (posix) — everything absolute is within it.
-  if (normalized === '') return true
-  return absPath.startsWith(normalized + sep)
-}
+// #7273 — this WAS a hand-rolled prefix match. It handled the trailing-separator
+// case (which most of the other copies did not) but stayed case-SENSITIVE and,
+// more seriously, shared the `relative()`-family's blindness to a target on a
+// DIFFERENT Windows root. The predicate now has exactly one implementation, in
+// `utils/path-containment.js`; this is a named re-export so the existing
+// importers (conversation-scope.js and four call sites below) keep working.
+//
+// NOTE the contract change: the canonical helper THROWS EINVAL on a
+// non-absolute argument rather than quietly answering a question about the
+// server process's cwd. Every call site in this file passes realpath'd absolute
+// paths. The one caller that can be handed an arbitrary string —
+// conversation-scope.js, reading a cwd out of a JSONL record — guards for it
+// explicitly and fails closed.
+export const isPathWithin = isPathWithinCanonical
 
 /**
  * Returns true if `absPath` touches any FORBIDDEN_HOME_SUBDIRS entry

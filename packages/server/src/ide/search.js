@@ -16,6 +16,7 @@
  */
 import { readdir, readFile, stat, realpath, lstat } from 'fs/promises'
 import { join, resolve, relative, extname, sep } from 'path'
+import { isPathWithin } from '../utils/path-containment.js'
 
 // Directories never worth walking (mirrors symbols.js IGNORED_DIRS).
 const IGNORED_DIRS = new Set([
@@ -95,7 +96,12 @@ async function collectMatches(rootDir, matchLine, opts = {}) {
       return { results: [], truncated: false }
     }
     const rel = relative(root, realTarget)
-    if (rel === '..' || rel.startsWith('..' + sep) || resolve(root, rel) !== realTarget) {
+    // #7273 — this was `rel === '..' || rel.startsWith('..' + sep) || resolve(root, rel) !== realTarget`.
+    // Correct for same-root escapes, blind to a target on a DIFFERENT Windows root:
+    // `path.win32.relative('C:\\ws', 'D:\\x')` returns `'D:\\x'`, which is neither `'..'`
+    // nor `'..' + sep`, and the round-trip clause is a tautology for exactly that input
+    // (`resolve(root, 'D:\\x') === 'D:\\x'`). `isPathWithin` is root-aware.
+    if (!isPathWithin(realTarget, root)) {
       return { results: [], truncated: false }
     }
     if (rel.split(sep).some((s) => IGNORED_DIRS.has(s) || s.startsWith('.'))) {

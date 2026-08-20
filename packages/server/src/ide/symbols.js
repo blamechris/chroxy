@@ -29,6 +29,7 @@
  */
 import { readdir, readFile, stat, realpath, lstat } from 'fs/promises'
 import { join, resolve, relative, extname, sep } from 'path'
+import { isPathWithin } from '../utils/path-containment.js'
 
 // Directories never worth walking — build output, vendored deps, VCS metadata,
 // language caches. Keeps the scan bounded and the symbol table signal-rich.
@@ -214,7 +215,12 @@ export async function collectWorkspaceSymbols(rootDir, opts = {}) {
       return { symbols: [], truncated: false }
     }
     const rel = relative(root, realTarget)
-    if (rel === '..' || rel.startsWith('..' + sep) || resolve(root, rel) !== realTarget) {
+    // #7273 — this was `rel === '..' || rel.startsWith('..' + sep) || resolve(root, rel) !== realTarget`.
+    // Correct for same-root escapes, blind to a target on a DIFFERENT Windows root:
+    // `path.win32.relative('C:\\ws', 'D:\\x')` returns `'D:\\x'`, which is neither `'..'`
+    // nor `'..' + sep`, and the round-trip clause is a tautology for exactly that input
+    // (`resolve(root, 'D:\\x') === 'D:\\x'`). `isPathWithin` is root-aware.
+    if (!isPathWithin(realTarget, root)) {
       // The REAL path escapes the workspace (e.g. via a symlink) — refuse.
       return { symbols: [], truncated: false }
     }

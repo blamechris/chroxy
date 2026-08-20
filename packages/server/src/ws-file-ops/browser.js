@@ -4,6 +4,7 @@ import { join, resolve, normalize, relative } from 'path'
 import { createLogger } from '../logger.js'
 import { getBuiltinCommands } from '../builtin-commands.js'
 import { getProvider } from '../providers.js'
+import { isPathWithin } from '../utils/path-containment.js'
 
 const log = createLogger('ws')
 
@@ -44,7 +45,7 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
       }
       const homeReal = await realpath(home)
 
-      if (!realAbsPath.startsWith(homeReal + '/') && realAbsPath !== homeReal) {
+      if (!isPathWithin(realAbsPath, homeReal)) {
         sendFn(ws, {
           type: 'directory_listing',
           path: absPath,
