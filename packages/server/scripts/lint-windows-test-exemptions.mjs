@@ -36,7 +36,7 @@
  */
 
 import { resolve, dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
@@ -77,7 +77,9 @@ testsRoot = testsRoot ? resolve(testsRoot) : resolve(HERE, '..', 'tests')
 // would read as "the code is dirty".
 let lib
 try {
-  lib = await import(join(HERE, 'lib', 'windows-test-set.mjs'))
+  // pathToFileURL, not a bare path: on Windows an absolute path is 'A:\\...',
+  // and the ESM loader rejects it as an unknown 'a:' protocol.
+  lib = await import(pathToFileURL(join(HERE, 'lib', 'windows-test-set.mjs')).href)
 } catch (err) {
   usageError(`could not load lib/windows-test-set.mjs: ${err && err.message}`)
 }
@@ -88,7 +90,7 @@ let reasons = lib.EXEMPT_REASONS
 let maxRatio = lib.MAX_EXEMPT_RATIO
 if (manifestPath) {
   try {
-    const mod = await import(resolve(manifestPath))
+    const mod = await import(pathToFileURL(resolve(manifestPath)).href)
     if (!Array.isArray(mod.WINDOWS_EXEMPT)) {
       usageError(`${manifestPath} does not export a WINDOWS_EXEMPT array`)
     }

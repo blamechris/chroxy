@@ -79,7 +79,9 @@ testsRoot = testsRoot ? resolve(testsRoot) : join(SERVER_ROOT, 'tests')
 
 let lib
 try {
-  lib = await import(join(HERE, 'lib', 'windows-test-set.mjs'))
+  // pathToFileURL, not a bare path: on Windows an absolute path is 'A:\\...',
+  // and the ESM loader rejects it as an unknown 'a:' protocol.
+  lib = await import(pathToFileURL(join(HERE, 'lib', 'windows-test-set.mjs')).href)
 } catch (err) {
   usageError(`could not load lib/windows-test-set.mjs: ${err && err.message}`)
 }
