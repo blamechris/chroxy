@@ -231,11 +231,14 @@ jobs:
     # somewhere that actually blocks a merge.
     needs: runner-target
     runs-on: ${{ fromJSON(needs.runner-target.outputs.winrunner) }}
-    # 15 was sized for EIGHT files (~4s of test time). The derived set is 482.
-    # Measured end-to-end on the chroxy-win box at 4 concurrency; raised with
-    # headroom because a timeout kill is indistinguishable from a hang. Reset
-    # this from the observed runtime once a few real runs have landed.
-    timeout-minutes: 30
+    # 15 was sized for EIGHT files (~4s of test time). The derived set is ~483,
+    # and the first real run of it on chroxy-win took 2m39s end to end (checkout
+    # + npm ci + protocol build + 99s of tests). 20 is that with room for a slow
+    # npm ci and a busy box, without tying up the single Windows runner for half
+    # an hour when something genuinely hangs — a timeout kill is
+    # indistinguishable from a hang, so this wants to be tight enough to be a
+    # useful signal.
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: packages/server

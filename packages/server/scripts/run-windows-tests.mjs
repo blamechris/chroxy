@@ -138,6 +138,8 @@ const lastNumber = (text, label) => {
 
 let totalTests = 0
 let totalFail = 0
+let totalCancelled = 0
+let worstExit = 0
 const filesExecuted = new Set()
 
 for (let b = 0; b < batches.length; b++) {
@@ -179,6 +181,14 @@ for (let b = 0; b < batches.length; b++) {
 
   const tests = lastNumber(captured.out, 'tests')
   const fail = lastNumber(captured.out, 'fail')
+  // A CANCELLED test is one that never finished — node reports it separately
+  // from `fail`, and a run can carry `# fail 0` alongside `# cancelled 33`.
+  // Counting only `fail` would make "33 tests never ran" indistinguishable
+  // from "everything passed", which is the exact mode this whole change exists
+  // to remove. Measured on the real Windows host: 33 cancelledByParent while
+  // `# fail` was 1.
+  const cancelled = lastNumber(captured.out, 'cancelled')
+  if (typeof captured.code === 'number' && captured.code !== 0) worstExit = captured.code
   if (tests === null || fail === null) {
     console.error(
       `\n[run-windows-tests] FAIL: batch ${b + 1}/${batches.length} produced no TAP summary ` +
@@ -206,6 +216,7 @@ for (let b = 0; b < batches.length; b++) {
 
   totalTests += tests
   totalFail += fail
+  totalCancelled += cancelled ?? 0
 }
 
 if (totalTests === 0) {
@@ -234,6 +245,27 @@ if (missing.length > 0 || unexpected.length > 0) {
   process.exit(1)
 }
 
+if (totalCancelled > 0) {
+  console.error(
+    `\n[run-windows-tests] FAIL: ${totalCancelled} test(s) were CANCELLED and never completed ` +
+    '(node reports these separately from failures — grep the TAP output above for cancelledByParent).\n' +
+    '  A cancelled test produced no result. It is not a pass.',
+  )
+  process.exit(1)
+}
+
+// Last line of defence: the child said something went wrong and none of the
+// checks above accounted for it. "The runner exited non-zero for a reason I
+// cannot name" must not be reported as green.
+if (worstExit !== 0 && totalFail === 0) {
+  console.error(
+    `\n[run-windows-tests] FAIL: the test runner exited ${worstExit} but the TAP summary reported ` +
+    'no failures and no cancellations. Something failed in a way this script does not model — ' +
+    'refusing to call the run green.',
+  )
+  process.exit(1)
+}
+
 if (totalFail > 0) {
   console.error(`\n[run-windows-tests] FAIL: ${totalFail} test(s) failed on Windows (see the TAP output above).`)
   console.error(
@@ -246,5 +278,6 @@ if (totalFail > 0) {
 
 console.log(
   `\n[run-windows-tests] OK: ${run.length} file(s) in the derived Windows set ` +
-  `(${all.length} total, ${exempt.length} exempt), ${batches.length} batch(es), ${totalTests} tests, 0 failed.`,
+  `(${all.length} total, ${exempt.length} exempt), ${batches.length} batch(es), ${totalTests} tests, ` +
+  '0 failed, 0 cancelled.',
 )
