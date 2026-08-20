@@ -1,29 +1,44 @@
-// path-containment.js — the ONE answer to "is this path inside that directory?"
-// (#7273).
+// path-containment.js — the shared answer to "is this path inside that
+// directory?" (#7273). Intended to be the only one; see the scope caveat below
+// for where copies still survive (#7287).
 //
 // ── Why this file exists ────────────────────────────────────────────────────
 //
-// The question "does `target` live inside `root`?" was answered by SIX
-// hand-rolled copies scattered across the server, in two spellings:
+// The question "does `target` live inside `root`?" was hand-rolled at fifteen
+// call sites across the server, in THREE spellings — and every one of them is
+// wrong in at least one way:
 //
-//   realAbsPath.startsWith(cwdReal + '/')     ws-file-ops/common.js  (x2)
-//                                             ws-file-ops/reader.js
-//                                             ws-file-ops/browser.js
-//   realPath.startsWith(cwdReal + sep)        ws-file-ops/common.js
-//                                             ws-file-ops/memory.js
+//   target.startsWith(root + '/')      ws-file-ops/common.js (x2), reader.js, browser.js
+//   target.startsWith(root + sep)      ws-file-ops/common.js, memory.js
+//   rel.startsWith('..')               handler-utils.js (x2)
+//   rel.startsWith('..' + sep)         ide/search.js, ide/symbols.js
 //
-// plus a third family that asked it backwards, via `relative()`:
+// This module replaces all of them, for the same reason
+// `utils/componentwise-resolver.js` exists: a security-relevant path predicate
+// must have exactly one implementation, or the copies drift and only some of
+// them get fixed. #6928 was a bug present in BOTH copies of the component-wise
+// walk; this is the same lesson applied to containment.
 //
-//   rel.startsWith('..')                      handler-utils.js (x2)
-//   rel.startsWith('..' + sep)                ide/search.js, ide/symbols.js
+// ── What this module does NOT yet cover ─────────────────────────────────────
 //
-// EVERY ONE of those spellings is wrong, in three different ways. This module
-// replaces all of them, for the same reason `utils/componentwise-resolver.js`
-// exists: a security-relevant path predicate must have exactly one
-// implementation, or the copies drift and only some of them get fixed. #6928
-// was a bug present in BOTH copies of the component-wise walk; this is the same
-// lesson applied to containment.
+// Be honest about the boundary, because "one implementation" is a claim that
+// rots quietly. #7273 converted the ws-file-ops, attachment, conversation-scope
+// and IDE surfaces. These hand-rolled copies survive elsewhere and are tracked
+// in #7287:
 //
+//   docker-byok-session.js  remapToContainerPath — `root + '/'` on a HOST path;
+//                           breaks docker-byok on a Windows host outright
+//   devcontainer-config.js  validateMounts — an `endsWith(sep) ? : + sep` variant
+//   pages-store.js          resolveFile — `root + sep`, twice
+//   server-cli.js           isWithinHome — a default-SELECTION heuristic, not a
+//                           containment gate; converting it would CHANGE behaviour
+//   permission-{floor,manager}.js  already carry the correct `isAbsolute(rel)`
+//                           term, so they are consistent but are still a second
+//                           implementation of this predicate
+//
+// There is no lint stopping a sixteenth copy from being written. That is the
+// most valuable unbuilt piece of this work; also #7287.
+
 // ── The three defects, and why the obvious fixes do not work ────────────────
 //
 // (1) `root + '/'` assumes the POSIX separator. On Windows every path that
@@ -148,14 +163,3 @@ export function makeIsPathWithin(pathImpl) {
  * @throws {Error} EINVAL if either argument is not an absolute string
  */
 export const isPathWithin = makeIsPathWithin(path)
-
-/**
- * The negation, for call sites that read better that way. Same contract.
- *
- * @param {string} target - Absolute path under test
- * @param {string} root - Absolute directory that should contain it
- * @returns {boolean}
- */
-export function isPathOutside(target, root) {
-  return !isPathWithin(target, root)
-}

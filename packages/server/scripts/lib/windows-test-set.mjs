@@ -129,16 +129,20 @@ export const EXEMPT_SYMPTOMS = new Set(['fail', 'timeout', 'load-error'])
 // Ceiling on how much of the suite may be exempt. Exempting in BULK is how
 // #7270 happened in the first place, and no per-row check can see it: every
 // individual row can be impeccable while the aggregate quietly becomes "most of
-// the suite". Measured at 13.5% (75 of 555) when this landed; the ceiling is set
-// with headroom for honest growth and nowhere near a doubling.
+// the suite". Measured at 13.5% (75 of 555) when this landed, and 11.8%
+// (66 of 557) after #7273 un-exempted nine files; the ceiling is set with
+// headroom for honest growth and nowhere near a doubling.
 export const MAX_EXEMPT_RATIO = 0.20
 
 // ── The manifest ────────────────────────────────────────────────────────────
 //
-// Rows are seeded from MEASURED behaviour, never from grep. 72 of them come
-// from the survey in docs/records/windows-test-coverage-7270.md, which ran all
-// 553 files of that commit in isolation on a real Windows host with the flags
-// the CI job uses — 481 passed unmodified. The other 3 (the windows-slow rows)
+// Rows are seeded from MEASURED behaviour, never from grep. They came from the
+// survey in docs/records/windows-test-coverage-7270.md, which ran all 553 files
+// of that commit in isolation on a real Windows host with the flags the CI job
+// uses — 481 passed unmodified. #7273 then re-measured the 15 rows it owned and
+// removed nine (docs/records/windows-path-containment-7273.md), so the survey no
+// longer accounts for every row one-to-one; read the two records together. The
+// windows-slow rows
 // came later and from the CI runner itself: they PASS in isolation and in a
 // full concurrent run on a different clone, and are cancelled only in the
 // runner's own working directory. Both are measurements; they are not the SAME
@@ -156,8 +160,10 @@ export const MAX_EXEMPT_RATIO = 0.20
 // instrument — most rows below fail only a handful of their tests (measured:
 // tests/permission-manager.test.js fails 1 of 96, tests/discord-webhook-sink.test.js
 // 2 of 114), so ~1,967 passing tests sit inside the exempt files and are not
-// run on Windows. Reclaiming them by guarding the individual tests is
-// #7273 / #7274, and #7276 for the three cancelled on the runner.
+// run on Windows. Reclaiming them by guarding the individual tests is #7274,
+// and #7276 for the three cancelled on the runner. #7273 is DONE — it fixed the
+// containment seam rather than guarding tests, which is why nine whole files
+// came off rather than individual assertions being skipped.
 export const WINDOWS_EXEMPT = [
   // ── node-pty / ConPTY (1)
   {

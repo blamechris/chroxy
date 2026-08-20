@@ -13,11 +13,11 @@ import {
 } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir, homedir } from 'node:os'
+import { isPathWithin } from '../src/utils/path-containment.js'
 import { nsCtx } from './test-helpers.js'
 import { createClientSender } from '../src/ws-client-sender.js'
 import { createKeyPair, deriveSharedKey, decrypt, DIRECTION_SERVER } from '@chroxy/store-core/crypto'
 import {
-
   validateAttachments,
   resolveFileRefAttachments,
   validateCwdWithinHome,
@@ -488,6 +488,70 @@ describe('resolveFileRefAttachments — path traversal at resolve level', () => 
   })
 })
 
+describe('resolveFileRefAttachments — containment (#7273)', () => {
+  // These exist because the #7273 review proved the containment fix in
+  // resolveFileRefAttachments could be reverted to its pre-PR spelling with the
+  // ENTIRE server suite still green — 361 tests across every file that mentions
+  // file_ref, all passing against the reintroduced bug. A security fix nothing
+  // can fail for is not a fix; it is a comment.
+  //
+  // The Windows fail-open itself (cross-root: D:\, UNC, \\?\) is proved in
+  // path-containment.test.js, which binds the shipping predicate to path.win32.
+  // What is proved HERE is that resolveFileRefAttachments actually ROUTES
+  // through that predicate — which needs an input where the old and new
+  // spellings disagree ON THIS PLATFORM.
+
+  it('reads a file under a top-level directory whose name starts with two dots', () => {
+    // The disagreement. relative() returns '..hidden/f.txt', so the old
+    // `rel.startsWith('..')` rejected it as traversal; it is not traversal, it
+    // is a directory called '..hidden'. validateAttachments has always allowed
+    // this shape, so the two layers actively contradicted each other.
+    mkdirSync(join(testDir, '..hidden'), { recursive: true })
+    writeFileSync(join(testDir, '..hidden', 'f.txt'), 'in-project content')
+
+    const [out] = resolveFileRefAttachments(
+      [{ type: 'file_ref', path: '..hidden/f.txt', name: 'f.txt' }],
+      testDir
+    )
+    const decoded = Buffer.from(out.data, 'base64').toString('utf-8')
+    assert.strictEqual(decoded, 'in-project content',
+      'a top-level ..hidden directory is inside the project and must be readable')
+  })
+
+  it('CONTROL: real traversal out of the project is still refused', () => {
+    // Without this, the test above could pass because containment stopped
+    // working altogether — which is exactly how the bug it guards went unnoticed.
+    const [out] = resolveFileRefAttachments(
+      [{ type: 'file_ref', path: '../../../etc/hosts', name: 'hosts' }],
+      testDir
+    )
+    const decoded = Buffer.from(out.data, 'base64').toString('utf-8')
+    assert.match(decoded, /cannot read file outside project/)
+  })
+
+  it('fails CLOSED when the containment check cannot be answered', () => {
+    // A symlink cycle makes realpathSync throw ELOOP, so the post-realpath
+    // containment check never runs. That branch used to be a bare `catch {}`
+    // that fell through to readFileSync — "could not check" reading as
+    // "nothing to check". It must report a containment refusal, not a read error.
+    const a = join(testDir, 'loop-a')
+    const b = join(testDir, 'loop-b')
+    try {
+      symlinkSync(b, a)
+      symlinkSync(a, b)
+    } catch {
+      return // no symlink privilege on this host
+    }
+    const [out] = resolveFileRefAttachments(
+      [{ type: 'file_ref', path: 'loop-a', name: 'loop-a' }],
+      testDir
+    )
+    const decoded = Buffer.from(out.data, 'base64').toString('utf-8')
+    assert.match(decoded, /cannot read file outside project/,
+      'an unanswerable containment check must refuse, not fall through to the read')
+  })
+})
+
 describe('resolveFileRefAttachments — symlink escape detection', () => {
   it('blocks symlink that resolves outside project directory', () => {
     const linkPath = join(testDir, 'src', 'escape-link')
@@ -660,15 +724,17 @@ describe('validateCwdWithinHome', () => {
     assert.match(err, /within your home directory/)
   })
 
-  it('rejects /tmp (outside home)', () => {
-    // /tmp is typically NOT within home directory
-    const realTmp = realpathSync('/tmp')
-    const home = homedir()
-    if (!realTmp.startsWith(home + '/') && realTmp !== home) {
-      const err = validateCwdWithinHome('/tmp')
-      assert.ok(err)
-      assert.match(err, /within your home directory/)
-    }
+  it('rejects the platform temp dir when it is outside home', () => {
+    // #7273 — was hardcoded to '/tmp' with a `realTmp.startsWith(home + '/')`
+    // guard, which is the very spelling this PR removed everywhere else. On
+    // Windows os.tmpdir() is C:\Users\<u>\AppData\Local\Temp — INSIDE home —
+    // so the guard is doing real work here, not just guarding a POSIX literal.
+    const realTmp = realpathSync(tmpdir())
+    const home = realpathSync(homedir())
+    if (isPathWithin(realTmp, home)) return   // legitimately inside home (Windows)
+    const err = validateCwdWithinHome(realTmp)
+    assert.ok(err)
+    assert.match(err, /within your home directory/)
   })
 
   it('rejects a directory outside home', () => {

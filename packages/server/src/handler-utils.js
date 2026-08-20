@@ -162,8 +162,16 @@ export function resolveFileRefAttachments(attachments, cwd) {
       if (!isPathWithin(realAbs, realCwd)) {
         return { type: 'document', mediaType: 'text/plain', data: Buffer.from(`[Error: cannot read file outside project: ${att.path}]`).toString('base64'), name: att.name || att.path }
       }
-    } catch {
-      // realpathSync fails if file doesn't exist — let readFileSync handle ENOENT below
+    } catch (err) {
+      // ENOENT is the ONLY benign case: the target does not exist yet, so there
+      // is no symlink to escape through and readFileSync reports "file not
+      // found" below. Anything else — EACCES, ELOOP, or an EINVAL out of
+      // isPathWithin — means the containment question was NOT answered, and a
+      // bare `catch {}` here fell through to readFileSync and served the file.
+      // "Could not check" must never read as "nothing to check" (#7273 review).
+      if (err?.code !== 'ENOENT') {
+        return { type: 'document', mediaType: 'text/plain', data: Buffer.from(`[Error: cannot read file outside project: ${att.path}]`).toString('base64'), name: att.name || att.path }
+      }
     }
     try {
       const stat = statSync(absPath)
@@ -240,20 +248,6 @@ const FORBIDDEN_HOME_SUBDIRS = new Set([
   '.claude',
 ])
 
-/**
- * Returns true if `absPath` is underneath OR equal to `baseDir`,
- * using segment-aware comparison so `/home/user/workspace` is NOT
- * considered within `/home/user/work`.
- *
- * Both arguments must already be realpath-resolved and absolute.
- *
- * Edge case: when `baseDir` already ends with a path separator (e.g.
- * POSIX `'/'` filesystem root, or Windows drive roots like `'C:\\'`),
- * `baseDir + sep` would become `'//'` / `'C:\\\\'` and startsWith()
- * would return false for paths that ARE inside the base. Strip the
- * trailing separator first to normalize. Found by Copilot review on
- * PR #2808.
- */
 // #5835: a client "views" a session iff it's its active session or in its
 // subscribed set — the SAME viewing clause ws-forwarding's terminalSubscriberFilter
 // uses to scope terminal_output/terminal_size broadcasts. Every PTY-touching
@@ -417,9 +411,24 @@ export function validateCwdAllowed(cwd, config = null) {
   // directory instead of creating throwaway dirs under the user's
   // real ~/.config. Never used in production — config.js does not
   // declare or forward homeOverride from user config.
-  const home = (config?.homeOverride && typeof config.homeOverride === 'string')
-    ? realpathSync(config.homeOverride)
+  // #7273 review — BOTH sides must be realpath-resolved or the comparison is
+  // meaningless. `realCwd` above is resolved; `homedir()` is not. When $HOME is
+  // itself a symlink (common on macOS//home layouts and in containers), the
+  // resolved cwd and the unresolved home share no prefix, `pathTouchesForbiddenSubdir`
+  // returns false for every path, and the whole credential deny-list — ~/.ssh,
+  // ~/.aws, ~/.config/gcloud — silently stops denying. Reproduced with a
+  // positive control. Falls back to the raw value if it cannot be resolved,
+  // which is the conservative direction: an unresolvable $HOME still gets a
+  // prefix test rather than none.
+  const rawHome = (config?.homeOverride && typeof config.homeOverride === 'string')
+    ? config.homeOverride
     : homedir()
+  let home
+  try {
+    home = realpathSync(rawHome)
+  } catch {
+    home = rawHome
+  }
   if (pathTouchesForbiddenSubdir(realCwd, home)) {
     return 'Directory is not allowed: credential/config directories under $HOME are blocked for security'
   }

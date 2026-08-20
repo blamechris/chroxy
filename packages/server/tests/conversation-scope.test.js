@@ -88,4 +88,30 @@ describe('scopeConversationsToClient', () => {
     const result = scopeConversationsToClient(conversations, client, {})
     assert.deepEqual(result, [], 'no sessionManager → fail closed for bound client')
   })
+
+  // #7273 — the containment predicate REFUSES a non-absolute path rather than
+  // silently resolving it against the server process's cwd. Both arguments here
+  // come from outside: `conv.cwd` is read out of a JSONL record on disk and
+  // `entry.cwd` off a session record. Without these guards the predicate throws
+  // out of a WS handler; with them the filter fails closed. Neither direction is
+  // observable from the existing cases, all of which pass absolute paths.
+  it('fails closed when the BOUND SESSION cwd is not absolute', () => {
+    const client = { boundSessionId: 's1' }
+    const ctx = makeCtx({ s1: 'relative/not/absolute' })
+    assert.deepEqual(
+      scopeConversationsToClient(conversations, client, ctx), [],
+      'an unplaceable bound cwd must reveal nothing, not throw')
+  })
+
+  it('drops a conversation whose recorded cwd is not absolute, and keeps the rest', () => {
+    const client = { boundSessionId: 's1' }
+    const ctx = makeCtx({ s1: '/home/dev/Projects/chroxy' })
+    const convs = [
+      { id: 'ok', cwd: '/home/dev/Projects/chroxy/packages/server' },
+      { id: 'bad', cwd: 'Projects/chroxy/relative' },
+    ]
+    const result = scopeConversationsToClient(convs, client, ctx)
+    assert.deepEqual(result.map((c) => c.id), ['ok'],
+      'the unplaceable row is dropped; the placeable one still comes through')
+  })
 })

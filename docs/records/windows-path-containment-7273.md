@@ -84,8 +84,9 @@ true conclusion from a false premise on Windows.
 ## What the fix was
 
 One root-aware predicate, `packages/server/src/utils/path-containment.js`,
-replacing six hand-rolled copies across three spellings — `root + '/'`,
-`root + sep`, and `relative()` + `startsWith('..')`. All three are wrong; see
+routing **fifteen** hand-rolled call sites through a single implementation. They
+used three spellings — `root + '/'`, `root + sep`, and `relative()` +
+`startsWith('..')` — and all three are wrong; see
 `docs/false-safety-guards.md` entry 11 for why, including why `root + sep` (the
 one-character "obvious" fix, already present in two of the six copies) is also
 wrong on both platforms.
@@ -96,3 +97,11 @@ drive letter, a UNC share or the `\\?\` device namespace all read as "inside the
 project". That seam is silent: no test failed for it, and it is not among the 15
 files above. It is closed and covered by `tests/path-containment.test.js` and
 new assertions in `tests/handler-utils.test.js`.
+
+## Scope caveat
+
+This converted the ws-file-ops, `file_ref` attachment, conversation-scope and IDE
+surfaces. Hand-rolled copies survive in `docker-byok-session.js` (confirmed
+broken on a Windows host), `devcontainer-config.js`, `pages-store.js`,
+`permission-{floor,manager}.js` and `@chroxy/protocol`, and there is no lint
+preventing a sixteenth. Tracked in #7287, with the evidence for each.

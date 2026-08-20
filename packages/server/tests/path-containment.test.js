@@ -14,7 +14,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert'
 import path from 'path'
-import { makeIsPathWithin, isPathWithin, isPathOutside } from '../src/utils/path-containment.js'
+import { makeIsPathWithin, isPathWithin } from '../src/utils/path-containment.js'
 
 const win = makeIsPathWithin(path.win32)
 const posix = makeIsPathWithin(path.posix)
@@ -131,13 +131,6 @@ describe('isPathWithin — contract', () => {
     assert.throws(() => isPathWithin(path.resolve('/tmp'), undefined), { code: 'EINVAL' })
   })
 
-  it('isPathOutside is the exact negation', () => {
-    const root = path.resolve('/tmp/root')
-    const inside = path.resolve('/tmp/root/a')
-    const outside = path.resolve('/tmp/other')
-    assert.equal(isPathOutside(inside, root), false)
-    assert.equal(isPathOutside(outside, root), true)
-  })
 
   it('the platform binding matches the platform namespace', () => {
     const native = process.platform === 'win32' ? win : posix
