@@ -444,6 +444,92 @@ describe('gitStage/gitUnstage pathspec magic (#7281)', () => {
     await resetIndex()
   })
 
+  // A SECOND over-stage vector --literal-pathspecs closes, independent of the escape
+  // above: glob expansion. A client that selects one file whose NAME contains glob
+  // metacharacters gets every file matching the pattern staged. Measured on main:
+  // selecting 'a[bc].txt' stages a[bc].txt, ab.txt AND ac.txt, and reports success —
+  // two files the user never selected. '[' and ']' are legal on NTFS as well as
+  // POSIX, so this runs on every platform.
+  it('stages only the selected file when its name contains glob metacharacters', async () => {
+    await writeFile(join(subDir, 'a[bc].txt'), 'literal')
+    await writeFile(join(subDir, 'ab.txt'), 'decoy')
+    await writeFile(join(subDir, 'ac.txt'), 'decoy')
+    await resetIndex()
+    lastMessage = null
+    await fileOps.gitStage(ws, ['a[bc].txt'], subDir)
+    assert.equal(lastMessage.type, 'git_stage_result')
+    assert.equal(lastMessage.error, null, `expected the literal file to stage, got: ${lastMessage.error}`)
+    assert.deepEqual(
+      await stagedPaths(), ['sub/a[bc].txt'],
+      'glob expansion staged files the client never selected',
+    )
+    await resetIndex()
+    await rm(join(subDir, 'a[bc].txt'), { force: true })
+    await rm(join(subDir, 'ab.txt'), { force: true })
+    await rm(join(subDir, 'ac.txt'), { force: true })
+  })
+
+  // Pins the realPath fallback in toLiteralPathspec. validatePathWithinCwd decides
+  // containment on the SYMLINK-RESOLVED path, so it approves an absolute path that
+  // merely REACHES the cwd through a symlinked prefix. Deriving the pathspec from the
+  // lexical path alone then yields a '..' chain pointing out of the cwd, which git
+  // refuses under --literal-pathspecs.
+  //
+  // Two forms of the same case, measured, which behave OPPOSITELY on main — hence the
+  // fallback rather than a plain reject:
+  //   - this fixture (a symlinked directory INSIDE the repo): main errors with
+  //     "beyond a symbolic link"; the fallback makes it work. An improvement.
+  //   - the same path shape via a symlinked TMPDIR — the ordinary macOS case where the
+  //     cwd resolves to /private/var/... and the client names /var/... — succeeds on
+  //     main, and a relative()-only fix REGRESSES it to a hard git failure. That form
+  //     cannot be a portable fixture, since it depends on the host's tmpdir being a
+  //     symlink, so it is recorded here rather than asserted.
+  it('accepts an absolute path that reaches the cwd through a symlinked prefix', async (t) => {
+    const alias = join(repoDir, 'alias')
+    try {
+      await symlink(subDir, alias)
+    } catch (err) {
+      if (err.code === 'EPERM' || err.code === 'EACCES' || err.code === 'ENOTSUP') {
+        t.skip(`symlinks not supported in this environment: ${err.code}`)
+        return
+      }
+      if (err.code !== 'EEXIST') throw err
+    }
+    await resetIndex()
+    lastMessage = null
+    await fileOps.gitStage(ws, [join(alias, 'inside.txt')], subDir)
+    assert.equal(lastMessage.type, 'git_stage_result')
+    assert.equal(lastMessage.error, null, `an aliased absolute path must still stage, got: ${lastMessage.error}`)
+    assert.deepEqual(await stagedPaths(), ['sub/inside.txt'])
+    await resetIndex()
+  })
+
+  // The mirror case, and a genuine escape that was open on main: a symlink ABOVE the
+  // cwd pointing back INTO it. Containment approves it (the real target is inside),
+  // but the lexical path names a file outside the cwd — pre-fix that staged
+  // `lure.txt`, above the workspace root, with error: null.
+  it('does not stage outside the cwd via a symlink above it that points back in', async (t) => {
+    const lure = join(repoDir, 'lure.txt')
+    try {
+      await symlink(join(subDir, 'inside.txt'), lure)
+    } catch (err) {
+      if (err.code === 'EPERM' || err.code === 'EACCES' || err.code === 'ENOTSUP') {
+        t.skip(`symlinks not supported in this environment: ${err.code}`)
+        return
+      }
+      if (err.code !== 'EEXIST') throw err
+    }
+    await resetIndex()
+    lastMessage = null
+    await fileOps.gitStage(ws, ['../lure.txt'], subDir)
+    assert.equal(lastMessage.type, 'git_stage_result')
+    assert.deepEqual(
+      await escapedPaths(), [],
+      'a symlink above the cwd staged a path outside the workspace root',
+    )
+    await resetIndex()
+  })
+
   it('rejects an empty pathspec rather than widening it to the whole cwd', async () => {
     await resetIndex()
     lastMessage = null

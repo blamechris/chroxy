@@ -6,6 +6,7 @@ import { tmpdir } from 'os'
 import { randomBytes } from 'crypto'
 import { GIT } from '../git.js'
 import { validateGitPath } from './common.js'
+import { isPathWithin } from '../utils/path-containment.js'
 
 const execFileAsync = promisify(execFileCb)
 
@@ -135,17 +136,39 @@ function mapGhCreateError(err) {
  *  - handing git the path we validated instead of the raw client string, so that what
  *    is checked is what is executed.
  *
- * Derived from `absPath` (lexically resolved), deliberately NOT from the validator's
- * `realPath` (symlink-resolved): for a symlink inside the repo, `realPath` names its
- * TARGET, so staging it would record a different object than the one the client asked
- * for. Containment is still decided on `realPath`; only the pathspec comes from here.
+ * Prefers `absPath` (lexically resolved) over the validator's `realPath`
+ * (symlink-resolved): for a symlink INSIDE the cwd, `realPath` names its TARGET, so
+ * staging that would record a different object than the one the client asked for.
+ *
+ * `absPath` is used only when it is lexically inside the cwd, because it is not
+ * always. validatePathWithinCwd decides containment on `realPath`, so it says yes to
+ * a path that merely REACHES the cwd through a symlink or an aliased prefix —
+ * including the entirely ordinary macOS case where the session cwd resolves to
+ * `/private/var/...` while the client names the same file under `/var/...`.
+ * `relative()` then yields a '..' chain pointing out of the cwd, which git refuses
+ * under --literal-pathspecs; and for a symlink ABOVE the cwd it would name a file
+ * outside it. Falling back to `realPath` — which containment has already proved is
+ * inside — gives this function an invariant worth stating plainly: it never returns
+ * a pathspec that leaves the cwd.
+ *
+ * Containment is still decided by validatePathWithinCwd. The isPathWithin call here
+ * is that same root-aware predicate (#7273), not a second implementation of the rule.
  *
  * @param {string} cwdReal - resolved session cwd; the git process's cwd
  * @param {string} absPath - the absolute path that validatePathWithinCwd approved
- * @returns {string} a cwd-relative, '/'-separated, magic-free pathspec
+ * @param {string} realPath - that path with every symlink resolved, from the validator
+ * @returns {string|null} a cwd-relative, '/'-separated, magic-free pathspec, or null
+ *   when neither form stays inside the cwd (the caller then rejects)
  */
-function toLiteralPathspec(cwdReal, absPath) {
-  const rel = relative(cwdReal, absPath)
+function toLiteralPathspec(cwdReal, absPath, realPath) {
+  const rel = isPathWithin(absPath, cwdReal)
+    ? relative(cwdReal, absPath)
+    : relative(cwdReal, realPath)
+  // Defensive: `valid === true` already means realPath is inside, so this is
+  // unreachable today. It stays because a pathspec that leaves the cwd must never
+  // reach git, and a future caller that stops checking `valid` should fail closed
+  // rather than silently widen.
+  if (rel !== '' && !isPathWithin(resolve(cwdReal, rel), cwdReal)) return null
   // absPath === cwdReal. git rejects an empty pathspec outright, and '.' is how the
   // caller's intent — "everything in the cwd" — is spelled. Callers reject an empty
   // client string before reaching here, so this only ever stands in for '.' / './'.
@@ -352,13 +375,14 @@ export function createGitOps(sendFn, resolveSessionCwd, validatePathWithinCwd, w
           return
         }
         const absPath = normalize(resolve(cwdReal, file))
-        const { valid } = await validatePathWithinCwd(absPath, sessionCwd)
-        if (!valid) {
+        const { valid, realPath } = await validatePathWithinCwd(absPath, sessionCwd)
+        const pathspec = valid ? toLiteralPathspec(cwdReal, absPath, realPath) : null
+        if (!valid || pathspec === null) {
           sendFn(ws, { type: 'git_stage_result', error: `Access denied: path outside project directory — ${file}` })
           return
         }
         // #7281 — what git receives is the path we validated, not the client's string.
-        validatedFiles.push(toLiteralPathspec(cwdReal, absPath))
+        validatedFiles.push(pathspec)
       }
       await execFileAsync(GIT, ['--literal-pathspecs', 'add', '--', ...validatedFiles], {
         cwd: cwdReal,
@@ -396,13 +420,14 @@ export function createGitOps(sendFn, resolveSessionCwd, validatePathWithinCwd, w
           return
         }
         const absPath = normalize(resolve(cwdReal, file))
-        const { valid } = await validatePathWithinCwd(absPath, sessionCwd)
-        if (!valid) {
+        const { valid, realPath } = await validatePathWithinCwd(absPath, sessionCwd)
+        const pathspec = valid ? toLiteralPathspec(cwdReal, absPath, realPath) : null
+        if (!valid || pathspec === null) {
           sendFn(ws, { type: 'git_unstage_result', error: `Access denied: path outside project directory — ${file}` })
           return
         }
         // #7281 — what git receives is the path we validated, not the client's string.
-        validatedFiles.push(toLiteralPathspec(cwdReal, absPath))
+        validatedFiles.push(pathspec)
       }
       await execFileAsync(GIT, ['--literal-pathspecs', 'reset', 'HEAD', '--', ...validatedFiles], {
         cwd: cwdReal,
