@@ -348,7 +348,88 @@ is handed to something that parses it under a different grammar — a pathspec, 
 revision, a glob, a shell word, a URL — the validation proves nothing.** The
 sibling instances that audit turned up are `#7290` (a revision allowlist whose
 comment claims it blocks flags, while `-` is inside its character class) and
-`#7291` (client prompts in positional argv slots with no `--`).
+`#7291` (client prompts in positional argv slots with no `--`) — both
+now catalogued as entry 13.
+
+### 13. The allowlist that permitted what its comment forbade — `#7290`, `#7291`
+
+Entry 12 predicted these two as its siblings. Both are the same shape: a guard
+whose *comment* describes a stronger check than its *code* performs.
+
+`getDiff` validated a client-controlled revision with
+
+```js
+// Validate ref name to prevent git flag injection
+const diffBase = /^[a-zA-Z0-9._\-\/~^@{}:]+$/.test(rawBase) ? rawBase : 'HEAD'
+```
+
+`-` is inside the character class, so it is a permitted *character*, and the
+regex has nothing to say about *position*. Measured against git 2.54.0, every
+single-token option passed and was then parsed as an option: `--stat`, `-p`,
+`--raw`, `--exit-code`, `--ext-diff`, `--word-diff`, `-U99999`, `-O<path>`.
+Only forms containing `=` were blocked, and only because `=` is absent from the
+class — an accident, not a defence.
+
+**The impact was larger than "git errors out".** `git diff -O<file>` reads
+`<file>` as a diff orderfile, and `getDiff` forwards raw git stderr to the
+client (`error: err.message`). So `-O` is a file existence/readability oracle
+over the entire filesystem, as the daemon user, escaping the session cwd
+completely, with the answer returned on the wire:
+
+```
+-O/etc/passwd                 -> (silent: readable)
+-O/etc/shadow                 -> fatal: failed to read orderfile … No such file or directory
+-O~/.ssh                      -> fatal: … Is a directory
+-O~/.chroxy/config.json       -> (silent: readable — outside the workspace)
+```
+
+The field is unconstrained on the wire: `ClientGetDiffSchema` is
+`z.object({ type: z.literal('get_diff') }).passthrough()`, so nothing upstream
+narrows it either.
+
+**The obvious fix does not work, and the issue itself proposed it.** Appending
+a `--` separator — `['diff', diffBase, '--']` — is ineffective, because `--`
+ends option parsing at *its own position* and `diffBase` precedes it:
+
+```
+git diff --stat --        still applies --stat
+git diff --exit-code --   still exits 1
+git diff -O/etc/nope --   still reads the orderfile
+```
+
+`--literal-pathspecs` (entry 12's fix) does not help either: it constrains the
+*pathspec* language, and a revision is not a pathspec. Rejecting the leading
+dash is the only thing that works here.
+
+**Which fix applies is decided by whether a leading `-` is legitimate**, and
+this is the part that is easy to get backwards. A git revision can never begin
+with `-`, so rejection is right. A user's chat message legitimately can
+("- first point"), so rejecting a prompt would break normal use — there, the
+`--` separator *is* the fix, with every flag moved before it. `#7291`'s
+`_spawnRemoteTask` needed the second treatment, not the first.
+
+**And the gate that was supposed to keep the prompt out of that argv reported
+success without checking.** Feature detection was `help.includes('--remote')`,
+a substring match. Measured against the installed CLI, whose help text carries
+`--remote-control` and `--remote-control-session-name-prefix` and no `--remote`
+at all:
+
+```
+help.includes('--remote')      -> true    (gate opens)
+/--remote(?![\w-])/.test(help) -> false   (correct)
+```
+
+The existing test for this gate fed a help text containing no `--remote`
+substring *at all*, so the naive check already answered it correctly. It passed
+before and after the fix — the recurring test shape in this document: a case
+the guard already handles proves nothing about the case it does not.
+
+**The generalisation.** `execFile` with an array argv stops *shell* injection —
+no shell ever sees the string — and it is easy to write a comment claiming that
+covers injection generally. It does not stop *argument* injection: the spawned
+program still runs its own option parser over that array. The two are different
+classes with different fixes, and "we use execFile, not exec" is an answer to
+only one of them.
 
 ## The one that got me while writing this
 

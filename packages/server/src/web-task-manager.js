@@ -1,6 +1,7 @@
 import { EventEmitter } from 'events'
 import { execFile } from 'child_process'
 import { randomUUID } from 'crypto'
+import { cliHelpAdvertisesFlag } from './utils/argv-safety.js'
 
 /**
  * Manages Claude Code Web tasks (cloud sandbox delegation).
@@ -64,8 +65,16 @@ export class WebTaskManager extends EventEmitter {
     const exec = deps.exec || execFileAsync
     try {
       const stdout = await exec('claude', ['--help'])
-      this._remoteAvailable = stdout.includes('--remote')
-      this._teleportAvailable = stdout.includes('--teleport')
+      // #7291: this was `stdout.includes('--remote')`, a SUBSTRING match, which
+      // is satisfied by the LONGER flag `--remote-control`. The installed CLI
+      // advertises `--remote-control` and `--remote-control-session-name-prefix`
+      // and has NO `--remote` at all, so the gate reported the feature
+      // available on a CLI that cannot accept it — a check that reports success
+      // without checking (docs/false-safety-guards.md), and the very thing that
+      // was supposed to keep a client prompt out of the argv in
+      // _spawnRemoteTask below.
+      this._remoteAvailable = cliHelpAdvertisesFlag(stdout, '--remote')
+      this._teleportAvailable = cliHelpAdvertisesFlag(stdout, '--teleport')
     } catch {
       this._remoteAvailable = false
       this._teleportAvailable = false
@@ -190,7 +199,7 @@ export class WebTaskManager extends EventEmitter {
    */
   _spawnRemoteTask(task) {
     // Use execFile with args array to prevent command injection
-    const child = execFile('claude', ['--remote', task.prompt], { cwd: task.cwd, timeout: 300_000 }, (err, stdout, stderr) => {
+    const child = execFile('claude', buildRemoteTaskArgs(task.prompt), { cwd: task.cwd, timeout: 300_000 }, (err, stdout, stderr) => {
       this._childProcesses.delete(child)
 
       if (err) {
@@ -367,6 +376,36 @@ export class WebTaskUnavailableError extends Error {
     this.name = 'WebTaskUnavailableError'
     this.code = 'WEB_TASK_UNAVAILABLE'
   }
+}
+
+/**
+ * Build the argv for a remote web task (#7291).
+ *
+ * `prompt` is the highest-trust-boundary string here — it comes straight from
+ * the client. It used to sit in a bare positional slot (`['--remote', prompt]`),
+ * so a prompt beginning with `-` was parsed by the CLI as an OPTION rather
+ * than as the task text.
+ *
+ * A prompt legitimately CAN begin with a dash ("- first point", "-- aside"),
+ * so REJECTING one would break normal use. The correct fix for a
+ * legitimately-dash-leading value is a `--` end-of-options separator with
+ * every flag placed BEFORE it — see utils/argv-safety.js.
+ *
+ * Verification note: the currently-shipping Claude Code CLI has no `--remote`
+ * flag at all (it has `--remote-control`), so this argv cannot be exercised
+ * against a live binary today — and after the detectFeatures fix above, the
+ * gate correctly keeps this path closed on such a CLI. The shape is asserted
+ * against the CLI's documented grammar, `claude [options] [command] [prompt]`,
+ * in which the prompt is positional and `--` therefore protects it. That `--`
+ * is honoured was measured directly against the installed binary:
+ * `claude --nonexistent-flag-xyz` errors "unknown option", while
+ * `claude -- --nonexistent-flag-xyz` does not.
+ *
+ * @param {string} prompt - client-supplied task text.
+ * @returns {string[]}
+ */
+export function buildRemoteTaskArgs(prompt) {
+  return ['--remote', '--', prompt]
 }
 
 /**

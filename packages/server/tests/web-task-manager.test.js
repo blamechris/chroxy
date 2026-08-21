@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
-import { WebTaskManager, WebTaskUnavailableError } from '../src/web-task-manager.js'
+import { WebTaskManager, WebTaskUnavailableError, buildRemoteTaskArgs } from '../src/web-task-manager.js'
 
 describe('WebTaskManager', () => {
   let manager
@@ -35,6 +35,49 @@ describe('WebTaskManager', () => {
       const features = await manager.detectFeatures({ exec: async () => 'Usage:\n  --remote\n  --teleport\n' })
       assert.equal(manager.isAvailable, true)
       assert.equal(manager.teleportAvailable, true)
+      assert.deepEqual(features, { remote: true, teleport: true })
+    })
+
+    // ── #7291: the availability gate is a substring match ─────────────────
+    //
+    // The test above ('...lacks --remote') feeds a help text containing no
+    // '--remote' substring AT ALL, so a naive `.includes('--remote')` already
+    // answers it correctly. It passes before and after this fix and proves
+    // nothing — the textbook false-safety test shape from
+    // docs/false-safety-guards.md.
+    //
+    // The control that actually bites is a help text carrying a LONGER flag
+    // that merely starts the same way. This is the real installed CLI's shape:
+    // it advertises --remote-control and --remote-control-session-name-prefix
+    // and has no --remote at all, so the old gate reported the flag available
+    // on a CLI that cannot accept it, opening the argv in _spawnRemoteTask.
+    it('#7291: --remote-control in --help must NOT be read as --remote', async () => {
+      manager = new WebTaskManager()
+      // Verbatim shape of the installed Claude Code CLI's help text.
+      const help = [
+        'Usage: claude [options] [command] [prompt]',
+        '  --remote-control                      Enable remote control',
+        '  --remote-control-session-name-prefix <prefix>',
+        '  --teleport                            Teleport a task',
+      ].join('\n')
+
+      const features = await manager.detectFeatures({ exec: async () => help })
+
+      assert.equal(features.remote, false,
+        '--remote-control must not satisfy a --remote probe')
+      assert.equal(manager.isAvailable, false)
+      // POSITIVE CONTROL in the same fixture: --teleport IS genuinely present,
+      // so a guard that simply answered "false" to everything would fail here.
+      assert.equal(features.teleport, true, '--teleport is really advertised')
+    })
+
+    it('#7291: an exactly-matching flag is still detected (positive control)', async () => {
+      manager = new WebTaskManager()
+      // --remote at end-of-line, and --teleport followed by whitespace: both
+      // are genuine advertisements and must still register.
+      const features = await manager.detectFeatures({
+        exec: async () => 'Usage:\n  --remote\n  --teleport <id>   Teleport\n',
+      })
       assert.deepEqual(features, { remote: true, teleport: true })
     })
 
@@ -403,4 +446,32 @@ describe('WebTaskManager', () => {
       assert.ok(err.message.includes('--remote'))
     })
   })
+
+  describe('#7291 remote task argv', () => {
+    it('puts a -- separator before the client prompt', () => {
+      const args = buildRemoteTaskArgs('do the thing')
+      const sep = args.indexOf('--')
+      assert.ok(sep !== -1, 'argv must carry an end-of-options separator')
+      assert.equal(args[sep + 1], 'do the thing', 'the prompt must sit AFTER the --')
+      // Every flag must precede the separator, or it becomes positional text.
+      for (const a of args.slice(sep + 2)) {
+        assert.ok(!a.startsWith('-'), `flag ${a} must not follow the --`)
+      }
+    })
+
+    it('keeps a dash-leading prompt as TEXT rather than rejecting it', () => {
+      // A prompt legitimately can start with a dash. The fix must not refuse
+      // it — it must stop it being OPTION-PARSED while preserving it verbatim.
+      for (const prompt of ['--print', '--dangerously-skip-permissions', '-p', '- a bullet']) {
+        const args = buildRemoteTaskArgs(prompt)
+        const sep = args.indexOf('--')
+        assert.ok(sep !== -1 && sep < args.length - 1,
+          `no separator protects ${prompt}`)
+        assert.equal(args[args.length - 1], prompt, 'prompt must survive verbatim')
+        assert.ok(args.indexOf(prompt) > sep,
+          `${prompt} must appear only AFTER the separator`)
+      }
+    })
+  })
+
 })
