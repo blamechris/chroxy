@@ -348,7 +348,136 @@ is handed to something that parses it under a different grammar — a pathspec, 
 revision, a glob, a shell word, a URL — the validation proves nothing.** The
 sibling instances that audit turned up are `#7290` (a revision allowlist whose
 comment claims it blocks flags, while `-` is inside its character class) and
-`#7291` (client prompts in positional argv slots with no `--`).
+`#7291` (client prompts in positional argv slots with no `--`) — both
+now catalogued as entry 13.
+
+### 13. The allowlist that permitted what its comment forbade — `#7290`, `#7291` (partial)
+
+`#7290` is closed. `#7291` is **not** — its `codex-session.js` half is still
+open, because fixing it needs an argv reorder around a documented
+`--sandbox`-before-`resume` invariant that only the repo's spawn-and-assert
+clap harness can verify, and that harness needs a working codex binary. This
+entry describes the half that landed; do not read it as closing `#7291`.
+
+Entry 12 predicted these two as its siblings. Both are the same shape: a guard
+whose *comment* describes a stronger check than its *code* performs.
+
+`getDiff` validated a client-controlled revision with
+
+```js
+// Validate ref name to prevent git flag injection
+const diffBase = /^[a-zA-Z0-9._\-\/~^@{}:]+$/.test(rawBase) ? rawBase : 'HEAD'
+```
+
+`-` is inside the character class, so it is a permitted *character*, and the
+regex has nothing to say about *position*. Measured against git 2.54.0, every
+single-token option passed and was then parsed as an option: `--stat`, `-p`,
+`--raw`, `--exit-code`, `--ext-diff`, `--word-diff`, `-U99999`, `-O<path>`.
+Only forms containing `=` were blocked, and only because `=` is absent from the
+class — an accident, not a defence.
+
+**The impact was larger than "git errors out".** `git diff -O<file>` reads
+`<file>` as a diff orderfile, and `getDiff` forwards raw git stderr to the
+client (`error: err.message`). So `-O` is a file existence/readability oracle
+over the entire filesystem, as the daemon user, escaping the session cwd
+completely, with the answer returned on the wire:
+
+```
+-O/etc/passwd                        -> (silent: readable)
+-O/etc/shadow                        -> fatal: failed to read orderfile … No such file or directory
+-O/Users/<you>/.ssh                  -> fatal: … Is a directory
+-O/Users/<you>/.chroxy/config.json   -> (silent: readable — outside the workspace)
+```
+
+Absolute paths, deliberately. git receives these as one argv element with no
+shell anywhere on the path, so a `~` is never expanded — `-O~/.ssh` only ever
+reports "No such file". A tilde in a table like this turns a reproducible
+measurement into a claim nobody can re-run, which is the failure mode this
+document is about.
+
+The field is unconstrained on the wire: `GetDiffSchema` is
+`z.object({ type: z.literal('get_diff') }).passthrough()`, so nothing upstream
+narrows it either.
+
+**The fix closes the leading-dash route and only that.** Said plainly because
+the first draft of this entry did not: `:` and `/` are both in the charset
+allowlist, and git's stderr is still forwarded verbatim, so a path oracle
+needing no dash at all survives —
+
+```
+base='HEAD:/etc/passwd'  -> fatal: path '/etc/passwd' exists on disk, but not in 'HEAD'
+base='HEAD:absent'       -> fatal: path 'absent' does not exist in 'HEAD'
+base='/etc/passwd'       -> fatal: '/etc/passwd' is outside repository
+base='/no/such/file'     -> fatal: ambiguous argument …
+```
+
+— which is pre-existing, tracked separately, and needs `rev-parse --verify`
+plus not forwarding raw git stderr. A guard entry that overstates its own
+reach is the same defect in miniature, which is why it is corrected here
+rather than left to read as sealed.
+
+**The obvious fix does not work, and the issue itself proposed it.** Appending
+a `--` separator — `['diff', diffBase, '--']` — is ineffective, because `--`
+ends option parsing at *its own position* and `diffBase` precedes it:
+
+```
+git diff --stat --        still applies --stat
+git diff --exit-code --   still exits 1
+git diff -O/etc/nope --   still reads the orderfile
+```
+
+`--literal-pathspecs` (entry 12's fix) does not help either: it constrains the
+*pathspec* language, and a revision is not a pathspec. Rejecting the leading
+dash is the only thing that works here.
+
+**Which fix applies is decided by whether a leading `-` is legitimate**, and
+this is the part that is easy to get backwards. A git revision can never begin
+with `-`, so rejection is right. A user's chat message legitimately can
+("- first point"), so rejecting a prompt would break normal use — there, a
+`--` separator is the fix, with every flag moved before it. `#7291`'s
+`_spawnRemoteTask` needed the second treatment, not the first.
+
+**But "use `--`" is not a rule either — it depends on the flag's arity, and
+against a required-argument flag it is worse than doing nothing.** Measured
+against commander 12.1.0 with a prompt of `--dangerously-skip-permissions`:
+
+| `--remote` declared as | `['--remote', prompt]` | `['--remote', '--', prompt]` |
+|---|---|---|
+| boolean | **injects** | safe |
+| `[name]` optional | **injects** | safe |
+| `<name>` **required** | safe — swallowed as the flag's value | **injects** |
+
+For a required-argument flag the `--` becomes the flag's own value, which frees
+the prompt to be option-parsed. No single argv is correct under both arities,
+so the caller must know which it faces: `detectFeatures` reads the advertised
+arity and refuses the feature when it cannot use a separator safely. gemini-cli
+is the third variant again — its `requiresArg` flags reject `--` outright, and
+need `--flag=value`. The generalisation is that **the fix shape is a property
+of the target CLI's parser and has to be measured per CLI**; a repo-wide "add
+`--` everywhere" sweep would have broken two of the three.
+
+**And the gate that was supposed to keep the prompt out of that argv reported
+success without checking.** Feature detection was `help.includes('--remote')`,
+a substring match. Measured against the installed CLI, whose help text carries
+`--remote-control` and `--remote-control-session-name-prefix` and no `--remote`
+at all:
+
+```
+help.includes('--remote')      -> true    (gate opens)
+/--remote(?![\w-])/.test(help) -> false   (correct)
+```
+
+The existing test for this gate fed a help text containing no `--remote`
+substring *at all*, so the naive check already answered it correctly. It passed
+before and after the fix — the recurring test shape in this document: a case
+the guard already handles proves nothing about the case it does not.
+
+**The generalisation.** `execFile` with an array argv stops *shell* injection —
+no shell ever sees the string — and it is easy to write a comment claiming that
+covers injection generally. It does not stop *argument* injection: the spawned
+program still runs its own option parser over that array. The two are different
+classes with different fixes, and "we use execFile, not exec" is an answer to
+only one of them.
 
 ## The one that got me while writing this
 

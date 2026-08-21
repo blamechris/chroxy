@@ -30,6 +30,7 @@ import { join, resolve, sep } from 'node:path'
 import { rmSync, mkdirSync, existsSync } from 'node:fs'
 import { GIT } from '../git.js'
 import { configDir } from '../config-dir.js'
+import { assertSafeArgvValue } from '../utils/argv-safety.js'
 
 const execFileAsync = promisify(execFileCb)
 
@@ -44,9 +45,28 @@ const DIFF_MAX_BUFFER = 64 * 1024 * 1024
 // carries a NUL/newline — defense-in-depth so a caller can never turn a branch
 // name into a git flag. execFile already blocks SHELL injection; this blocks
 // ARGUMENT injection.
+//
+// #7290: the CHECK now lives in utils/argv-safety.js and is shared with
+// ws-file-ops/reader.js. This wrapper exists only to translate its Error into
+// a GitOpsError; both messages (`empty <kind>` / `unsafe <kind>: <json>`) are
+// produced there, and orchestration-git-ops.test.js pins the `unsafe` half.
+// Do not re-inline the check here — #7290 was filed because a SECOND, weaker
+// spelling had grown in reader.js. A THIRD is still live and NOT folded in:
+// `rejectGitOptionLike` in environments/backends/k8s.js, scoped to gitRepo
+// fields.
 function assertSafeRef(name, kind = 'ref') {
-  if (typeof name !== 'string' || name.length === 0) throw new GitOpsError(`empty ${kind}`)
-  if (name.startsWith('-') || /[\0\n\r]/.test(name)) throw new GitOpsError(`unsafe ${kind}: ${JSON.stringify(name)}`)
+  try {
+    assertSafeArgvValue(name, kind)
+  } catch (err) {
+    // Only validation errors are expected here. Anything else would be a bug
+    // inside the shared guard, so keep the original rather than silently
+    // relabelling it as an unsafe ref. GitOpsError's constructor takes
+    // { args, stderr } and does not forward `cause` to super(), so it is set
+    // here rather than passed in — passing it would be dropped on the floor.
+    const wrapped = new GitOpsError(err.message)
+    wrapped.cause = err
+    throw wrapped
+  }
 }
 
 // Byte-accurate UTF-8 truncation that drops an incomplete trailing multibyte

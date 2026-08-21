@@ -1300,6 +1300,108 @@ describe('get_diff handler', () => {
       rmSync(nonGitDir, { recursive: true, force: true })
     }
   })
+
+  // ── #7290: the `base` revision must never reach git as an OPTION ──────────
+  //
+  // `base` arrives from the wire unvalidated — GetDiffSchema is
+  // `z.object({ type: z.literal('get_diff') }).passthrough()`, so the field is
+  // not constrained at all — and lands in the REVISION slot of
+  // `git diff <base>`. The old allowlist put `-` INSIDE its character class,
+  // so every single-token option passed it.
+  //
+  // These are NEGATIVE CONTROLS, per docs/false-safety-guards.md: each one
+  // observes a git behaviour that is only reachable when the option was
+  // actually parsed. Delete the leading-dash rejection and they go red.
+  //
+  // NOTE `['diff', base, '--']` does NOT fix this and these tests prove it:
+  // `--` ends option parsing at ITS position, and `base` precedes it.
+
+  it('#7290: -O<path> does not become a git orderfile read (filesystem oracle)', async () => {
+    // `git diff -O<file>` reads <file> as a diff order file. git reports
+    // whether it could read it, and getDiff forwards raw git stderr to the
+    // client (reader.js `error: err.message`) — so an unguarded `-O` is a
+    // file existence/readability oracle over the WHOLE filesystem, as the
+    // daemon user, escaping the session cwd entirely.
+    writeFileSync(join(tempDir, 'file.txt'), 'modified content\n')
+    const { ws, messages } = await createDiffTestServer()
+
+    send(ws, { type: 'get_diff', base: '-O/chroxy-7290-no-such-orderfile' })
+    const result = await waitForMessage(messages, 'diff_result', 5000)
+
+    // The oracle's tell. Present iff git parsed `-O` as an option.
+    assert.ok(
+      !/orderfile/i.test(result.error || ''),
+      `git must never see -O as an option; got error: ${result.error}`
+    )
+    // And it must still behave like an unrecognised base: fall back to HEAD.
+    assert.equal(result.error, null)
+    assert.equal(result.files.length, 1)
+
+    ws.close()
+  })
+
+  it('#7290: --exit-code does not become a git option', async () => {
+    // `git diff --exit-code` exits 1 when there are changes, which execFile
+    // surfaces as a rejection — so an unguarded `--exit-code` turns a healthy
+    // diff into a wire error.
+    writeFileSync(join(tempDir, 'file.txt'), 'modified content\n')
+    const { ws, messages } = await createDiffTestServer()
+
+    send(ws, { type: 'get_diff', base: '--exit-code' })
+    const result = await waitForMessage(messages, 'diff_result', 5000)
+
+    assert.equal(result.error, null, 'a dash-leading base must not reach git')
+    assert.equal(result.files.length, 1)
+
+    ws.close()
+  })
+
+  it('#7290: --stat does not become a git option', async () => {
+    // `git diff --stat` emits a summary, not a unified diff, so parseDiff
+    // yields ZERO files. An unguarded `--stat` silently empties the diff view.
+    writeFileSync(join(tempDir, 'file.txt'), 'modified content\n')
+    const { ws, messages } = await createDiffTestServer()
+
+    send(ws, { type: 'get_diff', base: '--stat' })
+    const result = await waitForMessage(messages, 'diff_result', 5000)
+
+    assert.equal(result.error, null)
+    assert.equal(result.files.length, 1, '--stat must not replace the unified diff')
+    assert.ok(result.files[0].hunks.length > 0, 'hunks are lost when --stat is parsed')
+
+    ws.close()
+  })
+
+  // POSITIVE CONTROL — the guard must not be vacuous. A legitimate revision
+  // still reaches git and still selects a real base. Without this, a guard
+  // that rejected EVERYTHING would pass all three tests above.
+  it('#7290: a legitimate revision is still honoured (positive control)', async () => {
+    // Second commit, so HEAD~1 names a base that differs from HEAD and the
+    // choice of base is observable in the output.
+    writeFileSync(join(tempDir, 'file.txt'), 'second content\n')
+    execFileSync(GIT, ['add', 'file.txt'], { cwd: tempDir, stdio: 'pipe' })
+    execFileSync(GIT, ['commit', '-m', 'second'], { cwd: tempDir, stdio: 'pipe' })
+
+    const { ws, messages } = await createDiffTestServer()
+
+    // vs HEAD: the tree is clean, so no files.
+    send(ws, { type: 'get_diff', base: 'HEAD' })
+    const clean = await waitForMessage(messages, 'diff_result', 5000)
+    assert.equal(clean.error, null)
+    assert.deepEqual(clean.files, [], 'HEAD must compare against the last commit')
+
+    // vs HEAD~1: the second commit shows up. Proves the base was really used.
+    // waitForMessage() scans an ACCUMULATING array with .find(), so it would
+    // re-read the reply above. Clear it before the second round-trip.
+    messages.length = 0
+    send(ws, { type: 'get_diff', base: 'HEAD~1' })
+    const prev = await waitForMessage(messages, 'diff_result', 5000)
+    assert.equal(prev.error, null)
+    assert.equal(prev.files.length, 1, 'HEAD~1 must reach git as a real revision')
+    assert.equal(prev.files[0].path, 'file.txt')
+
+    ws.close()
+  })
 })
 
 // ---------------------------------------------------------------------------
