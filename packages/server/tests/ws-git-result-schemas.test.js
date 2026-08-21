@@ -48,8 +48,9 @@ const SCHEMAS = {
  */
 const EXPECTED_EMIT_SITES = {
   git_commit_result: 4,
-  git_stage_result: 5,
-  git_unstage_result: 5,
+  // 6 since #7281 added the empty-pathspec rejection to gitStage and gitUnstage.
+  git_stage_result: 6,
+  git_unstage_result: 6,
 }
 
 /** Every response the handlers produced, so one fixture covers all three types. */
@@ -94,6 +95,10 @@ describe('#7085 git write-op result schemas', () => {
     await fileOps.gitStage(mockWs, ['../outside.txt'], tmpDir)
     await fileOps.gitUnstage(mockWs, ['../outside.txt'], tmpDir)
     await fileOps.gitCommit(mockWs, '   ', tmpDir)
+    // #7281 — the empty-pathspec rejection. A separate branch from the traversal
+    // one above: it fires before containment is consulted at all.
+    await fileOps.gitStage(mockWs, [''], tmpDir)
+    await fileOps.gitUnstage(mockWs, [''], tmpDir)
 
     await rm(join(tmpDir, 'new.txt'), { force: true })
   })

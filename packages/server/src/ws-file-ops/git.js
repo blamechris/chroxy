@@ -1,4 +1,4 @@
-import { normalize, resolve, join } from 'path'
+import { normalize, resolve, join, relative, sep } from 'path'
 import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
 import { writeFile, unlink } from 'fs/promises'
@@ -114,6 +114,45 @@ function mapGhCreateError(err) {
   }
   const line = firstLine(stderr)
   return { message: line || (err && err.message) || 'Failed to create pull request', existingUrl: null }
+}
+
+/**
+ * #7281 — turn a VALIDATED absolute path into the pathspec git will actually receive.
+ *
+ * `git add` / `git reset` take PATHSPECS, not paths, and a pathspec has its own magic
+ * syntax — so the string the client sent and the path we validated are not written in
+ * the same language. `:/` resolves, as a filesystem path, to a harmless `<cwd>/:` that
+ * passes containment; to git it means "from the repo root", staging the ENTIRE
+ * repository, including files outside the session cwd and outside the workspace root.
+ * The server reported `error: null` while doing it.
+ *
+ * Two changes close it, and only together:
+ *
+ *  - `--literal-pathspecs` on the git invocation, which disables all pathspec magic and
+ *    glob expansion. This is the load-bearing half: re-deriving the path is NOT
+ *    sufficient on its own, because `relative()` leaves a payload such as
+ *    `:/etc/shadow` byte-identical.
+ *  - handing git the path we validated instead of the raw client string, so that what
+ *    is checked is what is executed.
+ *
+ * Derived from `absPath` (lexically resolved), deliberately NOT from the validator's
+ * `realPath` (symlink-resolved): for a symlink inside the repo, `realPath` names its
+ * TARGET, so staging it would record a different object than the one the client asked
+ * for. Containment is still decided on `realPath`; only the pathspec comes from here.
+ *
+ * @param {string} cwdReal - resolved session cwd; the git process's cwd
+ * @param {string} absPath - the absolute path that validatePathWithinCwd approved
+ * @returns {string} a cwd-relative, '/'-separated, magic-free pathspec
+ */
+function toLiteralPathspec(cwdReal, absPath) {
+  const rel = relative(cwdReal, absPath)
+  // absPath === cwdReal. git rejects an empty pathspec outright, and '.' is how the
+  // caller's intent — "everything in the cwd" — is spelled. Callers reject an empty
+  // client string before reaching here, so this only ever stands in for '.' / './'.
+  if (rel === '') return '.'
+  // git pathspecs are '/'-separated on every platform. relative() yields backslashes
+  // on Windows, which git would not match against its own '/'-separated index.
+  return sep === '\\' ? rel.split(sep).join('/') : rel
 }
 
 /**
@@ -305,15 +344,23 @@ export function createGitOps(sendFn, resolveSessionCwd, validatePathWithinCwd, w
       // Validate each file path is within session CWD (prevents path traversal)
       const validatedFiles = []
       for (const file of files) {
+        // An empty pathspec is never meaningful, and would otherwise resolve to the
+        // cwd itself and widen to '.' below. git rejects it today; keep that outcome
+        // with a clearer message. (#7281)
+        if (typeof file !== 'string' || file === '') {
+          sendFn(ws, { type: 'git_stage_result', error: 'Invalid file path: empty' })
+          return
+        }
         const absPath = normalize(resolve(cwdReal, file))
         const { valid } = await validatePathWithinCwd(absPath, sessionCwd)
         if (!valid) {
           sendFn(ws, { type: 'git_stage_result', error: `Access denied: path outside project directory — ${file}` })
           return
         }
-        validatedFiles.push(file)
+        // #7281 — what git receives is the path we validated, not the client's string.
+        validatedFiles.push(toLiteralPathspec(cwdReal, absPath))
       }
-      await execFileAsync(GIT, ['add', '--', ...validatedFiles], {
+      await execFileAsync(GIT, ['--literal-pathspecs', 'add', '--', ...validatedFiles], {
         cwd: cwdReal,
         timeout: 10000,
       })
@@ -341,15 +388,23 @@ export function createGitOps(sendFn, resolveSessionCwd, validatePathWithinCwd, w
       // Validate each file path is within session CWD (prevents path traversal)
       const validatedFiles = []
       for (const file of files) {
+        // An empty pathspec is never meaningful, and would otherwise resolve to the
+        // cwd itself and widen to '.' below. git rejects it today; keep that outcome
+        // with a clearer message. (#7281)
+        if (typeof file !== 'string' || file === '') {
+          sendFn(ws, { type: 'git_unstage_result', error: 'Invalid file path: empty' })
+          return
+        }
         const absPath = normalize(resolve(cwdReal, file))
         const { valid } = await validatePathWithinCwd(absPath, sessionCwd)
         if (!valid) {
           sendFn(ws, { type: 'git_unstage_result', error: `Access denied: path outside project directory — ${file}` })
           return
         }
-        validatedFiles.push(file)
+        // #7281 — what git receives is the path we validated, not the client's string.
+        validatedFiles.push(toLiteralPathspec(cwdReal, absPath))
       }
-      await execFileAsync(GIT, ['reset', 'HEAD', '--', ...validatedFiles], {
+      await execFileAsync(GIT, ['--literal-pathspecs', 'reset', 'HEAD', '--', ...validatedFiles], {
         cwd: cwdReal,
         timeout: 10000,
       })

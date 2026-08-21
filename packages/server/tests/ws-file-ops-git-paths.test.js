@@ -282,3 +282,174 @@ describe('git ops workspace root validation (#2690)', () => {
     )
   })
 })
+
+describe('gitStage/gitUnstage pathspec magic (#7281)', () => {
+  // `git add` takes a PATHSPEC, not a path. gitStage validated a RESOLVED absolute
+  // path and then handed git the RAW client string — two different languages. `:/`
+  // resolves, as a filesystem path, to a harmless `<cwd>/:` that passes containment;
+  // to git it means "from the repo root". Measured pre-fix: every payload below
+  // returned `error: null` AND staged a file outside the session cwd *and* outside
+  // the workspace root, from a single WebSocket message.
+  //
+  // Topology matters: the escape needs the session cwd to be a STRICT SUBDIRECTORY
+  // of the git repo. Every pre-existing test in this file uses the repo root as the
+  // session cwd, where `:/` has nothing to reach — which is why none of them failed.
+  let repoDir      // the git repo root — NOT reachable by the session
+  let subDir       // session cwd AND workspace root
+  let fileOps
+  let lastMessage
+
+  const mockSend = (_ws, msg) => { lastMessage = msg }
+  const ws = {}
+
+  const OUTSIDE = 'OUTSIDE-THE-WORKSPACE.txt'
+
+  /** Index contents, as repo-root-relative paths. */
+  async function stagedPaths() {
+    const { stdout } = await execFileAsync('git', ['diff', '--cached', '--name-only'], { cwd: repoDir })
+    return stdout.split('\n').map(s => s.trim()).filter(Boolean)
+  }
+
+  /** Anything staged that is not under the session cwd is an escape. */
+  async function escapedPaths() {
+    return (await stagedPaths()).filter(p => !p.startsWith('sub/'))
+  }
+
+  async function resetIndex() {
+    await execFileAsync('git', ['reset', 'HEAD', '--', '.'], { cwd: repoDir }).catch(() => {})
+  }
+
+  before(async () => {
+    repoDir = await mkdtemp(join(tmpdir(), 'chroxy-pathspec-'))
+    subDir = join(repoDir, 'sub')
+    await mkdir(subDir, { recursive: true })
+    await execFileAsync('git', ['init'], { cwd: repoDir })
+    await execFileAsync('git', ['config', 'user.email', 'test@test.com'], { cwd: repoDir })
+    await execFileAsync('git', ['config', 'user.name', 'Test'], { cwd: repoDir })
+    await writeFile(join(subDir, 'inside.txt'), 'original')
+    await writeFile(join(repoDir, OUTSIDE), 'original')
+    await execFileAsync('git', ['add', '-A'], { cwd: repoDir })
+    await execFileAsync('git', ['commit', '-m', 'init'], { cwd: repoDir })
+    // Dirty both, so `git add` has something to stage on either side of the boundary.
+    await writeFile(join(subDir, 'inside.txt'), 'modified')
+    await writeFile(join(repoDir, OUTSIDE), 'modified')
+
+    // workspaceRoot === subDir: the repo root is outside the workspace entirely.
+    fileOps = createFileOps(mockSend, subDir)
+  })
+
+  after(async () => {
+    if (repoDir) await rmDirRobustAsync(repoDir)
+  })
+
+  // POSITIVE CONTROL. Without this, every assertion below would also pass if the
+  // implementation simply denied everything — the exact false-green this repo has
+  // been bitten by (docs/false-safety-guards.md).
+  it('POSITIVE CONTROL: stages an ordinary file inside the session cwd', async () => {
+    await resetIndex()
+    lastMessage = null
+    await fileOps.gitStage(ws, ['inside.txt'], subDir)
+    assert.equal(lastMessage.type, 'git_stage_result')
+    assert.equal(lastMessage.error, null, `ordinary staging must still work, got: ${lastMessage.error}`)
+    assert.deepEqual(await stagedPaths(), ['sub/inside.txt'])
+  })
+
+  // Every payload here was MEASURED to escape pre-fix. Two distinct mechanisms:
+  //   - root-anchoring  (':/', ':(top)', ':/*', ':/<file>', ':(top,glob)**') re-bases the
+  //     pathspec on the REPO root, which sits above the workspace root here;
+  //   - exclusion-only  (':!<file>', ':(exclude)<file>') means "everything except", and
+  //     that "everything" is resolved repo-wide, not cwd-wide.
+  // ':(glob)**' is deliberately NOT in this list: it stays cwd-relative and does not
+  // escape, so it would be a test that cannot fail.
+  for (const payload of [':/', ':(top)', ':/*', `:/${OUTSIDE}`, ':(top,glob)**', ':!inside.txt', ':(exclude)nothing']) {
+    it(`does not stage outside the workspace root via pathspec magic ${JSON.stringify(payload)}`, async () => {
+      await resetIndex()
+      lastMessage = null
+      await fileOps.gitStage(ws, [payload], subDir)
+      assert.ok(lastMessage, 'should send a response')
+      assert.equal(lastMessage.type, 'git_stage_result')
+      // The invariant, asserted on the filesystem rather than on the reply: whatever
+      // the server chose to report, nothing outside the session cwd may be staged.
+      assert.deepEqual(
+        await escapedPaths(), [],
+        `pathspec ${JSON.stringify(payload)} escaped the workspace root and staged files above it`
+      )
+    })
+  }
+
+  it('gitUnstage does not reach outside the workspace root via pathspec magic', async () => {
+    await resetIndex()
+    // Stage the outside file directly, so a successful escape would be VISIBLE as an
+    // unstage. Without this the assertion could pass simply because nothing was staged.
+    await execFileAsync('git', ['add', '--', OUTSIDE], { cwd: repoDir })
+    assert.deepEqual(await stagedPaths(), [OUTSIDE], 'fixture precondition')
+
+    lastMessage = null
+    await fileOps.gitUnstage(ws, [':/'], subDir)
+    assert.equal(lastMessage.type, 'git_unstage_result')
+    assert.deepEqual(
+      await stagedPaths(), [OUTSIDE],
+      'gitUnstage reached outside the workspace root and unstaged a file above it'
+    )
+    await resetIndex()
+  })
+
+  // POSITIVE CONTROL that --literal-pathspecs is actually ARMED, rather than the
+  // escape merely being blocked by something else. A filename beginning with ':' is
+  // UNSTAGEABLE without the flag (git reads it as magic and errors) and stageable
+  // with it, so this assertion fails if the flag is ever dropped.
+  //
+  // POSIX-only: NTFS forbids ':' in a filename (it is the alternate-data-stream
+  // separator), so the fixture cannot be created on Windows at all.
+  it('POSITIVE CONTROL: stages a file whose name begins with ":" (proves --literal-pathspecs is armed)', async (t) => {
+    if (process.platform === 'win32') {
+      t.skip('NTFS forbids ":" in filenames — the fixture cannot exist on Windows')
+      return
+    }
+    const weird = ':weird.txt'
+    await writeFile(join(subDir, weird), 'colon')
+    await resetIndex()
+    lastMessage = null
+    await fileOps.gitStage(ws, [weird], subDir)
+    assert.equal(lastMessage.type, 'git_stage_result')
+    assert.equal(lastMessage.error, null, `expected the colon-named file to stage, got: ${lastMessage.error}`)
+    assert.deepEqual(await stagedPaths(), [`sub/${weird}`])
+    await resetIndex()
+  })
+
+  // Guards the OTHER wrong fix: deriving the pathspec from the validator's
+  // symlink-resolved `realPath` rather than the lexically-resolved `absPath`. For a
+  // symlink inside the repo, realPath names its TARGET, so staging it would record a
+  // different object than the client asked for.
+  it('stages a symlink itself, not the file it points at', async (t) => {
+    const linkPath = join(subDir, 'link.txt')
+    try {
+      await symlink('inside.txt', linkPath)
+    } catch (err) {
+      if (err.code === 'EPERM' || err.code === 'EACCES' || err.code === 'ENOTSUP') {
+        // The Windows CI runner is NETWORK SERVICE and lacks SeCreateSymbolicLinkPrivilege.
+        t.skip(`symlinks not supported in this environment: ${err.code}`)
+        return
+      }
+      if (err.code !== 'EEXIST') throw err
+    }
+    await resetIndex()
+    lastMessage = null
+    await fileOps.gitStage(ws, ['link.txt'], subDir)
+    assert.equal(lastMessage.type, 'git_stage_result')
+    assert.equal(lastMessage.error, null, `expected the symlink to stage, got: ${lastMessage.error}`)
+    assert.deepEqual(await stagedPaths(), ['sub/link.txt'], 'must stage the link, not its target')
+    const { stdout } = await execFileAsync('git', ['ls-files', '-s', 'sub/link.txt'], { cwd: repoDir })
+    assert.ok(stdout.startsWith('120000'), `expected symlink mode 120000, got: ${stdout.trim()}`)
+    await resetIndex()
+  })
+
+  it('rejects an empty pathspec rather than widening it to the whole cwd', async () => {
+    await resetIndex()
+    lastMessage = null
+    await fileOps.gitStage(ws, [''], subDir)
+    assert.equal(lastMessage.type, 'git_stage_result')
+    assert.ok(lastMessage.error, 'an empty pathspec must be an error')
+    assert.deepEqual(await stagedPaths(), [], 'an empty pathspec must not stage anything')
+  })
+})
