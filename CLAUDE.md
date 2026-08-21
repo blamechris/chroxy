@@ -269,10 +269,12 @@ padding or font size, re-check the resulting box.
 **When you add or change a check, break the thing it protects and confirm it goes
 red.** If you cannot make it fail, it is not a guard.
 
-Every guard in `docs/false-safety-guards.md` reported success without checking
-anything, and every one of them passed unit tests, lint, typecheck, and CI —
-for months in some cases. Test suites cannot find this class, because the
-guard's *output* is correct and its *coverage* is what is wrong.
+Every guard in `docs/false-safety-guards.md` passed unit tests, lint, typecheck
+and CI — continuously, for months in some cases — because **success and
+not-checking were the same observable outcome** (entry 11, `#7273`, is that
+inverted: a check so broken it satisfied its own adversarial tests). Test
+suites cannot find this class, because the green is real and the *coverage* is
+what is wrong.
 
 **Don't put a count here.** This sentence read "eight guards" while the
 catalogue held twelve — a hardcoded number beside a growing set, which is the
