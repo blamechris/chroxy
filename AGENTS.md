@@ -288,18 +288,32 @@ padding or font size, re-check the resulting box.
 **When you add or change a check, break the thing it protects and confirm it goes
 red.** If you cannot make it fail, it is not a guard.
 
-Eight guards in this repo reported success without checking anything, and all
-eight passed unit tests, lint, typecheck, and CI — for months in some cases.
-Test suites cannot find this class, because the guard's *output* is correct and
-its *coverage* is what is wrong. The recurring causes:
+Every guard in `docs/false-safety-guards.md` reported success without checking
+anything, and every one of them passed unit tests, lint, typecheck, and CI —
+for months in some cases. Test suites cannot find this class, because the
+guard's *output* is correct and its *coverage* is what is wrong.
 
-- a hardcoded list next to a set that grows (`#7192`, `#7197`)
+**Don't put a count here.** This sentence read "eight guards" while the
+catalogue held twelve — a hardcoded number beside a growing set, which is the
+first cause below, and the catalogue says so itself: consult the entries, not a
+tally that is stale the moment one merges. The recurring causes:
+
+- a hardcoded list next to a set that grows (`#7192`, `#7197`, `#7267`) —
+  including one that lived in **CI config**, where no lint, test or code review
+  of the repo could reach it (`#7270`)
 - "cannot check this" silently treated as "nothing to check" (`#7195`, `#7210`)
 - a precondition that is false, so the body never runs and the job is green
   (`#7184`, `#7198`)
 - testing the source tree when the artifact is what ships (`#7189`)
 - a guard wired to only some of its callers, correct for every input it sees
   and never reached by the rest (`#7262`)
+- a check that denies *everything*, so its negative tests pass for the wrong
+  reason and would keep passing with the check deleted outright (`#7273`)
+- a validated value handed on to something that parses it under a different
+  grammar — a pathspec, a revision, a glob, a shell word (`#7281`)
+- a guard whose comment describes a stronger check than its code performs — a
+  character class that admits the flag it claims to block, a substring match
+  standing in for a token match (`#7290`, `#7291`)
 
 Check the **exit code**, not the output — and note `cmd | grep -c FAIL` reports
 `grep`'s status, not the script's. Restore mutations with `cp` from a backup,
