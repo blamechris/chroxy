@@ -6,7 +6,7 @@ import { tmpdir } from 'os'
 import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
 import { createFileOps } from '../src/ws-file-ops/index.js'
-import { rmDirRobustAsync } from './test-helpers.js'
+import { disableRepoAutoGc, rmDirRobustAsync } from './test-helpers.js'
 
 const execFileAsync = promisify(execFileCb)
 
@@ -324,6 +324,9 @@ describe('gitStage/gitUnstage pathspec magic (#7281)', () => {
     subDir = join(repoDir, 'sub')
     await mkdir(subDir, { recursive: true })
     await execFileAsync('git', ['init'], { cwd: repoDir })
+    // #6098 — this block is the only one in this file that COMMITS, so it is the only
+    // one that can trip background gc racing the teardown rm (ENOTEMPTY).
+    disableRepoAutoGc(repoDir)
     await execFileAsync('git', ['config', 'user.email', 'test@test.com'], { cwd: repoDir })
     await execFileAsync('git', ['config', 'user.name', 'Test'], { cwd: repoDir })
     await writeFile(join(subDir, 'inside.txt'), 'original')
