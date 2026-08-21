@@ -287,6 +287,69 @@ is also wrong, on both platforms: `'C:\Documents'.startsWith('C:\' + '\')` and
 a separator denies everything. Two of the six copies had already "fixed" it that
 way.
 
+### 12. The guard that validated one language and executed another — `#7281`
+
+`gitStage` resolved the client's string to an absolute path, asked
+`validatePathWithinCwd` whether that path was inside the project, and — having
+been told yes — handed **the client's original string** to `git add`.
+
+The check was correct. The path it checked was never the thing that ran.
+`git add` takes a *pathspec*, not a path, and a pathspec has its own grammar.
+`:/` resolves, as a filesystem path, to a harmless `<cwd>/:` that is plainly
+inside the project; to git it means "from the repository root". From a session
+confined to a subdirectory, one WebSocket message staged files above the
+workspace root, and the server replied `error: null`.
+
+Two grammars, two mechanisms: root-anchoring (`:/`, `:(top)`, `:/*`,
+`:(top,glob)**`) re-bases the pathspec on the repo root, and exclusion-only
+(`:!x`, `:(exclude)x`) means "everything except", resolved repo-wide.
+
+**Why no test caught it.** Every fixture in `ws-file-ops-git-paths.test.js` and
+`git-stage-commit.test.js` used the repo root as the session cwd — the one
+topology in which `:/` has nothing to reach. The suite tested the escape
+mechanism it knew about (`../`, correctly refused) and never asked about the
+one that worked. Fixture *geometry*, not payload, was what made the bug
+invisible; a reviewer scanning six adversarial payloads in a describe block
+named "path validation" would reasonably conclude the surface was covered.
+
+**The fix has two halves and needs both.** `--literal-pathspecs` disables the
+magic; handing git the validated path restores "what is checked is what runs".
+Re-deriving the path alone is *not* sufficient — `relative()` leaves
+`:/etc/shadow` byte-identical.
+
+**Two traps inside the fix**, both found by review after the first cut shipped:
+
+- Deriving the pathspec from the validator's `realPath` stages a symlink's
+  TARGET. Deriving it from the lexical `absPath` can point *out* of the cwd,
+  because containment is decided on `realPath` — so it says yes to a path that
+  merely reaches the cwd through a symlink or an aliased prefix (the ordinary
+  macOS `/var` → `/private/var` case, not an attack). Neither alone is right.
+- Falling back to `realPath` then re-introduces the original sin in miniature:
+  when the fallback yields an empty relative path, answering `'.'` turns a
+  one-path request into a whole-cwd stage. Measured: `['../aliasdir']` staged
+  every file in the cwd, `error: null`.
+
+**And the flag is silent on half the surface.** `git reset` does not error on a
+non-matching pathspec the way `git add` does, so deleting `--literal-pathspecs`
+from the unstage invocation left all 31 tests green. The guard needed its own
+positive control: a file whose name begins with `:` is unstageable *without* the
+flag and unstageable *with* it, so the assertion goes red the moment the flag is
+dropped. The stage half has the mirror control.
+
+**Environment can refuse the fix outright.** git rejects `--literal-pathspecs`
+when the environment also selects another global pathspec mode, so an inherited
+`GIT_GLOB_PATHSPECS=1` or `GIT_ICASE_PATHSPECS=1` would make *every* stage die
+with `fatal: global 'literal' pathspec setting is incompatible with all other
+global pathspec settings`. The daemon inherits the user's shell environment;
+those variables are dropped for our own invocations.
+
+The generalisation is worth more than the instance: **whenever a validated value
+is handed to something that parses it under a different grammar — a pathspec, a
+revision, a glob, a shell word, a URL — the validation proves nothing.** The
+sibling instances that audit turned up are `#7290` (a revision allowlist whose
+comment claims it blocks flags, while `-` is inside its character class) and
+`#7291` (client prompts in positional argv slots with no `--`).
+
 ## The one that got me while writing this
 
 A Maestro `repeat` was written with `maxRuns: 3`. `YamlRepeatCommand` has no
