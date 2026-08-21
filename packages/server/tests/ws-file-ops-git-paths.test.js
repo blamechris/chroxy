@@ -530,6 +530,12 @@ describe('gitStage/gitUnstage pathspec magic (#7281)', () => {
       await escapedPaths(), [],
       'a symlink above the cwd staged a path outside the workspace root',
     )
+    // And state what it DOES do, rather than leaving it to be discovered. Containment
+    // approved the link's TARGET, so that is what gets staged — a substitution, but a
+    // contained one, and strictly safer than main (which staged `lure.txt` itself, above
+    // the workspace root, replying error:null). Asserted so the behaviour is pinned
+    // rather than incidental; if it ever changes, this is the test that says so.
+    assert.deepEqual(await stagedPaths(), ['sub/inside.txt'])
     await resetIndex()
   })
 
@@ -613,6 +619,41 @@ describe('gitStage/gitUnstage pathspec magic (#7281)', () => {
         else delete process.env[varName]
         await resetIndex()
       }
+    })
+  }
+
+  // COVERAGE for the pathspec DERIVATION, not just the flag. Every other path in this
+  // file (and in every pre-existing gitStage/gitUnstage test) is a SINGLE component, so
+  // toLiteralPathspec could return only the last component and all 89 tests across the
+  // five git/file-ops suites stayed green — measured by mutation. A multi-component path
+  // is what makes `relative()` observable at all.
+  for (const op of ['gitStage', 'gitUnstage']) {
+    it(`${op} preserves every component of a nested path`, async () => {
+      await mkdir(join(subDir, 'nested', 'deep'), { recursive: true })
+      await writeFile(join(subDir, 'nested', 'deep', 'file.txt'), 'nested')
+      // A decoy of the same basename at the cwd root: if the pathspec is ever truncated
+      // to its last component, THIS is what git would match instead.
+      await writeFile(join(subDir, 'file.txt'), 'decoy')
+      const nested = 'sub/nested/deep/file.txt'
+      await resetIndex()
+
+      if (op === 'gitUnstage') {
+        await execFileAsync('git', ['add', '--', nested, 'sub/file.txt'], { cwd: repoDir })
+        assert.deepEqual(await stagedPaths(), ['sub/file.txt', nested], 'fixture precondition')
+      }
+
+      lastMessage = null
+      await fileOps[op](ws, [join('nested', 'deep', 'file.txt')], subDir)
+      assert.equal(lastMessage.error, null, `${op} failed on a nested path: ${lastMessage.error}`)
+      assert.deepEqual(
+        await stagedPaths(),
+        op === 'gitStage' ? [nested] : ['sub/file.txt'],
+        `${op} acted on the wrong path — the pathspec lost or gained a component`,
+      )
+
+      await resetIndex()
+      await rm(join(subDir, 'nested'), { recursive: true, force: true })
+      await rm(join(subDir, 'file.txt'), { force: true })
     })
   }
 
