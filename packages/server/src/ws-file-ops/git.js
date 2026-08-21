@@ -10,6 +10,27 @@ import { isPathWithin } from '../utils/path-containment.js'
 
 const execFileAsync = promisify(execFileCb)
 
+// #7281 — git REFUSES `--literal-pathspecs` when the environment also selects another
+// global pathspec mode: with GIT_GLOB_PATHSPECS=1 or GIT_ICASE_PATHSPECS=1 inherited from
+// the daemon's environment, every stage/unstage dies with `fatal: global 'literal'
+// pathspec setting is incompatible with all other global pathspec settings` (measured,
+// git 2.54.0). GIT_NOGLOB_PATHSPECS happens to be tolerated today; it is dropped anyway
+// rather than depending on that. The daemon inherits the user's shell environment, so
+// these are theirs to set and not ours to assume absent — drop the family for our own
+// invocations and let the flag decide pathspec semantics by itself.
+const PATHSPEC_ENV_VARS = [
+  'GIT_LITERAL_PATHSPECS',
+  'GIT_GLOB_PATHSPECS',
+  'GIT_NOGLOB_PATHSPECS',
+  'GIT_ICASE_PATHSPECS',
+]
+
+function gitEnvWithoutPathspecModes() {
+  const env = { ...process.env }
+  for (const key of PATHSPEC_ENV_VARS) delete env[key]
+  return env
+}
+
 // #6876 — result sender for the git_create_pr flow. Every field is always
 // present (present-and-nullable) so the wire payload satisfies
 // ServerGitCreatePrResultSchema on every path. #6938 — `existingUrl` is a
@@ -161,18 +182,26 @@ function mapGhCreateError(err) {
  *   when neither form stays inside the cwd (the caller then rejects)
  */
 function toLiteralPathspec(cwdReal, absPath, realPath) {
-  const rel = isPathWithin(absPath, cwdReal)
-    ? relative(cwdReal, absPath)
-    : relative(cwdReal, realPath)
+  const lexicallyInside = isPathWithin(absPath, cwdReal)
+  const rel = lexicallyInside ? relative(cwdReal, absPath) : relative(cwdReal, realPath)
+  if (rel === '') {
+    // The path denotes the cwd DIRECTORY itself, and the two ways of getting here mean
+    // opposite things:
+    //  - lexically inside: the client literally named the cwd ('.', './'). git rejects an
+    //    empty pathspec, and '.' is how "everything in the cwd" is spelled — which is
+    //    exactly what was asked for.
+    //  - via the realPath fallback: the client named something OUTSIDE the cwd that
+    //    RESOLVES to it (a symlink pointing at the cwd). Answering '.' there turns a
+    //    one-path request into a whole-cwd stage, touching files the client never named,
+    //    and replies `error: null` — the same false-success class this change exists to
+    //    remove. Reject instead.
+    return lexicallyInside ? '.' : null
+  }
   // Defensive: `valid === true` already means realPath is inside, so this is
   // unreachable today. It stays because a pathspec that leaves the cwd must never
   // reach git, and a future caller that stops checking `valid` should fail closed
   // rather than silently widen.
-  if (rel !== '' && !isPathWithin(resolve(cwdReal, rel), cwdReal)) return null
-  // absPath === cwdReal. git rejects an empty pathspec outright, and '.' is how the
-  // caller's intent — "everything in the cwd" — is spelled. Callers reject an empty
-  // client string before reaching here, so this only ever stands in for '.' / './'.
-  if (rel === '') return '.'
+  if (!isPathWithin(resolve(cwdReal, rel), cwdReal)) return null
   // git pathspecs are '/'-separated on every platform. relative() yields backslashes
   // on Windows, which git would not match against its own '/'-separated index.
   return sep === '\\' ? rel.split(sep).join('/') : rel
@@ -371,7 +400,7 @@ export function createGitOps(sendFn, resolveSessionCwd, validatePathWithinCwd, w
         // cwd itself and widen to '.' below. git rejects it today; keep that outcome
         // with a clearer message. (#7281)
         if (typeof file !== 'string' || file === '') {
-          sendFn(ws, { type: 'git_stage_result', error: 'Invalid file path: empty' })
+          sendFn(ws, { type: 'git_stage_result', error: `Invalid file path: ${typeof file !== 'string' ? 'not a string' : 'empty'}` })
           return
         }
         const absPath = normalize(resolve(cwdReal, file))
@@ -387,6 +416,7 @@ export function createGitOps(sendFn, resolveSessionCwd, validatePathWithinCwd, w
       await execFileAsync(GIT, ['--literal-pathspecs', 'add', '--', ...validatedFiles], {
         cwd: cwdReal,
         timeout: 10000,
+        env: gitEnvWithoutPathspecModes(),
       })
       sendFn(ws, { type: 'git_stage_result', error: null })
     } catch (err) {
@@ -416,7 +446,7 @@ export function createGitOps(sendFn, resolveSessionCwd, validatePathWithinCwd, w
         // cwd itself and widen to '.' below. git rejects it today; keep that outcome
         // with a clearer message. (#7281)
         if (typeof file !== 'string' || file === '') {
-          sendFn(ws, { type: 'git_unstage_result', error: 'Invalid file path: empty' })
+          sendFn(ws, { type: 'git_unstage_result', error: `Invalid file path: ${typeof file !== 'string' ? 'not a string' : 'empty'}` })
           return
         }
         const absPath = normalize(resolve(cwdReal, file))
@@ -432,6 +462,7 @@ export function createGitOps(sendFn, resolveSessionCwd, validatePathWithinCwd, w
       await execFileAsync(GIT, ['--literal-pathspecs', 'reset', 'HEAD', '--', ...validatedFiles], {
         cwd: cwdReal,
         timeout: 10000,
+        env: gitEnvWithoutPathspecModes(),
       })
       sendFn(ws, { type: 'git_unstage_result', error: null })
     } catch (err) {

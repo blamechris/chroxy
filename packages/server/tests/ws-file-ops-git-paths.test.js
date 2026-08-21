@@ -533,6 +533,89 @@ describe('gitStage/gitUnstage pathspec magic (#7281)', () => {
     await resetIndex()
   })
 
+  // The realPath fallback has a second empty-relative case, and it is NOT the client
+  // asking for '.': a path OUTSIDE the cwd that RESOLVES to the cwd directory. Answering
+  // '.' there turns a one-path request into a whole-cwd stage. Measured on the first cut
+  // of this fix: gitStage(['../aliasdir']) replied error:null and staged all three files
+  // in the cwd. Same false-success class as the escape itself.
+  it('does not widen a one-path request into the whole cwd via a symlink to the cwd', async (t) => {
+    const aliasDir = join(repoDir, 'aliasdir')
+    try {
+      await symlink(subDir, aliasDir)
+    } catch (err) {
+      if (err.code === 'EPERM' || err.code === 'EACCES' || err.code === 'ENOTSUP') {
+        t.skip(`symlinks not supported in this environment: ${err.code}`)
+        return
+      }
+      if (err.code !== 'EEXIST') throw err
+    }
+    await writeFile(join(subDir, 'second.txt'), 'other')
+    await resetIndex()
+    lastMessage = null
+    await fileOps.gitStage(ws, ['../aliasdir'], subDir)
+    assert.equal(lastMessage.type, 'git_stage_result')
+    assert.deepEqual(
+      await stagedPaths(), [],
+      'a single-path request was widened into a whole-cwd stage',
+    )
+    await resetIndex()
+    await rm(join(subDir, 'second.txt'), { force: true })
+  })
+
+  // POSITIVE CONTROL for --literal-pathspecs on the UNSTAGE invocation specifically.
+  // Without it the review showed every other test here stays green: `git reset` does not
+  // error on a non-matching pathspec the way `git add` does, so a dropped flag is silent.
+  // A ':'-prefixed filename is unstageable without the flag and unstageable-able with it,
+  // so this goes red the moment it is removed from the reset argv.
+  //
+  // POSIX-only: NTFS forbids ':' in a filename.
+  it('POSITIVE CONTROL: gitUnstage unstages a file whose name begins with ":" (proves --literal-pathspecs on reset)', async (t) => {
+    if (process.platform === 'win32') {
+      t.skip('NTFS forbids ":" in filenames — the fixture cannot exist on Windows')
+      return
+    }
+    const weird = ':unstage-me.txt'
+    await writeFile(join(subDir, weird), 'colon')
+    await resetIndex()
+    await execFileAsync('git', ['--literal-pathspecs', 'add', '--', `sub/${weird}`], { cwd: repoDir })
+    assert.deepEqual(await stagedPaths(), [`sub/${weird}`], 'fixture precondition: it is staged')
+
+    lastMessage = null
+    await fileOps.gitUnstage(ws, [weird], subDir)
+    assert.equal(lastMessage.type, 'git_unstage_result')
+    assert.equal(lastMessage.error, null, `expected the colon-named file to unstage, got: ${lastMessage.error}`)
+    assert.deepEqual(await stagedPaths(), [], 'the colon-named file was not actually unstaged')
+    await resetIndex()
+    await rm(join(subDir, weird), { force: true })
+  })
+
+  // git REFUSES --literal-pathspecs when the environment selects another global pathspec
+  // mode, so an inherited GIT_GLOB_PATHSPECS/GIT_ICASE_PATHSPECS would make EVERY stage
+  // die with `fatal: global 'literal' pathspec setting is incompatible ...`. The daemon
+  // inherits the user's shell environment, so this is reachable without any attacker.
+  for (const varName of ['GIT_GLOB_PATHSPECS', 'GIT_ICASE_PATHSPECS']) {
+    it(`stages normally when the daemon environment has ${varName} set`, async () => {
+      const had = Object.prototype.hasOwnProperty.call(process.env, varName)
+      const prev = process.env[varName]
+      process.env[varName] = '1'
+      try {
+        await resetIndex()
+        lastMessage = null
+        await fileOps.gitStage(ws, ['inside.txt'], subDir)
+        assert.equal(lastMessage.type, 'git_stage_result')
+        assert.equal(
+          lastMessage.error, null,
+          `an inherited ${varName} broke ordinary staging: ${lastMessage.error}`,
+        )
+        assert.deepEqual(await stagedPaths(), ['sub/inside.txt'])
+      } finally {
+        if (had) process.env[varName] = prev
+        else delete process.env[varName]
+        await resetIndex()
+      }
+    })
+  }
+
   it('rejects an empty pathspec rather than widening it to the whole cwd', async () => {
     await resetIndex()
     lastMessage = null
