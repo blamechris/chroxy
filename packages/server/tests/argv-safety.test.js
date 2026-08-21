@@ -14,6 +14,7 @@ import {
   isSafeArgvValue,
   assertSafeArgvValue,
   cliHelpAdvertisesFlag,
+  cliHelpFlagArity,
 } from '../src/utils/argv-safety.js'
 
 describe('isSafeArgvValue', () => {
@@ -134,5 +135,58 @@ describe('cliHelpAdvertisesFlag', () => {
     assert.equal(cliHelpAdvertisesFlag('--a.c', '--a.c'), true)
     assert.equal(cliHelpAdvertisesFlag('--abc', '--a.c'), false,
       'an unescaped "." would match "b" here')
+  })
+})
+
+describe('cliHelpAdvertisesFlag — boundaries on BOTH sides', () => {
+  // A trailing-only lookahead (the first cut of this guard) returned true for
+  // all three of these. The third is the exact mirror of the #7291 defect the
+  // function exists to prevent: a SHORTER probe satisfied by a LONGER flag.
+  it('refuses a match that is not left-delimited', () => {
+    assert.equal(cliHelpAdvertisesFlag('x--remote', '--remote'), false)
+    assert.equal(cliHelpAdvertisesFlag('---remote', '--remote'), false)
+    assert.equal(cliHelpAdvertisesFlag('  --O <file>   Order file', '-O'), false)
+  })
+
+  it('still accepts a genuinely advertised flag (positive control)', () => {
+    assert.equal(cliHelpAdvertisesFlag('  --remote', '--remote'), true)
+    assert.equal(cliHelpAdvertisesFlag('  --remote, -r   Go', '--remote'), true)
+    assert.equal(cliHelpAdvertisesFlag('Usage: x [--remote]', '--remote'), true)
+  })
+})
+
+describe('cliHelpFlagArity', () => {
+  // Which fix shape is safe depends on this. Against a REQUIRED-argument flag
+  // a `--` separator is consumed as the flag's value and frees the client
+  // string to be option-parsed — strictly worse than no separator.
+  it('reads the metavar that follows the flag', () => {
+    assert.equal(cliHelpFlagArity('  --remote            Launch', '--remote'), 'boolean')
+    assert.equal(cliHelpFlagArity('  --remote <name>     Launch', '--remote'), 'required')
+    assert.equal(cliHelpFlagArity('  --remote [name]     Launch', '--remote'), 'optional')
+    assert.equal(cliHelpFlagArity('  --remote=<url>      Launch', '--remote'), 'required')
+  })
+
+  it('skips an alias list before the metavar', () => {
+    assert.equal(cliHelpFlagArity('  --remote, -r        Launch', '--remote'), 'boolean')
+    assert.equal(cliHelpFlagArity('  --remote, -r <n>    Launch', '--remote'), 'required')
+  })
+
+  it('does not read a metavar out of the DESCRIPTION column', () => {
+    // Two spaces start the description, so `<file>` there belongs to the prose,
+    // not to this flag. Without that rule the arity would be misread and the
+    // caller would refuse a perfectly usable boolean flag.
+    assert.equal(cliHelpFlagArity('  --remote    Same as --output <file>', '--remote'), 'boolean')
+  })
+
+  it('returns absent for a flag that is not advertised', () => {
+    assert.equal(cliHelpFlagArity('  --remote-control  Enable', '--remote'), 'absent')
+    assert.equal(cliHelpFlagArity('nothing here', '--remote'), 'absent')
+  })
+
+  it('errs toward "required" — the fail-closed direction — when a flag appears only in prose', () => {
+    // Known limitation: an unanchored match can pick up a flag named in prose.
+    // It resolves to 'required', which makes the caller REFUSE the feature.
+    // Documented deliberately: the wrong answer here is the safe one.
+    assert.equal(cliHelpFlagArity('  --local   Opposite of --remote <x>', '--remote'), 'required')
   })
 })

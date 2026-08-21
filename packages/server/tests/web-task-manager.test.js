@@ -474,4 +474,66 @@ describe('WebTaskManager', () => {
     })
   })
 
+
+  describe('#7291 --remote arity gate', () => {
+    // buildRemoteTaskArgs protects the prompt with a `--`, and a separator is
+    // only correct for a boolean or optional-arg flag. Against a REQUIRED-arg
+    // `--remote <name>` the `--` becomes the flag's value and the prompt is
+    // freed to be option-parsed — strictly WORSE than no separator (measured
+    // against commander 12.1.0). Since no argv is correct under both arities,
+    // the gate must refuse rather than guess.
+    const withRemote = (decl) => `Usage: claude [options]\n  ${decl}   Launch a web task\n  --teleport <id>   Teleport\n`
+
+    it('refuses the feature when --remote takes a REQUIRED argument', async () => {
+      manager = new WebTaskManager()
+      const features = await manager.detectFeatures({ exec: async () => withRemote('--remote <name>') })
+      assert.equal(features.remote, false,
+        'a required-arg --remote cannot be protected by a -- separator, so it must be refused')
+      assert.equal(manager.isAvailable, false)
+      // Positive control in the same fixture: --teleport is unaffected.
+      assert.equal(features.teleport, true)
+    })
+
+    it('allows boolean and optional-arg --remote (positive control)', async () => {
+      for (const decl of ['--remote', '--remote [name]']) {
+        const m = new WebTaskManager()
+        const features = await m.detectFeatures({ exec: async () => withRemote(decl) })
+        assert.equal(features.remote, true, `${decl} must remain available`)
+        m.destroy()
+      }
+    })
+  })
+
+  describe('#7291 the production call site is wired to the builder', () => {
+    // buildRemoteTaskArgs is covered as a pure function above, but EVERY other
+    // test in this file stubs `_spawnRemoteTask` to avoid spawning a real
+    // process — so nothing observes that the real one actually CALLS the
+    // builder. Someone could inline `['--remote', prompt]` back into
+    // _spawnRemoteTask and the whole suite would stay green: the guard would
+    // be wired to none of its callers.
+    //
+    // execFile is a module-scope import with no injection seam, and
+    // mock.module of a global leaks across the parallel test runner, so this
+    // asserts on the SOURCE instead. It is deliberately narrow: it checks the
+    // call site names the builder and does not build an argv literal itself.
+    it('_spawnRemoteTask passes buildRemoteTaskArgs(...) to execFile, not a literal argv', async () => {
+      const { readFileSync } = await import('node:fs')
+      const { fileURLToPath } = await import('node:url')
+      const { join, dirname } = await import('node:path')
+      const src = readFileSync(
+        join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'web-task-manager.js'),
+        'utf8',
+      )
+      // Anchor on the METHOD DEFINITION, not the call in launchTask.
+      const defIdx = src.indexOf('_spawnRemoteTask(task) {')
+      assert.ok(defIdx !== -1, '_spawnRemoteTask definition not found')
+      const callSite = src.slice(defIdx, src.indexOf('\n  }', defIdx))
+
+      assert.match(callSite, /execFile\('claude', buildRemoteTaskArgs\(task\.prompt\)/,
+        '_spawnRemoteTask must delegate its argv to buildRemoteTaskArgs')
+      assert.ok(!/\[\s*'--remote'\s*,/.test(callSite),
+        '_spawnRemoteTask must not construct an argv literal of its own')
+    })
+  })
+
 })

@@ -562,15 +562,13 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
 
       const rawBase = (typeof base === 'string' && base.trim()) ? base.trim() : 'HEAD'
       // #7290: `base` is client-controlled and UNVALIDATED on the wire —
-      // ClientGetDiffSchema is `z.object({ type }).passthrough()` — and it lands
-      // in the REVISION slot of `git diff <base>`. The charset allowlist below
+      // GetDiffSchema is `z.object({ type }).passthrough()` — and it lands in
+      // the REVISION slot of `git diff <base>`. The charset allowlist below
       // used to be the only check, and it put `-` INSIDE its character class,
       // so every single-token option passed it: `--stat`, `-p`, `--exit-code`,
       // `--ext-diff`, and `-O<path>` — which makes git read <path> as a diff
       // orderfile and report whether it could, straight back to the client via
-      // the `error: err.message` branches below. That is a filesystem
-      // existence/readability oracle over the whole disk, as the daemon user,
-      // escaping the session cwd entirely.
+      // the `error: err.message` branches below.
       //
       // isSafeArgvValue is the load-bearing half (it rejects the leading dash);
       // the allowlist stays as a charset narrowing. A `--` separator canNOT
@@ -578,6 +576,22 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
       // A git revision can never legitimately begin with `-`, so REJECTING is
       // correct here; falling back to 'HEAD' preserves the pre-existing
       // contract for any unusable base.
+      //
+      // SCOPE — this closes the LEADING-DASH route and only that. A path
+      // oracle survives here that needs no dash at all, because `:` and `/`
+      // are both in the charset and git's stderr is forwarded verbatim:
+      //
+      //     base='HEAD:/etc/passwd' -> fatal: path '/etc/passwd' exists on
+      //                                disk, but not in 'HEAD'
+      //     base='HEAD:absent'      -> fatal: path 'absent' does not exist in 'HEAD'
+      //     base='/etc/passwd'      -> fatal: '/etc/passwd' is outside repository
+      //     base='/no/such/file'    -> fatal: ambiguous argument ...
+      //
+      // That is pre-existing (charset and stderr-forwarding are both unchanged
+      // by #7290) and is tracked separately; closing it means resolving the
+      // base with `rev-parse --verify` and not forwarding raw git stderr,
+      // which is a wider contract change than this fix. Do not read the guard
+      // below as sealing the oracle — it seals one route into it.
       const diffBase = (isSafeArgvValue(rawBase) && /^[a-zA-Z0-9._\-\/~^@{}:]+$/.test(rawBase))
         ? rawBase
         : 'HEAD'

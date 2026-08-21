@@ -48,15 +48,24 @@ const DIFF_MAX_BUFFER = 64 * 1024 * 1024
 //
 // #7290: the CHECK now lives in utils/argv-safety.js and is shared with
 // ws-file-ops/reader.js. This wrapper exists only to translate its Error into
-// a GitOpsError; the messages (`empty <kind>` / `unsafe <kind>: <json>`) are
-// produced there and are pinned by orchestration-git-ops.test.js. Do not
-// re-inline the check here — this module used to be the only copy, and #7290
-// was filed because a SECOND, weaker spelling had grown in reader.js.
+// a GitOpsError; both messages (`empty <kind>` / `unsafe <kind>: <json>`) are
+// produced there, and orchestration-git-ops.test.js pins the `unsafe` half.
+// Do not re-inline the check here — #7290 was filed because a SECOND, weaker
+// spelling had grown in reader.js. A THIRD is still live and NOT folded in:
+// `rejectGitOptionLike` in environments/backends/k8s.js, scoped to gitRepo
+// fields.
 function assertSafeRef(name, kind = 'ref') {
   try {
     assertSafeArgvValue(name, kind)
   } catch (err) {
-    throw new GitOpsError(err.message)
+    // Only validation errors are expected here. Anything else would be a bug
+    // inside the shared guard, so keep the original rather than silently
+    // relabelling it as an unsafe ref. GitOpsError's constructor takes
+    // { args, stderr } and does not forward `cause` to super(), so it is set
+    // here rather than passed in — passing it would be dropped on the floor.
+    const wrapped = new GitOpsError(err.message)
+    wrapped.cause = err
+    throw wrapped
   }
 }
 

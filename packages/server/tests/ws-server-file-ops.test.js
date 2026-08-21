@@ -1303,7 +1303,7 @@ describe('get_diff handler', () => {
 
   // ── #7290: the `base` revision must never reach git as an OPTION ──────────
   //
-  // `base` arrives from the wire unvalidated — ClientGetDiffSchema is
+  // `base` arrives from the wire unvalidated — GetDiffSchema is
   // `z.object({ type: z.literal('get_diff') }).passthrough()`, so the field is
   // not constrained at all — and lands in the REVISION slot of
   // `git diff <base>`. The old allowlist put `-` INSIDE its character class,

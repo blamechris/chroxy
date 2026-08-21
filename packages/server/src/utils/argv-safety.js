@@ -97,9 +97,12 @@ export function assertSafeArgvValue(value, kind = 'value') {
  *     help.includes('--remote')   -> true    (wrong: opens the gate)
  *     cliHelpAdvertisesFlag(...)  -> false   (right)
  *
- * The trailing `(?![\w-])` is the whole point — the flag must not be followed
- * by another word character or a hyphen, which is what distinguishes a flag
- * from a longer flag that merely starts the same way.
+ * The boundaries are the whole point — the flag must be delimited on BOTH
+ * sides by something that is not a word character or a hyphen, which is what
+ * distinguishes a flag from a longer flag sharing its prefix or its suffix.
+ * A trailing-only test still returns true for `x--remote`, for `---remote`,
+ * and — the exact mirror of the defect this function exists to prevent — for
+ * a `-O` probe against a help line advertising `--O <file>`.
  *
  * @param {unknown} helpText - captured stdout of `<cli> --help`.
  * @param {string} flag - the exact flag, including leading dashes, e.g. '--remote'.
@@ -107,6 +110,50 @@ export function assertSafeArgvValue(value, kind = 'value') {
  */
 export function cliHelpAdvertisesFlag(helpText, flag) {
   if (typeof helpText !== 'string' || typeof flag !== 'string' || !flag) return false
-  const escaped = flag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  return new RegExp(`${escaped}(?![\\w-])`).test(helpText)
+  return new RegExp(`(?<![\\w-])${escapeForRegExp(flag)}(?![\\w-])`).test(helpText)
+}
+
+/** Escape a flag so it can be interpolated into a RegExp body. */
+function escapeForRegExp(flag) {
+  return flag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+/**
+ * How does a CLI's `--help` say `flag` is called — specifically, does it take
+ * a REQUIRED argument?
+ *
+ * This decides whether fix shape (2), the `--` separator, is safe, and the
+ * distinction is not cosmetic. Measured against the repo's commander 12.1.0
+ * with a client prompt of `--dangerously-skip-permissions`:
+ *
+ *     declared as       ['--remote', prompt]   ['--remote', '--', prompt]
+ *     --remote          INJECTS                safe
+ *     --remote [name]   INJECTS                safe
+ *     --remote <name>   safe — swallowed as    INJECTS — the `--` becomes the
+ *                       the flag's own value   flag's value, freeing the
+ *                                              prompt to be option-parsed
+ *
+ * So against a required-argument flag the separator is not merely useless, it
+ * is strictly WORSE than omitting it. No single argv shape is correct under
+ * both arities, so a caller must know which it faces and fail closed when it
+ * cannot tell.
+ *
+ * @param {unknown} helpText - captured stdout of `<cli> --help`.
+ * @param {string} flag - the exact flag, e.g. '--remote'.
+ * @returns {'absent'|'boolean'|'optional'|'required'}
+ */
+export function cliHelpFlagArity(helpText, flag) {
+  if (!cliHelpAdvertisesFlag(helpText, flag)) return 'absent'
+  // Inspect what follows the flag on its own help line, skipping any alias
+  // list (`--remote, -r <name>`).
+  const re = new RegExp(`(?<![\\w-])${escapeForRegExp(flag)}(?![\\w-])((?:,\\s*-[\\w-]+)*)([^\\n]*)`)
+  const m = re.exec(helpText)
+  if (!m) return 'boolean'
+  // Only a metavar BEFORE the description column counts. Two spaces or a tab
+  // start the description in every help format we target, so a `<file>` in
+  // prose ("same as --output <file>") is not mistaken for this flag's own.
+  const head = m[2].split(/ {2,}|\t/)[0]
+  if (/^[ =]*<[^>]+>/.test(head)) return 'required'
+  if (/^[ =]*\[[^\]]+\]/.test(head)) return 'optional'
+  return 'boolean'
 }

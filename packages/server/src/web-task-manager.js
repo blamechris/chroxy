@@ -1,7 +1,7 @@
 import { EventEmitter } from 'events'
 import { execFile } from 'child_process'
 import { randomUUID } from 'crypto'
-import { cliHelpAdvertisesFlag } from './utils/argv-safety.js'
+import { cliHelpAdvertisesFlag, cliHelpFlagArity } from './utils/argv-safety.js'
 
 /**
  * Manages Claude Code Web tasks (cloud sandbox delegation).
@@ -73,7 +73,18 @@ export class WebTaskManager extends EventEmitter {
       // without checking (docs/false-safety-guards.md), and the very thing that
       // was supposed to keep a client prompt out of the argv in
       // _spawnRemoteTask below.
-      this._remoteAvailable = cliHelpAdvertisesFlag(stdout, '--remote')
+      //
+      // The arity check is the second half, and it is load-bearing:
+      // buildRemoteTaskArgs protects the prompt with a `--` separator, and a
+      // separator is only correct when `--remote` is boolean or takes an
+      // OPTIONAL argument. Against a REQUIRED-argument `--remote <name>` the
+      // `--` is consumed as the flag's value and the prompt is freed to be
+      // option-parsed — strictly worse than no separator at all (measured
+      // against commander 12.1.0; the table is in utils/argv-safety.js). We
+      // cannot make one argv correct under both arities, so when the help
+      // advertises a required argument we refuse the feature instead.
+      const remoteArity = cliHelpFlagArity(stdout, '--remote')
+      this._remoteAvailable = remoteArity === 'boolean' || remoteArity === 'optional'
       this._teleportAvailable = cliHelpAdvertisesFlag(stdout, '--teleport')
     } catch {
       this._remoteAvailable = false
