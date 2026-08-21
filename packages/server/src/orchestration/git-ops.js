@@ -30,7 +30,7 @@ import { join, resolve, sep } from 'node:path'
 import { rmSync, mkdirSync, existsSync } from 'node:fs'
 import { GIT } from '../git.js'
 import { configDir } from '../config-dir.js'
-import { isSafeArgvValue } from '../utils/argv-safety.js'
+import { assertSafeArgvValue } from '../utils/argv-safety.js'
 
 const execFileAsync = promisify(execFileCb)
 
@@ -46,15 +46,18 @@ const DIFF_MAX_BUFFER = 64 * 1024 * 1024
 // name into a git flag. execFile already blocks SHELL injection; this blocks
 // ARGUMENT injection.
 //
-// #7290: the PREDICATE now lives in utils/argv-safety.js and is shared with
-// ws-file-ops/reader.js. This wrapper survives only to keep throwing
-// GitOpsError (and to keep the 'empty` vs `unsafe` message split that
-// orchestration-git-ops.test.js pins). Do not re-inline the check here — this
-// module used to be the only copy, and #7290 was filed because a SECOND,
-// weaker spelling had grown in reader.js.
+// #7290: the CHECK now lives in utils/argv-safety.js and is shared with
+// ws-file-ops/reader.js. This wrapper exists only to translate its Error into
+// a GitOpsError; the messages (`empty <kind>` / `unsafe <kind>: <json>`) are
+// produced there and are pinned by orchestration-git-ops.test.js. Do not
+// re-inline the check here — this module used to be the only copy, and #7290
+// was filed because a SECOND, weaker spelling had grown in reader.js.
 function assertSafeRef(name, kind = 'ref') {
-  if (typeof name !== 'string' || name.length === 0) throw new GitOpsError(`empty ${kind}`)
-  if (!isSafeArgvValue(name)) throw new GitOpsError(`unsafe ${kind}: ${JSON.stringify(name)}`)
+  try {
+    assertSafeArgvValue(name, kind)
+  } catch (err) {
+    throw new GitOpsError(err.message)
+  }
 }
 
 // Byte-accurate UTF-8 truncation that drops an incomplete trailing multibyte
