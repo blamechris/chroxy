@@ -7,15 +7,34 @@
  * begins with `-` is read as an OPTION rather than as the datum it was meant
  * to be. That is a distinct class, and it needs a distinct guard.
  *
- * There are exactly two correct fixes, and which one applies is decided by
- * whether a leading `-` is LEGITIMATE for that datum:
+ * There are three correct fixes. Which one applies is decided by whether a
+ * leading `-` is LEGITIMATE for that datum, and by how the target CLI parses
+ * the slot — so it is a per-CLI question, answered by MEASURING, not assumed:
  *
  *   1. The value can never legitimately start with `-` (a git ref, a branch,
  *      a container name) → REJECT it. `isSafeArgvValue` / `assertSafeArgvValue`.
  *
- *   2. The value legitimately can (a user's chat message — "- first point")
- *      → do not reject; terminate option parsing with a `--` separator placed
- *      BEFORE the value, and put every flag the command needs BEFORE the `--`.
+ *   2. The value legitimately can (a user's chat message — "- first point"),
+ *      and it sits in a POSITIONAL slot → do not reject; terminate option
+ *      parsing with a `--` separator placed BEFORE the value, and put every
+ *      flag the command needs BEFORE the `--`. This is what the `claude`
+ *      web-task argv does.
+ *
+ *   3. The value legitimately can, and it is the ARGUMENT TO A NAMED FLAG that
+ *      the CLI declares as requiring one → `=`-join the long form,
+ *      `--flag=<value>`, binding the value to the flag in a single token.
+ *      Neither (1) nor (2) works here. Measured against gemini-cli 0.45.2,
+ *      whose `-p/--prompt` and `-m/--model` use yargs `requiresArg`:
+ *
+ *          gemini -p "- first bullet"       usage error, exit 1
+ *          gemini -p -- --list-extensions   usage error, exit 1  (`--` BREAKS it)
+ *          gemini --prompt="- first bullet" parses, value taken literally
+ *
+ *      So a blanket "add `--` everywhere" sweep would be a REGRESSION on such
+ *      a CLI. Beware short-circuiting flags when probing: `gemini -p --version`
+ *      prints a version because yargs handles `--version` before it validates
+ *      `requiresArg`, which makes it look like injection when it is not. Probe
+ *      with a flag that does not short-circuit.
  *
  * `--` is NOT interchangeable with (1). It ends option parsing at ITS OWN
  * position, so it cannot retroactively protect a value that precedes it.
