@@ -130,6 +130,19 @@ describe('cliHelpAdvertisesFlag', () => {
     assert.equal(cliHelpAdvertisesFlag('--remote', ''), false, 'empty flag')
   })
 
+  it('the non-string guard is load-bearing, not decoration', () => {
+    // The fixtures above are NOT a control for the `typeof helpText` check:
+    // every one of them coerces to a string that does not contain the flag, so
+    // RegExp.test() answers false by itself and the assertion passes with the
+    // type guard deleted. Review caught that. These two do not have that
+    // property — both coerce to a string that DOES contain the flag, so
+    // without the type guard they would report it as advertised.
+    assert.equal(cliHelpAdvertisesFlag(['--remote'], '--remote'), false,
+      'an array coercing to "--remote" must not satisfy the probe')
+    assert.equal(cliHelpAdvertisesFlag({ toString: () => '  --remote' }, '--remote'), false,
+      'an object coercing to help text must not satisfy the probe')
+  })
+
   it('does not let a regex metacharacter in the flag change the match', () => {
     // The flag is interpolated into a RegExp, so it must be escaped.
     assert.equal(cliHelpAdvertisesFlag('--a.c', '--a.c'), true)

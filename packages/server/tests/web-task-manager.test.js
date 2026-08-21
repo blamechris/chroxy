@@ -468,9 +468,22 @@ describe('WebTaskManager', () => {
         assert.ok(sep !== -1 && sep < args.length - 1,
           `no separator protects ${prompt}`)
         assert.equal(args[args.length - 1], prompt, 'prompt must survive verbatim')
-        assert.ok(args.indexOf(prompt) > sep,
-          `${prompt} must appear only AFTER the separator`)
+        // Assert by POSITION, not by searching for the value. `indexOf(prompt)`
+        // returns the separator's own index when the prompt is exactly '--',
+        // so it would fail against a CORRECT implementation.
+        assert.equal(sep, args.length - 2,
+          `the separator must sit immediately before ${JSON.stringify(prompt)}`)
       }
+    })
+
+    it('protects a prompt that is exactly the separator', () => {
+      // The degenerate input the assertion above used to get wrong. '--' is a
+      // legitimate thing for a user to type and must arrive as TEXT.
+      const args = buildRemoteTaskArgs('--')
+      assert.equal(args[args.length - 1], '--', 'the prompt survives verbatim')
+      assert.equal(args.indexOf('--'), args.length - 2,
+        'the FIRST -- is the separator; the second is the prompt')
+      assert.equal(args.filter(a => a === '--').length, 2)
     })
   })
 
