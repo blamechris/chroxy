@@ -645,7 +645,12 @@ jobs:
     # passes on ARM64. Fork PRs still route to ubuntu-24.04 via runner-target.
     needs: runner-target
     runs-on: ${{ fromJSON(needs.runner-target.outputs.runner) }}  # SELF_HOSTED_OR_HOSTED (see header)
-    timeout-minutes: 5
+    # 10, not 5, since #7300 capped this suite at maxWorkers 50%: measured on the
+    # self-hosted pool the job went 52s -> 2m30s. A 5-minute cap left a 2x margin
+    # on the one job whose defining problem is that it slows down unpredictably
+    # when the box is shared - and a job killed by its cap reports no TAP summary
+    # at all, a strictly worse signal than the flaky test it replaced.
+    timeout-minutes: 10
     defaults:
       run:
         working-directory: packages/store-core
