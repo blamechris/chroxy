@@ -295,10 +295,11 @@ inverted: a check so broken it satisfied its own adversarial tests). Test
 suites cannot find this class, because the green is real and the *coverage* is
 what is wrong.
 
-**Don't put a count here.** This sentence read "eight guards" while the
-catalogue held twelve — a hardcoded number beside a growing set, which is the
-first cause below, and the catalogue says so itself: consult the entries, not a
-tally that is stale the moment one merges. The recurring causes:
+**Don't put a count here.** This sentence used to carry one, and the catalogue
+had already grown past it twice before anyone noticed — a hardcoded number
+beside a growing set, which is the first cause below. The catalogue says so
+itself: consult the entries, not a tally that is stale the moment one merges.
+The recurring causes:
 
 - a hardcoded list next to a set that grows (`#7192`, `#7197`, `#7267`) —
   including one that lived in **CI config**, where no lint, test or code review
