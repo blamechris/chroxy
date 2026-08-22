@@ -39,5 +39,18 @@ export default defineConfig({
     environment: 'jsdom',
     include: ['src/**/*.test.{ts,tsx}'],
     setupFiles: ['src/test-setup.ts'],
+    // #7300. Every failure that issue catalogues is `Test timed out in 5000ms`
+    // and never an assertion, on a different random subset each run — so the
+    // premise that is wrong is the clock, not any test's behaviour. The
+    // self-hosted pool runs several jobs per physical box (chroxy-linux-winbox-01
+    // shares hardware with chroxy-win-01), and a spec that takes 200ms locally
+    // has been measured at 10.6s there.
+    //
+    // Two changes, because the default is unstated on both axes: give the clock
+    // headroom, and stop vitest opening one worker per core on a box it does not
+    // have to itself.
+    testTimeout: 30_000,
+    hookTimeout: 30_000,
+    maxWorkers: '50%',
   },
 })
