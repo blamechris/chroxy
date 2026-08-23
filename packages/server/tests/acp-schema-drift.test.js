@@ -12,11 +12,36 @@
  * "hardcoded copy beside a set that grows" shape from docs/false-safety-guards.md
  * (#7192, #7197), inverted: here the growing set is the dependency itself.
  *
- * This file compares the *installed* SDK's schema + method surface against a
- * vendored snapshot (`../vendor/acp-schema.snapshot.json`) captured at v1.4.0.
- * A mismatch means either an unintentional SDK version drifted in, or a
- * deliberate bump that needs the snapshot regenerated — either way, someone
- * should look, not have it silently pass.
+ * This file compares the *installed* SDK's method surface + schema STRUCTURE
+ * against a vendored snapshot (`../vendor/acp-schema.snapshot.json`) captured
+ * at v1.4.0. A mismatch means either an unintentional SDK version drifted in,
+ * or a deliberate bump that needs the snapshot regenerated — either way,
+ * someone should look, not have it silently pass.
+ *
+ * The snapshot is deliberately NOT a full deep-equal of schema.json. The SDK
+ * ships roughly monthly, and a full-content compare fails on every upstream
+ * prose edit (a reworded `description`, a typo fix in `title`) exactly as
+ * loudly as it fails on a real wire change — burying the signal (a renamed
+ * method, an added required field) in noise nobody reads before approving a
+ * 10,000-line regeneration diff. So the vendored snapshot instead captures
+ * only what carries wire meaning:
+ *
+ *   - PROTOCOL_VERSION
+ *   - CLIENT_METHODS / AGENT_METHODS, in full (keys AND values — a renamed
+ *     wire method fails)
+ *   - the sorted set of `$defs` type names (`defKeys`) — a type being added
+ *     or removed fails
+ *   - per non-trivial `$def`, its sorted `required` array and sorted
+ *     property-name list (`defs`) — a renamed/added/removed property, or a
+ *     property moving in or out of `required`, fails
+ *
+ * A `$def` with neither `properties` nor `required` (a `oneOf`/`anyOf` union
+ * or a bare type alias — 58 of 265 in the schema this was captured against)
+ * is omitted from `defs`; its continued existence is already covered by
+ * `defKeys`, so an empty entry would carry no information. Anything else —
+ * `description`, `title`, `x-method`/`x-side` annotations (redundant with the
+ * method maps above), enum members, `oneOf`/`anyOf` branch shapes — is not
+ * captured, and changes to it will NOT fail this test. That is deliberate.
  *
  * To regenerate after a DELIBERATE SDK version bump, run from packages/server/
  * (after `npm install`ing the new version there):
@@ -33,15 +58,39 @@
  *   const pkgRoot = dirname(dirname(schemaPath))
  *   const sdkPkg = JSON.parse(readFileSync(join(pkgRoot, 'package.json'), 'utf8'))
  *
+ *   function sortedRequired(def) {
+ *     return Array.isArray(def.required) ? [...def.required].sort() : []
+ *   }
+ *   function sortedPropertyNames(def) {
+ *     return def.properties && typeof def.properties === 'object'
+ *       ? Object.keys(def.properties).sort()
+ *       : []
+ *   }
+ *   function buildDefsDigest(fullSchema) {
+ *     const defs = fullSchema.$defs || {}
+ *     const defKeys = Object.keys(defs).sort()
+ *     const digest = {}
+ *     for (const key of defKeys) {
+ *       const required = sortedRequired(defs[key])
+ *       const properties = sortedPropertyNames(defs[key])
+ *       if (required.length === 0 && properties.length === 0) continue
+ *       digest[key] = { required, properties }
+ *     }
+ *     return { defKeys, defs: digest }
+ *   }
+ *
+ *   const { defKeys, defs } = buildDefsDigest(schema)
+ *
  *   writeFileSync('vendor/acp-schema.snapshot.json', JSON.stringify({
  *     _meta: {
- *       note: "Vendored snapshot of @agentclientprotocol/sdk's schema + method surface, used by tests/acp-schema-drift.test.js (#7318) to detect drift between the installed SDK and what this repo coded against. Regenerate ONLY when deliberately bumping the SDK version -- see the header comment in that test file for the regeneration command.",
+ *       note: "Structural surface snapshot of @agentclientprotocol/sdk, used by tests/acp-schema-drift.test.js (#7318) to detect drift between the installed SDK and what this repo coded against. Deliberately excludes prose (description/title/etc) so upstream doc-only edits don't fail this test -- only PROTOCOL_VERSION, the method maps, the set of $defs type names (defKeys), and each non-trivial type's required/property-name surface (defs) are captured. A $def with no properties and no required fields (a union or type alias) is omitted from `defs` -- its presence is already covered by `defKeys`. Regenerate ONLY when deliberately bumping the SDK version -- see the header comment in that test file for the regeneration command.",
  *       sdkVersion: sdkPkg.version,
  *     },
  *     protocolVersion: acp.PROTOCOL_VERSION,
  *     clientMethods: acp.CLIENT_METHODS,
  *     agentMethods: acp.AGENT_METHODS,
- *     schema,
+ *     defKeys,
+ *     defs,
  *   }, null, 2) + '\n', 'utf8')
  *   EOF
  *
@@ -73,6 +122,34 @@ function loadSnapshot() {
 function loadInstalledSchema() {
   const schemaPath = require.resolve('@agentclientprotocol/sdk/schema/schema.json')
   return JSON.parse(readFileSync(schemaPath, 'utf8'))
+}
+
+function sortedRequired(def) {
+  return Array.isArray(def.required) ? [...def.required].sort() : []
+}
+
+function sortedPropertyNames(def) {
+  return def.properties && typeof def.properties === 'object'
+    ? Object.keys(def.properties).sort()
+    : []
+}
+
+// Mirrors the generator documented in this file's header comment. Kept as a
+// standalone function (rather than importing anything from vendor/) so the
+// test computes its own digest from whatever is actually installed, and
+// compares that INDEPENDENTLY-COMPUTED digest against the vendored one —
+// not, say, re-reading the vendored file's own shape back at itself.
+function buildDefsDigest(schema) {
+  const defs = schema.$defs || {}
+  const defKeys = Object.keys(defs).sort()
+  const digest = {}
+  for (const key of defKeys) {
+    const required = sortedRequired(defs[key])
+    const properties = sortedPropertyNames(defs[key])
+    if (required.length === 0 && properties.length === 0) continue
+    digest[key] = { required, properties }
+  }
+  return { defKeys, defs: digest }
 }
 
 // Recursively collects source files under `dir`. There's no build output or
@@ -134,13 +211,19 @@ describe('@agentclientprotocol/sdk schema drift guard (#7318)', () => {
     )
   })
 
-  it('installed schema/schema.json matches the vendored snapshot', () => {
+  it('installed schema/schema.json structural surface (defKeys + per-def required/properties) matches the vendored snapshot', () => {
     const snapshot = loadSnapshot()
     const installedSchema = loadInstalledSchema()
+    const installedDigest = buildDefsDigest(installedSchema)
     assert.deepEqual(
-      installedSchema,
-      snapshot.schema,
-      "installed @agentclientprotocol/sdk schema/schema.json diverged from the vendored snapshot — see this file's header comment to regenerate after a deliberate SDK bump.",
+      installedDigest.defKeys,
+      snapshot.defKeys,
+      "installed @agentclientprotocol/sdk schema.json's set of $defs type names diverged from the vendored snapshot — a type was added or removed. See this file's header comment to regenerate after a deliberate SDK bump.",
+    )
+    assert.deepEqual(
+      installedDigest.defs,
+      snapshot.defs,
+      "installed @agentclientprotocol/sdk schema.json's per-type required/property surface diverged from the vendored snapshot — see this file's header comment to regenerate after a deliberate SDK bump.",
     )
   })
 
