@@ -47,6 +47,7 @@ The registry lives in [`packages/server/src/providers.js`](../packages/server/sr
 | `ollama` | `@anthropic-ai/sdk` → local Ollama daemon (v0.14+) | `CHROXY_OLLAMA_BASE_URL` / `OLLAMA_HOST` (optional endpoint overrides) | `qwen3-coder` | None — local inference | Local models via Ollama's Anthropic-compatible API; full BYOK agent loop (tools, permissions, MCP); cost always $0; any `ollama pull`ed model id accepted |
 | *(config-driven)* | `@anthropic-ai/sdk` → any Anthropic-compatible endpoint | Entry's `apiKeyEnv` (or `credentialsKey` in `~/.chroxy/credentials.json`) | Entry's `defaultModel` | Per-entry API key, or none (local servers) | Declared in `providers.anthropicCompatible` (config.json): Z.ai GLM, Moonshot Kimi, MiniMax, LM Studio, llama.cpp, vLLM, OpenRouter, custom. Full BYOK agent loop. See [below](#anthropic-compatible-endpoints-config-driven) |
 | *(config-driven)* | `openai` SDK → any OpenAI chat-completions endpoint | Entry's `apiKeyEnv` (or `credentialsKey` in `~/.chroxy/credentials.json`) | Entry's `defaultModel` | Per-entry API key, or none (local servers) | Declared in `providers.openaiCompatible` (config.json): OpenAI, OpenRouter, LM Studio, vLLM, llama.cpp, Together, Groq, DeepInfra, custom. Same BYOK agent loop, OpenAI wire format. See [below](#openai-compatible-endpoints-config-driven) |
+| *(config-driven)* | `@agentclientprotocol/sdk` → any [ACP](https://agentclientprotocol.com)-speaking agent, spawned over stdio | None managed by Chroxy — the agent authenticates itself | N/A — the agent picks its own model | The agent's own credential story | Declared in `providers.acp` (config.json): one persistent child process per configured agent, many turns. **Permissions are denied by default** — no permission bridge yet (#7320). See [below](#acp-agents-config-driven) |
 | `docker-cli` | Docker image + `claude` inside | Inherits Claude env from container | Inherits `claude-cli` | Same as `claude-cli` | Only registered when `environments.enabled=true` and Docker daemon is reachable |
 | `docker-sdk` | Docker image + SDK inside | Inherits Claude env from container | Inherits `claude-sdk` | Same as `claude-sdk` | Only registered when `environments.enabled=true` and Docker daemon is reachable |
 | `docker-byok` | Docker image; agent loop stays on the host via `@anthropic-ai/sdk` | Same as `claude-byok` | Inherits `claude-byok` | Same as `claude-byok` | Only registered when `environments.enabled=true` and Docker daemon is reachable; built-in tool execution (Read/Write/Edit/Bash/Glob/Grep) runs inside the container |
@@ -704,6 +705,54 @@ chroxy start --provider lm-studio-oai
 - Tool-use quality depends entirely on the model behind the endpoint (same caveat as Ollama and the Anthropic-compatible block).
 - Capabilities are identical to `claude-byok` by construction — see the [capability matrix](#capability-matrix) note.
 
+## ACP agents (config-driven)
+
+[Agent Client Protocol](https://agentclientprotocol.com) (ACP) is Zed's open protocol for driving a coding agent as a subprocess over stdio JSON-RPC — one client implementation talks to any conformant agent instead of a bespoke integration per agent. Declare one under `providers.acp` in `~/.chroxy/config.json` and it registers as a first-class provider at startup: `AcpSession` spawns the configured `command` **once** and holds the connection open for the session's lifetime (`initialize` + `session/new` happen once; every `sendMessage` is a `session/prompt` on the same persistent connection — not a new process per turn).
+
+**Permissions are denied by default (#7319).** Every `session/request_permission` the agent sends is answered with a rejection — there is no config knob to change that yet, and no in-process permission bridge (`capabilities.permissions` / `inProcessPermissions` are both `false`). An agent that needs to run a command or edit a file will have that request declined. The real permission bridge lands in #7320.
+
+### Entry shape
+
+```json
+{
+  "providers": {
+    "acp": [
+      {
+        "id": "my-agent",
+        "label": "My Agent",
+        "command": "/path/to/agent-cli",
+        "args": ["--acp"],
+        "env": { "MY_AGENT_API_KEY": "..." }
+      }
+    ]
+  }
+}
+```
+
+| Field | Required | Meaning |
+|-------|:--------:|---------|
+| `id` | yes | Provider id (lowercase letters, digits, dashes; must start with a letter). Must not collide with a built-in or already-registered id. Select it via `--provider my-agent`, `CHROXY_PROVIDER`, or the dashboard. |
+| `label` | no | Dashboard display label. Defaults to `id`. |
+| `command` | yes | Executable to spawn over stdio — an absolute path, or one resolvable on `PATH`. |
+| `args` | no | Argv passed to the executable. Defaults to `[]`. |
+| `env` | no | Extra environment variables for the child. **Unlike** `apiKeyEnv`/`credentialsKey` on the Anthropic/OpenAI-compatible blocks, this is a literal passthrough — ACP agents authenticate themselves, so there is no Chroxy-side credential to name. Defaults to `{}`. |
+
+Unlike the ambient-environment posture of the `claude` CLI provider, the spawned agent gets an **allowlisted** environment (`PATH`, `HOME`, locale, proxy vars, …) plus Chroxy's host-identity metadata plus this `env` map — never the daemon's full environment, and never Chroxy's own bearer token, regardless of what `env` contains.
+
+### Use
+
+```bash
+chroxy start --provider my-agent
+```
+
+### Caveats
+
+- **No conversation continuity signal beyond the persistent connection itself** — Chroxy has no visibility into the agent's own context management.
+- **No model switching** — the agent picks its own model; `modelSwitch` is `false`.
+- **No plan mode, no resume, no thinking-level control, no `fs/*` / `terminal/*` bridging yet** (#7306 follow-up).
+- **Permissions denied by default** (see above) — every tool call the agent wants to make is declined until #7320 lands.
+- Translation onto Chroxy's outbound events covers `agent_message_chunk`, `agent_thought_chunk`, `tool_call` / `tool_call_update`, and `StopReason`. `plan`, `available_commands_update`, and `current_mode_update` are **not** translated (no matching existing wire event) and are silently dropped.
+
 ## Serving a new model without a release (`providers.allowAnyModel`)
 
 Most of Chroxy's stack already lets a new model flow through with **no Chroxy release** the moment the provider's API exposes it:
@@ -804,6 +853,8 @@ For capability rows, "—" means the provider's `capabilities` object reports `f
 > session). See [`claude-channel`](#claude-channel-research-preview) and the
 > [spike's capability matrix](architecture/claude-channels-provider-spike.md#capability-matrix-proposed-from-sub-2).
 
+> **Config-driven ACP agents** (#7319 — [see above](#acp-agents-config-driven)) don't share a column with any existing provider: `permissions` and `inProcessPermissions` are both `false` (deny-all, no bridge yet — #7320), `modelSwitch` / `permissionModeSwitch` / `planMode` / `resume` / `terminal` / `thinkingLevel` are all `false` (the agent picks its own model; Chroxy has no visibility into or control over the rest), and `streaming` is `true`. Behaviourally: attachments are refused (not yet implemented), conversation continuity holds for the lifetime of the persistent connection (one child process, many turns — not per-message like `codex`/`gemini`), and cost reporting is unimplemented (no pricing concept for an arbitrary agent).
+
 ## Known limits
 
 ### `claude-sdk`
@@ -878,6 +929,15 @@ For capability rows, "—" means the provider's `capabilities` object reports `f
 - Only registered when `environments.enabled=true` in config AND `docker info` succeeds at server startup.
 - Inherits all capabilities of the underlying Claude provider. Model default and env requirements are resolved inside the container.
 - See [`docs/guides/`](guides/) for environment/container setup.
+
+### *(config-driven)* ACP agents
+
+- **Permissions are denied by default** (#7319) — no in-process bridge yet (#7320). Every tool call the agent requests is declined.
+- **No model switching, no plan mode, no resume, no thinking-level control.**
+- **No `fs/*` / `terminal/*` bridging yet** — an agent that needs filesystem or terminal access via those ACP methods will not get it (#7306 follow-up).
+- **No attachments, no agent tracking, no cost reporting.**
+- **`plan` / `available_commands_update` / `current_mode_update` are dropped** — no matching existing outbound event; translating them would require new `@chroxy/protocol` wire types, deferred to a follow-up.
+- **Manual QA against a real third-party agent is tracked separately** via `/qa-update` — CI proves the round-trip against a scripted fixture only, never a live agent (no new secret surface, no dependency on a third party's uptime).
 
 ## See also
 

@@ -87,24 +87,34 @@ function loadInstalledSdkPackageJson() {
 }
 
 describe('@agentclientprotocol/sdk schema drift guard (#7318)', () => {
-  it('packages/server/package.json pins @agentclientprotocol/sdk exactly to the vendored snapshot version, in devDependencies, not the stale @zed-industries predecessor', () => {
+  it('packages/server/package.json pins @agentclientprotocol/sdk exactly to the vendored snapshot version, in dependencies, not the stale @zed-industries predecessor', () => {
     const snapshot = loadSnapshot()
     const pkgJson = JSON.parse(readFileSync(SERVER_PACKAGE_JSON_PATH, 'utf8'))
     const deps = pkgJson.dependencies || {}
     const devDeps = pkgJson.devDependencies || {}
 
-    // devDependencies, not dependencies: nothing outside tests/ imports the
-    // SDK today, and packages/server's `files` allowlist ships neither
-    // tests/ nor vendor/ — so a `dependencies` entry ships 5+ MB of
-    // unreachable third-party code through every consumer that installs
-    // `dependencies` but not `devDependencies` (a global `npm install -g
-    // chroxy` / `npx chroxy`, `Dockerfile`'s `npm ci --omit=dev`, and
-    // packages/desktop/scripts/bundle-server.sh's `npm install --omit=dev`
-    // into the Tauri-bundled, Apple-notarized app). Once real code under
-    // src/ imports the SDK (#7306), THIS assertion is what should move.
+    // dependencies, not devDependencies: #7319 landed `src/acp-session.js`,
+    // which does a static top-level `import * as acp from
+    // '@agentclientprotocol/sdk'` and is reached from `server-cli.js` — the
+    // `chroxy start` entry point — whether or not `providers.acp` is
+    // configured. A devDependency is exactly what `npm ci --omit=dev`
+    // strips: the global install (`npm install -g @chroxy/server` /
+    // `npx chroxy`), `Dockerfile`'s `npm ci --workspace=@chroxy/server
+    // --omit=dev`, and packages/desktop/scripts/bundle-server.sh's
+    // `npm install --omit=dev` into the Tauri-bundled, Apple-notarized app
+    // would all install without it, and the daemon would die on
+    // `ERR_MODULE_NOT_FOUND` at module load — before any provider-specific
+    // code even runs. The premise this assertion originally encoded ("nothing
+    // outside tests/ imports the SDK") no longer holds; asserting the
+    // opposite of what actually ships is worse than asserting nothing, so
+    // this flips with the dependency move rather than being deleted.
     assert.ok(
-      !('@agentclientprotocol/sdk' in deps),
-      'packages/server/package.json must not list @agentclientprotocol/sdk in dependencies — nothing outside tests/ imports it, and dependencies ship through the published tarball, the Docker image, and the Tauri bundle. Move it to devDependencies.',
+      '@agentclientprotocol/sdk' in deps,
+      'packages/server/package.json must list @agentclientprotocol/sdk in dependencies — src/acp-session.js imports it at runtime from the chroxy start entry point (server-cli.js), so it has to ship in every install path (npm ci --omit=dev, the Docker image, the Tauri bundle). Move it out of devDependencies.',
+    )
+    assert.ok(
+      !('@agentclientprotocol/sdk' in devDeps),
+      'packages/server/package.json must not ALSO list @agentclientprotocol/sdk in devDependencies — a dependency listed in both is redundant and invites the two copies to drift on the next version bump.',
     )
     // Pinned EXACT (no ^, no ~): an upgrade is then always a deliberate
     // `npm install @agentclientprotocol/sdk@<version>` edit, never a caret
@@ -114,9 +124,9 @@ describe('@agentclientprotocol/sdk schema drift guard (#7318)', () => {
     // exact shape docs/false-safety-guards.md warns about, a hardcoded copy
     // beside a value that legitimately changes over time.
     assert.equal(
-      devDeps['@agentclientprotocol/sdk'],
+      deps['@agentclientprotocol/sdk'],
       snapshot._meta?.sdkVersion,
-      `packages/server/package.json's devDependencies["@agentclientprotocol/sdk"] must be pinned EXACTLY to the vendored snapshot's sdkVersion (${snapshot._meta?.sdkVersion}), with no ^ or ~ range operator.`,
+      `packages/server/package.json's dependencies["@agentclientprotocol/sdk"] must be pinned EXACTLY to the vendored snapshot's sdkVersion (${snapshot._meta?.sdkVersion}), with no ^ or ~ range operator.`,
     )
     assert.ok(
       !(ZED_PREDECESSOR in deps) && !(ZED_PREDECESSOR in devDeps),

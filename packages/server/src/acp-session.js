@@ -39,12 +39,12 @@
 import { spawn } from 'child_process'
 import { Readable, Writable } from 'stream'
 import * as acp from '@agentclientprotocol/sdk'
-import { BaseSession, buildBaseSessionOpts } from './base-session.js'
+import { BaseSession, buildBaseSessionOpts, CHROXY_CONTEXT_HINT_TEXT } from './base-session.js'
 import { prepareSpawn } from './utils/win-spawn.js'
 import { guardChildStreams } from './child-stream-guard.js'
 import { killProcessTree } from './platform.js'
 import { getChroxyHostEnv } from './chroxy-host-metadata.js'
-import { CHROXY_SECRET_DENYLIST } from './utils/spawn-env.js'
+import { CHROXY_SECRET_DENYLIST, STANDARD_ALLOWLIST } from './utils/spawn-env.js'
 import { validateAcpProviders } from './acp-config.js'
 import { registerProvider, getRegisteredProviderNames } from './providers.js'
 import { BILLING_CLASSES } from './billing-class.js'
@@ -61,22 +61,54 @@ const MAX_TOOL_RESULT_CHARS = 10_000
 // Cap on captured stderr (diagnostics only — surfaced in a spawn/exit error).
 const STDERR_CAP = 2000
 
+// #7319 review — grace window between SIGTERM and SIGKILL on teardown. The
+// configured `command` is entirely operator-chosen and unvetted (unlike the
+// four binaries chroxy itself resolves), so nothing guarantees it honors
+// SIGTERM; a no-op handler would otherwise leave it running indefinitely,
+// inheriting the daemon's own environment. Matches byok-mcp-client.js's
+// destroy()-teardown grace exactly (KILL_GRACE_MS).
+const ACP_KILL_GRACE_MS = 1000
+
+// #7319 review — grace window given to `child.on('exit')` to win the race
+// against `connection.closed` and report the informative code/signal message
+// (see `_onConnectionClosed`) before falling back to the generic "connection
+// closed" message. Both fire off the same underlying process teardown in the
+// common case (near-simultaneously); this is generous enough for that ORDER
+// to settle while still being a rounding error against the wedge it exists to
+// unstick (previously: forever).
+const CONNECTION_CLOSED_GRACE_MS = 250
+
 /**
- * Build the child's environment for a configured ACP agent. Full parent env
- * (an ACP agent is a real CLI tool that generally needs PATH/HOME/etc., same
- * posture as the 'claude' denylist branch in spawn-env.js) minus Chroxy's own
- * daemon secrets (#6311's floor — must never reach ANY spawned child,
- * regardless of provider), plus Chroxy's host-identity metadata, plus the
- * entry's configured `env` overrides last (highest precedence — the whole
+ * Build the child's environment for a configured ACP agent.
+ *
+ * ALLOWLIST posture (#7319 review), not denylist: `spawn-env.js`'s own header
+ * comment states the rule this file previously got backwards — allowlist mode
+ * is for THIRD-PARTY providers so operator secrets never reach them; denylist
+ * is for the first-party Claude CLI only. An ACP agent's `command` is entirely
+ * operator-chosen and unvetted — the least-trusted binary in the registry, not
+ * the most — so it starts from `STANDARD_ALLOWLIST` (PATH/HOME/locale/etc,
+ * the same baseline codex/gemini use) plus Chroxy's host-identity metadata,
+ * plus the entry's configured `env` overrides (highest precedence — the whole
  * point of the config knob, e.g. to hand the agent its OWN provider API key).
+ *
+ * Chroxy's own daemon secrets (`CHROXY_SECRET_DENYLIST`, #6311's floor) are
+ * stripped LAST, after `configuredEnv` is merged — not just from the ambient
+ * allowlisted env — so a `providers.acp[].env` entry can never smuggle one
+ * back in either. This is the one place that floor is enforced against an
+ * OPERATOR-supplied input, not just an ambient one, and it must actually hold
+ * for the claim below to be true rather than aspirational.
  *
  * @param {Record<string,string>} configuredEnv
  * @returns {Record<string,string>}
  */
 function buildAcpChildEnv(configuredEnv) {
-  const env = { ...process.env }
-  for (const key of CHROXY_SECRET_DENYLIST) delete env[key]
-  return { ...env, ...getChroxyHostEnv(), ...configuredEnv }
+  const env = {}
+  for (const key of STANDARD_ALLOWLIST) {
+    if (process.env[key] !== undefined) env[key] = process.env[key]
+  }
+  const merged = { ...env, ...getChroxyHostEnv(), ...configuredEnv }
+  for (const key of CHROXY_SECRET_DENYLIST) delete merged[key]
+  return merged
 }
 
 /**
@@ -212,8 +244,17 @@ export function createAcpSessionClass(rawEntry) {
       this._child = null
       this._connection = null
       this._sessionId = null
-      // { messageId, thinkingMessageId, didStreamStart } — null between turns.
+      // { messageId, thinkingMessageId, didStreamStart, openToolCalls,
+      //   toolCallContent } — null between turns.
       this._activeTurn = null
+      // #7319 review — inject the combined skills/preamble prefix once, on
+      // turn 1 (mirrors codex-app-server-session.js's #6606 fix).
+      this._skillsPrepended = false
+      // #7319 review — dedup so a dying child's `connection.closed` and
+      // `child.on('exit')` (which both fire off the same underlying process
+      // teardown) don't each independently report the same failure.
+      this._teardownReported = false
+      this._connectionClosedGraceTimer = null
     }
 
     _buildChildEnv() { return buildAcpChildEnv(this._acpEntry.env) }
@@ -265,18 +306,32 @@ export function createAcpSessionClass(rawEntry) {
       let connection
       try {
         connection = app.connect(stream)
-        // We only use this to avoid an unhandled-rejection warning on an
-        // abnormal close; child.on('exit'/'error') above is the authoritative
-        // signal for reporting an unexpected teardown to the session (see
-        // _onChildExit/_onChildError) — hooking .closed too would double-fire.
-        connection.closed.catch(() => {})
+        // #7319 review — child.on('exit'/'error') is NOT actually the sole
+        // authoritative teardown signal: an agent can close stdout (ending
+        // the stream, which settles `connection.closed`) while staying alive
+        // — no exit, no error, ever. Left unconsumed, that wedges the session
+        // "ready" forever with no path back to a working turn. Route it
+        // through the SAME dedup'd teardown path as child.on('exit') so
+        // EITHER signal — whichever actually fires — reports exactly once.
+        connection.closed
+          .then(() => this._onConnectionClosed())
+          .catch((err) => this._onConnectionClosed(err))
         this._connection = connection
 
-        await connection.agent.request(acp.AGENT_METHODS.initialize, {
+        const init = await connection.agent.request(acp.AGENT_METHODS.initialize, {
           protocolVersion: acp.PROTOCOL_VERSION,
           clientCapabilities: {},
           clientInfo: { name: 'chroxy', version: '1' },
         })
+        // #7319 review — the schema says the client SHOULD disconnect if the
+        // negotiated version isn't one it supports. We only ever OFFER v1;
+        // enforce that we also GOT v1 back rather than silently proceeding
+        // against an agent that negotiated something else.
+        if (init?.protocolVersion !== acp.PROTOCOL_VERSION) {
+          throw new Error(
+            `negotiated protocol version ${init?.protocolVersion} — chroxy only supports v${acp.PROTOCOL_VERSION}`,
+          )
+        }
         const newSession = await connection.agent.request(acp.AGENT_METHODS.session_new, {
           cwd: this.cwd,
           mcpServers: [],
@@ -325,12 +380,27 @@ export function createAcpSessionClass(rawEntry) {
       this._activeTurn = turn
       this._armResultTimeout()
 
+      // #7319 review — ACP has no system-prompt channel, so the first-turn
+      // message is the ONLY vehicle for the session preamble, the chroxy
+      // context hint, and any loaded skill (mirrors codex-app-server-
+      // session.js's #6606 fix for the identical "no system channel" shape).
+      // Flipped to true only AFTER the request succeeds so a failed first
+      // turn still retries with the prefix (jsonl-subprocess-session.js's
+      // discipline for the same flag).
+      let text = prompt || ''
+      const willPrependFirstTurn = !this._skillsPrepended
+      if (willPrependFirstTurn) {
+        const prefix = this._buildFirstTurnPrefix()
+        if (prefix) text = `${prefix}\n\n---\n\n${text}`
+      }
+
       let res
       try {
         res = await this._connection.agent.request(acp.AGENT_METHODS.session_prompt, {
           sessionId: this._sessionId,
-          prompt: [{ type: 'text', text: prompt || '' }],
+          prompt: [{ type: 'text', text }],
         })
+        if (willPrependFirstTurn) this._skillsPrepended = true
       } catch (err) {
         if (this._activeTurn !== turn) return
         this._failTurn(`ACP agent error: ${err.message}`)
@@ -338,6 +408,27 @@ export function createAcpSessionClass(rawEntry) {
       }
       if (this._activeTurn !== turn) return
       this._finishTurn(res)
+    }
+
+    /**
+     * The combined first-turn prefix: session preamble, then the chroxy
+     * context hint, then every loaded skill (prepend + append/system buckets
+     * combined — `_buildCombinedSkillsPrefix()` already de-duplicates those
+     * two buckets for a provider with no separate system-prompt channel; do
+     * NOT also call `_buildSystemPrompt()`, whose OWN skillsText source is
+     * the same append bucket and would double-inject it). Same ordering as
+     * `_buildSystemPrompt()` for consistency. Empty string when nothing is
+     * configured, so the `sendMessage` caller can branch on truthiness.
+     *
+     * @returns {string}
+     */
+    _buildFirstTurnPrefix() {
+      const parts = []
+      if (this.sessionPreamble) parts.push(this.sessionPreamble)
+      if (this.chroxyContextHint) parts.push(CHROXY_CONTEXT_HINT_TEXT)
+      const skills = typeof this._buildCombinedSkillsPrefix === 'function' ? this._buildCombinedSkillsPrefix() : ''
+      if (skills) parts.push(skills)
+      return parts.join('\n\n')
     }
 
     // ------------------------------------------------------------------
@@ -394,12 +485,24 @@ export function createAcpSessionClass(rawEntry) {
       this.emit('stream_delta', { messageId: t.thinkingMessageId, delta: text, thinking: true })
     }
 
+    // #7319 review — `ToolCall.status` is OPTIONAL and schema-legal to
+    // already be terminal on the VERY FIRST message about a call (only
+    // `toolCallId` + `title` are required); the SDK's own example agent
+    // always splits open/close into two messages, which is what the original
+    // implementation silently assumed. Ignoring `update.status` here left a
+    // tool_call that arrives pre-completed open for the rest of the turn, so
+    // the turn-end orphan sweep (BaseSession._sweepUnresolvedToolStarts)
+    // synthesized a FALSE "did not emit a result" failure for a tool that
+    // actually succeeded. Close immediately when the initial message is
+    // already terminal, exactly as if a separate tool_call_update had
+    // followed it.
     _onToolCall(update) {
       const toolUseId = update?.toolCallId
       if (typeof toolUseId !== 'string' || toolUseId.length === 0) return
       const t = this._activeTurn
       if (!t.openToolCalls) t.openToolCalls = new Set()
       t.openToolCalls.add(toolUseId)
+      this._rememberToolCallContent(t, toolUseId, update.content)
       const tool = update.kind || update.name || 'tool'
       this.emit('tool_start', {
         messageId: t.messageId,
@@ -408,23 +511,52 @@ export function createAcpSessionClass(rawEntry) {
         input: { title: update.title, kind: update.kind, rawInput: update.rawInput, locations: update.locations },
       })
       this._trackToolStart(toolUseId, tool)
+      if (update.status === 'completed' || update.status === 'failed') {
+        this._closeToolCall(toolUseId, update.status)
+      }
     }
 
     _onToolCallUpdate(update) {
       const toolUseId = update?.toolCallId
       if (typeof toolUseId !== 'string' || toolUseId.length === 0) return
+      const t = this._activeTurn
+      this._rememberToolCallContent(t, toolUseId, update.content)
       const status = update.status
       // Non-terminal progress updates (pending/in_progress) have no matching
-      // existing outbound event — only a completed/failed update closes the
-      // tool_start opened above (or synthesizes one, for a nonconformant
-      // agent that updates before it ever opened the call).
+      // existing outbound event beyond remembering their content above —
+      // only a completed/failed update closes the tool_start opened earlier
+      // (or synthesizes one, for a nonconformant agent that updates before
+      // it ever opened the call).
       if (status !== 'completed' && status !== 'failed') return
-      const t = this._activeTurn
       if (!t.openToolCalls || !t.openToolCalls.has(toolUseId)) {
         this._onToolCall({ toolCallId: toolUseId, title: update.title, kind: update.kind, name: update.name, rawInput: update.rawInput, locations: update.locations })
+        // The synthetic open above carries no `status`, so it never
+        // self-closes — fall through and close with the status we actually
+        // received.
       }
+      this._closeToolCall(toolUseId, status)
+    }
+
+    // #7319 review — `ToolCallUpdate`'s fields are ALL optional except
+    // `toolCallId` ("only changed fields need to be included" — the schema's
+    // own words), so a terminal update legitimately omits `content` when it
+    // didn't change since an earlier tick (e.g. content arrives on an
+    // in-progress update, then a bare `status:'completed'` follows with no
+    // content of its own). Remembering the latest non-empty content per
+    // toolCallId and reading it back here means a contentless terminal
+    // update can never blank out real output that already arrived.
+    _rememberToolCallContent(t, toolUseId, content) {
+      if (!t.toolCallContent) t.toolCallContent = new Map()
+      if (Array.isArray(content) && content.length > 0) t.toolCallContent.set(toolUseId, content)
+    }
+
+    _closeToolCall(toolUseId, status) {
+      const t = this._activeTurn
+      if (!t.openToolCalls || !t.openToolCalls.has(toolUseId)) return // already closed
       t.openToolCalls.delete(toolUseId)
-      const { result, truncated } = summarizeToolCallContent(update.content)
+      const content = t.toolCallContent?.get(toolUseId) ?? null
+      t.toolCallContent?.delete(toolUseId)
+      const { result, truncated } = summarizeToolCallContent(content)
       this.emit('tool_result', { toolUseId, result, truncated, isError: status === 'failed' })
       this._trackToolResult(toolUseId)
     }
@@ -544,31 +676,85 @@ export function createAcpSessionClass(rawEntry) {
     // Child / connection teardown
     // ------------------------------------------------------------------
 
+    /**
+     * Single choke point for reporting an UNEXPECTED teardown, from whichever
+     * signal actually fires first (#7319 review — `child.on('exit')` and
+     * `connection.closed` both stem from the same underlying process death in
+     * the common case, with no ordering guarantee between them; an agent that
+     * closes stdout while staying alive fires ONLY `connection.closed`, never
+     * `exit`). `_teardownReported` makes this report exactly once regardless
+     * of which signal(s) fire, or in which order.
+     */
+    _reportTeardown(message, { recoverable = true } = {}) {
+      if (this._destroying || this._teardownReported) return
+      this._teardownReported = true
+      this._processReady = false
+      if (this._activeTurn) this._failTurn(message)
+      else this.emit('error', { message, recoverable })
+    }
+
     _onChildExit(code, signal, stderrTail) {
       if (this._destroying) return
-      this._processReady = false
       const detail = `code=${code}${signal ? ` signal=${signal}` : ''}`
       ;(this._log || log).warn(`ACP agent "${this._acpEntry.id}" exited unexpectedly (${detail})`)
       const tail = stderrTail ? `: ${stderrTail.slice(0, 500)}` : ''
-      const message = `ACP agent "${this._acpEntry.label}" exited unexpectedly (${detail})${tail}`
-      if (this._activeTurn) this._failTurn(message)
-      else this.emit('error', { message, recoverable: true })
+      this._reportTeardown(`ACP agent "${this._acpEntry.label}" exited unexpectedly (${detail})${tail}`)
     }
 
     _onChildError(err) {
       if (this._destroying) return
-      this._processReady = false
-      const message = `Failed to run ACP agent "${this._acpEntry.label}": ${err.message}`
-      if (this._activeTurn) this._failTurn(message)
-      else this.emit('error', { message })
+      this._reportTeardown(`Failed to run ACP agent "${this._acpEntry.label}": ${err.message}`)
+    }
+
+    /**
+     * `connection.closed` settled — either because WE closed it (destroy(),
+     * guarded by `_destroying` above), the child exited (child.on('exit')
+     * fires too; whichever of the two gets here first wins via
+     * `_teardownReported`), or — the case this handler exists to catch — the
+     * agent closed stdout while remaining alive, which `child.on('exit')`
+     * never sees at all.
+     *
+     * Deferred by a short grace window rather than reported immediately: if
+     * `child.on('exit')` is ALSO about to fire (the common case), it carries
+     * the useful exit code/signal and should win the race and report that
+     * instead of this generic message. Reporting synchronously here would
+     * make the generic message win essentially every time (stdout 'end'
+     * tends to observably precede the 'exit' event), producing a double
+     * report — the exact defect a prior version of this file had (#7319
+     * review finding #10).
+     */
+    _onConnectionClosed(err) {
+      if (this._destroying || this._teardownReported) return
+      const detail = err ? `: ${err.message}` : ''
+      this._connectionClosedGraceTimer = setTimeout(() => {
+        this._connectionClosedGraceTimer = null
+        this._reportTeardown(`ACP agent "${this._acpEntry.label}" connection closed unexpectedly${detail}`)
+      }, CONNECTION_CLOSED_GRACE_MS)
+      if (typeof this._connectionClosedGraceTimer.unref === 'function') this._connectionClosedGraceTimer.unref()
     }
 
     // ------------------------------------------------------------------
     // Interrupt / teardown
     // ------------------------------------------------------------------
 
+    /**
+     * #7319 review — `markIntentionalStop()` and the `session/cancel` notify
+     * are gated behind an ACTIVE turn (mirrors SdkSession.interrupt(),
+     * sdk-session.js:1844: "return early when no query is active").
+     * `clearOutgoingQueue()` stays unconditional either way, matching that
+     * same method — a deliberate Stop should always cancel queued follow-ups,
+     * even with nothing currently running.
+     *
+     * Without the guard, tapping Stop between turns (input-handlers.js calls
+     * interrupt() with no busy check) armed the flag with no active turn to
+     * consume it — `_finishTurn` is the ONLY consumer, so the flag sat armed
+     * until the NEXT turn's clean `end_turn` completion, which then read it
+     * as an intentional stop and emitted `stopped` with no `result` event at
+     * all for a turn nobody interrupted.
+     */
     async interrupt() {
       this.clearOutgoingQueue()
+      if (!this._activeTurn) return
       this.markIntentionalStop()
       if (this._connection && this._sessionId) {
         try { await this._connection.agent.notify(acp.AGENT_METHODS.session_cancel, { sessionId: this._sessionId }) }
@@ -581,19 +767,59 @@ export function createAcpSessionClass(rawEntry) {
       this.clearOutgoingQueue({ emit: false })
       this._clearIntentionalStop()
       this._clearResultTimeout()
+      if (this._connectionClosedGraceTimer) { clearTimeout(this._connectionClosedGraceTimer); this._connectionClosedGraceTimer = null }
       this._activeTurn = null
       if (this._connection) {
         try { this._connection.close() } catch { /* already gone */ }
         this._connection = null
       }
       if (this._child) {
-        try { killProcessTree(this._child) } catch { /* already gone */ }
+        await this._killChildWithGrace(this._child)
         this._child = null
       }
       this._clearMessageState()
       this._destroyPendingBackgroundShells()
       this._processReady = false
       this.removeAllListeners()
+    }
+
+    /**
+     * #7319 review — a bare `killProcessTree()` is a SIGTERM-only request on
+     * POSIX (platform.js): it relies on the child actually honoring the
+     * signal. This provider's binary is entirely operator-chosen and
+     * unvetted (verified: an agent with a no-op SIGTERM handler was still
+     * alive 4.2s later) — an orphan here inherits the daemon's own
+     * environment, the expensive kind of leak. Escalate to SIGKILL after a
+     * short grace window, mirroring byok-mcp-client.js's destroy() teardown.
+     * Resolves once the child actually exits, or once the grace window
+     * elapses and SIGKILL is sent — whichever comes first.
+     *
+     * @param {import('child_process').ChildProcess} child
+     * @returns {Promise<void>}
+     */
+    _killChildWithGrace(child) {
+      // Already exited (e.g. the child died on its own — _onChildExit
+      // already ran — and destroy() is only now cleaning up) — nothing to
+      // signal or wait out. Node never replays a past 'exit' to a listener
+      // attached after the fact, so without this check we'd needlessly burn
+      // the full grace window waiting on an event that will never fire.
+      if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve()
+      return new Promise((resolve) => {
+        let settled = false
+        const finish = () => {
+          if (settled) return
+          settled = true
+          clearTimeout(graceTimer)
+          resolve()
+        }
+        child.once('exit', finish)
+        try { killProcessTree(child) } catch { /* already gone */ }
+        const graceTimer = setTimeout(() => {
+          try { killProcessTree(child, { force: true }) } catch { /* already gone */ }
+          finish()
+        }, ACP_KILL_GRACE_MS)
+        if (typeof graceTimer.unref === 'function') graceTimer.unref()
+      })
     }
   }
 

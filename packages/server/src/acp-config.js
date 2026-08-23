@@ -25,10 +25,17 @@
  * module only validates that every value is a string (a malformed non-string
  * value would otherwise reach `child_process.spawn`'s env object as-is);
  * whether config.json is an appropriate place to put a given value is the
- * operator's call, same as any locally-edited config file. Chroxy's OWN daemon
- * secret (the primary bearer token) is stripped from the child's environment
- * unconditionally at spawn time regardless of what this map contains — see
- * `CHROXY_SECRET_DENYLIST` (spawn-env.js), applied in acp-session.js.
+ * operator's call, same as any locally-edited config file. The AMBIENT
+ * daemon environment does NOT pass through to the child by default — the
+ * agent's `command` is entirely operator-chosen and unvetted, so
+ * `buildAcpChildEnv` (acp-session.js) uses the ALLOWLIST posture
+ * `spawn-env.js` reserves for third-party providers (`STANDARD_ALLOWLIST`),
+ * not the denylist posture reserved for the first-party Claude CLI: nothing
+ * outside that baseline reaches the child unless THIS `env` map adds it.
+ * Chroxy's OWN daemon secret (the primary bearer token,
+ * `CHROXY_SECRET_DENYLIST` in spawn-env.js) is additionally stripped
+ * UNCONDITIONALLY at spawn time — applied in acp-session.js AFTER this map is
+ * merged in, so it can never be smuggled back in via this map either.
  *
  * Permissions ship DENIED BY DEFAULT for every entry registered from this
  * block (#7319) — there is no config knob to change that yet. #7320 wires the

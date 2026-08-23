@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
@@ -38,10 +38,16 @@ function mkAcpSessionClass(entryOverrides = {}) {
 // SessionManager/session-state.json, but BaseSession's constructor loads
 // skills synchronously and a real skillsDir keeps that off the developer's
 // actual ~/.claude tree.
+//
+// #7319 review finding #9 — default a SHORT resultTimeoutMs (BaseSession's
+// own default is 30 MINUTES). A regression that drops the session/cancel
+// notify, or otherwise wedges a turn, must fail this suite in seconds via
+// the soft result timeout, not hang CI for half an hour before the runner's
+// own job timeout eventually kills it. `extraOpts` can still override it.
 function mkSession(extraOpts = {}, entryOverrides = {}) {
   const sk = mkdtempSync(join(tmpdir(), 'chroxy-acp-'))
   const Klass = mkAcpSessionClass(entryOverrides)
-  const s = new Klass({ cwd: tmpdir(), skillsDir: sk, repoSkillsDir: null, ...extraOpts })
+  const s = new Klass({ cwd: tmpdir(), skillsDir: sk, repoSkillsDir: null, resultTimeoutMs: 5000, ...extraOpts })
   return { s, cleanup: () => rmSync(sk, { recursive: true, force: true }) }
 }
 
@@ -304,5 +310,269 @@ describe('AcpSession — real fixture round trip', () => {
     assert.match(err.message, /does not support attachments/)
     await s.destroy()
     cleanup()
+  })
+})
+
+// #7319 review finding #2 — verified repro: after a normal turn ->
+// interrupt() -> follow-up turn emits ["stopped"] with no `result` event at
+// all, because interrupt() armed markIntentionalStop() unconditionally (no
+// active turn to consume it) and the NEXT turn's _finishTurn read the stale
+// flag. input-handlers.js calls interrupt() with no busy guard, so a Stop tap
+// racing a turn's natural end hits this in production.
+describe('AcpSession — interrupt() outside an active turn (#7319 review finding #2)', () => {
+  it('interrupt() with no active turn does not corrupt the NEXT turn', async () => {
+    const { s, cleanup } = mkSession()
+    await s.start()
+
+    // Turn 1: completes normally.
+    const result1P = waitFor(s, 'result')
+    await s.sendMessage('hi', [])
+    await result1P
+
+    // Stop tapped AFTER the turn already ended — nothing active to interrupt.
+    await s.interrupt()
+
+    // Turn 2 must ALSO complete as a normal `result` — not `stopped`, and
+    // not silently swallowed with no event at all.
+    const ev = capture(s, ['result', 'stopped', 'error'])
+    const result2P = waitFor(s, 'result')
+    await s.sendMessage('hi again', [])
+    await result2P
+    await s.destroy()
+    cleanup()
+
+    assert.deepEqual(
+      ev.map(([e]) => e),
+      ['result'],
+      'the second turn must report a clean result — a post-turn interrupt() must not leak into it as `stopped`',
+    )
+  })
+
+  it('interrupt() with no active turn does not send session/cancel (nothing to cancel)', async () => {
+    const { s, cleanup } = mkSession()
+    await s.start()
+    // No sendMessage() at all — start() alone leaves no active turn.
+    await s.interrupt() // must be a clean no-op, not throw, not hang
+    const resultP = waitFor(s, 'result')
+    await s.sendMessage('hi', [])
+    const result = await resultP
+    assert.equal(result.sessionId, 'fake-acp-session-1')
+    await s.destroy()
+    cleanup()
+  })
+})
+
+// #7319 review finding #6 — ToolCall.status is OPTIONAL and schema-legal to
+// already be terminal on the FIRST message about a call; ToolCallUpdate's
+// fields are all optional except toolCallId, so a terminal tick may omit
+// `content` when it didn't change since an earlier one. Both shapes are
+// legal even though the SDK's own example agent always uses the two-message
+// open-then-update flow the original implementation silently assumed.
+describe('AcpSession — tool_call schema-legal shapes (#7319 review finding #6)', () => {
+  it('a tool_call that arrives ALREADY terminal yields a successful tool_result, not a synthetic failure', async () => {
+    const { s, cleanup } = mkSession()
+    const ev = capture(s, ['tool_start', 'tool_result'])
+    await s.start()
+    const resultP = waitFor(s, 'result')
+    await s.sendMessage('WITH_TOOL_IMMEDIATE_COMPLETE', [])
+    await resultP
+    await s.destroy()
+    cleanup()
+
+    const kinds = ev.map(([e]) => e)
+    assert.equal(kinds.filter((k) => k === 'tool_start').length, 1)
+    assert.equal(kinds.filter((k) => k === 'tool_result').length, 1, 'no synthetic orphan tool_result on top of the real one')
+
+    const toolResult = ev.find(([e]) => e === 'tool_result')[1]
+    assert.equal(toolResult.toolUseId, 'tc-immediate')
+    assert.equal(toolResult.result, 'instant result')
+    assert.equal(toolResult.isError, false)
+    assert.equal(toolResult.synthetic, undefined, 'must not be BaseSession\'s orphan-sweep synthetic failure')
+  })
+
+  it('a bare terminal tool_call_update (no content) does not blank out content received on an earlier in-progress tick', async () => {
+    const { s, cleanup } = mkSession()
+    const ev = capture(s, ['tool_start', 'tool_result'])
+    await s.start()
+    const resultP = waitFor(s, 'result')
+    await s.sendMessage('WITH_TOOL_BARE_COMPLETE', [])
+    await resultP
+    await s.destroy()
+    cleanup()
+
+    const toolResult = ev.find(([e]) => e === 'tool_result')[1]
+    assert.equal(toolResult.toolUseId, 'tc-bare')
+    assert.equal(
+      toolResult.result,
+      'partial output',
+      'content from the EARLIER in-progress tick must survive a later contentless terminal update',
+    )
+    assert.equal(toolResult.isError, false)
+  })
+})
+
+// #7319 review finding #5 — spawn-env.js's own header comment states the
+// rule this file previously got backwards: allowlist mode is for
+// THIRD-PARTY providers (so operator secrets never reach them); denylist is
+// for the first-party Claude CLI only. Verified reaching the child under the
+// old denylist posture: ANTHROPIC_API_KEY, GITHUB_TOKEN,
+// AWS_SECRET_ACCESS_KEY, CHROXY_HOOK_SECRET.
+describe('AcpSession — child env posture is ALLOWLIST, not denylist (#7319 review finding #5)', () => {
+  it('an ambient secret NOT on STANDARD_ALLOWLIST never reaches the child', async () => {
+    const secretName = `ACP_TEST_FAKE_SECRET_${uniqueId('X').replace(/[^A-Z0-9]/gi, '_').toUpperCase()}`
+    process.env[secretName] = 'super-secret-ambient-value'
+    const { s, cleanup } = mkSession()
+    try {
+      await s.start()
+      const deltas = []
+      s.on('stream_delta', (p) => deltas.push(p.delta))
+      const resultP = waitFor(s, 'result')
+      await s.sendMessage(`REPORT_ENV:${secretName}`, [])
+      await resultP
+      assert.equal(deltas.join(''), `ENV:${secretName}=(unset)`)
+    } finally {
+      delete process.env[secretName]
+      await s.destroy()
+      cleanup()
+    }
+  })
+
+  it('a STANDARD_ALLOWLIST var (PATH) DOES reach the child — the baseline every CLI tool needs', async () => {
+    const { s, cleanup } = mkSession()
+    await s.start()
+    const deltas = []
+    s.on('stream_delta', (p) => deltas.push(p.delta))
+    const resultP = waitFor(s, 'result')
+    await s.sendMessage('REPORT_ENV:PATH', [])
+    await resultP
+    await s.destroy()
+    cleanup()
+    assert.notEqual(deltas.join(''), 'ENV:PATH=(unset)')
+  })
+
+  it("Chroxy's own daemon secret (API_TOKEN) is stripped even when the OPERATOR configures it in providers.acp[].env", async () => {
+    // #7319 review — the second half of finding #5: configuredEnv used to be
+    // spread AFTER the strip, so an operator's OWN config entry could
+    // resurrect the one secret the strip exists to guarantee never leaks.
+    process.env.API_TOKEN = 'ambient-primary-token'
+    const { s, cleanup } = mkSession({}, { env: { API_TOKEN: 'operator-configured-token' } })
+    try {
+      await s.start()
+      const deltas = []
+      s.on('stream_delta', (p) => deltas.push(p.delta))
+      const resultP = waitFor(s, 'result')
+      await s.sendMessage('REPORT_ENV:API_TOKEN', [])
+      await resultP
+      assert.equal(deltas.join(''), 'ENV:API_TOKEN=(unset)')
+    } finally {
+      delete process.env.API_TOKEN
+      await s.destroy()
+      cleanup()
+    }
+  })
+})
+
+// #7319 review finding #7 — ACP has no system-prompt channel, so the
+// first-turn user message is the ONLY vehicle for the session preamble and
+// any loaded skill. Verified: a loaded preamble and an always-apply skill
+// never reached the agent before this fix.
+describe('AcpSession — first-turn prefix carries the preamble + skills (#7319 review finding #7)', () => {
+  it('the session preamble and a loaded skill both reach the agent on the first turn', async () => {
+    const sk = mkdtempSync(join(tmpdir(), 'chroxy-acp-skill-'))
+    writeFileSync(join(sk, 'safety.md'), '---\nname: safety\ninjection: prepend\n---\nALWAYS_APPLY_SKILL_MARKER\n')
+    const Klass = mkAcpSessionClass()
+    const s = new Klass({
+      cwd: tmpdir(),
+      skillsDir: sk,
+      repoSkillsDir: null,
+      resultTimeoutMs: 5000,
+      sessionPreamble: 'SAFETY_INSTRUCTION_XYZ',
+    })
+    try {
+      await s.start()
+      const deltas = []
+      s.on('stream_delta', (p) => { if (!p.thinking) deltas.push(p.delta) })
+      const resultP = waitFor(s, 'result')
+      await s.sendMessage('CHECK_PREFIX', [])
+      await resultP
+      const raw = deltas.join('')
+      assert.match(raw, /SAFETY_INSTRUCTION_XYZ/, 'the session preamble must reach the agent')
+      assert.match(raw, /ALWAYS_APPLY_SKILL_MARKER/, 'the loaded skill must reach the agent')
+      assert.match(raw, /CHECK_PREFIX/, 'the original prompt text must still be present')
+    } finally {
+      await s.destroy()
+      rmSync(sk, { recursive: true, force: true })
+    }
+  })
+})
+
+// #7319 review finding #8 — the ACP schema says the client SHOULD disconnect
+// if the agent negotiates a protocol version it doesn't support. Pinning
+// what we OFFER (v1) isn't the same as enforcing what we actually GOT back.
+describe('AcpSession — negotiated protocol version is enforced (#7319 review finding #8)', () => {
+  it('start() rejects an agent that negotiates an unsupported protocol version', async () => {
+    const { s, cleanup } = mkSession({}, { env: { ACP_FIXTURE_PROTOCOL_VERSION: '2' } })
+    // start()'s failure path proactively kills the never-fully-initialized
+    // child; production always has a listener wired before start() runs
+    // (session-manager.js calls _wireSessionEvents BEFORE session.start()),
+    // so mirror that here and wait for the resulting teardown `error` to
+    // settle — otherwise the killed child's async `exit` fires with no
+    // listener attached (EventEmitter's special-cased throw on an
+    // unlistened 'error') and leaks past this test's own boundary.
+    const errorP = waitFor(s, 'error')
+    await assert.rejects(s.start(), /protocol version/)
+    await errorP
+    cleanup()
+  })
+})
+
+// #7319 review finding #3 — killProcessTree() is a bare SIGTERM request on
+// POSIX; nothing guarantees the operator-chosen, unvetted agent binary
+// honors it. Verified: an agent with a no-op SIGTERM handler was still alive
+// 4.2s after destroy() with the pre-fix code.
+describe('AcpSession — destroy() escalates to SIGKILL (#7319 review finding #3)', () => {
+  it('destroy() kills a child that ignores SIGTERM within the grace window', async () => {
+    const { s, cleanup } = mkSession({}, { env: { ACP_FIXTURE_IGNORE_SIGTERM: '1' } })
+    await s.start()
+    const pid = s._child.pid
+    const startedAt = Date.now()
+    await s.destroy()
+    const elapsedMs = Date.now() - startedAt
+    cleanup()
+
+    // A brief settle window for the OS to finish reaping before the probe.
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    let stillAlive = true
+    try { process.kill(pid, 0); } catch { stillAlive = false }
+    assert.equal(stillAlive, false, 'the child must be gone after destroy() resolves, even though it ignored SIGTERM')
+    assert.ok(
+      elapsedMs >= 800,
+      `expected destroy() to wait out most of the ~1s SIGKILL grace window before the child died, took only ${elapsedMs}ms`,
+    )
+  })
+})
+
+// #7319 review finding #10 — a dying child previously emitted the generic
+// "connection closed" message FIRST and the informative "exited unexpectedly
+// (code=N)" message SECOND (the latter marked recoverable:true) — two error
+// events for one failure, with the less useful one arriving first.
+describe('AcpSession — exactly one teardown report per failure (#7319 review finding #10)', () => {
+  it('an unexpected child death reports exactly ONE error event, and it is the informative one', async () => {
+    const { s, cleanup } = mkSession()
+    await s.start()
+    const ev = capture(s, ['error'])
+    s._child.kill('SIGKILL')
+    // Past CONNECTION_CLOSED_GRACE_MS so a (correctly suppressed) second
+    // report would have had its chance to fire before we assert.
+    await new Promise((resolve) => setTimeout(resolve, 400))
+    await s.destroy()
+    cleanup()
+
+    assert.equal(
+      ev.length,
+      1,
+      `expected exactly one error event, got ${ev.length}: ${JSON.stringify(ev.map(([, p]) => p.message))}`,
+    )
+    assert.match(ev[0][1].message, /exited unexpectedly/, 'the informative exit-code message must win, not the generic one')
   })
 })

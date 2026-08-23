@@ -28,7 +28,13 @@ import { getChroxyHostEnv } from '../chroxy-host-metadata.js'
 
 // Standard vars every child process needs for its runtime to function.
 // Shell PATH, locale, TERM, TMPDIR, user/home identity.
-const STANDARD_ALLOWLIST = [
+// Exported (#7319 review) so an allowlist-mode provider that isn't wired
+// through the `PROVIDERS`/`buildSpawnEnv` table below (a config-driven,
+// per-entry provider like AcpSession, which has no fixed provider-specific
+// allowlist to add — the operator's own `env` config IS that allowlist) can
+// still start from the same baseline instead of hand-duplicating a
+// security-relevant list that would then drift from this one.
+export const STANDARD_ALLOWLIST = [
   'PATH',
   'HOME',
   'USER',
