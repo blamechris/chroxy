@@ -160,6 +160,25 @@ function requireRgOrSkip(t, what) {
 }
 
 /**
+ * Same contract as {@link requireRgOrSkip}, for the grep-fallback branch, which
+ * needs a real `grep` and a real `bash` to shim onto a PATH. Absence must not be
+ * silently equivalent to "nothing to check", and must not hard-fail everywhere
+ * either — that is what reddened the Windows job.
+ *
+ * Returns true when the caller should bail out of the test.
+ */
+function requireGrepShimOrSkip(t) {
+  const missing = [GREP_PATH ? null : 'grep', BASH_PATH ? null : 'bash'].filter(Boolean)
+  if (missing.length === 0) return false
+  const what = `${missing.join(' and ')} not found on PATH`
+  if (process.env.CI) {
+    assert.fail(`${what} — the grep-fallback branch proof cannot run in CI (#7295).`)
+  }
+  t.skip(`${what} — the grep-fallback proof did NOT run (it is enforced in CI).`)
+  return true
+}
+
+/**
  * The spawning tests need a POSIX shell: the sinks under test are literally
  * `spawn('bash', ['-c', cmd])` and `docker exec … bash -c`, and the fixtures are
  * `#!/bin/sh` scripts with exec bits. None of that is meaningful on Windows, and
@@ -184,8 +203,13 @@ function build(pattern, root, input = {}) {
  * branch, which would make this test pass for the wrong reason.
  */
 async function makeGrepOnlyPath(dir) {
-  assert.ok(GREP_PATH, 'grep must be on PATH for the fallback-branch tests')
-  assert.ok(BASH_PATH, 'bash must be on PATH for the fallback-branch tests')
+  // Reachable only from a caller that forgot `requireGrepShimOrSkip` — the
+  // environment gate lives in the tests, so a missing tool SKIPS on a dev box and
+  // FAILS in CI. These two are a programming-error guard, and they are fireable:
+  // proven by setting BASH_PATH to null and calling this helper ungated. The
+  // `|| '/bin/bash'` default they used to sit behind made that impossible.
+  assert.ok(GREP_PATH, 'makeGrepOnlyPath called without requireGrepShimOrSkip: grep is not on PATH')
+  assert.ok(BASH_PATH, 'makeGrepOnlyPath called without requireGrepShimOrSkip: bash is not on PATH')
   const bin = path.join(dir, 'bin')
   await mkdir(bin, { recursive: true })
   for (const [name, target] of [['grep', GREP_PATH], ['bash', BASH_PATH]]) {
@@ -272,7 +296,8 @@ describe('Grep argv option injection (#7295)', () => {
   })
 
   describe('grep fallback branch', () => {
-    it('NEGATIVE CONTROL: a `--pre=` pattern is searched as text, not parsed as an option', POSIX_ONLY, async () => {
+    it('NEGATIVE CONTROL: a `--pre=` pattern is searched as text, not parsed as an option', POSIX_ONLY, async (t) => {
+      if (requireGrepShimOrSkip(t)) return
       const fx = await makeFixture()
       try {
         const bin = await makeGrepOnlyPath(fx.dir)
@@ -298,7 +323,8 @@ describe('Grep argv option injection (#7295)', () => {
       }
     })
 
-    it('POSITIVE CONTROL: `-Wall` still matches as text through the grep fallback', POSIX_ONLY, async () => {
+    it('POSITIVE CONTROL: `-Wall` still matches as text through the grep fallback', POSIX_ONLY, async (t) => {
+      if (requireGrepShimOrSkip(t)) return
       const fx = await makeFixture()
       try {
         const bin = await makeGrepOnlyPath(fx.dir)
