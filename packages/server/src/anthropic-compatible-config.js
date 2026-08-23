@@ -500,7 +500,12 @@ function validateCompatibleProviders(configKey, value, opts = {}) {
  * @param {string[]} warnings - Accumulator the caller logs/returns
  */
 export function validateProvidersConfigBlock(providers, warnings) {
-  const KNOWN_PROVIDER_BLOCK_KEYS = new Set(['anthropicCompatible', 'openaiCompatible', 'allowAnyModel'])
+  // #7319 — 'acp' is a KNOWN key here (so it doesn't warn as unrecognized),
+  // but its entries are validated by config.js directly via
+  // `validateAcpProviders` (acp-config.js), not here: acp-config.js already
+  // imports RESERVED_PROVIDER_IDS from this module, so importing back from
+  // acp-config.js here would be circular.
+  const KNOWN_PROVIDER_BLOCK_KEYS = new Set(['anthropicCompatible', 'openaiCompatible', 'allowAnyModel', 'acp'])
   for (const key of Object.keys(providers)) {
     if (!KNOWN_PROVIDER_BLOCK_KEYS.has(key)) {
       warnings.push(`Unknown key 'providers.${key}' (will be ignored)`)

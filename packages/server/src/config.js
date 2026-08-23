@@ -18,6 +18,12 @@ import { createLogger } from './logger.js'
 // deliberately a dependency-free module so importing it here never pulls
 // the BYOK/SDK machinery into the config-load path.
 import { validateProvidersConfigBlock } from './anthropic-compatible-config.js'
+// #7319: pure validation helpers for `providers.acp` — same dependency-free
+// rationale (no spawn/ACP-SDK machinery in the config-load path). Called
+// directly here (not from validateProvidersConfigBlock) to avoid a circular
+// import — acp-config.js already imports RESERVED_PROVIDER_IDS from
+// anthropic-compatible-config.js.
+import { validateAcpProviders } from './acp-config.js'
 // #6764: default cheap model + timeout for the one-shot semantic-title call.
 // Imported from the pure title module (no provider/SDK deps) so config load stays
 // lightweight.
@@ -1474,6 +1480,16 @@ export function validateConfig(config, verbose = false) {
     !Array.isArray(config.providers)
   ) {
     validateProvidersConfigBlock(config.providers, warnings)
+    // #7319 — `providers.acp` (config-driven ACP agents). Validated here
+    // rather than inside validateProvidersConfigBlock to avoid a circular
+    // import (see the import comment above); entry-level warnings use the
+    // same "Invalid value" wording so a malformed entry can't escalate into
+    // a fatal startup error — bad entries are dropped at registration
+    // (acp-session.js) and valid siblings still register.
+    if (Object.prototype.hasOwnProperty.call(config.providers, 'acp')) {
+      const { warnings: acpWarnings } = validateAcpProviders(config.providers.acp)
+      warnings.push(...acpWarnings)
+    }
   }
 
   // Validate externalUrl format if provided
