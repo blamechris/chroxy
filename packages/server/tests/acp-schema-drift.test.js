@@ -3,114 +3,62 @@
  *
  * We depend on the SDK's default v1 entry point only — `experimental/*` is a
  * draft whose wire protocol and API "may change incompatibly in any SDK
- * release" per the SDK's own README, so it is out of bounds (last test below).
- * We also lean on the SDK's shipped `schema/schema.json` + `PROTOCOL_VERSION` +
- * `CLIENT_METHODS` / `AGENT_METHODS` constants instead of hand-rolling wire
- * types ourselves — which means the installed SDK IS the source of truth this
- * repo coded against, and a routine `npm update` could silently change its
- * shape underneath us with nothing else here noticing. That is the
- * "hardcoded copy beside a set that grows" shape from docs/false-safety-guards.md
- * (#7192, #7197), inverted: here the growing set is the dependency itself.
+ * release" per the SDK's own README. That ban is enforced separately, by
+ * `scripts/lint-acp-imports.mjs` (a repo-tree walk, not a `node:test` file —
+ * see `tests/lint-acp-imports.test.js` for its own committed proof).
  *
- * This file compares the *installed* SDK's method surface + schema STRUCTURE
- * against a vendored snapshot (`../vendor/acp-schema.snapshot.json`) captured
- * at v1.4.0. A mismatch means either an unintentional SDK version drifted in,
- * or a deliberate bump that needs the snapshot regenerated — either way,
- * someone should look, not have it silently pass.
+ * This file proves two DIFFERENT things stay true, and they compose:
  *
- * The snapshot is deliberately NOT a full deep-equal of schema.json. The SDK
- * ships roughly monthly, and a full-content compare fails on every upstream
- * prose edit (a reworded `description`, a typo fix in `title`) exactly as
- * loudly as it fails on a real wire change — burying the signal (a renamed
- * method, an added required field) in noise nobody reads before approving a
- * 10,000-line regeneration diff. So the vendored snapshot instead captures
- * only what carries wire meaning:
+ * 1. The installed SDK version IS what this repo vendored a snapshot against.
+ *    `packages/server/package.json` pins `@agentclientprotocol/sdk` EXACT (no
+ *    caret) precisely so this is a fact about `npm install`, not a range that
+ *    could silently resolve upward. The first test below asserts the
+ *    RESOLVED, installed package's own `version` — not just the manifest
+ *    string — equals `vendor/acp-schema.snapshot.json`'s `_meta.sdkVersion`.
+ *    Without this, every comparison below it is comparing the vendored
+ *    snapshot against SOME installed SDK, never provably the right one — a
+ *    `node_modules` version mismatch (a bad `npm i`, a hand-edited lockfile)
+ *    would sail through silently. This is the tripwire; everything else is a
+ *    diagnostic aid once it holds.
+ * 2. Given that version match, the installed SDK's method surface and schema
+ *    STRUCTURE match the vendored snapshot. "Structure", not full content: a
+ *    full deep-equal of `schema.json` fails on every upstream prose edit (a
+ *    reworded `description`, a `title` typo fix) exactly as loudly as it
+ *    fails on a real wire change, burying a renamed method or an added
+ *    required field in a regeneration diff nobody reads closely. The digest
+ *    logic — what counts as "structural" and what does not — lives in
+ *    `scripts/lib/acp-schema-digest.mjs`, imported here AND by
+ *    `scripts/regen-acp-snapshot.mjs`, so there is exactly one implementation
+ *    rather than a live copy and a stale copy embedded in a comment.
  *
- *   - PROTOCOL_VERSION
- *   - CLIENT_METHODS / AGENT_METHODS, in full (keys AND values — a renamed
- *     wire method fails)
- *   - the sorted set of `$defs` type names (`defKeys`) — a type being added
- *     or removed fails
- *   - per non-trivial `$def`, its sorted `required` array and sorted
- *     property-name list (`defs`) — a renamed/added/removed property, or a
- *     property moving in or out of `required`, fails
+ * To regenerate the vendored snapshot after a DELIBERATE SDK version bump:
  *
- * A `$def` with neither `properties` nor `required` (a `oneOf`/`anyOf` union
- * or a bare type alias — 58 of 265 in the schema this was captured against)
- * is omitted from `defs`; its continued existence is already covered by
- * `defKeys`, so an empty entry would carry no information. Anything else —
- * `description`, `title`, `x-method`/`x-side` annotations (redundant with the
- * method maps above), enum members, `oneOf`/`anyOf` branch shapes — is not
- * captured, and changes to it will NOT fail this test. That is deliberate.
+ *   cd packages/server
+ *   npm install @agentclientprotocol/sdk@<exact-version>
+ *   node scripts/regen-acp-snapshot.mjs
  *
- * To regenerate after a DELIBERATE SDK version bump, run from packages/server/
- * (after `npm install`ing the new version there):
- *
- *   node --input-type=module <<'EOF'
- *   import { createRequire } from 'node:module'
- *   import { readFileSync, writeFileSync } from 'node:fs'
- *   import { dirname, join } from 'node:path'
- *   import * as acp from '@agentclientprotocol/sdk'
- *
- *   const require = createRequire(import.meta.url)
- *   const schemaPath = require.resolve('@agentclientprotocol/sdk/schema/schema.json')
- *   const schema = JSON.parse(readFileSync(schemaPath, 'utf8'))
- *   const pkgRoot = dirname(dirname(schemaPath))
- *   const sdkPkg = JSON.parse(readFileSync(join(pkgRoot, 'package.json'), 'utf8'))
- *
- *   function sortedRequired(def) {
- *     return Array.isArray(def.required) ? [...def.required].sort() : []
- *   }
- *   function sortedPropertyNames(def) {
- *     return def.properties && typeof def.properties === 'object'
- *       ? Object.keys(def.properties).sort()
- *       : []
- *   }
- *   function buildDefsDigest(fullSchema) {
- *     const defs = fullSchema.$defs || {}
- *     const defKeys = Object.keys(defs).sort()
- *     const digest = {}
- *     for (const key of defKeys) {
- *       const required = sortedRequired(defs[key])
- *       const properties = sortedPropertyNames(defs[key])
- *       if (required.length === 0 && properties.length === 0) continue
- *       digest[key] = { required, properties }
- *     }
- *     return { defKeys, defs: digest }
- *   }
- *
- *   const { defKeys, defs } = buildDefsDigest(schema)
- *
- *   writeFileSync('vendor/acp-schema.snapshot.json', JSON.stringify({
- *     _meta: {
- *       note: "Structural surface snapshot of @agentclientprotocol/sdk, used by tests/acp-schema-drift.test.js (#7318) to detect drift between the installed SDK and what this repo coded against. Deliberately excludes prose (description/title/etc) so upstream doc-only edits don't fail this test -- only PROTOCOL_VERSION, the method maps, the set of $defs type names (defKeys), and each non-trivial type's required/property-name surface (defs) are captured. A $def with no properties and no required fields (a union or type alias) is omitted from `defs` -- its presence is already covered by `defKeys`. Regenerate ONLY when deliberately bumping the SDK version -- see the header comment in that test file for the regeneration command.",
- *       sdkVersion: sdkPkg.version,
- *     },
- *     protocolVersion: acp.PROTOCOL_VERSION,
- *     clientMethods: acp.CLIENT_METHODS,
- *     agentMethods: acp.AGENT_METHODS,
- *     defKeys,
- *     defs,
- *   }, null, 2) + '\n', 'utf8')
- *   EOF
- *
- * then review the diff before committing — the whole point of vendoring is that
- * the change is visible and deliberate rather than a silent `npm update`.
+ * then review the diff before committing — the whole point of vendoring is
+ * that the change is visible and deliberate rather than a silent float.
  */
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
-import { readFileSync, readdirSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import * as acp from '@agentclientprotocol/sdk'
+import { buildDefsDigest, buildRootAnyOfDigest } from '../scripts/lib/acp-schema-digest.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const require = createRequire(import.meta.url)
 
 const VENDOR_SNAPSHOT_PATH = resolve(__dirname, '..', 'vendor', 'acp-schema.snapshot.json')
-const SRC_DIR = resolve(__dirname, '..', 'src')
 const SERVER_PACKAGE_JSON_PATH = resolve(__dirname, '..', 'package.json')
+
+// Built by concatenation, not spelled as one contiguous literal, so this file
+// does not fail scripts/lint-acp-imports.mjs's own scan of tests/ — see that
+// file's "A note on this file's own text" for the same technique.
+const ZED_PREDECESSOR = '@zed-industries' + '/agent-client-protocol'
 
 function loadSnapshot() {
   return JSON.parse(readFileSync(VENDOR_SNAPSHOT_PATH, 'utf8'))
@@ -119,68 +67,80 @@ function loadSnapshot() {
 // Resolved through the SDK's own `exports` map (only `./schema/schema.json` is
 // exported alongside the default entry point), so this reads whatever is
 // actually installed rather than assuming a fixed node_modules layout.
+function resolveInstalledSchemaPath() {
+  return require.resolve('@agentclientprotocol/sdk/schema/schema.json')
+}
+
 function loadInstalledSchema() {
-  const schemaPath = require.resolve('@agentclientprotocol/sdk/schema/schema.json')
-  return JSON.parse(readFileSync(schemaPath, 'utf8'))
+  return JSON.parse(readFileSync(resolveInstalledSchemaPath(), 'utf8'))
 }
 
-function sortedRequired(def) {
-  return Array.isArray(def.required) ? [...def.required].sort() : []
-}
-
-function sortedPropertyNames(def) {
-  return def.properties && typeof def.properties === 'object'
-    ? Object.keys(def.properties).sort()
-    : []
-}
-
-// Mirrors the generator documented in this file's header comment. Kept as a
-// standalone function (rather than importing anything from vendor/) so the
-// test computes its own digest from whatever is actually installed, and
-// compares that INDEPENDENTLY-COMPUTED digest against the vendored one —
-// not, say, re-reading the vendored file's own shape back at itself.
-function buildDefsDigest(schema) {
-  const defs = schema.$defs || {}
-  const defKeys = Object.keys(defs).sort()
-  const digest = {}
-  for (const key of defKeys) {
-    const required = sortedRequired(defs[key])
-    const properties = sortedPropertyNames(defs[key])
-    if (required.length === 0 && properties.length === 0) continue
-    digest[key] = { required, properties }
-  }
-  return { defKeys, defs: digest }
-}
-
-// Recursively collects source files under `dir`. There's no build output or
-// vendored code under packages/server/src today, but the skip keeps this safe
-// if that changes.
-function collectSourceFiles(dir) {
-  const out = []
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    if (entry.name === 'node_modules') continue
-    const full = join(dir, entry.name)
-    if (entry.isDirectory()) {
-      out.push(...collectSourceFiles(full))
-    } else if (/\.(m?js|jsx)$/.test(entry.name)) {
-      out.push(full)
-    }
-  }
-  return out
+// The SDK's exports map does not expose "./package.json" (only the entry
+// points it intends to be imported are listed), so the installed package's
+// OWN version is read by walking up from the schema path instead — the same
+// technique scripts/regen-acp-snapshot.mjs uses, so the two agree on what
+// "the installed version" means.
+function loadInstalledSdkPackageJson() {
+  const schemaPath = resolveInstalledSchemaPath()
+  const pkgRoot = dirname(dirname(schemaPath))
+  return JSON.parse(readFileSync(join(pkgRoot, 'package.json'), 'utf8'))
 }
 
 describe('@agentclientprotocol/sdk schema drift guard (#7318)', () => {
-  it('packages/server/package.json depends on @agentclientprotocol/sdk, not the stale @zed-industries predecessor', () => {
+  it('packages/server/package.json pins @agentclientprotocol/sdk exactly to the vendored snapshot version, in devDependencies, not the stale @zed-industries predecessor', () => {
+    const snapshot = loadSnapshot()
     const pkgJson = JSON.parse(readFileSync(SERVER_PACKAGE_JSON_PATH, 'utf8'))
-    const allDeps = { ...pkgJson.dependencies, ...pkgJson.devDependencies }
+    const deps = pkgJson.dependencies || {}
+    const devDeps = pkgJson.devDependencies || {}
+
+    // devDependencies, not dependencies: nothing outside tests/ imports the
+    // SDK today, and packages/server's `files` allowlist ships neither
+    // tests/ nor vendor/ — so a `dependencies` entry ships 5+ MB of
+    // unreachable third-party code through every consumer that installs
+    // `dependencies` but not `devDependencies` (a global `npm install -g
+    // chroxy` / `npx chroxy`, `Dockerfile`'s `npm ci --omit=dev`, and
+    // packages/desktop/scripts/bundle-server.sh's `npm install --omit=dev`
+    // into the Tauri-bundled, Apple-notarized app). Once real code under
+    // src/ imports the SDK (#7306), THIS assertion is what should move.
+    assert.ok(
+      !('@agentclientprotocol/sdk' in deps),
+      'packages/server/package.json must not list @agentclientprotocol/sdk in dependencies — nothing outside tests/ imports it, and dependencies ship through the published tarball, the Docker image, and the Tauri bundle. Move it to devDependencies.',
+    )
+    // Pinned EXACT (no ^, no ~): an upgrade is then always a deliberate
+    // `npm install @agentclientprotocol/sdk@<version>` edit, never a caret
+    // silently floating to a version this snapshot was never captured
+    // against. The expected value is DERIVED from the snapshot's own
+    // _meta.sdkVersion rather than a second hardcoded literal here — the
+    // exact shape docs/false-safety-guards.md warns about, a hardcoded copy
+    // beside a value that legitimately changes over time.
     assert.equal(
-      allDeps['@agentclientprotocol/sdk'],
-      '^1.4.0',
-      'packages/server/package.json must depend on @agentclientprotocol/sdk@^1.4.0',
+      devDeps['@agentclientprotocol/sdk'],
+      snapshot._meta?.sdkVersion,
+      `packages/server/package.json's devDependencies["@agentclientprotocol/sdk"] must be pinned EXACTLY to the vendored snapshot's sdkVersion (${snapshot._meta?.sdkVersion}), with no ^ or ~ range operator.`,
     )
     assert.ok(
-      !('@zed-industries/agent-client-protocol' in allDeps),
-      'packages/server/package.json must not depend on the stale @zed-industries/agent-client-protocol predecessor',
+      !(ZED_PREDECESSOR in deps) && !(ZED_PREDECESSOR in devDeps),
+      `packages/server/package.json must not depend on the stale ${ZED_PREDECESSOR} predecessor`,
+    )
+  })
+
+  it('the INSTALLED @agentclientprotocol/sdk resolves to the version the vendored snapshot was captured against', () => {
+    // This is the tripwire the rest of this file leans on. Without it, every
+    // comparison below is only ever proven against SOME installed SDK, never
+    // provably the one the snapshot describes — a node_modules mismatch
+    // (a bad install, a hand-edited lockfile, a stale global link) would
+    // pass every other test here silently.
+    const snapshot = loadSnapshot()
+    const installedPkg = loadInstalledSdkPackageJson()
+    assert.equal(
+      installedPkg.name,
+      '@agentclientprotocol/sdk',
+      `resolved node_modules package is "${installedPkg.name}", not @agentclientprotocol/sdk`,
+    )
+    assert.equal(
+      installedPkg.version,
+      snapshot._meta?.sdkVersion,
+      `installed @agentclientprotocol/sdk resolves to version ${installedPkg.version}, but the vendored snapshot (packages/server/vendor/acp-schema.snapshot.json) was captured against ${snapshot._meta?.sdkVersion}. If this is a deliberate bump, regenerate the snapshot — see this file's header comment. Otherwise node_modules has the wrong version installed regardless of what package.json declares.`,
     )
   })
 
@@ -189,7 +149,7 @@ describe('@agentclientprotocol/sdk schema drift guard (#7318)', () => {
     assert.equal(
       acp.PROTOCOL_VERSION,
       snapshot.protocolVersion,
-      `installed @agentclientprotocol/sdk PROTOCOL_VERSION (${acp.PROTOCOL_VERSION}) no longer matches the vendored snapshot (${snapshot.protocolVersion}, captured at sdk@${snapshot._meta.sdkVersion}). If this is a deliberate SDK bump, regenerate packages/server/vendor/acp-schema.snapshot.json — see this file's header comment. Otherwise an unexpected SDK version was installed.`,
+      `installed @agentclientprotocol/sdk PROTOCOL_VERSION (${acp.PROTOCOL_VERSION}) no longer matches the vendored snapshot (${snapshot.protocolVersion}). See this file's header comment to regenerate after a deliberate SDK bump.`,
     )
   })
 
@@ -211,33 +171,49 @@ describe('@agentclientprotocol/sdk schema drift guard (#7318)', () => {
     )
   })
 
-  it('installed schema/schema.json structural surface (defKeys + per-def required/properties) matches the vendored snapshot', () => {
+  it('installed PROTOCOL_METHODS matches the vendored snapshot', () => {
+    const snapshot = loadSnapshot()
+    assert.deepEqual(
+      acp.PROTOCOL_METHODS,
+      snapshot.protocolMethods,
+      "installed @agentclientprotocol/sdk PROTOCOL_METHODS diverged from the vendored snapshot — see this file's header comment to regenerate after a deliberate SDK bump.",
+    )
+  })
+
+  it('installed runtime export names match the vendored snapshot', () => {
+    const snapshot = loadSnapshot()
+    const installedExportNames = Object.keys(acp).sort()
+    assert.deepEqual(
+      installedExportNames,
+      snapshot.exportNames,
+      "installed @agentclientprotocol/sdk's runtime export names diverged from the vendored snapshot (something was renamed, added, or removed) — see this file's header comment to regenerate after a deliberate SDK bump.",
+    )
+  })
+
+  it('installed schema/schema.json structural surface (defKeys + per-def digest) matches the vendored snapshot', () => {
     const snapshot = loadSnapshot()
     const installedSchema = loadInstalledSchema()
-    const installedDigest = buildDefsDigest(installedSchema)
+    const installed = buildDefsDigest(installedSchema)
     assert.deepEqual(
-      installedDigest.defKeys,
+      installed.defKeys,
       snapshot.defKeys,
       "installed @agentclientprotocol/sdk schema.json's set of $defs type names diverged from the vendored snapshot — a type was added or removed. See this file's header comment to regenerate after a deliberate SDK bump.",
     )
     assert.deepEqual(
-      installedDigest.defs,
+      installed.defs,
       snapshot.defs,
-      "installed @agentclientprotocol/sdk schema.json's per-type required/property surface diverged from the vendored snapshot — see this file's header comment to regenerate after a deliberate SDK bump.",
+      "installed @agentclientprotocol/sdk schema.json's per-type digest (required fields, typed properties, const/enum members, discriminator) diverged from the vendored snapshot — see this file's header comment to regenerate after a deliberate SDK bump.",
     )
   })
 
-  it('never imports an experimental/* ACP entry point or the stale @zed-industries predecessor', () => {
-    const offenders = []
-    for (const file of collectSourceFiles(SRC_DIR)) {
-      const content = readFileSync(file, 'utf8')
-      if (content.includes('@zed-industries/agent-client-protocol')) {
-        offenders.push(`${file}: references the stale @zed-industries/agent-client-protocol package`)
-      }
-      if (/@agentclientprotocol\/sdk\/experimental/.test(content)) {
-        offenders.push(`${file}: imports an experimental/* ACP entry point`)
-      }
-    }
-    assert.deepEqual(offenders, [], `forbidden ACP reference(s) found:\n${offenders.join('\n')}`)
+  it("installed schema/schema.json's root anyOf union matches the vendored snapshot", () => {
+    const snapshot = loadSnapshot()
+    const installedSchema = loadInstalledSchema()
+    const installedRootAnyOf = buildRootAnyOfDigest(installedSchema)
+    assert.deepEqual(
+      installedRootAnyOf,
+      snapshot.rootAnyOf,
+      "installed @agentclientprotocol/sdk schema.json's root anyOf (the request/response/notification union) diverged from the vendored snapshot — see this file's header comment to regenerate after a deliberate SDK bump.",
+    )
   })
 })
