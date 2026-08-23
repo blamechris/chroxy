@@ -499,15 +499,27 @@ string that still begins with `-`, and rg has options that execute programs.
 Measured against ripgrep 15.1.0, with a marker-writing script:
 
 ```
-rg -n --no-heading '--pre=/tmp/pre.sh' <root>      rc=1, marker WRITTEN
-rg -n --no-heading -e '--pre=/tmp/pre.sh' <root>   rc=1, marker absent
+rg -i -n --no-heading '--pre=/tmp/pre.sh' <root>      rc=1, marker WRITTEN
+rg -i -n --no-heading -e '--pre=/tmp/pre.sh' <root>   rc=1, marker absent
 ```
 
-A second, quieter effect: `--pre=` self-terminates, so `<root>` slides into the
-pattern slot and rg is left with zero paths. Its stdin heuristic then makes it
-read a readable stdin and block until EOF — a hung tool call, measured at the
-full length of the test's 8-second timeout. `maskExit: true` on the container
-path does not help; the process never exits to have its code masked.
+A second, quieter effect, and the two are **alternatives rather than a pair** —
+which the first draft of this entry got wrong. `--pre=` self-terminates, so
+`<root>` slides into the pattern slot and rg is left with zero paths. What
+happens next is decided by the child's stdin, measured on the unfixed builder:
+
+```
+child stdin = 'ignore'  (what the host sink uses)  rc=1,    marker WRITTEN, no hang
+child stdin = 'pipe', held open                    hangs,   marker absent
+```
+
+`/dev/null` is a chardev, so rg's `is_readable_stdin` heuristic returns false and
+it falls back to searching `./` — executing the preprocessor without hanging.
+Give it a pipe or a file and it blocks on stdin until EOF instead, and
+`maskExit: true` cannot save that: the process never exits to have its code
+masked. So the host sink (`bash-exec.js`, `stdio: ['ignore', …]`) gets the
+EXECUTION, and the hang is what a caller with a piped stdin gets. Both are
+tested; only one can happen per call.
 
 **Why it was worse than an ordinary argv bug.** `Grep` is classified read-only
 everywhere in the permission system — `SECRET_READ_FLOOR_TOOLS`,
@@ -516,28 +528,100 @@ mode and can carry a standing auto-allow rule. `Bash` and `shell` are in
 `NEVER_AUTO_ALLOW`, refused a whitelist as too dangerous. The bug reached the
 `Bash` capability through the tool exempted for not having it.
 
-**The guard was wired to one of two siblings.** Six lines above `runGrep`,
-`runGlob` validates its pattern against `GLOB_PATTERN_SHELL_METACHARS` and says
-so in a comment. Two adjacent functions, same file, same class of input, same
-kind of sink — one checked, one not. This is the `#7262` cause seen from the
-other side: there, a guard existed and missed callers; here, a guard existed on
-the neighbour and was never asked for.
+**The guard was wired to one of two siblings.** `runGlob` — the function
+immediately preceding `runGrep` in `byok-tool-executor.js` — validates its
+pattern against `GLOB_PATTERN_SHELL_METACHARS` and says so in a comment. Two
+adjacent functions, same file, same class of input, same kind of sink — one
+checked, one not.
+
+**But the cover the neighbour had would not have helped**, and saying "one
+checked, one not" without that caveat reproduces entry 13's defect inside this
+very entry. `GLOB_PATTERN_SHELL_METACHARS` is ``/[$`;|&><()\\\n\r]/`` — a
+*shell*-metachar whitelist, guarding an interpolation that `buildGlobCommand`
+deliberately leaves UNQUOTED so the shell expands the glob. Measured, it rejects
+none of the exploit shapes:
+
+```
+--pre=/tmp/pre.sh  -> rejected? false
+-Wall              -> rejected? false
+--force            -> rejected? false
+-f/etc/passwd      -> rejected? false
+```
+
+`runGrep` faced an *argv* problem behind `shellQuote`; its neighbour solved a
+*shell* problem in front of a bare interpolation. Different classes, different
+fixes. So what was missing was not the guard — it was the **question**. A
+sibling with an explicit input check, sitting next to one with none, should have
+prompted "what is `runGrep`'s pattern protected against?", and nobody asked.
+That is the `#7262` cause seen from the other side: there a guard existed and
+missed callers; here a guard existed on the neighbour and was never interrogated.
 
 **The fix is `-e <pattern>`, not a leading-dash rejection.** `-Wall` and
 `--force` are legitimate search patterns; rejecting them is a functional
 regression, and on the unfixed builder `-Wall` was *already* one
 (`rg: unrecognized flag -W`, exit 2). This is fix shape (3) in
-`packages/server/src/utils/argv-safety.js`: bind the value to a named flag.
-Shape (2), a `--` separator, also works here — unlike `#7290`'s revision slot,
-because the pattern *follows* the separator — but `-e` survives future flag
-additions and needs no ordering argument.
+`packages/server/src/utils/argv-safety.js` — bind the value to a named flag the
+CLI declares as requiring an argument.
+
+Shape (3) as written there prescribes the `=`-joined SINGLE-token form
+(`--flag=<value>`), because gemini-cli's yargs `requiresArg` rejects the
+two-token one. `rg` and `grep` accept the two-token `-e <pattern>` (measured
+against ripgrep 15.1.0 and BSD grep: marker absent, rc=1; `-e '-Wall'` matches,
+rc=0), so it is sufficient here — which is that section's own point, that the
+form is a per-CLI question answered by measuring rather than assumed. Shape (2),
+a `--` separator, also works (measured: rc=1, marker absent) — unlike `#7290`'s
+revision slot, because the pattern *follows* the separator — but `-e` survives
+future flag additions and needs no ordering argument.
+
+**Two more slots the first fix walked past.** Binding the pattern left the
+builder's OTHER interpolation, `root`, in a bare positional slot — the
+adjacent-field shape, fixing the field in the report and not its neighbour. It
+is not exploitable today (both callers hand over an absolute path, via
+`safeResolveRoot` and `remapToContainerPath`), but the builder should not rest
+on an invariant it neither states nor tests. Measured:
+
+```
+rg -e TODO    '--pre=/tmp/pre.sh'   rc=0, marker WRITTEN
+rg -e TODO -- '--pre=/tmp/pre.sh'   rc=2, marker absent
+```
+
+And rg reads `RIPGREP_CONFIG_PATH` as flags — including `--pre`, reinstating
+execution *around* the argv fix entirely. Not client-reachable here, but it is
+also a live CORRECTNESS bug, which is the more useful half: a config containing
+`--pre=/bin/echo` silently turns a matching search into `rc=1` no-match. Output
+that gets machine-parsed must not depend on a developer's personal rg config.
+`--no-config` closes both.
 
 **What the test had to do.** `tests/built-in-tools/grep-argv-injection.test.js`
 spawns the built command rather than asserting on its text, because a string
-assertion is only as strong as the reviewer's model of rg's parser. All eight
-tests were confirmed red on the unfixed builder before the fix, and each branch
-was mutated alone afterwards: dropping `-e` from the rg branch kills five,
-dropping it from the `grep -r` fallback kills three.
+assertion is only as strong as the reviewer's model of rg's parser. Every test
+was confirmed red on the unfixed builder first; the full mutant now kills 12 of
+13 (the survivor is the armed positive control below, which deliberately does
+not go through the builder). Each guard was then mutated alone: dropping `-e`
+from the rg branch kills 5, from the `grep -r` fallback 3, dropping `--` before
+the root 3, dropping `--no-config` 3.
+
+**Three ways the tests were themselves false-safe, found by review.** All three
+are this document's own catalogued causes, reproduced inside the change that
+adds an entry to it:
+
+- **A negative control with no positive control.** "The marker was not written"
+  passes for free the moment the fixture stops taking effect. Demonstrated by
+  reverting the fix *and* dropping the script to mode `0o644`: the vulnerability
+  was live and the test went GREEN. The file now runs `--pre` as a genuine flag
+  first and asserts the marker IS written, so an inert fixture fails loudly.
+- **A skip that CI reads as a pass.** The three rg tests carried the whole
+  execution proof and `t.skip`ped when ripgrep was absent — and no CI job
+  installed it, which the Windows job's log proved in the literal form
+  `ok 1 - … # SKIP ripgrep is not installed`. `node:test` counts a skip in
+  `# tests` and not in `# fail`, so what CI actually enforced was the string
+  assertion the file argues is insufficient. Now: a hard failure when
+  `process.env.CI` is set, and a step that installs ripgrep.
+- **An assertion whose name outran its code.** The permission-coupling test
+  matched `-e '<pattern>'` against the whole `if … then rg …; else grep …; fi`
+  string, so EITHER branch satisfied it; it stayed green under each
+  single-branch mutant while that branch was fully exploitable. It now splits on
+  `'; else '` and asserts per branch.
 
 ## The one that got me while writing this
 

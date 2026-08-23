@@ -33,24 +33,36 @@ import { spawn } from 'node:child_process'
 import { mkdtemp, mkdir, writeFile, rm, access, chmod } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { existsSync } from 'node:fs'
+import { existsSync, statSync, accessSync, constants } from 'node:fs'
 import { buildGrepArgs, buildGrepCommand } from '../../src/built-in-tools/tool-transforms.js'
 import { SECRET_READ_FLOOR_TOOLS } from '../../src/permission-floor.js'
-import { ELIGIBLE_TOOLS, NEVER_AUTO_ALLOW } from '../../src/permission-manager.js'
+import { ACCEPT_EDITS_TOOLS, ELIGIBLE_TOOLS, NEVER_AUTO_ALLOW } from '../../src/permission-manager.js'
 
-/** Locate an executable on PATH without shelling out. */
+/**
+ * Locate an EXECUTABLE FILE on PATH without shelling out. `existsSync` alone is
+ * not enough: a directory or a non-executable file named `rg` would read as
+ * "present" and make the rg tests fail for an unrelated reason.
+ */
 function findOnPath(name) {
   for (const dir of (process.env.PATH || '').split(path.delimiter)) {
     if (!dir) continue
     const candidate = path.join(dir, name)
-    if (existsSync(candidate)) return candidate
+    try {
+      if (!statSync(candidate).isFile()) continue
+      accessSync(candidate, constants.X_OK)
+      return candidate
+    } catch {
+      continue
+    }
   }
   return null
 }
 
 const RG_PATH = findOnPath('rg')
 const GREP_PATH = findOnPath('grep')
-const BASH_PATH = findOnPath('bash') || '/bin/bash'
+// No `|| '/bin/bash'` fallback: that would make the `assert.ok(BASH_PATH)` guard
+// below unfireable, and silently shim to a bash that may not exist.
+const BASH_PATH = findOnPath('bash')
 
 /**
  * Run a built command the way the real sinks do (`bash -c`), with a hard
@@ -110,6 +122,11 @@ async function makeFixture() {
   return { dir, root, marker, script, cleanup: () => rm(dir, { recursive: true, force: true }) }
 }
 
+/** Single-quote a path for the hand-built positive-control command. */
+function shellQuoteForTest(v) {
+  return `'${String(v).replace(/'/g, `'\\''`)}'`
+}
+
 async function exists(p) {
   try {
     await access(p)
@@ -118,6 +135,40 @@ async function exists(p) {
     return false
   }
 }
+
+/**
+ * The rg tests carry the whole EXECUTION proof; the rest of the file can only
+ * assert on command text, which is exactly what this file's docblock argues is
+ * insufficient. So "ripgrep is missing" must not be silently equivalent to
+ * "nothing to check" — that is the second recurring cause in
+ * `docs/false-safety-guards.md`. On a developer machine without rg a loud skip
+ * is reasonable; in CI it is a FAILURE, because a green CI log is the thing
+ * nobody reads.
+ *
+ * Returns true when the caller should bail out of the test.
+ */
+function requireRgOrSkip(t, what) {
+  if (RG_PATH) return false
+  if (process.env.CI) {
+    assert.fail(
+      `ripgrep is not installed on this CI runner, so ${what} did not run. ` +
+      'This proof must not be skipped in CI — install ripgrep in the Server Tests job (#7295).',
+    )
+  }
+  t.skip(`ripgrep is not installed on this machine — ${what} did NOT run (it is enforced in CI).`)
+  return true
+}
+
+/**
+ * The spawning tests need a POSIX shell: the sinks under test are literally
+ * `spawn('bash', ['-c', cmd])` and `docker exec … bash -c`, and the fixtures are
+ * `#!/bin/sh` scripts with exec bits. None of that is meaningful on Windows, and
+ * the self-hosted Windows runner's bash is a distro-less WSL stub. Skipping the
+ * five spawning tests keeps the file IN the derived Windows run set (`run =
+ * all - WINDOWS_EXEMPT`, #7270) so the three command-shape/coupling tests still
+ * provide real Windows coverage — strictly better than exempting the whole file.
+ */
+const POSIX_ONLY = { skip: process.platform === 'win32' ? 'POSIX shell required (spawns bash + /bin/sh fixtures)' : false }
 
 /** Build exactly what `runGrep` / the container Grep build for this pattern. */
 function build(pattern, root, input = {}) {
@@ -147,11 +198,33 @@ async function makeGrepOnlyPath(dir) {
 
 describe('Grep argv option injection (#7295)', () => {
   describe('ripgrep branch', () => {
-    it('NEGATIVE CONTROL: a `--pre=` pattern must not execute a program', async (t) => {
-      if (!RG_PATH) {
-        t.skip('ripgrep is not installed on this machine — the rg-branch execution proof did NOT run. The grep-branch and command-shape tests below still cover the fix.')
-        return
+    // ARMS THE NEGATIVE CONTROL BELOW. Without this, `marker was not written`
+    // passes for free the moment the fixture stops taking effect — a failed
+    // chmod, a noexec tmpdir, a future rg that drops `--pre`, a cwd with no
+    // files to preprocess. Proven necessary: with the fix reverted AND the
+    // script mode changed to 0o644, the negative control went GREEN while the
+    // vulnerability was live. A negative assertion with no positive control is
+    // not evidence (`docs/false-safety-guards.md`).
+    it('POSITIVE CONTROL: the marker mechanism really does fire when --pre IS a genuine flag', POSIX_ONLY, async (t) => {
+      if (requireRgOrSkip(t, 'the marker-mechanism positive control')) return
+      const fx = await makeFixture()
+      try {
+        // Deliberately NOT via buildGrepCommand: this is the armed control, so
+        // it must reach rg's real `--pre` flag by construction.
+        const cmd = `rg -n --no-heading --pre=${shellQuoteForTest(fx.script)} -e 'compile' ${shellQuoteForTest(fx.root)}`
+        const res = await runBuilt(cmd, { cwd: fx.root })
+        assert.equal(
+          await exists(fx.marker),
+          true,
+          `the fixture is INERT: rg did not execute the preprocessor even when --pre was a real flag, so the negative control below proves nothing. rc=${res.code} stderr=${res.stderr} cmd=${cmd}`,
+        )
+      } finally {
+        await fx.cleanup()
       }
+    })
+
+    it('NEGATIVE CONTROL: a `--pre=` pattern must not execute a program', POSIX_ONLY, async (t) => {
+      if (requireRgOrSkip(t, 'the rg-branch execution proof')) return
       const fx = await makeFixture()
       try {
         const cmd = build(`--pre=${fx.script}`, fx.root)
@@ -168,11 +241,8 @@ describe('Grep argv option injection (#7295)', () => {
       }
     })
 
-    it('NEGATIVE CONTROL: a `--pre=` pattern must terminate, not hang on stdin', async (t) => {
-      if (!RG_PATH) {
-        t.skip('ripgrep is not installed on this machine — the rg-branch hang proof did NOT run.')
-        return
-      }
+    it('NEGATIVE CONTROL: a `--pre=` pattern must terminate, not hang on stdin', POSIX_ONLY, async (t) => {
+      if (requireRgOrSkip(t, 'the rg-branch hang proof')) return
       const fx = await makeFixture()
       try {
         const cmd = build(`--pre=${fx.script}`, fx.root)
@@ -187,11 +257,8 @@ describe('Grep argv option injection (#7295)', () => {
       }
     })
 
-    it('POSITIVE CONTROL: a legitimately dash-leading pattern (`-Wall`) still matches as text', async (t) => {
-      if (!RG_PATH) {
-        t.skip('ripgrep is not installed on this machine — the rg-branch positive control did NOT run.')
-        return
-      }
+    it('POSITIVE CONTROL: a legitimately dash-leading pattern (`-Wall`) still matches as text', POSIX_ONLY, async (t) => {
+      if (requireRgOrSkip(t, 'the rg-branch positive control')) return
       const fx = await makeFixture()
       try {
         const cmd = build('-Wall', fx.root)
@@ -205,7 +272,7 @@ describe('Grep argv option injection (#7295)', () => {
   })
 
   describe('grep fallback branch', () => {
-    it('NEGATIVE CONTROL: a `--pre=` pattern is searched as text, not parsed as an option', async () => {
+    it('NEGATIVE CONTROL: a `--pre=` pattern is searched as text, not parsed as an option', POSIX_ONLY, async () => {
       const fx = await makeFixture()
       try {
         const bin = await makeGrepOnlyPath(fx.dir)
@@ -215,6 +282,8 @@ describe('Grep argv option injection (#7295)', () => {
           env: { ...process.env, PATH: bin },
         })
         assert.equal(res.spawnError, undefined, `bash failed to spawn: ${res.spawnError}`)
+        // Belt-and-braces only: grep has no `--pre` analogue, so this can never
+        // fire. The rc assertion below is what actually carries this test.
         assert.equal(await exists(fx.marker), false, 'grep must not execute anything')
         // grep's exit codes: 0 = matched, 1 = no match, 2 = usage/other error.
         // Pre-fix the unknown `--pre` long option makes this a usage error (2);
@@ -229,7 +298,7 @@ describe('Grep argv option injection (#7295)', () => {
       }
     })
 
-    it('POSITIVE CONTROL: `-Wall` still matches as text through the grep fallback', async () => {
+    it('POSITIVE CONTROL: `-Wall` still matches as text through the grep fallback', POSIX_ONLY, async () => {
       const fx = await makeFixture()
       try {
         const bin = await makeGrepOnlyPath(fx.dir)
@@ -249,13 +318,78 @@ describe('Grep argv option injection (#7295)', () => {
   describe('command shape', () => {
     it('binds the pattern to `-e` in BOTH branches, so it can never fill a bare positional slot', () => {
       const cmd = build('--pre=/tmp/evil.sh', '/work')
-      assert.match(cmd, /rg .*--no-heading -e '--pre=\/tmp\/evil\.sh' '\/work'/)
-      assert.match(cmd, /grep -r .* -e '--pre=\/tmp\/evil\.sh' '\/work'/)
+      assert.match(cmd, /rg --no-config .*--no-heading -e '--pre=\/tmp\/evil\.sh' -- '\/work'/)
+      assert.match(cmd, /grep -r .* -e '--pre=\/tmp\/evil\.sh' -- '\/work'/)
     })
 
     it('keeps `-e` immediately before the pattern even with a glob filter present', () => {
       const cmd = build('-Wall', '/work', { glob: '*.c' })
-      assert.match(cmd, /--no-heading --glob '\*\.c' -e '-Wall' '\/work'/)
+      assert.match(cmd, /--no-heading --glob '\*\.c' -e '-Wall' -- '\/work'/)
+    })
+  })
+
+  describe('the root slot (#7295 follow-through)', () => {
+    // The fix bound the PATTERN. `root` is the builder's other interpolation and
+    // was still bare. Both callers happen to guarantee an absolute path today
+    // (safeResolveRoot / remapToContainerPath), so this is not a live hole — but
+    // the builder must not rest on an invariant it neither states nor tests.
+    // This is the adjacent-field shape: fix the field in the report, walk past
+    // its neighbour.
+    it('NEGATIVE CONTROL: a dash-leading root must not execute a program either', POSIX_ONLY, async (t) => {
+      if (requireRgOrSkip(t, 'the root-slot execution proof')) return
+      const fx = await makeFixture()
+      try {
+        const cmd = build('TODO', `--pre=${fx.script}`)
+        const res = await runBuilt(cmd, { cwd: fx.root })
+        assert.equal(
+          await exists(fx.marker),
+          false,
+          `the ROOT slot was option-parsed and rg executed the preprocessor. rc=${res.code} stderr=${res.stderr} cmd=${cmd}`,
+        )
+      } finally {
+        await fx.cleanup()
+      }
+    })
+
+    it('terminates option parsing with `--` before the root in BOTH branches', () => {
+      const cmd = build('TODO', '/work')
+      assert.match(cmd, /rg --no-config .* -e 'TODO' -- '\/work'/)
+      assert.match(cmd, /grep -r .* -e 'TODO' -- '\/work'/)
+    })
+
+    it('POSITIVE CONTROL: an ordinary root still searches normally', POSIX_ONLY, async (t) => {
+      if (requireRgOrSkip(t, 'the ordinary-root positive control')) return
+      const fx = await makeFixture()
+      try {
+        const res = await runBuilt(build('-Wall', fx.root), { cwd: fx.root })
+        assert.equal(res.code, 0, `expected a match, got rc=${res.code} stderr=${res.stderr}`)
+        assert.match(res.stdout, /compile with -Wall enabled/)
+      } finally {
+        await fx.cleanup()
+      }
+    })
+  })
+
+  describe('rg config isolation', () => {
+    // Not only hardening: rg applies RIPGREP_CONFIG_PATH as flags, so a developer
+    // config can silently CHANGE RESULTS of a machine-parsed search. Measured: a
+    // config of `--pre=/bin/echo` turns a matching search into rc=1 no-match.
+    it('ignores RIPGREP_CONFIG_PATH, which can both inject --pre and corrupt results', POSIX_ONLY, async (t) => {
+      if (requireRgOrSkip(t, 'the rg config-isolation proof')) return
+      const fx = await makeFixture()
+      try {
+        const cfg = path.join(fx.dir, 'rgcfg')
+        await writeFile(cfg, `--pre=${fx.script}\n`)
+        const res = await runBuilt(build('-Wall', fx.root), {
+          cwd: fx.root,
+          env: { ...process.env, RIPGREP_CONFIG_PATH: cfg },
+        })
+        assert.equal(await exists(fx.marker), false, 'a config-supplied --pre must not execute')
+        assert.equal(res.code, 0, `a hostile/ordinary rg config changed the RESULT: rc=${res.code} stderr=${res.stderr}`)
+        assert.match(res.stdout, /compile with -Wall enabled/)
+      } finally {
+        await fx.cleanup()
+      }
     })
   })
 
@@ -268,18 +402,26 @@ describe('Grep argv option injection (#7295)', () => {
     // its command must not let a pattern reach an option parser.
     it('Grep keeps its read-only exemption ONLY because the builder binds the pattern to `-e`', () => {
       assert.ok(SECRET_READ_FLOOR_TOOLS.has('Grep'), 'premise: Grep gets the reduced secret-read floor')
+      assert.ok(ACCEPT_EDITS_TOOLS.has('Grep'), 'premise: Grep is auto-approved in acceptEdits mode')
       assert.ok(ELIGIBLE_TOOLS.has('Grep'), 'premise: Grep is eligible for a session auto-allow rule')
       assert.ok(NEVER_AUTO_ALLOW.has('Bash'), 'premise: Bash is too dangerous to whitelist')
 
-      // Every dash-leading shape a model could send must land as the operand of
-      // `-e`, never in a slot rg or grep would option-parse.
+      // Assert PER BRANCH. Matching the whole `if … then rg …; else grep …; fi`
+      // string is satisfied by EITHER branch, so it stayed green under each
+      // single-branch mutant while that branch was fully exploitable — a check
+      // whose name claims more than its code verifies, which is the very defect
+      // class this file was written for.
       for (const pattern of ['--pre=/tmp/evil.sh', '-Wall', '--force', '-f/etc/passwd', '--']) {
         const cmd = build(pattern, '/work')
-        assert.match(
-          cmd,
-          new RegExp(`-e '${pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}'`),
-          `pattern ${pattern} is not bound to -e — Grep would exceed its read-only classification`,
-        )
+        const [rgHalf, grepHalf] = cmd.split('; else ')
+        assert.ok(rgHalf.includes('rg ') && grepHalf.includes('grep -r '), `unexpected builder shape: ${cmd}`)
+        const quoted = `-e '${pattern}'`
+        for (const [branch, half] of [['rg', rgHalf], ['grep', grepHalf]]) {
+          assert.ok(
+            half.includes(quoted),
+            `pattern ${pattern} is not bound to -e in the ${branch} branch — Grep would exceed its read-only classification. half=${half}`,
+          )
+        }
       }
     })
   })
