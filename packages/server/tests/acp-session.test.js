@@ -531,7 +531,23 @@ describe('AcpSession — negotiated protocol version is enforced (#7319 review f
 // honors it. Verified: an agent with a no-op SIGTERM handler was still alive
 // 4.2s after destroy() with the pre-fix code.
 describe('AcpSession — destroy() escalates to SIGKILL (#7319 review finding #3)', () => {
-  it('destroy() kills a child that ignores SIGTERM within the grace window', async () => {
+  // POSIX-only premise: the assertion is that destroy() actually WAITS OUT
+  // the ~1s grace window before escalating to SIGKILL, which only means
+  // anything for a child that can ignore SIGTERM in the first place. Windows
+  // has no SIGTERM for a child to ignore — child.kill()/killProcessTree()
+  // map to TerminateProcess there, which kills the process immediately
+  // regardless of any handler the child installed — so the grace window
+  // never elapses and the elapsed-time assertion is unsatisfiable by
+  // construction, not because the implementation is wrong on that platform.
+  // Skip is CONDITIONAL (win32 only): on every other platform this still
+  // runs and can still fail — see the cross-platform test below for the
+  // platform-independent postcondition ("destroy() actually kills the
+  // child"), which DOES run on Windows.
+  it('destroy() kills a child that ignores SIGTERM within the grace window', {
+    skip: process.platform === 'win32'
+      ? 'POSIX-only premise: Windows has no SIGTERM for a child to ignore — kill() maps to TerminateProcess and terminates immediately, so there is no grace window to wait out'
+      : false,
+  }, async () => {
     const { s, cleanup } = mkSession({}, { env: { ACP_FIXTURE_IGNORE_SIGTERM: '1' } })
     await s.start()
     const pid = s._child.pid
@@ -549,6 +565,24 @@ describe('AcpSession — destroy() escalates to SIGKILL (#7319 review finding #3
       elapsedMs >= 800,
       `expected destroy() to wait out most of the ~1s SIGKILL grace window before the child died, took only ${elapsedMs}ms`,
     )
+  })
+
+  // Platform-independent companion: makes no assumption about WHICH
+  // mechanism terminates the child (SIGTERM honored, SIGKILL escalation, or
+  // Windows' TerminateProcess) — only that destroy() leaves it dead. Runs
+  // (and is verifiable) on every platform, including this repo's dev
+  // machines, unlike the win32-only branch of the test above.
+  it('destroy() terminates the child (platform-independent postcondition)', async () => {
+    const { s, cleanup } = mkSession()
+    await s.start()
+    const pid = s._child.pid
+    await s.destroy()
+    cleanup()
+
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    let stillAlive = true
+    try { process.kill(pid, 0); } catch { stillAlive = false }
+    assert.equal(stillAlive, false, 'the child must be gone after destroy() resolves')
   })
 })
 
