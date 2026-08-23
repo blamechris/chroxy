@@ -382,7 +382,7 @@
     "Annotations": {
       "properties": {
         "_meta": "null|object",
-        "audience": "array|null",
+        "audience": "array|null<ref:Role>",
         "lastModified": "null|string",
         "priority": "null|number"
       }
@@ -412,7 +412,7 @@
       ],
       "properties": {
         "_meta": "null|object",
-        "args": "array",
+        "args": "array<string>",
         "description": "null|string",
         "env": "object",
         "id": "ref:AuthMethodId",
@@ -439,7 +439,7 @@
       ],
       "properties": {
         "_meta": "null|object",
-        "args": "array",
+        "args": "array<string>",
         "description": "null|string",
         "env": "object",
         "id": "ref:AuthMethodId",
@@ -487,7 +487,7 @@
       ],
       "properties": {
         "_meta": "null|object",
-        "availableCommands": "array"
+        "availableCommands": "array<ref:AvailableCommand>"
       }
     },
     "BlobResourceContents": {
@@ -541,7 +541,7 @@
         "fs": "ref:FileSystemCapabilities",
         "nes": "union",
         "plan": "union",
-        "positionEncodings": "array",
+        "positionEncodings": "array<ref:PositionEncodingKind>",
         "session": "union",
         "terminal": "boolean"
       }
@@ -648,7 +648,7 @@
         "compactionId": "ref:CompactionId",
         "error": "null|string",
         "status": "ref:CompactionStatus",
-        "summary": "array|null"
+        "summary": "array|null<ref:ContentBlock>"
       }
     },
     "CompleteElicitationNotification": {
@@ -666,7 +666,7 @@
       ],
       "properties": {
         "_meta": "null|object",
-        "configOptions": "array"
+        "configOptions": "array<ref:SessionConfigOption>"
       }
     },
     "ConnectMcpRequest": {
@@ -770,10 +770,10 @@
       ],
       "properties": {
         "_meta": "null|object",
-        "args": "array",
+        "args": "array<string>",
         "command": "string",
         "cwd": "null|string",
-        "env": "array",
+        "env": "array<ref:EnvVariable>",
         "outputByteLimit": "integer|null",
         "sessionId": "ref:SessionId"
       }
@@ -819,7 +819,7 @@
       ],
       "properties": {
         "_meta": "null|object",
-        "contentChanges": "array",
+        "contentChanges": "array<ref:TextDocumentContentChangeEvent>",
         "sessionId": "ref:SessionId",
         "uri": "string",
         "version": "integer"
@@ -955,9 +955,9 @@
       ],
       "properties": {
         "_meta": "null|object",
-        "default": "array|null|boolean|null|integer|null|null|number|null|string",
+        "default": "array|null<string>|boolean|null|integer|null|null|number|null|string",
         "description": "null|string",
-        "enum": "array|null",
+        "enum": "array|null<string>",
         "format": "union",
         "items": "ref:MultiSelectItems",
         "maxItems": "integer|null",
@@ -966,7 +966,7 @@
         "minItems": "integer|null",
         "minLength": "integer|null",
         "minimum": "integer|null|null|number",
-        "oneOf": "array|null",
+        "oneOf": "array|null<ref:EnumOption>",
         "pattern": "null|string",
         "title": "null|string",
         "type": "const:\"array\"|const:\"boolean\"|const:\"integer\"|const:\"number\"|const:\"string\"|string"
@@ -985,7 +985,7 @@
         "_meta": "null|object",
         "description": "null|string",
         "properties": "object",
-        "required": "array|null",
+        "required": "array|null<string>",
         "title": "null|string",
         "type": "ref:ElicitationSchemaType"
       }
@@ -1104,9 +1104,9 @@
       ],
       "properties": {
         "_meta": "null|object",
-        "additionalDirectories": "array",
+        "additionalDirectories": "array<string>",
         "cwd": "string",
-        "mcpServers": "array",
+        "mcpServers": "array<ref:McpServer>",
         "sessionId": "ref:SessionId"
       }
     },
@@ -1116,7 +1116,7 @@
       ],
       "properties": {
         "_meta": "null|object",
-        "configOptions": "array|null",
+        "configOptions": "array|null<ref:SessionConfigOption>",
         "modes": "union",
         "sessionId": "ref:SessionId"
       }
@@ -1176,7 +1176,7 @@
         "_meta": "null|object",
         "agentCapabilities": "ref:AgentCapabilities",
         "agentInfo": "union",
-        "authMethods": "array",
+        "authMethods": "array<ref:AuthMethod>",
         "protocolVersion": "ref:ProtocolVersion"
       }
     },
@@ -1217,7 +1217,7 @@
       ],
       "properties": {
         "_meta": "null|object",
-        "providers": "array"
+        "providers": "array<ref:ProviderInfo>"
       }
     },
     "ListSessionsRequest": {
@@ -1234,7 +1234,7 @@
       "properties": {
         "_meta": "null|object",
         "nextCursor": "null|string",
-        "sessions": "array"
+        "sessions": "array<ref:SessionInfo>"
       }
     },
     "LlmProtocol": {
@@ -1254,16 +1254,16 @@
       ],
       "properties": {
         "_meta": "null|object",
-        "additionalDirectories": "array",
+        "additionalDirectories": "array<string>",
         "cwd": "string",
-        "mcpServers": "array",
+        "mcpServers": "array<ref:McpServer>",
         "sessionId": "ref:SessionId"
       }
     },
     "LoadSessionResponse": {
       "properties": {
         "_meta": "null|object",
-        "configOptions": "array|null",
+        "configOptions": "array|null<ref:SessionConfigOption>",
         "modes": "union"
       }
     },
@@ -1296,10 +1296,10 @@
       ],
       "properties": {
         "_meta": "null|object",
-        "args": "array",
+        "args": "array<string>",
         "command": "string",
-        "env": "array",
-        "headers": "array",
+        "env": "array<ref:EnvVariable>",
+        "headers": "array<ref:HttpHeader>",
         "name": "string",
         "serverId": "ref:McpServerAcpId",
         "type": "const:\"acp\"|const:\"http\"|const:\"sse\"",
@@ -1325,7 +1325,7 @@
       ],
       "properties": {
         "_meta": "null|object",
-        "headers": "array",
+        "headers": "array<ref:HttpHeader>",
         "name": "string",
         "url": "string"
       }
@@ -1338,7 +1338,7 @@
       ],
       "properties": {
         "_meta": "null|object",
-        "headers": "array",
+        "headers": "array<ref:HttpHeader>",
         "name": "string",
         "url": "string"
       }
@@ -1352,9 +1352,9 @@
       ],
       "properties": {
         "_meta": "null|object",
-        "args": "array",
+        "args": "array<string>",
         "command": "string",
-        "env": "array",
+        "env": "array<ref:EnvVariable>",
         "name": "string"
       }
     },
@@ -1385,8 +1385,8 @@
     "MultiSelectItems": {
       "properties": {
         "_meta": "null|object",
-        "anyOf": "array",
-        "enum": "array",
+        "anyOf": "array<ref:EnumOption>",
+        "enum": "array<string>",
         "type": "const:\"string\"|string"
       }
     },
@@ -1396,7 +1396,7 @@
       ],
       "properties": {
         "_meta": "null|object",
-        "default": "array|null",
+        "default": "array|null<string>",
         "description": "null|string",
         "items": "ref:MultiSelectItems",
         "maxItems": "integer|null",
@@ -1515,7 +1515,7 @@
       "properties": {
         "_meta": "null|object",
         "cursorPosition": "union",
-        "edits": "array",
+        "edits": "array<ref:NesTextEdit>",
         "id": "ref:NesSuggestionId",
         "uri": "string"
       }
@@ -1609,7 +1609,7 @@
       ],
       "properties": {
         "_meta": "null|object",
-        "excerpts": "array",
+        "excerpts": "array<ref:NesExcerpt>",
         "uri": "string"
       }
     },
@@ -1675,12 +1675,12 @@
     "NesSuggestContext": {
       "properties": {
         "_meta": "null|object",
-        "diagnostics": "array|null",
-        "editHistory": "array|null",
-        "openFiles": "array|null",
-        "recentFiles": "array|null",
-        "relatedSnippets": "array|null",
-        "userActions": "array|null"
+        "diagnostics": "array|null<ref:NesDiagnostic>",
+        "editHistory": "array|null<ref:NesEditHistoryEntry>",
+        "openFiles": "array|null<ref:NesOpenFile>",
+        "recentFiles": "array|null<ref:NesRecentFile>",
+        "relatedSnippets": "array|null<ref:NesRelatedSnippet>",
+        "userActions": "array|null<ref:NesUserAction>"
       }
     },
     "NesSuggestion": {
@@ -1692,7 +1692,7 @@
       "properties": {
         "_meta": "null|object",
         "cursorPosition": "union",
-        "edits": "array",
+        "edits": "array<ref:NesTextEdit>",
         "id": "ref:NesSuggestionId",
         "isRegex": "boolean|null",
         "kind": "const:\"edit\"|const:\"jump\"|const:\"rename\"|const:\"searchAndReplace\"",
@@ -1752,9 +1752,9 @@
       ],
       "properties": {
         "_meta": "null|object",
-        "additionalDirectories": "array",
+        "additionalDirectories": "array<string>",
         "cwd": "string",
-        "mcpServers": "array"
+        "mcpServers": "array<ref:McpServer>"
       }
     },
     "NewSessionResponse": {
@@ -1763,7 +1763,7 @@
       ],
       "properties": {
         "_meta": "null|object",
-        "configOptions": "array|null",
+        "configOptions": "array|null<ref:SessionConfigOption>",
         "modes": "union",
         "sessionId": "ref:SessionId"
       }
@@ -1805,7 +1805,7 @@
       ],
       "properties": {
         "_meta": "null|object",
-        "entries": "array"
+        "entries": "array<ref:PlanEntry>"
       }
     },
     "PlanCapabilities": {
@@ -1858,7 +1858,7 @@
       ],
       "properties": {
         "_meta": "null|object",
-        "entries": "array",
+        "entries": "array<ref:PlanEntry>",
         "planId": "ref:PlanId"
       }
     },
@@ -1899,7 +1899,7 @@
       "properties": {
         "_meta": "null|object",
         "content": "string",
-        "entries": "array",
+        "entries": "array<ref:PlanEntry>",
         "planId": "ref:PlanId",
         "type": "const:\"file\"|const:\"items\"|const:\"markdown\"",
         "uri": "string"
@@ -1941,7 +1941,7 @@
       ],
       "properties": {
         "_meta": "null|object",
-        "prompt": "array",
+        "prompt": "array<ref:ContentBlock>",
         "sessionId": "ref:SessionId"
       }
     },
@@ -1977,7 +1977,7 @@
         "current": "union",
         "providerId": "ref:ProviderId",
         "required": "boolean",
-        "supported": "array"
+        "supported": "array<ref:LlmProtocol>"
       }
     },
     "ProvidersCapabilities": {
@@ -2067,7 +2067,7 @@
       ],
       "properties": {
         "_meta": "null|object",
-        "options": "array",
+        "options": "array<ref:PermissionOption>",
         "sessionId": "ref:SessionId",
         "toolCall": "ref:ToolCallUpdate"
       }
@@ -2104,16 +2104,16 @@
       ],
       "properties": {
         "_meta": "null|object",
-        "additionalDirectories": "array",
+        "additionalDirectories": "array<string>",
         "cwd": "string",
-        "mcpServers": "array",
+        "mcpServers": "array<ref:McpServer>",
         "sessionId": "ref:SessionId"
       }
     },
     "ResumeSessionResponse": {
       "properties": {
         "_meta": "null|object",
-        "configOptions": "array|null",
+        "configOptions": "array|null<ref:SessionConfigOption>",
         "modes": "union"
       }
     },
@@ -2216,7 +2216,7 @@
         "_meta": "null|object",
         "group": "ref:SessionConfigGroupId",
         "name": "string",
-        "options": "array"
+        "options": "array<ref:SessionConfigSelectOption>"
       }
     },
     "SessionConfigSelectOption": {
@@ -2248,7 +2248,7 @@
       ],
       "properties": {
         "_meta": "null|object",
-        "additionalDirectories": "array",
+        "additionalDirectories": "array<string>",
         "cwd": "string",
         "sessionId": "ref:SessionId",
         "title": "null|string",
@@ -2286,7 +2286,7 @@
       ],
       "properties": {
         "_meta": "null|object",
-        "availableModes": "array",
+        "availableModes": "array<ref:SessionMode>",
         "currentModeId": "ref:SessionModeId"
       }
     },
@@ -2312,16 +2312,16 @@
       ],
       "properties": {
         "_meta": "null|object",
-        "availableCommands": "array",
+        "availableCommands": "array<ref:AvailableCommand>",
         "compactionId": "ref:CompactionId",
-        "configOptions": "array",
-        "content": "array|array|null|ref:ContentBlock",
+        "configOptions": "array<ref:SessionConfigOption>",
+        "content": "array<ref:ToolCallContent>|array|null<ref:ToolCallContent>|ref:ContentBlock",
         "cost": "union",
         "currentModeId": "ref:SessionModeId",
-        "entries": "array",
+        "entries": "array<ref:PlanEntry>",
         "error": "null|string",
         "kind": "ref:ToolKind|union",
-        "locations": "array|array|null",
+        "locations": "array<ref:ToolCallLocation>|array|null<ref:ToolCallLocation>",
         "messageId": "union",
         "name": "null|string",
         "plan": "ref:PlanUpdateContent",
@@ -2331,7 +2331,7 @@
         "sessionUpdate": "const:\"agent_message_chunk\"|const:\"agent_thought_chunk\"|const:\"available_commands_update\"|const:\"compaction_summary_chunk\"|const:\"compaction_update\"|const:\"config_option_update\"|const:\"current_mode_update\"|const:\"plan\"|const:\"plan_removed\"|const:\"plan_update\"|const:\"session_info_update\"|const:\"tool_call\"|const:\"tool_call_update\"|const:\"usage_update\"|const:\"user_message_chunk\"",
         "size": "integer",
         "status": "ref:CompactionStatus|ref:ToolCallStatus|union",
-        "summary": "array|null",
+        "summary": "array|null<ref:ContentBlock>",
         "title": "null|string|string",
         "toolCallId": "ref:ToolCallId",
         "updatedAt": "null|string",
@@ -2380,7 +2380,7 @@
       ],
       "properties": {
         "_meta": "null|object",
-        "configOptions": "array"
+        "configOptions": "array<ref:SessionConfigOption>"
       }
     },
     "SetSessionModeRequest": {
@@ -2403,7 +2403,7 @@
       "properties": {
         "_meta": "null|object",
         "repository": "union",
-        "workspaceFolders": "array|null",
+        "workspaceFolders": "array|null<ref:WorkspaceFolder>",
         "workspaceUri": "null|string"
       }
     },
@@ -2439,7 +2439,7 @@
       ],
       "properties": {
         "_meta": "null|object",
-        "enum": "array"
+        "enum": "array<string>"
       }
     },
     "StringPropertySchema": {
@@ -2447,11 +2447,11 @@
         "_meta": "null|object",
         "default": "null|string",
         "description": "null|string",
-        "enum": "array|null",
+        "enum": "array|null<string>",
         "format": "union",
         "maxLength": "integer|null",
         "minLength": "integer|null",
-        "oneOf": "array|null",
+        "oneOf": "array|null<ref:EnumOption>",
         "pattern": "null|string",
         "title": "null|string"
       }
@@ -2481,7 +2481,7 @@
       ],
       "properties": {
         "_meta": "null|object",
-        "suggestions": "array"
+        "suggestions": "array<ref:NesSuggestion>"
       }
     },
     "Terminal": {
@@ -2567,7 +2567,7 @@
       ],
       "properties": {
         "_meta": "null|object",
-        "anyOf": "array"
+        "anyOf": "array<ref:EnumOption>"
       }
     },
     "ToolCall": {
@@ -2577,9 +2577,9 @@
       ],
       "properties": {
         "_meta": "null|object",
-        "content": "array",
+        "content": "array<ref:ToolCallContent>",
         "kind": "ref:ToolKind",
-        "locations": "array",
+        "locations": "array<ref:ToolCallLocation>",
         "name": "null|string",
         "rawInput": "unknown",
         "rawOutput": "unknown",
@@ -2629,9 +2629,9 @@
       ],
       "properties": {
         "_meta": "null|object",
-        "content": "array|null",
+        "content": "array|null<ref:ToolCallContent>",
         "kind": "union",
-        "locations": "array|null",
+        "locations": "array|null<ref:ToolCallLocation>",
         "name": "null|string",
         "rawInput": "unknown",
         "rawOutput": "unknown",

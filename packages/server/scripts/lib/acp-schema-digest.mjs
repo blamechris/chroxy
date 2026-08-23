@@ -23,9 +23,12 @@
 //   - the sorted set of `$defs` type names (`defKeys`) — a type appearing or
 //     disappearing
 //   - per non-trivial `$def`: its `required` fields, its `properties` (each
-//     tagged with a type/`$ref`/`const` signature, not just its name), any
-//     `const`/enum member set, and its `discriminator` — a renamed/retyped
-//     property, a required field moving, an enum member added or removed, or
+//     tagged with a type/`$ref`/`const` signature, not just its name — an
+//     array property additionally carries its element's type/`$ref`, one hop
+//     into `items`, e.g. `array<ref:PermissionOption>`), any `const`/enum
+//     member set, and its `discriminator` — a renamed/retyped property
+//     (including an array's ELEMENT type retargeting, not just the property
+//     itself), a required field moving, an enum member added or removed, or
 //     a discriminator renamed
 //   - one level of `oneOf`/`anyOf` branch recursion, including one hop through
 //     a branch's own `$ref` (bare or `allOf: [{ $ref }]`) into the referenced
@@ -61,13 +64,22 @@
 // would falsely claim `type` is always required (it is required in only one
 // of that type's two branches).
 //
-// ## Known residual gap
+// ## Known residual gaps
 //
-// A `oneOf`/`anyOf` whose branches are plain type unions with no `properties`
-// and no branch-level `const` (`RequestId`'s `anyOf` of string/number/null,
-// for instance) contributes nothing beyond its own existence in `defKeys`.
-// Capturing primitive-type unions themselves was not asked for and is left
-// as a known, narrow gap rather than guessed at.
+// - A `oneOf`/`anyOf` whose branches are plain type unions with no
+//   `properties` and no branch-level `const` (`RequestId`'s `anyOf` of
+//   string/number/null, for instance) contributes nothing beyond its own
+//   existence in `defKeys`. Capturing primitive-type unions themselves was
+//   not asked for and is left as a known, narrow gap rather than guessed at.
+// - An array property's element type is captured one hop into `items`
+//   (`array<ref:X>`, `array<string>`, ...), but `itemSignature` does not
+//   recurse into a combinator (`oneOf`/`anyOf`) INSIDE `items`, or handle
+//   JSON Schema's tuple-validation form (`items` as an array of schemas) —
+//   both fall back to the bare `array` signature. Neither shape appears in
+//   the schema this was written against; if one appears later, the fallback
+//   fails safe (it under-captures, same as before this fix, rather than
+//   throwing), but it will not detect a change confined entirely inside that
+//   combinator or tuple.
 
 /** "#/$defs/Foo" -> "Foo". Passes through anything that doesn't match. */
 export function refName(ref) {
@@ -76,15 +88,51 @@ export function refName(ref) {
 }
 
 /**
+ * One hop into an array property's `items` schema — the same "one hop, no
+ * deeper" discipline `branchContributions` applies to `oneOf`/`anyOf`
+ * branches. Returns `null` (not a string) when `items` carries nothing this
+ * function knows how to fingerprint, so the caller can fall back to the bare
+ * `array` signature rather than inventing one.
+ *
+ * Deliberately does NOT recurse into a combinator inside `items`
+ * (`oneOf`/`anyOf`) or handle JSON Schema's tuple-validation form (`items` as
+ * an array of schemas) — both fall through to `null`. Going further than one
+ * hop is how the original review's "72% uncompared" hole got rationalised in
+ * the first place.
+ */
+function itemSignature(items) {
+  if (!items || typeof items !== 'object') return null
+  if (items.const !== undefined) return `const:${JSON.stringify(items.const)}`
+  if (typeof items.$ref === 'string') return `ref:${refName(items.$ref)}`
+  if (Array.isArray(items.allOf) && items.allOf.length === 1
+    && items.allOf[0] && typeof items.allOf[0].$ref === 'string') {
+    return `ref:${refName(items.allOf[0].$ref)}`
+  }
+  if (items.type !== undefined) {
+    return Array.isArray(items.type) ? [...items.type].sort().join('|') : String(items.type)
+  }
+  if (items.enum !== undefined) return 'enum'
+  return null
+}
+
+/**
  * A short, deterministic fingerprint of a property's declared shape — enough
- * to catch a `string` -> `number` retype or a `$ref` target changing, without
+ * to catch a `string` -> `number` retype, a `$ref` target changing (at the
+ * property's own top level OR one hop into an array's `items`), without
  * carrying the property's `description`.
  */
 export function propertySignature(propSchema) {
   if (!propSchema || typeof propSchema !== 'object') return 'unknown'
   if (propSchema.const !== undefined) return `const:${JSON.stringify(propSchema.const)}`
   if (propSchema.type !== undefined) {
-    return Array.isArray(propSchema.type) ? [...propSchema.type].sort().join('|') : String(propSchema.type)
+    const isArrayType = propSchema.type === 'array'
+      || (Array.isArray(propSchema.type) && propSchema.type.includes('array'))
+    const base = Array.isArray(propSchema.type) ? [...propSchema.type].sort().join('|') : String(propSchema.type)
+    if (isArrayType) {
+      const elementSig = itemSignature(propSchema.items)
+      return elementSig ? `${base}<${elementSig}>` : base
+    }
+    return base
   }
   if (typeof propSchema.$ref === 'string') return `ref:${refName(propSchema.$ref)}`
   if (Array.isArray(propSchema.allOf) && propSchema.allOf.length === 1
@@ -93,7 +141,11 @@ export function propertySignature(propSchema) {
   }
   if (propSchema.enum !== undefined) return 'enum'
   if (propSchema.oneOf || propSchema.anyOf) return 'union'
-  if (propSchema.items !== undefined) return 'array'
+  if (propSchema.items !== undefined) {
+    // No explicit `type: "array"`, but `items` is present — treat as array-ish.
+    const elementSig = itemSignature(propSchema.items)
+    return elementSig ? `array<${elementSig}>` : 'array'
+  }
   return 'unknown'
 }
 
