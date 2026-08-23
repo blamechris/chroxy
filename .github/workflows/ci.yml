@@ -542,6 +542,29 @@ jobs:
             exit 1
           fi
 
+      - name: Check no forbidden ACP import (experimental/* entry point or the stale @zed-industries predecessor)
+        run: |
+          # Issue #7318 — @agentclientprotocol/sdk is sanctioned at its
+          # default v1 entry point only. experimental/* is a draft the SDK's
+          # own README says "may change incompatibly in any SDK release", and
+          # @zed-industries/agent-client-protocol is a stale predecessor.
+          # Walks packages/server/ (the SDK is a packages/server-only
+          # dependency), on comment-stripped source, so a comment explaining
+          # why the predecessor is avoided does not itself fail the build.
+          set +e
+          scripts/lint-acp-imports.sh
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "OK — no forbidden ACP import found"
+          elif [ "$rc" -eq 2 ]; then
+            echo "::error::lint-acp-imports could not run (bad flags, a comment stripper that will not load, or it walked fewer files than --min-files). The GUARD is broken, not necessarily the code. See packages/server/scripts/lint-acp-imports.mjs."
+            exit 1
+          else
+            echo "::error::A file imports an experimental/* ACP entry point or the stale @zed-industries/agent-client-protocol predecessor. See packages/server/scripts/lint-acp-imports.sh."
+            exit 1
+          fi
+
   dashboard-tests:
     name: Dashboard Tests
     needs: runner-target

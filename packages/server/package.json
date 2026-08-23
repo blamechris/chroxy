@@ -55,6 +55,7 @@
   },
   "license": "MIT",
   "devDependencies": {
+    "@agentclientprotocol/sdk": "1.4.0",
     "c8": "^11.0.0",
     "eslint": "^9.39.3",
     "playwright": "^1.58.2",
