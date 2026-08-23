@@ -479,6 +479,66 @@ program still runs its own option parser over that array. The two are different
 classes with different fixes, and "we use execFile, not exec" is an answer to
 only one of them.
 
+### 14. The quoting that stopped the wrong injection — `#7295`
+
+Entry 13 closed with a generalisation: `execFile` with an array argv stops
+*shell* injection, not *argument* injection. `#7295` is the same sentence with
+one word swapped, in a subsystem that does use a shell.
+
+The `Grep` built-in built its command as a bash string and quoted the
+model-controlled pattern:
+
+```js
+const rgCmd = `rg ${ci} ${ln} --no-heading${globArg} ${shellQuote(pattern)} ${shellQuote(root)}`
+```
+
+`shellQuote` is a real defence and it works: bash consumes the quotes, so no
+metacharacter in the pattern is ever interpreted. What it cannot do is change
+what the quoted argv element *is*. `rg` then runs its own option parser over a
+string that still begins with `-`, and rg has options that execute programs.
+Measured against ripgrep 15.1.0, with a marker-writing script:
+
+```
+rg -n --no-heading '--pre=/tmp/pre.sh' <root>      rc=1, marker WRITTEN
+rg -n --no-heading -e '--pre=/tmp/pre.sh' <root>   rc=1, marker absent
+```
+
+A second, quieter effect: `--pre=` self-terminates, so `<root>` slides into the
+pattern slot and rg is left with zero paths. Its stdin heuristic then makes it
+read a readable stdin and block until EOF — a hung tool call, measured at the
+full length of the test's 8-second timeout. `maskExit: true` on the container
+path does not help; the process never exits to have its code masked.
+
+**Why it was worse than an ordinary argv bug.** `Grep` is classified read-only
+everywhere in the permission system — `SECRET_READ_FLOOR_TOOLS`,
+`ACCEPT_EDITS_TOOLS`, `ELIGIBLE_TOOLS` — so it is auto-approved in `acceptEdits`
+mode and can carry a standing auto-allow rule. `Bash` and `shell` are in
+`NEVER_AUTO_ALLOW`, refused a whitelist as too dangerous. The bug reached the
+`Bash` capability through the tool exempted for not having it.
+
+**The guard was wired to one of two siblings.** Six lines above `runGrep`,
+`runGlob` validates its pattern against `GLOB_PATTERN_SHELL_METACHARS` and says
+so in a comment. Two adjacent functions, same file, same class of input, same
+kind of sink — one checked, one not. This is the `#7262` cause seen from the
+other side: there, a guard existed and missed callers; here, a guard existed on
+the neighbour and was never asked for.
+
+**The fix is `-e <pattern>`, not a leading-dash rejection.** `-Wall` and
+`--force` are legitimate search patterns; rejecting them is a functional
+regression, and on the unfixed builder `-Wall` was *already* one
+(`rg: unrecognized flag -W`, exit 2). This is fix shape (3) in
+`packages/server/src/utils/argv-safety.js`: bind the value to a named flag.
+Shape (2), a `--` separator, also works here — unlike `#7290`'s revision slot,
+because the pattern *follows* the separator — but `-e` survives future flag
+additions and needs no ordering argument.
+
+**What the test had to do.** `tests/built-in-tools/grep-argv-injection.test.js`
+spawns the built command rather than asserting on its text, because a string
+assertion is only as strong as the reviewer's model of rg's parser. All eight
+tests were confirmed red on the unfixed builder before the fix, and each branch
+was mutated alone afterwards: dropping `-e` from the rg branch kills five,
+dropping it from the `grep -r` fallback kills three.
+
 ## The one that got me while writing this
 
 A Maestro `repeat` was written with `maxRuns: 3`. `YamlRepeatCommand` has no

@@ -169,11 +169,28 @@ export function buildGrepArgs(input) {
  * exit 1 on "no matches"; pass `maskExit:true` when the runner rejects on
  * non-zero (the container's `execInEnvironment`) so that case isn't a failure.
  *
+ * SECURITY (#7295): the pattern is bound to `-e`, NOT dropped into a bare
+ * positional slot. `shellQuote` closes SHELL injection only — bash eats the
+ * quotes, and rg/grep then run their OWN option parser over an argv element
+ * that still begins with `-`. Measured against ripgrep 15.1.0, a positional
+ * `--pre=<path>` pattern makes rg EXECUTE `<path>` as a per-file preprocessor,
+ * and — with the root swallowed into the pattern slot, leaving rg zero paths —
+ * blocks forever reading stdin. That is program execution plus a hung tool
+ * call through `Grep`, which the permission model exempts as read-only
+ * (`SECRET_READ_FLOOR_TOOLS`, `ACCEPT_EDITS_TOOLS`, `ELIGIBLE_TOOLS`) while
+ * refusing to whitelist `Bash` at all.
+ *
+ * `-e` and not a leading-dash REJECTION: `-Wall` and `--force` are legitimate
+ * search patterns, so rejecting them would be a functional regression. This is
+ * fix shape (3) in `utils/argv-safety.js`. Proven red-before-green by
+ * `tests/built-in-tools/grep-argv-injection.test.js`, which spawns the built
+ * command and asserts the preprocessor never runs.
+ *
  * @param {{ pattern: string, root: string, ci: string, ln: string, globArg: string, maskExit?: boolean }} opts
  */
 export function buildGrepCommand({ pattern, root, ci, ln, globArg, maskExit = false }) {
-  const rgCmd = `rg ${ci} ${ln} --no-heading${globArg} ${shellQuote(pattern)} ${shellQuote(root)}`
-  const grepCmd = `grep -r ${ci} ${ln} ${shellQuote(pattern)} ${shellQuote(root)}`
+  const rgCmd = `rg ${ci} ${ln} --no-heading${globArg} -e ${shellQuote(pattern)} ${shellQuote(root)}`
+  const grepCmd = `grep -r ${ci} ${ln} -e ${shellQuote(pattern)} ${shellQuote(root)}`
   const core = `if command -v rg >/dev/null 2>&1; then ${rgCmd}; else ${grepCmd}; fi`
   return maskExit ? `${core}; true` : core
 }
