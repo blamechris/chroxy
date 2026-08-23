@@ -41,6 +41,7 @@ import { maybeEncryptCredentialsAtRest } from './credential-store.js'
 import { registerDockerProvider, resolveProviderLabel, DEFAULT_PROVIDER } from './providers.js'
 import { registerAnthropicCompatibleProviders } from './anthropic-compatible-session.js'
 import { registerOpenAiCompatibleProviders } from './openai-compatible-session.js'
+import { registerAcpProviders } from './acp-session.js'
 import { getSharedPool, isPoolEnabled } from './docker-byok-pool.js'
 import { getSharedPoolStats } from './docker-byok-pool-stats.js'
 import { getRegistryForProvider, watchModelsOverlay } from './models.js'
@@ -686,6 +687,11 @@ export async function startCliServer(config) {
   // talks chat-completions via the Anthropic↔OpenAI shim. Registered right
   // after the Anthropic-compatible block (collision-checked against it).
   registerOpenAiCompatibleProviders(config)
+  // #7319: register config-driven ACP (Agent Client Protocol) agents from
+  // `providers.acp` — one registered provider per configured agent, spawned
+  // over stdio. Permissions ship denied-by-default (#7320 wires the real
+  // bridge). Collision-checked against every provider registered above.
+  registerAcpProviders(config)
 
   const providerType = config.provider || DEFAULT_PROVIDER
 
