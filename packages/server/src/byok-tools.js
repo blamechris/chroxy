@@ -122,7 +122,9 @@ export const BUILTIN_TOOLS = [
     name: 'Glob',
     description:
       'List files matching a glob pattern. Pattern is shell-style (e.g. `**/*.ts`, `packages/server/src/*.js`). ' +
-      '`path` is the search root (default: workspace cwd). Returns file paths relative to the search root.',
+      '`path` is the search root (default: workspace cwd). Returns file paths relative to the search root. ' +
+      'The pattern must stay inside the workspace: a leading `/`, a `~`, or a `..` segment is rejected (#7341) — ' +
+      'use `path` to search a subdirectory.',
     input_schema: {
       type: 'object',
       properties: {

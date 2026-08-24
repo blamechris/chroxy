@@ -142,9 +142,66 @@ export function formatNumberedLines(text, { offset, limit, maxLines = DEFAULT_RE
 export const GLOB_PATTERN_SHELL_METACHARS = /[$`;|&><()\\\n\r]/
 
 /**
+ * Word-start positions a bash expansion can begin at inside an interpolated
+ * glob pattern: the start of the pattern, or — because brace expansion runs
+ * FIRST and yields each alternative as its own word — immediately after a
+ * `{` or a `,`. MEASURED (bash 3.2/5.x): `{~,.}/.ssh/config` tilde-expands to
+ * the real home, and `{a,/etc}/passwd` yields `/etc/passwd`. A leading-only
+ * check is therefore bypassable and this must anchor at all three positions.
+ */
+const GLOB_PATTERN_ABSOLUTE = /(^|[{,])\//
+const GLOB_PATTERN_TILDE = /(^|[{,])~/
+/**
+ * A `..` that forms a whole path SEGMENT. Delimited on both sides so an
+ * ordinary filename keeps working: `*~` (emacs backups) and `report..final.md`
+ * are legitimate patterns and must not be rejected — only `..`, `../x`,
+ * `x/../y` and the brace form `{.,..}/x` are traversal.
+ */
+const GLOB_PATTERN_DOTDOT = /(^|[/{,])\.\.($|[/},])/
+
+/**
+ * SECURITY (#7341): reject a Glob `pattern` that can expand OUTSIDE the
+ * workspace root. `GLOB_PATTERN_SHELL_METACHARS` is a *shell-injection*
+ * denylist and was mistaken for containment — it permits `~`, `/` and `..`,
+ * so `Glob {"pattern":"~/.ssh/*"}` and `{"pattern":"../../../../etc/pass*"}`
+ * both returned real files through a tool that is classified read-only and is
+ * therefore auto-approved in `acceptEdits` mode (`ACCEPT_EDITS_TOOLS`),
+ * rule-whitelistable (`ELIGIBLE_TOOLS`) and given only the reduced secrets
+ * floor (`SECRET_READ_FLOOR_TOOLS`). The protected-path floor could not catch
+ * it either: `PROTECTED_PATH_INPUT_FIELDS` is `['file_path','path',
+ * 'notebook_path']` and `pattern` is not a member — the same
+ * guard-one-field-not-its-sibling shape as #7262, here between `Glob`'s
+ * validated `path` and its unvalidated `pattern`.
+ *
+ * This is the SYNTACTIC half of the fix and it is the only half the container
+ * Glob can have (its matches are produced inside the container, out of reach
+ * of a host realpath). The host adds a second, stronger layer: every expanded
+ * match is realpath-checked against the workspace in `runGlob`, which is what
+ * closes the one escape no pattern inspection can see — a symlinked DIRECTORY
+ * inside the workspace (`esc -> /etc`, pattern `esc/pass*`, every character
+ * of which is legal).
+ *
+ * @param {string} pattern
+ * @returns {string|null} A reason string when the pattern can escape, else null.
+ */
+export function globPatternEscapeReason(pattern) {
+  if (GLOB_PATTERN_ABSOLUTE.test(pattern)) return 'absolute path'
+  if (GLOB_PATTERN_TILDE.test(pattern)) return 'home-directory (~) expansion'
+  if (GLOB_PATTERN_DOTDOT.test(pattern)) return 'parent-directory (..) traversal'
+  return null
+}
+
+/** The tool_result message for a pattern rejected by {@link globPatternEscapeReason}. */
+export function globPatternEscapeMessage(reason) {
+  return `EINVAL: glob pattern escapes the workspace root (${reason}). Patterns are relative to the workspace; use the "path" argument to search a subdirectory.`
+}
+
+/**
  * Build the bash command that lists files matching `pattern` under `root`.
- * `pattern` MUST already be validated against GLOB_PATTERN_SHELL_METACHARS by
- * the caller (it is interpolated unquoted so the shell expands it).
+ * `pattern` MUST already be validated against GLOB_PATTERN_SHELL_METACHARS AND
+ * {@link globPatternEscapeReason} by the caller (it is interpolated unquoted so
+ * the shell expands it — that expansion is the whole point, and is also why
+ * containment cannot be delegated to `shellQuote`).
  */
 export function buildGlobCommand(pattern, root) {
   return `shopt -s globstar nullglob; cd ${shellQuote(root)} && for f in ${pattern}; do printf '%s\\n' "$f"; done`

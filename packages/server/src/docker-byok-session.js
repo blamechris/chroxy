@@ -129,6 +129,8 @@ import { ClaudeByokSession } from './byok-session.js'
 import {
   applyEdit,
   GLOB_PATTERN_SHELL_METACHARS,
+  globPatternEscapeReason,
+  globPatternEscapeMessage,
   buildGlobCommand,
   buildGrepArgs,
   buildGrepCommand,
@@ -2018,6 +2020,17 @@ export class DockerByokSession extends ClaudeByokSession {
         content: 'EINVAL: glob pattern contains shell-dangerous characters',
         isError: true,
       }
+    }
+    // #7341 — same containment rule as the host Glob, from the same shared
+    // validator, so the two cannot drift. Here it is the ONLY layer: the host
+    // additionally realpath-confines the expanded matches, which is impossible
+    // from out here because the matches are produced inside the container.
+    // What it escapes into is the container filesystem (the image's /etc, the
+    // container user's ~), not the host's — lower severity than the host hole,
+    // same defect.
+    const escapeReason = globPatternEscapeReason(pattern)
+    if (escapeReason) {
+      return { content: globPatternEscapeMessage(escapeReason), isError: true }
     }
     if (signal?.aborted) {
       return { content: 'Interrupted before docker exec', isError: true }

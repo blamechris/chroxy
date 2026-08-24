@@ -18,6 +18,7 @@
  * audit).
  */
 
+import { dirname } from 'node:path'
 import { isIP } from 'node:net'
 import { lookup as dnsLookup } from 'node:dns/promises'
 import { validateRawPathWithinCwd } from './ws-file-ops/common.js'
@@ -25,6 +26,8 @@ import { executeBash, DEFAULT_BASH_TIMEOUT_MS } from './built-in-tools/bash-exec
 import { readFileTool, writeFileTool, editFileTool } from './built-in-tools/file-ops.js'
 import {
   GLOB_PATTERN_SHELL_METACHARS,
+  globPatternEscapeReason,
+  globPatternEscapeMessage,
   buildGlobCommand,
   buildGrepArgs,
   buildGrepCommand,
@@ -259,6 +262,12 @@ async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
       isError: true,
     }
   }
+  // #7341 — the metachar denylist above closes shell INJECTION only; it says
+  // nothing about where the glob expands to. Containment is a separate rule.
+  const escapeReason = globPatternEscapeReason(pattern)
+  if (escapeReason) {
+    return { content: globPatternEscapeMessage(escapeReason), isError: true }
+  }
 
   // Realpath-validate the search ROOT against cwd. Pre-fix this was a
   // weak "no ..." check that let absolute paths to /etc through.
@@ -279,8 +288,61 @@ async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
     return { content: `Glob failed: ${result.stderr || `exit ${result.exitCode}`}`, isError: true }
   }
   const files = result.stdout.split('\n').filter(Boolean)
-  if (files.length === 0) return { content: `No matches for ${pattern}`, isError: false }
-  return { content: files.join('\n'), isError: false }
+  const { kept, withheld } = await confineGlobMatches(files, realRoot, cwdRealCache, cwdCacheTtl)
+  const note = withheld > 0
+    ? `[${withheld} match${withheld === 1 ? '' : 'es'} outside the workspace withheld]`
+    : ''
+  if (kept.length === 0) {
+    return { content: [`No matches for ${pattern}`, note].filter(Boolean).join('\n'), isError: false }
+  }
+  return { content: [...kept, note].filter(Boolean).join('\n'), isError: false }
+}
+
+/**
+ * SECURITY (#7341) — second containment layer for Glob, after the syntactic
+ * `globPatternEscapeReason` check. Drops any expanded match whose real
+ * location is outside the workspace.
+ *
+ * Why a second layer at all: no inspection of the pattern can see a symlinked
+ * DIRECTORY sitting inside the workspace. With `esc -> /etc` present, the
+ * pattern `esc/pass*` contains no `~`, no `/` prefix and no `..` — every
+ * character is legal — and it lists `/etc`. Only resolving the RESULTS catches
+ * that, which is why the syntactic guard is not treated as sufficient here.
+ *
+ * It validates each match's PARENT directory, not the match itself, for two
+ * reasons. Cost: matches cluster into few directories, so the per-directory
+ * cache bounds this to one `open(2)`-faithful walk per unique directory
+ * instead of one per file. Correctness: a symlinked FILE whose name lives in
+ * the workspace is legitimately a workspace entry, and listing its name leaks
+ * nothing — following it is `Read`'s decision, and `Read` runs
+ * `validateRawPathWithinCwd` on it independently.
+ *
+ * FAIL-CLOSED: a match whose parent cannot be resolved (EACCES, ELOOP, depth
+ * bomb) is withheld, never emitted.
+ */
+async function confineGlobMatches(files, realRoot, cwdRealCache, cwdCacheTtl) {
+  const dirVerdicts = new Map()
+  const kept = []
+  let withheld = 0
+  for (const f of files) {
+    // Relative to realRoot — that is the cwd the glob expanded in. Pass the
+    // RAW relative dir (#6923: never pre-`resolve()`, a lexical `..` collapse
+    // hides a symlink escape).
+    const rawDir = dirname(f)
+    let ok = dirVerdicts.get(rawDir)
+    if (ok === undefined) {
+      try {
+        const { valid } = await validateRawPathWithinCwd(rawDir, realRoot, cwdRealCache, cwdCacheTtl)
+        ok = valid
+      } catch {
+        ok = false
+      }
+      dirVerdicts.set(rawDir, ok)
+    }
+    if (ok) kept.push(f)
+    else withheld++
+  }
+  return { kept, withheld }
 }
 
 async function runGrep({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {

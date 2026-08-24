@@ -679,6 +679,37 @@ describe('DockerByokSession _dispatchBuiltinTool — tool routing', () => {
     assert.equal(_dockerBackend.calls.length, 0)
   })
 
+  it('Glob refuses patterns that escape /workspace (security #7341)', async () => {
+    // The container Glob shares the host's containment validator, so the two
+    // cannot drift. Here it is the only layer available — the matches are
+    // produced inside the container, out of reach of a host realpath.
+    for (const pattern of ['~/.ssh/*', '{~,.}/.ssh/*', '/etc/pass*', '{a,/etc}/x', '../../etc/pass*', '{.,..}/x']) {
+      const _dockerBackend = backendStub()
+      const { session } = buildSession({ backend: _dockerBackend })
+      const result = await session._dispatchBuiltinTool({
+        toolName: 'Glob',
+        input: { pattern },
+      })
+      assert.equal(result.isError, true, `expected error for: ${pattern}`)
+      assert.match(result.content, /escapes the workspace root/)
+      assert.equal(_dockerBackend.calls.length, 0, `${pattern} must not reach docker exec`)
+    }
+  })
+
+  it('Glob still runs an ordinary in-workspace pattern (positive control #7341)', async () => {
+    // Without this the test above would pass just as well against a Glob that
+    // refused every pattern outright.
+    const _dockerBackend = backendStub({ defaultResponse: { stdout: 'src/a.ts\n', stderr: '' } })
+    const { session } = buildSession({ backend: _dockerBackend })
+    const result = await session._dispatchBuiltinTool({
+      toolName: 'Glob',
+      input: { pattern: '**/*.ts' },
+    })
+    assert.equal(result.isError, false)
+    assert.match(result.content, /src\/a\.ts/)
+    assert.ok(_dockerBackend.calls.length > 0, 'the legitimate pattern must reach docker exec')
+  })
+
   it('Grep falls back to grep when rg is unavailable (cmd shape)', async () => {
     const _dockerBackend = backendStub({
       defaultResponse: { stdout: 'foo.js:1:match\n', stderr: '' },

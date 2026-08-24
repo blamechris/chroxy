@@ -1,7 +1,7 @@
 import { describe, it, beforeEach, afterEach, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync, rmSync, mkdirSync, existsSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { mkdtempSync, writeFileSync, rmSync, mkdirSync, existsSync, symlinkSync } from 'node:fs'
+import { tmpdir, homedir } from 'node:os'
 import { join } from 'node:path'
 import { createServer } from 'node:http'
 import { executeBuiltinTool } from '../src/byok-tool-executor.js'
@@ -211,6 +211,114 @@ describe('executeBuiltinTool', () => {
       for (const pat of ['*.ts | cat', '*.ts; ls', '*.ts > /tmp/x', '*.ts && rm -rf']) {
         const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: pat }, ...ctx() })
         assert.equal(r.isError, true, `expected error for: ${pat}`)
+      }
+    })
+
+    // ---- #7341: the PATTERN escapes the workspace root -------------------
+    //
+    // Pre-fix these ALL returned isError:false with real file contents —
+    // measured end-to-end through this same dispatcher. `pattern` was checked
+    // only against GLOB_PATTERN_SHELL_METACHARS, a shell-INJECTION denylist
+    // that permits `~`, `/` and `..`; the sibling `path` field was fully
+    // realpath-confined. Glob is auto-approved in acceptEdits mode and gets
+    // only the reduced secrets floor, so this was a read-anything primitive
+    // behind a tool classified read-only.
+    //
+    // These assertions must FAIL on the pre-fix tree — verified by restoring
+    // the pre-fix src/ and re-running (docs/false-safety-guards.md).
+
+    it('refuses a home-directory (~) pattern (security #7341)', async () => {
+      for (const pattern of ['~/.ssh/*', '{~,.}/.ssh/*']) {
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern }, ...ctx() })
+        assert.equal(r.isError, true, `expected error for: ${pattern}`)
+        assert.match(r.content, /escapes the workspace root/)
+        assert.equal(
+          r.content.includes(homedir()),
+          false,
+          `${pattern} must not leak paths under the real home directory`,
+        )
+      }
+    })
+
+    it('refuses an absolute pattern (security #7341)', async () => {
+      for (const pattern of ['/etc/pass*', '{a,/etc}/pass*']) {
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern }, ...ctx() })
+        assert.equal(r.isError, true, `expected error for: ${pattern}`)
+        assert.match(r.content, /escapes the workspace root/)
+        assert.equal(r.content.includes('passwd'), false, `${pattern} must not list /etc`)
+      }
+    })
+
+    it('refuses a `..` traversal pattern (security #7341)', async () => {
+      // Enough `..` to clear even a deep macOS /private/var/folders tmpdir —
+      // a shallower one silently "passes" as No-matches and proves nothing.
+      for (const pattern of [
+        '../'.repeat(12) + 'etc/pass*',
+        'src/../' + '../'.repeat(11) + 'etc/pass*',
+        '{.,..}/' + '../'.repeat(11) + 'etc/pass*',
+      ]) {
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern }, ...ctx() })
+        assert.equal(r.isError, true, `expected error for: ${pattern}`)
+        assert.match(r.content, /escapes the workspace root/)
+        assert.equal(r.content.includes('passwd'), false, `${pattern} must not list /etc`)
+      }
+    })
+
+    it('withholds matches reached through a symlinked directory (security #7341)', async () => {
+      // The escape no pattern inspection can see: every character of
+      // `esc/pass*` is legal. Only resolving the expanded RESULTS catches it.
+      symlinkSync('/etc', join(dir, 'esc'))
+      const r = await executeBuiltinTool({
+        toolName: 'Glob',
+        input: { pattern: 'esc/pass*' },
+        ...ctx(),
+      })
+      assert.equal(r.content.includes('passwd'), false, 'must not list /etc through a symlink')
+      assert.match(r.content, /outside the workspace withheld/)
+    })
+
+    it('still returns in-workspace matches alongside a withheld one (positive control)', async () => {
+      // Guards the #7273 shape: a confiner that dropped EVERYTHING would pass
+      // the test above for the wrong reason and keep passing if the real rule
+      // were deleted. Here a legitimate match must survive the same call.
+      symlinkSync('/etc', join(dir, 'esc'))
+      mkdirSync(join(dir, 'keep'), { recursive: true })
+      writeFileSync(join(dir, 'keep/passenger.txt'), 'ok')
+      const r = await executeBuiltinTool({
+        toolName: 'Glob',
+        input: { pattern: '*/pass*' },
+        ...ctx(),
+      })
+      assert.equal(r.isError, false)
+      assert.match(r.content, /keep\/passenger\.txt/)
+      assert.equal(r.content.includes('esc/passwd'), false)
+      assert.match(r.content, /outside the workspace withheld/)
+    })
+
+    it('lists an in-workspace symlink that stays in the workspace (positive control)', async () => {
+      // A symlink is confined by where it POINTS, not by being a symlink.
+      mkdirSync(join(dir, 'real'), { recursive: true })
+      writeFileSync(join(dir, 'real/inside.txt'), 'ok')
+      symlinkSync(join(dir, 'real'), join(dir, 'alias'))
+      const r = await executeBuiltinTool({
+        toolName: 'Glob',
+        input: { pattern: 'alias/*.txt' },
+        ...ctx(),
+      })
+      assert.equal(r.isError, false)
+      assert.match(r.content, /alias\/inside\.txt/)
+      assert.equal(r.content.includes('withheld'), false)
+    })
+
+    it('allows ordinary patterns that merely LOOK like traversal (positive control)', async () => {
+      // `*~` and `a..b` are legitimate filenames. A containment rule that
+      // rejected them would be a functional regression, not extra safety.
+      writeFileSync(join(dir, 'draft.md~'), 'x')
+      writeFileSync(join(dir, 'v1..v2.diff'), 'y')
+      for (const pattern of ['*~', 'v1..v2.diff']) {
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern }, ...ctx() })
+        assert.equal(r.isError, false, `${pattern} must still work`)
+        assert.equal(r.content.includes('No matches'), false, `${pattern} must still match`)
       }
     })
   })

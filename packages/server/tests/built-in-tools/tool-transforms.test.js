@@ -4,6 +4,8 @@ import {
   applyEdit,
   formatNumberedLines,
   GLOB_PATTERN_SHELL_METACHARS,
+  globPatternEscapeReason,
+  globPatternEscapeMessage,
   buildGlobCommand,
   buildGrepArgs,
   buildGrepCommand,
@@ -138,5 +140,66 @@ describe('buildGrepCommand', () => {
 
   it('threads the glob arg into the rg command', () => {
     assert.match(buildGrepCommand({ ...base, globArg: ` --glob '*.md'` }), /rg --no-config -i -n --no-heading --glob '\*\.md' -e 'TODO'/)
+  })
+})
+
+describe('globPatternEscapeReason (#7341)', () => {
+  // The shell behaviours these rules encode were MEASURED against bash before
+  // the rules were written — brace expansion runs before tilde expansion and
+  // yields each alternative as its own word, so `{~,.}/x` really does reach
+  // the home directory and a leading-anchor-only check really is bypassable.
+  const ESCAPES = [
+    ['~/.ssh/*', /home-directory/],
+    ['~', /home-directory/],
+    ['~-/secrets/*', /home-directory/],
+    ['{~,.}/.ssh/*', /home-directory/],
+    ['{.,~}/.ssh/*', /home-directory/],
+    ['/etc/pass*', /absolute path/],
+    ['{a,/etc}/passwd', /absolute path/],
+    ['../*', /parent-directory/],
+    ['..', /parent-directory/],
+    ['../../../../etc/pass*', /parent-directory/],
+    ['src/../../etc/pass*', /parent-directory/],
+    ['{.,..}/x', /parent-directory/],
+    ['{..,src}/x', /parent-directory/],
+    ['src/{a,..}/x', /parent-directory/],
+  ]
+  for (const [pattern, reason] of ESCAPES) {
+    it(`rejects ${JSON.stringify(pattern)}`, () => {
+      const got = globPatternEscapeReason(pattern)
+      assert.notEqual(got, null, `expected ${pattern} to be rejected`)
+      assert.match(got, reason)
+    })
+  }
+
+  // POSITIVE CONTROLS. Without these the whole suite above would pass just as
+  // well against a validator that rejected every pattern unconditionally —
+  // the #7273 shape, where a check that denies everything satisfies its own
+  // negative tests. These pin that ordinary globs still work.
+  const ALLOWED = [
+    '*',
+    '*.ts',
+    '**/*.ts',
+    'src/**/*.{js,ts}',
+    '*~',                    // emacs backup files — a trailing ~ never expands
+    'src/*~',
+    'report..final.md',      // `..` inside a filename is not a segment
+    'v1..v2/*.diff',
+    'src/[a-z]*.js',
+    '.github/workflows/*.yml',
+    './src/*.ts',
+    'a,b/*.txt',
+  ]
+  for (const pattern of ALLOWED) {
+    it(`allows ${JSON.stringify(pattern)}`, () => {
+      assert.equal(globPatternEscapeReason(pattern), null)
+    })
+  }
+
+  it('message names the reason and points at the `path` argument', () => {
+    const msg = globPatternEscapeMessage(globPatternEscapeReason('~/.ssh/*'))
+    assert.match(msg, /^EINVAL: glob pattern escapes the workspace root/)
+    assert.match(msg, /home-directory/)
+    assert.match(msg, /"path" argument/)
   })
 })
