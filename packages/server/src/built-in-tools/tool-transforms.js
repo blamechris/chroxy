@@ -296,8 +296,17 @@ function segmentMatchesDotDot(segment) {
  */
 export function globPatternEscapeReason(pattern) {
   if (typeof pattern !== 'string') return 'not a string'
+  // Whitespace is rejected on BOTH paths, and deliberately so even though the
+  // host could now support it: the host matches with `fs.glob`, where a space
+  // is an ordinary character, but the container still interpolates the pattern
+  // unquoted into `for f in <pattern>`, where a space splits it into several
+  // patterns. Allowing it host-side would make the SAME input mean two
+  // different things depending on which backend the session runs — which is
+  // the divergence this whole module exists to prevent. `**` reaches into a
+  // directory whose name has a space perfectly well; only a LITERAL space in
+  // the pattern is refused.
   if (/\s/.test(pattern)) {
-    return 'whitespace (unquoted, the shell would read it as several patterns)'
+    return 'whitespace — use ** or a wildcard instead of a literal space'
   }
   const words = expandBraces(pattern)
   if (words === null) return 'brace expansion too large to verify'

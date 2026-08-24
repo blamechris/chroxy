@@ -403,6 +403,79 @@ describe('executeBuiltinTool', () => {
       }
     })
 
+    it('does not emit the workspace root itself for `**` (#7341 regression)', async () => {
+      // `fs.glob` yields the search ROOT as a match for `**`; `relative()`
+      // renders it '', which survived confinement and came out as a leading
+      // blank line — and as a bare '' on an empty workspace, where the shell
+      // implementation said "No matches". Both are regressions from the
+      // rewrite, not from the original bug.
+      const empty = mkdtempSync(join(tmpdir(), 'chroxy-glob-empty-'))
+      try {
+        const r0 = await executeBuiltinTool({
+          toolName: 'Glob', input: { pattern: '**' },
+          cwd: empty, cwdRealCache: new Map(), cwdCacheTtl: 30_000,
+        })
+        assert.equal(r0.isError, false)
+        assert.match(r0.content, /^No matches for/)
+      } finally {
+        rmSync(empty, { recursive: true, force: true })
+      }
+
+      // Non-empty: real matches, and no blank line among them.
+      writeFileSync(join(dir, 'a.ts'), '1')
+      mkdirSync(join(dir, 'sub'), { recursive: true })
+      writeFileSync(join(dir, 'sub/b.ts'), '1')
+      const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '**' }, ...ctx() })
+      assert.equal(r.isError, false)
+      const lines = r.content.split('\n')
+      assert.equal(lines.includes(''), false, 'the workspace root must not appear as an empty match')
+      assert.ok(lines.includes('a.ts') && lines.includes('sub/b.ts'), 'real matches must survive')
+    })
+
+    it('bounds a walk with a wall-clock timeout, and the bound FIRES', async () => {
+      // Dropping `executeBash` dropped its 30s kill, and `fs.glob` honours no
+      // AbortSignal (measured on Node 22: an already-aborted signal is simply
+      // ignored), so an unbounded walk was reachable. Asserting only the happy
+      // path here would be a guard whose success and whose absence look the
+      // same, so the budget is shrunk to 0 and the timeout branch is taken.
+      // The deadline can only be observed where the walk yields to the event
+      // loop, so the tree has to be big enough to span several ticks.
+      // MEASURED: 200 files in one directory times out 2/5 runs, 1000 across
+      // five directories times out 5/5. 1200 is used for margin — a smaller
+      // tree here would be a flaky test, not a faster one.
+      for (let d = 0; d < 8; d++) {
+        mkdirSync(join(dir, `d${d}`), { recursive: true })
+        for (let i = 0; i < 150; i++) writeFileSync(join(dir, `d${d}/f${i}.ts`), '1')
+      }
+
+      // POSITIVE CONTROL: the same call, same tree, with the normal budget.
+      const ok = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '**/*' }, ...ctx() })
+      assert.equal(ok.isError, false)
+      assert.match(ok.content, /d0\/f0\.ts/)
+
+      const prev = process.env.CHROXY_GLOB_TIMEOUT_MS
+      process.env.CHROXY_GLOB_TIMEOUT_MS = '0'
+      try {
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '**/*' }, ...ctx() })
+        assert.equal(r.isError, true, 'a zero budget must time out, not succeed')
+        assert.match(r.content, /timed out after 0ms/)
+      } finally {
+        if (prev === undefined) delete process.env.CHROXY_GLOB_TIMEOUT_MS
+        else process.env.CHROXY_GLOB_TIMEOUT_MS = prev
+      }
+    })
+
+    it('honors a pre-aborted signal', async () => {
+      writeFileSync(join(dir, 'a.ts'), '1')
+      const controller = new AbortController()
+      controller.abort()
+      const r = await executeBuiltinTool({
+        toolName: 'Glob', input: { pattern: '**/*' }, signal: controller.signal, ...ctx(),
+      })
+      assert.equal(r.isError, true)
+      assert.match(r.content, /interrupted/i)
+    })
+
     it('withholds a match it cannot resolve, rather than trusting it (fail-closed)', async () => {
       // The fail-closed `catch` had NO test: a mutation flipping it to
       // `return true` passed all 341 tests in this PR. That is the shape the

@@ -182,6 +182,7 @@ describe('globPatternEscapeReason (#7341)', () => {
     // patterns and only the first one has to look innocent.
     ['* /etc/pass*', /whitespace/],
     ['* ~/.ssh/*', /whitespace/],
+    ['My Docs/*.pdf', /whitespace/],   // refused on BOTH paths, for parity
     ['*.ts\t../../etc/pass*', /whitespace/],
   ]
   for (const [pattern, reason] of ESCAPES) {
