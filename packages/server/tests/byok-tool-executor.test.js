@@ -743,25 +743,35 @@ describe('executeBuiltinTool', () => {
       // pins `confineGlobMatches`' per-directory verdict cache. A mutant that
       // computed a real verdict for the first directory and assumed `true` for
       // every later one returned /etc/passwd with all 346 tests green.
-      symlinkSync('/etc', join(dir, 'esc'))
-      mkdirSync(join(dir, 'keep'), { recursive: true })
-      writeFileSync(join(dir, 'keep/passenger.txt'), 'ok')
+      // The escape target is a directory THIS TEST owns, not `/etc`. An earlier
+      // cut pointed at `/etc` and pinned the exact match set — which passed on
+      // macOS and failed on the Linux CI runner, where `/etc` also holds
+      // `passwd-`. A precondition that encodes the host's filesystem contents
+      // is a precondition about the wrong thing.
+      const outside = mkdtempSync(join(tmpdir(), 'chroxy-glob-outside-'))
+      try {
+        writeFileSync(join(outside, 'secret.txt'), 'pw')
+        symlinkSync(outside, join(dir, 'esc'))
+        mkdirSync(join(dir, 'keep'), { recursive: true })
+        writeFileSync(join(dir, 'keep/secret.txt'), 'ok')
 
-      const raw = []
-      for await (const f of fsGlob('{esc,keep}/pass*', { cwd: dir })) raw.push(f)
-      assert.deepEqual(
-        raw.sort(), ['esc/passwd', 'keep/passenger.txt'],
-        'precondition: the matcher must really produce BOTH, or this proves nothing',
-      )
+        const raw = []
+        for await (const f of fsGlob('{esc,keep}/secret*', { cwd: dir })) raw.push(f)
+        assert.deepEqual(
+          raw.sort(), ['esc/secret.txt', 'keep/secret.txt'],
+          'precondition: the matcher must really produce BOTH, or this proves nothing',
+        )
 
-      const r = await executeBuiltinTool({
-        toolName: 'Glob',
-        input: { pattern: '{esc,keep}/pass*' },
-        ...ctx(),
-      })
-      assert.equal(r.isError, false)
-      assert.match(r.content, /keep\/passenger\.txt/)
-      assert.equal(r.content.includes('passwd'), false, 'the escaping match must be withheld')
+        const r = await executeBuiltinTool({
+          toolName: 'Glob',
+          input: { pattern: '{esc,keep}/secret*' },
+          ...ctx(),
+        })
+        assert.equal(r.isError, false)
+        assert.equal(r.content, 'keep/secret.txt', 'exactly the in-workspace match, nothing else')
+      } finally {
+        rmSync(outside, { recursive: true, force: true })
+      }
     })
 
     it('lists an in-workspace symlink that stays in the workspace (positive control)', async () => {
