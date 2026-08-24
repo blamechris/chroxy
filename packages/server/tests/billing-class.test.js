@@ -32,12 +32,25 @@ describe('PROGRAMMATIC_CREDIT_ERA_START', () => {
 function withEraEnabled(body) {
   const saved = process.env.CHROXY_PROGRAMMATIC_CREDIT_ERA
   process.env.CHROXY_PROGRAMMATIC_CREDIT_ERA = '1'
-  try {
-    return body()
-  } finally {
+  const restore = () => {
     if (saved === undefined) delete process.env.CHROXY_PROGRAMMATIC_CREDIT_ERA
     else process.env.CHROXY_PROGRAMMATIC_CREDIT_ERA = saved
   }
+  // Promise-aware on purpose. A plain try/finally restores the flag the moment
+  // an ASYNC body returns its promise — i.e. before the body has run — so the
+  // assertions execute with the era already off. That silently un-did the
+  // wrapper for one async test here, and would have done the same to the next
+  // async test added to the sibling copies of this helper.
+  let out
+  try {
+    out = body()
+  } catch (err) {
+    restore()
+    throw err
+  }
+  if (out && typeof out.then === 'function') return out.finally(restore)
+  restore()
+  return out
 }
 
 describe('the era is OFF by default (#7333)', () => {
