@@ -7,10 +7,29 @@ import {
   runBillingCanary,
 } from '../src/doctor-billing.js'
 
-const AFTER = Date.UTC(2026, 5, 16) // one day into the programmatic-credit era
-const BEFORE = Date.UTC(2026, 5, 1) // before the cutover
+const AFTER = Date.UTC(2026, 5, 16) // one day past the announced cutover
+const BEFORE = Date.UTC(2026, 5, 1) // before the announced cutover
 
-test('detectBillingReclassification flags a claude-tui session reporting programmatic cost', () => {
+/**
+ * #7333 — the era is gated on an operator flag now, not the calendar, because
+ * Anthropic paused the change on 2026-06-15 and it never shipped. The canary's
+ * era-dependent signals only mean anything when the regime is actually in
+ * force, so those tests declare it. `AFTER` alone no longer turns it on — and
+ * the default-off behaviour gets its own test at the bottom, because "the
+ * doctor warns about a regime that does not exist" was part of the bug.
+ */
+function withEraEnabled(body) {
+  const saved = process.env.CHROXY_PROGRAMMATIC_CREDIT_ERA
+  process.env.CHROXY_PROGRAMMATIC_CREDIT_ERA = '1'
+  try {
+    return body()
+  } finally {
+    if (saved === undefined) delete process.env.CHROXY_PROGRAMMATIC_CREDIT_ERA
+    else process.env.CHROXY_PROGRAMMATIC_CREDIT_ERA = saved
+  }
+}
+
+test('detectBillingReclassification flags a claude-tui session reporting programmatic cost', () => withEraEnabled(() => {
   const w = detectBillingReclassification(
     [{ id: 's1', provider: 'claude-tui', totalCostUsd: 0.42 }],
     AFTER,
@@ -19,7 +38,7 @@ test('detectBillingReclassification flags a claude-tui session reporting program
   assert.equal(w[0].code, 'TUI_REPORTED_PROGRAMMATIC_COST')
   assert.equal(w[0].sessionId, 's1')
   assert.equal(w[0].costUsd, 0.42)
-})
+}))
 
 test('detectBillingReclassification ignores zero-cost and non-tui sessions', () => {
   const w = detectBillingReclassification(
@@ -33,26 +52,26 @@ test('detectBillingReclassification ignores zero-cost and non-tui sessions', () 
   assert.equal(w.length, 0)
 })
 
-test('detectSilentMeteredDefault flags a programmatic default in the era only', () => {
+test('detectSilentMeteredDefault flags a programmatic default in the era only', () => withEraEnabled(() => {
   assert.equal(detectSilentMeteredDefault('claude-sdk', AFTER).length, 1)
   assert.equal(detectSilentMeteredDefault('claude-sdk', AFTER)[0].code, 'SILENT_METERED_DEFAULT')
   assert.equal(detectSilentMeteredDefault('claude-sdk', BEFORE).length, 0) // subscription before cutover
   assert.equal(detectSilentMeteredDefault('claude-tui', AFTER).length, 0) // always subscription
   assert.equal(detectSilentMeteredDefault('claude-byok', AFTER).length, 0) // api-key
-})
+}))
 
-test('detectSilentMeteredDefault does NOT flag claude-sdk when apiKeyAuth (BYOK)', () => {
+test('detectSilentMeteredDefault does NOT flag claude-sdk when apiKeyAuth (BYOK)', () => withEraEnabled(() => {
   // claude-sdk + explicit ANTHROPIC_API_KEY = raw-API billing, not the credit
   // pool — so a BYOK default must not trip the silent-metered warning.
   assert.equal(detectSilentMeteredDefault('claude-sdk', AFTER, { apiKeyAuth: true }).length, 0)
   // ...but without the key it still warns.
   assert.equal(detectSilentMeteredDefault('claude-sdk', AFTER, { apiKeyAuth: false }).length, 1)
-})
+}))
 
-test('detectSilentMeteredDefault derives the cutover date from the shared constant', () => {
+test('detectSilentMeteredDefault derives the cutover date from the shared constant', () => withEraEnabled(() => {
   // Guards against a hardcoded date drifting from PROGRAMMATIC_CREDIT_ERA_START.
   assert.match(detectSilentMeteredDefault('claude-sdk', AFTER)[0].message, /since 2026-06-15\b/)
-})
+}))
 
 test('detectBillingReclassification stays silent before the cutover (era-gated)', () => {
   // Matches the docstring: a cost reading is only a reclassification signal
@@ -128,7 +147,7 @@ test('runBillingCanary threads datacenterPrefixes into the egress classifier (#5
   assert.ok(out.warnings.some((w) => w.code === 'DATACENTER_EGRESS'))
 })
 
-test('runBillingCanary aggregates all three signals', () => {
+test('runBillingCanary aggregates all three signals', () => withEraEnabled(() => {
   const out = runBillingCanary({
     sessions: [{ id: 's1', provider: 'claude-tui', totalCostUsd: 1.5 }],
     defaultProvider: 'claude-sdk',
@@ -138,7 +157,7 @@ test('runBillingCanary aggregates all three signals', () => {
   assert.equal(out.eraStarted, true)
   const codes = out.warnings.map((w) => w.code).sort()
   assert.deepEqual(codes, ['DATACENTER_EGRESS', 'SILENT_METERED_DEFAULT', 'TUI_REPORTED_PROGRAMMATIC_COST'])
-})
+}))
 
 test('runBillingCanary is quiet before the era with a clean setup', () => {
   const out = runBillingCanary({
@@ -149,4 +168,40 @@ test('runBillingCanary is quiet before the era with a clean setup', () => {
   })
   assert.equal(out.eraStarted, false)
   assert.equal(out.warnings.length, 0)
+})
+
+test('the canary is silent about metering today, at ANY date (#7333)', () => {
+  // The bug's doctor-shaped symptom: with the era hardcoded to a date, this
+  // warned that a configured default "would meter" — advice about a billing
+  // regime Anthropic paused and never shipped. With no operator flag set,
+  // no date may produce a metering signal.
+  for (const now of [BEFORE, AFTER, Date.UTC(2027, 0, 1)]) {
+    const out = runBillingCanary({
+      sessions: [{ id: 's1', provider: 'claude-tui', totalCostUsd: 1.5 }],
+      defaultProvider: 'claude-sdk',
+      egressIp: '73.162.4.10',
+      now,
+    })
+    assert.equal(out.eraStarted, false, `era must be off at ${now}`)
+    const codes = out.warnings.map((w) => w.code)
+    assert.equal(codes.includes('SILENT_METERED_DEFAULT'), false, `metering warning at ${now}`)
+    assert.equal(codes.includes('TUI_REPORTED_PROGRAMMATIC_COST'), false, `reclassification warning at ${now}`)
+  }
+})
+
+test('...but the canary still fires once an operator declares the era (control)', () => {
+  // Without this, the assertion above would be satisfied by a canary that
+  // never warns about anything.
+  withEraEnabled(() => {
+    const out = runBillingCanary({
+      sessions: [{ id: 's1', provider: 'claude-tui', totalCostUsd: 1.5 }],
+      defaultProvider: 'claude-sdk',
+      egressIp: '73.162.4.10',
+      now: AFTER,
+    })
+    assert.equal(out.eraStarted, true)
+    const codes = out.warnings.map((w) => w.code)
+    assert.ok(codes.includes('SILENT_METERED_DEFAULT'))
+    assert.ok(codes.includes('TUI_REPORTED_PROGRAMMATIC_COST'))
+  })
 })

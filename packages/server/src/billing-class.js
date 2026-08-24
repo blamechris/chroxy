@@ -2,7 +2,8 @@
  * Era-aware billing classification (#5630 / #5629).
  *
  * Chroxy bills Claude usage three different ways depending on the provider
- * and (for the programmatic providers) the date. Historically the dashboard
+ * and (for the programmatic providers) whether an operator has declared the
+ * programmatic-credit era in force. Historically the dashboard
  * labelled every dollar figure "Cost (BYOK)" — wrong for subscription and
  * programmatic-credit sessions (#5630) — and the provider copy still said
  * "subscription" for claude-cli / claude-sdk even though Anthropic moves
@@ -22,10 +23,11 @@
  *                          claude-channel). No per-turn dollar figure. Era-
  *                          independent.
  *   - programmatic-credit — host claude-cli / claude-sdk when auth is the
- *                          OAuth/subscription pool. BEFORE 2026-06-15 these
- *                          bill as flat `subscription`; ON/AFTER they draw from
- *                          Anthropic's monthly metered programmatic-credit pool,
- *                          so spend becomes a real dollar figure.
+ *                          OAuth/subscription pool AND an operator has declared
+ *                          the era in force via CHROXY_PROGRAMMATIC_CREDIT_ERA=1.
+ *                          NOT IN FORCE TODAY (#7333): Anthropic paused the
+ *                          change on 2026-06-15 and it never shipped, so these
+ *                          providers bill as flat `subscription`.
  *
  * Refinement: a claude-cli / claude-sdk session authed with an explicit
  * ANTHROPIC_API_KEY (the raw-API branch in resolveAuth, source === 'env') is
@@ -94,7 +96,36 @@ const API_KEY_PROVIDERS = new Set([
  * @returns {boolean}
  */
 export function isProgrammaticCreditEra(now = Date.now()) {
+  if (!programmaticCreditEraEnabled()) return false
   return now >= PROGRAMMATIC_CREDIT_ERA_START
+}
+
+/**
+ * Has an operator declared the programmatic-credit era in force? (#7333)
+ *
+ * THE ERA NEVER STARTED. Anthropic paused the change on 2026-06-15, the day it
+ * was due to take effect, and it has not shipped: `claude -p`, the Agent SDK
+ * and third-party app usage still draw from the subscription's usage limits.
+ * The date comparison above had no feature check, so it silently flipped true
+ * on the announced date and chroxy has been asserting a billing regime that
+ * does not exist every day since — telling users `claude-cli`/`claude-sdk`
+ * bill against a "monthly metered credit pool", and showing a real dollar
+ * figure where a subscription session should read "Included".
+ *
+ * That misdirects provider choice: it steers users away from `claude-cli`, at
+ * present the best-working Claude provider, toward `claude-tui`, which can
+ * neither report nor switch models (#7327), on the basis of a cost that is not
+ * being charged.
+ *
+ * A date with no way to observe whether the event happened is the
+ * "cannot check this, so assume it did" cause in docs/false-safety-guards.md.
+ * The observable replaces it: an operator sets `CHROXY_PROGRAMMATIC_CREDIT_ERA=1`
+ * when the regime actually arrives. The constant and every consumer stay wired
+ * up, because the pause is explicitly "for now" — a revival is this flag plus,
+ * if the announced date moves, one edit to PROGRAMMATIC_CREDIT_ERA_START.
+ */
+export function programmaticCreditEraEnabled() {
+  return process.env.CHROXY_PROGRAMMATIC_CREDIT_ERA === '1'
 }
 
 /**

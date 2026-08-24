@@ -21,24 +21,75 @@ describe('PROGRAMMATIC_CREDIT_ERA_START', () => {
   })
 })
 
-describe('isProgrammaticCreditEra(now)', () => {
+/**
+ * #7333 — the era is now gated on an OPERATOR FLAG, not the calendar.
+ *
+ * Anthropic paused the programmatic-credit change on 2026-06-15 and it never
+ * shipped, so a bare date comparison asserted a billing regime that does not
+ * exist. Every era-ON assertion below therefore has to declare the flag; the
+ * era-OFF assertions are the behaviour in force today.
+ */
+function withEraEnabled(body) {
+  const saved = process.env.CHROXY_PROGRAMMATIC_CREDIT_ERA
+  process.env.CHROXY_PROGRAMMATIC_CREDIT_ERA = '1'
+  try {
+    return body()
+  } finally {
+    if (saved === undefined) delete process.env.CHROXY_PROGRAMMATIC_CREDIT_ERA
+    else process.env.CHROXY_PROGRAMMATIC_CREDIT_ERA = saved
+  }
+}
+
+describe('the era is OFF by default (#7333)', () => {
+  // The bug in one assertion: on any date at or after the announced cutover,
+  // the old code said "programmatic credit pool". It never started.
+  it('is false at, after, and long after the announced cutover date', () => {
+    for (const now of [
+      PROGRAMMATIC_CREDIT_ERA_START,
+      PROGRAMMATIC_CREDIT_ERA_START + 1,
+      Date.UTC(2027, 0, 1),
+    ]) {
+      assert.equal(isProgrammaticCreditEra(now), false, `should be off at ${now}`)
+    }
+  })
+
+  it('classifies claude-cli and claude-sdk as subscription after the cutover', () => {
+    for (const p of ['claude-cli', 'claude-sdk']) {
+      assert.equal(
+        billingClassForProvider(p, Date.UTC(2027, 0, 1)),
+        BILLING_CLASSES.SUBSCRIPTION,
+        `${p} must not be billed as metered credit`,
+      )
+    }
+  })
+
+  it('says "Claude subscription" and never mentions a credit pool', () => {
+    const detail = billingDetailForClass(
+      billingClassForProvider('claude-cli', Date.UTC(2027, 0, 1)),
+    )
+    assert.match(detail, /subscription/i)
+    assert.equal(/credit pool|metered/i.test(detail), false)
+  })
+})
+
+describe('isProgrammaticCreditEra(now) — with the operator flag set', () => {
   it('is false one second before the boundary', () => {
     assert.equal(isProgrammaticCreditEra(JUST_BEFORE), false)
   })
-  it('is true exactly at the boundary (>= is inclusive)', () => {
+  it('is true exactly at the boundary (>= is inclusive)', () => withEraEnabled(() => {
     assert.equal(isProgrammaticCreditEra(AT_BOUNDARY), true)
-  })
-  it('is true one second after the boundary', () => {
+  }))
+  it('is true one second after the boundary', () => withEraEnabled(() => {
     assert.equal(isProgrammaticCreditEra(ONE_SEC_AFTER), true)
-  })
+  }))
   // #5825 — pin the inclusivity to the exact millisecond tick, not just a
   // whole second clear of the boundary. This is what makes a future `>=` → `>`
   // off-by-one (or a date drift) fail CI: at START the era is on; at START-1ms
   // it is not.
-  it('is true AT the constant instant and false exactly one ms before it', () => {
+  it('is true AT the constant instant and false exactly one ms before it', () => withEraEnabled(() => {
     assert.equal(isProgrammaticCreditEra(PROGRAMMATIC_CREDIT_ERA_START), true)
     assert.equal(isProgrammaticCreditEra(PROGRAMMATIC_CREDIT_ERA_START - 1), false)
-  })
+  }))
 })
 
 describe('billingClassForProvider — era-independent classes', () => {
@@ -69,17 +120,17 @@ describe('billingClassForProvider — era-gated programmatic providers', () => {
     it(`${p} is subscription BEFORE the boundary`, () => {
       assert.equal(billingClassForProvider(p, JUST_BEFORE), BILLING_CLASSES.SUBSCRIPTION)
     })
-    it(`${p} is programmatic-credit AT the boundary`, () => {
+    it(`${p} is programmatic-credit AT the boundary`, () => withEraEnabled(() => {
       assert.equal(billingClassForProvider(p, AT_BOUNDARY), BILLING_CLASSES.PROGRAMMATIC_CREDIT)
-    })
-    it(`${p} is programmatic-credit AFTER the boundary`, () => {
+    }))
+    it(`${p} is programmatic-credit AFTER the boundary`, () => withEraEnabled(() => {
       assert.equal(billingClassForProvider(p, ONE_SEC_AFTER), BILLING_CLASSES.PROGRAMMATIC_CREDIT)
-    })
+    }))
     // #5825 — millisecond-precision flip at the exact constant.
-    it(`${p} flips exactly at the constant instant (START vs START-1ms)`, () => {
+    it(`${p} flips exactly at the constant instant (START vs START-1ms)`, () => withEraEnabled(() => {
       assert.equal(billingClassForProvider(p, PROGRAMMATIC_CREDIT_ERA_START), BILLING_CLASSES.PROGRAMMATIC_CREDIT)
       assert.equal(billingClassForProvider(p, PROGRAMMATIC_CREDIT_ERA_START - 1), BILLING_CLASSES.SUBSCRIPTION)
-    })
+    }))
   }
 })
 

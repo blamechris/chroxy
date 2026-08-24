@@ -83,39 +83,36 @@ function generateDefaultName(cwdPath: string, existingNames: string[]): string {
 const EMPTY_STRINGS: string[] = []
 const EMPTY_MODELS: ModelInfo[] = []
 
-// #5629: the programmatic-credit era boundary, MIRRORED from the server's
-// PROGRAMMATIC_CREDIT_ERA_START (packages/server/src/billing-class.js). The
-// server-driven `auth.detail` is always preferred; this constant only date-
-// gates the STATIC fallback copy below (shown before the live provider list
-// arrives). Keep the two boundaries in sync if this ever moves. 2026-06-15
-// 00:00:00 UTC — Date.UTC month arg is 0-indexed so `5` is June.
-const PROGRAMMATIC_CREDIT_ERA_START = Date.UTC(2026, 5, 15)
-
-/** Client-side mirror of the server's isProgrammaticCreditEra (injectable now). */
-function isProgrammaticCreditEra(now: number = Date.now()): boolean {
-  return now >= PROGRAMMATIC_CREDIT_ERA_START
-}
+// #7333: the client-side mirror of the server's era boundary is GONE.
+//
+// It was a second implementation of one rule — a copy of
+// PROGRAMMATIC_CREDIT_ERA_START plus its comparison — kept in sync by a
+// comment. That was survivable while the rule was a pure date. It is not
+// survivable now: the server gates the era on an OPERATOR FLAG
+// (CHROXY_PROGRAMMATIC_CREDIT_ERA), because the regime Anthropic announced for
+// 2026-06-15 was paused and never shipped. A client cannot observe that flag,
+// so any date arithmetic here would be wrong by construction rather than
+// merely at risk of drifting.
+//
+// The static copy below is only the pre-load fallback; the server-driven
+// `auth.detail` — which does know the flag — takes precedence at the render
+// site, exactly as before. The fallback now states the billing that is
+// actually in force.
 
 /**
  * Billing context per provider — helps users understand cost implications.
  *
- * Date-gated only for the HOST providers that flip from a flat subscription to
- * the metered programmatic-credit pool on 2026-06-15 (claude-cli / claude-sdk).
- * docker-cli / docker-sdk forward an ANTHROPIC_API_KEY into the container with
- * no OAuth fallback, so they are always api-key (the host credit pool never
- * applies inside the container) — NOT date-gated. This is only the STATIC
- * fallback; the live server `auth.detail` (itself era-gated server-side) takes
- * precedence at the render site below.
+ * No longer date-gated (#7333): claude-cli / claude-sdk bill against the Claude
+ * subscription, because the metered programmatic-credit regime announced for
+ * 2026-06-15 was paused and never took effect. If it is ever revived, the
+ * server's `auth.detail` reports it — an operator sets the flag there and the
+ * live copy follows. This is only the STATIC pre-load fallback; the live
+ * server `auth.detail` takes precedence at the render site below.
  */
-function providerBillingFallback(provider: string, now: number = Date.now()): string | undefined {
-  const era = isProgrammaticCreditEra(now)
+function providerBillingFallback(provider: string): string | undefined {
   const STATIC: Record<string, string> = {
-    'claude-sdk': era
-      ? 'Programmatic credit pool — monthly metered credits'
-      : 'Uses your Claude subscription',
-    'claude-cli': era
-      ? 'Programmatic credit pool — monthly metered credits'
-      : 'Uses your Claude subscription',
+    'claude-sdk': 'Uses your Claude subscription',
+    'claude-cli': 'Uses your Claude subscription',
     'claude-tui': 'Uses your Claude subscription (interactive TUI — bypasses programmatic credit metering)',
     'claude-byok': 'Direct Anthropic API — per-token billing with your own ANTHROPIC_API_KEY. No claude binary required.',
     'docker-cli': 'Docker-isolated — Anthropic API (your ANTHROPIC_API_KEY forwarded to the container)',
