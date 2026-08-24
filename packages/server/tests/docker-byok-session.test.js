@@ -705,6 +705,45 @@ describe('DockerByokSession _dispatchBuiltinTool — tool routing', () => {
     }
   })
 
+  it('Glob withholds escaping paths the container actually returned (#7341)', async () => {
+    // The layer that holds. Six ways past the pattern guard were found in
+    // review — quote removal, whitespace splitting, a brace body with no
+    // top-level comma, `.*` matching `..`, POSIX bracket sub-expressions,
+    // nested braces — and every one of them is invisible in the pattern and
+    // plainly visible HERE, in what the shell produced. So this test bypasses
+    // the pattern guard entirely and feeds the escaping output straight back.
+    const _dockerBackend = backendStub({
+      defaultResponse: {
+        stdout: '/etc/passwd\n../../etc/shadow\nsrc/a.ts\n..\n',
+        stderr: '',
+      },
+    })
+    const { session } = buildSession({ backend: _dockerBackend })
+    const result = await session._dispatchBuiltinTool({
+      toolName: 'Glob',
+      input: { pattern: '**/*.ts' },      // a pattern the guard is happy with
+    })
+    assert.equal(result.isError, false)
+    assert.equal(result.content.includes('passwd'), false)
+    assert.equal(result.content.includes('shadow'), false)
+    // POSITIVE CONTROL, same call: the in-workspace match survives. Without it
+    // a filter that dropped everything would pass the two assertions above.
+    assert.match(result.content, /src\/a\.ts/)
+  })
+
+  it('Glob reports an all-withheld result as no match, with no count (oracle)', async () => {
+    const _dockerBackend = backendStub({
+      defaultResponse: { stdout: '/etc/passwd\n/etc/shadow\n', stderr: '' },
+    })
+    const { session } = buildSession({ backend: _dockerBackend })
+    const result = await session._dispatchBuiltinTool({
+      toolName: 'Glob', input: { pattern: '**/*.ts' },
+    })
+    assert.equal(result.isError, false)
+    assert.match(result.content, /^No matches for/)
+    assert.equal(/\d/.test(result.content.replace('**/*.ts', '')), false, 'no count may leak')
+  })
+
   it('Glob still runs an ordinary in-workspace pattern (positive control #7341)', async () => {
     // Without this the test above would pass just as well against a Glob that
     // refused every pattern outright.

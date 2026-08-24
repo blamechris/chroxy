@@ -1,8 +1,9 @@
 import { describe, it, beforeEach, afterEach, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync, rmSync, mkdirSync, existsSync, symlinkSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, rmSync, mkdirSync, existsSync, symlinkSync, realpathSync } from 'node:fs'
+import { glob as fsGlob } from 'node:fs/promises'
 import { tmpdir, homedir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { createServer } from 'node:http'
 import { executeBuiltinTool } from '../src/byok-tool-executor.js'
 
@@ -328,6 +329,150 @@ describe('executeBuiltinTool', () => {
       assert.equal(hit.isError, miss.isError)
       assert.equal(hit.content.replace('esc/passwd', 'X'), miss.content.replace('esc/definitely-no-such-file', 'X'))
       assert.equal(/\d/.test(hit.content), false, 'no count may leak')
+    })
+
+    it('withholds a parent-directory escape the matcher really does produce', async () => {
+      // THE test for layer 2, and the only one written against a vector that
+      // provably reaches a real secret. `{a}b,../TOP*}` walks past the
+      // syntactic guard — bash and node both skip a brace body with no
+      // top-level comma and keep scanning, which the guard does not model —
+      // so this is layer 2 alone, unaided.
+      //
+      // The `fsGlob` assertion is a POSITIVE CONTROL and is not decoration.
+      // Without it, "the tool returned no match" is satisfied just as well by
+      // a pattern that never matched anything, and the test would keep passing
+      // with the confinement deleted (docs/false-safety-guards.md).
+      const outer = mkdtempSync(join(tmpdir(), 'chroxy-glob-outer-'))
+      try {
+        writeFileSync(join(outer, 'TOPSECRET.txt'), 'pw')
+        const ws = join(outer, 'ws')
+        mkdirSync(ws)
+        writeFileSync(join(ws, 'a.ts'), '1')
+
+        for (const pattern of ['{a}b,../TOP*}', '../TOP*']) {
+          const raw = []
+          for await (const f of fsGlob(pattern, { cwd: ws })) raw.push(f)
+          assert.deepEqual(
+            raw, ['../TOPSECRET.txt'],
+            `precondition: ${pattern} must really escape, or this test proves nothing`,
+          )
+
+          const r = await executeBuiltinTool({
+            toolName: 'Glob',
+            input: { pattern },
+            cwd: ws,
+            cwdRealCache: new Map(),
+            cwdCacheTtl: 30_000,
+          })
+          assert.equal(
+            r.content.includes('TOPSECRET'), false,
+            `${pattern} must not reach outside the workspace`,
+          )
+        }
+
+        // Positive control on the SAME workspace: an in-bounds pattern still works.
+        const ok = await executeBuiltinTool({
+          toolName: 'Glob', input: { pattern: '*.ts' },
+          cwd: ws, cwdRealCache: new Map(), cwdCacheTtl: 30_000,
+        })
+        assert.match(ok.content, /a\.ts/)
+      } finally {
+        rmSync(outer, { recursive: true, force: true })
+      }
+    })
+
+    it('treats shell-only expansion syntax as literal characters (#7341)', async () => {
+      // The host no longer shells out, so quote removal, word splitting and
+      // POSIX bracket sub-expressions — three of the six bypasses review found
+      // against the old `for f in <pattern>` implementation — are not
+      // expansions any more, they are just characters that match no filename.
+      const outer = mkdtempSync(join(tmpdir(), 'chroxy-glob-outer-'))
+      try {
+        writeFileSync(join(outer, 'TOPSECRET.txt'), 'pw')
+        const ws = join(outer, 'ws')
+        mkdirSync(ws)
+        for (const pattern of [`'..'/TOP*`, `"..".${'/'}TOP*`, '.[[:punct:]]/TOP*']) {
+          const r = await executeBuiltinTool({
+            toolName: 'Glob', input: { pattern },
+            cwd: ws, cwdRealCache: new Map(), cwdCacheTtl: 30_000,
+          })
+          assert.equal(r.content.includes('TOPSECRET'), false, `${pattern} must not escape`)
+        }
+      } finally {
+        rmSync(outer, { recursive: true, force: true })
+      }
+    })
+
+    it('withholds a match it cannot resolve, rather than trusting it (fail-closed)', async () => {
+      // The fail-closed `catch` had NO test: a mutation flipping it to
+      // `return true` passed all 341 tests in this PR. That is the shape the
+      // whole issue is about — success and not-checking looking identical —
+      // so the escape hatch gets its own proof.
+      //
+      // A symlink cycle makes the component-wise resolver throw ELOOP, which
+      // is the only way to reach that branch without stubbing.
+      // Absolute targets: the test sandbox resolves a RELATIVE symlink target
+      // against process.cwd() and blocks it as a real-user-state write.
+      symlinkSync(join(dir, 'loop2'), join(dir, 'loop'))
+      symlinkSync(join(dir, 'loop'), join(dir, 'loop2'))
+      writeFileSync(join(dir, 'resolvable.ts'), '1')
+
+      const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '*' }, ...ctx() })
+      assert.equal(r.isError, false)
+      assert.equal(r.content.includes('loop'), false, 'an unresolvable match must be withheld')
+      // POSITIVE CONTROL, same call: an ordinary file is still returned, so
+      // this cannot pass by the tool having failed outright.
+      assert.match(r.content, /resolvable\.ts/)
+    })
+
+    it('never returns a path outside the workspace, over a corpus (property)', async () => {
+      // The rejection lists in this file are a hand-written enumeration of the
+      // classes someone thought of, and two review rounds found six more. This
+      // asserts the PROPERTY instead: whatever the pattern, every path the tool
+      // returns resolves inside the workspace. It is the test that does not
+      // need updating when round seven turns up.
+      const outer = mkdtempSync(join(tmpdir(), 'chroxy-glob-outer-'))
+      try {
+        writeFileSync(join(outer, 'TOPSECRET.txt'), 'pw')
+        const ws = join(outer, 'ws')
+        mkdirSync(join(ws, 'sub'), { recursive: true })
+        writeFileSync(join(ws, 'a.ts'), '1')
+        writeFileSync(join(ws, 'sub/b.ts'), '1')
+        symlinkSync(outer, join(ws, 'up'))
+        symlinkSync('/etc', join(ws, 'esc'))
+
+        const bits = ['*', '**', '..', '.', '/', '{', '}', ',', '~', "'", '"', '[', ']', '?', 'TOP', 'up', 'esc']
+        const corpus = ['../TOP*', '{a}b,../TOP*}', 'up/TOP*', 'esc/pass*', '{.,..}/TOP*', '.*/TOP*']
+        // Deterministic pseudo-random assembly — no Math.random, so a failure
+        // is reproducible from the seed.
+        let seed = 1337
+        const next = () => (seed = (seed * 1103515245 + 12345) % 2147483648)
+        for (let i = 0; i < 300; i++) {
+          let pat = ''
+          const len = 2 + (next() % 5)
+          for (let j = 0; j < len; j++) pat += bits[next() % bits.length]
+          corpus.push(pat)
+        }
+
+        const realWs = realpathSync(ws)
+        for (const pattern of corpus) {
+          const r = await executeBuiltinTool({
+            toolName: 'Glob', input: { pattern },
+            cwd: ws, cwdRealCache: new Map(), cwdCacheTtl: 30_000,
+          })
+          if (r.isError) continue                       // refused outright — fine
+          if (r.content.startsWith('No matches')) continue
+          for (const line of r.content.split('\n')) {
+            const resolved = realpathSync(resolve(realWs, line))
+            assert.ok(
+              resolved === realWs || resolved.startsWith(realWs + '/'),
+              `pattern ${JSON.stringify(pattern)} returned ${line} -> ${resolved}, outside ${realWs}`,
+            )
+          }
+        }
+      } finally {
+        rmSync(outer, { recursive: true, force: true })
+      }
     })
 
     it('still returns in-workspace matches alongside a withheld one (positive control)', async () => {

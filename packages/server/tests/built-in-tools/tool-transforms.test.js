@@ -6,6 +6,7 @@ import {
   GLOB_PATTERN_SHELL_METACHARS,
   globPatternEscapeReason,
   globPatternEscapeMessage,
+  globMatchEscapesRoot,
   buildGlobCommand,
   buildGrepArgs,
   buildGrepCommand,
@@ -258,5 +259,47 @@ describe('globPatternEscapeReason — brace-expansion ceilings (#7341)', () => {
     for (const bad of [undefined, null, 42, {}]) {
       assert.notEqual(globPatternEscapeReason(bad), null)
     }
+  })
+})
+
+describe('globMatchEscapesRoot (#7341)', () => {
+  // This is the container Glob's containment boundary. It inspects what the
+  // expansion PRODUCED rather than predicting what it will produce — which is
+  // why it catches all six of the bypasses that were found against the
+  // pattern-prediction guard, none of which are visible in the pattern text.
+  const ESCAPES = [
+    '/etc/passwd',                 // absolute — `''/etc/pass*`, `* /etc/pass*`
+    '../etc/passwd',               // `'..'/x`, `.[[:punct:]]/x`, `{a}b,../x}`
+    '../../etc/passwd',            // `.*` matching the `..` entry, twice
+    'src/../../etc/passwd',
+    '..',
+    'a/..',
+    '/',
+  ]
+  for (const m of ESCAPES) {
+    it(`withholds ${JSON.stringify(m)}`, () => {
+      assert.equal(globMatchEscapesRoot(m), true)
+    })
+  }
+
+  const CONTAINED = [
+    'a.ts',
+    'src/a.ts',
+    './a.ts',
+    'src/.env',
+    'report..final.md',            // `..` inside a NAME is not a segment
+    'v1..v2/x.diff',
+    '.github/workflows/ci.yml',
+    'a b.txt',                     // a space in a filename is not an escape
+    "it's.txt",
+  ]
+  for (const m of CONTAINED) {
+    it(`keeps ${JSON.stringify(m)}`, () => {
+      assert.equal(globMatchEscapesRoot(m), false)
+    })
+  }
+
+  it('fails closed on a non-string match', () => {
+    for (const bad of [undefined, null, 42]) assert.equal(globMatchEscapesRoot(bad), true)
   })
 })

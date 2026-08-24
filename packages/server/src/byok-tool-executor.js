@@ -18,7 +18,8 @@
  * audit).
  */
 
-import { dirname } from 'node:path'
+import { dirname, join, relative } from 'node:path'
+import { glob as fsGlob } from 'node:fs/promises'
 import { isIP } from 'node:net'
 import { lookup as dnsLookup } from 'node:dns/promises'
 import { validateRawPathWithinCwd } from './ws-file-ops/common.js'
@@ -28,7 +29,6 @@ import {
   GLOB_PATTERN_SHELL_METACHARS,
   globPatternEscapeReason,
   globPatternEscapeMessage,
-  buildGlobCommand,
   buildGrepArgs,
   buildGrepCommand,
 } from './built-in-tools/tool-transforms.js'
@@ -46,6 +46,13 @@ import { isPrivateOrSpecialIp } from './ssrf-guard.js'
  * hangs.
  */
 const BASH_TIMEOUT_CEILING_MS = 600_000
+
+/**
+ * Cap on how many matches Glob collects. The shell implementation was bounded
+ * only by executeBash's ~1MB stdout cap; this makes the same bound explicit so
+ * a `**\/*` over a node_modules tree cannot balloon the session's memory.
+ */
+const GLOB_MAX_MATCHES = 10_000
 
 /**
  * Env vars the model must NEVER see in a Bash subprocess. Centrally
@@ -273,21 +280,34 @@ async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
   // weak "no ..." check that let absolute paths to /etc through.
   const realRoot = await safeResolveRoot(input?.path, cwd, cwdRealCache, cwdCacheTtl)
 
-  // Shell expansion of `for f in <pattern>` is what produces the file
-  // paths. Pattern is now whitelist-validated above, so interpolation
-  // is safe.
-  const cmd = buildGlobCommand(pattern, realRoot)
-  const result = await executeBash({
-    command: cmd,
-    cwd: realRoot,
-    signal,
-    timeoutMs: 30_000,
-    env: buildSafeBashEnv(),
-  })
-  if (result.exitCode !== 0 && !result.stdout) {
-    return { content: `Glob failed: ${result.stderr || `exit ${result.exitCode}`}`, isError: true }
+  // #7341 — the host does NOT shell out for Glob any more. `for f in
+  // <pattern>` needed the pattern interpolated UNQUOTED to expand at all, and
+  // two review rounds found six ways to make that expansion leave the
+  // workspace (quote removal, whitespace word-splitting, a brace body with no
+  // top-level comma, `.*` matching the `..` entry, POSIX bracket
+  // sub-expressions, nested braces) — none of them visible in the source text.
+  // `node:fs/promises`'s glob has none of those layers: no tilde expansion, no
+  // word splitting, no quote removal. The question "what will bash do with
+  // this string" simply stops being asked. (The container still shells out —
+  // it cannot run JS inside itself — and confines its RESULTS instead.)
+  //
+  // `withFileTypes` is not cosmetic: the Dirent carries `isSymbolicLink()`,
+  // which the traversal already knows, so the confinement below can single out
+  // symlink entries for a realpath WITHOUT paying a syscall on every ordinary
+  // file.
+  const files = []
+  try {
+    for await (const entry of fsGlob(pattern, { cwd: realRoot, withFileTypes: true })) {
+      if (signal?.aborted) return { content: 'Glob interrupted', isError: true }
+      files.push({
+        path: relative(realRoot, join(entry.parentPath, entry.name)),
+        isSymlink: entry.isSymbolicLink(),
+      })
+      if (files.length >= GLOB_MAX_MATCHES) break
+    }
+  } catch (err) {
+    return { content: `Glob failed: ${err?.message || String(err)}`, isError: true }
   }
-  const files = result.stdout.split('\n').filter(Boolean)
   const kept = await confineGlobMatches(files, realRoot, cwdRealCache, cwdCacheTtl)
   // A withheld match is reported as no match, with no count and no marker.
   // Anything that distinguishes "matched, but outside" from "matched nothing"
@@ -309,40 +329,57 @@ async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
  * character is legal — and it lists `/etc`. Only resolving the RESULTS catches
  * that, which is why the syntactic guard is not treated as sufficient here.
  *
- * It validates each match's PARENT directory, not the match itself, for two
- * reasons. Cost: matches cluster into few directories, so the per-directory
- * cache bounds this to one `open(2)`-faithful walk per unique directory
- * instead of one per file. Correctness: a symlinked FILE whose name lives in
- * the workspace is legitimately a workspace entry, and listing its name leaks
- * nothing — following it is `Read`'s decision, and `Read` runs
- * `validateRawPathWithinCwd` on it independently.
+ * The property it establishes is the strong one, stated without caveats:
+ * EVERY path Glob returns resolves inside the workspace. An earlier cut
+ * checked only each match's parent directory, which let a symlink whose NAME
+ * is in the workspace but whose TARGET is outside be listed. That is arguably
+ * defensible — the entry really is in the directory, and `Read` would refuse
+ * to follow it — but it makes the tool's contract a sentence with an
+ * exception in it, and the property test caught it precisely because the
+ * exception could not be stated cleanly. Withholding it costs a listing
+ * nobody can act on.
  *
- * FAIL-CLOSED: a match whose parent cannot be resolved (EACCES, ELOOP, depth
- * bomb) is withheld, never emitted.
+ * Two checks, split so the common case is free:
+ *   - the match's PARENT, cached per directory. Catches traversal and any
+ *     descent through a symlinked directory. Matches cluster into few
+ *     directories, so this is one `open(2)`-faithful walk per directory, not
+ *     one per file.
+ *   - the ENTRY itself, but only when the glob's own Dirent already said it is
+ *     a symlink. Ordinary files — nearly all of them — cost nothing extra.
  *
+ * FAIL-CLOSED: a match that cannot be resolved (EACCES, ELOOP, depth bomb) is
+ * withheld, never emitted.
+ *
+ * @param {{path: string, isSymlink: boolean}[]} files
  * @returns {Promise<string[]>} The matches that are inside the workspace.
  */
 async function confineGlobMatches(files, realRoot, cwdRealCache, cwdCacheTtl) {
   const dirVerdicts = new Map()
   const kept = []
-  for (const f of files) {
-    // Relative to realRoot — that is the cwd the glob expanded in. Pass the
-    // RAW relative dir (#6923: never pre-`resolve()`, a lexical `..` collapse
+  for (const { path: f, isSymlink } of files) {
+    // Relative to realRoot — that is the directory the glob ran in. Pass the
+    // RAW relative path (#6923: never pre-`resolve()`, a lexical `..` collapse
     // hides a symlink escape).
     const rawDir = dirname(f)
     let ok = dirVerdicts.get(rawDir)
     if (ok === undefined) {
-      try {
-        const { valid } = await validateRawPathWithinCwd(rawDir, realRoot, cwdRealCache, cwdCacheTtl)
-        ok = valid
-      } catch {
-        ok = false
-      }
+      ok = await isWithin(rawDir, realRoot, cwdRealCache, cwdCacheTtl)
       dirVerdicts.set(rawDir, ok)
     }
+    if (ok && isSymlink) ok = await isWithin(f, realRoot, cwdRealCache, cwdCacheTtl)
     if (ok) kept.push(f)
   }
   return kept
+}
+
+/** {@link validateRawPathWithinCwd}, fail-closed on any resolution error. */
+async function isWithin(rawPath, realRoot, cwdRealCache, cwdCacheTtl) {
+  try {
+    const { valid } = await validateRawPathWithinCwd(rawPath, realRoot, cwdRealCache, cwdCacheTtl)
+    return valid
+  } catch {
+    return false
+  }
 }
 
 async function runGrep({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {

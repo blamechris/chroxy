@@ -131,6 +131,7 @@ import {
   GLOB_PATTERN_SHELL_METACHARS,
   globPatternEscapeReason,
   globPatternEscapeMessage,
+  globMatchEscapesRoot,
   buildGlobCommand,
   buildGrepArgs,
   buildGrepCommand,
@@ -2043,7 +2044,22 @@ export class DockerByokSession extends ClaudeByokSession {
     if (!stdout && stderr && stderr.trim()) {
       return { content: `Glob failed: ${stderr.trim()}`, isError: true }
     }
-    const files = stdout.split('\n').filter(Boolean)
+    // #7341 — confine the RESULTS, not just the pattern. This is the layer
+    // that actually holds: it inspects what the shell PRODUCED (a leading `/`
+    // or a `..` segment) rather than trying to predict what it will produce,
+    // and every one of the six expansion bypasses found in review is plainly
+    // visible here while being invisible in the pattern text. The host does
+    // strictly better (a realpath walk per match); from out here the matches
+    // are inside the container, so lexical is what is reachable.
+    //
+    // RESIDUAL, tracked separately: a symlinked directory inside /workspace
+    // (`esc -> /etc` in the CONTAINER's filesystem) produces a lexically clean
+    // match that resolves out. Closing it needs the match resolved in-container.
+    //
+    // Withheld matches read as no match — no count, no marker. Anything that
+    // distinguishes "matched, but outside" from "matched nothing" is an
+    // existence oracle on a tool auto-approved in `acceptEdits`.
+    const files = stdout.split('\n').filter(Boolean).filter((f) => !globMatchEscapesRoot(f))
     if (files.length === 0) return { content: `No matches for ${pattern}`, isError: false }
     return { content: files.join('\n'), isError: false }
   }

@@ -311,6 +311,31 @@ export function globPatternEscapeReason(pattern) {
   return null
 }
 
+/**
+ * SECURITY (#7341) — does a glob MATCH, as produced, point outside the root it
+ * was expanded in? Purely lexical, and deliberately so: it inspects what the
+ * expansion ACTUALLY produced instead of predicting what it will produce.
+ *
+ * That distinction is the whole lesson of this fix. Two review rounds found
+ * six ways past a guard that tried to model bash's expansion — quote removal,
+ * whitespace word-splitting, a brace body with no top-level comma, a glob that
+ * matches the `..` entry, POSIX bracket sub-expressions, and nested braces.
+ * Every one of them is invisible in the source text and every one of them is
+ * plainly visible in the OUTPUT, as a leading `/` or a `..` segment. Checking
+ * the output needs no model of the shell and therefore has no round seven.
+ *
+ * The host does strictly better than this (`confineGlobMatches` realpaths each
+ * match), so this is the CONTAINER's boundary: its matches are produced inside
+ * the container where no host realpath can reach them. What it cannot see is a
+ * symlinked directory inside `/workspace` — lexically clean, resolves out. See
+ * `_containerGlob` for that residual.
+ */
+export function globMatchEscapesRoot(match) {
+  if (typeof match !== 'string') return true
+  if (match.startsWith('/')) return true
+  return match.split('/').includes('..')
+}
+
 /** The tool_result message for a pattern rejected by {@link globPatternEscapeReason}. */
 export function globPatternEscapeMessage(reason) {
   return `EINVAL: glob pattern escapes the workspace root (${reason}). Patterns are relative to the workspace; use the "path" argument to search a subdirectory.`
@@ -318,6 +343,14 @@ export function globPatternEscapeMessage(reason) {
 
 /**
  * Build the bash command that lists files matching `pattern` under `root`.
+ *
+ * CONTAINER-ONLY since #7341. The host Glob no longer shells out at all — it
+ * uses `node:fs/promises`'s `glob`, which has no tilde expansion, no word
+ * splitting, no quote removal and no brace-body quirks to model, so the entire
+ * "what will bash do with this string" question disappears. The container
+ * cannot run JS inside itself, so it keeps this, and pairs it with
+ * {@link globMatchEscapesRoot} over the RESULTS.
+ *
  * `pattern` MUST already be validated against GLOB_PATTERN_SHELL_METACHARS AND
  * {@link globPatternEscapeReason} by the caller (it is interpolated unquoted so
  * the shell expands it — that expansion is the whole point, and is also why
