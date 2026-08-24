@@ -288,14 +288,14 @@ async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
     return { content: `Glob failed: ${result.stderr || `exit ${result.exitCode}`}`, isError: true }
   }
   const files = result.stdout.split('\n').filter(Boolean)
-  const { kept, withheld } = await confineGlobMatches(files, realRoot, cwdRealCache, cwdCacheTtl)
-  const note = withheld > 0
-    ? `[${withheld} match${withheld === 1 ? '' : 'es'} outside the workspace withheld]`
-    : ''
-  if (kept.length === 0) {
-    return { content: [`No matches for ${pattern}`, note].filter(Boolean).join('\n'), isError: false }
-  }
-  return { content: [...kept, note].filter(Boolean).join('\n'), isError: false }
+  const kept = await confineGlobMatches(files, realRoot, cwdRealCache, cwdCacheTtl)
+  // A withheld match is reported as no match, with no count and no marker.
+  // Anything that distinguishes "matched, but outside" from "matched nothing"
+  // is an existence ORACLE: a workspace that contains `esc -> /` turns one bit
+  // per call into filesystem enumeration, on a tool that is auto-approved in
+  // `acceptEdits`. The confinement is proven by tests, not by a runtime marker.
+  if (kept.length === 0) return { content: `No matches for ${pattern}`, isError: false }
+  return { content: kept.join('\n'), isError: false }
 }
 
 /**
@@ -319,11 +319,12 @@ async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
  *
  * FAIL-CLOSED: a match whose parent cannot be resolved (EACCES, ELOOP, depth
  * bomb) is withheld, never emitted.
+ *
+ * @returns {Promise<string[]>} The matches that are inside the workspace.
  */
 async function confineGlobMatches(files, realRoot, cwdRealCache, cwdCacheTtl) {
   const dirVerdicts = new Map()
   const kept = []
-  let withheld = 0
   for (const f of files) {
     // Relative to realRoot — that is the cwd the glob expanded in. Pass the
     // RAW relative dir (#6923: never pre-`resolve()`, a lexical `..` collapse
@@ -340,9 +341,8 @@ async function confineGlobMatches(files, realRoot, cwdRealCache, cwdCacheTtl) {
       dirVerdicts.set(rawDir, ok)
     }
     if (ok) kept.push(f)
-    else withheld++
   }
-  return { kept, withheld }
+  return kept
 }
 
 async function runGrep({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {

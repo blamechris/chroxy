@@ -163,6 +163,25 @@ describe('globPatternEscapeReason (#7341)', () => {
     ['{.,..}/x', /parent-directory/],
     ['{..,src}/x', /parent-directory/],
     ['src/{a,..}/x', /parent-directory/],
+    // Brace expansion runs BEFORE globbing, so this becomes the word
+    // `../etc/*` — a traversal whose SOURCE TEXT contains no `..` at all.
+    // The first cut of this guard was a set of anchored regexes and this
+    // walked straight through it.
+    ['.{.,x}/etc/pass*', /parent-directory/],
+    ['{.,x}{.,y}/etc/pass*', /parent-directory/],
+    // A glob MATCHES the `..` directory entry: `.*` expands to `. ..`
+    // (measured, bash 3.2 and 5.x), so these reach the parent with no `..`
+    // token present either.
+    ['.*/.*/etc/pass*', /parent-directory/],
+    ['.*/x', /parent-directory/],
+    ['..*/etc/pass*', /parent-directory/],
+    ['.?/etc/pass*', /parent-directory/],
+    ['.[.]/etc/pass*', /parent-directory/],
+    // The pattern is interpolated UNQUOTED, so whitespace makes it SEVERAL
+    // patterns and only the first one has to look innocent.
+    ['* /etc/pass*', /whitespace/],
+    ['* ~/.ssh/*', /whitespace/],
+    ['*.ts\t../../etc/pass*', /whitespace/],
   ]
   for (const [pattern, reason] of ESCAPES) {
     it(`rejects ${JSON.stringify(pattern)}`, () => {
@@ -189,6 +208,13 @@ describe('globPatternEscapeReason (#7341)', () => {
     '.github/workflows/*.yml',
     './src/*.ts',
     'a,b/*.txt',
+    '.github/**/*.yml',      // a dot-leading segment with no metachar
+    '.env*',                 // dot-leading WITH a metachar, but cannot match `..`
+    '.[a-z]*',               // ditto — `[a-z]` cannot match the second `.`
+    '.config/**',
+    '{src,tests}/**/*.js',   // ordinary brace expansion still works
+    '[.]*',                  // measured: a leading dot must be matched LITERALLY,
+                             // so this expands to nothing and cannot reach `..`
   ]
   for (const pattern of ALLOWED) {
     it(`allows ${JSON.stringify(pattern)}`, () => {
@@ -201,5 +227,36 @@ describe('globPatternEscapeReason (#7341)', () => {
     assert.match(msg, /^EINVAL: glob pattern escapes the workspace root/)
     assert.match(msg, /home-directory/)
     assert.match(msg, /"path" argument/)
+  })
+})
+
+describe('globPatternEscapeReason — brace-expansion ceilings (#7341)', () => {
+  it('REJECTS a brace bomb rather than skipping the check', () => {
+    // "Too complex to verify" must not read as "verified fine" — that is the
+    // cannot-check-so-nothing-to-check class in docs/false-safety-guards.md.
+    const bomb = '{a,b}'.repeat(12) + '/x'
+    assert.match(globPatternEscapeReason(bomb), /too large to verify/)
+  })
+
+  it('rejects an over-deep nest rather than skipping the check', () => {
+    let nest = 'x'
+    for (let i = 0; i < 12; i++) nest = `{${nest},y}`
+    assert.notEqual(globPatternEscapeReason(nest + '/z'), null)
+  })
+
+  it('still accepts a brace expansion just under the ceiling (positive control)', () => {
+    // Without this the two tests above would pass against a validator that
+    // rejected every brace pattern outright.
+    assert.equal(globPatternEscapeReason('{a,b}{c,d}/*.ts'), null)
+  })
+
+  it('leaves a comma-less brace body literal, as bash does', () => {
+    assert.equal(globPatternEscapeReason('{a}/*.ts'), null)
+  })
+
+  it('fails closed on a non-string pattern', () => {
+    for (const bad of [undefined, null, 42, {}]) {
+      assert.notEqual(globPatternEscapeReason(bad), null)
+    }
   })
 })

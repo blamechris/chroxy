@@ -264,6 +264,43 @@ describe('executeBuiltinTool', () => {
       }
     })
 
+    it('refuses a whitespace-split multi-pattern (security #7341)', async () => {
+      // The pattern is interpolated UNQUOTED into `for f in <pattern>`, so a
+      // space makes it SEVERAL patterns and only the first has to look
+      // innocent. Pre-fix `* /etc/pass*` listed /etc through the container
+      // Glob, which has no result-confinement layer to fall back on.
+      for (const pattern of ['* /etc/pass*', '* ~/.ssh/*']) {
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern }, ...ctx() })
+        assert.equal(r.isError, true, `expected error for: ${pattern}`)
+        assert.match(r.content, /whitespace/)
+        assert.equal(r.content.includes('passwd'), false)
+        assert.equal(r.content.includes(homedir()), false)
+      }
+    })
+
+    it('refuses a glob that MATCHES the `..` entry (security #7341)', async () => {
+      // `.*` expands to `. ..`, so these traverse upward without containing a
+      // `..` token for any regex over the source text to find.
+      for (const pattern of ['.*/'.repeat(12) + 'etc/pass*', '.{.,x}/etc/pass*', '.?/etc/pass*']) {
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern }, ...ctx() })
+        assert.equal(r.isError, true, `expected error for: ${pattern}`)
+        assert.match(r.content, /escapes the workspace root/)
+        assert.equal(r.content.includes('passwd'), false, `${pattern} must not list /etc`)
+      }
+    })
+
+    it('still globs dotfiles that cannot reach `..` (positive control)', async () => {
+      // The `..`-matching rule must not cost ordinary dotfile globbing. A
+      // leading `.` has to be matched LITERALLY by the shell, so `.env*` and
+      // `.[a-z]*` can never reach `..` and must keep working.
+      writeFileSync(join(dir, '.envrc'), 'x')
+      for (const pattern of ['.env*', '.[a-z]*']) {
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern }, ...ctx() })
+        assert.equal(r.isError, false, `${pattern} must still work`)
+        assert.match(r.content, /\.envrc/)
+      }
+    })
+
     it('withholds matches reached through a symlinked directory (security #7341)', async () => {
       // The escape no pattern inspection can see: every character of
       // `esc/pass*` is legal. Only resolving the expanded RESULTS catches it.
@@ -274,12 +311,28 @@ describe('executeBuiltinTool', () => {
         ...ctx(),
       })
       assert.equal(r.content.includes('passwd'), false, 'must not list /etc through a symlink')
-      assert.match(r.content, /outside the workspace withheld/)
+    })
+
+    it('reports a withheld match as no match, with no count or marker (oracle)', async () => {
+      // Anything that distinguishes "matched, but outside" from "matched
+      // nothing" is an existence oracle: a workspace containing `esc -> /`
+      // turns one bit per call into filesystem enumeration, through a tool
+      // auto-approved in acceptEdits. The two responses must be identical.
+      symlinkSync('/etc', join(dir, 'esc'))
+      const hit = await executeBuiltinTool({
+        toolName: 'Glob', input: { pattern: 'esc/passwd' }, ...ctx(),
+      })
+      const miss = await executeBuiltinTool({
+        toolName: 'Glob', input: { pattern: 'esc/definitely-no-such-file' }, ...ctx(),
+      })
+      assert.equal(hit.isError, miss.isError)
+      assert.equal(hit.content.replace('esc/passwd', 'X'), miss.content.replace('esc/definitely-no-such-file', 'X'))
+      assert.equal(/\d/.test(hit.content), false, 'no count may leak')
     })
 
     it('still returns in-workspace matches alongside a withheld one (positive control)', async () => {
       // Guards the #7273 shape: a confiner that dropped EVERYTHING would pass
-      // the test above for the wrong reason and keep passing if the real rule
+      // the tests above for the wrong reason and keep passing if the real rule
       // were deleted. Here a legitimate match must survive the same call.
       symlinkSync('/etc', join(dir, 'esc'))
       mkdirSync(join(dir, 'keep'), { recursive: true })
@@ -292,7 +345,6 @@ describe('executeBuiltinTool', () => {
       assert.equal(r.isError, false)
       assert.match(r.content, /keep\/passenger\.txt/)
       assert.equal(r.content.includes('esc/passwd'), false)
-      assert.match(r.content, /outside the workspace withheld/)
     })
 
     it('lists an in-workspace symlink that stays in the workspace (positive control)', async () => {

@@ -683,7 +683,16 @@ describe('DockerByokSession _dispatchBuiltinTool — tool routing', () => {
     // The container Glob shares the host's containment validator, so the two
     // cannot drift. Here it is the only layer available — the matches are
     // produced inside the container, out of reach of a host realpath.
-    for (const pattern of ['~/.ssh/*', '{~,.}/.ssh/*', '/etc/pass*', '{a,/etc}/x', '../../etc/pass*', '{.,..}/x']) {
+    // The whitespace and `.*`-matches-`..` rows are the ones that matter most
+    // here: this is the ONLY layer the container has, so a bypass of it is a
+    // live /workspace escape with nothing behind it.
+    for (const pattern of [
+      '~/.ssh/*', '{~,.}/.ssh/*',
+      '/etc/pass*', '{a,/etc}/x',
+      '../../etc/pass*', '{.,..}/x',
+      '* /etc/pass*', '* ~/.ssh/*',
+      '.*/.*/etc/pass*', '.{.,x}/etc/pass*', '.?/etc/pass*',
+    ]) {
       const _dockerBackend = backendStub()
       const { session } = buildSession({ backend: _dockerBackend })
       const result = await session._dispatchBuiltinTool({
@@ -691,7 +700,7 @@ describe('DockerByokSession _dispatchBuiltinTool — tool routing', () => {
         input: { pattern },
       })
       assert.equal(result.isError, true, `expected error for: ${pattern}`)
-      assert.match(result.content, /escapes the workspace root/)
+      assert.match(result.content, /escapes the workspace root|whitespace/)
       assert.equal(_dockerBackend.calls.length, 0, `${pattern} must not reach docker exec`)
     }
   })
