@@ -36,6 +36,32 @@ function withEraEnabled(body) {
   return out
 }
 
+/**
+ * The mirror of {@link withEraEnabled}, and just as necessary. An era-OFF
+ * assertion that merely relies on the flag being absent from the ambient
+ * environment tests nothing on a machine where an operator HAS set it: the
+ * premise silently inverts and the case either fails for the wrong reason or
+ * stops covering the default it exists to pin. Same class as #7360.
+ */
+function withEraDisabled(body) {
+  const saved = process.env.CHROXY_PROGRAMMATIC_CREDIT_ERA
+  delete process.env.CHROXY_PROGRAMMATIC_CREDIT_ERA
+  const restore = () => {
+    if (saved === undefined) delete process.env.CHROXY_PROGRAMMATIC_CREDIT_ERA
+    else process.env.CHROXY_PROGRAMMATIC_CREDIT_ERA = saved
+  }
+  let out
+  try {
+    out = body()
+  } catch (err) {
+    restore()
+    throw err
+  }
+  if (out && typeof out.then === 'function') return out.finally(restore)
+  restore()
+  return out
+}
+
 function make(opts = {}) {
   const broadcasts = []
   const monitor = new BillingCanaryMonitor({
@@ -253,7 +279,7 @@ test('notify failure is swallowed (does not break refresh)', () => {
   assert.equal(broadcasts.length, 1) // broadcast still happened
 })
 
-test('the monitor raises no metering warning by default, at any date (#7333)', () => {
+test('the monitor raises no metering warning by default, at any date (#7333)', () => withEraDisabled(() => {
   // The user-visible fix at the monitor layer: with no operator flag, the
   // canary must not broadcast advice about the paused regime — at the
   // announced cutover or any time after it.
@@ -263,7 +289,7 @@ test('the monitor raises no metering warning by default, at any date (#7333)', (
     const codes = (snap.warnings ?? []).map((w) => w.code)
     assert.equal(codes.includes('SILENT_METERED_DEFAULT'), false, `warned at ${now}`)
   }
-})
+}))
 
 test('...but it does warn once an operator declares the era (control)', () => {
   // Without this the assertion above is satisfied by a monitor that never

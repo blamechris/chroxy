@@ -85,6 +85,7 @@ describe('runDoctorChecks', () => {
       // programmatic-credit change on 2026-06-15 and it never shipped, so the
       // doctor was warning about a regime that does not exist. `AFTER` is now
       // necessary but not sufficient — an operator has to declare it.
+      const savedEra = process.env.CHROXY_PROGRAMMATIC_CREDIT_ERA
       process.env.CHROXY_PROGRAMMATIC_CREDIT_ERA = '1'
       try {
         const { checks } = await withEnv(null, () => runDoctorChecks({ providers: ['claude-sdk'], now: AFTER }))
@@ -93,18 +94,34 @@ describe('runDoctorChecks', () => {
         assert.equal(billing.status, 'warn')
         assert.match(billing.message, /metered programmatic-credit pool/)
       } finally {
-        delete process.env.CHROXY_PROGRAMMATIC_CREDIT_ERA
+        // SAVE/RESTORE, not an unconditional delete: clobbering an ambient
+        // value would leave every later assertion in this file depending on
+        // machine state.
+        if (savedEra === undefined) delete process.env.CHROXY_PROGRAMMATIC_CREDIT_ERA
+        else process.env.CHROXY_PROGRAMMATIC_CREDIT_ERA = savedEra
       }
     })
 
     it('does NOT warn about metering by default, at any date (#7333)', async () => {
       // The user-visible fix: with no operator flag, no date produces billing
       // advice about the paused regime.
-      for (const now of [AFTER, Date.UTC(2027, 0, 1)]) {
-        const { checks } = await withEnv(null, () => runDoctorChecks({ providers: ['claude-sdk'], now }))
-        const billing = checks.find(c => c.name === 'Billing')
-        assert.ok(billing)
-        assert.equal(/metered programmatic-credit pool/.test(billing.message), false, `warned at ${now}`)
+      //
+      // The flag is forced OFF rather than assumed absent. Relying on the
+      // ambient environment would mean this case silently stops testing the
+      // default on any machine where an operator has set the flag — the same
+      // read-ambient-state class as #7360.
+      const savedEra = process.env.CHROXY_PROGRAMMATIC_CREDIT_ERA
+      delete process.env.CHROXY_PROGRAMMATIC_CREDIT_ERA
+      try {
+        for (const now of [AFTER, Date.UTC(2027, 0, 1)]) {
+          const { checks } = await withEnv(null, () => runDoctorChecks({ providers: ['claude-sdk'], now }))
+          const billing = checks.find(c => c.name === 'Billing')
+          assert.ok(billing)
+          assert.equal(/metered programmatic-credit pool/.test(billing.message), false, `warned at ${now}`)
+        }
+      } finally {
+        if (savedEra === undefined) delete process.env.CHROXY_PROGRAMMATIC_CREDIT_ERA
+        else process.env.CHROXY_PROGRAMMATIC_CREDIT_ERA = savedEra
       }
     })
 

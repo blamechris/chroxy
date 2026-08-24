@@ -53,10 +53,36 @@ function withEraEnabled(body) {
   return out
 }
 
+/**
+ * The mirror of {@link withEraEnabled}, and just as necessary. An era-OFF
+ * assertion that merely relies on the flag being absent from the ambient
+ * environment tests nothing on a machine where an operator HAS set it: the
+ * premise silently inverts and the case either fails for the wrong reason or
+ * stops covering the default it exists to pin. Same class as #7360.
+ */
+function withEraDisabled(body) {
+  const saved = process.env.CHROXY_PROGRAMMATIC_CREDIT_ERA
+  delete process.env.CHROXY_PROGRAMMATIC_CREDIT_ERA
+  const restore = () => {
+    if (saved === undefined) delete process.env.CHROXY_PROGRAMMATIC_CREDIT_ERA
+    else process.env.CHROXY_PROGRAMMATIC_CREDIT_ERA = saved
+  }
+  let out
+  try {
+    out = body()
+  } catch (err) {
+    restore()
+    throw err
+  }
+  if (out && typeof out.then === 'function') return out.finally(restore)
+  restore()
+  return out
+}
+
 describe('the era is OFF by default (#7333)', () => {
   // The bug in one assertion: on any date at or after the announced cutover,
   // the old code said "programmatic credit pool". It never started.
-  it('is false at, after, and long after the announced cutover date', () => {
+  it('is false at, after, and long after the announced cutover date', () => withEraDisabled(() => {
     for (const now of [
       PROGRAMMATIC_CREDIT_ERA_START,
       PROGRAMMATIC_CREDIT_ERA_START + 1,
@@ -64,9 +90,9 @@ describe('the era is OFF by default (#7333)', () => {
     ]) {
       assert.equal(isProgrammaticCreditEra(now), false, `should be off at ${now}`)
     }
-  })
+  }))
 
-  it('classifies claude-cli and claude-sdk as subscription after the cutover', () => {
+  it('classifies claude-cli and claude-sdk as subscription after the cutover', () => withEraDisabled(() => {
     for (const p of ['claude-cli', 'claude-sdk']) {
       assert.equal(
         billingClassForProvider(p, Date.UTC(2027, 0, 1)),
@@ -74,15 +100,15 @@ describe('the era is OFF by default (#7333)', () => {
         `${p} must not be billed as metered credit`,
       )
     }
-  })
+  }))
 
-  it('says "Claude subscription" and never mentions a credit pool', () => {
+  it('says "Claude subscription" and never mentions a credit pool', () => withEraDisabled(() => {
     const detail = billingDetailForClass(
       billingClassForProvider('claude-cli', Date.UTC(2027, 0, 1)),
     )
     assert.match(detail, /subscription/i)
     assert.equal(/credit pool|metered/i.test(detail), false)
-  })
+  }))
 })
 
 describe('isProgrammaticCreditEra(now) — with the operator flag set', () => {

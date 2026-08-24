@@ -42,6 +42,32 @@ function withEraEnabled(body) {
   return out
 }
 
+/**
+ * The mirror of {@link withEraEnabled}, and just as necessary. An era-OFF
+ * assertion that merely relies on the flag being absent from the ambient
+ * environment tests nothing on a machine where an operator HAS set it: the
+ * premise silently inverts and the case either fails for the wrong reason or
+ * stops covering the default it exists to pin. Same class as #7360.
+ */
+function withEraDisabled(body) {
+  const saved = process.env.CHROXY_PROGRAMMATIC_CREDIT_ERA
+  delete process.env.CHROXY_PROGRAMMATIC_CREDIT_ERA
+  const restore = () => {
+    if (saved === undefined) delete process.env.CHROXY_PROGRAMMATIC_CREDIT_ERA
+    else process.env.CHROXY_PROGRAMMATIC_CREDIT_ERA = saved
+  }
+  let out
+  try {
+    out = body()
+  } catch (err) {
+    restore()
+    throw err
+  }
+  if (out && typeof out.then === 'function') return out.finally(restore)
+  restore()
+  return out
+}
+
 test('detectBillingReclassification flags a claude-tui session reporting programmatic cost', () => withEraEnabled(() => {
   const w = detectBillingReclassification(
     [{ id: 's1', provider: 'claude-tui', totalCostUsd: 0.42 }],
@@ -183,7 +209,7 @@ test('runBillingCanary is quiet before the era with a clean setup', () => {
   assert.equal(out.warnings.length, 0)
 })
 
-test('the canary is silent about metering today, at ANY date (#7333)', () => {
+test('the canary is silent about metering today, at ANY date (#7333)', () => withEraDisabled(() => {
   // The bug's doctor-shaped symptom: with the era hardcoded to a date, this
   // warned that a configured default "would meter" — advice about a billing
   // regime Anthropic paused and never shipped. With no operator flag set,
@@ -200,7 +226,7 @@ test('the canary is silent about metering today, at ANY date (#7333)', () => {
     assert.equal(codes.includes('SILENT_METERED_DEFAULT'), false, `metering warning at ${now}`)
     assert.equal(codes.includes('TUI_REPORTED_PROGRAMMATIC_COST'), false, `reclassification warning at ${now}`)
   }
-})
+}))
 
 test('...but the canary still fires once an operator declares the era (control)', () => {
   // Without this, the assertion above would be satisfied by a canary that

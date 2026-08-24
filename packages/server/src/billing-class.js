@@ -6,8 +6,10 @@
  * programmatic-credit era in force. Historically the dashboard
  * labelled every dollar figure "Cost (BYOK)" — wrong for subscription and
  * programmatic-credit sessions (#5630) — and the provider copy still said
- * "subscription" for claude-cli / claude-sdk even though Anthropic moves
- * those onto a metered programmatic-credit pool on 2026-06-15 (#5629).
+ * "subscription" for claude-cli / claude-sdk ahead of a metered
+ * programmatic-credit pool Anthropic announced for 2026-06-15 (#5629). That
+ * pool was PAUSED on the day it was due and never shipped, so subscription is
+ * the correct copy after all; see `programmaticCreditEraEnabled` (#7333).
  *
  * This module is the single source of truth for "which billing class is
  * this session/provider in right now?" Every provider `resolveAuth()` and the
