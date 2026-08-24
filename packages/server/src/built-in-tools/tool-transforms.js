@@ -142,9 +142,111 @@ export function formatNumberedLines(text, { offset, limit, maxLines = DEFAULT_RE
 export const GLOB_PATTERN_SHELL_METACHARS = /[$`;|&><()\\\n\r]/
 
 /**
+ * SECURITY (#7341) — reject a Glob `pattern` that OBVIOUSLY escapes the
+ * workspace, so the model gets a clear `EINVAL` instead of a puzzling
+ * "No matches".
+ *
+ * THIS IS NOT THE SECURITY BOUNDARY, and the history of the file is the reason
+ * it says so this loudly. It began as one — a check that tried to predict what
+ * bash would do with the pattern — and three review rounds walked past it six
+ * times (whitespace word-splitting, brace expansion, a glob matching the `..`
+ * entry, quote removal, a brace body with no top-level comma, POSIX bracket
+ * sub-expressions). The replacement modelled bash properly: a real brace
+ * expander and a glob-to-regex segment matcher. That was worse. It was
+ * measurably wrong (46 of 515 enumerated bracket segments answered "cannot
+ * reach `..`" for segments bash expands straight to `..`) and it was a denial
+ * of service (a 4 KB pattern of `{a,b}` groups and stars backtracked for 12.9
+ * SECONDS of blocked event loop, on a tool auto-approved in `acceptEdits`).
+ *
+ * Both problems came from the same source: modelling a shell. So the model is
+ * gone. Containment is enforced entirely on the OUTPUT — `confineGlobMatches`
+ * realpaths every match on the host, `globMatchEscapesRoot` filters every match
+ * on the container — and all six historical bypasses were re-confirmed closed
+ * at that layer, by fuzzing real bash. What remains here is a linear scan whose
+ * only job is a good error message, and which cannot be wrong in a way that
+ * matters: a false negative just yields "No matches" from the layer below.
+ *
+ * @param {string} pattern
+ * @returns {string|null} A reason string when the pattern obviously escapes.
+ */
+export function globPatternEscapeReason(pattern) {
+  if (typeof pattern !== 'string') return 'not a string'
+  // Whitespace: the CONTAINER interpolates the pattern unquoted into
+  // `for f in <pattern>`, so a space there is several patterns. Rejected on
+  // both paths so one input cannot mean two things depending on the backend.
+  if (/\s/.test(pattern)) {
+    return 'whitespace — use ** or a wildcard instead of a literal space'
+  }
+  // Word starts: the beginning, or after a `{` or `,` — brace expansion makes
+  // each alternative its own word. No expansion is performed; these anchors are
+  // a cheap approximation, which is all a message needs to be.
+  if (/(^|[{,])~/.test(pattern)) return 'home-directory (~) expansion'
+  if (/(^|[{,])[/\\]/.test(pattern)) return 'absolute path'
+  // Windows: `C:\x`, `C:/x` and the drive-relative `C:x` are all absolute
+  // enough to leave the workspace, and none of them starts with a separator.
+  // #6928 is the same lesson one layer down — a `/`-shaped path evading a
+  // guard that only knew about `\`, or the reverse.
+  if (/(^|[{,])[A-Za-z]:/.test(pattern)) return 'absolute path'
+  // A literal `..` path segment. Segments are delimited by either separator
+  // and by brace punctuation. This deliberately does NOT try to work out
+  // whether a glob such as `.*` could EXPAND to `..` — that computation is
+  // what produced both the false accepts and the DoS, and the output layer
+  // catches the real thing regardless.
+  for (const segment of pattern.split(/[/\\{},]/)) {
+    if (segment === '..') return 'parent-directory (..) traversal'
+  }
+  return null
+}
+
+/**
+ * SECURITY (#7341) — does a glob MATCH, as produced, point outside the root it
+ * was expanded in? Purely lexical, and deliberately so: it inspects what the
+ * expansion ACTUALLY produced instead of predicting what it will produce.
+ *
+ * That distinction is the whole lesson of this fix. Two review rounds found
+ * six ways past a guard that tried to model bash's expansion — quote removal,
+ * whitespace word-splitting, a brace body with no top-level comma, a glob that
+ * matches the `..` entry, POSIX bracket sub-expressions, and nested braces.
+ * Every one of them is invisible in the source text and every one of them is
+ * plainly visible in the OUTPUT, as a leading `/` or a `..` segment. Checking
+ * the output needs no model of the shell and therefore has no round seven.
+ *
+ * The host does strictly better than this (`confineGlobMatches` realpaths each
+ * match), so this is the CONTAINER's boundary: its matches are produced inside
+ * the container where no host realpath can reach them. What it cannot see is a
+ * symlinked directory inside `/workspace` — lexically clean, resolves out. See
+ * `_containerGlob` for that residual.
+ */
+export function globMatchEscapesRoot(match) {
+  if (typeof match !== 'string') return true
+  // Both separators and the Windows drive/UNC forms. Splitting on `/` alone is
+  // #6928 exactly — a guard that knew one separator and let the other through.
+  // The container is Linux today, so the Windows arms are contract rather than
+  // live defence; a validator whose JSDoc claims "absolute" must mean it.
+  if (/^[/\\]/.test(match)) return true
+  if (/^[A-Za-z]:/.test(match)) return true
+  return match.split(/[/\\]/).includes('..')
+}
+
+/** The tool_result message for a pattern rejected by {@link globPatternEscapeReason}. */
+export function globPatternEscapeMessage(reason) {
+  return `EINVAL: glob pattern escapes the workspace root (${reason}). Patterns are relative to the workspace; use the "path" argument to search a subdirectory.`
+}
+
+/**
  * Build the bash command that lists files matching `pattern` under `root`.
- * `pattern` MUST already be validated against GLOB_PATTERN_SHELL_METACHARS by
- * the caller (it is interpolated unquoted so the shell expands it).
+ *
+ * CONTAINER-ONLY since #7341. The host Glob no longer shells out at all — it
+ * uses `node:fs/promises`'s `glob`, which has no tilde expansion, no word
+ * splitting, no quote removal and no brace-body quirks to model, so the entire
+ * "what will bash do with this string" question disappears. The container
+ * cannot run JS inside itself, so it keeps this, and pairs it with
+ * {@link globMatchEscapesRoot} over the RESULTS.
+ *
+ * `pattern` MUST already be validated against GLOB_PATTERN_SHELL_METACHARS AND
+ * {@link globPatternEscapeReason} by the caller (it is interpolated unquoted so
+ * the shell expands it — that expansion is the whole point, and is also why
+ * containment cannot be delegated to `shellQuote`).
  */
 export function buildGlobCommand(pattern, root) {
   return `shopt -s globstar nullglob; cd ${shellQuote(root)} && for f in ${pattern}; do printf '%s\\n' "$f"; done`

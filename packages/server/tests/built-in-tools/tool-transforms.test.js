@@ -4,6 +4,9 @@ import {
   applyEdit,
   formatNumberedLines,
   GLOB_PATTERN_SHELL_METACHARS,
+  globPatternEscapeReason,
+  globPatternEscapeMessage,
+  globMatchEscapesRoot,
   buildGlobCommand,
   buildGrepArgs,
   buildGrepCommand,
@@ -138,5 +141,185 @@ describe('buildGrepCommand', () => {
 
   it('threads the glob arg into the rg command', () => {
     assert.match(buildGrepCommand({ ...base, globArg: ` --glob '*.md'` }), /rg --no-config -i -n --no-heading --glob '\*\.md' -e 'TODO'/)
+  })
+})
+
+describe('globPatternEscapeReason (#7341)', () => {
+  // The shell behaviours these rules encode were MEASURED against bash before
+  // the rules were written — brace expansion runs before tilde expansion and
+  // yields each alternative as its own word, so `{~,.}/x` really does reach
+  // the home directory and a leading-anchor-only check really is bypassable.
+  const ESCAPES = [
+    ['~/.ssh/*', /home-directory/],
+    ['~', /home-directory/],
+    ['~-/secrets/*', /home-directory/],
+    ['{~,.}/.ssh/*', /home-directory/],
+    ['{.,~}/.ssh/*', /home-directory/],
+    ['/etc/pass*', /absolute path/],
+    ['{a,/etc}/passwd', /absolute path/],
+    ['../*', /parent-directory/],
+    ['..', /parent-directory/],
+    ['../../../../etc/pass*', /parent-directory/],
+    ['src/../../etc/pass*', /parent-directory/],
+    ['{.,..}/x', /parent-directory/],
+    ['{..,src}/x', /parent-directory/],
+    ['src/{a,..}/x', /parent-directory/],
+      // NOTE: patterns that only REACH `..` by expansion — `.{.,x}/etc/*`,
+    // `..*/etc/*`, `.[.]/etc/*`, `{.,x}{.,y}/etc/*` — are deliberately NOT
+    // rejected here any more. Detecting them meant modelling brace expansion
+    // and glob-vs-`..` matching, which was both wrong (46/515 bracket segments)
+    // and a DoS. They are caught where they materialise: see the container's
+    // "escaping paths the container actually returned" test and the host's
+    // parent-escape test.
+    // Windows drive-absolute and UNC. These run on Windows CI (this file is not
+    // in WINDOWS_EXEMPT, unlike byok-tool-executor.test.js), which is the whole
+    // reason they belong here: the host Glob is portable now, but every test of
+    // it lives in a file no Windows job executes.
+    ['C:/Users/x/.ssh/*', /absolute path/],
+    ['C:\\Users\\x\\*', /absolute path/],
+    ['c:/Users/*', /absolute path/],
+    ['C:*', /absolute path/],
+    ['//server/share/*', /absolute path/],
+    ['{a,C:/etc}/x', /absolute path/],
+    ['..\\..\\etc\\pass*', /parent-directory/],
+    ['src\\..\\..\\etc', /parent-directory/],
+    // The pattern is interpolated UNQUOTED, so whitespace makes it SEVERAL
+    // patterns and only the first one has to look innocent.
+    ['* /etc/pass*', /whitespace/],
+    ['* ~/.ssh/*', /whitespace/],
+    ['My Docs/*.pdf', /whitespace/],   // refused on BOTH paths, for parity
+    ['*.ts\t../../etc/pass*', /whitespace/],
+  ]
+  for (const [pattern, reason] of ESCAPES) {
+    it(`rejects ${JSON.stringify(pattern)}`, () => {
+      const got = globPatternEscapeReason(pattern)
+      assert.notEqual(got, null, `expected ${pattern} to be rejected`)
+      assert.match(got, reason)
+    })
+  }
+
+  // POSITIVE CONTROLS. Without these the whole suite above would pass just as
+  // well against a validator that rejected every pattern unconditionally —
+  // the #7273 shape, where a check that denies everything satisfies its own
+  // negative tests. These pin that ordinary globs still work.
+  const ALLOWED = [
+    '*',
+    '*.ts',
+    '**/*.ts',
+    'src/**/*.{js,ts}',
+    '*~',                    // emacs backup files — a trailing ~ never expands
+    'src/*~',
+    'report..final.md',      // `..` inside a filename is not a segment
+    'v1..v2/*.diff',
+    'src/[a-z]*.js',
+    '.github/workflows/*.yml',
+    './src/*.ts',
+    'a,b/*.txt',
+    '.github/**/*.yml',      // a dot-leading segment with no metachar
+    '.env*',                 // dot-leading WITH a metachar, but cannot match `..`
+    '.[a-z]*',               // ditto — `[a-z]` cannot match the second `.`
+    '.config/**',
+    '{src,tests}/**/*.js',   // ordinary brace expansion still works
+    '[.]*',
+    // `.*` and `.?` are allowed again. They CAN expand to `..` in a shell, and
+    // the previous cut rejected them for that reason — but computing "can this
+    // glob reach `..`" is what produced both a 12.9-second event-loop stall and
+    // 46 wrong answers out of 515 enumerated bracket segments. Containment moved
+    // to the output, where a `..` that actually materialises is caught for real,
+    // so the common "list the dotfiles" pattern works again.
+    '.*',
+    '.?',
+    '.[[:punct:]]',
+    '.[z-a]',                // an invalid class is a matcher's problem, not ours
+  ]
+  for (const pattern of ALLOWED) {
+    it(`allows ${JSON.stringify(pattern)}`, () => {
+      assert.equal(globPatternEscapeReason(pattern), null)
+    })
+  }
+
+  it('message names the reason and points at the `path` argument', () => {
+    const msg = globPatternEscapeMessage(globPatternEscapeReason('~/.ssh/*'))
+    assert.match(msg, /^EINVAL: glob pattern escapes the workspace root/)
+    assert.match(msg, /home-directory/)
+    assert.match(msg, /"path" argument/)
+  })
+})
+
+describe('globPatternEscapeReason — cost (#7341)', () => {
+  // The layer this replaced was a denial of service. `{a,b}` × 8 fanned out to
+  // 256 words and each word's dot-leading segment was compiled to a regex with
+  // k adjacent unbounded quantifiers, then match-tested against `..`; V8
+  // backtracks that quadratically. MEASURED on the pre-fix tree: 4 KB of
+  // pattern = 12.9 SECONDS of blocked event loop, returning `null` — accepted.
+  // Glob is auto-approved in acceptEdits and callable in a loop, so that was a
+  // whole-daemon freeze from one tool call.
+  //
+  // The check is now a linear scan. This test fails if anything super-linear
+  // is ever reintroduced.
+  it('stays linear on a pathological pattern (no catastrophic backtracking)', () => {
+    for (const k of [4_000, 50_000, 200_000]) {
+      const pattern = '{a,b}'.repeat(8) + '/.' + '*'.repeat(k) + 'z'
+      const started = Date.now()
+      globPatternEscapeReason(pattern)
+      const elapsed = Date.now() - started
+      assert.ok(elapsed < 500, `${pattern.length} bytes took ${elapsed}ms — backtracking is back`)
+    }
+  })
+
+  it('fails closed on a non-string pattern', () => {
+    for (const bad of [undefined, null, 42, {}]) {
+      assert.notEqual(globPatternEscapeReason(bad), null)
+    }
+  })
+})
+
+describe('globMatchEscapesRoot (#7341)', () => {
+  // This is the container Glob's containment boundary. It inspects what the
+  // expansion PRODUCED rather than predicting what it will produce — which is
+  // why it catches all six of the bypasses that were found against the
+  // pattern-prediction guard, none of which are visible in the pattern text.
+  const ESCAPES = [
+    '/etc/passwd',                 // absolute — `''/etc/pass*`, `* /etc/pass*`
+    '../etc/passwd',               // `'..'/x`, `.[[:punct:]]/x`, `{a}b,../x}`
+    '../../etc/passwd',            // `.*` matching the `..` entry, twice
+    'src/../../etc/passwd',
+    '..',
+    'a/..',
+    '/',
+    // Both separators and the Windows absolute forms. Splitting on `/` alone
+    // is #6928 one layer down — a guard that knew one separator and let the
+    // other through.
+    '..\\etc\\passwd',
+    'src\\..\\..\\etc',
+    '\\etc\\passwd',
+    'C:\\Windows\\x',
+    'C:/Windows/x',
+  ]
+  for (const m of ESCAPES) {
+    it(`withholds ${JSON.stringify(m)}`, () => {
+      assert.equal(globMatchEscapesRoot(m), true)
+    })
+  }
+
+  const CONTAINED = [
+    'a.ts',
+    'src/a.ts',
+    './a.ts',
+    'src/.env',
+    'report..final.md',            // `..` inside a NAME is not a segment
+    'v1..v2/x.diff',
+    '.github/workflows/ci.yml',
+    'a b.txt',                     // a space in a filename is not an escape
+    "it's.txt",
+  ]
+  for (const m of CONTAINED) {
+    it(`keeps ${JSON.stringify(m)}`, () => {
+      assert.equal(globMatchEscapesRoot(m), false)
+    })
+  }
+
+  it('fails closed on a non-string match', () => {
+    for (const bad of [undefined, null, 42]) assert.equal(globMatchEscapesRoot(bad), true)
   })
 })

@@ -771,3 +771,56 @@ was checked against `--help` on the pinned version for exactly this reason.
   suite — `packages/server/tests/is-entry-point.test.js` and
   `scripts/__tests__/is-entry-point.test.mjs`; the sidecar's inline third copy
   is held only by the drift gate, since it cannot be imported to be tested.
+
+### 15. The denylist for the neighbouring threat, mistaken for containment — `#7341`
+
+**Entry 14 examined this exact guard and did not ask the symmetric question.** It
+asked what `runGrep`'s pattern was protected against. The answer for `runGlob`'s
+pattern turned out to be: nothing, for containment.
+
+`Glob { pattern }` was validated only against `GLOB_PATTERN_SHELL_METACHARS` — a
+*shell-injection* denylist. It permits `~`, `/` and `..`, so
+`Glob {"pattern":"~/.ssh/*"}` returned the user's SSH private keys and
+`{"pattern":"/etc/pass*"}` returned `/etc/passwd`, measured end-to-end through the
+real dispatcher. The sibling field `path` was fully realpath-confined, one function
+away. The permission floor could not catch it either: `PROTECTED_PATH_INPUT_FIELDS`
+is `['file_path','path','notebook_path']`, and `pattern` is not a member — so the
+tool read as *covered* while being an unrestricted read primitive that is
+auto-approved in `acceptEdits`.
+
+The shape: **a real defence against an adjacent class, sitting where containment
+should be, with a comment that says it is validated.** Entry 14 is the same family
+(#7295, shell quoting stopping the shell while the spawned program ran its own
+option parser). Here it is one layer further out — the guard stops injection, and
+injection was never how this tool leaked.
+
+**Three things the fix taught, all of which cost a review round:**
+
+1. *Predicting a shell is not winnable.* The first fix inspected the pattern to
+   work out where it would expand. Six bypasses followed across two rounds:
+   whitespace word-splitting, brace expansion, a glob matching the `..` entry,
+   quote removal, a brace body with no top-level comma, and POSIX bracket
+   sub-expressions. Every one is invisible in the pattern text and plainly visible
+   in the **output**. Confining results needs no model of the shell.
+2. *The more "correct" model was worse.* Replacing the regexes with a real brace
+   expander and a glob-to-regex segment matcher produced **46 wrong answers out of
+   515** enumerated bracket segments — and a denial of service: 4 KB of pattern
+   backtracked for **12.9 seconds** of blocked event loop, returning `null`
+   (accepted), on a tool callable in a loop. Deleting the model fixed both.
+3. *A guard's own escape hatch needs a test.* `catch { return false }` in the
+   confinement had no coverage — flipping it to `return true` passed all 341 tests.
+   A second fail-closed `catch`, added in the same commit whose message boasted
+   about testing the first, was also untested.
+
+**And the test that was itself the defect.** A case written *specifically* as a
+positive control against entry 11's deny-everything shape, and labelled
+`(positive control)`, globbed `*/pass*` and asserted `esc/passwd` was absent — but
+`fs.glob` does not descend a wildcard-matched symlinked directory, so that pattern
+never yields `esc/passwd` under any implementation. It asserted the absence of
+something that was never there and passed with the entire fix deleted. A negative
+assertion needs a **precondition proving the dangerous thing is produced**, or it is
+indistinguishable from a pattern that matched nothing.
+
+**Guard against it:** when a field decides what a tool reads, confine what the tool
+**returns**, not what it was asked for. And when auditing a floor, ask what the tool
+reads — not which of its fields the list happens to scan.

@@ -59,6 +59,20 @@ describe('BUILTIN_TOOLS', () => {
     assert.deepEqual(wf.input_schema.required.sort(), ['prompt', 'url'])
   })
 
+  it('Glob description discloses workspace confinement + truncation (#7341)', () => {
+    // This file's convention: a security-relevant description change gets a
+    // test naming the issue. The #7341 disclosure shipped without one, behind
+    // only the generic `length > 20` check — so the text could drift away from
+    // the behaviour with nothing to catch it, which is the defect class the
+    // issue itself is about.
+    const glob = BUILTIN_TOOLS.find((t) => t.name === 'Glob')
+    assert.ok(glob, 'Glob tool must exist')
+    const d = glob.description
+    for (const claim of ['`~`', '`..`', 'confined', 'withheld', 'sorted', 'truncated', '#7341']) {
+      assert.ok(d.includes(claim), `Glob description must disclose ${claim}`)
+    }
+  })
+
   it('WebFetch description discloses the auto-mode bypass (#4135)', () => {
     // Pre-fix the description claimed "Always permission-gated" which
     // contradicts the auto-mode short-circuit in PermissionManager. The

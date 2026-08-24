@@ -18,6 +18,8 @@
  * audit).
  */
 
+import { dirname, join, relative } from 'node:path'
+import { glob as fsGlob } from 'node:fs/promises'
 import { isIP } from 'node:net'
 import { lookup as dnsLookup } from 'node:dns/promises'
 import { validateRawPathWithinCwd } from './ws-file-ops/common.js'
@@ -25,7 +27,8 @@ import { executeBash, DEFAULT_BASH_TIMEOUT_MS } from './built-in-tools/bash-exec
 import { readFileTool, writeFileTool, editFileTool } from './built-in-tools/file-ops.js'
 import {
   GLOB_PATTERN_SHELL_METACHARS,
-  buildGlobCommand,
+  globPatternEscapeReason,
+  globPatternEscapeMessage,
   buildGrepArgs,
   buildGrepCommand,
 } from './built-in-tools/tool-transforms.js'
@@ -43,6 +46,49 @@ import { isPrivateOrSpecialIp } from './ssrf-guard.js'
  * hangs.
  */
 const BASH_TIMEOUT_CEILING_MS = 600_000
+
+/**
+ * Two bounds, because they do different jobs.
+ *
+ * `GLOB_COLLECT_CEILING` is the memory backstop on the walk. `GLOB_MAX_MATCHES`
+ * is how many paths the model is shown. Collecting more than we return is what
+ * makes truncation a SORTED PREFIX rather than an arbitrary subset — and that
+ * distinction was a real defect, not a nicety: with a single 10 000 cap on an
+ * unsorted traversal, `Glob **\/*.ts` over a 20 000-file tree returned 10 000
+ * paths, `isError: false`, no marker, and `d00`–`d09` — half the tree, the
+ * alphabetically-first half — simply absent. A model would conclude those
+ * directories contain no TypeScript.
+ */
+const GLOB_COLLECT_CEILING = 50_000
+const GLOB_MAX_MATCHES = 10_000
+
+/**
+ * Wall-clock bound on a Glob walk. Matches the 30s `executeBash` timeout the
+ * shell implementation had — dropping the subprocess dropped its kill, and
+ * `fs.glob` honours no AbortSignal of its own.
+ *
+ * Read per call, not at module load, and overridable via
+ * `CHROXY_GLOB_TIMEOUT_MS`. That knob is what lets the timeout be PROVEN: a
+ * test asserting a 30s bound by waiting 30s does not get written, and a test
+ * that only checks the happy path is a guard whose success and whose absence
+ * look identical (docs/false-safety-guards.md). A very large monorepo wanting
+ * a longer budget is the secondary use.
+ */
+const GLOB_TIMEOUT_DEFAULT_MS = 30_000
+function globTimeoutMs() {
+  // Trim and require a NON-EMPTY, strictly positive integer, matching every
+  // other env-timeout parser in this package (config.js, prompt-evaluator.js,
+  // claude-tui-session.js). The first cut used `Number(raw) >= 0`, and
+  // `Number('') === 0`: an exported-but-empty `CHROXY_GLOB_TIMEOUT_MS=` — what
+  // a bare `.env` line and `docker run -e VAR` both produce — gave every Glob
+  // call a 0 ms budget and disabled the tool outright, with nothing pointing at
+  // the cause. The knob exists to make the timeout testable; it must not be a
+  // way to switch Glob off by accident.
+  const raw = (process.env.CHROXY_GLOB_TIMEOUT_MS || '').trim()
+  if (!/^\d+$/.test(raw)) return GLOB_TIMEOUT_DEFAULT_MS
+  const n = Number(raw)
+  return n > 0 ? n : GLOB_TIMEOUT_DEFAULT_MS
+}
 
 /**
  * Env vars the model must NEVER see in a Bash subprocess. Centrally
@@ -259,28 +305,215 @@ async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
       isError: true,
     }
   }
+  // #7341 — the metachar denylist above closes shell INJECTION only; it says
+  // nothing about where the glob expands to. Containment is a separate rule.
+  const escapeReason = globPatternEscapeReason(pattern)
+  if (escapeReason) {
+    return { content: globPatternEscapeMessage(escapeReason), isError: true }
+  }
 
   // Realpath-validate the search ROOT against cwd. Pre-fix this was a
   // weak "no ..." check that let absolute paths to /etc through.
   const realRoot = await safeResolveRoot(input?.path, cwd, cwdRealCache, cwdCacheTtl)
 
-  // Shell expansion of `for f in <pattern>` is what produces the file
-  // paths. Pattern is now whitelist-validated above, so interpolation
-  // is safe.
-  const cmd = buildGlobCommand(pattern, realRoot)
-  const result = await executeBash({
-    command: cmd,
-    cwd: realRoot,
-    signal,
-    timeoutMs: 30_000,
-    env: buildSafeBashEnv(),
-  })
-  if (result.exitCode !== 0 && !result.stdout) {
-    return { content: `Glob failed: ${result.stderr || `exit ${result.exitCode}`}`, isError: true }
+  // #7341 — the host does NOT shell out for Glob any more. `for f in
+  // <pattern>` needed the pattern interpolated UNQUOTED to expand at all, and
+  // two review rounds found six ways to make that expansion leave the
+  // workspace (quote removal, whitespace word-splitting, a brace body with no
+  // top-level comma, `.*` matching the `..` entry, POSIX bracket
+  // sub-expressions, nested braces) — none of them visible in the source text.
+  // `node:fs/promises`'s glob has none of those layers: no tilde expansion, no
+  // word splitting, no quote removal. The question "what will bash do with
+  // this string" simply stops being asked. (The container still shells out —
+  // it cannot run JS inside itself — and confines its RESULTS instead.)
+  //
+  // `withFileTypes` is not cosmetic: the Dirent carries `isSymbolicLink()`,
+  // which the traversal already knows, so the confinement below can single out
+  // symlink entries for a realpath WITHOUT paying a syscall on every ordinary
+  // file.
+  //
+  // `fs.glob` IGNORES an AbortSignal (measured on Node 22 — passing an
+  // already-aborted one completes normally), and dropping `executeBash` also
+  // dropped its 30s kill. So the bound is rebuilt here: a flag the loop checks
+  // at each yield, plus a race so the TOOL CALL returns on time even when the
+  // walk is between yields. The walk itself can only stop at a yield, which is
+  // stated rather than papered over.
+  // #7341 — if the pattern NAMES a directory outright and that directory
+  // resolves outside the workspace, say so instead of returning "No matches".
+  //
+  // Containment itself is unchanged: every match is still confined below, and
+  // a symlink the caller merely DISCOVERED through a wildcard is still withheld
+  // in silence, because naming it would be the existence oracle that silence
+  // exists to prevent. This is the other case. When the caller writes
+  // `node_modules/**` and `node_modules` is a symlink into a pnpm store, a
+  // shared `.venv`, or a sibling repo, "No matches" is a baffling answer to a
+  // question the caller already knew the shape of — and it leaks nothing,
+  // because passing the very same path as `input.path` ALREADY returns exactly
+  // this error. It also makes `pattern` and `path` consistent rather than
+  // mysteriously different for the same directory.
+  const literalPrefix = literalDirPrefix(pattern)
+  if (literalPrefix) {
+    await safeResolveRoot(literalPrefix, realRoot, cwdRealCache, cwdCacheTtl)
   }
-  const files = result.stdout.split('\n').filter(Boolean)
-  if (files.length === 0) return { content: `No matches for ${pattern}`, isError: false }
-  return { content: files.join('\n'), isError: false }
+
+  // Check the signal BEFORE the walk: the in-loop check is only reached when
+  // the glob yields, so an already-aborted call on a pattern that matches
+  // nothing used to run the whole tree and then report a cheerful "No matches".
+  // The container Glob has always had this pre-check; the host lacked it, which
+  // made the two backends answer differently for identical input.
+  if (signal?.aborted) return { content: 'Glob interrupted', isError: true }
+
+  const files = []
+  // ONE timer sets the flag and releases the race, so the two cannot resolve
+  // in either order — a second, independent timer would let the race finish
+  // before `stop` was assigned and report success on a timed-out walk. The
+  // abort listener shares that single release for the same reason.
+  let stop = null
+  let releaseDeadline
+  const deadlineReached = new Promise((resolve) => { releaseDeadline = resolve })
+  const timeoutMs = globTimeoutMs()
+  const deadline = setTimeout(() => { stop = 'timed out'; releaseDeadline() }, timeoutMs)
+  deadline.unref?.()
+  const onAbort = () => { stop = 'interrupted'; releaseDeadline() }
+  signal?.addEventListener?.('abort', onAbort, { once: true })
+  const collect = (async () => {
+    for await (const entry of fsGlob(pattern, { cwd: realRoot, withFileTypes: true })) {
+      if (stop) break
+      const rel = relative(realRoot, join(entry.parentPath, entry.name))
+      // `**` yields the search root itself, which `relative()` renders as ''.
+      // The root is not a match; emitting it produced a blank first line (and
+      // a bare '' on an empty workspace) that the shell implementation never
+      // did.
+      if (rel === '') continue
+      files.push({ path: rel, isSymlink: entry.isSymbolicLink() })
+      if (files.length >= GLOB_COLLECT_CEILING) break
+    }
+  })()
+  // Attach a catch BEFORE the race: if the walk rejects after the deadline has
+  // already settled it, the rejection would otherwise be unhandled.
+  let walkError = null
+  collect.catch((err) => { walkError = err })
+  try {
+    await Promise.race([collect, deadlineReached])
+  } catch (err) {
+    walkError = err
+  }
+  clearTimeout(deadline)
+  signal?.removeEventListener?.('abort', onAbort)
+  if (walkError) {
+    return { content: `Glob failed: ${walkError?.message || String(walkError)}`, isError: true }
+  }
+  if (stop === 'timed out') {
+    return { content: `Glob timed out after ${timeoutMs}ms`, isError: true }
+  }
+  if (stop === 'interrupted') return { content: 'Glob interrupted', isError: true }
+  const kept = await confineGlobMatches(files, realRoot, cwdRealCache, cwdCacheTtl)
+  // A withheld match is reported as no match, with no count and no marker.
+  // Anything that distinguishes "matched, but outside" from "matched nothing"
+  // is an existence ORACLE: a workspace that contains `esc -> /` turns one bit
+  // per call into filesystem enumeration, on a tool that is auto-approved in
+  // `acceptEdits`. The confinement is proven by tests, not by a runtime marker.
+  if (kept.length === 0) return { content: `No matches for ${pattern}`, isError: false }
+
+  // Sort. Every shell glob does, on both the old host and the container;
+  // `fs.glob` yields in traversal order. Deterministic-but-different reshuffles
+  // the whole listing for a one-file change and destroys the alphabetical
+  // grouping that makes a long result readable.
+  kept.sort()
+
+  // TRUNCATION IS ANNOUNCED. The oracle argument that justifies silence for
+  // withheld matches does not apply here: a count of in-workspace matches
+  // reveals nothing about anything outside it, and silently dropping paths
+  // makes Glob wrong by omission with nothing to tell the model.
+  if (kept.length > GLOB_MAX_MATCHES) {
+    const total = files.length >= GLOB_COLLECT_CEILING ? `${kept.length}+` : `${kept.length}`
+    const shown = kept.slice(0, GLOB_MAX_MATCHES)
+    shown.push(`[truncated: showing ${GLOB_MAX_MATCHES} of ${total} matches — narrow the pattern or use "path"]`)
+    return { content: shown.join('\n'), isError: false }
+  }
+  return { content: kept.join('\n'), isError: false }
+}
+
+/**
+ * SECURITY (#7341) — second containment layer for Glob, after the syntactic
+ * `globPatternEscapeReason` check. Drops any expanded match whose real
+ * location is outside the workspace.
+ *
+ * Why a second layer at all: no inspection of the pattern can see a symlinked
+ * DIRECTORY sitting inside the workspace. With `esc -> /etc` present, the
+ * pattern `esc/pass*` contains no `~`, no `/` prefix and no `..` — every
+ * character is legal — and it lists `/etc`. Only resolving the RESULTS catches
+ * that, which is why the syntactic guard is not treated as sufficient here.
+ *
+ * The property it establishes is the strong one, stated without caveats:
+ * EVERY path Glob returns resolves inside the workspace. An earlier cut
+ * checked only each match's parent directory, which let a symlink whose NAME
+ * is in the workspace but whose TARGET is outside be listed. That is arguably
+ * defensible — the entry really is in the directory, and `Read` would refuse
+ * to follow it — but it makes the tool's contract a sentence with an
+ * exception in it, and the property test caught it precisely because the
+ * exception could not be stated cleanly. Withholding it costs a listing
+ * nobody can act on.
+ *
+ * Two checks, split so the common case is free:
+ *   - the match's PARENT, cached per directory. Catches traversal and any
+ *     descent through a symlinked directory. Matches cluster into few
+ *     directories, so this is one `open(2)`-faithful walk per directory, not
+ *     one per file.
+ *   - the ENTRY itself, but only when the glob's own Dirent already said it is
+ *     a symlink. Ordinary files — nearly all of them — cost nothing extra.
+ *
+ * FAIL-CLOSED: a match that cannot be resolved (EACCES, ELOOP, depth bomb) is
+ * withheld, never emitted.
+ *
+ * @param {{path: string, isSymlink: boolean}[]} files
+ * @returns {Promise<string[]>} The matches that are inside the workspace.
+ */
+async function confineGlobMatches(files, realRoot, cwdRealCache, cwdCacheTtl) {
+  const dirVerdicts = new Map()
+  const kept = []
+  for (const { path: f, isSymlink } of files) {
+    // Relative to realRoot — that is the directory the glob ran in. Pass the
+    // RAW relative path (#6923: never pre-`resolve()`, a lexical `..` collapse
+    // hides a symlink escape).
+    const rawDir = dirname(f)
+    let ok = dirVerdicts.get(rawDir)
+    if (ok === undefined) {
+      ok = await isWithin(rawDir, realRoot, cwdRealCache, cwdCacheTtl)
+      dirVerdicts.set(rawDir, ok)
+    }
+    if (ok && isSymlink) ok = await isWithin(f, realRoot, cwdRealCache, cwdCacheTtl)
+    if (ok) kept.push(f)
+  }
+  return kept
+}
+
+/**
+ * The leading run of LITERAL directory segments in a glob pattern — the part
+ * the caller named outright rather than asked the matcher to discover.
+ *
+ * `node_modules/**` → `node_modules`; `src/**\/*.ts` → `src`; `*.ts` → ''.
+ * The final segment is excluded: it is the basename, and confinement of the
+ * matches themselves covers it.
+ */
+function literalDirPrefix(pattern) {
+  const segments = pattern.split('/')
+  const literal = []
+  for (let i = 0; i < segments.length - 1; i++) {
+    if (/[*?[\]{}]/.test(segments[i])) break
+    literal.push(segments[i])
+  }
+  return literal.join('/')
+}
+
+/** {@link validateRawPathWithinCwd}, fail-closed on any resolution error. */
+async function isWithin(rawPath, realRoot, cwdRealCache, cwdCacheTtl) {
+  try {
+    const { valid } = await validateRawPathWithinCwd(rawPath, realRoot, cwdRealCache, cwdCacheTtl)
+    return valid
+  } catch {
+    return false
+  }
 }
 
 async function runGrep({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {

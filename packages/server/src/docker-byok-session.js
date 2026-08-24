@@ -129,6 +129,9 @@ import { ClaudeByokSession } from './byok-session.js'
 import {
   applyEdit,
   GLOB_PATTERN_SHELL_METACHARS,
+  globPatternEscapeReason,
+  globPatternEscapeMessage,
+  globMatchEscapesRoot,
   buildGlobCommand,
   buildGrepArgs,
   buildGrepCommand,
@@ -2019,6 +2022,17 @@ export class DockerByokSession extends ClaudeByokSession {
         isError: true,
       }
     }
+    // #7341 — same containment rule as the host Glob, from the same shared
+    // validator, so the two cannot drift. Here it is the ONLY layer: the host
+    // additionally realpath-confines the expanded matches, which is impossible
+    // from out here because the matches are produced inside the container.
+    // What it escapes into is the container filesystem (the image's /etc, the
+    // container user's ~), not the host's — lower severity than the host hole,
+    // same defect.
+    const escapeReason = globPatternEscapeReason(pattern)
+    if (escapeReason) {
+      return { content: globPatternEscapeMessage(escapeReason), isError: true }
+    }
     if (signal?.aborted) {
       return { content: 'Interrupted before docker exec', isError: true }
     }
@@ -2030,7 +2044,28 @@ export class DockerByokSession extends ClaudeByokSession {
     if (!stdout && stderr && stderr.trim()) {
       return { content: `Glob failed: ${stderr.trim()}`, isError: true }
     }
-    const files = stdout.split('\n').filter(Boolean)
+    // #7341 — confine the RESULTS, not just the pattern. This is the layer
+    // that actually holds: it inspects what the shell PRODUCED (a leading `/`
+    // or a `..` segment) rather than trying to predict what it will produce,
+    // and every one of the six expansion bypasses found in review is plainly
+    // visible here while being invisible in the pattern text. The host does
+    // strictly better (a realpath walk per match); from out here the matches
+    // are inside the container, so lexical is what is reachable.
+    //
+    // RESIDUAL, tracked by #7354: a symlinked directory inside /workspace
+    // (`esc -> /etc` in the CONTAINER's filesystem) produces a lexically clean
+    // match that resolves out. Closing it needs the match resolved in-container,
+    // and it is reachable through `input.path` as well as `pattern` — that route
+    // is shared with _containerGrep/_containerRead, so it is wider than Glob.
+    //
+    // This comment said "tracked separately" while nothing tracked it, which is
+    // the same false-safety shape as the bug above: an assertion of a stronger
+    // state than reality, in a place no test can check. The issue now exists.
+    //
+    // Withheld matches read as no match — no count, no marker. Anything that
+    // distinguishes "matched, but outside" from "matched nothing" is an
+    // existence oracle on a tool auto-approved in `acceptEdits`.
+    const files = stdout.split('\n').filter(Boolean).filter((f) => !globMatchEscapesRoot(f))
     if (files.length === 0) return { content: `No matches for ${pattern}`, isError: false }
     return { content: files.join('\n'), isError: false }
   }

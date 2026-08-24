@@ -679,6 +679,120 @@ describe('DockerByokSession _dispatchBuiltinTool — tool routing', () => {
     assert.equal(_dockerBackend.calls.length, 0)
   })
 
+  it('Glob refuses patterns that escape /workspace (security #7341)', async () => {
+    // The container Glob shares the host's containment validator, so the two
+    // cannot drift. Here it is the only layer available — the matches are
+    // produced inside the container, out of reach of a host realpath.
+    // The whitespace and `.*`-matches-`..` rows are the ones that matter most
+    // here: this is the ONLY layer the container has, so a bypass of it is a
+    // live /workspace escape with nothing behind it.
+    for (const pattern of [
+      '~/.ssh/*', '{~,.}/.ssh/*',
+      '/etc/pass*', '{a,/etc}/x',
+      '../../etc/pass*', '{.,..}/x',
+      '* /etc/pass*', '* ~/.ssh/*',
+    ]) {
+      const _dockerBackend = backendStub()
+      const { session } = buildSession({ backend: _dockerBackend })
+      const result = await session._dispatchBuiltinTool({
+        toolName: 'Glob',
+        input: { pattern },
+      })
+      assert.equal(result.isError, true, `expected error for: ${pattern}`)
+      assert.match(result.content, /escapes the workspace root|whitespace/)
+      assert.equal(_dockerBackend.calls.length, 0, `${pattern} must not reach docker exec`)
+    }
+  })
+
+  it('Glob contains the six historical bypasses at the RESULT layer (#7341)', async () => {
+    // These are the patterns that walked past the pattern guard across three
+    // review rounds — quote removal, a brace body with no top-level comma,
+    // `.*` matching the `..` entry, POSIX bracket sub-expressions. They are
+    // LIVE here and inert on the host: the container still interpolates the
+    // pattern unquoted into `for f in <pattern>`, while the host no longer
+    // shells out at all.
+    //
+    // An earlier version of this coverage asserted them against the HOST, the
+    // one place they cannot occur — so it passed with the entire fix deleted.
+    // Here each pattern is accepted by the pattern guard (asserted, so the
+    // test cannot silently become a guard test) and the shell is made to
+    // return the escaping path it really produces.
+    const { globPatternEscapeReason } = await import('../src/built-in-tools/tool-transforms.js')
+    // (`{a}b,../etc/pass*}` is NOT in this list: the crude segment split on
+    // `/{},` sees its `..` and rejects it up front — a case the "correct" brace
+    // expander missed, because it stopped at the first balanced `}` where bash
+    // keeps scanning. The cruder check is better here precisely because it does
+    // not try to be bash.)
+    for (const pattern of ["'..'/TOP*", '.[[:punct:]]/etc/pass*', '.*/etc/pass*']) {
+      assert.equal(
+        globPatternEscapeReason(pattern), null,
+        `precondition: ${pattern} must reach the shell, or this tests the wrong layer`,
+      )
+      const _dockerBackend = backendStub({
+        defaultResponse: { stdout: '../etc/passwd\n/etc/shadow\nsrc/ok.ts\n', stderr: '' },
+      })
+      const { session } = buildSession({ backend: _dockerBackend })
+      const result = await session._dispatchBuiltinTool({ toolName: 'Glob', input: { pattern } })
+      assert.equal(result.isError, false, `${pattern} should reach the shell and be filtered`)
+      assert.equal(result.content.includes('passwd'), false, `${pattern} leaked /etc/passwd`)
+      assert.equal(result.content.includes('shadow'), false, `${pattern} leaked /etc/shadow`)
+      assert.match(result.content, /src\/ok\.ts/, 'the in-workspace match must survive')
+    }
+  })
+
+  it('Glob withholds escaping paths the container actually returned (#7341)', async () => {
+    // The layer that holds. Six ways past the pattern guard were found in
+    // review — quote removal, whitespace splitting, a brace body with no
+    // top-level comma, `.*` matching `..`, POSIX bracket sub-expressions,
+    // nested braces — and every one of them is invisible in the pattern and
+    // plainly visible HERE, in what the shell produced. So this test bypasses
+    // the pattern guard entirely and feeds the escaping output straight back.
+    const _dockerBackend = backendStub({
+      defaultResponse: {
+        stdout: '/etc/passwd\n../../etc/shadow\nsrc/a.ts\n..\n',
+        stderr: '',
+      },
+    })
+    const { session } = buildSession({ backend: _dockerBackend })
+    const result = await session._dispatchBuiltinTool({
+      toolName: 'Glob',
+      input: { pattern: '**/*.ts' },      // a pattern the guard is happy with
+    })
+    assert.equal(result.isError, false)
+    assert.equal(result.content.includes('passwd'), false)
+    assert.equal(result.content.includes('shadow'), false)
+    // POSITIVE CONTROL, same call: the in-workspace match survives. Without it
+    // a filter that dropped everything would pass the two assertions above.
+    assert.match(result.content, /src\/a\.ts/)
+  })
+
+  it('Glob reports an all-withheld result as no match, with no count (oracle)', async () => {
+    const _dockerBackend = backendStub({
+      defaultResponse: { stdout: '/etc/passwd\n/etc/shadow\n', stderr: '' },
+    })
+    const { session } = buildSession({ backend: _dockerBackend })
+    const result = await session._dispatchBuiltinTool({
+      toolName: 'Glob', input: { pattern: '**/*.ts' },
+    })
+    assert.equal(result.isError, false)
+    assert.match(result.content, /^No matches for/)
+    assert.equal(/\d/.test(result.content.replace('**/*.ts', '')), false, 'no count may leak')
+  })
+
+  it('Glob still runs an ordinary in-workspace pattern (positive control #7341)', async () => {
+    // Without this the test above would pass just as well against a Glob that
+    // refused every pattern outright.
+    const _dockerBackend = backendStub({ defaultResponse: { stdout: 'src/a.ts\n', stderr: '' } })
+    const { session } = buildSession({ backend: _dockerBackend })
+    const result = await session._dispatchBuiltinTool({
+      toolName: 'Glob',
+      input: { pattern: '**/*.ts' },
+    })
+    assert.equal(result.isError, false)
+    assert.match(result.content, /src\/a\.ts/)
+    assert.ok(_dockerBackend.calls.length > 0, 'the legitimate pattern must reach docker exec')
+  })
+
   it('Grep falls back to grep when rg is unavailable (cmd shape)', async () => {
     const _dockerBackend = backendStub({
       defaultResponse: { stdout: 'foo.js:1:match\n', stderr: '' },

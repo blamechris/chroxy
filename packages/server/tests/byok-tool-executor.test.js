@@ -1,8 +1,9 @@
 import { describe, it, beforeEach, afterEach, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync, rmSync, mkdirSync, existsSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { mkdtempSync, writeFileSync, rmSync, mkdirSync, existsSync, symlinkSync, realpathSync } from 'node:fs'
+import { glob as fsGlob } from 'node:fs/promises'
+import { tmpdir, homedir } from 'node:os'
+import { join, resolve } from 'node:path'
 import { createServer } from 'node:http'
 import { executeBuiltinTool } from '../src/byok-tool-executor.js'
 
@@ -211,6 +212,592 @@ describe('executeBuiltinTool', () => {
       for (const pat of ['*.ts | cat', '*.ts; ls', '*.ts > /tmp/x', '*.ts && rm -rf']) {
         const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: pat }, ...ctx() })
         assert.equal(r.isError, true, `expected error for: ${pat}`)
+      }
+    })
+
+    // ---- #7341: the PATTERN escapes the workspace root -------------------
+    //
+    // Pre-fix these ALL returned isError:false with real file contents —
+    // measured end-to-end through this same dispatcher. `pattern` was checked
+    // only against GLOB_PATTERN_SHELL_METACHARS, a shell-INJECTION denylist
+    // that permits `~`, `/` and `..`; the sibling `path` field was fully
+    // realpath-confined. Glob is auto-approved in acceptEdits mode and gets
+    // only the reduced secrets floor, so this was a read-anything primitive
+    // behind a tool classified read-only.
+    //
+    // These assertions must FAIL on the pre-fix tree — verified by restoring
+    // the pre-fix src/ and re-running (docs/false-safety-guards.md).
+
+    it('refuses a home-directory (~) pattern (security #7341)', async () => {
+      for (const pattern of ['~/.ssh/*', '{~,.}/.ssh/*']) {
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern }, ...ctx() })
+        assert.equal(r.isError, true, `expected error for: ${pattern}`)
+        assert.match(r.content, /escapes the workspace root/)
+        assert.equal(
+          r.content.includes(homedir()),
+          false,
+          `${pattern} must not leak paths under the real home directory`,
+        )
+      }
+    })
+
+    it('refuses an absolute pattern (security #7341)', async () => {
+      for (const pattern of ['/etc/pass*', '{a,/etc}/pass*']) {
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern }, ...ctx() })
+        assert.equal(r.isError, true, `expected error for: ${pattern}`)
+        assert.match(r.content, /escapes the workspace root/)
+        assert.equal(r.content.includes('passwd'), false, `${pattern} must not list /etc`)
+      }
+    })
+
+    it('refuses a `..` traversal pattern (security #7341)', async () => {
+      // Enough `..` to clear even a deep macOS /private/var/folders tmpdir —
+      // a shallower one silently "passes" as No-matches and proves nothing.
+      for (const pattern of [
+        '../'.repeat(12) + 'etc/pass*',
+        'src/../' + '../'.repeat(11) + 'etc/pass*',
+        '{.,..}/' + '../'.repeat(11) + 'etc/pass*',
+      ]) {
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern }, ...ctx() })
+        assert.equal(r.isError, true, `expected error for: ${pattern}`)
+        assert.match(r.content, /escapes the workspace root/)
+        assert.equal(r.content.includes('passwd'), false, `${pattern} must not list /etc`)
+      }
+    })
+
+    it('refuses a whitespace-split multi-pattern (security #7341)', async () => {
+      // The pattern is interpolated UNQUOTED into `for f in <pattern>`, so a
+      // space makes it SEVERAL patterns and only the first has to look
+      // innocent. Pre-fix `* /etc/pass*` listed /etc through the container
+      // Glob, which has no result-confinement layer to fall back on.
+      for (const pattern of ['* /etc/pass*', '* ~/.ssh/*']) {
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern }, ...ctx() })
+        assert.equal(r.isError, true, `expected error for: ${pattern}`)
+        assert.match(r.content, /whitespace/)
+        assert.equal(r.content.includes('passwd'), false)
+        assert.equal(r.content.includes(homedir()), false)
+      }
+    })
+
+    it('contains a glob that reaches `..` by EXPANSION, without inspecting it', async () => {
+      // `.*` matches the `..` entry in a shell, so `.{.,x}/x` and `.*/x` reach
+      // the parent with no `..` token in the source text. The previous cut tried
+      // to detect that by modelling brace expansion and glob-vs-`..` matching.
+      // That model was wrong on 46 of 515 enumerated bracket segments AND cost
+      // 12.9 seconds of blocked event loop on a 4 KB pattern, so it is gone:
+      // these patterns are now ACCEPTED by the pattern check and contained by
+      // the output layer instead. What must hold is not the rejection — it is
+      // that nothing outside the workspace comes back.
+      const outer = mkdtempSync(join(tmpdir(), 'chroxy-glob-outer-'))
+      try {
+        writeFileSync(join(outer, 'TOPSECRET.txt'), 'pw')
+        const ws = join(outer, 'ws')
+        mkdirSync(ws)
+        writeFileSync(join(ws, 'a.ts'), '1')
+        for (const pattern of ['.{.,x}/TOP*', '.*/TOP*', '..*/TOP*', '.[.]/TOP*', '.[[:punct:]]/TOP*']) {
+          const r = await executeBuiltinTool({
+            toolName: 'Glob', input: { pattern },
+            cwd: ws, cwdRealCache: new Map(), cwdCacheTtl: 30_000,
+          })
+          assert.equal(
+            r.content.includes('TOPSECRET'), false,
+            `${pattern} must not reach outside the workspace`,
+          )
+        }
+        // POSITIVE CONTROL on the same workspace — the tool still works.
+        const ok = await executeBuiltinTool({
+          toolName: 'Glob', input: { pattern: '*.ts' },
+          cwd: ws, cwdRealCache: new Map(), cwdCacheTtl: 30_000,
+        })
+        assert.match(ok.content, /a\.ts/)
+      } finally {
+        rmSync(outer, { recursive: true, force: true })
+      }
+    })
+
+    it('still globs dotfiles that cannot reach `..` (positive control)', async () => {
+      // The `..`-matching rule must not cost ordinary dotfile globbing. A
+      // leading `.` has to be matched LITERALLY by the shell, so `.env*` and
+      // `.[a-z]*` can never reach `..` and must keep working.
+      writeFileSync(join(dir, '.envrc'), 'x')
+      for (const pattern of ['.env*', '.[a-z]*']) {
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern }, ...ctx() })
+        assert.equal(r.isError, false, `${pattern} must still work`)
+        assert.match(r.content, /\.envrc/)
+      }
+    })
+
+    it('names an explicitly-addressed out-of-workspace directory (#7341)', async () => {
+      // When the caller NAMES the directory, silence is the wrong answer and
+      // not required: `input.path: 'esc'` already returns exactly this error,
+      // so saying it for a literal pattern prefix leaks nothing new. This is
+      // what makes `Glob node_modules/**` over a pnpm store explain itself
+      // instead of returning a baffling "No matches".
+      symlinkSync('/etc', join(dir, 'esc'))
+      const r = await executeBuiltinTool({
+        toolName: 'Glob',
+        input: { pattern: 'esc/pass*' },
+        ...ctx(),
+      })
+      assert.equal(r.isError, true)
+      assert.match(r.content, /outside workspace/)
+      assert.equal(r.content.includes('passwd'), false, 'must not list /etc through a symlink')
+    })
+
+    it('stays silent about a symlink it DISCOVERED rather than was given (oracle)', async () => {
+      // The oracle case, and the reason the rule is split. Here the caller did
+      // not name `esc` — a wildcard found it. Anything distinguishing "matched,
+      // but outside" from "matched nothing" turns one bit per call into
+      // filesystem enumeration for a workspace containing `esc -> /`, through a
+      // tool auto-approved in acceptEdits. The two responses must be identical.
+      symlinkSync('/etc', join(dir, 'esc'))
+      const hit = await executeBuiltinTool({
+        toolName: 'Glob', input: { pattern: '{esc,nope}/passwd' }, ...ctx(),
+      })
+      const miss = await executeBuiltinTool({
+        toolName: 'Glob', input: { pattern: '{esc,nope}/definitely-no-such-file' }, ...ctx(),
+      })
+      assert.equal(hit.isError, false)
+      assert.equal(hit.isError, miss.isError)
+      assert.equal(
+        hit.content.replace('{esc,nope}/passwd', 'X'),
+        miss.content.replace('{esc,nope}/definitely-no-such-file', 'X'),
+      )
+      assert.equal(/\d/.test(hit.content), false, 'no count may leak')
+
+      // PRECONDITION: the matcher really does produce the escaping match, so
+      // "identical output" is evidence of withholding and not of a pattern
+      // that never matched.
+      const raw = []
+      for await (const f of fsGlob('{esc,nope}/passwd', { cwd: dir })) raw.push(f)
+      assert.deepEqual(raw, ['esc/passwd'], 'precondition: the escape must be real')
+    })
+
+    it('withholds a parent-directory escape the matcher really does produce', async () => {
+      // THE test for layer 2, and the only one written against a vector that
+      // provably reaches a real secret. `{a}b,../TOP*}` walks past the
+      // syntactic guard — bash and node both skip a brace body with no
+      // top-level comma and keep scanning, which the guard does not model —
+      // so this is layer 2 alone, unaided.
+      //
+      // The `fsGlob` assertion is a POSITIVE CONTROL and is not decoration.
+      // Without it, "the tool returned no match" is satisfied just as well by
+      // a pattern that never matched anything, and the test would keep passing
+      // with the confinement deleted (docs/false-safety-guards.md).
+      const outer = mkdtempSync(join(tmpdir(), 'chroxy-glob-outer-'))
+      try {
+        writeFileSync(join(outer, 'TOPSECRET.txt'), 'pw')
+        const ws = join(outer, 'ws')
+        mkdirSync(ws)
+        writeFileSync(join(ws, 'a.ts'), '1')
+
+        for (const pattern of ['{a}b,../TOP*}', '../TOP*']) {
+          const raw = []
+          for await (const f of fsGlob(pattern, { cwd: ws })) raw.push(f)
+          assert.deepEqual(
+            raw, ['../TOPSECRET.txt'],
+            `precondition: ${pattern} must really escape, or this test proves nothing`,
+          )
+
+          const r = await executeBuiltinTool({
+            toolName: 'Glob',
+            input: { pattern },
+            cwd: ws,
+            cwdRealCache: new Map(),
+            cwdCacheTtl: 30_000,
+          })
+          assert.equal(
+            r.content.includes('TOPSECRET'), false,
+            `${pattern} must not reach outside the workspace`,
+          )
+        }
+
+        // Positive control on the SAME workspace: an in-bounds pattern still works.
+        const ok = await executeBuiltinTool({
+          toolName: 'Glob', input: { pattern: '*.ts' },
+          cwd: ws, cwdRealCache: new Map(), cwdCacheTtl: 30_000,
+        })
+        assert.match(ok.content, /a\.ts/)
+      } finally {
+        rmSync(outer, { recursive: true, force: true })
+      }
+    })
+
+    it('treats shell-only expansion syntax as literal characters (#7341)', async () => {
+      // The host no longer shells out, so quote removal, word splitting and
+      // POSIX bracket sub-expressions — three of the six bypasses review found
+      // against the old `for f in <pattern>` implementation — are not
+      // expansions any more, they are just characters that match no filename.
+      const outer = mkdtempSync(join(tmpdir(), 'chroxy-glob-outer-'))
+      try {
+        writeFileSync(join(outer, 'TOPSECRET.txt'), 'pw')
+        const ws = join(outer, 'ws')
+        mkdirSync(ws)
+        for (const pattern of [`'..'/TOP*`, `"..".${'/'}TOP*`, '.[[:punct:]]/TOP*']) {
+          const r = await executeBuiltinTool({
+            toolName: 'Glob', input: { pattern },
+            cwd: ws, cwdRealCache: new Map(), cwdCacheTtl: 30_000,
+          })
+          assert.equal(r.content.includes('TOPSECRET'), false, `${pattern} must not escape`)
+        }
+      } finally {
+        rmSync(outer, { recursive: true, force: true })
+      }
+    })
+
+    it('does not emit the workspace root itself for `**` (#7341 regression)', async () => {
+      // `fs.glob` yields the search ROOT as a match for `**`; `relative()`
+      // renders it '', which survived confinement and came out as a leading
+      // blank line — and as a bare '' on an empty workspace, where the shell
+      // implementation said "No matches". Both are regressions from the
+      // rewrite, not from the original bug.
+      const empty = mkdtempSync(join(tmpdir(), 'chroxy-glob-empty-'))
+      try {
+        const r0 = await executeBuiltinTool({
+          toolName: 'Glob', input: { pattern: '**' },
+          cwd: empty, cwdRealCache: new Map(), cwdCacheTtl: 30_000,
+        })
+        assert.equal(r0.isError, false)
+        assert.match(r0.content, /^No matches for/)
+      } finally {
+        rmSync(empty, { recursive: true, force: true })
+      }
+
+      // Non-empty: real matches, and no blank line among them.
+      writeFileSync(join(dir, 'a.ts'), '1')
+      mkdirSync(join(dir, 'sub'), { recursive: true })
+      writeFileSync(join(dir, 'sub/b.ts'), '1')
+      const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '**' }, ...ctx() })
+      assert.equal(r.isError, false)
+      const lines = r.content.split('\n')
+      assert.equal(lines.includes(''), false, 'the workspace root must not appear as an empty match')
+      assert.ok(lines.includes('a.ts') && lines.includes('sub/b.ts'), 'real matches must survive')
+    })
+
+    it('bounds a walk with a wall-clock timeout, and the bound FIRES', async () => {
+      // Dropping `executeBash` dropped its 30s kill, and `fs.glob` honours no
+      // AbortSignal (measured on Node 22: an already-aborted signal is simply
+      // ignored), so an unbounded walk was reachable. Asserting only the happy
+      // path here would be a guard whose success and whose absence look the
+      // same, so the budget is shrunk to 0 and the timeout branch is taken.
+      // The deadline can only be observed where the walk yields to the event
+      // loop, so the tree has to be big enough to span several ticks.
+      // MEASURED: 200 files in one directory times out 2/5 runs, 1000 across
+      // five directories times out 5/5. 1200 is used for margin — a smaller
+      // tree here would be a flaky test, not a faster one.
+      for (let d = 0; d < 8; d++) {
+        mkdirSync(join(dir, `d${d}`), { recursive: true })
+        for (let i = 0; i < 150; i++) writeFileSync(join(dir, `d${d}/f${i}.ts`), '1')
+      }
+
+      // POSITIVE CONTROL: the same call, same tree, with the normal budget.
+      const ok = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '**/*' }, ...ctx() })
+      assert.equal(ok.isError, false)
+      assert.match(ok.content, /d0\/f0\.ts/)
+
+      const prev = process.env.CHROXY_GLOB_TIMEOUT_MS
+      process.env.CHROXY_GLOB_TIMEOUT_MS = '1'
+      try {
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '**/*' }, ...ctx() })
+        assert.equal(r.isError, true, 'a 1ms budget must time out, not succeed')
+        assert.match(r.content, /timed out after 1ms/)
+      } finally {
+        if (prev === undefined) delete process.env.CHROXY_GLOB_TIMEOUT_MS
+        else process.env.CHROXY_GLOB_TIMEOUT_MS = prev
+      }
+    })
+
+    it('treats an empty or unparseable CHROXY_GLOB_TIMEOUT_MS as unset', async () => {
+      // `Number('') === 0`, and the first cut accepted any finite `>= 0`. An
+      // exported-but-EMPTY var — what a bare `.env` line and `docker run -e VAR`
+      // both produce — therefore gave every Glob call a 0ms budget and disabled
+      // the tool outright, with nothing pointing at the cause. The knob exists
+      // to make the timeout testable; switching Glob off by accident is not a
+      // thing it may do.
+      // The tree must be big enough that a ZERO budget would actually be
+      // observed. Globbing a near-empty directory cannot tell "0 means unset"
+      // apart from "0 means a 0ms budget" — the walk finishes before the timer
+      // fires either way — so the assertion would pass under both readings and
+      // the mutant `n >= 0` survived it. Same size as the timeout test, and
+      // measured the same way.
+      for (let d = 0; d < 8; d++) {
+        mkdirSync(join(dir, `d${d}`), { recursive: true })
+        for (let i = 0; i < 150; i++) writeFileSync(join(dir, `d${d}/f${i}.ts`), '1')
+      }
+      const prev = process.env.CHROXY_GLOB_TIMEOUT_MS
+      try {
+        // CONTROL: with the budget genuinely set to 1ms this same call DOES
+        // time out, so a pass below is evidence the value was rejected as
+        // unset — not evidence that the budget is unobservable.
+        process.env.CHROXY_GLOB_TIMEOUT_MS = '1'
+        const control = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '**/*' }, ...ctx() })
+        assert.equal(control.isError, true, 'control: a real 1ms budget must fire on this tree')
+
+        for (const value of ['', '   ', '0', 'abc', '-1', '1e999', '0x10']) {
+          process.env.CHROXY_GLOB_TIMEOUT_MS = value
+          const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '**/*' }, ...ctx() })
+          assert.equal(r.isError, false, `${JSON.stringify(value)} must fall back to the default, not disable Glob`)
+          assert.match(r.content, /d0\/f0\.ts/)
+        }
+      } finally {
+        if (prev === undefined) delete process.env.CHROXY_GLOB_TIMEOUT_MS
+        else process.env.CHROXY_GLOB_TIMEOUT_MS = prev
+      }
+    })
+
+    it('aborts on a pattern that matches nothing', async () => {
+      // `signal.aborted` was only read INSIDE the loop, so a pattern with no
+      // matches never reached the check: an aborted call ran the whole tree and
+      // then reported a cheerful `No matches`, isError:false. Stop is the user's
+      // only lever on a runaway turn. The existing pre-abort test used a
+      // MATCHING pattern, so it was satisfied by the in-loop check and never
+      // covered this.
+      // Enough of a tree that the walk is still running when the abort lands —
+      // measured the same way the timeout test's fixture was sized.
+      for (let d = 0; d < 8; d++) {
+        mkdirSync(join(dir, `d${d}`), { recursive: true })
+        for (let i = 0; i < 150; i++) writeFileSync(join(dir, `d${d}/f${i}.ts`), '1')
+      }
+      const controller = new AbortController()
+      controller.abort()
+      const r = await executeBuiltinTool({
+        toolName: 'Glob', input: { pattern: '**/*.NOSUCHEXT' }, signal: controller.signal, ...ctx(),
+      })
+      assert.equal(r.isError, true, 'an aborted walk must not report success')
+      assert.match(r.content, /interrupted/i)
+    })
+
+    it('honors a pre-aborted signal', async () => {
+      writeFileSync(join(dir, 'a.ts'), '1')
+      const controller = new AbortController()
+      controller.abort()
+      const r = await executeBuiltinTool({
+        toolName: 'Glob', input: { pattern: '**/*' }, signal: controller.signal, ...ctx(),
+      })
+      assert.equal(r.isError, true)
+      assert.match(r.content, /interrupted/i)
+    })
+
+    it('withholds a match it cannot resolve, rather than trusting it (fail-closed)', async () => {
+      // The fail-closed `catch` had NO test: a mutation flipping it to
+      // `return true` passed all 341 tests in this PR. That is the shape the
+      // whole issue is about — success and not-checking looking identical —
+      // so the escape hatch gets its own proof.
+      //
+      // A symlink cycle makes the component-wise resolver throw ELOOP, which
+      // is the only way to reach that branch without stubbing.
+      // Absolute targets: the test sandbox resolves a RELATIVE symlink target
+      // against process.cwd() and blocks it as a real-user-state write.
+      symlinkSync(join(dir, 'loop2'), join(dir, 'loop'))
+      symlinkSync(join(dir, 'loop'), join(dir, 'loop2'))
+      writeFileSync(join(dir, 'resolvable.ts'), '1')
+
+      const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '*' }, ...ctx() })
+      assert.equal(r.isError, false)
+      assert.equal(r.content.includes('loop'), false, 'an unresolvable match must be withheld')
+      // POSITIVE CONTROL, same call: an ordinary file is still returned, so
+      // this cannot pass by the tool having failed outright.
+      assert.match(r.content, /resolvable\.ts/)
+    })
+
+    it('sorts, and announces truncation as a SORTED PREFIX (#7341)', async () => {
+      // Both halves were regressions from the rewrite. `fs.glob` yields in
+      // traversal order where every shell glob sorts, and the first cut capped
+      // that unsorted stream at 10 000 with no marker — so over a 20 000-file
+      // tree it returned 10 000 paths, isError:false, and `d00`-`d09` (half the
+      // tree, the alphabetically-first half) were simply absent. A model would
+      // conclude those directories hold no TypeScript.
+      //
+      // The oracle argument that justifies silence for WITHHELD matches does
+      // not apply to truncation: a count of in-workspace matches reveals
+      // nothing about anything outside it.
+      for (let d = 0; d < 12; d++) {
+        mkdirSync(join(dir, `d${String(d).padStart(2, '0')}`), { recursive: true })
+        for (let i = 0; i < 1000; i++) {
+          writeFileSync(join(dir, `d${String(d).padStart(2, '0')}/f${String(i).padStart(4, '0')}.ts`), '')
+        }
+      }
+      const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '**/*.ts' }, ...ctx() })
+      assert.equal(r.isError, false)
+      const lines = r.content.split('\n')
+      const marker = lines[lines.length - 1]
+      const data = lines.slice(0, -1)
+
+      assert.match(marker, /truncated: showing 10000 of 12000 matches/)
+      assert.equal(data.length, 10_000)
+      assert.deepEqual(data, [...data].sort(), 'output must be sorted')
+      // A PREFIX, not an arbitrary subset: the cut is at d09/d10, and every
+      // earlier directory is complete.
+      assert.equal(data[0], 'd00/f0000.ts')
+      assert.equal(data[data.length - 1], 'd09/f0999.ts')
+      assert.equal(data.some((l) => l.startsWith('d10/')), false)
+    })
+
+    it('sorts a result that is NOT truncated (positive control)', async () => {
+      // Without this, the sort assertion above could be satisfied by the
+      // truncation path alone.
+      for (const name of ['zebra.ts', 'alpha.ts', 'mango.ts']) writeFileSync(join(dir, name), '')
+      const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '*.ts' }, ...ctx() })
+      assert.equal(r.isError, false)
+      assert.deepEqual(r.content.split('\n'), ['alpha.ts', 'mango.ts', 'zebra.ts'])
+      assert.equal(r.content.includes('truncated'), false)
+    })
+
+    it('accepts a valid `path` and confines relative to it (#7341)', async () => {
+      // The rewrite changed what `path` means underneath — `fsGlob(pattern,
+      // {cwd: realRoot})` and confinement measured against `realRoot`, not
+      // `cwd` — and no test passed a VALID `path` at all. The only existing one
+      // asserted the `/etc` rejection.
+      mkdirSync(join(dir, 'sub/deep'), { recursive: true })
+      writeFileSync(join(dir, 'sub/a.ts'), '1')
+      writeFileSync(join(dir, 'sub/deep/b.ts'), '1')
+      writeFileSync(join(dir, 'outside-sub.ts'), '1')
+      symlinkSync('/etc', join(dir, 'sub/esc'))
+
+      const abs = await executeBuiltinTool({
+        toolName: 'Glob', input: { pattern: '**/*.ts', path: join(dir, 'sub') }, ...ctx(),
+      })
+      assert.equal(abs.isError, false)
+      assert.deepEqual(abs.content.split('\n'), ['a.ts', 'deep/b.ts'])
+      assert.equal(abs.content.includes('outside-sub'), false, 'results are relative to `path`')
+
+      const rel = await executeBuiltinTool({
+        toolName: 'Glob', input: { pattern: '*.ts', path: 'sub' }, ...ctx(),
+      })
+      assert.equal(rel.isError, false)
+      assert.match(rel.content, /a\.ts/)
+
+      // Confinement still applies BELOW a valid subdirectory root.
+      const esc = await executeBuiltinTool({
+        toolName: 'Glob', input: { pattern: '{esc,deep}/*', path: join(dir, 'sub') }, ...ctx(),
+      })
+      assert.equal(esc.content.includes('passwd'), false, 'confinement must hold under a `path` root')
+      assert.match(esc.content, /deep\/b\.ts/)
+    })
+
+    it('never returns a path outside the workspace, over a corpus (property)', async () => {
+      // The rejection lists in this file are a hand-written enumeration of the
+      // classes someone thought of, and two review rounds found six more. This
+      // asserts the PROPERTY instead: whatever the pattern, every path the tool
+      // returns resolves inside the workspace. It is the test that does not
+      // need updating when round seven turns up.
+      const outer = mkdtempSync(join(tmpdir(), 'chroxy-glob-outer-'))
+      try {
+        writeFileSync(join(outer, 'TOPSECRET.txt'), 'pw')
+        const ws = join(outer, 'ws')
+        mkdirSync(join(ws, 'sub'), { recursive: true })
+        writeFileSync(join(ws, 'a.ts'), '1')
+        writeFileSync(join(ws, 'sub/b.ts'), '1')
+        symlinkSync(outer, join(ws, 'up'))
+        symlinkSync('/etc', join(ws, 'esc'))
+
+        const bits = ['*', '**', '..', '.', '/', '{', '}', ',', '~', "'", '"', '[', ']', '?', 'TOP', 'up', 'esc']
+        const corpus = ['../TOP*', '{a}b,../TOP*}', 'up/TOP*', 'esc/pass*', '{.,..}/TOP*', '.*/TOP*']
+        // Deterministic pseudo-random assembly — no Math.random, so a failure
+        // is reproducible from the seed.
+        let seed = 1337
+        const next = () => (seed = (seed * 1103515245 + 12345) % 2147483648)
+        for (let i = 0; i < 300; i++) {
+          let pat = ''
+          const len = 2 + (next() % 5)
+          for (let j = 0; j < len; j++) pat += bits[next() % bits.length]
+          corpus.push(pat)
+        }
+
+        const realWs = realpathSync(ws)
+        for (const pattern of corpus) {
+          const r = await executeBuiltinTool({
+            toolName: 'Glob', input: { pattern },
+            cwd: ws, cwdRealCache: new Map(), cwdCacheTtl: 30_000,
+          })
+          if (r.isError) continue                       // refused outright — fine
+          if (r.content.startsWith('No matches')) continue
+          for (const line of r.content.split('\n')) {
+            const resolved = realpathSync(resolve(realWs, line))
+            assert.ok(
+              resolved === realWs || resolved.startsWith(realWs + '/'),
+              `pattern ${JSON.stringify(pattern)} returned ${line} -> ${resolved}, outside ${realWs}`,
+            )
+          }
+        }
+      } finally {
+        rmSync(outer, { recursive: true, force: true })
+      }
+    })
+
+    it('returns the in-workspace match and withholds the escaping one, in ONE call', async () => {
+      // This test was written as a positive control against the #7273 shape and
+      // WAS ITSELF that shape. It globbed `*/pass*` and asserted `esc/passwd`
+      // was absent — but `fs.glob` does not descend a wildcard-matched
+      // symlinked directory, so `*/pass*` never yields `esc/passwd` under any
+      // implementation. It asserted the absence of something that was never
+      // there, and passed with the entire fix deleted.
+      //
+      // `{esc,keep}/pass*` names the symlinked directory explicitly, so the
+      // escaping match really is produced and really must be withheld. The
+      // fsGlob precondition below is what proves that, and is the difference
+      // between a control and a decoration.
+      //
+      // It is also the ONLY test where one call produces matches from two
+      // different directories, one in-workspace and one out — which is what
+      // pins `confineGlobMatches`' per-directory verdict cache. A mutant that
+      // computed a real verdict for the first directory and assumed `true` for
+      // every later one returned /etc/passwd with all 346 tests green.
+      // The escape target is a directory THIS TEST owns, not `/etc`. An earlier
+      // cut pointed at `/etc` and pinned the exact match set — which passed on
+      // macOS and failed on the Linux CI runner, where `/etc` also holds
+      // `passwd-`. A precondition that encodes the host's filesystem contents
+      // is a precondition about the wrong thing.
+      const outside = mkdtempSync(join(tmpdir(), 'chroxy-glob-outside-'))
+      try {
+        writeFileSync(join(outside, 'secret.txt'), 'pw')
+        symlinkSync(outside, join(dir, 'esc'))
+        mkdirSync(join(dir, 'keep'), { recursive: true })
+        writeFileSync(join(dir, 'keep/secret.txt'), 'ok')
+
+        const raw = []
+        for await (const f of fsGlob('{esc,keep}/secret*', { cwd: dir })) raw.push(f)
+        assert.deepEqual(
+          raw.sort(), ['esc/secret.txt', 'keep/secret.txt'],
+          'precondition: the matcher must really produce BOTH, or this proves nothing',
+        )
+
+        const r = await executeBuiltinTool({
+          toolName: 'Glob',
+          input: { pattern: '{esc,keep}/secret*' },
+          ...ctx(),
+        })
+        assert.equal(r.isError, false)
+        assert.equal(r.content, 'keep/secret.txt', 'exactly the in-workspace match, nothing else')
+      } finally {
+        rmSync(outside, { recursive: true, force: true })
+      }
+    })
+
+    it('lists an in-workspace symlink that stays in the workspace (positive control)', async () => {
+      // A symlink is confined by where it POINTS, not by being a symlink.
+      mkdirSync(join(dir, 'real'), { recursive: true })
+      writeFileSync(join(dir, 'real/inside.txt'), 'ok')
+      symlinkSync(join(dir, 'real'), join(dir, 'alias'))
+      const r = await executeBuiltinTool({
+        toolName: 'Glob',
+        input: { pattern: 'alias/*.txt' },
+        ...ctx(),
+      })
+      assert.equal(r.isError, false)
+      assert.match(r.content, /alias\/inside\.txt/)
+      assert.equal(r.content.includes('withheld'), false)
+    })
+
+    it('allows ordinary patterns that merely LOOK like traversal (positive control)', async () => {
+      // `*~` and `a..b` are legitimate filenames. A containment rule that
+      // rejected them would be a functional regression, not extra safety.
+      writeFileSync(join(dir, 'draft.md~'), 'x')
+      writeFileSync(join(dir, 'v1..v2.diff'), 'y')
+      for (const pattern of ['*~', 'v1..v2.diff']) {
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern }, ...ctx() })
+        assert.equal(r.isError, false, `${pattern} must still work`)
+        assert.equal(r.content.includes('No matches'), false, `${pattern} must still match`)
       }
     })
   })
