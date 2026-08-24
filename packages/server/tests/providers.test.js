@@ -236,7 +236,7 @@ describe('Provider Registry', () => {
   // so the dashboard can grey-out unusable providers and show a billing-
   // identity confidence panel without making the user run `chroxy doctor`.
   describe('auth status (#3404 audit)', () => {
-    const ENV_KEYS = ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY', 'DEEPSEEK_API_KEY', 'CHROXY_CLAUDE_HOME', 'CHROXY_CLAUDE_CONFIG', 'CHROXY_CODEX_HOME', 'CHROXY_GEMINI_HOME', 'CHROXY_CONFIG_DIR']
+    const ENV_KEYS = ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY', 'DEEPSEEK_API_KEY', 'CHROXY_CLAUDE_HOME', 'CHROXY_CLAUDE_CONFIG', 'CHROXY_CLAUDE_KEYCHAIN', 'CHROXY_CODEX_HOME', 'CHROXY_GEMINI_HOME', 'CHROXY_CONFIG_DIR']
     const saved = {}
     let _tmpClaudeHome = null
     let _tmpCodexHome = null
@@ -254,6 +254,12 @@ describe('Provider Registry', () => {
       _tmpClaudeHome = mkdtempSync(join(tmpdir(), 'chroxy-claude-home-'))
       process.env.CHROXY_CLAUDE_HOME = _tmpClaudeHome
       process.env.CHROXY_CLAUDE_CONFIG = join(_tmpClaudeHome, '.claude.json')
+      // #7331: the probe now also consults the macOS Keychain, which an empty
+      // tmpdir cannot isolate — on a logged-in developer machine three
+      // `ready=false` assertions below started reading the real credential and
+      // failing. Same intent as the two lines above, extended to the one
+      // credential source that is not a file.
+      process.env.CHROXY_CLAUDE_KEYCHAIN = '0'
       // #4301: same isolation pattern for the new codex/gemini OAuth probes —
       // point them at empty tmpdirs so neither the developer's real ~/.codex
       // or ~/.gemini state nor any prior test leftover leaks in.
@@ -1203,7 +1209,7 @@ describe('listProviders credential-file caching (#4658)', () => {
   // Env vars the cache key is sensitive to. Saved/restored per test so a
   // stray ANTHROPIC_API_KEY in the developer env doesn't suppress the file
   // path under test.
-  const ENV_KEYS = ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'DEEPSEEK_API_KEY', 'HOME', 'CHROXY_CLAUDE_HOME', 'CHROXY_CLAUDE_CONFIG', 'CHROXY_CODEX_HOME', 'CHROXY_GEMINI_HOME', 'CHROXY_CONFIG_DIR']
+  const ENV_KEYS = ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'DEEPSEEK_API_KEY', 'HOME', 'CHROXY_CLAUDE_HOME', 'CHROXY_CLAUDE_CONFIG', 'CHROXY_CLAUDE_KEYCHAIN', 'CHROXY_CODEX_HOME', 'CHROXY_GEMINI_HOME', 'CHROXY_CONFIG_DIR']
   let saved
   let tmpHome
   let _tmpClaudeHome
@@ -1228,6 +1234,8 @@ describe('listProviders credential-file caching (#4658)', () => {
     _tmpClaudeHome = mkdtempSync(join(tmpdir(), 'chroxy-cred-cache-claude-'))
     process.env.CHROXY_CLAUDE_HOME = _tmpClaudeHome
     process.env.CHROXY_CLAUDE_CONFIG = join(_tmpClaudeHome, '.claude.json')
+    // #7331: Keychain isolation — see the note in the block above.
+    process.env.CHROXY_CLAUDE_KEYCHAIN = '0'
     _tmpCodexHome = mkdtempSync(join(tmpdir(), 'chroxy-cred-cache-codex-'))
     process.env.CHROXY_CODEX_HOME = _tmpCodexHome
     _tmpGeminiHome = mkdtempSync(join(tmpdir(), 'chroxy-cred-cache-gemini-'))

@@ -28,6 +28,7 @@
  * file-by-file rationale.
  */
 import { existsSync, readFileSync, statSync } from 'fs'
+import { spawnSync } from 'child_process'
 import { join } from 'path'
 import { homedir } from 'os'
 import { configPath } from './config-dir.js'
@@ -42,16 +43,43 @@ import { configPath } from './config-dir.js'
  *   1. `~/.claude/auth.json`            — current SDK auth file
  *   2. `~/.claude/.credentials.json`    — older Claude Code CLI keystore
  *   3. `~/.claude.json`                 — global config; contains a
- *                                          `claudeAiOauth` block when the
- *                                          user has logged in via subscription
+ *                                          `claudeAiOauth` block (older) or an
+ *                                          `oauthAccount` block (current) when
+ *                                          the user has logged in
+ *   4. macOS Keychain                   — the generic-password item
+ *                                          `Claude Code-credentials`, which is
+ *                                          where current Claude Code actually
+ *                                          stores the credential on darwin
+ *
+ * #7331: checks 1-3 were file-only and keyed on `claudeAiOauth`, so on a
+ * FULLY AUTHENTICATED current macOS install the probe returned false — both
+ * files absent, `~/.claude.json` carrying `oauthAccount` instead, and the real
+ * credential sitting in the Keychain the probe never looked at. That is not a
+ * cosmetic label: `CreateSessionModal` disables the Create button on
+ * `auth.ready === false`, so a correctly-logged-in user could not start an SDK
+ * session at all, and was silently pushed onto `claude-tui` — the provider that
+ * can neither report nor switch models (#7327).
+ *
+ * The Keychain check tests EXISTENCE ONLY. It never passes `-w`, so the secret
+ * is never printed, and stdout/stderr are discarded rather than captured: the
+ * daemon has no reason to hold the user's credential in its own memory, and
+ * the question being asked is only "is there one".
  *
  * Override paths for tests / atypical installs:
- *   - `CHROXY_CLAUDE_HOME`   — overrides the directory for the first two
- *                              file checks AND the default location of
- *                              `.claude.json` (one level up from this dir).
- *   - `CHROXY_CLAUDE_CONFIG` — overrides the global `.claude.json` path
- *                              directly. Wins over the `CHROXY_CLAUDE_HOME`-
- *                              derived default when both are set.
+ *   - `CHROXY_CLAUDE_HOME`     — overrides the directory for the first two
+ *                                file checks AND the default location of
+ *                                `.claude.json` (one level up from this dir).
+ *   - `CHROXY_CLAUDE_CONFIG`   — overrides the global `.claude.json` path
+ *                                directly. Wins over the `CHROXY_CLAUDE_HOME`-
+ *                                derived default when both are set.
+ *   - `CHROXY_CLAUDE_KEYCHAIN` — `0` forces the Keychain probe to report
+ *                                absent, `1` forces present. A test cannot
+ *                                delete the developer's real Keychain item, so
+ *                                without this the logged-OUT direction could
+ *                                not be proven on a developer machine — and a
+ *                                probe only ever proven in the `true`
+ *                                direction is exactly as broken as the one
+ *                                this replaces (docs/false-safety-guards.md).
  */
 function probeClaudeOAuthCreds() {
   try {
@@ -65,17 +93,90 @@ function probeClaudeOAuthCreds() {
     if (existsSync(globalConfig)) {
       try {
         const parsed = JSON.parse(readFileSync(globalConfig, 'utf-8'))
-        if (parsed && typeof parsed === 'object' && parsed.claudeAiOauth) {
+        // `claudeAiOauth` is the older shape; current Claude Code writes
+        // `oauthAccount` here instead (#7331). Accept either.
+        if (parsed && typeof parsed === 'object' && (parsed.claudeAiOauth || parsed.oauthAccount)) {
           return true
         }
       } catch {
         // Malformed JSON — treat as absent.
       }
     }
+    if (probeClaudeKeychainCreds()) return true
   } catch {
     // Any unexpected fs error → behave as if no creds.
   }
   return false
+}
+
+/** The macOS Keychain generic-password service Claude Code stores its creds under. */
+const CLAUDE_KEYCHAIN_SERVICE = 'Claude Code-credentials'
+
+/**
+ * Does the macOS Keychain hold a Claude Code credential? EXISTENCE ONLY.
+ *
+ * Deliberately never passes `-w` (which would print the secret) and discards
+ * all output — the daemon has no reason to hold the user's credential, and the
+ * exit code alone answers the question. Non-darwin returns false without
+ * spawning anything.
+ *
+ * A spawn failure (no `security` binary, sandbox denial, a locked Keychain)
+ * counts as ABSENT. That is the honest reading: we could not observe a
+ * credential, so we must not claim one. It also keeps the failure mode the
+ * same as it was before this probe existed.
+ */
+function probeClaudeKeychainCreds() {
+  const override = process.env.CHROXY_CLAUDE_KEYCHAIN
+  if (override === '0') return false
+  if (override === '1') return true
+  return keychainItemExists(CLAUDE_KEYCHAIN_SERVICE)
+}
+
+/**
+ * The argv for the existence check, exported so a test can assert what this
+ * module is about to hand to `security`.
+ *
+ * The absent flag is the point: `-w` makes `security` PRINT the password to
+ * stdout. Nothing in a readiness probe should be able to do that, and a
+ * source-level guard is the only thing standing between "we ask whether a
+ * credential exists" and "we pipe the user's credential into the daemon". The
+ * override that keeps the unit tests hermetic also means the spawn itself is
+ * rarely executed under test, so this shape is pinned directly rather than
+ * inferred from behaviour.
+ */
+export function claudeKeychainProbeArgv() {
+  return ['find-generic-password', '-s', CLAUDE_KEYCHAIN_SERVICE]
+}
+
+/**
+ * Does a macOS Keychain generic-password item exist for `service`?
+ * EXISTENCE ONLY — output is discarded, the secret is never requested.
+ *
+ * Non-darwin returns false without spawning — an optimisation, not a
+ * correctness guard: on a host with no `security` binary the spawn below
+ * reports absent anyway.
+ *
+ * Every failure counts as ABSENT — we could not observe a credential, so we
+ * must not claim one. Note WHERE that is enforced, because the obvious reading
+ * is wrong: `spawnSync` does NOT throw for a missing binary. MEASURED, it
+ * returns `{ status: null, error: ENOENT }`, so it is the `status === 0`
+ * comparison that rejects it, not the `catch`. The `catch` is an unreachable
+ * backstop kept for a genuinely thrown error; it has no test because nothing
+ * observable reaches it, and claiming otherwise would be the exact
+ * comment-stronger-than-code shape catalogued in docs/false-safety-guards.md.
+ */
+export function keychainItemExists(service) {
+  if (process.platform !== 'darwin') return false
+  try {
+    const result = spawnSync(
+      'security',
+      ['find-generic-password', '-s', service],
+      { stdio: 'ignore', timeout: 5_000 },
+    )
+    return result.status === 0
+  } catch {
+    return false
+  }
 }
 
 /**
@@ -154,7 +255,11 @@ function _cachedProbe(slot, key, probe) {
 }
 
 export function hasClaudeOAuthCreds() {
+  // The Keychain override is part of the key: without it a test that flips
+  // CHROXY_CLAUDE_KEYCHAIN inside the 5s TTL would silently read the previous
+  // verdict, and the logged-out assertion would pass for the wrong reason.
   const key = `${process.env.CHROXY_CLAUDE_HOME ?? ''}|${process.env.CHROXY_CLAUDE_CONFIG ?? ''}`
+    + `|${process.env.CHROXY_CLAUDE_KEYCHAIN ?? ''}`
   return _cachedProbe('claude', key, probeClaudeOAuthCreds)
 }
 
