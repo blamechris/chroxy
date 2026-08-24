@@ -128,7 +128,7 @@ describe('buildGrepCommand', () => {
   it('prefers rg with an if/then/else grep fallback', () => {
     assert.equal(
       buildGrepCommand(base),
-      `if command -v rg >/dev/null 2>&1; then rg -i -n --no-heading 'TODO' '/work'; else grep -r -i -n 'TODO' '/work'; fi`,
+      `if command -v rg >/dev/null 2>&1; then rg --no-config -i -n --no-heading -e 'TODO' -- '/work'; else grep -r -i -n -e 'TODO' -- '/work'; fi`,
     )
   })
 
@@ -137,6 +137,6 @@ describe('buildGrepCommand', () => {
   })
 
   it('threads the glob arg into the rg command', () => {
-    assert.match(buildGrepCommand({ ...base, globArg: ` --glob '*.md'` }), /rg -i -n --no-heading --glob '\*\.md'/)
+    assert.match(buildGrepCommand({ ...base, globArg: ` --glob '*.md'` }), /rg --no-config -i -n --no-heading --glob '\*\.md' -e 'TODO'/)
   })
 })

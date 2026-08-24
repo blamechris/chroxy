@@ -169,11 +169,51 @@ export function buildGrepArgs(input) {
  * exit 1 on "no matches"; pass `maskExit:true` when the runner rejects on
  * non-zero (the container's `execInEnvironment`) so that case isn't a failure.
  *
+ * SECURITY (#7295): BOTH model/caller-controlled interpolations are kept out
+ * of a bare positional slot — the pattern by `-e`, and the root by the `--`
+ * terminator after it. `shellQuote` closes SHELL injection only: bash eats the
+ * quotes, and rg/grep then run their OWN option parser over an argv element
+ * that still begins with `-`. Measured against ripgrep 15.1.0, a positional
+ * `--pre=<path>` value makes rg EXECUTE `<path>` as a per-file preprocessor,
+ * and — with the root swallowed into the pattern slot, leaving rg zero paths —
+ * blocks forever reading stdin. Program execution plus a hung tool call,
+ * through `Grep`.
+ *
+ * That matters because of WHERE this sits. `Grep` gets a reduced (secrets-only)
+ * permission floor via `SECRET_READ_FLOOR_TOOLS`, is auto-approved in
+ * `acceptEdits` mode via `ACCEPT_EDITS_TOOLS`, and can carry a standing
+ * auto-allow rule via `ELIGIBLE_TOOLS` — while `Bash`, which owns this
+ * capability honestly, is refused a whitelist outright by `NEVER_AUTO_ALLOW`.
+ *
+ * The `--` is defence in depth, not a live fix: both callers already guarantee
+ * an absolute root (`safeResolveRoot` on the host, `remapToContainerPath` in
+ * the container). It is here so the builder does not depend on an invariant it
+ * neither states nor tests — a third caller passing a raw client path would
+ * otherwise restore the identical `--pre=` execution through the root slot.
+ * MEASURED: `rg -e TODO '--pre=<script>'` executes the script (rc=0, marker
+ * written); with `--` before it, rc=2 and no execution.
+ *
+ * `--no-config` is both hardening and a correctness fix. rg reads the file named
+ * by `RIPGREP_CONFIG_PATH` and applies it as flags — including `--pre`, so an env
+ * that reaches the daemon reinstates the execution this function exists to stop.
+ * It is not client-reachable today (`buildSafeBashEnv` copies the daemon's own
+ * env, which nothing mutates at runtime), but it also breaks ordinary searching:
+ * MEASURED, a config containing `--pre=/bin/echo` turned a matching search into
+ * rc=1 no-match, silently. Machine-parsed output must not depend on a developer's
+ * personal rg config. `grep` has no equivalent to disable.
+ *
+ * `-e` and not a leading-dash REJECTION: `-Wall` and `--force` are legitimate
+ * search patterns, so rejecting them would be a functional regression. See
+ * `utils/argv-safety.js` (bind-to-a-named-flag); rg and grep accept the
+ * two-token `-e <value>` form, measured. Proven red-before-green by
+ * `tests/built-in-tools/grep-argv-injection.test.js`, which spawns the built
+ * command and asserts the preprocessor never runs.
+ *
  * @param {{ pattern: string, root: string, ci: string, ln: string, globArg: string, maskExit?: boolean }} opts
  */
 export function buildGrepCommand({ pattern, root, ci, ln, globArg, maskExit = false }) {
-  const rgCmd = `rg ${ci} ${ln} --no-heading${globArg} ${shellQuote(pattern)} ${shellQuote(root)}`
-  const grepCmd = `grep -r ${ci} ${ln} ${shellQuote(pattern)} ${shellQuote(root)}`
+  const rgCmd = `rg --no-config ${ci} ${ln} --no-heading${globArg} -e ${shellQuote(pattern)} -- ${shellQuote(root)}`
+  const grepCmd = `grep -r ${ci} ${ln} -e ${shellQuote(pattern)} -- ${shellQuote(root)}`
   const core = `if command -v rg >/dev/null 2>&1; then ${rgCmd}; else ${grepCmd}; fi`
   return maskExit ? `${core}; true` : core
 }

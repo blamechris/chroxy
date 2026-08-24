@@ -134,6 +134,25 @@ jobs:
         run: npm run build
         working-directory: packages/protocol
 
+      # #7295: the Grep argv-injection proof SPAWNS ripgrep and asserts it does not
+      # execute a `--pre=` preprocessor. A string assertion cannot stand in for that
+      # — the whole point is that rg's own option parser is the thing under test. The
+      # test FAILS (not skips) when rg is missing and CI is set, so this step is what
+      # keeps that from reddening the job: absent it, "cannot check" and "checked"
+      # were the same green, which is the second recurring cause in
+      # docs/false-safety-guards.md. Heterogeneous pool: node:22-bookworm as root has
+      # no sudo, the winbox VM is non-root and has it.
+      - name: Ensure ripgrep is installed (required by the #7295 execution proof)
+        run: |
+          if command -v rg >/dev/null 2>&1; then rg --version | head -1; exit 0; fi
+          if command -v sudo >/dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install -y ripgrep
+          else
+            apt-get update && apt-get install -y ripgrep
+          fi
+          rg --version | head -1
+        working-directory: .
+
       - name: Run tests with coverage
         run: npm test
         env:

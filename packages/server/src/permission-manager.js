@@ -34,7 +34,11 @@ const _fallbackLog = createLogger('permission-manager')
 // Tools that acceptEdits mode auto-approves. `apply_patch` is codex's file-edit
 // approval (item/fileChange/requestApproval, #6605) — the codex analogue of
 // Write/Edit, so acceptEdits auto-approves codex edits too.
-const ACCEPT_EDITS_TOOLS = new Set(['Read', 'Write', 'Edit', 'NotebookEdit', 'Glob', 'Grep', 'apply_patch'])
+// Exported so the classification can be PINNED by tests: it is the strongest of
+// the three read-only premises behind #7295 (ELIGIBLE_TOOLS needs a user to
+// create a rule; this one is automatic in acceptEdits mode), and it was the only
+// one a test could not assert.
+export const ACCEPT_EDITS_TOOLS = new Set(['Read', 'Write', 'Edit', 'NotebookEdit', 'Glob', 'Grep', 'apply_patch'])
 
 // Tools eligible for session-scoped auto-allow rules (`apply_patch` = codex edits).
 export const ELIGIBLE_TOOLS = new Set(['Read', 'Write', 'Edit', 'NotebookEdit', 'Glob', 'Grep', 'apply_patch'])

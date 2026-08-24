@@ -317,6 +317,9 @@ The recurring causes:
 - a guard whose comment describes a stronger check than its code performs — a
   character class that admits the flag it claims to block, a substring match
   standing in for a token match (`#7290`, `#7291`)
+- a real defence against the *neighbouring* class, mistaken for cover — shell
+  quoting stops the shell, and the quoted word still begins with `-` when the
+  spawned program runs its own option parser over it (`#7295`)
 
 Check the **exit code**, not the output — and note `cmd | grep -c FAIL` reports
 `grep`'s status, not the script's. Restore mutations with `cp` from a backup,
