@@ -691,7 +691,6 @@ describe('DockerByokSession _dispatchBuiltinTool — tool routing', () => {
       '/etc/pass*', '{a,/etc}/x',
       '../../etc/pass*', '{.,..}/x',
       '* /etc/pass*', '* ~/.ssh/*',
-      '.*/.*/etc/pass*', '.{.,x}/etc/pass*', '.?/etc/pass*',
     ]) {
       const _dockerBackend = backendStub()
       const { session } = buildSession({ backend: _dockerBackend })
@@ -702,6 +701,42 @@ describe('DockerByokSession _dispatchBuiltinTool — tool routing', () => {
       assert.equal(result.isError, true, `expected error for: ${pattern}`)
       assert.match(result.content, /escapes the workspace root|whitespace/)
       assert.equal(_dockerBackend.calls.length, 0, `${pattern} must not reach docker exec`)
+    }
+  })
+
+  it('Glob contains the six historical bypasses at the RESULT layer (#7341)', async () => {
+    // These are the patterns that walked past the pattern guard across three
+    // review rounds — quote removal, a brace body with no top-level comma,
+    // `.*` matching the `..` entry, POSIX bracket sub-expressions. They are
+    // LIVE here and inert on the host: the container still interpolates the
+    // pattern unquoted into `for f in <pattern>`, while the host no longer
+    // shells out at all.
+    //
+    // An earlier version of this coverage asserted them against the HOST, the
+    // one place they cannot occur — so it passed with the entire fix deleted.
+    // Here each pattern is accepted by the pattern guard (asserted, so the
+    // test cannot silently become a guard test) and the shell is made to
+    // return the escaping path it really produces.
+    const { globPatternEscapeReason } = await import('../src/built-in-tools/tool-transforms.js')
+    // (`{a}b,../etc/pass*}` is NOT in this list: the crude segment split on
+    // `/{},` sees its `..` and rejects it up front — a case the "correct" brace
+    // expander missed, because it stopped at the first balanced `}` where bash
+    // keeps scanning. The cruder check is better here precisely because it does
+    // not try to be bash.)
+    for (const pattern of ["'..'/TOP*", '.[[:punct:]]/etc/pass*', '.*/etc/pass*']) {
+      assert.equal(
+        globPatternEscapeReason(pattern), null,
+        `precondition: ${pattern} must reach the shell, or this tests the wrong layer`,
+      )
+      const _dockerBackend = backendStub({
+        defaultResponse: { stdout: '../etc/passwd\n/etc/shadow\nsrc/ok.ts\n', stderr: '' },
+      })
+      const { session } = buildSession({ backend: _dockerBackend })
+      const result = await session._dispatchBuiltinTool({ toolName: 'Glob', input: { pattern } })
+      assert.equal(result.isError, false, `${pattern} should reach the shell and be filtered`)
+      assert.equal(result.content.includes('passwd'), false, `${pattern} leaked /etc/passwd`)
+      assert.equal(result.content.includes('shadow'), false, `${pattern} leaked /etc/shadow`)
+      assert.match(result.content, /src\/ok\.ts/, 'the in-workspace match must survive')
     }
   })
 

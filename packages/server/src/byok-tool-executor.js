@@ -48,10 +48,18 @@ import { isPrivateOrSpecialIp } from './ssrf-guard.js'
 const BASH_TIMEOUT_CEILING_MS = 600_000
 
 /**
- * Cap on how many matches Glob collects. The shell implementation was bounded
- * only by executeBash's ~1MB stdout cap; this makes the same bound explicit so
- * a `**\/*` over a node_modules tree cannot balloon the session's memory.
+ * Two bounds, because they do different jobs.
+ *
+ * `GLOB_COLLECT_CEILING` is the memory backstop on the walk. `GLOB_MAX_MATCHES`
+ * is how many paths the model is shown. Collecting more than we return is what
+ * makes truncation a SORTED PREFIX rather than an arbitrary subset — and that
+ * distinction was a real defect, not a nicety: with a single 10 000 cap on an
+ * unsorted traversal, `Glob **\/*.ts` over a 20 000-file tree returned 10 000
+ * paths, `isError: false`, no marker, and `d00`–`d09` — half the tree, the
+ * alphabetically-first half — simply absent. A model would conclude those
+ * directories contain no TypeScript.
  */
+const GLOB_COLLECT_CEILING = 50_000
 const GLOB_MAX_MATCHES = 10_000
 
 /**
@@ -68,8 +76,18 @@ const GLOB_MAX_MATCHES = 10_000
  */
 const GLOB_TIMEOUT_DEFAULT_MS = 30_000
 function globTimeoutMs() {
-  const raw = Number(process.env.CHROXY_GLOB_TIMEOUT_MS)
-  return Number.isFinite(raw) && raw >= 0 ? raw : GLOB_TIMEOUT_DEFAULT_MS
+  // Trim and require a NON-EMPTY, strictly positive integer, matching every
+  // other env-timeout parser in this package (config.js, prompt-evaluator.js,
+  // claude-tui-session.js). The first cut used `Number(raw) >= 0`, and
+  // `Number('') === 0`: an exported-but-empty `CHROXY_GLOB_TIMEOUT_MS=` — what
+  // a bare `.env` line and `docker run -e VAR` both produce — gave every Glob
+  // call a 0 ms budget and disabled the tool outright, with nothing pointing at
+  // the cause. The knob exists to make the timeout testable; it must not be a
+  // way to switch Glob off by accident.
+  const raw = (process.env.CHROXY_GLOB_TIMEOUT_MS || '').trim()
+  if (!/^\d+$/.test(raw)) return GLOB_TIMEOUT_DEFAULT_MS
+  const n = Number(raw)
+  return n > 0 ? n : GLOB_TIMEOUT_DEFAULT_MS
 }
 
 /**
@@ -320,20 +338,47 @@ async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
   // at each yield, plus a race so the TOOL CALL returns on time even when the
   // walk is between yields. The walk itself can only stop at a yield, which is
   // stated rather than papered over.
+  // #7341 — if the pattern NAMES a directory outright and that directory
+  // resolves outside the workspace, say so instead of returning "No matches".
+  //
+  // Containment itself is unchanged: every match is still confined below, and
+  // a symlink the caller merely DISCOVERED through a wildcard is still withheld
+  // in silence, because naming it would be the existence oracle that silence
+  // exists to prevent. This is the other case. When the caller writes
+  // `node_modules/**` and `node_modules` is a symlink into a pnpm store, a
+  // shared `.venv`, or a sibling repo, "No matches" is a baffling answer to a
+  // question the caller already knew the shape of — and it leaks nothing,
+  // because passing the very same path as `input.path` ALREADY returns exactly
+  // this error. It also makes `pattern` and `path` consistent rather than
+  // mysteriously different for the same directory.
+  const literalPrefix = literalDirPrefix(pattern)
+  if (literalPrefix) {
+    await safeResolveRoot(literalPrefix, realRoot, cwdRealCache, cwdCacheTtl)
+  }
+
+  // Check the signal BEFORE the walk: the in-loop check is only reached when
+  // the glob yields, so an already-aborted call on a pattern that matches
+  // nothing used to run the whole tree and then report a cheerful "No matches".
+  // The container Glob has always had this pre-check; the host lacked it, which
+  // made the two backends answer differently for identical input.
+  if (signal?.aborted) return { content: 'Glob interrupted', isError: true }
+
   const files = []
   // ONE timer sets the flag and releases the race, so the two cannot resolve
   // in either order — a second, independent timer would let the race finish
-  // before `stop` was assigned and report success on a timed-out walk.
+  // before `stop` was assigned and report success on a timed-out walk. The
+  // abort listener shares that single release for the same reason.
   let stop = null
   let releaseDeadline
   const deadlineReached = new Promise((resolve) => { releaseDeadline = resolve })
   const timeoutMs = globTimeoutMs()
   const deadline = setTimeout(() => { stop = 'timed out'; releaseDeadline() }, timeoutMs)
   deadline.unref?.()
+  const onAbort = () => { stop = 'interrupted'; releaseDeadline() }
+  signal?.addEventListener?.('abort', onAbort, { once: true })
   const collect = (async () => {
     for await (const entry of fsGlob(pattern, { cwd: realRoot, withFileTypes: true })) {
       if (stop) break
-      if (signal?.aborted) { stop = 'interrupted'; break }
       const rel = relative(realRoot, join(entry.parentPath, entry.name))
       // `**` yields the search root itself, which `relative()` renders as ''.
       // The root is not a match; emitting it produced a blank first line (and
@@ -341,7 +386,7 @@ async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
       // did.
       if (rel === '') continue
       files.push({ path: rel, isSymlink: entry.isSymbolicLink() })
-      if (files.length >= GLOB_MAX_MATCHES) break
+      if (files.length >= GLOB_COLLECT_CEILING) break
     }
   })()
   // Attach a catch BEFORE the race: if the walk rejects after the deadline has
@@ -354,6 +399,7 @@ async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
     walkError = err
   }
   clearTimeout(deadline)
+  signal?.removeEventListener?.('abort', onAbort)
   if (walkError) {
     return { content: `Glob failed: ${walkError?.message || String(walkError)}`, isError: true }
   }
@@ -368,6 +414,23 @@ async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
   // per call into filesystem enumeration, on a tool that is auto-approved in
   // `acceptEdits`. The confinement is proven by tests, not by a runtime marker.
   if (kept.length === 0) return { content: `No matches for ${pattern}`, isError: false }
+
+  // Sort. Every shell glob does, on both the old host and the container;
+  // `fs.glob` yields in traversal order. Deterministic-but-different reshuffles
+  // the whole listing for a one-file change and destroys the alphabetical
+  // grouping that makes a long result readable.
+  kept.sort()
+
+  // TRUNCATION IS ANNOUNCED. The oracle argument that justifies silence for
+  // withheld matches does not apply here: a count of in-workspace matches
+  // reveals nothing about anything outside it, and silently dropping paths
+  // makes Glob wrong by omission with nothing to tell the model.
+  if (kept.length > GLOB_MAX_MATCHES) {
+    const total = files.length >= GLOB_COLLECT_CEILING ? `${kept.length}+` : `${kept.length}`
+    const shown = kept.slice(0, GLOB_MAX_MATCHES)
+    shown.push(`[truncated: showing ${GLOB_MAX_MATCHES} of ${total} matches — narrow the pattern or use "path"]`)
+    return { content: shown.join('\n'), isError: false }
+  }
   return { content: kept.join('\n'), isError: false }
 }
 
@@ -423,6 +486,24 @@ async function confineGlobMatches(files, realRoot, cwdRealCache, cwdCacheTtl) {
     if (ok) kept.push(f)
   }
   return kept
+}
+
+/**
+ * The leading run of LITERAL directory segments in a glob pattern — the part
+ * the caller named outright rather than asked the matcher to discover.
+ *
+ * `node_modules/**` → `node_modules`; `src/**\/*.ts` → `src`; `*.ts` → ''.
+ * The final segment is excluded: it is the basename, and confinement of the
+ * matches themselves covers it.
+ */
+function literalDirPrefix(pattern) {
+  const segments = pattern.split('/')
+  const literal = []
+  for (let i = 0; i < segments.length - 1; i++) {
+    if (/[*?[\]{}]/.test(segments[i])) break
+    literal.push(segments[i])
+  }
+  return literal.join('/')
 }
 
 /** {@link validateRawPathWithinCwd}, fail-closed on any resolution error. */

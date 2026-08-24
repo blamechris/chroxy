@@ -142,180 +142,58 @@ export function formatNumberedLines(text, { offset, limit, maxLines = DEFAULT_RE
 export const GLOB_PATTERN_SHELL_METACHARS = /[$`;|&><()\\\n\r]/
 
 /**
- * Ceilings on brace expansion so a `{a,b}{a,b}{a,b}...` bomb cannot make the
- * validator itself the denial of service. Exceeding either is a REJECT, not a
- * skip — "too complex to check" must never mean "checked and fine" (the
- * `docs/false-safety-guards.md` cannot-check-so-nothing-to-check class).
- */
-const GLOB_MAX_BRACE_WORDS = 256
-const GLOB_MAX_BRACE_DEPTH = 8
-
-/**
- * Expand bash brace syntax into the list of words the shell would actually
- * glob. This has to be a REAL expansion, not a set of regexes anchored at `{`
- * and `,`: brace expansion runs FIRST, so `.{.,x}/etc/*` becomes the word
- * `../etc/*` — a traversal whose source text contains no `..` substring at all
- * for a regex to find. MEASURED against bash; the first cut of this guard used
- * anchored regexes and that pattern walked straight through it.
+ * SECURITY (#7341) — reject a Glob `pattern` that OBVIOUSLY escapes the
+ * workspace, so the model gets a clear `EINVAL` instead of a puzzling
+ * "No matches".
  *
- * @returns {string[]|null} The expanded words, or null when a ceiling is hit.
- */
-function expandBraces(word, depth = 0) {
-  if (depth > GLOB_MAX_BRACE_DEPTH) return null
-  const open = word.indexOf('{')
-  if (open === -1) return [word]
-
-  // Find the matching `}` for this `{`, tracking nesting.
-  let level = 0
-  let close = -1
-  for (let i = open; i < word.length; i++) {
-    if (word[i] === '{') level++
-    else if (word[i] === '}') {
-      level--
-      if (level === 0) { close = i; break }
-    }
-  }
-  // Unbalanced `{` — bash leaves it literal, so we do too.
-  if (close === -1) return [word]
-
-  // Split the body on top-level commas only.
-  const body = word.slice(open + 1, close)
-  const alts = []
-  let cur = ''
-  let d = 0
-  for (const ch of body) {
-    if (ch === '{') d++
-    else if (ch === '}') d--
-    if (ch === ',' && d === 0) { alts.push(cur); cur = '' } else cur += ch
-  }
-  alts.push(cur)
-  // A body with no top-level comma is not an expansion in bash (`{a}` stays
-  // literal `{a}`), so keep the braces rather than silently dropping them.
-  if (alts.length === 1) {
-    const rest = expandBraces(word.slice(close + 1), depth + 1)
-    if (rest === null) return null
-    const head = word.slice(0, close + 1)
-    return rest.map((r) => head + r)
-  }
-
-  const prefix = word.slice(0, open)
-  const suffix = word.slice(close + 1)
-  const out = []
-  for (const alt of alts) {
-    const sub = expandBraces(prefix + alt + suffix, depth + 1)
-    if (sub === null) return null
-    for (const w of sub) {
-      if (out.length >= GLOB_MAX_BRACE_WORDS) return null
-      out.push(w)
-    }
-  }
-  return out
-}
-
-/**
- * Does this single path SEGMENT, read as a shell glob, match the string `..`?
+ * THIS IS NOT THE SECURITY BOUNDARY, and the history of the file is the reason
+ * it says so this loudly. It began as one — a check that tried to predict what
+ * bash would do with the pattern — and three review rounds walked past it six
+ * times (whitespace word-splitting, brace expansion, a glob matching the `..`
+ * entry, quote removal, a brace body with no top-level comma, POSIX bracket
+ * sub-expressions). The replacement modelled bash properly: a real brace
+ * expander and a glob-to-regex segment matcher. That was worse. It was
+ * measurably wrong (46 of 515 enumerated bracket segments answered "cannot
+ * reach `..`" for segments bash expands straight to `..`) and it was a denial
+ * of service (a 4 KB pattern of `{a,b}` groups and stars backtracked for 12.9
+ * SECONDS of blocked event loop, on a tool auto-approved in `acceptEdits`).
  *
- * The reason a substring search for `..` is not enough: a glob MATCHES the
- * `..` directory entry. MEASURED on bash 3.2 and 5.x, `.*` expands to `. ..`,
- * so a pattern using `.*` as a DIRECTORY segment twice over reaches
- * `../../etc/passwd` while containing no `..` token at all. `..*` and `.?`
- * match the entry too.
- *
- * The leading-dot rule is what keeps this from rejecting everything: POSIX
- * requires a leading `.` to be matched EXPLICITLY, so `*`, `?` and `[.]*` do
- * NOT match `..` (measured — `[.]*` expands to nothing). Only a segment whose
- * first character is a literal `.` is a candidate, which is why `.env*`,
- * `.github` and `.[a-z]*` keep working while `.*` does not.
- */
-function segmentMatchesDotDot(segment) {
-  if (segment[0] !== '.') return false
-  if (segment === '..') return true
-  let re = ''
-  for (let i = 0; i < segment.length; i++) {
-    const ch = segment[i]
-    if (ch === '*') { re += '[^/]*'; continue }
-    if (ch === '?') { re += '[^/]'; continue }
-    if (ch === '[') {
-      // Scan for the closing `]`. A `]` immediately after `[` or `[!`/`[^` is
-      // a literal member, per POSIX.
-      let j = i + 1
-      if (segment[j] === '!' || segment[j] === '^') j++
-      if (segment[j] === ']') j++
-      while (j < segment.length && segment[j] !== ']') j++
-      if (j >= segment.length) { re += '\\['; continue }   // unterminated — literal `[`
-      const body = segment.slice(i + 1, j).replace(/^!/, '^')
-      re += `[${body}]`
-      i = j
-      continue
-    }
-    re += ch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  }
-  try {
-    return new RegExp(`^${re}$`).test('..')
-  } catch {
-    return true   // unparseable class — FAIL CLOSED
-  }
-}
-
-/**
- * SECURITY (#7341): reject a Glob `pattern` that can expand OUTSIDE the
- * workspace root. `GLOB_PATTERN_SHELL_METACHARS` is a *shell-injection*
- * denylist and was mistaken for containment — it permits `~`, `/`, `..` and
- * whitespace, so `Glob {"pattern":"~/.ssh/*"}` and
- * `{"pattern":"../../../../etc/pass*"}` both returned real files through a
- * tool that is classified read-only and is therefore auto-approved in
- * `acceptEdits` mode (`ACCEPT_EDITS_TOOLS`), rule-whitelistable
- * (`ELIGIBLE_TOOLS`) and given only the reduced secrets floor
- * (`SECRET_READ_FLOOR_TOOLS`). The protected-path floor could not catch it
- * either: `PROTECTED_PATH_INPUT_FIELDS` is `['file_path','path',
- * 'notebook_path']` and `pattern` is not a member — the same
- * guard-one-field-not-its-sibling shape as #7262, here between `Glob`'s
- * validated `path` and its unvalidated `pattern`.
- *
- * It works on the words bash would actually glob, in bash's own order —
- * whitespace split, then brace expansion, then tilde — because every shortcut
- * short of that has a bypass:
- *   - whitespace: the pattern is interpolated UNQUOTED, so `* /etc/pass*` is
- *     two patterns and the second one escapes. A space can never match a
- *     literal space in a filename here for exactly the same reason, so
- *     rejecting it costs nothing.
- *   - braces: `.{.,x}/etc/*` expands to `../etc/*`, which no regex over the
- *     source text can see.
- *   - globs that match `..`: `.*` matches the `..` entry, so using it as a
- *     directory segment walks up with no `..` token in the source text.
- *
- * This is the SYNTACTIC half of the fix and it is the only half the container
- * Glob can have (its matches are produced inside the container, out of reach
- * of a host realpath). The host adds a second, stronger layer: every expanded
- * match is realpath-confined in `runGlob`, which is what closes the one escape
- * no pattern inspection can see — a symlinked DIRECTORY inside the workspace
- * (`esc -> /etc`, pattern `esc/pass*`, every character of which is legal).
+ * Both problems came from the same source: modelling a shell. So the model is
+ * gone. Containment is enforced entirely on the OUTPUT — `confineGlobMatches`
+ * realpaths every match on the host, `globMatchEscapesRoot` filters every match
+ * on the container — and all six historical bypasses were re-confirmed closed
+ * at that layer, by fuzzing real bash. What remains here is a linear scan whose
+ * only job is a good error message, and which cannot be wrong in a way that
+ * matters: a false negative just yields "No matches" from the layer below.
  *
  * @param {string} pattern
- * @returns {string|null} A reason string when the pattern can escape, else null.
+ * @returns {string|null} A reason string when the pattern obviously escapes.
  */
 export function globPatternEscapeReason(pattern) {
   if (typeof pattern !== 'string') return 'not a string'
-  // Whitespace is rejected on BOTH paths, and deliberately so even though the
-  // host could now support it: the host matches with `fs.glob`, where a space
-  // is an ordinary character, but the container still interpolates the pattern
-  // unquoted into `for f in <pattern>`, where a space splits it into several
-  // patterns. Allowing it host-side would make the SAME input mean two
-  // different things depending on which backend the session runs — which is
-  // the divergence this whole module exists to prevent. `**` reaches into a
-  // directory whose name has a space perfectly well; only a LITERAL space in
-  // the pattern is refused.
+  // Whitespace: the CONTAINER interpolates the pattern unquoted into
+  // `for f in <pattern>`, so a space there is several patterns. Rejected on
+  // both paths so one input cannot mean two things depending on the backend.
   if (/\s/.test(pattern)) {
     return 'whitespace — use ** or a wildcard instead of a literal space'
   }
-  const words = expandBraces(pattern)
-  if (words === null) return 'brace expansion too large to verify'
-  for (const word of words) {
-    if (word.startsWith('~')) return 'home-directory (~) expansion'
-    if (word.startsWith('/')) return 'absolute path'
-    for (const segment of word.split('/')) {
-      if (segmentMatchesDotDot(segment)) return 'parent-directory (..) traversal'
-    }
+  // Word starts: the beginning, or after a `{` or `,` — brace expansion makes
+  // each alternative its own word. No expansion is performed; these anchors are
+  // a cheap approximation, which is all a message needs to be.
+  if (/(^|[{,])~/.test(pattern)) return 'home-directory (~) expansion'
+  if (/(^|[{,])[/\\]/.test(pattern)) return 'absolute path'
+  // Windows: `C:\x`, `C:/x` and the drive-relative `C:x` are all absolute
+  // enough to leave the workspace, and none of them starts with a separator.
+  // #6928 is the same lesson one layer down — a `/`-shaped path evading a
+  // guard that only knew about `\`, or the reverse.
+  if (/(^|[{,])[A-Za-z]:/.test(pattern)) return 'absolute path'
+  // A literal `..` path segment. Segments are delimited by either separator
+  // and by brace punctuation. This deliberately does NOT try to work out
+  // whether a glob such as `.*` could EXPAND to `..` — that computation is
+  // what produced both the false accepts and the DoS, and the output layer
+  // catches the real thing regardless.
+  for (const segment of pattern.split(/[/\\{},]/)) {
+    if (segment === '..') return 'parent-directory (..) traversal'
   }
   return null
 }
@@ -341,8 +219,13 @@ export function globPatternEscapeReason(pattern) {
  */
 export function globMatchEscapesRoot(match) {
   if (typeof match !== 'string') return true
-  if (match.startsWith('/')) return true
-  return match.split('/').includes('..')
+  // Both separators and the Windows drive/UNC forms. Splitting on `/` alone is
+  // #6928 exactly — a guard that knew one separator and let the other through.
+  // The container is Linux today, so the Windows arms are contract rather than
+  // live defence; a validator whose JSDoc claims "absolute" must mean it.
+  if (/^[/\\]/.test(match)) return true
+  if (/^[A-Za-z]:/.test(match)) return true
+  return match.split(/[/\\]/).includes('..')
 }
 
 /** The tool_result message for a pattern rejected by {@link globPatternEscapeReason}. */

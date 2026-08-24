@@ -37,6 +37,21 @@ A tool's targets are read from `PROTECTED_PATH_INPUT_FIELDS` (`file_path`, `path
 A tool carrying none of those — `Bash`, `Task`, `WebFetch`, `WebSearch` — cannot be
 floored: command-shaped access is out of scope for a *path* floor.
 
+**A third category the two above do not name** (#7341): a tool that carries a listed
+field *and* an unlisted field which determines its actual reach. `Glob` has both — its
+`path` is floored and fully confined, while its `pattern` decides what the tool
+actually reads and is not a member of `PROTECTED_PATH_INPUT_FIELDS`. Reading the list
+alone would put `Glob` in the "covered" column; it was reading `~/.ssh/*` on main.
+
+`pattern` was deliberately **not** added to the list, and the reason needs to survive
+here rather than in a merged PR description: the field name is shared across tools, and
+`Grep`'s `pattern` is a **regex**, not a path. Flooring it would false-deny ordinary
+searches. Containment for `Glob` therefore lives at the tool, not in the floor —
+`globPatternEscapeReason` for the error message, and confinement of the **results**
+(`confineGlobMatches` on the host, `globMatchEscapesRoot` in the container) for the
+actual boundary. When auditing whether a tool is covered, ask what the tool *reads*,
+not which of its fields the floor happens to scan.
+
 ## 2. Precedence — the floor beats every lenient mode
 
 The floor is checked **before** any short-circuit, on **both** pipelines:
