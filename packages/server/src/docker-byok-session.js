@@ -2052,9 +2052,15 @@ export class DockerByokSession extends ClaudeByokSession {
     // strictly better (a realpath walk per match); from out here the matches
     // are inside the container, so lexical is what is reachable.
     //
-    // RESIDUAL, tracked separately: a symlinked directory inside /workspace
+    // RESIDUAL, tracked by #7354: a symlinked directory inside /workspace
     // (`esc -> /etc` in the CONTAINER's filesystem) produces a lexically clean
-    // match that resolves out. Closing it needs the match resolved in-container.
+    // match that resolves out. Closing it needs the match resolved in-container,
+    // and it is reachable through `input.path` as well as `pattern` — that route
+    // is shared with _containerGrep/_containerRead, so it is wider than Glob.
+    //
+    // This comment said "tracked separately" while nothing tracked it, which is
+    // the same false-safety shape as the bug above: an assertion of a stronger
+    // state than reality, in a place no test can check. The issue now exists.
     //
     // Withheld matches read as no match — no count, no marker. Anything that
     // distinguishes "matched, but outside" from "matched nothing" is an
