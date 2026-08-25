@@ -1,3 +1,4 @@
+import type { UseNotificationPermissionResult } from '../hooks/useNotificationPermission'
 import type { ComponentProps } from 'react'
 import type { TranscriptViewerState } from '../store/types'
 import { SettingsPanel } from './SettingsPanel'
@@ -34,6 +35,8 @@ export interface AppModalsProps {
   onToggleConsoleTab: (show: boolean) => void
   interventionPingEnabled: boolean
   onToggleInterventionPing: (enabled: boolean) => void
+  // #7351 — OS-notification permission state, forwarded to SettingsPanel.
+  notificationPermission?: UseNotificationPermissionResult
   // Shortcut help
   shortcutHelpOpen: boolean
   onShortcutHelpClose: () => void
@@ -117,6 +120,7 @@ export function AppModals(props: AppModalsProps) {
         onToggleConsoleTab={props.onToggleConsoleTab}
         interventionPingEnabled={props.interventionPingEnabled}
         onToggleInterventionPing={props.onToggleInterventionPing}
+        notificationPermission={props.notificationPermission}
       />
 
       {/* Keyboard shortcut help */}
