@@ -150,6 +150,8 @@ Containers receive only an explicit allowlist of environment variables. The full
 **DockerSession** forwards:
 `ANTHROPIC_API_KEY`, `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING`, `CHROXY_PORT`, `CHROXY_HOOK_SECRET`, `CHROXY_PERMISSION_MODE`, `CLAUDE_HEADLESS`, `HOME`, `PATH`, and conditionally `CHROXY_HOST` (set to `host.docker.internal` when the permission hook port is configured)
 
+It does **not** forward `CHROXY_PERMISSION_MODE_FILE`, which the host-side `CliSession` sets so `permission-hook.sh` can re-read the live permission mode on every tool call (#7337). That path lives in the host's tmpdir and `docker exec` cannot add a mount, so the key would name a path that does not exist in the container. A containerized CLI session consequently still picks up a permission-mode change only on the respawn — see `docs/architecture/reference.md` for the full rationale.
+
 **DockerSdkSession** forwards:
 `ANTHROPIC_API_KEY`, `NODE_ENV`, plus hardcoded overrides: `HOME=/home/<containerUser>` and a fixed `PATH` for the container environment (these are not forwarded from the host)
 

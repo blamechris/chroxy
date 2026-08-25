@@ -1437,6 +1437,13 @@ export async function startCliServer(config) {
     .then(({ ClaudeTuiSession }) => ClaudeTuiSession.sweepStaleSinkDirs(log))
     .catch((err) => log.warn(`claude-tui sink-dir sweep failed: ${(err && err.message) || err}`))
 
+  // #7337 — same sweep for claude-cli's per-session permission-mode sidecar
+  // dirs, which leak on a crash for exactly the same reason. Same ownership
+  // rule (only DEAD owners are reaped), same fire-and-forget lazy import.
+  import('./cli-session.js')
+    .then(({ CliSession }) => CliSession.sweepStaleSidecarDirs(log))
+    .catch((err) => log.warn(`claude-cli sidecar-dir sweep failed: ${(err && err.message) || err}`))
+
   console.log('\nPress Ctrl+C to stop.\n')
 
   // Graceful shutdown.

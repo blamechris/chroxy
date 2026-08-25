@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID } from 'crypto'
-import { mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'fs'
+import { mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'fs'
 // #6132 (HOL fix from #5337): the per-turn hook-drain hot path uses async fs so a
 // slow/stuck sink (FUSE/NFS, full disk, tmpwatch race) can't block the shared
 // event loop — which would freeze EVERY claude-tui session (the default provider).
@@ -22,6 +22,8 @@ import { discoverConfiguredMcpServers } from './byok-mcp-config.js'
 import { ALLOWED_MODEL_IDS } from './models.js'
 import { CLAUDE_FALLBACK_MODELS, claudeModelMetadata } from './claude-model-catalog.js'
 import { RespawnRateLimiter } from './utils/respawn-rate-limiter.js'
+import { writePermissionModeSidecarAtomic } from './utils/permission-mode-sidecar.js'
+import { sweepStaleOwnedDirs } from './utils/stale-session-dirs.js'
 import { labelBinarySpawnFailure } from './utils/verify-binary.js'
 import { CHROXY_SECRET_DENYLIST } from './utils/spawn-env.js'
 import { createLogger, loggerForSession, redactSensitive, redactSensitivePreservingEscapes } from './logger.js'
@@ -1172,53 +1174,14 @@ export class ClaudeTuiSession extends BaseSession {
    * @returns {{swept:number, kept:number}}
    */
   static sweepStaleSinkDirs(logger = log) {
-    const base = join(tmpdir(), 'chroxy-claude-tui')
-    let entries
-    try { entries = readdirSync(base) } catch { return { swept: 0, kept: 0 } }
-    let swept = 0
-    let kept = 0
-    for (const name of entries) {
-      if (!name.startsWith('s-')) continue
-      const dir = join(base, name)
-      let ownerPid = null
-      try {
-        const n = parseInt(readFileSync(join(dir, 'owner.pid'), 'utf8').trim(), 10)
-        if (Number.isInteger(n) && n > 0) ownerPid = n
-      } catch { /* no/garbage pidfile → orphaned, subject to the grace below */ }
-      if (ownerPid !== null) {
-        let alive
-        try {
-          process.kill(ownerPid, 0) // signal 0 = existence probe
-          alive = true
-        } catch (err) {
-          // ESRCH → dead; EPERM → exists but not ours → still alive, keep it.
-          alive = err && err.code === 'EPERM'
-        }
-        if (alive) { kept++; continue }
-      } else {
-        // #5359 review — a pidfile-less dir might be another process's sink dir
-        // caught BETWEEN its mkdir and its owner.pid write (a cross-process race;
-        // within one process those are synchronous). Give brand-new pidfile-less
-        // dirs a grace window before reaping so we can't delete one mid-creation;
-        // a genuinely orphaned dir is older than the grace and still gets swept.
-        try {
-          // #5332: wall-clock deliberately — compared against the filesystem
-          // mtime (also wall-clock). A monotonic clock would be meaningless here.
-          if (Date.now() - statSync(dir).mtimeMs < ClaudeTuiSession.SINK_SWEEP_GRACE_MS) {
-            kept++
-            continue
-          }
-        } catch { /* stat failed (dir vanished) → fall through to rmSync (no-op) */ }
-      }
-      try {
-        rmSync(dir, { recursive: true, force: true })
-        swept++
-      } catch (err) {
-        logger?.warn?.(`sink-dir sweep: failed to remove ${dir}: ${err.message}`)
-      }
-    }
-    if (swept > 0) logger?.info?.(`Swept ${swept} stale claude-tui sink dir(s) from ${base} (kept ${kept} live)`)
-    return { swept, kept }
+    // #7337: the reaper itself lives in utils/stale-session-dirs.js — CliSession
+    // now has a per-session dir of its own to sweep, and two hand-written copies
+    // of a "delete directories under /tmp" loop is not a drift this repo accepts.
+    return sweepStaleOwnedDirs(join(tmpdir(), 'chroxy-claude-tui'), {
+      graceMs: ClaudeTuiSession.SINK_SWEEP_GRACE_MS,
+      logger,
+      label: 'claude-tui sink',
+    })
   }
 
   // Upper bounds on how long we'll wait for status=idle before falling
@@ -3909,22 +3872,14 @@ export class ClaudeTuiSession extends BaseSession {
    */
   // #5374: BaseSession.setPermissionMode owns the validation + guard and fires
   // this hook after `this.permissionMode` is set, only when the mode changed.
-  // #5334 (IP-6): atomically write the permission-mode sidecar — write a tmp
-  // file then rename(2) over the target. Direct writeFileSync truncates-then-
-  // writes, so a concurrent PreToolUse hook `cat` could observe an empty/partial
-  // value mid-write and fall through to the stale env var. rename(2) is atomic
-  // within the same filesystem, so readers see either the OLD complete value or
-  // the NEW complete value — never an empty/partial one. Throws on failure
-  // (after best-effort tmp cleanup) so each caller applies its own fallback.
+  // #5334 (IP-6): the write is atomic (tmp file + rename(2)) so a concurrent
+  // PreToolUse hook `cat` can never read a truncated value and fall through to
+  // the stale env var. #7337 moved the implementation to utils/ — CliSession
+  // now needs the same channel, and a second hand-written copy of it is the
+  // drift class docs/false-safety-guards.md catalogues. Kept as a thin method
+  // so subclasses and tests can still stub the write.
   _writePermissionModeSidecarAtomic(path, value) {
-    const tmpPath = `${path}.tmp-${randomUUID()}`
-    try {
-      writeFileSync(tmpPath, value)
-      renameSync(tmpPath, path)
-    } catch (err) {
-      try { rmSync(tmpPath, { force: true }) } catch { /* ignore */ }
-      throw err
-    }
+    writePermissionModeSidecarAtomic(path, value)
   }
 
   _onPermissionModeChanged(mode) {
