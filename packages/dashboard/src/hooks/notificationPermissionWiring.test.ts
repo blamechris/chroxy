@@ -92,32 +92,63 @@ describe('App wires the turn-complete notification (#7347)', () => {
   // covered by its own behavioural suite, and every one of those tests would
   // still pass with the call deleted from App.tsx — leaving the exact state
   // #7347 was filed about (a trigger that exists and never runs).
+  //
+  // The two regions are sliced out and asserted WITHIN, rather than scanned
+  // for loosely across the whole file. A bare `expect(appSource).toMatch(
+  // /connected: isConnected/)` would keep passing the day some unrelated
+  // component picks up an identically-named prop — the guard would then be
+  // satisfied by a line that has nothing to do with this hook.
+  const CALL_ANCHOR = 'useTurnCompleteNotification(turnCompleteSessions'
+  const MEMO_ANCHOR = 'const turnCompleteSessions = useMemo'
+
+  const memoStart = appSource.indexOf(MEMO_ANCHOR)
+  const callStart = appSource.indexOf(CALL_ANCHOR)
+  const memoSource = memoStart >= 0 && callStart > memoStart ? appSource.slice(memoStart, callStart) : ''
+  const callSource = callStart >= 0 ? appSource.slice(callStart, appSource.indexOf('})', callStart) + 2) : ''
 
   it('imports and mounts useTurnCompleteNotification', () => {
     expect(appSource).toContain("from './hooks/useTurnCompleteNotification'")
-    expect(appSource).toMatch(/useTurnCompleteNotification\(\s*turnCompleteSessions\s*,/)
+    expect(callStart).toBeGreaterThan(-1)
+  })
+
+  it('sliced out both regions — positive control for the assertions below', () => {
+    // Without this, an anchor that stopped matching would leave both slices
+    // empty and every `not.toMatch` below would pass vacuously.
+    expect(memoSource.length).toBeGreaterThan(100)
+    expect(callSource.length).toBeGreaterThan(50)
+    expect(memoSource).toContain('sessions.map')
   })
 
   it('feeds it the live connection state, not a hardcoded true', () => {
     // `connected: false` is what discards tracking across a socket drop. Wire
     // a literal here and a reconnect manufactures a completed turn out of a
     // re-seeded session_list snapshot.
-    expect(appSource).toMatch(/connected:\s*isConnected\s*,/)
+    expect(callSource).toMatch(/connected:\s*isConnected\b/)
+  })
+
+  it('feeds it the live mute toggle, not a hardcoded true', () => {
+    expect(callSource).toMatch(/enabled:\s*turnCompleteNotificationEnabled\b/)
+  })
+
+  it('wires the click through to a session switch', () => {
+    expect(callSource).toMatch(/onNotificationClick:\s*handleSwitchSession\b/)
   })
 
   it('derives busy from the per-session isIdle flag, not from sessions[].isBusy', () => {
     // `sessions[].isBusy` is only a session_list snapshot and is NOT
-    // rebroadcast on a turn boundary — reading it here would mean the
-    // notification fires on session create/destroy and never on a completed
-    // turn. `session_activity` maintains `sessionStates[id].isIdle` instead.
+    // rebroadcast on a turn boundary; the top-level flat `isIdle` mirrors the
+    // ACTIVE session alone. `session_activity` maintains
+    // `sessionStates[id].isIdle` for every session, which is the one that
+    // moves on a turn boundary.
+    expect(memoSource).toMatch(/busy:\s*sessionBusyById\[/)
+    expect(memoSource).not.toMatch(/busy:\s*s\.isBusy\b/)
     expect(appSource).toMatch(/sessionStates\[id\]!\.isIdle === false/)
-    expect(appSource).toMatch(/busy:\s*sessionBusyById\[/)
   })
 
   it('suppresses the alert for a session that stopped on a permission prompt', () => {
     // Otherwise the same moment produces two cards: this one and
     // usePermissionNotification's.
-    expect(appSource).toMatch(/awaitingPermission:\s*\(pendingPermissionCounts\[/)
+    expect(memoSource).toMatch(/awaitingPermission:\s*\(pendingPermissionCounts\[/)
   })
 })
 
