@@ -2960,3 +2960,88 @@ describe('SettingsPanel — permission rules + audit history (#6772/#6829)', () 
     ).toBe('Auto-allowed Write ×50 (persisted rule)')
   })
 })
+
+/**
+ * #7351 — the Settings -> Dashboard notification-permission row.
+ *
+ * This row is not cosmetic: on the web backend the button is the ONLY path by
+ * which chroxy can ever obtain notification permission, because browsers
+ * require a user gesture to call `Notification.requestPermission()`. An
+ * untested control here is the same failure the issue is about — a permission
+ * that is never actually requested.
+ */
+describe('SettingsPanel — notification permission row (#7351)', () => {
+  function permissionProp(
+    permission: 'granted' | 'denied' | 'default' | 'unsupported',
+    backend: 'tauri' | 'web' | 'unsupported' = 'web',
+    request = vi.fn().mockResolvedValue(permission),
+  ) {
+    return { backend, permission, request }
+  }
+
+  it('renders nothing when the host does not supply the prop', () => {
+    render(<SettingsPanel isOpen onClose={vi.fn()} />)
+    expect(screen.queryByTestId('notification-permission-field')).not.toBeInTheDocument()
+  })
+
+  it('offers the Enable button while permission is still default', () => {
+    render(<SettingsPanel isOpen onClose={vi.fn()} notificationPermission={permissionProp('default')} />)
+    expect(screen.getByTestId('notification-permission-field')).toBeInTheDocument()
+    expect(screen.getByTestId('notification-permission-enable')).toBeInTheDocument()
+  })
+
+  it('requests permission when the Enable button is clicked', () => {
+    // The gesture that the whole web path depends on.
+    const request = vi.fn().mockResolvedValue('granted')
+    render(
+      <SettingsPanel isOpen onClose={vi.fn()} notificationPermission={permissionProp('default', 'web', request)} />,
+    )
+    fireEvent.click(screen.getByTestId('notification-permission-enable'))
+    expect(request).toHaveBeenCalledOnce()
+  })
+
+  it('reports the granted state and stops offering the button', () => {
+    render(<SettingsPanel isOpen onClose={vi.fn()} notificationPermission={permissionProp('granted')} />)
+    expect(screen.getByTestId('notification-permission-granted')).toBeInTheDocument()
+    expect(screen.queryByTestId('notification-permission-enable')).not.toBeInTheDocument()
+  })
+
+  it('reports the denied state and does not offer a button that cannot work', () => {
+    // Chroxy is not allowed to re-ask after a denial, so an Enable button here
+    // would be a control that silently does nothing.
+    render(<SettingsPanel isOpen onClose={vi.fn()} notificationPermission={permissionProp('denied')} />)
+    expect(screen.getByTestId('notification-permission-denied')).toBeInTheDocument()
+    expect(screen.queryByTestId('notification-permission-enable')).not.toBeInTheDocument()
+  })
+
+  it('reports the unsupported state — e.g. a LAN http:// dashboard', () => {
+    render(
+      <SettingsPanel isOpen onClose={vi.fn()} notificationPermission={permissionProp('unsupported', 'unsupported')} />,
+    )
+    expect(screen.getByTestId('notification-permission-unsupported')).toBeInTheDocument()
+    expect(screen.queryByTestId('notification-permission-enable')).not.toBeInTheDocument()
+  })
+
+  it('does not tell desktop users that "your browser" requires a click', () => {
+    // The gesture requirement is a browser rule; under Tauri the request goes
+    // through an OS dialog and the sentence is simply false.
+    render(<SettingsPanel isOpen onClose={vi.fn()} notificationPermission={permissionProp('default', 'tauri')} />)
+    const field = screen.getByTestId('notification-permission-field')
+    expect(field.textContent).not.toMatch(/your browser/i)
+
+    cleanup()
+
+    // Positive control: on the web backend that sentence IS shown, so the
+    // assertion above is about the backend and not about the copy having been
+    // removed outright.
+    render(<SettingsPanel isOpen onClose={vi.fn()} notificationPermission={permissionProp('default', 'web')} />)
+    expect(screen.getByTestId('notification-permission-field').textContent).toMatch(/your browser/i)
+  })
+
+  it('does not advise desktop users to "use the desktop app"', () => {
+    render(
+      <SettingsPanel isOpen onClose={vi.fn()} notificationPermission={permissionProp('denied', 'tauri')} />,
+    )
+    expect(screen.getByTestId('notification-permission-denied').textContent).toMatch(/in your OS/i)
+  })
+})

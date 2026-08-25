@@ -23,7 +23,10 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 const SRC = path.resolve(__dirname, '..')
-const appSource = fs.readFileSync(path.join(SRC, 'App.tsx'), 'utf-8')
+// Comment-stripped, like every other scan in this file: a guard whose whole
+// purpose is to catch the wiring going missing must not be satisfiable by
+// commenting the wiring out.
+const appSource = stripCommentLines(fs.readFileSync(path.join(SRC, 'App.tsx'), 'utf-8'))
 
 /**
  * Drop comment-ONLY lines (JSDoc bodies, `//` lines) before scanning.
@@ -62,6 +65,13 @@ function sourceFiles(dir: string, acc: string[] = []): string[] {
 }
 
 describe('App wires the notification-permission lifecycle', () => {
+  it('still has App source left after comment-stripping', () => {
+    // Positive control: if stripCommentLines ever ate the file, every
+    // assertion below would fail loudly rather than silently checking ''.
+    expect(appSource.length).toBeGreaterThan(1000)
+    expect(appSource).toContain('function App')
+  })
+
   it('imports useNotificationPermission', () => {
     expect(appSource).toContain("from './hooks/useNotificationPermission'")
   })
@@ -121,9 +131,37 @@ describe('native-notifications is the only Notification call site', () => {
   })
 })
 
+describe('the Enable-notifications button only uses classes that exist', () => {
+  it('has every class on the button defined in components.css', () => {
+    // Caught in review: the button shipped with `btn-secondary`, which is
+    // defined in no stylesheet in the repo — so it rendered with native OS
+    // chrome inside the themed panel. TypeScript cannot catch a class name
+    // that resolves to nothing, and neither can a render test that only
+    // queries by testid.
+    const panel = fs.readFileSync(path.join(SRC, 'components', 'SettingsPanel.tsx'), 'utf-8')
+    const css = fs.readFileSync(path.join(SRC, 'theme', 'components.css'), 'utf-8')
+
+    const match = panel.match(/className="([^"]*settings-notification-enable[^"]*)"/)
+    expect(match?.[1]).toBeTruthy()
+
+    const classes = (match?.[1] ?? '').split(/\s+/).filter(Boolean)
+    // Positive control: the button really does carry more than the one class
+    // this scan is named for, so an empty/one-item list means the regex broke.
+    expect(classes.length).toBeGreaterThan(1)
+
+    const undefinedClasses = classes.filter(c => !new RegExp(`\\.${c}\\b`).test(css))
+    expect(undefinedClasses).toEqual([])
+  })
+})
+
 describe('the Enable-notifications button meets the tap-target floor', () => {
   it('declares a 44px minimum, per the repo-wide rule', () => {
-    const css = fs.readFileSync(path.join(SRC, 'theme', 'components.css'), 'utf-8')
+    // Block comments removed first — the rule is documented with a /* */
+    // comment directly above it, and a commented-OUT rule must not count as
+    // the rule being present.
+    const css = fs
+      .readFileSync(path.join(SRC, 'theme', 'components.css'), 'utf-8')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
     const rule = css.match(/\.settings-notification-enable\s*\{[^}]*\}/)
     expect(rule).not.toBeNull()
     expect(rule![0]).toMatch(/min-height:\s*44px/)

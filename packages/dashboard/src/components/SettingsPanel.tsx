@@ -2108,7 +2108,7 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
                     <>
                       <button
                         type="button"
-                        className="btn-secondary settings-notification-enable"
+                        className="settings-secondary-button settings-notification-enable"
                         data-testid="notification-permission-enable"
                         onClick={() => { void notificationPermission.request() }}
                       >
@@ -2116,17 +2116,19 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
                       </button>
                       <p className="settings-hint">
                         Off — chroxy cannot notify you when a session needs
-                        your attention. Your browser only allows this to be
-                        requested from a click, so nothing is asked until you
-                        press the button.
+                        your attention.
+                        {notificationPermission.backend === 'web'
+                          ? ' Your browser only allows this to be requested from a click, so nothing is asked until you press the button.'
+                          : ' Press the button to allow them.'}
                       </p>
                     </>
                   )}
                   {notificationPermission.permission === 'denied' && (
                     <p className="settings-hint" data-testid="notification-permission-denied">
                       Blocked. Chroxy is not allowed to ask again — re-enable
-                      notifications for this site in your browser or OS
-                      settings, then reload.
+                      notifications for
+                      {notificationPermission.backend === 'web' ? ' this site in your browser' : ' Chroxy in your OS'}
+                      {' '}settings, then reload.
                     </p>
                   )}
                   {notificationPermission.permission === 'unsupported' && (
@@ -2135,7 +2137,7 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
                       notifications on a secure context, so a dashboard opened
                       over the LAN at an <code>http://</code> address cannot
                       use them — open it at <code>localhost</code>, or use the
-                      desktop app.
+                      desktop app instead.
                     </p>
                   )}
                 </div>

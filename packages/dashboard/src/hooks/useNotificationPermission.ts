@@ -108,6 +108,40 @@ export function useNotificationPermission(
     }
   }, [])
 
+  /**
+   * Re-probe when the window's focus/visibility changes.
+   *
+   * Without this the permission is read exactly once per page load, and a
+   * grant made OUT OF BAND — Chrome's site-settings panel, macOS
+   * Notifications preferences — would never reach React state, leaving
+   * notifications silently off for the life of the page. That would be a
+   * regression against the pre-#7351 code, which re-read the live
+   * `Notification.permission` on every effect run.
+   *
+   * Blur and visibility-hide are listened to as well as focus, because the
+   * moment the user leaves is precisely the moment notifications start
+   * mattering: a grant made while the tab was focused has to be picked up
+   * BEFORE the window loses focus, not after it comes back.
+   */
+  useEffect(() => {
+    if (backend === 'unsupported') return
+    let cancelled = false
+    const reprobe = () => {
+      refreshNotificationPermission().then(next => {
+        if (!cancelled) setPermission(next)
+      })
+    }
+    window.addEventListener('focus', reprobe)
+    window.addEventListener('blur', reprobe)
+    document.addEventListener('visibilitychange', reprobe)
+    return () => {
+      cancelled = true
+      window.removeEventListener('focus', reprobe)
+      window.removeEventListener('blur', reprobe)
+      document.removeEventListener('visibilitychange', reprobe)
+    }
+  }, [backend])
+
   const request = useCallback(async (): Promise<NativeNotificationPermission> => {
     hasRequestedRef.current = true
     persistNotificationPermissionAsked()
