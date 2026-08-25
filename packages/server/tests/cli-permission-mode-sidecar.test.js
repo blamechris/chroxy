@@ -252,7 +252,7 @@ describe('CliSession permission-mode sidecar (#7337)', () => {
       'positive control: the spawn-frozen env var is still stale, which is exactly why the sidecar exists')
   })
 
-  it('a session without permissions enabled gets no sidecar and no env var', () => {
+  it('a session without permissions enabled gets no sidecar, and an EMPTY sidecar env var', () => {
     const session = new CliSession({ cwd: tmp, stateFilePath: join(tmp, 'state.json') })
     created.push(session)
     session._spawnPersistentProcess = () => {}
