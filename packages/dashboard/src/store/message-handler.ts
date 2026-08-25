@@ -5420,7 +5420,33 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           updateSession(expTargetId, (ss) => ({
             messages: ss.messages.map((m) =>
               m.requestId === expiredRequestId && m.type === 'prompt'
-                ? { ...m, content: `${m.content}\n${expiredSystemMsg.content}`, options: undefined }
+                // #7335: `expiresAt` is what actually retires the card, and until
+                // now nothing moved it. Clearing `options` reads like it should,
+                // but #2853 records that PermissionPrompt hardcodes its own
+                // buttons and NEVER reads that array — the dashboard's
+                // interactive gate is `requestId && expiresAt && !answered`
+                // (useMessageRenderer), and the countdown is seeded from
+                // `Math.max(0, expiresAt - Date.now())`. So an expired prompt
+                // went on offering a working Allow for the rest of its five
+                // minutes, with "(Expired …)" printed next to it.
+                //
+                // Stamp it to NOW, not 0: the renderer's gate gives up on a
+                // falsy `expiresAt` and would drop the whole card, erasing the
+                // record of a tool call nobody answered (#7353). Now the card
+                // stays, reads "Timed out", and offers nothing.
+                //
+                // Setting `answered` instead would be wrong: that field is a
+                // DECISION token (#6222/#6223) and no decision was made.
+                //
+                // This also retires the tab badge and the "jump to next pending"
+                // target, both of which key off `isLivePermissionPrompt`'s
+                // `expiresAt > now`.
+                ? {
+                    ...m,
+                    content: `${m.content}\n${expiredSystemMsg.content}`,
+                    options: undefined,
+                    expiresAt: Date.now(),
+                  }
                 : m
             ),
           }));
