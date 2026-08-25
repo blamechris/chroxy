@@ -31,6 +31,13 @@ const KEY_INTERVENTION_PING = `${KEY_PREFIX}intervention_ping`;
 // `isPermissionGranted()` is a bare boolean. Without this flag the first-run
 // request would re-fire on every single page load for anyone who dismissed it.
 const KEY_NOTIFICATION_PERMISSION_ASKED = `${KEY_PREFIX}notification_permission_asked`;
+// #7347 — native notification when a session's turn completes and it is
+// waiting on the user. Defaults on; persisted per-device so a muted device
+// stays muted. Separate from the permission-request notification on purpose:
+// the two fire on different events, and an operator who finds turn-complete
+// alerts noisy must be able to mute THEM without switching OS notifications
+// off wholesale, which would take the permission ones with it.
+const KEY_TURN_COMPLETE_NOTIFICATION = `${KEY_PREFIX}turn_complete_notification`;
 // #6799 — global "compact" chat filter (hide tool calls + thinking, mobile
 // parity). Defaults off; persisted per-device so the choice survives reload.
 const KEY_COMPACT_CHAT_FILTER = `${KEY_PREFIX}compact_chat_filter`;
@@ -528,6 +535,33 @@ export function loadNotificationPermissionAsked(): boolean {
   }
 }
 
+/** Persist the turn-complete native-notification enable/mute preference (#7347) */
+export function persistTurnCompleteNotification(enabled: boolean): void {
+  try {
+    localStorage.setItem(KEY_TURN_COMPLETE_NOTIFICATION, String(enabled));
+  } catch {
+    // Storage not available
+  }
+}
+
+/**
+ * Load the persisted turn-complete native-notification preference (#7347).
+ *
+ * Defaults to ON (returns true) when unset, and falls back to ON when storage
+ * is unavailable — same contract as `loadPersistedInterventionPing`. Only an
+ * explicit `'false'` mutes it. The whole point of #7347 is that a finished
+ * session is otherwise indistinguishable from an idle one, so the alert has to
+ * ship enabled to be worth anything; the OS permission gate and the
+ * window-focus gate are what keep it from being noisy.
+ */
+export function loadPersistedTurnCompleteNotification(): boolean {
+  try {
+    return localStorage.getItem(KEY_TURN_COMPLETE_NOTIFICATION) !== 'false';
+  } catch {
+    return true;
+  }
+}
+
 /**
  * Persist the compact-chat-filter preference (#6799 — hide tool calls +
  * thinking across the whole transcript, mirroring the mobile app's coarse
@@ -757,6 +791,17 @@ export function clearPersistedState(): void {
  * server-scoped repo/session/tab ordering below), so they belong in the same
  * survive-clear class as the #6915 device prefs. Pre-existing asymmetry from
  * #4304 — this was never intentional exclusion.
+ *
+ * #7347 adds the two OS-notification keys, which are device-level for the same
+ * reason `theme` is — an OS permission grant and a per-device mute have
+ * nothing to do with which chroxy server you are pointed at:
+ *
+ * - `KEY_TURN_COMPLETE_NOTIFICATION` — the new mute toggle.
+ * - `KEY_NOTIFICATION_PERMISSION_ASKED` — shipped in #7351 and never added
+ *   here, so an unscoped `clearPersistedState()` (server switch) deleted it
+ *   and re-armed the automatic first-run permission prompt for a user who had
+ *   already dismissed one. That is exactly the re-prompt-forever behaviour the
+ *   flag was introduced to prevent, just gated behind a server switch.
  */
 function isGlobalKey(key: string): boolean {
   return key === KEY_VIEW_MODE
@@ -766,6 +811,8 @@ function isGlobalKey(key: string): boolean {
     || key === KEY_THEME
     || key === KEY_SHOW_CONSOLE_TAB
     || key === KEY_INTERVENTION_PING
+    || key === KEY_NOTIFICATION_PERMISSION_ASKED
+    || key === KEY_TURN_COMPLETE_NOTIFICATION
     || key === KEY_COMPACT_CHAT_FILTER
     || key === KEY_SIDEBAR_PANEL_HEIGHT
     || key === KEY_SIDEBAR_PANEL_VIEW

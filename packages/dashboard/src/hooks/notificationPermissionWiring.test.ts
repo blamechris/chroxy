@@ -87,6 +87,40 @@ describe('App wires the notification-permission lifecycle', () => {
   })
 })
 
+describe('App wires the turn-complete notification (#7347)', () => {
+  // Same class of guard, same reason: `useTurnCompleteNotification` is fully
+  // covered by its own behavioural suite, and every one of those tests would
+  // still pass with the call deleted from App.tsx — leaving the exact state
+  // #7347 was filed about (a trigger that exists and never runs).
+
+  it('imports and mounts useTurnCompleteNotification', () => {
+    expect(appSource).toContain("from './hooks/useTurnCompleteNotification'")
+    expect(appSource).toMatch(/useTurnCompleteNotification\(\s*turnCompleteSessions\s*,/)
+  })
+
+  it('feeds it the live connection state, not a hardcoded true', () => {
+    // `connected: false` is what discards tracking across a socket drop. Wire
+    // a literal here and a reconnect manufactures a completed turn out of a
+    // re-seeded session_list snapshot.
+    expect(appSource).toMatch(/connected:\s*isConnected\s*,/)
+  })
+
+  it('derives busy from the per-session isIdle flag, not from sessions[].isBusy', () => {
+    // `sessions[].isBusy` is only a session_list snapshot and is NOT
+    // rebroadcast on a turn boundary — reading it here would mean the
+    // notification fires on session create/destroy and never on a completed
+    // turn. `session_activity` maintains `sessionStates[id].isIdle` instead.
+    expect(appSource).toMatch(/sessionStates\[id\]!\.isIdle === false/)
+    expect(appSource).toMatch(/busy:\s*sessionBusyById\[/)
+  })
+
+  it('suppresses the alert for a session that stopped on a permission prompt', () => {
+    // Otherwise the same moment produces two cards: this one and
+    // usePermissionNotification's.
+    expect(appSource).toMatch(/awaitingPermission:\s*\(pendingPermissionCounts\[/)
+  })
+})
+
 describe('native-notifications is the only Notification call site', () => {
   const files = sourceFiles(SRC)
 
@@ -151,6 +185,34 @@ describe('the Enable-notifications button only uses classes that exist', () => {
 
     const undefinedClasses = classes.filter(c => !new RegExp(`\\.${c}\\b`).test(css))
     expect(undefinedClasses).toEqual([])
+  })
+})
+
+describe('the Dashboard-section toggles meet the tap-target floor', () => {
+  it('gives .settings-field-checkbox label a 44px minimum', () => {
+    // The label is the control (clicking the text toggles the checkbox), so
+    // the 44pt floor applies to it and not to the native checkbox glyph. This
+    // is asserted on the SHARED class deliberately: the turn-complete toggle
+    // (#7347), the intervention ping and the console-tab switch all use it, so
+    // one rule covers the whole section and a fourth toggle inherits it.
+    const css = fs
+      .readFileSync(path.join(SRC, 'theme', 'components.css'), 'utf-8')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+    const rule = css.match(/\.settings-field-checkbox\s+label\s*\{[^}]*\}/)
+    expect(rule).not.toBeNull()
+    expect(rule![0]).toMatch(/min-height:\s*44px/)
+  })
+
+  it('renders the turn-complete toggle inside a .settings-field-checkbox row', () => {
+    // Positive control for the CSS assertion above: the rule only protects
+    // this toggle if the toggle actually carries the class.
+    const panel = stripCommentLines(
+      fs.readFileSync(path.join(SRC, 'components', 'SettingsPanel.tsx'), 'utf-8'),
+    )
+    const row = panel.match(
+      /className="settings-field settings-field-checkbox"[\s\S]{0,600}?turn-complete-notification-toggle/,
+    )
+    expect(row).not.toBeNull()
   })
 })
 

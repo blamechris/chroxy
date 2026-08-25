@@ -35,6 +35,9 @@ export interface AppModalsProps {
   onToggleConsoleTab: (show: boolean) => void
   interventionPingEnabled: boolean
   onToggleInterventionPing: (enabled: boolean) => void
+  // #7347 — turn-complete OS-notification mute, forwarded to SettingsPanel.
+  turnCompleteNotificationEnabled: boolean
+  onToggleTurnCompleteNotification: (enabled: boolean) => void
   // #7351 — OS-notification permission state, forwarded to SettingsPanel.
   notificationPermission?: UseNotificationPermissionResult
   // Shortcut help
@@ -120,6 +123,8 @@ export function AppModals(props: AppModalsProps) {
         onToggleConsoleTab={props.onToggleConsoleTab}
         interventionPingEnabled={props.interventionPingEnabled}
         onToggleInterventionPing={props.onToggleInterventionPing}
+        turnCompleteNotificationEnabled={props.turnCompleteNotificationEnabled}
+        onToggleTurnCompleteNotification={props.onToggleTurnCompleteNotification}
         notificationPermission={props.notificationPermission}
       />
 

@@ -221,6 +221,28 @@ export interface NativeNotificationOptions {
   body?: string
   /** Collapse key — replaces an earlier notification with the same tag. */
   tag?: string
+  /**
+   * Invoked when the user clicks the notification, **after** the backend has
+   * done whatever raising the window means for it. Use it for what happens
+   * *inside* the app (select a session, open a view) — never for the window
+   * itself, which differs per backend and is handled below.
+   *
+   * ## Web backend only — and that is a real gap, not an oversight
+   *
+   * `Notification.onclick` is standard and reliable in a browser, so the web
+   * dashboard gets click-to-focus. **The Tauri backend silently ignores this
+   * callback.** `window.__TAURI__.notification.sendNotification()` returns
+   * `void` and exposes no click handler on desktop; the plugin's `onAction`
+   * surface is built around `registerActionTypes`, which is an Android/iOS
+   * concept. Wiring desktop click-to-focus properly means a Rust-side
+   * notification that can call `window::show_window` — a separate,
+   * platform-specific change (tracked as a follow-on to #7347).
+   *
+   * This is deliberately NOT papered over with a fallback: silently doing
+   * nothing where the caller asked for a click action is the honest state, and
+   * `native-notifications.test.ts` pins it so nobody later assumes it works.
+   */
+  onClick?: () => void
 }
 
 /**
@@ -238,6 +260,7 @@ export function sendNativeNotification(title: string, options: NativeNotificatio
   if (tauriApi) {
     try {
       // The plugin has no `tag` equivalent; collapsing is the OS's business.
+      // `options.onClick` is dropped here — see its doc comment.
       tauriApi.sendNotification({ title, body: options.body })
       return true
     } catch {
@@ -248,7 +271,31 @@ export function sendNativeNotification(title: string, options: NativeNotificatio
   const webApi = getWebNotificationApi()
   if (!webApi) return false
   try {
-    new webApi(title, { body: options.body, tag: options.tag })
+    const notification = new webApi(title, { body: options.body, tag: options.tag })
+    const onClick = options.onClick
+    if (onClick) {
+      notification.onclick = () => {
+        // Raising the window is the backend's job, not the caller's: a click
+        // on a notification means "take me there", and what "there" is
+        // depends on which backend sent it. Best-effort — popup blockers and
+        // some window-management policies reject `focus()`, and the in-app
+        // navigation below is still worth doing when they do.
+        try {
+          window.focus()
+        } catch {
+          // Not focusable — fall through and navigate anyway.
+        }
+        // Chrome leaves a clicked notification on screen until it is closed
+        // explicitly; without this the tray keeps a stale "awaiting you" card
+        // for a session the user has already come back to.
+        try {
+          notification.close()
+        } catch {
+          // Already dismissed.
+        }
+        onClick()
+      }
+    }
     return true
   } catch {
     return false

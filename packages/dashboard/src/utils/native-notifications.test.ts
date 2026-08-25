@@ -213,3 +213,89 @@ describe('sendNativeNotification', () => {
     expect(sendNativeNotification('t')).toBe(false)
   })
 })
+
+/**
+ * #7347 — click-to-focus.
+ *
+ * The turn-complete notification names a session, so clicking it has to be
+ * able to bring that session to the front. These pin BOTH halves of what the
+ * module actually does: the web backend wires the click, and the Tauri backend
+ * demonstrably does not. The second half is the point — desktop click-to-focus
+ * needs a Rust-side notification, and a test that only covered the web path
+ * would leave "does the desktop app do this?" answerable only by guessing.
+ */
+describe('sendNativeNotification — onClick (#7347)', () => {
+  /**
+   * Web backend whose constructor produces an instance with a real `close`,
+   * so the click handler can be invoked the way a browser would invoke it.
+   */
+  function installClickableWebBackend() {
+    const instances: Array<{ onclick: (() => void) | null; close: ReturnType<typeof vi.fn> }> = []
+    const ctor = installWebBackend('granted')
+    ctor.mockImplementation(function (this: { onclick: (() => void) | null; close: ReturnType<typeof vi.fn> }) {
+      this.onclick = null
+      this.close = vi.fn()
+      instances.push(this)
+    })
+    return { ctor, instances }
+  }
+
+  it('wires the click handler on the web backend, focusing the window and closing the card', () => {
+    const { instances } = installClickableWebBackend()
+    const onClick = vi.fn()
+    const focusSpy = vi.spyOn(window, 'focus').mockImplementation(() => {})
+
+    expect(sendNativeNotification('Chroxy: api', { body: 'Finished', onClick })).toBe(true)
+    expect(instances).toHaveLength(1)
+    const instance = instances[0]!
+    // Not yet — only the click may fire it.
+    expect(onClick).not.toHaveBeenCalled()
+
+    expect(typeof instance.onclick).toBe('function')
+    instance.onclick!()
+
+    expect(focusSpy).toHaveBeenCalled()
+    expect(instance.close).toHaveBeenCalled()
+    expect(onClick).toHaveBeenCalledOnce()
+    focusSpy.mockRestore()
+  })
+
+  it('still calls back when window.focus() is refused', () => {
+    const { instances } = installClickableWebBackend()
+    const onClick = vi.fn()
+    const focusSpy = vi.spyOn(window, 'focus').mockImplementation(() => {
+      throw new Error('blocked by window-management policy')
+    })
+
+    sendNativeNotification('Chroxy: api', { onClick })
+    instances[0]!.onclick!()
+
+    // The in-app navigation is worth doing even when the window cannot be
+    // raised — otherwise a focus policy silently eats the whole interaction.
+    expect(onClick).toHaveBeenCalledOnce()
+    focusSpy.mockRestore()
+  })
+
+  it('leaves onclick unset when the caller passes no handler', () => {
+    const { instances } = installClickableWebBackend()
+    sendNativeNotification('Chroxy: api', { body: 'Finished' })
+    expect(instances[0]!.onclick).toBeNull()
+  })
+
+  it('sends but does NOT invoke onClick on the Tauri backend — the documented desktop gap', async () => {
+    const api = installTauriBackend({ granted: true })
+    await refreshNotificationPermission()
+    const onClick = vi.fn()
+
+    // The notification itself still goes out; only the click wiring is absent.
+    expect(sendNativeNotification('Chroxy: api', { body: 'Finished', onClick })).toBe(true)
+    expect(api.sendNotification).toHaveBeenCalledWith({ title: 'Chroxy: api', body: 'Finished' })
+    // The plugin's sendNotification returns void and takes no click callback,
+    // so there is nowhere for `onClick` to be attached. If a future plugin
+    // version gains one, THIS assertion is the thing that should be updated —
+    // deliberately, rather than the gap being discovered by a user clicking a
+    // notification and nothing happening.
+    expect(onClick).not.toHaveBeenCalled()
+    expect(api.sendNotification.mock.calls[0]![0]).not.toHaveProperty('onClick')
+  })
+})
