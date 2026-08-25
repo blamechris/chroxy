@@ -28,7 +28,7 @@
  * Nothing here can pass by pretending a permission was granted, because
  * nothing here touches the global permission at all.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { renderHook } from '@testing-library/react'
 import { usePermissionNotification } from './usePermissionNotification'
 import { sendNativeNotification } from '../utils/native-notifications'
@@ -46,9 +46,17 @@ beforeEach(() => {
   mockSend.mockClear()
   // Default: window not focused (notifications should fire)
   document.hasFocus = () => false
-  return () => {
-    document.hasFocus = originalHasFocus
-  }
+})
+
+// Restored in an explicit afterEach rather than by returning a teardown from
+// beforeEach. Vitest DOES honour a returned teardown — verified, not assumed:
+// a probe asserting the exact order ran `before:0, cleanup:1, before:1,
+// cleanup:2, before:2`. But Jest does not, and that is the rule most readers
+// (and at least one review bot) carry, so the returned-function form reads as
+// a leak even when it is not. The explicit form costs nothing and is not
+// ambiguous.
+afterEach(() => {
+  document.hasFocus = originalHasFocus
 })
 
 function makePrompt(overrides: Partial<{ id: string; requestId: string; tool: string; description: string; expiresAt: number; answered: string | undefined }> = {}) {
