@@ -19,7 +19,8 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { createEmptySessionState } from './utils'
-import type { ChatMessage } from '@chroxy/store-core'
+import type { ChatMessage, SessionInfo } from '@chroxy/store-core'
+import type { ProviderInfo } from './types'
 
 const SESSION_ID = 'sess-7335'
 
@@ -59,12 +60,12 @@ async function confirmCopyFor(opts: {
   useConnectionStore.setState({
     activeSessionId: SESSION_ID,
     sessionStates: { [SESSION_ID]: ss },
-    sessions: [{ sessionId: SESSION_ID, provider: 'claude-cli' } as never],
+    sessions: [{ sessionId: SESSION_ID, provider: 'claude-cli' } as unknown as SessionInfo],
     availableProviders: [
       {
         name: 'claude-cli',
         capabilities: { interruptsTurnOnAutoSwitch: opts.interruptsTurnOnAutoSwitch },
-      } as never,
+      } as unknown as ProviderInfo,
     ],
     socket: null,
   })
@@ -130,7 +131,7 @@ describe('#7335 — Auto-mode confirm copy vs the session busy predicate', () =>
     expect(copy).toMatch(/Tools will run without asking for permission/)
   })
 
-  it('POSITIVE CONTROL: an EXPIRED prompt is not work at risk — plain copy', async () => {
+  it('POSITIVE CONTROL: a CLOCK-expired prompt is not work at risk — plain copy', async () => {
     const now = Date.now()
     const stale = { ...livePrompt(now), expiresAt: now - 1 } as ChatMessage
     const copy = await confirmCopyFor({
@@ -140,6 +141,24 @@ describe('#7335 — Auto-mode confirm copy vs the session busy predicate', () =>
       interruptsTurnOnAutoSwitch: true,
     })
     expect(copy).not.toMatch(/INTERRUPT/)
+  })
+
+  it('POSITIVE CONTROL: a SERVER-retired prompt is not work at risk — plain copy', async () => {
+    // The case this PR's own server half makes routine: _killAndRespawn emits
+    // permission_expired, whose handler clears `options` but leaves `answered`
+    // unset and `expiresAt` in the future. Flipping to Auto again a minute later
+    // must not claim there is a turn to interrupt. Distinct from the clock case
+    // above — that one was never reachable this way.
+    const now = Date.now()
+    const retired = { ...livePrompt(now), options: undefined } as ChatMessage
+    const copy = await confirmCopyFor({
+      streamingMessageId: null,
+      isIdle: true,
+      messages: [retired],
+      interruptsTurnOnAutoSwitch: true,
+    })
+    expect(copy).not.toMatch(/INTERRUPT/)
+    expect(copy).toMatch(/Tools will run without asking for permission/)
   })
 
   it('POSITIVE CONTROL: an ANSWERED prompt is not work at risk — plain copy', async () => {

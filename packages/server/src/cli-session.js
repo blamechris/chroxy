@@ -913,28 +913,39 @@ export class CliSession extends BaseSession {
    * clears the prompt's `options`, which is what actually retires the dead
    * Allow button — so emitting here is the whole client-side fix.
    *
-   * Extracted because it was wired to `_handleHardTimeout` alone while a turn
-   * has several ways to die — correct for every input it saw and never reached
-   * by the rest, the shape catalogued in docs/false-safety-guards.md. The
-   * callers, audited rather than assumed:
+   * Wired at three sites, and the third is the one that matters:
    *
-   *   - `_handleHardTimeout`  — the original (#2831).
-   *   - `_killAndRespawn`     — the #3729 panic-button, the auto-mode switch,
-   *                             and mid-turn setModel.
-   *   - `_handleChildClose`   — a crash, and user Stop via SIGINT.
+   *   - `_clearMessageState` — the FUNNEL. Every turn end reaches it: the
+   *     normal `result`, the hard cap, the interrupt safety timeout,
+   *     `destroy()`. It is also where the ids used to be dropped silently.
+   *   - `_killAndRespawn`    — the #3729 panic-button, the auto-mode switch,
+   *     mid-turn setModel. Needs its OWN call because it reaches the funnel via
+   *     `_emitInterruptedTurnResult`, which early-returns when the session is
+   *     not busy.
+   *   - `_handleChildClose`  — a crash, or user Stop where the child dies. Same
+   *     early-return caveat.
    *
-   * Deliberately NOT wired to the remaining three:
+   * An earlier draft wired only the two death sites and justified skipping the
+   * rest in a table. Review found the table wrong twice over: the interrupt
+   * safety timeout was excused as "the child ignored SIGINT so the prompt is
+   * still answerable", which this file contradicts eleven hundred lines below
+   * (`claude only aborts the current turn` — the hook dies with the turn), and
+   * that path then wiped the ids anyway via `_clearMessageState`, so no later
+   * close could expire them. The plain `result` path was not in the table at
+   * all. Enumerating callers by hand is what produced both errors; wiring the
+   * funnel is what fixes them.
    *
-   *   - `_handleStreamStall` cannot fire while a permission is pending —
-   *     `notifyPermissionPending` clears the stall timer and
-   *     `_armResultTimeout` bails on `_resultTimeoutPaused`, so it is
-   *     unreachable in this state rather than merely unlikely.
-   *   - the interrupt safety timeout fires when the child IGNORED SIGINT and
-   *     is still alive, so its hook is still blocked and its prompt still
-   *     genuinely answerable. Expiring there would be the lie this method
-   *     exists to prevent.
-   *   - `destroy()` tears the whole session down; the card goes with it, and
-   *     the HTTP side is already released by ws-permissions' own close path.
+   * `_handleStreamStall` is genuinely unreachable with a permission pending —
+   * `notifyPermissionPending` clears the stall timer and `_armResultTimeout`
+   * bails on `_resultTimeoutPaused` — and it routes through the funnel anyway.
+   *
+   * NOT a full solution on its own: this retires the prompt in the CLIENTS. The
+   * daemon's own `pendingPermissions` entry (ws-permissions.js) is NOT released
+   * here, because killing the CLI child does not signal the hook's `curl`
+   * grandchild (POSIX `killProcessTree` sends SIGTERM to the direct child only),
+   * so its socket stays open and `resendPendingPermissions` will re-send the
+   * request to any client that reconnects inside the five-minute window. That
+   * gap predates this change; see #7379.
    *
    * @param {string} message Reason forwarded on the wire (clients log it; the
    *   user-visible copy is fixed client-side).
@@ -945,6 +956,18 @@ export class CliSession extends BaseSession {
       this.emit('permission_expired', { requestId, message })
     }
     this._pendingPermissionIds.clear()
+    // #7335: the set and this flag are ONE piece of bookkeeping —
+    // notifyPermissionPending sets both, and notifyPermissionResolved is the
+    // only other thing that unsets the flag, which it does only for an id still
+    // IN the set. Taking the ids without releasing the flag therefore wedges it
+    // true forever on any path that does not reach _clearMessageState (which
+    // resets it) — and _emitInterruptedTurnResult early-returns when the
+    // session is not busy, so that path is real. `_armResultTimeout` bails on
+    // this flag, so the cost is the inactivity warning, the hard cap AND the
+    // #4467 stream-stall recovery all silently dead for the rest of the
+    // session. Releasing it here is correct by construction: there are no
+    // pending permissions left to pause for.
+    this._resultTimeoutPaused = false
   }
 
   // #4467: stream-stall recovery. Fires when the child has been silent
@@ -1444,6 +1467,15 @@ export class CliSession extends BaseSession {
     super._clearMessageState()
     this._waitingForAnswer = false
     this._currentCtx = null
+    // #7335: this is the ONE funnel every turn end passes through — the normal
+    // `result`, the hard cap, the interrupt safety timeout, destroy() — and it
+    // used to drop `_pendingPermissionIds` on the floor without telling anyone.
+    // Expiring here rather than only at the individual death sites is the
+    // difference between a guard wired to the callers someone remembered and
+    // one wired to all of them (docs/false-safety-guards.md). Idempotent: a
+    // no-op when the set is already empty, which it is on the paths that
+    // expired explicitly moments earlier.
+    this._expirePendingPermissions('Permission request expired (the turn it belonged to ended before it was answered)')
     // Reset permission pause bookkeeping — the next message starts fresh.
     this._pendingPermissionIds.clear()
     this._resultTimeoutPaused = false

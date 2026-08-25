@@ -3464,11 +3464,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // server is authoritative regardless (it queues any mid-turn input and
     // reconciles via message_queued/message_dequeued), so this only keeps the
     // optimistic render honest.
-    // #7335: the same predicate the Auto-mode confirm asks, so the two can no
-    // longer drift. `isSessionBusy` — NOT `hasInterruptibleWork` — is correct
-    // here: this mirrors an InputBar affordance, and counting a pending
-    // permission as busy would optimistically badge a send "Queued" in a state
-    // where the server would not queue it. See lib/session-busy.
+    // #7335: extracted so this and the Auto-mode confirm can no longer drift.
+    // `isSessionBusy` — NOT `hasInterruptibleWork` — is correct here: this
+    // expression must keep mirroring the InputBar's own `isStreaming || isBusy`
+    // (the #5952 invariant above), and a clause the InputBar does not have would
+    // re-open exactly the gap that invariant closed. See lib/session-busy.
     const active = get().getActiveSessionState();
     const busy = isSessionBusy(active);
 

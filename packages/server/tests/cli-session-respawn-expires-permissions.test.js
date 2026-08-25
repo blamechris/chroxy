@@ -121,17 +121,105 @@ describe('CliSession — respawn expires pending permissions (#7335)', () => {
     assert.equal(expired.length, 0, 'no phantom expiries on a clean exit')
   })
 
-  it('does not expire twice when a respawn is followed by the child close it caused', async () => {
+  it('does not expire the SAME prompt twice across a respawn and the close it caused', async () => {
     await session.sendMessage('do something')
     session.notifyPermissionPending('perm-1')
 
     session._killAndRespawn()
     assert.equal(expired.length, 1, 'respawn expired it')
 
-    // The kill above sets _respawning, so the close it triggers short-circuits
-    // before the expire — but assert it rather than trust the ordering.
     session._handleChildClose(0)
-    assert.equal(expired.length, 1, 'the close it caused does not re-expire')
+    assert.deepEqual(expired.map((e) => e.requestId), ['perm-1'], 'not re-expired')
+  })
+
+  it('the _respawning short-circuit is REAL, not just an empty set', async () => {
+    // The previous version of this case asserted only that the count stayed at
+    // 1 — which it would with the `if (this._respawning) return` guard DELETED,
+    // because _killAndRespawn had already emptied the set. Deleting the guard
+    // left the whole suite green. Re-arm an id in the gap so the two outcomes
+    // actually differ: with the guard, the close short-circuits and this id
+    // survives to be expired later; without it, the close expires it now.
+    await session.sendMessage('do something')
+    session.notifyPermissionPending('perm-1')
+
+    session._killAndRespawn()
+    assert.equal(expired.length, 1, 'respawn expired the first prompt')
+
+    // The old child lives for up to the 10s force-kill grace and can raise a
+    // fresh PreToolUse hook in that window (the file asserts this itself).
+    session.notifyPermissionPending('perm-during-grace')
+
+    session._handleChildClose(0)
+
+    assert.deepEqual(
+      expired.map((e) => e.requestId),
+      ['perm-1'],
+      'the close short-circuited on _respawning and did NOT expire the late prompt',
+    )
+    assert.ok(
+      session._pendingPermissionIds.has('perm-during-grace'),
+      'the late prompt is still pending, owned by the respawned child',
+    )
+  })
+
+  it('C1: expiring releases the inactivity PAUSE, not just the ids', async () => {
+    // The set and _resultTimeoutPaused are one piece of bookkeeping.
+    // notifyPermissionResolved only unsets the flag for an id still in the set,
+    // so taking the ids without releasing the flag wedges it true — and
+    // _armResultTimeout bails on it, leaving the inactivity warning, the hard
+    // cap and the stream-stall recovery all dead for the rest of the session.
+    await session.sendMessage('do something')
+    // Drive _isBusy false first, so _emitInterruptedTurnResult early-returns and
+    // cannot mask the bug by resetting the flag itself.
+    session._clearMessageState()
+    session.notifyPermissionPending('perm-late')
+    assert.equal(session._resultTimeoutPaused, true, 'precondition: paused')
+    assert.equal(session._isBusy, false, 'precondition: not busy')
+
+    session._handleChildClose(1)
+
+    assert.equal(session._resultTimeoutPaused, false, 'pause released')
+
+    // The real consequence: the next turn must re-arm its safety timers.
+    session._processReady = true
+    session._child = createMockChild()
+    await session.sendMessage('next turn')
+    assert.ok(session._resultTimeout, 'inactivity warning re-armed')
+    assert.ok(session._hardTimeout, 'hard cap re-armed')
+  })
+
+  it('F3: the interrupt safety timeout expires too — it aborts the turn, killing the hook', async () => {
+    // Previously excused as "the child ignored SIGINT so the prompt is still
+    // answerable". This file says otherwise at the markIntentionalStop comment:
+    // claude only aborts the CURRENT TURN, so the in-flight hook dies with it.
+    // That path also wiped the ids via _clearMessageState, so no later close
+    // could expire them either.
+    await session.sendMessage('do something')
+    session.notifyPermissionPending('perm-int')
+
+    // The safety timeout's body, reached 5s after interrupt() when the child
+    // survived SIGINT.
+    session._emitInterruptedTurnResult()
+
+    assert.deepEqual(expired.map((e) => e.requestId), ['perm-int'], 'expired, not silently dropped')
+    assert.equal(session._pendingPermissionIds.size, 0)
+  })
+
+  it('F4: a NORMAL turn end expires a prompt left pending, rather than dropping it', async () => {
+    // The most common way a turn stops was in neither column of the original
+    // audit table. _clearMessageState wiped the set with no event.
+    await session.sendMessage('do something')
+    session.notifyPermissionPending('perm-orphaned-by-result')
+
+    session._clearMessageState()
+
+    assert.deepEqual(expired.map((e) => e.requestId), ['perm-orphaned-by-result'])
+  })
+
+  it('POSITIVE CONTROL: a normal turn end with nothing pending emits nothing', async () => {
+    await session.sendMessage('do something')
+    session._clearMessageState()
+    assert.equal(expired.length, 0, 'the funnel does not fire unconditionally')
   })
 
   it('POSITIVE CONTROL: a respawn with NO pending permissions emits nothing', async () => {

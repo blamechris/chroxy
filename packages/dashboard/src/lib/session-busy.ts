@@ -25,7 +25,7 @@
  * safety predicate that can drift IS the defect, so there is one exported
  * helper and both call sites use it.
  */
-import { countLivePermissionPrompts } from '@chroxy/store-core'
+import { isLivePermissionPrompt } from '@chroxy/store-core'
 import type { ChatMessage } from '@chroxy/store-core'
 
 /** The fields of a session state this module reads. */
@@ -40,12 +40,29 @@ export interface SessionBusyState {
  * busy (`isStreaming || isBusy`), because it decides whether an optimistic
  * send renders as "Queued" or as a fresh turn.
  *
+ * "Must match" is the CONTRACT, not yet a fact this module can enforce: the
+ * InputBar's own props are still computed inline in App.tsx as
+ * `isBusy={!isIdle}` / `isStreaming={streamingMessageId !== null}` at five call
+ * sites — a third copy, and `!isIdle` is not even equivalent to
+ * `isIdle === false` should that field ever be nullish (they invert). Routing
+ * those props through this helper is #7378. Until then, treat the sentence
+ * above as the invariant to preserve rather than one already guarded.
+ *
  * `isIdle` is the server-authoritative working flag (#4639); `streamingMessageId`
  * additionally covers the optimistic pre-status window. Either ⇒ busy.
  *
- * Deliberately does NOT consider pending permissions: this predicate mirrors an
- * INPUT-BAR affordance, and widening it would make a send optimistically claim
- * the server queued it in a state where the server would not.
+ * Deliberately does NOT consider pending permissions. The reason is the match
+ * itself, NOT anything about server behaviour: this expression mirrors the
+ * InputBar's own `isStreaming || isBusy`, and any clause added here that the
+ * InputBar does not have re-opens the window #5952 closed — where the input UI
+ * says one thing and the optimistic render assumes another.
+ *
+ * (Widening it would in fact be a no-op for the state that motivated #7335: a
+ * session paused on a prompt already reports `isIdle === false`. And note the
+ * server WOULD queue such a send — `CliSession.sendMessage` gates purely on
+ * `_isBusy`, which a pending permission never clears — so "the server would not
+ * queue it" is not a reason for anything. An earlier draft of this comment said
+ * exactly that and was wrong.)
  */
 export function isSessionBusy(
   s: Pick<SessionBusyState, 'streamingMessageId' | 'isIdle'>,
@@ -58,16 +75,32 @@ export function isSessionBusy(
  * respawn-on-auto-switch) would destroy?
  *
  * A strict superset of {@link isSessionBusy}: busy in the InputBar sense, OR
- * holding a live unanswered permission prompt. The third clause is defence in
- * depth rather than the fix — a session paused on a prompt already reports
- * `isIdle === false` — but it keeps the warning honest if that server-side
- * signal is ever late, dropped, or reconciled out of order, and a false
- * POSITIVE here only costs an extra sentence of confirm copy while a false
- * negative costs the user their turn.
+ * holding a permission prompt that is still ANSWERABLE. The second clause is
+ * defence in depth rather than the fix — a session paused on a prompt already
+ * reports `isIdle === false` — but it keeps the warning honest if that
+ * server-side signal is ever late, dropped, or reconciled out of order.
  *
- * `now` is injected (not read from the clock) so the expiry half of
- * `isLivePermissionPrompt` is testable.
+ * The `options` check is a SECOND signal, not the primary one. The primary fix
+ * is in the `permission_expired` handler (message-handler.ts), which now stamps
+ * `expiresAt` to the present so `isLivePermissionPrompt`'s `expiresAt > now`
+ * gate goes false — previously it cleared only `options`, which that predicate
+ * never reads, so a prompt the server had already killed went on counting as
+ * "live" for the rest of its five minutes and this dialog cried wolf ("this
+ * will INTERRUPT the running turn") at a session with nothing in flight.
+ * #7335's own server half made that state ROUTINE rather than rare: every
+ * auto-switch now expires the open prompt.
+ *
+ * Kept as well as the `expiresAt` fix because the two fail independently: a
+ * retired prompt is identifiable by EITHER signal, and this is a
+ * destructive-action warning where the cost of the redundancy is one extra
+ * boolean. Both are pinned by tests, so neither can rot into a lie unnoticed.
+ *
+ * Filtered here rather than inside `isLivePermissionPrompt`, which is shared
+ * cross-client (#5759) and has four other call sites.
+ *
+ * `now` is injected (not read from the clock) so the expiry gate is testable.
  */
 export function hasInterruptibleWork(s: SessionBusyState, now: number): boolean {
-  return isSessionBusy(s) || countLivePermissionPrompts(s.messages, now) > 0
+  if (isSessionBusy(s)) return true
+  return s.messages.some((m) => m.options !== undefined && isLivePermissionPrompt(m, now))
 }
