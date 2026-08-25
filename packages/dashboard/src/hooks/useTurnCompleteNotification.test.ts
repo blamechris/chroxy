@@ -11,11 +11,17 @@
  * effect cannot pass as a suppression. Each guard was additionally verified by
  * deleting it from the hook and confirming the matching test goes red:
  *
- *   - `if (document.hasFocus()) return`         → "does not notify while focused"
- *   - `if (!enabled) return`                    → "does not notify while muted"
- *   - `if (session.awaitingPermission) continue`→ "does not double-notify"
- *   - `if (!connected) { clear; return }`       → "does not notify across a reconnect"
- *   - `observedBusy &&` (edge → state)          → "does not notify for a session that was never busy"
+ *   - `if (document.hasFocus()) return`   → does not notify while the window is focused
+ *   - `if (!enabled) return`              → does not notify while muted
+ *   - `if (session.awaitingPermission)`   → does not double-notify a session that stopped on a permission prompt
+ *   - `if (!connected) { clear; return }` → does not notify across a reconnect that re-seeds the session as idle
+ *   - `observedBusy &&` (edge → state)    → does not notify for a session that was never busy
+ *   - the stale-session prune             → forgets a session that disappears mid-turn
+ *   - `clickRef` (captured closure)       → uses the latest click handler
+ *
+ * The harness asserted each replacement actually landed (one match, bytes
+ * changed) before trusting a red, and that the NAMED test was among the
+ * failures rather than just "something failed".
  *
  * ## Harness notes
  *
@@ -29,6 +35,7 @@
  * `waitFor` that could pass before the thing it guards had a chance to happen.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { StrictMode } from 'react'
 import { renderHook, cleanup } from '@testing-library/react'
 import {
   useTurnCompleteNotification,
@@ -298,6 +305,44 @@ describe('useTurnCompleteNotification — multiple sessions', () => {
     rerender({ sessions: [session({ sessionId: 's1', busy: false })], options: DEFAULTS })
 
     expect(mockSend).not.toHaveBeenCalled()
+    unmount()
+  })
+})
+
+describe('useTurnCompleteNotification — under StrictMode', () => {
+  // `src/main.tsx` renders the app inside <StrictMode>, which double-invokes
+  // effects on mount. The hook keeps its busy set in a ref and has no cleanup
+  // function, so the second invocation sees the bookkeeping the first one
+  // already did. Verified rather than reasoned about: a hook that tracks an
+  // edge in a ref is exactly the shape StrictMode catches out, and getting it
+  // wrong is silent — either a duplicate alert or a swallowed one.
+  const strict = { wrapper: StrictMode }
+
+  function mountStrict(sessions: TurnCompleteSession[]) {
+    return renderHook(
+      ({ sessions: s }: { sessions: TurnCompleteSession[] }) =>
+        useTurnCompleteNotification(s, DEFAULTS),
+      { initialProps: { sessions }, ...strict },
+    )
+  }
+
+  it('does not fire on the double-invoked mount of an already-busy session', () => {
+    const { unmount } = mountStrict([session({ busy: true })])
+    expect(mockSend).not.toHaveBeenCalled()
+    unmount()
+  })
+
+  it('does not fire on the double-invoked mount of an already-idle session', () => {
+    const { unmount } = mountStrict([session({ busy: false })])
+    expect(mockSend).not.toHaveBeenCalled()
+    unmount()
+  })
+
+  it('still fires exactly once for a turn that completes after mount', () => {
+    const { rerender, unmount } = mountStrict([session({ busy: true })])
+    rerender({ sessions: [session({ busy: false })] })
+
+    expect(mockSend).toHaveBeenCalledOnce()
     unmount()
   })
 })

@@ -63,6 +63,10 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  // #7347: the onClick cases spy on `window.focus`. Restoring here rather than
+  // only at the end of each case means a failing assertion cannot leak a
+  // throwing focus stub into the next test and turn one red into several.
+  vi.restoreAllMocks()
   if (originalNotification) Object.defineProperty(globalThis, 'Notification', originalNotification)
   // @ts-expect-error — clearing the global
   else delete globalThis.Notification
