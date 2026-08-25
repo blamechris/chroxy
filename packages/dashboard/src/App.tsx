@@ -76,6 +76,7 @@ import { startServer, revealInFinder } from './hooks/useTauriIPC'
 import { usePermissionNotification, type PermissionPromptInfo } from './hooks/usePermissionNotification'
 import { useNotificationPermission } from './hooks/useNotificationPermission'
 import { useInterventionPing } from './hooks/useInterventionPing'
+import { useTurnCompleteNotification, type TurnCompleteSession } from './hooks/useTurnCompleteNotification'
 import { useShortcutDispatch } from './hooks/useShortcutDispatch'
 import { FileOpenPalette } from './components/FileOpenPalette'
 import { SymbolSearchPalette } from './components/SymbolSearchPalette'
@@ -90,7 +91,7 @@ import { useMessageRenderer } from './hooks/useMessageRenderer'
 import { SplitPane } from './components/SplitPane'
 import { ViewSwitcher } from './components/ViewSwitcher'
 import { DEFAULT_PROVIDER, USER_SHELL_PROVIDER } from '@chroxy/protocol'
-import { persistSidebarWidth, loadPersistedSidebarWidth, persistSplitMode, persistShowConsoleTab, loadPersistedShowConsoleTab, persistInterventionPing, loadPersistedInterventionPing, persistCompactChatFilter, loadPersistedCompactChatFilter, loadPersistedSidebarPanelHeight, loadPersistedSidebarPanelView, loadPersistedSidebarPanelCollapsed } from './store/persistence'
+import { persistSidebarWidth, loadPersistedSidebarWidth, persistSplitMode, persistShowConsoleTab, loadPersistedShowConsoleTab, persistInterventionPing, loadPersistedInterventionPing, persistTurnCompleteNotification, loadPersistedTurnCompleteNotification, persistCompactChatFilter, loadPersistedCompactChatFilter, loadPersistedSidebarPanelHeight, loadPersistedSidebarPanelView, loadPersistedSidebarPanelCollapsed } from './store/persistence'
 import { applyOrderById } from './utils/reorderById'
 import { DiffViewerPanel } from './components/DiffViewerPanel'
 import { AgentMonitorPanel } from './components/AgentMonitorPanel'
@@ -480,6 +481,13 @@ export function App() {
   // dedupes by requestId and throttles bursts; `enabled` honors the operator
   // mute toggle (Settings → Dashboard, persisted per-device).
   useInterventionPing(permissionPrompts, { enabled: interventionPingEnabled })
+  // #7347 — turn-complete OS-notification enable/mute. Defaults on; persisted
+  // per-device. Separate from the intervention ping and from the OS permission
+  // itself so muting "the session finished" does not also mute "the session
+  // needs permission" — the hook is wired further down, next to `isConnected`.
+  const [turnCompleteNotificationEnabled, setTurnCompleteNotificationEnabled] = useState(() => {
+    return loadPersistedTurnCompleteNotification()
+  })
 
   // #3698 — derive the user-message history for the InputBar's terminal-
   // style Up/Down navigation. Oldest-first (matches the natural arrival
@@ -2097,6 +2105,42 @@ export function App() {
   // available). Extracted to `useTunnelReady` (#5560).
   const tunnelReady = useTunnelReady(isConnected)
 
+  // #7347 — native notification when a session finishes its turn and is left
+  // waiting on the user. Sits here rather than beside the other notification
+  // hooks (~L470) because it needs `isConnected`, declared just above; the
+  // call is unconditional, so hook order stays stable.
+  //
+  // `busy` comes from the per-session server-authoritative `isIdle` (#4639) in
+  // `sessionStates`, which `session_activity` maintains for EVERY session
+  // (broadcast on stream_start and on result). Two nearby signals are wrong
+  // here and both are easy to reach for: `sessions[].isBusy` is only a
+  // `session_list` snapshot and is not rebroadcast on a turn boundary, and the
+  // top-level flat `isIdle` mirrors the ACTIVE session only. Shallow-equal so
+  // the record keeps its identity — and the hook's effect stays put — unless a
+  // session's busy state actually flips.
+  const sessionBusyById = useConnectionStore(
+    useShallow((s) => {
+      const out: Record<string, boolean> = {}
+      for (const id in s.sessionStates) out[id] = s.sessionStates[id]!.isIdle === false
+      return out
+    }),
+  )
+  const turnCompleteSessions = useMemo<TurnCompleteSession[]>(
+    () =>
+      sessions.map(s => ({
+        sessionId: s.sessionId,
+        name: s.name,
+        busy: sessionBusyById[s.sessionId] ?? false,
+        awaitingPermission: (pendingPermissionCounts[s.sessionId] ?? 0) > 0,
+      })),
+    [sessions, sessionBusyById, pendingPermissionCounts],
+  )
+  useTurnCompleteNotification(turnCompleteSessions, {
+    enabled: turnCompleteNotificationEnabled,
+    connected: isConnected,
+    onNotificationClick: handleSwitchSession,
+  })
+
   // Fetch conversation history when welcome screen is shown
   useEffect(() => {
     if (showWelcome) fetchConversationHistory()
@@ -2403,6 +2447,11 @@ export function App() {
               onToggleInterventionPing={(enabled) => {
                 setInterventionPingEnabled(enabled)
                 persistInterventionPing(enabled)
+              }}
+              turnCompleteNotificationEnabled={turnCompleteNotificationEnabled}
+              onToggleTurnCompleteNotification={(enabled) => {
+                setTurnCompleteNotificationEnabled(enabled)
+                persistTurnCompleteNotification(enabled)
               }}
               notificationPermission={notificationPermission}
             />
@@ -2766,6 +2815,8 @@ export function App() {
         onToggleConsoleTab={(show) => { setShowConsoleTab(show); persistShowConsoleTab(show) }}
         interventionPingEnabled={interventionPingEnabled}
         onToggleInterventionPing={(enabled) => { setInterventionPingEnabled(enabled); persistInterventionPing(enabled) }}
+        turnCompleteNotificationEnabled={turnCompleteNotificationEnabled}
+        onToggleTurnCompleteNotification={(enabled) => { setTurnCompleteNotificationEnabled(enabled); persistTurnCompleteNotification(enabled) }}
         notificationPermission={notificationPermission}
         shortcutHelpOpen={shortcutHelpOpen}
         onShortcutHelpClose={() => setShortcutHelpOpen(false)}

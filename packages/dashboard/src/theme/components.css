@@ -8341,6 +8341,13 @@ button.sidebar-token-view-session-row:hover {
   display: inline-flex;
   align-items: center;
   gap: 8px;
+  /* Tap-target floor (#3751 family): the LABEL is the control here — clicking
+     the text toggles the checkbox — so it is the box that has to clear 44px,
+     not the 13px native checkbox glyph inside it. At 14px text the row was
+     ~20px tall, well under the floor, for every toggle in this section. Grown
+     on the shared class rather than per-row so a new toggle inherits a
+     compliant target instead of having to remember one (#7347). */
+  min-height: 44px;
   margin-bottom: 6px;
   font-size: 14px;
   color: var(--text-primary);

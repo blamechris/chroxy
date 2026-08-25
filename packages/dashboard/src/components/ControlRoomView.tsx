@@ -439,6 +439,9 @@ export interface ControlRoomViewProps {
   onToggleConsoleTab?: (show: boolean) => void
   interventionPingEnabled?: boolean
   onToggleInterventionPing?: (enabled: boolean) => void
+  // #7347 — turn-complete OS-notification mute, forwarded to SettingsContent.
+  turnCompleteNotificationEnabled?: boolean
+  onToggleTurnCompleteNotification?: (enabled: boolean) => void
   // #7351 — OS-notification permission state, forwarded to the Settings tab.
   notificationPermission?: UseNotificationPermissionResult
 }
@@ -454,6 +457,8 @@ export function ControlRoomView({
   onToggleConsoleTab,
   interventionPingEnabled,
   onToggleInterventionPing,
+  turnCompleteNotificationEnabled,
+  onToggleTurnCompleteNotification,
   notificationPermission,
 }: ControlRoomViewProps = {}) {
   const [rawTab, setTab] = useState<ControlRoomTab>(() => initialTab ?? loadPersistedTab())
@@ -801,6 +806,8 @@ export function ControlRoomView({
             onToggleConsoleTab={onToggleConsoleTab}
             interventionPingEnabled={interventionPingEnabled}
             onToggleInterventionPing={onToggleInterventionPing}
+            turnCompleteNotificationEnabled={turnCompleteNotificationEnabled}
+            onToggleTurnCompleteNotification={onToggleTurnCompleteNotification}
             notificationPermission={notificationPermission}
           />
         </div>

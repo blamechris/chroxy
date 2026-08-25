@@ -251,6 +251,10 @@ export interface SettingsContentProps {
   // when the handler is provided.
   interventionPingEnabled?: boolean
   onToggleInterventionPing?: (enabled: boolean) => void
+  // #7347 — turn-complete OS-notification enable/mute. Optional on the same
+  // terms as the ping props.
+  turnCompleteNotificationEnabled?: boolean
+  onToggleTurnCompleteNotification?: (enabled: boolean) => void
   // #7351 — OS-notification permission state + the request trigger. Optional
   // for the same reason as the ping props: call sites and tests that don't
   // wire it stay valid, and the row simply doesn't render.
@@ -264,6 +268,8 @@ export interface SettingsPanelProps {
   onToggleConsoleTab?: (show: boolean) => void
   interventionPingEnabled?: boolean
   onToggleInterventionPing?: (enabled: boolean) => void
+  turnCompleteNotificationEnabled?: boolean
+  onToggleTurnCompleteNotification?: (enabled: boolean) => void
   notificationPermission?: UseNotificationPermissionResult
 }
 
@@ -726,7 +732,7 @@ function ThemeSwatches({ theme }: { theme: ThemeDefinition }) {
   )
 }
 
-export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, interventionPingEnabled, onToggleInterventionPing, notificationPermission }: SettingsContentProps) {
+export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, interventionPingEnabled, onToggleInterventionPing, turnCompleteNotificationEnabled, onToggleTurnCompleteNotification, notificationPermission }: SettingsContentProps) {
   // #5544: alias retained so the body's many `isOpen` reads (effect gates,
   // refresh-on-open) keep their original meaning — true while this surface
   // is the visible one (modal open, or Control Room Settings tab active).
@@ -2048,7 +2054,7 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
             )}
           </section>
 
-          {(onToggleConsoleTab || onToggleInterventionPing || notificationPermission) && (
+          {(onToggleConsoleTab || onToggleInterventionPing || onToggleTurnCompleteNotification || notificationPermission) && (
             <section className="settings-section" data-testid="dashboard-section">
               <h3>Dashboard</h3>
               {onToggleConsoleTab && (
@@ -2085,6 +2091,36 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
                     Applies to this device only. Repeat alerts for the same
                     request are deduped, and bursts across multiple sessions
                     are throttled into a single ping.
+                  </p>
+                </div>
+              )}
+              {/* #7347 — turn-complete OS notification. The session that has
+                  FINISHED and is waiting on you is the one you cannot spot
+                  in-app (#7340) — it looks exactly like a session nobody
+                  asked to do anything. Muted per-device and separately from
+                  the permission notification, so an operator who finds this
+                  one chatty does not answer by revoking OS notifications
+                  outright and losing the permission alerts too. */}
+              {onToggleTurnCompleteNotification && (
+                <div className="settings-field settings-field-checkbox">
+                  <label htmlFor="turn-complete-notification-toggle">
+                    <input
+                      id="turn-complete-notification-toggle"
+                      type="checkbox"
+                      checked={turnCompleteNotificationEnabled ?? true}
+                      onChange={(e) => onToggleTurnCompleteNotification(e.target.checked)}
+                      data-testid="turn-complete-notification-toggle"
+                    />
+                    Notify me when a session finishes
+                  </label>
+                  <p className="settings-hint">
+                    Raises a desktop notification when a session completes its
+                    turn and is left waiting on you — but only while this
+                    window is not focused, so it never fires for a turn you
+                    watched finish. A session that stops on a permission
+                    request is covered by the permission notification instead,
+                    not announced twice. Applies to this device only, and needs
+                    desktop notifications allowed below.
                   </p>
                 </div>
               )}
@@ -2330,7 +2366,7 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
  * still open a dismissable panel. The primary entry points (gear / Cmd+,)
  * now redirect to the Control Room Settings tab instead — see App.tsx.
  */
-export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsoleTab, interventionPingEnabled, onToggleInterventionPing, notificationPermission }: SettingsPanelProps) {
+export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsoleTab, interventionPingEnabled, onToggleInterventionPing, turnCompleteNotificationEnabled, onToggleTurnCompleteNotification, notificationPermission }: SettingsPanelProps) {
   const backdropRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -2366,6 +2402,8 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
           onToggleConsoleTab={onToggleConsoleTab}
           interventionPingEnabled={interventionPingEnabled}
           onToggleInterventionPing={onToggleInterventionPing}
+          turnCompleteNotificationEnabled={turnCompleteNotificationEnabled}
+          onToggleTurnCompleteNotification={onToggleTurnCompleteNotification}
           notificationPermission={notificationPermission}
         />
       </div>
