@@ -51,12 +51,13 @@ case "$HOOK_HOST" in
 esac
 # Permission mode resolution order:
 #   1. CHROXY_PERMISSION_MODE_FILE — if set AND readable AND non-empty.
-#      ClaudeTuiSession writes this sidecar file when setPermissionMode()
-#      is called mid-session, since env vars on a running PTY can't be
-#      mutated from outside (#4013).
-#   2. CHROXY_PERMISSION_MODE env var — the value at session-spawn time.
-#      Used by CliSession (which restarts on mode change) and as the
-#      initial value for TUI sessions.
+#      BOTH hook-routed providers write this sidecar when setPermissionMode()
+#      is called mid-session, since a running subprocess's env can't be mutated
+#      from outside: ClaudeTuiSession since #4013, CliSession since #7337.
+#   2. CHROXY_PERMISSION_MODE env var — the value at session-spawn time, and
+#      the fallback whenever the sidecar is missing or unreadable. Also the
+#      initial value for both providers, and the ONLY channel inside a
+#      container (DockerSession cannot mount the host's sidecar path).
 #   3. "approve" — default if nothing else is set.
 PERM_MODE=""
 if [ -n "$CHROXY_PERMISSION_MODE_FILE" ] && [ -r "$CHROXY_PERMISSION_MODE_FILE" ]; then

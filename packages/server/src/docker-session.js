@@ -75,6 +75,28 @@ const FORWARDED_ENV_KEYS = [
   'PATH',
 ]
 
+// #7337: `CHROXY_PERMISSION_MODE_FILE` is DELIBERATELY absent from the list
+// above, and must stay absent until the sidecar is actually reachable from
+// inside the container.
+//
+// CliSession creates the sidecar under the HOST's tmpdir and publishes its
+// path in the child env, so `permission-hook.sh` can re-read the live
+// permission mode on every tool call instead of the spawn-frozen
+// CHROXY_PERMISSION_MODE. A container has its own filesystem and `docker exec`
+// cannot add a mount (mounts are fixed at `docker run`), so forwarding the key
+// would name a host path that does not exist in the container. The hook's
+// `[ -r ... ]` guard makes that fall back to CHROXY_PERMISSION_MODE — correct,
+// but only by accident, and it would read as "containers have the live channel"
+// when they do not.
+//
+// The consequence is that a containerized CLI session still needs the respawn
+// to pick up a mode change, exactly as before #7337. Giving it the live channel
+// needs a bind mount established in `_startContainer()`; tracked separately.
+// tests/cli-permission-mode-sidecar.test.js pins the omission (with a
+// CHROXY_PERMISSION_MODE positive control) so it cannot be "fixed" by adding
+// the key alone. NOT docker-session.test.js — that file drives a hand-written
+// mirror of _spawnPersistentProcess and never reads the real array.
+
 /**
  * DockerSession runs Claude Code inside an isolated Docker container.
  *

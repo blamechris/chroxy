@@ -79,11 +79,14 @@ Both Docker providers forward only explicitly allowlisted env vars into the cont
 | `CHROXY_PORT` | yes | — | Permission hook HTTP port on host |
 | `CHROXY_HOOK_SECRET` | yes | — | Permission hook auth secret |
 | `CHROXY_PERMISSION_MODE` | yes | — | Permission handling mode |
+| `CHROXY_PERMISSION_MODE_FILE` | **no** (host only) | — | Path to the live permission-mode sidecar. Deliberately NOT forwarded — see below |
 | `CHROXY_HOST` | injected | — | Permission hook hostname (set to `host.docker.internal`) |
 | `HOME` | forwarded from host | hardcoded in container | User home directory |
 | `PATH` | forwarded from host | hardcoded in container | Executable search path |
 
 **Why they differ:** `DockerSession` extends `CliSession`, which runs `claude -p` as a subprocess and uses an external HTTP permission hook to route permission requests back to the host server. This requires `CHROXY_PORT`, `CHROXY_HOOK_SECRET`, and `CHROXY_PERMISSION_MODE` inside the container, plus `CLAUDE_HEADLESS` for stream-json mode. `DockerSdkSession` extends `SdkSession`, which manages the conversation loop and permissions in-process via the Agent SDK — no external hook calls are needed, so those vars are omitted. `HOME` and `PATH` are forwarded from the host env in `DockerSession` but hardcoded by the SDK spawn callback in `DockerSdkSession` (`/home/<user>` and a standard POSIX path). `CHROXY_HOST` is not in the `FORWARDED_ENV_KEYS` array — it is dynamically injected by `DockerSession._spawnPersistentProcess()` when `CHROXY_PORT` is present, set to `host.docker.internal` so the container can reach the host's permission hook endpoint.
+
+**Why `CHROXY_PERMISSION_MODE_FILE` stops at the host (#7337):** on the host, `CliSession` writes the session's current permission mode to a small sidecar file and names it in the child env, because `permission-hook.sh` prefers that file and re-reads it on *every* tool call — so a mid-session mode change reaches even the subprocess that is already running. `CHROXY_PERMISSION_MODE` alone is frozen at spawn and can only be refreshed by a kill-and-respawn, during which the still-live old child keeps resolving the stale mode. The sidecar path is a host tmp path, and `docker exec` cannot add a mount (mounts are fixed at `docker run`), so forwarding the key would name a path that does not exist inside the container. A containerized CLI session therefore still depends on the respawn to pick up a mode change; giving it the live channel needs a bind mount established in `_startContainer()`.
 
 ## App Screens
 

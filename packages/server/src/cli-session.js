@@ -1,8 +1,9 @@
 import { spawn } from 'child_process'
 import { createInterface } from 'readline'
-import { randomBytes } from 'crypto'
+import { randomBytes, randomUUID } from 'crypto'
+import { mkdirSync, rmSync, writeFileSync } from 'fs'
 import { normalizeSdkModelUsage } from './usage-normalize.js'
-import { homedir } from 'os'
+import { homedir, tmpdir } from 'os'
 import { join } from 'path'
 import { createPermissionHookManager } from './permission-hook.js'
 import { guardChildStreams } from './child-stream-guard.js'
@@ -19,6 +20,8 @@ import { labelBinarySpawnFailure } from './utils/verify-binary.js'
 import { prepareSpawn } from './utils/win-spawn.js'
 import { buildSpawnEnv } from './utils/spawn-env.js'
 import { RespawnRateLimiter } from './utils/respawn-rate-limiter.js'
+import { writePermissionModeSidecarAtomic } from './utils/permission-mode-sidecar.js'
+import { sweepStaleOwnedDirs, ensureOwnedBaseDir, OWNER_PID_FILE } from './utils/stale-session-dirs.js'
 import { createLogger, loggerForSession } from './logger.js'
 import { formatIdleDuration } from './session-timeout-manager.js'
 import { BILLING_CLASSES, isProgrammaticCreditEra } from './billing-class.js'
@@ -433,6 +436,14 @@ export class CliSession extends BaseSession {
     // Hook manager (shared module)
     this._hookManager = (this._port) ? createPermissionHookManager(this, { settingsPath }) : null
 
+    // #7337: the re-readable permission-mode sidecar. `permission-hook.sh`
+    // prefers this file over CHROXY_PERMISSION_MODE, which is frozen at spawn.
+    // Created on the first start() when permissions are enabled, reused across
+    // respawns, removed on destroy(). Null means "env-var-only" — either
+    // permissions are off (no port) or the initial write failed.
+    this._permissionModeFile = null
+    this._permissionModeDir = null
+
     // Pending-permission bookkeeping for the inactivity timer (#2831).
     // WsServer calls notifyPermissionPending/Resolved when a hook
     // permission belonging to this session is broadcast/resolved.
@@ -470,6 +481,10 @@ export class CliSession extends BaseSession {
       this._hookManager.register()
     }
 
+    // #7337: must run BEFORE _spawnPersistentProcess, which is where
+    // _buildChildEnv() reads `_permissionModeFile` to point the child at it.
+    this._ensurePermissionModeSidecar()
+
     // Skills MVP (#2957) — append shared skills to the Claude CLI system prompt.
     const skillsText = this._buildSystemPrompt()
 
@@ -506,6 +521,19 @@ export class CliSession extends BaseSession {
       CLAUDE_HEADLESS: '1',
       CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING: '1',
       CHROXY_PERMISSION_MODE: this.permissionMode,
+      // #7337: the hook prefers this file and re-reads it on EVERY tool call,
+      // so a mid-session mode change reaches even the child already running.
+      // CHROXY_PERMISSION_MODE above stays as the fallback for a hook that
+      // cannot read the file (deleted /tmp entry, container without the mount).
+      //
+      // ALWAYS set, never omitted. buildSpawnEnv('claude') is DENYLIST mode, so
+      // the whole parent env passes through — and this daemon may itself have
+      // been launched from inside another chroxy session, whose sidecar path is
+      // then sitting in our env. Omitting the key would let that FOREIGN file
+      // decide this session's permissions, since the hook prefers it over our
+      // own CHROXY_PERMISSION_MODE. Empty string fails the hook's `[ -n ]` guard
+      // and falls through to the env var, which is the documented intent.
+      CHROXY_PERMISSION_MODE_FILE: this._permissionModeFile || '',
       ...(this._port ? { CHROXY_PORT: String(this._port) } : {}),
       // Pass a short-lived per-session secret instead of the primary API token.
       // This limits the blast radius if a tool reads process.env — the hook secret
@@ -1567,12 +1595,139 @@ export class CliSession extends BaseSession {
     this._killAndRespawn()
   }
 
+  /**
+   * Base dir for the per-session permission-mode sidecar dirs (#7337).
+   * Exposed so the boot sweep and its tests name it once.
+   */
+  static get PERMISSION_MODE_SIDECAR_BASE() { return join(tmpdir(), 'chroxy-claude-cli') }
+
+  /**
+   * #7337: boot-time sweep of sidecar dirs orphaned by a crash. destroy()
+   * removes a session's own dir, but a SIGKILL leaks it, so a long-lived host
+   * accumulates one per crashed session. Same ownership rule as the claude-tui
+   * sink sweep and the same implementation — only dirs whose `owner.pid` is
+   * DEAD are removed, so a live daemon's dirs (including this one's) are kept
+   * and the sweep is safe to run unconditionally at boot.
+   *
+   * @param {object} [logger] - logger with info/warn (defaults to module log)
+   * @returns {{swept:number, kept:number}}
+   */
+  static sweepStaleSidecarDirs(logger = log) {
+    return sweepStaleOwnedDirs(CliSession.PERMISSION_MODE_SIDECAR_BASE, {
+      logger,
+      label: 'claude-cli permission-mode sidecar',
+    })
+  }
+
+  /**
+   * #7337: create the re-readable permission-mode sidecar and seed it with the
+   * session's current mode. Idempotent — a respawn calls start() again and must
+   * keep the SAME path, because the sidecar the still-draining old child holds
+   * in its env has to stay valid until that child is gone.
+   *
+   * Only meaningful when permissions are enabled: with no port there is no hook
+   * endpoint, so `permission-hook.sh` never runs and the mode is moot. A failed
+   * initial write leaves `_permissionModeFile` null and the session falls back
+   * to env-var-only mode — losing the ability to hot-swap the mode is bad, but
+   * failing session start over a /tmp write is worse (same trade ClaudeTuiSession
+   * makes at #4013).
+   */
+  _ensurePermissionModeSidecar() {
+    if (!this._port) return
+    const mode = this.permissionMode || 'approve'
+
+    // Re-seed on EVERY start(), not only the first. The path is kept stable
+    // across a respawn (a still-draining old child holds it in its env), but
+    // the CONTENTS must be re-asserted, because the file outranks the env var
+    // in the hook's resolution order. Without this, a mid-session write that
+    // failed (ENOSPC / EROFS / EIO) left the sidecar holding the OLD mode while
+    // the respawned child carried the NEW one in CHROXY_PERMISSION_MODE — and
+    // the hook read the file. A tighten to `approve` would then keep
+    // auto-allowing for the rest of the session while the daemon, the state
+    // file and the UI all said `approve`. The respawn was documented as the
+    // repair and was not one.
+    if (this._permissionModeFile) {
+      try {
+        writePermissionModeSidecarAtomic(this._permissionModeFile, mode)
+        return
+      } catch (err) {
+        // The existing file is now untrustworthy — and a stale file is WORSE
+        // than none, because it outranks the correct env var. Drop it so the
+        // hook falls back to CHROXY_PERMISSION_MODE, then try a fresh dir below.
+        ;(this._log || log).warn(`permission-mode sidecar re-seed failed (${err.message}) — dropping the stale sidecar so the hook falls back to the env var`)
+        this._cleanupPermissionModeSidecar()
+      }
+    }
+
+    let dir = null
+    try {
+      const base = ensureOwnedBaseDir(CliSession.PERMISSION_MODE_SIDECAR_BASE)
+      dir = join(base, `s-${randomUUID()}`)
+      mkdirSync(dir, { recursive: true, mode: 0o700 })
+      // Stamp the owning pid so the boot-time sweep can tell a live daemon's
+      // dir from one orphaned by a crash. Best-effort: a missing pidfile just
+      // makes the dir sweep-eligible after a grace window, which is the safe
+      // default for an orphan.
+      try { writeFileSync(join(dir, OWNER_PID_FILE), String(process.pid)) } catch { /* best effort */ }
+      const path = join(dir, 'permission-mode')
+      writePermissionModeSidecarAtomic(path, mode)
+      this._permissionModeDir = dir
+      this._permissionModeFile = path
+    } catch (err) {
+      // Remove the dir we just created, if we got that far — otherwise a
+      // persistent write failure leaks one dir per respawn, and because
+      // owner.pid names this LIVE daemon the boot sweep keeps every one of
+      // them for the daemon's whole lifetime.
+      if (dir) { try { rmSync(dir, { recursive: true, force: true }) } catch { /* best effort */ } }
+      ;(this._log || log).warn(`permission-mode sidecar unavailable (${err.message}) — falling back to env-var-only mode; a mid-session permission switch will not reach the running process until it respawns`)
+      this._permissionModeFile = null
+      this._permissionModeDir = null
+    }
+  }
+
+  /** Remove the sidecar dir created by _ensurePermissionModeSidecar. */
+  _cleanupPermissionModeSidecar() {
+    if (this._permissionModeDir) {
+      try { rmSync(this._permissionModeDir, { recursive: true, force: true }) }
+      catch (err) { (this._log || log).warn(`permission-mode sidecar cleanup failed: ${err.message}`) }
+    }
+    this._permissionModeDir = null
+    this._permissionModeFile = null
+  }
+
   _onPermissionModeChanged(mode) {
+    // #7337: publish to the sidecar FIRST. `permission-hook.sh` prefers the
+    // file over CHROXY_PERMISSION_MODE and re-reads it on every tool call, so
+    // this takes effect immediately — including for the child that is still
+    // alive right now. Without it the only channel was the respawn below, which
+    // does not land until the old child's `close` fires (up to the 10s
+    // force-kill grace in _killAndRespawn), and every PreToolUse hook that old
+    // child raises in the meantime resolves the STALE mode. That is #7337: a
+    // Bash approval card on a session whose state file already read `"auto"`.
+    if (this._permissionModeFile) {
+      try {
+        writePermissionModeSidecarAtomic(this._permissionModeFile, mode)
+      } catch (err) {
+        // Hook precedence is file -> env var, so a sidecar left holding the
+        // PREVIOUS mode outranks the correct value in CHROXY_PERMISSION_MODE —
+        // and on a TIGHTEN that is fail-open. Remove it rather than leave it:
+        // the hook then falls back to the env var, and start()'s re-seed
+        // rebuilds a fresh sidecar on the respawn below. Leaving it in place
+        // pinned the old mode for the whole session.
+        ;(this._log || log).warn(`failed to write permission-mode sidecar (${err.message}) — removing it so the hook falls back to the spawn env var until the respawn re-seeds`)
+        this._cleanupPermissionModeSidecar()
+      }
+    }
+
     // #3729 panic-button semantics: BaseSession.setPermissionMode lets `'auto'`
     // bypass the `_isBusy` guard, so flipping to auto mid-turn IS destructive —
     // the in-flight `claude -p` process is killed and respawned, dropping the
     // current turn. This is by design (parity with SDK auto-resolve of pending
-    // prompts); see #3735 for the regression test pinning this behavior.
+    // prompts); see #3735 for the regression test pinning this behavior. The
+    // respawn is still required for the OTHER mode channel: `--permission-mode
+    // bypassPermissions` / `plan` is argv, not env, so only a new process picks
+    // it up (buildClaudeCliArgs). The sidecar covers the hook; the respawn
+    // covers claude's own flag.
     // #4828: session-scoped if init has fired.
     ;(this._log || log).info(`Permission mode changed to ${mode}, restarting process`)
     this._killAndRespawn()
@@ -1864,6 +2019,18 @@ export class CliSession extends BaseSession {
       child.on('close', () => clearTimeout(forceKillTimer))
       this._child = null
     }
+
+    // #7337: remove the sidecar dir so long-lived daemons don't leak one
+    // directory per session under /tmp. Nulls `_permissionModeFile` too, so a
+    // setPermissionMode() after destroy() no-ops cleanly.
+    //
+    // Deliberately AFTER the kill above, not before it. The child stays alive
+    // for up to the 3s force-kill grace and can fire a PreToolUse hook in that
+    // window; removing the sidecar first makes that hook fall back to the
+    // spawn-frozen CHROXY_PERMISSION_MODE, which is fail-open on a session that
+    // was tightened since spawn (spawned `auto`, switched to `approve`, then
+    // destroyed).
+    this._cleanupPermissionModeSidecar()
 
     // Emit completions for any tracked agents and clear busy state.
     // Must happen before removeAllListeners() so events are delivered.

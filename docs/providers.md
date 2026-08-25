@@ -102,7 +102,7 @@ If `claude` is reported "Not found", ensure it's in one of the paths listed abov
 |---------|--------------|--------------|--------------|
 | In-process permissions (`canUseTool`) | Yes | No (HTTP hook) | No (HTTP hook) |
 | Live `setModel` | Yes | Yes (restart) | — |
-| Live `setPermissionMode` | Yes | Yes (restart) | Yes (sidecar file, no restart) |
+| Live `setPermissionMode` | Yes | Yes (sidecar file, no restart) | Yes (sidecar file, no restart) |
 | Plan mode | No | **Yes** | No |
 | Resume (`resumeSessionId`) | Yes | Yes (`--resume` on respawn/restore) | Yes (`--resume` on restore) |
 | Thinking level control | Yes | No | No |
@@ -823,7 +823,7 @@ Rows marked **(capability)** come directly from each session class's `static get
 | **(capability)** Permissions (`canUseTool` / hook) | Yes | Yes | Yes (HTTP hook) | Yes (channel relay) | — | — | Yes (in-process) | Yes (in-process) | Yes (in-process) |
 | **(capability)** In-process permissions | Yes | — | — | — | — | — | Yes | Yes | Yes |
 | **(capability)** Live model switch | Yes | Yes | — | — | Yes | Yes | Yes | Yes | Yes |
-| **(capability)** Live permission-mode switch | Yes | Yes | Yes (sidecar file) | — | — | — | Yes | Yes | Yes |
+| **(capability)** Live permission-mode switch | Yes | Yes (sidecar file) | Yes (sidecar file) | — | — | — | Yes | Yes | Yes |
 | **(capability)** Plan mode | — | **Yes** | — | — | — | — | — | — | — |
 | **(capability)** Resume (`resumeSessionId`) | Yes | Yes | Yes | — | — | — | — | — | — |
 | **(capability)** Terminal (raw PTY) | — | — | — | — | — | — | — | — | — |
@@ -901,7 +901,8 @@ For capability rows, "—" means the provider's `capabilities` object reports `f
 - **No live model switch, no permission-mode switch, no plan mode, no resume,
   no thinking-level control** — the channel surface does not expose these
   (same gaps as `claude-tui`, except `claude-tui` fakes permission-mode via a
-  sidecar file and resumes across restarts via `--resume`). The channel's wins
+  sidecar file — as `claude-cli` also does since #7337 — and resumes across
+  restarts via `--resume`). The channel's wins
   over `claude-tui` are live streaming and a
   documented first-party permission relay.
 - **Not available on Bedrock / Vertex / Foundry**, and Team/Enterprise orgs
