@@ -2345,6 +2345,13 @@ export class WsServer {
       // settings-handlers subscription guard naturally passes for legitimate
       // viewers (including the "view A → switch to B → respond" flow).
       registerPermissionRoute: (requestId, sessionId) => this._registerPermissionRoute(requestId, sessionId),
+      // #7379: a session reporting `permission_expired` means the turn that
+      // raised the prompt is gone, so the daemon's own pending entry must be
+      // released — otherwise resendPendingPermissions hands a dead prompt, with
+      // a live Allow button, to the next client that connects. One ctx serves
+      // both the multi-session and legacy-CLI forwarding paths, so wiring it
+      // here covers both by construction.
+      releasePermission: (requestId) => this._permissions?.releaseAbandonedPermission?.(requestId),
       broadcast: (msg, filter) => this._broadcast(msg, filter),
       broadcastToSession: (sid, msg, filter) => this._broadcastToSession(sid, msg, filter),
       broadcastSessionList: () => this._handlerCtx.transport.broadcastSessionList(),

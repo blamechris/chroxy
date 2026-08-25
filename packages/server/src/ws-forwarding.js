@@ -457,7 +457,7 @@ function setupCliForwarding(normalizer, ctx) {
 /** Execute side effect descriptors returned by the normalizer */
 function executeSideEffects(sideEffects, sessionId, ctx) {
   if (!sideEffects) return
-  const { normalizer, sessionManager, pushManager, broadcast, broadcastToSession, broadcastSessionList } = ctx
+  const { normalizer, sessionManager, pushManager, broadcast, broadcastToSession, broadcastSessionList, releasePermission } = ctx
   for (const effect of sideEffects) {
     switch (effect.type) {
       case 'session_list':
@@ -466,6 +466,20 @@ function executeSideEffects(sideEffects, sessionId, ctx) {
             broadcastSessionList()
           } else {
             broadcast({ type: 'session_list', sessions: sessionManager.listSessions() })
+          }
+        }
+        break
+      case 'release_permission':
+        // #7379: the session says the turn behind this prompt is dead, so the
+        // daemon must stop holding (and re-sending) its pending entry. Optional
+        // in ctx so a harness that does not wire permissions still forwards
+        // events; a no-op when the requestId was never in the HTTP map, which is
+        // the normal case for the SDK path and for a hook that closed cleanly.
+        if (releasePermission) {
+          try {
+            releasePermission(effect.requestId)
+          } catch (err) {
+            log.warn(`Failed to release abandoned permission ${effect.requestId}: ${err?.message || err}`)
           }
         }
         break

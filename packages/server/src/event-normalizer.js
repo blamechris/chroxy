@@ -776,6 +776,13 @@ Object.assign(EVENT_MAP, {
   }),
 
   permission_expired: (data, ctx) => ({
+    // #7379: retiring the card in the clients is only half of it — the daemon's
+    // own pending entry has to go too, or `resendPendingPermissions` hands the
+    // dead prompt to the next client that connects. Carried as a side effect
+    // rather than wired at the two event-subscription sites because those are
+    // separate code paths (multi-session and legacy-CLI) and wiring one is how
+    // this class of bug happens; `executeSideEffects` runs on both.
+    sideEffects: [{ type: 'release_permission', requestId: data.requestId }],
     messages: [{
       msg: {
         type: 'permission_expired',
