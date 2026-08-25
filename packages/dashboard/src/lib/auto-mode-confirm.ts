@@ -25,11 +25,18 @@ export interface AutoModeConfirmInput {
    */
   interruptsTurn?: boolean
   /**
-   * Whether the active session is currently streaming a response (a turn is in
-   * flight). When false, even a CLI switch has no turn to interrupt, so the
-   * destructive warning is omitted.
+   * Whether the active session has in-flight work the switch would destroy.
+   * When false, even a CLI switch has no turn to interrupt, so the destructive
+   * warning is omitted.
+   *
+   * #7335: this was named `isStreaming`, and the name was the bug — the call
+   * site dutifully fed it `!!streamingMessageId`, which the #554 stream-split
+   * clears the moment a permission prompt arrives, so a session PAUSED on a
+   * prompt looked idle and got benign copy while the CLI respawn dropped its
+   * turn. Callers must source this from `hasInterruptibleWork` (lib/session-busy),
+   * never from the streaming flag alone.
    */
-  isStreaming: boolean
+  isBusy: boolean
 }
 
 const BASE_COPY = 'Switch to Auto mode? Tools will run without asking for permission.'
@@ -48,7 +55,7 @@ const DESTRUCTIVE_COPY =
  * the standard non-destructive copy.
  */
 export function buildAutoModeConfirmMessage(input: AutoModeConfirmInput): string {
-  if (input.interruptsTurn && input.isStreaming) {
+  if (input.interruptsTurn && input.isBusy) {
     return DESTRUCTIVE_COPY
   }
   return BASE_COPY

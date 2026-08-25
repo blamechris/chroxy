@@ -893,17 +893,41 @@ export class CliSession extends BaseSession {
     const friendly = formatIdleDuration(this._hardTimeoutMs)
     // #4828: session-scoped (hard-cap fires from active turn).
     ;(this._log || log).warn(`Hard-cap timeout (${friendly}) — force-clearing busy state`)
-    // Fire permission_expired for every pending permission we know about
-    // so the client clears the stale prompt.
-    for (const requestId of this._pendingPermissionIds) {
-      this.emit('permission_expired', {
-        requestId,
-        message: 'Permission request expired (session timeout)',
-      })
-    }
-    this._pendingPermissionIds.clear()
+    this._expirePendingPermissions('Permission request expired (session timeout)')
     this._emitInterruptedTurnResult(this._hardTimeoutMs)
     this.emit('error', { message: `Response timed out after ${friendly}` })
+  }
+
+  /**
+   * Emit `permission_expired` for every prompt this session is still blocked
+   * on, then drop the bookkeeping (#2831, extended by #7335).
+   *
+   * A prompt outlives its turn on BOTH sides and neither side says so:
+   * client-side the card stays live until its own 5-minute `expiresAt`, and
+   * server-side the daemon's HTTP handler tears the pending entry down on the
+   * hook's `req 'aborted'` / `res 'close'` without broadcasting anything. So a
+   * user who clicks Allow afterwards gets the "stale/unknown toolUseId …
+   * already resolved" path with nothing explaining which decision died.
+   *
+   * The dashboard's `permission_expired` handler appends the expiry note AND
+   * clears the prompt's `options`, which is what actually retires the dead
+   * Allow button — so emitting here is the whole client-side fix.
+   *
+   * Extracted because it was wired to `_handleHardTimeout` alone while a turn
+   * has two ways to die: the hard cap, and `_killAndRespawn` (the #3729
+   * panic-button, mid-turn setModel, the auto-mode switch). Correct for every
+   * input it saw and never reached by the other caller — the shape catalogued
+   * in docs/false-safety-guards.md.
+   *
+   * @param {string} message Reason forwarded on the wire (clients log it; the
+   *   user-visible copy is fixed client-side).
+   */
+  _expirePendingPermissions(message) {
+    if (this._pendingPermissionIds.size === 0) return
+    for (const requestId of this._pendingPermissionIds) {
+      this.emit('permission_expired', { requestId, message })
+    }
+    this._pendingPermissionIds.clear()
   }
 
   // #4467: stream-stall recovery. Fires when the child has been silent
@@ -1456,6 +1480,13 @@ export class CliSession extends BaseSession {
    * Suppresses auto-respawn during the kill, clears timers, and starts fresh.
    */
   _killAndRespawn() {
+    // #7335: retire the prompts the dying turn was blocked on BEFORE
+    // _emitInterruptedTurnResult, which reaches _clearMessageState and wipes
+    // `_pendingPermissionIds` silently. Ordering is the whole fix: after that
+    // call there is nothing left to tell the client about, which is exactly
+    // how the card ended up stranded live on screen with a dead Allow button.
+    this._expirePendingPermissions('Permission request expired (the turn it belonged to was interrupted and the session restarted)')
+
     // #4471: emit synthetic terminating events BEFORE setting _respawning,
     // otherwise the _handleChildClose guard short-circuits and the dashboard
     // never receives `agent_idle` — Stop stays stuck on panic-button +

@@ -88,6 +88,7 @@ import { armSchedulerRequest, failAllSchedulerRequests, SCHEDULER_DISCONNECT_ERR
 import { formatQuestionAnswerSummary } from '../utils/questionAnswerSummary';
 import { getAuthToken } from '../utils/auth';
 import { buildAutoModeConfirmMessage } from '../lib/auto-mode-confirm';
+import { hasInterruptibleWork, isSessionBusy } from '../lib/session-busy';
 import {
   setStore,
   wsSend,
@@ -3463,8 +3464,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // server is authoritative regardless (it queues any mid-turn input and
     // reconciles via message_queued/message_dequeued), so this only keeps the
     // optimistic render honest.
+    // #7335: the same predicate the Auto-mode confirm asks, so the two can no
+    // longer drift. `isSessionBusy` — NOT `hasInterruptibleWork` — is correct
+    // here: this mirrors an InputBar affordance, and counting a pending
+    // permission as busy would optimistically badge a send "Queued" in a state
+    // where the server would not queue it. See lib/session-busy.
     const active = get().getActiveSessionState();
-    const busy = active.streamingMessageId !== null || active.isIdle === false;
+    const busy = isSessionBusy(active);
 
     // Show user message immediately (optimistic update + thinking indicator, or
     // a queued badge when busy). #6632: carry the caller-built MessageAttachment
@@ -4136,12 +4142,18 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       const caps = state.availableProviders.find(
         (p) => p.name === activeProvider,
       )?.capabilities;
-      const isStreaming = !!get().getActiveSessionState().streamingMessageId;
+      // #7335: ask the ONE busy predicate, not `!!streamingMessageId`. The
+      // #554 stream-split CLEARS streamingMessageId when a permission prompt
+      // arrives, so the old read reported "nothing in flight" for a session
+      // PAUSED on a prompt — and being prompted is exactly why a user reaches
+      // for "skip all prompts". The benign copy was therefore shown in the one
+      // state where confirming silently kills the turn on claude-cli.
+      const isBusy = hasInterruptibleWork(get().getActiveSessionState(), Date.now());
       const ok = typeof window !== 'undefined' && typeof window.confirm === 'function'
         ? window.confirm(
             buildAutoModeConfirmMessage({
               interruptsTurn: caps?.interruptsTurnOnAutoSwitch,
-              isStreaming,
+              isBusy,
             }),
           )
         : true;
