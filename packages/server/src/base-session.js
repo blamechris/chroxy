@@ -401,6 +401,20 @@ export class BaseSession extends EventEmitter {
 
     this._isBusy = false
     this._processReady = false
+    // #7382: outstanding hook-routed permission prompts, by requestId. Hoisted
+    // from CliSession, where it was written for #2831 and stayed provider-local
+    // through #7375/#7379 — so claude-tui, which is DEFAULT_PROVIDER and routes
+    // its prompts through the SAME permission-hook.sh into the SAME daemon map,
+    // silently had none of it. `ws-permissions` guards its calls with
+    // `typeof ownerSession.notifyPermissionPending === 'function'`, so the
+    // missing methods were not an error — they were a skip, which is the
+    // success-and-not-checking shape in docs/false-safety-guards.md.
+    //
+    // Lives here so a THIRD hook-routed provider inherits it rather than
+    // re-implementing it. A derived-roster test (hook-routed-permission-
+    // bookkeeping.test.js) fails if any `*-session.js` that mints a
+    // `_hookSecret` lacks the API.
+    this._pendingPermissionIds = new Set()
     // #5375: user-initiated stop vs crash. Set by interrupt() (markIntentionalStop),
     // captured-and-cleared by the provider's close/error handler
     // (_consumeIntentionalStop) so a clean stop is not reported as an error.
@@ -1601,6 +1615,69 @@ export class BaseSession extends EventEmitter {
     }
     return super.emit(event, ...args)
   }
+
+  /**
+   * A hook-routed permission request belonging to this session is outstanding.
+   * Called by ws-permissions when the hook's POST /permission is parked (#2831).
+   */
+  notifyPermissionPending(requestId) {
+    if (!requestId || this._pendingPermissionIds.has(requestId)) return
+    this._pendingPermissionIds.add(requestId)
+    if (this._pendingPermissionIds.size === 1) this._onFirstPermissionPending()
+  }
+
+  /**
+   * A hook-routed permission resolved (allow / deny / expired). Called by
+   * ws-permissions' shared cleanup on every resolution path.
+   */
+  notifyPermissionResolved(requestId) {
+    if (!requestId || !this._pendingPermissionIds.has(requestId)) return
+    this._pendingPermissionIds.delete(requestId)
+    if (this._pendingPermissionIds.size === 0) this._onLastPermissionResolved()
+  }
+
+  /**
+   * Emit `permission_expired` for every prompt this session is still blocked on,
+   * then drop the bookkeeping (#2831, #7375, generalised in #7382).
+   *
+   * A prompt outlives its turn on BOTH sides and neither says so: the client
+   * card stays live until its own expiry, and the daemon's HTTP entry is not
+   * released by the child dying, because killing the child does not signal the
+   * hook's `curl` grandchild. Emitting here drives both — the clients retire the
+   * card, and #7381's `release_permission` after-effect releases the daemon
+   * entry so a reconnect cannot resurrect it.
+   *
+   * Call it from the provider's turn-end FUNNEL, not from hand-enumerated death
+   * sites. Enumerating by hand is what missed the plain `result` path and the
+   * interrupt-safety timeout in #7375.
+   *
+   * @param {string} message Reason forwarded on the wire (clients log it; the
+   *   user-visible copy is fixed client-side). Must be non-empty — the wire
+   *   schema requires a string.
+   */
+  _expirePendingPermissions(message) {
+    if (this._pendingPermissionIds.size === 0) return
+    for (const requestId of this._pendingPermissionIds) {
+      this.emit('permission_expired', { requestId, message })
+    }
+    this._pendingPermissionIds.clear()
+    this._onPendingPermissionsAbandoned()
+  }
+
+  /**
+   * Timer hooks for the pending-permission lifecycle. No-ops by default: the
+   * bookkeeping above is provider-agnostic, but "don't time out while the user
+   * is being asked" is not — CliSession pauses its inactivity trio, while
+   * ClaudeTuiSession's hard cap deliberately stays armed and its silence
+   * backstops are suspended by a separate AskUserQuestion mechanism.
+   *
+   * Kept as THREE hooks rather than one because the abandon path must NOT
+   * re-arm: the turn it belonged to is over. Collapsing them re-creates the
+   * #7375 regression where a cleared pause left the safety timers wedged.
+   */
+  _onFirstPermissionPending() {}
+  _onLastPermissionResolved() {}
+  _onPendingPermissionsAbandoned() {}
 
   _clearMessageState() {
     this._isBusy = false

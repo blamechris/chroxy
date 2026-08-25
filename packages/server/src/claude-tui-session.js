@@ -3273,6 +3273,18 @@ export class ClaudeTuiSession extends BaseSession {
    * didn't run the base per-turn reset.
    */
   _clearTurnEndState() {
+    // #7382: the turn is ending, so any prompt it was blocked on can never be
+    // answered — the hook died with the turn. Expire them BEFORE the state below
+    // is torn down, so the clients retire the card and #7381's release
+    // after-effect frees the daemon's pending entry (otherwise
+    // resendPendingPermissions hands a dead prompt, with a live Allow button, to
+    // the next client that connects).
+    //
+    // Wired to this FUNNEL rather than to the individual death sites
+    // (_finishTurnError, _handleHardTimeout, _handleStreamStall, interrupt,
+    // destroy) on purpose: hand-enumerating them is exactly what missed two
+    // paths in #7375. Idempotent — a no-op when nothing is pending.
+    this._expirePendingPermissions('Permission request expired (the turn it belonged to ended before it was answered)')
     if (this._resultTimeout) { clearTimeout(this._resultTimeout); this._resultTimeout = null }
     if (this._hardTimeout) { clearTimeout(this._hardTimeout); this._hardTimeout = null }
     if (this._streamStallTimeout) { clearTimeout(this._streamStallTimeout); this._streamStallTimeout = null }
