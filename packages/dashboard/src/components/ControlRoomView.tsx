@@ -37,6 +37,7 @@
  * added — the smallest refactor that eliminates the per-tab edit cost without
  * churning the tested store internals or the protocol.
  */
+import type { UseNotificationPermissionResult } from '../hooks/useNotificationPermission'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ControlRoomSection, type RepoInvestigateRequest, type RepoOpenSessionRequest } from './ControlRoomSection'
 import { RunnerStatusSection } from './RunnerStatusSection'
@@ -438,6 +439,8 @@ export interface ControlRoomViewProps {
   onToggleConsoleTab?: (show: boolean) => void
   interventionPingEnabled?: boolean
   onToggleInterventionPing?: (enabled: boolean) => void
+  // #7351 — OS-notification permission state, forwarded to the Settings tab.
+  notificationPermission?: UseNotificationPermissionResult
 }
 
 export function ControlRoomView({
@@ -451,6 +454,7 @@ export function ControlRoomView({
   onToggleConsoleTab,
   interventionPingEnabled,
   onToggleInterventionPing,
+  notificationPermission,
 }: ControlRoomViewProps = {}) {
   const [rawTab, setTab] = useState<ControlRoomTab>(() => initialTab ?? loadPersistedTab())
 
@@ -797,6 +801,7 @@ export function ControlRoomView({
             onToggleConsoleTab={onToggleConsoleTab}
             interventionPingEnabled={interventionPingEnabled}
             onToggleInterventionPing={onToggleInterventionPing}
+            notificationPermission={notificationPermission}
           />
         </div>
       )}

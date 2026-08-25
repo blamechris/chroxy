@@ -8358,6 +8358,23 @@ button.sidebar-token-view-session-row:hover {
   margin-bottom: 0;
 }
 
+/* #7351 — "Enable notifications" button in Settings -> Dashboard. This is the
+   ONLY path by which the web backend can ever be granted notification
+   permission (browsers require a user gesture to call
+   Notification.requestPermission), so it must be comfortably hittable: 44px
+   is the tap-target floor this repo holds on every surface (Apple HIG /
+   WCAG 2.1 SC 2.5.5). */
+.settings-notification-enable {
+  min-height: 44px;
+  min-width: 44px;
+  padding: 0 16px;
+  margin-bottom: 8px;
+}
+
+.settings-field-notifications .settings-hint {
+  margin-bottom: 0;
+}
+
 /* #4563: per-device "Mute on this device" row inside each notification
    category <li>. The row is logically subordinate to the global per-category
    toggle (which lives on the same <li>), so it needs visible hierarchy:

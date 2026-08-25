@@ -74,6 +74,7 @@ import { useTauriMenuWiring } from './hooks/useTauriMenuWiring'
 import { isTauri } from './utils/tauri'
 import { startServer, revealInFinder } from './hooks/useTauriIPC'
 import { usePermissionNotification, type PermissionPromptInfo } from './hooks/usePermissionNotification'
+import { useNotificationPermission } from './hooks/useNotificationPermission'
 import { useInterventionPing } from './hooks/useInterventionPing'
 import { useShortcutDispatch } from './hooks/useShortcutDispatch'
 import { FileOpenPalette } from './components/FileOpenPalette'
@@ -461,7 +462,13 @@ export function App() {
       })),
     [storeMessages],
   )
-  usePermissionNotification(permissionPrompts)
+  // #7351 — own the OS-notification permission lifecycle. `autoRequest` is
+  // gated on a session existing so the first-run prompt lands when
+  // notifications actually become useful, not the instant the app opens. The
+  // request itself is Tauri-only; in a browser it needs a click, which is what
+  // the Settings → Dashboard "Enable notifications" button provides.
+  const notificationPermission = useNotificationPermission({ autoRequest: sessions.length > 0 })
+  usePermissionNotification(permissionPrompts, notificationPermission.permission)
   // #4891 — audible intervention ping enable/mute. Defaults on; persisted
   // per-device in localStorage. Toggled via Settings → Dashboard.
   const [interventionPingEnabled, setInterventionPingEnabled] = useState(() => {
@@ -2397,6 +2404,7 @@ export function App() {
                 setInterventionPingEnabled(enabled)
                 persistInterventionPing(enabled)
               }}
+              notificationPermission={notificationPermission}
             />
           </div>
         )}
@@ -2758,6 +2766,7 @@ export function App() {
         onToggleConsoleTab={(show) => { setShowConsoleTab(show); persistShowConsoleTab(show) }}
         interventionPingEnabled={interventionPingEnabled}
         onToggleInterventionPing={(enabled) => { setInterventionPingEnabled(enabled); persistInterventionPing(enabled) }}
+        notificationPermission={notificationPermission}
         shortcutHelpOpen={shortcutHelpOpen}
         onShortcutHelpClose={() => setShortcutHelpOpen(false)}
         shortcuts={SHORTCUTS}

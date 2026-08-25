@@ -24,6 +24,13 @@ const KEY_SHOW_CONSOLE_TAB = `${KEY_PREFIX}show_console_tab`;
 // #4891 — audible intervention ping. Defaults on; persisted per-device so a
 // muted browser tab stays muted across reload + Tauri restart.
 const KEY_INTERVENTION_PING = `${KEY_PREFIX}intervention_ping`;
+// #7351 — whether we have already prompted for OS-notification permission on
+// this device. Needed because neither backend can report "asked and dismissed"
+// as distinct from "never asked": the Web API leaves `Notification.permission`
+// at 'default' when the user closes the prompt without choosing, and Tauri's
+// `isPermissionGranted()` is a bare boolean. Without this flag the first-run
+// request would re-fire on every single page load for anyone who dismissed it.
+const KEY_NOTIFICATION_PERMISSION_ASKED = `${KEY_PREFIX}notification_permission_asked`;
 // #6799 — global "compact" chat filter (hide tool calls + thinking, mobile
 // parity). Defaults off; persisted per-device so the choice survives reload.
 const KEY_COMPACT_CHAT_FILTER = `${KEY_PREFIX}compact_chat_filter`;
@@ -485,6 +492,37 @@ export function persistInterventionPing(enabled: boolean): void {
 export function loadPersistedInterventionPing(): boolean {
   try {
     return localStorage.getItem(KEY_INTERVENTION_PING) !== 'false';
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Record that we have prompted for OS-notification permission (#7351).
+ *
+ * Written once, when the automatic first-run request is made. An explicit
+ * click on "Enable notifications" in Settings deliberately does NOT consult
+ * this flag — the user asked for the prompt, so they get it.
+ */
+export function persistNotificationPermissionAsked(): void {
+  try {
+    localStorage.setItem(KEY_NOTIFICATION_PERMISSION_ASKED, 'true');
+  } catch {
+    // Storage not available
+  }
+}
+
+/**
+ * Whether the automatic notification-permission request has already been made
+ * on this device (#7351).
+ *
+ * Falls back to `true` when storage is unavailable: if we cannot remember
+ * having asked, the safe failure is to *not* ask automatically (the Settings
+ * button still works) rather than to re-prompt on every load.
+ */
+export function loadNotificationPermissionAsked(): boolean {
+  try {
+    return localStorage.getItem(KEY_NOTIFICATION_PERMISSION_ASKED) === 'true';
   } catch {
     return true;
   }

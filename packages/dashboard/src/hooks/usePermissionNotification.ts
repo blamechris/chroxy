@@ -2,9 +2,21 @@
  * usePermissionNotification — fire native notifications for permission requests
  * when the browser/Tauri window is not focused.
  *
- * Uses the Web Notification API (supported in both browsers and Tauri WKWebView).
+ * Sends through `utils/native-notifications`, which picks the Tauri plugin
+ * when available and the Web Notification API otherwise. It does NOT touch
+ * `window.Notification` directly: before #7351 it did, behind a
+ * `Notification.permission === 'granted'` guard that nothing ever satisfied,
+ * because `Notification.requestPermission()` was never called anywhere in
+ * chroxy. The permission lifecycle now lives in `useNotificationPermission`,
+ * and dispatch lives in the backend module — this hook only decides *which*
+ * prompts deserve a notification.
  */
 import { useRef, useEffect } from 'react'
+import {
+  getNotificationPermission,
+  sendNativeNotification,
+  type NativeNotificationPermission,
+} from '../utils/native-notifications'
 
 export interface PermissionPromptInfo {
   id: string
@@ -15,11 +27,23 @@ export interface PermissionPromptInfo {
   answered: string | undefined
 }
 
-export function usePermissionNotification(prompts: PermissionPromptInfo[]) {
+/**
+ * @param prompts     Active permission prompts, newest state each render.
+ * @param permission  Live permission state from `useNotificationPermission`.
+ *   Passing it makes a mid-session grant take effect immediately for prompts
+ *   that are still pending, instead of waiting for the next change to
+ *   `prompts` to re-run the effect. Omitted (tests, other call sites) it is
+ *   read from the backend at effect time.
+ */
+export function usePermissionNotification(
+  prompts: PermissionPromptInfo[],
+  permission?: NativeNotificationPermission,
+) {
   const notifiedRef = useRef(new Set<string>())
 
   useEffect(() => {
-    if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return
+    const current = permission ?? getNotificationPermission()
+    if (current !== 'granted') return
 
     // Prune stale IDs no longer in the active prompts list
     const activeIds = new Set(prompts.map(p => p.requestId))
@@ -42,12 +66,14 @@ export function usePermissionNotification(prompts: PermissionPromptInfo[]) {
       // Only notify when window is not focused
       if (document.hasFocus()) continue
 
+      // Marked before dispatch, and regardless of whether dispatch succeeds:
+      // a backend that throws must not be retried on every subsequent render.
       notifiedRef.current.add(prompt.requestId)
 
-      new Notification('Chroxy: Permission Requested', {
+      sendNativeNotification('Chroxy: Permission Requested', {
         body: prompt.description,
         tag: `chroxy-perm-${prompt.requestId}`,
       })
     }
-  }, [prompts])
+  }, [prompts, permission])
 }

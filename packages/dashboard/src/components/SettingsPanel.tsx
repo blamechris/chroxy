@@ -4,6 +4,7 @@
  * Triggered via gear icon in header or Cmd+,. Changes apply instantly
  * and persist to localStorage.
  */
+import type { UseNotificationPermissionResult } from '../hooks/useNotificationPermission'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useConnectionStore, isRuleEligibleProvider } from '../store/connection'
 import type { PermissionRule, PermissionAuditEntry } from '../store/types'
@@ -250,6 +251,10 @@ export interface SettingsContentProps {
   // when the handler is provided.
   interventionPingEnabled?: boolean
   onToggleInterventionPing?: (enabled: boolean) => void
+  // #7351 — OS-notification permission state + the request trigger. Optional
+  // for the same reason as the ping props: call sites and tests that don't
+  // wire it stay valid, and the row simply doesn't render.
+  notificationPermission?: UseNotificationPermissionResult
 }
 
 export interface SettingsPanelProps {
@@ -259,6 +264,7 @@ export interface SettingsPanelProps {
   onToggleConsoleTab?: (show: boolean) => void
   interventionPingEnabled?: boolean
   onToggleInterventionPing?: (enabled: boolean) => void
+  notificationPermission?: UseNotificationPermissionResult
 }
 
 /**
@@ -720,7 +726,7 @@ function ThemeSwatches({ theme }: { theme: ThemeDefinition }) {
   )
 }
 
-export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, interventionPingEnabled, onToggleInterventionPing }: SettingsContentProps) {
+export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, interventionPingEnabled, onToggleInterventionPing, notificationPermission }: SettingsContentProps) {
   // #5544: alias retained so the body's many `isOpen` reads (effect gates,
   // refresh-on-open) keep their original meaning — true while this surface
   // is the visible one (modal open, or Control Room Settings tab active).
@@ -2042,7 +2048,7 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
             )}
           </section>
 
-          {(onToggleConsoleTab || onToggleInterventionPing) && (
+          {(onToggleConsoleTab || onToggleInterventionPing || notificationPermission) && (
             <section className="settings-section" data-testid="dashboard-section">
               <h3>Dashboard</h3>
               {onToggleConsoleTab && (
@@ -2080,6 +2086,58 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
                     request are deduped, and bursts across multiple sessions
                     are throttled into a single ping.
                   </p>
+                </div>
+              )}
+              {/* #7351 — OS-notification permission. Before this, chroxy never
+                  called requestPermission() at all, so the notification path
+                  was unreachable and *silent about it*. This row is the
+                  "surface the ungranted state" half: it always says which of
+                  the four states we are in, and it is the only way the web
+                  backend can ever be granted (the browser requires a user
+                  gesture, so the click below is the request). */}
+              {notificationPermission && (
+                <div className="settings-field settings-field-notifications" data-testid="notification-permission-field">
+                  <label>Desktop notifications</label>
+                  {notificationPermission.permission === 'granted' && (
+                    <p className="settings-hint" data-testid="notification-permission-granted">
+                      On — chroxy will notify you when a session needs your
+                      attention and this window is not focused.
+                    </p>
+                  )}
+                  {notificationPermission.permission === 'default' && (
+                    <>
+                      <button
+                        type="button"
+                        className="btn-secondary settings-notification-enable"
+                        data-testid="notification-permission-enable"
+                        onClick={() => { void notificationPermission.request() }}
+                      >
+                        Enable notifications
+                      </button>
+                      <p className="settings-hint">
+                        Off — chroxy cannot notify you when a session needs
+                        your attention. Your browser only allows this to be
+                        requested from a click, so nothing is asked until you
+                        press the button.
+                      </p>
+                    </>
+                  )}
+                  {notificationPermission.permission === 'denied' && (
+                    <p className="settings-hint" data-testid="notification-permission-denied">
+                      Blocked. Chroxy is not allowed to ask again — re-enable
+                      notifications for this site in your browser or OS
+                      settings, then reload.
+                    </p>
+                  )}
+                  {notificationPermission.permission === 'unsupported' && (
+                    <p className="settings-hint" data-testid="notification-permission-unsupported">
+                      Unavailable in this window. Browsers only expose
+                      notifications on a secure context, so a dashboard opened
+                      over the LAN at an <code>http://</code> address cannot
+                      use them — open it at <code>localhost</code>, or use the
+                      desktop app.
+                    </p>
+                  )}
                 </div>
               )}
             </section>
@@ -2270,7 +2328,7 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
  * still open a dismissable panel. The primary entry points (gear / Cmd+,)
  * now redirect to the Control Room Settings tab instead — see App.tsx.
  */
-export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsoleTab, interventionPingEnabled, onToggleInterventionPing }: SettingsPanelProps) {
+export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsoleTab, interventionPingEnabled, onToggleInterventionPing, notificationPermission }: SettingsPanelProps) {
   const backdropRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -2306,6 +2364,7 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
           onToggleConsoleTab={onToggleConsoleTab}
           interventionPingEnabled={interventionPingEnabled}
           onToggleInterventionPing={onToggleInterventionPing}
+          notificationPermission={notificationPermission}
         />
       </div>
     </>
