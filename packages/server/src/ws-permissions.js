@@ -862,6 +862,58 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
     }
   }
 
+  /**
+   * #7379 — release a pending HTTP-hook permission whose asker is gone.
+   *
+   * Called when a session reports (via `permission_expired`) that the turn a
+   * prompt belonged to has died. The daemon cannot detect this itself: killing
+   * the CLI child does NOT kill the hook. POSIX `killProcessTree` is
+   * `child.kill('SIGTERM')` against the DIRECT child, while the hook is
+   * `bash permission-hook.sh` -> `curl --max-time 300` — both grandchildren,
+   * neither signalled, and on a crash nothing runs at all. So the socket stays
+   * open, `req 'aborted'` / `res 'close'` never fire, and the entry sits there
+   * with time left on its clock until `resendPendingPermissions` hands it to
+   * the next client that connects — a live Allow button for a turn that no
+   * longer exists (#7335 all over again, one reconnect later).
+   *
+   * Resolves as DENY, which is both the fail-closed default and the truth: the
+   * request can no longer be honoured by anyone. The shared `cleanup()` then
+   * deletes the map entry, tears down the permission-induced subscription, and
+   * releases the session's inactivity pause.
+   *
+   * Quiet and idempotent when the entry is already gone — that is the NORMAL
+   * case whenever the hook's socket did close on its own, and this is called on
+   * every `permission_expired`, including the SDK path whose prompts never live
+   * in this map at all. Returns whether it actually released something so
+   * callers can log meaningfully.
+   */
+  function releaseAbandonedPermission(requestId, sessionId = null) {
+    if (!requestId) return false
+    const pending = pendingPermissions.get(requestId)
+    if (!pending) return false
+    // Ownership guard. Not reachable today — ids are minted per-request here
+    // (`perm-${randomUUID()}`) and registered against their owner via the
+    // hook-secret lookup, and the SDK's `perm-<nonce>-<n>-<ts>` format cannot
+    // collide — but this releases a permission on behalf of a session, and
+    // "the caller passed the right id" is exactly the invariant a future
+    // emitter breaks silently. One line, checked against the route map rather
+    // than assumed.
+    if (sessionId && permissionSessionMap.has(requestId) && permissionSessionMap.get(requestId) !== sessionId) {
+      log.warn(`Refusing to release permission ${requestId}: owned by session ${permissionSessionMap.get(requestId)}, not ${sessionId}`)
+      return false
+    }
+    log.info(`Releasing permission ${requestId}: the turn that raised it is gone (#7379)`)
+    try {
+      pending.resolve('deny')
+    } catch (err) {
+      // cleanup() runs BEFORE the response write inside resolve(), so the entry
+      // IS released even when writing to a torn-down socket throws. Same
+      // rationale as drainSessionPermissions — debug, not warn.
+      log.debug(`Permission ${requestId} released, but the deny response write failed (socket likely gone): ${err?.message || err}`)
+    }
+    return true
+  }
+
   /** Resolve a pending permission request */
   function resolvePermission(requestId, decision) {
     const pending = pendingPermissions.get(requestId)
@@ -942,6 +994,7 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
     handlePermissionResponseHttp,
     resendPendingPermissions,
     resolvePermission,
+    releaseAbandonedPermission,
     drainSessionPermissions,
     destroy,
     // #3996: expose the HTTP-permission limiter so /diagnostics can include
