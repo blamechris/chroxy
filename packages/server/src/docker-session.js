@@ -92,8 +92,10 @@ const FORWARDED_ENV_KEYS = [
 // The consequence is that a containerized CLI session still needs the respawn
 // to pick up a mode change, exactly as before #7337. Giving it the live channel
 // needs a bind mount established in `_startContainer()`; tracked separately.
-// docker-session.test.js pins the omission (with a CHROXY_PERMISSION_MODE
-// positive control) so it cannot be "fixed" by adding the key alone.
+// tests/cli-permission-mode-sidecar.test.js pins the omission (with a
+// CHROXY_PERMISSION_MODE positive control) so it cannot be "fixed" by adding
+// the key alone. NOT docker-session.test.js — that file drives a hand-written
+// mirror of _spawnPersistentProcess and never reads the real array.
 
 /**
  * DockerSession runs Claude Code inside an isolated Docker container.

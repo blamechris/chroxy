@@ -2,13 +2,15 @@ import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { Readable, Writable } from 'node:stream'
-import { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync, existsSync, utimesSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readdirSync, rmSync, readFileSync, writeFileSync, existsSync, utimesSync, statSync, symlinkSync, chmodSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { spawn, spawnSync } from 'node:child_process'
 import { createServer } from 'node:http'
 import { CliSession } from '../src/cli-session.js'
+import { ensureOwnedBaseDir } from '../src/utils/stale-session-dirs.js'
+import { writePermissionModeSidecarAtomic } from '../src/utils/permission-mode-sidecar.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const hookPath = join(__dirname, '../hooks/permission-hook.sh')
@@ -132,17 +134,41 @@ describe('CliSession permission-mode sidecar (#7337)', () => {
   // and every assertion below about "the session did/didn't set it" would be
   // reading someone else's value. Scrub it for the suite; restore in afterEach
   // so a failing assertion can't leak the scrubbed state into the next file.
-  let ambientModeFile
+  //
+  // The hook env is built from `...process.env`, so EVERY CHROXY_ var the hook
+  // reads must be scrubbed — not just the one under test. CHROXY_HOST in
+  // particular redirects the hook's curl target: with it set (as it is inside a
+  // container, or when this suite runs inside a chroxy session) both `approve`
+  // positive controls fail while the auto test stays green, i.e. exactly the
+  // shape where "fix the flake by skipping it" silently unguards the auto path.
+  const AMBIENT_KEYS = [
+    'CHROXY_PERMISSION_MODE_FILE',
+    'CHROXY_PERMISSION_MODE',
+    'CHROXY_HOST',
+    'CHROXY_HOOK_HOST',
+    'CHROXY_HOOK_SECRET',
+    'CHROXY_PORT',
+    'CHROXY_SINK_DIR',
+    'CHROXY_HOOK_UNREACHABLE_DECISION',
+  ]
+  let ambient
 
   beforeEach(() => {
     tmp = mkdtempSync(join(tmpdir(), 'cli-perm-sidecar-test-'))
-    ambientModeFile = process.env.CHROXY_PERMISSION_MODE_FILE
-    delete process.env.CHROXY_PERMISSION_MODE_FILE
+    ambient = {}
+    for (const k of AMBIENT_KEYS) {
+      ambient[k] = process.env[k]
+      delete process.env[k]
+    }
   })
 
   afterEach(() => {
-    if (ambientModeFile === undefined) delete process.env.CHROXY_PERMISSION_MODE_FILE
-    else process.env.CHROXY_PERMISSION_MODE_FILE = ambientModeFile
+    // Restored FIRST so an assertion throwing mid-test cannot leak the scrub
+    // into the next file.
+    for (const k of AMBIENT_KEYS) {
+      if (ambient?.[k] === undefined) delete process.env[k]
+      else process.env[k] = ambient[k]
+    }
     for (const s of created) {
       s._child = null
       try { const r = s.destroy(); if (r?.catch) r.catch(() => {}) } catch { /* ignore */ }
@@ -165,27 +191,45 @@ describe('CliSession permission-mode sidecar (#7337)', () => {
       ...opts,
     })
     created.push(session)
-    session._spawnPersistentProcess = () => {}
+    // Capture the env AT SPAWN TIME rather than calling _buildChildEnv() again
+    // afterwards. `_ensurePermissionModeSidecar()` must run BEFORE the spawn —
+    // _spawnPersistentProcess reads _buildChildEnv() inline — and a post-hoc
+    // call cannot see that ordering: moving the sidecar creation to AFTER the
+    // spawn leaves the real child with no CHROXY_PERMISSION_MODE_FILE at all
+    // (i.e. #7337 reproduced) while every assertion still passes.
+    session.spawnedEnvs = []
+    session._spawnPersistentProcess = () => {
+      session.spawnedEnvs.push(session._buildChildEnv())
+    }
     session.start()
     session._child = createMockChild()
     session._processReady = true
     return session
   }
 
+  /** The env of the most recent spawn — what the live child actually holds. */
+  const lastSpawnEnv = (session) => session.spawnedEnvs[session.spawnedEnvs.length - 1]
+
   // ---- wiring ----------------------------------------------------------
 
-  it('start() creates a sidecar holding the initial mode and points the child env at it', () => {
-    const session = startedSession()
+  it('start() seeds the sidecar with the session\'s ACTUAL mode and spawns the child pointing at it', () => {
+    // NOT the default: 'approve' is BaseSession's default, so seeding with a
+    // hardcoded 'approve' would satisfy this assertion while breaking every
+    // restored session — `permissionMode` is a real constructor opt, so a
+    // session restored in `acceptEdits` would seed `approve` and prompt on
+    // every tool call until the user toggled the mode.
+    const session = startedSession({ permissionMode: 'acceptEdits' })
 
     assert.ok(session._permissionModeFile,
       'CliSession must create a permission-mode sidecar when permissions are enabled')
-    assert.equal(readFileSync(session._permissionModeFile, 'utf8'), 'approve',
-      'sidecar must be seeded with the session\'s initial permission mode')
+    assert.equal(readFileSync(session._permissionModeFile, 'utf8'), 'acceptEdits',
+      'sidecar must be seeded with the session\'s ACTUAL initial mode, not a hardcoded default')
 
-    const env = session._buildChildEnv()
+    const env = lastSpawnEnv(session)
+    assert.ok(env, 'positive control: the spawn must have happened')
     assert.equal(env.CHROXY_PERMISSION_MODE_FILE, session._permissionModeFile,
-      'the child env must name the sidecar so permission-hook.sh reads it first')
-    assert.equal(env.CHROXY_PERMISSION_MODE, 'approve',
+      'the child must be SPAWNED with the sidecar path — built before the spawn, not after')
+    assert.equal(env.CHROXY_PERMISSION_MODE, 'acceptEdits',
       'the frozen env var stays as the fallback for a hook that cannot read the file')
   })
 
@@ -214,8 +258,8 @@ describe('CliSession permission-mode sidecar (#7337)', () => {
     session.start()
 
     assert.equal(session._permissionModeFile, null, 'no port -> no sidecar')
-    assert.equal(session._buildChildEnv().CHROXY_PERMISSION_MODE_FILE, undefined,
-      'no sidecar -> the env var must be absent, not an empty string')
+    assert.equal(session._buildChildEnv().CHROXY_PERMISSION_MODE_FILE, '',
+      'no sidecar -> the key must be SET-BUT-EMPTY, not omitted. buildSpawnEnv(\'claude\') is denylist mode, so omitting it lets an ambient CHROXY_PERMISSION_MODE_FILE inherited from an outer chroxy session decide this session\'s permissions')
     assert.equal(session.setPermissionMode('auto'), true,
       'a mode change must still succeed without a sidecar')
   })
@@ -239,7 +283,7 @@ describe('CliSession permission-mode sidecar (#7337)', () => {
     try {
       const session = startedSession({ port: mock.port })
       // The env the running child was spawned with. Nothing can mutate it.
-      const frozenEnv = session._buildChildEnv()
+      const frozenEnv = lastSpawnEnv(session)
 
       session.setPermissionMode('auto')
 
@@ -263,7 +307,7 @@ describe('CliSession permission-mode sidecar (#7337)', () => {
     const mock = await startMockPermissionServer({ decision: 'allow' })
     try {
       const session = startedSession({ port: mock.port })
-      const frozenEnv = session._buildChildEnv()
+      const frozenEnv = lastSpawnEnv(session)
 
       // No mode change: the session stays in `approve`.
       assert.equal(session.permissionMode, 'approve')
@@ -283,6 +327,149 @@ describe('CliSession permission-mode sidecar (#7337)', () => {
     }
   })
 
+  // ---- the sidecar outranks the env var, so it must never go stale --------
+
+  /**
+   * THE fail-open this whole mechanism can produce. The hook prefers the file
+   * over CHROXY_PERMISSION_MODE, so a sidecar holding a STALE, more-permissive
+   * mode beats the correct value in the freshly-spawned child's env — silently,
+   * for the rest of the session, while the daemon/state file/UI all disagree.
+   *
+   * The original code early-returned from `_ensurePermissionModeSidecar()` on a
+   * non-null path, so nothing ever re-validated the contents, and the comment
+   * claimed "the respawn below is still the eventual repair". It was not.
+   */
+  it('start() RE-SEEDS an existing sidecar, so a respawn repairs stale contents', () => {
+    const session = startedSession({ permissionMode: 'auto' })
+    const sidecar = session._permissionModeFile
+
+    // Simulate the mid-session write having failed: the session's mode moved on
+    // but the file still holds the old, more permissive value.
+    session.permissionMode = 'approve'
+    writeFileSync(sidecar, 'auto')
+
+    session.start() // the respawn
+
+    assert.equal(session._permissionModeFile, sidecar,
+      'the path must stay stable across a respawn — a still-draining old child holds it in its env')
+    assert.equal(readFileSync(sidecar, 'utf8'), 'approve',
+      'contents must be re-asserted on every start(); a stale sidecar outranks the correct env var')
+  })
+
+  it('a failed mode-change write REMOVES the sidecar rather than leaving it stale', () => {
+    const session = startedSession({ permissionMode: 'auto' })
+    const sidecar = session._permissionModeFile
+    const dir = join(sidecar, '..')
+
+    // Make the atomic write fail the way a full/read-only disk would, without
+    // touching the rest of the filesystem: drop the directory out from under it.
+    rmSync(dir, { recursive: true, force: true })
+
+    assert.equal(session.setPermissionMode('approve'), true, 'the tighten must still be accepted')
+    assert.equal(session._permissionModeFile, null,
+      'the sidecar reference must be dropped so the hook falls back to the env var, not to a stale file')
+  })
+
+  it('_ensurePermissionModeSidecar is idempotent on the path across repeated start()s', () => {
+    const session = startedSession()
+    const first = session._permissionModeFile
+    const firstDir = session._permissionModeDir
+
+    session.start()
+    session.start()
+
+    assert.equal(session._permissionModeFile, first, 'the sidecar path must not move on respawn')
+    assert.equal(session._permissionModeDir, firstDir,
+      'a new dir per respawn would leak every previous one — owner.pid names this LIVE daemon, so the sweep keeps them all')
+    assert.equal(session.spawnedEnvs.length, 3, 'positive control: three spawns really happened')
+    for (const env of session.spawnedEnvs) {
+      assert.equal(env.CHROXY_PERMISSION_MODE_FILE, first, 'every spawn must name the same sidecar')
+    }
+  })
+
+  it('destroy() removes the sidecar only AFTER the child has been killed', () => {
+    const session = startedSession({ permissionMode: 'auto' })
+    const sidecar = session._permissionModeFile
+
+    // The child stays alive for up to the 3s force-kill grace and can fire a
+    // PreToolUse hook in that window. If the sidecar is gone by then the hook
+    // falls back to the spawn-frozen CHROXY_PERMISSION_MODE — which on a
+    // session tightened since spawn (spawned `auto`, switched to `approve`) is
+    // MORE permissive than the user's current setting.
+    let sidecarAliveAtKill = null
+    const child = session._child
+    const realEnd = child.stdin.end.bind(child.stdin)
+    child.stdin.end = (...args) => { sidecarAliveAtKill = existsSync(sidecar); return realEnd(...args) }
+
+    session.destroy()
+
+    assert.equal(sidecarAliveAtKill, true,
+      'the sidecar must still be readable while the child is being killed')
+    assert.equal(existsSync(sidecar), false, 'and removed once destroy() returns')
+  })
+
+  it('the sidecar write goes through the restricted-write helper (owner-only, not a plain write)', { skip: process.platform === 'win32' }, () => {
+    const dir = join(tmp, 'atomic')
+    mkdirSync(dir, { recursive: true })
+    const path = join(dir, 'permission-mode')
+
+    writePermissionModeSidecarAtomic(path, 'auto')
+
+    assert.equal(readFileSync(path, 'utf8'), 'auto')
+    assert.equal(statSync(path).mode & 0o777, 0o600,
+      'this file decides whether a tool call is prompted — a plain writeFileSync would leave it 0644')
+    assert.deepEqual(
+      readdirSync(dir).filter((f) => f.includes('.tmp-')), [],
+      'no intermediate temp file may survive the rename',
+    )
+  })
+
+  // ---- the base dir is attacker-reachable on a shared /tmp ----------------
+
+  describe('ensureOwnedBaseDir', () => {
+    it('creates the base owner-only and re-asserts the mode on an existing dir', { skip: process.platform === 'win32' }, () => {
+      const base = join(tmp, 'base-mode')
+      ensureOwnedBaseDir(base)
+      assert.equal(statSync(base).mode & 0o777, 0o700, 'a fresh base must be 0700, not umask-dependent')
+
+      chmodSync(base, 0o777)
+      ensureOwnedBaseDir(base)
+      assert.equal(statSync(base).mode & 0o777, 0o700,
+        'an ADOPTED base keeps whatever mode it had — re-assert rather than trust the create')
+    })
+
+    it('refuses a base that is a symlink', () => {
+      const real = join(tmp, 'attacker-owned')
+      const link = join(tmp, 'squatted-base')
+      mkdirSync(real, { recursive: true })
+      symlinkSync(real, link)
+      // Positive control: plain mkdirSync would silently accept this and write
+      // straight through the link — that is the whole reason for the check.
+      mkdirSync(link, { recursive: true })
+      assert.equal(existsSync(link), true)
+
+      assert.throws(() => ensureOwnedBaseDir(link), /symlink/i,
+        'a symlinked base lets another local user substitute a permission-mode file that decides every tool call')
+    })
+
+    it('a session whose base is unusable degrades to env-var-only instead of failing start()', () => {
+      const badBase = join(tmp, 'not-a-dir')
+      writeFileSync(badBase, 'i am a file')
+      const original = Object.getOwnPropertyDescriptor(CliSession, 'PERMISSION_MODE_SIDECAR_BASE')
+      Object.defineProperty(CliSession, 'PERMISSION_MODE_SIDECAR_BASE', { get: () => badBase, configurable: true })
+      try {
+        const session = startedSession()
+        assert.equal(session._permissionModeFile, null, 'no sidecar when the base is unusable')
+        assert.equal(lastSpawnEnv(session).CHROXY_PERMISSION_MODE_FILE, '',
+          'and the key must still be set-but-empty so no ambient path leaks in')
+        assert.equal(lastSpawnEnv(session).CHROXY_PERMISSION_MODE, 'approve',
+          'the env var carries the mode instead — degraded, not broken')
+      } finally {
+        Object.defineProperty(CliSession, 'PERMISSION_MODE_SIDECAR_BASE', original)
+      }
+    })
+  })
+
   // ---- crash cleanup ---------------------------------------------------
 
   /**
@@ -298,6 +485,30 @@ describe('CliSession permission-mode sidecar (#7337)', () => {
       writeFileSync(join(dir, 'permission-mode'), 'approve')
       return dir
     }
+
+    /**
+     * EPERM from `process.kill(pid, 0)` means the process EXISTS but belongs to
+     * another user — so it is ALIVE and its dir must be kept. Reading EPERM as
+     * "dead" would make the reaper delete a live session's dir on any host where
+     * two users run chroxy. This branch had no coverage anywhere in the repo,
+     * which is how a mutation of exactly this line survived a 923-test run.
+     */
+    it('treats EPERM (another user\'s LIVE process) as alive, not dead', () => {
+      const dir = makeSidecarDir(`test-eperm-${process.pid}`, 1)
+      const realKill = process.kill
+      process.kill = (pid, sig) => {
+        if (sig === 0 && pid === 1) { const e = new Error('EPERM'); e.code = 'EPERM'; throw e }
+        return realKill.call(process, pid, sig)
+      }
+      try {
+        CliSession.sweepStaleSidecarDirs({ info() {}, warn() {} })
+        assert.equal(existsSync(dir), true,
+          'EPERM means the process exists but is not ours — keeping the dir is the only safe read')
+      } finally {
+        process.kill = realKill
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
 
     it('reaps a dir whose owner pid is dead and keeps one whose owner is alive', () => {
       // A pid that is definitely dead: run a process to completion and reuse its
@@ -406,11 +617,17 @@ describe('CliSession permission-mode sidecar (#7337)', () => {
   it('POSITIVE CONTROL: switching back from auto to approve re-raises the prompt', { skip: SKIP_POSIX_SHELL }, async () => {
     const mock = await startMockPermissionServer({ decision: 'deny' })
     try {
-      const session = startedSession({ port: mock.port })
-      const frozenEnv = session._buildChildEnv()
+      // Spawned in `auto`, so the FROZEN env var says `auto` too. Only the
+      // sidecar can carry the tighten — if the sidecar channel were deleted
+      // entirely this test would auto-allow and fail. Starting from the default
+      // `approve` made it a duplicate of the previous test: the env var alone
+      // satisfied every assertion, so it passed on origin/main (where no
+      // sidecar exists at all) and with the channel mutated out.
+      const session = startedSession({ port: mock.port, permissionMode: 'auto' })
+      const frozenEnv = lastSpawnEnv(session)
+      assert.equal(frozenEnv.CHROXY_PERMISSION_MODE, 'auto',
+        'positive control: the frozen env var must say auto, so only the sidecar can re-tighten')
 
-      session.setPermissionMode('auto')
-      session._isBusy = false
       assert.equal(session.setPermissionMode('approve'), true, 'switch back must be accepted')
 
       const { status, stdout } = await runHook({

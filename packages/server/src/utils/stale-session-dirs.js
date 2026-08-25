@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, rmSync, statSync } from 'fs'
+import { chmodSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from 'fs'
 import { join } from 'path'
 
 /**
@@ -45,8 +45,15 @@ export function sweepStaleOwnedDirs(base, { prefix = 's-', graceMs = OWNED_DIR_S
     const dir = join(base, name)
     let ownerPid = null
     try {
-      const n = parseInt(readFileSync(join(dir, OWNER_PID_FILE), 'utf8').trim(), 10)
-      if (Number.isInteger(n) && n > 0) ownerPid = n
+      // statSync + isFile() BEFORE the read: readFileSync on a FIFO blocks
+      // forever with no timeout, so a planted `owner.pid` fifo would hang the
+      // daemon's boot sweep. A non-regular pidfile is treated as garbage, which
+      // routes to the grace-window branch below — the safe default for an orphan.
+      const pidPath = join(dir, OWNER_PID_FILE)
+      if (statSync(pidPath).isFile()) {
+        const n = parseInt(readFileSync(pidPath, 'utf8').trim(), 10)
+        if (Number.isInteger(n) && n > 0) ownerPid = n
+      }
     } catch { /* no/garbage pidfile → orphaned, subject to the grace below */ }
     if (ownerPid !== null) {
       let alive
@@ -55,7 +62,7 @@ export function sweepStaleOwnedDirs(base, { prefix = 's-', graceMs = OWNED_DIR_S
         alive = true
       } catch (err) {
         // ESRCH → dead; EPERM → exists but not ours → still alive, keep it.
-        alive = false // MUTANT: EPERM (another user's live process) treated as dead
+        alive = err && err.code === 'EPERM'
       }
       if (alive) { kept++; continue }
     } else {
@@ -82,4 +89,46 @@ export function sweepStaleOwnedDirs(base, { prefix = 's-', graceMs = OWNED_DIR_S
   }
   if (swept > 0) logger?.info?.(`Swept ${swept} stale ${label} dir(s) from ${base} (kept ${kept} live)`)
   return { swept, kept }
+}
+
+/**
+ * Create (or adopt) the shared BASE dir that per-session dirs live under, and
+ * refuse to use one an attacker could have prepared.
+ *
+ * `mkdirSync(base, { recursive: true })` returns silently when `base` already
+ * exists — INCLUDING when it is a symlink to a directory — and then creates
+ * children through it. On Linux `os.tmpdir()` is the shared `/tmp`, so another
+ * local user can pre-create `/tmp/chroxy-claude-cli` (or point it elsewhere)
+ * and then substitute a session dir whose `permission-mode` reads `auto`. The
+ * hook re-reads that file on every tool call, so the substitution decides
+ * whether tool calls are prompted. macOS is unaffected — its `$TMPDIR` is a
+ * per-user directory at 0700 — which is exactly why this needs an explicit
+ * check rather than a platform assumption.
+ *
+ * Throws when the base is a symlink, is not ours, or is group/other-writable.
+ * Callers are expected to treat that as "no sidecar" and degrade, not to fail
+ * session start.
+ *
+ * @param {string} base Directory to create or adopt.
+ * @returns {string} `base`, once it is safe to write into.
+ */
+export function ensureOwnedBaseDir(base) {
+  mkdirSync(base, { recursive: true, mode: 0o700 })
+  const st = lstatSync(base)
+  if (st.isSymbolicLink()) {
+    throw new Error(`${base} is a symlink — refusing to write session state through it`)
+  }
+  if (!st.isDirectory()) {
+    throw new Error(`${base} exists and is not a directory`)
+  }
+  // getuid is POSIX-only; on Windows there is no uid and the per-user profile
+  // tmpdir already provides the isolation this check is standing in for.
+  const uid = process.getuid?.()
+  if (uid !== undefined && st.uid !== uid) {
+    throw new Error(`${base} is owned by uid ${st.uid}, not ${uid} — refusing to adopt it`)
+  }
+  // mkdir's mode is masked by umask, and an ADOPTED dir keeps whatever mode it
+  // already had — so re-assert rather than trust the create.
+  if (st.mode & 0o077) chmodSync(base, 0o700)
+  return base
 }

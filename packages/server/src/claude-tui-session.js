@@ -23,7 +23,7 @@ import { ALLOWED_MODEL_IDS } from './models.js'
 import { CLAUDE_FALLBACK_MODELS, claudeModelMetadata } from './claude-model-catalog.js'
 import { RespawnRateLimiter } from './utils/respawn-rate-limiter.js'
 import { writePermissionModeSidecarAtomic } from './utils/permission-mode-sidecar.js'
-import { sweepStaleOwnedDirs } from './utils/stale-session-dirs.js'
+import { sweepStaleOwnedDirs, OWNER_PID_FILE } from './utils/stale-session-dirs.js'
 import { labelBinarySpawnFailure } from './utils/verify-binary.js'
 import { CHROXY_SECRET_DENYLIST } from './utils/spawn-env.js'
 import { createLogger, loggerForSession, redactSensitive, redactSensitivePreservingEscapes } from './logger.js'
@@ -869,7 +869,7 @@ export class ClaudeTuiSession extends BaseSession {
       // so mkdir can create a real directory.
       try { rmSync(this._sinkDir, { recursive: true, force: true }) } catch { /* best effort */ }
       mkdirSync(this._sinkDir, { recursive: true })
-      try { writeFileSync(join(this._sinkDir, 'owner.pid'), String(process.pid)) } catch { /* best effort */ }
+      try { writeFileSync(join(this._sinkDir, OWNER_PID_FILE), String(process.pid)) } catch { /* best effort */ }
       if (this._permissionModeFile) {
         try { this._writePermissionModeSidecarAtomic(this._permissionModeFile, this.permissionMode || 'approve') } catch { /* hook falls back to env var */ }
       }
@@ -1268,7 +1268,7 @@ export class ClaudeTuiSession extends BaseSession {
     // (sweepStaleSinkDirs) can tell a live daemon's sink dir from one orphaned
     // by a prior crash. Best-effort: a missing pidfile just makes the dir
     // sweep-eligible, which is the safe default for an orphan.
-    try { writeFileSync(join(this._sinkDir, 'owner.pid'), String(process.pid)) } catch { /* best effort */ }
+    try { writeFileSync(join(this._sinkDir, OWNER_PID_FILE), String(process.pid)) } catch { /* best effort */ }
 
     // Generate the upstream session uuid here so the JSONL path is
     // predictable + so claude resumes the same conversation across turns.

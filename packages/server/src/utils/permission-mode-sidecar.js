@@ -1,5 +1,5 @@
-import { writeFileSync, renameSync, rmSync } from 'fs'
 import { randomUUID } from 'crypto'
+import { writeFileRestricted } from '../platform.js'
 
 /**
  * The permission-mode sidecar: the IPC channel between a live chroxy session
@@ -15,35 +15,37 @@ import { randomUUID } from 'crypto'
  * in #7337, whose only refresh channel had been a destructive kill+respawn
  * that leaves the OLD child — still firing hooks — reading the stale mode.
  *
- * This module is the single implementation. Two hand-written copies of the
- * same atomic-write dance is the drift class `docs/false-safety-guards.md`
- * catalogues; both session classes call in here instead.
+ * This module is the single seam both session classes call. It is a thin
+ * wrapper, not a third implementation: the atomic write itself belongs to
+ * `platform.writeFileRestricted`, which #4874 established as the ONE
+ * tmp+rename(2) helper after collapsing the hand-rolled copies in
+ * environment-manager.js and models.js onto it.
  */
 
 /**
- * Write `value` to `path` atomically: write a tmp file, then rename(2) over
- * the target.
+ * Publish `value` to the sidecar at `path`, atomically and owner-only.
  *
- * A direct `writeFileSync` truncates-then-writes, so a concurrent PreToolUse
- * hook `cat` can observe an empty or partial value mid-write and silently
- * fall through to the stale env var (#5334). rename(2) is atomic within a
- * filesystem, so a reader sees either the OLD complete value or the NEW
- * complete value — never a torn one.
+ * Atomic because a direct `writeFileSync` truncates-then-writes, so a
+ * concurrent PreToolUse hook `cat` can observe an empty or partial value and
+ * silently fall through to the stale env var (#5334). rename(2) is atomic
+ * within a filesystem, so a reader sees either the OLD complete value or the
+ * NEW complete value — never a torn one.
  *
- * Throws on failure (after a best-effort tmp cleanup) so each caller applies
- * its own fallback rather than inheriting one.
+ * Owner-only (0600 POSIX / owner DACL on Windows) because this file's contents
+ * decide whether a tool call is prompted. `writeFileRestricted` also carries the
+ * Windows AV-held-handle rename retry, which a hand-rolled copy would not.
  *
- * @param {string} path  Sidecar path. The tmp file is created alongside it,
- *   so the directory must exist and be on the same filesystem.
+ * The tmp suffix is randomised so two writers racing on one sidecar — a respawn
+ * seeding it while a mode change publishes to it — cannot collide on the
+ * intermediate file.
+ *
+ * Throws on failure (after `writeFileRestricted`'s own tmp cleanup) so each
+ * caller applies its own fallback.
+ *
+ * @param {string} path  Sidecar path. The tmp file is created alongside it, so
+ *   the directory must exist.
  * @param {string} value The permission mode to publish.
  */
 export function writePermissionModeSidecarAtomic(path, value) {
-  const tmpPath = `${path}.tmp-${randomUUID()}`
-  try {
-    writeFileSync(tmpPath, value)
-    renameSync(tmpPath, path)
-  } catch (err) {
-    try { rmSync(tmpPath, { force: true }) } catch { /* ignore */ }
-    throw err
-  }
+  writeFileRestricted(path, value, { tmpSuffix: `.tmp-${randomUUID()}` })
 }
