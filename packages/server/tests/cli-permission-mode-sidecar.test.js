@@ -6,7 +6,7 @@ import { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync, existsSync
 import { join, dirname } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { createServer } from 'node:http'
 import { CliSession } from '../src/cli-session.js'
 
@@ -108,6 +108,15 @@ function createMockChild() {
 // A non-file tool: `Bash` carries no PROTECTED_PATH_INPUT_FIELDS value, so the
 // permission floor can never cover it (permission-floor.js:70-71). In `auto`
 // it must short-circuit to allow; in `approve` it must route to the phone.
+// The three tests that drive the real hook spawn it via `/bin/bash`, which
+// Windows does not have. Guarded PER TEST rather than exempting the whole file
+// in scripts/lib/windows-test-set.mjs — that manifest names per-test skips as
+// the preferred fix and whole-file exemption as the blunt instrument, and the
+// other eight tests here cover the JS side of the fix and run fine on Windows.
+const SKIP_POSIX_SHELL = process.platform === 'win32'
+  ? 'spawns hooks/permission-hook.sh via /bin/bash, which Windows has no analogue for'
+  : false
+
 const BASH_PAYLOAD = JSON.stringify({
   tool_name: 'Bash',
   tool_input: { command: 'git commit -m wip' },
@@ -225,7 +234,7 @@ describe('CliSession permission-mode sidecar (#7337)', () => {
 
   // ---- outcome, through the real hook ----------------------------------
 
-  it('after switching to auto, the real hook allows Bash with NO prompt — using the child\'s frozen env', async () => {
+  it('after switching to auto, the real hook allows Bash with NO prompt — using the child\'s frozen env', { skip: SKIP_POSIX_SHELL }, async () => {
     const mock = await startMockPermissionServer()
     try {
       const session = startedSession({ port: mock.port })
@@ -250,7 +259,7 @@ describe('CliSession permission-mode sidecar (#7337)', () => {
     }
   })
 
-  it('POSITIVE CONTROL: in approve mode the same path still raises the prompt', async () => {
+  it('POSITIVE CONTROL: in approve mode the same path still raises the prompt', { skip: SKIP_POSIX_SHELL }, async () => {
     const mock = await startMockPermissionServer({ decision: 'allow' })
     try {
       const session = startedSession({ port: mock.port })
@@ -291,9 +300,13 @@ describe('CliSession permission-mode sidecar (#7337)', () => {
     }
 
     it('reaps a dir whose owner pid is dead and keeps one whose owner is alive', () => {
-      // 2^22 is above every real pid_max on macOS/Linux, so it cannot collide
-      // with a live process and be kept for the wrong reason.
-      const orphan = makeSidecarDir(`test-orphan-${process.pid}`, 4194304)
+      // A pid that is definitely dead: run a process to completion and reuse its
+      // pid. A magic large number would be a guess — Windows pids are DWORDs, so
+      // there is no portable "above pid_max" value, and a guess that happened to
+      // be live would keep the dir and pass this test for the WRONG reason.
+      const reaped = spawnSync(process.execPath, ['-e', ''])
+      assert.ok(reaped.pid > 0, 'positive control: the throwaway process must have started')
+      const orphan = makeSidecarDir(`test-orphan-${process.pid}`, reaped.pid)
       const live = makeSidecarDir(`test-live-${process.pid}`, process.pid)
       try {
         assert.ok(existsSync(orphan) && existsSync(live), 'positive control: both dirs exist before the sweep')
@@ -390,7 +403,7 @@ describe('CliSession permission-mode sidecar (#7337)', () => {
       'the sidecar path is a HOST path; `docker exec` cannot mount it, so forwarding the key would name a path that does not exist in the container. Add the bind mount in _startContainer() before adding the key.')
   })
 
-  it('POSITIVE CONTROL: switching back from auto to approve re-raises the prompt', async () => {
+  it('POSITIVE CONTROL: switching back from auto to approve re-raises the prompt', { skip: SKIP_POSIX_SHELL }, async () => {
     const mock = await startMockPermissionServer({ decision: 'deny' })
     try {
       const session = startedSession({ port: mock.port })

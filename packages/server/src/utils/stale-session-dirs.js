@@ -1,4 +1,5 @@
 import { readdirSync, readFileSync, rmSync, statSync } from 'fs'
+import { join } from 'path'
 
 /**
  * Boot-time reaper for per-session scratch dirs under the OS tmpdir.
@@ -41,10 +42,10 @@ export function sweepStaleOwnedDirs(base, { prefix = 's-', graceMs = OWNED_DIR_S
   let kept = 0
   for (const name of entries) {
     if (!name.startsWith(prefix)) continue
-    const dir = `${base}/${name}`
+    const dir = join(base, name)
     let ownerPid = null
     try {
-      const n = parseInt(readFileSync(`${dir}/${OWNER_PID_FILE}`, 'utf8').trim(), 10)
+      const n = parseInt(readFileSync(join(dir, OWNER_PID_FILE), 'utf8').trim(), 10)
       if (Number.isInteger(n) && n > 0) ownerPid = n
     } catch { /* no/garbage pidfile → orphaned, subject to the grace below */ }
     if (ownerPid !== null) {
@@ -54,7 +55,7 @@ export function sweepStaleOwnedDirs(base, { prefix = 's-', graceMs = OWNED_DIR_S
         alive = true
       } catch (err) {
         // ESRCH → dead; EPERM → exists but not ours → still alive, keep it.
-        alive = err && err.code === 'EPERM'
+        alive = false // MUTANT: EPERM (another user's live process) treated as dead
       }
       if (alive) { kept++; continue }
     } else {
