@@ -11,6 +11,7 @@ import { createServer } from 'node:http'
 import { CliSession } from '../src/cli-session.js'
 import { ensureOwnedBaseDir } from '../src/utils/stale-session-dirs.js'
 import { writePermissionModeSidecarAtomic } from '../src/utils/permission-mode-sidecar.js'
+import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const hookPath = join(__dirname, '../hooks/permission-hook.sh')
@@ -438,7 +439,13 @@ describe('CliSession permission-mode sidecar (#7337)', () => {
         'an ADOPTED base keeps whatever mode it had — re-assert rather than trust the create')
     })
 
-    it('refuses a base that is a symlink', () => {
+    // Gated on the PROBED capability, not on `process.platform` (#7273): the
+    // same Windows box answers differently for an interactive developer account
+    // (has SeCreateSymbolicLinkPrivilege) and for the CI service account (does
+    // not) — which is precisely how the platform-inferred version of this guard
+    // passes locally and fails in CI. Only the fixture is unbuildable there; the
+    // symlink branch of ensureOwnedBaseDir is not platform-gated and still runs.
+    it('refuses a base that is a symlink', { skip: SKIP_NO_SYMLINK }, () => {
       const real = join(tmp, 'attacker-owned')
       const link = join(tmp, 'squatted-base')
       mkdirSync(real, { recursive: true })

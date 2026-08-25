@@ -121,10 +121,16 @@ export function ensureOwnedBaseDir(base) {
   if (!st.isDirectory()) {
     throw new Error(`${base} exists and is not a directory`)
   }
-  // getuid is POSIX-only; on Windows there is no uid and the per-user profile
-  // tmpdir already provides the isolation this check is standing in for.
+  // Everything below is POSIX permission semantics. Windows has no uid and its
+  // `mode` bits are a synthetic approximation — `st.mode & 0o077` is non-zero
+  // for essentially every directory there, so this would chmod on every single
+  // start() to no effect. The isolation these checks stand in for is already
+  // provided on Windows by the per-user profile tmpdir that `os.tmpdir()`
+  // returns. The symlink and is-a-directory checks above DO apply everywhere.
   const uid = process.getuid?.()
-  if (uid !== undefined && st.uid !== uid) {
+  if (uid === undefined) return base
+
+  if (st.uid !== uid) {
     throw new Error(`${base} is owned by uid ${st.uid}, not ${uid} — refusing to adopt it`)
   }
   // mkdir's mode is masked by umask, and an ADOPTED dir keeps whatever mode it
