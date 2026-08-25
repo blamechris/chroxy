@@ -778,11 +778,22 @@ Object.assign(EVENT_MAP, {
   permission_expired: (data, ctx) => ({
     // #7379: retiring the card in the clients is only half of it — the daemon's
     // own pending entry has to go too, or `resendPendingPermissions` hands the
-    // dead prompt to the next client that connects. Carried as a side effect
-    // rather than wired at the two event-subscription sites because those are
-    // separate code paths (multi-session and legacy-CLI) and wiring one is how
-    // this class of bug happens; `executeSideEffects` runs on both.
-    sideEffects: [{ type: 'release_permission', requestId: data.requestId }],
+    // dead prompt to the next client that connects. Carried as an effect rather
+    // than wired at the two event-subscription sites because those are separate
+    // code paths (multi-session and legacy-CLI) and wiring one is how this class
+    // of bug happens; the executor runs on both.
+    //
+    // AFTER-effect, not a side effect, and the distinction is load-bearing:
+    // releasing runs ws-permissions' shared cleanup() -> tearDownRoute ->
+    // WsServer._unregisterPermissionRoute, which UNSUBSCRIBES every client whose
+    // subscription to this session was permission-induced and who is not
+    // actively viewing it (the #4798 "view A, get prompted for A, switch to B"
+    // flow). broadcastToSession's recipient filter is `active || subscribed`, so
+    // releasing first drops exactly the clients that still need to hear the
+    // prompt is dead — their card would keep a live Allow button until the
+    // client-side expiry, which is the bug this whole change exists to remove.
+    // Tell the clients first, then release.
+    afterEffects: [{ type: 'release_permission', requestId: data?.requestId }],
     messages: [{
       msg: {
         type: 'permission_expired',

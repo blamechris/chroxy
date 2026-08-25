@@ -887,10 +887,21 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
    * in this map at all. Returns whether it actually released something so
    * callers can log meaningfully.
    */
-  function releaseAbandonedPermission(requestId) {
+  function releaseAbandonedPermission(requestId, sessionId = null) {
     if (!requestId) return false
     const pending = pendingPermissions.get(requestId)
     if (!pending) return false
+    // Ownership guard. Not reachable today — ids are minted per-request here
+    // (`perm-${randomUUID()}`) and registered against their owner via the
+    // hook-secret lookup, and the SDK's `perm-<nonce>-<n>-<ts>` format cannot
+    // collide — but this releases a permission on behalf of a session, and
+    // "the caller passed the right id" is exactly the invariant a future
+    // emitter breaks silently. One line, checked against the route map rather
+    // than assumed.
+    if (sessionId && permissionSessionMap.has(requestId) && permissionSessionMap.get(requestId) !== sessionId) {
+      log.warn(`Refusing to release permission ${requestId}: owned by session ${permissionSessionMap.get(requestId)}, not ${sessionId}`)
+      return false
+    }
     log.info(`Releasing permission ${requestId}: the turn that raised it is gone (#7379)`)
     try {
       pending.resolve('deny')

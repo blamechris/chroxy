@@ -247,6 +247,13 @@ function setupSessionForwarding(normalizer, ctx) {
         broadcastToSession(sessionId, stamped)
       }
     }
+
+    // #7379: AFTER the broadcast, deliberately. Releasing a permission runs
+    // ws-permissions' cleanup() -> tearDownRoute, which unsubscribes the
+    // permission-induced viewers of this session — so anything released here
+    // must already have been told. Same executor as sideEffects so the two
+    // buckets can never grow divergent handling.
+    executeSideEffects(result.afterEffects, sessionId, ctx)
     } catch (err) {
       // #5313 (WP-1.3): see the try at the top of this listener.
       const message = err?.message || String(err)
@@ -405,6 +412,12 @@ function setupCliForwarding(normalizer, ctx) {
             broadcast(stamped)
           }
         }
+
+        // #7379: after the broadcast — see the multi-session path. This path
+        // broadcasts globally rather than per-session, so the unsubscribe hazard
+        // does not bite here; the ordering is mirrored anyway so the two paths
+        // cannot drift into different semantics for the same effect.
+        executeSideEffects(result.afterEffects, null, ctx)
       } catch (err) {
         const message = err?.message || String(err)
         log.error(`legacy-cli forwarding threw (event=${event}): ${message}${err?.stack ? '\n' + err.stack : ''}`)
@@ -477,7 +490,7 @@ function executeSideEffects(sideEffects, sessionId, ctx) {
         // the normal case for the SDK path and for a hook that closed cleanly.
         if (releasePermission) {
           try {
-            releasePermission(effect.requestId)
+            releasePermission(effect.requestId, sessionId)
           } catch (err) {
             log.warn(`Failed to release abandoned permission ${effect.requestId}: ${err?.message || err}`)
           }

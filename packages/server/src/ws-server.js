@@ -2351,7 +2351,7 @@ export class WsServer {
       // a live Allow button, to the next client that connects. One ctx serves
       // both the multi-session and legacy-CLI forwarding paths, so wiring it
       // here covers both by construction.
-      releasePermission: (requestId) => this._permissions?.releaseAbandonedPermission?.(requestId),
+      releasePermission: (requestId, sessionId) => this._permissions?.releaseAbandonedPermission?.(requestId, sessionId),
       broadcast: (msg, filter) => this._broadcast(msg, filter),
       broadcastToSession: (sid, msg, filter) => this._broadcastToSession(sid, msg, filter),
       broadcastSessionList: () => this._handlerCtx.transport.broadcastSessionList(),

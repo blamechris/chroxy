@@ -52,6 +52,10 @@ function createReadyCliSession() {
   const session = new CliSession({ cwd: '/tmp' })
   session._processReady = true
   session._child = createMockChild()
+  // _killAndRespawn / _handleChildClose reach start(), which really spawns the
+  // provider binary. Nothing here tests the respawn, so stub it: shelling out to
+  // the developer's real `claude` is a side effect the suite should not have.
+  session.start = mock.fn(async () => {})
   return session
 }
 
@@ -194,6 +198,25 @@ describe('#7379 — a killed turn releases the daemon-side pending permission', 
     assert.equal(rig.pendingPermissions.size, 0, 'released on the child-close path too')
   })
 
+  it('releases ALL of several pending prompts, despite re-entrancy into the iterated Set', async () => {
+    // Post-fix the emit inside _expirePendingPermissions reaches ws-permissions'
+    // cleanup() -> ownerSession.notifyPermissionResolved(), which DELETES from
+    // the very Set being iterated. Parallel prompts are real (the SDK raises
+    // several tool calls at once), so pin that none are skipped.
+    await session.sendMessage('run several commands')
+    await raisePermission(rig.handler, session)
+    await raisePermission(rig.handler, session)
+    await raisePermission(rig.handler, session)
+    assert.equal(rig.pendingPermissions.size, 3, 'precondition: three pending')
+
+    session._killAndRespawn()
+    await new Promise((r) => setImmediate(r))
+
+    assert.equal(rig.pendingPermissions.size, 0, 'all three released, none skipped')
+    assert.equal(session._pendingPermissionIds.size, 0, 'session bookkeeping drained')
+    assert.equal(session._resultTimeoutPaused, false, 'inactivity pause released')
+  })
+
   it('POSITIVE CONTROL: a prompt whose turn is still alive is NOT released, and IS resent', async () => {
     // The guard that keeps this fix from becoming "drop every pending
     // permission" — the resend path must still work for live prompts.
@@ -295,6 +318,79 @@ describe('#7379 — the release reaches BOTH forwarding paths, not just one', ()
   })
 })
 
+describe('#7379 C1 — the release must happen AFTER the expiry is broadcast', () => {
+  /**
+   * Releasing the daemon entry runs the shared `cleanup()`, which calls
+   * `tearDownRoute` -> `WsServer._unregisterPermissionRoute` -> `_decPermissionSub`
+   * -> `clientManager.unsubscribe`. That drops every client whose subscription
+   * to the session was PERMISSION-INDUCED and who is not actively viewing it —
+   * the #4798 "view A, get a prompt for A, switch to B" flow.
+   *
+   * `broadcastToSession`'s default recipient filter is `active || subscribed`.
+   * So releasing BEFORE the broadcast unsubscribes exactly the clients that
+   * still need to be told the prompt is dead, and their card keeps a live Allow
+   * button until the client-side expiry — reintroducing the bug this PR exists
+   * to remove, by a different route.
+   *
+   * The ordering IS the fix, so the ordering is what this pins.
+   */
+  function orderProbe() {
+    const order = []
+    const sessionManager = new EventEmitter()
+    sessionManager.getSession = () => ({ provider: 'claude-cli' })
+    sessionManager.listSessions = () => []
+    const devPreview = new EventEmitter()
+    devPreview.handleToolResult = () => {}
+
+    setupForwarding({
+      normalizer: new EventNormalizer(),
+      sessionManager,
+      cliSession: null,
+      devPreview,
+      checkpointManager: new EventEmitter(),
+      pushManager: null,
+      permissionSessionMap: new Map(),
+      questionSessionMap: new Map(),
+      registerQuestionRoute: () => {},
+      registerPermissionRoute: () => {},
+      releasePermission: () => order.push('release'),
+      broadcast: (msg) => order.push(`broadcast:${msg?.type}`),
+      broadcastToSession: (_sid, msg) => order.push(`broadcast:${msg?.type}`),
+      broadcastSessionList: () => {},
+    })
+
+    sessionManager.emit('session_event', {
+      sessionId: 'sess-1',
+      event: 'permission_expired',
+      data: { requestId: 'req-1', message: 'turn interrupted' },
+    })
+    return order
+  }
+
+  it('THE BUG: permission_expired is broadcast BEFORE the daemon entry is released', () => {
+    const order = orderProbe()
+    const b = order.indexOf('broadcast:permission_expired')
+    const r = order.indexOf('release')
+    assert.ok(b !== -1, 'the expiry was broadcast')
+    assert.ok(r !== -1, 'the entry was released')
+    assert.ok(
+      b < r,
+      `broadcast must precede release, got ${JSON.stringify(order)} — releasing first ` +
+      'unsubscribes the permission-induced viewers before they are told',
+    )
+  })
+
+  it('POSITIVE CONTROL: both still happen — deferring must not drop either', () => {
+    const order = orderProbe()
+    assert.equal(order.filter((o) => o === 'release').length, 1, 'released exactly once')
+    assert.equal(
+      order.filter((o) => o === 'broadcast:permission_expired').length,
+      1,
+      'broadcast exactly once',
+    )
+  })
+})
+
 describe('#7379 — the WsServer ctx actually carries releasePermission', () => {
   // A source-level guard, ANCHORED to the setupForwarding call rather than run
   // over the whole file: a file-wide grep for "releasePermission" would be
@@ -305,24 +401,50 @@ describe('#7379 — the WsServer ctx actually carries releasePermission', () => 
 
   function setupForwardingCallSlice() {
     const start = src.indexOf('setupForwarding({')
-    if (start === -1) return ''
-    const end = src.indexOf('\n    })', start)
-    if (end === -1) return ''
-    return src.slice(start, end)
+    assert.notEqual(start, -1, 'setupForwarding call not found')
+    assert.equal(
+      src.indexOf('setupForwarding({', start + 1),
+      -1,
+      'more than one setupForwarding call — the anchor is ambiguous',
+    )
+    // Walk to the matching close brace rather than the first `\n    })`, which
+    // lands mid-literal the moment a nested object is added. Guessing the
+    // terminator is how an anchored guard quietly starts checking the wrong
+    // region.
+    const open = src.indexOf('{', start)
+    let depth = 0
+    for (let i = open; i < src.length; i++) {
+      if (src[i] === '{') depth++
+      else if (src[i] === '}') {
+        depth--
+        if (depth === 0) return src.slice(start, i + 1)
+      }
+    }
+    return ''
   }
 
-  it('POSITIVE CONTROL: the slice is found and non-empty', () => {
+  it('POSITIVE CONTROL: the slice is the whole ctx literal, start to end', () => {
     const slice = setupForwardingCallSlice()
     assert.ok(slice.length > 200, 'anchor located the setupForwarding ctx literal')
-    assert.match(slice, /broadcastToSession:/, 'slice really is the ctx object')
+    // First and last keys of the literal — proves the slice did not stop early.
+    assert.match(slice, /normalizer:/, 'slice starts at the ctx object')
+    assert.match(slice, /broadcastSessionList:/, 'slice reaches the LAST key')
   })
 
-  it('the ctx passes releasePermission through to the forwarding layer', () => {
+  it('the ctx wires releasePermission through to releaseAbandonedPermission', () => {
     const slice = setupForwardingCallSlice()
+    // Assert the BODY, not just the key. Checking only `releasePermission:` would
+    // keep passing if the arrow were mutated to `() => undefined`, since every
+    // behavioural test in this file builds its own ctx and never imports WsServer.
     assert.match(
       slice,
-      /releasePermission:\s*\(requestId\)\s*=>/,
-      'releasePermission is wired in the ctx that serves BOTH forwarding paths',
+      /releasePermission:[^\n]*releaseAbandonedPermission/,
+      'releasePermission must actually call the handler, in the ctx that serves BOTH paths',
+    )
+    assert.match(
+      slice,
+      /releasePermission:\s*\(requestId,\s*sessionId\)/,
+      'the session id is threaded through for the ownership guard',
     )
   })
 })
