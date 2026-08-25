@@ -433,18 +433,50 @@ describe('#7379 — the WsServer ctx actually carries releasePermission', () => 
 
   it('the ctx wires releasePermission through to releaseAbandonedPermission', () => {
     const slice = setupForwardingCallSlice()
-    // Assert the BODY, not just the key. Checking only `releasePermission:` would
-    // keep passing if the arrow were mutated to `() => undefined`, since every
-    // behavioural test in this file builds its own ctx and never imports WsServer.
+    // Assert the BODY, not just the key: checking only `releasePermission:`
+    // keeps passing if the arrow is gutted to `() => undefined`, because every
+    // behavioural test here builds its own ctx and never imports WsServer.
+    //
+    // \b on BOTH sides, and it is load-bearing. A bare substring match is
+    // satisfied by `releaseAbandonedPermissionTYPO`, and the production call is
+    // OPTIONAL (`this._permissions?.releaseAbandonedPermission?.(…)`), so a
+    // misspelled callee is not a crash — it is a silent no-op. Substring guard
+    // plus optional call is precisely "success and not-checking look the same"
+    // (docs/false-safety-guards.md). Verified: the TYPO mutant passed this
+    // assertion before the word boundaries were added.
     assert.match(
       slice,
-      /releasePermission:[^\n]*releaseAbandonedPermission/,
-      'releasePermission must actually call the handler, in the ctx that serves BOTH paths',
+      /releasePermission:[^\n]*\breleaseAbandonedPermission\b/,
+      'releasePermission must call releaseAbandonedPermission exactly, in the ctx that serves BOTH paths',
     )
     assert.match(
       slice,
       /releasePermission:\s*\(requestId,\s*sessionId\)/,
       'the session id is threaded through for the ownership guard',
     )
+  })
+
+  it('and the handler really exports that method — the other half of the name match', () => {
+    // The source guard pins the CALLER's spelling. This pins the CALLEE's, so
+    // renaming the export without updating ws-server.js cannot slip through as
+    // an optional-call no-op. Together they close both directions of the seam
+    // that no behavioural test in this file can reach.
+    const probe = createPermissionHandler({
+      sendFn: () => {},
+      broadcastFn: () => {},
+      validateBearerAuth: () => true,
+      validateHookAuth: () => true,
+      pushManager: null,
+      pendingPermissions: new Map(),
+      permissionSessionMap: new Map(),
+      getSessionManager: () => null,
+      findSessionByHookSecret: () => null,
+    })
+    assert.equal(
+      typeof probe.releaseAbandonedPermission,
+      'function',
+      'ws-permissions must export releaseAbandonedPermission under exactly that name',
+    )
+    probe.destroy?.()
   })
 })
