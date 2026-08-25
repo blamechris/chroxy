@@ -914,10 +914,27 @@ export class CliSession extends BaseSession {
    * Allow button — so emitting here is the whole client-side fix.
    *
    * Extracted because it was wired to `_handleHardTimeout` alone while a turn
-   * has two ways to die: the hard cap, and `_killAndRespawn` (the #3729
-   * panic-button, mid-turn setModel, the auto-mode switch). Correct for every
-   * input it saw and never reached by the other caller — the shape catalogued
-   * in docs/false-safety-guards.md.
+   * has several ways to die — correct for every input it saw and never reached
+   * by the rest, the shape catalogued in docs/false-safety-guards.md. The
+   * callers, audited rather than assumed:
+   *
+   *   - `_handleHardTimeout`  — the original (#2831).
+   *   - `_killAndRespawn`     — the #3729 panic-button, the auto-mode switch,
+   *                             and mid-turn setModel.
+   *   - `_handleChildClose`   — a crash, and user Stop via SIGINT.
+   *
+   * Deliberately NOT wired to the remaining three:
+   *
+   *   - `_handleStreamStall` cannot fire while a permission is pending —
+   *     `notifyPermissionPending` clears the stall timer and
+   *     `_armResultTimeout` bails on `_resultTimeoutPaused`, so it is
+   *     unreachable in this state rather than merely unlikely.
+   *   - the interrupt safety timeout fires when the child IGNORED SIGINT and
+   *     is still alive, so its hook is still blocked and its prompt still
+   *     genuinely answerable. Expiring there would be the lie this method
+   *     exists to prevent.
+   *   - `destroy()` tears the whole session down; the card goes with it, and
+   *     the HTTP side is already released by ws-permissions' own close path.
    *
    * @param {string} message Reason forwarded on the wire (clients log it; the
    *   user-visible copy is fixed client-side).
@@ -1828,6 +1845,17 @@ export class CliSession extends BaseSession {
 
     if (this._destroying) return
     if (this._respawning) return
+
+    // #7335: the child is gone, so every PreToolUse hook it had blocked on
+    // died with it and its prompt can never be answered — same stranded card
+    // as the respawn path, reached a different way. This covers a crash AND a
+    // user Stop (interrupt() → SIGINT → the child exits here, NOT through
+    // _killAndRespawn). Before _emitInterruptedTurnResult for the same reason:
+    // that call reaches _clearMessageState, which drops the ids silently.
+    //
+    // The respawn path already expired them and set `_respawning`, so the
+    // close it causes returns above — no double emit; pinned by a test.
+    this._expirePendingPermissions('Permission request expired (the session process exited before it could be answered)')
 
     this._emitInterruptedTurnResult()
 

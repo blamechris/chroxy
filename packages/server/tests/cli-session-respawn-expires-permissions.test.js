@@ -57,6 +57,10 @@ describe('CliSession — respawn expires pending permissions (#7335)', () => {
     session = createReadySession()
     expired = []
     session.on('permission_expired', (d) => expired.push(d))
+    // Several of these paths emit `error` by design (a child close reports
+    // "exited unexpectedly"). Sink it so node:test does not rethrow an
+    // EventEmitter unhandled-'error' and bury the assertion under test.
+    session.on('error', () => {})
   })
 
   afterEach(() => {
@@ -93,6 +97,41 @@ describe('CliSession — respawn expires pending permissions (#7335)', () => {
 
     assert.equal(expired.length, 1, 'the open prompt is expired, not abandoned')
     assert.equal(expired[0].requestId, 'perm-auto')
+  })
+
+  it('THE ADJACENT PATH: a child that exits (crash or user Stop) also expires its prompts', async () => {
+    await session.sendMessage('run a command')
+    session.notifyPermissionPending('perm-crash')
+
+    // interrupt()/Stop sends SIGINT and the child exits; a crash lands here
+    // too. Neither goes through _killAndRespawn, so this path needed wiring of
+    // its own — the hook died with the child either way.
+    session._handleChildClose(1)
+
+    assert.equal(expired.length, 1, 'the prompt the dead child was blocked on is expired')
+    assert.equal(expired[0].requestId, 'perm-crash')
+    assert.equal(session._pendingPermissionIds.size, 0, 'bookkeeping cleared')
+  })
+
+  it('POSITIVE CONTROL: a child close with NO pending permissions emits nothing', async () => {
+    await session.sendMessage('do something')
+
+    session._handleChildClose(0)
+
+    assert.equal(expired.length, 0, 'no phantom expiries on a clean exit')
+  })
+
+  it('does not expire twice when a respawn is followed by the child close it caused', async () => {
+    await session.sendMessage('do something')
+    session.notifyPermissionPending('perm-1')
+
+    session._killAndRespawn()
+    assert.equal(expired.length, 1, 'respawn expired it')
+
+    // The kill above sets _respawning, so the close it triggers short-circuits
+    // before the expire — but assert it rather than trust the ordering.
+    session._handleChildClose(0)
+    assert.equal(expired.length, 1, 'the close it caused does not re-expire')
   })
 
   it('POSITIVE CONTROL: a respawn with NO pending permissions emits nothing', async () => {
