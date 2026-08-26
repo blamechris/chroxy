@@ -40,7 +40,39 @@ and it is the whole reason this is a short document.** `ci.yml`'s
 
 It simply declared no `cache:`, so it **cold-installed the whole monorepo on every
 run and saved nothing**. Adding `cache: npm` with the three-lockfile key makes it
-the producer *and makes the job faster*. The cost is negative.
+the producer at **no meaningful cost to the job**.
+
+### Measured, after the fact — and it corrects this record's first claim
+
+This section originally said the change *makes the job faster*, so the cost was
+"negative". Measured on the first post-merge run against the two before it, that
+is **wrong**:
+
+| run | total job | `npm ci` |
+|---|---|---|
+| `f2129e6d3` — with cache | **97 s** | 29 s (plus ~5 s restore) |
+| `1674dba8e` — no cache | 93 s | 35 s |
+| `4514acc2a` — no cache | 95 s | 35 s |
+
+`npm ci` did get ~6 s faster, and the 497 MB restore costs ~5 s, so the two
+cancel: 93–95 s becomes 97 s. **A wash, marginally on the wrong side of it.**
+
+The reason is worth carrying, because it caps what cache-warming can ever buy
+here: `~/.npm` is npm's **download** cache. `npm ci` still extracts and links all
+1353 packages either way, and that is what dominates the 29–35 s. The cache
+removes network fetch, not install work.
+
+So the argument for doing this is **not** "it is free because the job gets
+faster". It is:
+
+- the job cost is ~zero (±5 s, inside run-to-run noise), and
+- a *dedicated* warm job would cost a whole additional hosted job per push.
+
+Same conclusion, honest reason. The producer function itself is unaffected: on a
+key MISS — the case that matters, right after a lockfile change — the job saves
+the new entry. On a hit it correctly does not re-save (`Cache hit occurred on the
+primary key …, not saving cache`), which is why the first post-merge run produced
+no new entry.
 
 `nightly-k8s-integration.yml` (hosted, `refs/heads/main`, 06:00 UTC) remains a
 second producer. It is the fallback: it re-saves after the 7-day eviction on a
