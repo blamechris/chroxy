@@ -8,8 +8,9 @@
  * strict superset (it drives a destructive-action warning).
  */
 import { describe, it, expect } from 'vitest'
-import { isSessionBusy, hasInterruptibleWork } from './session-busy'
+import { isSessionBusy, hasInterruptibleWork, inputBarBusyProps } from './session-busy'
 import type { ChatMessage } from '@chroxy/store-core'
+import type { SessionBusyState } from './session-busy'
 
 const NOW = 1_700_000_000_000
 
@@ -108,5 +109,64 @@ describe('hasInterruptibleWork (#7335)', () => {
     const pausedButIdle = { ...idle, messages: [livePrompt] }
     expect(isSessionBusy(pausedButIdle)).toBe(false)
     expect(hasInterruptibleWork(pausedButIdle, NOW)).toBe(true)
+  })
+})
+
+describe('inputBarBusyProps (#7378 — the InputBar props ARE the predicate)', () => {
+  // The whole point of the helper: `isStreaming || isBusy` — what InputBar.tsx
+  // actually renders as busy — must equal `isSessionBusy`. Before #7378 that was
+  // a sentence in a comment; App.tsx wrote the props by hand in a spelling that
+  // disagreed with it for nullish input.
+  const MATRIX: Array<Pick<SessionBusyState, 'streamingMessageId' | 'isIdle'>> = [
+    { streamingMessageId: null, isIdle: true },
+    { streamingMessageId: null, isIdle: false },
+    { streamingMessageId: 'm1', isIdle: true },
+    { streamingMessageId: 'm1', isIdle: false },
+    // The nullish cases the store's `boolean` type says cannot happen, and that
+    // App.tsx nonetheless guards against (`isIdle ?? true`, `state?.isIdle`).
+    { streamingMessageId: null, isIdle: undefined as unknown as boolean },
+    { streamingMessageId: null, isIdle: null as unknown as boolean },
+    { streamingMessageId: undefined as unknown as string | null, isIdle: true },
+  ]
+
+  it('`isStreaming || isBusy` equals isSessionBusy for every input', () => {
+    for (const s of MATRIX) {
+      const { isStreaming, isBusy } = inputBarBusyProps(s)
+      expect(isStreaming || isBusy, JSON.stringify(s)).toBe(isSessionBusy(s))
+    }
+  })
+
+  it('keeps the two props DISTINCT — collapsing them would change the UI', () => {
+    // InputBar gates a separate affordance on `isBusy && !isStreaming`
+    // (InputBar.tsx:1188), so these cannot be merged into one boolean even
+    // though only their disjunction has to match isSessionBusy.
+    expect(inputBarBusyProps({ streamingMessageId: null, isIdle: false }))
+      .toEqual({ isStreaming: false, isBusy: true })
+    expect(inputBarBusyProps({ streamingMessageId: 'm1', isIdle: true }))
+      .toEqual({ isStreaming: true, isBusy: false })
+  })
+
+  it('DECIDES the nullish isIdle case: absent means IDLE, not busy', () => {
+    // This is the #7378 bug in one assertion. The old inline `!isIdle` returned
+    // TRUE here (busy); `isIdle === false` returns false (idle). They invert.
+    // Idle is the deliberate answer: it matches the two pre-existing copies and
+    // App.tsx's own `isIdle ?? true`.
+    for (const absent of [undefined, null]) {
+      const s = { streamingMessageId: null, isIdle: absent as unknown as boolean }
+      expect(inputBarBusyProps(s).isBusy).toBe(false)
+      expect(isSessionBusy(s)).toBe(false)
+      // and the old spelling would have disagreed — this is the regression pin
+      expect(!s.isIdle).toBe(true)
+    }
+  })
+
+  it('leaves the SIBLING convention alone: an absent streamingMessageId reads as busy', () => {
+    // Deliberately the opposite of the isIdle decision above, and deliberately
+    // unchanged: this clause is inherited from isSessionBusy, which also backs
+    // hasInterruptibleWork — a destructive-action warning, which should fail
+    // toward warning. Pinned so it stays a decision rather than an accident.
+    const s = { streamingMessageId: undefined as unknown as string | null, isIdle: true }
+    expect(inputBarBusyProps(s).isStreaming).toBe(true)
+    expect(isSessionBusy(s)).toBe(true)
   })
 })
