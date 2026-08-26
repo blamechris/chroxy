@@ -5408,9 +5408,25 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         // which (a) is dashboard-only, (b) is capped at 1000 entries so a long
         // session could evict the answer and resurrect the bug, and (c) cannot be
         // seeded by `FixtureInitialState`, which is why this path had no
-        // cross-client contract coverage at all. `resolvedPermissions` is
-        // untouched for everything else that reads it (PermissionPrompt's
-        // remount-durable answered UI, ChildAgentEventList, ViewerPreWriteReview).
+        // cross-client contract coverage at all. Every OTHER read of
+        // `resolvedPermissions` is untouched (PermissionPrompt's remount-durable
+        // answered UI, ChildAgentEventList, ViewerPreWriteReview) — only this
+        // gate moves.
+        //
+        // KNOWN LIMIT, and the condition that would make it a bug: a permission
+        // with no `type:'prompt'` ChatMessage is invisible here. Child-agent
+        // permissions are exactly that — they arrive as
+        // `agent_event{eventType:'permission_request'}` and live in the parent
+        // Task bubble's `childAgentEvents[]`, so `ChildAgentEventList`'s Allow
+        // reaches `sendPermissionResponse` (setting `resolvedPermissions`) while
+        // `markPromptAnsweredByRequestId` finds no message to stamp. It is not a
+        // bug TODAY because no `permission_expired` ever reaches a child
+        // requestId: byok-session relays the child's `permission_request` upward
+        // (byok-session.js) but its FORWARDED set carries no `permission_expired`,
+        // and `_expirePendingPermissions` fires on the CHILD session's own
+        // bookkeeping. Relay child expiry upward and this gate goes silent on it
+        // — stamp `answered` on the child row (or give it a real prompt message)
+        // in the same change.
         const alreadyResolved = isPermissionRequestAnswered(
           get().sessionStates,
           expiredRequestId,
