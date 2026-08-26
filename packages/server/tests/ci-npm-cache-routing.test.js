@@ -1,6 +1,6 @@
 import { before, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
+import { readFile, readdir } from 'node:fs/promises'
 
 /**
  * #7383 — setup-node's npm cache must be routed, never hardcoded.
@@ -111,16 +111,30 @@ function code(lines) {
   return lines.filter(l => !/^\s*#/.test(l))
 }
 
-/** The value of a `with:` input inside a single step block, or undefined. */
+/**
+ * The value of a `with:` input inside a single step block, or undefined.
+ *
+ * Must strip a TRAILING comment, not just a whole-line one. `cache: npm # hosted-only`
+ * parses as `npm` in YAML, and a naive read of the rest of the line sees
+ * `npm # hosted-only` — which matches no rule and so slips past every assertion
+ * here. Verified: adding exactly that line to a job left the suite 9/9 green
+ * while the workflow really did hardcode the cache.
+ */
 function stepInput(stepLines, key) {
   for (const line of code(stepLines)) {
     const m = new RegExp(`^\\s*${key}:\\s*(.*)$`).exec(line)
     if (!m) continue
-    let v = m[1].trim()
-    if ((v.startsWith("'") && v.endsWith("'")) || (v.startsWith('"') && v.endsWith('"'))) {
-      v = v.slice(1, -1)
+    const raw = m[1].trim()
+
+    // A quoted scalar ends at its closing quote; anything after it is a comment.
+    if (raw.startsWith("'") || raw.startsWith('"')) {
+      const q = raw[0]
+      const close = raw.indexOf(q, 1)
+      return close === -1 ? raw.slice(1) : raw.slice(1, close)
     }
-    return v
+    // Otherwise a ` #` (whitespace-preceded, per YAML) starts a comment. `${{ }}`
+    // expressions contain no `#`, so this cannot truncate a routed value.
+    return raw.replace(/\s+#.*$/, '').trim()
   }
   return undefined
 }
@@ -145,7 +159,11 @@ describe('CI npm cache routing (#7383)', () => {
   // docs/false-safety-guards.md. These three make that impossible.
 
   it('parses ci.yml into jobs and steps', () => {
-    assert.ok(jobs.length >= 15, `expected to parse >=15 jobs from ci.yml, got ${jobs.length}`)
+    // Thresholds are LOOSE on purpose. Their job is to catch a reader that has
+    // stopped understanding ci.yml (which yields zero), not to pin the job count
+    // — sitting them on today's exact numbers would turn "a job was merged away"
+    // into a failure that blames the reader for someone else's refactor.
+    assert.ok(jobs.length >= 10, `expected to parse >=10 jobs from ci.yml, got ${jobs.length}`)
     assert.ok(
       jobs.some(j => j.id === 'runner-target'),
       `expected a 'runner-target' job among: ${jobs.map(j => j.id).join(', ')}`
@@ -158,8 +176,8 @@ describe('CI npm cache routing (#7383)', () => {
 
   it('finds the setup-node steps', () => {
     assert.ok(
-      setupNodeSteps.length >= 15,
-      `expected >=15 setup-node steps, found ${setupNodeSteps.length}`
+      setupNodeSteps.length >= 8,
+      `expected >=8 setup-node steps, found ${setupNodeSteps.length} — the reader is probably broken`
     )
   })
 
@@ -168,8 +186,9 @@ describe('CI npm cache routing (#7383)', () => {
       ROUTED_RUNNER_OUTPUTS.some(o => job.runsOn.includes(o))
     )
     assert.ok(
-      routed.length >= 13,
-      `expected >=13 setup-node steps in runner-target-routed jobs, found ${routed.length}`
+      routed.length >= 8,
+      `expected >=8 setup-node steps in runner-target-routed jobs, found ${routed.length} — ` +
+        'the reader is probably broken'
     )
   })
 
@@ -263,9 +282,9 @@ describe('CI npm cache routing (#7383)', () => {
         job.steps.some(step => code(step).some(l => /(^|\s)npm ci(\s|$)/.test(l)))
     )
     assert.ok(
-      installers.length >= 12,
-      `expected >=12 routed jobs running 'npm ci', found ${installers.length} ` +
-        '(positive control: if this drops, the scan stopped seeing the install steps)'
+      installers.length >= 8,
+      `expected >=8 routed jobs running 'npm ci', found ${installers.length} ` +
+        '(positive control: if this drops to nothing, the scan stopped seeing install steps)'
     )
 
     const offenders = installers
@@ -302,8 +321,8 @@ describe('CI npm cache routing (#7383)', () => {
     // a lockfile change under packages/ would reuse a stale entry.
     const cached = setupNodeSteps.filter(({ step }) => stepInput(step, 'cache') === ROUTED_CACHE)
     assert.ok(
-      cached.length >= 13,
-      `expected >=13 routed-cache setup-node steps, found ${cached.length} ` +
+      cached.length >= 8,
+      `expected >=8 routed-cache setup-node steps, found ${cached.length} ` +
         '(positive control for the assertion below)'
     )
 
@@ -314,6 +333,72 @@ describe('CI npm cache routing (#7383)', () => {
       missing,
       [],
       `steps using the routed cache must keep cache-dependency-path: '**/package-lock.json': ${missing.join(', ')}`
+    )
+  })
+})
+
+
+/**
+ * The same rule, across EVERY workflow file — not just ci.yml.
+ *
+ * This block exists because the first version of this fix did exactly what
+ * MEMORY records as the repo's recurring miss: corrected the roster it was
+ * looking at and walked past the entry one file over. `maestro-nightly.yml`
+ * pins `[self-hosted, macOS, ARM64, chroxy-mac]` and was hardcoding `cache: npm`
+ * with a live 1.86 GB entry, restored over a ~/.npm measured at 4.8 GB on that
+ * very runner — the identical defect, invisible to a ci.yml-scoped guard, and
+ * invisible to the sibling `ci-cache-key.test.js` for the same reason (it also
+ * carried the bare `package-lock.json` key that test forbids).
+ *
+ * A workflow-scoped guard would have to be rewritten every time the class turns
+ * up somewhere new. This one is scoped to the DEFECT: any setup-node step whose
+ * job names a self-hosted runner literally. That covers files that do not exist
+ * yet.
+ */
+describe('npm cache across all workflows (#7383)', () => {
+  let workflows
+
+  before(async () => {
+    const dir = new URL('../../../.github/workflows/', import.meta.url)
+    const names = (await readdir(dir)).filter(n => n.endsWith('.yml') || n.endsWith('.yaml'))
+    workflows = await Promise.all(
+      names.map(async name => ({ name, jobs: parseJobs(await readFile(new URL(name, dir), 'utf8')) }))
+    )
+  })
+
+  it('reads every workflow file', () => {
+    // Positive control. A readdir that returns nothing, or a reader that finds no
+    // jobs, would make the assertion below vacuous — which is precisely how the
+    // maestro-nightly instance stayed invisible in the first place.
+    assert.ok(workflows.length >= 5, `expected >=5 workflow files, found ${workflows.length}`)
+    assert.ok(
+      workflows.some(w => w.name === 'maestro-nightly.yml'),
+      'expected maestro-nightly.yml to be among the scanned workflows'
+    )
+    const totalJobs = workflows.reduce((n, w) => n + w.jobs.length, 0)
+    assert.ok(totalJobs >= 20, `expected >=20 jobs across all workflows, found ${totalJobs}`)
+  })
+
+  it('no self-hosted job hardcodes an npm cache', () => {
+    const offenders = []
+    for (const { name, jobs } of workflows) {
+      for (const job of jobs) {
+        // `runs-on` naming self-hosted LITERALLY. ci.yml's routed jobs go through
+        // `runner-target` instead and are covered by the suite above; those may
+        // legitimately resolve to a hosted runner for a fork PR.
+        if (!/self-hosted/.test(job.runsOn)) continue
+        for (const step of job.steps) {
+          if (!step.some(l => l.includes(SETUP_NODE))) continue
+          const cache = stepInput(step, 'cache')
+          if (cache) offenders.push(`${name}:${job.line} ${job.id} -> cache: ${cache}`)
+        }
+      }
+    }
+    assert.deepEqual(
+      offenders,
+      [],
+      'a job pinned to a self-hosted runner must not restore an npm cache — its ~/.npm is ' +
+        `already warm, so the restore is a download over a superset of itself (#7383):\n  ${offenders.join('\n  ')}`
     )
   })
 })
