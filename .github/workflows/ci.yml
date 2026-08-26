@@ -115,25 +115,24 @@ jobs:
         # when `cache` is empty. packages/server/tests/ci-npm-cache-routing.test.js
         # holds this whole arrangement in place.
         #
-        # #7386 — THE HOSTED ENTRY HAS NO DEDICATED PRODUCER, and that is a
-        # decision, not an oversight. setup-node keys on RUNNER_OS/RUNNER_ARCH,
-        # not on pool, so the `Linux-x64` entry fork PRs restore used to be saved
-        # by whichever self-hosted `push` jobs happened to land on the ONE x86_64
-        # pool member (the Hyper-V VM — see the mixed-arch note above; the ARM64
-        # members produced `Linux-arm64`, which no hosted fork job reads).
-        # Sporadic, not systematic. Emptying `npmcache` stopped even that.
-        # A fork PR cannot help the next one either (GitHub scopes a PR's cache
-        # WRITES to its own ref). What does close it is
-        # nightly-k8s-integration.yml: ubuntu-24.04, on refs/heads/main, 06:00
-        # UTC, `cache: npm` — it saves on a key miss. So the exposure is bounded
-        # at "a lockfile change, then up to ~24h", not "every fork PR forever".
+        # #7386 — WHO SAVES THE ENTRY THE HOSTED BRANCH RESTORES? setup-node keys
+        # on RUNNER_OS/RUNNER_ARCH, not on pool. The `Linux-x64` entry fork PRs
+        # restore used to be saved by whichever self-hosted `push` jobs happened
+        # to land on the ONE x86_64 pool member (the Hyper-V VM — see the
+        # mixed-arch note above; the ARM64 members produced `Linux-arm64`, which
+        # no hosted fork job reads). Sporadic, not systematic — and emptying
+        # `npmcache` stopped even that. A fork PR cannot help the next one either:
+        # GitHub scopes a PR's cache WRITES to its own ref.
         #
-        # THAT NIGHTLY IS LOAD-BEARING FOR THIS. Disabling it, or moving it off a
-        # hosted runner, removes the only producer — silently.
+        # The producer is now `dashboard-smoke` below — hosted, x86_64,
+        # unconditional, on push-to-main, and already running `npm ci` with no
+        # cache at all. Caching it makes that job faster and produces the entry as
+        # a side effect. `nightly-k8s-integration.yml` is the scheduled fallback.
         #
-        # Adopt the deliberate warm job when fork PRs stop being rare, or a
-        # contributor reports slow CI. The trigger conditions and the exact job
-        # to add are in docs/decisions/2026-08-npm-cache-producer.md.
+        # BOTH ARE LOAD-BEARING, and prose alone did not protect them:
+        # ci-npm-cache-routing.test.js asserts a push-to-main producer AND a
+        # scheduled one exist, scoped to the property rather than to filenames.
+        # See docs/decisions/2026-08-npm-cache-producer.md.
         run: |
           if [ "${{ github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository }}" = "true" ]; then
             echo 'runner=["self-hosted", "Linux", "chroxy-linux"]' >> "$GITHUB_OUTPUT"
@@ -1304,9 +1303,35 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
+      # #7386 — THIS JOB IS THE HOSTED CACHE'S PRODUCER, deliberately.
+      #
+      # setup-node keys on RUNNER_OS/RUNNER_ARCH, not on pool, so the
+      # `node-cache-Linux-x64-npm-*` entry a FORK PR restores on ubuntu-24.04 has
+      # to be saved by some job that (a) runs on a GitHub-hosted x86_64 runner
+      # and (b) runs on `main`, since a PR's cache writes are scoped to its own
+      # ref and can never help the next PR. #7385 emptied `npmcache` on the
+      # self-hosted pool — right for those runners, but it left nothing on `main`
+      # saving the entry.
+      #
+      # This job already satisfied both conditions: hosted, x86_64 (pinned for
+      # Playwright), unconditional, on `push: branches: [main]`, running a root
+      # `npm ci`. It just had no `cache:`, so it cold-installed the monorepo every
+      # run AND saved nothing. Adding the cache costs nothing and MAKES THE JOB
+      # FASTER; the producer is a free side effect. It was the reason the "add a
+      # dedicated warm job" option looked expensive — it isn't, because the job
+      # exists.
+      #
+      # Do not remove `cache:` here, un-pin it from a hosted runner, or gate it
+      # behind an `if:`/`needs:` without reading
+      # docs/decisions/2026-08-npm-cache-producer.md — each silently reverts fork
+      # PRs to cold-installing across ~12 jobs. Pinned by
+      # packages/server/tests/ci-npm-cache-routing.test.js, which also carries the
+      # one named exception this `cache: npm` needs.
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
+          cache: npm
+          cache-dependency-path: '**/package-lock.json'
 
       - name: Install dependencies
         run: npm ci

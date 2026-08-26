@@ -1,10 +1,11 @@
-# The hosted npm cache has no dedicated producer, deliberately
+# The hosted npm cache is produced by `dashboard-smoke`
 
 **Date**: 2026-08-26
 **Issue**: #7386 (follow-on from #7383 / #7385)
-**Status**: decided — accept, with a named escalation trigger (below)
-**Touches**: `.github/workflows/ci.yml` (`runner-target.outputs.npmcache`),
+**Status**: decided — adopt, at no cost
+**Touches**: `.github/workflows/ci.yml` (`dashboard-smoke`, `runner-target.outputs.npmcache`),
 `.github/workflows/nightly-k8s-integration.yml`, `.github/workflows/release.yml`
+**Pinned by**: `packages/server/tests/ci-npm-cache-routing.test.js`
 
 ## The question
 
@@ -17,118 +18,110 @@ burned its whole timeout, and the cancellation rendered as `fail`.
 The fix routed the cache on the same predicate as the runner: empty on the
 self-hosted pool, `npm` on GitHub-hosted runners (fork PRs). Correct — but
 `actions/setup-node` keys its cache on `RUNNER_OS`/`RUNNER_ARCH`, **not** on which
-pool the runner belongs to. The `node-cache-Linux-x64-npm-…` entry that fork PRs
-restore on `ubuntu-24.04` had been *produced* by the self-hosted `push`-to-`main`
-jobs. After #7385, no `push` job saves it.
+pool the runner belongs to. So who saves the `node-cache-Linux-x64-npm-*` entry
+that fork PRs restore?
 
-So: does the hosted cache need a job whose only purpose is to warm it?
+Only a job that is **GitHub-hosted** *and* runs on **`main`**. A fork PR cannot
+help the next one: GitHub scopes a PR's cache *writes* to that PR's own ref, so a
+fork that cold-installs and saves populates a scope nothing else can read. There
+is no self-healing here.
 
-## Decision: no. Accept it.
+## Decision: cache `dashboard-smoke`. It was already the job we would have added.
 
-## Why — the exposure is bounded, and something already closes it
+The first draft of this record accepted the gap, on the reasoning that closing it
+meant paying for a hosted job on every push to `main`. **That premise was wrong,
+and it is the whole reason this is a short document.** `ci.yml`'s
+`dashboard-smoke` already:
 
-Three facts, all measured rather than assumed (2026-08-26):
+- runs on `ubuntu-24.04` — GitHub-hosted, x86_64, deliberately pinned there for
+  Playwright and explicitly *not* routed through `runner-target`;
+- has no `if:` and no `needs:`, and `ci.yml` triggers on `push: branches: [main]`;
+- runs a root `npm ci`.
 
-1. **Nothing on `main` has produced a Linux-x64 entry since #7385.** The newest
-   `refs/heads/main` entry was *created* `2026-08-23T20:14Z`, before #7385 merged
-   (`2026-08-26T01:57Z`). Later timestamps on it are `last_accessed_at`, which
-   updates on a **restore**, not a save. The issue's premise is correct.
+It simply declared no `cache:`, so it **cold-installed the whole monorepo on every
+run and saved nothing**. Adding `cache: npm` with the three-lockfile key makes it
+the producer *and makes the job faster*. The cost is negative.
 
-2. **A fork PR can never help the next fork PR.** GitHub scopes a PR's cache
-   *writes* to that PR's own ref. A fork that cold-installs and saves populates a
-   scope nothing else can read. There is no self-healing here.
+`nightly-k8s-integration.yml` (hosted, `refs/heads/main`, 06:00 UTC) remains a
+second producer. It is the fallback: it re-saves after the 7-day eviction on a
+quiet week, and covers a run where the push producer is skipped.
 
-3. **But `nightly-k8s-integration.yml` is a producer.** It runs on `ubuntu-24.04`
-   — GitHub-hosted — on `refs/heads/main`, at 06:00 UTC, with `cache: npm` and the
-   correct `**/package-lock.json` key. On a key miss it *saves*. The issue named it
-   as "the only remaining producer" and treated that as the problem; it is also
-   the mitigation.
+## What this does NOT fix, and nothing can
 
-Put together, the exposure is not "every fork PR cold-installs". It is:
+A fork PR that **itself changes a `package-lock.json`** has a cache key that
+exists in no readable scope, and no producer will ever create it — a producer on
+`main` builds `main`'s key, not the PR's. No `restore-keys` are configured, so
+there is no partial fallback either. **Such a PR cold-installs on every push, for
+its whole life.** A dependency-bump PR from a contributor is exactly that shape.
 
-> a lockfile change lands on `main` → **up to ~24 h** → the 06:00 nightly misses
-> the new key and saves it. Fork PRs opened inside that window cold-install
-> across ~12 hosted jobs; fork PRs outside it hit the cache.
+This is expected, costs a couple of minutes per job, and does not fail. It is
+written up for contributors in `CONTRIBUTING.md` so nobody spends time hunting a
+bug that isn't there. Adding `restore-keys` would give partial hits, at the cost
+of restoring a stale tree over the correct one — not worth it for a
+`~/.npm` cache the subsequent `npm ci` reconciles anyway.
 
-**One case the window does not describe, and it is the likelier one.** A fork PR
-that *itself changes a lockfile* has a key that exists in no readable scope and
-that no nightly will ever create — the nightly builds `main`'s key, not the PR's.
-There are no `restore-keys`, so there is no partial fallback. Such a PR
-cold-installs on **every push, for its whole life**, and a warm job on `main`
-would not help it either. A dependency-bump PR from a contributor is exactly the
-shape that hits this, so do not read "up to ~24 h" as the worst case — it is the
-worst case only for PRs that leave the lockfiles alone.
+## The invariants, and why they are guards rather than prose
 
-A cold `npm ci` of the monorepo costs a couple of minutes per job and **does not
-fail**. Fork PRs are currently rare (this is a solo-maintained project). Paying a
-hosted job on every push to `main` to shorten a rare window for a rare event is
-the wrong trade today.
+Three comments used to carry "keep the producer hosted / scheduled / cached". That
+is the weakest possible form, and the trap here is sharper than "someone might
+edit it":
 
-## The escalation trigger — read this before deciding it is still fine
+> The all-workflows guard in `ci-npm-cache-routing.test.js` **requires** that a
+> self-hosted job not hardcode an npm cache — correctly, that is #7383. So moving
+> a producer to the self-hosted pool would make **CI itself demand** the removal
+> of its `cache: npm` line. The change would go green while deleting the producer.
 
-**This decision is a function of contributor volume, and that is the one input
-most likely to change.** Chroxy is open source; the reasoning above stops holding
-the moment fork PRs stop being rare.
+A guard that drives the defect next to it needs a counterpart. `ci-npm-cache-routing.test.js`
+now asserts, **scoped to the property rather than to a roster of filenames**:
 
-Adopt the deliberate producer when **any** of these becomes true:
+- at least one producer exists at all;
+- at least one runs on a **push to main** (not merely `on: push:` — `release.yml`
+  is `push: tags`, and its hosted jobs *do* carry `cache: npm`, so a loose check
+  let `release.yml` stand in for the real producer. Measured: with the loose
+  regex, deleting the real producer left the suite green);
+- at least one runs on a **schedule**;
+- no producer sits on a self-hosted runner — this fails *first*, and explains the
+  trap above.
 
-- **External fork PRs become routine** — say, more than one a week, or any week
-  where two land inside the same post-lockfile-change window.
-- **A contributor reports slow or timing-out CI** on a first PR, or you see a
-  hosted job spend minutes in `npm ci` where the cache should have hit.
-- **The nightly stops running, is disabled, or moves off `ubuntu-24.04`** — it is
-  load-bearing here and nothing states that inside its own workflow. Removing it
-  silently removes the only producer.
-- **Lockfile churn increases** (a Renovate cadence change, a dependency-heavy
-  epic), which widens the fraction of time spent inside the window.
+Swapping in an equivalent producer passes. Removing the last one fails.
 
-### The proper fix, when the trigger fires
+`dashboard-smoke` is also the first and only entry in `ALLOWED_HARDCODED_CACHE`,
+the named exception to "no setup-node step hardcodes `cache: npm`". That
+allowlist is name-based by necessity — an exception has to name what it excepts —
+and it carries a staleness check, so renaming the job fails the guard on purpose:
+renaming the one job allowed to hardcode the cache is exactly when someone should
+re-read why the exception exists.
 
-Add a small `push`-to-`main` job to `ci.yml` whose only purpose is to warm the
-hosted cache. It must run on a **GitHub-hosted** runner — a self-hosted one has
-`npmcache` empty by #7383's routing and would save nothing:
+## When to revisit
 
-```yaml
-  warm-hosted-npm-cache:
-    # NOT routed through runner-target: the point is to produce the entry that
-    # fork PRs on ubuntu-24.04 restore, and the self-hosted pool saves nothing.
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@<pinned-sha>
-      - uses: actions/setup-node@<pinned-sha>
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: '**/package-lock.json'
-      - run: npm ci
-```
-
-Two things that will bite whoever adds it:
-
-- `packages/server/tests/ci-npm-cache-routing.test.js` asserts that **no**
-  setup-node step hardcodes `cache: npm`, deliberately including unrouted jobs.
-  This job is the first legitimate exception; add it to that guard explicitly
-  rather than loosening the rule.
-- `cache-dependency-path` must stay `'**/package-lock.json'`. This repo has three
-  lockfiles and setup-node's default key is the root one alone — see
-  `packages/server/tests/ci-cache-key.test.js` and
-  `docs/false-safety-guards.md` entry 16.
+- **A contributor reports slow CI on a PR that does not touch a lockfile.** That
+  should not happen now; if it does, a producer has been lost in a way the guards
+  did not catch, and the guards need the missing assertion.
+- **Lockfile-changing fork PRs become common enough to be a real drag.** The only
+  remedy is `restore-keys`, with the stale-restore tradeoff above. Decide it
+  deliberately; do not add them reflexively.
+- **The 7-day eviction starts biting** — a week with no push to `main` and no
+  nightly. Currently impossible while the nightly runs daily.
 
 ## The Windows cache: kept, and it is not dead config
 
-There are **zero** `node-cache-Windows-*` entries in the repo's cache list, of any
-age. #7386 asked whether `release.yml`'s `desktop-windows` `cache: npm` should be
-dropped as a permanent no-op. It should not, for a reason the issue did not have:
+There are **zero** `node-cache-Windows-*` entries in the repo's cache list. #7386
+asked whether `release.yml`'s `desktop-windows` `cache: npm` should be dropped as
+a permanent no-op. It should not.
 
-- CI's `server-tests-windows` routes through `winrunner` to the self-hosted
-  `chroxy-win`, where `npmcache` is empty — so CI never produces one.
-- A fork PR resolving to `windows-latest` writes to its own isolated ref scope.
-- `release.yml` runs on **tag** refs, whose caches are not readable from a PR
-  branch — which is why no PR has ever seen one.
+The emptiness is explained, not contradictory. A tag-push run *does* save into
+that tag's scope; `actions/cache` evicts after 7 days without access, and releases
+here are months apart (v0.11.0 on 2026-08-15, v0.9.46 before it on 2026-06-21).
+Any entry the last release wrote aged out long before the list was taken.
+
+No *PR* has ever seen one because: CI's `server-tests-windows` routes through
+`winrunner` to the self-hosted `chroxy-win`, where `npmcache` is empty; a fork PR
+on `windows-latest` writes to its own isolated ref scope; and `release.yml` runs
+on tag refs, whose caches a PR branch cannot read.
 
 But a release **re-dispatched on an existing tag** (`gh workflow run release.yml
---ref vX.Y.Z`, a real workflow here) reads that same tag scope, and hits the entry
-the first run saved. The input earns its keep on the second run, not the first.
-The comment now in `release.yml` says so, so the next audit does not re-file it.
+--ref vX.Y.Z`, a real workflow here) reads that same tag scope and hits what the
+first run saved — provided the re-dispatch is inside the 7-day window, which is
+the realistic case, since you re-dispatch to fix a failed release rather than
+months later. Narrow value, not zero. The comment in `release.yml` says so, so the
+next audit does not re-file it as a no-op — which is nearly what happened here.
