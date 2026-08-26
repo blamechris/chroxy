@@ -447,7 +447,9 @@ export class CliSession extends BaseSession {
     // Pending-permission bookkeeping for the inactivity timer (#2831).
     // WsServer calls notifyPermissionPending/Resolved when a hook
     // permission belonging to this session is broadcast/resolved.
-    this._pendingPermissionIds = new Set()
+    // #7382: `_pendingPermissionIds` now lives on BaseSession so every
+    // hook-routed provider has it. The inactivity PAUSE stays CLI-local — it is
+    // wired to this provider's timer trio via the _on*Permission* hooks below.
     this._resultTimeoutPaused = false
   }
 
@@ -950,25 +952,6 @@ export class CliSession extends BaseSession {
    * @param {string} message Reason forwarded on the wire (clients log it; the
    *   user-visible copy is fixed client-side).
    */
-  _expirePendingPermissions(message) {
-    if (this._pendingPermissionIds.size === 0) return
-    for (const requestId of this._pendingPermissionIds) {
-      this.emit('permission_expired', { requestId, message })
-    }
-    this._pendingPermissionIds.clear()
-    // #7335: the set and this flag are ONE piece of bookkeeping —
-    // notifyPermissionPending sets both, and notifyPermissionResolved is the
-    // only other thing that unsets the flag, which it does only for an id still
-    // IN the set. Taking the ids without releasing the flag therefore wedges it
-    // true forever on any path that does not reach _clearMessageState (which
-    // resets it) — and _emitInterruptedTurnResult early-returns when the
-    // session is not busy, so that path is real. `_armResultTimeout` bails on
-    // this flag, so the cost is the inactivity warning, the hard cap AND the
-    // #4467 stream-stall recovery all silently dead for the rest of the
-    // session. Releasing it here is correct by construction: there are no
-    // pending permissions left to pause for.
-    this._resultTimeoutPaused = false
-  }
 
   // #4467: stream-stall recovery. Fires when the child has been silent
   // for `_streamStallTimeoutMs` despite the session being busy — typically
@@ -997,46 +980,52 @@ export class CliSession extends BaseSession {
    *
    * @param {string} requestId
    */
-  notifyPermissionPending(requestId) {
-    if (!requestId || this._pendingPermissionIds.has(requestId)) return
-    this._pendingPermissionIds.add(requestId)
-    if (this._pendingPermissionIds.size === 1) {
-      this._resultTimeoutPaused = true
-      // #3899: clear BOTH the soft warning and hard cap. Awaiting user
-      // input is not inactivity; the timer trio re-arms together when
-      // the last pending permission resolves.
-      if (this._resultTimeout) {
-        clearTimeout(this._resultTimeout)
-        this._resultTimeout = null
-      }
-      if (this._hardTimeout) {
-        clearTimeout(this._hardTimeout)
-        this._hardTimeout = null
-      }
-      // #4467: clear the stall timer too — waiting on the user is not a stall.
-      if (this._streamStallTimeout) {
-        clearTimeout(this._streamStallTimeout)
-        this._streamStallTimeout = null
-      }
+  /**
+   * #7382: the generic add/remove bookkeeping is BaseSession's. These hooks are
+   * the CLI-specific half — pausing the inactivity trio while the user is being
+   * asked (#2831/#3899/#4467), which is not behaviour every provider shares.
+   */
+  _onFirstPermissionPending() {
+    this._resultTimeoutPaused = true
+    // #3899: clear BOTH the soft warning and the hard cap. Awaiting user input
+    // is not inactivity; the trio re-arms together when the last pending
+    // permission resolves. #4467: the stall timer too — waiting on the user is
+    // not a stall.
+    if (this._resultTimeout) {
+      clearTimeout(this._resultTimeout)
+      this._resultTimeout = null
+    }
+    if (this._hardTimeout) {
+      clearTimeout(this._hardTimeout)
+      this._hardTimeout = null
+    }
+    if (this._streamStallTimeout) {
+      clearTimeout(this._streamStallTimeout)
+      this._streamStallTimeout = null
+    }
+  }
+
+  /** Last prompt ANSWERED — the turn continues, so re-arm the trio. */
+  _onLastPermissionResolved() {
+    this._resultTimeoutPaused = false
+    if (this._isBusy) {
+      this._armResultTimeout()
     }
   }
 
   /**
-   * Notify the session that a permission request has been resolved
-   * (allow/deny/expired). When the last outstanding permission clears,
-   * the inactivity timer re-arms for a fresh window. #2831.
+   * Last prompt ABANDONED — the turn that raised it is over, so release the
+   * pause but do NOT re-arm.
    *
-   * @param {string} requestId
+   * #7375: releasing the flag is the load-bearing half. It and the id set are
+   * one piece of bookkeeping, and `notifyPermissionResolved` only unsets the
+   * flag for an id still IN the set — so taking the ids without releasing it
+   * wedged the flag true on any path that does not reach `_clearMessageState`,
+   * leaving the inactivity warning, the hard cap and the stall recovery dead
+   * for the rest of the session.
    */
-  notifyPermissionResolved(requestId) {
-    if (!requestId || !this._pendingPermissionIds.has(requestId)) return
-    this._pendingPermissionIds.delete(requestId)
-    if (this._pendingPermissionIds.size === 0) {
-      this._resultTimeoutPaused = false
-      if (this._isBusy) {
-        this._armResultTimeout()
-      }
-    }
+  _onPendingPermissionsAbandoned() {
+    this._resultTimeoutPaused = false
   }
 
   /**
@@ -1475,7 +1464,11 @@ export class CliSession extends BaseSession {
     // one wired to all of them (docs/false-safety-guards.md). Idempotent: a
     // no-op when the set is already empty, which it is on the paths that
     // expired explicitly moments earlier.
-    this._expirePendingPermissions('Permission request expired (the turn it belonged to ended before it was answered)')
+    // #7382: the expire itself moved to BaseSession._clearMessageState (called
+    // by super above), so every provider inherits it rather than each wiring
+    // its own. The explicit calls in _killAndRespawn / _handleChildClose stay:
+    // both reach this funnel via _emitInterruptedTurnResult, which early-returns
+    // when the session is not busy.
     // Reset permission pause bookkeeping — the next message starts fresh.
     this._pendingPermissionIds.clear()
     this._resultTimeoutPaused = false

@@ -1457,6 +1457,11 @@ export class ClaudeTuiSession extends BaseSession {
     // The cleanup is idempotent (rmSync force:true) so a later call is fine.
     this._cleanupTurnAttachments(this._activeTurn)
     this._activeTurn = null
+    // #7382: the PTY is gone, so every PreToolUse hook it had blocked on died
+    // with it — the prompt can never be answered. Reached on 'exit', 'error'
+    // and 'close'; this path nulls the busy triple by hand and never touches
+    // _clearTurnEndState or _clearMessageState, so it needs its own call.
+    this._expirePendingPermissions('Permission request expired (the session process exited before it could be answered)')
     this._isBusy = false
     this._currentMessageId = null
     // #4307: the PTY is gone, so the ephemeral intra-turn run_in_background
@@ -3273,6 +3278,18 @@ export class ClaudeTuiSession extends BaseSession {
    * didn't run the base per-turn reset.
    */
   _clearTurnEndState() {
+    // #7382: the turn is ending, so any prompt it was blocked on can never be
+    // answered — the hook died with the turn. Expire them BEFORE the state below
+    // is torn down, so the clients retire the card and #7381's release
+    // after-effect frees the daemon's pending entry (otherwise
+    // resendPendingPermissions hands a dead prompt, with a live Allow button, to
+    // the next client that connects).
+    //
+    // Wired to this FUNNEL rather than to the individual death sites
+    // (_finishTurnError, _handleHardTimeout, _handleStreamStall, interrupt,
+    // destroy) on purpose: hand-enumerating them is exactly what missed two
+    // paths in #7375. Idempotent — a no-op when nothing is pending.
+    this._expirePendingPermissions('Permission request expired (the turn it belonged to ended before it was answered)')
     if (this._resultTimeout) { clearTimeout(this._resultTimeout); this._resultTimeout = null }
     if (this._hardTimeout) { clearTimeout(this._hardTimeout); this._hardTimeout = null }
     if (this._streamStallTimeout) { clearTimeout(this._streamStallTimeout); this._streamStallTimeout = null }
@@ -3788,6 +3805,15 @@ export class ClaudeTuiSession extends BaseSession {
    * of the current callers exercise this, but it leaves room for future
    * teardown paths that only want the cleanup half).
    */
+  /**
+   * #7382 (review): `_teardownTurn` is the OTHER turn-end path — the hard cap,
+   * the stall watchdog and the first-output watchdog all land here, and none of
+   * them reaches `_clearTurnEndState` or `_clearMessageState`. An earlier draft
+   * wired only `_clearTurnEndState` and called it "the funnel"; it has two call
+   * sites (the success path and `_finishTurnError`), so five of the six ways a
+   * TUI turn dies still stranded their prompt. Naming a funnel does not make it
+   * one — the same defect #7375 hit, one provider over.
+   */
   _teardownTurn(reason, {
     duration,
     errorPayload = null,
@@ -3816,6 +3842,7 @@ export class ClaudeTuiSession extends BaseSession {
     // 3. Per-turn attachment + busy-state cleanup. _cleanupTurnAttachments
     // runs BEFORE _activeTurn is nulled so the helper still has access
     // to attachmentsDir; no-op when the turn had no attachments.
+    this._expirePendingPermissions('Permission request expired (the turn it belonged to ended before it was answered)')
     this._cleanupTurnAttachments(this._activeTurn)
     this._activeTurn = null
     this._isBusy = false
