@@ -119,9 +119,9 @@ No *PR* has ever seen one because: CI's `server-tests-windows` routes through
 on `windows-latest` writes to its own isolated ref scope; and `release.yml` runs
 on tag refs, whose caches a PR branch cannot read.
 
-But a release **re-dispatched on an existing tag** (`gh workflow run release.yml
---ref vX.Y.Z`, a real workflow here) reads that same tag scope and hits what the
-first run saved — provided the re-dispatch is inside the 7-day window, which is
+But a release **re-dispatched on an existing tag**
+(`gh workflow run release.yml --ref vX.Y.Z`, a real workflow here) reads that
+same tag scope and hits what the first run saved — provided the re-dispatch is inside the 7-day window, which is
 the realistic case, since you re-dispatch to fix a failed release rather than
 months later. Narrow value, not zero. The comment in `release.yml` says so, so the
 next audit does not re-file it as a no-op — which is nearly what happened here.

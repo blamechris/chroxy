@@ -825,7 +825,7 @@ indistinguishable from a pattern that matched nothing.
 **returns**, not what it was asked for. And when auditing a floor, ask what the tool
 reads — not which of its fields the list happens to scan.
 
-### 16. The guard scoped to one file, and the value it could not spell — 
+### 16. The guard scoped to one file, and the value it could not spell — `#7386`
 
 Two instances, one PR, both in the same guard.
 
