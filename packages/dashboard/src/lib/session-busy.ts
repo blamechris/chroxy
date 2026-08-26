@@ -40,13 +40,13 @@ export interface SessionBusyState {
  * busy (`isStreaming || isBusy`), because it decides whether an optimistic
  * send renders as "Queued" or as a fresh turn.
  *
- * "Must match" is the CONTRACT, not yet a fact this module can enforce: the
- * InputBar's own props are still computed inline in App.tsx as
- * `isBusy={!isIdle}` / `isStreaming={streamingMessageId !== null}` at five call
- * sites — a third copy, and `!isIdle` is not even equivalent to
- * `isIdle === false` should that field ever be nullish (they invert). Routing
- * those props through this helper is #7378. Until then, treat the sentence
- * above as the invariant to preserve rather than one already guarded.
+ * "Must match" is now a FACT rather than an aspiration (#7378). The InputBar's
+ * props are no longer written inline in App.tsx: they come from
+ * {@link inputBarBusyProps} below, which builds `isStreaming` and `isBusy` from
+ * the same two clauses this function ORs — so `isStreaming || isBusy` equals
+ * `isSessionBusy(s)` by construction, for every input including nullish ones.
+ * `input-bar-busy-wiring.test.ts` fails if a seventh inline copy appears at any
+ * of those prop sites, and `session-busy.test.ts` pins the identity itself.
  *
  * `isIdle` is the server-authoritative working flag (#4639); `streamingMessageId`
  * additionally covers the optimistic pre-status window. Either ⇒ busy.
@@ -68,6 +68,50 @@ export function isSessionBusy(
   s: Pick<SessionBusyState, 'streamingMessageId' | 'isIdle'>,
 ): boolean {
   return s.streamingMessageId !== null || s.isIdle === false
+}
+
+/** The two busy props the InputBar (and the components that forward to it) take. */
+export interface InputBarBusyProps {
+  isStreaming: boolean
+  isBusy: boolean
+}
+
+/**
+ * #7378 — the InputBar's busy props, derived here so `isStreaming || isBusy` is
+ * {@link isSessionBusy} BY CONSTRUCTION rather than by everyone spelling it the
+ * same way.
+ *
+ * The header comment above used to claim that match as a fact. It was not one:
+ * the props were hand-written inline in App.tsx at six sites as
+ * `isBusy={!isIdle}` / `isStreaming={streamingMessageId !== null}` — a third
+ * copy of the predicate, in a different spelling from both others.
+ *
+ * `!isIdle` and `isIdle === false` agree only while the field is a strict
+ * boolean. **They invert when it is nullish**: `!undefined` is `true` (busy),
+ * `undefined === false` is `false` (idle). The store types `isIdle` as
+ * `boolean`, but this surface evidently does not trust that — `App.tsx` writes
+ * `isIdle: isIdle ?? true` in one place and passes `state?.isIdle` in another.
+ *
+ * The decision, taken deliberately here rather than differing per call site:
+ * **an absent `isIdle` means IDLE.** That follows `isIdle === false`, which is
+ * what both other copies already use (`sendInput`, and the per-session busy map
+ * in App.tsx), and what `isIdle ?? true` independently implies. `!isIdle` was
+ * the outlier, and it was the one wired to the UI.
+ *
+ * Note the SIBLING field keeps the opposite convention: `streamingMessageId
+ * !== null` reads an absent id as streaming, i.e. busy. That is deliberate and
+ * left alone — it is inherited unchanged from `isSessionBusy`, which also backs
+ * `hasInterruptibleWork`, where a destructive-action warning should fail toward
+ * warning. Both conventions are pinned by tests below so neither is accidental.
+ *
+ * Returns BOTH props rather than one merged boolean because the InputBar draws
+ * a real distinction between them — `isBusy && !isStreaming` gates a separate
+ * affordance — so collapsing them would change the UI, not just the wiring.
+ */
+export function inputBarBusyProps(
+  s: Pick<SessionBusyState, 'streamingMessageId' | 'isIdle'>,
+): InputBarBusyProps {
+  return { isStreaming: s.streamingMessageId !== null, isBusy: s.isIdle === false }
 }
 
 /**

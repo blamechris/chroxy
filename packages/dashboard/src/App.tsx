@@ -43,6 +43,7 @@ import { SessionBar, type SessionTabData, type SessionStatus } from './component
 import { formatTranscript } from './lib/transcript'
 import { extractRowSearchText } from './lib/transcriptSearch'
 import { runQueuedEdit } from './lib/edit-queued'
+import { inputBarBusyProps } from './lib/session-busy'
 import { ActivityIndicator, findInFlightToolUse } from './components/ActivityIndicator'
 import { CheckInChip } from './components/CheckInChip'
 import { EvaluatorClarifyPrompt } from './components/EvaluatorPrompts'
@@ -312,6 +313,22 @@ export function App() {
     // strip in the header StatusBar.
     statusLine,
   } = useConnectionStore(useShallow(s => s.getActiveSessionState()))
+
+  // #7378: the ONE place this file decides "busy". Every `isBusy=` /
+  // `isStreaming=` prop below spreads or reads this object; none of them
+  // recompute the expression. That matters because `isStreaming || isBusy` is
+  // what the InputBar renders as busy, and `isSessionBusy` — which decides
+  // whether an optimistic send draws as "Queued" or as a fresh turn (#5952) —
+  // has to agree with it exactly. Deriving both from one helper makes them agree
+  // by construction instead of by everyone spelling it the same way.
+  //
+  // The six sites previously wrote `isBusy={!isIdle}` by hand, which is NOT
+  // equivalent to the `isIdle === false` the other two copies use: they invert
+  // when the field is nullish. See session-busy.ts for that decision.
+  const busyProps = useMemo(
+    () => inputBarBusyProps({ streamingMessageId, isIdle }),
+    [streamingMessageId, isIdle],
+  )
 
   // #3205: stable Set for SkillsPanel mismatch indicator. useMemo
   // keyed by the array reference so the Set only re-derives when the
@@ -2286,7 +2303,7 @@ export function App() {
         inputTokens={contextUsage?.inputTokens}
         outputTokens={contextUsage?.outputTokens}
         contextWindow={activeModel ? contextWindowForMeter ?? undefined : undefined}
-        isBusy={!isIdle}
+        isBusy={busyProps.isBusy}
         agentCount={activeAgents.length}
         provider={sessions.find(s => s.sessionId === activeSessionId)?.provider}
         modelLabel={activeModelLabel}
@@ -2534,8 +2551,8 @@ export function App() {
                     first={
                       <ChatView
                         messages={chatMessages}
-                        isStreaming={streamingMessageId !== null}
-                        isBusy={!isIdle}
+                        isStreaming={busyProps.isStreaming}
+                        isBusy={busyProps.isBusy}
                         chatActivityState={chatActivity.state}
                         renderMessage={renderMessage}
                         scrollToBottomSignal={scrollToBottomSignal}
@@ -2583,8 +2600,8 @@ export function App() {
                     >
                       <ChatView
                         messages={chatMessages}
-                        isStreaming={streamingMessageId !== null}
-                        isBusy={!isIdle}
+                        isStreaming={busyProps.isStreaming}
+                        isBusy={busyProps.isBusy}
                         chatActivityState={chatActivity.state}
                         renderMessage={renderMessage}
                         hidden={viewMode !== 'chat'}
@@ -2726,8 +2743,8 @@ export function App() {
               onSend={handleSend}
               onInterrupt={handleInterrupt}
               disabled={!isConnected}
-              isBusy={!isIdle}
-              isStreaming={streamingMessageId !== null}
+              isBusy={busyProps.isBusy}
+              isStreaming={busyProps.isStreaming}
               chatActivityState={chatActivity.state}
               queuedCount={queuedIds.size}
               placeholder={isConnected ? `Type a message... (${inputSettings.chatEnterToSend ? 'Enter' : formatShortcutKeys('Cmd+Enter')} to send)` : 'Connecting...'}
@@ -2781,7 +2798,7 @@ export function App() {
         contextEstimated={contextOccupancy?.source === 'final-round-prompt'}
         inputTokens={contextUsage?.inputTokens}
         outputTokens={contextUsage?.outputTokens}
-        isBusy={!isIdle}
+        isBusy={busyProps.isBusy}
         agentCount={activeAgents.length}
         onShowQr={isConnected ? handleShowQr : undefined}
         onShareSession={isConnected && activeSessionId ? handleShareSession : undefined}
