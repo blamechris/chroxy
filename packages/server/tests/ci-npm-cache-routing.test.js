@@ -229,7 +229,9 @@ describe('CI npm cache routing (#7383)', () => {
     // an ALLOWLIST OF ONE rather than a relaxed rule. `dashboard-smoke` is
     // GitHub-hosted, x86_64, unconditional, on push-to-main, and already ran a
     // root `npm ci` with no cache: it cold-installed every run and saved nothing.
-    // Caching it makes the job faster AND produces the entry fork PRs restore.
+    // Caching it produces the entry fork PRs restore, at ~zero net cost to the
+    // job (measured: the restore roughly cancels the `npm ci` saving — it is NOT
+    // a speedup, whatever an earlier version of this comment said).
     // See docs/decisions/2026-08-npm-cache-producer.md.
     //
     // Keep this list exact. Widening it to "any hosted job may hardcode" would

@@ -126,8 +126,10 @@ jobs:
         #
         # The producer is now `dashboard-smoke` below — hosted, x86_64,
         # unconditional, on push-to-main, and already running `npm ci` with no
-        # cache at all. Caching it makes that job faster and produces the entry as
-        # a side effect. `nightly-k8s-integration.yml` is the scheduled fallback.
+        # cache at all. Caching it produces the entry as a side effect, at ~zero
+        # net cost to that job (the restore roughly cancels the `npm ci` saving —
+        # measured, see the decision record; it is NOT a speedup).
+        # `nightly-k8s-integration.yml` is the scheduled fallback.
         #
         # BOTH ARE LOAD-BEARING, and prose alone did not protect them:
         # ci-npm-cache-routing.test.js asserts a push-to-main producer AND a
@@ -1316,10 +1318,15 @@ jobs:
       # This job already satisfied both conditions: hosted, x86_64 (pinned for
       # Playwright), unconditional, on `push: branches: [main]`, running a root
       # `npm ci`. It just had no `cache:`, so it cold-installed the monorepo every
-      # run AND saved nothing. Adding the cache costs nothing and MAKES THE JOB
-      # FASTER; the producer is a free side effect. It was the reason the "add a
-      # dedicated warm job" option looked expensive — it isn't, because the job
-      # exists.
+      # run AND saved nothing.
+      #
+      # Measured after the fact, correcting what this comment first claimed: the
+      # cache does NOT make the job faster. Per step: setup-node 0-3s -> 7s,
+      # `npm ci` 35s -> 30s. It cancels. (The job TOTAL moved 93-95s -> 97s, but
+      # that residual is in Playwright's chromium download, not here — see the
+      # decision record.) `~/.npm` is npm's DOWNLOAD cache; extracting and linking
+      # 1353 packages dominates either way. The reason to do it is that the cost
+      # is ~zero while a DEDICATED warm job would cost a whole extra hosted job.
       #
       # packages/server/tests/ci-npm-cache-routing.test.js pins, specifically:
       # a producer exists that is GitHub-hosted AND x86_64 (an `ubuntu-*-arm`

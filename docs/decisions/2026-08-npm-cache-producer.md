@@ -40,7 +40,57 @@ and it is the whole reason this is a short document.** `ci.yml`'s
 
 It simply declared no `cache:`, so it **cold-installed the whole monorepo on every
 run and saved nothing**. Adding `cache: npm` with the three-lockfile key makes it
-the producer *and makes the job faster*. The cost is negative.
+the producer at **no meaningful cost to the job**.
+
+### Measured, after the fact — and it corrects this record's first claim
+
+This section originally said the change *makes the job faster*, so the cost was
+"negative". Measured on the first post-merge run against the two before it, that
+is **wrong**:
+
+Per step, which is the only level at which this is attributable:
+
+| step | with cache (`f2129e6d3`) | no cache (`1674dba8e` / `4514acc2a`) |
+|---|---|---|
+| setup-node (restore) | 7 s | 0–3 s |
+| Install dependencies (`npm ci`) | 30 s | 35 s / 36 s |
+| *Build dashboard* | *9 s* | *12 s / 13 s* |
+| *Install Playwright chromium* | *27 s* | *22 s / 20 s* |
+| **total job** | **97 s** | **93 s / 95 s** |
+
+**The cache itself is a wash**: it costs ~4–7 s in the restore and saves ~5–6 s
+in `npm ci`. The +2–4 s in the job TOTAL is not attributable to it — it is in the
+italicised steps, which the cache does not touch (Playwright's chromium download
+ran 5–7 s slower on that run, partly offset by Build dashboard running 3–4 s
+faster). Ordinary run-to-run variance. An earlier draft of this section billed
+that residual to the cache and called it "marginally on the wrong side"; the
+arithmetic never supported it (−6 s + 5 s predicts ~93 s, not 97 s), which is
+what gives it away.
+
+**One cost here is UNMEASURED and should not be glossed.** Every run above was a
+cache HIT, and a hit does not save. The run that actually *produces* — the one
+right after a lockfile change — additionally compresses and uploads ~497 MB in
+the post-`setup-node` step. Every recent producer run (six consecutive nightlies)
+hit the key, so there is no measured save to quote, and none is invented here. It
+is paid once per lockfile change, not per push.
+
+The reason is worth carrying, because it caps what cache-warming can ever buy
+here: `~/.npm` is npm's **download** cache. `npm ci` still extracts and links all
+1353 packages either way, and that is what dominates the 29–35 s. The cache
+removes network fetch, not install work.
+
+So the argument for doing this is **not** "it is free because the job gets
+faster". It is:
+
+- the cache's own cost on this job is ~zero (restore ≈ `npm ci` saving), plus an
+  unmeasured post-step upload on the rarer save runs, and
+- a *dedicated* warm job would cost a whole additional hosted job per push.
+
+Same conclusion, honest reason. The producer function itself is unaffected: on a
+key MISS — the case that matters, right after a lockfile change — the job saves
+the new entry. On a hit it correctly does not re-save (`Cache hit occurred on the
+primary key …, not saving cache`), which is why the first post-merge run produced
+no new entry.
 
 `nightly-k8s-integration.yml` (hosted, `refs/heads/main`, 06:00 UTC) remains a
 second producer. It is the fallback: it re-saves after the 7-day eviction on a
