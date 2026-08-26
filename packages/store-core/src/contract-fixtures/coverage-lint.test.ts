@@ -44,6 +44,7 @@ import {
 } from '@chroxy/protocol/handler-coverage'
 import { SWITCH_FIXTURES } from './fixtures'
 import { DISPATCH_TABLE_TYPES } from '../dispatch-table'
+import { PERMISSION_ALREADY_ANSWERED_NOTICE } from '../handlers/permission'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const appHandlerPath = resolve(here, '../../../app/src/store/message-handler.ts')
@@ -308,5 +309,34 @@ describe('both-clients SWITCH_FIXTURES coverage lint (#5619)', () => {
         '(migrated to the dispatch table, renamed, or single-platform). Move or ' +
         `remove them:\n  ${stale.join('\n  ')}`,
     ).toEqual([])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #7388 — the fixture table is PURE DATA (type-only imports) so all four test
+// runners can consume it, which means a fixture asserting a SHARED string has
+// to spell it out as a literal. That literal is a copy, and a copy drifts —
+// exactly the defect class this repo catalogues. Pin it here, where a runtime
+// import IS allowed: rewording PERMISSION_ALREADY_ANSWERED_NOTICE without
+// updating the fixture fails HERE, naming the cause, instead of failing in two
+// client suites as an opaque string mismatch.
+// ---------------------------------------------------------------------------
+
+describe('shared-string literals inlined into fixtures stay pinned to their source', () => {
+  it('the permission_expired already-answered fixture quotes PERMISSION_ALREADY_ANSWERED_NOTICE verbatim', () => {
+    const fx = SWITCH_FIXTURES.find(
+      (f) => f.name === 'permission_expired does NOT expire a prompt the user already answered (#2833 race)',
+    )
+    expect(fx, 'the #7388 already-answered fixture must exist').toBeDefined()
+
+    // App side: the notice is a transcript system line.
+    const appMessages = (fx!.divergent?.app.sessions?.s1?.messages ?? []) as Array<Record<string, unknown>>
+    const appNotice = appMessages.find((m) => m.type === 'system')
+    expect(appNotice?.content, 'app transcript notice').toBe(PERMISSION_ALREADY_ANSWERED_NOTICE)
+
+    // Dashboard side: the same words, as an info toast.
+    expect(fx!.divergent?.dashboard.infoNotifications, 'dashboard toast').toEqual([
+      PERMISSION_ALREADY_ANSWERED_NOTICE,
+    ])
   })
 })

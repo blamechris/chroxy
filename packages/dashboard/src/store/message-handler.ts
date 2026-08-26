@@ -65,6 +65,9 @@ import {
   // #7380 — one wording for the #2833 already-answered race, shared with the app
   // (which surfaces it as a transcript line, having no toast by design).
   PERMISSION_ALREADY_ANSWERED_NOTICE,
+  // #7388 — one predicate for "was this permission already answered?", shared
+  // with the app so the #2833 suppression cannot drift between the two clients.
+  isPermissionRequestAnswered,
   // permission_rules_updated migrated to the shared dispatch table (#5556)
   // #5454 — dashboard adopts the shared permission family + the remaining
   // both-sides duplicates
@@ -5392,11 +5395,27 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           delete next[expiredRequestId];
           return { permissionInputs: next };
         });
-        // If the user already resolved this request (via Allow/Deny/AllowSession),
-        // this is the race condition from #2833 — the server expired the prompt
-        // after we answered. Suppress the "Expired — already handled" message
-        // append so the UI does not surface this as an error to the user.
-        const alreadyResolved = Boolean(get().resolvedPermissions?.[expiredRequestId]);
+        // If this request was already answered (via Allow/Deny/AllowSession, on
+        // this client or another), this is the race condition from #2833 — the
+        // server expired the prompt after we answered. Suppress the
+        // "Expired — already handled" append so the UI does not surface it as an
+        // error to the user.
+        //
+        // #7388: the gate is the SHARED `isPermissionRequestAnswered`, reading the
+        // prompt's own `answered` decision token — the same signal the app uses,
+        // so "was this already answered?" now has one implementation instead of
+        // two that happened to agree. It previously read `resolvedPermissions`,
+        // which (a) is dashboard-only, (b) is capped at 1000 entries so a long
+        // session could evict the answer and resurrect the bug, and (c) cannot be
+        // seeded by `FixtureInitialState`, which is why this path had no
+        // cross-client contract coverage at all. `resolvedPermissions` is
+        // untouched for everything else that reads it (PermissionPrompt's
+        // remount-durable answered UI, ChildAgentEventList, ViewerPreWriteReview).
+        const alreadyResolved = isPermissionRequestAnswered(
+          get().sessionStates,
+          expiredRequestId,
+          get().messages,
+        );
         if (alreadyResolved) {
           // #5008 — drain the banner stack without dropping the row from the
           // widget's durable history. See handlePermissionResolved for the

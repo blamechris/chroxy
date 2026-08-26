@@ -199,6 +199,11 @@ function seedStore(fx: ContractFixture) {
   // writes (raw / raw_background / terminal_output) via expect.terminalWrites,
   // mirroring the dashboard harness's _terminalWrites.
   const terminalWrites: string[] = [];
+  // #7388: the app has no toast mechanism by design (#4878/#4879), so this
+  // stays empty — captured anyway so the assertion below is the SAME assertion
+  // on both clients, and a fixture declaring `infoNotifications: []` for the app
+  // side actually proves the absence rather than skipping the check.
+  const infoNotifications: string[] = [];
   const store = createMockStore({
     activeSessionId: fx.init?.activeSessionId ?? null,
     sessions: [],
@@ -211,6 +216,10 @@ function seedStore(fx: ContractFixture) {
       terminalWrites.push(d);
     },
     _terminalWrites: terminalWrites,
+    addInfoNotification: (m: string) => {
+      infoNotifications.push(m);
+    },
+    _infoNotifications: infoNotifications,
     // #6325: flat connection-state fields the real store always initialises;
     // seed them so handlers that read them (client_joined → connectedClients,
     // activity_delta/_snapshot → activity, server_error → serverErrors,
@@ -314,6 +323,13 @@ describe('contract switch fixtures — app real handleMessage (#5556.5)', () => 
         expect((store.getState() as unknown as { _terminalWrites: string[] })._terminalWrites).toEqual(
           exp!.terminalWrites,
         );
+      }
+      // #7388: the ordered addInfoNotification args. Omitted slice = "don't
+      // care"; an empty array asserts NO toast fired.
+      if (exp!.infoNotifications) {
+        expect(
+          (store.getState() as unknown as { _infoNotifications: string[] })._infoNotifications,
+        ).toEqual(exp!.infoNotifications);
       }
     });
   }

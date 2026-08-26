@@ -2391,7 +2391,7 @@ describe('resolvedPermissions + Allow for Session (#2833, #2834)', () => {
     expect(state.memoryStackLoading).toBe(false);
   });
 
-  it('permission_expired for an already-resolved requestId does not mutate the prompt message', async () => {
+  it('permission_expired for an already-answered requestId does not mutate the prompt message', async () => {
     const { useConnectionStore } = await import('./connection');
     const { createEmptySessionState } = await import('./utils');
     const { _testMessageHandler } = await import('./message-handler');
@@ -2405,6 +2405,11 @@ describe('resolvedPermissions + Allow for Session (#2833, #2834)', () => {
           messages: [{
             id: 'm1', type: 'prompt', content: originalContent, timestamp: 1,
             requestId: 'req-resolved', tool: 'Write',
+            // #7388: the decision token on the message is what the gate reads
+            // now (shared `isPermissionRequestAnswered`, same as the app).
+            // `sendPermissionResponse` writes this and `resolvedPermissions`
+            // together, so both are seeded here as production would have them.
+            answered: 'allow',
           }],
         },
       },

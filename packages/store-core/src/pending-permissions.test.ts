@@ -11,6 +11,8 @@ import {
   selectNextPendingSession,
   pathMatchesViewer,
   findPendingWriteForFile,
+  isPermissionRequestAnswered,
+  PERMISSION_DECISION_TOKENS,
 } from './pending-permissions'
 
 const NOW = 1_000_000
@@ -225,5 +227,75 @@ describe('findPendingWriteForFile (#6859)', () => {
     const msgs = [editPrompt({ expiresAt: NOW2 + 100 })]
     expect(findPendingWriteForFile(msgs, FILE, NOW2, isReviewableTool)?.requestId).toBe('req-1')
     expect(findPendingWriteForFile(msgs, FILE, NOW2 + 101, isReviewableTool)).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #7388 — the ONE "was this permission already answered?" gate. Both clients'
+// permission_expired handlers call this; if it says yes they suppress the
+// "(Expired — …)" note and reassure instead (the #2833 race).
+// ---------------------------------------------------------------------------
+
+describe('isPermissionRequestAnswered', () => {
+  it('is true for every real decision token, in any session', () => {
+    for (const token of PERMISSION_DECISION_TOKENS) {
+      expect(
+        isPermissionRequestAnswered(states({ s1: [prompt({ answered: token })] }), 'req-1'),
+        `token ${token}`,
+      ).toBe(true)
+    }
+  })
+
+  it('is false for an unanswered prompt', () => {
+    expect(isPermissionRequestAnswered(states({ s1: [prompt()] }), 'req-1')).toBe(false)
+  })
+
+  it("rejects history_replay_end's '(resolved)' placeholder — the #7380 inverse bug", () => {
+    // `answered` merely being SET is not a decision: history_replay_end stamps
+    // this on prompts NOBODY answered. A defined-check here would tell those
+    // users "your response was already recorded" and swallow the expiry note.
+    expect(isPermissionRequestAnswered(states({ s1: [prompt({ answered: '(resolved)' })] }), 'req-1')).toBe(
+      false,
+    )
+    // And not just that one placeholder — any unknown string is rejected, so a
+    // FUTURE placeholder cannot quietly qualify either.
+    expect(isPermissionRequestAnswered(states({ s1: [prompt({ answered: 'whatever' })] }), 'req-1')).toBe(
+      false,
+    )
+    expect(isPermissionRequestAnswered(states({ s1: [prompt({ answered: '' })] }), 'req-1')).toBe(false)
+  })
+
+  it('scans EVERY session, not just the first — the push path answers background prompts', () => {
+    const st = states({
+      s1: [prompt({ id: 'other', requestId: 'req-other', answered: 'allow' })],
+      s2: [prompt({ id: 'bg', answered: 'deny' })],
+    })
+    expect(isPermissionRequestAnswered(st, 'req-1')).toBe(true)
+  })
+
+  it('matches on requestId, and only on a prompt bubble', () => {
+    expect(isPermissionRequestAnswered(states({ s1: [prompt({ answered: 'allow' })] }), 'req-2')).toBe(false)
+    // An AskUserQuestion answer, or any non-prompt bubble carrying the id, must
+    // not stand in for a permission decision.
+    expect(
+      isPermissionRequestAnswered(
+        states({ s1: [prompt({ type: 'response', answered: 'allow' })] }),
+        'req-1',
+      ),
+    ).toBe(false)
+  })
+
+  it('also reads the flat message list (the dashboard stamps `answered` there too)', () => {
+    expect(
+      isPermissionRequestAnswered(states({ s1: [] }), 'req-1', [prompt({ answered: 'allow' })]),
+    ).toBe(true)
+    expect(isPermissionRequestAnswered(states({ s1: [] }), 'req-1', [prompt()])).toBe(false)
+  })
+
+  it('is false for a missing/empty requestId and tolerates absent state', () => {
+    expect(isPermissionRequestAnswered(states({ s1: [prompt({ answered: 'allow' })] }), '')).toBe(false)
+    expect(isPermissionRequestAnswered(states({ s1: [prompt({ answered: 'allow' })] }), null)).toBe(false)
+    expect(isPermissionRequestAnswered(undefined, 'req-1')).toBe(false)
+    expect(isPermissionRequestAnswered(null, 'req-1', null)).toBe(false)
   })
 })

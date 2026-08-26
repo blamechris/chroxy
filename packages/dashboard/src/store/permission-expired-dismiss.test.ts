@@ -148,11 +148,17 @@ describe('permission_expired drains banners while preserving widget history (#15
 
 // ---------------------------------------------------------------------------
 // #2839: surface an info toast when permission_expired arrives for a
-// requestId that the user already resolved locally (race condition with
-// server-side expiry).
+// requestId that the user already answered (race condition with server-side
+// expiry).
+//
+// #7388 — the gate is now the prompt's own `answered` decision token, read via
+// the SHARED `isPermissionRequestAnswered` (the same call the app makes), not
+// the dashboard-only `resolvedPermissions` map. These tests therefore seed an
+// ANSWERED prompt; the last one below is the positive control proving the old
+// signal alone no longer suppresses.
 // ---------------------------------------------------------------------------
 describe('permission_expired info toast for resolved requests (#2839)', () => {
-  it('fires addInfoNotification when the requestId is in resolvedPermissions', () => {
+  it('fires addInfoNotification when the matching prompt carries a decision token', () => {
     const addInfoNotification = vi.fn()
     const store = createMockStore({
       activeSessionId: 'sess-1',
@@ -160,7 +166,11 @@ describe('permission_expired info toast for resolved requests (#2839)', () => {
       resolvedPermissions: { 'req-abc': 'allow' },
       addInfoNotification,
       sessionStates: {
-        'sess-1': { messages: [] },
+        'sess-1': {
+          messages: [
+            { type: 'prompt', content: 'Allow write?', requestId: 'req-abc', answered: 'allow' },
+          ],
+        },
       } as unknown as ConnectionState['sessionStates'],
     })
     setStore(store)
@@ -203,7 +213,7 @@ describe('permission_expired info toast for resolved requests (#2839)', () => {
     expect(addInfoNotification).not.toHaveBeenCalled()
   })
 
-  it('marks the matching session notification as read (banner drains, widget retains) for resolved ids (#5008)', () => {
+  it('marks the matching session notification as read (banner drains, widget retains) for answered ids (#5008)', () => {
     const addInfoNotification = vi.fn()
     const store = createMockStore({
       activeSessionId: 'sess-1',
@@ -213,7 +223,11 @@ describe('permission_expired info toast for resolved requests (#2839)', () => {
       resolvedPermissions: { 'req-abc': 'allow' },
       addInfoNotification,
       sessionStates: {
-        'sess-1': { messages: [] },
+        'sess-1': {
+          messages: [
+            { type: 'prompt', content: 'Allow write?', requestId: 'req-abc', answered: 'allow' },
+          ],
+        },
       } as unknown as ConnectionState['sessionStates'],
     })
     setStore(store)
@@ -231,5 +245,103 @@ describe('permission_expired info toast for resolved requests (#2839)', () => {
     expect(list).toHaveLength(1)
     expect(list[0]!.readAt).toBeTypeOf('number')
     expect(addInfoNotification).toHaveBeenCalled()
+  })
+
+  // #7388 positive control. Without this, every test above would still pass if
+  // the gate silently fell back to `resolvedPermissions` — they all seed BOTH
+  // signals, because in production both are written together. This is the one
+  // input that separates them, and it is the input that matters: a long session
+  // evicts old entries from `resolvedPermissions` (capped at 1000 by
+  // `capResolvedPermissions`) while `answered` lives on the message forever.
+  it('does NOT suppress on resolvedPermissions alone — the retired signal (#7388)', () => {
+    const addInfoNotification = vi.fn()
+    const store = createMockStore({
+      activeSessionId: 'sess-1',
+      sessionNotifications: [],
+      resolvedPermissions: { 'req-abc': 'allow' },
+      addInfoNotification,
+      sessionStates: {
+        'sess-1': {
+          messages: [
+            // The map says answered; the message does not. The message wins.
+            { type: 'prompt', content: 'Allow write?', requestId: 'req-abc' },
+          ],
+        },
+      } as unknown as ConnectionState['sessionStates'],
+    })
+    setStore(store)
+    setConnectionContext(mockCtx)
+
+    handleMessage({
+      type: 'permission_expired',
+      requestId: 'req-abc',
+      message: 'Permission timed out',
+    }, mockCtx)
+
+    expect(addInfoNotification).not.toHaveBeenCalled()
+    const msg = store.getState().sessionStates['sess-1']!.messages[0]!
+    expect(msg.content).toContain('(Expired')
+  })
+
+  // #7388 / #7380 — `answered` merely being SET is not a decision.
+  // `history_replay_end` blanket-stamps '(resolved)' on prompts NOBODY answered;
+  // suppressing on it would tell those users their response was recorded.
+  it("does NOT suppress on history_replay_end's '(resolved)' placeholder", () => {
+    const addInfoNotification = vi.fn()
+    const store = createMockStore({
+      activeSessionId: 'sess-1',
+      sessionNotifications: [],
+      resolvedPermissions: {},
+      addInfoNotification,
+      sessionStates: {
+        'sess-1': {
+          messages: [
+            { type: 'prompt', content: 'Allow write?', requestId: 'req-abc', answered: '(resolved)' },
+          ],
+        },
+      } as unknown as ConnectionState['sessionStates'],
+    })
+    setStore(store)
+    setConnectionContext(mockCtx)
+
+    handleMessage({
+      type: 'permission_expired',
+      requestId: 'req-abc',
+      message: 'Permission timed out',
+    }, mockCtx)
+
+    expect(addInfoNotification).not.toHaveBeenCalled()
+    const msg = store.getState().sessionStates['sess-1']!.messages[0]!
+    expect(msg.content).toContain('(Expired')
+  })
+
+  // #7388 — the dashboard's flat `messages` list is a real answered-prompt
+  // location (markPromptAnsweredByRequestId falls back to it when the prompt is
+  // in no session, and so does the permission_resolved handler). Passing it to
+  // the shared predicate is load-bearing, not defensive.
+  it('suppresses when the answered prompt lives only in the flat messages list', () => {
+    const addInfoNotification = vi.fn()
+    const store = createMockStore({
+      activeSessionId: 'sess-1',
+      sessionNotifications: [],
+      resolvedPermissions: {},
+      addInfoNotification,
+      messages: [
+        { type: 'prompt', content: 'Allow write?', requestId: 'req-abc', answered: 'deny' },
+      ] as unknown as ConnectionState['messages'],
+      sessionStates: {
+        'sess-1': { messages: [] },
+      } as unknown as ConnectionState['sessionStates'],
+    })
+    setStore(store)
+    setConnectionContext(mockCtx)
+
+    handleMessage({
+      type: 'permission_expired',
+      requestId: 'req-abc',
+      message: 'Permission timed out',
+    }, mockCtx)
+
+    expect(addInfoNotification).toHaveBeenCalledTimes(1)
   })
 })

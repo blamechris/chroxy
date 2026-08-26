@@ -52,6 +52,59 @@ export function isPermissionDecision(answered: string | undefined | null): boole
   return (PERMISSION_DECISION_TOKENS as readonly string[]).includes(answered ?? '')
 }
 
+/**
+ * True iff the permission request `requestId` was ALREADY ANSWERED by a user —
+ * the gate both clients apply when a `permission_expired` arrives for it (the
+ * #2833 race, which #7375 made routine: `permission_expired` now fires whenever
+ * a turn dies, not only on the five-minute timeout).
+ *
+ * #7388 — this is the ONE signal for that question. Before it the two clients
+ * answered it from different state: the app from the prompt's own `answered`
+ * token (#7380), the dashboard from its separate `resolvedPermissions` map.
+ * Both were correct for the input each happened to see, which is exactly the
+ * shape `docs/false-safety-guards.md` catalogues; and the dashboard's map is
+ * additionally CAPPED (`capResolvedPermissions`, 1000 entries) while `answered`
+ * lives on the message forever, so a long session could evict the entry and
+ * start telling users an answered permission had "expired" again.
+ *
+ * Unified on `answered` because it is the cross-client token (#6222/#6223), it
+ * is what `isLivePermissionPrompt` already keys on, and — unlike
+ * `resolvedPermissions` — it is seedable by `FixtureInitialState`, so this path
+ * can finally carry cross-client contract coverage.
+ *
+ * `isPermissionDecision`, NOT a defined-check: `history_replay_end` blanket-
+ * stamps the placeholder `'(resolved)'` on every unanswered prompt in the
+ * active session, and under `answered !== undefined` a prompt nobody touched
+ * would read as answered — the inverse bug, caught in #7380's first draft.
+ *
+ * Scans every session, not just the target one: the push-notification path
+ * answers prompts in background sessions, which is why
+ * `markPromptAnsweredByRequestId` walks all sessions too.
+ *
+ * `flatMessages` is OPTIONAL because only the dashboard has such a list: its
+ * `markPromptAnsweredByRequestId` and its `permission_resolved` fallback both
+ * stamp `answered` onto the top-level `messages` array, so omitting it there
+ * would leave a real answered-prompt location unscanned. The app has no flat
+ * list at all — its `addMessage` writes into the active session — so it passes
+ * nothing rather than passing a field that does not exist.
+ */
+export function isPermissionRequestAnswered(
+  sessionStates: Record<string, { messages: ChatMessage[] } | undefined> | undefined | null,
+  requestId: string | null | undefined,
+  flatMessages?: ChatMessage[] | null,
+): boolean {
+  if (!requestId) return false
+  const answeredIn = (messages: ChatMessage[] | undefined | null): boolean =>
+    !!messages?.some(
+      (m) => m.requestId === requestId && m.type === 'prompt' && isPermissionDecision(m.answered),
+    )
+  if (answeredIn(flatMessages)) return true
+  for (const id in sessionStates ?? {}) {
+    if (answeredIn(sessionStates![id]?.messages)) return true
+  }
+  return false
+}
+
 /** True iff `m` is a live, unanswered permission prompt (not an AskUserQuestion). */
 export function isLivePermissionPrompt(m: ChatMessage, now: number): boolean {
   return (

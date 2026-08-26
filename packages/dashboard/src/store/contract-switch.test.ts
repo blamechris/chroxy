@@ -114,6 +114,7 @@ function seedStore(fx: ContractFixture) {
     sessionStates[id] = { ...createEmptySessionState(), ...(seed as Partial<SessionState>) }
   }
   const terminalWrites: string[] = []
+  const infoNotifications: string[] = []
   const store = createMockStore({
     connectionPhase: 'connected',
     socket: null,
@@ -151,6 +152,14 @@ function seedStore(fx: ContractFixture) {
     // The dashboard `error` handler routes structured errors here; stub so the
     // `error` fixture exercises the switch without a real toast store.
     addServerError: () => {},
+    // #7388: the permission_expired already-answered branch raises the #2839
+    // info toast. Captured (not just stubbed) so a fixture can assert the
+    // dashboard's HALF of "same reassurance, different channel" — the app says
+    // it as a transcript line, which the messages slice already covers.
+    addInfoNotification: (m: string) => {
+      infoNotifications.push(m)
+    },
+    _infoNotifications: infoNotifications,
     _terminalWrites: terminalWrites,
   } as unknown as ConnectionState)
   // #6325: checkpoint_restored calls get().switchSession(newId) — stub it to write
@@ -237,6 +246,15 @@ describe('contract switch fixtures — dashboard real handleMessage (#5556.5)', 
           (store.getState() as unknown as { _terminalWrites: string[] })._terminalWrites,
           `${fx.name}: terminal writes`,
         ).toEqual(exp!.terminalWrites)
+      }
+      // #7388: the ordered addInfoNotification args (the dashboard's toast
+      // channel). Omitted slice = "don't care", so existing fixtures are
+      // unaffected; an empty array asserts NO toast fired.
+      if (exp!.infoNotifications) {
+        expect(
+          (store.getState() as unknown as { _infoNotifications: string[] })._infoNotifications,
+          `${fx.name}: info notifications`,
+        ).toEqual(exp!.infoNotifications)
       }
     })
   }
