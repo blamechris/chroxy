@@ -318,3 +318,95 @@ describe('npm cache across all workflows (#7383)', () => {
     )
   })
 })
+
+/**
+ * The hosted cache's ONLY producer, pinned (#7386).
+ *
+ * `docs/decisions/2026-08-npm-cache-producer.md` accepts that no job exists
+ * solely to warm the hosted `node-cache-Linux-x64-npm-*` entry that fork PRs
+ * restore. That acceptance rests entirely on ONE job being a producer as a side
+ * effect: `nightly-k8s-integration.yml`, GitHub-hosted, on a schedule, with
+ * `cache: npm`. Until now that invariant existed only as prose in three
+ * comments, which is the weakest form this repo has a whole document about.
+ *
+ * The trap is sharper than "someone might edit it". The all-workflows guard
+ * above REQUIRES that a self-hosted job not hardcode an npm cache — correctly,
+ * that is #7383. So moving this job to the self-hosted pool would make CI itself
+ * demand the removal of `cache: npm`, and the change would go green while
+ * silently deleting the last producer. A guard that drives the defect it is
+ * adjacent to needs a counterpart, and this is it: move the job self-hosted and
+ * THIS fails first, naming the decision record.
+ */
+describe('the hosted npm cache keeps a producer (#7386)', () => {
+  let nightly
+  let job
+  let step
+
+  before(async () => {
+    // Load only. The positive control is an `it()` below, NOT an assertion here:
+    // a failed `before()` hook aborts its subtests and node:test still prints
+    // `# fail 0` in the aggregate TAP summary. The run does exit non-zero (and
+    // assert-test-count.mjs propagates that), but anything reading the summary
+    // by eye — or by grep — sees a clean count. That is the reporting half of
+    // the very defect class this file guards, so don't create it here.
+    const workflows = await readWorkflows()
+    nightly = workflows.find(w => w.name === 'nightly-k8s-integration.yml') ?? null
+    job = nightly?.jobs.find(j => j.steps.some(st => st.some(l => l.includes(SETUP_NODE)))) ?? null
+    step = job?.steps.find(st => st.some(l => l.includes(SETUP_NODE))) ?? null
+  })
+
+  it('finds the producer workflow and its setup-node step', async () => {
+    const workflows = await readWorkflows()
+    assert.ok(
+      nightly,
+      'nightly-k8s-integration.yml is the only producer of the hosted npm cache ' +
+        '(docs/decisions/2026-08-npm-cache-producer.md). If it was renamed, update this ' +
+        `guard; if it was deleted, the decision record must be revisited. Saw: ${
+          workflows.map(w => w.name).join(', ')
+        }`
+    )
+    assert.ok(job, 'expected a job with a setup-node step in nightly-k8s-integration.yml')
+    assert.ok(step, 'expected to locate that setup-node step')
+  })
+
+  it('runs on a GitHub-HOSTED runner', () => {
+    // The whole point. A self-hosted runner has npmcache empty by #7383's
+    // routing and saves nothing, so this job would stop being a producer while
+    // still looking like one.
+    assert.ok(job, 'producer job not found (see the previous test)')
+    assert.doesNotMatch(
+      job.runsOn,
+      /self-hosted/,
+      'the producer must stay GitHub-hosted — a self-hosted runner saves no cache entry ' +
+        '(#7383), which would silently remove the last producer of the entry fork PRs ' +
+        'restore. See docs/decisions/2026-08-npm-cache-producer.md.'
+    )
+    assert.match(job.runsOn, /ubuntu-/, `expected an ubuntu- runner, got: ${job.runsOn.trim()}`)
+  })
+
+  it('still declares the npm cache with the three-lockfile key', () => {
+    assert.ok(step, 'producer setup-node step not found (see the first test)')
+    assert.equal(
+      stepInput(step, 'cache'),
+      'npm',
+      'the producer must keep `cache: npm` — without it the job restores nothing AND saves ' +
+        'nothing. See docs/decisions/2026-08-npm-cache-producer.md.'
+    )
+    assert.equal(stepInput(step, 'cache-dependency-path'), LOCKFILE_GLOB)
+  })
+
+  it('still runs on a schedule', () => {
+    // A producer that only fires on workflow_dispatch is not a producer. Checked
+    // on the file text above the jobs mapping, so the reader's job-scoped view
+    // does not apply.
+    assert.ok(nightly, 'producer workflow not found (see the first test)')
+    const header = nightly.text.slice(0, nightly.text.indexOf('\njobs:'))
+    assert.match(
+      header,
+      /^\s*schedule:/m,
+      'the producer must stay scheduled — on workflow_dispatch alone it would only warm the ' +
+        'cache when someone remembers to. See docs/decisions/2026-08-npm-cache-producer.md.'
+    )
+    assert.match(header, /cron:/, 'expected a cron entry under schedule:')
+  })
+})

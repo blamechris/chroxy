@@ -50,6 +50,15 @@ Put together, the exposure is not "every fork PR cold-installs". It is:
 > the new key and saves it. Fork PRs opened inside that window cold-install
 > across ~12 hosted jobs; fork PRs outside it hit the cache.
 
+**One case the window does not describe, and it is the likelier one.** A fork PR
+that *itself changes a lockfile* has a key that exists in no readable scope and
+that no nightly will ever create — the nightly builds `main`'s key, not the PR's.
+There are no `restore-keys`, so there is no partial fallback. Such a PR
+cold-installs on **every push, for its whole life**, and a warm job on `main`
+would not help it either. A dependency-bump PR from a contributor is exactly the
+shape that hits this, so do not read "up to ~24 h" as the worst case — it is the
+worst case only for PRs that leave the lockfiles alone.
+
 A cold `npm ci` of the monorepo costs a couple of minutes per job and **does not
 fail**. Fork PRs are currently rare (this is a solo-maintained project). Paying a
 hosted job on every push to `main` to shorten a rare window for a rare event is

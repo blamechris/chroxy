@@ -93,16 +93,25 @@ contributors require maintainer approval before they run.
 ### If your PR's CI looks slow
 
 PRs from a fork run on GitHub-hosted runners, which start with an empty `~/.npm`
-and rely on a restored npm cache. That cache is produced by a nightly job on
-`main`, so if a dependency change landed on `main` within roughly the last day,
-the entry your PR wants may not exist yet and each job will install the monorepo
-from scratch — a couple of extra minutes per job. **It does not fail, and it is
-not something you did.** It resolves itself after the next nightly.
+and rely on a restored npm cache. Each job may instead install the monorepo from
+scratch — a couple of extra minutes per job. **It does not fail, and it is not
+something you did.** Two different cases:
 
-If you hit this more than once, please say so in your PR: it is the signal that a
-dedicated cache-warming job is now worth adding, and the maintainer is watching
-for exactly that. The reasoning, the measurements behind it, and the job to add
-are written down in
+- **Your PR does not touch a `package-lock.json`.** The cache is produced by a
+  nightly job on `main`, so if a dependency change landed on `main` within roughly
+  the last day, the entry may not exist yet. This one does resolve itself after
+  the next nightly.
+- **Your PR changes a `package-lock.json`** — a dependency bump, or anything that
+  regenerates a lockfile. The cache key is a hash of the lockfiles, so *your* key
+  exists in no scope anything can read, and no nightly will ever create it (the
+  nightly builds `main`'s key, not yours). There are no `restore-keys` configured,
+  so there is no partial fallback either. **Every push to this PR cold-installs,
+  for the life of the PR.** That is expected and is not worth working around.
+
+If you hit either case in a way that actually slows you down, please say so in
+your PR — it is the signal that a dedicated cache-warming job is worth adding, and
+the maintainer is watching for exactly that. The reasoning, the measurements
+behind it, and the job to add are written down in
 [`docs/decisions/2026-08-npm-cache-producer.md`](docs/decisions/2026-08-npm-cache-producer.md).
 
 ## Code Style
