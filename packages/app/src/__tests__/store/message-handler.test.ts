@@ -20,7 +20,11 @@ import {
   setDeltaFlushIntervalOverride,
 } from '../../store/message-handler';
 import { createEmptySessionState } from '../../store/utils';
-import { PERMISSION_ALREADY_ANSWERED_NOTICE } from '@chroxy/store-core';
+import {
+  PERMISSION_ALREADY_ANSWERED_NOTICE,
+  PERMISSION_DECISION_TOKENS,
+  isLivePermissionPrompt,
+} from '@chroxy/store-core';
 import { clearPersistedSession } from '../../store/persistence';
 import { setCallback, clearAllCallbacks } from '../../store/imperative-callbacks';
 import { useMultiClientStore } from '../../store/multi-client';
@@ -3832,6 +3836,103 @@ describe('permission_expired handler', () => {
         0,
       ]);
     }
+  });
+
+  it("REVIEW: a replay-stamped '(resolved)' prompt is NOT treated as answered", () => {
+    // history_replay_end blanket-stamps `answered: '(resolved)'` on every
+    // unanswered prompt in the active session. That placeholder is not a
+    // decision, and an `answered !== undefined` gate — the first draft of this
+    // fix — could not tell the two apart. A prompt nobody answered would then be
+    // told "your response was already recorded" AND lose its expiry note.
+    const messages = expire(storeWithPrompt('(resolved)'));
+
+    const prompt = promptIn(messages);
+    expect(prompt.content).toBe(`Bash: rm -rf /tmp/x\n${EXPIRED_NOTE}`);
+    expect(messages.filter((m: any) => m.type === 'system')).toHaveLength(0);
+  });
+
+  it('accepts every real decision token, and nothing else', () => {
+    // Pinned against the token list itself, so widening the enum without
+    // revisiting this gate is a visible change rather than a silent one.
+    for (const token of PERMISSION_DECISION_TOKENS) {
+      const prompt = promptIn(expire(storeWithPrompt(token)));
+      expect([token, prompt.content]).toEqual([token, 'Bash: rm -rf /tmp/x']);
+    }
+    for (const notADecision of ['(resolved)', '', 'allowed', 'yes']) {
+      const prompt = promptIn(expire(storeWithPrompt(notADecision)));
+      expect([notADecision, prompt.content]).toEqual([
+        notADecision,
+        `Bash: rm -rf /tmp/x\n${EXPIRED_NOTE}`,
+      ]);
+    }
+  });
+
+  it('REVIEW: an expired UNANSWERED prompt stops counting as live (#7335 mobile half)', () => {
+    // `isLivePermissionPrompt` requires `expiresAt > now`; clearing `options`
+    // never touched it, so a dead prompt went on driving SessionPicker's pending
+    // badge and usePermissionAnnouncer for the rest of its five minutes.
+    const store = storeWithPrompt(undefined);
+    store.setState((st: any) => ({
+      sessionStates: {
+        ...st.sessionStates,
+        s1: {
+          ...st.sessionStates.s1,
+          messages: st.sessionStates.s1.messages.map((m: any) => ({
+            ...m,
+            expiresAt: Date.now() + 5 * 60_000,
+          })),
+        },
+      },
+    }));
+    // precondition: it IS live before the expiry arrives, or this proves nothing
+    expect(isLivePermissionPrompt(promptIn(store.getState().sessionStates.s1.messages), Date.now()))
+      .toBe(true);
+
+    const messages = expire(store);
+
+    const prompt = promptIn(messages);
+    expect(isLivePermissionPrompt(prompt, Date.now())).toBe(false);
+    // and `answered` stays unset — it is a DECISION token, and none was made
+    expect(prompt.answered).toBeUndefined();
+  });
+
+  it('REVIEW: a burst of expiries writes ONE notice, not N identical lines', () => {
+    // A single turn death expires every permission it was holding, so these
+    // arrive together. The old in-place mutation could not stack; appending can.
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: {
+        s1: {
+          ...createEmptySessionState(),
+          messages: ['a', 'b', 'c'].map((k) => ({
+            id: `perm-${k}`,
+            type: 'prompt' as const,
+            content: `Bash: ${k}`,
+            requestId: `req-${k}`,
+            timestamp: 1,
+            answered: 'allow',
+          })),
+        },
+      },
+      sessionNotifications: [],
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+    for (const k of ['a', 'b', 'c']) {
+      _testMessageHandler.handle({
+        type: 'permission_expired',
+        requestId: `req-${k}`,
+        sessionId: 's1',
+        message: 'turn died',
+      });
+    }
+
+    const notices = store
+      .getState()
+      .sessionStates.s1.messages.filter((m: any) => m.type === 'system');
+    expect(notices).toHaveLength(1);
+    expect(notices[0].content).toBe(PERMISSION_ALREADY_ANSWERED_NOTICE);
   });
 
   it('sees an answer recorded in a NON-active session (push-notification path)', () => {

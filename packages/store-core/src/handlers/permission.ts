@@ -144,9 +144,10 @@ export const PERMISSION_ALREADY_ANSWERED_NOTICE =
  *
  * That already-resolved gate stays platform-specific because the two clients
  * read DIFFERENT signals for it: the dashboard keys on its `resolvedPermissions`
- * map, the app (#7380) on the prompt message's own `answered` decision token,
- * which is what `markPromptAnsweredByRequestId` sets and what
- * `isLivePermissionPrompt` already keys on. Unifying them is #7388.
+ * map, the app (#7380) on the prompt message's own `answered` field — via
+ * `isPermissionDecision`, NOT a defined-check, because `history_replay_end`
+ * stamps the placeholder `'(resolved)'` on prompts nobody answered. Unifying
+ * the two signals is #7388.
  */
 export function handlePermissionExpired(msg: Record<string, unknown>): {
   requestId: string | null

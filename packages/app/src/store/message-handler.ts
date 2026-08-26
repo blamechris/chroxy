@@ -73,6 +73,9 @@ import {
   // #7380 — one wording for the #2833 already-answered race, shared with the
   // dashboard (which surfaces the same words as an info toast).
   PERMISSION_ALREADY_ANSWERED_NOTICE,
+  // #7380 — a REAL user decision, not merely `answered` being set:
+  // history_replay_end stamps '(resolved)' on prompts nobody answered.
+  isPermissionDecision,
   handlePermissionTimeout as sharedPermissionTimeout,
   // permission_rules_updated migrated to the shared dispatch table (#5556)
   // #5454 — remaining both-sides duplicates extracted into store-core
@@ -3175,12 +3178,22 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         // same behaviour on its separate `resolvedPermissions` map; that the two
         // clients read different signals for one question is #7388.
         //
+        // `isPermissionDecision`, NOT `answered !== undefined`. `history_replay_end`
+        // blanket-stamps `answered: '(resolved)'` on every unanswered prompt in the
+        // active session, and that placeholder is indistinguishable from a real
+        // decision under a defined-check — so a prompt the user never answered
+        // would be told "your response was already recorded" AND lose its expiry
+        // note. Only the four real decision tokens count.
+        //
         // Scan every session, not just the target: the push-notification path
         // answers prompts in background sessions, which is exactly what
         // `markPromptAnsweredByRequestId` walks all sessions for.
         const alreadyAnswered = Object.values(get().sessionStates).some((ss) =>
           ss.messages.some(
-            (m) => m.requestId === expiredRequestId && m.type === 'prompt' && m.answered !== undefined
+            (m) =>
+              m.requestId === expiredRequestId &&
+              m.type === 'prompt' &&
+              isPermissionDecision(m.answered)
           )
         );
         if (!alreadyAnswered) {
@@ -3190,7 +3203,25 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
             updateSession(expTargetId, (ss) => ({
               messages: ss.messages.map((m) =>
                 m.requestId === expiredRequestId && m.type === 'prompt'
-                  ? { ...m, content: `${m.content}\n${expiredSystemMsg.content}`, options: undefined }
+                  ? {
+                      ...m,
+                      content: `${m.content}\n${expiredSystemMsg.content}`,
+                      options: undefined,
+                      // #7335's mobile half, which that issue fixed only on the
+                      // dashboard. `expiresAt` is what actually retires a prompt:
+                      // `isLivePermissionPrompt` requires `expiresAt > now`, and
+                      // clearing `options` does not touch it. So an expired prompt
+                      // went on counting as pending for the rest of its five
+                      // minutes — SessionPicker's badge and usePermissionAnnouncer
+                      // both key on that predicate.
+                      //
+                      // Stamped to NOW rather than 0 for the dashboard's reason:
+                      // a falsy `expiresAt` makes the predicate give up entirely,
+                      // erasing the record of a tool call nobody answered (#7353).
+                      // `answered` is deliberately NOT set — it is a DECISION token
+                      // and no decision was made.
+                      expiresAt: Date.now(),
+                    }
                   : m
               ),
             }));
@@ -3209,7 +3240,17 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           };
           const noticeTargetId = (msg.sessionId as string) || get().activeSessionId;
           if (noticeTargetId && get().sessionStates[noticeTargetId]) {
-            updateSession(noticeTargetId, (ss) => ({ messages: [...ss.messages, noticeMsg] }));
+            updateSession(noticeTargetId, (ss) => {
+              // One turn death expires EVERY permission it was holding, so these
+              // arrive in a burst and the notice is generic — N identical lines
+              // says nothing the first one did not. The old in-place mutation
+              // could not stack this way; appending can, so collapse a repeat.
+              const last = ss.messages[ss.messages.length - 1];
+              if (last?.type === 'system' && last.content === PERMISSION_ALREADY_ANSWERED_NOTICE) {
+                return {};
+              }
+              return { messages: [...ss.messages, noticeMsg] };
+            });
           } else {
             get().addMessage(noticeMsg);
           }
