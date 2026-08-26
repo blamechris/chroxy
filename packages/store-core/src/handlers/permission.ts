@@ -121,15 +121,33 @@ export function handlePermissionResolved(
 }
 
 /**
+ * The reassurance shown when `permission_expired` arrives for a request the
+ * user ALREADY answered — the #2833 race.
+ *
+ * Shared because both clients must say the same thing, and they say it through
+ * different channels: the dashboard raises an info toast (#2839), the app has no
+ * toast mechanism by design (#4878/#4879) and appends a system line to the
+ * transcript instead. Different surface, identical words — which is only
+ * guaranteed if there is one string. #7380.
+ */
+export const PERMISSION_ALREADY_ANSWERED_NOTICE =
+  'Already answered — your response was already recorded'
+
+/**
  * Parse a `permission_expired` message into the requestId plus a system
  * ChatMessage (mirrors `handleBudgetExceeded`'s shape).
  *
  * The system message text is the same line both clients append to the
  * matching prompt today: `"(Expired — this permission was already handled or
  * timed out)"`. The handler does NOT decide whether to apply it — the call
- * site gates on `requestId` and on whether the prompt was already resolved
- * (the dashboard's "already handled" race-suppression path stays platform-
- * specific). Banner dismissal also stays at the call site.
+ * site gates on `requestId` and on whether the prompt was already resolved.
+ *
+ * That already-resolved gate stays platform-specific because the two clients
+ * read DIFFERENT signals for it: the dashboard keys on its `resolvedPermissions`
+ * map, the app (#7380) on the prompt message's own `answered` field — via
+ * `isPermissionDecision`, NOT a defined-check, because `history_replay_end`
+ * stamps the placeholder `'(resolved)'` on prompts nobody answered. Unifying
+ * the two signals is #7388.
  */
 export function handlePermissionExpired(msg: Record<string, unknown>): {
   requestId: string | null

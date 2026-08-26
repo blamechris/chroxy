@@ -25,6 +25,33 @@
  */
 import type { ChatMessage } from './types'
 
+/**
+ * The decision tokens `ChatMessage.answered` carries when a USER actually
+ * answered a permission prompt (#6222/#6223 — the field is an enum, never a
+ * display label). Tallied verbatim today by the app's SettingsScreen and
+ * PermissionHistoryScreen and by the dashboard's App.tsx.
+ */
+export const PERMISSION_DECISION_TOKENS = ['allow', 'allowAlways', 'allowSession', 'deny'] as const
+
+export type PermissionDecisionToken = (typeof PERMISSION_DECISION_TOKENS)[number]
+
+/**
+ * True iff `answered` is a real user decision.
+ *
+ * `answered` being merely SET is not that, which is the trap #7380's first draft
+ * fell into: `history_replay_end` blanket-stamps `answered: '(resolved)'` on
+ * every unanswered prompt in the active session, on the reasoning that anything
+ * in replayed history is over. That placeholder is indistinguishable from a
+ * decision under an `!== undefined` test — so a prompt the user never answered
+ * reads as answered, and any behaviour gated that way misfires on it.
+ *
+ * Deliberately does NOT accept an arbitrary non-empty string: a future
+ * placeholder would then quietly qualify too, which is the same bug again.
+ */
+export function isPermissionDecision(answered: string | undefined | null): boolean {
+  return (PERMISSION_DECISION_TOKENS as readonly string[]).includes(answered ?? '')
+}
+
 /** True iff `m` is a live, unanswered permission prompt (not an AskUserQuestion). */
 export function isLivePermissionPrompt(m: ChatMessage, now: number): boolean {
   return (

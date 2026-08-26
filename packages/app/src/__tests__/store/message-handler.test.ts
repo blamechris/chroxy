@@ -20,6 +20,11 @@ import {
   setDeltaFlushIntervalOverride,
 } from '../../store/message-handler';
 import { createEmptySessionState } from '../../store/utils';
+import {
+  PERMISSION_ALREADY_ANSWERED_NOTICE,
+  PERMISSION_DECISION_TOKENS,
+  isLivePermissionPrompt,
+} from '@chroxy/store-core';
 import { clearPersistedSession } from '../../store/persistence';
 import { setCallback, clearAllCallbacks } from '../../store/imperative-callbacks';
 import { useMultiClientStore } from '../../store/multi-client';
@@ -3729,6 +3734,243 @@ describe('permission_expired handler', () => {
     const notifs = store.getState().sessionNotifications;
     expect(notifs).toHaveLength(1);
     expect(notifs[0].requestId).toBe('keep-me');
+  });
+
+  // #7380 — the #2833 race, which #7375 made routine: permission_expired now
+  // fires whenever a claude-cli turn dies (mode switch, model switch, Stop,
+  // crash), not only on the five-minute timeout. So "user answered, then the
+  // prompt expired" is common rather than rare, and on a phone over a cellular
+  // tunnel the in-flight window is wide.
+  const EXPIRED_NOTE = '(Expired — this permission was already handled or timed out)';
+
+  function storeWithPrompt(answered?: string) {
+    return createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: {
+        s1: {
+          ...createEmptySessionState(),
+          messages: [
+            {
+              id: 'perm-race',
+              type: 'prompt' as const,
+              content: 'Bash: rm -rf /tmp/x',
+              requestId: 'req-race',
+              timestamp: 1,
+              ...(answered !== undefined ? { answered } : {}),
+            },
+          ],
+        },
+      },
+      sessionNotifications: [{ requestId: 'req-race', sessionId: 's1', message: 'Bash?' } as any],
+    });
+  }
+
+  // A `.find()` that misses would otherwise make every assertion below read as
+  // `undefined` — silently passing a `not.toContain`. Make the miss the failure.
+  function promptIn(messages: any[], requestId = 'req-race') {
+    const found = messages.find((m: any) => m.requestId === requestId);
+    if (!found) throw new Error(`no prompt with requestId=${requestId} in ${messages.length} messages`);
+    return found;
+  }
+
+  function expire(store: ReturnType<typeof createMockStore>) {
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+    _testMessageHandler.handle({
+      type: 'permission_expired',
+      requestId: 'req-race',
+      sessionId: 's1',
+      message: 'permission response could not be routed (expired/handled)',
+    });
+    return store.getState().sessionStates.s1.messages;
+  }
+
+  it('suppresses the expiry note for a prompt the user already answered', () => {
+    // The bug: the user taps Allow, the turn is killed while the response is in
+    // flight, and the app tells them their permission "was already handled or
+    // timed out" — on a prompt they successfully answered.
+    const messages = expire(storeWithPrompt('allow'));
+
+    const prompt = promptIn(messages);
+    expect(prompt.content).toBe('Bash: rm -rf /tmp/x');
+    expect(prompt.content).not.toContain(EXPIRED_NOTE);
+    // and the decision token survives untouched — it is a DECISION (#6222/#6223),
+    // and no expiry retroactively unmakes it
+    expect(prompt.answered).toBe('allow');
+  });
+
+  it('surfaces the shared reassurance instead of swallowing the event', () => {
+    // The app has no toast by design (#4878/#4879), so it says it in the
+    // transcript. Same words as the dashboard's info toast, from the same
+    // constant — which is the only way "the same reassurance" is a fact.
+    const messages = expire(storeWithPrompt('allow'));
+
+    const notice = messages.filter((m: any) => m.type === 'system');
+    expect(notice).toHaveLength(1);
+    expect(notice[0].content).toBe(PERMISSION_ALREADY_ANSWERED_NOTICE);
+    expect(PERMISSION_ALREADY_ANSWERED_NOTICE).toBe(
+      'Already answered — your response was already recorded'
+    );
+  });
+
+  it('POSITIVE CONTROL: an UNANSWERED prompt still gets the expiry note', () => {
+    // Without this the suppression could be unconditional — every assertion
+    // above would pass just as well with the note deleted outright, which is the
+    // "denies everything" false-safety shape (#7273).
+    const messages = expire(storeWithPrompt(undefined));
+
+    const prompt = promptIn(messages);
+    expect(prompt.content).toBe(`Bash: rm -rf /tmp/x\n${EXPIRED_NOTE}`);
+    expect(prompt.options).toBeUndefined();
+    expect(messages.filter((m: any) => m.type === 'system')).toHaveLength(0);
+  });
+
+  it('drains the banner on BOTH paths — the request is over either way', () => {
+    for (const answered of ['allow', undefined]) {
+      const store = storeWithPrompt(answered);
+      expire(store);
+      // (jest's expect takes no message arg — the loop label lives in the array)
+      expect([String(answered), store.getState().sessionNotifications.length]).toEqual([
+        String(answered),
+        0,
+      ]);
+    }
+  });
+
+  it("REVIEW: a replay-stamped '(resolved)' prompt is NOT treated as answered", () => {
+    // history_replay_end blanket-stamps `answered: '(resolved)'` on every
+    // unanswered prompt in the active session. That placeholder is not a
+    // decision, and an `answered !== undefined` gate — the first draft of this
+    // fix — could not tell the two apart. A prompt nobody answered would then be
+    // told "your response was already recorded" AND lose its expiry note.
+    const messages = expire(storeWithPrompt('(resolved)'));
+
+    const prompt = promptIn(messages);
+    expect(prompt.content).toBe(`Bash: rm -rf /tmp/x\n${EXPIRED_NOTE}`);
+    expect(messages.filter((m: any) => m.type === 'system')).toHaveLength(0);
+  });
+
+  it('accepts every real decision token, and nothing else', () => {
+    // Pinned against the token list itself, so widening the enum without
+    // revisiting this gate is a visible change rather than a silent one.
+    for (const token of PERMISSION_DECISION_TOKENS) {
+      const prompt = promptIn(expire(storeWithPrompt(token)));
+      expect([token, prompt.content]).toEqual([token, 'Bash: rm -rf /tmp/x']);
+    }
+    for (const notADecision of ['(resolved)', '', 'allowed', 'yes']) {
+      const prompt = promptIn(expire(storeWithPrompt(notADecision)));
+      expect([notADecision, prompt.content]).toEqual([
+        notADecision,
+        `Bash: rm -rf /tmp/x\n${EXPIRED_NOTE}`,
+      ]);
+    }
+  });
+
+  it('REVIEW: an expired UNANSWERED prompt stops counting as live (#7335 mobile half)', () => {
+    // `isLivePermissionPrompt` requires `expiresAt > now`; clearing `options`
+    // never touched it, so a dead prompt went on driving SessionPicker's pending
+    // badge and usePermissionAnnouncer for the rest of its five minutes.
+    const store = storeWithPrompt(undefined);
+    store.setState((st: any) => ({
+      sessionStates: {
+        ...st.sessionStates,
+        s1: {
+          ...st.sessionStates.s1,
+          messages: st.sessionStates.s1.messages.map((m: any) => ({
+            ...m,
+            expiresAt: Date.now() + 5 * 60_000,
+          })),
+        },
+      },
+    }));
+    // precondition: it IS live before the expiry arrives, or this proves nothing
+    expect(isLivePermissionPrompt(promptIn(store.getState().sessionStates.s1.messages), Date.now()))
+      .toBe(true);
+
+    const messages = expire(store);
+
+    const prompt = promptIn(messages);
+    expect(isLivePermissionPrompt(prompt, Date.now())).toBe(false);
+    // and `answered` stays unset — it is a DECISION token, and none was made
+    expect(prompt.answered).toBeUndefined();
+  });
+
+  it('REVIEW: a burst of expiries writes ONE notice, not N identical lines', () => {
+    // A single turn death expires every permission it was holding, so these
+    // arrive together. The old in-place mutation could not stack; appending can.
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: {
+        s1: {
+          ...createEmptySessionState(),
+          messages: ['a', 'b', 'c'].map((k) => ({
+            id: `perm-${k}`,
+            type: 'prompt' as const,
+            content: `Bash: ${k}`,
+            requestId: `req-${k}`,
+            timestamp: 1,
+            answered: 'allow',
+          })),
+        },
+      },
+      sessionNotifications: [],
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+    for (const k of ['a', 'b', 'c']) {
+      _testMessageHandler.handle({
+        type: 'permission_expired',
+        requestId: `req-${k}`,
+        sessionId: 's1',
+        message: 'turn died',
+      });
+    }
+
+    const notices = store
+      .getState()
+      .sessionStates.s1.messages.filter((m: any) => m.type === 'system');
+    expect(notices).toHaveLength(1);
+    expect(notices[0].content).toBe(PERMISSION_ALREADY_ANSWERED_NOTICE);
+  });
+
+  it('sees an answer recorded in a NON-active session (push-notification path)', () => {
+    // markPromptAnsweredByRequestId walks every session because a prompt can be
+    // answered from a push notification while another session is active. A gate
+    // that only looked at the target session would miss exactly that case.
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any, { sessionId: 's2', name: 'S2' } as any],
+      sessionStates: {
+        s1: createEmptySessionState(),
+        s2: {
+          ...createEmptySessionState(),
+          messages: [
+            {
+              id: 'perm-bg',
+              type: 'prompt' as const,
+              content: 'Bash: ls',
+              requestId: 'req-race',
+              timestamp: 1,
+              answered: 'allow',
+            },
+          ],
+        },
+      },
+      sessionNotifications: [],
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+    _testMessageHandler.handle({
+      type: 'permission_expired',
+      requestId: 'req-race',
+      sessionId: 's2',
+      message: 'expired',
+    });
+
+    const prompt = promptIn(store.getState().sessionStates.s2.messages);
+    expect(prompt.content).toBe('Bash: ls');
   });
 });
 

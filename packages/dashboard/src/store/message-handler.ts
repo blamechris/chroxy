@@ -62,6 +62,9 @@ import {
   replayDedupCache,
   resetReplayReconcile,
   handlePermissionExpired as sharedPermissionExpired,
+  // #7380 — one wording for the #2833 already-answered race, shared with the app
+  // (which surfaces it as a transcript line, having no toast by design).
+  PERMISSION_ALREADY_ANSWERED_NOTICE,
   // permission_rules_updated migrated to the shared dispatch table (#5556)
   // #5454 — dashboard adopts the shared permission family + the remaining
   // both-sides duplicates
@@ -5411,7 +5414,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           // #2839: surface a user-centric info toast confirming the
           // response was already recorded, without exposing the underlying
           // server-side expiration race as an error-like message.
-          get().addInfoNotification('Already answered — your response was already recorded');
+          get().addInfoNotification(PERMISSION_ALREADY_ANSWERED_NOTICE);
           break;
         }
         console.warn(`[ws] Permission ${expiredRequestId} expired: ${msg.message}`);

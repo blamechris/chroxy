@@ -655,6 +655,9 @@ export {
   handlePermissionRequest,
   handlePermissionResolved,
   handlePermissionExpired,
+  // #7380 — the one wording for the #2833 already-answered race, shared because
+  // the two clients surface it through different channels (toast vs transcript).
+  PERMISSION_ALREADY_ANSWERED_NOTICE,
   handlePermissionTimeout,
   handlePermissionRulesUpdated,
   handleSessionList,
@@ -949,6 +952,10 @@ export {
 // "live, unanswered permission prompt" predicate across both clients).
 export {
   isLivePermissionPrompt,
+  // #7380 — a REAL user decision, as opposed to `answered` merely being set
+  // (history_replay_end stamps '(resolved)' on prompts nobody answered).
+  isPermissionDecision,
+  PERMISSION_DECISION_TOKENS,
   firstLivePermissionPrompt,
   livePermissionPrompts,
   countLivePermissionPrompts,
