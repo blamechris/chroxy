@@ -5388,7 +5388,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         sharedPermissionExpired(msg);
       if (expiredRequestId) {
         // #6559 — prune the pulled input for an expired prompt. Hoisted above the
-        // alreadyResolved early-return so both branches drop it (guarded copy-delete).
+        // alreadyAnswered early-return so both branches drop it (guarded copy-delete).
         set((s) => {
           if (!s.permissionInputs || !Object.prototype.hasOwnProperty.call(s.permissionInputs, expiredRequestId)) return {};
           const next = { ...s.permissionInputs };
@@ -5427,12 +5427,12 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         // bookkeeping. Relay child expiry upward and this gate goes silent on it
         // — stamp `answered` on the child row (or give it a real prompt message)
         // in the same change.
-        const alreadyResolved = isPermissionRequestAnswered(
+        const alreadyAnswered = isPermissionRequestAnswered(
           get().sessionStates,
           expiredRequestId,
           get().messages,
         );
-        if (alreadyResolved) {
+        if (alreadyAnswered) {
           // #5008 — drain the banner stack without dropping the row from the
           // widget's durable history. See handlePermissionResolved for the
           // full rationale; this branch handles the #2833 race where expiry
