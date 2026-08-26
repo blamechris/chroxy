@@ -42,8 +42,18 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
-          cache: npm
-          cache-dependency-path: package-lock.json
+          # No `cache:` — #7383. This job is pinned to the self-hosted macOS
+          # runner and, as the comment above says, is unreachable from a fork, so
+          # there is no hosted branch to route for: it is ALWAYS on a box whose
+          # ~/.npm is already warm (4.8 GB on the current runner). `cache: npm`
+          # only restored a 1.86 GB actions/cache entry over a superset of
+          # itself. ci.yml's 13 consumers took the routed form instead because
+          # they DO have a fork-PR branch that still needs the restore.
+          #
+          # It also carried `cache-dependency-path: package-lock.json` — the bare
+          # root lockfile that ci-cache-key.test.js forbids, in a repo with three
+          # lockfiles, so a change under packages/ never busted the key. Both are
+          # gone with the cache.
 
       - name: Install dependencies
         run: npm ci
