@@ -98,8 +98,15 @@ describe('setup-node npm cache key covers every lockfile (#7386)', () => {
     // A step with no `cache:` at all (scripts-tests, release-pr-subject,
     // dashboard-smoke, maestro) uses setup-node for the Node runtime alone and
     // is correctly exempt — cache-dependency-path is inert without `cache:`.
-    // An empty `cache:` (the self-hosted branch of #7383's routing) is likewise
-    // exempt by the same falsiness.
+    //
+    // The exemption is on the LITERAL text, which is the only thing a static
+    // reader has. #7383's routed steps carry `cache: ${{ ... .npmcache }}`, a
+    // non-empty string here even though it resolves to empty on the self-hosted
+    // branch at runtime — so they are REQUIRED to declare the path, and do. That
+    // is the right answer for the reason that matters: the same expression
+    // resolves to `npm` on the hosted fork-PR branch, which is exactly the case
+    // the key has to be correct for. A literal `cache: ''` would be exempt by
+    // falsiness; no workflow writes one today.
     const offenders = steps
       .filter(({ step }) => {
         const cache = stepInput(step, 'cache')

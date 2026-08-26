@@ -1,6 +1,8 @@
 /**
  * A small indentation-aware reader for `.github/workflows/*.yml`, shared by the
- * CI guards in `tests/ci-*.test.js`.
+ * CI guards in `packages/server/tests/ci-*.test.js` — today `ci-cache-key`
+ * (#7386), `ci-npm-cache-routing` (#7383) and `ci-workflow-reader` (this
+ * module's own tests).
  *
  * WHY THIS IS A MODULE AND NOT A COPY IN EACH TEST
  * ------------------------------------------------
