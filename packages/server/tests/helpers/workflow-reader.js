@@ -71,9 +71,46 @@ export function parseJobs(yml, name = 'workflow') {
   return starts.map((s, idx) => {
     const end = idx + 1 < starts.length ? starts[idx + 1].line : lines.length
     const body = lines.slice(s.line, end)
-    const runsOn = body.find(l => /^\s*runs-on:/.test(l)) ?? ''
-    return { id: s.id, line: s.line + 1, body, runsOn, steps: parseSteps(body) }
+    return { id: s.id, line: s.line + 1, body, runsOn: runsOnOf(body), steps: parseSteps(body) }
   })
+}
+
+/**
+ * A job's whole `runs-on:` value as one string — the key line PLUS its block
+ * body when the labels are written as a YAML block sequence.
+ *
+ * This used to be `body.find(l => /^\s*runs-on:/.test(l))`, a single line, and
+ * that is a false-safety guard of the kind this repo catalogues. GitHub accepts
+ * two spellings of the same label set:
+ *
+ *     runs-on: [self-hosted, macOS, ARM64]        # flow — the whole value is on the line
+ *     runs-on:                                    # block — the line holds NOTHING
+ *       - self-hosted
+ *       - macOS
+ *
+ * Under the old reader the block form yielded the literal string `"runs-on:"`,
+ * so `/self-hosted/.test(job.runsOn)` was false and every self-hosted rule
+ * `continue`d past the job. Reproduced before this fix: a workflow pinned to
+ * `[self-hosted, macOS, ARM64]` in block form while hardcoding `cache: npm` —
+ * precisely the #7383 defect — passed all 14 tests green. Two spellings of
+ * identical config must not disagree, least of all in a module whose stated job
+ * is covering files that do not exist yet.
+ *
+ * Blank and comment lines are skipped rather than treated as the end of the
+ * block, so a commented label list does not truncate the value early.
+ */
+function runsOnOf(bodyLines) {
+  const at = bodyLines.findIndex(l => /^\s*runs-on:/.test(l))
+  if (at === -1) return ''
+  const keyIndent = /^(\s*)/.exec(bodyLines[at])[1].length
+  const parts = [bodyLines[at]]
+  for (let i = at + 1; i < bodyLines.length; i++) {
+    const line = bodyLines[i]
+    if (/^\s*$/.test(line) || /^\s*#/.test(line)) continue
+    if (/^(\s*)/.exec(line)[1].length <= keyIndent) break
+    parts.push(line)
+  }
+  return parts.join(' ')
 }
 
 /**

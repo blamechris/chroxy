@@ -824,3 +824,48 @@ indistinguishable from a pattern that matched nothing.
 **Guard against it:** when a field decides what a tool reads, confine what the tool
 **returns**, not what it was asked for. And when auditing a floor, ask what the tool
 reads — not which of its fields the list happens to scan.
+
+### 16. The guard scoped to one file, and the value it could not spell — 
+
+Two instances, one PR, both in the same guard.
+
+**The file.** `ci-cache-key.test.js` enforced that setup-node's
+`cache-dependency-path` is `**/package-lock.json` — this is a three-lockfile
+monorepo, and the default key is the root file alone, so a bare key means a
+dependency change under `packages/` restores a stale cache. It read `ci.yml`
+and nothing else. `maestro-nightly.yml` carried the bare key (found while fixing
+`#7383`, not by this guard) and `release.yml` carried it **four times** — so a
+*release* build could be cut from a stale cache, which is the worst place in the
+repo for it. Cause #1 again, in its purest form: a guard whose roster is a
+hardcoded list of one file, beside a directory that grows.
+
+The fix is the same one that worked in `#7383`: **scope to the defect, not the
+file.** Discovery is `readdir`, so a workflow that does not exist yet is covered.
+
+**And the value it could not spell — found in review of that fix.** The reader
+took `runs-on` as a single line. GitHub accepts two spellings of one label set:
+
+```yaml
+runs-on: [self-hosted, macOS, ARM64]   # flow — the value is on the line
+runs-on:                               # block — the line holds NOTHING
+  - self-hosted
+```
+
+The block form yielded the literal string `"runs-on:"`, so `/self-hosted/` never
+matched and every self-hosted rule `continue`d past the job. A workflow pinned to
+`[self-hosted, macOS, ARM64]` in block form while hardcoding `cache: npm` —
+`#7383`'s defect verbatim — passed **all 14 tests green**. Reproduced before
+fixing.
+
+This is a variant worth naming on its own: **two spellings of identical config,
+one of them invisible to the guard.** The repo happens to use only the flow form,
+so no amount of scanning the real workflows could have revealed it — which is why
+the reader now has unit tests driven by *synthetic* YAML. A guard that only ever
+sees the inputs the repo currently produces is untested against the inputs it
+exists to catch.
+
+**Guard against it:** when a reader becomes shared infrastructure, test the
+reader, with inputs the repo does not currently contain. A consumer's positive
+control catches a reader that finds *nothing*; nothing catches a reader that
+finds *most things*.
+
