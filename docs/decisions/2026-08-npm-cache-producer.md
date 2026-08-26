@@ -48,14 +48,31 @@ This section originally said the change *makes the job faster*, so the cost was
 "negative". Measured on the first post-merge run against the two before it, that
 is **wrong**:
 
-| run | total job | `npm ci` |
-|---|---|---|
-| `f2129e6d3` — with cache | **97 s** | 29 s (plus ~5 s restore) |
-| `1674dba8e` — no cache | 93 s | 35 s |
-| `4514acc2a` — no cache | 95 s | 35 s |
+Per step, which is the only level at which this is attributable:
 
-`npm ci` did get ~6 s faster, and the 497 MB restore costs ~5 s, so the two
-cancel: 93–95 s becomes 97 s. **A wash, marginally on the wrong side of it.**
+| step | with cache (`f2129e6d3`) | no cache (`1674dba8e` / `4514acc2a`) |
+|---|---|---|
+| setup-node (restore) | 7 s | 0–3 s |
+| Install dependencies (`npm ci`) | 30 s | 35 s / 36 s |
+| *Build dashboard* | *9 s* | *12 s / 13 s* |
+| *Install Playwright chromium* | *27 s* | *22 s / 20 s* |
+| **total job** | **97 s** | **93 s / 95 s** |
+
+**The cache itself is a wash**: it costs ~4–7 s in the restore and saves ~5–6 s
+in `npm ci`. The +2–4 s in the job TOTAL is not attributable to it — it is in the
+italicised steps, which the cache does not touch (Playwright's chromium download
+ran 5–7 s slower on that run, partly offset by Build dashboard running 3–4 s
+faster). Ordinary run-to-run variance. An earlier draft of this section billed
+that residual to the cache and called it "marginally on the wrong side"; the
+arithmetic never supported it (−6 s + 5 s predicts ~93 s, not 97 s), which is
+what gives it away.
+
+**One cost here is UNMEASURED and should not be glossed.** Every run above was a
+cache HIT, and a hit does not save. The run that actually *produces* — the one
+right after a lockfile change — additionally compresses and uploads ~497 MB in
+the post-`setup-node` step. Every recent producer run (six consecutive nightlies)
+hit the key, so there is no measured save to quote, and none is invented here. It
+is paid once per lockfile change, not per push.
 
 The reason is worth carrying, because it caps what cache-warming can ever buy
 here: `~/.npm` is npm's **download** cache. `npm ci` still extracts and links all
@@ -65,7 +82,8 @@ removes network fetch, not install work.
 So the argument for doing this is **not** "it is free because the job gets
 faster". It is:
 
-- the job cost is ~zero (±5 s, inside run-to-run noise), and
+- the cache's own cost on this job is ~zero (restore ≈ `npm ci` saving), plus an
+  unmeasured post-step upload on the rarer save runs, and
 - a *dedicated* warm job would cost a whole additional hosted job per push.
 
 Same conclusion, honest reason. The producer function itself is unaffected: on a
