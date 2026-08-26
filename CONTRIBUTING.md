@@ -90,6 +90,29 @@ SHAs, the default workflow token is read-only (jobs elevate their own permission
 per-workflow as needed), and workflows on pull requests from first-time
 contributors require maintainer approval before they run.
 
+### If your PR's CI looks slow
+
+PRs from a fork run on GitHub-hosted runners, which start with an empty `~/.npm`
+and rely on a restored npm cache. Each job may instead install the monorepo from
+scratch — a couple of extra minutes per job. **It does not fail, and it is not
+something you did.** Two different cases:
+
+- **Your PR does not touch a `package-lock.json`.** A cold install here should be
+  rare — the cache is refreshed by a job on every push to `main`. If you see one
+  anyway, it is worth reporting: it means a cache producer has gone missing.
+- **Your PR changes a `package-lock.json`** — a dependency bump, or anything that
+  regenerates a lockfile. The cache key is a hash of the lockfiles, so *your* key
+  exists in no scope anything can read, and no job on `main` will ever create it
+  (those build `main`'s key, not yours). There are no `restore-keys` configured,
+  so there is no partial fallback either. **Every push to this PR cold-installs,
+  for the life of the PR.** That is expected, is not worth working around, and no
+  amount of cache-warming on our side would change it.
+
+If you hit the first case, please say so in your PR — it means something on our
+side broke, and it is worth knowing. The reasoning, the measurements behind it,
+and the guards that are supposed to prevent it are written down in
+[`docs/decisions/2026-08-npm-cache-producer.md`](docs/decisions/2026-08-npm-cache-producer.md).
+
 ## Code Style
 
 - **TypeScript** for the app, **JavaScript (ES modules)** for the server

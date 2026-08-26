@@ -220,17 +220,44 @@ describe('CI npm cache routing (#7383)', () => {
     )
   })
 
-  it('no setup-node step hardcodes cache: npm', () => {
-    // Deliberately covers UNROUTED jobs too. A hosted-pinned job hardcoding the
-    // cache is defensible today, but the ones that exist (dashboard-smoke) do not
-    // set a cache at all, so there is no legitimate hardcode left in the file —
-    // and the moment one appears it is worth a deliberate look rather than a
-    // copy-paste. Anchored to step bodies, so ci.yml's comments about `cache: npm`
-    // do not trip it.
+  it('no setup-node step hardcodes cache: npm, except the named producer', () => {
+    // Deliberately covers UNROUTED jobs too: a routed job hardcoding the cache
+    // re-adds the 521 MB per-job download on the self-hosted pool, and an
+    // unrouted one is worth a deliberate look rather than a copy-paste.
+    //
+    // #7386 added the first — and so far only — legitimate hardcode, so this is
+    // an ALLOWLIST OF ONE rather than a relaxed rule. `dashboard-smoke` is
+    // GitHub-hosted, x86_64, unconditional, on push-to-main, and already ran a
+    // root `npm ci` with no cache: it cold-installed every run and saved nothing.
+    // Caching it makes the job faster AND produces the entry fork PRs restore.
+    // See docs/decisions/2026-08-npm-cache-producer.md.
+    //
+    // Keep this list exact. Widening it to "any hosted job may hardcode" would
+    // give back the copy-paste this guard exists to catch, and #7383's cost was
+    // nine cancelled jobs across four PRs.
+    const ALLOWED_HARDCODED_CACHE = new Set(['dashboard-smoke'])
+
     const offenders = setupNodeSteps
-      .filter(({ step }) => stepInput(step, 'cache') === 'npm')
+      .filter(({ job, step }) => stepInput(step, 'cache') === 'npm' && !ALLOWED_HARDCODED_CACHE.has(job.id))
       .map(({ job }) => `${job.id} (ci.yml:${job.line})`)
-    assert.deepEqual(offenders, [], `setup-node steps hardcoding 'cache: npm': ${offenders.join(', ')}`)
+    assert.deepEqual(
+      offenders,
+      [],
+      "setup-node steps hardcoding 'cache: npm'. Routed jobs must use " +
+        `'cache: ${ROUTED_CACHE}'; an unrouted job needs a deliberate entry in ` +
+        `ALLOWED_HARDCODED_CACHE with a reason: ${offenders.join(', ')}`
+    )
+
+    // The allowlist must not outlive its entries. A stale name here would silently
+    // permit a future job that happens to be called `dashboard-smoke`, and would
+    // hide the removal of the producer itself.
+    const present = new Set(setupNodeSteps.map(({ job }) => job.id))
+    const stale = [...ALLOWED_HARDCODED_CACHE].filter(id => !present.has(id))
+    assert.deepEqual(
+      stale,
+      [],
+      `ALLOWED_HARDCODED_CACHE names job(s) that no longer have a setup-node step: ${stale.join(', ')}`
+    )
   })
 
   it('every routed cache still declares cache-dependency-path for the hosted branch', () => {
@@ -315,6 +342,211 @@ describe('npm cache across all workflows (#7383)', () => {
       [],
       'a job pinned to a self-hosted runner must not restore an npm cache — its ~/.npm is ' +
         `already warm, so the restore is a download over a superset of itself (#7383):\n  ${offenders.join('\n  ')}`
+    )
+  })
+})
+
+/**
+ * The hosted cache keeps a producer (#7386).
+ *
+ * `docs/decisions/2026-08-npm-cache-producer.md`: the `node-cache-Linux-x64-npm-*`
+ * entry a FORK PR restores on ubuntu-24.04 can only be saved by a job that runs
+ * on a GitHub-hosted runner AND on `main` — a PR's cache writes are scoped to its
+ * own ref, so no fork ever helps the next one. #7385 emptied `npmcache` on the
+ * self-hosted pool, which was right for those runners and left nothing on `main`
+ * saving the entry.
+ *
+ * Two jobs restore that: `dashboard-smoke` on every push to `main` (the primary —
+ * it was already hosted and already ran `npm ci` uncached), and the k8s nightly
+ * daily (the fallback). Until now the invariant was prose in three comments.
+ *
+ * The trap is sharper than "someone might edit it". The all-workflows guard above
+ * REQUIRES that a self-hosted job not hardcode an npm cache — correctly, that is
+ * #7383 — so moving a producer to the self-hosted pool would make CI itself demand
+ * the removal of `cache: npm`, going green while deleting the producer. A guard
+ * that drives the defect next to it needs a counterpart.
+ *
+ * SCOPED TO THE PROPERTY, NOT THE ROSTER. This asserts "some hosted job produces
+ * the entry on a push to main, and some producer runs on a schedule" — not
+ * "these two files exist". Naming files here would rebuild the hardcoded-roster
+ * defect that this whole PR and docs/false-safety-guards.md entry 16 are about.
+ * Swapping in an equivalent producer passes; removing the last one fails.
+ *
+ * The `ALLOWED_HARDCODED_CACHE` allowlist in the suite above is name-based, and
+ * necessarily so — an exception has to name what it excepts. Its staleness check
+ * therefore DOES fire when a producer job is renamed. That is intended: renaming
+ * the one job allowed to hardcode `cache: npm` is exactly when someone should
+ * re-read why the exception exists.
+ */
+describe('the hosted npm cache keeps a producer (#7386)', () => {
+  let workflows
+  let producers
+
+  before(async () => {
+    // Load only — the positive control is an `it()` below, never an assertion in
+    // `before()`. A failed hook aborts its subtests while node:test still prints
+    // `# fail 0` in the aggregate summary; the run exits non-zero (and
+    // assert-test-count.mjs propagates that), but anything reading the summary
+    // sees a clean count. Measured: an earlier draft reported `pass 11, fail 0`
+    // on a mutation it had actually caught. Creating the reporting half of this
+    // file's own defect class inside it is not on.
+    workflows = await readWorkflows()
+
+    // A PRODUCER: a setup-node step that really saves the hosted entry.
+    //   - hosted AND x86_64 (a self-hosted runner has npmcache empty by #7383 and
+    //     saves nothing; an ubuntu-*-arm runner saves the arm64 entry, which no
+    //     hosted fork job reads),
+    //   - unconditionally reachable — a job-level `if:` can switch the producer
+    //     off without touching anything this file used to look at,
+    //   - `cache: npm` literally — a routed expression resolves to empty on the
+    //     self-hosted branch, so a routed job is not a dependable producer,
+    //   - the three-lockfile key, or it produces an entry under the WRONG key.
+    producers = workflows.flatMap(w =>
+      w.jobs.flatMap(job =>
+        job.steps
+          .filter(st => st.some(l => l.includes(SETUP_NODE)))
+          .filter(() => isHostedX64Linux(job.runsOn) && isUnconditional(job))
+          .filter(st => stepInput(st, 'cache') === 'npm')
+          .filter(st => stepInput(st, 'cache-dependency-path') === LOCKFILE_GLOB)
+          .map(() => ({ workflow: w, job }))
+      )
+    )
+  })
+
+  /** The `on:` block — everything above the jobs mapping. */
+  const triggers = w => w.text.slice(0, w.text.indexOf('\njobs:'))
+
+  /** The lines strictly more indented than `lines[at]` (its YAML sub-block). */
+  const subBlock = (lines, at) => {
+    const indent = /^(\s*)/.exec(lines[at])[1].length
+    const out = []
+    for (let i = at + 1; i < lines.length; i++) {
+      if (/^\s*$/.test(lines[i]) || /^\s*#/.test(lines[i])) continue
+      if (/^(\s*)/.exec(lines[i])[1].length <= indent) break
+      out.push(lines[i])
+    }
+    return out
+  }
+
+  /** The sub-block under the first line matching `re`, plus that line's own tail. */
+  const blockFor = (lines, re) => {
+    const at = lines.findIndex(l => re.test(l))
+    if (at === -1) return null
+    return [lines[at], ...subBlock(lines, at)].join('\n')
+  }
+
+  /**
+   * Does this workflow run on a push to the DEFAULT BRANCH, unfiltered?
+   *
+   * Three loose-match traps, each measured green before being closed:
+   *
+   * 1. Not `/push:/`. `release.yml` is `on: push: tags: ['v*']` with hosted jobs
+   *    that DO carry `cache: npm` and the right key, so a bare match let it stand
+   *    in for the real producer — deleting dashboard-smoke's cache left the suite
+   *    GREEN.
+   * 2. Not `branches:` and `main` tested INDEPENDENTLY over the push block. A
+   *    `paths: [packages/main-app/**]` alongside `branches: [release]` satisfies
+   *    both halves while the workflow never runs on main. The branch check now
+   *    reads the `branches:` sub-block only.
+   * 3. A `paths:`/`paths-ignore:` filter makes the push conditional on which
+   *    files changed — so a lockfile-only change could skip the producer, which
+   *    is precisely when the cache needs re-saving. Treated as not-a-producer.
+   */
+  const triggersOnPushToMain = w => {
+    const lines = triggers(w).split('\n')
+    const at = lines.findIndex(l => /^\s*push:\s*$/.test(l))
+    if (at === -1) return false
+    const push = subBlock(lines, at)
+    if (push.some(l => /^\s*paths(-ignore)?:/.test(l))) return false
+    const branches = blockFor(push, /^\s*branches:/)
+    return branches !== null && /\bmain\b/.test(branches)
+  }
+
+  /**
+   * A GitHub-hosted x86_64 Linux runner.
+   *
+   * `/ubuntu-/` alone was wrong on the one axis this whole record is built on:
+   * `ubuntu-24.04-arm` is a real GitHub label, and it saves
+   * `node-cache-Linux-arm64-*` — NOT the `Linux-x64` entry a fork PR on
+   * ubuntu-24.04 restores. Measured: moving the producer there left the suite
+   * green while the entry stopped being produced.
+   */
+  const isHostedX64Linux = runsOn =>
+    !/self-hosted/.test(runsOn) && /ubuntu-/.test(runsOn) && !/\barm\b|arm64/i.test(runsOn)
+
+  /**
+   * Is the job unconditionally reachable — no job-level `if:`?
+   *
+   * ci.yml's comment on the producer tells the reader not to "gate it behind an
+   * `if:`/`needs:`" and says this file pins that. It did not: adding
+   * `if: github.event_name == 'pull_request'` to dashboard-smoke left the suite
+   * at pass 15 / fail 0 with the producer gone. A comment claiming a stronger
+   * check than its code performs is this repo's entry-13 shape, so the code now
+   * matches the comment rather than the comment being softened.
+   *
+   * Job-level only: a step-level `if:` is normal and irrelevant here, so scan
+   * the job body ABOVE `steps:`.
+   */
+  const isUnconditional = job => {
+    const stepsAt = job.body.findIndex(l => /^\s*steps:\s*$/.test(l))
+    const head = stepsAt === -1 ? job.body : job.body.slice(0, stepsAt)
+    return !head.some(l => /^\s{2,}if:/.test(l))
+  }
+
+  it('finds at least one producer at all', () => {
+    // Positive control AND the load-bearing assertion. If this reaches zero, every
+    // fork PR cold-installs the monorepo across ~12 jobs and nothing else notices.
+    assert.ok(
+      producers.length > 0,
+      'NO job produces the hosted npm cache. A fork PR on ubuntu-24.04 restores ' +
+        '`node-cache-Linux-x64-npm-*`, and only a GitHub-hosted job running on `main` with ' +
+        '`cache: npm` + the three-lockfile key can save it. See ' +
+        'docs/decisions/2026-08-npm-cache-producer.md for what to restore and where.'
+    )
+  })
+
+  it('at least one producer runs on every push to main', () => {
+    // The primary. A daily producer alone leaves a window after each lockfile
+    // change; a push-to-main producer closes it.
+    const onPush = producers.filter(p => triggersOnPushToMain(p.workflow))
+    assert.ok(
+      onPush.length > 0,
+      'no push-to-main producer. Something must save the hosted cache on every push, or a ' +
+        'lockfile change leaves fork PRs cold-installing until the next scheduled producer. ' +
+        `Producers found: ${producers.map(p => `${p.workflow.name}:${p.job.id}`).join(', ') || '(none)'}`
+    )
+  })
+
+  it('at least one producer runs on a schedule', () => {
+    // The fallback. Keeps the entry warm even if the push producer is skipped,
+    // and re-saves after the 7-day eviction on a quiet week.
+    const onSchedule = producers.filter(p => /^\s*schedule:/m.test(triggers(p.workflow)))
+    assert.ok(
+      onSchedule.length > 0,
+      'no scheduled producer. Producers found: ' +
+        `${producers.map(p => `${p.workflow.name}:${p.job.id}`).join(', ') || '(none)'}`
+    )
+  })
+
+  it('no producer sits on a self-hosted runner', () => {
+    // The counterpart to the all-workflows self-hosted rule above: that guard
+    // would DEMAND removing `cache: npm` from a producer moved to the self-hosted
+    // pool. This one fails first, and says why.
+    const stranded = workflows.flatMap(w =>
+      w.jobs
+        .filter(job => /self-hosted/.test(job.runsOn))
+        .filter(job =>
+          job.steps.some(st => st.some(l => l.includes(SETUP_NODE)) && stepInput(st, 'cache') === 'npm')
+        )
+        .map(job => `${w.name}:${job.id}`)
+    )
+    assert.deepEqual(
+      stranded,
+      [],
+      'a job on a self-hosted runner declares `cache: npm`. It saves nothing there (#7383), so ' +
+        'if this was a producer being moved, the move removed a producer — and the ' +
+        'all-workflows guard above will now demand you delete the `cache:` line, completing it ' +
+        `silently. See docs/decisions/2026-08-npm-cache-producer.md:\n  ${stranded.join('\n  ')}`
     )
   })
 })

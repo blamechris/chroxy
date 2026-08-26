@@ -30,6 +30,14 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
+          # #7386: this is not only a convenience for this job — it is the
+          # SCHEDULED FALLBACK producer of the hosted `node-cache-Linux-x64-npm-*`
+          # entry that fork PRs on ubuntu-24.04 restore. ci.yml's `dashboard-smoke`
+          # is the primary (every push to main); this one re-saves after the 7-day
+          # eviction on a quiet week and covers a run where the primary is skipped.
+          # Keep this job hosted, scheduled, and cached — ci-npm-cache-routing.test.js
+          # asserts a scheduled producer exists and will fail if this stops being one.
+          # See docs/decisions/2026-08-npm-cache-producer.md.
           cache: npm
           cache-dependency-path: '**/package-lock.json'
 
