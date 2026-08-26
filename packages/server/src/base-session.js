@@ -1652,13 +1652,25 @@ export class BaseSession extends EventEmitter {
    * interrupt-safety timeout in #7375.
    *
    * @param {string} message Reason forwarded on the wire (clients log it; the
-   *   user-visible copy is fixed client-side). Must be non-empty — the wire
-   *   schema requires a string.
+   *   user-visible copy is fixed client-side). Falsy or empty is coerced to a
+   *   generic reason — the wire schema declares `message: z.string()`, so an
+   *   empty one would fail validation at the client.
    */
   _expirePendingPermissions(message) {
     if (this._pendingPermissionIds.size === 0) return
+    // The doc below used to say `message` must be non-empty "because the wire
+    // schema requires it" and then not enforce it — a comment describing a
+    // stronger guarantee than the code delivers, which is the defect class this
+    // whole change belongs to. ServerPermissionExpiredSchema declares
+    // `message: z.string()`, so a caller passing '' or undefined would emit a
+    // frame that fails validation at the client. Default rather than throw: the
+    // callers are turn-teardown paths, and taking a session down over a missing
+    // log string would be a worse failure than a generic one.
+    const reason = typeof message === 'string' && message.length > 0
+      ? message
+      : 'Permission request expired (the turn it belonged to ended)'
     for (const requestId of this._pendingPermissionIds) {
-      this.emit('permission_expired', { requestId, message })
+      this.emit('permission_expired', { requestId, message: reason })
     }
     this._pendingPermissionIds.clear()
     this._onPendingPermissionsAbandoned()

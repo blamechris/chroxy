@@ -4,8 +4,6 @@ import { mkdtempSync, rmSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { EventEmitter } from 'node:events'
-import { Readable, Writable } from 'node:stream'
 
 import { ClaudeTuiSession } from '../src/claude-tui-session.js'
 import { CliSession } from '../src/cli-session.js'
@@ -37,7 +35,7 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 
 function makeTui() {
   const skillsDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-skills-'))
-  const session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir, repoSkillsDir: null })
+  const session = new ClaudeTuiSession({ cwd: tmpdir(), skillsDir, repoSkillsDir: null })
   session.on('error', () => {})
   return { session, skillsDir }
 }
@@ -138,6 +136,29 @@ describe('#7382 — claude-tui tracks and expires its permission prompts', () =>
     assert.equal(expired.length, 0, 'an answered prompt is not reported as expired')
   })
 
+  it('an empty or missing reason is coerced, never emitted as-is', () => {
+    // ServerPermissionExpiredSchema declares `message: z.string()`, so an empty
+    // one fails validation at the client. The doc claimed this was required and
+    // the code did not enforce it — comment stronger than code, the same class
+    // this change is about.
+    session.notifyPermissionPending('perm-empty')
+    session._expirePendingPermissions('')
+    assert.equal(expired.length, 1)
+    assert.equal(typeof expired[0].message, 'string')
+    assert.ok(expired[0].message.length > 0, 'empty reason coerced to a generic one')
+
+    expired.length = 0
+    session.notifyPermissionPending('perm-undef')
+    session._expirePendingPermissions(undefined)
+    assert.ok(expired[0].message.length > 0, 'missing reason coerced too')
+  })
+
+  it('POSITIVE CONTROL: a real reason is passed through verbatim, not overwritten', () => {
+    session.notifyPermissionPending('perm-real')
+    session._expirePendingPermissions('a specific reason')
+    assert.equal(expired[0].message, 'a specific reason')
+  })
+
   it('every expiry carries a non-empty message (the wire schema requires it)', () => {
     session.notifyPermissionPending('perm-msg')
     session._clearTurnEndState()
@@ -213,7 +234,7 @@ describe('#7382 — the bookkeeping lives on BaseSession, so it cannot be forgot
       tmpDirs.push(skillsDir)
       let probe
       try {
-        probe = new cls({ cwd: '/tmp', skillsDir, repoSkillsDir: null })
+        probe = new cls({ cwd: tmpdir(), skillsDir, repoSkillsDir: null })
       } catch (err) {
         assert.fail(`${file}: could not construct for the behavioural probe (${err?.message}). Add the opts it needs — do not skip it.`)
       }
