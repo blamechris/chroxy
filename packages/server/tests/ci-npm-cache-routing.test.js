@@ -99,9 +99,21 @@ function parseSteps(bodyLines) {
   })
 }
 
+/**
+ * Drop comment lines.
+ *
+ * ci.yml is heavily commented and several of those comments quote the very
+ * strings this file matches on — `cache: npm` in the rationale for removing it,
+ * and `npm ci` twice in `server-tests-windows`'s explanation of its 20-minute
+ * budget. A guard that reads prose as configuration is satisfiable by prose.
+ */
+function code(lines) {
+  return lines.filter(l => !/^\s*#/.test(l))
+}
+
 /** The value of a `with:` input inside a single step block, or undefined. */
 function stepInput(stepLines, key) {
-  for (const line of stepLines) {
+  for (const line of code(stepLines)) {
     const m = new RegExp(`^\\s*${key}:\\s*(.*)$`).exec(line)
     if (!m) continue
     let v = m[1].trim()
@@ -166,7 +178,9 @@ describe('CI npm cache routing (#7383)', () => {
   it('runner-target exposes an npmcache output', () => {
     const job = jobs.find(j => j.id === 'runner-target')
     assert.ok(
-      job.body.some(l => /^\s*npmcache:\s*\$\{\{\s*steps\.resolve\.outputs\.npmcache\s*\}\}\s*$/.test(l)),
+      code(job.body).some(l =>
+        /^\s*npmcache:\s*\$\{\{\s*steps\.resolve\.outputs\.npmcache\s*\}\}\s*$/.test(l)
+      ),
       "runner-target must expose 'npmcache: ${{ steps.resolve.outputs.npmcache }}' in its outputs"
     )
   })
@@ -176,8 +190,13 @@ describe('CI npm cache routing (#7383)', () => {
     // the `if` body is the trusted/self-hosted case, the `else` body is the fork
     // case. Asserting each npmcache value inside its own branch is what makes a
     // swap fail — checking only that both strings appear somewhere would not.
+    // The resolve STEP's shell, comments stripped — not the job body. The long
+    // rationale comment directly above that shell names both branch values, so a
+    // job-body scan would be reading the explanation rather than the code.
     const job = jobs.find(j => j.id === 'runner-target')
-    const text = job.body.join('\n')
+    const resolveStep = job.steps.find(s => s.some(l => /^\s*(- )?id: resolve\s*$/.test(l)))
+    assert.ok(resolveStep, "expected a step with 'id: resolve' in runner-target")
+    const text = code(resolveStep).join('\n')
 
     const ifAt = text.indexOf('echo \'runner=["self-hosted"')
     const elseAt = text.indexOf('echo \'runner="ubuntu-24.04"\'')
@@ -232,10 +251,16 @@ describe('CI npm cache routing (#7383)', () => {
     // `cache:` off entirely costs the self-hosted pool nothing (which is why it
     // would go unnoticed) while making every fork PR do a cold `npm ci` of the
     // whole monorepo on a fresh VM.
+    // Scans STEP bodies, minus comments — not the whole job. `server-tests-windows`
+    // explains its 20-minute budget in prose that mentions `npm ci` twice, so a
+    // job-body scan reads two comments as install steps. It reaches the right
+    // verdict there only because that job also genuinely installs; a job that
+    // merely *discussed* npm ci would be misclassified, and then required to
+    // declare a cache it has no use for.
     const installers = jobs.filter(
       job =>
         ROUTED_RUNNER_OUTPUTS.some(o => job.runsOn.includes(o)) &&
-        job.body.some(l => /(^|\s)npm ci(\s|$)/.test(l))
+        job.steps.some(step => code(step).some(l => /(^|\s)npm ci(\s|$)/.test(l)))
     )
     assert.ok(
       installers.length >= 12,
