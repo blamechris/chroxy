@@ -70,6 +70,9 @@ import {
   handlePermissionRequest as sharedPermissionRequest,
   handlePermissionResolved as sharedPermissionResolved,
   handlePermissionExpired as sharedPermissionExpired,
+  // #7380 — one wording for the #2833 already-answered race, shared with the
+  // dashboard (which surfaces the same words as an info toast).
+  PERMISSION_ALREADY_ANSWERED_NOTICE,
   handlePermissionTimeout as sharedPermissionTimeout,
   // permission_rules_updated migrated to the shared dispatch table (#5556)
   // #5454 — remaining both-sides duplicates extracted into store-core
@@ -3155,17 +3158,64 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       const { requestId: expiredRequestId, systemMessage: expiredSystemMsg } =
         sharedPermissionExpired(msg);
       if (expiredRequestId) {
-        console.warn(`[ws] Permission ${expiredRequestId} expired: ${msg.message}`);
-        const expTargetId = (msg.sessionId as string) || get().activeSessionId;
-        if (expTargetId && get().sessionStates[expTargetId]) {
-          updateSession(expTargetId, (ss) => ({
-            messages: ss.messages.map((m) =>
-              m.requestId === expiredRequestId && m.type === 'prompt'
-                ? { ...m, content: `${m.content}\n${expiredSystemMsg.content}`, options: undefined }
-                : m
-            ),
-          }));
+        // #7380 — the #2833 race, which #7375 made routine. `permission_expired`
+        // no longer fires only on the five-minute timeout: it now fires whenever
+        // a claude-cli turn dies (mode switch, model switch, Stop, crash). So the
+        // window between "user taps Allow" and "server expires the prompt" is hit
+        // often, and on a phone over a cellular tunnel it is wide.
+        //
+        // Without this gate the app appended "(Expired — this permission was
+        // already handled or timed out)" to a prompt the user DID answer
+        // successfully, and gave no sign their tap had landed.
+        //
+        // The signal is the prompt's own `answered` decision token (#6222/#6223),
+        // set synchronously by `markPromptAnsweredByRequestId` the moment
+        // `sendPermissionResponse` puts the frame on the wire — so it is always
+        // present before any server reply can arrive. The dashboard gates the
+        // same behaviour on its separate `resolvedPermissions` map; that the two
+        // clients read different signals for one question is #7388.
+        //
+        // Scan every session, not just the target: the push-notification path
+        // answers prompts in background sessions, which is exactly what
+        // `markPromptAnsweredByRequestId` walks all sessions for.
+        const alreadyAnswered = Object.values(get().sessionStates).some((ss) =>
+          ss.messages.some(
+            (m) => m.requestId === expiredRequestId && m.type === 'prompt' && m.answered !== undefined
+          )
+        );
+        if (!alreadyAnswered) {
+          console.warn(`[ws] Permission ${expiredRequestId} expired: ${msg.message}`);
+          const expTargetId = (msg.sessionId as string) || get().activeSessionId;
+          if (expTargetId && get().sessionStates[expTargetId]) {
+            updateSession(expTargetId, (ss) => ({
+              messages: ss.messages.map((m) =>
+                m.requestId === expiredRequestId && m.type === 'prompt'
+                  ? { ...m, content: `${m.content}\n${expiredSystemMsg.content}`, options: undefined }
+                  : m
+              ),
+            }));
+          }
+        } else {
+          // Reassure rather than swallow. The dashboard raises an info toast
+          // (#2839); the app has no toast mechanism by design (#4878/#4879) and
+          // says it in the transcript instead — same words, from the shared
+          // constant, because "the same reassurance" is only a fact if there is
+          // one string.
+          const noticeMsg: ChatMessage = {
+            id: nextMessageId('system'),
+            type: 'system',
+            content: PERMISSION_ALREADY_ANSWERED_NOTICE,
+            timestamp: Date.now(),
+          };
+          const noticeTargetId = (msg.sessionId as string) || get().activeSessionId;
+          if (noticeTargetId && get().sessionStates[noticeTargetId]) {
+            updateSession(noticeTargetId, (ss) => ({ messages: [...ss.messages, noticeMsg] }));
+          } else {
+            get().addMessage(noticeMsg);
+          }
         }
+        // Both branches drain the banner and the pulled input: the request is
+        // over either way, so the row must not sit there offering buttons.
         // Auto-dismiss matching notification banner
         set((s) => ({
           sessionNotifications: (s.sessionNotifications ?? []).filter(

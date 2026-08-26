@@ -655,6 +655,9 @@ export {
   handlePermissionRequest,
   handlePermissionResolved,
   handlePermissionExpired,
+  // #7380 — the one wording for the #2833 already-answered race, shared because
+  // the two clients surface it through different channels (toast vs transcript).
+  PERMISSION_ALREADY_ANSWERED_NOTICE,
   handlePermissionTimeout,
   handlePermissionRulesUpdated,
   handleSessionList,

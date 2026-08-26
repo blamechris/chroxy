@@ -2043,11 +2043,20 @@ export const SWITCH_FIXTURES: ContractFixture[] = [
     // requestId + type==='prompt') and clears its options (options is dropped by
     // the harness normalize, so not asserted). Target = msg.sessionId ||
     // activeSessionId; no-op if requestId is null or the session/prompt is absent
-    // — so the fixture seeds a prompt carrying the requestId. The dashboard's
-    // #2833 already-resolved early-return is gated on `resolvedPermissions`, which
-    // FixtureInitialState can't seed, so both clients take the same path → single
-    // expect. The banner-drain is a sessionNotifications side effect outside the
-    // asserted messages slice.
+    // — so the fixture seeds a prompt carrying the requestId.
+    //
+    // Both clients take the same path here because the seeded prompt is
+    // UNANSWERED, which is now the load-bearing detail: as of #7380 the app's
+    // already-answered early-return is gated on the prompt's own `answered`
+    // token, which FixtureInitialState CAN seed. The dashboard's stays gated on
+    // `resolvedPermissions`, which it cannot. So the suppression path — the one
+    // #7375 made routine — still has no cross-client contract coverage, and it is
+    // the difference in signal, not the harness, that prevents it. Unifying them
+    // (and then covering it here, `divergent` if they legitimately differ) is
+    // #7388.
+    //
+    // The banner-drain is a sessionNotifications side effect outside the asserted
+    // messages slice.
     name: 'permission_expired appends the expired suffix to the matching prompt in place (both clients)',
     type: 'permission_expired',
     init: {
