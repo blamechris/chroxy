@@ -2046,14 +2046,13 @@ export const SWITCH_FIXTURES: ContractFixture[] = [
     // — so the fixture seeds a prompt carrying the requestId.
     //
     // Both clients take the same path here because the seeded prompt is
-    // UNANSWERED, which is now the load-bearing detail: as of #7380 the app's
-    // already-answered early-return is gated on the prompt's own `answered`
-    // token, which FixtureInitialState CAN seed. The dashboard's stays gated on
-    // `resolvedPermissions`, which it cannot. So the suppression path — the one
-    // #7375 made routine — still has no cross-client contract coverage, and it is
-    // the difference in signal, not the harness, that prevents it. Unifying them
-    // (and then covering it here, `divergent` if they legitimately differ) is
-    // #7388.
+    // UNANSWERED — the load-bearing detail. As of #7388 BOTH clients gate the
+    // already-answered early-return on the prompt's own `answered` decision
+    // token (shared `isPermissionRequestAnswered`), which FixtureInitialState
+    // CAN seed, so the suppression path — the one #7375 made routine — is
+    // covered by the two fixtures below rather than being untestable here. It
+    // previously was untestable: the dashboard gated on `resolvedPermissions`,
+    // which the harness cannot seed.
     //
     // The banner-drain is a sessionNotifications side effect outside the asserted
     // messages slice.
@@ -2070,6 +2069,151 @@ export const SWITCH_FIXTURES: ContractFixture[] = [
               content: 'Bash: rm -rf /tmp/x',
               tool: 'Bash',
               requestId: 'req-1',
+              options: [{ label: 'Allow', value: 'allow' }, { label: 'Deny', value: 'deny' }],
+            } as unknown as ChatMessage,
+          ],
+        },
+      },
+    },
+    message: {
+      type: 'permission_expired',
+      requestId: 'req-1',
+      sessionId: 's1',
+      message: 'permission response could not be routed (expired/handled)',
+    },
+    expect: {
+      sessions: {
+        s1: {
+          messages: [
+            {
+              id: 'prompt-req-1',
+              type: 'prompt',
+              content: 'Bash: rm -rf /tmp/x\n(Expired — this permission was already handled or timed out)',
+              tool: 'Bash',
+            },
+          ],
+        },
+      },
+    },
+  },
+  {
+    // #7388 — the #2833 race, which #7375 turned from a five-minute-timeout edge
+    // case into a routine one (permission_expired now fires whenever a turn
+    // dies). The user answered; the server expired the prompt anyway. NEITHER
+    // client may append "(Expired — …)" to a prompt that was answered, and the
+    // prompt's `expiresAt`/content must be left alone.
+    //
+    // This is the fixture the old note here said could not exist: the gate used
+    // to be the dashboard's `resolvedPermissions` map (unseedable by
+    // FixtureInitialState) on one side and the app's `answered` token on the
+    // other. Both now call the shared `isPermissionRequestAnswered`, which reads
+    // `answered` — a seedable ChatMessage field — so the suppression path is
+    // finally covered on BOTH clients from one row.
+    //
+    // MUTATION THAT MUST GO RED: point either client's gate back at its own
+    // signal (dashboard `resolvedPermissions[requestId]`, which this fixture
+    // deliberately does not seed) and the dashboard side appends the expired
+    // suffix — message count and content both diverge from the expectation below.
+    name: 'permission_expired does NOT expire a prompt the user already answered (#2833 race)',
+    type: 'permission_expired',
+    init: {
+      activeSessionId: 's1',
+      sessions: {
+        s1: {
+          messages: [
+            {
+              id: 'prompt-req-1',
+              type: 'prompt',
+              content: 'Bash: rm -rf /tmp/x',
+              tool: 'Bash',
+              requestId: 'req-1',
+              // The decision token the send path stamps (#6222/#6223) — an enum
+              // value, never a display label.
+              answered: 'allow',
+              options: [{ label: 'Allow', value: 'allow' }, { label: 'Deny', value: 'deny' }],
+            } as unknown as ChatMessage,
+          ],
+        },
+      },
+    },
+    message: {
+      type: 'permission_expired',
+      requestId: 'req-1',
+      sessionId: 's1',
+      message: 'permission response could not be routed (expired/handled)',
+    },
+    divergent: {
+      app: {
+        sessions: {
+          s1: {
+            messages: [
+              {
+                id: 'prompt-req-1',
+                type: 'prompt',
+                // Unchanged — no "(Expired …)" suffix.
+                content: 'Bash: rm -rf /tmp/x',
+                tool: 'Bash',
+              },
+              // The reassurance, as a transcript line.
+              { type: 'system', content: 'Already answered — your response was already recorded' },
+            ],
+          },
+        },
+        // Proven absent, not assumed: the app has no toast mechanism (#4878/#4879).
+        infoNotifications: [],
+      },
+      dashboard: {
+        sessions: {
+          s1: {
+            messages: [
+              {
+                id: 'prompt-req-1',
+                type: 'prompt',
+                content: 'Bash: rm -rf /tmp/x',
+                tool: 'Bash',
+              },
+            ],
+          },
+        },
+        // Same words, different channel — asserted, not merely asserted-about.
+        infoNotifications: ['Already answered — your response was already recorded'],
+      },
+      reason:
+        'Both clients suppress the expiry note identically (shared isPermissionRequestAnswered). ' +
+        'They differ only in the CHANNEL for the reassurance: the dashboard raises an info ' +
+        'toast (#2839), the app has no toast mechanism by design (#4878/#4879) and appends the ' +
+        'same shared string (PERMISSION_ALREADY_ANSWERED_NOTICE) to the transcript (#7380). ' +
+        'Hence one extra system message on the app side and an infoNotifications entry on the ' +
+        'dashboard side.',
+    },
+  },
+  {
+    // #7388 / #7380 — the INVERSE input, and the reason the gate is
+    // `isPermissionDecision` rather than `answered !== undefined`.
+    // `history_replay_end` blanket-stamps the placeholder `answered: '(resolved)'`
+    // on every unanswered prompt in the active session. Under a defined-check
+    // that placeholder is indistinguishable from a real decision, so a prompt
+    // NOBODY answered would be told "your response was already recorded" and
+    // would silently lose its expiry note.
+    //
+    // MUTATION THAT MUST GO RED: relax `isPermissionRequestAnswered` to
+    // `m.answered !== undefined` (or to any non-empty string) and both clients
+    // suppress here — the expired suffix vanishes from the expectation below.
+    name: 'permission_expired still expires a prompt carrying only the (resolved) replay placeholder',
+    type: 'permission_expired',
+    init: {
+      activeSessionId: 's1',
+      sessions: {
+        s1: {
+          messages: [
+            {
+              id: 'prompt-req-1',
+              type: 'prompt',
+              content: 'Bash: rm -rf /tmp/x',
+              tool: 'Bash',
+              requestId: 'req-1',
+              // NOT a decision token — history_replay_end's placeholder.
+              answered: '(resolved)',
               options: [{ label: 'Allow', value: 'allow' }, { label: 'Deny', value: 'deny' }],
             } as unknown as ChatMessage,
           ],

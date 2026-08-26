@@ -956,6 +956,9 @@ export {
   // (history_replay_end stamps '(resolved)' on prompts nobody answered).
   isPermissionDecision,
   PERMISSION_DECISION_TOKENS,
+  // #7388 — the ONE "was this permission already answered by a user?" gate,
+  // applied by both clients' permission_expired handlers (the #2833 race).
+  isPermissionRequestAnswered,
   firstLivePermissionPrompt,
   livePermissionPrompts,
   countLivePermissionPrompts,

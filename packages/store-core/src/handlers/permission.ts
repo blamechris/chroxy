@@ -140,14 +140,21 @@ export const PERMISSION_ALREADY_ANSWERED_NOTICE =
  * The system message text is the same line both clients append to the
  * matching prompt today: `"(Expired — this permission was already handled or
  * timed out)"`. The handler does NOT decide whether to apply it — the call
- * site gates on `requestId` and on whether the prompt was already resolved.
+ * site gates on `requestId` and on whether the prompt was already answered.
  *
- * That already-resolved gate stays platform-specific because the two clients
- * read DIFFERENT signals for it: the dashboard keys on its `resolvedPermissions`
- * map, the app (#7380) on the prompt message's own `answered` field — via
- * `isPermissionDecision`, NOT a defined-check, because `history_replay_end`
- * stamps the placeholder `'(resolved)'` on prompts nobody answered. Unifying
- * the two signals is #7388.
+ * #7388: that gate is now ONE predicate, `isPermissionRequestAnswered`
+ * (pending-permissions.ts), which both clients call — keyed on the prompt's own
+ * `answered` decision token via `isPermissionDecision`, NOT a defined-check,
+ * because `history_replay_end` stamps the placeholder `'(resolved)'` on prompts
+ * nobody answered. It previously WAS platform-specific (dashboard:
+ * `resolvedPermissions`; app: `answered`, #7380), which left the suppression
+ * path — the one #7375 made routine — with no cross-client contract coverage,
+ * because `resolvedPermissions` is not seedable by `FixtureInitialState`.
+ *
+ * What the two clients still legitimately differ on is the CHANNEL for the
+ * reassurance: the dashboard raises an info toast, the app appends
+ * {@link PERMISSION_ALREADY_ANSWERED_NOTICE} to the transcript. That difference
+ * is pinned by a `divergent` contract fixture, not left to chance.
  */
 export function handlePermissionExpired(msg: Record<string, unknown>): {
   requestId: string | null

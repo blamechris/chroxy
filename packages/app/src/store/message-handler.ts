@@ -73,9 +73,11 @@ import {
   // #7380 — one wording for the #2833 already-answered race, shared with the
   // dashboard (which surfaces the same words as an info toast).
   PERMISSION_ALREADY_ANSWERED_NOTICE,
-  // #7380 — a REAL user decision, not merely `answered` being set:
-  // history_replay_end stamps '(resolved)' on prompts nobody answered.
-  isPermissionDecision,
+  // #7388 — one predicate for "was this permission already answered?", shared
+  // with the dashboard so the #2833 suppression cannot drift between clients.
+  // Keys on a REAL user decision, not merely `answered` being set:
+  // history_replay_end stamps '(resolved)' on prompts nobody answered (#7380).
+  isPermissionRequestAnswered,
   handlePermissionTimeout as sharedPermissionTimeout,
   // permission_rules_updated migrated to the shared dispatch table (#5556)
   // #5454 — remaining both-sides duplicates extracted into store-core
@@ -3174,28 +3176,20 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         // The signal is the prompt's own `answered` decision token (#6222/#6223),
         // set synchronously by `markPromptAnsweredByRequestId` the moment
         // `sendPermissionResponse` puts the frame on the wire — so it is always
-        // present before any server reply can arrive. The dashboard gates the
-        // same behaviour on its separate `resolvedPermissions` map; that the two
-        // clients read different signals for one question is #7388.
+        // present before any server reply can arrive.
         //
-        // `isPermissionDecision`, NOT `answered !== undefined`. `history_replay_end`
-        // blanket-stamps `answered: '(resolved)'` on every unanswered prompt in the
-        // active session, and that placeholder is indistinguishable from a real
-        // decision under a defined-check — so a prompt the user never answered
-        // would be told "your response was already recorded" AND lose its expiry
-        // note. Only the four real decision tokens count.
+        // #7388: the scan itself now lives in store-core and the DASHBOARD calls
+        // the same function, so this question has one implementation rather than
+        // two that happened to agree. See `isPermissionRequestAnswered` for why
+        // it is `isPermissionDecision` and not a defined-check (the
+        // `history_replay_end` '(resolved)' placeholder), and why it walks every
+        // session (the push-notification path answers background prompts).
         //
-        // Scan every session, not just the target: the push-notification path
-        // answers prompts in background sessions, which is exactly what
-        // `markPromptAnsweredByRequestId` walks all sessions for.
-        const alreadyAnswered = Object.values(get().sessionStates).some((ss) =>
-          ss.messages.some(
-            (m) =>
-              m.requestId === expiredRequestId &&
-              m.type === 'prompt' &&
-              isPermissionDecision(m.answered)
-          )
-        );
+        // No third argument: the app has no flat message list — `addMessage`
+        // writes into the ACTIVE session (connection.ts), so sessionStates is
+        // the whole universe here. The dashboard, which does have one and stamps
+        // `answered` into it, passes it.
+        const alreadyAnswered = isPermissionRequestAnswered(get().sessionStates, expiredRequestId);
         if (!alreadyAnswered) {
           console.warn(`[ws] Permission ${expiredRequestId} expired: ${msg.message}`);
           const expTargetId = (msg.sessionId as string) || get().activeSessionId;

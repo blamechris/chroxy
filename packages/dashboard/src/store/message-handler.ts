@@ -65,6 +65,9 @@ import {
   // #7380 — one wording for the #2833 already-answered race, shared with the app
   // (which surfaces it as a transcript line, having no toast by design).
   PERMISSION_ALREADY_ANSWERED_NOTICE,
+  // #7388 — one predicate for "was this permission already answered?", shared
+  // with the app so the #2833 suppression cannot drift between the two clients.
+  isPermissionRequestAnswered,
   // permission_rules_updated migrated to the shared dispatch table (#5556)
   // #5454 — dashboard adopts the shared permission family + the remaining
   // both-sides duplicates
@@ -5385,19 +5388,51 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         sharedPermissionExpired(msg);
       if (expiredRequestId) {
         // #6559 — prune the pulled input for an expired prompt. Hoisted above the
-        // alreadyResolved early-return so both branches drop it (guarded copy-delete).
+        // alreadyAnswered early-return so both branches drop it (guarded copy-delete).
         set((s) => {
           if (!s.permissionInputs || !Object.prototype.hasOwnProperty.call(s.permissionInputs, expiredRequestId)) return {};
           const next = { ...s.permissionInputs };
           delete next[expiredRequestId];
           return { permissionInputs: next };
         });
-        // If the user already resolved this request (via Allow/Deny/AllowSession),
-        // this is the race condition from #2833 — the server expired the prompt
-        // after we answered. Suppress the "Expired — already handled" message
-        // append so the UI does not surface this as an error to the user.
-        const alreadyResolved = Boolean(get().resolvedPermissions?.[expiredRequestId]);
-        if (alreadyResolved) {
+        // If this request was already answered (via Allow/Deny/AllowSession, on
+        // this client or another), this is the race condition from #2833 — the
+        // server expired the prompt after we answered. Suppress the
+        // "Expired — already handled" append so the UI does not surface it as an
+        // error to the user.
+        //
+        // #7388: the gate is the SHARED `isPermissionRequestAnswered`, reading the
+        // prompt's own `answered` decision token — the same signal the app uses,
+        // so "was this already answered?" now has one implementation instead of
+        // two that happened to agree. It previously read `resolvedPermissions`,
+        // which (a) is dashboard-only, (b) is capped at 1000 entries so a long
+        // session could evict the answer and resurrect the bug, and (c) cannot be
+        // seeded by `FixtureInitialState`, which is why this path had no
+        // cross-client contract coverage at all. Every OTHER read of
+        // `resolvedPermissions` is untouched (PermissionPrompt's remount-durable
+        // answered UI, ChildAgentEventList, ViewerPreWriteReview) — only this
+        // gate moves.
+        //
+        // KNOWN LIMIT, and the condition that would make it a bug: a permission
+        // with no `type:'prompt'` ChatMessage is invisible here. Child-agent
+        // permissions are exactly that — they arrive as
+        // `agent_event{eventType:'permission_request'}` and live in the parent
+        // Task bubble's `childAgentEvents[]`, so `ChildAgentEventList`'s Allow
+        // reaches `sendPermissionResponse` (setting `resolvedPermissions`) while
+        // `markPromptAnsweredByRequestId` finds no message to stamp. It is not a
+        // bug TODAY because no `permission_expired` ever reaches a child
+        // requestId: byok-session relays the child's `permission_request` upward
+        // (byok-session.js) but its FORWARDED set carries no `permission_expired`,
+        // and `_expirePendingPermissions` fires on the CHILD session's own
+        // bookkeeping. Relay child expiry upward and this gate goes silent on it
+        // — stamp `answered` on the child row (or give it a real prompt message)
+        // in the same change.
+        const alreadyAnswered = isPermissionRequestAnswered(
+          get().sessionStates,
+          expiredRequestId,
+          get().messages,
+        );
+        if (alreadyAnswered) {
           // #5008 — drain the banner stack without dropping the row from the
           // widget's durable history. See handlePermissionResolved for the
           // full rationale; this branch handles the #2833 race where expiry
