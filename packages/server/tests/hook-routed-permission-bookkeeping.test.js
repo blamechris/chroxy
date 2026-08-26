@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { EventEmitter } from 'node:events'
 import { Readable, Writable } from 'node:stream'
 
@@ -91,6 +91,39 @@ describe('#7382 — claude-tui tracks and expires its permission prompts', () =>
     assert.deepEqual(expired.map((e) => e.requestId).sort(), ['a', 'b', 'c'])
   })
 
+  // #7382 review: `_clearTurnEndState` is NOT the funnel. It has exactly two
+  // call sites (the success path and `_finishTurnError`). Three more death
+  // paths route through the SIBLING helper `_teardownTurn`, and two end the
+  // turn by hand-nulling the busy triple. Wiring only the first and calling it
+  // "the funnel" is the same defect #7375 hit — a comment claiming a stronger
+  // guarantee than the code delivers. Every path below genuinely ends the turn
+  // (each sets `_isBusy = false`), so every one must expire.
+  const DEATH_PATHS = [
+    ['_handleHardTimeout', (s) => s._handleHardTimeout()],
+    ['_handleStreamStall', (s) => s._handleStreamStall()],
+    ['_handleFirstOutputTimeout', (s) => s._handleFirstOutputTimeout()],
+    ['_onPtyGone (PTY exit/crash)', (s) => s._onPtyGone('exit')],
+  ]
+
+  for (const [name, drive] of DEATH_PATHS) {
+    it(`THE GAP: ${name} ends the turn, so it must expire the prompt`, () => {
+      session.notifyPermissionPending('perm-path')
+      drive(session)
+      assert.equal(session._isBusy, false, `${name} really ended the turn`)
+      assert.deepEqual(
+        expired.map((e) => e.requestId),
+        ['perm-path'],
+        `${name} ended the turn without expiring — the card stays live and the daemon entry is never released`,
+      )
+    })
+  }
+
+  it('THE GAP: destroy() expires too', async () => {
+    session.notifyPermissionPending('perm-destroy')
+    await session.destroy()
+    assert.deepEqual(expired.map((e) => e.requestId), ['perm-destroy'])
+  })
+
   it('POSITIVE CONTROL: a turn ending with nothing pending emits nothing', () => {
     session._clearTurnEndState()
     assert.equal(expired.length, 0, 'not fired unconditionally')
@@ -126,49 +159,89 @@ describe('#7382 — the bookkeeping lives on BaseSession, so it cannot be forgot
     assert.equal(typeof CliSession.prototype._expirePendingPermissions, 'function')
   })
 
-  it('THE GUARD: every hook-routed session class has the bookkeeping', async () => {
-    // The roster is DERIVED, not hardcoded: any src/*-session.js that mints a
-    // _hookSecret is hook-routed and must qualify. A hardcoded list beside a
-    // growing set is the first cause in docs/false-safety-guards.md, and a new
-    // provider is exactly the thing that would be added without updating it.
+  it('THE GUARD: every hook-routed session EXPIRES on turn death, not merely has the methods', async () => {
+    // The roster is DERIVED, not hardcoded: any src/*-session.js that uses
+    // `this._hookSecret` is hook-routed and must qualify. A hardcoded list beside
+    // a growing set is the first cause in docs/false-safety-guards.md.
+    //
+    // And this asserts BEHAVIOUR, not method presence. The first version checked
+    // `typeof cls.prototype.notifyPermissionPending === 'function'` — which, once
+    // the methods moved onto BaseSession, was guaranteed by inheritance for every
+    // candidate the loop could ever see. Proven tautological in review: a fake
+    // BaseSession subclass that minted a _hookSecret and wired NOTHING passed,
+    // and deleting claude-tui's expiry left it green too. A check that passes for
+    // everything is #7273's shape, and it was sitting in the test that cites the
+    // catalogue.
+    //
+    // destroy() is the probe because every session has one and it must end the
+    // turn. A provider that overrides it without reaching _clearMessageState —
+    // which is exactly how claude-tui's _teardownTurn escaped — fails here.
     const srcDir = join(HERE, '../src')
     const { readdirSync } = await import('node:fs')
     const files = readdirSync(srcDir).filter((f) => f.endsWith('-session.js') && f !== 'base-session.js')
     // `this._hookSecret`, not a bare `_hookSecret`: the loose form matches any
     // PROSE mention, and it immediately did — a comment added to base-session.js
     // while writing this fix put the base class itself on the roster. A detector
-    // that a comment can move is not measuring what it claims to.
+    // a comment can move is not measuring what it claims to.
     const hookRouted = files.filter((f) => readFileSync(join(srcDir, f), 'utf-8').includes('this._hookSecret'))
 
     assert.ok(hookRouted.length >= 2, `expected at least cli + tui, got ${JSON.stringify(hookRouted)}`)
-    // The detector must DISCRIMINATE, not match everything: a predicate that is
-    // true for every file would satisfy the loop below for the wrong reason and
-    // keep passing when a genuinely hook-routed provider is added without the
-    // bookkeeping. sdk-session.js routes permissions in-process through
-    // PermissionManager and must NOT be on this roster.
+    // The detector must DISCRIMINATE, not match everything.
     assert.ok(files.includes('sdk-session.js'), 'control: sdk-session.js is in the scanned set')
-    assert.ok(
-      !hookRouted.includes('sdk-session.js'),
-      'control: the detector excludes the in-process (non-hook-routed) provider',
-    )
+    assert.ok(!hookRouted.includes('sdk-session.js'), 'control: the in-process provider is excluded')
     assert.ok(hookRouted.length < files.length, 'control: the roster is a strict subset')
 
+    const tmpDirs = []
     for (const file of hookRouted) {
-      const mod = await import(join(srcDir, file))
+      // pathToFileURL, not a bare path: the CI runner's checkout is on A:\, and
+      // Node's ESM loader rejects a Windows absolute path outright
+      // (ERR_UNSUPPORTED_ESM_URL_SCHEME — "Received protocol 'a:'"). Caught by
+      // Server Windows Tests, which is the only job that runs this on Windows.
+      const mod = await import(pathToFileURL(join(srcDir, file)).href)
       const cls = Object.values(mod).find(
         (v) => typeof v === 'function' && v.prototype instanceof BaseSession,
       )
-      assert.ok(cls, `no BaseSession subclass exported from ${file}`)
-      assert.equal(
-        typeof cls.prototype.notifyPermissionPending,
-        'function',
-        `${file} is hook-routed but has no notifyPermissionPending — ws-permissions will silently skip it`,
+      assert.ok(
+        cls,
+        `${file} is hook-routed but exports no BaseSession subclass. Config-driven providers ` +
+        `export a factory instead — extend this guard to construct it rather than deleting the check.`,
       )
+
+      // Construction failure is a FAILURE, not a skip: "cannot check" silently
+      // becoming "nothing to check" is the second cause in the catalogue.
+      const skillsDir = mkdtempSync(join(tmpdir(), 'chroxy-guard-'))
+      tmpDirs.push(skillsDir)
+      let probe
+      try {
+        probe = new cls({ cwd: '/tmp', skillsDir, repoSkillsDir: null })
+      } catch (err) {
+        assert.fail(`${file}: could not construct for the behavioural probe (${err?.message}). Add the opts it needs — do not skip it.`)
+      }
+      probe.on('error', () => {})
+      const seen = []
+      probe.on('permission_expired', (d) => seen.push(d))
+
+      // Assert the probe exists rather than letting a missing method surface as
+      // a TypeError: an unclear failure reason is how a real finding gets
+      // dismissed as "the test is broken".
       assert.equal(
-        typeof cls.prototype._expirePendingPermissions,
+        typeof probe.destroy,
         'function',
-        `${file} is hook-routed but cannot expire its prompts on turn death`,
+        `${file} exposes no destroy() — every session must have one, and it is the probe this guard drives`,
+      )
+
+      probe.notifyPermissionPending('guard-probe')
+      assert.equal(probe._pendingPermissionIds.size, 1, `${file}: precondition — the prompt is tracked`)
+
+      await probe.destroy()
+
+      assert.deepEqual(
+        seen.map((d) => d.requestId),
+        ['guard-probe'],
+        `${file} ended its session without expiring a pending prompt — the client card stays live ` +
+        `and the daemon entry is never released (#7379/#7382)`,
       )
     }
+    for (const d of tmpDirs) rmSync(d, { recursive: true, force: true })
   })
 })

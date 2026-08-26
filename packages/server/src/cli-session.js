@@ -1464,7 +1464,11 @@ export class CliSession extends BaseSession {
     // one wired to all of them (docs/false-safety-guards.md). Idempotent: a
     // no-op when the set is already empty, which it is on the paths that
     // expired explicitly moments earlier.
-    this._expirePendingPermissions('Permission request expired (the turn it belonged to ended before it was answered)')
+    // #7382: the expire itself moved to BaseSession._clearMessageState (called
+    // by super above), so every provider inherits it rather than each wiring
+    // its own. The explicit calls in _killAndRespawn / _handleChildClose stay:
+    // both reach this funnel via _emitInterruptedTurnResult, which early-returns
+    // when the session is not busy.
     // Reset permission pause bookkeeping — the next message starts fresh.
     this._pendingPermissionIds.clear()
     this._resultTimeoutPaused = false

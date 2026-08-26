@@ -1680,6 +1680,15 @@ export class BaseSession extends EventEmitter {
   _onPendingPermissionsAbandoned() {}
 
   _clearMessageState() {
+    // #7382 (review): expire HERE, so inheriting the bookkeeping also inherits
+    // the BEHAVIOUR. Hoisting the API alone bought a new provider the methods
+    // and none of the wiring — and the roster guard, which only checked that
+    // the methods existed, passed for a provider that never called them. A
+    // check that passes for everything is #7273's shape.
+    //
+    // Idempotent (no-op on an empty set), so providers that already expired at
+    // an earlier point in their teardown are unaffected.
+    this._expirePendingPermissions('Permission request expired (the turn it belonged to ended before it was answered)')
     this._isBusy = false
     this._currentMessageId = null
 
