@@ -34,18 +34,30 @@ import { resolve } from 'node:path'
 // really there — a cwd change must fail loudly, not silently read nothing.
 const APP_TSX = resolve(process.cwd(), 'src/App.tsx')
 
+/** The only values that need no justification: the shared derivation itself. */
+const DERIVED = new Set(['{busyProps.isBusy}', '{busyProps.isStreaming}'])
+
 /**
- * Values a busy prop is allowed to carry.
+ * A site may be hardcoded INERT, but only deliberately and only to `{false}`.
  *
- * `{false}` is on the list for the system pane, a static ChatView of
- * system-side messages that never streams and shows no input — inert on
- * purpose, not an oversight.
+ * `{false}` used to be blanket-allowed, and a mutation showed what that bought:
+ * hardcoding the live InputBar to `isBusy={false} isStreaming={false}` kills the
+ * Stop button, the follow-up placeholder and the `isBusy && !isStreaming` block,
+ * and the guard stayed green. Only the system pane — a static ChatView that
+ * never streams and shows no input — has a reason to be inert.
+ *
+ * So an exemption must be WRITTEN, in the style of the repo's other deliberate
+ * opt-outs (`lint-ignore-opt-forwarding: <key>`), within the few lines above the
+ * prop:
+ *
+ *     {/* busy-wiring-exempt: static system pane, never streams *\/}
+ *
+ * Note what is still impossible even with a marker: the value must be `{false}`.
+ * An exemption can make a site inert; it can never re-introduce an inline
+ * predicate, which is the thing #7378 removed.
  */
-const ALLOWED = new Set([
-  '{busyProps.isBusy}',
-  '{busyProps.isStreaming}',
-  '{false}',
-])
+const EXEMPT_MARKER = 'busy-wiring-exempt:'
+const EXEMPT_LOOKBACK = 8
 
 interface PropSite {
   line: number
@@ -54,37 +66,75 @@ interface PropSite {
   text: string
 }
 
-/** Non-comment lines in App.tsx that OPEN a busy prop, parsed or not. */
-function busyPropLines(): Array<{ line: number; text: string }> {
+/**
+ * Every non-comment line of App.tsx, with its 1-based number.
+ *
+ * Comment lines are dropped because prose is not code: App.tsx's #7378 comment
+ * quotes `isBusy={!isIdle}` on purpose, to record what the old spelling was.
+ */
+function codeLines(): Array<{ line: number; text: string }> {
   return readFileSync(APP_TSX, 'utf8')
     .split('\n')
-    .map((raw, i) => ({ line: i + 1, text: raw.trim() }))
+    .map((raw, i) => ({ line: i + 1, text: raw }))
     .filter(({ text }) => {
-      // Prose is not code. App.tsx's #7378 comment quotes `isBusy={!isIdle}` on
-      // purpose, to say what the old spelling was and why it was wrong.
-      if (text.startsWith('//') || text.startsWith('*') || text.startsWith('/*')) return false
-      return /^(isBusy|isStreaming)=/.test(text)
+      const t = text.trim()
+      return !t.startsWith('//') && !t.startsWith('*') && !t.startsWith('/*')
     })
 }
 
+/** Lines carrying at least one busy attribute, whether or not its value parses. */
+function busyPropLines(): Array<{ line: number; text: string }> {
+  return codeLines().filter(({ text }) => /\b(isBusy|isStreaming)=/.test(text))
+}
+
 /**
- * The value regex deliberately accepts SPACES.
+ * Read a JSX attribute value starting at `i` (the char after `=`).
  *
- * It did not, at first — `(\S+)` — and a mutation caught it: reverting a site to
- * `isStreaming={streamingMessageId !== null}` left the suite green, because the
- * spaces in that expression meant the line failed to parse and was **skipped**
- * rather than flagged. A prop the scanner cannot read is the one most likely to
- * be wrong; treating "cannot check this" as "nothing to check" is the exact
- * false-safety shape in docs/false-safety-guards.md. `every busy prop line
- * parses` below now makes an unreadable site an error in its own right.
+ * Returns undefined if a `{` never closes on this line — a multi-line prop the
+ * scanner cannot judge. That is reported as unreadable rather than skipped.
+ */
+function readValue(text: string, i: number): string | undefined {
+  if (text[i] !== '{') {
+    const m = /^\S+/.exec(text.slice(i))
+    return m ? m[0] : undefined
+  }
+  let depth = 0
+  for (let j = i; j < text.length; j++) {
+    if (text[j] === '{') depth++
+    else if (text[j] === '}' && --depth === 0) return text.slice(i, j + 1)
+  }
+  return undefined
+}
+
+/**
+ * All busy attribute occurrences, ANYWHERE on a line.
+ *
+ * The first version anchored to `^(isBusy|isStreaming)=` on the trimmed line, so
+ * a prop written on the JSX opening tag — `<InputBar isBusy={!isIdle}` — was
+ * invisible and the suite passed. Twice now this guard has been caught treating
+ * "cannot see it" as "nothing to check"; matching the attribute wherever it
+ * appears, and reporting anything unreadable, is the fix for both.
  */
 function busyPropSites(): PropSite[] {
   const sites: PropSite[] = []
-  for (const { line, text } of busyPropLines()) {
-    const m = /^(isBusy|isStreaming)=(.+?)\s*$/.exec(text)
-    if (m) sites.push({ line, name: m[1]!, value: m[2]!, text })
+  for (const { line, text } of codeLines()) {
+    const re = /\b(isBusy|isStreaming)=/g
+    let m: RegExpExecArray | null
+    while ((m = re.exec(text)) !== null) {
+      const value = readValue(text, m.index + m[0].length)
+      if (value !== undefined) {
+        sites.push({ line, name: m[1]!, value, text: text.trim() })
+      }
+    }
   }
   return sites
+}
+
+/** Is this site covered by a written exemption in the lines just above it? */
+function isExempt(line: number): boolean {
+  const all = readFileSync(APP_TSX, 'utf8').split('\n')
+  const from = Math.max(0, line - 1 - EXEMPT_LOOKBACK)
+  return all.slice(from, line).some(l => l.includes(EXEMPT_MARKER))
 }
 
 describe('InputBar busy props are wired, not rewritten (#7378)', () => {
@@ -102,30 +152,46 @@ describe('InputBar busy props are wired, not rewritten (#7378)', () => {
     expect(sites.filter(s => s.name === 'isStreaming').length).toBeGreaterThanOrEqual(3)
   })
 
-  it('every busy prop line parses — an unreadable site is an error, not a skip', () => {
-    // The gap a mutation found: a value containing spaces did not match the
-    // pattern, so the site vanished from `sites` and every rule below simply
-    // never saw it. Any line that opens a busy prop must end up parsed.
-    const lines = busyPropLines()
+  it('every busy attribute parses — an unreadable site is an error, not a skip', () => {
+    // Two mutations have now exploited the gap this closes: a value containing
+    // spaces (the `(\S+)` regex), and a prop on the JSX opening line (the
+    // `^`-anchored match). Both made a site vanish from `sites`, so every rule
+    // below simply never saw it.
     const parsed = new Set(sites.map(s => s.line))
-    const unreadable = lines.filter(l => !parsed.has(l.line)).map(l => `App.tsx:${l.line}  ${l.text}`)
+    const unreadable = busyPropLines()
+      .filter(l => !parsed.has(l.line))
+      .map(l => `App.tsx:${l.line}  ${l.text.trim()}`)
     expect(
       unreadable,
-      `these lines open a busy prop but could not be parsed, so no rule was applied to them:\n  ${unreadable.join('\n  ')}`,
+      `these lines carry a busy attribute whose value could not be read, so no rule ` +
+        `was applied to them:\n  ${unreadable.join('\n  ')}`,
     ).toEqual([])
-    expect(lines.length).toBe(sites.length)
   })
 
-  it('every busy prop reads the shared derivation, none recompute it', () => {
+  it('every busy prop reads the shared derivation, or is a WRITTEN inert exemption', () => {
     const offenders = sites
-      .filter(s => !ALLOWED.has(s.value))
-      .map(s => `App.tsx:${s.line}  ${s.text}`)
+      .filter(s => !DERIVED.has(s.value))
+      .filter(s => !(s.value === '{false}' && isExempt(s.line)))
+      .map(s => `App.tsx:${s.line}  ${s.name}=${s.value}`)
     expect(
       offenders,
-      'each isBusy=/isStreaming= prop must come from `busyProps` (inputBarBusyProps) ' +
-        'or be the literal {false}. Recomputing it inline re-creates the third copy #7378 ' +
-        `removed:\n  ${offenders.join('\n  ')}`,
+      'each isBusy=/isStreaming= prop must come from `busyProps` (inputBarBusyProps). ' +
+        `A site may be hardcoded {false} only with a '${EXEMPT_MARKER} <reason>' comment above ` +
+        'it — and never to anything else, since an inline predicate is what #7378 removed:\n  ' +
+        offenders.join('\n  '),
     ).toEqual([])
+  })
+
+  it('exemptions stay rare and inert', () => {
+    // Only the static system pane has a reason to be inert. This is a deliberate
+    // cap on a set that should NOT grow quietly: raising it should take an
+    // argument, not a copy-paste.
+    const exempt = sites.filter(s => s.value === '{false}' && isExempt(s.line))
+    expect(exempt.every(s => s.value === '{false}')).toBe(true)
+    expect(
+      exempt.length,
+      `exempt busy props: ${exempt.map(s => `App.tsx:${s.line} ${s.name}`).join(', ')}`,
+    ).toBeLessThanOrEqual(2)
   })
 
   it('App.tsx imports the helper it is supposed to be using', () => {

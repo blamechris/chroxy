@@ -2660,6 +2660,10 @@ export function App() {
                       display: viewMode === 'system' ? 'contents' : 'none',
                     }}
                   >
+                    {/* busy-wiring-exempt: the system pane is a static view of
+                        system-side messages — it never streams and shows no
+                        input, so both flags are inert here rather than derived
+                        (#7378). */}
                     <ChatView
                       messages={systemMessages}
                       isStreaming={false}
