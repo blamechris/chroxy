@@ -38,6 +38,14 @@ permissions:
 # `runner-target` and every consumer follows. The cost is one extra
 # job-scheduling hop and a `needs:` edge per consumer.
 #
+# A THIRD output, `npmcache`, rides the same predicate and feeds setup-node's
+# `cache:` input: empty on the self-hosted pool (whose ~/.npm is already warm and
+# persistent), `npm` on GitHub-hosted fork-PR runners (whose VM is fresh). See the
+# long comment on the `resolve` step for the measurements behind it (#7383). Every
+# setup-node consumer routed through this job MUST take `cache:` from `npmcache`
+# rather than hardcoding `npm` — a new job that hardcodes it silently re-adds a
+# 521 MB per-job download, so `ci-npm-cache-routing.test.js` fails the build on it.
+#
 # The macOS desktop job uses the separate self-hosted macOS runner and routes on
 # the same boolean inline in its `if:` (it has no shared `runs-on` array, so it
 # is not a `runner-target` consumer). The Windows jobs route through a second
@@ -70,19 +78,51 @@ jobs:
     outputs:
       runner: ${{ steps.resolve.outputs.runner }}
       winrunner: ${{ steps.resolve.outputs.winrunner }}
+      npmcache: ${{ steps.resolve.outputs.npmcache }}
     steps:
       - id: resolve
         # The condition is the same routing predicate the per-job ternary used:
         # push events and same-repo PRs are trusted; fork PRs are not.
         #   * runner    — Linux pool (label `chroxy-linux`) / ubuntu-24.04 for forks
         #   * winrunner — Windows pool (self-hosted chroxy-win) / windows-latest for forks
+        #   * npmcache  — setup-node's `cache:` input; EMPTY on self-hosted, `npm` on hosted (#7383)
+        #
+        # npmcache rides the SAME predicate on purpose: "which runner" and "does
+        # that runner already have a warm ~/.npm" are the same question, and
+        # giving it its own copy of the condition is how the two drift apart.
+        #
+        # Why empty for self-hosted: the pool members are LONG-LIVED (the Mac
+        # Docker members have been up for weeks; the winbox VM's
+        # /opt/actions-runner/_work persists across jobs), so `~/.npm` is already
+        # warm — measured at 2.2 GB, populated since the container was built.
+        # `cache: npm` made every job additionally DOWNLOAD a 521 MB
+        # actions/cache tarball and unpack it over that superset: pure overhead,
+        # 12 Linux jobs per run. Measured setup-node cost with it enabled:
+        # p50 55-58s, p90 98-244s, max 521s. Worse than slow, it is the step
+        # that FAILS: on chroxy-linux-winbox-01 the download stalls at
+        # `Received 0 of 521063625 (0.0%), 0.0 MBs/sec`, burns the job's whole
+        # `timeout-minutes`, and the resulting cancellation renders as `fail` in
+        # `gh pr checks` with every real step `skipped` — 9 such cancellations
+        # across 4 PRs before this was tracked down.
+        #
+        # Hosted runners are the opposite case and KEEP `npm`: a fork PR gets a
+        # fresh ubuntu-24.04 VM with an empty ~/.npm, so the restore is the only
+        # thing standing between it and a cold `npm ci` of the whole monorepo.
+        #
+        # `cache: ''` is how you tell setup-node "no cache" — its `if (cache)`
+        # guard treats the empty string as absent. `cache-dependency-path` stays
+        # on every job because it is what the hosted branch keys on; it is inert
+        # when `cache` is empty. packages/server/tests/ci-npm-cache-routing.test.js
+        # holds this whole arrangement in place.
         run: |
           if [ "${{ github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository }}" = "true" ]; then
             echo 'runner=["self-hosted", "Linux", "chroxy-linux"]' >> "$GITHUB_OUTPUT"
             echo 'winrunner=["self-hosted", "Windows", "X64", "chroxy-win"]' >> "$GITHUB_OUTPUT"
+            echo 'npmcache=' >> "$GITHUB_OUTPUT"
           else
             echo 'runner="ubuntu-24.04"' >> "$GITHUB_OUTPUT"
             echo 'winrunner="windows-latest"' >> "$GITHUB_OUTPUT"
+            echo 'npmcache=npm' >> "$GITHUB_OUTPUT"
           fi
   server-tests:
     name: Server Tests
@@ -123,7 +163,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
-          cache: npm
+          cache: ${{ needs.runner-target.outputs.npmcache }}
           cache-dependency-path: '**/package-lock.json'
 
       - name: Install dependencies
@@ -274,7 +314,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
-          cache: npm
+          cache: ${{ needs.runner-target.outputs.npmcache }}
           cache-dependency-path: '**/package-lock.json'
 
       - name: Install dependencies
@@ -338,7 +378,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
-          cache: npm
+          cache: ${{ needs.runner-target.outputs.npmcache }}
           cache-dependency-path: '**/package-lock.json'
 
       - name: Install dependencies
@@ -598,7 +638,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
-          cache: npm
+          cache: ${{ needs.runner-target.outputs.npmcache }}
           cache-dependency-path: '**/package-lock.json'
 
       - name: Install dependencies
@@ -634,7 +674,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
-          cache: npm
+          cache: ${{ needs.runner-target.outputs.npmcache }}
           cache-dependency-path: '**/package-lock.json'
 
       - name: Install dependencies
@@ -702,7 +742,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
-          cache: npm
+          cache: ${{ needs.runner-target.outputs.npmcache }}
           cache-dependency-path: '**/package-lock.json'
 
       - name: Install dependencies
@@ -738,7 +778,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
-          cache: npm
+          cache: ${{ needs.runner-target.outputs.npmcache }}
           cache-dependency-path: '**/package-lock.json'
 
       - name: Install dependencies
@@ -767,7 +807,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
-          cache: npm
+          cache: ${{ needs.runner-target.outputs.npmcache }}
           cache-dependency-path: '**/package-lock.json'
 
       - name: Install dependencies
@@ -794,7 +834,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
-          cache: npm
+          cache: ${{ needs.runner-target.outputs.npmcache }}
           cache-dependency-path: '**/package-lock.json'
 
       - name: Install dependencies
@@ -833,7 +873,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
-          cache: npm
+          cache: ${{ needs.runner-target.outputs.npmcache }}
           cache-dependency-path: '**/package-lock.json'
 
       - name: Install dependencies
@@ -861,7 +901,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
-          cache: npm
+          cache: ${{ needs.runner-target.outputs.npmcache }}
           cache-dependency-path: '**/package-lock.json'
 
       - name: Install dependencies
@@ -952,7 +992,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
-          cache: npm
+          cache: ${{ needs.runner-target.outputs.npmcache }}
           cache-dependency-path: '**/package-lock.json'
 
       - name: Install dependencies
@@ -1106,7 +1146,7 @@ jobs:
           # resolves an explicit `renovate@<version>` spec regardless of what
           # is cached — the staleness that motivated pinning came from an
           # UNPINNED spec silently reusing whatever the cache held.
-          cache: npm
+          cache: ${{ needs.runner-target.outputs.npmcache }}
           # Glob, not the bare root lockfile: this monorepo has three
           # (root, packages/server, packages/server/sidecar) and the cache key
           # must cover all of them. packages/server/tests/ci-cache-key.test.js
