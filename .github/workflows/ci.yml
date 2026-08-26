@@ -1321,12 +1321,18 @@ jobs:
       # dedicated warm job" option looked expensive — it isn't, because the job
       # exists.
       #
-      # Do not remove `cache:` here, un-pin it from a hosted runner, or gate it
-      # behind an `if:`/`needs:` without reading
-      # docs/decisions/2026-08-npm-cache-producer.md — each silently reverts fork
-      # PRs to cold-installing across ~12 jobs. Pinned by
-      # packages/server/tests/ci-npm-cache-routing.test.js, which also carries the
-      # one named exception this `cache: npm` needs.
+      # packages/server/tests/ci-npm-cache-routing.test.js pins, specifically:
+      # a producer exists that is GitHub-hosted AND x86_64 (an `ubuntu-*-arm`
+      # runner saves the arm64 entry, which no hosted fork job reads), carries
+      # `cache: npm` with the three-lockfile key, has no job-level `if:`, and sits
+      # in a workflow whose `push:` names `main` with no `paths:` filter. It also
+      # carries the one named exception this `cache: npm` needs.
+      #
+      # NOT pinned, and worth thinking about anyway: adding a `needs:` edge here
+      # would make the producer conditional on that dependency succeeding, so a
+      # flaky upstream job would quietly stop the cache being saved. Read
+      # docs/decisions/2026-08-npm-cache-producer.md before changing any of this —
+      # each of these silently reverts fork PRs to cold-installing across ~12 jobs.
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22

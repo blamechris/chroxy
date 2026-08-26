@@ -393,8 +393,11 @@ describe('the hosted npm cache keeps a producer (#7386)', () => {
     workflows = await readWorkflows()
 
     // A PRODUCER: a setup-node step that really saves the hosted entry.
-    //   - hosted (a self-hosted runner has npmcache empty by #7383 and saves
-    //     nothing, while still looking cached),
+    //   - hosted AND x86_64 (a self-hosted runner has npmcache empty by #7383 and
+    //     saves nothing; an ubuntu-*-arm runner saves the arm64 entry, which no
+    //     hosted fork job reads),
+    //   - unconditionally reachable — a job-level `if:` can switch the producer
+    //     off without touching anything this file used to look at,
     //   - `cache: npm` literally — a routed expression resolves to empty on the
     //     self-hosted branch, so a routed job is not a dependable producer,
     //   - the three-lockfile key, or it produces an entry under the WRONG key.
@@ -402,7 +405,7 @@ describe('the hosted npm cache keeps a producer (#7386)', () => {
       w.jobs.flatMap(job =>
         job.steps
           .filter(st => st.some(l => l.includes(SETUP_NODE)))
-          .filter(st => !/self-hosted/.test(job.runsOn) && /ubuntu-/.test(job.runsOn))
+          .filter(() => isHostedX64Linux(job.runsOn) && isUnconditional(job))
           .filter(st => stepInput(st, 'cache') === 'npm')
           .filter(st => stepInput(st, 'cache-dependency-path') === LOCKFILE_GLOB)
           .map(() => ({ workflow: w, job }))
@@ -413,32 +416,81 @@ describe('the hosted npm cache keeps a producer (#7386)', () => {
   /** The `on:` block — everything above the jobs mapping. */
   const triggers = w => w.text.slice(0, w.text.indexOf('\njobs:'))
 
+  /** The lines strictly more indented than `lines[at]` (its YAML sub-block). */
+  const subBlock = (lines, at) => {
+    const indent = /^(\s*)/.exec(lines[at])[1].length
+    const out = []
+    for (let i = at + 1; i < lines.length; i++) {
+      if (/^\s*$/.test(lines[i]) || /^\s*#/.test(lines[i])) continue
+      if (/^(\s*)/.exec(lines[i])[1].length <= indent) break
+      out.push(lines[i])
+    }
+    return out
+  }
+
+  /** The sub-block under the first line matching `re`, plus that line's own tail. */
+  const blockFor = (lines, re) => {
+    const at = lines.findIndex(l => re.test(l))
+    if (at === -1) return null
+    return [lines[at], ...subBlock(lines, at)].join('\n')
+  }
+
   /**
-   * Does this workflow run on a push to the DEFAULT BRANCH?
+   * Does this workflow run on a push to the DEFAULT BRANCH, unfiltered?
    *
-   * Not `/push:/`. `release.yml` is `on: push: tags: ['v*']`, and its hosted
-   * `test` / `verify-artifacts` jobs do carry `cache: npm` with the right key —
-   * so a bare `push:` match counted them as producers. They are not: a tag push
-   * saves into that TAG's cache scope, which a PR branch cannot read. Measured:
-   * with the loose regex, deleting the real push producer left this suite GREEN
-   * because release.yml stood in for it.
+   * Three loose-match traps, each measured green before being closed:
    *
-   * So: find the `push:` key, take its indented sub-block, and require a
-   * `branches:` naming main. A tags-only push is explicitly not this.
+   * 1. Not `/push:/`. `release.yml` is `on: push: tags: ['v*']` with hosted jobs
+   *    that DO carry `cache: npm` and the right key, so a bare match let it stand
+   *    in for the real producer — deleting dashboard-smoke's cache left the suite
+   *    GREEN.
+   * 2. Not `branches:` and `main` tested INDEPENDENTLY over the push block. A
+   *    `paths: [packages/main-app/**]` alongside `branches: [release]` satisfies
+   *    both halves while the workflow never runs on main. The branch check now
+   *    reads the `branches:` sub-block only.
+   * 3. A `paths:`/`paths-ignore:` filter makes the push conditional on which
+   *    files changed — so a lockfile-only change could skip the producer, which
+   *    is precisely when the cache needs re-saving. Treated as not-a-producer.
    */
   const triggersOnPushToMain = w => {
     const lines = triggers(w).split('\n')
     const at = lines.findIndex(l => /^\s*push:\s*$/.test(l))
     if (at === -1) return false
-    const indent = /^(\s*)/.exec(lines[at])[1].length
-    const block = []
-    for (let i = at + 1; i < lines.length; i++) {
-      if (/^\s*$/.test(lines[i]) || /^\s*#/.test(lines[i])) continue
-      if (/^(\s*)/.exec(lines[i])[1].length <= indent) break
-      block.push(lines[i])
-    }
-    const text = block.join('\n')
-    return /^\s*branches:/m.test(text) && /\bmain\b/.test(text)
+    const push = subBlock(lines, at)
+    if (push.some(l => /^\s*paths(-ignore)?:/.test(l))) return false
+    const branches = blockFor(push, /^\s*branches:/)
+    return branches !== null && /\bmain\b/.test(branches)
+  }
+
+  /**
+   * A GitHub-hosted x86_64 Linux runner.
+   *
+   * `/ubuntu-/` alone was wrong on the one axis this whole record is built on:
+   * `ubuntu-24.04-arm` is a real GitHub label, and it saves
+   * `node-cache-Linux-arm64-*` — NOT the `Linux-x64` entry a fork PR on
+   * ubuntu-24.04 restores. Measured: moving the producer there left the suite
+   * green while the entry stopped being produced.
+   */
+  const isHostedX64Linux = runsOn =>
+    !/self-hosted/.test(runsOn) && /ubuntu-/.test(runsOn) && !/\barm\b|arm64/i.test(runsOn)
+
+  /**
+   * Is the job unconditionally reachable — no job-level `if:`?
+   *
+   * ci.yml's comment on the producer tells the reader not to "gate it behind an
+   * `if:`/`needs:`" and says this file pins that. It did not: adding
+   * `if: github.event_name == 'pull_request'` to dashboard-smoke left the suite
+   * at pass 15 / fail 0 with the producer gone. A comment claiming a stronger
+   * check than its code performs is this repo's entry-13 shape, so the code now
+   * matches the comment rather than the comment being softened.
+   *
+   * Job-level only: a step-level `if:` is normal and irrelevant here, so scan
+   * the job body ABOVE `steps:`.
+   */
+  const isUnconditional = job => {
+    const stepsAt = job.body.findIndex(l => /^\s*steps:\s*$/.test(l))
+    const head = stepsAt === -1 ? job.body : job.body.slice(0, stepsAt)
+    return !head.some(l => /^\s{2,}if:/.test(l))
   }
 
   it('finds at least one producer at all', () => {

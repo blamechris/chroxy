@@ -97,9 +97,9 @@ and rely on a restored npm cache. Each job may instead install the monorepo from
 scratch — a couple of extra minutes per job. **It does not fail, and it is not
 something you did.** Two different cases:
 
-- **Your PR does not touch a `package-lock.json`.** This should be rare: the cache
-  is refreshed by a job on every push to `main`. If you see a cold install anyway,
-  it is worth reporting — it means a cache producer has gone missing.
+- **Your PR does not touch a `package-lock.json`.** A cold install here should be
+  rare — the cache is refreshed by a job on every push to `main`. If you see one
+  anyway, it is worth reporting: it means a cache producer has gone missing.
 - **Your PR changes a `package-lock.json`** — a dependency bump, or anything that
   regenerates a lockfile. The cache key is a hash of the lockfiles, so *your* key
   exists in no scope anything can read, and no job on `main` will ever create it
