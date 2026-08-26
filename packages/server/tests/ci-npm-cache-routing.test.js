@@ -1,6 +1,17 @@
 import { before, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFile, readdir } from 'node:fs/promises'
+import { readFile } from 'node:fs/promises'
+import {
+  parseJobs,
+  code,
+  stepInput,
+  readWorkflows,
+  assertReaderSane,
+  SETUP_NODE,
+  ROUTED_CACHE,
+  ROUTED_RUNNER_OUTPUTS,
+  LOCKFILE_GLOB,
+} from './helpers/workflow-reader.js'
 
 /**
  * #7383 — setup-node's npm cache must be routed, never hardcoded.
@@ -40,104 +51,13 @@ import { readFile, readdir } from 'node:fs/promises'
  * loudly, instead of letting every later assertion pass over an empty set.
  */
 
-const SETUP_NODE = 'actions/setup-node@'
-const ROUTED_CACHE = '${{ needs.runner-target.outputs.npmcache }}'
-
-/** Runner-target outputs that mean "this job's runner depends on the trust predicate". */
-const ROUTED_RUNNER_OUTPUTS = ['needs.runner-target.outputs.runner', 'needs.runner-target.outputs.winrunner']
-
 /**
- * Split ci.yml's `jobs:` mapping into per-job blocks.
- *
- * Job ids are the only keys at exactly two-space indent, and ci.yml has a single
- * top-level `jobs:` key, so this needs no general YAML support — but it must not
- * silently return nothing, which is what the positive control below checks.
+ * The reader (parseJobs / parseSteps / code / stepInput / readWorkflows) moved to
+ * `helpers/workflow-reader.js` in #7386, when `ci-cache-key.test.js` needed the
+ * same one. Transcribing it would have made two implementations of the thing
+ * both guards depend on being right — see that module's header. Its rationale
+ * comments moved with it; nothing here changed behaviourally.
  */
-function parseJobs(ciYml) {
-  const lines = ciYml.split('\n')
-  const jobsAt = lines.findIndex(l => l === 'jobs:')
-  assert.notEqual(jobsAt, -1, "ci.yml should have a top-level 'jobs:' key")
-
-  const starts = []
-  for (let i = jobsAt + 1; i < lines.length; i++) {
-    const m = /^ {2}([A-Za-z0-9_-]+):\s*$/.exec(lines[i])
-    if (m) starts.push({ id: m[1], line: i })
-  }
-
-  return starts.map((s, idx) => {
-    const end = idx + 1 < starts.length ? starts[idx + 1].line : lines.length
-    const body = lines.slice(s.line, end)
-    const runsOn = body.find(l => /^\s*runs-on:/.test(l)) ?? ''
-    return { id: s.id, line: s.line + 1, body, runsOn, steps: parseSteps(body) }
-  })
-}
-
-/**
- * Split a job body into step blocks.
- *
- * A step begins at a `- ` list item under `steps:`; the block runs until the next
- * list item at the same indent or the end of the job. Only step bodies are ever
- * asserted on, which is what keeps ci.yml's explanatory comments — several of
- * which quote `cache: npm` verbatim — out of the guard's reach.
- */
-function parseSteps(bodyLines) {
-  const stepsAt = bodyLines.findIndex(l => /^\s*steps:\s*$/.test(l))
-  if (stepsAt === -1) return []
-
-  const starts = []
-  let indent = null
-  for (let i = stepsAt + 1; i < bodyLines.length; i++) {
-    const m = /^(\s*)- /.exec(bodyLines[i])
-    if (!m) continue
-    if (indent === null) indent = m[1].length
-    if (m[1].length === indent) starts.push(i)
-  }
-
-  return starts.map((start, idx) => {
-    const end = idx + 1 < starts.length ? starts[idx + 1] : bodyLines.length
-    return bodyLines.slice(start, end)
-  })
-}
-
-/**
- * Drop comment lines.
- *
- * ci.yml is heavily commented and several of those comments quote the very
- * strings this file matches on — `cache: npm` in the rationale for removing it,
- * and `npm ci` twice in `server-tests-windows`'s explanation of its 20-minute
- * budget. A guard that reads prose as configuration is satisfiable by prose.
- */
-function code(lines) {
-  return lines.filter(l => !/^\s*#/.test(l))
-}
-
-/**
- * The value of a `with:` input inside a single step block, or undefined.
- *
- * Must strip a TRAILING comment, not just a whole-line one. `cache: npm # hosted-only`
- * parses as `npm` in YAML, and a naive read of the rest of the line sees
- * `npm # hosted-only` — which matches no rule and so slips past every assertion
- * here. Verified: adding exactly that line to a job left the suite 9/9 green
- * while the workflow really did hardcode the cache.
- */
-function stepInput(stepLines, key) {
-  for (const line of code(stepLines)) {
-    const m = new RegExp(`^\\s*${key}:\\s*(.*)$`).exec(line)
-    if (!m) continue
-    const raw = m[1].trim()
-
-    // A quoted scalar ends at its closing quote; anything after it is a comment.
-    if (raw.startsWith("'") || raw.startsWith('"')) {
-      const q = raw[0]
-      const close = raw.indexOf(q, 1)
-      return close === -1 ? raw.slice(1) : raw.slice(1, close)
-    }
-    // Otherwise a ` #` (whitespace-preceded, per YAML) starts a comment. `${{ }}`
-    // expressions contain no `#`, so this cannot truncate a routed value.
-    return raw.replace(/\s+#.*$/, '').trim()
-  }
-  return undefined
-}
 
 describe('CI npm cache routing (#7383)', () => {
   let ciYml
@@ -327,12 +247,12 @@ describe('CI npm cache routing (#7383)', () => {
     )
 
     const missing = cached
-      .filter(({ step }) => stepInput(step, 'cache-dependency-path') !== '**/package-lock.json')
+      .filter(({ step }) => stepInput(step, 'cache-dependency-path') !== LOCKFILE_GLOB)
       .map(({ job }) => `${job.id} (ci.yml:${job.line})`)
     assert.deepEqual(
       missing,
       [],
-      `steps using the routed cache must keep cache-dependency-path: '**/package-lock.json': ${missing.join(', ')}`
+      `steps using the routed cache must keep cache-dependency-path: '${LOCKFILE_GLOB}': ${missing.join(', ')}`
     )
   })
 })
@@ -359,24 +279,20 @@ describe('npm cache across all workflows (#7383)', () => {
   let workflows
 
   before(async () => {
-    const dir = new URL('../../../.github/workflows/', import.meta.url)
-    const names = (await readdir(dir)).filter(n => n.endsWith('.yml') || n.endsWith('.yaml'))
-    workflows = await Promise.all(
-      names.map(async name => ({ name, jobs: parseJobs(await readFile(new URL(name, dir), 'utf8')) }))
-    )
+    workflows = await readWorkflows()
   })
 
   it('reads every workflow file', () => {
     // Positive control. A readdir that returns nothing, or a reader that finds no
     // jobs, would make the assertion below vacuous — which is precisely how the
-    // maestro-nightly instance stayed invisible in the first place.
-    assert.ok(workflows.length >= 5, `expected >=5 workflow files, found ${workflows.length}`)
+    // maestro-nightly instance stayed invisible in the first place. The shared
+    // floor lives in the reader module so this guard and ci-cache-key.test.js
+    // cannot disagree about what "the reader still works" means.
+    assertReaderSane(workflows)
     assert.ok(
       workflows.some(w => w.name === 'maestro-nightly.yml'),
       'expected maestro-nightly.yml to be among the scanned workflows'
     )
-    const totalJobs = workflows.reduce((n, w) => n + w.jobs.length, 0)
-    assert.ok(totalJobs >= 20, `expected >=20 jobs across all workflows, found ${totalJobs}`)
   })
 
   it('no self-hosted job hardcodes an npm cache', () => {
