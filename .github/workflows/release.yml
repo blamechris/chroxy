@@ -316,6 +316,21 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
+      # #7386 asked whether this `cache: npm` should be dropped: there are ZERO
+      # `node-cache-Windows-*` entries in the repo's cache list, of any age, so it
+      # has never hit. KEPT, because "never hits" is not the same as "dead":
+      #
+      #   - CI's server-tests-windows routes through `winrunner` to the
+      #     self-hosted chroxy-win, where #7383 sets npmcache empty — so CI never
+      #     produces a Windows entry;
+      #   - a fork PR on windows-latest writes to its own isolated ref scope;
+      #   - this workflow runs on TAG refs, whose caches a PR branch cannot read.
+      #
+      # Which is why no PR has ever seen one. But a release RE-DISPATCHED on an
+      # existing tag (`gh workflow run release.yml --ref vX.Y.Z`, a real workflow
+      # here) reads that same tag scope and hits what the first run saved. This
+      # earns its keep on the second run, not the first — don't re-file it as a
+      # no-op. See docs/decisions/2026-08-npm-cache-producer.md.
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22

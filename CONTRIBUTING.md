@@ -90,6 +90,21 @@ SHAs, the default workflow token is read-only (jobs elevate their own permission
 per-workflow as needed), and workflows on pull requests from first-time
 contributors require maintainer approval before they run.
 
+### If your PR's CI looks slow
+
+PRs from a fork run on GitHub-hosted runners, which start with an empty `~/.npm`
+and rely on a restored npm cache. That cache is produced by a nightly job on
+`main`, so if a dependency change landed on `main` within roughly the last day,
+the entry your PR wants may not exist yet and each job will install the monorepo
+from scratch — a couple of extra minutes per job. **It does not fail, and it is
+not something you did.** It resolves itself after the next nightly.
+
+If you hit this more than once, please say so in your PR: it is the signal that a
+dedicated cache-warming job is now worth adding, and the maintainer is watching
+for exactly that. The reasoning, the measurements behind it, and the job to add
+are written down in
+[`docs/decisions/2026-08-npm-cache-producer.md`](docs/decisions/2026-08-npm-cache-producer.md).
+
 ## Code Style
 
 - **TypeScript** for the app, **JavaScript (ES modules)** for the server

@@ -114,6 +114,23 @@ jobs:
         # on every job because it is what the hosted branch keys on; it is inert
         # when `cache` is empty. packages/server/tests/ci-npm-cache-routing.test.js
         # holds this whole arrangement in place.
+        #
+        # #7386 — THE HOSTED ENTRY HAS NO DEDICATED PRODUCER, and that is a
+        # decision, not an oversight. setup-node keys on RUNNER_OS/RUNNER_ARCH,
+        # not on pool, so the entry fork PRs restore used to be saved by the
+        # self-hosted `push` jobs above; emptying `npmcache` for them stopped
+        # that. A fork PR cannot help the next one either (GitHub scopes a PR's
+        # cache WRITES to its own ref). What does close it is
+        # nightly-k8s-integration.yml: ubuntu-24.04, on refs/heads/main, 06:00
+        # UTC, `cache: npm` — it saves on a key miss. So the exposure is bounded
+        # at "a lockfile change, then up to ~24h", not "every fork PR forever".
+        #
+        # THAT NIGHTLY IS LOAD-BEARING FOR THIS. Disabling it, or moving it off a
+        # hosted runner, removes the only producer — silently.
+        #
+        # Adopt the deliberate warm job when fork PRs stop being rare, or a
+        # contributor reports slow CI. The trigger conditions and the exact job
+        # to add are in docs/decisions/2026-08-npm-cache-producer.md.
         run: |
           if [ "${{ github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository }}" = "true" ]; then
             echo 'runner=["self-hosted", "Linux", "chroxy-linux"]' >> "$GITHUB_OUTPUT"
