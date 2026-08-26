@@ -27,12 +27,27 @@
  */
 import { describe, it, expect } from 'vitest'
 import { existsSync, readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
+import path from 'node:path'
 
-// Vitest transforms this module, so `import.meta.url` is not a file: URL here.
-// Resolve from the package root (vitest's cwd) instead, and assert the file is
-// really there — a cwd change must fail loudly, not silently read nothing.
-const APP_TSX = resolve(process.cwd(), 'src/App.tsx')
+// Resolved RELATIVE TO THIS FILE, matching the package's other source-level
+// wiring guard (hooks/notificationPermissionWiring.test.ts). An earlier version
+// used `process.cwd()`, which silently makes the guard depend on where the
+// runner was invoked from — running the suite from the repo root rather than the
+// workspace would have pointed it at a path that does not exist.
+const APP_TSX = path.resolve(__dirname, '..', 'App.tsx')
+
+/**
+ * Read App.tsx lazily, once.
+ *
+ * Not at module scope: a read that throws during collection fails the whole file
+ * with a stack trace instead of the `resolves App.tsx` assertion below, which is
+ * the one that actually says what went wrong.
+ */
+let cachedSource: string | undefined
+function appSource(): string {
+  cachedSource ??= readFileSync(APP_TSX, 'utf8')
+  return cachedSource
+}
 
 /** The only values that need no justification: the shared derivation itself. */
 const DERIVED = new Set(['{busyProps.isBusy}', '{busyProps.isStreaming}'])
@@ -73,7 +88,7 @@ interface PropSite {
  * quotes `isBusy={!isIdle}` on purpose, to record what the old spelling was.
  */
 function codeLines(): Array<{ line: number; text: string }> {
-  return readFileSync(APP_TSX, 'utf8')
+  return appSource()
     .split('\n')
     .map((raw, i) => ({ line: i + 1, text: raw }))
     .filter(({ text }) => {
@@ -132,13 +147,17 @@ function busyPropSites(): PropSite[] {
 
 /** Is this site covered by a written exemption in the lines just above it? */
 function isExempt(line: number): boolean {
-  const all = readFileSync(APP_TSX, 'utf8').split('\n')
+  const all = appSource().split('\n')
   const from = Math.max(0, line - 1 - EXEMPT_LOOKBACK)
   return all.slice(from, line).some(l => l.includes(EXEMPT_MARKER))
 }
 
 describe('InputBar busy props are wired, not rewritten (#7378)', () => {
-  const sites = busyPropSites()
+  // Lazy + memoised, for the same reason the source read is: computed at
+  // collection time, a parse failure here would fail the file before any
+  // assertion could name it.
+  let cached: PropSite[] | undefined
+  const allSites = () => (cached ??= busyPropSites())
 
   it('resolves App.tsx', () => {
     expect(existsSync(APP_TSX), `App.tsx not found at ${APP_TSX}`).toBe(true)
@@ -147,9 +166,9 @@ describe('InputBar busy props are wired, not rewritten (#7378)', () => {
   it('finds the busy prop sites in App.tsx', () => {
     // Positive control. Every assertion below quantifies over `sites`; if the
     // scan breaks they all pass vacuously and report a clean green.
-    expect(sites.length).toBeGreaterThanOrEqual(8)
-    expect(sites.filter(s => s.name === 'isBusy').length).toBeGreaterThanOrEqual(5)
-    expect(sites.filter(s => s.name === 'isStreaming').length).toBeGreaterThanOrEqual(3)
+    expect(allSites().length).toBeGreaterThanOrEqual(8)
+    expect(allSites().filter(s => s.name === 'isBusy').length).toBeGreaterThanOrEqual(5)
+    expect(allSites().filter(s => s.name === 'isStreaming').length).toBeGreaterThanOrEqual(3)
   })
 
   it('every busy attribute parses — an unreadable site is an error, not a skip', () => {
@@ -157,7 +176,7 @@ describe('InputBar busy props are wired, not rewritten (#7378)', () => {
     // spaces (the `(\S+)` regex), and a prop on the JSX opening line (the
     // `^`-anchored match). Both made a site vanish from `sites`, so every rule
     // below simply never saw it.
-    const parsed = new Set(sites.map(s => s.line))
+    const parsed = new Set(allSites().map(s => s.line))
     const unreadable = busyPropLines()
       .filter(l => !parsed.has(l.line))
       .map(l => `App.tsx:${l.line}  ${l.text.trim()}`)
@@ -169,7 +188,7 @@ describe('InputBar busy props are wired, not rewritten (#7378)', () => {
   })
 
   it('every busy prop reads the shared derivation, or is a WRITTEN inert exemption', () => {
-    const offenders = sites
+    const offenders = allSites()
       .filter(s => !DERIVED.has(s.value))
       .filter(s => !(s.value === '{false}' && isExempt(s.line)))
       .map(s => `App.tsx:${s.line}  ${s.name}=${s.value}`)
@@ -186,7 +205,7 @@ describe('InputBar busy props are wired, not rewritten (#7378)', () => {
     // Only the static system pane has a reason to be inert. This is a deliberate
     // cap on a set that should NOT grow quietly: raising it should take an
     // argument, not a copy-paste.
-    const exempt = sites.filter(s => s.value === '{false}' && isExempt(s.line))
+    const exempt = allSites().filter(s => s.value === '{false}' && isExempt(s.line))
     expect(exempt.every(s => s.value === '{false}')).toBe(true)
     expect(
       exempt.length,
@@ -197,7 +216,7 @@ describe('InputBar busy props are wired, not rewritten (#7378)', () => {
   it('App.tsx imports the helper it is supposed to be using', () => {
     // Without this, deleting the import and hardcoding `busyProps` as a local
     // object literal would satisfy every assertion above.
-    const src = readFileSync(APP_TSX, 'utf8')
+    const src = appSource()
     expect(src).toContain("import { inputBarBusyProps } from './lib/session-busy'")
     expect(src).toMatch(/const busyProps = useMemo\(\s*\n?\s*\(\) => inputBarBusyProps\(/)
   })
@@ -205,7 +224,7 @@ describe('InputBar busy props are wired, not rewritten (#7378)', () => {
   it('the old inline spellings are gone from JSX', () => {
     // The specific regression, named. Checked over prop sites only, so the
     // deliberate explanatory comments quoting the old form do not trip it.
-    const revived = sites
+    const revived = allSites()
       .filter(s => /!isIdle|streamingMessageId/.test(s.value))
       .map(s => `App.tsx:${s.line}  ${s.text}`)
     expect(
