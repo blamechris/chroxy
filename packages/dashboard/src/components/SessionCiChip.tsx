@@ -22,6 +22,14 @@
  */
 import type { ServerSessionPrStatusMessage } from '@chroxy/protocol'
 
+/**
+ * How recently the automatic pull must have asked before it skips (#7344,
+ * Copilot review). Long enough that cycling tabs does not spawn a git + `gh`
+ * pair per switch, short enough that returning to a tab after reading a diff
+ * still re-checks. The manual Refresh ignores it entirely.
+ */
+export const SESSION_PR_STATUS_AUTO_PULL_MAX_AGE_MS = 30_000
+
 export interface SessionCiChipProps {
   /** Latest snapshot for the active session, or null before one lands. */
   status: ServerSessionPrStatusMessage | null

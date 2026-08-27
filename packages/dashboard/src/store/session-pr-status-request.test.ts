@@ -105,6 +105,57 @@ describe('#7344 — requestSessionPrStatus', () => {
     expect(useConnectionStore.getState().sessionPrStatusLoading).toEqual({})
   })
 
+  describe('auto-pull freshness window (Copilot review)', () => {
+    it('suppresses a second AUTO request inside the window', async () => {
+      // Without this the App effect spawns a git + `gh pr list` pair on every
+      // tab switch.
+      const { useConnectionStore } = await import('./connection')
+      const sent: unknown[] = []
+      useConnectionStore.setState({ socket: liveSocket(sent), activeSessionId: 's1', sessionPrStatusLoading: {}, sessionPrStatusRequestedAt: {} } as never)
+
+      expect(useConnectionStore.getState().requestSessionPrStatus('s1', 30_000)).toBe(true)
+      expect(useConnectionStore.getState().requestSessionPrStatus('s1', 30_000)).toBe(false)
+      expect(sent).toHaveLength(1)
+    })
+
+    it('does NOT suppress a request for a DIFFERENT session', async () => {
+      // The window is per session; switching tabs must still pull the new one.
+      const { useConnectionStore } = await import('./connection')
+      const sent: unknown[] = []
+      useConnectionStore.setState({ socket: liveSocket(sent), activeSessionId: 's1', sessionPrStatusLoading: {}, sessionPrStatusRequestedAt: {} } as never)
+
+      useConnectionStore.getState().requestSessionPrStatus('s1', 30_000)
+      expect(useConnectionStore.getState().requestSessionPrStatus('s2', 30_000)).toBe(true)
+      expect(sent).toHaveLength(2)
+    })
+
+    it('NEVER suppresses a manual Refresh, which passes no window', async () => {
+      // The load-bearing half: a Refresh button that silently does nothing
+      // inside the window would be worse than no button.
+      const { useConnectionStore } = await import('./connection')
+      const sent: unknown[] = []
+      useConnectionStore.setState({ socket: liveSocket(sent), activeSessionId: 's1', sessionPrStatusLoading: {}, sessionPrStatusRequestedAt: {} } as never)
+
+      useConnectionStore.getState().requestSessionPrStatus('s1', 30_000)
+      expect(useConnectionStore.getState().requestSessionPrStatus('s1')).toBe(true)
+      expect(useConnectionStore.getState().requestSessionPrStatus('s1')).toBe(true)
+      expect(sent).toHaveLength(3)
+    })
+
+    it('re-requests once the window has elapsed', async () => {
+      // Positive control for the suppression: a window that never expired would
+      // pin the chip to its first reading forever.
+      const { useConnectionStore } = await import('./connection')
+      const sent: unknown[] = []
+      useConnectionStore.setState({
+        socket: liveSocket(sent), activeSessionId: 's1', sessionPrStatusLoading: {},
+        sessionPrStatusRequestedAt: { s1: Date.now() - 60_000 },
+      } as never)
+
+      expect(useConnectionStore.getState().requestSessionPrStatus('s1', 30_000)).toBe(true)
+      expect(sent).toHaveLength(1)
+    })
+  })
   it('returns false without sending when there is no session to ask about', async () => {
     const { useConnectionStore } = await import('./connection')
     const socket = liveSocket([])

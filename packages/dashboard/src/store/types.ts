@@ -1326,6 +1326,14 @@ export interface ConnectionState {
    */
   sessionPrStatusLoading: Record<string, boolean>;
   /**
+   * #7344 — client-clock timestamp of the last `session_pr_status_request` per
+   * session, used ONLY to rate-limit the App's automatic pull (which re-fires
+   * on every tab switch). Deliberately NOT the snapshot's server-side
+   * `generatedAt`: this bounds how often we ASK, and mixing a server timestamp
+   * with a client clock would make that a function of skew.
+   */
+  sessionPrStatusRequestedAt: Record<string, number>;
+  /**
    * #6540 (item 3 of #6536) — Control Room repo-events webhook-secret config: the
    * latest `github_webhook_config` (is a secret set + source, the payload URL,
    * recent delivery status — never the secret value), or null before the first
@@ -2163,8 +2171,12 @@ export interface ConnectionState {
    * active session. Sets `sessionPrStatusLoading[sessionId]`; the reply lands in
    * `sessionPrStatus[sessionId]`. Returns false (without setting loading) when
    * the socket is closed or no session id can be resolved.
+   *
+   * `maxAgeMs`, when given, suppresses the request if this session was asked
+   * about more recently than that — the automatic pull passes it, the manual
+   * Refresh does not and so always re-fetches.
    */
-  requestSessionPrStatus: (sessionId?: string) => boolean;
+  requestSessionPrStatus: (sessionId?: string, maxAgeMs?: number) => boolean;
   /**
    * #6540 — request the current GitHub webhook config (secret status + payload
    * URL + delivery readout). Sets `githubWebhookConfigLoading`; the reply lands

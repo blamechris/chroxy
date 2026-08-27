@@ -149,6 +149,7 @@ vi.mock('./components/StdinDisabledBanner', () => ({
 }))
 
 import { App } from './App'
+import { SESSION_PR_STATUS_AUTO_PULL_MAX_AGE_MS } from './components/SessionCiChip'
 import { createShortcutRegistry } from './shortcuts/registry'
 import { DEFAULT_SHORTCUTS } from './shortcuts/defaults'
 import { __setSharedRegistryForTesting } from './shortcuts/useShortcutRegistry'
@@ -372,7 +373,10 @@ describe('App', () => {
     it('requests the active session\'s PR/CI status once connected', () => {
       stateOverrides = connectedWithSession
       render(<App />)
-      expect(requestSessionPrStatusMock).toHaveBeenCalledWith('s1')
+      // The second arg is the auto-pull freshness window — asserted explicitly,
+      // because passing NO window here would turn every tab switch back into a
+      // git + `gh pr list` spawn (the Copilot review finding).
+      expect(requestSessionPrStatusMock).toHaveBeenCalledWith('s1', SESSION_PR_STATUS_AUTO_PULL_MAX_AGE_MS)
     })
 
     it('does NOT request it while disconnected', () => {

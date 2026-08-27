@@ -107,6 +107,7 @@ import { type RepoInvestigateRequest, type RepoOpenSessionRequest } from './comp
 import { ControlRoomView } from './components/ControlRoomView'
 import { AppModals } from './components/AppModals'
 import { AppHeader } from './components/AppHeader'
+import { SESSION_PR_STATUS_AUTO_PULL_MAX_AGE_MS } from './components/SessionCiChip'
 import { SetupWizard } from './components/SetupWizard'
 
 /** Server-injected config from <meta name="chroxy-config"> tag */
@@ -678,15 +679,21 @@ export function App() {
   // genuinely arrive undefined — treated the same as "no snapshot yet".
   const sessionPrStatus = useConnectionStore(s => (s.activeSessionId ? s.sessionPrStatus?.[s.activeSessionId] ?? null : null))
   const sessionPrStatusLoading = useConnectionStore(s => (s.activeSessionId ? s.sessionPrStatusLoading?.[s.activeSessionId] === true : false))
+  // No window: an explicit Refresh must always go to the wire, or the button
+  // silently does nothing within the auto-pull window.
   const refreshSessionPrStatus = useCallback(() => { requestSessionPrStatus() }, [requestSessionPrStatus])
 
-  // #7344: pull the session's PR/CI status once per (session, connection) so the
-  // header chip has something to show without the user clicking Refresh first.
-  // Deliberately NOT a poll — the automatic completion event that wakes the
-  // agent is the follow-on slice; here a stale reading plus a visible Refresh
-  // beats no reading at all, which is what the user has today.
+  // #7344: pull the session's PR/CI status so the header chip has something to
+  // show without the user clicking Refresh first. Deliberately NOT a poll — the
+  // automatic completion event that wakes the agent is the follow-on slice;
+  // here a recent reading plus a visible Refresh beats no reading at all.
+  //
+  // This re-fires on every tab switch, which is what we want (returning to a
+  // tab is exactly when a stale CI answer is worth re-checking) but would spawn
+  // a git + `gh pr list` pair per switch. AUTO_PULL_MAX_AGE_MS bounds that rate
+  // in the store; the chip's Refresh passes no window and always re-fetches.
   useEffect(() => {
-    if (activeSessionId && connectionPhase === 'connected') requestSessionPrStatus(activeSessionId)
+    if (activeSessionId && connectionPhase === 'connected') requestSessionPrStatus(activeSessionId, SESSION_PR_STATUS_AUTO_PULL_MAX_AGE_MS)
   }, [activeSessionId, connectionPhase, requestSessionPrStatus])
   const conversationHistory = useConnectionStore(s => s.conversationHistory)
   const fetchConversationHistory = useConnectionStore(s => s.fetchConversationHistory)

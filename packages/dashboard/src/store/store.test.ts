@@ -4094,12 +4094,16 @@ describe('server_error toast scope filtering', () => {
       try {
         useConnectionStore.setState({
           sessionPrStatusLoading: { 's1': true, 's2': true },
+          sessionPrStatusRequestedAt: { 's1': Date.now() },
           // Snapshots are deliberately KEPT — a stale reading is still
           // information, and the chip's Refresh re-fetches after reconnect.
           sessionPrStatus: { 's1': { type: 'session_pr_status', sessionId: 's1', generatedAt: 'x', branch: null, repo: null, pr: null, checks: null, merge: null, reason: null } } as never,
         });
         socket.onclose!();
         expect(useConnectionStore.getState().sessionPrStatusLoading).toEqual({});
+        // The auto-pull window is per CONNECTION — a stale one would suppress the
+        // first survey after a reconnect.
+        expect(useConnectionStore.getState().sessionPrStatusRequestedAt).toEqual({});
         expect(useConnectionStore.getState().sessionPrStatus.s1).toBeTruthy();
       } finally {
         teardown();
