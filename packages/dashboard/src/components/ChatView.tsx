@@ -780,6 +780,18 @@ function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, inFlig
 
   // Keys only count when they did not come from a text field inside the list —
   // an inline input's arrow-key caret movement is not a scroll.
+  //
+  // PRECONDITION, and it is a narrow one: a keydown targets
+  // `document.activeElement`, and this container is not itself focusable, so
+  // this handler is only reached when focus is already INSIDE the list — a
+  // reader who clicked a row's copy button or an expandable tool row
+  // (`ToolBubble` carries role=button + tabIndex=0). That is also exactly the
+  // state in which the browser scrolls this container rather than the document,
+  // so the handler is useful precisely where it is reachable. With focus on
+  // `body` the keys do not scroll the conversation at all today — a real
+  // keyboard-access gap, but a pre-existing one that wants the whole scroller in
+  // the tab order, so it is tracked separately in #7406 rather than smuggled
+  // into a scroll-behaviour fix.
   const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
     if (!SCROLL_UP_KEYS.has(e.key)) return
     const target = e.target as HTMLElement | null

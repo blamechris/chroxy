@@ -649,23 +649,40 @@ describe('ChatView', () => {
       vi.useRealTimers()
     })
 
-    // NOTE the deliberate absence of a `scroll` event here. A page-sized jump
-    // lands well outside SCROLL_THRESHOLD, so firing one would let the POSITION
-    // path set `userScrolledUp` and the test would pass with the key handler
-    // unwired entirely (it did, until the mutation run caught it). In the
-    // browser that path is unreachable anyway: the next frame re-pins before the
-    // event is dispatched, so the event reports the bottom. The key press is the
-    // only evidence the fix is allowed to use, so it is the only one supplied.
+    // Two things about the key cases, both learned the hard way.
+    //
+    // (1) The keydown is dispatched from a FOCUSED DESCENDANT, not from the
+    // container. A keydown targets `document.activeElement`, and `.chat-messages`
+    // is not itself focusable — so firing one straight at the container tests a
+    // path the browser never takes. The path it DOES take is a reader who has
+    // clicked something inside the list (a row's copy button, an expandable tool
+    // row): focus is then inside the scroller, the browser scrolls the nearest
+    // scrollable ancestor — this container — and the keydown bubbles to the
+    // handler. That is the case this covers. Making the scroller itself
+    // focusable is a separate a11y gap, tracked on its own issue.
+    //
+    // (2) No `scroll` event is fired. A page-sized jump lands well outside
+    // SCROLL_THRESHOLD, so one would let the POSITION path set `userScrolledUp`
+    // and the test would pass with the key handler unwired entirely (it did,
+    // until the mutation run caught it). In the browser that path is unreachable
+    // anyway: the next frame re-pins before the event is dispatched, so the
+    // event reports the bottom. The key press is the only evidence the fix is
+    // allowed to use, so it is the only one supplied.
     for (const key of ['ArrowUp', 'PageUp', 'Home']) {
-      it(`holds the reader in place after a ${key} key (#7399)`, async () => {
+      it(`holds the reader in place after a ${key} key from a focused row control (#7399)`, async () => {
         vi.useFakeTimers()
         const { container, scroller } = renderStreaming()
         await act(() => { vi.advanceTimersByTime(50) })
         const start = scroller.bottom
 
+        const rowControl = screen.getAllByTestId('msg-copy-button')[0]
+        expect(container.contains(rowControl)).toBe(true)
+        await act(() => { rowControl.focus() })
+        expect(document.activeElement).toBe(rowControl)
+
         await act(() => {
           scroller.drag(-360)
-          fireEvent.keyDown(container, { key })
+          fireEvent.keyDown(rowControl, { key })
           vi.advanceTimersByTime(20)
         })
         expect(container.scrollTop).toBe(start - 360)
