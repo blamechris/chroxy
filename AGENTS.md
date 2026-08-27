@@ -323,6 +323,10 @@ The recurring causes:
 - a guard that HANGS instead of failing — `assert.match` against a multi-KB
   source slice wedges `node --test` with an empty TAP stream, so its two states
   are green and "flake", never red (`#7340`)
+- a guard whose precondition a NEIGHBOURING loop falsifies — a per-frame re-pin
+  holds the "this scroll was ours" flag continuously and restores the position
+  the guard tests, so `programmatic && atBottom` is true by construction and the
+  user-scrolled-up branch is never reached (`#7399`)
 
 Check the **exit code**, not the output — and note `cmd | grep -c FAIL` reports
 `grep`'s status, not the script's. Then check the mutant went **red, legibly,

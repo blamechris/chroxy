@@ -936,3 +936,63 @@ that the exit code was non-zero. The same applies to any wrapper that decides
 pass/fail from an exit status alone: `cmd | grep -c FAIL` reporting `grep`'s
 status is the identical defect one pipe further along, and it is already
 catalogued above.
+
+### 18. The guard falsified by the loop it was meant to interrupt — `#7399`
+
+The dashboard's chat view has, and had for months, a correct-looking guard
+against yanking a reader who has scrolled up to read history (`#4652` / AC3).
+It classifies each `scroll` event and bails out of the auto-follow when the
+viewport is no longer at the bottom:
+
+```js
+if (programmaticScrollRef.current && atBottom) return   // our own write — ignore
+setUserScrolledUp(!atBottom)
+```
+
+Nothing is wrong with those two lines. They were never reached.
+
+Twenty lines below sits a streaming re-pin loop that re-arms every frame for the
+whole duration of a stream. Each tick writes `scrollTop = scrollHeight` and marks
+the write programmatic until the *next* frame — so a loop that re-arms every
+frame holds that flag **continuously**. And the position it restores is the
+bottom. Both halves of `programmaticScrollRef.current && atBottom` are therefore
+true for the entire stream, by construction, and every scroll event is discarded
+as self-induced.
+
+The second half is the part worth internalising, because the flag alone would
+not have done it. `atBottom` is not "at the bottom" — it is "within 100px of the
+bottom". A trackpad flick moves 10-40px per frame. So the user's gesture had to
+clear 100px **in a single frame**, because the next tick threw away everything
+they had gained. Two individually reasonable choices — a wide "still following"
+band and a per-frame pin — composed into a guard whose precondition its
+neighbour falsified sixty times a second.
+
+**Tests could not see it, and neither could review.** The guard has unit tests
+and they pass; they scroll up while idle, when no loop is running. Reviewers read
+the two lines, which are correct in isolation. What was needed was to read them
+*against* the effect twenty lines down — and the comment above that effect
+actively discouraged it, ending with the claim that "a genuine user scroll-up
+(`atBottom` false) is still honored" when `atBottom false` is precisely the state
+the loop made unreachable. That is entry 13's shape (a comment describing a
+stronger property than the code delivers) sitting on top of this one, and it is
+why the bug survived a dogfooding report long enough to be filed against a
+specific line number.
+
+**What the fix had to change** is not the guard but the *evidence*: intent now
+comes from the gesture (`wheel` / `touchmove` / key, direction-checked), which is
+unambiguously the user whatever position the loop leaves behind. A position the
+loop itself controls cannot be evidence about the user, and no amount of
+threshold tuning changes that.
+
+Two of the fix's own first-cut tests then repeated the original mistake at
+one remove: they supplied *both* a gesture and a scroll event landing outside the
+threshold, so the position path satisfied them and they passed with the gesture
+handler unwired entirely. Mutation testing caught it. A test for a
+gesture-derived guard must withhold every other source of evidence.
+
+**Guard against it:** when a check reads shared mutable state, find every writer
+of that state and ask what value it holds *while the check runs* — not what it
+holds in the test. A flag set-and-cleared across frames is continuously set if
+anything re-arms it per frame. And a threshold band is a precondition too: a
+guard that needs N pixels of movement is unreachable if something else resets the
+movement more often than the user can produce N.

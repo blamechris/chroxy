@@ -675,7 +675,8 @@ describe('ChatView', () => {
         await act(() => { vi.advanceTimersByTime(50) })
         const start = scroller.bottom
 
-        const rowControl = screen.getAllByTestId('msg-copy-button')[0]
+        const [rowControl] = screen.getAllByTestId('msg-copy-button')
+        if (!rowControl) throw new Error('expected a finished response bubble to render a copy button')
         expect(container.contains(rowControl)).toBe(true)
         await act(() => { rowControl.focus() })
         expect(document.activeElement).toBe(rowControl)
@@ -771,6 +772,249 @@ describe('ChatView', () => {
       await act(() => { fireEvent.pointerUp(window) })
       await act(() => { scroller.grow(2000); vi.advanceTimersByTime(500) })
       expect(container.scrollTop).toBe(start - 160)
+      vi.useRealTimers()
+    })
+
+
+    // ---- review findings (#7404) -----------------------------------------
+    //
+    // Every case below is a way the ORIGINAL bug re-entered through a gesture
+    // the first cut did not model, or a way the fix broke the follow it
+    // promised to preserve. Each was reproduced before it was fixed.
+
+    // C1 — a slow drag delivers ~3px per `touchmove` on a 120Hz panel. A
+    // per-event slop rejected every one of them, so 180px of real finger travel
+    // moved nothing and the reader stayed pinned for the whole gesture: #7399
+    // verbatim, on touch.
+    it('a slow touch drag stops the follow even though no single move clears the slop (#7399)', async () => {
+      vi.useFakeTimers()
+      const { container, scroller } = renderStreaming()
+      await act(() => { vi.advanceTimersByTime(50) })
+      const start = scroller.bottom
+
+      await act(() => { fireEvent.touchStart(container, { touches: [{ clientX: 0, clientY: 100 }] }) })
+      for (let i = 1; i <= 60; i++) {
+        await act(() => {
+          scroller.drag(-3)
+          fireEvent.touchMove(container, { touches: [{ clientX: 0, clientY: 100 + i * 3 }] })
+          vi.advanceTimersByTime(8)
+        })
+      }
+      expect(container.scrollTop).toBe(start - 180)
+      expect(screen.getByTestId('scroll-to-bottom')).toBeInTheDocument()
+
+      await act(() => { scroller.grow(2000); vi.advanceTimersByTime(500) })
+      expect(container.scrollTop).toBe(start - 180)
+      vi.useRealTimers()
+    })
+
+    // T1 — the negative control the slop exists for, and which nothing covered:
+    // a finger resting on the list wobbles a few px either way and must never
+    // register. Without the reversal reset, an accumulator would let it creep.
+    it('a resting finger wobbling within the slop does not stop the follow (#7399)', async () => {
+      vi.useFakeTimers()
+      const { container, scroller } = renderStreaming()
+      await act(() => { vi.advanceTimersByTime(50) })
+
+      await act(() => { fireEvent.touchStart(container, { touches: [{ clientX: 0, clientY: 200 }] }) })
+      for (let i = 0; i < 40; i++) {
+        await act(() => {
+          scroller.grow(20)
+          fireEvent.touchMove(container, { touches: [{ clientX: 0, clientY: 200 + (i % 2 === 0 ? 3 : 0) }] })
+          vi.advanceTimersByTime(8)
+        })
+      }
+      expect(container.scrollTop).toBe(scroller.bottom)
+      expect(screen.queryByTestId('scroll-to-bottom')).not.toBeInTheDocument()
+      vi.useRealTimers()
+    })
+
+    // C2 — `.chat-messages` contains its own scrollers: `.question-prompt--multi`
+    // and ToolGroup's result `<pre>`. A wheel inside one moves THAT element, not
+    // the list, but still bubbles here. Reading it as list intent killed the
+    // follow while the list had not moved — and `overscroll-behavior: contain`
+    // means no outer scroll event ever arrives to correct it. Worst in #4652's
+    // own scenario: reading an AskUserQuestion form mid-stream.
+    function renderWithNestedScroller() {
+      render(
+        <ChatView
+          messages={makeMessages(3)}
+          isStreaming
+          renderMessage={(m) => (m.id === 'msg-1'
+            ? <div data-testid="nested-scroller" style={{ overflowY: 'auto', maxHeight: 100 }}>nested</div>
+            : undefined)}
+        />,
+      )
+      const container = screen.getByTestId('chat-messages')
+      const scroller = installScroller(container, 4000, 400)
+      const nested = screen.getByTestId('nested-scroller')
+      Object.defineProperty(nested, 'scrollHeight', { value: 600, configurable: true })
+      Object.defineProperty(nested, 'clientHeight', { value: 100, configurable: true })
+      Object.defineProperty(nested, 'scrollTop', { value: 300, writable: true, configurable: true })
+      return { container, scroller, nested }
+    }
+
+    it('a wheel inside a nested scroller does not stop the outer follow (#7399)', async () => {
+      vi.useFakeTimers()
+      const { container, scroller, nested } = renderWithNestedScroller()
+      await act(() => { vi.advanceTimersByTime(50) })
+
+      // The nested scroller has room above (scrollTop 300), so it consumes the
+      // gesture — the outer list never moves.
+      for (let i = 0; i < 5; i++) {
+        await act(() => { fireEvent.wheel(nested, { deltaY: -40 }); vi.advanceTimersByTime(20) })
+      }
+      await act(() => { scroller.grow(2000); vi.advanceTimersByTime(100) })
+      expect(container.scrollTop).toBe(scroller.bottom)
+      expect(screen.queryByTestId('scroll-to-bottom')).not.toBeInTheDocument()
+      vi.useRealTimers()
+    })
+
+    // ...and the other half of that guard: once the nested scroller is at its
+    // own top it has nothing left to consume, so the gesture belongs to the list
+    // again. A blanket "is there a scroller in the path" check would swallow it.
+    it('a wheel inside a nested scroller already at its top DOES stop the follow (#7399)', async () => {
+      vi.useFakeTimers()
+      const { container, scroller, nested } = renderWithNestedScroller()
+      await act(() => { vi.advanceTimersByTime(50) })
+      const start = scroller.bottom
+      nested.scrollTop = 0
+
+      await act(() => {
+        scroller.drag(-40)
+        fireEvent.wheel(nested, { deltaY: -40 })
+        vi.advanceTimersByTime(20)
+      })
+      expect(container.scrollTop).toBe(start - 40)
+      await act(() => { scroller.grow(2000); vi.advanceTimersByTime(100) })
+      expect(container.scrollTop).toBe(start - 40)
+      vi.useRealTimers()
+    })
+
+    // C3 — a conversation too short to scroll. The wheel moves nothing, but
+    // latching the flag killed the follow for the rest of the session with no
+    // scroll event able to clear it. Pre-fix this gesture was a plain no-op, so
+    // that would be a regression the fix invented.
+    it('a wheel on a list too short to scroll does not stop the follow (#7399)', async () => {
+      vi.useFakeTimers()
+      render(<ChatView messages={makeMessages(3)} isStreaming />)
+      const container = screen.getByTestId('chat-messages')
+      const scroller = installScroller(container, 200, 400)
+      await act(() => { vi.advanceTimersByTime(50) })
+
+      for (let i = 0; i < 5; i++) {
+        await act(() => { fireEvent.wheel(container, { deltaY: -40 }); vi.advanceTimersByTime(20) })
+      }
+      expect(screen.queryByTestId('scroll-to-bottom')).not.toBeInTheDocument()
+
+      // The assistant now streams a long answer — the tail must still be followed.
+      await act(() => { scroller.grow(4000); vi.advanceTimersByTime(200) })
+      expect(container.scrollTop).toBe(scroller.bottom)
+      vi.useRealTimers()
+    })
+
+    // C4 — the pin pause must not be able to latch. A `pointerdown` whose
+    // `pointerup` never arrives (a context menu running a nested event loop, a
+    // release outside the window) would otherwise freeze the view silently:
+    // `userScrolledUp` stays false, so not even the scroll-to-bottom button
+    // appears. The release listeners cover the ordinary endings; the timeout
+    // covers the ones nobody enumerated.
+    it('a pointerdown with no pointerup cannot pause the pin forever (#7399)', async () => {
+      vi.useFakeTimers()
+      const { container, scroller } = renderStreaming()
+      await act(() => { vi.advanceTimersByTime(50) })
+
+      await act(() => { fireEvent.pointerDown(container) })
+      await act(() => { scroller.grow(2000); vi.advanceTimersByTime(500) })
+      // Paused, as designed, while the pointer is (as far as we know) held.
+      expect(container.scrollTop).not.toBe(scroller.bottom)
+
+      // No pointerup ever arrives. The pause still has to end.
+      await act(() => { vi.advanceTimersByTime(11_000) })
+      await act(() => { scroller.grow(200); vi.advanceTimersByTime(100) })
+      expect(container.scrollTop).toBe(scroller.bottom)
+      vi.useRealTimers()
+    })
+
+    // T2 — the load-bearing release test. The thumb-drag case above crosses
+    // SCROLL_THRESHOLD, so `userScrolledUp` is true and the loop is dead
+    // whatever the release does; a mutant that no-oped the release listener
+    // survived it. Here the drag stays INSIDE the band, so the follow is only
+    // paused — and resuming it on release is the whole contract.
+    for (const [label, fire] of [
+      ['pointerup', () => fireEvent.pointerUp(window)],
+      ['pointercancel', () => fireEvent.pointerCancel(window)],
+      ['mouseup', () => fireEvent.mouseUp(window)],
+    ] as const) {
+      it(`${label} resumes the pin after a sub-threshold pointer drag (#7399)`, async () => {
+        vi.useFakeTimers()
+        const { container, scroller } = renderStreaming()
+        await act(() => { vi.advanceTimersByTime(50) })
+
+        await act(() => { fireEvent.pointerDown(container) })
+        await act(() => {
+          scroller.drag(-40)
+          fireEvent.scroll(container)
+          vi.advanceTimersByTime(20)
+        })
+        // Inside the 100px band, so the reader is NOT classified as scrolled up —
+        // the pin is merely paused.
+        expect(screen.queryByTestId('scroll-to-bottom')).not.toBeInTheDocument()
+        expect(container.scrollTop).toBe(scroller.bottom - 40)
+
+        await act(() => { fire() })
+        await act(() => { scroller.grow(2000); vi.advanceTimersByTime(100) })
+        expect(container.scrollTop).toBe(scroller.bottom)
+        vi.useRealTimers()
+      })
+    }
+
+    // S1 — the resume window cannot be position-only. A reader who scrolls hard
+    // to the bottom lands there, but the stream appends before the handler runs,
+    // so the position reports "30px short of a bottom that moved" and they are
+    // stranded for the rest of the turn with no further event coming.
+    it('resumes the follow when a tail-ward gesture lands short of a bottom that moved (#7399)', async () => {
+      vi.useFakeTimers()
+      const { container, scroller } = renderStreaming()
+      await act(() => { vi.advanceTimersByTime(50) })
+
+      for (let i = 0; i < 10; i++) await wheelUpOneFrame(container, scroller, 40)
+      expect(screen.getByTestId('scroll-to-bottom')).toBeInTheDocument()
+
+      // The reader wheels hard back to the tail and lands on the bottom — but a
+      // stream_delta commits 30px of new content before the handler runs.
+      await act(() => {
+        scroller.drag(1000)
+        fireEvent.wheel(container, { deltaY: 1000 })
+        scroller.grow(30)
+        fireEvent.scroll(container)
+        vi.advanceTimersByTime(50)
+      })
+      expect(screen.queryByTestId('scroll-to-bottom')).not.toBeInTheDocument()
+      await act(() => { scroller.grow(2000); vi.advanceTimersByTime(200) })
+      expect(container.scrollTop).toBe(scroller.bottom)
+      vi.useRealTimers()
+    })
+
+    // ...and the intent must not override the position wholesale: a tail-ward
+    // gesture that leaves the reader far from the bottom is still not following.
+    it('a tail-ward gesture far from the bottom does not resume the follow (#7399)', async () => {
+      vi.useFakeTimers()
+      const { container, scroller } = renderStreaming()
+      await act(() => { vi.advanceTimersByTime(50) })
+
+      for (let i = 0; i < 20; i++) await wheelUpOneFrame(container, scroller, 40)
+      const parked = container.scrollTop
+
+      await act(() => {
+        scroller.drag(100)
+        fireEvent.wheel(container, { deltaY: 100 })
+        fireEvent.scroll(container)
+        vi.advanceTimersByTime(50)
+      })
+      expect(screen.getByTestId('scroll-to-bottom')).toBeInTheDocument()
+      await act(() => { scroller.grow(2000); vi.advanceTimersByTime(200) })
+      expect(container.scrollTop).toBe(parked + 100)
       vi.useRealTimers()
     })
 
