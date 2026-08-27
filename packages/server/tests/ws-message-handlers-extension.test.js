@@ -37,6 +37,7 @@ function makeCtx(overrides = {}) {
     broadcast: mock.fn(),
     broadcastToSession: mock.fn(),
     sendSessionInfo: mock.fn(),
+    reseedActiveAgents: mock.fn(), // #7340
     primaryClients: new Map(),
     updatePrimary: mock.fn(),
     checkpointManager: { createCheckpoint: mock.fn(() => Promise.resolve()) },

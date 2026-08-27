@@ -888,22 +888,24 @@ describe('BaseSession', () => {
 
     // #7340: `_completeAgents` is the ONE drain, shared by the turn-end sweep
     // and by the provider-death sites that cannot reach it.
-    it('_completeAgents() drains everything and reports nothing surviving', () => {
+    it('_completeAgents() drains everything — the death-path default', () => {
       const completed = []
       session.on('agent_completed', (e) => completed.push(e))
       session._activeAgents.set('bg', { toolUseId: 'bg', background: true, backgroundConfirmed: true })
       session._activeAgents.set('fg', { toolUseId: 'fg' })
-      const surviving = session._completeAgents()
+      session._completeAgents()
       assert.deepEqual(completed.map(c => c.toolUseId).sort(), ['bg', 'fg'])
-      assert.equal(surviving.size, 0)
       assert.equal(session._activeAgents.size, 0)
     })
 
-    it('_completeAgents({ keepBackground: true }) returns the ids it spared', () => {
+    it('_completeAgents({ exempt }) spares exactly the ids it is given', () => {
+      const completed = []
+      session.on('agent_completed', (e) => completed.push(e))
       session._activeAgents.set('bg', { toolUseId: 'bg', background: true, backgroundConfirmed: true })
       session._activeAgents.set('fg', { toolUseId: 'fg' })
-      const surviving = session._completeAgents({ keepBackground: true })
-      assert.deepEqual([...surviving], ['bg'])
+      session._completeAgents({ exempt: new Set(['bg']) })
+      assert.deepEqual(completed.map(c => c.toolUseId), ['fg'])
+      assert.deepEqual([...session._activeAgents.keys()], ['bg'])
     })
 
     // #7340: the drain keys off the MAP KEY, like the sweep it replaced.
@@ -929,6 +931,18 @@ describe('BaseSession', () => {
 
     it('getActiveAgents() is empty when nothing is tracked', () => {
       assert.deepEqual(session.getActiveAgents(), [])
+    })
+
+    // A mixed set, in insertion order — the re-seed replays the whole live list
+    // to a reconnecting client, so both the foreground and the backgrounded
+    // agent must ride out, and neither may carry the internal flags.
+    it('getActiveAgents() projects a mixed set in insertion order', () => {
+      session._trackAgent({ toolUseId: 'fg', description: 'Foreground', startedAt: 1 })
+      session._trackAgent({ toolUseId: 'bg', description: 'Backgrounded', background: true, authoritative: true, startedAt: 2 })
+      assert.deepEqual(session.getActiveAgents(), [
+        { toolUseId: 'fg', description: 'Foreground', startedAt: 1 },
+        { toolUseId: 'bg', description: 'Backgrounded', startedAt: 2 },
+      ])
     })
 
     // #7340: the sweep is total by DEFAULT and narrowed only by an explicit
@@ -1009,11 +1023,12 @@ describe('BaseSession', () => {
     // reset so the two surfaces cannot disagree. Asserted through the registry
     // rather than by spying on the call, so a change that passes the right set
     // to the wrong place still fails.
+    // Driven through `_trackAgent` rather than by poking the maps, because the
+    // registry learns "this outlives its turn" from that call — a test that
+    // hand-seeds both sides would pass with the notification deleted.
     it('keeps a spared agent\'s Control Room node alive through the turn-end reset', () => {
-      session._activity.onAgentSpawned({ toolUseId: 'bg', description: 'probe', startedAt: 1000 })
-      session._activity.onAgentSpawned({ toolUseId: 'fg', description: 'other', startedAt: 1000 })
-      session._activeAgents.set('bg', { toolUseId: 'bg', background: true, backgroundConfirmed: true })
-      session._activeAgents.set('fg', { toolUseId: 'fg', background: false })
+      session._trackAgent({ toolUseId: 'bg', description: 'probe', background: true, authoritative: true })
+      session._trackAgent({ toolUseId: 'fg', description: 'other' })
       session._clearMessageState({ turnEndedCleanly: true })
       assert.ok(session._activity.getEntry('bg'), 'the spared agent keeps its activity node')
       assert.equal(session._activity.getEntry('bg').status, 'running')
@@ -1021,10 +1036,48 @@ describe('BaseSession', () => {
     })
 
     it('ends a spared agent\'s node when the provider died instead', () => {
-      session._activity.onAgentSpawned({ toolUseId: 'bg', description: 'probe', startedAt: 1000 })
-      session._activeAgents.set('bg', { toolUseId: 'bg', background: true, backgroundConfirmed: true })
+      session._trackAgent({ toolUseId: 'bg', description: 'probe', background: true, authoritative: true })
       session._clearMessageState()
       assert.equal(session._activity.getEntry('bg'), null)
+    })
+
+    // #7340 (review): the orphan sweep fabricates a `tool_result` with
+    // `isError: true` for every unresolved `tool_start`. A backgrounded
+    // subagent that has not reported back looks exactly like an orphan — so
+    // the client was told it had FAILED while it was running fine, and the
+    // synthetic result terminated its activity node on the way past, making
+    // the registry carve-out inert.
+    it('does not fabricate a failed tool_result for a spared subagent', () => {
+      const results = []
+      session.on('tool_result', (r) => results.push(r))
+      session._trackAgent({ toolUseId: 'bg', description: 'probe', background: true, authoritative: true })
+      session._inFlightToolStarts.set('bg', { tool: 'Agent' })
+      session._clearMessageState({ turnEndedCleanly: true })
+      assert.deepEqual(results, [], 'a running subagent is not an orphan')
+      assert.equal(session._inFlightToolStarts.size, 1, 'its tool_start stays in flight')
+    })
+
+    it('DOES sweep the same orphan when the provider died', () => {
+      const results = []
+      session.on('tool_result', (r) => results.push(r))
+      session._trackAgent({ toolUseId: 'bg', description: 'probe', background: true, authoritative: true })
+      session._inFlightToolStarts.set('bg', { tool: 'Agent' })
+      session._clearMessageState()
+      assert.equal(results.length, 1)
+      assert.equal(results[0].isError, true)
+      assert.equal(session._inFlightToolStarts.size, 0)
+    })
+
+    // A normal orphan is still swept on a clean turn end — otherwise the
+    // exemption above would have disabled #4628 wholesale.
+    it('still sweeps a NON-agent orphan tool_start on a clean turn end', () => {
+      const results = []
+      session.on('tool_result', (r) => results.push(r))
+      session._inFlightToolStarts.set('t1', { tool: 'Grep' })
+      session._clearMessageState({ turnEndedCleanly: true })
+      assert.equal(results.length, 1)
+      assert.equal(results[0].toolUseId, 't1')
+      assert.equal(session._inFlightToolStarts.size, 0)
     })
 
     // #7340 (review, N8): the sweep keys off the MAP KEY, not the record's

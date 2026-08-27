@@ -312,51 +312,120 @@ describe('ActivityRegistry — reset (turn-end) and clear (destroy)', () => {
   })
 
   // #7340: a confirmed-backgrounded subagent outlives its turn for the same
-  // reason a backgrounded shell does, so BaseSession's turn-end sweep hands
-  // reset() the ids it spared. Everything else is still an orphan.
-  it('reset spares an exempt agent and still ends its non-exempt siblings', () => {
+  // reason a backgrounded shell does. The registry is TOLD which agents those
+  // are; it never derives it. Everything else is still an orphan.
+  it('reset spares a marked agent and still ends its unmarked siblings', () => {
     const { r, deltas } = makeRegistry()
     r.onAgentSpawned({ toolUseId: 'bg', description: 'backgrounded' })
     r.onAgentSpawned({ toolUseId: 'fg', description: 'foreground' })
     r.onToolStart({ toolUseId: 't1', tool: 'Grep' })
+    r.setAgentOutlivesTurn('bg', true)
     deltas.length = 0
-    r.reset(new Set(['bg']))
+    r.reset()
     const endedIds = deltas.filter((d) => d.op === 'ended').map((d) => d.entry.id).sort()
     assert.deepEqual(endedIds, ['fg', 't1'])
     assert.equal(r.getEntry('bg').status, 'running')
   })
 
-  // The exempt agent's own child tool nodes go with it. Ending them would
+  // The marked agent's own child tool nodes go with it. Ending them would
   // leave a running `Agent` node with every step under it falsely marked done.
-  it('reset spares the child tool nodes of an exempt agent', () => {
+  it('reset spares the child tool nodes of a marked agent', () => {
     const { r } = makeRegistry()
     r.onAgentSpawned({ toolUseId: 'bg', description: 'backgrounded' })
     r.onAgentEvent({ parentToolUseId: 'bg', type: 'tool_start', payload: { toolUseId: 'c1', tool: 'Read' } })
     r.onAgentSpawned({ toolUseId: 'fg', description: 'foreground' })
     r.onAgentEvent({ parentToolUseId: 'fg', type: 'tool_start', payload: { toolUseId: 'c2', tool: 'Read' } })
-    r.reset(new Set(['bg']))
+    r.setAgentOutlivesTurn('bg', true)
+    r.reset()
     const ids = r.getEntries().map((e) => e.id).sort()
-    assert.equal(ids.length, 2, 'only the exempt agent and its child survive')
+    assert.equal(ids.length, 2, 'only the marked agent and its child survive')
     assert.ok(ids.some((id) => id === 'bg'))
     assert.ok(ids.some((id) => id.startsWith('bg') && id !== 'bg'), 'the child node survives with its parent')
   })
 
-  // A bare reset() must behave exactly as it did before #7340 — otherwise the
-  // provider-death paths, which pass nothing, would start sparing agents.
-  it('reset with no exempt set still ends every non-shell entry', () => {
+  // Nothing marked → pre-#7340 behaviour exactly. This is what every
+  // provider-death path gets, because `_completeAgents` clears every mark
+  // before `reset()` runs.
+  it('reset with nothing marked still ends every non-shell entry', () => {
     const { r } = makeRegistry()
     r.onAgentSpawned({ toolUseId: 'bg', description: 'backgrounded' })
     r.reset()
     assert.equal(r.getEntry('bg'), null)
   })
 
-  it('reset ignores exempt ids that are not in the registry', () => {
+  // #7340: the mark is cleared by the agent's real terminal signal, so a
+  // completed agent stops being exempt from anything.
+  it('agent_completed clears the mark, so a later reset does not spare it', () => {
     const { r } = makeRegistry()
-    r.onAgentSpawned({ toolUseId: 'a1', description: 'x' })
-    r.reset(new Set(['ghost']))
-    assert.equal(r.getEntry('a1'), null, 'a1 was not exempt')
-    assert.equal(r.getEntry('ghost'), null, 'an exempt id is never resurrected')
+    r.onAgentSpawned({ toolUseId: 'bg', description: 'backgrounded' })
+    r.setAgentOutlivesTurn('bg', true)
+    r.onAgentCompleted({ toolUseId: 'bg' })
+    assert.equal(r.getEntry('bg'), null, 'agent_completed ends the node')
+    // ...and the mark did not linger: a fresh node on the same id is sweepable.
+    r.onAgentSpawned({ toolUseId: 'bg', description: 'again' })
+    r.reset()
+    assert.equal(r.getEntry('bg'), null, 'a stale mark would have spared this')
+  })
+
+  it('unmarking restores the agent to the sweep (a downward correction)', () => {
+    const { r } = makeRegistry()
+    r.onAgentSpawned({ toolUseId: 'bg', description: 'x' })
+    r.setAgentOutlivesTurn('bg', true)
+    r.setAgentOutlivesTurn('bg', false)
+    r.reset()
+    assert.equal(r.getEntry('bg'), null)
+  })
+
+  it('marking an id the registry has never seen never resurrects it', () => {
+    const { r } = makeRegistry()
+    r.setAgentOutlivesTurn('ghost', true)
+    r.reset()
+    assert.equal(r.getEntry('ghost'), null)
     assert.equal(r.getEntries().length, 0)
+  })
+
+  // #7340 (review): the one that actually bit. A backgrounded `Agent` returns
+  // its tool_result the moment the task STARTS ("task started in background"),
+  // so `onToolResult` retired the node within milliseconds of creating it —
+  // `cancelActivity` then answered `not-found` for the whole time the subagent
+  // ran, and the Control Room tree disagreed with the badge list. The
+  // turn-end carve-out alone was inert against this.
+  it('a marked agent survives its own tool_result', () => {
+    const { r } = makeRegistry()
+    r.onAgentSpawned({ toolUseId: 'bg', description: 'backgrounded' })
+    r.setAgentOutlivesTurn('bg', true)
+    r.onToolResult({ toolUseId: 'bg', isError: false })
+    assert.equal(r.getEntry('bg')?.status, 'running', 'the subagent is still running')
+  })
+
+  it('a marked agent keeps its children through its own tool_result', () => {
+    const { r } = makeRegistry()
+    r.onAgentSpawned({ toolUseId: 'bg', description: 'backgrounded' })
+    r.onAgentEvent({ parentToolUseId: 'bg', type: 'tool_start', payload: { toolUseId: 'c1', tool: 'Read' } })
+    r.setAgentOutlivesTurn('bg', true)
+    r.onToolResult({ toolUseId: 'bg', isError: false })
+    assert.equal(r.getEntries().length, 2, 'parent and child both still running')
+  })
+
+  // Negative control: an UNMARKED agent must still be ended by its
+  // tool_result, or the carve-out would retire nothing at all.
+  it('an unmarked agent is still ended by its tool_result', () => {
+    const { r } = makeRegistry()
+    r.onAgentSpawned({ toolUseId: 'fg', description: 'foreground' })
+    r.onToolResult({ toolUseId: 'fg', isError: false })
+    assert.equal(r.getEntry('fg'), null)
+  })
+
+  it('clear() drops the marks so a marked agent is still terminated', () => {
+    const { r } = makeRegistry()
+    r.onAgentSpawned({ toolUseId: 'bg', description: 'backgrounded' })
+    r.setAgentOutlivesTurn('bg', true)
+    r.clear()
+    assert.equal(r.getEntries().length, 0)
+    // ...and the mark is gone, so a reused registry does not inherit it.
+    r.onAgentSpawned({ toolUseId: 'bg', description: 'again' })
+    r.reset()
+    assert.equal(r.getEntry('bg'), null)
   })
 
   it('clear ends everything (including shells) and empties the registry', () => {

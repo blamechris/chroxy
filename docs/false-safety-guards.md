@@ -869,48 +869,70 @@ reader, with inputs the repo does not currently contain. A consumer's positive
 control catches a reader that finds *nothing*; nothing catches a reader that
 finds *most things*.
 
+### 17. The mutation harness that accepted a hang as red — `#7340`
 
-### 17. The guard that hung instead of failing — `#7340`
+The guard here was fine. **The thing checking the guard was not** — and it is a
+textbook instance of the shape at the top of this file, one level up: for the
+harness, "the mutant was caught" and "the harness never found out" were the same
+observable outcome.
 
-Every entry above is about a guard that reports **success** when it should
-report failure. This one reports *nothing at all*, and the effect on a reader is
-the same or worse.
+The harness was a shell wrapper: apply a mutant, run `node --test`, and report.
+Its verdict was one line.
 
-`#7340`'s new source-contract guards assert that the turn-end exemption is
-wired at exactly two call sites. They were written the way the existing ones in
-`sdk-session-cancel-activity.test.js` are — slice the file to the branch,
-`assert.match(branch, /…/)`. Mutation-tested, and the first two mutants went red
-in under a second.
-
-The third did not go red. It did not go green either: `node --test` ran past
-**two minutes with an empty TAP stream** and had to be killed. Same guard, same
-kind of mutation — the only difference was which file the slice came from.
-`cli-session.js` is large, so "one branch" is still multiple kilobytes, and a
-failing `assert.match` carries **the entire subject as the error's `actual`**.
-Serialising a multi-kilobyte multi-line string into the TAP YAML block wedged
-the runner before it emitted a single line.
-
-So the guard's states were: **pass → green; fail → hang.** Nothing in that
-mapping is a red build. In CI a hung job reads as infrastructure flake and gets
-re-run, which is exactly the response that makes a real defect invisible — and
-the "evidence" it leaves behind is an empty log, so there is nothing to read
-even if someone looks.
-
-The fix is one line at each site: collapse to a boolean *before* asserting, so
-the subject never rides on the assertion.
-
-```js
-assert.match(branch, /authoritative: true/)          // fail → wedge
-assert.ok(/authoritative: true/.test(branch), msg)   // fail → red, in ~1s
+```sh
+if [ $rc -ne 0 ]; then echo "RED as required (exit $rc)"; else echo "STILL GREEN"; fi
 ```
 
-`assert.deepEqual(bigArrayOfPaths, [])` has the same hazard and the same fix:
-map to the short field you actually care about first.
+`!= 0` is not "the guard caught it". It also covers **hung and killed**,
+**crashed before the first test ran**, **out of memory**, and **wrong CLI flag**.
+Every one of those prints `RED as required` and moves on, and a mutation pass is
+precisely the situation where you have deliberately broken the tree — so the
+run *failing to run* is not a remote possibility, it is a live one.
+
+It fired here. Fifteen mutants were confirmed with that line. Two of them never
+executed a single assertion: `node --test` ran past **two minutes with an empty
+TAP stream** and had to be killed by hand. They were recorded as caught. The
+guard's real states were **pass → green, fail → hang**, and nothing in that
+mapping is a red build.
+
+The mechanism, since it is a decent hazard in its own right: a failing
+`assert.match(subject, re)` carries **the entire subject as the error's
+`actual`**, and these guards match against multi-kilobyte source slices. The fix
+is to collapse to a boolean *before* asserting, so the subject never rides on the
+assertion —
+
+```js
+assert.match(branch, /authoritative: true/)          // fail → 124 KB of TAP
+assert.ok(/authoritative: true/.test(branch), msg)   // fail → red, in ~0.3s
+```
+
+— and `assert.deepEqual(bigArrayOfPaths, [])` wants the same treatment: map to
+the short field you actually care about first.
+
+**Do not treat the wedge itself as an established mechanism.** Two reviewers
+tried independently to reproduce it and could not: one from a standalone script
+against a 101 KB subject (failed in ~1.2 s, emitting 124 KB of TAP), one by
+reverting the fix in-tree and re-running the original mutant (exit 1 in 289 ms;
+still 287 ms with every slice widened to the whole file and five simultaneous
+failures). Both were node v22.22.3 / darwin-arm64. So whatever produced a
+two-minute empty stream needs something neither reproduction had — `c8`, the
+`assert-test-count.mjs` wrapper that spawns the runner and parses its stdout,
+concurrent test processes, or something not yet identified.
+
+What IS established: the wedge was observed three times in-tree, at 0.33 s once
+the subject stopped riding on the assertion, and 124 KB of TAP for a one-line
+assertion is a bad idea regardless of whether it hangs. Keep the style fix; treat
+the cause as open.
+
+And note that the uncertainty does not touch the entry. The harness defect stands
+on its own — it was found by reading the harness, not by explaining the hang, and
+it would have accepted a crash, an OOM or a bad CLI flag just as happily.
 
 **Guard against it:** a mutation test is not finished when the suite stops being
-green. **Check that it went RED, with a legible message, and how long it took.**
-"Not green" silently includes hung, crashed-before-start, and killed-by-timeout —
-three outcomes that a `!= 0` exit check happily accepts and a human skimming a CI
-dashboard does not distinguish from a flake. The harness used for `#7340`
-reported `RED as required (exit 1)` for both a 0.3s failure and a 120s wedge,
-which is how this survived its own mutation pass long enough to be found by hand.
+green. **Check that it went red, with a legible message, and how long it took.**
+Assert the shape of the failure — the expected test name in the output, a
+non-empty TAP stream, a duration in the range a real failure takes — not merely
+that the exit code was non-zero. The same applies to any wrapper that decides
+pass/fail from an exit status alone: `cmd | grep -c FAIL` reporting `grep`'s
+status is the identical defect one pipe further along, and it is already
+catalogued above.

@@ -1162,8 +1162,13 @@ export function resolveReplayPlan(sessionManager, history, sessionId, lastSeq, l
  */
 export function reseedActiveAgents(ctx, ws, sessionId) {
   const { sessionManager, send } = ctx
+  // No `typeof session.getActiveAgents === 'function'` guard: it is defined on
+  // BaseSession, which every provider extends, so it can never be missing --
+  // and a feature-detect that can never fail turns a future regression into a
+  // silent no-op instead of a crash ("cannot check this" read as "nothing to
+  // check", docs/false-safety-guards.md).
   const session = sessionManager?.getSession(sessionId)?.session
-  if (!session || typeof session.getActiveAgents !== 'function') return
+  if (!session) return
   for (const agent of session.getActiveAgents()) {
     send(ws, { type: 'agent_spawned', sessionId, ...agent })
   }

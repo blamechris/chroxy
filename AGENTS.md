@@ -326,7 +326,8 @@ The recurring causes:
 
 Check the **exit code**, not the output — and note `cmd | grep -c FAIL` reports
 `grep`'s status, not the script's. Then check the mutant went **red, legibly,
-and fast**: `!= 0` also accepts hung, crashed-before-start and killed-by-timeout. Restore mutations with `cp` from a backup,
+and fast** — `!= 0` also accepts hung, crashed-before-start and
+killed-by-timeout, which read as flake rather than as a finding. Restore mutations with `cp` from a backup,
 never `git checkout --`, which eats unrelated uncommitted work.
 
 ### Server tests must not touch real user state (#4633)

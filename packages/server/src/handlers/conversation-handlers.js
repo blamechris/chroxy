@@ -231,12 +231,15 @@ async function handleRequestConversationTranscript(ws, client, msg, ctx) {
     })
   }
   ctx.transport.send(ws, { type: 'history_replay_end', sessionId: conversationId })
-  // #7340: this replay frame makes both clients wipe `activeAgents` on their
-  // ACTIVE session — not on `conversationId`, which is a closed transcript with
-  // no live session behind it. So the surface repaired here is the live
-  // session's, whose confirmed-backgrounded subagents now outlive their turn
-  // and would otherwise vanish from the badge list just because the user
-  // opened an old conversation. No-op when nothing is active or nothing runs.
+  // #7340: defence-in-depth. The dashboard normally DIVERTS this frame — it
+  // routes `history_replay_start`/`message`/`history_replay_end` for a pending
+  // transcript id into the transcript viewer, which never touches
+  // `sessionStates`, so no wipe happens — and the mobile app has no transcript
+  // surface at all. This covers the fail-safe branch where the diversion is not
+  // armed (a raw client, or a frame that arrives without a pending request), in
+  // which case the client wipes its ACTIVE session's badge list because
+  // `conversationId` is a closed transcript with no live session behind it.
+  // Idempotent either way: both clients dedupe `agent_spawned` by `toolUseId`.
   if (client?.activeSessionId) {
     ctx.transport.reseedActiveAgents(ws, client.activeSessionId)
   }

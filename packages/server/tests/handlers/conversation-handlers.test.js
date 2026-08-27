@@ -20,8 +20,12 @@ function makeCtx(sessions = new Map(), overrides = {}) {
     sendSessionInfo: createSpy(),
     replayHistory: createSpy(),
     // #7340: both replay handlers re-assert the session's live subagents after
-    // the replay frame made the client wipe them.
-    reseedActiveAgents: createSpy(),
+    // the replay frame made the client wipe them. The spy records into the SAME
+    // ordered log as `send`, because ORDER is the whole contract: the client
+    // wipes on `history_replay_start`, so a re-seed emitted before that frame
+    // is erased by it. A spy that only counted calls passed with the re-seed
+    // hoisted above the replay entirely.
+    reseedActiveAgents: createSpy((_ws, sid) => { sent.push({ type: '__reseed', sessionId: sid }) }),
     // Default test stubs — never touch real ~/.claude/projects
     scanConversations: createSpy(async () => []),
     searchConversations: createSpy(async () => []),
@@ -661,6 +665,11 @@ describe('conversation-handlers', () => {
 
       assert.equal(ctx.transport.reseedActiveAgents.callCount, 1)
       assert.equal(ctx.transport.reseedActiveAgents.calls[0][1], 'live-1')
+      const types = ctx._sent.map((m) => m.type)
+      assert.ok(
+        types.indexOf('__reseed') > types.indexOf('history_replay_end'),
+        'the re-seed must FOLLOW the replay frames it repairs',
+      )
     })
 
     it('re-seeds nothing when the client has no active session', async () => {
@@ -851,6 +860,11 @@ describe('conversation-handlers', () => {
       assert.equal(ctx.transport.reseedActiveAgents.callCount, 1)
       assert.equal(ctx.transport.reseedActiveAgents.calls[0][1], 's1',
         'the re-seed must target the session that was just replayed')
+      const types = ctx._sent.map((m) => m.type)
+      assert.ok(
+        types.indexOf('__reseed') > types.indexOf('history_replay_end'),
+        'the re-seed must FOLLOW the replay — the client wipes on history_replay_start, so anything sent before that is erased by it',
+      )
     })
   })
 

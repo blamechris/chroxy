@@ -8,6 +8,7 @@ import {
   sendPostAuthInfo,
   sendSessionInfo,
   replayHistory,
+  reseedActiveAgents,
   resolveReplayPlan,
   flushPostAuthQueue,
   scheduleAfterDrain,
@@ -2029,25 +2030,18 @@ describe('replayHistory — activeAgents re-seed (#7340)', () => {
     assert.equal(ctx._sends.filter(m => m.type === 'agent_spawned').length, 0)
   })
 
-  // A session object predating the accessor (or a non-Claude provider) must
-  // not crash the replay.
-  it('skips a session that exposes no getActiveAgents', async () => {
-    const { manager } = createMockSessionManager([
-      { id: 'sess-1', name: 'Alpha', cwd: '/alpha' },
-    ])
-    manager.getHistory = () => [{ type: 'response', content: 'Hello' }]
-    manager.isHistoryTruncated = () => false
-    delete manager.getSession('sess-1').session.getActiveAgents
+  // An unknown session id must not crash the replay — `getSession` returns
+  // undefined and there is nothing to re-seed.
+  it('skips a session the manager does not know', async () => {
     const ws = makeFakeWs()
-    const ctx = makeCtx({ sessionManager: manager })
+    const ctx = makeCtx({
+      sessionManager: managerWithAgents([{ type: 'response', content: 'Hello' }], [AGENT]),
+    })
     registerClient(ctx, ws)
 
-    replayHistory(ctx, ws, 'sess-1')
-    await new Promise(r => setImmediate(r))
+    reseedActiveAgents(ctx, ws, 'no-such-session')
 
-    const types = ctx._sends.map(m => m.type)
-    assert.ok(types.includes('history_replay_end'))
-    assert.equal(types.filter(t => t === 'agent_spawned').length, 0)
+    assert.equal(ctx._sends.filter(m => m.type === 'agent_spawned').length, 0)
   })
 })
 

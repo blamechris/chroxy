@@ -954,7 +954,7 @@ export class BaseSession extends EventEmitter {
       // guarantee, so the same chokepoint that stops the shell sweep clears
       // them. A destroy landing MID-TURN also has foreground agents tracked,
       // which is why this is an unconditional clear and not a filtered one --
-      // the `background` predicate belongs to the turn-end sweep, where the
+      // the `backgroundConfirmed` predicate belongs to the turn-end sweep, where the
       // question is "did this outlive its turn", not to teardown, where there
       // is no next turn for anything to outlive. No `agent_completed` emit: the
       // session is being destroyed, its clients drop its state wholesale, and
@@ -1012,7 +1012,12 @@ export class BaseSession extends EventEmitter {
    * @returns {{ toolUseId: string, description: string, startedAt: number }[]}
    */
   getActiveAgents() {
-    return Array.from(this._activeAgents.values()).map(({ toolUseId, description, startedAt }) => ({
+    // Keyed by the MAP KEY, not `agent.toolUseId` -- the same invariant
+    // `_completeAgents` states. A record whose field drifted from its key would
+    // otherwise be re-announced under one id and completed under another, and
+    // the client's dedupe and its filter would key on different ids, leaving a
+    // badge entry nothing can clear.
+    return Array.from(this._activeAgents, ([toolUseId, { description, startedAt }]) => ({
       toolUseId,
       description,
       startedAt,
@@ -1585,10 +1590,18 @@ export class BaseSession extends EventEmitter {
    * @param {string} reason — short identifier for the sweep cause
    * @returns {number} count of sweeps emitted
    */
-  _sweepUnresolvedToolStarts(reason = 'stream_completed_without_result') {
+  _sweepUnresolvedToolStarts(reason = 'stream_completed_without_result', exempt = null) {
     if (this._inFlightToolStarts.size === 0) return 0
-    const count = this._inFlightToolStarts.size
-    for (const [toolUseId, entry] of this._inFlightToolStarts) {
+    let count = 0
+    for (const [toolUseId, entry] of [...this._inFlightToolStarts]) {
+      // #7340: a confirmed-backgrounded subagent that has not reported back is
+      // NOT an orphan -- it is running. Synthesising an `isError` result for it
+      // would report a failure that did not happen and terminate its activity
+      // node. Its `tool_start` stays in flight, to be swept by whichever turn
+      // end or death path finally does complete it.
+      if (exempt && exempt.has(toolUseId)) continue
+      count++
+      this._inFlightToolStarts.delete(toolUseId)
       this.emit('tool_result', {
         toolUseId,
         result: `Tool ${entry.tool} did not emit a result before the turn ended (reason: ${reason}). Chroxy synthesized this result to clear the stale activeTools entry.`,
@@ -1599,7 +1612,6 @@ export class BaseSession extends EventEmitter {
         reason,
       })
     }
-    this._inFlightToolStarts.clear()
     return count
   }
 
@@ -1768,31 +1780,28 @@ export class BaseSession extends EventEmitter {
    * balancing `agent_completed` for every agent it drops, so a client's badge
    * clears whichever route got here.
    *
-   * `keepBackground` exempts agents whose backgrounding was CONFIRMED by the
-   * provider's own `task_started` (see `_trackAgent` for why the model's
-   * unconfirmed request is not enough). Default `false` -- a bare call is a
-   * total drain, which is what every death path wants.
+   * `exempt` is the set of ids to spare, computed ONCE by `_clearMessageState`
+   * and shared with the orphan sweep so the two cannot disagree about what is
+   * still running. Default empty -- a bare call is a total drain, which is what
+   * every death path wants.
    *
    * Keyed by the MAP KEY, not `agent.toolUseId`: a record whose field has
    * drifted from its key would otherwise leak and complete the wrong id.
    *
-   * @param {{ keepBackground?: boolean }} [opts]
-   * @returns {Set<string>} ids still tracked after the drain (empty unless
-   *   `keepBackground`). The activity registry's turn-end `reset()` takes this
-   *   verbatim so the two sweeps cannot disagree about what is still running.
+   * Every agent it completes emits `agent_completed`, which the registry turns
+   * into a node termination AND a clearing of that agent's outlives-turn mark
+   * -- which is what lets `ActivityRegistry.reset()` simply read the marks
+   * afterwards instead of being handed a second copy of this predicate.
+   *
+   * @param {{ exempt?: Set<string> }} [opts]
    * @protected
    */
-  _completeAgents({ keepBackground = false } = {}) {
-    const surviving = new Set()
-    for (const [toolUseId, agent] of [...this._activeAgents]) {
-      if (keepBackground && agent?.backgroundConfirmed === true) {
-        surviving.add(toolUseId)
-        continue
-      }
+  _completeAgents({ exempt = null } = {}) {
+    for (const toolUseId of [...this._activeAgents.keys()]) {
+      if (exempt && exempt.has(toolUseId)) continue
       this._activeAgents.delete(toolUseId)
       this.emit('agent_completed', { toolUseId })
     }
-    return surviving
   }
 
   /**
@@ -1844,6 +1853,11 @@ export class BaseSession extends EventEmitter {
       if (authoritative === true) {
         existing.background = background === true
         existing.backgroundConfirmed = background === true
+        // #7340: the registry is TOLD, never left to re-derive. This is the
+        // upgrade path -- `task_started` landing after the tool_use block --
+        // and it emits no event, so without this call the activity node would
+        // never learn that it outlives its turn.
+        this._activity.setAgentOutlivesTurn(toolUseId, existing.backgroundConfirmed)
       } else if (background === true) {
         existing.background = true
       }
@@ -1864,6 +1878,9 @@ export class BaseSession extends EventEmitter {
     }
     this._activeAgents.set(toolUseId, agentInfo)
     this.emit('agent_spawned', agentInfo)
+    // #7340: after the spawn, so the node exists to be marked. The other
+    // arrival order (`task_started` first) is handled by the upgrade above.
+    if (agentInfo.backgroundConfirmed) this._activity.setAgentOutlivesTurn(toolUseId, true)
   }
 
   /**
@@ -1920,7 +1937,25 @@ export class BaseSession extends EventEmitter {
     // with a synthetic tool_result rather than silently dropped — so
     // the dashboard's activeTools clears whether result fires next or
     // never fires at all.
-    this._sweepUnresolvedToolStarts('message_state_cleared')
+    // #7340: the ids that will outlive this turn, computed ONCE and shared by
+    // all three sweeps below so they cannot disagree. Empty on every
+    // provider-death path, which is what makes those a total drain.
+    //
+    // Computed BEFORE the orphan sweep, and that ordering is load-bearing: the
+    // sweep fabricates a `tool_result` with `isError: true` for every
+    // unresolved `tool_start`, and a backgrounded subagent that has not
+    // reported back yet looks exactly like an orphan. Sweeping it told the
+    // client the subagent had failed -- while it was running fine -- and ended
+    // its activity node on the way past.
+    const survivingAgents = turnEndedCleanly
+      ? new Set(
+        [...this._activeAgents]
+          .filter(([, agent]) => agent?.backgroundConfirmed === true)
+          .map(([toolUseId]) => toolUseId),
+      )
+      : null
+
+    this._sweepUnresolvedToolStarts('message_state_cleared', survivingAgents)
 
     // #7340: complete the tracked subagents this turn end owns, and no more.
     // A confirmed-backgrounded subagent deliberately outlives its turn, so
@@ -1929,7 +1964,7 @@ export class BaseSession extends EventEmitter {
     // itself said the turn ended (see `turnEndedCleanly` above); on every death
     // path the sweep stays total, because the signal that would clear it later
     // can no longer arrive.
-    const survivingAgents = this._completeAgents({ keepBackground: turnEndedCleanly })
+    this._completeAgents({ exempt: survivingAgents })
 
     // #5160: turn-end reconciliation for the activity registry. Ends any
     // tool/agent/blocked node still marked running/blocked (orphans the
@@ -1943,10 +1978,14 @@ export class BaseSession extends EventEmitter {
     // the two surfaces disagree -- AgentMonitorPanel says running while the
     // Control Room tree says done, and `cancelActivity` answers `not-found`
     // for the entire time the subagent runs. #4307 set this precedent one
-    // branch above for shells, for the same reason. The exempt set is derived
-    // from what the sweep actually kept rather than re-deciding the predicate
-    // here: two copies of "is this backgrounded" is how the pair drifts.
-    this._activity.reset(survivingAgents)
+    // branch above for shells, for the same reason.
+    //
+    // No argument: the registry reads its own outlives-turn marks, and
+    // `_completeAgents` above has just cleared the mark of every agent it
+    // completed (via `agent_completed`). So the set it spares is exactly the
+    // set that survived here -- by construction rather than by a second copy
+    // of the predicate.
+    this._activity.reset()
 
     if (this._resultTimeout) {
       clearTimeout(this._resultTimeout)

@@ -1475,9 +1475,13 @@ export class CliSession extends BaseSession {
       }
       case 'task': {
         if (!parseSucceeded) return
-        // #7340: `background` (from the tool's `run_in_background`) decides
-        // whether the turn-end sweep may complete this agent. The CLI's own
-        // `task_started` confirms it moments later with `is_backgrounded`;
+        // #7340: this records the MODEL'S REQUEST (`run_in_background`) into
+        // `background`. It does NOT exempt the agent from the turn-end sweep —
+        // `backgroundConfirmed` does, and only the CLI's own `task_started` can
+        // set that. Exempting on an unconfirmed request would strand an agent
+        // on a build that emits no task lifecycle events, because the same
+        // event is what proves a terminal `task_notification` can arrive.
+        // `task_started` may correct this value in EITHER direction;
         // `_trackAgent` upgrades rather than re-emits, so either order is fine.
         this._trackAgent({
           toolUseId,
