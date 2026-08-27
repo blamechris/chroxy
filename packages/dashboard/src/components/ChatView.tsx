@@ -253,6 +253,111 @@ const TYPE_CLASS: Record<string, string> = {
 const SCROLL_THRESHOLD = 100
 
 /**
+ * #7399 — minimum ACCUMULATED finger travel (px) that counts as a deliberate
+ * touch drag rather than the jitter of a finger resting on the list.
+ *
+ * Accumulated, not per-event: a slow drag on a 120Hz panel delivers ~3px per
+ * `touchmove`, so a per-event comparison rejected every one of them and the
+ * reader stayed pinned for the whole gesture — this bug, unfixed, on touch.
+ *
+ * The accumulator is plain NET signed travel since `touchstart`, with no
+ * reversal reset. A reset was written first and then removed: a symmetric
+ * wobble nets ~zero with or without it, and an asymmetric one is real travel
+ * that should register — so no test could tell the two implementations apart,
+ * and a mutant that deleted the reset survived the whole suite. An untestable
+ * refinement is not a guard.
+ */
+const TOUCH_INTENT_SLOP = 4
+
+/**
+ * #7399 — keys that scroll the list toward history, and toward the tail. A key
+ * press is read as INTENT directly, because the position it produces is not
+ * usable evidence while the streaming re-pin loop is running (see
+ * `handleWheel`). `Space`/`Shift+Space` are deliberately absent: Space
+ * activates a focused control, and every reachable target here (a row's copy
+ * button, an expandable tool row) is one.
+ */
+const SCROLL_UP_KEYS = new Set(['ArrowUp', 'PageUp', 'Home'])
+const SCROLL_DOWN_KEYS = new Set(['ArrowDown', 'PageDown', 'End'])
+
+/** Sub-pixel slack when comparing scroll geometry. */
+const SCROLL_EPSILON = 1
+
+/**
+ * #7399 review — hard ceiling on the pin pause a held pointer opens. The
+ * release listeners below cover every ordinary ending, but a `pointerdown`
+ * whose `pointerup` never arrives (a context menu that runs a nested event
+ * loop, a drag released outside the window, an engine that dispatches the
+ * press but not the release) would otherwise pause the pin FOREVER — and
+ * silently, since `userScrolledUp` stays false so no scroll-to-bottom button
+ * appears. A pause that cannot latch is worth more than one that is merely
+ * unlikely to.
+ */
+const POINTER_PAUSE_MAX_MS = 10_000
+
+/**
+ * #7399 — how close to the bottom (px) the viewport must get before a reader
+ * who scrolled up is considered to be FOLLOWING again.
+ *
+ * Deliberately much tighter than SCROLL_THRESHOLD: the two directions cannot
+ * share a threshold. Leaving the follow uses the wide band (a small nudge off
+ * the bottom is still "following the conversation"), but resuming it on the
+ * same band re-opens this bug at small scale — a 40px scroll-up lands INSIDE
+ * the band, so the next scroll event would classify the reader as at-bottom,
+ * hand them back to the re-pin loop, and they could never accumulate enough
+ * movement to escape. A few px of slack absorbs sub-pixel scrollTop rounding;
+ * anything more is a user who has not actually returned to the bottom.
+ */
+const RESUME_FOLLOW_THRESHOLD = 8
+
+/**
+ * #7399 review — did a scroller INSIDE the list consume this gesture?
+ *
+ * `.chat-messages` contains scrollable descendants: `.question-prompt--multi`
+ * (`max-height: 60vh; overflow-y: auto; overscroll-behavior: contain`) and
+ * `ToolGroup`'s result `<pre>` (`max-height: 180px; overflow: auto`). A wheel
+ * or touch inside one of those moves that element, not the list — but the
+ * event still bubbles to the list's handlers. Reading it as list-scroll intent
+ * killed the auto-follow while the list had not moved a pixel, and
+ * `overscroll-behavior: contain` means no outer `scroll` event ever arrives to
+ * correct the mistake. That is worst in exactly the #4652 scenario: reading an
+ * AskUserQuestion form mid-stream.
+ *
+ * A nested scroller only consumes the gesture while it can still move in that
+ * direction; once it is at its own end the event legitimately belongs to the
+ * list, which is why the check is direction-aware rather than a blanket
+ * "is there a scroller in the path".
+ */
+function consumedByNestedScroller(target: EventTarget | null, container: HTMLElement, up: boolean): boolean {
+  let node = target instanceof Element ? target : null
+  while (node && node !== container) {
+    if (node.scrollHeight - node.clientHeight > SCROLL_EPSILON) {
+      const overflowY = getComputedStyle(node).overflowY
+      if (overflowY === 'auto' || overflowY === 'scroll') {
+        const room = up
+          ? node.scrollTop > SCROLL_EPSILON
+          : node.scrollTop < node.scrollHeight - node.clientHeight - SCROLL_EPSILON
+        if (room) return true
+      }
+    }
+    node = node.parentElement
+  }
+  return false
+}
+
+/**
+ * #7399 review — ArrowUp is caret movement, not scrolling, inside a text entry
+ * or a widget that owns arrow-key navigation.
+ */
+function isTextEntryTarget(el: HTMLElement | null): boolean {
+  if (!el) return false
+  if (el.isContentEditable) return true
+  if (/^(?:INPUT|TEXTAREA|SELECT)$/.test(el.tagName)) return true
+  const role = el.getAttribute('role')
+  return role === 'textbox' || role === 'combobox' || role === 'listbox' || role === 'menu' || role === 'menuitem'
+}
+
+/**
  * #6788 — headroom (px) left above a search match when the list scrolls to it,
  * so the matched row lands just below the top edge rather than flush against it
  * (mirrors the mobile `y - 80` headroom / `viewPosition: 0` landing).
@@ -531,12 +636,22 @@ function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, inFlig
     return positions
   }, [messages, queuedIds])
 
-  const [userScrolledUp, setUserScrolledUp] = useState(false)
+  const [userScrolledUp, setUserScrolledUpState] = useState(false)
   const programmaticScrollRef = useRef(false)
   // #5954 — a ref mirror of `userScrolledUp` so the ResizeObserver callback can
   // read the live follow-state without re-subscribing the observer every time
-  // the user crosses the bottom threshold. Kept in sync by the effect below.
+  // the user crosses the bottom threshold.
+  //
+  // #7399 — the mirror is now also the SYNCHRONOUS source of truth for the
+  // streaming re-pin loop, which has to stop within the same tick the user's
+  // gesture arrives: a `setState` only lands a render later, and the loop pins
+  // to the bottom on every frame in between. `setScrolledUp` below is the ONLY
+  // writer of either — a write to one without the other is how the two drift.
   const userScrolledUpRef = useRef(false)
+  const setScrolledUp = useCallback((next: boolean) => {
+    userScrolledUpRef.current = next
+    setUserScrolledUpState(next)
+  }, [])
 
   // #5561 — scroll-anchor compensation state. WKWebView (the Tauri desktop's
   // engine, and the dashboard's PRIMARY consumer) does NOT implement default
@@ -683,11 +798,182 @@ function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, inFlig
     // layout change.
     setScrollTop(el.scrollTop)
     setViewportHeight(el.clientHeight)
-    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < SCROLL_THRESHOLD
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
+    const atBottom = distanceFromBottom < SCROLL_THRESHOLD
     // During programmatic scrolls, only update if we're at bottom (don't falsely set scrolledUp)
     if (programmaticScrollRef.current && atBottom) return
-    setUserScrolledUp(!atBottom)
+    // #7399 — asymmetric thresholds (see RESUME_FOLLOW_THRESHOLD). A reader who
+    // has already left the bottom only rejoins the follow by actually reaching
+    // it; the wide band decides the leaving direction only.
+    if (userScrolledUpRef.current) {
+      // Two ways back into the follow, and the second one is why gestures are
+      // tracked in both directions. Reaching the bottom is the position proof;
+      // a deliberate tail-ward gesture that lands inside the follow band is the
+      // INTENT proof, and it is needed because the stream can append content
+      // between the reader's gesture and this event — leaving them a few px
+      // short of a bottom that moved, and stranded for the rest of the turn.
+      if (distanceFromBottom <= RESUME_FOLLOW_THRESHOLD || (followIntentRef.current && atBottom)) {
+        followIntentRef.current = false
+        setScrolledUp(false)
+      }
+      return
+    }
+    setScrolledUp(!atBottom)
+  }, [setScrolledUp])
+
+  // #7399 — read the user's scroll INTENT from the input gesture, not from the
+  // scroll position the gesture produced.
+  //
+  // Position is not usable evidence while streaming. The re-pin loop below runs
+  // every frame, so by the time a gesture's `scroll` event is dispatched the
+  // view is already back at the bottom and `programmaticScrollRef` is still
+  // held — and a trackpad flick only moves ~10-40px per frame, an order of
+  // magnitude inside SCROLL_THRESHOLD. `handleScroll` therefore reads
+  // `programmatic && atBottom` and discards a genuine user gesture, and the
+  // user can never accumulate enough movement in a single frame to escape the
+  // threshold. That is the reported "I can't scroll up, it's forcing me to the
+  // bottom": the guard is not wrong, it is unreachable.
+  //
+  // A wheel / touch / key event with an upward delta is unambiguously the user
+  // whatever position it lands on, so it is the ground truth. It writes through
+  // `setScrolledUp`, which stops the loop in the SAME tick via the ref — a
+  // render later would be too late, because the frames in between would pin the
+  // reader's position away before the effect could tear the loop down.
+  // #7399 review — the mirror image, and the reason it exists: a reader who
+  // deliberately scrolls back toward the tail is ASKING to follow again.
+  // Position alone cannot tell "stopped 8px short" from "reached the bottom and
+  // the stream appended 30px between the gesture and this event", and the
+  // second case stranded them for the rest of the turn. Recorded as intent and
+  // consumed by `handleScroll`, which still requires the position to be inside
+  // the follow band before it acts on it.
+  const followIntentRef = useRef(false)
+  const markFollowIntentByGesture = useCallback(() => {
+    followIntentRef.current = true
   }, [])
+
+  // #7399 review — a gesture only means "stop following" on a list that can
+  // actually scroll. On a short conversation the wheel moves nothing, but
+  // latching the flag would kill the follow for the rest of the session with no
+  // scroll event able to clear it — and pre-fix these gestures were plain
+  // no-ops, so that would be a regression invented by the fix.
+  const markScrolledUpByGesture = useCallback(() => {
+    const el = containerRef.current
+    if (!el || el.scrollHeight - el.clientHeight <= SCROLL_EPSILON) return
+    followIntentRef.current = false
+    if (userScrolledUpRef.current) return
+    setScrolledUp(true)
+  }, [setScrolledUp])
+
+  const handleWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
+    if (e.deltaY === 0) return
+    const el = containerRef.current
+    if (!el) return
+    const up = e.deltaY < 0
+    if (consumedByNestedScroller(e.target, el, up)) return
+    if (up) markScrolledUpByGesture()
+    else markFollowIntentByGesture()
+  }, [markScrolledUpByGesture, markFollowIntentByGesture])
+
+  // A finger dragging DOWN the screen scrolls the content UP toward history.
+  // Travel is ACCUMULATED across moves (see TOUCH_INTENT_SLOP), so a slow
+  // deliberate drag registers while a resting finger's wobble never does.
+  const touchYRef = useRef<number | null>(null)
+  const touchTravelRef = useRef(0)
+  const handleTouchStart = useCallback((e: React.TouchEvent<HTMLDivElement>) => {
+    touchYRef.current = e.touches[0]?.clientY ?? null
+    touchTravelRef.current = 0
+  }, [])
+  const handleTouchMove = useCallback((e: React.TouchEvent<HTMLDivElement>) => {
+    const y = e.touches[0]?.clientY
+    if (y === undefined) return
+    const last = touchYRef.current
+    touchYRef.current = y
+    if (last === null) return
+    const dy = y - last
+    if (dy === 0) return
+    touchTravelRef.current += dy
+    const el = containerRef.current
+    if (!el) return
+    const up = touchTravelRef.current > 0
+    if (consumedByNestedScroller(e.target, el, up)) return
+    if (touchTravelRef.current > TOUCH_INTENT_SLOP) markScrolledUpByGesture()
+    else if (touchTravelRef.current < -TOUCH_INTENT_SLOP) markFollowIntentByGesture()
+  }, [markScrolledUpByGesture, markFollowIntentByGesture])
+
+  // Keys only count when they did not come from a text entry or an arrow-key
+  // widget inside the list — that is caret movement, not scrolling.
+  //
+  // PRECONDITION, and it is a narrow one: a keydown targets
+  // `document.activeElement`, and this container is not itself focusable, so
+  // this handler is only reached when focus is already INSIDE the list — a
+  // reader who clicked a row's copy button or an expandable tool row
+  // (`ToolBubble` carries role=button + tabIndex=0). That is also exactly the
+  // state in which the browser scrolls this container rather than the document,
+  // so the handler is useful precisely where it is reachable. With focus on
+  // `body` the keys do not scroll the conversation at all today — a real
+  // keyboard-access gap, but a pre-existing one that wants the whole scroller in
+  // the tab order, so it is tracked separately in #7406 rather than smuggled
+  // into a scroll-behaviour fix.
+  const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
+    const up = SCROLL_UP_KEYS.has(e.key)
+    if (!up && !SCROLL_DOWN_KEYS.has(e.key)) return
+    const target = e.target as HTMLElement | null
+    if (isTextEntryTarget(target)) return
+    const el = containerRef.current
+    if (!el) return
+    if (consumedByNestedScroller(e.target, el, up)) return
+    if (up) markScrolledUpByGesture()
+    else markFollowIntentByGesture()
+  }, [markScrolledUpByGesture, markFollowIntentByGesture])
+
+  // #7399 — a native scrollbar-thumb drag emits no wheel/touch/key event, so
+  // the handlers above cannot see it; the loop and the user just fight over
+  // `scrollTop` every frame and the user loses. While a pointer is held down on
+  // the scroller we therefore PAUSE the pin instead of classifying anything.
+  // With no writes in flight `programmaticScrollRef` clears, `handleScroll`'s
+  // position logic becomes reachable again, and the drag accumulates until it
+  // crosses SCROLL_THRESHOLD and registers normally. Deliberately not a
+  // classification: a plain click that moves nothing simply resumes following
+  // when the button comes back up.
+  //
+  // This is BEST EFFORT and is written down as such rather than asserted:
+  // whether an engine dispatches pointer events for a press on a native
+  // scrollbar is engine-specific, and WKWebView — the Tauri desktop's engine —
+  // is the one this is least certain of. Where it does not fire, the thumb drag
+  // falls back to the pre-existing position path (a drag crossing
+  // SCROLL_THRESHOLD in one frame still registers), exactly as it did before
+  // this PR. It can only add coverage; it cannot take any away. The bounded
+  // pause (POINTER_PAUSE_MAX_MS) is what makes "can only add" true.
+  const pointerDownRef = useRef(false)
+  const pointerPauseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const releasePointerPause = useCallback(() => {
+    pointerDownRef.current = false
+    if (pointerPauseTimerRef.current !== null) {
+      clearTimeout(pointerPauseTimerRef.current)
+      pointerPauseTimerRef.current = null
+    }
+  }, [])
+  const handlePointerDown = useCallback(() => {
+    pointerDownRef.current = true
+    if (pointerPauseTimerRef.current !== null) clearTimeout(pointerPauseTimerRef.current)
+    pointerPauseTimerRef.current = setTimeout(releasePointerPause, POINTER_PAUSE_MAX_MS)
+  }, [releasePointerPause])
+  useEffect(() => {
+    const release = () => { releasePointerPause() }
+    const onVisibility = () => { if (document.visibilityState === 'hidden') releasePointerPause() }
+    // Capture phase: a `stopPropagation` anywhere in the app must not be able to
+    // hide the release from us — that is precisely how the pause would latch.
+    // `mouseup` is listed alongside `pointerup` as the fallback for an engine
+    // that dispatches the compatibility mouse event but not the pointer one.
+    const events = ['pointerup', 'pointercancel', 'mouseup', 'blur', 'contextmenu'] as const
+    for (const type of events) window.addEventListener(type, release, true)
+    document.addEventListener('visibilitychange', onVisibility, true)
+    return () => {
+      for (const type of events) window.removeEventListener(type, release, true)
+      document.removeEventListener('visibilitychange', onVisibility, true)
+      releasePointerPause()
+    }
+  }, [releasePointerPause])
 
   // The bare "snap to bottom" primitive shared by the mount, count-follow, and
   // scrollToBottomSignal effects: flag the write as programmatic (so the
@@ -708,8 +994,8 @@ function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, inFlig
 
   const scrollToBottom = useCallback(() => {
     scrollToBottomNow()
-    setUserScrolledUp(false)
-  }, [scrollToBottomNow])
+    setScrolledUp(false)
+  }, [scrollToBottomNow, setScrolledUp])
 
   // Scroll to the bottom on initial mount so switching back to the chat
   // tab always lands on the most-recent message above the input bar.
@@ -723,13 +1009,6 @@ function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, inFlig
     // so the first render after layout has an accurate viewport height.
     syncGeometry()
   }, [syncGeometry, scrollToBottomNow])
-
-  // #5954 — mirror `userScrolledUp` into a ref so the ResizeObserver callback
-  // (which we don't want to re-subscribe on every threshold crossing) reads the
-  // current follow-state.
-  useEffect(() => {
-    userScrolledUpRef.current = userScrolledUp
-  }, [userScrolledUp])
 
   // #5561 — keep the windowed range correct when the container resizes (panel
   // split drag, window resize, sidebar toggle) without a scroll event firing.
@@ -754,7 +1033,11 @@ function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, inFlig
     if (!el || typeof ResizeObserver === 'undefined') return
     const ro = new ResizeObserver(() => {
       syncGeometry()
-      if (!userScrolledUpRef.current) scrollToBottomNow()
+      // #7399 review — yield to a held pointer for the same reason the streaming
+      // tick does: a thumb drag held while the input area grows would otherwise
+      // be yanked to the bottom mid-drag, which is the one case the pause exists
+      // to prevent.
+      if (!userScrolledUpRef.current && !pointerDownRef.current) scrollToBottomNow()
     })
     ro.observe(el)
     return () => ro.disconnect()
@@ -871,9 +1154,9 @@ function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, inFlig
   useEffect(() => {
     if (scrollToBottomSignal === lastScrollSignalRef.current) return
     lastScrollSignalRef.current = scrollToBottomSignal
-    setUserScrolledUp(false)
+    setScrolledUp(false)
     requestAnimationFrame(() => { scrollToBottomNow() })
-  }, [scrollToBottomSignal, scrollToBottomNow])
+  }, [scrollToBottomSignal, scrollToBottomNow, setScrolledUp])
 
   // During streaming, continuously re-pin to the bottom via RAF so the growing
   // tail stays in view. #5954: reuse `scrollToBottomNow()` rather than an inline
@@ -887,13 +1170,25 @@ function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, inFlig
   // below the fold ("doesn't consistently stay at the bottom"). `scrollToBottomNow`
   // holds the flag until the next frame, so `handleScroll`'s
   // `programmaticScrollRef.current && atBottom` guard reliably ignores the
-  // self-induced events while a genuine user scroll-up (atBottom false) is still
-  // honored.
+  // self-induced events.
+  //
+  // #7399 — this comment used to end by claiming "a genuine user scroll-up
+  // (atBottom false) is still honored". It was exactly backwards: because the
+  // loop re-pins every frame, `atBottom false` is the state it makes
+  // unreachable, and a user scrolling up during a long turn was pinned to the
+  // bottom for the whole stream. User intent now comes from the GESTURE
+  // handlers above, not from the position, and the tick re-reads the REF so a
+  // gesture stops the pinning in the same tick rather than a render later.
   useEffect(() => {
     if (!isStreaming || userScrolledUp) return
     let rafId: number
     const tick = () => {
-      scrollToBottomNow()
+      // Stop for good: a gesture flipped the ref, and the state update that
+      // tears this effect down is still a render away.
+      if (userScrolledUpRef.current) return
+      // Yield to a pointer the user is holding on the scroller (thumb drag) —
+      // keep the loop alive so following resumes on release.
+      if (!pointerDownRef.current) scrollToBottomNow()
       rafId = requestAnimationFrame(tick)
     }
     rafId = requestAnimationFrame(tick)
@@ -948,7 +1243,7 @@ function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, inFlig
   useEffect(() => {
     if (!searchMatchId) return
     if (!containerRef.current) return
-    setUserScrolledUp(true)
+    setScrolledUp(true)
     const index = dedupRef.current.findIndex((m) => m.id === searchMatchId)
     if (index < 0) return
     scrollToRowIndex(index)
@@ -966,7 +1261,7 @@ function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, inFlig
         programmaticScrollRef.current = false
       }
     }
-  }, [searchMatchId, scrollToRowIndex])
+  }, [searchMatchId, scrollToRowIndex, setScrolledUp])
 
   // #5561 — the windowed slice. Only rows in [startIndex, endIndex) mount; the
   // top/bottom spacers reserve the height of the skipped rows so the scrollbar
@@ -1000,6 +1295,11 @@ function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, inFlig
           className="chat-messages"
           data-testid="chat-messages"
           onScroll={handleScroll}
+          onWheel={handleWheel}
+          onTouchStart={handleTouchStart}
+          onTouchMove={handleTouchMove}
+          onKeyDown={handleKeyDown}
+          onPointerDown={handlePointerDown}
         >
           {/* Top spacer — reserves the height of windowed-out leading rows. The
               `flex: 0 0 auto` style keeps it from being squeezed by the flex
