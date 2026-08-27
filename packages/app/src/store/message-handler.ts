@@ -2479,12 +2479,14 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         // state whose transient slices are still undefined.
         //
         // #7402 — `isPlanPending`/`planAllowedPrompts` are wiped here, on the
-        // REPLAYED session, for exactly the reasons above. They used to be
-        // wiped via `updateActiveSession`, so the same background-replay burst
-        // cancelled a pending plan approval the user was looking at, on the
-        // very reconnect that was supposed to restore it. #7340 moved
-        // `activeAgents` and deliberately left this alone to keep its blast
-        // radius to the bug it was fixing; this is the follow-up.
+        // REPLAYED session, for the same KEYING reason as `activeAgents` (not
+        // the guarding note above, which is about reading a partially-built
+        // state). They used to be wiped via `updateActiveSession`, so the same
+        // background-replay burst cancelled a pending plan approval the user
+        // was looking at, on the very reconnect that was supposed to restore
+        // it. #7340 moved `activeAgents` and deliberately left this alone to
+        // keep its blast radius to the bug it was fixing; this is the
+        // follow-up.
         updateSession(replayTargetId, (ss) => {
           const patch: Partial<SessionState> = {};
           if ((ss.activeAgents?.length ?? 0) > 0) patch.activeAgents = [];

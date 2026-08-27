@@ -628,6 +628,10 @@ describe('history_replay_start: isPlanPending wipe targeting (#7402)', () => {
   // one — can be a partially-built state whose transient slices are undefined.
   it('does not throw when the replayed session state is partially built', () => {
     const store = seedTwoSessions();
+    // `activeAgents` is the slice the `?? 0` guard in the merged updater
+    // actually defends — deleting only the plan slices leaves the test unable
+    // to fail for the reason it is named after (neither is read unguarded).
+    delete (store.getState().sessionStates.s2 as any).activeAgents;
     delete (store.getState().sessionStates.s2 as any).isPlanPending;
     delete (store.getState().sessionStates.s2 as any).planAllowedPrompts;
 
