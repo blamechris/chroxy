@@ -4,9 +4,11 @@ import { NotificationsWidget } from './NotificationsWidget'
 import { HeaderOverflowMenu, type HeaderOverflowItem } from './HeaderOverflowMenu'
 import { StatusBar } from './StatusBar'
 import { DevPreviewChip } from './DevPreviewChip'
+import { SessionCiChip } from './SessionCiChip'
 import { formatShortcutKeys } from '../utils/platform'
 import type { ChatActivityState } from '@chroxy/store-core'
 import type { DevPreview } from '../store/types'
+import type { ServerSessionPrStatusMessage } from '@chroxy/protocol'
 
 declare const __APP_VERSION__: string
 
@@ -101,6 +103,11 @@ export interface AppHeaderProps {
   // renders nothing; DevPreviewChip self-gates.
   devPreviews: DevPreview[]
   onCloseDevPreview: (port: number) => void
+  // #7344 — the active session's pull-request / CI status. Null before the
+  // first snapshot lands; SessionCiChip self-gates on it.
+  sessionPrStatus: ServerSessionPrStatusMessage | null
+  sessionPrStatusLoading?: boolean
+  onRefreshSessionPrStatus: () => void
 }
 
 export function AppHeader(props: AppHeaderProps) {
@@ -194,6 +201,18 @@ export function AppHeader(props: AppHeaderProps) {
             resulting URL discoverable (previously only visible by scrolling
             raw tool output). Self-gates on an empty devPreviews array. */}
         <DevPreviewChip previews={props.devPreviews} onClose={props.onCloseDevPreview} />
+        {/* #7344 — the session's PR + CI state. Before this the only signal that
+            CI was running at all was prose the agent typed, so the user could
+            not tell a finished session from one waiting on an external
+            resource. Check state and merge state render as SEPARATE pills and
+            are never collapsed into one "ready to merge?" badge — they diverge
+            (21/21 green alongside mergeStateStatus BLOCKED is the case that
+            motivated the issue). */}
+        <SessionCiChip
+          status={props.sessionPrStatus}
+          loading={props.sessionPrStatusLoading}
+          onRefresh={props.onRefreshSessionPrStatus}
+        />
         {/* #4890 — Slack-style intervention notifications widget. Bell
             with unread badge → dropdown listing every intervention alert
             (read + unread) so the operator gets a durable "do I have

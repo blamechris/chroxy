@@ -4082,6 +4082,30 @@ describe('server_error toast scope filtering', () => {
       }
     });
 
+    // #7344: `sessionPrStatusLoading` is a Record keyed by session id, so the
+    // #6153 sweep — which walks a FLAT list of boolean keys — cannot reach it.
+    // Same failure mode as #6289 above: a chip whose Refresh was in flight when
+    // the socket dropped would stay disabled forever, unable to issue the
+    // request that would clear it.
+    it('clears every sessionPrStatusLoading entry when onclose fires (#7344)', async () => {
+      const { useConnectionStore } = await import('./connection');
+      const { socket, teardown } = await setupCapturedSocket();
+
+      try {
+        useConnectionStore.setState({
+          sessionPrStatusLoading: { 's1': true, 's2': true },
+          // Snapshots are deliberately KEPT — a stale reading is still
+          // information, and the chip's Refresh re-fetches after reconnect.
+          sessionPrStatus: { 's1': { type: 'session_pr_status', sessionId: 's1', generatedAt: 'x', branch: null, repo: null, pr: null, checks: null, merge: null, reason: null } } as never,
+        });
+        socket.onclose!();
+        expect(useConnectionStore.getState().sessionPrStatusLoading).toEqual({});
+        expect(useConnectionStore.getState().sessionPrStatus.s1).toBeTruthy();
+      } finally {
+        teardown();
+      }
+    });
+
     it('preserves other session state when clearing pendingTrustGrants on transport drop', async () => {
       // Regression guard: the cleanup must only zero `pendingTrustGrants` —
       // other session fields (messages, claudeReady, etc.) must survive an

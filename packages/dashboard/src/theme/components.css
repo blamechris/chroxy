@@ -13463,3 +13463,89 @@ button.sidebar-token-view-session-row:hover {
   outline: none;
   border-color: var(--border-focus);
 }
+
+/* #7344 — session pull-request / CI status chip in the header.
+   Tone is severity only; the merge pill is a separate element because check
+   state and merge state are separate facts that must never be collapsed. */
+.session-ci-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  /* 44px is the tap-target floor this repo holds on every surface (WCAG 2.1
+     SC 2.5.5), stricter than WCAG 2.2 AA's 24px. */
+  min-height: 44px;
+  padding: 0 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-primary);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+}
+
+.session-ci-chip--success {
+  background: var(--accent-green-light);
+  border-color: var(--accent-green-border);
+}
+
+.session-ci-chip--failure {
+  background: var(--accent-red-subtle);
+  border-color: var(--accent-red-border);
+}
+
+.session-ci-chip--pending {
+  background: var(--accent-blue-light);
+  border-color: var(--accent-blue-border);
+}
+
+.session-ci-chip--neutral {
+  background: transparent;
+  border-color: var(--border-secondary);
+  color: var(--text-muted);
+}
+
+.session-ci-chip__pr {
+  font-weight: 600;
+  color: var(--text-link);
+  text-decoration: none;
+}
+
+a.session-ci-chip__pr:hover,
+a.session-ci-chip__pr:focus-visible {
+  text-decoration: underline;
+}
+
+.session-ci-chip__label {
+  color: var(--text-secondary);
+}
+
+.session-ci-chip__merge {
+  color: var(--text-muted);
+  border-left: 1px solid var(--border-primary);
+  padding-left: 6px;
+}
+
+.session-ci-chip__refresh {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* Grow the visible control to the 44pt floor rather than relying on a hit
+     area the dashboard has no `hitSlop` equivalent for. */
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: var(--text-base);
+  line-height: 1;
+}
+
+.session-ci-chip__refresh:hover:not(:disabled),
+.session-ci-chip__refresh:focus-visible:not(:disabled) {
+  color: var(--text-heading);
+}
+
+.session-ci-chip__refresh:disabled {
+  color: var(--text-disabled);
+  cursor: default;
+}

@@ -261,6 +261,13 @@ vi.mock('./store/connection', () => {
     subscribeTerminalMirror: vi.fn(),
     unsubscribeTerminalMirror: vi.fn(),
     serverCapabilities: null,
+    // #7344 — the App-level effect pulls the session's PR/CI status once per
+    // (session, connection) for the header chip. The base mock exposes the
+    // action plus its two session-keyed slices so the effect's selectors don't
+    // crash on a partial store shape.
+    requestSessionPrStatus: vi.fn(),
+    sessionPrStatus: {},
+    sessionPrStatusLoading: {},
   }
   const useConnectionStore = (
     selector?: (s: typeof baseState) => unknown,

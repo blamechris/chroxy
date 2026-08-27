@@ -667,6 +667,27 @@ export function App() {
   const markAllSessionNotificationsRead = useConnectionStore(s => s.markAllSessionNotificationsRead)
   // #6790 — dismiss an active dev-server preview tunnel from the header chip.
   const closeDevPreview = useConnectionStore(s => s.closeDevPreview)
+  // #7344 — the active session's pull-request / CI status for the header chip.
+  // Selected by session id rather than through getActiveSessionState(), because
+  // the snapshot lives in its own session-keyed slice (a reply can land after a
+  // tab switch and must stay filed under the session it describes).
+  const requestSessionPrStatus = useConnectionStore(s => s.requestSessionPrStatus)
+  // Optional-chained on the SLICES, not just the keys: several App-level test
+  // fixtures mock the store with partial shapes that predate these fields (the
+  // same reason DevPreviewChip's `previews` prop is optional), so the record can
+  // genuinely arrive undefined — treated the same as "no snapshot yet".
+  const sessionPrStatus = useConnectionStore(s => (s.activeSessionId ? s.sessionPrStatus?.[s.activeSessionId] ?? null : null))
+  const sessionPrStatusLoading = useConnectionStore(s => (s.activeSessionId ? s.sessionPrStatusLoading?.[s.activeSessionId] === true : false))
+  const refreshSessionPrStatus = useCallback(() => { requestSessionPrStatus() }, [requestSessionPrStatus])
+
+  // #7344: pull the session's PR/CI status once per (session, connection) so the
+  // header chip has something to show without the user clicking Refresh first.
+  // Deliberately NOT a poll — the automatic completion event that wakes the
+  // agent is the follow-on slice; here a stale reading plus a visible Refresh
+  // beats no reading at all, which is what the user has today.
+  useEffect(() => {
+    if (activeSessionId && connectionPhase === 'connected') requestSessionPrStatus(activeSessionId)
+  }, [activeSessionId, connectionPhase, requestSessionPrStatus])
   const conversationHistory = useConnectionStore(s => s.conversationHistory)
   const fetchConversationHistory = useConnectionStore(s => s.fetchConversationHistory)
   const resumeConversation = useConnectionStore(s => s.resumeConversation)
@@ -2310,6 +2331,9 @@ export function App() {
         costBadgeMode={costBadgeMode}
         devPreviews={devPreviews}
         onCloseDevPreview={closeDevPreview}
+        sessionPrStatus={sessionPrStatus}
+        sessionPrStatusLoading={sessionPrStatusLoading}
+        onRefreshSessionPrStatus={refreshSessionPrStatus}
       />
 
       {/* Sidebar */}

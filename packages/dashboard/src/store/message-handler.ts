@@ -155,7 +155,7 @@ import {
   formatMemoryAppendNotice,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
-import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerByokPoolStatusSnapshotSchema, ServerByokPoolActionAckSchema, ServerHostPruneStatusSnapshotSchema, ServerHostPruneActionAckSchema, ServerSimulatorStatusSnapshotSchema, ServerSimulatorActionAckSchema, ServerEmulatorStatusSnapshotSchema, ServerEmulatorActionAckSchema, ServerWslStatusSnapshotSchema, ServerWslActionAckSchema, ServerIntegrationStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerExternalSessionsSnapshotSchema, ServerRepoEventsSnapshotSchema, ServerRepoEventsDeltaSchema, ServerGithubWebhookConfigSchema, ServerPermissionInputSchema, ServerPermissionAuditResultSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerSessionPresetSnapshotSchema, ServerPairPendingSchema, ServerPairResolvedSchema, ServerBillingCanarySchema, BillingCanarySnapshotSchema, ServerSymbolsSnapshotSchema, ServerSymbolLocationSchema, ServerSearchResultsSchema, ServerReferencesResultSchema, ServerOrchestrationRunsSnapshotSchema, ServerOrchestrationRunSnapshotSchema, ServerOrchestrationRunDeltaSchema, ServerOrchestrationActionAckSchema, ServerGitCreatePrResultSchema, ServerMemoryStackResultSchema, ServerScheduledTasksSchema } from '@chroxy/protocol/schemas'
+import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerByokPoolStatusSnapshotSchema, ServerByokPoolActionAckSchema, ServerHostPruneStatusSnapshotSchema, ServerHostPruneActionAckSchema, ServerSimulatorStatusSnapshotSchema, ServerSimulatorActionAckSchema, ServerEmulatorStatusSnapshotSchema, ServerEmulatorActionAckSchema, ServerWslStatusSnapshotSchema, ServerWslActionAckSchema, ServerIntegrationStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerExternalSessionsSnapshotSchema, ServerRepoEventsSnapshotSchema, ServerRepoEventsDeltaSchema, ServerSessionPrStatusSchema, ServerGithubWebhookConfigSchema, ServerPermissionInputSchema, ServerPermissionAuditResultSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerSessionPresetSnapshotSchema, ServerPairPendingSchema, ServerPairResolvedSchema, ServerBillingCanarySchema, BillingCanarySnapshotSchema, ServerSymbolsSnapshotSchema, ServerSymbolLocationSchema, ServerSearchResultsSchema, ServerReferencesResultSchema, ServerOrchestrationRunsSnapshotSchema, ServerOrchestrationRunSnapshotSchema, ServerOrchestrationRunDeltaSchema, ServerOrchestrationActionAckSchema, ServerGitCreatePrResultSchema, ServerMemoryStackResultSchema, ServerScheduledTasksSchema } from '@chroxy/protocol/schemas'
 import { resolveSummarizeRequest, rejectSummarizeRequest } from './summarizeRequests'
 import { settleSchedulerRequest } from './scheduledTaskRequests'
 import {
@@ -3220,6 +3220,30 @@ function handleRepoEventsSnapshot(msg: Record<string, unknown>, _get: MsgGet, se
 }
 
 /**
+ * #7344 — `session_pr_status`: store the snapshot under ITS OWN session id and
+ * clear that session's loading flag. Same Zod-validate-or-drop posture as the
+ * survey snapshots above.
+ *
+ * The snapshot is filed under `parsed.data.sessionId`, not under the active
+ * session: a reply can land after the user has switched tabs, and writing it to
+ * whichever session happens to be active then would show one session's CI state
+ * on another's chip. A snapshot with a null `sessionId` is dropped for the same
+ * reason — there is no session it can be truthfully attributed to.
+ */
+function handleSessionPrStatus(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const parsed = ServerSessionPrStatusSchema.safeParse(msg);
+  if (!parsed.success) return;
+  const sessionId = parsed.data.sessionId;
+  if (!sessionId) return;
+  const loading = { ...get().sessionPrStatusLoading };
+  delete loading[sessionId];
+  set({
+    sessionPrStatus: { ...get().sessionPrStatus, [sessionId]: parsed.data },
+    sessionPrStatusLoading: loading,
+  });
+}
+
+/**
  * #6536 (PR-2 of #5966) — live repo-events delta `repo_events_delta`: APPEND the
  * single carried event to the stored snapshot so the pane updates without a
  * Refresh. Same defensive Zod-validate-or-drop pattern as the snapshot. A delta
@@ -4094,6 +4118,8 @@ const HANDLERS: Record<string, Handler> = {
   external_sessions_snapshot: handleExternalSessionsSnapshot,
   // #5966 (epic #5422 phase 5): Control Room repo-events survey snapshot.
   repo_events_snapshot: handleRepoEventsSnapshot,
+  // #7344: the session's pull-request / CI status (display slice).
+  session_pr_status: handleSessionPrStatus,
   github_webhook_config: handleGithubWebhookConfig,
   // #6536 (PR-2 of #5966): live repo-events delta appended to the pane.
   repo_events_delta: handleRepoEventsDelta,

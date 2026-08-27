@@ -936,6 +936,11 @@ export declare const SkillsInventoryRequestSchema: z.ZodObject<{
     type: z.ZodLiteral<"skills_inventory_request">;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
+export declare const SessionPrStatusRequestSchema: z.ZodObject<{
+    type: z.ZodLiteral<"session_pr_status_request">;
+    sessionId: z.ZodOptional<z.ZodString>;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
 export declare const IntegrationActionSchema: z.ZodObject<{
     type: z.ZodLiteral<"integration_action">;
     action: z.ZodEnum<{
@@ -1646,6 +1651,10 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     type: z.ZodLiteral<"skills_inventory_request">;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"session_pr_status_request">;
+    sessionId: z.ZodOptional<z.ZodString>;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"mailbox_status_request">;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>, z.ZodObject<{
@@ -1821,6 +1830,7 @@ export type EmulatorStatusRequestMessage = z.infer<typeof EmulatorStatusRequestS
 export type WslStatusRequestMessage = z.infer<typeof WslStatusRequestSchema>;
 export type IntegrationStatusRequestMessage = z.infer<typeof IntegrationStatusRequestSchema>;
 export type SkillsInventoryRequestMessage = z.infer<typeof SkillsInventoryRequestSchema>;
+export type SessionPrStatusRequestMessage = z.infer<typeof SessionPrStatusRequestSchema>;
 export type MailboxStatusRequestMessage = z.infer<typeof MailboxStatusRequestSchema>;
 export type ExternalSessionsRequestMessage = z.infer<typeof ExternalSessionsRequestSchema>;
 export type RepoEventsRequestMessage = z.infer<typeof RepoEventsRequestSchema>;

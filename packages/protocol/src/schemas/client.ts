@@ -1610,6 +1610,17 @@ export const SkillsInventoryRequestSchema = z.object({
   requestId: z.string().max(128).optional(),
 })
 
+// #7344: pull the session's pull-request / CI status (reply: 'session_pr_status'
+// in server/session.ts). SESSION-scoped, not host-scoped — unlike the Control
+// Room surveys this answers "what is the state of the thing THIS session
+// produced", so a pairing-bound client may ask about the session it is bound to
+// and only that one. `sessionId` defaults to the client's active session.
+export const SessionPrStatusRequestSchema = z.object({
+  type: z.literal('session_pr_status_request'),
+  sessionId: z.string().optional(),
+  requestId: z.string().max(128).optional(),
+})
+
 // #5500 (epic #5498): a MUTATING Control Room integration action — the
 // observe half of the tab is `integration_status_request`; this is the
 // control half. Actions:
@@ -1950,6 +1961,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   WslStatusRequestSchema,
   IntegrationStatusRequestSchema,
   SkillsInventoryRequestSchema,
+  SessionPrStatusRequestSchema,
   MailboxStatusRequestSchema,
   ExternalSessionsRequestSchema,
   RepoEventsRequestSchema,
@@ -2012,6 +2024,7 @@ export type EmulatorStatusRequestMessage = z.infer<typeof EmulatorStatusRequestS
 export type WslStatusRequestMessage = z.infer<typeof WslStatusRequestSchema>
 export type IntegrationStatusRequestMessage = z.infer<typeof IntegrationStatusRequestSchema>
 export type SkillsInventoryRequestMessage = z.infer<typeof SkillsInventoryRequestSchema>
+export type SessionPrStatusRequestMessage = z.infer<typeof SessionPrStatusRequestSchema>
 export type MailboxStatusRequestMessage = z.infer<typeof MailboxStatusRequestSchema>
 export type ExternalSessionsRequestMessage = z.infer<typeof ExternalSessionsRequestSchema>
 export type RepoEventsRequestMessage = z.infer<typeof RepoEventsRequestSchema>

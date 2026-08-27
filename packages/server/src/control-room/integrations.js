@@ -55,6 +55,7 @@ import { join } from 'path'
 import { parseGithubOwnerRepo } from './survey.js'
 import { DEFAULT_CONCURRENCY, EXEC_TIMEOUT_MS } from './constants.js'
 import { isoFromEpochMs } from '../utils/iso-datetime.js'
+import { execFailureReason } from '../utils/exec-failure-reason.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -256,22 +257,6 @@ async function surveyCache(statFn, repoPath) {
   return { present: true, sizeBytes, lastModified }
 }
 
-/**
- * First meaningful line of a subprocess failure, for the per-repo `reason` /
- * the reindex error message. `label` names the failing command ("repo-memory
- * report" for the survey cell, "repo-memory index" for the #5500 action).
- *
- * @param {unknown} err
- * @param {string} [label]
- * @returns {string}
- */
-function execFailureReason(err, label = 'repo-memory report') {
-  const stderr = err && typeof err === 'object' && typeof err.stderr === 'string' ? err.stderr : ''
-  const firstLine = stderr.split('\n').map(l => l.trim()).find(l => l.length > 0)
-  if (firstLine) return `${label} failed: ${firstLine}`
-  const message = err && typeof err === 'object' && typeof err.message === 'string' ? err.message : 'unknown error'
-  return `${label} failed: ${message}`
-}
 
 /**
  * #5500: parse the human-readable `repo-memory index <root>` report into the
@@ -833,7 +818,7 @@ async function surveyRepoMemory(ctx, repo) {
       report = parseRepoMemoryReport(typeof stdout === 'string' ? stdout : '')
       if (report === null) reason = 'repo-memory report produced unparseable output'
     } catch (err) {
-      reason = execFailureReason(err)
+      reason = execFailureReason(err, 'repo-memory report')
     }
   }
 

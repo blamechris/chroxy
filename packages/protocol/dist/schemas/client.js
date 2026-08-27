@@ -1439,6 +1439,16 @@ export const SkillsInventoryRequestSchema = z.object({
     type: z.literal('skills_inventory_request'),
     requestId: z.string().max(128).optional(),
 });
+// #7344: pull the session's pull-request / CI status (reply: 'session_pr_status'
+// in server/session.ts). SESSION-scoped, not host-scoped — unlike the Control
+// Room surveys this answers "what is the state of the thing THIS session
+// produced", so a pairing-bound client may ask about the session it is bound to
+// and only that one. `sessionId` defaults to the client's active session.
+export const SessionPrStatusRequestSchema = z.object({
+    type: z.literal('session_pr_status_request'),
+    sessionId: z.string().optional(),
+    requestId: z.string().max(128).optional(),
+});
 // #5500 (epic #5498): a MUTATING Control Room integration action — the
 // observe half of the tab is `integration_status_request`; this is the
 // control half. Actions:
@@ -1762,6 +1772,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     WslStatusRequestSchema,
     IntegrationStatusRequestSchema,
     SkillsInventoryRequestSchema,
+    SessionPrStatusRequestSchema,
     MailboxStatusRequestSchema,
     ExternalSessionsRequestSchema,
     RepoEventsRequestSchema,
