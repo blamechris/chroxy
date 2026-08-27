@@ -15,10 +15,15 @@ import { spawnSync } from 'node:child_process'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
-const SETUP = resolve(HERE, '_setup.mjs')
+// A file URL, never a bare Windows path: `--import` takes a module SPECIFIER,
+// so `A:\\runners\\...\\_setup.mjs` parses as protocol "a:" and node refuses it
+// with ERR_UNSUPPORTED_ESM_URL_SCHEME. Measured on the Windows runner — and the
+// refusal cases still "passed" there, because a child that dies before loading
+// anything satisfies "no test ran" perfectly. The control is what went red.
+const SETUP = pathToFileURL(resolve(HERE, '_setup.mjs')).href
 
 const dir = mkdtempSync(join(tmpdir(), 'chroxy-hooks-force-exit-'))
 const probe = join(dir, 'probe.test.js')
@@ -45,6 +50,13 @@ const run = (extraArgs = []) => {
 }
 
 describe('tests/_setup.mjs refuses --test-force-exit (#7400)', () => {
+  it('passes --import a file:// URL, not a bare path (Windows)', () => {
+    // Pins the shape that broke the Windows job: an absolute path is not a valid
+    // ESM specifier there. This runs on every platform, so the regression is
+    // caught on Linux/macOS too rather than only where it hurts.
+    assert.ok(SETUP.startsWith('file://'), `--import specifier must be a file URL, got: ${SETUP}`)
+  })
+
   it('CONTROL: green without the flag, probe reported', () => {
     const r = run()
     assert.equal(r.status, 0, `expected exit 0, got ${r.status}\n${r.all.slice(0, 2000)}`)

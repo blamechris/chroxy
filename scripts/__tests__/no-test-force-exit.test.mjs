@@ -32,7 +32,7 @@ import { spawnSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import {
   FORCE_EXIT_ALLOW_ENV,
@@ -45,13 +45,16 @@ import {
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = resolve(HERE, '..', '..')
-const MODULE_PATH = resolve(REPO_ROOT, 'scripts/lib/no-test-force-exit.mjs')
-const HOOK_PATH = resolve(REPO_ROOT, 'scripts/lib/no-test-force-exit-hook.mjs')
+// File URLs, not bare paths: an absolute Windows path is not a valid ESM
+// specifier for `--import` (or for an `import` statement), and node rejects it
+// with ERR_UNSUPPORTED_ESM_URL_SCHEME on protocol "a:"/"c:".
+const MODULE_URL = pathToFileURL(resolve(REPO_ROOT, 'scripts/lib/no-test-force-exit.mjs')).href
+const HOOK_URL = pathToFileURL(resolve(REPO_ROOT, 'scripts/lib/no-test-force-exit-hook.mjs')).href
 
 // A floor on the number of cases accounted for, so a run that loses cases
 // (an early `return`, a bad refactor) goes red instead of printing a small
 // tidy "all passed".
-const MIN_CASES = 30
+const MIN_CASES = 31
 
 let pass = 0
 let fail = 0
@@ -291,7 +294,7 @@ try {
   const shim = join(dir, 'shim.mjs')
   writeFileSync(
     shim,
-    `import { assertNoTestForceExit } from ${JSON.stringify(MODULE_PATH)}\nassertNoTestForceExit()\n`,
+    `import { assertNoTestForceExit } from ${JSON.stringify(MODULE_URL)}\nassertNoTestForceExit()\n`,
   )
   const probe = join(dir, 'probe.test.js')
   writeFileSync(
@@ -301,9 +304,18 @@ try {
 
   const run = (extraArgs, env) => spawnSync(
     process.execPath,
-    ['--import', shim, '--test', ...extraArgs, probe],
+    ['--import', pathToFileURL(shim).href, '--test', ...extraArgs, probe],
     { encoding: 'utf8', env: { ...process.env, ...env }, cwd: dir },
   )
+
+  test('every --import specifier is a file:// URL, not a bare path (Windows)', () => {
+    // Pins the shape that broke the Windows job: an absolute path is not a valid
+    // ESM specifier there. This runs on every platform, so the regression is
+    // caught on Linux/macOS too rather than only where it hurts.
+    for (const [name, url] of [['module', MODULE_URL], ['hook', HOOK_URL], ['shim', pathToFileURL(shim).href]]) {
+      assert(url.startsWith('file://'), `${name} specifier must be a file URL, got: ${url}`)
+    }
+  })
 
   test('POSITIVE CONTROL: the same spawn is green without the flag', () => {
     const r = run([], {})
@@ -328,14 +340,14 @@ try {
   // The hook is what packages/protocol and packages/design-tokens --import;
   // they have no setup module, so nothing else would prove it fires.
   test('the --import hook refuses on its own', () => {
-    const r = spawnSync(process.execPath, ['--import', HOOK_PATH, '--test-force-exit', '-e', "console.log('RAN')"], { encoding: 'utf8' })
+    const r = spawnSync(process.execPath, ['--import', HOOK_URL, '--test-force-exit', '-e', "console.log('RAN')"], { encoding: 'utf8' })
     assert(r.status !== 0, `expected a non-zero exit, got ${r.status}`)
     assert(!`${r.stdout}`.includes('RAN'), 'the program must not have run')
     assert(`${r.stderr}`.includes(FORCE_EXIT_ERROR_CODE), `expected the refusal:\n${r.stderr.slice(0, 1000)}`)
   })
 
   test('POSITIVE CONTROL: the hook is inert without the flag', () => {
-    const r = spawnSync(process.execPath, ['--import', HOOK_PATH, '-e', "console.log('RAN')"], { encoding: 'utf8' })
+    const r = spawnSync(process.execPath, ['--import', HOOK_URL, '-e', "console.log('RAN')"], { encoding: 'utf8' })
     assert(r.status === 0, `expected exit 0, got ${r.status}\n${r.stderr}`)
     assert(`${r.stdout}`.includes('RAN'), 'the program must have run')
   })

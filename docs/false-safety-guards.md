@@ -1064,6 +1064,16 @@ have been satisfied by a child that never ran, for a reason having nothing to do
 with the guard. The positive control is what named it: the same spawn without
 the flag has to go green *with the probe reported*, and it did not.
 
+The Windows job then produced the same shape a second time, from a different
+cause: `--import` takes a module *specifier*, so the absolute path
+`A:\runners\...\_setup.mjs` parses as protocol `a:` and node refuses to load it
+(`ERR_UNSUPPORTED_ESM_URL_SCHEME`). Every child died before running anything —
+and "refuses before the probe runs" passed, because a child that never loads
+satisfies a negative assertion perfectly. The control failed, as it should have.
+Twice in one change, a negative assertion was satisfied by a child that did
+nothing; the fix is `pathToFileURL()`, and a case pinning the specifier's shape
+so the next occurrence is caught on Linux instead of only on Windows.
+
 **Guard against it:** a green that comes from the tooling is still a green you
 have to earn. When a run reports a count, pin the count — and when a comment
 tells you which flags a command carries, check the command. Both halves here
