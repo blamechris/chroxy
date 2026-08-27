@@ -1957,6 +1957,100 @@ describe('replayHistory', () => {
 // newer than the cursor, flagging fullHistory:false so the client appends
 // rather than rebuilds. Falls back to a full replay (fullHistory:true) when the
 // cursor can't be honoured (trimmed / unknown / reset).
+describe('replayHistory — activeAgents re-seed (#7340)', () => {
+  // Both clients WIPE `activeAgents` on `history_replay_start`, and nothing
+  // replayed from history puts it back. Harmless while no subagent outlived
+  // its turn; once a confirmed-backgrounded one does, a 2s cellular drop or a
+  // tab switch emptied the badge list with the subagents still running — the
+  // exact symptom #7340 was filed for, reached a different way. The server
+  // re-asserts the live set AFTER the replay so the wipe becomes a REPLACE.
+  function managerWithAgents(history, agents) {
+    const { manager } = createMockSessionManager([
+      { id: 'sess-1', name: 'Alpha', cwd: '/alpha' },
+    ])
+    manager.getHistory = () => history
+    manager.isHistoryTruncated = () => false
+    manager.getSession('sess-1').session.getActiveAgents = () => agents
+    return manager
+  }
+
+  const AGENT = { toolUseId: 'toolu_1', description: 'Probe sleep test', startedAt: 1000 }
+
+  it('re-emits agent_spawned after history_replay_end', async () => {
+    const ws = makeFakeWs()
+    const ctx = makeCtx({
+      sessionManager: managerWithAgents([{ type: 'response', content: 'Hello' }], [AGENT]),
+    })
+    registerClient(ctx, ws)
+
+    replayHistory(ctx, ws, 'sess-1')
+    await new Promise(r => setImmediate(r))
+
+    const types = ctx._sends.map(m => m.type)
+    const endIdx = types.indexOf('history_replay_end')
+    const spawnIdx = types.indexOf('agent_spawned')
+    assert.ok(endIdx >= 0, 'the replay finished')
+    assert.ok(spawnIdx > endIdx, 'the re-seed must follow the replay, not precede it')
+    assert.deepEqual(ctx._sends[spawnIdx], { type: 'agent_spawned', sessionId: 'sess-1', ...AGENT })
+  })
+
+  // The empty-slice path is a SECOND exit from replayHistory and is the most
+  // common one of all — the quick reconnect whose cursor is already current.
+  // A re-seed bolted onto only the chunked exit would leave it unfixed.
+  it('re-emits agent_spawned on an already-current (empty-slice) replay too', async () => {
+    const history = [{ type: 'response', content: 'Hello', _seq: 1 }]
+    const manager = managerWithAgents(history, [AGENT])
+    manager.getLatestHistorySeq = () => 1
+    const ws = makeFakeWs()
+    const ctx = makeCtx({ sessionManager: manager })
+    registerClient(ctx, ws)
+    ctx.clients.get(ws).historyCursors = { 'sess-1': 1 }
+
+    replayHistory(ctx, ws, 'sess-1')
+    await new Promise(r => setImmediate(r))
+
+    const types = ctx._sends.map(m => m.type)
+    assert.ok(!types.includes('response'), 'precondition: nothing was replayed')
+    const endIdx = types.indexOf('history_replay_end')
+    const spawnIdx = types.indexOf('agent_spawned')
+    assert.ok(endIdx >= 0 && spawnIdx > endIdx)
+  })
+
+  it('sends nothing extra when no subagent is running', async () => {
+    const ws = makeFakeWs()
+    const ctx = makeCtx({
+      sessionManager: managerWithAgents([{ type: 'response', content: 'Hello' }], []),
+    })
+    registerClient(ctx, ws)
+
+    replayHistory(ctx, ws, 'sess-1')
+    await new Promise(r => setImmediate(r))
+
+    assert.equal(ctx._sends.filter(m => m.type === 'agent_spawned').length, 0)
+  })
+
+  // A session object predating the accessor (or a non-Claude provider) must
+  // not crash the replay.
+  it('skips a session that exposes no getActiveAgents', async () => {
+    const { manager } = createMockSessionManager([
+      { id: 'sess-1', name: 'Alpha', cwd: '/alpha' },
+    ])
+    manager.getHistory = () => [{ type: 'response', content: 'Hello' }]
+    manager.isHistoryTruncated = () => false
+    delete manager.getSession('sess-1').session.getActiveAgents
+    const ws = makeFakeWs()
+    const ctx = makeCtx({ sessionManager: manager })
+    registerClient(ctx, ws)
+
+    replayHistory(ctx, ws, 'sess-1')
+    await new Promise(r => setImmediate(r))
+
+    const types = ctx._sends.map(m => m.type)
+    assert.ok(types.includes('history_replay_end'))
+    assert.equal(types.filter(t => t === 'agent_spawned').length, 0)
+  })
+})
+
 describe('replayHistory — lastSeq delta replay (#5555.3)', () => {
   // Build a session-manager mock whose history entries carry _seq, and whose
   // seq helpers derive from the (front-trimmable) entries. `oldestSeq` lets a

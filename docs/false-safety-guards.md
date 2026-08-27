@@ -869,3 +869,48 @@ reader, with inputs the repo does not currently contain. A consumer's positive
 control catches a reader that finds *nothing*; nothing catches a reader that
 finds *most things*.
 
+
+### 17. The guard that hung instead of failing — `#7340`
+
+Every entry above is about a guard that reports **success** when it should
+report failure. This one reports *nothing at all*, and the effect on a reader is
+the same or worse.
+
+`#7340`'s new source-contract guards assert that the turn-end exemption is
+wired at exactly two call sites. They were written the way the existing ones in
+`sdk-session-cancel-activity.test.js` are — slice the file to the branch,
+`assert.match(branch, /…/)`. Mutation-tested, and the first two mutants went red
+in under a second.
+
+The third did not go red. It did not go green either: `node --test` ran past
+**two minutes with an empty TAP stream** and had to be killed. Same guard, same
+kind of mutation — the only difference was which file the slice came from.
+`cli-session.js` is large, so "one branch" is still multiple kilobytes, and a
+failing `assert.match` carries **the entire subject as the error's `actual`**.
+Serialising a multi-kilobyte multi-line string into the TAP YAML block wedged
+the runner before it emitted a single line.
+
+So the guard's states were: **pass → green; fail → hang.** Nothing in that
+mapping is a red build. In CI a hung job reads as infrastructure flake and gets
+re-run, which is exactly the response that makes a real defect invisible — and
+the "evidence" it leaves behind is an empty log, so there is nothing to read
+even if someone looks.
+
+The fix is one line at each site: collapse to a boolean *before* asserting, so
+the subject never rides on the assertion.
+
+```js
+assert.match(branch, /authoritative: true/)          // fail → wedge
+assert.ok(/authoritative: true/.test(branch), msg)   // fail → red, in ~1s
+```
+
+`assert.deepEqual(bigArrayOfPaths, [])` has the same hazard and the same fix:
+map to the short field you actually care about first.
+
+**Guard against it:** a mutation test is not finished when the suite stops being
+green. **Check that it went RED, with a legible message, and how long it took.**
+"Not green" silently includes hung, crashed-before-start, and killed-by-timeout —
+three outcomes that a `!= 0` exit check happily accepts and a human skimming a CI
+dashboard does not distinguish from a flake. The harness used for `#7340`
+reported `RED as required (exit 1)` for both a 0.3s failure and a 120s wedge,
+which is how this survived its own mutation pass long enough to be found by hand.

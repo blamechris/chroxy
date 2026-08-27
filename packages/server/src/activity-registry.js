@@ -365,13 +365,35 @@ export class ActivityRegistry {
    * `_sweepUnresolvedToolStarts`). Shell entries SURVIVE turn-end on purpose
    * (#4307: a backgrounded shell outlives the turn that spawned it; it clears
    * via `onBackgroundWorkChanged`).
+   *
+   * #7340: `exemptIds` extends that carve-out to the subagents BaseSession's
+   * turn-end sweep just spared — a confirmed-backgrounded `Agent`, which
+   * outlives its turn for exactly the reason a backgrounded shell does. It is
+   * passed in rather than re-derived from the entries because the registry
+   * holds no `background` flag and should not grow one: the caller has already
+   * decided, and a second copy of the predicate is a second thing to drift.
+   * Anything not in the set (and not a shell) is still an orphan and still
+   * ends here, so an empty/absent set is exactly the pre-#7340 behaviour.
+   *
+   * An exempt agent's CHILD tool nodes are spared with it. `onAgentEvent`
+   * nests a subagent's own `tool_start`s under the parent's id, and a child of
+   * a still-running parent is not an orphan — ending it would drain the live
+   * subagent's subtree and leave a running `Agent` node with every step under
+   * it falsely marked done. Terminating the parent later still drains them:
+   * `onAgentCompleted` calls `_endChildrenOf` first.
+   *
+   * Ids in the set that are absent from the registry are simply not found —
+   * `exemptIds` never resurrects or creates a node.
+   *
+   * @param {Set<string>|null} [exemptIds] ids to spare in addition to shells
    */
-  reset() {
+  reset(exemptIds = null) {
     // Snapshot the ids first so `_end`'s delete-while-iterate is safe even if
     // a delta listener re-enters the registry.
     const toEnd = []
     for (const [id, entry] of this._entries) {
       if (entry.kind === 'shell') continue
+      if (exemptIds && (exemptIds.has(id) || (entry.parentId && exemptIds.has(entry.parentId)))) continue
       toEnd.push(id)
     }
     for (const id of toEnd) {

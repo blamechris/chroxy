@@ -898,6 +898,12 @@ export class SdkSession extends BaseSession {
                     ? msg.description
                     : 'Background task',
                   background: msg.is_backgrounded === true,
+                  // #7340: authoritative -- this is the provider's own account,
+                  // so it overwrites the model's request in BOTH directions.
+                  // It is also the evidence that this build emits task
+                  // lifecycle messages at all, which is what makes the
+                  // turn-end exemption safe: `task_notification` can arrive.
+                  authoritative: true,
                 })
               }
               break
@@ -1203,7 +1209,12 @@ export class SdkSession extends BaseSession {
               ...(contextUsageSnapshot ? { contextOccupancy: contextUsageSnapshot } : {}),
             }, 'turn_ended_with_orphan_tool_start')
 
-            this._clearMessageState()
+            // #7340: the SDK's own `result` message -- the provider is alive
+            // and reported the turn over itself, so a confirmed-backgrounded
+            // subagent survives the sweep. This and CliSession's `result` are
+            // the ONLY two sites that may pass this flag; see the contract on
+            // `BaseSession._clearMessageState`.
+            this._clearMessageState({ turnEndedCleanly: true })
             break
           }
         }
@@ -2056,8 +2067,11 @@ export class SdkSession extends BaseSession {
   /**
    * Clear per-message state, marking us as ready for the next message.
    */
-  _clearMessageState() {
-    super._clearMessageState()
+  // #7340: forward the opts to super. `turnEndedCleanly` decides whether a
+  // confirmed-backgrounded subagent survives BaseSession's turn-end sweep;
+  // an override that drops it silently disables the exemption.
+  _clearMessageState(opts) {
+    super._clearMessageState(opts)
     this._permissions.clearAll()
     // Pause counter is tied to the previous message — reset so the next
     // message starts with a fresh counter.

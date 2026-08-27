@@ -19,6 +19,9 @@ function makeCtx(sessions = new Map(), overrides = {}) {
     ...makeSessionIndexCtx(),
     sendSessionInfo: createSpy(),
     replayHistory: createSpy(),
+    // #7340: both replay handlers re-assert the session's live subagents after
+    // the replay frame made the client wipe them.
+    reseedActiveAgents: createSpy(),
     // Default test stubs — never touch real ~/.claude/projects
     scanConversations: createSpy(async () => []),
     searchConversations: createSpy(async () => []),
@@ -642,6 +645,36 @@ describe('conversation-handlers', () => {
       assert.match(readPath, /-tmp-repo/, 'path must encode the recorded cwd (Claude Code layout)')
     })
 
+    // #7340: this replay frame makes both clients wipe `activeAgents` on their
+    // ACTIVE session — `conversationId` is a closed transcript with no live
+    // session behind it — so opening an old conversation would clear the badges
+    // of subagents still running in the live one. The repair targets the active
+    // session for that reason, not the conversation.
+    it('re-seeds the ACTIVE session\'s live subagents, not the conversation\'s', async () => {
+      const ctx = makeCtx()
+      ctx.scanConversations = createSpy(async () => [{ conversationId: CONV_ID, cwd: '/tmp/repo' }])
+      ctx.readConversationTranscript = createSpy(async () => [])
+      await conversationHandlers.request_conversation_transcript(makeWs(), makeClient({ activeSessionId: 'live-1' }), {
+        type: 'request_conversation_transcript',
+        conversationId: CONV_ID,
+      }, ctx)
+
+      assert.equal(ctx.transport.reseedActiveAgents.callCount, 1)
+      assert.equal(ctx.transport.reseedActiveAgents.calls[0][1], 'live-1')
+    })
+
+    it('re-seeds nothing when the client has no active session', async () => {
+      const ctx = makeCtx()
+      ctx.scanConversations = createSpy(async () => [{ conversationId: CONV_ID, cwd: '/tmp/repo' }])
+      ctx.readConversationTranscript = createSpy(async () => [])
+      await conversationHandlers.request_conversation_transcript(makeWs(), makeClient({ activeSessionId: null }), {
+        type: 'request_conversation_transcript',
+        conversationId: CONV_ID,
+      }, ctx)
+
+      assert.equal(ctx.transport.reseedActiveAgents.callCount, 0)
+    })
+
     it('sends session_error for a missing conversationId', async () => {
       const ctx = makeCtx()
       await conversationHandlers.request_conversation_transcript(makeWs(), makeClient(), {
@@ -801,6 +834,23 @@ describe('conversation-handlers', () => {
       const end = ctx._sent.find(m => m.type === 'history_replay_end')
       assert.ok(start, 'history_replay_start not sent')
       assert.ok(end, 'history_replay_end not sent')
+    })
+
+    // #7340: `history_replay_start` makes both clients WIPE `activeAgents`, and
+    // nothing replayed from history puts it back — a confirmed-backgrounded
+    // subagent now outlives its turn, so the wipe would silently empty the badge
+    // list while it is still running. The re-seed re-asserts the live set.
+    it('re-seeds the session\'s live subagents after the replay', async () => {
+      const sessions = new Map()
+      sessions.set('s1', { session: createMockSession(), name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+
+      await conversationHandlers.request_full_history(makeWs(), client, {}, ctx)
+
+      assert.equal(ctx.transport.reseedActiveAgents.callCount, 1)
+      assert.equal(ctx.transport.reseedActiveAgents.calls[0][1], 's1',
+        'the re-seed must target the session that was just replayed')
     })
   })
 

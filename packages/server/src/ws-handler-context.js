@@ -109,6 +109,7 @@ export const CTX_NAMESPACES = {
     'syncTerminalMirror',
     'sendSessionInfo',
     'replayHistory',
+    'reseedActiveAgents',
     'clients',
   ],
   sessions: [

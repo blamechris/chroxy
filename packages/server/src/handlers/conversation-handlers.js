@@ -231,6 +231,15 @@ async function handleRequestConversationTranscript(ws, client, msg, ctx) {
     })
   }
   ctx.transport.send(ws, { type: 'history_replay_end', sessionId: conversationId })
+  // #7340: this replay frame makes both clients wipe `activeAgents` on their
+  // ACTIVE session — not on `conversationId`, which is a closed transcript with
+  // no live session behind it. So the surface repaired here is the live
+  // session's, whose confirmed-backgrounded subagents now outlive their turn
+  // and would otherwise vanish from the badge list just because the user
+  // opened an old conversation. No-op when nothing is active or nothing runs.
+  if (client?.activeSessionId) {
+    ctx.transport.reseedActiveAgents(ws, client.activeSessionId)
+  }
 }
 
 async function handleRequestFullHistory(ws, client, msg, ctx) {
@@ -259,6 +268,10 @@ async function handleRequestFullHistory(ws, client, msg, ctx) {
     }
   }
   ctx.transport.send(ws, { type: 'history_replay_end', sessionId: targetId })
+  // #7340: same wipe, same repair — `request_full_history` targets a LIVE
+  // session, so its confirmed-backgrounded subagents must be re-asserted after
+  // the replay that cleared them.
+  ctx.transport.reseedActiveAgents(ws, targetId)
 }
 
 async function handleRequestSessionContext(ws, client, msg, ctx) {

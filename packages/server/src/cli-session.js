@@ -1147,6 +1147,12 @@ export class CliSession extends BaseSession {
                   ? data.description
                   : 'Background task',
                 background: data.is_backgrounded === true,
+                // #7340: authoritative -- the CLI's own account, so it
+                // overwrites the model's request in BOTH directions. It is
+                // also the evidence that this build emits task lifecycle
+                // messages at all, which is what makes the turn-end exemption
+                // safe: `task_notification` can arrive.
+                authoritative: true,
               })
             }
           } else {
@@ -1379,8 +1385,13 @@ export class CliSession extends BaseSession {
           modelUsage: normalizeSdkModelUsage(data.modelUsage),
         })
 
-        // Message complete — ready for next message
-        this._clearMessageState()
+        // Message complete — ready for next message.
+        // #7340: the CLI's own `result` message -- the child is alive and
+        // reported the turn over itself, so a confirmed-backgrounded subagent
+        // survives the sweep and clears later on `task_notification`. This and
+        // SdkSession's `result` are the ONLY two sites that may pass this flag;
+        // see the contract on `BaseSession._clearMessageState`.
+        this._clearMessageState({ turnEndedCleanly: true })
         break
       }
     }
@@ -1492,8 +1503,11 @@ export class CliSession extends BaseSession {
    * After clearing, drains the next item from _pendingQueue (if any) so
    * that all queued messages are eventually delivered in FIFO order.
    */
-  _clearMessageState() {
-    super._clearMessageState()
+  // #7340: forward the opts to super. `turnEndedCleanly` decides whether a
+  // confirmed-backgrounded subagent survives BaseSession's turn-end sweep;
+  // an override that drops it silently disables the exemption.
+  _clearMessageState(opts) {
+    super._clearMessageState(opts)
     this._waitingForAnswer = false
     this._currentCtx = null
     // #7335: this is the ONE funnel every turn end passes through — the normal
@@ -1568,6 +1582,20 @@ export class CliSession extends BaseSession {
     // call there is nothing left to tell the client about, which is exactly
     // how the card ended up stranded live on screen with a dead Allow button.
     this._expirePendingPermissions('Permission request expired (the turn it belonged to was interrupted and the session restarted)')
+
+    // #7340: the child is about to be gone (or already is), and with it every
+    // subagent it was running. `task_notification` -- the ONLY signal that
+    // clears a confirmed-backgrounded agent now that the turn-end sweep spares
+    // it -- can never arrive, so drain them here or the session claims to be
+    // working for the rest of the daemon's life.
+    //
+    // Needs its OWN call for the same reason `_expirePendingPermissions` above
+    // does (#7335): both reach the `_clearMessageState` funnel via
+    // `_emitInterruptedTurnResult`, which early-returns when the session is not
+    // busy -- and "not busy with a backgrounded agent still running" is the
+    // exact state the exemption creates. Idempotent, and the funnel's own
+    // unconditional sweep covers the busy case.
+    this._completeAgents()
 
     // #4471: emit synthetic terminating events BEFORE setting _respawning,
     // otherwise the _handleChildClose guard short-circuits and the dashboard
@@ -1921,6 +1949,20 @@ export class CliSession extends BaseSession {
     // The respawn path already expired them and set `_respawning`, so the
     // close it causes returns above — no double emit; pinned by a test.
     this._expirePendingPermissions('Permission request expired (the session process exited before it could be answered)')
+
+    // #7340: the child is about to be gone (or already is), and with it every
+    // subagent it was running. `task_notification` -- the ONLY signal that
+    // clears a confirmed-backgrounded agent now that the turn-end sweep spares
+    // it -- can never arrive, so drain them here or the session claims to be
+    // working for the rest of the daemon's life.
+    //
+    // Needs its OWN call for the same reason `_expirePendingPermissions` above
+    // does (#7335): both reach the `_clearMessageState` funnel via
+    // `_emitInterruptedTurnResult`, which early-returns when the session is not
+    // busy -- and "not busy with a backgrounded agent still running" is the
+    // exact state the exemption creates. Idempotent, and the funnel's own
+    // unconditional sweep covers the busy case.
+    this._completeAgents()
 
     this._emitInterruptedTurnResult()
 

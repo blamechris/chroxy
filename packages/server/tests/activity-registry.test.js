@@ -311,6 +311,54 @@ describe('ActivityRegistry — reset (turn-end) and clear (destroy)', () => {
     assert.equal(remaining[0].status, 'running')
   })
 
+  // #7340: a confirmed-backgrounded subagent outlives its turn for the same
+  // reason a backgrounded shell does, so BaseSession's turn-end sweep hands
+  // reset() the ids it spared. Everything else is still an orphan.
+  it('reset spares an exempt agent and still ends its non-exempt siblings', () => {
+    const { r, deltas } = makeRegistry()
+    r.onAgentSpawned({ toolUseId: 'bg', description: 'backgrounded' })
+    r.onAgentSpawned({ toolUseId: 'fg', description: 'foreground' })
+    r.onToolStart({ toolUseId: 't1', tool: 'Grep' })
+    deltas.length = 0
+    r.reset(new Set(['bg']))
+    const endedIds = deltas.filter((d) => d.op === 'ended').map((d) => d.entry.id).sort()
+    assert.deepEqual(endedIds, ['fg', 't1'])
+    assert.equal(r.getEntry('bg').status, 'running')
+  })
+
+  // The exempt agent's own child tool nodes go with it. Ending them would
+  // leave a running `Agent` node with every step under it falsely marked done.
+  it('reset spares the child tool nodes of an exempt agent', () => {
+    const { r } = makeRegistry()
+    r.onAgentSpawned({ toolUseId: 'bg', description: 'backgrounded' })
+    r.onAgentEvent({ parentToolUseId: 'bg', type: 'tool_start', payload: { toolUseId: 'c1', tool: 'Read' } })
+    r.onAgentSpawned({ toolUseId: 'fg', description: 'foreground' })
+    r.onAgentEvent({ parentToolUseId: 'fg', type: 'tool_start', payload: { toolUseId: 'c2', tool: 'Read' } })
+    r.reset(new Set(['bg']))
+    const ids = r.getEntries().map((e) => e.id).sort()
+    assert.equal(ids.length, 2, 'only the exempt agent and its child survive')
+    assert.ok(ids.some((id) => id === 'bg'))
+    assert.ok(ids.some((id) => id.startsWith('bg') && id !== 'bg'), 'the child node survives with its parent')
+  })
+
+  // A bare reset() must behave exactly as it did before #7340 — otherwise the
+  // provider-death paths, which pass nothing, would start sparing agents.
+  it('reset with no exempt set still ends every non-shell entry', () => {
+    const { r } = makeRegistry()
+    r.onAgentSpawned({ toolUseId: 'bg', description: 'backgrounded' })
+    r.reset()
+    assert.equal(r.getEntry('bg'), null)
+  })
+
+  it('reset ignores exempt ids that are not in the registry', () => {
+    const { r } = makeRegistry()
+    r.onAgentSpawned({ toolUseId: 'a1', description: 'x' })
+    r.reset(new Set(['ghost']))
+    assert.equal(r.getEntry('a1'), null, 'a1 was not exempt')
+    assert.equal(r.getEntry('ghost'), null, 'an exempt id is never resurrected')
+    assert.equal(r.getEntries().length, 0)
+  })
+
   it('clear ends everything (including shells) and empties the registry', () => {
     const { r, deltas } = makeRegistry()
     r.onToolStart({ toolUseId: 't1', tool: 'Grep' })

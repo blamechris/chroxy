@@ -1135,6 +1135,41 @@ export function resolveReplayPlan(sessionManager, history, sessionId, lastSeq, l
 }
 
 /**
+ * #7340 — re-seed a client's `activeAgents` after a history replay.
+ *
+ * Both clients WIPE `activeAgents` on `history_replay_start` (dashboard
+ * `message-handler.ts`, app `message-handler.ts`) because `agent_spawned` /
+ * `agent_completed` are transient and never replayed from history, so anything
+ * they still held could be stale from before the disconnect. That wipe is
+ * correct and is KEPT — it is the only thing that drops a completion the
+ * client missed while offline. What was missing is the other half: nothing
+ * re-asserted the subagents that ARE still running, so a reconnect or a tab
+ * switch silently emptied the badge list.
+ *
+ * Sending the live set here turns the pair into a snapshot REPLACE, mirroring
+ * `activity_snapshot`'s snapshot-on-subscribe and `background_work_changed`'s
+ * full-snapshot philosophy. It runs AFTER `history_replay_end` deliberately:
+ * `sendSessionInfo` is called BEFORE `replayHistory` on both the connect
+ * handshake and the session-switch path, so anything seeded there is erased by
+ * the wipe that follows it.
+ *
+ * Idempotent — both clients dedupe `agent_spawned` by `toolUseId`, so a client
+ * that never lost the entry sees no change.
+ *
+ * Before #7340 this was reachable but pointless (nothing survived a turn end,
+ * so the live set was empty on every replay); with the turn-end exemption a
+ * confirmed-backgrounded subagent is exactly what is in it.
+ */
+export function reseedActiveAgents(ctx, ws, sessionId) {
+  const { sessionManager, send } = ctx
+  const session = sessionManager?.getSession(sessionId)?.session
+  if (!session || typeof session.getActiveAgents !== 'function') return
+  for (const agent of session.getActiveAgents()) {
+    send(ws, { type: 'agent_spawned', sessionId, ...agent })
+  }
+}
+
+/**
  * Replay message history for a session to a single client.
  * Sends the retained ring buffer in batches to yield the event loop.
  *
@@ -1190,6 +1225,16 @@ export function replayHistory(ctx, ws, sessionId, opts = {}) {
   const { fullHistory, startOffset } = resolveReplayPlan(sessionManager, history, sessionId, lastSeq, latestSeq)
 
   send(ws, { type: 'history_replay_start', sessionId, truncated, fullHistory, latestSeq })
+
+  // #7340: ONE exit from the replay, because there are two ways out of it (an
+  // empty slice and a drained final chunk) and the re-seed must follow BOTH.
+  // Two `history_replay_end` sends with the follow-up bolted onto only one of
+  // them leaves the empty-slice path — the quick reconnect, the most common
+  // replay of all — silently unfixed.
+  const finishReplay = () => {
+    send(ws, { type: 'history_replay_end', sessionId, latestSeq })
+    reseedActiveAgents(ctx, ws, sessionId)
+  }
 
   const CHUNK_SIZE = 20
   const sendChunk = (offset) => {
@@ -1251,7 +1296,7 @@ export function replayHistory(ctx, ws, sessionId, opts = {}) {
       // tool_result payloads.
       scheduleAfterDrain(ws, () => sendChunk(nextOffset))
     } else {
-      send(ws, { type: 'history_replay_end', sessionId, latestSeq })
+      finishReplay()
     }
   }
   // #5555.3 — start at the resolved offset: 0 for a full replay, the
@@ -1259,7 +1304,7 @@ export function replayHistory(ctx, ws, sessionId, opts = {}) {
   // already current (startOffset === history.length) this immediately falls
   // through to the empty-slice path and emits start+end with nothing between.
   if (startOffset >= history.length) {
-    send(ws, { type: 'history_replay_end', sessionId, latestSeq })
+    finishReplay()
   } else {
     sendChunk(startOffset)
   }

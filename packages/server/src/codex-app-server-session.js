@@ -729,8 +729,11 @@ export class CodexAppServerSession extends BaseSession {
 
   // #6638: also release cached fileChange diffs when per-turn state is cleared
   // (turn end / fail / destroy), so a diff can't outlive its turn.
-  _clearMessageState() {
-    super._clearMessageState()
+  // #7340: forward the opts to super. `turnEndedCleanly` decides whether a
+  // confirmed-backgrounded subagent survives BaseSession's turn-end sweep;
+  // an override that drops it silently disables the exemption.
+  _clearMessageState(opts) {
+    super._clearMessageState(opts)
     this._pendingFileChanges.clear()
     this._clearReconnectWatchdog() // #6629 — drop the reconnect backstop on any turn teardown
     this._clearReconnectDeadline() // #6856 — drop the suppression deadline on any turn teardown
