@@ -569,25 +569,37 @@ describe('CliSession permission-mode sidecar (#7337)', () => {
   })
 
   /**
-   * A reaper nobody calls is dead code that reads as cleanup. Both boot calls
-   * are pinned here, ANCHORED to the `import(` expression that performs them so
-   * the assertion cannot be satisfied by the explanatory comment beside it.
+   * A reaper nobody calls is dead code that reads as cleanup.
+   *
+   * #7374 — this used to grep the whole boot block out of `server-cli.js`, and
+   * claimed the anchoring meant it "cannot be satisfied by the explanatory
+   * comment beside it". That claim was too strong: mutation testing found two
+   * bypasses that kept it green — wrapping the block in
+   * `if (process.env.__NEVER_SET__)`, and replacing the call with
+   * `.then(({CliSession}) => void CliSession)` while leaving the expected
+   * string in a comment INSIDE the anchored window.
+   *
+   * The block now lives in `sweep-stale-provider-dirs.js` and its behaviour is
+   * covered by `tests/sweep-stale-provider-dirs.test.js`, which RUNS it — all
+   * three of those mutants die there.
+   *
+   * What is left here is only the CALL SITE, and it is still source-level:
+   * short of booting the daemon, nothing distinguishes this call from the same
+   * characters behind a false condition. That residual is recorded in
+   * `docs/false-safety-guards.md`; it is deliberately not talked away here.
    */
-  it('server-cli boot sweeps BOTH providers\' stale per-session dirs', () => {
+  it('server-cli boot calls the provider stale-dir sweep', () => {
     const src = readFileSync(join(__dirname, '../src/server-cli.js'), 'utf8')
 
-    for (const [module, method] of [
-      ['./claude-tui-session.js', 'sweepStaleSinkDirs'],
-      ['./cli-session.js', 'sweepStaleSidecarDirs'],
-    ]) {
-      const start = src.indexOf(`import('${module}')`)
-      assert.ok(start !== -1, `positive control: server-cli must lazily import ${module} at boot`)
-      // The `.then(...)` that consumes the import, and nothing after it.
-      const slice = src.slice(start, src.indexOf('.catch(', start))
-      assert.ok(slice.length > 0, `positive control: the ${module} import slice must be non-empty`)
-      assert.ok(slice.includes(`${method}(log)`),
-        `boot must actually call ${method}(log) on the ${module} import — otherwise the reaper never runs and crashed sessions leak a dir each`)
-    }
+    assert.ok(
+      /^import \{ sweepStaleProviderDirs \} from '\.\/sweep-stale-provider-dirs\.js'/m.test(src),
+      'positive control: server-cli must import the sweep',
+    )
+    // Line-anchored, so a mention inside a comment or docstring does not count.
+    assert.ok(
+      /^\s*sweepStaleProviderDirs\(log\)/m.test(src),
+      'boot must actually call sweepStaleProviderDirs(log) — otherwise the reapers never run and crashed sessions leak a dir each',
+    )
   })
 
   // ---- blast radius: DockerSession extends CliSession -----------------
@@ -600,12 +612,18 @@ describe('CliSession permission-mode sidecar (#7337)', () => {
    * not exist; this pins that it STAYS out until a bind mount makes the
    * sidecar readable in there.
    *
-   * Source-level and ANCHORED: docker-session.test.js drives a hand-written
-   * MIRROR of `_spawnPersistentProcess`, so an argv assertion over that mirror
-   * would keep passing with the real array changed. Slice the real array out
-   * of the real module instead, and assert only within the slice — a file-wide
-   * grep would be satisfiable by the explanatory comment sitting right below
-   * it, which names the key.
+   * #7374 — this is a source-level grep of the array literal, and it has a
+   * KNOWN bypass: pushing `--env CHROXY_PERMISSION_MODE_FILE=…` into
+   * `dockerArgs` outside the allowlist loop keeps it green, and two explicit
+   * single-key pushes already sit below that loop. It is kept because it names
+   * the naive fix precisely (adding the key to the array goes red here with a
+   * pointed message), but it is NO LONGER the guard.
+   *
+   * The real guard is now behavioural:
+   * `docker-session.test.js` → 'DockerSession._spawnPersistentProcess — real
+   * argv (#7374)' drives the real method and captures argv at the
+   * `_spawnDocker` seam, so every route into `dockerArgs` is covered. Verified:
+   * the outside-the-loop mutant fails 2 tests there and 0 here.
    */
   it('DockerSession does NOT forward CHROXY_PERMISSION_MODE_FILE into the container', () => {
     const src = readFileSync(join(__dirname, '../src/docker-session.js'), 'utf8')
