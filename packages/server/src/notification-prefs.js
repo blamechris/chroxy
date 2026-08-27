@@ -92,6 +92,10 @@ export const ALL_CATEGORIES = Object.freeze([
   // (mailbox-route.js). Listed so the category is mutable in prefs and visible
   // in snapshots (sanitizeCategoryMap strips unknown keys otherwise).
   'mailbox',
+  // #7424: CI-completion events from the session CI watcher. Listed so the
+  // category is mutable in prefs and visible in snapshots (sanitizeCategoryMap
+  // strips unknown keys otherwise).
+  'ci_complete',
 ])
 
 /**

@@ -68,7 +68,11 @@ export function settlePush(promise, label, logger = log) {
 //   duplicate with 'activity_update' for the same unattended-completion
 //   case, producing two OS-level notifications per query. Left out of this
 //   map so a future resurrection has to be deliberate.
-const RATE_LIMITS = {
+// Exported so notification-prefs.js's ALL_CATEGORIES can be asserted against
+// this map rather than against itself: the "MUST stay in sync" claim in that
+// file went unenforced for eight categories because its coverage test derived
+// its expectation from ALL_CATEGORIES, so it could not go red (#7424).
+export const RATE_LIMITS = {
   permission: 0,       // Always send permission prompts immediately
   result: 30_000,      // At most once per 30s for task completion
   activity_update: 0,       // Immediate: one push per unattended completion (noActiveViewers gate is the real dedupe)
@@ -90,6 +94,12 @@ const RATE_LIMITS = {
   // Mailbox live-interrupt: a "new mail" ping for an agent (POST /api/mailbox,
   // mailbox-route.js). Rare and meaningful → immediate.
   mailbox: 0,
+  // #7424: a CI run settled on the PR a session produced (session-ci-watcher.js).
+  // Immediate: the watcher fires at most once per (PR, head SHA) pending→settled
+  // transition, so its own arming IS the throttle — and a shared 30s window
+  // would swallow the second of two PRs settling together, which is the case
+  // the user most needs to hear about.
+  ci_complete: 0,
 }
 
 // Re-exported for existing importers/tests — the implementation moved to

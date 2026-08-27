@@ -181,6 +181,14 @@ const CONFIG_SCHEMA = {
   // (clean trees only, never --force). Defaults to off; the `chroxy worktree
   // gc` CLI is always available for manual/dry-run use.
   worktreeGc: 'object',
+  // #7424: the session CI-completion watcher. `{ watch?: boolean, wakeAgent?:
+  // boolean, intervalMs?: number, discoveryIntervalMs?: number }`. `watch`
+  // defaults ON — the daemon periodically surveys each session's PR through the
+  // user's own `gh` and, when a run settles, notifies (`ci_complete`) and types
+  // one line into the session's prompt. Set `watch: false` on a host that should
+  // make no background GitHub calls; `wakeAgent: false` keeps the notification
+  // but never types into a session.
+  sessionCi: 'object',
   sandbox: 'object',
   // Optional allowlist of absolute directory paths that sessions may use
   // as their working directory. When set (non-empty array), session
@@ -521,6 +529,9 @@ const BILLING_SUPPORTED_KEYS = new Set([
 ])
 const WORKTREE_GC_SUPPORTED_KEYS = new Set([
   'autoReap', 'reapIntervalMs', 'maxLockAgeMs',
+])
+const SESSION_CI_SUPPORTED_KEYS = new Set([
+  'watch', 'wakeAgent', 'intervalMs', 'discoveryIntervalMs',
 ])
 const RANCHER_SUPPORTED_KEYS = new Set([
   'rancherUrl', 'clusterId', 'token', 'tokenEnv', 'tokenFile', 'caData', 'skipTLSVerify', 'defaultProjectId',
@@ -1433,6 +1444,31 @@ export function validateConfig(config, verbose = false) {
       }
       // #5878: typo-catch for the worktree-GC knobs.
       warnUnknownKeys(config.worktreeGc, WORKTREE_GC_SUPPORTED_KEYS, 'worktreeGc', warnings)
+    }
+  }
+
+  // #7424: session CI-completion watcher. Every key is optional; an unset block
+  // means "watch on, wake on, built-in intervals". The two intervals must be
+  // positive finite numbers — a zero or negative sweep interval would spin the
+  // event loop spawning `gh`, so a typo warns and the wiring layer falls back to
+  // the module default rather than honouring it.
+  if (config.sessionCi !== undefined) {
+    if (typeof config.sessionCi !== 'object' || config.sessionCi === null || Array.isArray(config.sessionCi)) {
+      warnings.push(`Invalid type for 'sessionCi': expected object, got ${Array.isArray(config.sessionCi) ? 'array' : typeof config.sessionCi}`)
+    } else {
+      for (const key of ['watch', 'wakeAgent']) {
+        if (Object.prototype.hasOwnProperty.call(config.sessionCi, key) && typeof config.sessionCi[key] !== 'boolean') {
+          warnings.push(`Invalid type for 'sessionCi.${key}': expected boolean, got ${typeof config.sessionCi[key]}`)
+        }
+      }
+      for (const key of ['intervalMs', 'discoveryIntervalMs']) {
+        if (!Object.prototype.hasOwnProperty.call(config.sessionCi, key)) continue
+        const v = config.sessionCi[key]
+        if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) {
+          warnings.push(`Invalid value for 'sessionCi.${key}': expected a positive number, got ${typeof v === 'number' ? v : typeof v}`)
+        }
+      }
+      warnUnknownKeys(config.sessionCi, SESSION_CI_SUPPORTED_KEYS, 'sessionCi', warnings)
     }
   }
 

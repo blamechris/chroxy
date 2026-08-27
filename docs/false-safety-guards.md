@@ -1163,3 +1163,61 @@ a claim to test, not a property to assert: `\s`, `.` under `/s`, and any
 the body until a test can call it. A grep answers "do these characters exist",
 which is a different question, and the gap between them is exactly where these
 two lived.
+
+### 21. The coverage test that derived its expectation from its subject — `#7424`
+
+`notification-prefs.js` carries an explicit contract in its header: `ALL_CATEGORIES`
+**"MUST stay in sync with the keys of `RATE_LIMITS` in `push.js`"**, followed by
+"the schema-coverage test asserts every category has a default." A test with
+that name existed:
+
+```js
+it('enumerates every RATE_LIMITS category', () => {
+  for (const cat of ALL_CATEGORIES) {
+    assert.equal(typeof CATEGORY_DEFAULTS[cat], 'boolean', `missing default for ${cat}`)
+  }
+})
+```
+
+It never imported `push.js`. And `CATEGORY_DEFAULTS` is *built from* the list it
+iterates —
+
+```js
+export const CATEGORY_DEFAULTS = Object.freeze(
+  Object.fromEntries(ALL_CATEGORIES.map((c) => [c, true]))
+)
+```
+
+— so the assertion is `Object.fromEntries(xs)[x] !== undefined` for `x` drawn
+from `xs`. It cannot fail. Deleting `RATE_LIMITS` outright would not have
+failed it; nor would deleting the entire body of `push.js`. Eight categories
+were added between #4541 and #7424 (`session_online`, `session_offline`,
+`session_activity`, `billing_warning`, `mailbox`, …), each touching both files,
+and the "parity test" was green for all of them because it was never comparing
+the two lists in the first place.
+
+Both directions of the real drift have consequences, and neither is loud:
+
+- a `RATE_LIMITS` key missing from `ALL_CATEGORIES` is a push the per-category
+  UI **cannot mute** — `sanitizeCategoryMap` strips it as unknown, so the toggle
+  silently does nothing (this is why #5432's review added the external-session
+  categories by hand);
+- a category missing from `RATE_LIMITS` silently inherits `send()`'s
+  `?? 30_000` fallback, so a category documented as "immediate" is quietly
+  throttled to once per 30 seconds.
+
+**The distinguishing feature is that the expectation was *derived* rather than
+independent.** Entry 3 ("the list that stopped growing") is a hardcoded list
+beside a growing set — visibly stale once you look. This one looks *better* than
+a hardcoded list: it iterates, so it appears to adapt. What it adapts to is
+itself. `RATE_LIMITS` is now exported and the two rosters are compared with a
+single `deepEqual` on both sorted key sets, which dies on either direction;
+deleting the new category from `ALL_CATEGORIES` fails it, and so does deleting
+the corresponding `RATE_LIMITS` entry.
+
+**Guard against it:** when a test asserts that two things agree, read what it
+imports. If the expected value and the actual value can be traced back to the
+same expression, the test has one input and proves nothing about agreement. The
+question to ask of any coverage or parity test is not "does it iterate the right
+list" but **"which file would I have to break for this to go red?"** — and if
+the answer is "the one it iterates", the other file is unguarded.

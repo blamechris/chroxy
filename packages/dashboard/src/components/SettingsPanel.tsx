@@ -180,6 +180,11 @@ const NOTIFICATION_CATEGORY_LABELS: Record<string, { label: string; hint?: strin
     label: 'Mailbox',
     hint: 'New agent-to-agent mailbox messages waiting for a session.',
   },
+  // #7424: CI runs settling on a session's pull request.
+  ci_complete: {
+    label: 'CI results',
+    hint: 'A CI run finished on the pull request a session opened.',
+  },
 }
 
 /** Render order for known categories. Unknown keys append at the end in snapshot order. */
@@ -197,6 +202,7 @@ const NOTIFICATION_CATEGORY_ORDER = [
   'session_offline',
   'session_activity',
   'mailbox',
+  'ci_complete',
   'live_activity',
 ]
 

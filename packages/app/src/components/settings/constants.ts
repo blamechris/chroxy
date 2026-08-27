@@ -30,6 +30,8 @@ export const NOTIFICATION_CATEGORY_LABELS: Record<string, { label: string; hint?
   session_activity: { label: 'External session activity', hint: 'Subagent and tool activity from external sessions.' },
   // Mailbox live-interrupt: "new mail" pings fed by POST /api/mailbox.
   mailbox: { label: 'Mailbox', hint: 'New agent-to-agent mailbox messages waiting for a session.' },
+  // #7424: CI runs settling on a session's pull request.
+  ci_complete: { label: 'CI results', hint: 'A CI run finished on the pull request a session opened.' },
 };
 
 /** Render order for known categories. Unknown keys append in snapshot order. */
@@ -47,6 +49,7 @@ export const NOTIFICATION_CATEGORY_ORDER = [
   'session_offline',
   'session_activity',
   'mailbox',
+  'ci_complete',
   'live_activity',
 ];
 
