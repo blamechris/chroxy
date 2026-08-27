@@ -68,6 +68,11 @@
 // the other two have none, so they import the side-effecting hook next door.
 // `packages/dashboard` and `packages/store-core` run vitest and `packages/app`
 // runs jest — none of them accepts this flag, so there is nothing to refuse.
+//
+// The limit, stated rather than left to be discovered: a run that skips
+// `--import` altogether (`node --test tests/foo.test.js`, no setup module) is
+// not reachable from here. Such a run also has no fs write sandbox, which is
+// the larger reason not to do it — see `tests/_setup.mjs` and #4633.
 
 export const FORCE_EXIT_OPTION = '--test-force-exit'
 export const FORCE_EXIT_ERROR_CODE = 'CHROXY_TEST_FORCE_EXIT'
