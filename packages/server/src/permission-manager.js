@@ -50,7 +50,13 @@ export const ELIGIBLE_TOOLS = new Set(['Read', 'Write', 'Edit', 'NotebookEdit', 
 // filesystem/network scope must always prompt, never be silently rule-whitelisted.
 // `mcp_elicitation` is a codex MCP connector eliciting the user (#6635, e.g. a
 // GitHub connector write approval) — a connector action must always prompt too.
-export const NEVER_AUTO_ALLOW = new Set(['Bash', 'Task', 'WebFetch', 'WebSearch', 'shell', 'request_permissions', 'mcp_elicitation'])
+// `Agent` is what Claude Code calls the sub-delegation tool today; `Task` is the
+// older spelling and both are live, because chroxy runs against whatever
+// `claude` the user has installed (#7340). Not exploitable on its own — a rule
+// also has to clear `ELIGIBLE_TOOLS`, which neither name is in — but a denylist
+// that names only the retired spelling is a guard whose comment describes a
+// stronger check than its code performs.
+export const NEVER_AUTO_ALLOW = new Set(['Bash', 'Task', 'Agent', 'WebFetch', 'WebSearch', 'shell', 'request_permissions', 'mcp_elicitation'])
 
 // #7004 — back-compat re-exports. The floor moved to permission-floor.js (the
 // single source both pipelines import); these names were exported from here since

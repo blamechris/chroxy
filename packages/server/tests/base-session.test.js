@@ -13,6 +13,7 @@ import {
   buildBaseSessionOpts,
 } from '../src/base-session.js'
 import { SkillsTrustStore, sha256Hex } from '../src/skills-trust.js'
+import { AGENT_DESCRIPTION_MAX } from '../src/claude-stream-parser.js'
 
 describe('BaseSession', () => {
   let session
@@ -783,10 +784,103 @@ describe('BaseSession', () => {
       assert.equal(session._activeAgents.size, 0)
     })
 
+    // #7340 (review, S6): `removeAllListeners()` is the teardown chokepoint
+    // every provider reaches (directly or via SessionManager), and the clear
+    // added there had no test — deleting the line left the suite green.
+    it('drops tracked agents on full teardown via removeAllListeners()', () => {
+      session._activeAgents.set('a1', { toolUseId: 'a1' })
+      session.removeAllListeners()
+      assert.equal(session._activeAgents.size, 0)
+    })
+
+    // ...but a TARGETED removeAllListeners('foo') must not drain agent state,
+    // for the same reason it must not drain the activity registry. Without
+    // this, narrowing the guard to an unconditional clear would pass.
+    it('does NOT drop tracked agents on a targeted removeAllListeners(event)', () => {
+      session._activeAgents.set('a1', { toolUseId: 'a1' })
+      session.removeAllListeners('agent_completed')
+      assert.equal(session._activeAgents.size, 1)
+    })
+
     it('clears result timeout', () => {
       session._resultTimeout = setTimeout(() => {}, 10000)
       session._clearMessageState()
       assert.equal(session._resultTimeout, null)
+    })
+
+    // #7340 (review): `description` rides out on `agent_spawned` and is
+    // rendered by AgentMonitorPanel and the mobile SettingsBar. The tool-input
+    // path was clamped by the parser, but `task_started` is a SECOND producer
+    // feeding the same field from provider-supplied text, and the wire schema
+    // (`description: z.string().optional()`) has no max — so nothing
+    // downstream would have caught an unbounded value either. Clamped at the
+    // one choke point every producer goes through.
+    it('clamps a subagent description to the shared cap, whichever producer supplied it', () => {
+      const spawned = []
+      session.on('agent_spawned', (e) => spawned.push(e))
+      session._trackAgent({ toolUseId: 'a1', description: 'x'.repeat(5000) })
+      assert.equal(spawned.length, 1)
+      assert.equal(spawned[0].description.length, AGENT_DESCRIPTION_MAX)
+      // ...and the record the sweep reads carries the clamped value too, not
+      // the raw one — otherwise the cap would be cosmetic at the emit only.
+      assert.equal(session._activeAgents.get('a1').description.length, AGENT_DESCRIPTION_MAX)
+    })
+
+    it('leaves a short description untouched (the clamp is not a truncate-always)', () => {
+      const spawned = []
+      session.on('agent_spawned', (e) => spawned.push(e))
+      session._trackAgent({ toolUseId: 'a2', description: 'Probe sleep test' })
+      assert.equal(spawned[0].description, 'Probe sleep test')
+    })
+
+    // #7340: the sweep is UNCONDITIONAL, and that is deliberate rather than
+    // unfinished. `background` is recorded on the agent record but is not read
+    // here: exempting backgrounded agents needs three other changes to land
+    // with it (the provider-death paths, the activity registry, and both
+    // clients' replay wipe) or the session is pinned as "working" forever.
+    // These pin the current contract so the exemption cannot be added as a
+    // one-liner without a test going red and sending the reader to #7340.
+    it('sweeps a backgrounded agent at turn end too, until #7340 lands', () => {
+      const completed = []
+      session.on('agent_completed', (e) => completed.push(e))
+      session._activeAgents.set('bg', { toolUseId: 'bg', background: true })
+      session._clearMessageState()
+      assert.deepEqual(completed.map(c => c.toolUseId), ['bg'])
+      assert.equal(session._activeAgents.size, 0)
+    })
+
+    it('sweeps an agent the model abandoned mid-turn', () => {
+      const completed = []
+      session.on('agent_completed', (e) => completed.push(e))
+      session._activeAgents.set('fg', { toolUseId: 'fg', background: false })
+      session._activeAgents.set('legacy', { toolUseId: 'legacy' }) // no flag at all
+      session._clearMessageState()
+      assert.deepEqual(completed.map(c => c.toolUseId).sort(), ['fg', 'legacy'])
+      assert.equal(session._activeAgents.size, 0)
+    })
+
+    it('sweeps foreground and backgrounded agents alike in the same turn', () => {
+      const completed = []
+      session.on('agent_completed', (e) => completed.push(e))
+      session._activeAgents.set('fg', { toolUseId: 'fg', background: false })
+      session._activeAgents.set('bg', { toolUseId: 'bg', background: true })
+      session._clearMessageState()
+      assert.deepEqual(completed.map(c => c.toolUseId).sort(), ['bg', 'fg'])
+      assert.equal(session._activeAgents.size, 0)
+    })
+
+    // #7340 (review, N8): the sweep keys off the MAP KEY, not the record's
+    // `toolUseId` field. The old code ended in an unconditional `clear()`, so a
+    // record whose field had drifted from its key was still removed; an
+    // iteration that deletes by the FIELD would leak the entry forever and
+    // complete the wrong id.
+    it('sweeps by map key even when the record\'s toolUseId field has drifted', () => {
+      const completed = []
+      session.on('agent_completed', (e) => completed.push(e))
+      session._activeAgents.set('key-id', { toolUseId: 'stale-field-id' })
+      session._clearMessageState()
+      assert.deepEqual(completed.map(c => c.toolUseId), ['key-id'])
+      assert.equal(session._activeAgents.size, 0, 'the entry must not survive the sweep')
     })
   })
 

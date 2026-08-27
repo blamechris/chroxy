@@ -69,6 +69,52 @@ describe('extractToolInputSemantics', () => {
       assert.equal(result.kind, 'task')
       assert.equal(result.payload.description, 'Background task')
     })
+
+    // #7340: Claude Code renamed the subagent tool `Task` -> `Agent`. Both the
+    // standalone CLI (2.1.243) and the Agent SDK's bundled binary (2.1.114)
+    // emit `"name":"Agent"` on the tool_use block -- captured from live
+    // `-p --output-format stream-json` runs of each. A parser that only knows
+    // `Task` tracks no subagents at all on either path, which is why the
+    // session shows idle with reviewers still running. Both names must work:
+    // chroxy supports whatever `claude` the user has installed.
+    it('returns task kind for the `Agent` tool name (Claude Code >= 2.1.114)', () => {
+      const result = extractToolInputSemantics('Agent', { description: 'Run a thing' })
+      assert.ok(result, 'Agent must be recognised as the subagent tool')
+      assert.equal(result.kind, 'task')
+      assert.equal(result.payload.description, 'Run a thing')
+    })
+
+    // The verbatim input block from the backgrounded probe run.
+    it('marks an Agent spawn backgrounded when run_in_background is true', () => {
+      const result = extractToolInputSemantics('Agent', {
+        description: 'Probe sleep test',
+        prompt: 'Run `sleep 45` with the Bash tool, then reply with exactly: PROBE DONE',
+        subagent_type: 'general-purpose',
+        run_in_background: true,
+      })
+      assert.equal(result.kind, 'task')
+      assert.equal(result.payload.background, true)
+    })
+
+    // The verbatim input block from the foreground probe run -- the field is
+    // ABSENT, not `false`, so `background` must be derived by strict compare
+    // and never default to true.
+    it('does not mark a foreground Agent spawn backgrounded when the field is absent', () => {
+      const result = extractToolInputSemantics('Agent', {
+        description: 'Reply with BLUE',
+        subagent_type: 'general-purpose',
+        prompt: 'Reply with exactly the word BLUE and nothing else.',
+      })
+      assert.equal(result.kind, 'task')
+      assert.equal(result.payload.background, false)
+    })
+
+    it('does not mark a Task spawn backgrounded on a non-boolean run_in_background', () => {
+      for (const value of ['true', 1, {}, null]) {
+        const result = extractToolInputSemantics('Task', { description: 'd', run_in_background: value })
+        assert.equal(result.payload.background, false, `run_in_background: ${JSON.stringify(value)}`)
+      }
+    })
   })
 
   describe('EnterPlanMode', () => {

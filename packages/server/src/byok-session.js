@@ -1915,10 +1915,12 @@ export class ClaudeByokSession extends BaseSession {
     // `description`, `startedAt`). The toolUseId matches the parent
     // turn's tool_use block id so the dashboard correlates the spawn
     // with the open tool_call bubble.
+    // #7340: byok's Task tool AWAITS its child in-process (the tool result is
+    // the child's answer), so a byok subagent can never outlive its turn —
+    // `background: false` is a statement of fact here, not a default, and it
+    // keeps byok agents eligible for the turn-end orphan sweep.
     const startedAt = Date.now()
-    const agentInfo = { toolUseId, description, startedAt }
-    this._activeAgents.set(toolUseId, agentInfo)
-    this.emit('agent_spawned', agentInfo)
+    this._trackAgent({ toolUseId, description, background: false, startedAt })
 
     // Build a child session. Reuse this session's already-resolved
     // client so the API key resolution + Anthropic constructor only
@@ -2668,13 +2670,14 @@ export class ClaudeByokSession extends BaseSession {
    * completion don't double-emit. Mirrors SdkSession's helper of the same name
    * (minus the task-id map, which byok doesn't have).
    *
+   * #7340: the body is now BaseSession's `_completeAgent` — same guard, same
+   * emit, ONE implementation shared with SdkSession and CliSession. Kept as a
+   * named wrapper because #5274's callers and the cancel path read by this name.
+   *
    * @param {string} toolUseId
    */
   _finalizeAgentByToolUseId(toolUseId) {
-    if (typeof toolUseId !== 'string' || !toolUseId) return
-    if (!this._activeAgents.has(toolUseId)) return
-    this._activeAgents.delete(toolUseId)
-    this.emit('agent_completed', { toolUseId })
+    this._completeAgent(toolUseId)
   }
 
   // #5374: no setModel override needed — BaseSession.setModel updates the

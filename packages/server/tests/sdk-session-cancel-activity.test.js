@@ -241,4 +241,38 @@ describe('SdkSession #5269 — lifecycle clears the task map', () => {
     assert.match(src, /subtype === 'task_started'[\s\S]*?_captureTaskId\(msg\.tool_use_id, msg\.task_id\)/)
     assert.match(src, /subtype === 'task_notification'[\s\S]*?_finalizeAgentByToolUseId\(msg\.tool_use_id\)/)
   })
+
+  // #7340 (review, S6): the `task_started` branch also tracks the subagent, and
+  // that had no coverage — deleting the `local_agent` gate left the suite green.
+  //
+  // Sliced to the branch and asserted WITHIN the slice, not across the whole
+  // file: a file-wide `assert.match` is satisfiable by any unrelated line that
+  // happens to contain the same tokens, which is the shape
+  // `docs/false-safety-guards.md` catalogues. The slice runs from the
+  // `task_started` test to the next sibling branch, so a call that drifts OUT
+  // of the branch fails even though the file still contains it.
+  it('tracks only local_agent tasks, inside the task_started branch itself', () => {
+    const src = readFileSync(new URL('../src/sdk-session.js', import.meta.url), 'utf8')
+    const start = src.indexOf("subtype === 'task_started'")
+    const end = src.indexOf("subtype === 'task_notification'")
+    assert.ok(start > 0 && end > start, 'both branches must be present and in order')
+    const branch = src.slice(start, end)
+
+    assert.match(branch, /msg\.task_type === 'local_agent'/,
+      'a backgrounded Bash shell also emits task_started — tracking it as an agent would double-count #4307\'s surface')
+    assert.match(branch, /this\._trackAgent\(/,
+      'the branch must register the subagent, not merely capture its task id')
+    assert.match(branch, /background: msg\.is_backgrounded === true/,
+      'strict compare: is_backgrounded is ABSENT on a foreground spawn, not false')
+
+    // Negative controls: every assertion above would pass just as happily if
+    // the slice were the whole file, so prove the slice is actually narrow.
+    // A RATIO, not a char count — the first draft of this used `< 1500` and
+    // failed on its own comment block, which is the tell that the bound was
+    // arbitrary rather than meaningful.
+    assert.ok(branch.length < src.length * 0.05,
+      `slice should be one branch, got ${branch.length} of ${src.length} chars`)
+    assert.doesNotMatch(branch, /_finalizeAgentByToolUseId/,
+      'the slice must stop before the task_notification branch')
+  })
 })

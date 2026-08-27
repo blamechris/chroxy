@@ -883,6 +883,23 @@ export class SdkSession extends BaseSession {
               // activity id back to a stoppable task. No client-facing emit —
               // the agent node already exists via agent_spawned.
               this._captureTaskId(msg.tool_use_id, msg.task_id)
+              // #7340: `task_started` is the provider's OWN lifecycle event and
+              // carries `is_backgrounded` — authoritative where the tool input
+              // is only the model's request. It also arrives regardless of what
+              // the subagent tool is NAMED, so tracking survives a future
+              // rename the way the `Task` -> `Agent` one was not survived.
+              // `task_type` distinguishes a subagent (`local_agent`) from a
+              // backgrounded Bash (`local_bash`), which is #4307's surface and
+              // must not be tracked as an agent.
+              if (msg.task_type === 'local_agent') {
+                this._trackAgent({
+                  toolUseId: msg.tool_use_id,
+                  description: typeof msg.description === 'string' && msg.description
+                    ? msg.description
+                    : 'Background task',
+                  background: msg.is_backgrounded === true,
+                })
+              }
               break
             } else if (msg.subtype === 'task_notification') {
               // #5269: a Task subagent reached a terminal state (completed /
@@ -1538,13 +1555,14 @@ export class SdkSession extends BaseSession {
       // tool_start id. Without this, _activeAgents.set(undefined, ...)
       // collides on undefined for any fallback-path Task spawn.
       const toolUseId = block.id || `${messageId}-tool`
-      const agentInfo = {
+      // #7340: `background` decides whether the turn-end sweep may complete
+      // this agent. `task_started`'s `is_backgrounded` confirms it moments
+      // later; whichever lands first wins via `_trackAgent`'s upgrade.
+      this._trackAgent({
         toolUseId,
         description: semantics.payload.description,
-        startedAt: Date.now(),
-      }
-      this._activeAgents.set(toolUseId, agentInfo)
-      this.emit('agent_spawned', agentInfo)
+        background: semantics.payload.background,
+      })
     }
     // EnterPlanMode / ExitPlanMode are not currently surfaced by SdkSession
     // (plan-mode flow is CliSession-only today). Extracting via the shared
@@ -1773,10 +1791,10 @@ export class SdkSession extends BaseSession {
   _finalizeAgentByToolUseId(toolUseId) {
     if (typeof toolUseId !== 'string' || !toolUseId) return
     this._taskIdByToolUseId.delete(toolUseId)
-    if (this._activeAgents.has(toolUseId)) {
-      this._activeAgents.delete(toolUseId)
-      this.emit('agent_completed', { toolUseId })
-    }
+    // #7340: the agent half is BaseSession's `_completeAgent` (idempotent, and
+    // the single implementation shared with CliSession and ByokSession). This
+    // wrapper adds only the SDK-specific task-id mapping cleanup above.
+    this._completeAgent(toolUseId)
   }
 
   /**

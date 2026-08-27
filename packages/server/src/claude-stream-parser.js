@@ -42,6 +42,17 @@
 import { parseMcpToolName } from './mcp-tools.js'
 
 /**
+ * Cap on a subagent's `description` — the field that rides out on
+ * `agent_spawned` and is rendered by AgentMonitorPanel and the mobile
+ * SettingsBar. Named and exported rather than left as a bare `200` because
+ * #7340 added a SECOND producer of that field (BaseSession's `_trackAgent`,
+ * fed by `task_started`), and a cap written once per producer is a cap that
+ * drifts. `_trackAgent` is the choke point that applies it; the clamp below
+ * is kept as defence in depth for direct callers of this parser.
+ */
+export const AGENT_DESCRIPTION_MAX = 200
+
+/**
  * Tools whose input fields drive session-level state (plan mode, agent
  * tracking, user-question prompts). The semantics returned here are
  * applied by the caller to its own state (CliSession or SdkSession)
@@ -62,13 +73,29 @@ export function extractToolInputSemantics(toolName, parsedInput) {
         payload: { questions: input.questions },
       }
 
-    case 'Task': {
+    // #7340: `Agent` is what Claude Code emits today; `Task` is the older
+    // spelling. Verified on live `-p --output-format stream-json` runs of both
+    // the standalone CLI (2.1.243) and the Agent SDK's bundled binary
+    // (2.1.114) -- BOTH emit `"name":"Agent"`. Matching only `Task` meant
+    // `agent_spawned` never fired on either path, so every subagent surface
+    // (AgentMonitorPanel, the header agent count, activity-registry agent
+    // nodes, Control Room's cancelActivity) was dead. Chroxy runs against
+    // whatever `claude` the user has installed, so both names stay live rather
+    // than the new one replacing the old.
+    case 'Task':
+    case 'Agent': {
       const description = (typeof input.description === 'string'
         ? input.description
-        : 'Background task').slice(0, 200)
+        : 'Background task').slice(0, AGENT_DESCRIPTION_MAX)
+      // Strict `=== true`: on a FOREGROUND spawn the field is ABSENT, not
+      // `false` (verified in the probe), and a truthy test would let a string
+      // "true" or a 1 through. Defaulting to background is the dangerous
+      // direction -- a session that permanently claims to be working is a
+      // worse failure than one that clears early (#7340's positive control).
+      const background = input.run_in_background === true
       return {
         kind: 'task',
-        payload: { description },
+        payload: { description, background },
       }
     }
 

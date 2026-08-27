@@ -1223,3 +1223,233 @@ describe('per-model usage forwarding (#6692)', () => {
     assert.equal(results[0].modelUsage, null)
   })
 })
+
+/**
+ * #7340 — background subagent lifecycle on the CLI path.
+ *
+ * The events below are the VERBATIM shapes captured from a live
+ * `claude -p --output-format stream-json --verbose` run (CLI 2.1.243), not
+ * hand-written approximations: the subagent tool is named `Agent` (not
+ * `Task`), a backgrounded spawn carries `run_in_background: true` on the tool
+ * input and `is_backgrounded: true` on `task_started`, a FOREGROUND spawn
+ * omits `is_backgrounded` entirely rather than sending `false`, and
+ * `task_started` fires for backgrounded Bash shells too under
+ * `task_type: 'local_bash'`.
+ */
+describe('CliSession background subagent lifecycle (#7340)', () => {
+  const AGENT_ID = 'toolu_01B3P1veTC2fq6XJhhVYJThV'
+
+  function spawnAgentTool(session, id, input) {
+    session._handleEvent(toolUseStart('Agent', id))
+    session._handleEvent(inputJsonDelta(JSON.stringify(input)))
+    session._handleEvent(contentBlockStop())
+  }
+
+  function taskStarted(extra) {
+    return { type: 'system', subtype: 'task_started', task_id: 'a960d63aeb85307cc', ...extra }
+  }
+
+  function taskNotification(toolUseId, status = 'completed') {
+    return {
+      type: 'system',
+      subtype: 'task_notification',
+      task_id: 'a960d63aeb85307cc',
+      tool_use_id: toolUseId,
+      status,
+      summary: 'PROBE DONE',
+    }
+  }
+
+  it('tracks an `Agent` tool_use as a spawned subagent', () => {
+    const session = createSession()
+    const spawned = []
+    session.on('agent_spawned', (e) => spawned.push(e))
+    spawnAgentTool(session, AGENT_ID, {
+      description: 'Probe sleep test',
+      subagent_type: 'general-purpose',
+      run_in_background: true,
+    })
+    assert.equal(spawned.length, 1, '`Agent` must be recognised as the subagent tool')
+    assert.equal(spawned[0].toolUseId, AGENT_ID)
+    assert.equal(spawned[0].description, 'Probe sleep test')
+  })
+
+  // Before #7395 the CLI had NO terminal signal for a subagent at all: the
+  // turn-end sweep was the only finalizer, so a subagent that finished early in
+  // a long turn kept its badge for the rest of it. `task_notification` clears
+  // it when it actually finishes.
+  it('clears a subagent on task_notification, without waiting for turn end', () => {
+    const session = createSession()
+    const completed = []
+    session.on('agent_completed', (e) => completed.push(e))
+
+    spawnAgentTool(session, AGENT_ID, { description: 'Probe sleep test', run_in_background: true })
+    session._handleEvent(taskStarted({
+      tool_use_id: AGENT_ID,
+      description: 'Probe sleep test',
+      task_type: 'local_agent',
+      is_backgrounded: true,
+    }))
+    assert.deepEqual(completed, [], 'still running')
+
+    session._handleEvent(taskNotification(AGENT_ID))
+    assert.deepEqual(completed.map((c) => c.toolUseId), [AGENT_ID])
+    assert.equal(session._activeAgents.size, 0)
+
+    // ...and the turn-end sweep does not then double-complete it.
+    session._clearMessageState()
+    assert.deepEqual(completed.map((c) => c.toolUseId), [AGENT_ID])
+  })
+
+  // #7340 is NOT closed by this PR: the turn-end sweep still completes every
+  // tracked subagent, backgrounded or not. Exempting backgrounded ones needs
+  // three other changes to land with it (see the block in `_clearMessageState`)
+  // or the session pins as "working" forever. Pinned here so the exemption
+  // cannot be reintroduced as a one-liner without a test going red.
+  it('sweeps a still-running backgrounded subagent at turn end, until #7340 lands', () => {
+    const session = createSession()
+    const completed = []
+    session.on('agent_completed', (e) => completed.push(e))
+    spawnAgentTool(session, AGENT_ID, { description: 'Probe sleep test', run_in_background: true })
+    session._handleEvent(taskStarted({
+      tool_use_id: AGENT_ID,
+      description: 'Probe sleep test',
+      task_type: 'local_agent',
+      is_backgrounded: true,
+    }))
+    session._clearMessageState()
+    assert.deepEqual(completed.map((c) => c.toolUseId), [AGENT_ID])
+    assert.equal(session._activeAgents.size, 0)
+  })
+
+  it('sweeps a foreground subagent at turn end', () => {
+    const session = createSession()
+    const completed = []
+    session.on('agent_completed', (e) => completed.push(e))
+    // Verbatim foreground shape: no `run_in_background` key at all.
+    spawnAgentTool(session, 'toolu_017LdZgVdy3BhaP9iW6r4dmd', {
+      description: 'Reply with BLUE',
+      subagent_type: 'general-purpose',
+    })
+    session._handleEvent(taskStarted({
+      tool_use_id: 'toolu_017LdZgVdy3BhaP9iW6r4dmd',
+      description: 'Reply with BLUE',
+      task_type: 'local_agent',
+    }))
+    session._clearMessageState()
+    assert.deepEqual(completed.map((c) => c.toolUseId), ['toolu_017LdZgVdy3BhaP9iW6r4dmd'])
+    assert.equal(session._activeAgents.size, 0)
+  })
+
+  // A failed or stopped subagent must clear its badge too — notifying only on
+  // `completed` would pin the session as working forever on the exact case the
+  // user most needs to hear about.
+  for (const status of ['failed', 'stopped']) {
+    it(`clears a subagent on a "${status}" task_notification`, () => {
+      const session = createSession()
+      const completed = []
+      session.on('agent_completed', (e) => completed.push(e))
+      spawnAgentTool(session, AGENT_ID, { description: 'd', run_in_background: true })
+      session._handleEvent(taskNotification(AGENT_ID, status))
+      assert.deepEqual(completed.map((c) => c.toolUseId), [AGENT_ID])
+      assert.equal(session._activeAgents.size, 0)
+    })
+  }
+
+  // #4307's surface, not this one. A backgrounded Bash shell also emits
+  // task_started; tracking it as an agent would double-count the same work.
+  it('does not track a backgrounded Bash shell as a subagent', () => {
+    const session = createSession()
+    const spawned = []
+    session.on('agent_spawned', (e) => spawned.push(e))
+    session._handleEvent(taskStarted({
+      task_id: 'b0xkho5w0',
+      owned_by_subagent: true,
+      tool_use_id: 'toolu_019tPSofhR2ZNXGKGq4MA4sh',
+      description: 'Sleep 45 seconds in background',
+      is_backgrounded: true,
+      task_type: 'local_bash',
+    }))
+    assert.deepEqual(spawned, [])
+    assert.equal(session._activeAgents.size, 0)
+  })
+
+  // #7340 (review, F2): the ordering the JSDoc calls NORMAL — tool_use block
+  // first, then `task_started` — is the one that exercises `_trackAgent`'s
+  // upgrade line, and it had no test. The sibling below sends `task_started`
+  // first, which hits the `if (existing) … return` early-out WITHOUT reaching
+  // the upgrade, so deleting `if (background === true) existing.background =
+  // true` left every suite green. An assertion whose name outran its code.
+  it('upgrades the background flag when task_started follows the tool_use block', () => {
+    const session = createSession()
+    const spawned = []
+    session.on('agent_spawned', (e) => spawned.push(e))
+    // Tool input says nothing about backgrounding...
+    spawnAgentTool(session, AGENT_ID, { description: 'Probe sleep test' })
+    assert.equal(session._activeAgents.get(AGENT_ID).background, false)
+    // ...then the CLI's own signal says it IS backgrounded. That is the
+    // authoritative one and it must win.
+    session._handleEvent(taskStarted({
+      tool_use_id: AGENT_ID,
+      description: 'Probe sleep test',
+      task_type: 'local_agent',
+      is_backgrounded: true,
+    }))
+    assert.equal(session._activeAgents.get(AGENT_ID).background, true, 'task_started must upgrade the flag')
+    assert.equal(spawned.length, 1, 'and must not emit a second agent_spawned')
+  })
+
+  // task_started can arrive before the tool_use block is fully parsed. Either
+  // order must yield exactly one spawn, and must not lose the background flag.
+  it('emits one spawn and keeps the background flag whichever signal lands first', () => {
+    const session = createSession()
+    const spawned = []
+    const completed = []
+    session.on('agent_spawned', (e) => spawned.push(e))
+    session.on('agent_completed', (e) => completed.push(e))
+    session._handleEvent(taskStarted({
+      tool_use_id: AGENT_ID,
+      description: 'Probe sleep test',
+      task_type: 'local_agent',
+      is_backgrounded: true,
+    }))
+    // The tool input says nothing about backgrounding; the flag recorded by
+    // the authoritative signal must not be undone by the later one.
+    spawnAgentTool(session, AGENT_ID, { description: 'Probe sleep test' })
+    assert.equal(spawned.length, 1, 'exactly one agent_spawned per subagent')
+    assert.equal(session._activeAgents.get(AGENT_ID).background, true)
+    // Nothing reads `background` yet — the sweep is unconditional (#7340) —
+    // so assert the recorded value directly rather than via the sweep.
+    session._clearMessageState()
+    assert.deepEqual(completed.map((c) => c.toolUseId), [AGENT_ID])
+  })
+
+  // #7340 (review, F3): the parse-failure diagnostic accepted only `Task`, so
+  // an `Agent` spawn with unparseable input was logged as a generic tool.
+  // Control flow is identical either way (both return), so ONLY the log
+  // distinguishes them — which is exactly why it was the roster line that got
+  // missed. Driven through the session's injectable `_log`.
+  for (const toolName of ['Task', 'Agent']) {
+    it(`names the tool in the parse-failure log for \`${toolName}\``, () => {
+      const session = createSession()
+      const warns = []
+      session._log = { warn: (m) => warns.push(m), error: () => {}, info: () => {} }
+      session._handleEvent(toolUseStart(toolName, 'toolu_bad'))
+      session._handleEvent(inputJsonDelta('{"description": "trunc'))
+      session._handleEvent(contentBlockStop())
+      assert.equal(warns.length, 1, 'a parse failure must be logged exactly once')
+      assert.match(warns[0], new RegExp(`Failed to parse ${toolName} tool input`))
+    })
+  }
+
+  // These used to fall through to the generic system-event branch, which
+  // forwarded the literal string "task_started" to the client as a chat bubble.
+  it('does not forward task lifecycle events to the client as chat messages', () => {
+    const session = createSession()
+    const messages = []
+    session.on('message', (m) => messages.push(m))
+    session._handleEvent(taskStarted({ tool_use_id: AGENT_ID, task_type: 'local_agent' }))
+    session._handleEvent(taskNotification(AGENT_ID))
+    assert.deepEqual(messages, [])
+  })
+})
