@@ -62,8 +62,12 @@ export const CI_PREFILL_BUSY_NOTICE =
   'Composer already has a draft — clear or send it before inserting the CI status.'
 
 /**
- * State word for the check clause. Never 'green' for anything but `success`,
- * and `none` is handled by the caller because it carries no useful counts.
+ * State word for the check clause. Never 'green' for anything but `success`.
+ *
+ * `none` deliberately has NO row here: `checksClause` returns before reaching
+ * this map, because a head that produced no run has no counts worth printing —
+ * and a missing row would otherwise fall through to the `??` default and label
+ * it "unrecognised", which is a different (and wrong) claim.
  */
 const CHECK_VERB: Record<string, string> = {
   pending: 'checks still running',
