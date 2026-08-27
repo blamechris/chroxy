@@ -33,6 +33,7 @@ export class ServerOrchestrator {
     pairingManager,
     pushManager = null,
     billingCanaryMonitor = null,
+    sessionCiWatcher = null,
     orchestrationManager = null,
     schedulerEngine = null,
     modelsOverlayWatcher = null,
@@ -54,6 +55,10 @@ export class ServerOrchestrator {
     this._pairingManager = pairingManager
     this._pushManager = pushManager
     this._billingCanaryMonitor = billingCanaryMonitor
+    // #7424: the session CI-completion watcher (null when sessionCi.watch is
+    // off). Stopped on shutdown so a sweep can't spawn `gh` into a tearing-down
+    // daemon.
+    this._sessionCiWatcher = sessionCiWatcher
     // #6691 (E-4): the orchestration engine (null when the feature is off).
     // Disposed on shutdown: unhooks its SessionManager listeners (permission
     // gate + turn driver) and flushes the run ledger's pending snapshot writes.
@@ -115,6 +120,11 @@ export class ServerOrchestrator {
     // wouldn't block exit, but clearing it avoids a recompute racing shutdown.
     if (this._billingCanaryMonitor) {
       try { this._billingCanaryMonitor.stop() } catch {}
+    }
+    // #7424: stop the CI watcher's sweep. Unref'd like the canary's timer, but
+    // clearing it keeps a survey from racing shutdown.
+    if (this._sessionCiWatcher) {
+      try { this._sessionCiWatcher.stop() } catch {}
     }
     // #6691 (E-4): tear down the orchestration engine BEFORE destroying the
     // sessions it may own — dispose unhooks its listeners and flushes the run

@@ -108,6 +108,27 @@ describe('ServerOrchestrator — graceful shutdown order (SIGTERM)', () => {
     assert.deepEqual(seq.at(-1), ['exit', 0])
   })
 
+  it('stops the CI watcher before sessions are destroyed (#7424)', async () => {
+    // The watcher spawns git + gh per sweep. Stopping it after destroyAll would
+    // let a sweep survey sessions that are already gone, mid-teardown.
+    const { orchestrator, seq } = build({
+      sessionCiWatcher: { stop: () => seq.push(['ciWatcher.stop']) },
+    })
+    await orchestrator.shutdown('SIGTERM')
+    const names = seq.map((e) => e[0])
+    assert.ok(names.includes('ciWatcher.stop'), 'the CI watcher must be stopped on shutdown')
+    assert.ok(names.indexOf('ciWatcher.stop') < names.indexOf('destroyAll'))
+  })
+
+  it('a CI-watcher stop that throws does not derail teardown', async () => {
+    const { orchestrator, seq, exits } = build({
+      sessionCiWatcher: { stop: () => { throw new Error('nope') } },
+    })
+    await orchestrator.shutdown('SIGTERM')
+    assert.deepEqual(exits, [0])
+    assert.ok(seq.map((e) => e[0]).includes('destroyAll'))
+  })
+
   it('drains the docker-byok pool before close when the pool is enabled', async () => {
     const seqPool = []
     const { orchestrator, seq } = build({

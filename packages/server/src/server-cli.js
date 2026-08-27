@@ -5,6 +5,7 @@ import { formatIdleDuration } from './session-timeout-manager.js'
 import { isOperatorTimeoutInRange } from './duration.js'
 import { WsServer } from './ws-server.js'
 import { BillingCanaryMonitor } from './billing-canary-monitor.js'
+import { buildSessionCiWatcher } from './session-ci-watcher.js'
 import { resolvePublicIp } from './get-public-ip.js'
 import { createTunnel, parseTunnelArg } from './tunnel/index.js'
 // #5368 slice (c): QUICK_TUNNEL_DNS_SETTLE_MS + TUNNEL_STATUS_MIN_PROTOCOL_VERSION
@@ -1277,6 +1278,18 @@ export async function startCliServer(config) {
   sessionManager.on('session_destroyed', () => billingCanaryMonitor.refresh())
   billingCanaryMonitor.start()
 
+  // #7424 (step 3 of #7344): watch the PR each session opened and announce a CI
+  // run the moment it SETTLES, to both audiences — a `ci_complete` push for the
+  // user's phone, and one typed line into the session's own prompt so the agent
+  // learns it without spending a turn (and a full cached-context re-read)
+  // polling `gh pr checks`.
+  //
+  // ON by default; `sessionCi.watch: false` returns null here. Everything
+  // decidable lives in buildSessionCiWatcher so it is unit-tested rather than
+  // source-grepped.
+  const sessionCiWatcher = buildSessionCiWatcher({ config, sessionManager, pushManager, logger: log })
+  sessionCiWatcher?.start()
+
   // #5053: wire the pool stats aggregator to the shared pool so the
   // dashboard's GET /api/pool/stats has rolling counters (hit rate,
   // eviction-by-reason, recent evictions) to read. Default-OFF — only the
@@ -1461,6 +1474,7 @@ export async function startCliServer(config) {
     pairingManager,
     pushManager,
     billingCanaryMonitor,
+    sessionCiWatcher,
     orchestrationManager,
     schedulerEngine,
     modelsOverlayWatcher,

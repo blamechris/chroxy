@@ -22,6 +22,7 @@ import { resolveIngestSecret } from './event-ingest.js'
 import { sendOversizeResponse } from './http-oversize.js'
 import { settlePush } from './push.js'
 import { RateLimiter, getRateLimitKey } from './rate-limiter.js'
+import { wakeSession } from './session-wake.js'
 
 const log = createLogger('mailbox-route')
 
@@ -222,31 +223,19 @@ export function handleMailboxPing(server, req, res) {
 
 /**
  * Inject a wakeup prompt into the recipient's live session when it is safe —
- * a claude-tui session at a quiet prompt. Uses only public session surface
- * (`writeTerminalInput` + the `isRunning` getter). Returns the outcome reason.
- * @returns {'injected'|'busy'|'not-tui'|'no-session'|'pty-dead'}
+ * a claude-tui session at a quiet prompt.
+ *
+ * Routing (mailbox id → session) is this module's job; the "may I type into
+ * it" gate is NOT, and lives in `session-wake.js` so the CI-completion watcher
+ * (#7424) enforces the same rules rather than a copy of them. The rules
+ * themselves — claude-tui only via the positive discriminator (#5984 /
+ * swarm-audit C2), idle only, scrubbed single line — are documented there.
+ *
+ * @returns {import('./session-wake.js').WakeOutcome}
  */
 function injectWakeup(server, to, unreadCount) {
   const session = server.sessionManager?.resolveSessionByAgentCommId?.(to) ?? null
   if (!session) return 'no-session'
-  // #5984 (epic #5982): gate on the positive claude-tui discriminator, NOT
-  // `typeof session.writeTerminalInput` — a user-shell session (#5983) will
-  // also expose writeTerminalInput, and duck-typing here would let the weaker
-  // ingest-secret holder inject an executed line into a root shell (swarm-audit
-  // finding C2). Only the claude-tui PTY mirror is a legitimate wakeup target.
-  // Strict `!== true` (not truthiness): this gate is security-load-bearing, so a
-  // buggy override returning a truthy non-boolean must NOT be treated as tui.
-  if (session.constructor?.isClaudeTui !== true) return 'not-tui'
-  // Defense-in-depth: isClaudeTui===true implies writeTerminalInput exists today
-  // (only ClaudeTuiSession sets the marker AND defines the method), so this is
-  // unreachable in practice — but it guards against a future class that sets the
-  // marker without the method rather than throwing on the write below.
-  if (typeof session.writeTerminalInput !== 'function') return 'not-tui'
-  // `isRunning` is true mid-turn or with background shells — inject only at a
-  // quiet prompt so we never corrupt an in-flight turn's input.
-  if (session.isRunning) return 'busy'
   const countText = unreadCount != null ? `${unreadCount} unread mailbox message(s)` : 'unread mailbox messages'
-  const text = `You have ${countText} — run receive_next to process them.\r`
-  const ok = session.writeTerminalInput(text)
-  return ok ? 'injected' : 'pty-dead'
+  return wakeSession(session, `You have ${countText} — run receive_next to process them.`)
 }

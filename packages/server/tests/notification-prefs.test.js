@@ -13,6 +13,7 @@ import {
   CATEGORY_DEFAULTS,
   ALL_CATEGORIES,
 } from '../src/notification-prefs.js'
+import { RATE_LIMITS } from '../src/push.js'
 import { ServerNotificationPrefsSchema } from '@chroxy/protocol'
 
 let tmpDir
@@ -42,11 +43,28 @@ describe('notification-prefs', () => {
   })
 
   describe('CATEGORY_DEFAULTS', () => {
-    it('enumerates every RATE_LIMITS category', () => {
-      // The canonical category list from push.js RATE_LIMITS — categories
-      // here MUST match so the per-category UI gates the same set of pushes
-      // the server actually fires. Adding a new push category requires
-      // adding it to this default map (and consequently to the wire shape).
+    it('matches push.js RATE_LIMITS exactly, in both directions', () => {
+      // notification-prefs.js says ALL_CATEGORIES "MUST stay in sync with the
+      // keys of RATE_LIMITS in push.js", and until #7424 nothing checked it: the
+      // test here iterated ALL_CATEGORIES and asserted CATEGORY_DEFAULTS had a
+      // key for each — but CATEGORY_DEFAULTS is BUILT from ALL_CATEGORIES, so it
+      // was a tautology that stayed green through eight category additions and
+      // would have stayed green if push.js and this file had drifted completely.
+      //
+      // Both directions matter, and they fail for different reasons:
+      //   - a RATE_LIMITS key missing here is a push the per-category UI cannot
+      //     mute (sanitizeCategoryMap strips it as unknown);
+      //   - a category here missing from RATE_LIMITS silently inherits send()'s
+      //     30s fallback throttle, so a "fires immediately" category quietly
+      //     does not.
+      assert.deepEqual(
+        [...ALL_CATEGORIES].sort(),
+        Object.keys(RATE_LIMITS).sort(),
+        'ALL_CATEGORIES (notification-prefs.js) and RATE_LIMITS (push.js) must carry the same category set',
+      )
+    })
+
+    it('gives every category a boolean default', () => {
       for (const cat of ALL_CATEGORIES) {
         assert.equal(typeof CATEGORY_DEFAULTS[cat], 'boolean', `missing default for ${cat}`)
       }
