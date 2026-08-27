@@ -458,6 +458,8 @@ test('#6732 the manager has exactly one guarded run-status and one guarded subta
   assert.equal(updateLines.length, 1, `every subtask-status write must go through _setSubtaskStatus; found ${updateLines.length} raw _ledger.updateSubtask( call sites:\n${updateLines.join('\n')}`)
 
   // and those single sites must be the asserting helpers
-  assert.match(src, /_setRunStatus\s*\([^)]*\)\s*\{[\s\S]{0,600}?assertRunTransition\(/, '_setRunStatus must call assertRunTransition')
-  assert.match(src, /_setSubtaskStatus\s*\([^)]*\)\s*\{[\s\S]{0,600}?assertNodeTransition\(/, '_setSubtaskStatus must call assertNodeTransition')
+  // #7401 — boolean collapse: `src` is orchestration-manager.js (~66 KB) and a
+  // failing assert.match would serialise all of it as the error's `actual`.
+  assert.ok(/_setRunStatus\s*\([^)]*\)\s*\{[\s\S]{0,600}?assertRunTransition\(/.test(src), '_setRunStatus must call assertRunTransition')
+  assert.ok(/_setSubtaskStatus\s*\([^)]*\)\s*\{[\s\S]{0,600}?assertNodeTransition\(/.test(src), '_setSubtaskStatus must call assertNodeTransition')
 })

@@ -75,6 +75,7 @@ import { join, resolve } from 'node:path'
 
 import { installFsWriteSandbox } from '../../../scripts/lib/test-fs-sandbox.mjs'
 import { assertNoTestForceExit } from '../../../scripts/lib/no-test-force-exit.mjs'
+import { installAssertMatchPayloadGuard } from '../../../scripts/lib/assert-match-payload-guard.mjs'
 
 // --- Refuse `--test-force-exit` (#7400) --------------------------------------
 // First thing in the body, before any temp dir exists: the flag makes this
@@ -87,6 +88,23 @@ import { assertNoTestForceExit } from '../../../scripts/lib/no-test-force-exit.m
 // aggregates; the non-zero exit is the authoritative signal, not the message.)
 // See the module for the measurements and for why nothing needs the flag.
 assertNoTestForceExit()
+
+// --- Cap assert.match's failure payload (#7401) -------------------------------
+// A failing `assert.match(subject, re)` carries the ENTIRE subject as the
+// error's `actual` — 124 KB of TAP output for one assertion where the subject
+// is file text, and observed wedging the runner. #7401 converted every site
+// whose subject was a large checked-in source file, but that conversion is a
+// LIST, and a list beside a growing set is the first recurring cause in
+// docs/false-safety-guards.md. This caps the payload for any site the list
+// misses or that lands later. It never changes whether an assertion passes or
+// fails — only how much of the subject rides along on a failure. See the
+// module for why this is a runtime cap and not a lint (the static check has a
+// demonstrated false-negative class).
+//
+// Safe to run before the fs sandbox arms: the module reaches `node:assert`
+// through its own `createRequire` and never imports `node:fs`, so it cannot
+// disarm the guard installed below (#7262).
+installAssertMatchPayloadGuard()
 
 // CRITICAL: Patch `node:fs` via the CJS object obtained from `createRequire`,
 // NOT via an ESM default import. ESM `import fs from 'node:fs'` returns a

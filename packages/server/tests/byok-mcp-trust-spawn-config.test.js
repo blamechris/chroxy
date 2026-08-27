@@ -194,6 +194,8 @@ describe('#7001 the remote trust key covers the endpoint and its headers', () =>
     const disk = readFileSync(storePath, 'utf8')
     assert.ok(!disk.includes('pw') && !disk.includes('tok=secret') && !disk.includes('Bearer'),
       'no credential material may reach the trust store')
+    // #7401 — left as assert.match deliberately: the subject is a file this test just wrote (a small trust-store JSON), so the whole
+    // subject in a failure is useful rather than a 100 KB TAP block.
     assert.match(disk, /"url": "https:\/\/mcp\.example\.com\/api"/, 'the sanitized url stays readable on disk')
   })
 

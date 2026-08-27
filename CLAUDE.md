@@ -312,6 +312,17 @@ The recurring causes:
   192 of one file's 192 tests across five runs, every run `# fail 0` and exit 0,
   while a side-channel proved all 192 had executed (`#7400`)
 
+**Collapse to a boolean before asserting against file text.** A failing
+`assert.match(subject, re)` carries the ENTIRE subject as the error's `actual`
+— 124 KB of TAP for a one-line assertion, and it has wedged the runner
+(`#7340`, catalogue entry 17). Write `assert.ok(re.test(src), 'message')`
+instead; `assert.deepEqual` against a large array wants the same treatment (map
+to the short field first). `#7401` swept the existing sites, and
+`scripts/lib/assert-match-payload-guard.mjs` — installed from
+`packages/server/tests/_setup.mjs` — bounds the payload for anything that
+lands later, without ever changing a verdict. Subjects a test wrote itself (a
+log, a generated script) are small and fine as-is.
+
 **Never pass `--test-force-exit`, and run what CI runs.** Every package that runs
 `node --test` refuses it now (`scripts/lib/no-test-force-exit.mjs`, installed via
 each `tests/_setup.mjs` or the `--import` hook) because it drops test

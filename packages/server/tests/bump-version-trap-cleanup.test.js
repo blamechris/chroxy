@@ -11,9 +11,11 @@ const SCRIPT = resolve(ROOT, 'scripts/bump-version.sh')
 describe('bump-version.sh trap-cleans orphan .tmp files (#3886)', () => {
   it('script source defines a TMP_FILES tracker and EXIT trap', () => {
     const src = readFileSync(SCRIPT, 'utf-8')
-    assert.match(src, /TMP_FILES=\(\)/, 'script should declare TMP_FILES array')
-    assert.match(src, /track_tmp\s*\(\)/, 'script should define track_tmp()')
-    assert.match(src, /trap\s+cleanup_tmp_files\s+EXIT/, 'script should register EXIT trap')
+    // #7401 — boolean collapse: bump-version.sh is ~26 KB, not the "few KB" it
+    // looks like; a failing assert.match would serialise all of it as `actual`.
+    assert.ok(/TMP_FILES=\(\)/.test(src), 'script should declare TMP_FILES array')
+    assert.ok(/track_tmp\s*\(\)/.test(src), 'script should define track_tmp()')
+    assert.ok(/trap\s+cleanup_tmp_files\s+EXIT/.test(src), 'script should register EXIT trap')
   })
 
   it('script registers Cargo.lock .tmp before its awk write', () => {
@@ -26,7 +28,7 @@ describe('bump-version.sh trap-cleans orphan .tmp files (#3886)', () => {
     // when iOS moved to CNG (#5642) — the native version now comes from
     // app.json at prebuild — so this guards the remaining awk-into-place site.
     const pattern = /track_tmp "\$CARGO_LOCK\.tmp"[\s\S]{0,400}awk[\s\S]{0,400}> "\$CARGO_LOCK\.tmp"/
-    assert.match(src, pattern, 'Cargo.lock awk block should call track_tmp before writing the .tmp')
+    assert.ok(pattern.test(src), 'Cargo.lock awk block should call track_tmp before writing the .tmp')
   })
 
   it('forced awk failure under the same trap pattern leaves no orphan .tmp', () => {

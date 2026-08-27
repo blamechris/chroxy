@@ -267,9 +267,12 @@ describe('scheduled-task health — CLI source parity (#6868 / PR #7013)', () =>
         src.includes('deriveScheduledTaskHealthTag'),
         'the CLI has no local healthTag() — it must then import deriveScheduledTaskHealthTag from @chroxy/protocol, or it has no health mapping at all',
       )
-      assert.match(
-        src,
-        /from\s+'@chroxy\/protocol'/,
+      // #7401 — boolean collapse: `src` is schedule-cmd.js (~32 KB), the
+      // largest subject in this sweep outside the provider modules. Missed by
+      // the first sweep because the CALL spans lines, so the subject is not on
+      // the same line as `assert.match(`.
+      assert.ok(
+        /from\s+'@chroxy\/protocol'/.test(src),
         'the CLI must take its health mapping from the shared @chroxy/protocol module',
       )
       return

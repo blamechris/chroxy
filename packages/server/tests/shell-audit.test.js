@@ -77,6 +77,7 @@ describe('shell-audit — always-on under quiet LOG_LEVEL (#6001)', () => {
     closeFileLogging()
 
     const content = readFileSync(join(logDir, 'chroxy.log'), 'utf8')
+    // #7401 — left as assert.match deliberately: the subject is a file this test just wrote (an audit log of a few lines).
     assert.match(content, /event=user_shell_create/)
     assert.match(content, /sessionId="sess-9"/)
     assert.match(content, /\[AUDIT\]/)

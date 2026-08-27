@@ -909,6 +909,24 @@ assert.ok(/authoritative: true/.test(branch), msg)   // fail → red, in ~0.3s
 — and `assert.deepEqual(bigArrayOfPaths, [])` wants the same treatment: map to
 the short field you actually care about first.
 
+**The sweep landed in `#7401`, and it is now backed by a runtime cap.** Every
+assertion whose subject was a large checked-in file was converted; the ~10 that
+remain read a file the test itself just wrote and carry a note saying so. The
+conversion is a LIST, though, and a list beside a growing set is the first
+recurring cause on this page — so `scripts/lib/assert-match-payload-guard.mjs`
+(installed from `packages/server/tests/_setup.mjs`) bounds the failure payload
+for any site the list missed or that lands later. It never changes a verdict,
+only how much of the subject rides along.
+
+A static lint was written first and rejected on evidence: deciding "is this
+subject large file text?" from the syntax proved unsound in BOTH directions —
+tight enough to avoid false positives, it missed three real sites (a multi-line
+`await readFile()`, a subject derived through `.split().filter().join()`, and a
+call whose subject sat on the next line); loose enough to catch those, it went
+from 26 hits to 61, mostly small in-test strings. That is worth remembering
+before writing the next source-scanning guard: **a predicate that is not
+soundly decidable from the syntax should not be enforced from the syntax.**
+
 **Do not treat the wedge itself as an established mechanism.** Two reviewers
 tried independently to reproduce it and could not: one from a standalone script
 against a 101 KB subject (failed in ~1.2 s, emitting 124 KB of TAP), one by

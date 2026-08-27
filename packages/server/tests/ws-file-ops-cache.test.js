@@ -104,7 +104,9 @@ describe('#1931 — CWD real path cache TTL', () => {
     assert.ok(source.includes('_cwdRealCache'), 'should have CWD real path cache')
     assert.ok(source.includes('CWD_CACHE_TTL'), 'should have TTL constant')
     assert.ok(source.includes('60_000'), 'TTL should be 60 seconds')
-    assert.match(source, /\bts\b/, 'should store a timestamp field for cache entries')
-    assert.match(source, /Date\.now\(\)\s*-\s*\w+\.ts/, 'should compare current time against cached timestamp')
+    // #7401 — boolean collapse: `source` is index.js + common.js concatenated
+    // (~14 KB); a failing assert.match would carry the whole thing as `actual`.
+    assert.ok(/\bts\b/.test(source), 'should store a timestamp field for cache entries')
+    assert.ok(/Date\.now\(\)\s*-\s*\w+\.ts/.test(source), 'should compare current time against cached timestamp')
   })
 })

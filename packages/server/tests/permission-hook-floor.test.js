@@ -1061,18 +1061,27 @@ describe('anti-drift: the floor has exactly ONE implementation (#7004)', () => {
   const hookCode = hookSrc.split('\n').filter((l) => !/^\s*#/.test(l)).join('\n')
 
   it('both call sites go through the SAME isFlooredTarget from permission-floor.js', () => {
-    assert.match(managerSrc, /from '\.\/permission-floor\.js'/, 'permission-manager imports the shared floor')
-    assert.match(managerSrc, /isFlooredTarget\(toolName, input, this\._cwd\)/, 'in-process path calls it')
-    assert.match(wsPermSrc, /import \{ isFlooredTarget \} from '\.\/permission-floor\.js'/, 'hook path imports it')
-    assert.match(wsPermSrc, /isFlooredTarget\(tool, input, cwd\)/, 'hook path calls it')
+    // #7401 — boolean collapse: these subjects are permission-manager.js (~61 KB)
+    // and ws-permissions.js (~52 KB). A failing assert.match carries the entire
+    // subject as the error's `actual`, which is what wedged the runner in #7340.
+    assert.ok(/from '\.\/permission-floor\.js'/.test(managerSrc), 'permission-manager imports the shared floor')
+    assert.ok(/isFlooredTarget\(toolName, input, this\._cwd\)/.test(managerSrc), 'in-process path calls it')
+    assert.ok(/import \{ isFlooredTarget \} from '\.\/permission-floor\.js'/.test(wsPermSrc), 'hook path imports it')
+    assert.ok(/isFlooredTarget\(tool, input, cwd\)/.test(wsPermSrc), 'hook path calls it')
   })
 
   it('the tool-aware read-vs-write choice exists in exactly one file', () => {
     // If a second site re-derives "which floor applies to which tool", the two
     // pipelines can drift again — that IS #7004.
-    assert.match(floorSrc, /SECRET_READ_FLOOR_TOOLS\.has\(toolName\)/)
-    assert.doesNotMatch(managerSrc, /SECRET_READ_FLOOR_TOOLS\.has/)
-    assert.doesNotMatch(wsPermSrc, /SECRET_READ_FLOOR_TOOLS\.has/)
+    // #7401 — boolean collapse, and the two negatives gain a message: a failing
+    // `assert.doesNotMatch(managerSrc, re)` with no message is the worst case of
+    // all — ~61 KB of `actual` and nothing telling you what broke.
+    assert.ok(/SECRET_READ_FLOOR_TOOLS\.has\(toolName\)/.test(floorSrc),
+      'permission-floor.js owns the tool-aware read-vs-write choice')
+    assert.ok(!/SECRET_READ_FLOOR_TOOLS\.has/.test(managerSrc),
+      'permission-manager must NOT re-derive which floor applies to which tool (#7004)')
+    assert.ok(!/SECRET_READ_FLOOR_TOOLS\.has/.test(wsPermSrc),
+      'ws-permissions must NOT re-derive which floor applies to which tool (#7004)')
     // And the predicate set is still the documented one.
     assert.deepEqual([...SECRET_READ_FLOOR_TOOLS].sort(), ['Glob', 'Grep', 'Read'])
   })
@@ -1085,7 +1094,10 @@ describe('anti-drift: the floor has exactly ONE implementation (#7004)', () => {
         `permission-hook.sh must not reimplement the floor (found ${literal} in executable code)`,
       )
     }
-    assert.match(hookCode, /permission-floor/, 'it asks the daemon instead')
+    // #7401 — boolean collapse: `hookCode` is permission-hook.sh with comment
+    // lines stripped, ~8 KB. Missed by the first sweep because it is a DERIVED
+    // binding (.split().filter().join()), never bound from a read directly.
+    assert.ok(/permission-floor/.test(hookCode), 'it asks the daemon instead')
   })
 
   it('the hook pre-filter covers EVERY field the floor scans (drift → this fails)', () => {
