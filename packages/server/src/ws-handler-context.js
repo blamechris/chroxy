@@ -16,7 +16,9 @@
  * while the typedef was decorative and drifted silently (seven fields missing,
  * one present here but absent from the roster — #7403). They are now pinned
  * against each other by `tests/ws-handler-context-typedef-parity.test.js`, so
- * this paragraph is enforced rather than aspirational. ws-server.js builds the production ctx; tests build a
+ * this paragraph is enforced rather than aspirational.
+ *
+ * ws-server.js builds the production ctx; tests build a
  * namespaced mock via `tests/test-helpers.js` and may run it through
  * `assertCtxShape()` so a partial mock fails loudly at construction instead of
  * at the first missing-field read deep inside a handler.

@@ -40,10 +40,32 @@ function typedefNameFor(ns) {
   return `WsHandler${ns[0].toUpperCase()}${ns.slice(1)}`
 }
 
-/** The text of one `@typedef {Object} <name>` block, up to the next `@typedef`. */
+/**
+ * The text of one `@typedef {Object} <name>` block, up to the next `@typedef`.
+ *
+ * THROWS rather than returning null when the block is absent. The
+ * "every namespace resolves to a real typedef block" control below covers the
+ * same ground, but `node --test` can run an individual test in isolation
+ * (`--test-name-pattern`), so that control does not gate the parity tests. Left
+ * returning null, a renamed typedef would surface as
+ * `TypeError: Cannot read properties of null` from inside the regex helper —
+ * true, useless, and pointing at the wrong file.
+ */
 function typedefBlock(name) {
-  const start = SRC.indexOf(`@typedef {Object} ${name}`)
-  if (start === -1) return null
+  // Word-boundary matched, NOT `indexOf`. A plain substring search for
+  // `@typedef {Object} WsHandlerServices` also matches
+  // `@typedef {Object} WsHandlerServicesRenamed`, so renaming a typedef left
+  // this test green — measured, 13/13, with the block it was supposed to be
+  // pinning gone. Prefix-matching an identifier is the same class as a
+  // substring standing in for a token match (#7290/#7291).
+  const match = new RegExp(`@typedef \\{Object\\} ${name}\\b`).exec(SRC)
+  const start = match ? match.index : -1
+  assert.ok(
+    start !== -1,
+    `no '@typedef {Object} ${name}' block found in ws-handler-context.js — ` +
+      'the typedef was renamed or removed, or the WsHandler<Namespace> naming convention changed. ' +
+      'Both sides of this test derive from that convention.',
+  )
   const rest = SRC.slice(start)
   const next = rest.indexOf('@typedef', 1)
   return next === -1 ? rest : rest.slice(0, next)
@@ -85,8 +107,10 @@ describe('WsHandler typedefs match CTX_NAMESPACES (#7403)', () => {
     // empty, pass vacuously.
     for (const ns of CTX_NAMESPACE_NAMES) {
       const name = typedefNameFor(ns)
+      // typedefBlock() itself asserts the block exists, so this reads as
+      // "does not throw" — the explicit length check below is what makes it a
+      // control rather than a restatement.
       const block = typedefBlock(name)
-      assert.ok(block, `no '@typedef {Object} ${name}' block found for namespace '${ns}'`)
       assert.ok(
         propertyNames(block).length > 0,
         `'${name}' parsed to zero properties — the parser or the typedef is broken`,
