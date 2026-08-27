@@ -1274,7 +1274,11 @@ describe('CliSession background subagent lifecycle (#7340)', () => {
     assert.equal(spawned[0].description, 'Probe sleep test')
   })
 
-  it('keeps a backgrounded subagent alive across turn end, then clears it on task_notification', () => {
+  // Before #7395 the CLI had NO terminal signal for a subagent at all: the
+  // turn-end sweep was the only finalizer, so a subagent that finished early in
+  // a long turn kept its badge for the rest of it. `task_notification` clears
+  // it when it actually finishes.
+  it('clears a subagent on task_notification, without waiting for turn end', () => {
     const session = createSession()
     const completed = []
     session.on('agent_completed', (e) => completed.push(e))
@@ -1286,21 +1290,39 @@ describe('CliSession background subagent lifecycle (#7340)', () => {
       task_type: 'local_agent',
       is_backgrounded: true,
     }))
+    assert.deepEqual(completed, [], 'still running')
 
-    // The turn ends while the subagent is still running.
-    session._clearMessageState()
-    assert.deepEqual(completed, [], 'turn end must not complete a backgrounded subagent')
-    assert.ok(session._activeAgents.has(AGENT_ID), 'it stays tracked so the session still reads as working')
-
-    // Its own terminal signal, which arrives after the turn is over.
     session._handleEvent(taskNotification(AGENT_ID))
+    assert.deepEqual(completed.map((c) => c.toolUseId), [AGENT_ID])
+    assert.equal(session._activeAgents.size, 0)
+
+    // ...and the turn-end sweep does not then double-complete it.
+    session._clearMessageState()
+    assert.deepEqual(completed.map((c) => c.toolUseId), [AGENT_ID])
+  })
+
+  // #7340 is NOT closed by this PR: the turn-end sweep still completes every
+  // tracked subagent, backgrounded or not. Exempting backgrounded ones needs
+  // three other changes to land with it (see the block in `_clearMessageState`)
+  // or the session pins as "working" forever. Pinned here so the exemption
+  // cannot be reintroduced as a one-liner without a test going red.
+  it('sweeps a still-running backgrounded subagent at turn end, until #7340 lands', () => {
+    const session = createSession()
+    const completed = []
+    session.on('agent_completed', (e) => completed.push(e))
+    spawnAgentTool(session, AGENT_ID, { description: 'Probe sleep test', run_in_background: true })
+    session._handleEvent(taskStarted({
+      tool_use_id: AGENT_ID,
+      description: 'Probe sleep test',
+      task_type: 'local_agent',
+      is_backgrounded: true,
+    }))
+    session._clearMessageState()
     assert.deepEqual(completed.map((c) => c.toolUseId), [AGENT_ID])
     assert.equal(session._activeAgents.size, 0)
   })
 
-  // The positive control: a foreground subagent the model abandoned mid-turn
-  // must STILL be swept, or the fix trades stuck-idle for stuck-busy.
-  it('still sweeps a foreground subagent at turn end', () => {
+  it('sweeps a foreground subagent at turn end', () => {
     const session = createSession()
     const completed = []
     session.on('agent_completed', (e) => completed.push(e))
@@ -1323,12 +1345,11 @@ describe('CliSession background subagent lifecycle (#7340)', () => {
   // `completed` would pin the session as working forever on the exact case the
   // user most needs to hear about.
   for (const status of ['failed', 'stopped']) {
-    it(`clears a backgrounded subagent on a "${status}" task_notification`, () => {
+    it(`clears a subagent on a "${status}" task_notification`, () => {
       const session = createSession()
       const completed = []
       session.on('agent_completed', (e) => completed.push(e))
       spawnAgentTool(session, AGENT_ID, { description: 'd', run_in_background: true })
-      session._clearMessageState()
       session._handleEvent(taskNotification(AGENT_ID, status))
       assert.deepEqual(completed.map((c) => c.toolUseId), [AGENT_ID])
       assert.equal(session._activeAgents.size, 0)
@@ -1367,12 +1388,15 @@ describe('CliSession background subagent lifecycle (#7340)', () => {
       task_type: 'local_agent',
       is_backgrounded: true,
     }))
-    // The tool input says nothing about backgrounding; the upgrade must not
-    // be undone by the later, less authoritative signal.
+    // The tool input says nothing about backgrounding; the flag recorded by
+    // the authoritative signal must not be undone by the later one.
     spawnAgentTool(session, AGENT_ID, { description: 'Probe sleep test' })
     assert.equal(spawned.length, 1, 'exactly one agent_spawned per subagent')
+    assert.equal(session._activeAgents.get(AGENT_ID).background, true)
+    // Nothing reads `background` yet — the sweep is unconditional (#7340) —
+    // so assert the recorded value directly rather than via the sweep.
     session._clearMessageState()
-    assert.deepEqual(completed, [], 'the background flag must survive the second signal')
+    assert.deepEqual(completed.map((c) => c.toolUseId), [AGENT_ID])
   })
 
   // These used to fall through to the generic system-event branch, which

@@ -1426,8 +1426,13 @@ export class CliSession extends BaseSession {
           ;(this._log || log).error(`Failed to parse AskUserQuestion input: ${err.message}`)
           return
         }
-        if (toolName === 'Task') {
-          ;(this._log || log).warn(`Failed to parse Task tool input: ${err.message}`)
+        // #7340: `Agent` alongside `Task` here too. Control flow is identical
+        // either way (both `return`), so only the diagnostic differed -- which
+        // is exactly how a roster gets fixed in three places and missed in the
+        // fourth. A subagent spawn whose input failed to parse would have been
+        // logged as a generic tool under the current tool name.
+        if (toolName === 'Task' || toolName === 'Agent') {
+          ;(this._log || log).warn(`Failed to parse ${toolName} tool input: ${err.message}`)
           return
         }
         if (toolName === 'ExitPlanMode') {
