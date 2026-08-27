@@ -13,6 +13,7 @@ import {
   buildBaseSessionOpts,
 } from '../src/base-session.js'
 import { SkillsTrustStore, sha256Hex } from '../src/skills-trust.js'
+import { AGENT_DESCRIPTION_MAX } from '../src/claude-stream-parser.js'
 
 describe('BaseSession', () => {
   let session
@@ -787,6 +788,31 @@ describe('BaseSession', () => {
       session._resultTimeout = setTimeout(() => {}, 10000)
       session._clearMessageState()
       assert.equal(session._resultTimeout, null)
+    })
+
+    // #7340 (review): `description` rides out on `agent_spawned` and is
+    // rendered by AgentMonitorPanel and the mobile SettingsBar. The tool-input
+    // path was clamped by the parser, but `task_started` is a SECOND producer
+    // feeding the same field from provider-supplied text, and the wire schema
+    // (`description: z.string().optional()`) has no max — so nothing
+    // downstream would have caught an unbounded value either. Clamped at the
+    // one choke point every producer goes through.
+    it('clamps a subagent description to the shared cap, whichever producer supplied it', () => {
+      const spawned = []
+      session.on('agent_spawned', (e) => spawned.push(e))
+      session._trackAgent({ toolUseId: 'a1', description: 'x'.repeat(5000) })
+      assert.equal(spawned.length, 1)
+      assert.equal(spawned[0].description.length, AGENT_DESCRIPTION_MAX)
+      // ...and the record the sweep reads carries the clamped value too, not
+      // the raw one — otherwise the cap would be cosmetic at the emit only.
+      assert.equal(session._activeAgents.get('a1').description.length, AGENT_DESCRIPTION_MAX)
+    })
+
+    it('leaves a short description untouched (the clamp is not a truncate-always)', () => {
+      const spawned = []
+      session.on('agent_spawned', (e) => spawned.push(e))
+      session._trackAgent({ toolUseId: 'a2', description: 'Probe sleep test' })
+      assert.equal(spawned[0].description, 'Probe sleep test')
     })
 
     // #7340: the turn ending is not evidence that a BACKGROUNDED subagent

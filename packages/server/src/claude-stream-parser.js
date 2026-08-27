@@ -42,6 +42,17 @@
 import { parseMcpToolName } from './mcp-tools.js'
 
 /**
+ * Cap on a subagent's `description` — the field that rides out on
+ * `agent_spawned` and is rendered by AgentMonitorPanel and the mobile
+ * SettingsBar. Named and exported rather than left as a bare `200` because
+ * #7340 added a SECOND producer of that field (BaseSession's `_trackAgent`,
+ * fed by `task_started`), and a cap written once per producer is a cap that
+ * drifts. `_trackAgent` is the choke point that applies it; the clamp below
+ * is kept as defence in depth for direct callers of this parser.
+ */
+export const AGENT_DESCRIPTION_MAX = 200
+
+/**
  * Tools whose input fields drive session-level state (plan mode, agent
  * tracking, user-question prompts). The semantics returned here are
  * applied by the caller to its own state (CliSession or SdkSession)
@@ -75,7 +86,7 @@ export function extractToolInputSemantics(toolName, parsedInput) {
     case 'Agent': {
       const description = (typeof input.description === 'string'
         ? input.description
-        : 'Background task').slice(0, 200)
+        : 'Background task').slice(0, AGENT_DESCRIPTION_MAX)
       // Strict `=== true`: on a FOREGROUND spawn the field is ABSENT, not
       // `false` (verified in the probe), and a truthy test would let a string
       // "true" or a 1 through. Defaulting to background is the dangerous

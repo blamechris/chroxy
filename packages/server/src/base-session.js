@@ -19,6 +19,7 @@ import { isOperatorTimeoutInRange } from './duration.js'
 import { createLogger } from './logger.js'
 import { ActivityRegistry } from './activity-registry.js'
 import { ALLOWED_PERMISSION_MODE_IDS } from './handler-utils.js'
+import { AGENT_DESCRIPTION_MAX } from './claude-stream-parser.js'
 
 const log = createLogger('base-session')
 
@@ -947,13 +948,17 @@ export class BaseSession extends EventEmitter {
       // and never call _destroyPendingBackgroundShells, so this is the
       // chokepoint that guarantees no provider leaks the recurring timer.
       this._stopBackgroundShellSweep()
-      // #7340: drop any BACKGROUNDED subagents still tracked. Before #7340 the
-      // turn-end sweep guaranteed this map was empty by the time a session was
-      // torn down; agents that outlive their turn break that guarantee, so the
-      // same chokepoint that stops the shell sweep clears them. No
-      // `agent_completed` emit -- the session is being destroyed, its clients
-      // are dropping its state wholesale, and the listeners are removed on the
-      // next line anyway.
+      // #7340: drop EVERY tracked subagent, foreground and backgrounded alike.
+      // Before #7340 the turn-end sweep guaranteed this map was empty by the
+      // time a session was torn down; agents that outlive their turn break that
+      // guarantee, so the same chokepoint that stops the shell sweep clears
+      // them. A destroy landing MID-TURN also has foreground agents tracked,
+      // which is why this is an unconditional clear and not a filtered one --
+      // the `background` predicate belongs to the turn-end sweep, where the
+      // question is "did this outlive its turn", not to teardown, where there
+      // is no next turn for anything to outlive. No `agent_completed` emit: the
+      // session is being destroyed, its clients drop its state wholesale, and
+      // the listeners come off on the next line anyway.
       this._activeAgents.clear()
       return super.removeAllListeners()
     }
@@ -1747,7 +1752,18 @@ export class BaseSession extends EventEmitter {
       if (background === true) existing.background = true
       return
     }
-    const agentInfo = { toolUseId, description, startedAt, background: background === true }
+    // Clamp HERE, not in each caller. `task_started`'s `description` is
+    // provider-supplied and reaches the wire verbatim via `agent_spawned`;
+    // only the tool-input path was clamped before, so the second producer
+    // #7340 added would have shipped an unbounded field (the wire schema
+    // declares `description: z.string().optional()` with no max, so nothing
+    // downstream would have caught it either).
+    const agentInfo = {
+      toolUseId,
+      description: String(description).slice(0, AGENT_DESCRIPTION_MAX),
+      startedAt,
+      background: background === true,
+    }
     this._activeAgents.set(toolUseId, agentInfo)
     this.emit('agent_spawned', agentInfo)
   }
