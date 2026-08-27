@@ -61,7 +61,19 @@ export async function sweepStaleProviderDirs(log, loaders = DEFAULT_SWEEP_LOADER
         const sweep = await load()
         await sweep(log)
       } catch (err) {
-        log.warn(`${label} sweep failed: ${(err && err.message) || err}`)
+        // The logger is the one call left outside the try, and a throwing
+        // `log.warn` would reject `Promise.all` — which nothing awaits, so it
+        // surfaces as an unhandledRejection, and server-orchestrator treats
+        // that as fatal. The OLD inline form had the identical hole (a throw
+        // inside `.catch()` rejects the chain just the same), so this is not a
+        // regression being fixed — it is the "never rejects" claim being made
+        // true rather than nearly true.
+        try {
+          log.warn(`${label} sweep failed: ${(err && err.message) || err}`)
+        } catch {
+          // Nothing left to report it with. Swallowing is correct: a
+          // best-effort reaper must never be able to take down boot.
+        }
       }
     }),
   )

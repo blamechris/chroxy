@@ -660,7 +660,7 @@ describe('DockerSession._spawnPersistentProcess — real argv (#7374)', () => {
     return child
   }
 
-  async function captureArgv(mutate) {
+  async function captureArgv() {
     const { DockerSession } = await import('../src/docker-session.js')
     const session = new DockerSession({ cwd: '/tmp', image: 'node:22-slim' })
     session._containerId = 'c0ffee1234567890'
@@ -676,13 +676,13 @@ describe('DockerSession._spawnPersistentProcess — real argv (#7374)', () => {
       captured = dockerArgs
       return child
     }
-    if (mutate) mutate(session)
-
     session._spawnPersistentProcess(['-p', '--model', 'opus'])
 
     // Tear down the readline interfaces and streams this created, or the file
     // leaks handles and the runner hangs after its summary.
-    session._cleanupReadlines?.()
+    // No `?.` — if this is ever renamed the teardown must go RED, not silently
+    // no-op and leave the file hanging on a leaked readline handle (entry 17).
+    session._cleanupReadlines()
     for (const s of [child.stdin, child.stdout, child.stderr]) s.destroy()
 
     return { captured, session }

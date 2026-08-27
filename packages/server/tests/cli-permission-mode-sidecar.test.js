@@ -592,12 +592,24 @@ describe('CliSession permission-mode sidecar (#7337)', () => {
     const src = readFileSync(join(__dirname, '../src/server-cli.js'), 'utf8')
 
     assert.ok(
-      /^import \{ sweepStaleProviderDirs \} from '\.\/sweep-stale-provider-dirs\.js'/m.test(src),
+      /from '\.\/sweep-stale-provider-dirs\.js'/.test(src),
       'positive control: server-cli must import the sweep',
     )
-    // Line-anchored, so a mention inside a comment or docstring does not count.
+    // Strip block comments FIRST, then match with `[ \t]` rather than `\s`.
+    //
+    // Both halves are load-bearing, and the first version of this assertion had
+    // neither. `\s` matches newlines, so `/^\s*sweepStaleProviderDirs\(log\)/m`
+    // was satisfied by `/*\nsweepStaleProviderDirs(log)\n*/` with the real call
+    // DELETED — measured: 20/20 green, boot sweep gone. It rejected `//` and
+    // ` * ` lines only, which is what made it look line-anchored.
+    //
+    // This is still a source-level pin and still bypassable by a call after an
+    // early `return`, or inside a function nobody invokes. See entry 20 in
+    // docs/false-safety-guards.md; the sweep's BEHAVIOUR is covered by
+    // tests/sweep-stale-provider-dirs.test.js, which runs it.
+    const code = src.replace(/\/\*[\s\S]*?\*\//g, '')
     assert.ok(
-      /^\s*sweepStaleProviderDirs\(log\)/m.test(src),
+      /^[ \t]*sweepStaleProviderDirs\(log\)/m.test(code),
       'boot must actually call sweepStaleProviderDirs(log) — otherwise the reapers never run and crashed sessions leak a dir each',
     )
   })
