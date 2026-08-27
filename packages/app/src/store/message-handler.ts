@@ -148,6 +148,10 @@ import {
   // (byte-identical wording with the dashboard).
   handleAppendMemoryResult as sharedAppendMemoryResult,
   formatMemoryAppendNotice,
+  // #7410 — the `history_replay_end` '(resolved)' sweep must not stamp a LIVE
+  // permission prompt. Imported rather than re-expressed inline so there is
+  // exactly one definition of "live permission prompt" in the codebase.
+  isLivePermissionPrompt,
 } from '@chroxy/store-core';
 import type {
   DeltaFlusher,
@@ -2564,17 +2568,37 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         // omits `sessionId`, so the single-session case is unchanged; and
         // `updateSession` no-ops on an id with no state, which is the right
         // outcome for the "session vanished mid-replay" branch above.
+        //
+        // LIVE permission prompts are excluded, and that follows from the wire
+        // contract rather than from taste: `permission_request` is in the
+        // server's `builtinTransient` list (`session-manager.js`), so it is
+        // NEVER written to the history ring buffer and can never arrive as a
+        // replayed entry. A live permission prompt sitting in `messages` at
+        // replay-end is therefore always a LIVE one that raced the replay —
+        // replay is chunked in 20-entry `setImmediate` batches with
+        // back-pressure pauses (`ws-history.js`), so that race is wide, and
+        // `reconcileReplayEnd`'s baseline slice deliberately keeps such
+        // entries. Stamping it destroys the pending approval the user
+        // reconnected to answer, which is the opposite of this sweep's premise
+        // ("anything in history is already resolved").
+        //
+        // `user_question` prompts, by contrast, ARE in the ring buffer and are
+        // re-sent on every replay, so they stay stampable — and they carry no
+        // `requestId`/`expiresAt`, so `isLivePermissionPrompt` leaves them
+        // alone by construction. (A live AskUserQuestion that races a replay is
+        // indistinguishable from a replayed one on the wire; see #7420.)
         if (endTargetId) {
+          // One `now` for the whole sweep so the `some` predicate and the `map`
+          // predicate cannot disagree across a millisecond boundary.
+          const sweepNow = Date.now();
+          const isStampable = (m: ChatMessage): boolean =>
+            m.type === 'prompt' && !m.answered && !isLivePermissionPrompt(m, sweepNow);
           updateSession(endTargetId, (ss) => {
-            const hasUnansweredPrompts = ss.messages.some(
-              (m) => m.type === 'prompt' && !m.answered
-            );
+            const hasUnansweredPrompts = ss.messages.some(isStampable);
             if (!hasUnansweredPrompts) return {};
             return {
               messages: ss.messages.map((m) =>
-                m.type === 'prompt' && !m.answered
-                  ? { ...m, answered: '(resolved)' }
-                  : m
+                isStampable(m) ? { ...m, answered: '(resolved)' } : m
               ),
             };
           });

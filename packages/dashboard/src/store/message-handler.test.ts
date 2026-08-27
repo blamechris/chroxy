@@ -3604,6 +3604,22 @@ describe('dashboard message-handler dispatch', () => {
   describe("history_replay_end: '(resolved)' sweep targeting (#7410)", () => {
     const FUTURE = Date.now() + 600_000;
 
+    /**
+     * An AskUserQuestion-shaped prompt: `type: 'prompt'` with no `requestId`
+     * and no `expiresAt`. `user_question` IS in the server's history ring
+     * buffer, so this is what a genuinely REPLAYED prompt looks like — and it
+     * is what the sweep exists to stamp. `isLivePermissionPrompt` is false.
+     */
+    function historicalPrompt(id: string) {
+      return {
+        id,
+        type: 'prompt',
+        content: 'Which approach?',
+        options: ['a', 'b'],
+        timestamp: 1,
+      } as any;
+    }
+
     /** A live, unanswered permission prompt — `isLivePermissionPrompt` is true. */
     function livePrompt(id: string, requestId: string) {
       return {
@@ -3616,25 +3632,84 @@ describe('dashboard message-handler dispatch', () => {
       } as any;
     }
 
-    function seedTwoSessions() {
+    function seed(s1First: any, s2First: any) {
       store = createMockStore(
         baseState({
           activeSessionId: 's1',
           sessions: [{ sessionId: 's1', name: 'S1' } as any, { sessionId: 's2', name: 'S2' } as any],
           sessionStates: {
-            s1: { ...createEmptySessionState(), messages: [livePrompt('p1', 'req-1')] },
-            s2: { ...createEmptySessionState(), messages: [livePrompt('p2', 'req-2')] },
+            s1: { ...createEmptySessionState(), messages: [s1First] },
+            s2: { ...createEmptySessionState(), messages: [s2First] },
           },
         }),
       );
       setStore(store);
     }
 
+    // --- the keying guard ---------------------------------------------------
+    //
+    // HISTORICAL prompts on both sides on purpose. If s1 held a LIVE prompt
+    // here the live-prompt exclusion would protect it too, and the test would
+    // still pass with the keying reverted to `updateActiveSession` — pinning
+    // nothing. Correct keying is the ONLY reason s1's prompt survives.
+    it("a background session's replay-end stamps that session, not the active one", () => {
+      seed(historicalPrompt('p1'), historicalPrompt('p2'));
+
+      handleMessage({ type: 'history_replay_end', sessionId: 's2' }, ctx() as any);
+
+      const st = (store.getState() as any).sessionStates;
+      expect(st.s1.messages[0].answered).toBeUndefined();
+      expect(st.s2.messages[0].answered).toBe('(resolved)');
+    });
+
+    it('still stamps the active session when it is the one being replayed', () => {
+      seed(historicalPrompt('p1'), historicalPrompt('p2'));
+
+      handleMessage({ type: 'history_replay_end', sessionId: 's1' }, ctx() as any);
+
+      const st = (store.getState() as any).sessionStates;
+      expect(st.s1.messages[0].answered).toBe('(resolved)');
+      expect(st.s2.messages[0].answered).toBeUndefined();
+    });
+
+    it('falls back to the active session when the frame omits sessionId', () => {
+      seed(historicalPrompt('p1'), historicalPrompt('p2'));
+
+      handleMessage({ type: 'history_replay_end' } as any, ctx() as any);
+
+      expect((store.getState() as any).sessionStates.s1.messages[0].answered).toBe('(resolved)');
+    });
+
+    // --- the live-prompt exclusion ------------------------------------------
+    //
+    // `permission_request` is in the server's `builtinTransient` list, so it is
+    // never in the history ring buffer: a live permission prompt present at
+    // replay-end always raced the (chunked, back-pressure-paused) replay rather
+    // than being replayed. Stamping it destroys the approval the user
+    // reconnected to answer.
+    it('does not stamp a LIVE permission prompt belonging to the REPLAYED session', () => {
+      seed(historicalPrompt('p1'), livePrompt('p2', 'req-2'));
+      // Positive control: prove the fixture is live BEFORE asserting it
+      // survives, so a malformed fixture fails rather than satisfying the
+      // assertion for free (#7409's lesson).
+      expect(
+        isLivePermissionPrompt((store.getState() as any).sessionStates.s2.messages[0], Date.now()),
+      ).toBe(true);
+
+      handleMessage({ type: 'history_replay_end', sessionId: 's2' }, ctx() as any);
+
+      const s2Prompt = (store.getState() as any).sessionStates.s2.messages[0];
+      expect(s2Prompt.answered).toBeUndefined();
+      expect(isLivePermissionPrompt(s2Prompt, Date.now())).toBe(true);
+    });
+
+    // --- the end-to-end scenario from #7410 ---------------------------------
+    //
+    // Protected twice over now (wrong session AND live), which is the point:
+    // this pins the user-visible regression, while the two guards above pin
+    // each mechanism independently.
     it("a background session's replay-end does not resolve the active session's LIVE prompt", () => {
-      seedTwoSessions();
-      // Positive control (#7409's lesson): prove the fixture really is a live
-      // prompt BEFORE asserting it survives, so a malformed fixture fails the
-      // test instead of satisfying it vacuously.
+      seed(livePrompt('p1', 'req-1'), historicalPrompt('p2'));
       expect(
         isLivePermissionPrompt((store.getState() as any).sessionStates.s1.messages[0], Date.now()),
       ).toBe(true);
@@ -3644,32 +3719,6 @@ describe('dashboard message-handler dispatch', () => {
       const s1Prompt = (store.getState() as any).sessionStates.s1.messages[0];
       expect(s1Prompt.answered).toBeUndefined();
       expect(isLivePermissionPrompt(s1Prompt, Date.now())).toBe(true);
-    });
-
-    it("stamps the REPLAYED session's own unanswered prompts", () => {
-      seedTwoSessions();
-
-      handleMessage({ type: 'history_replay_end', sessionId: 's2' }, ctx() as any);
-
-      expect((store.getState() as any).sessionStates.s2.messages[0].answered).toBe('(resolved)');
-    });
-
-    it('still stamps the active session when it is the one being replayed', () => {
-      seedTwoSessions();
-
-      handleMessage({ type: 'history_replay_end', sessionId: 's1' }, ctx() as any);
-
-      expect((store.getState() as any).sessionStates.s1.messages[0].answered).toBe('(resolved)');
-      // ...and the background session is left alone, the mirror of the first case.
-      expect((store.getState() as any).sessionStates.s2.messages[0].answered).toBeUndefined();
-    });
-
-    it('falls back to the active session when the frame omits sessionId', () => {
-      seedTwoSessions();
-
-      handleMessage({ type: 'history_replay_end' } as any, ctx() as any);
-
-      expect((store.getState() as any).sessionStates.s1.messages[0].answered).toBe('(resolved)');
     });
   });
 
