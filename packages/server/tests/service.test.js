@@ -165,8 +165,9 @@ describe('service', () => {
       it('shell-quotes the path in the POSIX wrapper', () => {
         const wrapper = generateServiceWrapper({ ...cfg, configDirEnv: "/tmp/it's here" })
         // #7401 — left as assert.match deliberately: `wrapper` is a generated
-    // service wrapper script of a few dozen lines, not a checked-in source file.
-    assert.match(wrapper, /export CHROXY_CONFIG_DIR='\/tmp\/it'/, 'must reuse the wrapper quoting helper')
+        // service wrapper script of a few dozen lines, not a checked-in source
+        // file.
+        assert.match(wrapper, /export CHROXY_CONFIG_DIR='\/tmp\/it'/, 'must reuse the wrapper quoting helper')
       })
     })
 
@@ -368,7 +369,8 @@ describe('service', () => {
       // wrapper written to disk
       assert.ok(existsSync(wrapperPath))
       const wrapper = readFileSync(wrapperPath, 'utf-8')
-      // #7401 — see the note above: a generated wrapper script, not file text.
+      // #7401 — left as assert.match deliberately: a generated service wrapper
+      // script this test just wrote, a few dozen lines.
       assert.match(wrapper, /cd \/d "C:\\work"/)
       assert.match(wrapper, /"C:\\Program Files\\nodejs\\node\.exe" "C:\\chroxy\\cli\.js" start/)
       assert.match(wrapper, /chroxy-stdout\.log/)

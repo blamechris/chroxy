@@ -19,6 +19,7 @@ import { join } from 'node:path'
 import {
   installAssertMatchPayloadGuard,
   DEFAULT_SUBJECT_LIMIT,
+  FULL_PAYLOAD_ENV,
 } from '../../../scripts/lib/assert-match-payload-guard.mjs'
 
 const TESTS_DIR = import.meta.dirname
@@ -63,6 +64,15 @@ describe('assert.match payload guard — verdicts are unchanged (#7401)', () => 
     const err = thrown(() => assert.doesNotMatch(`${BIG}NEEDLE`, /NEEDLE/))
     assert.ok(err, 'an over-limit matching subject must still throw for doesNotMatch')
     assert.equal(err.operator, 'doesNotMatch')
+    // Pin the PAYLOAD too, not just the verdict. Without this line, removing
+    // 'doesNotMatch' from the patch loop leaves the whole suite green: stock
+    // assert.doesNotMatch also throws with operator 'doesNotMatch', so every
+    // other assertion here is satisfied by the unguarded function. That mutant
+    // survived review, and this is what kills it.
+    assert.ok(
+      !String(err.actual).includes(BIG),
+      'doesNotMatch must withhold the subject too — not just match',
+    )
   })
 
   it('a large subject that does not match PASSES doesNotMatch', () => {
@@ -98,6 +108,29 @@ describe('assert.match payload guard — the payload is actually capped (#7401)'
   it('preserves a caller-supplied message verbatim', () => {
     const err = thrown(() => assert.match(BIG, /NEEDLE/, 'my specific complaint'))
     assert.equal(err.message, 'my specific complaint')
+  })
+
+  // Copilot suggested preserving a caller-supplied '' verbatim (i.e. `message
+  // !== undefined` rather than `message ||`). Measured against stock
+  // node:assert/strict on Node 22, that would DIVERGE: stock treats every
+  // falsy message as absent and generates one, with generatedMessage=true.
+  // The guard's contract is to be indistinguishable from stock except for
+  // payload size, so it matches stock and this pins that.
+  it('treats every falsy message as absent, exactly as stock assert does', () => {
+    for (const falsy of ['', 0, false, null, undefined]) {
+      const err = thrown(() => assert.match(BIG, /NEEDLE/, falsy))
+      assert.ok(err, `precondition: falsy message ${JSON.stringify(falsy)} still fails`)
+      assert.ok(
+        err.generatedMessage === true && err.message.includes('#7401'),
+        `falsy message ${JSON.stringify(falsy)} should fall back to the generated message`,
+      )
+    }
+  })
+
+  it('throws a caller-supplied Error verbatim, as stock does', () => {
+    const boom = new Error('boom')
+    const err = thrown(() => assert.match(BIG, /NEEDLE/, boom))
+    assert.equal(err, boom, "an Error message is stock's throw-it-verbatim path")
   })
 
   it('points the reader at the per-site fix when no message was supplied', () => {
@@ -136,6 +169,31 @@ describe('assert.match payload guard — mechanics (#7401)', () => {
     assert.ok(re.lastIndex > 0, 'exactly one .test() call should have advanced lastIndex')
   })
 
+  it('delegates AT the limit and truncates one char above it', () => {
+    // Pins DEFAULT_SUBJECT_LIMIT's boundary. Nothing else does, so `<=` could
+    // become `<` unnoticed. Verdicts are identical either side; what changes is
+    // whether the subject survives, so assert on that.
+    const atLimit = 'x'.repeat(DEFAULT_SUBJECT_LIMIT)
+    const overLimit = 'x'.repeat(DEFAULT_SUBJECT_LIMIT + 1)
+    assert.equal(thrown(() => assert.match(atLimit, /NEEDLE/)).actual, atLimit)
+    assert.ok(!String(thrown(() => assert.match(overLimit, /NEEDLE/)).actual).includes(overLimit))
+  })
+
+  it('honours the full-payload escape hatch, and only on an affirmative value', () => {
+    assert.equal(installAssertMatchPayloadGuard({ env: { [FULL_PAYLOAD_ENV]: '1' } }).skipped, true)
+    // `FOO=0` must NOT disarm it — the #7400 lesson.
+    assert.equal(installAssertMatchPayloadGuard({ env: { [FULL_PAYLOAD_ENV]: '0' } }).skipped, false)
+    assert.equal(installAssertMatchPayloadGuard({ env: {} }).skipped, false)
+  })
+
+  it('matches stock for a regex with an overridden exec', () => {
+    // `regexp.test()` reads `exec` off the object; `assert.match` uses the
+    // primordial one. A guard using `.test()` would report this failing
+    // assertion as a PASS.
+    const liar = Object.assign(new RegExp('NEEDLE'), { exec: () => ['x'] })
+    assert.ok(thrown(() => assert.match(BIG, liar)), 'must still fail despite a lying exec')
+  })
+
   it('is idempotent — installing twice does not double-wrap', () => {
     const again = installAssertMatchPayloadGuard()
     assert.deepEqual(again.patched, [], 'a second install on already-patched objects is a no-op')
@@ -153,17 +211,52 @@ describe('assert.match payload guard — mechanics (#7401)', () => {
 // it. There are none today. This fails the moment one lands, rather than the
 // guard quietly covering less than it claims — the same "category enforced,
 // not asserted" shape as tests/setup-sandbox-coverage.test.js.
+function walkTestFiles(dir, out = []) {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, entry.name)
+    if (entry.isDirectory()) walkTestFiles(full, out)
+    else if (/\.(m?js)$/.test(entry.name)) out.push(full)
+  }
+  return out
+}
+
+/**
+ * A named or namespace import of `node:assert`, tolerant of the statement
+ * being split across lines (`[^'"]*` crosses newlines).
+ *
+ * Anchored to the start of a line with the `m` flag, which is what keeps it
+ * off PROSE: this file and the guard module both mention
+ * `import { match } from 'node:assert'` inside comments, and those lines begin
+ * with `//` or ` *`. An unanchored search matches them and the test fails
+ * against itself — which is exactly how the first version of this regex
+ * behaved.
+ */
+const NON_DEFAULT_ASSERT_IMPORT =
+  /^[ \t]*import\s+[^'"]*?(?:\{|\*)[^'"]*?from\s*['"]node:assert(?:\/strict)?['"]/gm
+
 describe('assert.match payload guard — coverage is enforced (#7401)', () => {
+  it('scans every server test file, subdirectories included', () => {
+    // Positive control for the scan itself. The first version of this test
+    // used a flat `readdirSync(TESTS_DIR)` and silently skipped the 50 test
+    // files under tests/security, tests/handlers, tests/cli and friends — a
+    // guard covering 91% of what it claimed to cover, which is the defect
+    // class this whole PR is about. Pin the traversal, not just its verdict.
+    const files = walkTestFiles(TESTS_DIR)
+    const nested = files.filter((f) => f.slice(TESTS_DIR.length + 1).includes('/'))
+    assert.ok(
+      nested.length > 0,
+      'the walk must descend into subdirectories; found none, so the scan below proves nothing',
+    )
+    assert.ok(files.length > 500, `expected the full server test corpus, got ${files.length} files`)
+  })
+
   it('no server test imports assert by a binding form the guard cannot patch', () => {
     const offenders = []
-    for (const entry of readdirSync(TESTS_DIR)) {
-      if (!entry.endsWith('.test.js')) continue
-      const src = readFileSync(join(TESTS_DIR, entry), 'utf8')
-      for (const line of src.split('\n')) {
-        // `import { x } from 'node:assert'` or `import * as x from 'node:assert'`
-        if (/^\s*import\s+(?:\{|\*)\s.*from\s+['"]node:assert(?:\/strict)?['"]/.test(line)) {
-          offenders.push(`${entry}: ${line.trim()}`)
-        }
+    for (const file of walkTestFiles(TESTS_DIR)) {
+      const src = readFileSync(file, 'utf8')
+      NON_DEFAULT_ASSERT_IMPORT.lastIndex = 0
+      for (const m of src.matchAll(NON_DEFAULT_ASSERT_IMPORT)) {
+        offenders.push(`${file.slice(TESTS_DIR.length + 1)}: ${m[0].replace(/\s+/g, ' ').trim()}`)
       }
     }
     assert.ok(
@@ -172,5 +265,36 @@ describe('assert.match payload guard — coverage is enforced (#7401)', () => {
         'switch them to `import assert from \'node:assert/strict\'` or widen the guard:\n' +
         offenders.join('\n'),
     )
+  })
+
+  it('the offender regex actually detects both bypassing forms, incl. multi-line', () => {
+    // Positive control for the DETECTOR. Without this, the test above passes
+    // just as well with a regex that matches nothing at all.
+    const bypasses = [
+      "import { match } from 'node:assert'",
+      "import * as assert from 'node:assert'",
+      "import assert, { match } from 'node:assert/strict'",
+      'import {\n  match,\n  doesNotMatch,\n} from \'node:assert\'',
+    ]
+    for (const sample of bypasses) {
+      NON_DEFAULT_ASSERT_IMPORT.lastIndex = 0
+      assert.ok(
+        NON_DEFAULT_ASSERT_IMPORT.test(sample),
+        `should have flagged a bypassing import: ${JSON.stringify(sample)}`,
+      )
+    }
+    // ...and must NOT flag the default form, or every file becomes an offender.
+    for (const ok of ["import assert from 'node:assert/strict'", "import assert from 'node:assert'"]) {
+      NON_DEFAULT_ASSERT_IMPORT.lastIndex = 0
+      assert.ok(!NON_DEFAULT_ASSERT_IMPORT.test(ok), `should not have flagged: ${ok}`)
+    }
+    // ...nor a mention inside a comment, which is why it is line-anchored.
+    for (const prose of [
+      "// A NAMED import (`import { match } from 'node:assert'`) would bypass it.",
+      " * `import * as assert from 'node:assert'` binds differently.",
+    ]) {
+      NON_DEFAULT_ASSERT_IMPORT.lastIndex = 0
+      assert.ok(!NON_DEFAULT_ASSERT_IMPORT.test(prose), `should not have flagged prose: ${prose}`)
+    }
   })
 })

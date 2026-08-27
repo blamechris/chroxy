@@ -1094,7 +1094,10 @@ describe('anti-drift: the floor has exactly ONE implementation (#7004)', () => {
         `permission-hook.sh must not reimplement the floor (found ${literal} in executable code)`,
       )
     }
-    assert.match(hookCode, /permission-floor/, 'it asks the daemon instead')
+    // #7401 — boolean collapse: `hookCode` is permission-hook.sh with comment
+    // lines stripped, ~8 KB. Missed by the first sweep because it is a DERIVED
+    // binding (.split().filter().join()), never bound from a read directly.
+    assert.ok(/permission-floor/.test(hookCode), 'it asks the daemon instead')
   })
 
   it('the hook pre-filter covers EVERY field the floor scans (drift → this fails)', () => {
