@@ -75,6 +75,11 @@ import { join, resolve } from 'node:path'
 import { createRequire } from 'node:module'
 
 import { installFsWriteSandbox } from '../../../scripts/lib/test-fs-sandbox.mjs'
+import { assertNoTestForceExit } from '../../../scripts/lib/no-test-force-exit.mjs'
+
+// Same refusal the server installs (#7400): `--test-force-exit` drops test
+// RESULTS, not tests, and still exits 0 with `# fail 0`.
+assertNoTestForceExit()
 
 const require = createRequire(import.meta.url)
 const fs = require('node:fs')

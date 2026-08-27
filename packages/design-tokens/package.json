@@ -16,7 +16,7 @@
     "index.d.ts"
   ],
   "scripts": {
-    "test": "node --test"
+    "test": "node --import ../../scripts/lib/no-test-force-exit-hook.mjs --test"
   },
   "license": "MIT"
 }

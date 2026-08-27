@@ -996,3 +996,85 @@ holds in the test. A flag set-and-cleared across frames is continuously set if
 anything re-arms it per frame. And a threshold band is a precondition too: a
 guard that needs N pixels of movement is unreachable if something else resets the
 movement more often than the user can produce N.
+
+### 19. The test runner that reported fewer tests than it ran — `#7400`
+
+Every other entry here is a guard inside the repo. This one is the *instrument*:
+`--test-force-exit`, the flag the local test command carried for a year.
+
+Same file, same command, five consecutive runs of `base-session.test.js`
+(192 tests):
+
+```
+WITH --test-force-exit:   192 / 165 / 173 / 162 / 154   (every run `# fail 0`, exit 0)
+WITHOUT:                  192 / 192 / 192               (exit 0)
+```
+
+Up to 38 tests missing from the summary, non-deterministically, with nothing in
+the output saying so. And the tests were not skipped — a root `beforeEach`
+appending one line per test to a side file recorded **all 192** on a run whose
+summary said 168. What the flag drops is the *results*, on their way from the
+child process to the runner: under the default process isolation the child
+inherits the flag, `process.exit()`s the moment its own root test settles, and
+whatever it had queued for the parent goes with it. Run the same file
+in-process (`--experimental-test-isolation=none`) and the flag is harmless —
+192, three times out of three.
+
+**What makes it the worst instance in this catalogue** is not the size of the
+drop, it is *what* it corrupts. This document's own answer to false safety is
+mutation testing: break the thing, confirm the test goes red. Do that through a
+runner that silently omits a fifth of its results and "the mutant survived" and
+"the test that kills it never reported" become the same reading — the exact
+equivalence the whole document is about, now sitting underneath the method used
+to detect it.
+
+Two things kept it invisible for a year, and both are entries in their own right:
+
+- **The floor could not see a targeted run.** `assert-test-count.mjs` does floor
+  the total — but only for the whole suite, in CI, which never passed the flag.
+  The runs that carried the flag were the local, single-file ones, which have no
+  floor at all.
+- **The docblock said the flag was in use.** It had not been since `#6042`, and
+  the stale sentence was load-bearing in the wrong direction: it is what
+  re-derived, for the next reader, that typing the flag locally was normal and
+  safe.
+
+The honest limit of the damage: a *failing* test still turns the run red. A
+deliberate failure planted mid-file and at the tail exited 1 on 14 of 14 runs,
+truncated or not, because the child's non-zero exit reaches the parent whatever
+happened to its output. So RED was always trustworthy. It is GREEN that was
+worth less than it looked — which is the shape of every entry above.
+
+**The fix is refusal, not a louder green.** `scripts/lib/no-test-force-exit.mjs`
+is installed in every package that runs `node --test` — server and claude-hooks
+call it from `tests/_setup.mjs`, protocol and design-tokens `--import` the hook
+next door — so every file fails before a single test in it executes. (`--import` loads in the per-file children, not in the
+runner parent — measured — so the red comes from the files, and the exit code is
+what to trust.) Nothing needed the flag any more: the leaked handles it papered over
+were fixed in `#6027`/`#6042`, all eight files on that leak map now exit on
+their own, and the flag buys no wall clock (byok-session 66.5s → 63.9s,
+byok-mcp-client 74.9s → 74.9s). A file that hangs after its summary is a leaked
+handle to tear down — the same leak CI will hit, which force-exiting locally
+hides.
+
+**Its own tests nearly repeated the pattern.** The call-site tests spawn a real
+`node --test` from inside a test, and a child that inherits `NODE_TEST_CONTEXT`
+refuses to run files at all — exits 0, reports nothing. The refusal cases would
+have been satisfied by a child that never ran, for a reason having nothing to do
+with the guard. The positive control is what named it: the same spawn without
+the flag has to go green *with the probe reported*, and it did not.
+
+The Windows job then produced the same shape a second time, from a different
+cause: `--import` takes a module *specifier*, so the absolute path
+`A:\runners\...\_setup.mjs` parses as protocol `a:` and node refuses to load it
+(`ERR_UNSUPPORTED_ESM_URL_SCHEME`). Every child died before running anything —
+and "refuses before the probe runs" passed, because a child that never loads
+satisfies a negative assertion perfectly. The control failed, as it should have.
+Twice in one change, a negative assertion was satisfied by a child that did
+nothing; the fix is `pathToFileURL()`, and a case pinning the specifier's shape
+so the next occurrence is caught on Linux instead of only on Windows.
+
+**Guard against it:** a green that comes from the tooling is still a green you
+have to earn. When a run reports a count, pin the count — and when a comment
+tells you which flags a command carries, check the command. Both halves here
+were readable in ten seconds by anyone who thought to look.

@@ -74,6 +74,19 @@ import { homedir, tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
 import { installFsWriteSandbox } from '../../../scripts/lib/test-fs-sandbox.mjs'
+import { assertNoTestForceExit } from '../../../scripts/lib/no-test-force-exit.mjs'
+
+// --- Refuse `--test-force-exit` (#7400) --------------------------------------
+// First thing in the body, before any temp dir exists: the flag makes this
+// runner report fewer tests than it ran (154-192 of 192 across five runs of
+// base-session.test.js) while still exiting 0 with `# fail 0`. `--import` puts
+// this file ahead of the test graph in the per-file child processes, so the
+// throw lands before a single test in the file executes and the file is
+// reported as failed. (Under the default isolation the runner PARENT does not
+// load --import at all — measured — so it keeps force-exiting while it
+// aggregates; the non-zero exit is the authoritative signal, not the message.)
+// See the module for the measurements and for why nothing needs the flag.
+assertNoTestForceExit()
 
 // CRITICAL: Patch `node:fs` via the CJS object obtained from `createRequire`,
 // NOT via an ESM default import. ESM `import fs from 'node:fs'` returns a

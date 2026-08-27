@@ -1,46 +1,57 @@
 #!/usr/bin/env node
 /**
- * Truncation guard for `--test-force-exit` (#5480).
+ * Truncation guard for the server suite (#5480, corrected in #7400).
  *
- * The server test command runs the Node test runner with `--test-force-exit`,
- * which `process.exit()`s the moment the runner *appears* idle. On a large
- * file this can fire while trailing suites are still queued, so the file runs
- * only a subset of its tests — yet exit code stays 0. A truncated run is then
- * indistinguishable from a green one (confirmed reproducible on current main:
- * `discord-webhook-sink.test.js` ran anywhere from 79 to 114 of its 114 tests
- * across 20 runs, always exiting 0).
+ * A test run that dies, aborts, or silently drops whole files still prints a
+ * clean-looking TAP summary and exits 0. "Ran and passed" and "never ran" are
+ * the same observable outcome — the defect class `docs/false-safety-guards.md`
+ * exists for — so this wrapper adds the one thing the runner's own exit code
+ * cannot give you: a floor on how much of the suite reported back.
  *
- * `--test-force-exit` cannot simply be removed: WITHOUT it the full suite hangs
- * past the 10-minute CI budget on leaked handles (tunnel-recovery timers and
- * friends — see follow-up issue). So instead of trading one silent failure
- * mode for a loud hang, this wrapper makes a *truncated* run go RED:
+ * ── What this docblock used to say, and why it was wrong ───────────────────
+ *
+ * It said "the server test command runs the Node test runner with
+ * `--test-force-exit`". It has not since #6042/#6100, and CI never did. The
+ * stale claim mattered: #7400 was filed only after someone re-derived, from
+ * this comment, that the flag was in use and therefore safe to type locally.
+ * It is not safe — measured on `base-session.test.js` (192 tests), the flag
+ * reported 154-192 of them across five runs, every run `# fail 0`, exit 0. The
+ * tests all RAN; their results were dropped on the way from the child process
+ * to the runner. Both `tests/_setup.mjs` files now REFUSE the flag outright
+ * (`scripts/lib/no-test-force-exit.mjs`), so no run this wrapper sees can be
+ * truncated that way any more.
+ *
+ * ── What it still catches ──────────────────────────────────────────────────
  *
  *   1. It runs the underlying test command (passed as argv), streaming all
  *      output through unchanged so coverage + TAP land on the terminal/CI log.
  *   2. From the aggregate TAP summary it reads `# tests N` and `# fail M`.
  *   3. It exits non-zero if:
  *        - the summary is missing (the runner died before reporting), OR
+ *        - the run was killed by a signal, OR
  *        - `M > 0` (real test failures — mirrors the runner's own exit), OR
- *        - `N < EXPECTED_MIN_TESTS` (a truncation dropped enough tests to fall
- *          below the documented floor).
+ *        - `N < EXPECTED_MIN_TESTS` (enough of the suite went missing to fall
+ *          below the documented floor — a glob that stopped matching, a file
+ *          that failed to load, a bad merge that deleted a directory).
  *
- * EXPECTED_MIN_TESTS is a *lower bound*, not the exact count. The full suite
- * reports ~10040 tests today; the floor sits below that with headroom so it
- * does not break every time a test is added, but high enough that a meaningful
- * truncation trips it. When the suite grows well past the floor, bump the floor
- * (the script prints the live count + a nudge when headroom gets large). When
- * tests are deliberately removed below the floor, lower it in the same PR.
+ * EXPECTED_MIN_TESTS is a *lower bound*, not the exact count. The floor sits
+ * below the live count with headroom so it does not break every time a test is
+ * added, but high enough that a meaningful loss trips it. When the suite grows
+ * well past the floor, bump the floor (the script prints the live count + a
+ * nudge when headroom gets large). When tests are deliberately removed below
+ * the floor, lower it in the same PR.
  */
-
 import { spawn } from 'node:child_process'
 
 // --- The documented floor -----------------------------------------------------
-// Set below the observed full-suite count (~10040 tests, three clean runs on
-// 2026-06-18: 10040 / 10044 / 10048) with deliberate headroom for honest growth
-// AND shrinkage, while still catching a truncation that drops more than a couple
-// hundred tests. Override per-invocation with CHROXY_MIN_TEST_COUNT for targeted
-// runs of a subset (e.g. a single large file in local repro).
-const DEFAULT_MIN_TESTS = 9700
+// Set below the observed full-suite count with deliberate headroom for honest
+// growth AND shrinkage, while still catching a loss of more than a few hundred
+// tests. Measured 2026-08-27: 14049 on the CI Linux runner (`# tests` from the
+// Server Tests job on main @ 1028ee8e3) and 14059 locally on macOS — the two
+// platforms differ by ten tests, so one floor covers both. Override
+// per-invocation with CHROXY_MIN_TEST_COUNT for targeted runs of a subset
+// (e.g. a single large file in local repro).
+const DEFAULT_MIN_TESTS = 13500
 // Validate the override: an invalid value (typo, empty, non-numeric) must NOT
 // silently disable the floor. `Number('abc')` is NaN and `total < NaN` is always
 // false, which would quietly turn the guard off — so fall back to the default and
@@ -129,9 +140,10 @@ child.on('close', (code, signal) => {
   if (total < EXPECTED_MIN_TESTS) {
     console.error(
       `\n[assert-test-count] FAIL: only ${total} tests ran, below the floor of ${EXPECTED_MIN_TESTS}.\n` +
-      '  This is the --test-force-exit truncation guard (#5480): a large test file very likely\n' +
-      '  had trailing suites skipped before the forced exit. Re-run; if it persists, a file\n' +
-      '  grew large enough to truncate reliably (split it, or move suites earlier). If you\n' +
+      '  Part of the suite did not report (#5480). Something stopped whole files from\n' +
+      '  running or reporting: a glob that no longer matches, a file that threw while\n' +
+      '  loading, a deleted directory. Look for a file the TAP output never mentions —\n' +
+      '  the count is the only symptom, because the run still exited 0. If you\n' +
       '  intentionally removed tests below the floor, lower EXPECTED_MIN_TESTS in this script.',
     )
     return fail()
