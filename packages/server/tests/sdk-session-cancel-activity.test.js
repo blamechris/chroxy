@@ -224,6 +224,52 @@ describe('BaseSession #5269 — default cancelActivity is not-supported', () => 
   })
 })
 
+// #7340 — SdkSession must NOT exempt a backgrounded subagent, and its
+// `_clearMessageState` override must forward its opts either way.
+//
+// The SDK creates one `query()` per turn and nulls it one statement after
+// `result`, so an agent spared there could never receive the
+// `task_notification` that clears it — `interrupt()` and `cancelActivity` are
+// both no-ops with a null query, and the timeout/stall timers are disarmed.
+// It would be stranded until `destroy()`, pinning the session as working.
+describe('SdkSession #7340 — no turn-end exemption', () => {
+  // The exemption is a property of the CALL SITE, not of the provider class —
+  // `_clearMessageState` honours the flag for whoever passes it. That SdkSession
+  // never passes it is asserted by name in `turn-end-agent-exemption.test.js`
+  // (its `result` dispatch lives in an async-iterator loop that cannot be driven
+  // in isolation). What IS observable here is the default: a bare call sweeps a
+  // confirmed-backgrounded agent, which is what every SDK path now takes.
+  it('sweeps a confirmed-backgrounded subagent on a bare _clearMessageState()', () => {
+    const session = createSession()
+    const completed = []
+    session.on('agent_completed', (e) => completed.push(e))
+    session._trackAgent({ toolUseId: 'bg', description: 'probe', background: true, authoritative: true })
+    session._clearMessageState()
+    assert.deepEqual(completed.map((c) => c.toolUseId), ['bg'])
+    assert.equal(session._activeAgents.size, 0)
+    session.destroy()
+  })
+
+  // The override forwards its opts. This cannot be observed through the
+  // exemption (SdkSession exempts nothing), so it is observed through the
+  // sibling opt the same object carries into `super`.
+  it('forwards its opts to super rather than discarding them', () => {
+    const session = createSession()
+    const seen = []
+    const proto = Object.getPrototypeOf(Object.getPrototypeOf(session))
+    const original = proto._clearMessageState
+    proto._clearMessageState = function (opts) { seen.push(opts); return original.call(this, opts) }
+    try {
+      session._clearMessageState({ turnEndedCleanly: true })
+    } finally {
+      proto._clearMessageState = original
+    }
+    assert.deepEqual(seen, [{ turnEndedCleanly: true }],
+      'an override that drops its opts silently disables the #7340 exemption for its provider')
+    session.destroy()
+  })
+})
+
 describe('SdkSession #5269 — lifecycle clears the task map', () => {
   it('destroy() clears stranded mappings', () => {
     const session = createSession()
@@ -238,8 +284,20 @@ describe('SdkSession #5269 — lifecycle clears the task map', () => {
     // be driven in isolation; pin the wiring as a source-text contract (mirrors
     // the #4881 finally-clear source assertion pattern).
     const src = readFileSync(new URL('../src/sdk-session.js', import.meta.url), 'utf8')
-    assert.match(src, /subtype === 'task_started'[\s\S]*?_captureTaskId\(msg\.tool_use_id, msg\.task_id\)/)
-    assert.match(src, /subtype === 'task_notification'[\s\S]*?_finalizeAgentByToolUseId\(msg\.tool_use_id\)/)
+    // #7340: `assert.ok` on a computed boolean, never `assert.match` against
+    // the file. A failing `assert.match` carries the whole 100 KB source as the
+    // error's `actual`; serialising that into the TAP YAML block emits 124 KB
+    // for a one-line assertion and, in-tree, wedged the runner outright — so
+    // the guard's states became green and "flake", never red. See entry 17 of
+    // docs/false-safety-guards.md, which this file is the named exemplar for.
+    assert.ok(
+      /subtype === 'task_started'[\s\S]*?_captureTaskId\(msg\.tool_use_id, msg\.task_id\)/.test(src),
+      "the task_started branch must capture the task id via _captureTaskId",
+    )
+    assert.ok(
+      /subtype === 'task_notification'[\s\S]*?_finalizeAgentByToolUseId\(msg\.tool_use_id\)/.test(src),
+      'the task_notification branch must finalize via _finalizeAgentByToolUseId',
+    )
   })
 
   // #7340 (review, S6): the `task_started` branch also tracks the subagent, and
@@ -258,11 +316,11 @@ describe('SdkSession #5269 — lifecycle clears the task map', () => {
     assert.ok(start > 0 && end > start, 'both branches must be present and in order')
     const branch = src.slice(start, end)
 
-    assert.match(branch, /msg\.task_type === 'local_agent'/,
+    assert.ok(/msg\.task_type === 'local_agent'/.test(branch),
       'a backgrounded Bash shell also emits task_started — tracking it as an agent would double-count #4307\'s surface')
-    assert.match(branch, /this\._trackAgent\(/,
+    assert.ok(/this\._trackAgent\(/.test(branch),
       'the branch must register the subagent, not merely capture its task id')
-    assert.match(branch, /background: msg\.is_backgrounded === true/,
+    assert.ok(/background: msg\.is_backgrounded === true/.test(branch),
       'strict compare: is_backgrounded is ABSENT on a foreground spawn, not false')
 
     // Negative controls: every assertion above would pass just as happily if
@@ -272,7 +330,7 @@ describe('SdkSession #5269 — lifecycle clears the task map', () => {
     // arbitrary rather than meaningful.
     assert.ok(branch.length < src.length * 0.05,
       `slice should be one branch, got ${branch.length} of ${src.length} chars`)
-    assert.doesNotMatch(branch, /_finalizeAgentByToolUseId/,
+    assert.ok(!/_finalizeAgentByToolUseId/.test(branch),
       'the slice must stop before the task_notification branch')
   })
 })

@@ -5120,9 +5120,33 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       }
       // Clear transient state — these events are not replayed from history,
       // so any surviving entries are stale from pre-disconnect
+      // #7340: the `activeAgents` wipe targets `replayTargetId` (the session
+      // this frame is actually replaying), NOT `activeSessionId`. It used to
+      // use the latter, which was harmless only while no subagent outlived its
+      // turn. `subscribe_sessions` replays every NEWLY-SUBSCRIBED background
+      // session (server `session-handlers.js`), and both clients fire it for
+      // all non-active sessions on every `session_list` — so on each reconnect
+      // a burst of replays for sessions B, C, D each wiped the ACTIVE session
+      // A's badge list, moments after A's own replay had correctly re-seeded
+      // it. The server re-seeds by the replayed id, so keying the wipe to the
+      // same id is what makes the pair a genuine snapshot replace.
+      //
+      // `replayTargetId` falls back to `activeSessionId` when the frame omits
+      // `sessionId`, so the single-session case is unchanged. This mirrors the
+      // #4909 block below, which made exactly this move for
+      // `stoppedAt`/`stoppedCode` and explained why.
+      if (replayTargetId && get().sessionStates[replayTargetId]) {
+        // `activeAgents?.length` — the old code read `ss.activeAgents.length`
+        // unguarded and was safe only because `updateActiveSession` always
+        // handed it the ACTIVE session, which is fully initialised. Targeting
+        // the replayed session means it can now be handed a partially-built
+        // state whose transient slices are still undefined.
+        updateSession(replayTargetId, (ss) =>
+          (ss.activeAgents?.length ?? 0) > 0 ? { activeAgents: [] } : {},
+        );
+      }
       updateActiveSession((ss) => {
         const patch: Partial<SessionState> = {};
-        if (ss.activeAgents.length > 0) patch.activeAgents = [];
         // #4466: preserve activeTools through the replay boundary. The
         // earlier #4308 wipe rebuilt entries from replayed tool_start
         // events with startedAt = Date.now(), so the "Running <tool> · Ns"

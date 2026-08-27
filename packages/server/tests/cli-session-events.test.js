@@ -1301,12 +1301,12 @@ describe('CliSession background subagent lifecycle (#7340)', () => {
     assert.deepEqual(completed.map((c) => c.toolUseId), [AGENT_ID])
   })
 
-  // #7340 is NOT closed by this PR: the turn-end sweep still completes every
-  // tracked subagent, backgrounded or not. Exempting backgrounded ones needs
-  // three other changes to land with it (see the block in `_clearMessageState`)
-  // or the session pins as "working" forever. Pinned here so the exemption
-  // cannot be reintroduced as a one-liner without a test going red.
-  it('sweeps a still-running backgrounded subagent at turn end, until #7340 lands', () => {
+  // #7340: the turn ends via the CLI's own `result` message, driven here
+  // rather than by calling `_clearMessageState` directly. That distinction is
+  // the point: the exemption is opt-in at exactly two call sites, so a test
+  // that pokes the method by hand would pass no matter how the `result` branch
+  // was wired (or unwired).
+  it('spares a still-running backgrounded subagent at turn end', () => {
     const session = createSession()
     const completed = []
     session.on('agent_completed', (e) => completed.push(e))
@@ -1317,7 +1317,14 @@ describe('CliSession background subagent lifecycle (#7340)', () => {
       task_type: 'local_agent',
       is_backgrounded: true,
     }))
-    session._clearMessageState()
+    session._handleEvent({ type: 'result' })
+    assert.deepEqual(completed, [], 'the subagent is still running after its turn ended')
+    assert.deepEqual([...session._activeAgents.keys()], [AGENT_ID])
+    assert.equal(session._isBusy, false, 'the turn itself did end')
+
+    // ...and it clears on its own terminal signal, which is now the ONLY
+    // thing that clears it.
+    session._handleEvent(taskNotification(AGENT_ID))
     assert.deepEqual(completed.map((c) => c.toolUseId), [AGENT_ID])
     assert.equal(session._activeAgents.size, 0)
   })
@@ -1336,8 +1343,103 @@ describe('CliSession background subagent lifecycle (#7340)', () => {
       description: 'Reply with BLUE',
       task_type: 'local_agent',
     }))
-    session._clearMessageState()
+    session._handleEvent({ type: 'result' })
     assert.deepEqual(completed.map((c) => c.toolUseId), ['toolu_017LdZgVdy3BhaP9iW6r4dmd'])
+    assert.equal(session._activeAgents.size, 0)
+  })
+
+  // #7340: `run_in_background: true` on the tool input is the MODEL's request.
+  // A CLI build that emits no `task_started` gives us no confirmation — and,
+  // more to the point, will emit no `task_notification` either, so the turn-end
+  // sweep is the only finalizer this agent will ever get. Sparing it here is
+  // how a session ends up claiming to be working for the rest of the daemon's
+  // life, which #7340 names as the worse failure.
+  it('sweeps a backgrounded subagent the CLI never confirmed via task_started', () => {
+    const session = createSession()
+    const completed = []
+    session.on('agent_completed', (e) => completed.push(e))
+    spawnAgentTool(session, AGENT_ID, { description: 'Probe sleep test', run_in_background: true })
+    assert.equal(session._activeAgents.get(AGENT_ID).background, true, 'the request is recorded...')
+    assert.equal(session._activeAgents.get(AGENT_ID).backgroundConfirmed, false, '...but not confirmed')
+    session._handleEvent({ type: 'result' })
+    assert.deepEqual(completed.map((c) => c.toolUseId), [AGENT_ID])
+    assert.equal(session._activeAgents.size, 0)
+  })
+
+  // The downward correction. The model asked for a backgrounded subagent; the
+  // CLI ran it in the foreground and said so by OMITTING `is_backgrounded`.
+  // The turn-end sweep must still take it.
+  it('sweeps a subagent task_started corrected back to foreground', () => {
+    const session = createSession()
+    const completed = []
+    session.on('agent_completed', (e) => completed.push(e))
+    spawnAgentTool(session, AGENT_ID, { description: 'Probe sleep test', run_in_background: true })
+    session._handleEvent(taskStarted({
+      tool_use_id: AGENT_ID,
+      description: 'Probe sleep test',
+      task_type: 'local_agent',
+      // No `is_backgrounded` key — the verbatim foreground shape.
+    }))
+    assert.equal(session._activeAgents.get(AGENT_ID).backgroundConfirmed, false)
+    session._handleEvent({ type: 'result' })
+    assert.deepEqual(completed.map((c) => c.toolUseId), [AGENT_ID])
+  })
+
+  // #7340: the death paths. A backgrounded subagent lives inside the child
+  // process, so when the child dies the subagent dies with it and no
+  // `task_notification` can ever arrive. Both sites need their OWN drain
+  // because they reach the turn-end funnel via `_emitInterruptedTurnResult`,
+  // which early-returns when the session is not busy — and "not busy with a
+  // backgrounded subagent still running" is the exact state the exemption
+  // creates. Each test therefore ends the turn FIRST, so `_isBusy` is false
+  // when the child dies; without that the funnel would mask the missing call.
+  function spawnSurvivingBackgroundAgent(session) {
+    spawnAgentTool(session, AGENT_ID, { description: 'Probe sleep test', run_in_background: true })
+    session._handleEvent(taskStarted({
+      tool_use_id: AGENT_ID,
+      description: 'Probe sleep test',
+      task_type: 'local_agent',
+      is_backgrounded: true,
+    }))
+    session._handleEvent({ type: 'result' })
+    assert.deepEqual([...session._activeAgents.keys()], [AGENT_ID], 'precondition: it outlived its turn')
+    assert.equal(session._isBusy, false, 'precondition: the session is idle')
+  }
+
+  it('completes a surviving backgrounded subagent when the child process exits', () => {
+    const session = createSession()
+    spawnSurvivingBackgroundAgent(session)
+    const completed = []
+    session.on('agent_completed', (e) => completed.push(e))
+    // A crash close also emits `error` (auto-respawn toast); absorb it so the
+    // EventEmitter's unhandled-'error' throw doesn't mask the assertion.
+    session.on('error', () => {})
+    session.start = async () => {}
+    session._handleChildClose(1)
+    assert.deepEqual(completed.map((c) => c.toolUseId), [AGENT_ID])
+    assert.equal(session._activeAgents.size, 0)
+  })
+
+  it('completes a surviving backgrounded subagent when the child is killed and respawned', () => {
+    const session = createSession()
+    spawnSurvivingBackgroundAgent(session)
+    const completed = []
+    session.on('agent_completed', (e) => completed.push(e))
+    // _killAndRespawn restarts the child; stub start() so the test doesn't
+    // spawn a real `claude` process.
+    session.start = async () => {}
+    session._killAndRespawn()
+    assert.deepEqual(completed.map((c) => c.toolUseId), [AGENT_ID])
+    assert.equal(session._activeAgents.size, 0)
+  })
+
+  it('completes a surviving backgrounded subagent on destroy()', () => {
+    const session = createSession()
+    spawnSurvivingBackgroundAgent(session)
+    const completed = []
+    session.on('agent_completed', (e) => completed.push(e))
+    session.destroy()
+    assert.deepEqual(completed.map((c) => c.toolUseId), [AGENT_ID])
     assert.equal(session._activeAgents.size, 0)
   })
 
@@ -1418,10 +1520,12 @@ describe('CliSession background subagent lifecycle (#7340)', () => {
     spawnAgentTool(session, AGENT_ID, { description: 'Probe sleep test' })
     assert.equal(spawned.length, 1, 'exactly one agent_spawned per subagent')
     assert.equal(session._activeAgents.get(AGENT_ID).background, true)
-    // Nothing reads `background` yet — the sweep is unconditional (#7340) —
-    // so assert the recorded value directly rather than via the sweep.
-    session._clearMessageState()
-    assert.deepEqual(completed.map((c) => c.toolUseId), [AGENT_ID])
+    assert.equal(session._activeAgents.get(AGENT_ID).backgroundConfirmed, true)
+    // ...and the confirmation the FIRST signal made is what the turn-end sweep
+    // reads, so the later tool_use block cannot strand it by arriving second.
+    session._handleEvent({ type: 'result' })
+    assert.deepEqual(completed, [])
+    assert.deepEqual([...session._activeAgents.keys()], [AGENT_ID])
   })
 
   // #7340 (review, F3): the parse-failure diagnostic accepted only `Task`, so

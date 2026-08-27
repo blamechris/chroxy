@@ -19,7 +19,7 @@ import { setupForwarding } from './ws-forwarding.js'
 import { handleSessionMessage, handleCliMessage } from './ws-message-handlers.js'
 import { handleAuthMessage, handlePairMessage, handlePairRequestMessage, handleKeyExchange, BENIGN_PAIR_WINDOW_MS } from './ws-auth.js'
 import { postPairLinkToDiscord } from './discord-pair-delivery.js'
-import { sendPostAuthInfo, replayHistory, flushPostAuthQueue, sendSessionInfo } from './ws-history.js'
+import { sendPostAuthInfo, replayHistory, flushPostAuthQueue, sendSessionInfo, reseedActiveAgents } from './ws-history.js'
 import { createDevicePreferences } from './device-preferences.js'
 import { isUserShellEnabled, isIdeFeatureEnabled, isOrchestrationEnabled, DEFAULT_MAX_PAYLOAD_BYTES } from './config.js'
 import { createHttpHandler } from './http-routes.js'
@@ -459,7 +459,7 @@ function _isSecureRequest(req) {
  *   { type: 'pair_resolved', requestId, reason } — pairing-approval retraction (#5510) to host-level surfaces so every banner drops a request that was approved/denied/expired/disconnected elsewhere.
  *   { type: 'rate_limited', message }                   — client rate-limited
  *   { type: 'agent_spawned', sessionId, toolUseId, description, startedAt } — a Task/Agent subagent spawned. #7340: the field list here read `agentId, parentToolId, model` — three names the emitter has never sent (see event-normalizer's `agent_spawned`); corrected alongside the lifecycle fix. `toolUseId` is the spawning tool_use block's id, and is the key `agent_completed` / `agent_event` correlate on.
- *   { type: 'agent_completed', sessionId, toolUseId }    — that subagent reached a terminal state: the provider's own terminal signal (the CLI/SDK `task_notification`, byok's child returning, or a cancel), or turn end, whichever comes first. Turn end still completes EVERY tracked subagent including backgrounded ones — narrowing that is #7340 and needs three other changes to land with it (see `_clearMessageState` in base-session.js).
+ *   { type: 'agent_completed', sessionId, toolUseId }    — that subagent reached a terminal state: the provider's own terminal signal (the CLI/SDK `task_notification`, byok's child returning, or a cancel), or turn end, whichever comes first. Turn end completes every tracked subagent EXCEPT one whose backgrounding the provider itself confirmed (#7340) — those outlive their turn deliberately, and `task_notification` is then their only finalizer. The exemption applies on the claude-cli path only, where a persistent child can still deliver it; see `_clearMessageState` in base-session.js.
  *   { type: 'agent_event', sessionId, parentToolUseId, eventType, payload } — Task subagent intermediate wire event re-emit (#5016, transient; eventType is one of `tool_start` / `tool_input_delta` / `tool_result` / `stream_delta`)
  *   { type: 'background_work_changed', sessionId, pending } — pending background shells snapshot changed (#4307, transient; `pending: [{ shellId, command, startedAt }, …]`)
  *   { type: 'shell_pending_approval', approvalId, hint? } — #6277 host-local user-shell approval: a requested user-shell spawn is HELD pending the host operator's out-of-band approval (`chroxy shell approve <id>`). Informational; dashboard-only banner for v1. The normal `session_switched` confirms on approval, a `session_error` (SHELL_APPROVAL_DENIED) on deny.
@@ -863,6 +863,8 @@ export class WsServer {
         syncTerminalMirror: (sid) => self._syncTerminalMirror(sid),
         sendSessionInfo: (ws, sid) => self._sendSessionInfo(ws, sid),
         replayHistory: (ws, sid, opts) => self._replayHistory(ws, sid, opts),
+        // #7340: re-assert a session's live subagents after a replay wiped them.
+        reseedActiveAgents: (ws, sid) => self._reseedActiveAgents(ws, sid),
         get clients() { return self.clients },
       },
       sessions: {
@@ -2404,6 +2406,7 @@ export class WsServer {
   _replayHistory(ws, sessionId, opts) { replayHistory(this._historyCtx, ws, sessionId, opts) }
   _flushPostAuthQueue(ws, queue) { flushPostAuthQueue(this._historyCtx, ws, queue) }
   _sendSessionInfo(ws, sessionId) { sendSessionInfo(this._historyCtx, ws, sessionId) }
+  _reseedActiveAgents(ws, sessionId) { reseedActiveAgents(this._historyCtx, ws, sessionId) }
 
   /** Route incoming client messages */
   async _handleMessage(ws, msg) {

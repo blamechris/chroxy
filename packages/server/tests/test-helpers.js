@@ -452,6 +452,13 @@ export function createMockSession(overrides = {}) {
   session.sessionPreamble = ''
   session.sendMessage = createSpy()
   session.interrupt = createSpy()
+  // #7340: every provider inherits `getActiveAgents()` from BaseSession, and
+  // `ws-history.reseedActiveAgents` calls it unguarded — deliberately, since a
+  // feature-detect that can never fail in production only converts a future
+  // regression into a silent no-op. The mock must therefore carry the method
+  // for the same reason it carries `sendMessage`. Empty by default; tests that
+  // exercise the re-seed override it.
+  session.getActiveAgents = createSpy(() => [])
   // #5696: mirror the real BaseSession.setModel contract — returns true only
   // when the change actually lands (false when busy mid-turn or a same-model
   // no-op). The handler now reads this return to decide whether to broadcast

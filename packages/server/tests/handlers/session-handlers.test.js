@@ -28,6 +28,7 @@ function makeCtx(overrides = {}) {
     broadcastSessionList: createSpy(),
     sendSessionInfo: createSpy(),
     replayHistory: createSpy(),
+    reseedActiveAgents: createSpy(), // #7340
     syncTerminalMirror: createSpy(),
     ...indexCtx,
     permissionSessionMap: new Map(),

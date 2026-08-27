@@ -73,6 +73,11 @@ export class ActivityRegistry {
     this._emit = emit
     /** @type {Map<string, ActivityEntry>} */
     this._entries = new Map()
+    // #7340: ids of `agent` nodes that OUTLIVE their turn (a confirmed-
+    // backgrounded subagent). Kept beside the entries, not on them, because an
+    // `ActivityEntry` is the wire shape and this is server-side bookkeeping.
+    // See `setAgentOutlivesTurn`.
+    this._outlivesTurn = new Set()
   }
 
   /**
@@ -162,6 +167,13 @@ export class ActivityRegistry {
     // never strands a child beneath a terminated parent.
     const existing = this._entries.get(toolUseId)
     if (existing && existing.kind === 'agent') {
+      // #7340: ...unless it outlives its turn. A backgrounded subagent's
+      // tool_result reports that the task STARTED, not that it finished, so
+      // ending the node here would retire a subagent that is still running.
+      // `agent_completed` (from the provider's `task_notification`) is its
+      // only terminal signal — and its children are still running too, so
+      // they are not drained either.
+      if (this._outlivesTurn.has(toolUseId)) return
       this._endChildrenOf(toolUseId)
     }
     this._end(toolUseId, data?.isError === true ? 'failed' : 'done')
@@ -173,6 +185,39 @@ export class ActivityRegistry {
    * `agent` node in place; otherwise create a fresh `agent` node.
    * @param {{ toolUseId?: string, description?: string, startedAt?: number }} data
    */
+  /**
+   * #7340: mark (or unmark) an agent node as one that OUTLIVES ITS TURN.
+   *
+   * A confirmed-backgrounded subagent keeps running after the turn that
+   * spawned it ends, so two things that normally terminate an `agent` node
+   * must not: the turn-end `reset()` sweep, and `onToolResult`. The second is
+   * the one that actually bites — a backgrounded `Agent` returns its
+   * tool_result the moment the task STARTS ("task started in background"), so
+   * without this the node was ended within milliseconds of being created,
+   * `cancelActivity` answered `not-found` for the entire time the subagent
+   * ran, and the Control Room tree disagreed with the badge list. `#4307`
+   * gives backgrounded shells the same standing via `kind === 'shell'`.
+   *
+   * The registry does NOT derive this — it is TOLD, by the one place that
+   * decides it (`BaseSession._trackAgent`, off the provider's own
+   * `task_started`). A second derivation here is how the two would drift.
+   *
+   * Held beside the entries rather than on them: an `ActivityEntry` is the
+   * wire shape, and this is server-side bookkeeping that must not leak into
+   * `activity_delta` / `activity_snapshot`.
+   *
+   * Cleared by `onAgentCompleted` (the agent's real terminal signal) and by
+   * `clear()`, so a completed agent stops being exempt from anything.
+   *
+   * @param {string} toolUseId
+   * @param {boolean} outlives
+   */
+  setAgentOutlivesTurn(toolUseId, outlives) {
+    if (!isNonEmptyString(toolUseId)) return
+    if (outlives) this._outlivesTurn.add(toolUseId)
+    else this._outlivesTurn.delete(toolUseId)
+  }
+
   onAgentSpawned(data) {
     const toolUseId = data?.toolUseId
     if (!isNonEmptyString(toolUseId)) return
@@ -200,6 +245,8 @@ export class ActivityRegistry {
   onAgentCompleted(data) {
     const toolUseId = data?.toolUseId
     if (!isNonEmptyString(toolUseId)) return
+    // #7340: the agent's real terminal signal — it no longer outlives anything.
+    this._outlivesTurn.delete(toolUseId)
     // End any child tool nodes still open under this agent first, so the
     // tree drains leaf-up and no orphaned child outlives its parent.
     this._endChildrenOf(toolUseId)
@@ -365,6 +412,25 @@ export class ActivityRegistry {
    * `_sweepUnresolvedToolStarts`). Shell entries SURVIVE turn-end on purpose
    * (#4307: a backgrounded shell outlives the turn that spawned it; it clears
    * via `onBackgroundWorkChanged`).
+   *
+   * #7340 extends that carve-out to agents marked by `setAgentOutlivesTurn` —
+   * a confirmed-backgrounded `Agent`, which outlives its turn for exactly the
+   * reason a backgrounded shell does.
+   *
+   * It reads the marks rather than taking a set from the caller, and the
+   * ordering in `BaseSession._clearMessageState` is what keeps the two
+   * surfaces identical: `_completeAgents` runs FIRST, and every agent it
+   * completes emits `agent_completed`, which clears that agent's mark. So by
+   * the time this runs, exactly the agents that survived the badge sweep are
+   * still marked. On a provider-death path `_completeAgents` drains all of
+   * them, no marks remain, and this is pre-#7340 behaviour exactly.
+   *
+   * A marked agent's CHILD tool nodes are spared with it. `onAgentEvent` nests
+   * a subagent's own `tool_start`s under the parent's id, and a child of a
+   * still-running parent is not an orphan — ending it would drain the live
+   * subagent's subtree and leave a running `Agent` node with every step under
+   * it falsely marked done. Terminating the parent later still drains them:
+   * `onAgentCompleted` calls `_endChildrenOf` first.
    */
   reset() {
     // Snapshot the ids first so `_end`'s delete-while-iterate is safe even if
@@ -372,6 +438,7 @@ export class ActivityRegistry {
     const toEnd = []
     for (const [id, entry] of this._entries) {
       if (entry.kind === 'shell') continue
+      if (this._outlivesTurn.has(id) || (entry.parentId && this._outlivesTurn.has(entry.parentId))) continue
       toEnd.push(id)
     }
     for (const id of toEnd) {
@@ -384,6 +451,10 @@ export class ActivityRegistry {
    * session is gone, so nothing is still in flight) and empties the map.
    */
   clear() {
+    // #7340: drop the outlives-turn marks first, so `_end` terminates every
+    // node including a backgrounded agent's — the session is gone, nothing is
+    // still in flight, and a surviving mark would leak into a reused registry.
+    this._outlivesTurn.clear()
     for (const id of Array.from(this._entries.keys())) {
       this._end(id, 'done')
     }

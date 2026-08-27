@@ -898,6 +898,12 @@ export class SdkSession extends BaseSession {
                     ? msg.description
                     : 'Background task',
                   background: msg.is_backgrounded === true,
+                  // #7340: authoritative -- this is the provider's own account,
+                  // so it overwrites the model's request in BOTH directions.
+                  // It is also the evidence that this build emits task
+                  // lifecycle messages at all, which is what makes the
+                  // turn-end exemption safe: `task_notification` can arrive.
+                  authoritative: true,
                 })
               }
               break
@@ -1203,6 +1209,28 @@ export class SdkSession extends BaseSession {
               ...(contextUsageSnapshot ? { contextOccupancy: contextUsageSnapshot } : {}),
             }, 'turn_ended_with_orphan_tool_start')
 
+            // #7340: NOT `{ turnEndedCleanly: true }`, however much this looks
+            // like CliSession's `result` branch -- and the difference is the
+            // whole reason that flag is opt-in.
+            //
+            // CliSession owns a PERSISTENT stream-json child that spans turns,
+            // so after its `result` a backgrounded subagent's
+            // `task_notification` still arrives. SdkSession creates one
+            // `query()` PER TURN (`sendMessage`: "Each call creates a new
+            // query() with resume"), and the `break` on the next line ends the
+            // `for await` loop, after which the `finally` sets
+            // `this._query = null`. Chroxy stops reading the stream one
+            // statement from here, so no `task_notification` can ever be
+            // observed for an agent spared at this point -- and every recovery
+            // route is closed too: `_handleHardTimeout` / `_handleStreamStall`
+            // early-return on `!_isBusy`, `interrupt()` early-returns on a null
+            // `_query`, and `cancelActivity` answers `not-supported`. The agent
+            // would be stranded until `destroy()`, pinning the session as
+            // working -- the failure #7340 names as the worse one.
+            //
+            // The subagent dies with the query, so completing it here is not
+            // merely safe, it is accurate. Exempting on this path needs the
+            // query kept alive past `result`, which is a much larger change.
             this._clearMessageState()
             break
           }
@@ -1555,9 +1583,11 @@ export class SdkSession extends BaseSession {
       // tool_start id. Without this, _activeAgents.set(undefined, ...)
       // collides on undefined for any fallback-path Task spawn.
       const toolUseId = block.id || `${messageId}-tool`
-      // #7340: `background` decides whether the turn-end sweep may complete
-      // this agent. `task_started`'s `is_backgrounded` confirms it moments
-      // later; whichever lands first wins via `_trackAgent`'s upgrade.
+      // #7340: this records the MODEL'S REQUEST (`run_in_background`) into
+      // `background`. It does NOT exempt the agent from the turn-end sweep —
+      // `backgroundConfirmed` does, and only `task_started` can set that.
+      // (On this provider nothing is exempted at all; see the `result` branch.)
+      // Whichever signal lands first wins via `_trackAgent`'s upgrade.
       this._trackAgent({
         toolUseId,
         description: semantics.payload.description,
@@ -2056,8 +2086,11 @@ export class SdkSession extends BaseSession {
   /**
    * Clear per-message state, marking us as ready for the next message.
    */
-  _clearMessageState() {
-    super._clearMessageState()
+  // #7340: forward the opts to super. `turnEndedCleanly` decides whether a
+  // confirmed-backgrounded subagent survives BaseSession's turn-end sweep;
+  // an override that drops it silently disables the exemption.
+  _clearMessageState(opts) {
+    super._clearMessageState(opts)
     this._permissions.clearAll()
     // Pause counter is tied to the previous message — reset so the next
     // message starts with a fresh counter.

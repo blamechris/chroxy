@@ -35,6 +35,7 @@
  * @property {(sessionId: string) => void} syncTerminalMirror - Re-evaluate the terminal-mirror coalescer gate for a session after its subscriber set changes (#5837).
  * @property {(ws: any, sessionId: string) => void} sendSessionInfo - Send a session_info envelope.
  * @property {(ws: any, sessionId: string) => void} replayHistory - Replay a session's history to a client.
+ * @property {(ws: any, sessionId: string) => void} reseedActiveAgents - Re-assert a session's live subagents after a replay wiped the client's list (#7340).
  * @property {Map} clients - WebSocket → client-state Map (the WsClientManager's Map).
  *
  * @typedef {Object} WsHandlerSessions
@@ -109,6 +110,7 @@ export const CTX_NAMESPACES = {
     'syncTerminalMirror',
     'sendSessionInfo',
     'replayHistory',
+    'reseedActiveAgents',
     'clients',
   ],
   sessions: [

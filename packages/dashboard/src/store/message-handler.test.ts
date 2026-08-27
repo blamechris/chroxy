@@ -3435,6 +3435,67 @@ describe('dashboard message-handler dispatch', () => {
     })
   })
 
+  // #7340 — the `activeAgents` wipe on `history_replay_start` must target the
+  // session the frame is REPLAYING, not whichever session happens to be active.
+  //
+  // `subscribe_sessions` replays every newly-subscribed BACKGROUND session, and
+  // both clients fire it for all non-active sessions on every `session_list` —
+  // i.e. on every reconnect. With the wipe keyed to `activeSessionId`, that
+  // burst wiped the active session's badge list moments after its own replay
+  // had correctly re-seeded it, restoring #7340's exact symptom on the exact
+  // reconnect the fix targets.
+  describe('history replay: activeAgents wipe targeting (#7340)', () => {
+    const agent = { toolUseId: 'tu-1', description: 'Probe', startedAt: 1000 };
+
+    function seedTwoSessions() {
+      const a = createEmptySessionState();
+      const b = createEmptySessionState();
+      (a as any).activeAgents = [agent];
+      store = createMockStore(
+        baseState({
+          activeSessionId: 's1',
+          sessions: [{ sessionId: 's1', name: 'S1' } as any, { sessionId: 's2', name: 'S2' } as any],
+          sessionStates: { s1: a, s2: b },
+        }),
+      );
+      setStore(store);
+    }
+
+    it('wipes the replayed session, not the active one', () => {
+      seedTwoSessions();
+      handleMessage({ type: 'history_replay_start', sessionId: 's2' }, ctx() as any);
+      const st = (store.getState() as any).sessionStates;
+      expect(st.s1.activeAgents).toEqual([agent]); // a background session's replay must not touch the active session
+    });
+
+    it('still wipes the active session when it is the one being replayed', () => {
+      seedTwoSessions();
+      handleMessage({ type: 'history_replay_start', sessionId: 's1' }, ctx() as any);
+      expect((store.getState() as any).sessionStates.s1.activeAgents).toEqual([]);
+    });
+
+    // The input CI found and these tests originally missed. The pre-#7340 code
+    // read `ss.activeAgents.length` unguarded and was safe only because
+    // `updateActiveSession` always handed it the ACTIVE session, which is fully
+    // initialised. Targeting the replayed session means it can be handed a
+    // partially-built state whose transient slices are still undefined.
+    it('does not throw when the replayed session state has no activeAgents yet', () => {
+      seedTwoSessions();
+      delete ((store.getState() as any).sessionStates.s2 as any).activeAgents;
+      handleMessage({ type: 'history_replay_start', sessionId: 's2' }, ctx() as any);
+      // ...and the active session is still untouched.
+      expect((store.getState() as any).sessionStates.s1.activeAgents).toEqual([agent]);
+    });
+
+    // Frames without an explicit sessionId fall back to activeSessionId, so
+    // the single-session case is unchanged.
+    it('falls back to the active session when the frame omits sessionId', () => {
+      seedTwoSessions();
+      handleMessage({ type: 'history_replay_start' }, ctx() as any);
+      expect((store.getState() as any).sessionStates.s1.activeAgents).toEqual([]);
+    });
+  });
+
   describe('history replay: user_input rehydration', () => {
     function seed() {
       store = createMockStore(

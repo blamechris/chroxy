@@ -18,6 +18,7 @@ function makeCtx(sessions = new Map(), overrides = {}) {
     broadcastSessionList: createSpy(),
     sendSessionInfo: createSpy(),
     replayHistory: createSpy(),
+    reseedActiveAgents: createSpy(), // #7340
     sessionManager: {
       getSession: createSpy((id) => sessions.get(id)),
       createSession: createSpy(async () => 'restored-session-id'),

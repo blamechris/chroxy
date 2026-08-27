@@ -320,9 +320,14 @@ The recurring causes:
 - a real defence against the *neighbouring* class, mistaken for cover — shell
   quoting stops the shell, and the quoted word still begins with `-` when the
   spawned program runs its own option parser over it (`#7295`)
+- a guard that HANGS instead of failing — `assert.match` against a multi-KB
+  source slice wedges `node --test` with an empty TAP stream, so its two states
+  are green and "flake", never red (`#7340`)
 
 Check the **exit code**, not the output — and note `cmd | grep -c FAIL` reports
-`grep`'s status, not the script's. Restore mutations with `cp` from a backup,
+`grep`'s status, not the script's. Then check the mutant went **red, legibly,
+and fast** — `!= 0` also accepts hung, crashed-before-start and
+killed-by-timeout, which read as flake rather than as a finding. Restore mutations with `cp` from a backup,
 never `git checkout --`, which eats unrelated uncommitted work.
 
 ### Server tests must not touch real user state (#4633)

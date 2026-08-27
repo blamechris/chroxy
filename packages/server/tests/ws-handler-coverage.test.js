@@ -17,6 +17,8 @@ function createMockCtx(sessionManager, opts = {}) {
   const updatePrimarySpy = createSpy()
   const sendSessionInfoSpy = createSpy()
   const replayHistorySpy = createSpy()
+  // #7340: replay handlers re-assert the session's live subagents afterwards.
+  const reseedActiveAgentsSpy = createSpy()
   const broadcastToSessionSpy = createSpy()
   const broadcastSessionListSpy = createSpy()
 
@@ -51,6 +53,7 @@ function createMockCtx(sessionManager, opts = {}) {
     updatePrimary: updatePrimarySpy,
     sendSessionInfo: sendSessionInfoSpy,
     replayHistory: replayHistorySpy,
+    reseedActiveAgents: reseedActiveAgentsSpy,
     broadcastToSession: broadcastToSessionSpy,
     broadcastSessionList: broadcastSessionListSpy,
     checkpointManager,
