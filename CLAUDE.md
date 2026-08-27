@@ -311,6 +311,10 @@ The recurring causes:
 - the TEST RUNNER itself dropping results — `--test-force-exit` reported 154 to
   192 of one file's 192 tests across five runs, every run `# fail 0` and exit 0,
   while a side-channel proved all 192 had executed (`#7400`)
+- a coverage test whose EXPECTATION is derived from its own subject — a parity
+  test that iterated `ALL_CATEGORIES` and checked a map built from
+  `ALL_CATEGORIES`, so it could not go red and never once compared the two
+  rosters it was named for (`#7424`)
 
 **Collapse to a boolean before asserting against file text.** A failing
 `assert.match(subject, re)` carries the ENTIRE subject as the error's `actual`
