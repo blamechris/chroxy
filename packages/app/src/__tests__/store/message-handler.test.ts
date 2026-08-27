@@ -643,6 +643,198 @@ describe('history_replay_start: isPlanPending wipe targeting (#7402)', () => {
     expect(store.getState().sessionStates.s1.isPlanPending).toBe(true);
   });
 });
+
+// #7410 — the `answered: '(resolved)'` sweep on `history_replay_end` must
+// target the session the frame is ENDING, not whichever session happens to be
+// active. Fourth instance of this mis-keying in this file after #4909
+// (`stoppedAt`), #7340 (`activeAgents`) and #7402 (`isPlanPending`), and the
+// worst of the four: the predicate is `type === 'prompt' && !answered`, which
+// matches LIVE prompts as well as replayed ones. `isLivePermissionPrompt`
+// (store-core) is `type === 'prompt' && requestId && expiresAt > now &&
+// !answered`, so a stamp of '(resolved)' takes a live prompt out of the
+// pending-permission surface — and AskUserQuestion emits `type: 'prompt'` too.
+//
+// `subscribe_sessions` replays every background session on every reconnect, so
+// keyed to `activeSessionId` this silently dismissed a permission approval the
+// user was looking at, every time a second session reconnected.
+describe("history_replay_end: '(resolved)' sweep targeting (#7410)", () => {
+  afterEach(() => {
+    resetReplayFlags();
+  });
+
+  /**
+   * An AskUserQuestion-shaped prompt: `type: 'prompt'` with no `requestId` and
+   * no `expiresAt`. `user_question` IS in the server's history ring buffer, so
+   * this is what a genuinely REPLAYED prompt looks like — and it is what the
+   * sweep exists to stamp. `isLivePermissionPrompt` is false for it.
+   */
+  function historicalPrompt(id: string) {
+    return {
+      id,
+      type: 'prompt',
+      content: 'Which approach?',
+      options: ['a', 'b'],
+      timestamp: 1,
+    } as any;
+  }
+
+  /** A live, unanswered permission prompt — `isLivePermissionPrompt` is true. */
+  function livePrompt(id: string, requestId: string) {
+    return {
+      id,
+      type: 'prompt',
+      content: 'Allow Write to src/index.ts?',
+      requestId,
+      // Computed per call, not once at describe-collection time: a slow suite
+      // would otherwise leave the fixture expired and silently non-live.
+      expiresAt: Date.now() + 600_000,
+      timestamp: 1,
+    } as any;
+  }
+
+  /**
+   * A permission prompt whose frame carried no `remainingMs`. `remainingMs` is
+   * `.optional()` in `ServerPermissionRequestSchema` and the shared parser maps
+   * an omitted value to `null`, so the client leaves `expiresAt` undefined —
+   * giving a genuinely LIVE, answerable prompt for which
+   * `isLivePermissionPrompt` is FALSE. This is the shape that made an earlier
+   * `!isLivePermissionPrompt(...)` predicate stamp a live approval.
+   */
+  function livePromptNoTtl(id: string, requestId: string) {
+    return {
+      id,
+      type: 'prompt',
+      content: 'Allow Bash: rm -rf /tmp/x?',
+      requestId,
+      timestamp: 1,
+    } as any;
+  }
+
+  function seed(s1First: any, s2First: any) {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [
+        { sessionId: 's1', name: 'S1' } as any,
+        { sessionId: 's2', name: 'S2' } as any,
+      ],
+      sessionStates: {
+        s1: { ...createEmptySessionState(), messages: [s1First] },
+        s2: { ...createEmptySessionState(), messages: [s2First] },
+      },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+    return store;
+  }
+
+  // --- the keying guard -----------------------------------------------------
+  //
+  // HISTORICAL prompts on both sides on purpose. If s1 held a LIVE prompt here
+  // the live-prompt exclusion would protect it too, and the test would still
+  // pass with the keying reverted to `updateActiveSession` — pinning nothing.
+  // Keyed correctly is the ONLY reason s1's prompt survives this case.
+  it("a background session's replay-end stamps that session, not the active one", () => {
+    const store = seed(historicalPrompt('p1'), historicalPrompt('p2'));
+
+    _testMessageHandler.handle({ type: 'history_replay_end', sessionId: 's2' });
+
+    const st = store.getState().sessionStates;
+    expect((st.s1.messages[0] as any).answered).toBeUndefined();
+    expect((st.s2.messages[0] as any).answered).toBe('(resolved)');
+  });
+
+  it('still stamps the active session when it is the one being replayed', () => {
+    const store = seed(historicalPrompt('p1'), historicalPrompt('p2'));
+
+    _testMessageHandler.handle({ type: 'history_replay_end', sessionId: 's1' });
+
+    const st = store.getState().sessionStates;
+    expect((st.s1.messages[0] as any).answered).toBe('(resolved)');
+    expect((st.s2.messages[0] as any).answered).toBeUndefined();
+  });
+
+  it('falls back to the active session when the frame omits sessionId', () => {
+    const store = seed(historicalPrompt('p1'), historicalPrompt('p2'));
+
+    _testMessageHandler.handle({ type: 'history_replay_end' } as any);
+
+    expect((store.getState().sessionStates.s1.messages[0] as any).answered).toBe('(resolved)');
+  });
+
+  // --- the live-prompt exclusion --------------------------------------------
+  //
+  // `permission_request` is in the server's `builtinTransient` list, so it is
+  // never in the history ring buffer: a live permission prompt present at
+  // replay-end always raced the (chunked, back-pressure-paused) replay rather
+  // than being replayed. Stamping it destroys the approval the user
+  // reconnected to answer.
+  it("does not stamp a LIVE permission prompt belonging to the REPLAYED session", () => {
+    const store = seed(historicalPrompt('p1'), livePrompt('p2', 'req-2'));
+    // Positive control: prove the fixture is live BEFORE asserting it survives,
+    // so a malformed fixture fails rather than satisfying the assertion for
+    // free (#7409's lesson).
+    expect(
+      isLivePermissionPrompt(store.getState().sessionStates.s2.messages[0] as any, Date.now()),
+    ).toBe(true);
+
+    _testMessageHandler.handle({ type: 'history_replay_end', sessionId: 's2' });
+
+    const s2Prompt = store.getState().sessionStates.s2.messages[0] as any;
+    expect(s2Prompt.answered).toBeUndefined();
+    expect(isLivePermissionPrompt(s2Prompt, Date.now())).toBe(true);
+  });
+
+  // --- the end-to-end scenario from #7410 -----------------------------------
+  //
+  // Protected twice over now (wrong session AND live), which is the point: this
+  // pins the user-visible regression, while the two guards above pin each
+  // mechanism independently.
+  it("a background session's replay-end does not resolve the active session's LIVE prompt", () => {
+    const store = seed(livePrompt('p1', 'req-1'), historicalPrompt('p2'));
+    expect(
+      isLivePermissionPrompt(store.getState().sessionStates.s1.messages[0] as any, Date.now()),
+    ).toBe(true);
+
+    _testMessageHandler.handle({ type: 'history_replay_end', sessionId: 's2' });
+
+    const s1Prompt = store.getState().sessionStates.s1.messages[0] as any;
+    expect(s1Prompt.answered).toBeUndefined();
+    expect(isLivePermissionPrompt(s1Prompt, Date.now())).toBe(true);
+  });
+
+  // The sweep keys off `requestId`, not liveness, and this is why. A permission
+  // frame may omit `remainingMs` (`.optional()` in the schema), which leaves
+  // `expiresAt` undefined and makes `isLivePermissionPrompt` false for a prompt
+  // the user can still answer. A liveness-based predicate stamps it; a
+  // `requestId`-based one cannot.
+  it('does not stamp a live permission prompt that has no expiresAt', () => {
+    const store = seed(historicalPrompt('p1'), livePromptNoTtl('p2', 'req-2'));
+    const before = store.getState().sessionStates.s2.messages[0] as any;
+    // Positive controls: it IS a permission prompt (has a requestId) and it is
+    // NOT recognised as live — i.e. exactly the gap being closed.
+    expect(before.requestId).toBe('req-2');
+    expect(before.expiresAt).toBeUndefined();
+    expect(isLivePermissionPrompt(before, Date.now())).toBe(false);
+
+    _testMessageHandler.handle({ type: 'history_replay_end', sessionId: 's2' });
+
+    expect((store.getState().sessionStates.s2.messages[0] as any).answered).toBeUndefined();
+  });
+
+  // `updateSession` no-ops on an id with no state. Stamping the active session
+  // instead — what the pre-fix code did — was never right for a frame naming a
+  // session this client does not track.
+  it('stamps nothing when the replayed session has no state', () => {
+    const store = seed(historicalPrompt('p1'), historicalPrompt('p2'));
+
+    _testMessageHandler.handle({ type: 'history_replay_end', sessionId: 's-gone' });
+
+    const st = store.getState().sessionStates;
+    expect((st.s1.messages[0] as any).answered).toBeUndefined();
+    expect((st.s2.messages[0] as any).answered).toBeUndefined();
+  });
+});
+
 describe('session_timeout handler', () => {
   it('removes timed-out session from sessionStates and sessions list', () => {
     const store = createMockStore({

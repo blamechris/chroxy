@@ -39,11 +39,17 @@ export type PermissionDecisionToken = (typeof PERMISSION_DECISION_TOKENS)[number
  * True iff `answered` is a real user decision.
  *
  * `answered` being merely SET is not that, which is the trap #7380's first draft
- * fell into: `history_replay_end` blanket-stamps `answered: '(resolved)'` on
- * every unanswered prompt in the active session, on the reasoning that anything
- * in replayed history is over. That placeholder is indistinguishable from a
- * decision under an `!== undefined` test — so a prompt the user never answered
- * reads as answered, and any behaviour gated that way misfires on it.
+ * fell into: `history_replay_end` stamps `answered: '(resolved)'` on unanswered
+ * prompts, on the reasoning that anything in replayed history is over. That
+ * placeholder is indistinguishable from a decision under an `!== undefined`
+ * test — so a prompt the user never answered reads as answered, and any
+ * behaviour gated that way misfires on it.
+ *
+ * #7410 narrowed that sweep twice — it now targets the session the frame is
+ * REPLAYING rather than the active one, and it skips any prompt carrying a
+ * `requestId` (permission prompts are transient server-side and can never be
+ * replayed, so one present at replay-end is live). This guard is still
+ * load-bearing: `user_question` prompts ARE replayed and are still stamped.
  *
  * Deliberately does NOT accept an arbitrary non-empty string: a future
  * placeholder would then quietly qualify too, which is the same bug again.
@@ -72,10 +78,11 @@ export function isPermissionDecision(answered: string | undefined | null): boole
  * `resolvedPermissions` — it is seedable by `FixtureInitialState`, so this path
  * can finally carry cross-client contract coverage.
  *
- * `isPermissionDecision`, NOT a defined-check: `history_replay_end` blanket-
- * stamps the placeholder `'(resolved)'` on every unanswered prompt in the
- * active session, and under `answered !== undefined` a prompt nobody touched
- * would read as answered — the inverse bug, caught in #7380's first draft.
+ * `isPermissionDecision`, NOT a defined-check: `history_replay_end` stamps the
+ * placeholder `'(resolved)'` on unanswered prompts in the session it is
+ * replaying (#7410; formerly the active one), and under `answered !== undefined`
+ * a prompt nobody touched would read as answered — the inverse bug, caught in
+ * #7380's first draft.
  *
  * Scans every session, not just the target one: the push-notification path
  * answers prompts in background sessions, which is why

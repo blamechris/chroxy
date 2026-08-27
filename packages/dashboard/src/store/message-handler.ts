@@ -5215,22 +5215,75 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           // Session vanished mid-replay — still settle the cursor.
           reconcileReplayEnd(endTargetId, [], endLatestSeq);
         }
+        // Mark all replayed prompts as answered — any prompt in history
+        // has already been resolved by the server.
+        //
+        // #7410 — keyed to `endTargetId`, NOT `activeSessionId`. The predicate
+        // matches LIVE prompts as well as historical ones:
+        // `isLivePermissionPrompt` is `type === 'prompt' && requestId &&
+        // expiresAt > now && !answered`, and AskUserQuestion emits
+        // `type: 'prompt'` too. Keyed to the active session, a BACKGROUND
+        // session's replay-end stamped '(resolved)' on a permission approval
+        // the user was looking at — silently dismissing it — and
+        // `subscribe_sessions` replays every background session, so that
+        // happened on every multi-session reconnect. Fourth instance of this
+        // mis-keying in this pair of files after #4909, #7340 and #7402.
+        //
+        // `endTargetId` already falls back to `activeSessionId` when the frame
+        // omits `sessionId`, so the single-session case is unchanged; and
+        // `updateSession` no-ops on an id with no state, which is the right
+        // outcome for the "session vanished mid-replay" branch above.
+        //
+        // Permission prompts are excluded by `requestId`, and that follows from
+        // the wire contract rather than from taste. Exactly two things produce
+        // a `type: 'prompt'` ChatMessage, and history splits them cleanly:
+        //
+        //   - `permission_request` is in the server's `builtinTransient` list
+        //     (`session-manager.js`), so it is NEVER written to the history
+        //     ring buffer and can never arrive as a replayed entry. It is the
+        //     only producer that sets `requestId`.
+        //   - `user_question` IS in the ring buffer and is re-sent on every
+        //     replay (`store-core/handlers/user-question.ts`), and it sets no
+        //     `requestId`.
+        //
+        // So `!m.requestId` is precisely "could this have come from history?",
+        // which is the only question this sweep is entitled to ask. A prompt
+        // with a `requestId` present at replay-end always raced the replay
+        // instead of being replayed — and that is routine, not exotic:
+        // `replayHistory` sends its first 20-entry chunk synchronously and
+        // defers the rest, while `resendPendingPermissions` runs later in the
+        // same post-auth block (`ws-history.js`), so on any session with more
+        // than one chunk of history the re-sent permission lands BEFORE
+        // `history_replay_end`. `reconcileReplayEnd`'s baseline slice keeps it
+        // deliberately. Stamping it destroys the pending approval the user
+        // reconnected to answer — the opposite of this sweep's premise that
+        // anything in history is already resolved.
+        //
+        // NOT `isLivePermissionPrompt`: that also requires `expiresAt > now`,
+        // and `expiresAt` is only set when the frame carried `remainingMs`,
+        // which is `.optional()` in `ServerPermissionRequestSchema`. An emitter
+        // that omits it yields a live prompt with `requestId` and no
+        // `expiresAt` — not "live" by that predicate, and stamped. It would
+        // also stamp a `permission_expired` prompt, whose `answered` is left
+        // empty on purpose (it is a DECISION token and no decision was made).
+        // `requestId` has neither hole.
+        //
+        // Still open: a LIVE AskUserQuestion racing a replay is byte-identical
+        // to a replayed one, so nothing here can separate them — see #7420.
+        if (endTargetId) {
+          const isStampable = (m: ChatMessage): boolean =>
+            m.type === 'prompt' && !m.answered && !m.requestId;
+          updateSession(endTargetId, (ss) => {
+            const hasUnansweredPrompts = ss.messages.some(isStampable);
+            if (!hasUnansweredPrompts) return {};
+            return {
+              messages: ss.messages.map((m) =>
+                isStampable(m) ? { ...m, answered: '(resolved)' } : m
+              ),
+            };
+          });
+        }
       }
-      // Mark all replayed prompts as answered — any prompt in history
-      // has already been resolved by the server.
-      updateActiveSession((ss) => {
-        const hasUnansweredPrompts = ss.messages.some(
-          (m) => m.type === 'prompt' && !m.answered
-        );
-        if (!hasUnansweredPrompts) return {};
-        return {
-          messages: ss.messages.map((m) =>
-            m.type === 'prompt' && !m.answered
-              ? { ...m, answered: '(resolved)' }
-              : m
-          ),
-        };
-      });
       break;
 
     // --- User input echoed from other clients ---

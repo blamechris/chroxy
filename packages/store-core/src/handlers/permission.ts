@@ -145,8 +145,10 @@ export const PERMISSION_ALREADY_ANSWERED_NOTICE =
  * #7388: that gate is now ONE predicate, `isPermissionRequestAnswered`
  * (pending-permissions.ts), which both clients call — keyed on the prompt's own
  * `answered` decision token via `isPermissionDecision`, NOT a defined-check,
- * because `history_replay_end` stamps the placeholder `'(resolved)'` on prompts
- * nobody answered. It previously WAS platform-specific (dashboard:
+ * because `history_replay_end` stamps the placeholder `'(resolved)'` on
+ * replayed prompts nobody answered (#7410 narrowed that sweep to the replayed
+ * session and to prompts with no `requestId`, but replayed `user_question`
+ * prompts are still stamped). It previously WAS platform-specific (dashboard:
  * `resolvedPermissions`; app: `answered`, #7380), which left the suppression
  * path — the one #7375 made routine — with no cross-client contract coverage,
  * because `resolvedPermissions` is not seedable by `FixtureInitialState`.
