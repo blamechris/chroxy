@@ -1,7 +1,8 @@
 import { describe, it, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { OrchestrationPermissionGate } from '../src/orchestration/permission-gate.js'
+import { readFileSync } from 'node:fs'
+import { OrchestrationPermissionGate, ALWAYS_DENY } from '../src/orchestration/permission-gate.js'
 
 // #6691 E-2 — the scoped headless approver. It answers permission_request ONLY
 // for sessions the run owns, and never grants a standing Bash whitelist.
@@ -69,16 +70,65 @@ describe('OrchestrationPermissionGate', () => {
       isOwnedSession: () => true,
       policyForSession: () => 'implement',
     })
-    // #7340: the expected-decision array used to be a hardcoded `['deny',
-    // 'deny', 'deny']` beside the list being iterated, so adding `Agent` made
-    // the test fail for a length mismatch rather than a decision mismatch —
-    // and, worse, dropping a tool from the list would have kept it passing.
-    // Derive both from the one list.
-    const denied = ['Task', 'Agent', 'WebFetch', 'WebSearch']
+    // #7340 (review, F1): this test CANNOT fail on `ALWAYS_DENY` — `_decide`
+    // ends in `return 'deny'`, so every tool here is denied whether the set is
+    // consulted or not. Verified: emptying `ALWAYS_DENY` to `new Set([])`, and
+    // deleting the `if (ALWAYS_DENY.has(toolName))` branch outright, both leave
+    // this file 10/10 green. It is kept as a behavioural smoke test, and the
+    // two tests below are what actually guard the denylist.
+    //
+    // Derived from the exported set, so dropping a tool from src fails here.
+    const denied = [...ALWAYS_DENY]
     for (const [i, tool] of denied.entries()) {
       sm.req('s1', { requestId: `r${i}`, toolName: tool, input: {} })
     }
     assert.deepEqual(s.responses, denied.map((_, i) => ({ requestId: `r${i}`, decision: 'deny' })))
+  })
+
+  // #7340 (review, F1). Membership, bidirectionally — mirrors
+  // permission-manager.test.js's NEVER_AUTO_ALLOW roster test, which was
+  // confirmed load-bearing in both directions. This is what makes emptying the
+  // set, or dropping a name from it, go red.
+  //
+  // `Task` and `Agent` are the retired and current names Claude Code has used
+  // for sub-delegation; both are listed because chroxy runs against whatever
+  // `claude` the user has installed.
+  it('ALWAYS_DENY names exactly the tools a worker may never use headlessly', () => {
+    const expected = ['Task', 'Agent', 'WebFetch', 'WebSearch']
+    for (const tool of expected) {
+      assert.ok(ALWAYS_DENY.has(tool), `expected ALWAYS_DENY to contain ${tool}`)
+    }
+    assert.equal(ALWAYS_DENY.size, expected.length, 'and nothing else')
+  })
+
+  // #7340 (review, F1). The set assertion above still cannot catch the branch
+  // being DELETED, because deletion is behaviourally invisible while `_decide`
+  // fails closed. So pin the invariant that actually matters: the denylist is
+  // consulted BEFORE any path that can return 'allow'. That is the whole point
+  // of the branch — it is defence against a future allow path, not against
+  // today's control flow — and it is the thing a refactor would silently break.
+  //
+  // Source-anchored because the ordering is a property of the function body,
+  // not of any observable output. Sliced to `_decide` and asserted within the
+  // slice: a file-wide search would be satisfied by the `_respond` helper's own
+  // 'allow' comparison further down.
+  it('consults ALWAYS_DENY before any path that can return allow', () => {
+    const src = readFileSync(new URL('../src/orchestration/permission-gate.js', import.meta.url), 'utf8')
+    const start = src.indexOf('_decide(role, toolName, input) {')
+    assert.ok(start > 0, '_decide must exist under this name')
+    const end = src.indexOf('_respond(', start)
+    assert.ok(end > start, '_decide must be followed by _respond')
+    const body = src.slice(start, end)
+
+    const denyIdx = body.indexOf('ALWAYS_DENY.has(toolName)')
+    const allowIdx = body.indexOf("return 'allow'")
+    assert.ok(denyIdx > 0, '_decide must consult ALWAYS_DENY')
+    assert.ok(allowIdx > 0, '_decide must have an allow path for this test to be meaningful')
+    assert.ok(denyIdx < allowIdx, 'ALWAYS_DENY must be checked before any allow path')
+
+    // Negative controls: prove the slice is the function and not the file.
+    assert.ok(body.length < src.length * 0.2, `slice should be _decide, got ${body.length} of ${src.length}`)
+    assert.doesNotMatch(body, /respondToPermission/, 'the slice must stop before _respond')
   })
 
   it('allows an implement Bash command that matches the allowlist; escalates a non-match', () => {

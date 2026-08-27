@@ -24,7 +24,13 @@
 // `claude` the user has installed. `_decide` already ends in `return 'deny'`,
 // so the omission was not a fail-open; it did mean an `Agent` call was denied
 // by the catch-all rather than by the rule that exists to say why.
-const ALWAYS_DENY = new Set(['Task', 'Agent', 'WebFetch', 'WebSearch'])
+// Exported so its test can assert MEMBERSHIP directly. A behavioural test
+// cannot: `_decide` ends in `return 'deny'`, so every tool in this set is
+// denied whether or not the set is consulted, and the whole branch can be
+// deleted with no observable change today. That makes the branch a guard
+// against a FUTURE allow path being added above it, and the invariant worth
+// testing is its POSITION, not its effect (see the test).
+export const ALWAYS_DENY = new Set(['Task', 'Agent', 'WebFetch', 'WebSearch'])
 
 export class OrchestrationPermissionGate {
   /**

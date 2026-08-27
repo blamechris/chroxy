@@ -1374,6 +1374,31 @@ describe('CliSession background subagent lifecycle (#7340)', () => {
     assert.equal(session._activeAgents.size, 0)
   })
 
+  // #7340 (review, F2): the ordering the JSDoc calls NORMAL — tool_use block
+  // first, then `task_started` — is the one that exercises `_trackAgent`'s
+  // upgrade line, and it had no test. The sibling below sends `task_started`
+  // first, which hits the `if (existing) … return` early-out WITHOUT reaching
+  // the upgrade, so deleting `if (background === true) existing.background =
+  // true` left every suite green. An assertion whose name outran its code.
+  it('upgrades the background flag when task_started follows the tool_use block', () => {
+    const session = createSession()
+    const spawned = []
+    session.on('agent_spawned', (e) => spawned.push(e))
+    // Tool input says nothing about backgrounding...
+    spawnAgentTool(session, AGENT_ID, { description: 'Probe sleep test' })
+    assert.equal(session._activeAgents.get(AGENT_ID).background, false)
+    // ...then the CLI's own signal says it IS backgrounded. That is the
+    // authoritative one and it must win.
+    session._handleEvent(taskStarted({
+      tool_use_id: AGENT_ID,
+      description: 'Probe sleep test',
+      task_type: 'local_agent',
+      is_backgrounded: true,
+    }))
+    assert.equal(session._activeAgents.get(AGENT_ID).background, true, 'task_started must upgrade the flag')
+    assert.equal(spawned.length, 1, 'and must not emit a second agent_spawned')
+  })
+
   // task_started can arrive before the tool_use block is fully parsed. Either
   // order must yield exactly one spawn, and must not lose the background flag.
   it('emits one spawn and keeps the background flag whichever signal lands first', () => {
@@ -1398,6 +1423,24 @@ describe('CliSession background subagent lifecycle (#7340)', () => {
     session._clearMessageState()
     assert.deepEqual(completed.map((c) => c.toolUseId), [AGENT_ID])
   })
+
+  // #7340 (review, F3): the parse-failure diagnostic accepted only `Task`, so
+  // an `Agent` spawn with unparseable input was logged as a generic tool.
+  // Control flow is identical either way (both return), so ONLY the log
+  // distinguishes them — which is exactly why it was the roster line that got
+  // missed. Driven through the session's injectable `_log`.
+  for (const toolName of ['Task', 'Agent']) {
+    it(`names the tool in the parse-failure log for \`${toolName}\``, () => {
+      const session = createSession()
+      const warns = []
+      session._log = { warn: (m) => warns.push(m), error: () => {}, info: () => {} }
+      session._handleEvent(toolUseStart(toolName, 'toolu_bad'))
+      session._handleEvent(inputJsonDelta('{"description": "trunc'))
+      session._handleEvent(contentBlockStop())
+      assert.equal(warns.length, 1, 'a parse failure must be logged exactly once')
+      assert.match(warns[0], new RegExp(`Failed to parse ${toolName} tool input`))
+    })
+  }
 
   // These used to fall through to the generic system-event branch, which
   // forwarded the literal string "task_started" to the client as a chat bubble.
