@@ -153,10 +153,6 @@ import {
   // (byte-identical wording with the mobile app).
   handleAppendMemoryResult as sharedAppendMemoryResult,
   formatMemoryAppendNotice,
-  // #7410 — the `history_replay_end` '(resolved)' sweep must not stamp a LIVE
-  // permission prompt. Imported rather than re-expressed inline so there is
-  // exactly one definition of "live permission prompt" in the codebase.
-  isLivePermissionPrompt,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
 import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerByokPoolStatusSnapshotSchema, ServerByokPoolActionAckSchema, ServerHostPruneStatusSnapshotSchema, ServerHostPruneActionAckSchema, ServerSimulatorStatusSnapshotSchema, ServerSimulatorActionAckSchema, ServerEmulatorStatusSnapshotSchema, ServerEmulatorActionAckSchema, ServerWslStatusSnapshotSchema, ServerWslActionAckSchema, ServerIntegrationStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerExternalSessionsSnapshotSchema, ServerRepoEventsSnapshotSchema, ServerRepoEventsDeltaSchema, ServerGithubWebhookConfigSchema, ServerPermissionInputSchema, ServerPermissionAuditResultSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerSessionPresetSnapshotSchema, ServerPairPendingSchema, ServerPairResolvedSchema, ServerBillingCanarySchema, BillingCanarySnapshotSchema, ServerSymbolsSnapshotSchema, ServerSymbolLocationSchema, ServerSearchResultsSchema, ServerReferencesResultSchema, ServerOrchestrationRunsSnapshotSchema, ServerOrchestrationRunSnapshotSchema, ServerOrchestrationRunDeltaSchema, ServerOrchestrationActionAckSchema, ServerGitCreatePrResultSchema, ServerMemoryStackResultSchema, ServerScheduledTasksSchema } from '@chroxy/protocol/schemas'
@@ -5238,30 +5234,45 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         // `updateSession` no-ops on an id with no state, which is the right
         // outcome for the "session vanished mid-replay" branch above.
         //
-        // LIVE permission prompts are excluded, and that follows from the wire
-        // contract rather than from taste: `permission_request` is in the
-        // server's `builtinTransient` list (`session-manager.js`), so it is
-        // NEVER written to the history ring buffer and can never arrive as a
-        // replayed entry. A live permission prompt sitting in `messages` at
-        // replay-end is therefore always a LIVE one that raced the replay —
-        // replay is chunked in 20-entry `setImmediate` batches with
-        // back-pressure pauses (`ws-history.js`), so that race is wide, and
-        // `reconcileReplayEnd`'s baseline slice deliberately keeps such
-        // entries. Stamping it destroys the pending approval the user
-        // reconnected to answer, which is the opposite of this sweep's premise
-        // ("anything in history is already resolved").
+        // Permission prompts are excluded by `requestId`, and that follows from
+        // the wire contract rather than from taste. Exactly two things produce
+        // a `type: 'prompt'` ChatMessage, and history splits them cleanly:
         //
-        // `user_question` prompts, by contrast, ARE in the ring buffer and are
-        // re-sent on every replay, so they stay stampable — and they carry no
-        // `requestId`/`expiresAt`, so `isLivePermissionPrompt` leaves them
-        // alone by construction. (A live AskUserQuestion that races a replay is
-        // indistinguishable from a replayed one on the wire; see #7420.)
+        //   - `permission_request` is in the server's `builtinTransient` list
+        //     (`session-manager.js`), so it is NEVER written to the history
+        //     ring buffer and can never arrive as a replayed entry. It is the
+        //     only producer that sets `requestId`.
+        //   - `user_question` IS in the ring buffer and is re-sent on every
+        //     replay (`store-core/handlers/user-question.ts`), and it sets no
+        //     `requestId`.
+        //
+        // So `!m.requestId` is precisely "could this have come from history?",
+        // which is the only question this sweep is entitled to ask. A prompt
+        // with a `requestId` present at replay-end always raced the replay
+        // instead of being replayed — and that is routine, not exotic:
+        // `replayHistory` sends its first 20-entry chunk synchronously and
+        // defers the rest, while `resendPendingPermissions` runs later in the
+        // same post-auth block (`ws-history.js`), so on any session with more
+        // than one chunk of history the re-sent permission lands BEFORE
+        // `history_replay_end`. `reconcileReplayEnd`'s baseline slice keeps it
+        // deliberately. Stamping it destroys the pending approval the user
+        // reconnected to answer — the opposite of this sweep's premise that
+        // anything in history is already resolved.
+        //
+        // NOT `isLivePermissionPrompt`: that also requires `expiresAt > now`,
+        // and `expiresAt` is only set when the frame carried `remainingMs`,
+        // which is `.optional()` in `ServerPermissionRequestSchema`. An emitter
+        // that omits it yields a live prompt with `requestId` and no
+        // `expiresAt` — not "live" by that predicate, and stamped. It would
+        // also stamp a `permission_expired` prompt, whose `answered` is left
+        // empty on purpose (it is a DECISION token and no decision was made).
+        // `requestId` has neither hole.
+        //
+        // Still open: a LIVE AskUserQuestion racing a replay is byte-identical
+        // to a replayed one, so nothing here can separate them — see #7420.
         if (endTargetId) {
-          // One `now` for the whole sweep so the `some` predicate and the `map`
-          // predicate cannot disagree across a millisecond boundary.
-          const sweepNow = Date.now();
           const isStampable = (m: ChatMessage): boolean =>
-            m.type === 'prompt' && !m.answered && !isLivePermissionPrompt(m, sweepNow);
+            m.type === 'prompt' && !m.answered && !m.requestId;
           updateSession(endTargetId, (ss) => {
             const hasUnansweredPrompts = ss.messages.some(isStampable);
             if (!hasUnansweredPrompts) return {};

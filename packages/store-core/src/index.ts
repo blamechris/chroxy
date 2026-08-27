@@ -953,7 +953,9 @@ export {
 export {
   isLivePermissionPrompt,
   // #7380 — a REAL user decision, as opposed to `answered` merely being set
-  // (history_replay_end stamps '(resolved)' on prompts nobody answered).
+  // (history_replay_end stamps '(resolved)' on replayed prompts nobody
+  // answered; #7410 narrowed that sweep to the replayed session and to prompts
+  // with no `requestId`, but it still stamps replayed `user_question` prompts).
   isPermissionDecision,
   PERMISSION_DECISION_TOKENS,
   // #7388 — the ONE "was this permission already answered by a user?" gate,
