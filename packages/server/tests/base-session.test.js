@@ -788,6 +788,55 @@ describe('BaseSession', () => {
       session._clearMessageState()
       assert.equal(session._resultTimeout, null)
     })
+
+    // #7340: the turn ending is not evidence that a BACKGROUNDED subagent
+    // finished. Sweeping it emits agent_completed for work that is still
+    // running, and the session reads idle while four reviewers are in flight.
+    it('does NOT complete a backgrounded agent at turn end', () => {
+      const completed = []
+      session.on('agent_completed', (e) => completed.push(e))
+      session._activeAgents.set('bg', { toolUseId: 'bg', background: true })
+      session._clearMessageState()
+      assert.deepEqual(completed, [], 'a backgrounded agent must survive turn end')
+      assert.ok(session._activeAgents.has('bg'), 'and stay tracked, so the UI can still see it')
+    })
+
+    // The positive control the issue names: trading a stuck-idle bug for a
+    // stuck-busy one is the WORSE failure. An agent the model abandoned
+    // mid-turn carries no background flag and must still be swept.
+    it('still sweeps a foreground agent abandoned mid-turn', () => {
+      const completed = []
+      session.on('agent_completed', (e) => completed.push(e))
+      session._activeAgents.set('fg', { toolUseId: 'fg', background: false })
+      session._activeAgents.set('legacy', { toolUseId: 'legacy' }) // no flag at all
+      session._clearMessageState()
+      assert.deepEqual(completed.map(c => c.toolUseId).sort(), ['fg', 'legacy'])
+      assert.equal(session._activeAgents.size, 0)
+    })
+
+    // Mixed turn: the sweep must be per-agent, not all-or-nothing. A single
+    // backgrounded agent must not rescue its foreground siblings, and a single
+    // foreground one must not drag the backgrounded agent out with it.
+    it('sweeps foreground and keeps backgrounded agents in the same turn', () => {
+      const completed = []
+      session.on('agent_completed', (e) => completed.push(e))
+      session._activeAgents.set('fg', { toolUseId: 'fg', background: false })
+      session._activeAgents.set('bg', { toolUseId: 'bg', background: true })
+      session._clearMessageState()
+      assert.deepEqual(completed.map(c => c.toolUseId), ['fg'])
+      assert.deepEqual([...session._activeAgents.keys()], ['bg'])
+    })
+
+    // `background` arrives from provider JSON, so a truthy non-boolean must not
+    // be enough to pin an agent open forever.
+    it('treats a non-boolean background flag as foreground', () => {
+      const completed = []
+      session.on('agent_completed', (e) => completed.push(e))
+      session._activeAgents.set('x', { toolUseId: 'x', background: 'true' })
+      session._clearMessageState()
+      assert.deepEqual(completed.map(c => c.toolUseId), ['x'])
+      assert.equal(session._activeAgents.size, 0)
+    })
   })
 
   describe('EventEmitter', () => {

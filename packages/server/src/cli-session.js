@@ -1119,6 +1119,39 @@ export class CliSession extends BaseSession {
             compactMetadata: meta,
             timestamp: Date.now(),
           })
+        } else if (data.subtype === 'task_started' || data.subtype === 'task_notification') {
+          // #7340: the CLI's subagent lifecycle events. Until now these fell
+          // into the generic branch below, which forwarded the literal string
+          // "task_started" / "task_notification" to the client as a chat
+          // bubble — noise in place of state.
+          //
+          // `task_started` is authoritative in two ways the tool_use block is
+          // not: it carries `is_backgrounded` (the model's `run_in_background`
+          // is a request; this is what the CLI actually did), and it identifies
+          // subagents by `task_type` rather than by tool NAME, so tracking
+          // survives a rename the way `Task` -> `Agent` was not survived.
+          // `task_type: 'local_bash'` is a backgrounded shell — #4307's
+          // surface, tracked separately, and never an agent.
+          //
+          // `task_notification` is the terminal signal. It is the ONLY thing
+          // that clears a backgrounded agent now that the turn-end sweep no
+          // longer does, so it is wired here rather than left to the sweep.
+          // It fires for FAILED and STOPPED subagents too, not just completed
+          // ones — every terminal status must clear the badge, or a subagent
+          // that errored pins the session as working forever.
+          if (data.subtype === 'task_started') {
+            if (data.task_type === 'local_agent') {
+              this._trackAgent({
+                toolUseId: data.tool_use_id,
+                description: typeof data.description === 'string' && data.description
+                  ? data.description
+                  : 'Background task',
+                background: data.is_backgrounded === true,
+              })
+            }
+          } else {
+            this._completeAgent(data.tool_use_id)
+          }
         } else {
           // Forward non-init system events (e.g. usage limits, sub-agent
           // notifications) as system messages to the client
@@ -1426,13 +1459,15 @@ export class CliSession extends BaseSession {
       }
       case 'task': {
         if (!parseSucceeded) return
-        const agentInfo = {
+        // #7340: `background` (from the tool's `run_in_background`) decides
+        // whether the turn-end sweep may complete this agent. The CLI's own
+        // `task_started` confirms it moments later with `is_backgrounded`;
+        // `_trackAgent` upgrades rather than re-emits, so either order is fine.
+        this._trackAgent({
           toolUseId,
           description: semantics.payload.description,
-          startedAt: Date.now(),
-        }
-        this._activeAgents.set(toolUseId, agentInfo)
-        this.emit('agent_spawned', agentInfo)
+          background: semantics.payload.background,
+        })
         return
       }
       case 'enter_plan': {

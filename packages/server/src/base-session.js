@@ -947,6 +947,14 @@ export class BaseSession extends EventEmitter {
       // and never call _destroyPendingBackgroundShells, so this is the
       // chokepoint that guarantees no provider leaks the recurring timer.
       this._stopBackgroundShellSweep()
+      // #7340: drop any BACKGROUNDED subagents still tracked. Before #7340 the
+      // turn-end sweep guaranteed this map was empty by the time a session was
+      // torn down; agents that outlive their turn break that guarantee, so the
+      // same chokepoint that stops the shell sweep clears them. No
+      // `agent_completed` emit -- the session is being destroyed, its clients
+      // are dropping its state wholesale, and the listeners are removed on the
+      // next line anyway.
+      this._activeAgents.clear()
       return super.removeAllListeners()
     }
     return super.removeAllListeners(eventName)
@@ -1691,6 +1699,59 @@ export class BaseSession extends EventEmitter {
   _onLastPermissionResolved() {}
   _onPendingPermissionsAbandoned() {}
 
+  /**
+   * #7340: finalize a tracked subagent by its `tool_use_id` -- the ONE
+   * implementation of "this agent is done". Drops it from `_activeAgents` and
+   * balances its `agent_spawned` with a matching `agent_completed`.
+   *
+   * Idempotent (guarded on `has`), which is what lets an optimistic finalize
+   * and the provider's natural terminal signal both call it without emitting a
+   * duplicate completion.
+   *
+   * This matters more since backgrounded agents stopped being swept at turn
+   * end: the sweep used to be a backstop that eventually cleared everything, so
+   * a missed finalize was invisible. It is now the ONLY way a backgrounded
+   * agent clears, and a provider that tracks a background spawn without wiring
+   * a terminal signal leaves the session claiming to be working forever.
+   *
+   * @param {unknown} toolUseId
+   * @protected
+   */
+  _completeAgent(toolUseId) {
+    if (typeof toolUseId !== 'string' || !toolUseId) return
+    if (!this._activeAgents.has(toolUseId)) return
+    this._activeAgents.delete(toolUseId)
+    this.emit('agent_completed', { toolUseId })
+  }
+
+  /**
+   * #7340: record a spawned subagent and announce it. Shared by every provider
+   * that reads the Agent/Task tool off a Claude Code stream, so the record
+   * shape (notably `background`, which decides whether the turn-end sweep may
+   * complete it) cannot drift between them.
+   *
+   * Re-registering an already-tracked id UPGRADES the record rather than
+   * replacing it, and re-emits nothing. That is the `task_started` case: the
+   * tool_use block arrives first and carries `run_in_background`, then
+   * `task_started` arrives with the authoritative `is_backgrounded`. Whichever
+   * order they land in, one `agent_spawned` is emitted and the background flag
+   * is the OR of what both sources said.
+   *
+   * @param {{ toolUseId: string, description?: string, background?: boolean, startedAt?: number }} info
+   * @protected
+   */
+  _trackAgent({ toolUseId, description = 'Background task', background = false, startedAt = Date.now() } = {}) {
+    if (typeof toolUseId !== 'string' || !toolUseId) return
+    const existing = this._activeAgents.get(toolUseId)
+    if (existing) {
+      if (background === true) existing.background = true
+      return
+    }
+    const agentInfo = { toolUseId, description, startedAt, background: background === true }
+    this._activeAgents.set(toolUseId, agentInfo)
+    this.emit('agent_spawned', agentInfo)
+  }
+
   _clearMessageState() {
     // #7382 (review): expire HERE, so inheriting the bookkeeping also inherits
     // the BEHAVIOUR. Hoisting the API alone bought a new provider the methods
@@ -1723,12 +1784,33 @@ export class BaseSession extends EventEmitter {
     // never fires at all.
     this._sweepUnresolvedToolStarts('message_state_cleared')
 
-    // Emit completions for any tracked agents so the app clears badges
+    // Sweep the agents the model ABANDONED mid-turn so the app clears their
+    // badges. #7340: this used to sweep every tracked agent, on the reasoning
+    // that the turn ending meant the work ended. It doesn't. A subagent spawned
+    // with `run_in_background: true` deliberately outlives the turn, and
+    // completing it here emits `agent_completed` for work that is still
+    // running -- the session then reads idle while four reviewers are in
+    // flight, which is the wrong answer to the only question a user glancing at
+    // their phone is asking.
+    //
+    // The two cases were indistinguishable at this point in the code until
+    // `background` was carried on the agent record (from the Agent/Task tool's
+    // `run_in_background`, and from `task_started`'s `is_backgrounded`). Only
+    // the orphans are swept now; backgrounded agents stay tracked and are
+    // finalized by their provider's terminal signal (`task_notification`) --
+    // see `_completeAgent` above.
+    //
+    // Strict `!== true` rather than a falsy test, in BOTH directions: the flag
+    // is provider-derived, and defaulting an unknown value to "backgrounded"
+    // would pin the agent open forever. A session that permanently claims to be
+    // working is a worse failure than one that clears early, so anything that
+    // is not exactly `true` is swept.
     if (this._activeAgents.size > 0) {
-      for (const agent of this._activeAgents.values()) {
+      for (const agent of [...this._activeAgents.values()]) {
+        if (agent.background === true) continue
+        this._activeAgents.delete(agent.toolUseId)
         this.emit('agent_completed', { toolUseId: agent.toolUseId })
       }
-      this._activeAgents.clear()
     }
 
     // #5160: turn-end reconciliation for the activity registry. Ends any

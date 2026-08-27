@@ -61,7 +61,7 @@ describe('OrchestrationPermissionGate', () => {
     assert.deepEqual(s.responses, [{ requestId: 'r1', decision: 'deny' }])
   })
 
-  it('always denies Task/WebFetch/WebSearch regardless of role', () => {
+  it('always denies Task/Agent/WebFetch/WebSearch regardless of role', () => {
     const { sm, add } = mkStub()
     const s = add('s1')
     gate = new OrchestrationPermissionGate({
@@ -69,10 +69,16 @@ describe('OrchestrationPermissionGate', () => {
       isOwnedSession: () => true,
       policyForSession: () => 'implement',
     })
-    for (const [i, tool] of ['Task', 'WebFetch', 'WebSearch'].entries()) {
+    // #7340: the expected-decision array used to be a hardcoded `['deny',
+    // 'deny', 'deny']` beside the list being iterated, so adding `Agent` made
+    // the test fail for a length mismatch rather than a decision mismatch —
+    // and, worse, dropping a tool from the list would have kept it passing.
+    // Derive both from the one list.
+    const denied = ['Task', 'Agent', 'WebFetch', 'WebSearch']
+    for (const [i, tool] of denied.entries()) {
       sm.req('s1', { requestId: `r${i}`, toolName: tool, input: {} })
     }
-    assert.deepEqual(s.responses.map((r) => r.decision), ['deny', 'deny', 'deny'])
+    assert.deepEqual(s.responses, denied.map((_, i) => ({ requestId: `r${i}`, decision: 'deny' })))
   })
 
   it('allows an implement Bash command that matches the allowlist; escalates a non-match', () => {

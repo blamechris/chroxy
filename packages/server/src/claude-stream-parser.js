@@ -62,13 +62,29 @@ export function extractToolInputSemantics(toolName, parsedInput) {
         payload: { questions: input.questions },
       }
 
-    case 'Task': {
+    // #7340: `Agent` is what Claude Code emits today; `Task` is the older
+    // spelling. Verified on live `-p --output-format stream-json` runs of both
+    // the standalone CLI (2.1.243) and the Agent SDK's bundled binary
+    // (2.1.114) -- BOTH emit `"name":"Agent"`. Matching only `Task` meant
+    // `agent_spawned` never fired on either path, so every subagent surface
+    // (AgentMonitorPanel, the header agent count, activity-registry agent
+    // nodes, Control Room's cancelActivity) was dead. Chroxy runs against
+    // whatever `claude` the user has installed, so both names stay live rather
+    // than the new one replacing the old.
+    case 'Task':
+    case 'Agent': {
       const description = (typeof input.description === 'string'
         ? input.description
         : 'Background task').slice(0, 200)
+      // Strict `=== true`: on a FOREGROUND spawn the field is ABSENT, not
+      // `false` (verified in the probe), and a truthy test would let a string
+      // "true" or a 1 through. Defaulting to background is the dangerous
+      // direction -- a session that permanently claims to be working is a
+      // worse failure than one that clears early (#7340's positive control).
+      const background = input.run_in_background === true
       return {
         kind: 'task',
-        payload: { description },
+        payload: { description, background },
       }
     }
 

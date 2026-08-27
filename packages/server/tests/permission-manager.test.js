@@ -739,7 +739,8 @@ describe('PermissionManager', () => {
       // filesystem/network scope must always prompt, never be rule-whitelisted.
       // mcp_elicitation = a codex MCP connector eliciting the user (#6635) — a
       // connector action (e.g. a GitHub write approval) must always prompt too.
-      const expected = ['Bash', 'Task', 'WebFetch', 'WebSearch', 'shell', 'request_permissions', 'mcp_elicitation']
+      // Task + Agent = the retired and current names for sub-delegation (#7340).
+      const expected = ['Bash', 'Task', 'Agent', 'WebFetch', 'WebSearch', 'shell', 'request_permissions', 'mcp_elicitation']
       for (const tool of expected) {
         assert.ok(NEVER_AUTO_ALLOW.has(tool), `Expected NEVER_AUTO_ALLOW to contain ${tool}`)
       }
