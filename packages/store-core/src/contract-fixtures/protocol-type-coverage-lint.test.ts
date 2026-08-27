@@ -149,7 +149,7 @@ function clientCoverage(): { inApp: (t: string) => boolean; inDash: (t: string) 
 // budget meter); mobile parity is a tracked follow-up under the cited epic.
 const DASHBOARD_ONLY = new Set<string>([
   'git_create_pr_result',       // #6876 in-app PR creation reply — GitPanel "Create PR" flow is dashboard-only for v1; mobile PR-creation UI is a tracked follow-up
-  'session_pr_status',          // #7344 session PR/CI status chip — dashboard-only for the display slice (the mobile app header has no equivalent chip); mobile parity is a tracked follow-up
+  'session_pr_status',          // #7344 session PR/CI status chip — dashboard-only for the display slice (the mobile app header has no equivalent chip); mobile parity is #7425
   'shell_pending_approval',     // #6277 host-local user-shell approval — "waiting for host approval" banner; dashboard-only for v1, mobile parity deferred
   // activity_snapshot / activity_delta removed — the mobile app now feeds them
   // too (#6246/#6247, the Phase-2 mobile-parity fast-follow per epic #5159), so
