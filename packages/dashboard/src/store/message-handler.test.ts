@@ -57,6 +57,7 @@ import {
   MCP_SERVER_OP_PENDING_CAP,
 } from './message-handler'
 import { createEmptySessionState } from './utils'
+import { isLivePermissionPrompt } from '@chroxy/store-core'
 import type { ConnectionState } from './types'
 
 function createMockStore(initial: Partial<ConnectionState>) {
@@ -3583,6 +3584,92 @@ describe('dashboard message-handler dispatch', () => {
       ).not.toThrow();
       // ...and the active session's pending plan is still untouched.
       expect((store.getState() as any).sessionStates.s1.isPlanPending).toBe(true);
+    });
+  });
+
+  // #7410 — the `answered: '(resolved)'` sweep on `history_replay_end` must
+  // target the session the frame is ENDING, not whichever session happens to be
+  // active. Fourth instance of this mis-keying in this pair of files after
+  // #4909 (`stoppedAt`), #7340 (`activeAgents`) and #7402 (`isPlanPending`,
+  // the describe above), and the worst of the four: the predicate is
+  // `type === 'prompt' && !answered`, which matches LIVE prompts as well as
+  // replayed ones. `isLivePermissionPrompt` (store-core) is
+  // `type === 'prompt' && requestId && expiresAt > now && !answered`, so a
+  // stamp of '(resolved)' takes a live prompt out of the pending-permission
+  // surface — and AskUserQuestion emits `type: 'prompt'` too.
+  //
+  // `subscribe_sessions` replays every background session on every reconnect,
+  // so keyed to `activeSessionId` this silently dismissed a permission approval
+  // the user was looking at, every time a second session reconnected.
+  describe("history_replay_end: '(resolved)' sweep targeting (#7410)", () => {
+    const FUTURE = Date.now() + 600_000;
+
+    /** A live, unanswered permission prompt — `isLivePermissionPrompt` is true. */
+    function livePrompt(id: string, requestId: string) {
+      return {
+        id,
+        type: 'prompt',
+        content: 'Allow Write to src/index.ts?',
+        requestId,
+        expiresAt: FUTURE,
+        timestamp: 1,
+      } as any;
+    }
+
+    function seedTwoSessions() {
+      store = createMockStore(
+        baseState({
+          activeSessionId: 's1',
+          sessions: [{ sessionId: 's1', name: 'S1' } as any, { sessionId: 's2', name: 'S2' } as any],
+          sessionStates: {
+            s1: { ...createEmptySessionState(), messages: [livePrompt('p1', 'req-1')] },
+            s2: { ...createEmptySessionState(), messages: [livePrompt('p2', 'req-2')] },
+          },
+        }),
+      );
+      setStore(store);
+    }
+
+    it("a background session's replay-end does not resolve the active session's LIVE prompt", () => {
+      seedTwoSessions();
+      // Positive control (#7409's lesson): prove the fixture really is a live
+      // prompt BEFORE asserting it survives, so a malformed fixture fails the
+      // test instead of satisfying it vacuously.
+      expect(
+        isLivePermissionPrompt((store.getState() as any).sessionStates.s1.messages[0], Date.now()),
+      ).toBe(true);
+
+      handleMessage({ type: 'history_replay_end', sessionId: 's2' }, ctx() as any);
+
+      const s1Prompt = (store.getState() as any).sessionStates.s1.messages[0];
+      expect(s1Prompt.answered).toBeUndefined();
+      expect(isLivePermissionPrompt(s1Prompt, Date.now())).toBe(true);
+    });
+
+    it("stamps the REPLAYED session's own unanswered prompts", () => {
+      seedTwoSessions();
+
+      handleMessage({ type: 'history_replay_end', sessionId: 's2' }, ctx() as any);
+
+      expect((store.getState() as any).sessionStates.s2.messages[0].answered).toBe('(resolved)');
+    });
+
+    it('still stamps the active session when it is the one being replayed', () => {
+      seedTwoSessions();
+
+      handleMessage({ type: 'history_replay_end', sessionId: 's1' }, ctx() as any);
+
+      expect((store.getState() as any).sessionStates.s1.messages[0].answered).toBe('(resolved)');
+      // ...and the background session is left alone, the mirror of the first case.
+      expect((store.getState() as any).sessionStates.s2.messages[0].answered).toBeUndefined();
+    });
+
+    it('falls back to the active session when the frame omits sessionId', () => {
+      seedTwoSessions();
+
+      handleMessage({ type: 'history_replay_end' } as any, ctx() as any);
+
+      expect((store.getState() as any).sessionStates.s1.messages[0].answered).toBe('(resolved)');
     });
   });
 

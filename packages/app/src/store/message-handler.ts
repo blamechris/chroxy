@@ -2546,23 +2546,41 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         } else {
           reconcileReplayEnd(endTargetId, [], endLatestSeq);
         }
+        // Mark all replayed prompts as answered — any prompt in history
+        // has already been resolved by the server.
+        //
+        // #7410 — keyed to `endTargetId`, NOT `activeSessionId`. The predicate
+        // matches LIVE prompts as well as historical ones:
+        // `isLivePermissionPrompt` is `type === 'prompt' && requestId &&
+        // expiresAt > now && !answered`, and AskUserQuestion emits
+        // `type: 'prompt'` too. Keyed to the active session, a BACKGROUND
+        // session's replay-end stamped '(resolved)' on a permission approval
+        // the user was looking at — silently dismissing it — and
+        // `subscribe_sessions` replays every background session, so that
+        // happened on every multi-session reconnect. Fourth instance of this
+        // mis-keying in this pair of files after #4909, #7340 and #7402.
+        //
+        // `endTargetId` already falls back to `activeSessionId` when the frame
+        // omits `sessionId`, so the single-session case is unchanged; and
+        // `updateSession` no-ops on an id with no state, which is the right
+        // outcome for the "session vanished mid-replay" branch above.
+        if (endTargetId) {
+          updateSession(endTargetId, (ss) => {
+            const hasUnansweredPrompts = ss.messages.some(
+              (m) => m.type === 'prompt' && !m.answered
+            );
+            if (!hasUnansweredPrompts) return {};
+            return {
+              messages: ss.messages.map((m) =>
+                m.type === 'prompt' && !m.answered
+                  ? { ...m, answered: '(resolved)' }
+                  : m
+              ),
+            };
+          });
+        }
       }
       _ctx.isSessionSwitchReplay = false;
-      // Mark all replayed prompts as answered — any prompt in history
-      // has already been resolved by the server.
-      updateActiveSession((ss) => {
-        const hasUnansweredPrompts = ss.messages.some(
-          (m) => m.type === 'prompt' && !m.answered
-        );
-        if (!hasUnansweredPrompts) return {};
-        return {
-          messages: ss.messages.map((m) =>
-            m.type === 'prompt' && !m.answered
-              ? { ...m, answered: '(resolved)' }
-              : m
-          ),
-        };
-      });
       break;
 
     // --- User input echoed from other clients ---
