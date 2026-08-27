@@ -5141,28 +5141,35 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         // handed it the ACTIVE session, which is fully initialised. Targeting
         // the replayed session means it can now be handed a partially-built
         // state whose transient slices are still undefined.
-        updateSession(replayTargetId, (ss) =>
-          (ss.activeAgents?.length ?? 0) > 0 ? { activeAgents: [] } : {},
-        );
+        //
+        // #7402 — `isPlanPending`/`planAllowedPrompts` are wiped here, on the
+        // REPLAYED session, for exactly the reasons above. They used to be
+        // wiped via `updateActiveSession`, so the same background-replay burst
+        // cancelled a pending plan approval the user was looking at, on the
+        // very reconnect that was supposed to restore it. #7340 moved
+        // `activeAgents` and deliberately left this alone to keep its blast
+        // radius to the bug it was fixing; this is the follow-up.
+        //
+        // #4466: activeTools is deliberately NOT wiped here. The earlier #4308
+        // wipe rebuilt entries from replayed tool_start events with
+        // startedAt = Date.now(), so the "Running <tool> · Ns" pill restarted
+        // at 1s every time the user switched tabs. The in-flight set is
+        // authoritative (carried in-memory, not derivable from history), so
+        // keeping it intact preserves the elapsed-time clock. tool_result
+        // events that fire during replay still correctly drop resolved entries
+        // via sharedToolResult, and the dedup logic in sharedToolStart prevents
+        // replayed tool_start events from re-adding tools already in
+        // activeTools.
+        updateSession(replayTargetId, (ss) => {
+          const patch: Partial<SessionState> = {};
+          if ((ss.activeAgents?.length ?? 0) > 0) patch.activeAgents = [];
+          if (ss.isPlanPending) {
+            patch.isPlanPending = false;
+            patch.planAllowedPrompts = [];
+          }
+          return patch;
+        });
       }
-      updateActiveSession((ss) => {
-        const patch: Partial<SessionState> = {};
-        // #4466: preserve activeTools through the replay boundary. The
-        // earlier #4308 wipe rebuilt entries from replayed tool_start
-        // events with startedAt = Date.now(), so the "Running <tool> · Ns"
-        // pill restarted at 1s every time the user switched tabs. The
-        // in-flight set is authoritative (carried in-memory, not derivable
-        // from history), so keeping it intact preserves the elapsed-time
-        // clock. tool_result events that fire during replay still
-        // correctly drop resolved entries via sharedToolResult, and the
-        // dedup logic in sharedToolStart prevents replayed tool_start
-        // events from re-adding tools already in activeTools.
-        if (ss.isPlanPending) {
-          patch.isPlanPending = false;
-          patch.planAllowedPrompts = [];
-        }
-        return Object.keys(patch).length > 0 ? patch : {};
-      });
       break;
     }
 

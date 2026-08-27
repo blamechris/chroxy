@@ -2477,18 +2477,24 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         // handed it the ACTIVE session, which is fully initialised. Targeting
         // the replayed session means it can now be handed a partially-built
         // state whose transient slices are still undefined.
-        updateSession(replayTargetId, (ss) =>
-          (ss.activeAgents?.length ?? 0) > 0 ? { activeAgents: [] } : {},
-        );
+        //
+        // #7402 — `isPlanPending`/`planAllowedPrompts` are wiped here, on the
+        // REPLAYED session, for exactly the reasons above. They used to be
+        // wiped via `updateActiveSession`, so the same background-replay burst
+        // cancelled a pending plan approval the user was looking at, on the
+        // very reconnect that was supposed to restore it. #7340 moved
+        // `activeAgents` and deliberately left this alone to keep its blast
+        // radius to the bug it was fixing; this is the follow-up.
+        updateSession(replayTargetId, (ss) => {
+          const patch: Partial<SessionState> = {};
+          if ((ss.activeAgents?.length ?? 0) > 0) patch.activeAgents = [];
+          if (ss.isPlanPending) {
+            patch.isPlanPending = false;
+            patch.planAllowedPrompts = [];
+          }
+          return patch;
+        });
       }
-      updateActiveSession((ss) => {
-        const patch: Partial<SessionState> = {};
-        if (ss.isPlanPending) {
-          patch.isPlanPending = false;
-          patch.planAllowedPrompts = [];
-        }
-        return Object.keys(patch).length > 0 ? patch : {};
-      });
       // #4909 — `session_stopped` is a transient event NOT recorded into
       // per-session history (#4868 wire path), so it isn't replayed on
       // reconnect. But the client-side `stoppedAt`/`stoppedCode` derived
