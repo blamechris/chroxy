@@ -11,7 +11,12 @@
  *
  * This module is the SINGLE SOURCE OF TRUTH for the shape: the JSDoc typedef
  * below, the `CTX_NAMESPACES` list, and `assertCtxShape()` are all derived from
- * the same five buckets. ws-server.js builds the production ctx; tests build a
+ * the same five buckets. Only two of those were ever COUPLED, though —
+ * `nsCtx`'s `FIELD_TO_NS` and `assertCtxShape` both read `CTX_NAMESPACES`,
+ * while the typedef was decorative and drifted silently (seven fields missing,
+ * one present here but absent from the roster — #7403). They are now pinned
+ * against each other by `tests/ws-handler-context-typedef-parity.test.js`, so
+ * this paragraph is enforced rather than aspirational. ws-server.js builds the production ctx; tests build a
  * namespaced mock via `tests/test-helpers.js` and may run it through
  * `assertCtxShape()` so a partial mock fails loudly at construction instead of
  * at the first missing-field read deep inside a handler.
@@ -64,6 +69,13 @@
  * @property {object|null} skillsUsageRecorder - Per-skill usage aggregates (lives on SessionManager).
  * @property {(requestId: string, result: object) => void} resolvePairRequester - Resolve a pending pair request.
  * @property {(requestId: string, reason: string) => void} broadcastPairResolved - Fan-out a pair-resolved notice.
+ * @property {object|null} shellApprovalStore - #6277 host-local user-shell approval store; null in test ctx mocks.
+ * @property {object|null} repoEventStore - #5966 bounded RepoEventStore; null until the first GitHub-webhook delivery lazily creates it.
+ * @property {string|null} webhookPayloadUrl - #6540 GitHub payload URL derived from the live origin.
+ * @property {object|null} repoWebhookDeliveries - #6540 in-memory recent-delivery ring; null until the first delivery.
+ * @property {(value: string|null) => void} setWebhookSecretCache - #6540 refresh the in-process webhook-secret cache.
+ * @property {object|null} orchestrationManager - #6691 OrchestrationManager; null while the feature is off.
+ * @property {object|null} schedulerEngine - Scheduled-task engine; null when scheduling is off.
  *
  * @typedef {Object} WsHandlerRuntime
  * @property {boolean} draining - True while the server is draining for shutdown.
@@ -129,6 +141,12 @@ export const CTX_NAMESPACES = {
     'pushManager',
     'pairingManager',
     'checkpointManager',
+    // #6006: the token lifecycle manager, exposed so the primary-gated
+    // `revoke_token` handler can fire the operator panic button. Null under
+    // --no-auth. It was on the production ctx and in the typedef but NOT in
+    // this roster (#7403) — so `assertCtxShape({deep:true})` never required it
+    // and `nsCtx()` never routed it. The typedef was the correct side.
+    'tokenManager',
     'devPreview',
     'webTaskManager',
     'environmentManager',
