@@ -42,9 +42,12 @@ vi.mock('./hooks/useVoiceInput', () => ({
 // "Copied!" tooltip). Both are declared via `vi.hoisted()` because
 // `vi.mock()` factories are hoisted to the top of the file before any
 // top-level `const`, so a plain const would hit a TDZ ReferenceError.
-const { clipboardWriteTextMock, addServerErrorMock } = vi.hoisted(() => ({
+const { clipboardWriteTextMock, addServerErrorMock, requestSessionPrStatusMock } = vi.hoisted(() => ({
   clipboardWriteTextMock: vi.fn<(text: string) => Promise<boolean>>(() => Promise.resolve(true)),
   addServerErrorMock: vi.fn<(message: string, action?: unknown, severity?: unknown) => void>(),
+  // #7344 — shared with the store mock below so the auto-pull effect's tests can
+  // assert on it. Same TDZ reason as the two above.
+  requestSessionPrStatusMock: vi.fn<(sessionId?: string) => boolean>(),
 }))
 vi.mock('./utils/clipboard', () => ({
   writeText: (text: string) => clipboardWriteTextMock(text),
@@ -264,8 +267,10 @@ vi.mock('./store/connection', () => {
     // #7344 — the App-level effect pulls the session's PR/CI status once per
     // (session, connection) for the header chip. The base mock exposes the
     // action plus its two session-keyed slices so the effect's selectors don't
-    // crash on a partial store shape.
-    requestSessionPrStatus: vi.fn(),
+    // crash on a partial store shape. Hoisted (not an inline vi.fn()) so the
+    // effect's own tests can assert it was called — deleting that effect used to
+    // leave the whole suite green.
+    requestSessionPrStatus: requestSessionPrStatusMock,
     sessionPrStatus: {},
     sessionPrStatusLoading: {},
   }
@@ -299,6 +304,8 @@ vi.mock('zustand/react/shallow', () => ({
 beforeEach(() => {
   stateOverrides = {}
   capturedOnRestart = null
+  // #7344 — reset so each case only sees the auto-pull it triggered.
+  requestSessionPrStatusMock.mockReset()
   // #4673 — reset the clipboard mock between tests so per-case rejection
   // overrides don't bleed through.
   clipboardWriteTextMock.mockReset()
@@ -350,6 +357,37 @@ describe('App', () => {
     render(<App />)
     expect(screen.queryByTestId('welcome-screen')).not.toBeInTheDocument()
     expect(screen.getByTestId('input-bar')).toBeInTheDocument()
+  })
+
+  // #7344 — the auto-pull that makes the header CI chip appear without a click.
+  // Deleting the effect entirely used to leave all 116 App tests green, so these
+  // two pin both directions.
+  describe('session PR/CI status auto-pull (#7344)', () => {
+    const connectedWithSession = {
+      connectionPhase: 'connected',
+      sessions: [{ sessionId: 's1', name: 'Test', cwd: '/tmp', type: 'cli', hasTerminal: true, model: null, permissionMode: null, isBusy: false, createdAt: Date.now(), conversationId: null }],
+      activeSessionId: 's1',
+    }
+
+    it('requests the active session\'s PR/CI status once connected', () => {
+      stateOverrides = connectedWithSession
+      render(<App />)
+      expect(requestSessionPrStatusMock).toHaveBeenCalledWith('s1')
+    })
+
+    it('does NOT request it while disconnected', () => {
+      // The negative half: without this, an effect that fired unconditionally
+      // would satisfy the assertion above and spam a dead socket.
+      stateOverrides = { ...connectedWithSession, connectionPhase: 'disconnected' }
+      render(<App />)
+      expect(requestSessionPrStatusMock).not.toHaveBeenCalled()
+    })
+
+    it('does NOT request it when there is no active session', () => {
+      stateOverrides = { connectionPhase: 'connected', sessions: [], activeSessionId: null }
+      render(<App />)
+      expect(requestSessionPrStatusMock).not.toHaveBeenCalled()
+    })
   })
 
   it('opens shortcut help when ? is pressed', () => {

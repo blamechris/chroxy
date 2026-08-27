@@ -44,9 +44,9 @@
  * ## Reading the result
  *
  * `pr: null` with `reason: null` is the quiet negative — this branch definitively
- * has no open PR. `pr: null` with a `reason` means the survey could not find out.
- * Those must render differently; "cannot determine" must never read as an
- * implied green.
+ * has no open PR, on `origin` OR (when `origin` is a fork) on its upstream.
+ * `pr: null` with a `reason` means the survey could not find out. Those must
+ * render differently; "cannot determine" must never read as an implied green.
  *
  * Every external interaction is injectable so tests never touch real git/gh:
  *   - `_execFile(file, args, opts)` — async, resolves `{ stdout, stderr }`.
@@ -68,11 +68,21 @@ const EXEC_MAX_BUFFER = 8 * 1024 * 1024
 /** Shared exec options for every probe (see EXEC_TIMEOUT_MS's rationale). */
 const EXEC_OPTS = { timeout: EXEC_TIMEOUT_MS, maxBuffer: EXEC_MAX_BUFFER }
 
+/**
+ * How many base-repo rows to consider when disambiguating a fork's PR by head
+ * owner. One branch name can be open from several forks at once, so this is
+ * deliberately more than 1 — but bounded, since it is a fallback path.
+ */
+export const FORK_QUERY_LIMIT = 30
+
 /** Reason when the session has no working directory to resolve a repo from. */
 export const NO_CWD_REASON = 'session has no working directory'
 
 /** Reason when the session's cwd is not inside a git repository. */
 export const NOT_A_REPO_REASON = 'session working directory is not a git repository'
+
+/** Reason when the session's cwd no longer exists (e.g. a reaped worktree). */
+export const CWD_MISSING_REASON = 'session working directory no longer exists'
 
 /** Reason when the session's checkout is on a detached HEAD (no branch to match a PR to). */
 export const DETACHED_HEAD_REASON = 'detached HEAD — no branch to resolve a pull request from'
@@ -86,8 +96,16 @@ export const GH_MISSING_REASON = 'gh CLI not found on PATH — install GitHub CL
 /** Reason when the branch name is not safe to place in an option-parsed argv slot. */
 export const UNSAFE_BRANCH_REASON = 'branch name cannot be passed safely to gh'
 
-/** The `--json` fields requested from `gh pr list`. One call, one head SHA. */
+/**
+ * The `--json` fields requested from `gh pr list`. One call, one head SHA.
+ *
+ * `headRepositoryOwner` is here for the fork path below: a base-repo query
+ * matches on the bare branch name, and two forks can both have a `fix-typos`
+ * branch open against the same base — so the row must be disambiguated by who
+ * owns the head, not taken on `--limit 1`.
+ */
 export const PR_JSON_FIELDS = [
+  'headRepositoryOwner',
   'number',
   'title',
   'url',
@@ -98,6 +116,33 @@ export const PR_JSON_FIELDS = [
   'reviewDecision',
   'statusCheckRollup',
 ].join(',')
+
+/**
+ * Reduce every absolute path in a degradation reason to its basename.
+ *
+ * This reply is session-scoped rather than host-scoped, so unlike the Control
+ * Room surveys it reaches a pairing-bound (share-a-session) client, which has no
+ * business learning host filesystem layout. `execFile`'s own error message is
+ * `Command failed: /Users/<name>/.../gh pr list …`.
+ *
+ * Deliberately NOT "strip the one path we resolved": that only removes the path
+ * it was told about, and a message can carry others (a cwd, a config path, a
+ * second binary). Rewriting every path-shaped token is the general form, and it
+ * cannot be defeated by a path the caller did not anticipate.
+ *
+ * @param {string} reason
+ * @returns {string}
+ */
+export function redactAbsolutePaths(reason) {
+  if (typeof reason !== 'string') return reason
+  // Any run of non-space characters containing a '/' after a leading '/' —
+  // i.e. an absolute path with at least one directory — collapses to its
+  // basename. A bare '/' or a lone segment is left alone.
+  return reason.replace(/\/\S*\/\S*/g, match => {
+    const base = match.slice(match.lastIndexOf('/') + 1)
+    return base.length > 0 ? base : '/'
+  })
+}
 
 /** Zeroed check counts — also the shape returned for a head with no checks. */
 function emptyCounts() {
@@ -268,7 +313,11 @@ async function resolveBranch(execFn, cwd) {
   let stdout
   try {
     ;({ stdout } = await execFn('git', ['branch', '--show-current'], { ...EXEC_OPTS, cwd }))
-  } catch {
+  } catch (err) {
+    // A worktree can be reaped out from under a live session (the harness GCs
+    // `.claude/worktrees/` on its own schedule), and "not a git repository" would
+    // be a misleading way to say the directory is simply gone.
+    if (err && typeof err === 'object' && err.code === 'ENOENT') return { reason: CWD_MISSING_REASON }
     return { reason: NOT_A_REPO_REASON }
   }
   const branch = String(stdout == null ? '' : stdout).trim()
@@ -287,6 +336,35 @@ async function resolveRepo(execFn, cwd) {
   } catch {
     return null
   }
+}
+
+/**
+ * Resolve the upstream this repo was forked from, or null when it is not a fork
+ * (or the lookup fails — absence is signal, and the caller then reports the
+ * quiet negative it already had).
+ *
+ * @returns {Promise<{owner: string, repo: string}|null>}
+ */
+async function resolveParentRepo(execFn, ghPath, target, cwd) {
+  let stdout
+  try {
+    ;({ stdout } = await execFn(ghPath, ['repo', 'view', `${target.owner}/${target.repo}`, '--json', 'parent'], { ...EXEC_OPTS, cwd }))
+  } catch {
+    return null
+  }
+  let parsed
+  try {
+    parsed = JSON.parse(String(stdout == null ? '' : stdout))
+  } catch {
+    return null
+  }
+  const owner = parsed?.parent?.owner?.login
+  const repo = parsed?.parent?.name
+  if (typeof owner !== 'string' || typeof repo !== 'string') return null
+  // These come from GitHub's own JSON rather than a client, but they go straight
+  // into an option-parsed `-R` slot, so they are checked like any other argv datum.
+  if (!isSafeArgvValue(owner) || !isSafeArgvValue(repo)) return null
+  return { owner, repo }
 }
 
 /** Probe the PATH for `gh`. Any failure resolves null (the survey then degrades). */
@@ -361,7 +439,12 @@ export async function surveySessionPrStatus({ sessionId, cwd, _execFile = execFi
   try {
     ;({ stdout } = await _execFile(ghPath, args, { ...EXEC_OPTS, cwd }))
   } catch (err) {
-    snapshot.reason = execFailureReason(err, 'gh pr list')
+    // Deliberately NOT the raw message fallback. Unlike the Control Room
+    // surveys, this reply reaches a pairing-bound (share-a-session) client, and
+    // execFile's own message is `Command failed: <absolute gh path> ...` — a
+    // host filesystem path, often including the operator's username. gh's first
+    // stderr line is the useful part and carries no such path.
+    snapshot.reason = redactAbsolutePaths(execFailureReason(err, 'gh pr list'))
     return snapshot
   }
 
@@ -377,9 +460,54 @@ export async function surveySessionPrStatus({ sessionId, cwd, _execFile = execFi
     return snapshot
   }
 
-  // An empty array is the QUIET negative: this branch has no open PR. It leaves
-  // `reason` null, which is what distinguishes it from "could not determine".
-  if (rows.length === 0) return snapshot
+  // An empty array is NOT yet the quiet negative — it is also what a FORK
+  // checkout looks like. A cross-repository PR is listed on the BASE repo, not
+  // on the head repo, so `origin` (the fork) legitimately reports nothing while
+  // an open PR with running CI exists. Reporting "no PR" there would be
+  // confidently wrong in exactly the "lost in no man's land" case #7344 exists
+  // to remove.
+  //
+  // Measured against gh 2.97.0 before writing this, because the obvious fix is
+  // wrong: `--head owner:branch` against the base repo returns NOTHING. The base
+  // repo must be queried with the BARE branch name, and the row then
+  // disambiguated by `headRepositoryOwner` — two forks can have the same branch
+  // name open against one base, so `--limit 1` alone could return someone
+  // else's PR.
+  //
+  // Only a fork pays these two extra calls; the common same-repo case still
+  // makes exactly one.
+  if (rows.length === 0) {
+    const parent = await resolveParentRepo(_execFile, ghPath, target, cwd)
+    if (!parent) return snapshot
+
+    let parentRows
+    try {
+      const { stdout: parentOut } = await _execFile(ghPath, [
+        'pr', 'list',
+        '-R', `${parent.owner}/${parent.repo}`,
+        '--head', snapshot.branch,
+        '--state', 'open',
+        '--limit', String(FORK_QUERY_LIMIT),
+        '--json', PR_JSON_FIELDS,
+      ], { ...EXEC_OPTS, cwd })
+      parentRows = JSON.parse(String(parentOut == null ? '' : parentOut))
+    } catch {
+      // The fork lookup is a best-effort widening of an already-empty result, so
+      // a failure here falls back to the quiet negative rather than downgrading
+      // a usable answer to "cannot determine".
+      return snapshot
+    }
+    if (!Array.isArray(parentRows)) return snapshot
+
+    const mine = parentRows.find(row => row?.headRepositoryOwner?.login === target.owner)
+    if (!mine) return snapshot
+
+    const forkNormalised = normalisePrRow(mine)
+    if (!forkNormalised) return snapshot
+    // `repo` names the repo the PR actually lives on, which is what the user
+    // needs in order to find it — for a fork that is the base, not `origin`.
+    return { ...snapshot, repo: { owner: parent.owner, name: parent.repo }, ...forkNormalised }
+  }
 
   const normalised = normalisePrRow(rows[0])
   if (!normalised) {

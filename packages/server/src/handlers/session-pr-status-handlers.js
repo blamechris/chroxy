@@ -27,6 +27,13 @@
  * The authority check runs BEFORE the session lookup, so a bound client cannot
  * use the difference between "not authorised" and "not found" to probe which
  * session ids exist.
+ *
+ * NOTE the binding check below duplicates the one in `handler-utils.js`'s
+ * `resolveSession`. That is deliberate — `resolveSession` collapses "not
+ * authorised" and "not found" into a single `null`, and this handler must keep
+ * them apart AND check authority first — but it means a change to the binding
+ * rule there will not reach here. `resolveSession` carries the matching
+ * back-reference. See docs/security/bearer-token-authority.md §4.
  */
 import { surveySessionPrStatus } from '../session-pr-status.js'
 import { createLogger } from '../logger.js'
@@ -44,11 +51,41 @@ export const NO_SESSION_REASON = 'no such session'
 export const IN_PROGRESS_REASON = 'a pull-request status survey is already running for this client'
 
 /**
- * One survey per client at a time. `gh` + git spawn subprocesses, so an
- * un-guarded client could fan out a subprocess per click; the guard is keyed on
- * the client object (a WeakSet, so a disconnected client is collected).
+ * One survey per (client, session) at a time. `gh` + git spawn subprocesses, so
+ * an un-guarded client could fan out a subprocess per click.
+ *
+ * Keyed on the SESSION as well as the client, deliberately. A client-global
+ * guard conflated "this client is spamming Refresh" with "this client switched
+ * tabs while a survey was running" — and the second is not abuse. It produced a
+ * real defect: switching from session A to B mid-survey had B's request refused
+ * on account of A's, and because every reply is stored under its own session id,
+ * B's chip was left reading "CI unavailable" with nothing scheduled to retry it.
+ *
+ * A WeakMap keyed on the client keeps the disconnected-client collection
+ * property the WeakSet had; the inner Set is bounded by the client's session
+ * count, and entries are removed in the `finally` below.
  */
-const inFlight = new WeakSet()
+const inFlight = new WeakMap()
+
+/** True when this client already has a survey running for `sessionId`. */
+function isInFlight(client, sessionId) {
+  return inFlight.get(client)?.has(sessionId) === true
+}
+
+/** Mark `sessionId` in flight for this client. */
+function markInFlight(client, sessionId) {
+  const set = inFlight.get(client)
+  if (set) set.add(sessionId)
+  else inFlight.set(client, new Set([sessionId]))
+}
+
+/** Release `sessionId` for this client, dropping the bag when it empties. */
+function clearInFlight(client, sessionId) {
+  const set = inFlight.get(client)
+  if (!set) return
+  set.delete(sessionId)
+  if (set.size === 0) inFlight.delete(client)
+}
 
 /** Build the degraded reply used by every non-survey path. */
 function degraded({ requestId, sessionId, reason, now = new Date() }) {
@@ -92,7 +129,7 @@ export async function handleSessionPrStatusRequest(ws, client, msg, ctx) {
     return
   }
 
-  if (inFlight.has(client)) {
+  if (isInFlight(client, targetSessionId)) {
     ctx.transport.send(ws, degraded({ requestId, sessionId: targetSessionId, reason: IN_PROGRESS_REASON }))
     return
   }
@@ -102,7 +139,7 @@ export async function handleSessionPrStatusRequest(ws, client, msg, ctx) {
   // never shells out to real git/gh.
   const surveyFn = typeof ctx?.surveySessionPrStatus === 'function' ? ctx.surveySessionPrStatus : surveySessionPrStatus
 
-  inFlight.add(client)
+  markInFlight(client, targetSessionId)
   try {
     const snapshot = await surveyFn({ sessionId: targetSessionId, cwd: entry.cwd })
     ctx.transport.send(ws, { type: 'session_pr_status', requestId, ...snapshot })
@@ -117,7 +154,7 @@ export async function handleSessionPrStatusRequest(ws, client, msg, ctx) {
       reason: `pull-request status survey failed: ${message}`,
     }))
   } finally {
-    inFlight.delete(client)
+    clearInFlight(client, targetSessionId)
   }
 }
 

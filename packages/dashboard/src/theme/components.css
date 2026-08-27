@@ -13503,9 +13503,23 @@ button.sidebar-token-view-session-row:hover {
 }
 
 .session-ci-chip__pr {
+  /* The chip's own 44px min-height does not stretch a centred child, so the
+     link needs its own — CLAUDE.md's 44pt floor is per CONTROL, and this one is
+     tappable. The dashboard has no hitSlop equivalent, so grow the box. */
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 2px;
   font-weight: 600;
   color: var(--text-link);
   text-decoration: none;
+}
+
+.session-ci-chip__draft {
+  color: var(--text-muted);
+  text-transform: uppercase;
+  font-size: var(--text-xs);
+  letter-spacing: 0.04em;
 }
 
 a.session-ci-chip__pr:hover,

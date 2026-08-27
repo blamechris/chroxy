@@ -159,6 +159,41 @@ describe('#7344 — session_pr_status_request handler', () => {
     assert.equal(ctx._send.calls[1][1].reason, null)
   })
 
+  it('does NOT let one session\'s in-flight survey refuse a DIFFERENT session', async () => {
+    // The guard is per (client, session), not per client. A tab switch mid-survey
+    // is not abuse, and refusing it left the second session's chip reading
+    // "CI unavailable" with nothing scheduled to retry — because every reply is
+    // stored under its own session id, so the refusal clobbered that session.
+    let release
+    const gate = new Promise(resolve => { release = resolve })
+    ctx = makeCtx({ surveySessionPrStatus: createSpy(async ({ sessionId }) => { await gate; return { ...SAMPLE, sessionId } }) })
+    const client = { id: 'c1' }
+
+    const first = handler(ws, client, { type: 'session_pr_status_request', sessionId: 'sess-1' }, ctx)
+    const second = handler(ws, client, { type: 'session_pr_status_request', sessionId: 'sess-2' }, ctx)
+
+    // Neither has replied — the second is running its OWN survey, not refused.
+    assert.equal(ctx._send.callCount, 0)
+    release()
+    await Promise.all([first, second])
+
+    assert.equal(ctx._send.callCount, 2)
+    for (const call of ctx._send.calls) {
+      assert.equal(call[1].reason, null, 'neither session may be refused on account of the other')
+    }
+    assert.equal(ctx.surveySessionPrStatus.callCount, 2)
+  })
+
+  it('releases the per-session guard so the SAME session can be re-surveyed after one completes', async () => {
+    // Positive control for the release: without it, the per-session guard would
+    // simply never clear and the second request would be refused.
+    const client = { id: 'c1' }
+    await handler(ws, client, { type: 'session_pr_status_request', sessionId: 'sess-1' }, ctx)
+    await handler(ws, client, { type: 'session_pr_status_request', sessionId: 'sess-1' }, ctx)
+    assert.equal(ctx._send.callCount, 2)
+    assert.equal(ctx._send.calls[1][1].reason, null)
+  })
+
   it('releases the in-flight guard after a survey THROWS, and still answers', async () => {
     // Without the finally, one thrown survey would wedge the client's chip for
     // the life of the connection.

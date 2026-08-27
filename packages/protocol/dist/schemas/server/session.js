@@ -667,9 +667,14 @@ export const ServerStatuslineOutputSchema = z.object({
 //     thread. `mergeStateStatus: 'UNKNOWN'` means GitHub is recomputing after a
 //     base change, not that a blocker exists.
 //   - `pr: null` + `reason: null` is the quiet negative — this branch has no open
-//     PR. `pr: null` + a `reason` means the survey could not find out (no `gh`,
-//     no GitHub remote, detached HEAD, a failed call). "Cannot determine" must
-//     render as cannot-determine, never as an implied green.
+//     PR on `origin`, nor (when `origin` is a fork) on its upstream. `pr: null` +
+//     a `reason` means the survey could not find out (no `gh`, no GitHub remote,
+//     detached HEAD, a failed call). "Cannot determine" must render as
+//     cannot-determine, never as an implied green.
+//   - `repo` names the repo the PR actually LIVES on, which for a fork checkout
+//     is the upstream rather than the session's `origin` — a cross-repository PR
+//     is listed on the base repo, so that is where it was found and where the
+//     user will find it.
 export const SessionPrCheckCountsSchema = z.object({
     total: z.number().int().nonnegative(),
     passed: z.number().int().nonnegative(),

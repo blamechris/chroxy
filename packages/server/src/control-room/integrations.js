@@ -257,7 +257,6 @@ async function surveyCache(statFn, repoPath) {
   return { present: true, sizeBytes, lastModified }
 }
 
-
 /**
  * #5500: parse the human-readable `repo-memory index <root>` report into the
  * `IntegrationActionCountsSchema` shape. The CLI has no `--json` for index —

@@ -11,6 +11,10 @@ import {
   NO_GITHUB_REMOTE_REASON,
   GH_MISSING_REASON,
   UNSAFE_BRANCH_REASON,
+  CWD_MISSING_REASON,
+  redactAbsolutePaths,
+  PR_JSON_FIELDS,
+  FORK_QUERY_LIMIT,
 } from '../src/session-pr-status.js'
 import { ServerSessionPrStatusSchema } from '@chroxy/protocol'
 
@@ -40,13 +44,18 @@ function fakeExec(table, calls = []) {
   }
 }
 
+/** The exact `--json` field list the survey requests, so tables key off one source. */
+const FIELDS = PR_JSON_FIELDS
+
 /** The happy-path exec table; `prListJson` is the `gh pr list` stdout. */
-function happyTable(prListJson, branch = 'feat/x') {
+function happyTable(prListJson, branch = 'feat/x', origin = 'blamechris/chroxy') {
   return {
     'git branch --show-current': `${branch}\n`,
-    'git remote get-url origin': 'git@github.com:blamechris/chroxy.git\n',
+    'git remote get-url origin': `git@github.com:${origin}.git\n`,
     'which gh': '/usr/local/bin/gh\n',
-    [`/usr/local/bin/gh pr list -R blamechris/chroxy --head ${branch} --state open --limit 1 --json number,title,url,headRefOid,isDraft,mergeable,mergeStateStatus,reviewDecision,statusCheckRollup`]: prListJson,
+    [`/usr/local/bin/gh pr list -R ${origin} --head ${branch} --state open --limit 1 --json ${FIELDS}`]: prListJson,
+    // Default: not a fork. Tests that exercise the fork path override this.
+    [`/usr/local/bin/gh repo view ${origin} --json parent`]: JSON.stringify({ parent: null }),
   }
 }
 
@@ -62,6 +71,7 @@ function prRow(overrides = {}) {
     url: 'https://github.com/blamechris/chroxy/pull/7419',
     headRefOid: 'abc1234def',
     isDraft: false,
+    headRepositoryOwner: { login: 'blamechris' },
     mergeable: 'MERGEABLE',
     mergeStateStatus: 'CLEAN',
     reviewDecision: 'APPROVED',
@@ -140,6 +150,16 @@ describe('#7344 — session PR/CI status survey', () => {
 
     it('a COMPLETED CheckRun with NO conclusion is unknown, not a pass', () => {
       assert.equal(bucketRollupEntry({ __typename: 'CheckRun', status: 'COMPLETED', conclusion: null }), 'unknown')
+    })
+
+    it('dispatches on the SHAPE when __typename is absent', () => {
+      // Live gh always emits __typename, so this fallback is defensive — but it
+      // is the branch that picks between the CheckRun and StatusContext
+      // grammars, and picking wrong silently mis-buckets every entry.
+      assert.equal(bucketRollupEntry({ state: 'FAILURE' }), 'failed')
+      assert.equal(bucketRollupEntry({ state: 'SUCCESS' }), 'passed')
+      assert.equal(bucketRollupEntry({ status: 'COMPLETED', conclusion: 'FAILURE' }), 'failed')
+      assert.equal(bucketRollupEntry({ status: 'IN_PROGRESS' }), 'pending')
     })
 
     it('a non-object, a null and an unrecognised __typename are all unknown', () => {
@@ -300,6 +320,170 @@ describe('#7344 — session PR/CI status survey', () => {
       })
       const ghCalls = calls.filter(c => c.args[0] === 'pr')
       assert.equal(ghCalls.length, 1, 'a second call could straddle a push and mix two heads')
+    })
+  })
+
+  describe('fork checkouts — an empty origin result is not yet a negative', () => {
+    // A cross-repository PR is listed on the BASE repo, not the head repo, so a
+    // fork checkout's `origin` legitimately reports nothing while an open PR
+    // with running CI exists. Reporting "no PR" there is the confidently-wrong
+    // answer this path exists to prevent.
+    //
+    // The shapes below are what gh 2.97.0 actually returns — measured before the
+    // code was written, because the obvious fix is WRONG: `--head owner:branch`
+    // against the base repo returns [].
+    function forkTable({ baseRows, branch = 'fix-typos' } = {}) {
+      const table = happyTable('[]', branch, 'MsfPablo/cli')
+      table[`/usr/local/bin/gh repo view MsfPablo/cli --json parent`] =
+        JSON.stringify({ parent: { name: 'cli', owner: { login: 'cli' } } })
+      table[`/usr/local/bin/gh pr list -R cli/cli --head ${branch} --state open --limit ${FORK_QUERY_LIMIT} --json ${FIELDS}`] = baseRows
+      return table
+    }
+
+    it('finds the PR on the upstream when origin is a fork', async () => {
+      const row = prRow({ number: 14245, headRepositoryOwner: { login: 'MsfPablo' } })
+      const snap = await surveySessionPrStatus({
+        sessionId: 's1', cwd: '/repo',
+        _execFile: fakeExec(forkTable({ baseRows: JSON.stringify([row]) })),
+      })
+      assert.equal(snap.pr.number, 14245)
+      assert.equal(snap.reason, null)
+      // `repo` names where the PR actually lives, which is where the user will
+      // find it — the upstream, not the session's origin.
+      assert.deepEqual(snap.repo, { owner: 'cli', name: 'cli' })
+    })
+
+    it('picks the row whose HEAD OWNER matches, not merely the first', async () => {
+      // Two forks with the same branch name open against one base is the reason
+      // the base query cannot just take --limit 1.
+      const mine = prRow({ number: 14245, headRepositoryOwner: { login: 'MsfPablo' } })
+      const theirs = prRow({ number: 999, headRepositoryOwner: { login: 'SomeoneElse' } })
+      const snap = await surveySessionPrStatus({
+        sessionId: 's1', cwd: '/repo',
+        _execFile: fakeExec(forkTable({ baseRows: JSON.stringify([theirs, mine]) })),
+      })
+      assert.equal(snap.pr.number, 14245, 'must not return another fork\'s PR for the same branch name')
+    })
+
+    it('stays a quiet negative when the upstream has no PR from this fork', async () => {
+      const theirs = prRow({ number: 999, headRepositoryOwner: { login: 'SomeoneElse' } })
+      const snap = await surveySessionPrStatus({
+        sessionId: 's1', cwd: '/repo',
+        _execFile: fakeExec(forkTable({ baseRows: JSON.stringify([theirs]) })),
+      })
+      assert.equal(snap.pr, null)
+      assert.equal(snap.reason, null)
+    })
+
+    it('makes NO extra calls when origin is not a fork and DOES find a PR', async () => {
+      // The common case must still cost exactly one `gh pr list` — the fork path
+      // is a fallback on an empty result, not a tax on every survey.
+      const calls = []
+      await surveySessionPrStatus({
+        sessionId: 's1', cwd: '/repo',
+        _execFile: fakeExec(happyTable(JSON.stringify([prRow()])), calls),
+      })
+      const ghCalls = calls.filter(c => c.file === '/usr/local/bin/gh')
+      assert.equal(ghCalls.length, 1)
+      assert.equal(ghCalls[0].args[0], 'pr')
+    })
+
+    it('falls back to the quiet negative when the parent lookup fails', async () => {
+      // A best-effort widening of an already-empty result must not downgrade it
+      // to "cannot determine".
+      const table = happyTable('[]', 'feat/x', 'me/chroxy')
+      table['/usr/local/bin/gh repo view me/chroxy --json parent'] = new Error('boom')
+      const snap = await surveySessionPrStatus({ sessionId: 's1', cwd: '/repo', _execFile: fakeExec(table) })
+      assert.equal(snap.pr, null)
+      assert.equal(snap.reason, null)
+    })
+
+    it('never puts an option-parseable parent owner/name into an argv slot', async () => {
+      // Asserting only on the SNAPSHOT here is vacuous, and a mutation proved
+      // it: with the guard removed the survey still returns pr:null/reason:null,
+      // because the unsafe call simply misses the fixture table and degrades the
+      // same way. Success and not-checking looked identical — the exact shape
+      // docs/false-safety-guards.md catalogues. So assert on the ARGV instead:
+      // the observable that actually differs is whether the call is MADE.
+      const calls = []
+      const table = happyTable('[]', 'feat/x', 'me/chroxy')
+      table['/usr/local/bin/gh repo view me/chroxy --json parent'] =
+        JSON.stringify({ parent: { name: 'cli', owner: { login: '--upload-file' } } })
+      await surveySessionPrStatus({ sessionId: 's1', cwd: '/repo', _execFile: fakeExec(table, calls) })
+
+      const listCalls = calls.filter(c => c.args[0] === 'pr' && c.args.includes('-R'))
+      for (const call of listCalls) {
+        const target = call.args[call.args.indexOf('-R') + 1]
+        assert.ok(!target.startsWith('-'), `built an option-parseable -R target: ${target}`)
+        assert.ok(!target.includes('--upload-file'), `used the rejected parent owner: ${target}`)
+      }
+    })
+
+    it('positive control: a SAFE parent owner/name IS queried', async () => {
+      // Without this, the assertion above would also pass against a survey that
+      // never made a fork query at all.
+      const calls = []
+      const row = prRow({ number: 42, headRepositoryOwner: { login: 'me' } })
+      const table = happyTable('[]', 'feat/x', 'me/chroxy')
+      table['/usr/local/bin/gh repo view me/chroxy --json parent'] =
+        JSON.stringify({ parent: { name: 'chroxy', owner: { login: 'blamechris' } } })
+      table[`/usr/local/bin/gh pr list -R blamechris/chroxy --head feat/x --state open --limit ${FORK_QUERY_LIMIT} --json ${FIELDS}`] = JSON.stringify([row])
+
+      const snap = await surveySessionPrStatus({ sessionId: 's1', cwd: '/repo', _execFile: fakeExec(table, calls) })
+      assert.equal(snap.pr.number, 42)
+      const targets = calls.filter(c => c.args.includes('-R')).map(c => c.args[c.args.indexOf('-R') + 1])
+      assert.ok(targets.includes('blamechris/chroxy'), `expected the parent to be queried, got ${JSON.stringify(targets)}`)
+    })
+  })
+
+  describe('the reply reaches a pairing-bound client, so it must not leak host layout', () => {
+    it('strips the absolute gh path out of a degradation reason', async () => {
+      // execFile's own message is `Command failed: /Users/<name>/... pr list ...`.
+      // Unlike the Control Room surveys this reply is session-scoped, so a
+      // share-a-session client would otherwise learn the operator's home path.
+      const table = { ...happyTable('[]') }
+      const key = Object.keys(table).find(k => k.includes('pr list'))
+      table[key] = new Error('Command failed: /Users/someone/bin/gh pr list -R x/y')
+      const snap = await surveySessionPrStatus({ sessionId: 's1', cwd: '/repo', _execFile: fakeExec(table) })
+      assert.ok(!snap.reason.includes('/Users/someone'), `reason leaked a host path: ${snap.reason}`)
+      assert.ok(snap.reason.includes('gh'), 'the binary name should survive redaction')
+    })
+
+    it('redacts EVERY absolute path, not just the binary it resolved', () => {
+      // The first version stripped only the resolved gh path, which a message
+      // carrying any OTHER path (a cwd, a config file, a second binary) defeats.
+      const out = redactAbsolutePaths('ENOENT /Users/a/b/c and /opt/homebrew/bin/gh')
+      assert.ok(!out.includes('/Users/a'), out)
+      assert.ok(!out.includes('/opt/homebrew'), out)
+    })
+
+    it('leaves a reason with no paths in it untouched', () => {
+      // Positive control: a redactor that mangled everything would pass the
+      // negative assertions above for the wrong reason.
+      assert.equal(redactAbsolutePaths('gh pr list failed: gh: not authenticated'), 'gh pr list failed: gh: not authenticated')
+      assert.equal(redactAbsolutePaths('timeout after 20000ms'), 'timeout after 20000ms')
+    })
+
+    it('positive control: a stderr-carrying failure still reports gh\'s own message', async () => {
+      const table = { ...happyTable('[]') }
+      const key = Object.keys(table).find(k => k.includes('pr list'))
+      table[key] = Object.assign(new Error('exit 1'), { stderr: 'gh: not authenticated\n' })
+      const snap = await surveySessionPrStatus({ sessionId: 's1', cwd: '/repo', _execFile: fakeExec(table) })
+      assert.equal(snap.reason, 'gh pr list failed: gh: not authenticated')
+    })
+
+    it('reports a vanished working directory distinctly from a non-repo one', async () => {
+      const gone = await surveySessionPrStatus({
+        sessionId: 's1', cwd: '/repo',
+        _execFile: fakeExec({ 'git branch --show-current': Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' }) }),
+      })
+      assert.equal(gone.reason, CWD_MISSING_REASON)
+
+      const notRepo = await surveySessionPrStatus({
+        sessionId: 's1', cwd: '/repo',
+        _execFile: fakeExec({ 'git branch --show-current': new Error('not a git repository') }),
+      })
+      assert.equal(notRepo.reason, NOT_A_REPO_REASON)
     })
   })
 

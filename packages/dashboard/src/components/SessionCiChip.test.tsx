@@ -47,6 +47,20 @@ describe('formatChecks', () => {
       .toBe('3 failed / 5 pending')
   })
 
+  it('counts skipped checks as settled, so an all-skipped rollup is not "0/5 green"', () => {
+    // Skipped checks satisfy branch protection, and this repo's path-filtered
+    // jobs make a largely-skipped rollup common.
+    expect(formatChecks({ state: 'success', counts: { total: 5, passed: 0, failed: 0, pending: 0, skipped: 5, unknown: 0 } }))
+      .toBe('5/5 green')
+  })
+
+  it('keeps the unrecognised count visible in the pending branch', () => {
+    // The unknown bucket exists to surface entries the server could not classify.
+    // Omitting it from the label hid it in the branch that most needs it.
+    expect(formatChecks({ state: 'pending', counts: { total: 10, passed: 5, failed: 0, pending: 2, skipped: 0, unknown: 3 } }))
+      .toBe('5/10 · 2 pending · 3 unrecognised')
+  })
+
   it('reports a failing run', () => {
     expect(formatChecks({ state: 'failure', counts: { total: 4, passed: 1, failed: 3, pending: 0, skipped: 0, unknown: 0 } }))
       .toBe('3 failed')
@@ -64,8 +78,14 @@ describe('formatMergeState', () => {
       .toBe('merge: blocked')
   })
 
-  it('returns null when there is nothing to say', () => {
-    expect(formatMergeState({ mergeable: null, mergeStateStatus: null, reviewDecision: null })).toBeNull()
+  it('renders "unknown" for a null merge state rather than dropping the pill', () => {
+    // The defect this replaced: returning null here rendered a GREEN chip with
+    // no merge pill beside it, which reads as "ready to merge". `mergeStateStatus`
+    // is `.nullable()` in the schema, so this is a schema-valid server reply.
+    expect(formatMergeState({ mergeable: null, mergeStateStatus: null, reviewDecision: null })).toBe('merge: unknown')
+  })
+
+  it('returns null ONLY when there is no PR to have a merge state', () => {
     expect(formatMergeState(null)).toBeNull()
   })
 })
@@ -77,6 +97,24 @@ describe('SessionCiChip', () => {
     render(<SessionCiChip status={status({ merge: { mergeable: 'MERGEABLE', mergeStateStatus: 'BLOCKED', reviewDecision: 'APPROVED' } })} onRefresh={vi.fn()} />)
     expect(screen.getByTestId('session-ci-chip-checks').textContent).toBe('21/21 green')
     expect(screen.getByTestId('session-ci-chip-merge').textContent).toBe('merge: blocked')
+  })
+
+  it('still shows a merge pill when the merge state is null, so green never stands alone', () => {
+    // Regression guard for the "green chip, no merge pill" reading. A user must
+    // never see a passing check label with nothing beside it unless there is
+    // genuinely no PR.
+    render(<SessionCiChip status={status({ merge: { mergeable: null, mergeStateStatus: null, reviewDecision: null } })} onRefresh={vi.fn()} />)
+    expect(screen.getByTestId('session-ci-chip-checks').textContent).toBe('21/21 green')
+    expect(screen.getByTestId('session-ci-chip-merge').textContent).toBe('merge: unknown')
+  })
+
+  it('marks a draft PR', () => {
+    const { unmount } = render(<SessionCiChip status={status({ pr: { number: 7419, title: 't', url: 'https://github.com/blamechris/chroxy/pull/7419', headRefOid: 'abc', isDraft: true } })} onRefresh={vi.fn()} />)
+    expect(screen.getByTestId('session-ci-chip-draft')).toBeTruthy()
+    unmount()
+
+    render(<SessionCiChip status={status()} onRefresh={vi.fn()} />)
+    expect(screen.queryByTestId('session-ci-chip-draft')).toBeNull()
   })
 
   it('tones a no-checks head neutral, never success', () => {

@@ -52,18 +52,26 @@ const CHECK_TONE: Record<string, Tone> = {
 export function formatChecks(checks: ServerSessionPrStatusMessage['checks']): string {
   if (!checks) return 'No CI data'
   const { state, counts } = checks
+  // A skipped check satisfies branch protection, so it counts toward "settled".
+  // Reporting `passed/total` alone rendered a fully-skipped rollup as "0/5
+  // green", which is very reachable here given the repo's path-filtered jobs.
+  const settled = counts.passed + counts.skipped
+  // The unknown bucket exists to surface entries the server did not recognise.
+  // Leaving it out of the label made it invisible in exactly the branch where a
+  // reader most needs it.
+  const unknownSuffix = counts.unknown > 0 ? ` · ${counts.unknown} unrecognised` : ''
   switch (state) {
     case 'none':
       // Not a green: this head produced no run at all.
       return 'No checks'
     case 'pending':
       return counts.failed > 0
-        ? `${counts.failed} failed / ${counts.pending} pending`
-        : `${counts.passed}/${counts.total} · ${counts.pending} pending`
+        ? `${counts.failed} failed / ${counts.pending} pending${unknownSuffix}`
+        : `${settled}/${counts.total} · ${counts.pending} pending${unknownSuffix}`
     case 'failure':
-      return `${counts.failed} failed`
+      return `${counts.failed} failed${unknownSuffix}`
     case 'success':
-      return `${counts.passed}/${counts.total} green`
+      return `${settled}/${counts.total} green`
     case 'unknown':
     default:
       return `${counts.unknown} unrecognised`
@@ -71,16 +79,24 @@ export function formatChecks(checks: ServerSessionPrStatusMessage['checks']): st
 }
 
 /**
- * Short label for the merge state, or null when there is nothing worth showing.
+ * Short label for the merge state.
  *
- * `UNKNOWN` is rendered as "recomputing" rather than hidden or treated as a
- * blocker: GitHub reports it while it recalculates after a base change, and
- * silently dropping it would let a stale-looking chip imply a settled answer.
+ * Returns null in exactly ONE case: `merge` itself is null, i.e. there is no PR
+ * to have a merge state. Whenever there IS a PR, this always renders something —
+ * because the pill's absence beside a green check label is read as "ready", and
+ * that is the one impression this chip exists to avoid giving.
+ *
+ * So the two thin cases render explicitly rather than vanishing:
+ *   - `UNKNOWN` → "recomputing". GitHub reports it while recalculating after a
+ *     base change; it means not-yet-known, not "no blocker".
+ *   - `null` (schema-valid: `mergeStateStatus` is `.nullable()`) → "unknown".
+ *     Dropping it was the defect: a PR with 21/21 green and a null merge state
+ *     rendered a green chip with no merge pill at all.
  */
 export function formatMergeState(merge: ServerSessionPrStatusMessage['merge']): string | null {
   if (!merge) return null
   const status = merge.mergeStateStatus
-  if (!status) return null
+  if (!status) return 'merge: unknown'
   if (status === 'UNKNOWN') return 'merge: recomputing'
   return `merge: ${status.toLowerCase()}`
 }
@@ -162,6 +178,9 @@ export function SessionCiChip({ status, loading = false, onRefresh }: SessionCiC
         </a>
       ) : (
         <span className="session-ci-chip__pr">{prLabel}</span>
+      )}
+      {status.pr.isDraft && (
+        <span className="session-ci-chip__draft" data-testid="session-ci-chip-draft">draft</span>
       )}
       <span className="session-ci-chip__label" data-testid="session-ci-chip-checks">
         {formatChecks(status.checks)}
