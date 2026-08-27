@@ -650,3 +650,75 @@ export const ServerStatuslineOutputSchema = z.object({
     active: z.boolean().optional(),
     truncated: z.boolean().optional(),
 });
+// #7344 — session ↔ pull-request / CI status (display slice). Reply to
+// `session_pr_status_request`. Assembled by the server from ONE `gh pr list`
+// response (plus git for the branch/remote), so `checks` and `merge` always
+// describe the same head SHA — both are functions of it, and a reading spliced
+// from two calls can straddle a push.
+//
+// Three field-level contracts this schema exists to hold:
+//
+//   - `checks.state: 'none'` means this head produced NO run. It is NOT success,
+//     and a client must not render it as one — a push can legitimately create no
+//     run at all, and "absence of failure" is not a green.
+//   - `checks` and `merge` are SEPARATE and are never to be collapsed into one
+//     "ready to merge?" badge. The case that motivated #7344 had 21/21 checks
+//     green while `mergeStateStatus` was `BLOCKED` on an unresolved review
+//     thread. `mergeStateStatus: 'UNKNOWN'` means GitHub is recomputing after a
+//     base change, not that a blocker exists.
+//   - `pr: null` + `reason: null` is the quiet negative — this branch has no open
+//     PR on `origin`, nor (when `origin` is a fork) on its upstream. `pr: null` +
+//     a `reason` means the survey could not find out (no `gh`, no GitHub remote,
+//     detached HEAD, a failed call). "Cannot determine" must render as
+//     cannot-determine, never as an implied green.
+//   - `repo` names the repo the PR actually LIVES on, which for a fork checkout
+//     is the upstream rather than the session's `origin` — a cross-repository PR
+//     is listed on the base repo, so that is where it was found and where the
+//     user will find it.
+export const SessionPrCheckCountsSchema = z.object({
+    total: z.number().int().nonnegative(),
+    passed: z.number().int().nonnegative(),
+    failed: z.number().int().nonnegative(),
+    pending: z.number().int().nonnegative(),
+    skipped: z.number().int().nonnegative(),
+    // A rollup entry whose status/conclusion the server did not recognise. It
+    // suppresses a 'success' verdict rather than being counted as a pass, so a
+    // new GitHub check state surfaces as unknown instead of a fabricated green.
+    unknown: z.number().int().nonnegative(),
+});
+export const SessionPrChecksSchema = z.object({
+    // 'pending' follows GitHub's own rollup semantics and outranks 'failure': a
+    // run with anything still going is not settled, even if something in it has
+    // already failed. The `failed` count stays visible alongside so a client can
+    // render "3 failed / 5 pending" rather than hiding a known failure.
+    state: z.enum(['none', 'pending', 'failure', 'unknown', 'success']),
+    counts: SessionPrCheckCountsSchema,
+});
+export const SessionPrMergeSchema = z.object({
+    // Passed through verbatim as GitHub reports them (empty string → null). The
+    // server does not interpret these, and deliberately derives no boolean from
+    // them — see the `checks`/`merge` separation note above.
+    mergeable: z.string().nullable(),
+    mergeStateStatus: z.string().nullable(),
+    reviewDecision: z.string().nullable(),
+});
+export const SessionPrRefSchema = z.object({
+    number: z.number().int().positive(),
+    title: z.string().nullable(),
+    url: z.string().nullable(),
+    // The head SHA the `checks` and `merge` verdicts above describe.
+    headRefOid: z.string().nullable(),
+    isDraft: z.boolean(),
+});
+export const ServerSessionPrStatusSchema = z.object({
+    type: z.literal('session_pr_status'),
+    requestId: z.string().max(128).nullable().optional(),
+    sessionId: z.string().nullable(),
+    generatedAt: z.string(),
+    branch: z.string().nullable(),
+    repo: z.object({ owner: z.string(), name: z.string() }).nullable(),
+    pr: SessionPrRefSchema.nullable(),
+    checks: SessionPrChecksSchema.nullable(),
+    merge: SessionPrMergeSchema.nullable(),
+    reason: z.string().nullable(),
+});

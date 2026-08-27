@@ -478,3 +478,81 @@ export declare const ServerStatuslineOutputSchema: z.ZodObject<{
     active: z.ZodOptional<z.ZodBoolean>;
     truncated: z.ZodOptional<z.ZodBoolean>;
 }, z.core.$strip>;
+export declare const SessionPrCheckCountsSchema: z.ZodObject<{
+    total: z.ZodNumber;
+    passed: z.ZodNumber;
+    failed: z.ZodNumber;
+    pending: z.ZodNumber;
+    skipped: z.ZodNumber;
+    unknown: z.ZodNumber;
+}, z.core.$strip>;
+export declare const SessionPrChecksSchema: z.ZodObject<{
+    state: z.ZodEnum<{
+        unknown: "unknown";
+        success: "success";
+        none: "none";
+        pending: "pending";
+        failure: "failure";
+    }>;
+    counts: z.ZodObject<{
+        total: z.ZodNumber;
+        passed: z.ZodNumber;
+        failed: z.ZodNumber;
+        pending: z.ZodNumber;
+        skipped: z.ZodNumber;
+        unknown: z.ZodNumber;
+    }, z.core.$strip>;
+}, z.core.$strip>;
+export declare const SessionPrMergeSchema: z.ZodObject<{
+    mergeable: z.ZodNullable<z.ZodString>;
+    mergeStateStatus: z.ZodNullable<z.ZodString>;
+    reviewDecision: z.ZodNullable<z.ZodString>;
+}, z.core.$strip>;
+export declare const SessionPrRefSchema: z.ZodObject<{
+    number: z.ZodNumber;
+    title: z.ZodNullable<z.ZodString>;
+    url: z.ZodNullable<z.ZodString>;
+    headRefOid: z.ZodNullable<z.ZodString>;
+    isDraft: z.ZodBoolean;
+}, z.core.$strip>;
+export declare const ServerSessionPrStatusSchema: z.ZodObject<{
+    type: z.ZodLiteral<"session_pr_status">;
+    requestId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    sessionId: z.ZodNullable<z.ZodString>;
+    generatedAt: z.ZodString;
+    branch: z.ZodNullable<z.ZodString>;
+    repo: z.ZodNullable<z.ZodObject<{
+        owner: z.ZodString;
+        name: z.ZodString;
+    }, z.core.$strip>>;
+    pr: z.ZodNullable<z.ZodObject<{
+        number: z.ZodNumber;
+        title: z.ZodNullable<z.ZodString>;
+        url: z.ZodNullable<z.ZodString>;
+        headRefOid: z.ZodNullable<z.ZodString>;
+        isDraft: z.ZodBoolean;
+    }, z.core.$strip>>;
+    checks: z.ZodNullable<z.ZodObject<{
+        state: z.ZodEnum<{
+            unknown: "unknown";
+            success: "success";
+            none: "none";
+            pending: "pending";
+            failure: "failure";
+        }>;
+        counts: z.ZodObject<{
+            total: z.ZodNumber;
+            passed: z.ZodNumber;
+            failed: z.ZodNumber;
+            pending: z.ZodNumber;
+            skipped: z.ZodNumber;
+            unknown: z.ZodNumber;
+        }, z.core.$strip>;
+    }, z.core.$strip>>;
+    merge: z.ZodNullable<z.ZodObject<{
+        mergeable: z.ZodNullable<z.ZodString>;
+        mergeStateStatus: z.ZodNullable<z.ZodString>;
+        reviewDecision: z.ZodNullable<z.ZodString>;
+    }, z.core.$strip>>;
+    reason: z.ZodNullable<z.ZodString>;
+}, z.core.$strip>;

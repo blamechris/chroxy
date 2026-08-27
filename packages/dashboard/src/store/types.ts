@@ -16,7 +16,7 @@ import type { PermissionMode } from '@chroxy/store-core'
 // #5175: Host/Repo Status Control Room snapshot type (epic #5170). The store
 // holds the latest `host_status_snapshot` so the Control Room section can render
 // the fleet table; the type is the protocol contract pinned in @chroxy/protocol.
-import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerContainersStatusSnapshotMessage, ServerRepoRuntimeConfigSnapshotMessage, ServerByokPoolStatusSnapshotMessage, ServerHostPruneStatusSnapshotMessage, ServerSimulatorStatusSnapshotMessage, ServerEmulatorStatusSnapshotMessage, ServerWslStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, ServerSkillsInventorySnapshotMessage, ServerMailboxStatusSnapshotMessage, ServerExternalSessionsSnapshotMessage, ServerRepoEventsSnapshotMessage, ServerGithubWebhookConfigMessage, ServerPermissionInputMessage, ServerSymbolsSnapshotMessage, ServerSearchResultsMessage, ServerReferencesResultMessage, IntegrationActionCounts, ServerPairPendingMessage, ServerSessionPresetFull, Attachment, ServerOrchestrationRunsSnapshot, ServerScheduledTasksMessage, ScheduledTaskInput, CodexSandboxMode } from '@chroxy/protocol'
+import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerContainersStatusSnapshotMessage, ServerRepoRuntimeConfigSnapshotMessage, ServerByokPoolStatusSnapshotMessage, ServerHostPruneStatusSnapshotMessage, ServerSimulatorStatusSnapshotMessage, ServerEmulatorStatusSnapshotMessage, ServerWslStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, ServerSkillsInventorySnapshotMessage, ServerMailboxStatusSnapshotMessage, ServerExternalSessionsSnapshotMessage, ServerRepoEventsSnapshotMessage, ServerGithubWebhookConfigMessage, ServerSessionPrStatusMessage, ServerPermissionInputMessage, ServerSymbolsSnapshotMessage, ServerSearchResultsMessage, ServerReferencesResultMessage, IntegrationActionCounts, ServerPairPendingMessage, ServerSessionPresetFull, Attachment, ServerOrchestrationRunsSnapshot, ServerScheduledTasksMessage, ScheduledTaskInput, CodexSandboxMode } from '@chroxy/protocol'
 import type { HeldRunDetail } from '@chroxy/store-core'
 // #5184: header cost-badge display mode. Defined in a plain lib module
 // (which owns the union + runtime guard) — the store only needs the type
@@ -1310,6 +1310,30 @@ export interface ConnectionState {
   /** #5966 — true between dispatching a `repo_events_request` and its snapshot. */
   repoEventsLoading: boolean;
   /**
+   * #7344 — the latest `session_pr_status` per session id: the PR the session's
+   * branch has open, its check rollup and its merge state. Keyed by session
+   * BECAUSE it is session-scoped — unlike the Control Room surveys above, which
+   * are host-wide singletons, this answers "what is the state of the thing THIS
+   * session produced", and two open tabs have two different answers. Replaced
+   * wholesale per snapshot; an absent key means no snapshot has landed yet.
+   */
+  sessionPrStatus: Record<string, ServerSessionPrStatusMessage>;
+  /**
+   * #7344 — per-session in-flight flag for the above. Keyed the same way, and
+   * (like the #6153 survey-loading sweep) reset on a socket drop, so a refresh
+   * that was in flight when the socket died cannot leave the chip's Refresh
+   * button disabled forever.
+   */
+  sessionPrStatusLoading: Record<string, boolean>;
+  /**
+   * #7344 — client-clock timestamp of the last `session_pr_status_request` per
+   * session, used ONLY to rate-limit the App's automatic pull (which re-fires
+   * on every tab switch). Deliberately NOT the snapshot's server-side
+   * `generatedAt`: this bounds how often we ASK, and mixing a server timestamp
+   * with a client clock would make that a function of skew.
+   */
+  sessionPrStatusRequestedAt: Record<string, number>;
+  /**
    * #6540 (item 3 of #6536) — Control Room repo-events webhook-secret config: the
    * latest `github_webhook_config` (is a secret set + source, the payload URL,
    * recent delivery status — never the secret value), or null before the first
@@ -2142,6 +2166,17 @@ export interface ConnectionState {
   requestExternalSessions: () => boolean;
   /** #5966 — request the buffered repo-events snapshot for the Control Room pane. */
   requestRepoEvents: () => boolean;
+  /**
+   * #7344 — request the session's pull-request / CI status. Defaults to the
+   * active session. Sets `sessionPrStatusLoading[sessionId]`; the reply lands in
+   * `sessionPrStatus[sessionId]`. Returns false (without setting loading) when
+   * the socket is closed or no session id can be resolved.
+   *
+   * `maxAgeMs`, when given, suppresses the request if this session was asked
+   * about more recently than that — the automatic pull passes it, the manual
+   * Refresh does not and so always re-fetches.
+   */
+  requestSessionPrStatus: (sessionId?: string, maxAgeMs?: number) => boolean;
   /**
    * #6540 — request the current GitHub webhook config (secret status + payload
    * URL + delivery readout). Sets `githubWebhookConfigLoading`; the reply lands

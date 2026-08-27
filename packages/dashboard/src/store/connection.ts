@@ -755,6 +755,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // repo_events_snapshot handler. Null until the first survey lands.
   repoEventsSnapshot: null,
   repoEventsLoading: false,
+  // #7344: per-session pull-request / CI status, fed by the session_pr_status
+  // handler. Empty until the first snapshot lands for a session.
+  sessionPrStatus: {},
+  sessionPrStatusLoading: {},
+  sessionPrStatusRequestedAt: {},
   // #6540 (item 3 of #6536): repo-events webhook-secret config surface, fed by
   // the github_webhook_config handler. Null until the first config reply lands.
   githubWebhookConfig: null,
@@ -1302,6 +1307,40 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       return true;
     }
     return false;
+  },
+
+  // #7344: request the session's pull-request / CI status. Session-scoped, so
+  // unlike the host surveys above it needs a session id — the caller's, else the
+  // active one. Wire-or-nothing, and (per #6310) the loading flag flips only
+  // once wsSend has confirmed the frame actually went out: an optimistic flip on
+  // a send that failed would disable the chip's Refresh with nothing in flight
+  // to ever clear it.
+  requestSessionPrStatus: (sessionId?: string, maxAgeMs?: number): boolean => {
+    const { socket, activeSessionId } = get();
+    const target = sessionId ?? activeSessionId;
+    if (!target) return false;
+
+    // #7344 (Copilot review): the App effect re-fires on every tab switch, so
+    // without a bound, cycling tabs spawns a git + `gh pr list` pair per switch.
+    // Suppressing repeats OUTRIGHT would be worse — a CI chip that never
+    // re-checks shows yesterday's answer — so the AUTO caller passes a freshness
+    // window and the manual Refresh passes none and always re-fetches.
+    //
+    // Keyed on when we last ASKED, on the client clock, not on the snapshot's
+    // server-side `generatedAt`: this bounds request RATE, and comparing a
+    // server timestamp against a client clock would make it a function of skew.
+    if (typeof maxAgeMs === 'number') {
+      const askedAt = get().sessionPrStatusRequestedAt[target];
+      if (typeof askedAt === 'number' && Date.now() - askedAt < maxAgeMs) return false;
+    }
+
+    if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+    if (!wsSend(socket, { type: 'session_pr_status_request', sessionId: target })) return false;
+    set({
+      sessionPrStatusLoading: { ...get().sessionPrStatusLoading, [target]: true },
+      sessionPrStatusRequestedAt: { ...get().sessionPrStatusRequestedAt, [target]: Date.now() },
+    });
+    return true;
   },
 
   // #6540 (item 3 of #6536): request the GitHub webhook config (secret status +
@@ -2844,6 +2883,23 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       }
       if (Object.keys(loadingReset).length > 0) {
         set(loadingReset);
+      }
+
+      // #7344: the sweep above walks a FLAT list of boolean keys, so it cannot
+      // reach `sessionPrStatusLoading`, which is keyed by session id. Reset it
+      // here for the same #6153 reason: a chip whose Refresh was in flight when
+      // the socket dropped would otherwise stay disabled forever, unable to
+      // issue the request that would clear it. Snapshots are KEPT, matching the
+      // survey family — a stale reading is still information, and the chip's
+      // Refresh re-fetches.
+      if (Object.keys(get().sessionPrStatusLoading).length > 0) {
+        set({ sessionPrStatusLoading: {} });
+      }
+      // The auto-pull window is per CONNECTION, so a drop clears it too: after a
+      // reconnect the first tab visit must re-survey rather than be suppressed by
+      // a request made on a socket that no longer exists.
+      if (Object.keys(get().sessionPrStatusRequestedAt).length > 0) {
+        set({ sessionPrStatusRequestedAt: {} });
       }
 
       // Clear transient streaming/plan state so stale UI doesn't persist

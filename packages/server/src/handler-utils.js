@@ -547,6 +547,10 @@ export function autoSubscribeOtherClients(sessionId, excludeWs, ctx) {
  * @returns {object|null} Session entry or null
  */
 export function resolveSession(ctx, msg, client) {
+  // #7344: session-pr-status-handlers.js re-implements this binding check rather
+  // than calling in here, because it must distinguish "not authorised" from "not
+  // found" (this helper collapses both to null) and must check authority first.
+  // A change to the binding rule below needs mirroring there.
   const sid = msg.sessionId || client?.activeSessionId
 
   // Enforce session token binding: a bound client can only resolve its own

@@ -107,6 +107,7 @@ import { type RepoInvestigateRequest, type RepoOpenSessionRequest } from './comp
 import { ControlRoomView } from './components/ControlRoomView'
 import { AppModals } from './components/AppModals'
 import { AppHeader } from './components/AppHeader'
+import { SESSION_PR_STATUS_AUTO_PULL_MAX_AGE_MS } from './components/SessionCiChip'
 import { SetupWizard } from './components/SetupWizard'
 
 /** Server-injected config from <meta name="chroxy-config"> tag */
@@ -667,6 +668,33 @@ export function App() {
   const markAllSessionNotificationsRead = useConnectionStore(s => s.markAllSessionNotificationsRead)
   // #6790 — dismiss an active dev-server preview tunnel from the header chip.
   const closeDevPreview = useConnectionStore(s => s.closeDevPreview)
+  // #7344 — the active session's pull-request / CI status for the header chip.
+  // Selected by session id rather than through getActiveSessionState(), because
+  // the snapshot lives in its own session-keyed slice (a reply can land after a
+  // tab switch and must stay filed under the session it describes).
+  const requestSessionPrStatus = useConnectionStore(s => s.requestSessionPrStatus)
+  // Optional-chained on the SLICES, not just the keys: several App-level test
+  // fixtures mock the store with partial shapes that predate these fields (the
+  // same reason DevPreviewChip's `previews` prop is optional), so the record can
+  // genuinely arrive undefined — treated the same as "no snapshot yet".
+  const sessionPrStatus = useConnectionStore(s => (s.activeSessionId ? s.sessionPrStatus?.[s.activeSessionId] ?? null : null))
+  const sessionPrStatusLoading = useConnectionStore(s => (s.activeSessionId ? s.sessionPrStatusLoading?.[s.activeSessionId] === true : false))
+  // No window: an explicit Refresh must always go to the wire, or the button
+  // silently does nothing within the auto-pull window.
+  const refreshSessionPrStatus = useCallback(() => { requestSessionPrStatus() }, [requestSessionPrStatus])
+
+  // #7344: pull the session's PR/CI status so the header chip has something to
+  // show without the user clicking Refresh first. Deliberately NOT a poll — the
+  // automatic completion event that wakes the agent is the follow-on slice;
+  // here a recent reading plus a visible Refresh beats no reading at all.
+  //
+  // This re-fires on every tab switch, which is what we want (returning to a
+  // tab is exactly when a stale CI answer is worth re-checking) but would spawn
+  // a git + `gh pr list` pair per switch. AUTO_PULL_MAX_AGE_MS bounds that rate
+  // in the store; the chip's Refresh passes no window and always re-fetches.
+  useEffect(() => {
+    if (activeSessionId && connectionPhase === 'connected') requestSessionPrStatus(activeSessionId, SESSION_PR_STATUS_AUTO_PULL_MAX_AGE_MS)
+  }, [activeSessionId, connectionPhase, requestSessionPrStatus])
   const conversationHistory = useConnectionStore(s => s.conversationHistory)
   const fetchConversationHistory = useConnectionStore(s => s.fetchConversationHistory)
   const resumeConversation = useConnectionStore(s => s.resumeConversation)
@@ -2310,6 +2338,9 @@ export function App() {
         costBadgeMode={costBadgeMode}
         devPreviews={devPreviews}
         onCloseDevPreview={closeDevPreview}
+        sessionPrStatus={sessionPrStatus}
+        sessionPrStatusLoading={sessionPrStatusLoading}
+        onRefreshSessionPrStatus={refreshSessionPrStatus}
       />
 
       {/* Sidebar */}

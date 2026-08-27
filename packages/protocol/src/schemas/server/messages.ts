@@ -11,7 +11,7 @@ import { BillingCanarySnapshotSchema, BillingCanaryWarningSchema, ServerAuthOkSc
 import { ServerPermissionRequestSchema, ServerPermissionInputSchema, ServerPermissionExpiredSchema, ServerPermissionResolvedSchema, ServerStreamDeltaSchema, ServerShellPendingApprovalSchema } from './stream.ts'
 import { ActivityEntrySchema, ActivityKindSchema, ActivityOutputRefSchema, ActivityStatusSchema, ServerActivityDeltaSchema, ServerActivitySnapshotSchema, ServerCancelActivityAckSchema, ServerMessageDequeuedSchema, ServerMessageQueuedSchema } from './activity.ts'
 import { ExternalSessionEntrySchema, HostStatusSummarySchema, IntegrationActionCountsSchema, IntegrationCliStatusSchema, IntegrationRepoSchema, IntegrationStatusSummarySchema, MailboxDeliveryEventSchema, MailboxRegistrationSchema, RepoEventSchema, ServerRepoEventsDeltaSchema, RepoWebhookDeliveriesSchema, ServerGithubWebhookConfigSchema, RepoMemoryCacheSchema, RepoMemoryReportSchema, RepoMemoryStatusSchema, RepoRelayRunSchema, RepoRelayStatusSchema, RepoRelayVerdictSchema, RepoRunnersSchema, RepoRuntimeConfigEntrySchema, RepoStatusSchema, RepoTreeSchema, RepoVerdictSchema, RunnerInfoSchema, RunnerServiceStateSchema, RunnerStatusSummarySchema, RunnerVerdictSchema, ServerByokPoolActionAckSchema, ServerByokPoolStatusSnapshotSchema, ServerContainersActionAckSchema, ServerContainersStatusSnapshotSchema, ServerEmulatorActionAckSchema, ServerEmulatorStatusSnapshotSchema, ServerExternalSessionsSnapshotSchema, ServerHostPruneActionAckSchema, ServerHostPruneStatusSnapshotSchema, ServerHostStatusSnapshotSchema, ServerIntegrationActionAckSchema, ServerIntegrationStatusSnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerRepoEventsSnapshotSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerSessionPresetDisclosureSchema, ServerSessionPresetFullSchema, ServerSessionPresetSnapshotSchema, ServerSimulatorActionAckSchema, ServerSimulatorStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerSummarizeSessionResultSchema, ServerWslActionAckSchema, ServerWslStatusSnapshotSchema, SkillInventoryEntrySchema, SkillInventoryRepoSchema } from './control-room.ts'
-import { CumulativeUsageSchema, ServerAuthBootstrapSchema, ServerConversationIdSchema, ServerSessionStoppedSchema, ServerSkillTrustGrantInvalidAuthorSchema, ServerSkillTrustGrantOkSchema, ServerSkillsListSchema, ServerStatuslineOutputSchema, ServerTunnelUrlChangedSchema } from './session.ts'
+import { CumulativeUsageSchema, ServerAuthBootstrapSchema, ServerConversationIdSchema, ServerSessionPrStatusSchema, ServerSessionStoppedSchema, ServerSkillTrustGrantInvalidAuthorSchema, ServerSkillTrustGrantOkSchema, ServerSkillsListSchema, ServerStatuslineOutputSchema, ServerTunnelUrlChangedSchema, SessionPrCheckCountsSchema, SessionPrChecksSchema, SessionPrMergeSchema, SessionPrRefSchema } from './session.ts'
 import { ServerBillingCanarySchema, ServerBudgetResumeAckSchema, ServerByokCredentialsStatusSchema, ServerCostUpdateSchema, ServerCredentialTestResultSchema, ServerCredentialsStatusSchema, ServerErrorEnvelopeSchema, ServerErrorSchema, ServerEvaluateDraftResultSchema, ServerEvaluatorClarifySchema, ServerEvaluatorRewriteSchema, ServerExtensionMessageSchema, ServerMonthlyBudgetSchema, ServerSessionCostThresholdCrossedSchema, ServerSessionUsageSchema } from './billing.ts'
 
 // -- Inferred TypeScript types --
@@ -59,6 +59,14 @@ export type ServerAuthBootstrapMessage = z.infer<typeof ServerAuthBootstrapSchem
 export type ServerTunnelUrlChangedMessage = z.infer<typeof ServerTunnelUrlChangedSchema>
 // #6791 — the user's Claude Code statusLine script output.
 export type ServerStatuslineOutputMessage = z.infer<typeof ServerStatuslineOutputSchema>
+// #7344 — session ↔ pull-request / CI status (display slice). Consumed by the
+// server emitter (session-pr-status.js + session-pr-status-handlers.js), the
+// dashboard store handler, and the session-header CI chip.
+export type SessionPrCheckCounts = z.infer<typeof SessionPrCheckCountsSchema>
+export type SessionPrChecks = z.infer<typeof SessionPrChecksSchema>
+export type SessionPrMerge = z.infer<typeof SessionPrMergeSchema>
+export type SessionPrRef = z.infer<typeof SessionPrRefSchema>
+export type ServerSessionPrStatusMessage = z.infer<typeof ServerSessionPrStatusSchema>
 export type ServerEvaluateDraftResultMessage = z.infer<typeof ServerEvaluateDraftResultSchema>
 export type ServerEvaluatorRewriteMessage = z.infer<typeof ServerEvaluatorRewriteSchema>
 export type ServerEvaluatorClarifyMessage = z.infer<typeof ServerEvaluatorClarifySchema>
