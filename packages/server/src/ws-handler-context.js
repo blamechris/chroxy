@@ -15,8 +15,14 @@
  * `nsCtx`'s `FIELD_TO_NS` and `assertCtxShape` both read `CTX_NAMESPACES`,
  * while the typedef was decorative and drifted silently (seven fields missing,
  * one present here but absent from the roster — #7403). They are now pinned
- * against each other by `tests/ws-handler-context-typedef-parity.test.js`, so
- * this paragraph is enforced rather than aspirational.
+ * against each other by `tests/ws-handler-context-typedef-parity.test.js`.
+ *
+ * That pins TWO of the three sides. `assertCtxShape({deep: true})`, which
+ * ws-server.js runs on its own `_handlerCtx` at construction, pins
+ * roster ⊆ production. What is still unpinned is production ⊆ roster — a
+ * getter added to ws-server.js's namespace literals but never added to
+ * CTX_NAMESPACES is invisible to every check here. That is exactly how
+ * `tokenManager` drifted for the whole life of #6006.
  *
  * ws-server.js builds the production ctx; tests build a
  * namespaced mock via `tests/test-helpers.js` and may run it through
@@ -71,13 +77,13 @@
  * @property {object|null} skillsUsageRecorder - Per-skill usage aggregates (lives on SessionManager).
  * @property {(requestId: string, result: object) => void} resolvePairRequester - Resolve a pending pair request.
  * @property {(requestId: string, reason: string) => void} broadcastPairResolved - Fan-out a pair-resolved notice.
- * @property {object|null} shellApprovalStore - #6277 host-local user-shell approval store; null in test ctx mocks.
+ * @property {object} shellApprovalStore - #6277 host-local user-shell approval store (always constructed on the production ctx; test mocks may pass null).
  * @property {object|null} repoEventStore - #5966 bounded RepoEventStore; null until the first GitHub-webhook delivery lazily creates it.
- * @property {string|null} webhookPayloadUrl - #6540 GitHub payload URL derived from the live origin.
+ * @property {{url: string|null, lanOnly: boolean, note: string|null}} webhookPayloadUrl - #6540 GitHub payload URL derived from the live origin (`deriveWebhookPayloadUrl`).
  * @property {object|null} repoWebhookDeliveries - #6540 in-memory recent-delivery ring; null until the first delivery.
  * @property {(value: string|null) => void} setWebhookSecretCache - #6540 refresh the in-process webhook-secret cache.
  * @property {object|null} orchestrationManager - #6691 OrchestrationManager; null while the feature is off.
- * @property {object|null} schedulerEngine - Scheduled-task engine; null when scheduling is off.
+ * @property {object|null} schedulerEngine - #6871 scheduled-task engine; null when scheduling is off.
  *
  * @typedef {Object} WsHandlerRuntime
  * @property {boolean} draining - True while the server is draining for shutdown.

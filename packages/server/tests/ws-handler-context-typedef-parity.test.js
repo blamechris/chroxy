@@ -67,7 +67,15 @@ function typedefBlock(name) {
       'Both sides of this test derive from that convention.',
   )
   const rest = SRC.slice(start)
-  const next = rest.indexOf('@typedef', 1)
+  let next = rest.indexOf('@typedef', 1)
+  // Also stop at the end of the doc comment. The LAST typedef has no `@typedef`
+  // after it, so bounding only on that returned 5630 of the file's ~12.6k chars
+  // — the whole of CTX_NAMESPACES, assertCtxShape and every comment below.
+  // Green today only because no `@property` string happens to appear down
+  // there, which is the unanchored-slice hazard this repo has already been
+  // bitten by. Measured: 5630 chars → 350, same properties parsed.
+  const end = rest.indexOf('\n */')
+  if (end !== -1 && (next === -1 || end < next)) next = end
   return next === -1 ? rest : rest.slice(0, next)
 }
 
@@ -138,12 +146,44 @@ describe('WsHandler typedefs match CTX_NAMESPACES (#7403)', () => {
       )
     })
 
+    it(`${ns}: the parser reads EVERY @property line in the block`, () => {
+      // The parity assertion above compares parsed names. A line the regex
+      // cannot match is silently DROPPED, and in the documented-but-unrostered
+      // direction — the exact `tokenManager` bug this file exists to prevent —
+      // that reads as agreement. Three shapes were confirmed to pass 13/13
+      // while carrying an unrostered field: two levels of brace nesting, two
+      // spaces after `@property`, and a name wrapped onto the next line.
+      //
+      // Counting is the fix: parse-count must equal the number of `@property`
+      // occurrences, so an unreadable line fails HERE, naming the parser,
+      // rather than mutating a set comparison somewhere downstream.
+      const block = typedefBlock(typedefNameFor(ns))
+      const parsed = propertyNames(block)
+      const occurrences = (block.match(/@property/g) || []).length
+      assert.equal(
+        parsed.length,
+        occurrences,
+        `${typedefNameFor(ns)}: the @property parser read ${parsed.length} of ${occurrences} lines. ` +
+          'An unparseable @property is dropped silently and would make the parity check above ' +
+          'agree for the wrong reason. Parsed: ' + JSON.stringify(parsed),
+      )
+    })
+
     it(`${ns}: no field is documented twice`, () => {
       const documented = propertyNames(typedefBlock(typedefNameFor(ns)))
       const dupes = documented.filter((k, i) => documented.indexOf(k) !== i)
       assert.deepEqual(dupes, [], `duplicate @property entries in ${typedefNameFor(ns)}`)
     })
   }
+
+  it('the parser reads every @property line in WsHandlerContext too', () => {
+    const block = typedefBlock('WsHandlerContext')
+    assert.equal(
+      propertyNames(block).length,
+      (block.match(/@property/g) || []).length,
+      'an unparseable @property in WsHandlerContext would be dropped silently',
+    )
+  })
 
   it('the WsHandlerContext typedef documents exactly the five namespaces', () => {
     // The top-level typedef is the other half of the same roster, and it drifts
