@@ -3474,6 +3474,19 @@ describe('dashboard message-handler dispatch', () => {
       expect((store.getState() as any).sessionStates.s1.activeAgents).toEqual([]);
     });
 
+    // The input CI found and these tests originally missed. The pre-#7340 code
+    // read `ss.activeAgents.length` unguarded and was safe only because
+    // `updateActiveSession` always handed it the ACTIVE session, which is fully
+    // initialised. Targeting the replayed session means it can be handed a
+    // partially-built state whose transient slices are still undefined.
+    it('does not throw when the replayed session state has no activeAgents yet', () => {
+      seedTwoSessions();
+      delete ((store.getState() as any).sessionStates.s2 as any).activeAgents;
+      handleMessage({ type: 'history_replay_start', sessionId: 's2' }, ctx() as any);
+      // ...and the active session is still untouched.
+      expect((store.getState() as any).sessionStates.s1.activeAgents).toEqual([agent]);
+    });
+
     // Frames without an explicit sessionId fall back to activeSessionId, so
     // the single-session case is unchanged.
     it('falls back to the active session when the frame omits sessionId', () => {

@@ -5136,8 +5136,13 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // #4909 block below, which made exactly this move for
       // `stoppedAt`/`stoppedCode` and explained why.
       if (replayTargetId && get().sessionStates[replayTargetId]) {
+        // `activeAgents?.length` — the old code read `ss.activeAgents.length`
+        // unguarded and was safe only because `updateActiveSession` always
+        // handed it the ACTIVE session, which is fully initialised. Targeting
+        // the replayed session means it can now be handed a partially-built
+        // state whose transient slices are still undefined.
         updateSession(replayTargetId, (ss) =>
-          ss.activeAgents.length > 0 ? { activeAgents: [] } : {},
+          (ss.activeAgents?.length ?? 0) > 0 ? { activeAgents: [] } : {},
         );
       }
       updateActiveSession((ss) => {
