@@ -224,7 +224,11 @@ describe('SdkSession _callQuery finally — source contains safety-net clear for
     // Pin both: (a) the comment header so future edits understand the
     // intent, and (b) the actual clear line. Without the clear, the race
     // where `result` lands before interrupt() throws would leak the flag.
-    assert.match(src, /#4881: safety-net clear of _intentionalStop/,
+    // #7401 — `assert.ok(re.test(src), msg)`, not `assert.match(src, re)`:
+    // `src` is sdk-session.js (~100 KB), and a failing assert.match carries the
+    // ENTIRE subject as the error's `actual`. The boolean collapse keeps the
+    // failure payload to `false` plus this message.
+    assert.ok(/#4881: safety-net clear of _intentionalStop/.test(src),
       'finally must carry the documented race-safety comment')
     // Locate the comment then assert the clear is within 10 lines after.
     // #5375 hoisted the flag to BaseSession, so the safety-net clear is now

@@ -571,6 +571,7 @@ describe('loadOrCreateIngestSecret', () => {
   it('creates the secret 0600 with base64url content and is stable across loads', () => {
     const secretPath = join(dir, 'sub', 'ingest-secret')
     const secret = loadOrCreateIngestSecret(secretPath)
+    // #7401 — left as assert.match deliberately: the subject is a file this test just wrote (a single ~43-char secret line).
     assert.match(secret, /^[A-Za-z0-9_-]{40,}$/, 'base64url, 32 bytes')
     const mode = statSync(secretPath).mode & 0o777
     assert.equal(mode, 0o600, 'secret file is 0600')

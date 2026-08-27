@@ -76,6 +76,7 @@ describe('initFileLogging', () => {
 
     const content = readFileSync(join(logDir, 'chroxy.log'), 'utf8')
     // Format: 2026-02-22T12:34:56.789Z [WARN] [widget] something bad
+    // #7401 — left as assert.match deliberately: the subject is a file this test just wrote (a log file of a few lines).
     assert.match(content, /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z/)
     assert.ok(content.includes('[WARN]'), 'should contain level')
     assert.ok(content.includes('[widget]'), 'should contain component')
