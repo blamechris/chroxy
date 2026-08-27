@@ -51,6 +51,7 @@ import { getRegistryForProvider, watchModelsOverlay } from './models.js'
 // (`if (config?.environments?.enabled)`).
 import { UNREACHABLE_STATUSES } from './environment-statuses.js'
 import { resolveSkipPermissions, buildEnvironmentBackend, isUserShellEnabled, getAllowAnyModelProviders, isSemanticTitlesEnabled, resolveSemanticTitleModel, resolveSemanticTitleTimeoutMs, resolveBinaryProvenanceMode, isBinarySignatureGateEnabled } from './config.js'
+import { sweepStaleProviderDirs } from './sweep-stale-provider-dirs.js'
 import { buildOrchestrationManager } from './orchestration/build-manager.js'
 import { buildSchedulerEngine } from './scheduler.js'
 import { parseDuration } from './duration.js'
@@ -1428,21 +1429,12 @@ export async function startCliServer(config) {
       .catch((err) => log.warn(`worktree auto-reaper failed: ${(err && err.message) || err}`))
   }
 
-  // #5323 (WP-5.1) — sweep claude-tui hook-sink dirs left in /tmp by prior
-  // crashed processes (a leak on every crash). Safe + unconditional: only dirs
-  // whose owner pid is dead are removed, so a live daemon's dirs — including
-  // ours — are kept. Fire-and-forget + lazily imported so a non-tui boot pays
-  // nothing and a failure never affects startup.
-  import('./claude-tui-session.js')
-    .then(({ ClaudeTuiSession }) => ClaudeTuiSession.sweepStaleSinkDirs(log))
-    .catch((err) => log.warn(`claude-tui sink-dir sweep failed: ${(err && err.message) || err}`))
-
-  // #7337 — same sweep for claude-cli's per-session permission-mode sidecar
-  // dirs, which leak on a crash for exactly the same reason. Same ownership
-  // rule (only DEAD owners are reaped), same fire-and-forget lazy import.
-  import('./cli-session.js')
-    .then(({ CliSession }) => CliSession.sweepStaleSidecarDirs(log))
-    .catch((err) => log.warn(`claude-cli sidecar-dir sweep failed: ${(err && err.message) || err}`))
+  // #7374 — both providers' stale per-session dirs. The body lives in its own
+  // module so the sweep is covered by tests that RUN it; this block used to be
+  // inline and was pinned only by a source grep, which stayed green with the
+  // whole thing behind a false condition. Fire-and-forget: the function never
+  // rejects, and a sweep must never affect startup.
+  sweepStaleProviderDirs(log)
 
   console.log('\nPress Ctrl+C to stop.\n')
 

@@ -1096,3 +1096,70 @@ so the next occurrence is caught on Linux instead of only on Windows.
 have to earn. When a run reports a count, pin the count — and when a comment
 tells you which flags a command carries, check the command. Both halves here
 were readable in ten seconds by anyone who thought to look.
+### 20. Two guards pinned at the source text, not the behaviour — `#7374`
+
+Both guards were **honest** about being source-level greps, and both were still
+bypassable. That is the point of this entry: "it says it is a source grep" is a
+disclosure, not a defence, and the residual belongs here rather than in a
+comment that only the next editor of that file will read.
+
+**The reaper nobody proved was called.** `cli-permission-mode-sidecar.test.js`
+asserted that `server-cli.js` contained `sweepStaleSinkDirs(log)` inside an
+anchored `import(...)` slice, and its docstring claimed the anchoring meant the
+assertion "cannot be satisfied by the explanatory comment beside it". Two
+mutants said otherwise, both **GREEN**:
+
+- wrap the whole boot block in `if (process.env.__NEVER_SET__) { … }`
+- replace the call with `.then(({CliSession}) => void CliSession)` and put the
+  expected string in a comment *inside* the anchored window
+
+Entry 1 verbatim: a source grep cannot tell a call reached at boot from the same
+characters behind a false condition, and anchoring only excludes comments
+*outside* the window it happens to choose.
+
+**The allowlist that was not the only way in.** The same file asserted that
+`FORWARDED_ENV_KEYS` in `docker-session.js` does not contain
+`CHROXY_PERMISSION_MODE_FILE` — a host path that names nothing inside the
+container. Adding the key to the array went red, which is why the guard felt
+solid. But pushing `dockerArgs.push('--env', 'CHROXY_PERMISSION_MODE_FILE=…')`
+*outside* the allowlist loop stayed **GREEN**, and two explicit single-key
+pushes already sit immediately below that loop. The guard pinned one syntactic
+route into `dockerArgs`, not the property.
+
+**The fix, in both cases, was to make the work observable rather than to write a
+cleverer grep.** The boot block moved into `sweep-stale-provider-dirs.js` with
+injectable loaders, so tests RUN it; all three of its mutants now die.
+`DockerSession` gained a one-line `_spawnDocker` seam so a test can capture the
+argv the real `_spawnPersistentProcess` actually builds; the outside-the-loop
+mutant fails 2 tests there and **0** against the old grep — the two were run
+side by side under the same mutant to confirm it.
+
+The negative assertion also needed a positive control it did not have: the child
+env emits `CHROXY_PERMISSION_MODE_FILE` as `''` when no sidecar exists, so
+"the key is absent from argv" would have passed on a session that never had a
+path to leak. The behavioural test sets a real host path first and asserts an
+allowlisted key *does* get forwarded, so the machinery is proven to have run.
+
+**What is still source-level, stated plainly:** that `server-cli.js` calls
+`sweepStaleProviderDirs(log)` at boot. Short of booting the daemon nothing
+distinguishes that call from the same characters behind a false condition.
+
+**And the first version of that residual grep was itself bypassable**, which is
+the part worth keeping. It read `/^\s*sweepStaleProviderDirs\(log\)/m` and its
+comment claimed "line-anchored, so a mention inside a comment does not count".
+`\s` matches newlines. Review deleted the real call, left
+`/*\nsweepStaleProviderDirs(log)\n*/` in its place, and got **20/20 green** —
+the boot sweep gone and the guard satisfied. It rejected `//` and ` * ` lines
+only, which is exactly what made it look anchored. It now strips block comments
+first and matches with `[ \t]`, and the bypass goes red.
+
+That is causes #7290/#7291 — a guard whose comment describes a stronger check
+than its code performs — occurring *inside the entry written to catalogue them*,
+in the same change, by someone who had just read them. Treat "line-anchored" as
+a claim to test, not a property to assert: `\s`, `.` under `/s`, and any
+`[\s\S]` window all cross line boundaries.
+
+**Guard against it:** when a guard's subject is "does this code RUN", extract
+the body until a test can call it. A grep answers "do these characters exist",
+which is a different question, and the gap between them is exactly where these
+two lived.

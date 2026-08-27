@@ -1,6 +1,7 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
+import { PassThrough } from 'node:stream'
 
 /**
  * Tests for DockerSession.
@@ -625,5 +626,110 @@ describe('DockerSession inherits CliSession close-handler fix (#4469)', () => {
     assert.equal(events[0].payload.messageId, 'msg_docker')
     assert.equal(events[1].payload.sessionId, 'sess_docker')
     assert.equal(events[1].payload.cost, null)
+  })
+})
+
+/**
+ * #7374 — the env-forwarding rule, pinned at the ARGV the real code builds.
+ *
+ * Until this block, "DockerSession must not forward CHROXY_PERMISSION_MODE_FILE
+ * into the container" was pinned only by a source-level grep of the
+ * `FORWARDED_ENV_KEYS` array literal in cli-permission-mode-sidecar.test.js.
+ * Mutation testing during #7371's review showed the bypass: pushing
+ * `--env CHROXY_PERMISSION_MODE_FILE=…` into `dockerArgs` OUTSIDE the allowlist
+ * loop kept that guard GREEN. The allowlist is demonstrably not the only way in
+ * — two explicit single-key pushes sit immediately below it.
+ *
+ * These tests drive the REAL DockerSession through the REAL
+ * `_spawnPersistentProcess`, capturing argv at the `_spawnDocker` seam, so any
+ * route into `dockerArgs` is covered rather than one syntactic form of it.
+ * Note this is deliberately NOT the mirror harness at the top of this file:
+ * a mirror re-implements the thing under test, so it keeps passing when the
+ * real code changes.
+ */
+describe('DockerSession._spawnPersistentProcess — real argv (#7374)', () => {
+  const HOST_ONLY_SIDECAR = '/tmp/chroxy-host-only/s-abc/permission-mode'
+
+  /** Minimal stdio-shaped child so the post-spawn wiring runs unchanged. */
+  function fakeChild() {
+    const child = new EventEmitter()
+    child.stdin = new PassThrough()
+    child.stdout = new PassThrough()
+    child.stderr = new PassThrough()
+    child.kill = () => {}
+    return child
+  }
+
+  async function captureArgv() {
+    const { DockerSession } = await import('../src/docker-session.js')
+    const session = new DockerSession({ cwd: '/tmp', image: 'node:22-slim' })
+    session._containerId = 'c0ffee1234567890'
+    // Give the session a REAL-looking host sidecar path. Without this,
+    // `_buildChildEnv()` emits CHROXY_PERMISSION_MODE_FILE as '' and the
+    // negative assertion below would pass because there was nothing to leak —
+    // the vacuous-pass shape this whole issue is about.
+    session._permissionModeFile = HOST_ONLY_SIDECAR
+
+    let captured = null
+    const child = fakeChild()
+    session._spawnDocker = (dockerArgs) => {
+      captured = dockerArgs
+      return child
+    }
+    session._spawnPersistentProcess(['-p', '--model', 'opus'])
+
+    // Tear down the readline interfaces and streams this created, or the file
+    // leaks handles and the runner hangs after its summary.
+    // No `?.` — if this is ever renamed the teardown must go RED, not silently
+    // no-op and leave the file hanging on a leaked readline handle (entry 17).
+    session._cleanupReadlines()
+    for (const s of [child.stdin, child.stdout, child.stderr]) s.destroy()
+
+    return { captured, session }
+  }
+
+  it('POSITIVE CONTROL: the env really does carry the host sidecar path', async () => {
+    const { DockerSession } = await import('../src/docker-session.js')
+    const session = new DockerSession({ cwd: '/tmp', image: 'node:22-slim' })
+    session._permissionModeFile = HOST_ONLY_SIDECAR
+    // If this ever stops holding, every "does not forward" assertion below
+    // becomes vacuous — it would be asserting the absence of something that
+    // was never in the env to begin with.
+    assert.equal(
+      session._buildChildEnv().CHROXY_PERMISSION_MODE_FILE,
+      HOST_ONLY_SIDECAR,
+      'the child env must carry the host sidecar path for the leak test to mean anything',
+    )
+  })
+
+  it('POSITIVE CONTROL: allowlisted env vars DO reach the container argv', async () => {
+    const { captured } = await captureArgv()
+    assert.ok(captured, 'the spawn seam must have been reached')
+    // Proves the forwarding machinery ran at all — without it, a session that
+    // returned early would satisfy the negative assertion trivially.
+    assert.ok(
+      captured.some((a) => String(a).startsWith('CHROXY_PERMISSION_MODE=')),
+      `an allowlisted key must be forwarded; got: ${JSON.stringify(captured)}`,
+    )
+    assert.ok(captured.includes('exec'), 'argv must be a docker exec invocation')
+  })
+
+  it('does NOT forward CHROXY_PERMISSION_MODE_FILE into the container', async () => {
+    const { captured } = await captureArgv()
+    const offenders = captured.filter((a) => String(a).includes('CHROXY_PERMISSION_MODE_FILE'))
+    assert.deepEqual(
+      offenders,
+      [],
+      'the sidecar path is a HOST path; `docker exec` cannot mount it, so forwarding the key would name a path that does not exist in the container. Add the bind mount in _startContainer() before adding the key.',
+    )
+  })
+
+  it('does not leak the host sidecar PATH by any other argv route', async () => {
+    // Keyed on the VALUE, not the variable name: a forward that renamed the key
+    // (or embedded the path in another var) would slip past a name-only check
+    // while leaking exactly the same host path.
+    const { captured } = await captureArgv()
+    const leaked = captured.filter((a) => String(a).includes(HOST_ONLY_SIDECAR))
+    assert.deepEqual(leaked, [], `the host sidecar path must not appear anywhere in argv; got ${JSON.stringify(leaked)}`)
   })
 })

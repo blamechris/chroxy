@@ -270,6 +270,26 @@ export class DockerSession extends CliSession {
   }
 
   /**
+   * Spawn seam (#7374).
+   *
+   * Exists so a test can observe the argv `_spawnPersistentProcess` ACTUALLY
+   * builds. Before this, the rule that `CHROXY_PERMISSION_MODE_FILE` must not
+   * reach the container was pinned only by a source-level grep of the
+   * `FORWARDED_ENV_KEYS` literal — which stays green when a key is pushed into
+   * `dockerArgs` OUTSIDE the allowlist loop. That is not hypothetical: there
+   * are already two such explicit pushes immediately below the loop
+   * (`CHROXY_HOST`, `getChroxyHostEnv()`), so the allowlist is demonstrably not
+   * the only way in.
+   *
+   * Kept as a one-line override point rather than a constructor opt so it adds
+   * no BaseSession opt to forward (see BASE_SESSION_OPT_KEYS and
+   * scripts/lint-session-opt-forwarding.sh).
+   */
+  _spawnDocker(dockerArgs) {
+    return spawn('docker', dockerArgs, { stdio: ['pipe', 'pipe', 'pipe'] })
+  }
+
+  /**
    * Override CliSession._spawnPersistentProcess to use `docker exec -i`
    * instead of spawning `claude` directly.
    *
@@ -320,9 +340,7 @@ export class DockerSession extends CliSession {
 
     log.info(`Exec into container ${this._containerId.slice(0, 12)} (model: ${this.model || 'default'})`)
 
-    const child = spawn('docker', dockerArgs, {
-      stdio: ['pipe', 'pipe', 'pipe'],
-    })
+    const child = this._spawnDocker(dockerArgs)
 
     this._child = child
 
