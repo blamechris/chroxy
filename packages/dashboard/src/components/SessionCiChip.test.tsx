@@ -176,4 +176,42 @@ describe('SessionCiChip', () => {
     render(<SessionCiChip status={null} loading onRefresh={vi.fn()} />)
     expect(screen.getByTestId('session-ci-chip')).toBeTruthy()
   })
+
+  // #7423 — the prefill action. Its formatting and its refusal logic live in
+  // `lib/ci-prefill`; what the chip owns is WHEN the affordance is offered.
+  it('offers the prefill action for every check state that has a PR, not just green', () => {
+    for (const checks of [
+      { state: 'success', counts: { total: 21, passed: 21, failed: 0, pending: 0, skipped: 0, unknown: 0 } },
+      { state: 'failure', counts: { total: 3, passed: 0, failed: 3, pending: 0, skipped: 0, unknown: 0 } },
+      { state: 'pending', counts: { total: 3, passed: 1, failed: 0, pending: 2, skipped: 0, unknown: 0 } },
+      { state: 'none', counts: { total: 0, passed: 0, failed: 0, pending: 0, skipped: 0, unknown: 0 } },
+    ] as ServerSessionPrStatusMessage['checks'][]) {
+      const { unmount } = render(<SessionCiChip status={status({ checks })} onRefresh={vi.fn()} onPrefill={vi.fn()} />)
+      expect(screen.queryByTestId('session-ci-chip-prefill')).toBeTruthy()
+      unmount()
+    }
+  })
+
+  it('calls onPrefill on click', () => {
+    const onPrefill = vi.fn()
+    render(<SessionCiChip status={status()} onRefresh={vi.fn()} onPrefill={onPrefill} />)
+    fireEvent.click(screen.getByTestId('session-ci-chip-prefill'))
+    expect(onPrefill).toHaveBeenCalledTimes(1)
+  })
+
+  it('withholds the prefill action when there is no PR to describe', () => {
+    // Both pr:null branches — the quiet negative and cannot-determine. Neither
+    // is verified state worth handing an agent.
+    const { unmount } = render(<SessionCiChip status={status({ pr: null, checks: null, merge: null, reason: null })} onRefresh={vi.fn()} onPrefill={vi.fn()} />)
+    expect(screen.queryByTestId('session-ci-chip-prefill')).toBeNull()
+    unmount()
+
+    render(<SessionCiChip status={status({ pr: null, checks: null, merge: null, reason: 'gh not found' })} onRefresh={vi.fn()} onPrefill={vi.fn()} />)
+    expect(screen.queryByTestId('session-ci-chip-prefill')).toBeNull()
+  })
+
+  it('omits the action entirely when no handler is supplied', () => {
+    render(<SessionCiChip status={status()} onRefresh={vi.fn()} />)
+    expect(screen.queryByTestId('session-ci-chip-prefill')).toBeNull()
+  })
 })

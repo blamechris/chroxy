@@ -108,6 +108,9 @@ export interface AppHeaderProps {
   sessionPrStatus: ServerSessionPrStatusMessage | null
   sessionPrStatusLoading?: boolean
   onRefreshSessionPrStatus: () => void
+  // #7423 — stage the snapshot as a status line in the composer. PREFILL
+  // ONLY; the user presses Enter. Optional so the chip is usable without it.
+  onPrefillSessionPrStatus?: () => void
 }
 
 export function AppHeader(props: AppHeaderProps) {
@@ -212,6 +215,7 @@ export function AppHeader(props: AppHeaderProps) {
           status={props.sessionPrStatus}
           loading={props.sessionPrStatusLoading}
           onRefresh={props.onRefreshSessionPrStatus}
+          onPrefill={props.onPrefillSessionPrStatus}
         />
         {/* #4890 — Slack-style intervention notifications widget. Bell
             with unread badge → dropdown listing every intervention alert
