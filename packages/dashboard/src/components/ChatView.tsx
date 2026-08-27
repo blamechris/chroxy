@@ -253,6 +253,34 @@ const TYPE_CLASS: Record<string, string> = {
 const SCROLL_THRESHOLD = 100
 
 /**
+ * #7399 — minimum per-event finger travel (px) that counts as a deliberate
+ * touch drag rather than the jitter of a finger resting on the list.
+ */
+const TOUCH_INTENT_SLOP = 4
+
+/**
+ * #7399 — keys that scroll the list toward history. A key press is read as
+ * scroll INTENT directly, because the position it produces is not usable
+ * evidence while the streaming re-pin loop is running (see `handleWheel`).
+ */
+const SCROLL_UP_KEYS = new Set(['ArrowUp', 'PageUp', 'Home'])
+
+/**
+ * #7399 — how close to the bottom (px) the viewport must get before a reader
+ * who scrolled up is considered to be FOLLOWING again.
+ *
+ * Deliberately much tighter than SCROLL_THRESHOLD: the two directions cannot
+ * share a threshold. Leaving the follow uses the wide band (a small nudge off
+ * the bottom is still "following the conversation"), but resuming it on the
+ * same band re-opens this bug at small scale — a 40px scroll-up lands INSIDE
+ * the band, so the next scroll event would classify the reader as at-bottom,
+ * hand them back to the re-pin loop, and they could never accumulate enough
+ * movement to escape. A few px of slack absorbs sub-pixel scrollTop rounding;
+ * anything more is a user who has not actually returned to the bottom.
+ */
+const RESUME_FOLLOW_THRESHOLD = 8
+
+/**
  * #6788 — headroom (px) left above a search match when the list scrolls to it,
  * so the matched row lands just below the top edge rather than flush against it
  * (mirrors the mobile `y - 80` headroom / `viewPosition: 0` landing).
@@ -531,12 +559,22 @@ function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, inFlig
     return positions
   }, [messages, queuedIds])
 
-  const [userScrolledUp, setUserScrolledUp] = useState(false)
+  const [userScrolledUp, setUserScrolledUpState] = useState(false)
   const programmaticScrollRef = useRef(false)
   // #5954 — a ref mirror of `userScrolledUp` so the ResizeObserver callback can
   // read the live follow-state without re-subscribing the observer every time
-  // the user crosses the bottom threshold. Kept in sync by the effect below.
+  // the user crosses the bottom threshold.
+  //
+  // #7399 — the mirror is now also the SYNCHRONOUS source of truth for the
+  // streaming re-pin loop, which has to stop within the same tick the user's
+  // gesture arrives: a `setState` only lands a render later, and the loop pins
+  // to the bottom on every frame in between. `setScrolledUp` below is the ONLY
+  // writer of either — a write to one without the other is how the two drift.
   const userScrolledUpRef = useRef(false)
+  const setScrolledUp = useCallback((next: boolean) => {
+    userScrolledUpRef.current = next
+    setUserScrolledUpState(next)
+  }, [])
 
   // #5561 — scroll-anchor compensation state. WKWebView (the Tauri desktop's
   // engine, and the dashboard's PRIMARY consumer) does NOT implement default
@@ -683,10 +721,91 @@ function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, inFlig
     // layout change.
     setScrollTop(el.scrollTop)
     setViewportHeight(el.clientHeight)
-    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < SCROLL_THRESHOLD
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
+    const atBottom = distanceFromBottom < SCROLL_THRESHOLD
     // During programmatic scrolls, only update if we're at bottom (don't falsely set scrolledUp)
     if (programmaticScrollRef.current && atBottom) return
-    setUserScrolledUp(!atBottom)
+    // #7399 — asymmetric thresholds (see RESUME_FOLLOW_THRESHOLD). A reader who
+    // has already left the bottom only rejoins the follow by actually reaching
+    // it; the wide band decides the leaving direction only.
+    if (userScrolledUpRef.current) {
+      if (distanceFromBottom <= RESUME_FOLLOW_THRESHOLD) setScrolledUp(false)
+      return
+    }
+    setScrolledUp(!atBottom)
+  }, [setScrolledUp])
+
+  // #7399 — read the user's scroll INTENT from the input gesture, not from the
+  // scroll position the gesture produced.
+  //
+  // Position is not usable evidence while streaming. The re-pin loop below runs
+  // every frame, so by the time a gesture's `scroll` event is dispatched the
+  // view is already back at the bottom and `programmaticScrollRef` is still
+  // held — and a trackpad flick only moves ~10-40px per frame, an order of
+  // magnitude inside SCROLL_THRESHOLD. `handleScroll` therefore reads
+  // `programmatic && atBottom` and discards a genuine user gesture, and the
+  // user can never accumulate enough movement in a single frame to escape the
+  // threshold. That is the reported "I can't scroll up, it's forcing me to the
+  // bottom": the guard is not wrong, it is unreachable.
+  //
+  // A wheel / touch / key event with an upward delta is unambiguously the user
+  // whatever position it lands on, so it is the ground truth. It writes through
+  // `setScrolledUp`, which stops the loop in the SAME tick via the ref — a
+  // render later would be too late, because the frames in between would pin the
+  // reader's position away before the effect could tear the loop down.
+  const markScrolledUpByGesture = useCallback(() => {
+    if (userScrolledUpRef.current) return
+    setScrolledUp(true)
+  }, [setScrolledUp])
+
+  const handleWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
+    if (e.deltaY < 0) markScrolledUpByGesture()
+  }, [markScrolledUpByGesture])
+
+  // A finger dragging DOWN the screen scrolls the content UP toward history.
+  // Compared against the PREVIOUS move (not the touch's origin) so a direction
+  // reversal mid-drag is seen immediately; TOUCH_INTENT_SLOP keeps a resting
+  // finger's jitter from registering as a deliberate drag.
+  const touchYRef = useRef<number | null>(null)
+  const handleTouchStart = useCallback((e: React.TouchEvent<HTMLDivElement>) => {
+    touchYRef.current = e.touches[0]?.clientY ?? null
+  }, [])
+  const handleTouchMove = useCallback((e: React.TouchEvent<HTMLDivElement>) => {
+    const y = e.touches[0]?.clientY
+    if (y === undefined) return
+    const last = touchYRef.current
+    touchYRef.current = y
+    if (last !== null && y - last > TOUCH_INTENT_SLOP) markScrolledUpByGesture()
+  }, [markScrolledUpByGesture])
+
+  // Keys only count when they did not come from a text field inside the list —
+  // an inline input's arrow-key caret movement is not a scroll.
+  const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (!SCROLL_UP_KEYS.has(e.key)) return
+    const target = e.target as HTMLElement | null
+    if (target && (target.isContentEditable || /^(?:INPUT|TEXTAREA|SELECT)$/.test(target.tagName))) return
+    markScrolledUpByGesture()
+  }, [markScrolledUpByGesture])
+
+  // #7399 — a native scrollbar-thumb drag emits no wheel/touch/key event, so
+  // the handlers above cannot see it; the loop and the user just fight over
+  // `scrollTop` every frame and the user loses. While a pointer is held down on
+  // the scroller we therefore PAUSE the pin instead of classifying anything.
+  // With no writes in flight `programmaticScrollRef` clears, `handleScroll`'s
+  // position logic becomes reachable again, and the drag accumulates until it
+  // crosses SCROLL_THRESHOLD and registers normally. Deliberately not a
+  // classification: a plain click that moves nothing simply resumes following
+  // when the button comes back up.
+  const pointerDownRef = useRef(false)
+  const handlePointerDown = useCallback(() => { pointerDownRef.current = true }, [])
+  useEffect(() => {
+    const release = () => { pointerDownRef.current = false }
+    window.addEventListener('pointerup', release)
+    window.addEventListener('pointercancel', release)
+    return () => {
+      window.removeEventListener('pointerup', release)
+      window.removeEventListener('pointercancel', release)
+    }
   }, [])
 
   // The bare "snap to bottom" primitive shared by the mount, count-follow, and
@@ -708,8 +827,8 @@ function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, inFlig
 
   const scrollToBottom = useCallback(() => {
     scrollToBottomNow()
-    setUserScrolledUp(false)
-  }, [scrollToBottomNow])
+    setScrolledUp(false)
+  }, [scrollToBottomNow, setScrolledUp])
 
   // Scroll to the bottom on initial mount so switching back to the chat
   // tab always lands on the most-recent message above the input bar.
@@ -723,13 +842,6 @@ function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, inFlig
     // so the first render after layout has an accurate viewport height.
     syncGeometry()
   }, [syncGeometry, scrollToBottomNow])
-
-  // #5954 — mirror `userScrolledUp` into a ref so the ResizeObserver callback
-  // (which we don't want to re-subscribe on every threshold crossing) reads the
-  // current follow-state.
-  useEffect(() => {
-    userScrolledUpRef.current = userScrolledUp
-  }, [userScrolledUp])
 
   // #5561 — keep the windowed range correct when the container resizes (panel
   // split drag, window resize, sidebar toggle) without a scroll event firing.
@@ -871,9 +983,9 @@ function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, inFlig
   useEffect(() => {
     if (scrollToBottomSignal === lastScrollSignalRef.current) return
     lastScrollSignalRef.current = scrollToBottomSignal
-    setUserScrolledUp(false)
+    setScrolledUp(false)
     requestAnimationFrame(() => { scrollToBottomNow() })
-  }, [scrollToBottomSignal, scrollToBottomNow])
+  }, [scrollToBottomSignal, scrollToBottomNow, setScrolledUp])
 
   // During streaming, continuously re-pin to the bottom via RAF so the growing
   // tail stays in view. #5954: reuse `scrollToBottomNow()` rather than an inline
@@ -887,13 +999,25 @@ function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, inFlig
   // below the fold ("doesn't consistently stay at the bottom"). `scrollToBottomNow`
   // holds the flag until the next frame, so `handleScroll`'s
   // `programmaticScrollRef.current && atBottom` guard reliably ignores the
-  // self-induced events while a genuine user scroll-up (atBottom false) is still
-  // honored.
+  // self-induced events.
+  //
+  // #7399 — this comment used to end by claiming "a genuine user scroll-up
+  // (atBottom false) is still honored". It was exactly backwards: because the
+  // loop re-pins every frame, `atBottom false` is the state it makes
+  // unreachable, and a user scrolling up during a long turn was pinned to the
+  // bottom for the whole stream. User intent now comes from the GESTURE
+  // handlers above, not from the position, and the tick re-reads the REF so a
+  // gesture stops the pinning in the same tick rather than a render later.
   useEffect(() => {
     if (!isStreaming || userScrolledUp) return
     let rafId: number
     const tick = () => {
-      scrollToBottomNow()
+      // Stop for good: a gesture flipped the ref, and the state update that
+      // tears this effect down is still a render away.
+      if (userScrolledUpRef.current) return
+      // Yield to a pointer the user is holding on the scroller (thumb drag) —
+      // keep the loop alive so following resumes on release.
+      if (!pointerDownRef.current) scrollToBottomNow()
       rafId = requestAnimationFrame(tick)
     }
     rafId = requestAnimationFrame(tick)
@@ -948,7 +1072,7 @@ function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, inFlig
   useEffect(() => {
     if (!searchMatchId) return
     if (!containerRef.current) return
-    setUserScrolledUp(true)
+    setScrolledUp(true)
     const index = dedupRef.current.findIndex((m) => m.id === searchMatchId)
     if (index < 0) return
     scrollToRowIndex(index)
@@ -966,7 +1090,7 @@ function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, inFlig
         programmaticScrollRef.current = false
       }
     }
-  }, [searchMatchId, scrollToRowIndex])
+  }, [searchMatchId, scrollToRowIndex, setScrolledUp])
 
   // #5561 — the windowed slice. Only rows in [startIndex, endIndex) mount; the
   // top/bottom spacers reserve the height of the skipped rows so the scrollbar
@@ -1000,6 +1124,11 @@ function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, inFlig
           className="chat-messages"
           data-testid="chat-messages"
           onScroll={handleScroll}
+          onWheel={handleWheel}
+          onTouchStart={handleTouchStart}
+          onTouchMove={handleTouchMove}
+          onKeyDown={handleKeyDown}
+          onPointerDown={handlePointerDown}
         >
           {/* Top spacer — reserves the height of windowed-out leading rows. The
               `flex: 0 0 auto` style keeps it from being squeezed by the flex
