@@ -73,6 +73,17 @@ export const FORCE_EXIT_OPTION = '--test-force-exit'
 export const FORCE_EXIT_ERROR_CODE = 'CHROXY_TEST_FORCE_EXIT'
 export const FORCE_EXIT_ALLOW_ENV = 'CHROXY_ALLOW_TEST_FORCE_EXIT'
 
+// The escape hatch takes an explicit AFFIRMATIVE value, not any truthy string.
+// `CHROXY_ALLOW_TEST_FORCE_EXIT=0` and `=false` read, to anyone who exported
+// them, as "guard on" — and under plain truthiness they turn it off, silently,
+// which is the failure this whole module is about.
+const ALLOW_VALUES = new Set(['1', 'true', 'yes', 'on'])
+
+/** Is this env value an explicit "yes, waive the refusal"? */
+export function isAllowValue (raw) {
+  return ALLOW_VALUES.has(String(raw ?? '').trim().toLowerCase())
+}
+
 /**
  * Reduce one node CLI argument to its canonical option name: drop any `=value`
  * and fold `_` to `-`, the two transformations node itself applies. Returns the
@@ -117,7 +128,8 @@ export function forceExitRefusalMessage ({ source, arg }) {
     '  same leak CI will hit, which this flag would hide.\n' +
     '\n' +
     `  Deliberately debugging the flag itself? Set ${FORCE_EXIT_ALLOW_ENV}=1 and the\n` +
-    '  run proceeds with a warning instead.'
+    '  run proceeds with a warning instead. Only 1/true/yes/on waive it — anything\n' +
+    '  else, including 0 and false, still refuses.'
   )
 }
 
@@ -125,8 +137,18 @@ export function forceExitRefusalMessage ({ source, arg }) {
  * Throw unless this process was started without `--test-force-exit`.
  *
  * Installed from each package's `tests/_setup.mjs`, which `--import` puts ahead
- * of the test graph — so the refusal lands before a single test runs, in the
- * runner's own process and in every child it spawns.
+ * of the test graph — so the refusal lands before a single test in that file
+ * runs.
+ *
+ * WHICH process, precisely, because it is not the obvious one: under the
+ * default process isolation `--import` runs in the per-file CHILDREN only. The
+ * runner parent never loads it (measured: two children logged the hook, the
+ * parent did not), so the parent keeps its own `--test-force-exit` and still
+ * force-exits while it aggregates. That is fine — every file fails, the run is
+ * red, and the refusals are small enough to survive the parent's exit — but the
+ * authoritative signal is the non-zero exit, not the message. With
+ * `--experimental-test-isolation=none` it is the other way round: one process,
+ * which does load the hook, and where the flag was harmless anyway.
  *
  * @returns {{ allowed: true, found: object } | null} `null` when clean; the
  *   found flag when the escape hatch waived it (a warning is printed).
@@ -139,7 +161,7 @@ export function assertNoTestForceExit ({
   const found = findTestForceExit({ execArgv, env })
   if (!found) return null
 
-  if (env?.[FORCE_EXIT_ALLOW_ENV]) {
+  if (isAllowValue(env?.[FORCE_EXIT_ALLOW_ENV])) {
     warn(
       `WARNING: running with \`${found.arg}\` because ${FORCE_EXIT_ALLOW_ENV} is set.\n` +
       '  Test COUNTS from this run are not trustworthy — up to 20% of results are\n' +

@@ -312,8 +312,9 @@ The recurring causes:
   192 of one file's 192 tests across five runs, every run `# fail 0` and exit 0,
   while a side-channel proved all 192 had executed (`#7400`)
 
-**Never pass `--test-force-exit`, and run what CI runs.** Both `tests/_setup.mjs`
-files refuse it now (`scripts/lib/no-test-force-exit.mjs`) because it drops test
+**Never pass `--test-force-exit`, and run what CI runs.** Every package that runs
+`node --test` refuses it now (`scripts/lib/no-test-force-exit.mjs`, installed via
+each `tests/_setup.mjs` or the `--import` hook) because it drops test
 RESULTS — the tests run, up to a fifth of them never report, and the run still
 exits 0 with `# fail 0` (`#7400`, catalogue entry 19). Nothing needs it: the
 leaks that once required it were fixed in `#6027`/`#6042`, and it saves no wall

@@ -1046,8 +1046,11 @@ happened to its output. So RED was always trustworthy. It is GREEN that was
 worth less than it looked — which is the shape of every entry above.
 
 **The fix is refusal, not a louder green.** `scripts/lib/no-test-force-exit.mjs`
-throws from both `tests/_setup.mjs` files, so the run dies before a single test
-executes. Nothing needed the flag any more: the leaked handles it papered over
+is installed in every package that runs `node --test` — server and claude-hooks
+call it from `tests/_setup.mjs`, protocol and design-tokens `--import` the hook
+next door — so every file fails before a single test in it executes. (`--import` loads in the per-file children, not in the
+runner parent — measured — so the red comes from the files, and the exit code is
+what to trust.) Nothing needed the flag any more: the leaked handles it papered over
 were fixed in `#6027`/`#6042`, all eight files on that leak map now exit on
 their own, and the flag buys no wall clock (byok-session 66.5s → 63.9s,
 byok-mcp-client 74.9s → 74.9s). A file that hangs after its summary is a leaked
