@@ -883,12 +883,19 @@ export function resetReplayFlags(): void {
 // explicit reset). Closing the viewer, the watchdog firing, and Retry must
 // NOT disarm it mid-stream: frames arriving after a disarm are not inert.
 // A `message` frame would fall through the switch below to its flat
-// `get().addMessage(...)` fallback (transcript text rendered as live chat),
-// and a late `history_replay_start` would reach `updateActiveSession`, which
-// WIPES the live session's `activeAgents` and cancels `isPlanPending` /
-// `planAllowedPrompts` — i.e. opening and closing the read-only viewer could
-// silently drop a pending plan approval. So: closing the viewer stops
-// RENDERING, never INTERCEPTING.
+// `get().addMessage(...)` fallback, rendering transcript text as live chat.
+//
+// A late `history_replay_start` no longer wipes live transient state: #4909,
+// #7340 and #7402 between them moved every slice of that case body off
+// `activeSessionId` and onto the frame's own `replayTargetId`, which for a
+// transcript id has no `sessionStates` entry, so the wipe block is skipped
+// entirely. Do NOT read that as "late replay frames are now inert" — the two
+// unconditional statements above the wipe still run on the frame's raw id, so
+// a disarmed transcript stream would add a conversationId to
+// `_replayingSessions` (gating live-session replay logic on an id that is not
+// a session) and hand it to `reconcileReplayStart` as a rebuild baseline.
+//
+// So: closing the viewer stops RENDERING, never INTERCEPTING.
 //
 // Arming is REFCOUNTED per id because Retry re-requests the SAME
 // conversationId while stream 1 may still be on the wire — stream 1's
@@ -5132,37 +5139,47 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // same id is what makes the pair a genuine snapshot replace.
       //
       // `replayTargetId` falls back to `activeSessionId` when the frame omits
-      // `sessionId`, so the single-session case is unchanged. This mirrors the
-      // #4909 block below, which made exactly this move for
-      // `stoppedAt`/`stoppedCode` and explained why.
+      // `sessionId`, so the single-session case is unchanged. This mirrors what
+      // #4909 did for `stoppedAt`/`stoppedCode` — in the APP's copy of this
+      // case, which is where that block lives; the dashboard has no equivalent
+      // block here because it clears `stoppedAt` in `connection.ts` instead.
       if (replayTargetId && get().sessionStates[replayTargetId]) {
         // `activeAgents?.length` — the old code read `ss.activeAgents.length`
         // unguarded and was safe only because `updateActiveSession` always
         // handed it the ACTIVE session, which is fully initialised. Targeting
         // the replayed session means it can now be handed a partially-built
         // state whose transient slices are still undefined.
-        updateSession(replayTargetId, (ss) =>
-          (ss.activeAgents?.length ?? 0) > 0 ? { activeAgents: [] } : {},
-        );
+        //
+        // #7402 — `isPlanPending`/`planAllowedPrompts` are wiped here, on the
+        // REPLAYED session, for the same KEYING reason as `activeAgents` (not
+        // the guarding note above, which is about reading a partially-built
+        // state). They used to be wiped via `updateActiveSession`, so the same
+        // background-replay burst cancelled a pending plan approval the user
+        // was looking at, on the very reconnect that was supposed to restore
+        // it. #7340 moved `activeAgents` and deliberately left this alone to
+        // keep its blast radius to the bug it was fixing; this is the
+        // follow-up.
+        //
+        // #4466: activeTools is deliberately NOT wiped here. The earlier #4308
+        // wipe rebuilt entries from replayed tool_start events with
+        // startedAt = Date.now(), so the "Running <tool> · Ns" pill restarted
+        // at 1s every time the user switched tabs. The in-flight set is
+        // authoritative (carried in-memory, not derivable from history), so
+        // keeping it intact preserves the elapsed-time clock. tool_result
+        // events that fire during replay still correctly drop resolved entries
+        // via sharedToolResult, and the dedup logic in sharedToolStart prevents
+        // replayed tool_start events from re-adding tools already in
+        // activeTools.
+        updateSession(replayTargetId, (ss) => {
+          const patch: Partial<SessionState> = {};
+          if ((ss.activeAgents?.length ?? 0) > 0) patch.activeAgents = [];
+          if (ss.isPlanPending) {
+            patch.isPlanPending = false;
+            patch.planAllowedPrompts = [];
+          }
+          return patch;
+        });
       }
-      updateActiveSession((ss) => {
-        const patch: Partial<SessionState> = {};
-        // #4466: preserve activeTools through the replay boundary. The
-        // earlier #4308 wipe rebuilt entries from replayed tool_start
-        // events with startedAt = Date.now(), so the "Running <tool> · Ns"
-        // pill restarted at 1s every time the user switched tabs. The
-        // in-flight set is authoritative (carried in-memory, not derivable
-        // from history), so keeping it intact preserves the elapsed-time
-        // clock. tool_result events that fire during replay still
-        // correctly drop resolved entries via sharedToolResult, and the
-        // dedup logic in sharedToolStart prevents replayed tool_start
-        // events from re-adding tools already in activeTools.
-        if (ss.isPlanPending) {
-          patch.isPlanPending = false;
-          patch.planAllowedPrompts = [];
-        }
-        return Object.keys(patch).length > 0 ? patch : {};
-      });
       break;
     }
 

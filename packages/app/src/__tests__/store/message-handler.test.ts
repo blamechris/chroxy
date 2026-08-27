@@ -537,6 +537,112 @@ describe('history_replay_start clears stale session_stopped marker (#4909)', () 
   });
 });
 
+// #7402 — the `isPlanPending` / `planAllowedPrompts` wipe on
+// `history_replay_start` must target the session the frame is REPLAYING, not
+// whichever session happens to be active. Same mis-keying #7340 fixed for
+// `activeAgents` in the block immediately above it, and #4909 fixed for
+// `stoppedAt`/`stoppedCode` in the block below.
+//
+// `subscribe_sessions` replays every newly-subscribed BACKGROUND session
+// (server `session-handlers.js`), and both clients fire it for all non-active
+// sessions on every `session_list` — i.e. on every reconnect. Keyed to
+// `activeSessionId`, that burst cancels a pending plan approval the user is
+// looking at, on the very reconnect that is supposed to restore it.
+describe('history_replay_start: isPlanPending wipe targeting (#7402)', () => {
+  afterEach(() => {
+    resetReplayFlags();
+  });
+
+  function seedTwoSessions() {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [
+        { sessionId: 's1', name: 'S1' } as any,
+        { sessionId: 's2', name: 'S2' } as any,
+      ],
+      sessionStates: {
+        s1: { ...createEmptySessionState(), isPlanPending: true, planAllowedPrompts: [{ tool: 'ExitPlanMode', prompt: 'go ahead' }] },
+        s2: createEmptySessionState(),
+      },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+    return store;
+  }
+
+  it("a background session's replay does not cancel the active session's pending plan", () => {
+    const store = seedTwoSessions();
+
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's2' });
+
+    const state = store.getState();
+    expect(state.sessionStates.s1.isPlanPending).toBe(true);
+    expect(state.sessionStates.s1.planAllowedPrompts).toEqual([{ tool: 'ExitPlanMode', prompt: 'go ahead' }]);
+  });
+
+  it('still clears the active session when it is the one being replayed', () => {
+    const store = seedTwoSessions();
+
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's1' });
+
+    const state = store.getState();
+    expect(state.sessionStates.s1.isPlanPending).toBe(false);
+    expect(state.sessionStates.s1.planAllowedPrompts).toEqual([]);
+  });
+
+  it("clears a background session's own pending plan when it is the replay target", () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [
+        { sessionId: 's1', name: 'S1' } as any,
+        { sessionId: 's2', name: 'S2' } as any,
+      ],
+      sessionStates: {
+        s1: createEmptySessionState(),
+        s2: { ...createEmptySessionState(), isPlanPending: true, planAllowedPrompts: [{ tool: 'ExitPlanMode', prompt: 'yes' }] },
+      },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's2' });
+
+    const state = store.getState();
+    expect(state.sessionStates.s2.isPlanPending).toBe(false);
+    expect(state.sessionStates.s2.planAllowedPrompts).toEqual([]);
+  });
+
+  // Frames without an explicit sessionId fall back to activeSessionId via
+  // sharedHistoryReplayStart, so the single-session case is unchanged.
+  it('falls back to the active session when the frame omits sessionId', () => {
+    const store = seedTwoSessions();
+
+    _testMessageHandler.handle({ type: 'history_replay_start' });
+
+    const state = store.getState();
+    expect(state.sessionStates.s1.isPlanPending).toBe(false);
+    expect(state.sessionStates.s1.planAllowedPrompts).toEqual([]);
+  });
+
+  // The wipe now runs against the REPLAYED session, which — unlike the active
+  // one — can be a partially-built state whose transient slices are undefined.
+  it('does not throw when the replayed session state is partially built', () => {
+    const store = seedTwoSessions();
+    // `activeAgents` is the slice the `?? 0` guard in the merged updater
+    // actually defends — deleting only the plan slices leaves the test unable
+    // to fail for the reason it is named after (neither is read unguarded).
+    delete (store.getState().sessionStates.s2 as any).activeAgents;
+    delete (store.getState().sessionStates.s2 as any).isPlanPending;
+    delete (store.getState().sessionStates.s2 as any).planAllowedPrompts;
+
+    expect(() =>
+      _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's2' }),
+    ).not.toThrow();
+
+    // ...and the active session's pending plan is still untouched.
+    expect(store.getState().sessionStates.s1.isPlanPending).toBe(true);
+  });
+});
 describe('session_timeout handler', () => {
   it('removes timed-out session from sessionStates and sessions list', () => {
     const store = createMockStore({
