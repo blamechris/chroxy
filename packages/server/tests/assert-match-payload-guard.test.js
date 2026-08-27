@@ -14,7 +14,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { readdirSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join, relative, sep } from 'node:path'
 
 import {
   installAssertMatchPayloadGuard,
@@ -242,7 +242,13 @@ describe('assert.match payload guard — coverage is enforced (#7401)', () => {
     // guard covering 91% of what it claimed to cover, which is the defect
     // class this whole PR is about. Pin the traversal, not just its verdict.
     const files = walkTestFiles(TESTS_DIR)
-    const nested = files.filter((f) => f.slice(TESTS_DIR.length + 1).includes('/'))
+    // `dirname(f) !== TESTS_DIR`, NOT a '/' search on the relative path: on
+    // Windows `join` emits backslashes, so `includes('/')` finds nothing and
+    // this control fails for a reason that has nothing to do with the walk.
+    // It did exactly that on the Windows CI job — the control working as
+    // intended (it refused to certify a scan it could not verify) via an
+    // implementation that was POSIX-only.
+    const nested = files.filter((f) => dirname(f) !== TESTS_DIR)
     assert.ok(
       nested.length > 0,
       'the walk must descend into subdirectories; found none, so the scan below proves nothing',
@@ -256,7 +262,8 @@ describe('assert.match payload guard — coverage is enforced (#7401)', () => {
       const src = readFileSync(file, 'utf8')
       NON_DEFAULT_ASSERT_IMPORT.lastIndex = 0
       for (const m of src.matchAll(NON_DEFAULT_ASSERT_IMPORT)) {
-        offenders.push(`${file.slice(TESTS_DIR.length + 1)}: ${m[0].replace(/\s+/g, ' ').trim()}`)
+        const rel = relative(TESTS_DIR, file).split(sep).join('/')
+        offenders.push(`${rel}: ${m[0].replace(/\s+/g, ' ').trim()}`)
       }
     }
     assert.ok(
