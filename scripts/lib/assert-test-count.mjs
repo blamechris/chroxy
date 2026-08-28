@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 /**
- * Truncation guard for the server suite (#5480, corrected in #7400).
+ * Truncation guard for the `node --test` suites (#5480, corrected in #7400;
+ * hoisted from packages/server/scripts and shared in #7447 — server,
+ * design-tokens and claude-hooks all front their test commands with it).
  *
  * A test run that dies, aborts, or silently drops whole files still prints a
  * clean-looking TAP summary and exits 0. "Ran and passed" and "never ran" are
@@ -34,7 +36,8 @@
  *          below the documented floor — a glob that stopped matching, a file
  *          that failed to load, a bad merge that deleted a directory).
  *
- * EXPECTED_MIN_TESTS is a *lower bound*, not the exact count. The floor sits
+ * The floor (--min for the non-server consumers, EXPECTED_MIN_TESTS below for
+ * the server) is a *lower bound*, not the exact count. The floor sits
  * below the live count with headroom so it does not break every time a test is
  * added, but high enough that a meaningful loss trips it. When the suite grows
  * well past the floor, bump the floor (the script prints the live count + a
@@ -57,10 +60,12 @@ const DEFAULT_MIN_TESTS = 13500
 // false, which would quietly turn the guard off — so fall back to the default and
 // warn loudly instead.
 let EXPECTED_MIN_TESTS = DEFAULT_MIN_TESTS
+let envOverrideValid = false
 if (process.env.CHROXY_MIN_TEST_COUNT !== undefined) {
   const parsed = Number(process.env.CHROXY_MIN_TEST_COUNT)
   if (Number.isInteger(parsed) && parsed > 0) {
     EXPECTED_MIN_TESTS = parsed
+    envOverrideValid = true
   } else {
     console.error(
       `[assert-test-count] ignoring invalid CHROXY_MIN_TEST_COUNT='${process.env.CHROXY_MIN_TEST_COUNT}' ` +
@@ -70,14 +75,37 @@ if (process.env.CHROXY_MIN_TEST_COUNT !== undefined) {
 }
 
 // How far above the floor the live count must climb before we suggest bumping
-// the floor. Purely advisory — never fails the run.
+// the floor. Purely advisory — never fails the run. Calibrated to the server
+// default; for small --min floors it effectively never fires, which is fine —
+// a 6-test package does not need drift nudges (#7461 review, N1).
 const HEADROOM_NUDGE = 600
 
-const cmd = process.argv[2]
-const args = process.argv.slice(3)
+// #7447: consumers other than the server pass their own (much smaller) floor
+// as `--min N`. Precedence: a valid CHROXY_MIN_TEST_COUNT env override (the
+// documented targeted-run escape hatch) > --min (the package's floor) > the
+// server default above. An INVALID --min is fail-closed (exit 2, never a
+// silently-disabled floor) — unlike the env var, it is committed configuration,
+// not a one-off override, so a typo must break the build loudly.
+let argIdx = 2
+if (process.argv[argIdx] === '--min') {
+  const parsed = Number(process.argv[argIdx + 1])
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    console.error(`[assert-test-count] invalid --min '${process.argv[argIdx + 1]}' (must be a positive integer).`)
+    process.exit(2)
+  }
+  // Only a VALID env override outranks --min (validity tracked explicitly —
+  // comparing values would let --min beat a valid override that happens to
+  // equal the default). An invalid override already warned, and must fall
+  // back to the package's floor, not to 13500.
+  if (!envOverrideValid) EXPECTED_MIN_TESTS = parsed
+  argIdx += 2
+}
+
+const cmd = process.argv[argIdx]
+const args = process.argv.slice(argIdx + 1)
 
 if (!cmd) {
-  console.error('[assert-test-count] usage: assert-test-count.mjs <cmd> [...args]')
+  console.error('[assert-test-count] usage: assert-test-count.mjs [--min N] <cmd> [...args]')
   process.exit(2)
 }
 
@@ -144,7 +172,8 @@ child.on('close', (code, signal) => {
       '  running or reporting: a glob that no longer matches, a file that threw while\n' +
       '  loading, a deleted directory. Look for a file the TAP output never mentions —\n' +
       '  the count is the only symptom, because the run still exited 0. If you\n' +
-      '  intentionally removed tests below the floor, lower EXPECTED_MIN_TESTS in this script.',
+      '  intentionally removed tests below the floor, lower it: the --min N in your\n' +
+      '  package.json test script, or (server) EXPECTED_MIN_TESTS in this script.',
     )
     return fail()
   }
@@ -153,7 +182,8 @@ child.on('close', (code, signal) => {
   if (total - EXPECTED_MIN_TESTS > HEADROOM_NUDGE) {
     console.error(
       `\n[assert-test-count] OK: ${total} tests ran (floor ${EXPECTED_MIN_TESTS}). ` +
-      `Consider raising EXPECTED_MIN_TESTS — the suite is now ${total - EXPECTED_MIN_TESTS} above the floor.`,
+      `Consider raising the floor (--min in the caller's package.json, or the server's ` +
+      `EXPECTED_MIN_TESTS here) — the suite is now ${total - EXPECTED_MIN_TESTS} above it.`,
     )
   } else {
     console.error(`\n[assert-test-count] OK: ${total} tests ran (floor ${EXPECTED_MIN_TESTS}).`)

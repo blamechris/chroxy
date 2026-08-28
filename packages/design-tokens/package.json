@@ -16,7 +16,7 @@
     "index.d.ts"
   ],
   "scripts": {
-    "test": "node --import ../../scripts/lib/no-test-force-exit-hook.mjs --test"
+    "test": "node ../../scripts/lib/assert-test-count.mjs --min 5 node --import ../../scripts/lib/no-test-force-exit-hook.mjs --test"
   },
   "license": "MIT"
 }

@@ -7,7 +7,7 @@
     "chroxy-hooks": "bin/chroxy-hooks.js"
   },
   "scripts": {
-    "test": "node --import ./tests/_setup.mjs --test './tests/**/*.test.js'"
+    "test": "node ../../scripts/lib/assert-test-count.mjs --min 150 node --import ./tests/_setup.mjs --test './tests/**/*.test.js'"
   },
   "engines": {
     "node": ">=22"
