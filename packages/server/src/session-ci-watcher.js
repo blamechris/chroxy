@@ -475,7 +475,9 @@ export class SessionCiWatcher {
     // "Could not determine" changes nothing. Disarming here would mean a single
     // `gh` hiccup silently cancels a watch the user is waiting on. The
     // `indeterminate` marker is the fork bail-outs saying the same thing while
-    // keeping the DISPLAY contract's quiet negative on the wire (#7435).
+    // keeping the DISPLAY contract's quiet negative on the wire (#7435). Only
+    // `session-pr-status.js` sets it, always as a literal boolean — the strict
+    // `=== true` is deliberate, so nothing truthy-but-foreign widens the rule.
     if (snapshot?.reason || snapshot?.indeterminate === true) return 'undeterminable'
 
     // No open PR (the quiet negative — merged, closed, or never opened). Nothing

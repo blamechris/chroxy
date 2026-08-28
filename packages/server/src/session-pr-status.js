@@ -361,6 +361,8 @@ async function resolveRepo(execFn, cwd) {
  *   fork); `{ failed: true }` when the lookup failed or answered in a shape
  *   that cannot be used (including a parent name that would be option-parsed —
  *   the upstream exists but cannot be queried, which is still not absence).
+ *   The union is discriminated by key PRESENCE: `failed` exists only on the
+ *   failure member, `parent` only on the answered one.
  */
 async function resolveParentRepo(execFn, ghPath, target, cwd) {
   let stdout

@@ -405,6 +405,23 @@ describe('#7344 — session PR/CI status survey', () => {
       assert.equal(snap.indeterminate, true)
     })
 
+    it('pins each answered-but-unusable parent shape as indeterminate (#7435)', async () => {
+      // Each shape exercises a DISTINCT resolveParentRepo failure arm —
+      // unparseable output, an answer with no `parent` key, and a parent whose
+      // names are not usable strings. Reverting any one of those arms to the
+      // pre-#7435 `{ parent: null }` reads "could not use the answer" as
+      // "authoritatively not a fork" and must fail here (review on #7440
+      // proved all three survived the suite before this test existed).
+      for (const bad of ['notjson', '{}', '{"parent":{}}', '{"parent":"x"}']) {
+        const table = happyTable('[]', 'feat/x', 'me/chroxy')
+        table['/usr/local/bin/gh repo view me/chroxy --json parent'] = bad
+        const snap = await surveySessionPrStatus({ sessionId: 's1', cwd: '/repo', _execFile: fakeExec(table) })
+        assert.equal(snap.pr, null, `for ${bad}`)
+        assert.equal(snap.reason, null, `for ${bad}`)
+        assert.equal(snap.indeterminate, true, `for ${bad}`)
+      }
+    })
+
     it('marks a FAILED upstream query indeterminate, not a negative (#7435)', async () => {
       const table = forkTable({ baseRows: '[]' })
       table[`/usr/local/bin/gh pr list -R cli/cli --head fix-typos --state open --limit ${FORK_QUERY_LIMIT} --json ${FIELDS}`] = new Error('boom')
@@ -449,7 +466,7 @@ describe('#7344 — session PR/CI status survey', () => {
       const table = happyTable('[]', 'feat/x', 'me/chroxy')
       table['/usr/local/bin/gh repo view me/chroxy --json parent'] =
         JSON.stringify({ parent: { name: 'cli', owner: { login: '--upload-file' } } })
-      await surveySessionPrStatus({ sessionId: 's1', cwd: '/repo', _execFile: fakeExec(table, calls) })
+      const snap = await surveySessionPrStatus({ sessionId: 's1', cwd: '/repo', _execFile: fakeExec(table, calls) })
 
       const listCalls = calls.filter(c => c.args[0] === 'pr' && c.args.includes('-R'))
       for (const call of listCalls) {
@@ -457,6 +474,9 @@ describe('#7344 — session PR/CI status survey', () => {
         assert.ok(!target.startsWith('-'), `built an option-parseable -R target: ${target}`)
         assert.ok(!target.includes('--upload-file'), `used the rejected parent owner: ${target}`)
       }
+      // #7435: the OUTCOME of the rejection changed too — a parent that exists
+      // but cannot be QUERIED is not absence, so it must read indeterminate.
+      assert.equal(snap.indeterminate, true, 'a rejected parent name is a failed lookup, not a negative')
     })
 
     it('positive control: a SAFE parent owner/name IS queried', async () => {
@@ -535,6 +555,13 @@ describe('#7344 — session PR/CI status survey', () => {
         happyTable(JSON.stringify([prRow({ statusCheckRollup: [done('a', 'FAILURE')] })])),
         happyTable('[]'),
         { 'git branch --show-current': new Error('nope') },
+        // #7435: the indeterminate fork bail-out — the schema (a stripping
+        // z.object) must keep accepting it; the wire never carries the marker.
+        (() => {
+          const t = happyTable('[]', 'feat/x', 'me/chroxy')
+          t['/usr/local/bin/gh repo view me/chroxy --json parent'] = '{}'
+          return t
+        })(),
       ]
       for (const table of cases) {
         const snap = await surveySessionPrStatus({ sessionId: 's1', cwd: '/repo', _execFile: fakeExec(table) })

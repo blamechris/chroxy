@@ -941,22 +941,39 @@ describe('isSurveySnapshot', () => {
       } },
       'no open PR': { exec: async (bin, argv) => {
         if (bin === 'which') return { stdout: '/usr/bin/gh\n' }
+        // The fork lookup gets its OWN answer: a blanket '[]' here also fed
+        // `gh repo view --json parent`, which #7435's `!('parent' in parsed)`
+        // arm reads as a FAILED lookup — quietly rerouting this entry away from
+        // the quiet negative it exists to cover (caught in review of #7440).
+        if (bin === '/usr/bin/gh' && argv[0] === 'repo') return { stdout: '{"parent":null}' }
+        if (bin === '/usr/bin/gh') return { stdout: '[]' }
+        return { stdout: argv[0] === 'branch' ? 'feat/x\n' : 'git@github.com:o/r.git\n' }
+      } },
+      'fork lookup failed': { exec: async (bin, argv) => {
+        // #7435's third state, from the REAL producer: pr:null + reason:null +
+        // indeterminate:true (upstream widening failed; absence not established).
+        if (bin === 'which') return { stdout: '/usr/bin/gh\n' }
+        if (bin === '/usr/bin/gh' && argv[0] === 'repo') return { stdout: '{}' }
         if (bin === '/usr/bin/gh') return { stdout: '[]' }
         return { stdout: argv[0] === 'branch' ? 'feat/x\n' : 'git@github.com:o/r.git\n' }
       } },
     }
-    let sawPr = false, sawReason = false
+    let sawPr = false, sawReason = false, sawQuietNegative = false, sawIndeterminate = false
     for (const [label, { cwd = '/repo', exec }] of Object.entries(paths)) {
       const real = await surveySessionPrStatus({ sessionId: 's1', cwd, _execFile: exec })
       assert.equal(isSurveySnapshot(real), true, `rejected a REAL snapshot from the '${label}' path`)
       if (real.pr) sawPr = true
       if (real.reason) sawReason = true
+      if (!real.pr && !real.reason && real.indeterminate !== true) sawQuietNegative = true
+      if (real.indeterminate === true) sawIndeterminate = true
     }
     // POSITIVE CONTROL: the table above really did reach both a populated-PR
     // path and a degraded one, rather than seven variations of the same early
     // return that would make the assertion above nearly free.
     assert.ok(sawPr, 'the table must reach a path that returns an actual PR')
     assert.ok(sawReason, 'the table must reach a degraded path')
+    assert.ok(sawQuietNegative, 'the table must reach the authoritative quiet negative — a new arm that reroutes it must fail here, not relabel it (#7435)')
+    assert.ok(sawIndeterminate, 'the table must reach an indeterminate fork bail-out (#7435)')
   })
 
   it('accepts the local fixtures too, which is what the rest of this file uses', () => {
