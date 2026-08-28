@@ -105,6 +105,7 @@ export declare const ServerMessageSchema: z.ZodObject<{
     attemptedResumeId: z.ZodOptional<z.ZodString>;
     stdout: z.ZodOptional<z.ZodString>;
     stderr: z.ZodOptional<z.ZodString>;
+    historySeq: z.ZodOptional<z.ZodNumber>;
 }, z.core.$strip>;
 export declare const ServerToolStartSchema: z.ZodObject<{
     type: z.ZodLiteral<"tool_start">;
@@ -113,6 +114,7 @@ export declare const ServerToolStartSchema: z.ZodObject<{
     tool: z.ZodString;
     input: z.ZodAny;
     serverName: z.ZodOptional<z.ZodString>;
+    historySeq: z.ZodOptional<z.ZodNumber>;
 }, z.core.$strip>;
 export declare const ServerToolResultSchema: z.ZodObject<{
     type: z.ZodLiteral<"tool_result">;
@@ -120,6 +122,7 @@ export declare const ServerToolResultSchema: z.ZodObject<{
     result: z.ZodAny;
     truncated: z.ZodOptional<z.ZodBoolean>;
     isError: z.ZodOptional<z.ZodBoolean>;
+    historySeq: z.ZodOptional<z.ZodNumber>;
 }, z.core.$strip>;
 export declare const ServerToolInputDeltaSchema: z.ZodObject<{
     type: z.ZodLiteral<"tool_input_delta">;
@@ -186,6 +189,7 @@ export declare const ServerResultSchema: z.ZodObject<{
             "final-round-prompt": "final-round-prompt";
         }>>;
     }, z.core.$strip>>>;
+    historySeq: z.ZodOptional<z.ZodNumber>;
 }, z.core.$strip>;
 export declare const ServerModelChangedSchema: z.ZodObject<{
     type: z.ZodLiteral<"model_changed">;

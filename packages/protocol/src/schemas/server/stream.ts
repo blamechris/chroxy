@@ -198,6 +198,11 @@ export const ServerMessageSchema = z.object({
   // shape-compatible.
   stdout: z.string().max(8192).optional(),
   stderr: z.string().max(8192).optional(),
+  // #7454/#7458: present on REPLAYED frames only (both replay paths map the
+  // server-internal `_seq` onto the wire; absent on live broadcasts). The
+  // #5555.3 delta-replay cursor — and for user_question the #7420
+  // live-vs-replayed guard — key on this field's presence.
+  historySeq: z.number().optional(),
 })
 
 export const ServerToolStartSchema = z.object({
@@ -207,6 +212,11 @@ export const ServerToolStartSchema = z.object({
   tool: z.string(),
   input: z.any(),
   serverName: z.string().optional(),
+  // #7454/#7458: present on REPLAYED frames only (both replay paths map the
+  // server-internal `_seq` onto the wire; absent on live broadcasts). The
+  // #5555.3 delta-replay cursor — and for user_question the #7420
+  // live-vs-replayed guard — key on this field's presence.
+  historySeq: z.number().optional(),
 })
 
 export const ServerToolResultSchema = z.object({
@@ -220,6 +230,11 @@ export const ServerToolResultSchema = z.object({
   // missing value as false. Older servers and non-mcp tools omit it; codex
   // mcpToolCall emits it explicitly (`false` on success).
   isError: z.boolean().optional(),
+  // #7454/#7458: present on REPLAYED frames only (both replay paths map the
+  // server-internal `_seq` onto the wire; absent on live broadcasts). The
+  // #5555.3 delta-replay cursor — and for user_question the #7420
+  // live-vs-replayed guard — key on this field's presence.
+  historySeq: z.number().optional(),
 })
 
 // #4080 / #4081: incremental partial-JSON chunk for a streaming tool_use
@@ -325,6 +340,11 @@ export const ServerResultSchema = z.object({
   // #6769: occupancy snapshot (see ServerContextOccupancySnapshotSchema).
   // Absent from older servers and from providers with no occupancy signal.
   contextOccupancy: ServerContextOccupancySnapshotSchema.nullable().optional(),
+  // #7454/#7458: present on REPLAYED frames only (both replay paths map the
+  // server-internal `_seq` onto the wire; absent on live broadcasts). The
+  // #5555.3 delta-replay cursor — and for user_question the #7420
+  // live-vs-replayed guard — key on this field's presence.
+  historySeq: z.number().optional(),
 })
 
 export const ServerModelChangedSchema = z.object({

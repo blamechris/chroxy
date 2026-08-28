@@ -50,6 +50,22 @@ describe('#7454 — request_full_history maps _seq onto the wire like replayHist
     assert.ok(!('historySeq' in q), 'no _seq means no historySeq — never null, never fabricated')
   })
 
+  it('maps _seq for EVERY else-branch ring type, not just user_question', async () => {
+    // Review on #7458: narrowing the mapping to user_question survived every
+    // test. The clients read historySeq off `message` and `tool_start` too
+    // (the #5555.3 delta-replay cursor), so the breadth is load-bearing.
+    const { ctx, sends } = build([
+      { type: 'tool_start', tool: 'Bash', timestamp: 1, _seq: 11 },
+      { type: 'tool_result', tool: 'Bash', timestamp: 2, _seq: 12 },
+    ])
+    await handler({}, { id: 'c1', activeSessionId: 'sess-1' }, { type: 'request_full_history' }, ctx)
+    const ts = sends.find(m => m.type === 'tool_start')
+    const tr = sends.find(m => m.type === 'tool_result')
+    assert.equal(ts.historySeq, 11, 'tool_start must carry historySeq — the delta-replay cursor reads it')
+    assert.equal(tr.historySeq, 12)
+    assert.ok(!('_seq' in ts) && !('_seq' in tr), 'no raw counter on any else-branch type')
+  })
+
   it('still brackets the forward with history_replay_start/end and rebuilds message-branch entries', async () => {
     const { ctx, sends } = build([
       { type: 'response', content: 'Hi', timestamp: 1, _seq: 3 },
@@ -61,5 +77,6 @@ describe('#7454 — request_full_history maps _seq onto the wire like replayHist
     const rebuilt = sends.find(m => m.type === 'message')
     assert.equal(rebuilt.messageType, 'response')
     assert.ok(!('_seq' in rebuilt), 'the message branch never carried _seq and must not start')
+    assert.ok(!('historySeq' in rebuilt), 'nor may it grow a historySeq — the rebuild enumerates its fields')
   })
 })
