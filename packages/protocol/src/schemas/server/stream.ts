@@ -653,6 +653,11 @@ export const ServerUserQuestionSchema = z.object({
   type: z.literal('user_question'),
   toolUseId: z.string(),
   questions: z.array(z.any()),
+  // #7454: present on REPLAYED frames only (both replay paths map the server's
+  // internal `_seq` onto the wire); absent on every live broadcast. The #7420
+  // live-vs-replayed discriminator keys on this field's PRESENCE — a
+  // strip-on-parse schema without it would silently disarm that guard.
+  historySeq: z.number().optional(),
 })
 
 export const ServerAgentBusySchema = z.object({

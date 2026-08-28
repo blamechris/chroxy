@@ -405,6 +405,7 @@ export declare const ServerUserQuestionSchema: z.ZodObject<{
     type: z.ZodLiteral<"user_question">;
     toolUseId: z.ZodString;
     questions: z.ZodArray<z.ZodAny>;
+    historySeq: z.ZodOptional<z.ZodNumber>;
 }, z.core.$strip>;
 export declare const ServerAgentBusySchema: z.ZodObject<{
     type: z.ZodLiteral<"agent_busy">;

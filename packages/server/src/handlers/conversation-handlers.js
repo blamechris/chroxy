@@ -267,7 +267,12 @@ async function handleRequestFullHistory(ws, client, msg, ctx) {
         sessionId: targetId,
       })
     } else {
-      ctx.transport.send(ws, { ...entry, sessionId: targetId })
+      // #7454: this is the SECOND replay path (replayHistory is the first), and
+      // the #7420 live-vs-replayed discriminator keys on `historySeq` PRESENCE
+      // — map the internal `_seq` onto the wire exactly as replayHistory does
+      // (ws-history.js), and never leak the raw counter.
+      const { _seq, ...wireEntry } = entry
+      ctx.transport.send(ws, { ...wireEntry, sessionId: targetId, ...(typeof _seq === 'number' ? { historySeq: _seq } : {}) })
     }
   }
   ctx.transport.send(ws, { type: 'history_replay_end', sessionId: targetId })
