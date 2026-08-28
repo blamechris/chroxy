@@ -1090,7 +1090,11 @@ describe('buildSessionCiWatcher — the daemon wiring', () => {
       survey: async ({ sessionId }) => { surveyed.push(sessionId); return noPr() },
     })
     await watcher.tick()
-    assert.equal(surveyed.length, 2, '2.5 floors to 2 — the ctor must receive an integer')
+    assert.equal(surveyed.length, 2, '2.5 caps the batch at 2')
+    // The batch size alone cannot see the floor: slice with a 2.5 bound
+    // also yields 2 items, and the Math.floor mutant survived on that
+    // assertion in re-verification. Pin the actual claim: integer arg.
+    assert.ok(Number.isInteger(watcher._maxSurveysPerTick), 'the ctor must receive an INTEGER cap')
   })
 
   it('POSITIVE CONTROL: without maxSurveysPerTick one tick surveys the default cap', async () => {
