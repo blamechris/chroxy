@@ -680,9 +680,23 @@ export function App() {
   // genuinely arrive undefined — treated the same as "no snapshot yet".
   const sessionPrStatus = useConnectionStore(s => (s.activeSessionId ? s.sessionPrStatus?.[s.activeSessionId] ?? null : null))
   const sessionPrStatusLoading = useConnectionStore(s => (s.activeSessionId ? s.sessionPrStatusLoading?.[s.activeSessionId] === true : false))
+  // #7430 — the same session's unresolved review-thread count, on its own
+  // request and its own clock. Optional-chained on the SLICE for the same
+  // partial-store-fixture reason as the two selectors above.
+  const requestSessionPrThreads = useConnectionStore(s => s.requestSessionPrThreads)
+  const sessionPrThreads = useConnectionStore(s => (s.activeSessionId ? s.sessionPrThreads?.[s.activeSessionId] ?? null : null))
   // No window: an explicit Refresh must always go to the wire, or the button
   // silently does nothing within the auto-pull window.
-  const refreshSessionPrStatus = useCallback(() => { requestSessionPrStatus() }, [requestSessionPrStatus])
+  //
+  // #7430: the thread count is pulled HERE and from the prefill click, and
+  // nowhere else. It deliberately does NOT ride the auto-pull effect below —
+  // that effect re-fires on every tab switch, and the entire reason the count
+  // is not on the daemon's CI sweep is that a `gh` subprocess must not be spent
+  // on a schedule. A click is a schedule of one.
+  const refreshSessionPrStatus = useCallback(() => {
+    requestSessionPrStatus()
+    requestSessionPrThreads()
+  }, [requestSessionPrStatus, requestSessionPrThreads])
 
   // #7344: pull the session's PR/CI status so the header chip has something to
   // show without the user clicking Refresh first. Deliberately NOT a poll — the
@@ -1650,8 +1664,18 @@ export function App() {
   // settle, and this is the path for every case it structurally cannot cover
   // (a run it never saw pending, a non-claude-tui session, a busy session whose
   // wake was dropped, or simply asking a second time).
+  //
+  // #7430: the click also pulls a fresh thread count. The line is staged from
+  // whatever count is already in the store — which on the first click of a
+  // freshly-opened tab is none, and the line then makes no thread claim at all
+  // rather than an unverified one. That is the honest shape: staging is
+  // synchronous, the count is a round trip, and a line that waited for it would
+  // either block the composer or silently rewrite what the user is about to
+  // send. The chip's Refresh pulls both together, so the count is normally
+  // already there.
   const handlePrefillSessionPrStatus = useCallback(() => {
-    runCiPrefill(sessionPrStatus, {
+    requestSessionPrThreads()
+    runCiPrefill(sessionPrStatus, sessionPrThreads, {
       getDraft: () =>
         (activeSessionId ? inputDraftsRef.current.get(activeSessionId) : '') ?? '',
       getLastStaged: () =>
@@ -1665,7 +1689,7 @@ export function App() {
       },
       notify: addInfoNotification,
     })
-  }, [sessionPrStatus, activeSessionId, addInfoNotification])
+  }, [sessionPrStatus, sessionPrThreads, requestSessionPrThreads, activeSessionId, addInfoNotification])
 
   // Per-session collapsed-paste storage (#3797). Each composer paste that
   // crosses the size threshold is stashed by id; the textarea sees only

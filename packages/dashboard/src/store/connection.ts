@@ -760,6 +760,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   sessionPrStatus: {},
   sessionPrStatusLoading: {},
   sessionPrStatusRequestedAt: {},
+  // #7430: per-session unresolved review-thread count, fed by the
+  // session_pr_threads reply. Separate clock from sessionPrStatus above.
+  sessionPrThreads: {},
+  sessionPrThreadsLoading: {},
   // #6540 (item 3 of #6536): repo-events webhook-secret config surface, fed by
   // the github_webhook_config handler. Null until the first config reply lands.
   githubWebhookConfig: null,
@@ -1340,6 +1344,24 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       sessionPrStatusLoading: { ...get().sessionPrStatusLoading, [target]: true },
       sessionPrStatusRequestedAt: { ...get().sessionPrStatusRequestedAt, [target]: Date.now() },
     });
+    return true;
+  },
+
+  // #7430: request the session PR's unresolved review-thread count. A SEPARATE
+  // request from `requestSessionPrStatus` on purpose — the server needs a
+  // GraphQL read for it, and the daemon-side CI sweep must never pay for it
+  // (see the schema note). No freshness window here, unlike the status pull:
+  // there is no automatic caller to bound, every caller is a click, and the
+  // daemon throttles the read per session anyway.
+  requestSessionPrThreads: (sessionId?: string): boolean => {
+    const { socket, activeSessionId } = get();
+    const target = sessionId ?? activeSessionId;
+    if (!target) return false;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+    // #6310: the loading flag flips only once wsSend confirms the frame went
+    // out — an optimistic flip on a failed send leaves a flag nothing clears.
+    if (!wsSend(socket, { type: 'session_pr_threads_request', sessionId: target })) return false;
+    set({ sessionPrThreadsLoading: { ...get().sessionPrThreadsLoading, [target]: true } });
     return true;
   },
 
@@ -2900,6 +2922,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // a request made on a socket that no longer exists.
       if (Object.keys(get().sessionPrStatusRequestedAt).length > 0) {
         set({ sessionPrStatusRequestedAt: {} });
+      }
+      // #7430: the thread-count loading flag is session-keyed for the same
+      // reason and needs the same reset — a count in flight when the socket
+      // dropped would otherwise leave its control disabled forever.
+      if (Object.keys(get().sessionPrThreadsLoading).length > 0) {
+        set({ sessionPrThreadsLoading: {} });
       }
 
       // Clear transient streaming/plan state so stale UI doesn't persist

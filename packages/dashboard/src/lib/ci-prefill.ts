@@ -39,17 +39,30 @@
  *     would pass a naive test while dropping the case the user most needs to
  *     relay.
  *
- * ## Deliberately NOT included: the unresolved-thread count
+ * ## The unresolved-thread count (#7430)
  *
  * #7423's example line carries "0 unresolved threads", which `session_pr_status`
- * does not have — it needs a GraphQL `reviewThreads` read. That is not paid for
- * here: since #7426 the same survey runs on a daemon-side sweep across every
- * session, so adding a second `gh` call to it would multiply the cost of a
- * background poll to enrich a string that only a click builds. `reviewDecision`
- * (already on the snapshot) carries the review state in the meantime. See the
- * follow-on issue for the on-demand shape.
+ * does not have — it needs a GraphQL `reviewThreads` read that the daemon-side
+ * CI sweep must not be made to pay for. It arrives instead as its OWN on-demand
+ * message (`session_pr_threads`), which is why it is a second, OPTIONAL argument
+ * here rather than another field read off the snapshot.
+ *
+ * Three renderings, and they must never collapse into each other:
+ *
+ *   - **absent** — no count was supplied. The line makes NO thread claim.
+ *   - **unavailable** — a count was attempted and failed. The line says so, in
+ *     words, with the server's reason.
+ *   - **counted** — a number, which may be zero.
+ *
+ * The middle one is the reason this is worth spelling out. A missing count that
+ * printed as "0 unresolved threads", beside a green check clause, tells a model
+ * that nothing is blocking the PR — the same false green the check clause's own
+ * `state: 'none'` handling exists to prevent, arriving by a different route. A
+ * TRUNCATED count is the third route to it: 100 resolved threads on page one
+ * with every unresolved one past it is a real "0" that means nothing, so it
+ * renders as a lower bound instead.
  */
-import type { ServerSessionPrStatusMessage } from '@chroxy/protocol'
+import type { ServerSessionPrStatusMessage, ServerSessionPrThreadsMessage } from '@chroxy/protocol'
 
 /** Short SHA length, matching the chip's tooltip. */
 const SHA_CHARS = 7
@@ -134,7 +147,60 @@ function mergeClause(merge: ServerSessionPrStatusMessage['merge']): string {
  * A caller must not offer the action in that case; a line saying "this branch
  * has no open PR" is not state worth handing an agent.
  */
-export function formatCiPrefill(status: ServerSessionPrStatusMessage | null): string | null {
+/**
+ * The unresolved-thread clause, or `null` when the line should make no thread
+ * claim at all.
+ *
+ * `null` is returned for exactly two inputs, and both mean "no claim" rather
+ * than "no threads": no count was supplied, or the count describes a DIFFERENT
+ * pull request (a reply that landed for the previously-active session, say).
+ * Narrating another PR's threads as this one's would be a fabrication of the
+ * same family as the zero.
+ *
+ * Note the order of the guards below. `reason` is checked BEFORE the number, so
+ * a degraded reading that somehow also carried a count renders as unavailable:
+ * the caveat wins, because the failure mode of believing a suspect number is
+ * worse than the failure mode of discarding a good one. Today's server never
+ * emits that pairing; the schema permits it, and a dashboard talks to daemons
+ * it did not ship with.
+ */
+function threadsClause(
+  threads: ServerSessionPrThreadsMessage | null | undefined,
+  prNumber: number,
+): string | null {
+  if (!threads) return null
+  if (threads.prNumber !== prNumber) return null
+
+  if (threads.reason !== null || threads.unresolvedCount === null) {
+    // Said in words, never by omission: an omitted clause beside a green check
+    // clause reads as nothing-to-report, which is the impression to avoid.
+    const why = threads.reason
+    return why ? `unresolved-thread count unavailable: ${why}` : 'unresolved-thread count unavailable'
+  }
+
+  const n = threads.unresolvedCount
+  const noun = `unresolved thread${n === 1 ? '' : 's'}`
+  // WHEN it was counted, for the same reason the subject carries `generatedAt`:
+  // this is its OWN clock, and the two readings can be minutes apart.
+  const at = typeof threads.countedAt === 'string' && threads.countedAt.length > 0
+    ? ` (counted ${threads.countedAt})`
+    : ''
+
+  if (threads.truncated) {
+    // A lower bound, and labelled as one. `totalCount` is GitHub's own total and
+    // stays authoritative even when only part of it was read.
+    const of = threads.totalCount === null
+      ? ' — not all review threads were read'
+      : ` — only part of ${threads.totalCount} review threads were read`
+    return `at least ${n} ${noun}${of}${at}`
+  }
+  return `${n} ${noun}${at}`
+}
+
+export function formatCiPrefill(
+  status: ServerSessionPrStatusMessage | null,
+  threads?: ServerSessionPrThreadsMessage | null,
+): string | null {
   if (!status || !status.pr) return null
   const sha = shortSha(status.pr.headRefOid)
   // Everything after CI_PREFILL_PREFIX, which already carries the "PR #".
@@ -154,6 +220,10 @@ export function formatCiPrefill(status: ServerSessionPrStatusMessage | null): st
   const clauses = [checksClause(status.checks, sha), mergeClause(status.merge)]
   const reviewDecision = status.merge?.reviewDecision
   if (reviewDecision) clauses.push(`review ${reviewDecision}`)
+  // #7430: placed after the review decision, which it explains — the count is
+  // what turns `CHANGES_REQUESTED` or a `BLOCKED` merge state into a number.
+  const threadsText = threadsClause(threads, status.pr.number)
+  if (threadsText !== null) clauses.push(threadsText)
   if (status.pr.isDraft) clauses.push('PR is a draft')
   // A partial reading says so: the chip can hide a caveat in a tooltip, a prompt
   // line cannot, and a caveat the model never sees is a caveat that did not
@@ -197,9 +267,10 @@ export interface CiPrefillEffects {
  */
 export function runCiPrefill(
   status: ServerSessionPrStatusMessage | null,
+  threads: ServerSessionPrThreadsMessage | null,
   fx: CiPrefillEffects,
 ): string | null {
-  const text = formatCiPrefill(status)
+  const text = formatCiPrefill(status, threads)
   if (text === null) return null
   const draft = fx.getDraft()
   // Guard: never clobber an in-progress draft. #7423 is explicit that the

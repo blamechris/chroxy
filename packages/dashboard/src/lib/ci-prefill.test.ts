@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { formatCiPrefill, runCiPrefill, CI_PREFILL_BUSY_NOTICE } from './ci-prefill'
-import type { ServerSessionPrStatusMessage } from '@chroxy/protocol'
+import type { ServerSessionPrStatusMessage, ServerSessionPrThreadsMessage } from '@chroxy/protocol'
 
 /**
  * #7423 — the composer prefill line.
@@ -188,7 +188,7 @@ describe('runCiPrefill', () => {
 
   it('stages the line in the composer and never sends it', () => {
     const fx = effects()
-    const staged = runCiPrefill(status(), fx)
+    const staged = runCiPrefill(status(), null, fx)
     expect(staged).not.toBeNull()
     expect(fx.setDraft).toHaveBeenCalledTimes(1)
     expect(fx.setDraft).toHaveBeenCalledWith(staged)
@@ -198,14 +198,14 @@ describe('runCiPrefill', () => {
 
   it('refuses rather than clobbering an in-progress draft', () => {
     const fx = effects('half a thought about the refactor')
-    expect(runCiPrefill(status(), fx)).toBeNull()
+    expect(runCiPrefill(status(), null, fx)).toBeNull()
     expect(fx.setDraft).not.toHaveBeenCalled()
     expect(fx.notify).toHaveBeenCalledWith(CI_PREFILL_BUSY_NOTICE)
   })
 
   it('treats a whitespace-only draft as empty', () => {
     const fx = effects('   \n  ')
-    expect(runCiPrefill(status(), fx)).not.toBeNull()
+    expect(runCiPrefill(status(), null, fx)).not.toBeNull()
     expect(fx.setDraft).toHaveBeenCalledTimes(1)
     expect(fx.notify).not.toHaveBeenCalled()
   })
@@ -220,7 +220,7 @@ describe('runCiPrefill', () => {
     const fx = { ...effects(first), getLastStaged: vi.fn(() => first) }
     const second = runCiPrefill(status({
       checks: { state: 'failure', counts: { total: 3, passed: 1, failed: 2, pending: 0, skipped: 0, unknown: 0 } },
-    }), fx)
+    }), null, fx)
     expect(second).not.toBeNull()
     expect(second).not.toBe(first)
     expect(fx.setDraft).toHaveBeenCalledWith(second)
@@ -235,7 +235,7 @@ describe('runCiPrefill', () => {
       ...effects(staged + ' — can you look at the failure?'),
       getLastStaged: vi.fn(() => staged),
     }
-    expect(runCiPrefill(status(), fx)).toBeNull()
+    expect(runCiPrefill(status(), null, fx)).toBeNull()
     expect(fx.setDraft).not.toHaveBeenCalled()
     expect(fx.notify).toHaveBeenCalledWith(CI_PREFILL_BUSY_NOTICE)
   })
@@ -243,13 +243,13 @@ describe('runCiPrefill', () => {
   it('refuses a non-empty draft when no getLastStaged is supplied at all', () => {
     // The effect is optional; omitting it must fail CLOSED, never open.
     const fx = effects('something the user typed')
-    expect(runCiPrefill(status(), fx)).toBeNull()
+    expect(runCiPrefill(status(), null, fx)).toBeNull()
     expect(fx.notify).toHaveBeenCalledWith(CI_PREFILL_BUSY_NOTICE)
   })
 
   it('does nothing at all — not even a notice — when there is no PR', () => {
     const fx = effects()
-    expect(runCiPrefill(status({ pr: null, checks: null, merge: null }), fx)).toBeNull()
+    expect(runCiPrefill(status({ pr: null, checks: null, merge: null }), null, fx)).toBeNull()
     expect(fx.setDraft).not.toHaveBeenCalled()
     expect(fx.notify).not.toHaveBeenCalled()
   })
@@ -258,7 +258,140 @@ describe('runCiPrefill', () => {
     // Order matters: a no-PR click must not produce the busy notice just
     // because the user happened to be typing.
     const fx = effects('typing')
-    runCiPrefill(status({ pr: null, checks: null, merge: null }), fx)
+    runCiPrefill(status({ pr: null, checks: null, merge: null }), null, fx)
     expect(fx.notify).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * #7430 — the unresolved-review-thread clause.
+ *
+ * The clause is optional, and the reason it is worth a test block of its own is
+ * a single asymmetry: of the three things the line can say about threads —
+ * a counted number, "unavailable", or nothing at all — exactly one of them is
+ * dangerous when it is wrong. "0 unresolved threads" printed for a count that
+ * was never taken reads as "nothing is blocking this PR", beside a green check
+ * clause, to a model that will act on it. Every assertion below exists to pin
+ * that the three renderings cannot collapse into each other.
+ */
+function threads(overrides: Partial<ServerSessionPrThreadsMessage> = {}): ServerSessionPrThreadsMessage {
+  return {
+    type: 'session_pr_threads',
+    requestId: null,
+    sessionId: 's1',
+    countedAt: '2026-08-27T00:05:00.000Z',
+    prNumber: 7423,
+    unresolvedCount: 0,
+    totalCount: 4,
+    truncated: false,
+    reason: null,
+    ...overrides,
+  } as ServerSessionPrThreadsMessage
+}
+
+/**
+ * A DEFINITE counted zero — the claim "this PR has no unresolved threads".
+ *
+ * The lookbehind is load-bearing rather than cosmetic: "at least 0 unresolved
+ * threads" is the TRUNCATED rendering, which asserts a lower bound and not an
+ * absence, so it must be allowed to contain the same five words. Without the
+ * exclusion this regex would conflate the one rendering that is dangerous with
+ * one that is explicitly hedged — and the two controls below pin exactly that
+ * boundary, so the exclusion cannot quietly widen later.
+ */
+const COUNTED_ZERO = /(?<!at least )\b0 unresolved threads\b/
+
+describe('#7430 — the unresolved-thread clause', () => {
+  it('renders a counted zero as "0 unresolved threads"', () => {
+    const text = formatCiPrefill(status(), threads()) as string
+    expect(text).toMatch(COUNTED_ZERO)
+    expect(text).not.toMatch(/unavailable/i)
+  })
+
+  it('renders a non-zero count, singular and plural', () => {
+    expect(formatCiPrefill(status(), threads({ unresolvedCount: 1 }))).toContain('1 unresolved thread')
+    expect(formatCiPrefill(status(), threads({ unresolvedCount: 1 }))).not.toContain('1 unresolved threads')
+    expect(formatCiPrefill(status(), threads({ unresolvedCount: 3 }))).toContain('3 unresolved threads')
+  })
+
+  it('THE FALSE-GREEN PIN: a count that was not taken NEVER renders as a zero', () => {
+    // The direction that matters. `reason` set + `unresolvedCount: null` is the
+    // server's "could not find out"; if this ever renders as "0 unresolved
+    // threads" the line asserts an absence of blockers it never verified.
+    const text = formatCiPrefill(status(), threads({
+      unresolvedCount: null,
+      totalCount: null,
+      reason: 'gh CLI not found on PATH',
+    })) as string
+    expect(text).not.toMatch(COUNTED_ZERO)
+    expect(text).not.toMatch(/\bunresolved threads?\b(?!\s*count)/)
+    // Positive control: it did not simply drop the subject either — silence
+    // beside a green check clause reads as nothing-to-report.
+    expect(text).toContain('unresolved-thread count unavailable')
+    expect(text).toContain('gh CLI not found on PATH')
+  })
+
+  it('the two renderings are DIFFERENT strings for the same PR', () => {
+    // The issue's requirement stated directly: whatever the wording, a counted
+    // zero and an uncounted one must not produce the same line.
+    const counted = formatCiPrefill(status(), threads({ unresolvedCount: 0 }))
+    const uncounted = formatCiPrefill(status(), threads({ unresolvedCount: null, totalCount: null, reason: 'gh api graphql failed: timeout' }))
+    expect(counted).not.toEqual(uncounted)
+  })
+
+  it('a TRUNCATED zero is not a definite zero', () => {
+    // 100 resolved threads on page one, every unresolved one past it. A flat
+    // "0 unresolved threads" here is the same false green by another route.
+    const text = formatCiPrefill(status(), threads({
+      unresolvedCount: 0,
+      totalCount: 150,
+      truncated: true,
+    })) as string
+    expect(text).not.toMatch(COUNTED_ZERO)
+    expect(text).toContain('at least 0 unresolved threads')
+    expect(text).toContain('150')
+  })
+
+  it('omits the clause entirely when no count was supplied', () => {
+    // Absent ≠ unavailable ≠ zero. An omitted optional argument makes NO claim
+    // and must not manufacture one in either direction.
+    const text = formatCiPrefill(status()) as string
+    expect(text).not.toMatch(/unresolved/i)
+    // Positive control: the rest of the line is unchanged.
+    expect(text).toContain('checks green')
+    expect(text).toContain('merge state CLEAN')
+  })
+
+  it('makes no claim when the count describes a DIFFERENT pull request', () => {
+    // A stale count from the previously-active session's PR must not be
+    // narrated as this one's.
+    const text = formatCiPrefill(status(), threads({ prNumber: 9999, unresolvedCount: 0 })) as string
+    expect(text).not.toMatch(/unresolved/i)
+  })
+
+  it('carries the count\'s OWN timestamp, not the status snapshot\'s', () => {
+    // The two readings are taken separately and go stale separately; one
+    // timestamp over both would claim a consistency neither has.
+    const text = formatCiPrefill(status(), threads({ unresolvedCount: 2 })) as string
+    expect(text).toContain('2026-08-27T00:00:00.000Z') // generatedAt, the status reading
+    expect(text).toContain('2026-08-27T00:05:00.000Z') // countedAt, the thread reading
+  })
+
+  it('treats a count that arrives WITH a reason as unavailable', () => {
+    // Defensive: the schema permits the pairing and the server never emits it,
+    // but if a daemon ever does, the caveat wins over the number.
+    const text = formatCiPrefill(status(), threads({ unresolvedCount: 0, reason: 'partial read' })) as string
+    expect(text).not.toMatch(COUNTED_ZERO)
+    expect(text).toContain('unresolved-thread count unavailable')
+  })
+
+  it('positive control: COUNTED_ZERO can actually match, so the negatives are not free', () => {
+    expect('… — 0 unresolved threads (counted x)').toMatch(COUNTED_ZERO)
+  })
+
+  it('control: COUNTED_ZERO excludes the hedged lower bound, and ONLY that', () => {
+    // The exclusion the pin depends on, stated as its own fact.
+    expect('at least 0 unresolved threads — only part of 150 were read').not.toMatch(COUNTED_ZERO)
+    expect('roughly 0 unresolved threads').toMatch(COUNTED_ZERO)
   })
 })

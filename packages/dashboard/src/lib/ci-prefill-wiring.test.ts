@@ -86,7 +86,7 @@ describe('#7423 CI prefill wiring', () => {
 
     // The helper is CALLED — a handler that formatted the line itself would
     // bypass the draft-clobber guard entirely.
-    expect(body.includes('runCiPrefill(sessionPrStatus, {')).toBe(true)
+    expect(body.includes('runCiPrefill(sessionPrStatus, sessionPrThreads, {')).toBe(true)
     // Both halves of the draft write. Dropping the ref write leaves the staged
     // text invisible to the session-switch restore effect, so switching tabs and
     // back would silently discard it.
@@ -108,5 +108,73 @@ describe('#7423 CI prefill wiring', () => {
     // Unbounded growth over a long-lived dashboard process is the failure this
     // invariant exists to prevent.
     expect(body.includes('ciPrefillStagedRef.current.delete(sessionId)')).toBe(true)
+  })
+})
+
+/**
+ * #7430 — the thread count must be REQUESTED, and requested only from a click.
+ *
+ * Two failure shapes this pins, both of which type-check and leave every unit
+ * test green:
+ *
+ *   1. the count is never asked for, so `sessionPrThreads` stays empty and the
+ *      prefill line silently omits the clause forever — indistinguishable from
+ *      "this PR genuinely has no count to show";
+ *   2. the count IS asked for, from a `useEffect` or an interval. That is the
+ *      failure the whole issue exists to prevent, one layer up: the reason it
+ *      is not on the daemon sweep is that a `gh` subprocess must not be spent
+ *      on a schedule, and a dashboard timer re-introduces exactly that.
+ */
+describe('#7430 thread-count wiring', () => {
+  /** The body of a named `useCallback` handler in App.tsx. */
+  function handlerBody(src: string, name: string, span = 1200): string {
+    const start = src.indexOf(`const ${name}`)
+    expect(start, `App.tsx should define ${name}`).toBeGreaterThan(-1)
+    return src.slice(start, start + span)
+  }
+
+  it('the prefill handler passes the stored count to runCiPrefill', () => {
+    const body = handlerBody(read(APP_TSX), 'handlePrefillSessionPrStatus')
+    // The second argument is the whole feature. Without it the helper renders
+    // the pre-#7430 line and no test of the formatter can notice.
+    expect(body.includes('runCiPrefill(sessionPrStatus, sessionPrThreads, {')).toBe(true)
+  })
+
+  it('the prefill click also REQUESTS a fresh count', () => {
+    const body = handlerBody(read(APP_TSX), 'handlePrefillSessionPrStatus')
+    expect(body.includes('requestSessionPrThreads()')).toBe(true)
+  })
+
+  it('the chip Refresh requests the count alongside the status', () => {
+    const body = handlerBody(read(APP_TSX), 'refreshSessionPrStatus', 400)
+    expect(body.includes('requestSessionPrStatus()')).toBe(true)
+    expect(body.includes('requestSessionPrThreads()')).toBe(true)
+  })
+
+  it('NOTHING requests the count from an effect or a timer', () => {
+    // The anti-schedule guard. Every legitimate call site is a click handler;
+    // a `useEffect`/`setInterval`/`setTimeout` around one would put the daemon
+    // back on the per-tick `gh` cost this design refuses.
+    const src = read(APP_TSX)
+    const sites = [...src.matchAll(/requestSessionPrThreads\s*\(/g)].map(m => m.index ?? 0)
+    expect(sites.length, 'expected the two click call sites').toBeGreaterThan(0)
+    for (const at of sites) {
+      // The 600 characters preceding a call site comfortably cover the
+      // enclosing declaration in either shape.
+      const before = src.slice(Math.max(0, at - 600), at)
+      const enclosing = before.lastIndexOf('useEffect(')
+      const callback = before.lastIndexOf('useCallback(')
+      expect(enclosing < callback, `requestSessionPrThreads at ${at} appears to be inside a useEffect`).toBe(true)
+      expect(before.includes('setInterval(') || before.includes('setTimeout(')).toBe(false)
+    }
+  })
+
+  it('positive control: the anti-schedule scan can actually fail', () => {
+    // Same scan, run over a fixture that DOES call it from an effect — so the
+    // assertion above is known to be reachable rather than vacuously true.
+    const fixture = 'useEffect(() => { requestSessionPrThreads() }, [])'
+    const at = fixture.indexOf('requestSessionPrThreads(')
+    const before = fixture.slice(0, at)
+    expect(before.lastIndexOf('useEffect(') < before.lastIndexOf('useCallback(')).toBe(false)
   })
 })
