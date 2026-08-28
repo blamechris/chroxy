@@ -667,7 +667,11 @@ export const ServerStatuslineOutputSchema = z.object({
 //     thread. `mergeStateStatus: 'UNKNOWN'` means GitHub is recomputing after a
 //     base change, not that a blocker exists.
 //   - `pr: null` + `reason: null` is the quiet negative — this branch has no open
-//     PR on `origin`, nor (when `origin` is a fork) on its upstream. `pr: null` +
+//     PR on `origin`, nor (when `origin` is a fork) on its upstream. On a FORK
+//     checkout that reading is BEST-EFFORT: a transiently-failed upstream
+//     widening reports the same shape (#7435). The authoritative-vs-transient
+//     distinction is held server-side (the CI watcher consumes it) and is
+//     deliberately not transmitted. `pr: null` +
 //     a `reason` means the survey could not find out (no `gh`, no GitHub remote,
 //     detached HEAD, a failed call). "Cannot determine" must render as
 //     cannot-determine, never as an implied green.

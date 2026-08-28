@@ -82,6 +82,26 @@ describe('#7427 — the reply arms the CI watcher', () => {
     assert.deepEqual(observe.calls[0], ['sess-1', SAMPLE], 'observe(sessionId, snapshot), verbatim')
   })
 
+  it('strips the server-only `indeterminate` marker off the wire, while observe() gets it (#7435)', async () => {
+    // The marker is how the fork bail-outs tell the WATCHER "this is not
+    // evidence" without changing what the DISPLAY sees. It is server-side
+    // state, not a wire field: the reply keeps the pre-#7435 shape byte-for-
+    // byte, and the watcher receives the snapshot verbatim.
+    const observed = []
+    const forkBailout = { ...SAMPLE, pr: null, checks: null, merge: null, reason: null, indeterminate: true }
+    const ctx = makeCtx({
+      surveySessionPrStatus: createSpy(async () => forkBailout),
+      sessionCiWatcher: { observe: (sessionId, snap) => { observed.push(snap); return 'undeterminable' } },
+    })
+    await handler(ws, { id: 'c1' }, req, ctx)
+    const reply = soleReply(ctx)
+    assert.ok(!('indeterminate' in reply), 'the wire reply must not carry the internal marker')
+    assert.equal(reply.pr, null)
+    assert.equal(reply.reason, null)
+    assert.equal(observed.length, 1)
+    assert.equal(observed[0].indeterminate, true, 'observe() must see the marker the wire does not')
+  })
+
   it('arms the session that was SURVEYED, not the one the client is sitting on', async () => {
     // The fallback path: no explicit sessionId, so the survey ran against the
     // client's active session. Arming any other id would watch the wrong repo.
