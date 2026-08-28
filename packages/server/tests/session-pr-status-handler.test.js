@@ -5,6 +5,8 @@ import {
   NOT_AUTHORIZED_REASON,
   NO_SESSION_REASON,
   IN_PROGRESS_REASON,
+  RATE_LIMITED_REASON,
+  SURVEY_MIN_INTERVAL_MS,
 } from '../src/handlers/session-pr-status-handlers.js'
 import { registeredMessageTypes } from '../src/ws-message-handlers.js'
 import { createSpy, createMockSessionManager, nsCtx } from './test-helpers.js'
@@ -336,7 +338,11 @@ describe('#7344 — session_pr_status_request handler', () => {
 
   it('releases the per-session guard so the SAME session can be re-surveyed after one completes', async () => {
     // Positive control for the release: without it, the per-session guard would
-    // simply never clear and the second request would be refused.
+    // simply never clear and the second request would be refused. The clock
+    // steps past the #7436 throttle on every read so this stays a test of the
+    // in-flight guard, not of the throttle (which has its own describe below).
+    let now = 0
+    ctx = makeCtx({ _nowMs: () => (now += SURVEY_MIN_INTERVAL_MS + 1) })
     const client = { id: 'c1' }
     await handler(ws, client, { type: 'session_pr_status_request', sessionId: 'sess-1' }, ctx)
     await handler(ws, client, { type: 'session_pr_status_request', sessionId: 'sess-1' }, ctx)
@@ -364,5 +370,92 @@ describe('#7344 — session_pr_status_request handler', () => {
 
     await handler(ws, client, { type: 'session_pr_status_request', sessionId: 'sess-1' }, ctx)
     assert.equal(ctx._send.calls[1][1].reason, null, 'the guard must have been released')
+  })
+})
+
+describe('#7436 — per-session survey throttle', () => {
+  const handler = sessionPrStatusHandlers.session_pr_status_request
+  const ws = {}
+  const req = { type: 'session_pr_status_request', sessionId: 'sess-1' }
+
+  /** A ctx with a test-owned clock; nsCtx leaves the `_nowMs` seam flat. */
+  function throttleCtx(overrides = {}) {
+    let now = 1_000_000
+    const ctx = makeCtx({ _nowMs: () => now, ...overrides })
+    return { ctx, advance: (ms) => { now += ms } }
+  }
+
+  it('refuses a back-to-back re-survey of one session with a schema-valid reason', async () => {
+    const { ctx } = throttleCtx()
+    await handler(ws, { id: 'c1' }, req, ctx)
+    await handler(ws, { id: 'c1' }, req, ctx)
+    assert.equal(ctx._send.callCount, 2, 'a refusal is still a reply — one per request')
+    const refusal = ctx._send.calls[1][1]
+    assert.equal(refusal.type, 'session_pr_status')
+    assert.ok(ServerSessionPrStatusSchema.safeParse(refusal).success, 'the refusal must be schema-valid')
+    assert.equal(refusal.reason, RATE_LIMITED_REASON)
+    assert.equal(refusal.pr, null)
+  })
+
+  it('does NOT arm the watcher on a refused request', async () => {
+    const observe = createSpy(() => 'armed')
+    const { ctx } = throttleCtx({ sessionCiWatcher: { observe } })
+    await handler(ws, { id: 'c1' }, req, ctx)
+    await handler(ws, { id: 'c1' }, req, ctx)
+    assert.equal(observe.callCount, 1, 'the refused request must not reach observe()')
+  })
+
+  it('POSITIVE CONTROL: past the interval the same session is surveyed again', async () => {
+    const { ctx, advance } = throttleCtx()
+    await handler(ws, { id: 'c1' }, req, ctx)
+    advance(SURVEY_MIN_INTERVAL_MS + 1)
+    await handler(ws, { id: 'c1' }, req, ctx)
+    assert.equal(ctx._send.calls[1][1].reason, null)
+  })
+
+  it('throttles per SESSION — a second session is not refused on account of the first', async () => {
+    const { ctx } = throttleCtx()
+    await handler(ws, { id: 'c1' }, req, ctx)
+    await handler(ws, { id: 'c1' }, { type: 'session_pr_status_request', sessionId: 'sess-2' }, ctx)
+    assert.equal(ctx._send.calls[1][1].reason, null)
+  })
+
+  it('applies across CLIENTS — the stamp is per session, not per (client, session)', async () => {
+    // bearer-token-authority.md: a pairing-bound token is authoritative for its
+    // own session, so the throttle does not need to distinguish token classes —
+    // and a per-client stamp would let N clients multiply the subprocess cost.
+    const { ctx } = throttleCtx()
+    await handler(ws, { id: 'c1' }, req, ctx)
+    await handler(ws, { id: 'c2' }, req, ctx)
+    assert.equal(ctx._send.calls[1][1].reason, RATE_LIMITED_REASON)
+  })
+
+  it('a refusal does not EXTEND the window', async () => {
+    const { ctx, advance } = throttleCtx()
+    await handler(ws, { id: 'c1' }, req, ctx)
+    advance(SURVEY_MIN_INTERVAL_MS - 1000)
+    await handler(ws, { id: 'c1' }, req, ctx)
+    assert.equal(ctx._send.calls[1][1].reason, RATE_LIMITED_REASON)
+    advance(2000)
+    await handler(ws, { id: 'c1' }, req, ctx)
+    assert.equal(ctx._send.calls[2][1].reason, null, 'the mid-window refusal must not have re-stamped')
+  })
+
+  it('a survey that THROWS rolls its stamp back, so the retry is not punished', async () => {
+    // Same principle as #7435: a failure is not evidence, and here it is not
+    // consumption either — the subprocess bound the throttle protects was
+    // not meaningfully spent.
+    let calls = 0
+    const { ctx } = throttleCtx({
+      surveySessionPrStatus: createSpy(async () => {
+        calls += 1
+        if (calls === 1) throw new Error('boom')
+        return SAMPLE
+      }),
+    })
+    await handler(ws, { id: 'c1' }, req, ctx)
+    await handler(ws, { id: 'c1' }, req, ctx)
+    assert.equal(calls, 2, 'the immediate retry after a thrown survey is allowed')
+    assert.equal(ctx._send.calls[1][1].reason, null)
   })
 })

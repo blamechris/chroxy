@@ -701,6 +701,9 @@ export function buildSessionCiWatcher({ config, sessionManager, pushManager = nu
     wakeAgent: sessionCi.wakeAgent !== false,
     ...(positive(sessionCi.intervalMs) ? { tickIntervalMs: sessionCi.intervalMs } : {}),
     ...(positive(sessionCi.discoveryIntervalMs) ? { discoveryIntervalMs: sessionCi.discoveryIntervalMs } : {}),
+    // #7436: operator escape hatch for sweep contention on many-session
+    // daemons; floored to an integer, non-positive/NaN ignored like the rest.
+    ...(positive(sessionCi.maxSurveysPerTick) ? { maxSurveysPerTick: Math.floor(sessionCi.maxSurveysPerTick) } : {}),
     ...(survey ? { survey } : {}),
     notify: (event) => {
       if (!pushManager) return

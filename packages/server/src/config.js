@@ -531,7 +531,7 @@ const WORKTREE_GC_SUPPORTED_KEYS = new Set([
   'autoReap', 'reapIntervalMs', 'maxLockAgeMs',
 ])
 const SESSION_CI_SUPPORTED_KEYS = new Set([
-  'watch', 'wakeAgent', 'intervalMs', 'discoveryIntervalMs',
+  'watch', 'wakeAgent', 'intervalMs', 'discoveryIntervalMs', 'maxSurveysPerTick',
 ])
 const RANCHER_SUPPORTED_KEYS = new Set([
   'rancherUrl', 'clusterId', 'token', 'tokenEnv', 'tokenFile', 'caData', 'skipTLSVerify', 'defaultProjectId',
@@ -1461,7 +1461,7 @@ export function validateConfig(config, verbose = false) {
           warnings.push(`Invalid type for 'sessionCi.${key}': expected boolean, got ${typeof config.sessionCi[key]}`)
         }
       }
-      for (const key of ['intervalMs', 'discoveryIntervalMs']) {
+      for (const key of ['intervalMs', 'discoveryIntervalMs', 'maxSurveysPerTick']) {
         if (!Object.prototype.hasOwnProperty.call(config.sessionCi, key)) continue
         const v = config.sessionCi[key]
         if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) {

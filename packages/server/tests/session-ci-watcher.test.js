@@ -1052,6 +1052,34 @@ describe('buildSessionCiWatcher — the daemon wiring', () => {
     assert.ok(buildSessionCiWatcher({ sessionManager: fakeManager() }) instanceof SessionCiWatcher)
   })
 
+  it('honours sessionCi.maxSurveysPerTick (#7436)', async () => {
+    const sessions = Array.from({ length: 5 }, (_, i) => ({ sessionId: `s${i}`, cwd: '/repo' }))
+    const surveyed = []
+    const watcher = buildSessionCiWatcher({
+      config: { sessionCi: { maxSurveysPerTick: 2, discoveryIntervalMs: 1 } },
+      sessionManager: { listSessions: () => sessions, getSession: () => null },
+      logger: { debug() {}, info() {}, warn() {} },
+      survey: async ({ sessionId }) => { surveyed.push(sessionId); return noPr() },
+    })
+    await watcher.tick()
+    assert.equal(surveyed.length, 2, 'one tick surveys exactly the configured cap')
+  })
+
+  it('POSITIVE CONTROL: without maxSurveysPerTick one tick surveys the default cap', async () => {
+    // Without this, the test above could pass against a builder that ignores
+    // the key entirely on a fleet the default cap already covers.
+    const sessions = Array.from({ length: 5 }, (_, i) => ({ sessionId: `s${i}`, cwd: '/repo' }))
+    const surveyed = []
+    const watcher = buildSessionCiWatcher({
+      config: { sessionCi: { discoveryIntervalMs: 1 } },
+      sessionManager: { listSessions: () => sessions, getSession: () => null },
+      logger: { debug() {}, info() {}, warn() {} },
+      survey: async ({ sessionId }) => { surveyed.push(sessionId); return noPr() },
+    })
+    await watcher.tick()
+    assert.equal(surveyed.length, 4, 'the module default cap is 4')
+  })
+
   it('routes a completion to the push pipeline as a ci_complete notification', async () => {
     const sent = []
     const q = [pending(), red()]

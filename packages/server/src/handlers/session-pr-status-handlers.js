@@ -38,9 +38,11 @@
  * way out: opening the dashboard arms the watch.
  *
  * Note this endpoint is therefore no longer read-only — it MUTATES daemon watch
- * state — while `isInFlight` below still only bars CONCURRENT surveys per
- * client, not back-to-back ones. `observe()` is written to be safe under an
- * un-throttled caller (see its doc); a server-side rate limit is #7436.
+ * state. `isInFlight` below bars CONCURRENT surveys per client; the #7436
+ * per-session throttle (`SURVEY_MIN_INTERVAL_MS`) bounds back-to-back ones
+ * across clients. `observe()` is additionally written to be safe under an
+ * un-throttled caller (see its doc) — the throttle is the bound, that is the
+ * belt.
  *
  * `observe()` arms and never fires, so nothing a client does can produce a
  * completion event. Note the order and the isolation below — the reply goes out
@@ -69,6 +71,45 @@ export const NO_SESSION_REASON = 'no such session'
 
 /** Reason when this client already has a survey running. */
 export const IN_PROGRESS_REASON = 'a pull-request status survey is already running for this client'
+
+/** Reason when this session was surveyed within the minimum interval (#7436). */
+export const RATE_LIMITED_REASON = 'pull-request status was surveyed moments ago — retry in a few seconds'
+
+/**
+ * #7436: minimum interval between surveys of ONE session, across all clients.
+ *
+ * The in-flight guard below only bars CONCURRENT surveys; back-to-back ones
+ * were unrestricted, and since #7427 each survey also MUTATES daemon watch
+ * state via `observe()`. `observe()` is written to be safe under an
+ * un-throttled caller, but "the callee is careful" is a weaker guarantee than
+ * a bound on the caller. Five seconds keeps the Refresh button useful for a
+ * user actually waiting on CI (the armed sweep itself only re-reads once a
+ * minute) while bounding the git+gh subprocess fan-out.
+ *
+ * Per SESSION, not per (client, session), deliberately: a pairing-bound token
+ * is authoritative for its own session (bearer-token-authority.md), so there
+ * are no token classes to keep apart — and a per-client stamp would let N
+ * clients multiply the subprocess cost N-fold.
+ */
+export const SURVEY_MIN_INTERVAL_MS = 5_000
+
+/**
+ * WeakMap<sessionManager, Map<sessionId, lastSurveyStartedAtMs>>.
+ *
+ * Keyed on the session MANAGER: in production that is the daemon-lifetime
+ * singleton, so stamps survive the per-message shallow ctx copies; in tests
+ * every `makeCtx()` builds a fresh mock manager, so isolation comes free. A
+ * destroyed session's stamp lingers until the manager itself is collected —
+ * one number per ever-surveyed session id, bounded and tiny.
+ */
+const surveyStamps = new WeakMap()
+
+/** The per-session stamp map for this daemon's manager. */
+function stampsFor(manager) {
+  let m = surveyStamps.get(manager)
+  if (!m) { m = new Map(); surveyStamps.set(manager, m) }
+  return m
+}
 
 /**
  * One survey per (client, session) at a time. `gh` + git spawn subprocesses, so
@@ -154,6 +195,20 @@ export async function handleSessionPrStatusRequest(ws, client, msg, ctx) {
     return
   }
 
+  // #7436: per-session minimum interval. Checked AFTER the in-flight guard so a
+  // concurrent duplicate keeps its more specific reason, and the stamp is only
+  // written when a survey actually starts — a refusal must not extend the
+  // window. `entry` resolved above, so the manager exists.
+  const manager = ctx.sessions.sessionManager
+  const stamps = stampsFor(manager)
+  const nowMs = typeof ctx._nowMs === 'function' ? ctx._nowMs() : Date.now()
+  const last = stamps.get(targetSessionId)
+  if (typeof last === 'number' && nowMs - last < SURVEY_MIN_INTERVAL_MS) {
+    ctx.transport.send(ws, degraded({ requestId, sessionId: targetSessionId, reason: RATE_LIMITED_REASON }))
+    return
+  }
+  stamps.set(targetSessionId, nowMs)
+
   // Tests can inject `ctx.surveySessionPrStatus` to stub the survey, matching the
   // `ctx.surveyRepos` seam the Control Room handlers use — so a handler test
   // never shells out to real git/gh.
@@ -171,6 +226,12 @@ export async function handleSessionPrStatusRequest(ws, client, msg, ctx) {
       log.warn(`session_pr_status_request: ci-watch observe failed: ${getErrorMessage(err, 'unknown error')}`)
     }
   } catch (err) {
+    // #7436: a thrown survey did not spend the subprocess budget the throttle
+    // protects, and the retry a user reaches for next must not be refused for
+    // it — roll the stamp back. Safe to delete unconditionally: the stamp
+    // written above is ours (the throttle admits one survey per session per
+    // window, so no concurrent writer exists to clobber).
+    stamps.delete(targetSessionId)
     // surveySessionPrStatus degrades environmental failures itself, so reaching
     // here means a genuine defect — log it, and still answer.
     const message = getErrorMessage(err, 'unknown error')
