@@ -199,12 +199,12 @@ describe('updateModels', () => {
       updateModels([
         { value: 'claude-opus-4-8', displayName: 'Opus 4.8', description: '' },
       ])
-      // Fable is a merged fallback (GA again, #6219 revert) whose own 1M window
-      // synthesizes a claude-fable-5[1m] chip with no pricing entry of its own
-      // (flat pricing, no oneM block) — that drift warning is expected and
-      // unrelated to this test, so scope the assertion to the opus-4-8[1m]
-      // variant this test is actually about.
-      const drift = warnings.filter(w => w.includes('pricing-table drift') && w.includes('claude-opus-4-8[1m]'))
+      // No 1M variant here should warn: opus-4-8[1m] has an explicit pricing
+      // entry with a longContext premium, and the merged fable fallback's
+      // claude-fable-5[1m] carries a flat longContext block too (#6219 revert),
+      // so the guard stays silent for BOTH. Assert zero drift warnings of any
+      // kind — the unscoped form is the stronger assertion.
+      const drift = warnings.filter(w => w.includes('pricing-table drift'))
       assert.equal(drift.length, 0, `unexpected drift warning: ${JSON.stringify(warnings)}`)
     })
 

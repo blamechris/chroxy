@@ -36,7 +36,9 @@ const FALLBACK_MODELS_SNAPSHOT = [
 ]
 
 // CLAUDE_PRICING_USD_PER_MTOK snapshot. Fable is back (GA, #6219 revert) with
-// flat pricing — no >200K premium tier, so no `claude-fable-5[1m]` entry.
+// flat pricing — the `claude-fable-5[1m]` entry exists but its longContext
+// tier equals the base rates (no >200K premium). Priced keys are asserted
+// exhaustively in claude-model-catalog.test.js; this snapshot checks a subset.
 const CLAUDE_PRICING_SNAPSHOT = {
   'claude-sonnet-4-6': { input: 3.00, output: 15.00, cacheRead: 0.30, cacheWrite: 3.75 },
   'claude-opus-4-8': { input: 15.00, output: 75.00, cacheRead: 1.50, cacheWrite: 18.75 },
