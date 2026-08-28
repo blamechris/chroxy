@@ -127,6 +127,50 @@ describe('#7438 — Stop then a follow-up restarts the session', () => {
     )
   })
 
+  it('re-arms after a synchronous start() failure so the next input can retry, not strand forever', () => {
+    const session = createRunningSession()
+    // The catch path emits 'error'; an EventEmitter with no 'error' listener
+    // throws (Node special-case). Production always has one (session-manager);
+    // give the bare test session one so we assert on state, not the throw.
+    const errors = []
+    session.on('error', (e) => errors.push(e))
+    session.interrupt()
+    session._handleChildClose(0)
+    assert.equal(session._stoppedByUser, true, 'stop latches the session as user-stopped')
+
+    // start() throws synchronously (e.g. spawn/arg resolution failure) — no child.
+    session._spawnPersistentProcess = () => { throw new Error('spawn boom') }
+    session.sendMessage('follow-up after a failed restart')
+
+    // The consumed latch must be RE-ARMED, and the message queued (not lost),
+    // so a later working restart can still deliver it. Without the re-arm the
+    // latch stays false and every future send only enqueues — the #7438 bug
+    // behind a start-time exception.
+    assert.equal(session._child, null, 'a failed start leaves no child')
+    assert.equal(session._stoppedByUser, true, 're-armed so the next input retries')
+    assert.equal(session._pendingQueue.length, 1, 'the follow-up is queued, not dropped')
+    assert.equal(errors.length, 1, 'the start failure is surfaced as an error event')
+
+    // Next input, start() now works: restart succeeds and drains the follow-up.
+    session._spawnPersistentProcess = (args) => {
+      const child = createMockChild()
+      session.spawns.push({ args, child })
+      session._child = child
+      session._processReady = true
+      session._drainPendingQueue()
+    }
+    session.sendMessage('second input')
+    assert.equal(session.spawns.length, 1, 'the retry restarts the child')
+    assert.notEqual(session._child, null, 'the session is alive again after the retry')
+    // The restart delivers the previously-stranded follow-up (the point of the
+    // re-arm); the second input may remain queued behind the now-busy turn,
+    // which is normal mid-turn queueing, so assert delivery, not an empty queue.
+    assert.ok(
+      sentPrompts(session._child).includes('follow-up after a failed restart'),
+      'the follow-up stranded by the failed start is delivered on the retry',
+    )
+  })
+
   it('restarts exactly once when several follow-ups arrive after a Stop', () => {
     const session = createRunningSession()
 

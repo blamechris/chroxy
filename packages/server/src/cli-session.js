@@ -2156,6 +2156,13 @@ export class CliSession extends BaseSession {
     try {
       this.start()
     } catch (err) {
+      // Re-arm the latch: start() threw synchronously (spawn/arg failure) BEFORE
+      // any child or container launch, so nothing was started. Without this the
+      // latch stays consumed and the next sendMessage would only enqueue — never
+      // retry the restart — re-stranding the follow-up behind a start-time error
+      // (the exact #7438 failure mode). Re-arming lets the next user input retry;
+      // it is not a loop — a retry only happens on a fresh send.
+      this._stoppedByUser = true
       ;(this._log || log).error(`Restart after stop failed: ${err.message}`)
       this.emit('error', { message: `Failed to restart the stopped Claude process: ${err.message}` })
     }
