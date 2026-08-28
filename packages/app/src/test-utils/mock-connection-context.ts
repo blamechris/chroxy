@@ -17,14 +17,23 @@
 import type { ConnectionContext } from '../store/types';
 
 /**
- * Build a `ConnectionContext` for message-handler tests.
+ * Build a `ConnectionContext` for message-handler tests. (Named for the type
+ * it actually returns — `MessageHandlerContext` is a DIFFERENT, module-private
+ * type in message-handler.ts; review N2 on #7463.)
  *
  * Pass `overrides` for the per-suite differences that are load-bearing (a
  * reconnect context, a socket whose `send` a test asserts against, …) so the
  * intent stays visible at the call site rather than hiding in a private copy.
  */
-export function createMockMessageHandlerContext(
-  overrides: Partial<ConnectionContext> = {},
+export function createMockConnectionContext<
+  // Review on #7463 (S1): a typed-return factory checks the BASE literal, but
+  // a variable-held override could smuggle an unknown field straight onto the
+  // returned object — the fossil condition re-entering through the override
+  // door. The mapped-`never` constraint rejects any key not on the real type,
+  // for inline AND variable-held overrides alike.
+  T extends Partial<ConnectionContext>,
+>(
+  overrides?: T & Record<Exclude<keyof T, keyof ConnectionContext>, never>,
 ): ConnectionContext {
   const base: ConnectionContext = {
     url: 'wss://test.example.com',
@@ -37,5 +46,5 @@ export function createMockMessageHandlerContext(
     // is checked against the real type.
     socket: { readyState: 1, send: jest.fn(), close: jest.fn() } as unknown as WebSocket,
   };
-  return { ...base, ...overrides };
+  return { ...base, ...(overrides ?? {}) };
 }

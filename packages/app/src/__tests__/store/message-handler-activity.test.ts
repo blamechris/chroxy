@@ -19,7 +19,7 @@ import {
   _testResetStore,
   setStore,
 } from '../../store/message-handler';
-import { createMockMessageHandlerContext } from '../../test-utils/mock-message-handler-context';
+import { createMockConnectionContext } from '../../test-utils/mock-connection-context';
 import { createEmptyActivityState } from '@chroxy/store-core';
 import type { ActivityEntry, ActivityState } from '@chroxy/store-core';
 import type { ConnectionState } from '../../store/types';
@@ -98,7 +98,7 @@ describe('activity feeder (#6246)', () => {
   it('activity_snapshot populates state.activity for a session', () => {
     const { store, current } = createMockStore(createEmptyActivityState());
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'activity_snapshot',
@@ -116,7 +116,7 @@ describe('activity feeder (#6246)', () => {
   it('activity_snapshot REPLACES the prior tree for that session', () => {
     const { store, current } = createMockStore(createEmptyActivityState());
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'activity_snapshot',
@@ -139,7 +139,7 @@ describe('activity feeder (#6246)', () => {
   it('activity_delta upserts an entry into its session', () => {
     const { store, current } = createMockStore(createEmptyActivityState());
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'activity_delta',
@@ -170,7 +170,7 @@ describe('activity feeder (#6246)', () => {
     const seeded = createEmptyActivityState();
     const { store, current } = createMockStore(seeded);
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     expect(() =>
       _testMessageHandler.handle({
@@ -190,7 +190,7 @@ describe('activity feeder (#6246)', () => {
     const seeded = createEmptyActivityState();
     const { store, current } = createMockStore(seeded);
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     expect(() =>
       _testMessageHandler.handle({
@@ -214,7 +214,7 @@ describe('activity feeder (#6246)', () => {
       s2: { lastClientActivityAt: 1000, inactivityWarning: { remainingMs: 5000 } },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'activity_delta',
@@ -232,7 +232,7 @@ describe('activity feeder (#6246)', () => {
   it('activity_delta does NOT bump a session absent from sessionStates (no throw)', () => {
     const { store, current } = createMockStore(createEmptyActivityState()); // empty sessionStates
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     expect(() =>
       _testMessageHandler.handle({
@@ -257,7 +257,7 @@ describe('activity feeder (#6246)', () => {
       s2: { messages: [], lastClientActivityAt: 1000, inactivityWarning: { remainingMs: 5000 } },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     // Put s2 into _ctx.replayingSessions via the real replay-start path.
     _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's2' });
@@ -284,7 +284,7 @@ describe('activity feeder (#6246)', () => {
       s2: { lastClientActivityAt: 1000, inactivityWarning: { remainingMs: 5000 } },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'activity_snapshot',

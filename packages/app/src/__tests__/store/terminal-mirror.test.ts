@@ -3,7 +3,7 @@ import {
   createEmptySessionState,
   _testMessageHandler,
 } from '../../store/connection';
-import { createMockMessageHandlerContext } from '../../test-utils/mock-message-handler-context';
+import { createMockConnectionContext } from '../../test-utils/mock-connection-context';
 
 // #5835 / #5987 — read-only PTY mirror channel on mobile (PR1). Covers the new
 // store actions (terminal_subscribe / terminal_unsubscribe / terminal_resize)
@@ -162,7 +162,7 @@ describe('terminal_output receive', () => {
   const mockSocket = { readyState: 1, send: jest.fn(), close: jest.fn() } as unknown as WebSocket;
 
   beforeEach(() => {
-    _testMessageHandler.setContext(createMockMessageHandlerContext({ socket: mockSocket }));
+    _testMessageHandler.setContext(createMockConnectionContext({ socket: mockSocket }));
   });
   afterEach(() => _testMessageHandler.clearContext());
 

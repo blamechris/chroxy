@@ -12,7 +12,7 @@ import {
   _testMessageHandler,
   setStore,
 } from '../../store/message-handler';
-import { createMockMessageHandlerContext } from '../../test-utils/mock-message-handler-context';
+import { createMockConnectionContext } from '../../test-utils/mock-connection-context';
 import { createEmptySessionState } from '../../store/utils';
 import type { ConnectionState } from '../../store/types';
 import type { ChatMessage } from '../../store/connection';
@@ -73,7 +73,7 @@ describe('agent_event handler (#5060)', () => {
   it('appends a child wire event to the parent Task bubble childAgentEvents[]', () => {
     const store = storeWithTask('parent-1');
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'agent_event',
@@ -93,7 +93,7 @@ describe('agent_event handler (#5060)', () => {
   it('accumulates multiple events in arrival order', () => {
     const store = storeWithTask('parent-2');
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'agent_event',
@@ -123,7 +123,7 @@ describe('agent_event handler (#5060)', () => {
   it('same-reference no-op when parentToolUseId matches no bubble', () => {
     const store = storeWithTask('parent-3');
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
     const before = store.getState().sessionStates.s1.messages;
 
     _testMessageHandler.handle({

@@ -19,7 +19,7 @@ import {
   _testClearPendingPermissionModeRequests,
   setDeltaFlushIntervalOverride,
 } from '../../store/message-handler';
-import { createMockMessageHandlerContext } from '../../test-utils/mock-message-handler-context';
+import { createMockConnectionContext } from '../../test-utils/mock-connection-context';
 import { createEmptySessionState } from '../../store/utils';
 import {
   PERMISSION_ALREADY_ANSWERED_NOTICE,
@@ -84,7 +84,7 @@ describe('session_error SESSION_TOKEN_MISMATCH UX', () => {
       sessionStates: { s1: createEmptySessionState() },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'session_error',
@@ -118,7 +118,7 @@ describe('session_error SESSION_TOKEN_MISMATCH UX', () => {
       clearSavedConnection,
     } as any);
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'session_error',
@@ -146,7 +146,7 @@ describe('session_error SESSION_TOKEN_MISMATCH UX', () => {
       sessionStates: { s1: createEmptySessionState() },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'session_error',
@@ -175,7 +175,7 @@ describe('session_role handler (#5589 / #5281)', () => {
       sessionStates: { s1: createEmptySessionState() },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({ type: 'session_role', sessionId: 's1', primaryClientId: 'other' });
 
@@ -192,7 +192,7 @@ describe('session_role handler (#5589 / #5281)', () => {
       sessionStates: { s1: createEmptySessionState() },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({ type: 'session_role', sessionId: 's1', primaryClientId: 'me' });
 
@@ -209,7 +209,7 @@ describe('session_role handler (#5589 / #5281)', () => {
       sessionStates: { s1: { ...createEmptySessionState(), sessionRole: 'observer', primaryClientId: 'other' } },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({ type: 'session_role', sessionId: 's1', primaryClientId: null });
 
@@ -222,7 +222,7 @@ describe('session_role handler (#5589 / #5281)', () => {
     useMultiClientStore.getState().setMyClientId('me');
     const store = createMockStore({ activeSessionId: null, sessionStates: {} });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({ type: 'session_role', sessionId: 'ghost', primaryClientId: 'other' });
 
@@ -254,7 +254,7 @@ describe('session_error input_conflict handler (#5589 / #5281)', () => {
       },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     const reason = 'Session is already processing input from another device. Wait for it to finish or interrupt first.';
     _testMessageHandler.handle({
@@ -287,7 +287,7 @@ describe('session_error input_conflict handler (#5589 / #5281)', () => {
       sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     const reason = 'Another device is the primary for this session. Request a hand-off or wait for it to release.';
     _testMessageHandler.handle({
@@ -323,7 +323,7 @@ describe('session_stopped handler (#4879)', () => {
       },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     const before = Date.now();
     _testMessageHandler.handle({ type: 'session_stopped', sessionId: 's2', code: 143 });
@@ -351,7 +351,7 @@ describe('session_stopped handler (#4879)', () => {
       sessionStates: { s1: createEmptySessionState() },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({ type: 'session_stopped', code: 0 });
 
@@ -367,7 +367,7 @@ describe('session_stopped handler (#4879)', () => {
       sessionStates: { s1: createEmptySessionState() },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({ type: 'session_stopped' });
 
@@ -385,7 +385,7 @@ describe('session_stopped handler (#4879)', () => {
       sessionStates: { s1: createEmptySessionState() },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({ type: 'session_stopped', sessionId: 's1', code: 0 });
 
@@ -399,7 +399,7 @@ describe('session_stopped handler (#4879)', () => {
       sessionStates: { s1: createEmptySessionState() },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({ type: 'session_stopped', sessionId: 'unknown-session', code: 0 });
 
@@ -420,7 +420,7 @@ describe('session_stopped handler (#4879)', () => {
       sessionStates: { s1: { ...createEmptySessionState(), stoppedAt: 123, stoppedCode: 0 } },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({ type: 'claude_ready' });
 
@@ -452,7 +452,7 @@ describe('history_replay_start clears stale session_stopped marker (#4909)', () 
       },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's1' });
 
@@ -477,7 +477,7 @@ describe('history_replay_start clears stale session_stopped marker (#4909)', () 
       },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's2' });
 
@@ -495,7 +495,7 @@ describe('history_replay_start clears stale session_stopped marker (#4909)', () 
       sessionStates: { s1: createEmptySessionState() },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     const sessionStatesBefore = store.getState().sessionStates;
     _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's1' });
@@ -515,7 +515,7 @@ describe('history_replay_start clears stale session_stopped marker (#4909)', () 
       sessionStates: { s1: createEmptySessionState() },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     expect(() =>
       _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 'unknown-id' }),
@@ -554,7 +554,7 @@ describe('history_replay_start: isPlanPending wipe targeting (#7402)', () => {
       },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
     return store;
   }
 
@@ -591,7 +591,7 @@ describe('history_replay_start: isPlanPending wipe targeting (#7402)', () => {
       },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's2' });
 
@@ -711,7 +711,7 @@ describe("history_replay_end: '(resolved)' sweep targeting (#7410)", () => {
       },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
     return store;
   }
 
@@ -856,7 +856,7 @@ describe("history_replay_end: '(resolved)' sweep vs a racing live AskUserQuestio
       sessionNotifications: [],
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
     return store;
   }
 
@@ -964,7 +964,7 @@ describe("history_replay_end: '(resolved)' sweep vs a racing live AskUserQuestio
       sessionNotifications: [],
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     // Only s2 is replaying; a live question for s1 is not inside any window of
     // its own, so s1's own replay-end still stamps it.
@@ -994,7 +994,7 @@ describe('session_timeout handler', () => {
     });
 
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({ type: 'session_timeout', sessionId: 's1', name: 'Session 1', idleMs: 600000 });
 
@@ -1019,7 +1019,7 @@ describe('session_timeout handler', () => {
     });
 
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({ type: 'session_timeout', sessionId: 's1', name: 'Session 1', idleMs: 600000 });
 
@@ -1039,7 +1039,7 @@ describe('session_timeout handler', () => {
     });
 
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({ type: 'session_timeout', sessionId: 's1', name: 'Session 1', idleMs: 600000 });
 
@@ -1057,7 +1057,7 @@ describe('session_timeout handler', () => {
     });
 
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({ type: 'session_timeout', sessionId: 's1', name: 'Test', idleMs: 300000 });
 
@@ -1073,7 +1073,7 @@ describe('session_timeout handler', () => {
     });
 
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({ type: 'session_timeout', sessionId: 's1', name: 'My Project', idleMs: 600000 });
 
@@ -1098,7 +1098,7 @@ describe('session_timeout handler', () => {
     });
 
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({ type: 'session_timeout', sessionId: 's2', name: 'Background', idleMs: 600000 });
 
@@ -1127,7 +1127,7 @@ describe('session_list GC handler', () => {
     });
 
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     // Send session_list that only includes s1 (s2 removed)
     _testMessageHandler.handle({
@@ -1148,7 +1148,7 @@ describe('session_list GC handler', () => {
     });
 
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'session_list',
@@ -1175,7 +1175,7 @@ describe('session_list GC handler', () => {
     });
 
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     // Only s1 remains
     _testMessageHandler.handle({
@@ -1208,7 +1208,7 @@ describe('session_list GC handler', () => {
     });
 
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     // Remove active session s1, only s2 remains
     _testMessageHandler.handle({
@@ -1235,7 +1235,7 @@ describe('session_list GC handler', () => {
     });
 
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'session_list',
@@ -1264,7 +1264,7 @@ describe('checkpoint_restored handler', () => {
     } as any);
 
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({ type: 'checkpoint_restored', newSessionId: 's2' });
 
@@ -1282,7 +1282,7 @@ describe('checkpoint_restored handler', () => {
     } as any);
 
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({ type: 'checkpoint_restored' });
 
@@ -1300,7 +1300,7 @@ describe('checkpoint_restored handler', () => {
     } as any);
 
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({ type: 'checkpoint_restored', newSessionId: '' });
 
@@ -1318,7 +1318,7 @@ describe('checkpoint_restored handler', () => {
     } as any);
 
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({ type: 'checkpoint_restored', newSessionId: '   ' });
 
@@ -1336,7 +1336,7 @@ describe('checkpoint_restored handler', () => {
     } as any);
 
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({ type: 'checkpoint_restored', newSessionId: 42 });
 
@@ -1357,7 +1357,7 @@ describe('checkpoint_restored handler', () => {
     } as any);
 
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'checkpoint_restored',
@@ -1387,7 +1387,7 @@ describe('session_updated handler (#1381)', () => {
     });
 
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'session_updated',
@@ -1406,7 +1406,7 @@ describe('session_updated handler (#1381)', () => {
     });
 
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'session_updated',
@@ -1426,7 +1426,7 @@ describe('conversations_list handler', () => {
     });
 
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     const mockConversations = [
       { conversationId: 'conv-1', projectName: 'project-a', lastModified: Date.now(), preview: 'hello', sizeBytes: 1024 },
@@ -1450,7 +1450,7 @@ describe('conversations_list handler', () => {
     });
 
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'conversations_list',
@@ -1485,7 +1485,7 @@ describe('unknown message type (default case)', () => {
     });
 
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({ type: 'some_future_feature' });
 
@@ -1504,7 +1504,7 @@ describe('unknown message type (default case)', () => {
     });
 
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({ type: 'some_future_feature' });
 
@@ -1520,7 +1520,7 @@ describe('unknown message type (default case)', () => {
     });
 
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({ type: 'some_future_feature' });
 
@@ -1553,7 +1553,7 @@ describe('client_focus_changed follow mode', () => {
     });
 
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'client_focus_changed',
@@ -1583,7 +1583,7 @@ describe('client_focus_changed follow mode', () => {
     });
 
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'client_focus_changed',
@@ -1615,7 +1615,7 @@ describe('client_focus_changed follow mode', () => {
     });
 
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'client_focus_changed',
@@ -1647,7 +1647,7 @@ describe('client_focus_changed follow mode', () => {
     });
 
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'client_focus_changed',
@@ -1666,7 +1666,7 @@ describe('server_mode handler (PTY removal)', () => {
       viewMode: 'chat',
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({ type: 'server_mode', mode: 'cli' });
     // serverMode now lives in the lifecycle store (canonical source)
@@ -1678,7 +1678,7 @@ describe('server_mode handler (PTY removal)', () => {
       viewMode: 'chat',
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({ type: 'server_mode', mode: 'terminal' });
     // serverMode now lives in the lifecycle store (canonical source)
@@ -1697,7 +1697,7 @@ describe('git result handlers', () => {
 
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'git_status_result',
@@ -1725,7 +1725,7 @@ describe('git result handlers', () => {
 
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     expect(() => {
       _testMessageHandler.handle({
@@ -1748,7 +1748,7 @@ describe('git result handlers', () => {
 
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'git_branches_result',
@@ -1773,7 +1773,7 @@ describe('git result handlers', () => {
 
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({ type: 'git_stage_result' });
 
@@ -1790,7 +1790,7 @@ describe('git result handlers', () => {
 
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({ type: 'git_unstage_result' });
 
@@ -1807,7 +1807,7 @@ describe('git result handlers', () => {
 
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({ type: 'git_stage_result', error: 'failed to stage' });
 
@@ -1824,7 +1824,7 @@ describe('git result handlers', () => {
 
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'git_commit_result',
@@ -1849,7 +1849,7 @@ describe('git result handlers', () => {
 
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'git_commit_result',
@@ -1881,7 +1881,7 @@ describe('permission_request rich notification details', () => {
     });
 
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'permission_request',
@@ -1917,7 +1917,7 @@ describe('permission_request rich notification details', () => {
     });
 
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     const longCommand = 'a'.repeat(200);
     _testMessageHandler.handle({
@@ -1950,7 +1950,7 @@ describe('permission_request rich notification details', () => {
     });
 
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'permission_request',
@@ -1984,7 +1984,7 @@ describe('plan_ready notification', () => {
     });
 
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'plan_ready',
@@ -2014,7 +2014,7 @@ describe('plan_ready notification', () => {
     });
 
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'plan_ready',
@@ -2038,7 +2038,7 @@ describe('session subscription (#1692)', () => {
     });
 
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'session_list',
@@ -2067,7 +2067,7 @@ describe('session subscription (#1692)', () => {
     });
 
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'session_list',
@@ -2090,7 +2090,7 @@ describe('session subscription (#1692)', () => {
     });
 
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     // Create enough sessions to require chunking: 1 active + (CHUNK_SIZE + 4) non-active
     const nonActiveCount = SUBSCRIBE_SESSIONS_CHUNK_SIZE + 4;
@@ -2121,7 +2121,7 @@ describe('session subscription (#1692)', () => {
     });
 
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'subscriptions_updated',
@@ -2141,7 +2141,7 @@ describe('user_input cross-client echo', () => {
       },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'user_input',
@@ -2167,7 +2167,7 @@ describe('user_input cross-client echo', () => {
       },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'user_input',
@@ -2204,7 +2204,7 @@ describe('stream_start handler', () => {
 
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({ type: 'stream_start', messageId: 'msg-1', sessionId: 's1' });
 
@@ -2223,7 +2223,7 @@ describe('stream_start handler', () => {
 
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({ type: 'stream_start', messageId: 'msg-1', sessionId: 's1' });
 
@@ -2243,7 +2243,7 @@ describe('stream_start handler', () => {
 
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({ type: 'stream_start', messageId: 'msg-1', sessionId: 's1' });
 
@@ -2268,7 +2268,7 @@ describe('reconnect replay dedup', () => {
       sessionStates: { s1: { ...createEmptySessionState(), messages, streamingMessageId: null } },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
     // Enter reconnect replay mode (no fullHistory = not a session switch)
     _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's1' });
     return store;
@@ -2466,7 +2466,7 @@ describe('reconnect replay dedup', () => {
       sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'message', messageType: 'user_input', content: 'live echo',
@@ -2497,7 +2497,7 @@ describe('stream_delta handler', () => {
 
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({ type: 'stream_start', messageId: 'msg-1', sessionId: 's1' });
     _testMessageHandler.handle({ type: 'stream_delta', messageId: 'msg-1', sessionId: 's1', delta: 'Hello' });
@@ -2522,7 +2522,7 @@ describe('stream_delta handler', () => {
       sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     const setTimeoutSpy = jest.spyOn(global, 'setTimeout');
     try {
@@ -2554,7 +2554,7 @@ describe('stream_delta handler', () => {
       sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({ type: 'stream_start', messageId: 'msg-1', sessionId: 's1', serverTs: 1_700_000_000_000 });
     _testMessageHandler.handle({ type: 'stream_delta', messageId: 'msg-1', sessionId: 's1', delta: 'Hello', serverTs: 1_700_000_000_010 });
@@ -2576,7 +2576,7 @@ describe('stream_delta handler', () => {
 
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({ type: 'stream_start', messageId: 'msg-1', sessionId: 's1' });
     _testMessageHandler.handle({ type: 'stream_delta', messageId: 'msg-1', sessionId: 's1', delta: 'Content' });
@@ -2602,7 +2602,7 @@ describe('stream_delta handler', () => {
       sessionStates: { s1: { ...createEmptySessionState(), messages: [toolMsg] } },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     // Skip stream_start — simulate the dropped/raced case
     _testMessageHandler.handle({ type: 'stream_delta', messageId: 'msg-1', sessionId: 's1', delta: 'After tool ' });
@@ -2630,7 +2630,7 @@ describe('stream_delta handler', () => {
       sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     // Step 1: dispatch delta when no message exists at this id — defensive
     // remap can't catch the collision since the tool_use isn't there yet.
@@ -2677,7 +2677,7 @@ describe('stream_delta handler', () => {
       sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     // Skip stream_start — simulate the dropped/raced case
     _testMessageHandler.handle({ type: 'stream_delta', messageId: 'msg-orphan', sessionId: 's1', delta: 'After tool ' });
@@ -2731,7 +2731,7 @@ describe('post-tool text chunks split into continuation slots (#4922 / #4889)', 
       sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     // text-A -> tool -> text-B -> tool -> text-C, all sharing messageId 'resp-1'
     _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
@@ -2806,7 +2806,7 @@ describe('post-tool text chunks split into continuation slots (#4922 / #4889)', 
       sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
     // Sentence-terminated fixtures so #4975 mid-word peel doesn't kick in --
@@ -2853,7 +2853,7 @@ describe('post-tool text chunks split into continuation slots (#4922 / #4889)', 
       sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
     _testMessageHandler.handle({
@@ -2888,7 +2888,7 @@ describe('post-tool text chunks split into continuation slots (#4922 / #4889)', 
       sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
     // Sentence-terminated fixtures so #4975 mid-word peel doesn't fire --
@@ -2937,7 +2937,7 @@ describe('post-tool text chunks split into continuation slots (#4922 / #4889)', 
       sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     // Enter replay mode for s1 -- mirrors the live wire sequence: server emits
     // `history_replay_start` before streaming the cached transcript.
@@ -3001,7 +3001,7 @@ describe('post-tool text chunks split into continuation slots (#4922 / #4889)', 
         sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
       });
       setStore(store as any);
-      _testMessageHandler.setContext(createMockMessageHandlerContext());
+      _testMessageHandler.setContext(createMockConnectionContext());
 
       // text "Starting Phase 1 — agent-review on PR #3.Del" -> tool ->
       // "egating...". The pre-tool content ends with `l` (mid-sentence),
@@ -3047,7 +3047,7 @@ describe('post-tool text chunks split into continuation slots (#4922 / #4889)', 
         sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
       });
       setStore(store as any);
-      _testMessageHandler.setContext(createMockMessageHandlerContext());
+      _testMessageHandler.setContext(createMockConnectionContext());
 
       _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
       // Skip jest.runAllTimers() so "PR #3.Del" stays in pendingDeltas
@@ -3088,7 +3088,7 @@ describe('post-tool text chunks split into continuation slots (#4922 / #4889)', 
         sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
       });
       setStore(store as any);
-      _testMessageHandler.setContext(createMockMessageHandlerContext());
+      _testMessageHandler.setContext(createMockConnectionContext());
 
       _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
       _testMessageHandler.handle({
@@ -3134,7 +3134,7 @@ describe('post-tool text chunks split into continuation slots (#4922 / #4889)', 
         sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
       });
       setStore(store as any);
-      _testMessageHandler.setContext(createMockMessageHandlerContext());
+      _testMessageHandler.setContext(createMockConnectionContext());
 
       _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
       // Prior delta ends with `Running` (word char `g`).
@@ -3183,7 +3183,7 @@ describe('post-tool text chunks split into continuation slots (#4922 / #4889)', 
         sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
       });
       setStore(store as any);
-      _testMessageHandler.setContext(createMockMessageHandlerContext());
+      _testMessageHandler.setContext(createMockConnectionContext());
 
       _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
       _testMessageHandler.handle({
@@ -3231,7 +3231,7 @@ describe('post-tool text chunks split into continuation slots (#4922 / #4889)', 
         sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
       });
       setStore(store as any);
-      _testMessageHandler.setContext(createMockMessageHandlerContext());
+      _testMessageHandler.setContext(createMockConnectionContext());
 
       // Repro from #4999.
       _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
@@ -3275,7 +3275,7 @@ describe('post-tool text chunks split into continuation slots (#4922 / #4889)', 
         sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
       });
       setStore(store as any);
-      _testMessageHandler.setContext(createMockMessageHandlerContext());
+      _testMessageHandler.setContext(createMockConnectionContext());
 
       _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
       _testMessageHandler.handle({
@@ -3317,7 +3317,7 @@ describe('post-tool text chunks split into continuation slots (#4922 / #4889)', 
         sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
       });
       setStore(store as any);
-      _testMessageHandler.setContext(createMockMessageHandlerContext());
+      _testMessageHandler.setContext(createMockConnectionContext());
 
       _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
       _testMessageHandler.handle({
@@ -3356,7 +3356,7 @@ describe('post-tool text chunks split into continuation slots (#4922 / #4889)', 
         sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
       });
       setStore(store as any);
-      _testMessageHandler.setContext(createMockMessageHandlerContext());
+      _testMessageHandler.setContext(createMockConnectionContext());
 
       _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
       _testMessageHandler.handle({
@@ -3401,7 +3401,7 @@ describe('post-tool text chunks split into continuation slots (#4922 / #4889)', 
         sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
       });
       setStore(store as any);
-      _testMessageHandler.setContext(createMockMessageHandlerContext());
+      _testMessageHandler.setContext(createMockConnectionContext());
 
       _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
       _testMessageHandler.handle({
@@ -3441,7 +3441,7 @@ describe('post-tool text chunks split into continuation slots (#4922 / #4889)', 
         sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
       });
       setStore(store as any);
-      _testMessageHandler.setContext(createMockMessageHandlerContext());
+      _testMessageHandler.setContext(createMockConnectionContext());
 
       _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
       _testMessageHandler.handle({
@@ -3484,7 +3484,7 @@ describe('post-tool text chunks split into continuation slots (#4922 / #4889)', 
         sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
       });
       setStore(store as any);
-      _testMessageHandler.setContext(createMockMessageHandlerContext());
+      _testMessageHandler.setContext(createMockConnectionContext());
 
       _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
       _testMessageHandler.handle({
@@ -3524,7 +3524,7 @@ describe('post-tool text chunks split into continuation slots (#4922 / #4889)', 
         sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
       });
       setStore(store as any);
-      _testMessageHandler.setContext(createMockMessageHandlerContext());
+      _testMessageHandler.setContext(createMockConnectionContext());
 
       _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
       _testMessageHandler.handle({
@@ -3564,7 +3564,7 @@ describe('post-tool text chunks split into continuation slots (#4922 / #4889)', 
         sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
       });
       setStore(store as any);
-      _testMessageHandler.setContext(createMockMessageHandlerContext());
+      _testMessageHandler.setContext(createMockConnectionContext());
 
       _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
       _testMessageHandler.handle({
@@ -3604,7 +3604,7 @@ describe('post-tool text chunks split into continuation slots (#4922 / #4889)', 
         sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
       });
       setStore(store as any);
-      _testMessageHandler.setContext(createMockMessageHandlerContext());
+      _testMessageHandler.setContext(createMockConnectionContext());
 
       _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
       _testMessageHandler.handle({
@@ -3647,7 +3647,7 @@ describe('post-tool text chunks split into continuation slots (#4922 / #4889)', 
         sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
       });
       setStore(store as any);
-      _testMessageHandler.setContext(createMockMessageHandlerContext());
+      _testMessageHandler.setContext(createMockConnectionContext());
 
       _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
       _testMessageHandler.handle({
@@ -3696,7 +3696,7 @@ describe('stream_end handler', () => {
 
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({ type: 'stream_start', messageId: 'msg-1', sessionId: 's1' });
     _testMessageHandler.handle({ type: 'stream_delta', messageId: 'msg-1', sessionId: 's1', delta: 'Final text' });
@@ -3719,7 +3719,7 @@ describe('tool_start handler', () => {
 
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'tool_start',
@@ -3755,7 +3755,7 @@ describe('tool_start handler', () => {
       },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'tool_start',
@@ -3783,7 +3783,7 @@ describe('tool_start handler', () => {
       },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'tool_start',
@@ -3807,7 +3807,7 @@ describe('tool_start handler', () => {
       },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'tool_start',
@@ -3847,7 +3847,7 @@ describe('agent_idle handler (#3171)', () => {
       },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({ type: 'agent_idle', sessionId: 's1' });
 
@@ -3865,7 +3865,7 @@ describe('agent_idle handler (#3171)', () => {
       },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({ type: 'agent_idle', sessionId: 's1' });
 
@@ -3890,7 +3890,7 @@ describe('tool_result handler', () => {
 
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'tool_result',
@@ -3911,7 +3911,7 @@ describe('tool_result handler', () => {
 
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     expect(() => {
       _testMessageHandler.handle({ type: 'tool_result', sessionId: 's1' });
@@ -3939,7 +3939,7 @@ describe('result handler', () => {
       sessionNotifications: [],
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'result',
@@ -3975,7 +3975,7 @@ describe('result handler', () => {
       sessionNotifications: [],
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'result',
@@ -4044,7 +4044,7 @@ describe('permission_resolved handler', () => {
 
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'permission_resolved',
@@ -4079,7 +4079,7 @@ describe('permission_resolved handler', () => {
 
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'permission_resolved',
@@ -4098,7 +4098,7 @@ describe('permission_resolved handler', () => {
       sessionStates: {},
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     // Should not throw when no session has the requestId
     _testMessageHandler.handle({
@@ -4123,7 +4123,7 @@ describe('permission_resolved handler', () => {
       ],
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'permission_resolved',
@@ -4163,7 +4163,7 @@ describe('permission_expired handler', () => {
       ],
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'permission_expired',
@@ -4217,7 +4217,7 @@ describe('permission_expired handler', () => {
 
   function expire(store: ReturnType<typeof createMockStore>) {
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
     _testMessageHandler.handle({
       type: 'permission_expired',
       requestId: 'req-race',
@@ -4359,7 +4359,7 @@ describe('permission_expired handler', () => {
       sessionNotifications: [],
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
     for (const k of ['a', 'b', 'c']) {
       _testMessageHandler.handle({
         type: 'permission_expired',
@@ -4402,7 +4402,7 @@ describe('permission_expired handler', () => {
       sessionNotifications: [],
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
     _testMessageHandler.handle({
       type: 'permission_expired',
       requestId: 'req-race',
@@ -4426,7 +4426,7 @@ describe('permission_request message handler', () => {
       sessionNotifications: [],
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
     clearPermissionSplits();
 
     _testMessageHandler.handle({
@@ -4461,7 +4461,7 @@ describe('permission_request message handler', () => {
       sessionNotifications: [],
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
     clearPermissionSplits();
 
     _testMessageHandler.handle({
@@ -4489,7 +4489,7 @@ describe('permission_request message handler', () => {
       sessionNotifications: [],
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
     clearPermissionSplits();
 
     _testMessageHandler.handle({
@@ -4521,7 +4521,7 @@ describe('permission_request message handler', () => {
       sessionNotifications: [],
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
     clearPermissionSplits();
 
     _testMessageHandler.handle({
@@ -4555,7 +4555,7 @@ describe('permission_request message handler', () => {
       sessionNotifications: [],
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
     clearPermissionSplits();
 
     _testMessageHandler.handle({
@@ -4582,7 +4582,7 @@ describe('permission_request message handler', () => {
       sessionNotifications: [],
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
     clearPermissionSplits();
 
     _testMessageHandler.handle({
@@ -4607,7 +4607,7 @@ describe('permission_request message handler', () => {
       sessionNotifications: [],
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
     clearPermissionSplits();
 
     _testMessageHandler.handle({
@@ -4630,7 +4630,7 @@ describe('session_context handler', () => {
 
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'session_context',
@@ -4657,7 +4657,7 @@ describe('session_context handler', () => {
 
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     expect(() => {
       _testMessageHandler.handle({
@@ -4685,7 +4685,7 @@ describe('user_question handler', () => {
       sessionNotifications: [],
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'user_question',
@@ -4715,7 +4715,7 @@ describe('user_question handler', () => {
       sessionNotifications: [],
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({ type: 'user_question', sessionId: 's1', questions: [] });
 
@@ -4731,7 +4731,7 @@ describe('permission_rules_updated handler', () => {
       sessionStates: { s1: createEmptySessionState() },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'permission_rules_updated',
@@ -4753,7 +4753,7 @@ describe('permission_rules_updated handler', () => {
       },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'permission_rules_updated',
@@ -4777,7 +4777,7 @@ describe('permission_rules_updated handler', () => {
       },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'permission_rules_updated',
@@ -4795,7 +4795,7 @@ describe('permission_rules_updated handler', () => {
       sessionStates: { s1: createEmptySessionState() },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'permission_rules_updated',
@@ -4814,7 +4814,7 @@ describe('permission_rules_updated handler', () => {
       sessionStates: { s1: createEmptySessionState() },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     expect(() => {
       _testMessageHandler.handle({
@@ -4849,7 +4849,7 @@ describe('permission_timeout handler', () => {
       serverErrors: [],
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'permission_timeout',
@@ -4888,7 +4888,7 @@ describe('permission_timeout handler', () => {
       serverErrors: [],
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'permission_timeout',
@@ -4923,7 +4923,7 @@ describe('permission_timeout handler', () => {
       ],
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'permission_timeout',
@@ -4959,7 +4959,7 @@ describe('permission_timeout handler', () => {
       serverErrors: [],
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'permission_timeout',
@@ -4983,7 +4983,7 @@ describe('permission_timeout handler', () => {
       serverErrors: [],
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'permission_timeout',
@@ -5004,7 +5004,7 @@ describe('permission_timeout handler', () => {
       serverErrors: [],
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     expect(() => {
       _testMessageHandler.handle({
@@ -5026,7 +5026,7 @@ describe('error handler', () => {
       sessionStates: { s1: createEmptySessionState() },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     expect(() => {
       _testMessageHandler.handle({
@@ -5045,7 +5045,7 @@ describe('error handler', () => {
       sessionStates: { s1: createEmptySessionState() },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'error',
@@ -5064,7 +5064,7 @@ describe('error handler', () => {
       sessionStates: { s1: createEmptySessionState() },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     expect(() => {
       _testMessageHandler.handle({ type: 'error' });
@@ -5088,7 +5088,7 @@ describe('error handler', () => {
         sessionStates: { s1: createEmptySessionState() },
       });
       setStore(store as any);
-      _testMessageHandler.setContext(createMockMessageHandlerContext());
+      _testMessageHandler.setContext(createMockConnectionContext());
 
       _testMessageHandler.handle({
         type: 'error',
@@ -5123,7 +5123,7 @@ describe('error handler', () => {
         sessionStates: { s1: createEmptySessionState() },
       });
       setStore(store as any);
-      _testMessageHandler.setContext(createMockMessageHandlerContext());
+      _testMessageHandler.setContext(createMockConnectionContext());
 
       _testMessageHandler.handle({
         type: 'error',
@@ -5150,7 +5150,7 @@ describe('error handler', () => {
         sessionStates: { s1: createEmptySessionState() },
       });
       setStore(store as any);
-      _testMessageHandler.setContext(createMockMessageHandlerContext());
+      _testMessageHandler.setContext(createMockConnectionContext());
 
       _testMessageHandler.handle({
         type: 'error',
@@ -5176,7 +5176,7 @@ describe('web_task_error SESSION_TOKEN_MISMATCH UX', () => {
       webTasks: [],
     } as any);
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'web_task_error',
@@ -5213,7 +5213,7 @@ describe('web_task_error SESSION_TOKEN_MISMATCH UX', () => {
       clearSavedConnection,
     } as any);
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'web_task_error',
@@ -5243,7 +5243,7 @@ describe('web_task_error SESSION_TOKEN_MISMATCH UX', () => {
       webTasks: [],
     } as any);
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'web_task_error',
@@ -5270,7 +5270,7 @@ describe('web_task_error SESSION_TOKEN_MISMATCH UX', () => {
       webTasks: [],
     } as any);
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'web_task_error',
@@ -5306,7 +5306,7 @@ describe('set_permission_mode CAPABILITY_NOT_SUPPORTED rejection', () => {
       pendingPermissionConfirm: { mode: 'auto', warning: 'Are you sure?' } as any,
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     // Simulate the connection-store action: optimistically apply 'auto' and
     // register the pending request with the previous mode 'plan'.
@@ -5345,7 +5345,7 @@ describe('set_permission_mode CAPABILITY_NOT_SUPPORTED rejection', () => {
       sessionStates: { s1: createEmptySessionState() },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'error',
@@ -5365,7 +5365,7 @@ describe('set_permission_mode CAPABILITY_NOT_SUPPORTED rejection', () => {
       sessionStates: { s1: createEmptySessionState() },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     registerPendingPermissionModeRequest('perm-mode-req-2', {
       sessionId: 's1',
@@ -5414,7 +5414,7 @@ describe('set_permission_mode CAPABILITY_NOT_SUPPORTED rejection', () => {
       sessionStates: { s1: session },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     // Tap #1: plan → auto (request A in flight)
     registerPendingPermissionModeRequest('perm-mode-req-A', {
@@ -5477,7 +5477,7 @@ describe('set_permission_mode CAPABILITY_NOT_SUPPORTED rejection', () => {
       sessionStates: { s1: session },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     // Pending request is for 'auto' but the current mode has already moved
     // on to 'acceptEdits' (e.g. a later request landed first).
@@ -5521,7 +5521,7 @@ describe('history replay must not reset activity timers (#4492)', () => {
       sessionStates: { s1: { ...createEmptySessionState(), ...extra } },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
     return store;
   }
 
@@ -5604,7 +5604,7 @@ describe('replay flag is per-session (#4512)', () => {
       },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
     return store;
   }
 
@@ -5655,7 +5655,7 @@ describe('replay flag is per-session (#4512)', () => {
     // wrongly gated against a session that no longer thinks it's replaying.
     const store = seedTwoSessions({ lastClientActivityAt: 100 }, { lastClientActivityAt: 100 });
     // Reconnect context preserves session state through auth_ok.
-    _testMessageHandler.setContext(createMockMessageHandlerContext({ isReconnect: true }));
+    _testMessageHandler.setContext(createMockConnectionContext({ isReconnect: true }));
     _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 'sA' });
     _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 'sB' });
     // Reconnect: auth_ok must drop both entries.
@@ -5716,7 +5716,7 @@ describe('replay flag is per-session (#4512)', () => {
       },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     // Session A starts replay. Session B is NOT replaying.
     _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 'sA' });
@@ -5772,7 +5772,7 @@ describe('server_error session-scoped routing (#3141)', () => {
       serverErrors: [],
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'server_error',
@@ -5797,7 +5797,7 @@ describe('server_error session-scoped routing (#3141)', () => {
       serverErrors: [],
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'server_error',
@@ -5821,7 +5821,7 @@ describe('server_error session-scoped routing (#3141)', () => {
       serverErrors: [],
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'server_error',
@@ -5847,7 +5847,7 @@ describe('multi_question_intervention handler (#4764)', () => {
       sessionStates: { s1: createEmptySessionState() },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'multi_question_intervention',
@@ -5875,7 +5875,7 @@ describe('multi_question_intervention handler (#4764)', () => {
       sessionStates: { s1: createEmptySessionState() },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'multi_question_intervention',
@@ -5908,7 +5908,7 @@ describe('multi_question_intervention handler (#4764)', () => {
       sessionStates: { s1: createEmptySessionState() },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     const payload = {
       type: 'multi_question_intervention' as const,
@@ -5934,7 +5934,7 @@ describe('multi_question_intervention handler (#4764)', () => {
       sessionStates: { s1: createEmptySessionState() },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'multi_question_intervention',
@@ -5969,7 +5969,7 @@ describe('multi_question_intervention handler (#4764)', () => {
       },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'multi_question_intervention',
@@ -6001,7 +6001,7 @@ describe('auth_bootstrap (#5555)', () => {
   it('skips the 3 connect-time list requests when capabilities.authBootstrap is set', () => {
     const store = createMockStore({ sessionStates: {} });
     setStore(store as any);
-    const ctx = createMockMessageHandlerContext();
+    const ctx = createMockConnectionContext();
     _testMessageHandler.setContext(ctx);
 
     _testMessageHandler.handle({
@@ -6020,7 +6020,7 @@ describe('auth_bootstrap (#5555)', () => {
   it('requests the 3 lists when authBootstrap is absent (old server)', () => {
     const store = createMockStore({ sessionStates: {} });
     setStore(store as any);
-    const ctx = createMockMessageHandlerContext();
+    const ctx = createMockConnectionContext();
     _testMessageHandler.setContext(ctx);
 
     _testMessageHandler.handle({
@@ -6038,7 +6038,7 @@ describe('auth_bootstrap (#5555)', () => {
   it('folds availablePermissionModes from auth_ok into the store', () => {
     const store = createMockStore({ sessionStates: {} });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'auth_ok',
@@ -6053,7 +6053,7 @@ describe('auth_bootstrap (#5555)', () => {
   it('applies a subsequent auth_bootstrap burst to the provider/slash/agent stores', () => {
     const store = createMockStore({ sessionStates: {}, activeSessionId: null });
     setStore(store as any);
-    const ctx = createMockMessageHandlerContext();
+    const ctx = createMockConnectionContext();
     _testMessageHandler.setContext(ctx);
 
     _testMessageHandler.handle({
@@ -6077,7 +6077,7 @@ describe('auth_bootstrap (#5555)', () => {
   it('#5555 (sub-item 7): an auth_bootstrap burst with tunnelUrl re-learns the rotated URL', () => {
     const store = createMockStore({ sessionStates: {}, activeSessionId: null });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
     useConnectionLifecycleStore.getState().setSavedConnection({
       url: 'wss://old.trycloudflare.com',
       token: 'tok',
@@ -6108,7 +6108,7 @@ describe('tunnel_url_changed (#5555 sub-item 7)', () => {
   it('repoints the persisted tunnelUrl when the push arrives', () => {
     const store = createMockStore({ sessionStates: {} });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
     useConnectionLifecycleStore.getState().setSavedConnection({
       url: 'wss://old.trycloudflare.com',
       token: 'tok',
@@ -6129,7 +6129,7 @@ describe('tunnel_url_changed (#5555 sub-item 7)', () => {
   it('ignores a malformed push (no url) without throwing', () => {
     const store = createMockStore({ sessionStates: {} });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
     useConnectionLifecycleStore.getState().setSavedConnection({
       url: 'wss://old.trycloudflare.com',
       token: 'tok',

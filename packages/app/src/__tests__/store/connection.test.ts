@@ -20,7 +20,7 @@ import {
   getEncryptionState,
   setEncryptionState,
 } from '../../store/message-handler';
-import { createMockMessageHandlerContext } from '../../test-utils/mock-message-handler-context';
+import { createMockConnectionContext } from '../../test-utils/mock-connection-context';
 import { createKeyPair } from '@chroxy/store-core';
 
 // Reset store between tests
@@ -822,7 +822,7 @@ describe('connectionError and connectionRetryCount state', () => {
 
   it('auth_ok clears both fields', () => {
     const mockSocket = { readyState: 1, send: jest.fn(), close: jest.fn() } as unknown as WebSocket;
-    _testMessageHandler.setContext(createMockMessageHandlerContext({ socket: mockSocket }));
+    _testMessageHandler.setContext(createMockConnectionContext({ socket: mockSocket }));
     useConnectionLifecycleStore.setState({ connectionError: 'Network error', connectionRetryCount: 2 });
     _testMessageHandler.handle({ type: 'auth_ok', serverMode: 'cli' });
     const state = useConnectionLifecycleStore.getState();
@@ -857,7 +857,7 @@ describe('multi-client message handling', () => {
   const mockSocket = { readyState: 1, send: jest.fn(), close: jest.fn() } as unknown as WebSocket;
 
   beforeEach(() => {
-    _testMessageHandler.setContext(createMockMessageHandlerContext({ socket: mockSocket }));
+    _testMessageHandler.setContext(createMockConnectionContext({ socket: mockSocket }));
   });
   afterEach(() => _testMessageHandler.clearContext());
 
@@ -992,7 +992,7 @@ describe('WS message handler (direct)', () => {
   beforeEach(() => {
     (mockSocket.send as jest.Mock).mockClear();
     (mockSocket.close as jest.Mock).mockClear();
-    _testMessageHandler.setContext(createMockMessageHandlerContext({ socket: mockSocket }));
+    _testMessageHandler.setContext(createMockConnectionContext({ socket: mockSocket }));
   });
   afterEach(() => _testMessageHandler.clearContext());
 
@@ -1315,7 +1315,7 @@ describe('WS message handler (direct)', () => {
 
       useConnectionStore.getState().disconnect();
 
-      _testMessageHandler.setContext(createMockMessageHandlerContext({ socket: mockSocket }));
+      _testMessageHandler.setContext(createMockConnectionContext({ socket: mockSocket }));
 
       _testMessageHandler.handle({
         type: 'directory_listing',
@@ -1599,7 +1599,7 @@ describe('permission boundary splitting', () => {
     useConnectionLifecycleStore.setState({ connectionPhase: 'disconnected' });
     (mockSocket.send as jest.Mock).mockClear();
     (mockSocket.close as jest.Mock).mockClear();
-    _testMessageHandler.setContext(createMockMessageHandlerContext({ socket: mockSocket }));
+    _testMessageHandler.setContext(createMockConnectionContext({ socket: mockSocket }));
   });
 
   afterEach(() => {
@@ -1780,7 +1780,7 @@ describe('permission_request dedup on reconnect', () => {
     useConnectionLifecycleStore.setState({ connectionPhase: 'disconnected' });
     (mockSocket.send as jest.Mock).mockClear();
     (mockSocket.close as jest.Mock).mockClear();
-    _testMessageHandler.setContext(createMockMessageHandlerContext({ socket: mockSocket }));
+    _testMessageHandler.setContext(createMockConnectionContext({ socket: mockSocket }));
   });
 
   afterEach(() => {

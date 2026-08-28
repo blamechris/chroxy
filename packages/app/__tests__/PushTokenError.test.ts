@@ -1,5 +1,5 @@
 import { _testMessageHandler, setStore } from '../src/store/message-handler';
-import { createMockMessageHandlerContext } from '../src/test-utils/mock-message-handler-context';
+import { createMockConnectionContext } from '../src/test-utils/mock-connection-context';
 import { createEmptySessionState } from '../src/store/utils';
 import type { ConnectionState } from '../src/store/types';
 
@@ -53,7 +53,7 @@ describe('push_token_error handler (#1987)', () => {
       sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'push_token_error',
@@ -73,7 +73,7 @@ describe('push_token_error handler (#1987)', () => {
       sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockMessageHandlerContext());
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'push_token_error',
