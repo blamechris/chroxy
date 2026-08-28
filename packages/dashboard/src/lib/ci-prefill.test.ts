@@ -1,4 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
+import { existsSync, readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { formatCiPrefill, runCiPrefill, CI_PREFILL_BUSY_NOTICE } from './ci-prefill'
 import type { ServerSessionPrStatusMessage, ServerSessionPrThreadsMessage } from '@chroxy/protocol'
 
@@ -266,13 +268,31 @@ describe('runCiPrefill', () => {
 /**
  * #7430 — the unresolved-review-thread clause.
  *
- * The clause is optional, and the reason it is worth a test block of its own is
- * a single asymmetry: of the three things the line can say about threads —
- * a counted number, "unavailable", or nothing at all — exactly one of them is
- * dangerous when it is wrong. "0 unresolved threads" printed for a count that
- * was never taken reads as "nothing is blocking this PR", beside a green check
- * clause, to a model that will act on it. Every assertion below exists to pin
- * that the three renderings cannot collapse into each other.
+ * The clause is optional, and it is worth a block of its own because of a
+ * single asymmetry: of the four things the line can say about threads — a
+ * counted number, a RETAINED number whose refresh failed, "unavailable", or
+ * nothing at all — exactly one is dangerous when it is wrong. "0 unresolved
+ * threads" printed for a count that was never taken reads as "nothing is
+ * blocking this PR", beside a green check clause, to a model that will act on
+ * it.
+ *
+ * ## The fixtures are the server's shapes, not convenient ones
+ *
+ * The first version of this block pinned the false green against
+ * `{ prNumber: 7423, reason: 'gh CLI not found' }` — a pairing the server can
+ * only emit if `gh` disappears from PATH *between* the resolution call and the
+ * `probeGh` that follows it. Review on #7469 proved it: every degraded reply
+ * `degraded()` builds carries `prNumber: null`, as does every survey path that
+ * returns before the PR is resolved. So the pin was green against a shape that
+ * essentially cannot reach it, while all four REACHABLE degraded readings
+ * silently rendered no clause at all.
+ *
+ * `serverDegraded()` below is therefore shape-coupled to the handler's
+ * `degraded()` on purpose, and `SERVER_REASONS` carries the real reason strings
+ * — with a source-level join test that fails if the producer's shape drifts
+ * from this fixture. Validating the experiment ("does the formatter print a
+ * zero?") without validating the fixture ("can the server produce this?") is
+ * the same defect class as M12, one seam further out.
  */
 function threads(overrides: Partial<ServerSessionPrThreadsMessage> = {}): ServerSessionPrThreadsMessage {
   return {
@@ -288,6 +308,38 @@ function threads(overrides: Partial<ServerSessionPrThreadsMessage> = {}): Server
     ...overrides,
   } as ServerSessionPrThreadsMessage
 }
+
+/**
+ * EXACTLY the shape `degraded()` in `session-pr-threads-handlers.js` puts on
+ * the wire, and the shape every pre-resolution bail-out in
+ * `session-pr-threads.js` returns: no count, and — the part that mattered —
+ * `prNumber: null`, because a reading that failed before resolving the PR has
+ * no PR number to name.
+ */
+function serverDegraded(reason: string): ServerSessionPrThreadsMessage {
+  return threads({ prNumber: null, unresolvedCount: null, totalCount: null, truncated: false, reason })
+}
+
+/**
+ * The reasons a user can actually provoke, copied from the server's exported
+ * constants. Each is reachable from the dashboard as it is wired today:
+ *
+ *   - IN_PROGRESS — a second prefill click while the first count is in flight
+ *     (the click fires a request even when `runCiPrefill` then refuses it).
+ *   - RATE_LIMITED — two clicks inside the 5s window before any count has
+ *     completed, which is the FIRST-click path since the auto-pull deliberately
+ *     does not fetch a count.
+ *   - a passed-through status-survey reason — the double-`gh` coherence race:
+ *     the dashboard holds a good status snapshot with a PR while the threads
+ *     survey's own re-resolution fails transiently.
+ *   - a handler-level failure.
+ */
+const SERVER_REASONS = [
+  'a review-thread count is already running for this client',
+  'review threads were counted moments ago — retry in a few seconds',
+  'gh CLI not found on PATH — install GitHub CLI (gh) to see pull-request and CI status',
+  'review-thread count failed: boom',
+]
 
 /**
  * A DEFINITE counted zero — the claim "this PR has no unresolved threads".
@@ -315,28 +367,38 @@ describe('#7430 — the unresolved-thread clause', () => {
   })
 
   it('THE FALSE-GREEN PIN: a count that was not taken NEVER renders as a zero', () => {
-    // The direction that matters. `reason` set + `unresolvedCount: null` is the
-    // server's "could not find out"; if this ever renders as "0 unresolved
-    // threads" the line asserts an absence of blockers it never verified.
-    const text = formatCiPrefill(status(), threads({
-      unresolvedCount: null,
-      totalCount: null,
-      reason: 'gh CLI not found on PATH',
-    })) as string
+    // The direction that matters, on the shape the server ACTUALLY emits
+    // (`prNumber: null`). If this ever renders as "0 unresolved threads" the
+    // line asserts an absence of blockers it never verified.
+    const text = formatCiPrefill(status(), serverDegraded('gh CLI not found on PATH')) as string
     expect(text).not.toMatch(COUNTED_ZERO)
-    expect(text).not.toMatch(/\bunresolved threads?\b(?!\s*count)/)
-    // Positive control: it did not simply drop the subject either — silence
-    // beside a green check clause reads as nothing-to-report.
+    expect(text).not.toMatch(/\b\d+ unresolved threads?\b/)
+    // Positive control, and the half that fails without the guard reorder: it
+    // did not simply DROP the subject either. Silence beside a green check
+    // clause reads as nothing-to-report, which is the same false green by
+    // omission rather than by number.
     expect(text).toContain('unresolved-thread count unavailable')
     expect(text).toContain('gh CLI not found on PATH')
   })
 
-  it('the two renderings are DIFFERENT strings for the same PR', () => {
-    // The issue's requirement stated directly: whatever the wording, a counted
-    // zero and an uncounted one must not produce the same line.
+  it('THE JOIN: every reason the server can actually send renders the caveat', () => {
+    // Each half of this was pinned separately before #7469's review and the two
+    // disagreed about `prNumber`: the server test asserted null on the
+    // passthrough path, the formatter test assumed a number. Nothing was
+    // positioned to notice. This is that join.
+    for (const reason of SERVER_REASONS) {
+      const text = formatCiPrefill(status(), serverDegraded(reason)) as string
+      expect(text, `no caveat for: ${reason}`).toContain('unresolved-thread count unavailable')
+      expect(text, `caveat lost its reason for: ${reason}`).toContain(reason)
+      expect(text).not.toMatch(COUNTED_ZERO)
+    }
+  })
+
+  it('the three renderings are DIFFERENT strings for the same PR', () => {
     const counted = formatCiPrefill(status(), threads({ unresolvedCount: 0 }))
-    const uncounted = formatCiPrefill(status(), threads({ unresolvedCount: null, totalCount: null, reason: 'gh api graphql failed: timeout' }))
-    expect(counted).not.toEqual(uncounted)
+    const uncounted = formatCiPrefill(status(), serverDegraded('gh api graphql failed: timeout'))
+    const absent = formatCiPrefill(status())
+    expect(new Set([counted, uncounted, absent]).size).toBe(3)
   })
 
   it('a TRUNCATED zero is not a definite zero', () => {
@@ -353,8 +415,8 @@ describe('#7430 — the unresolved-thread clause', () => {
   })
 
   it('omits the clause entirely when no count was supplied', () => {
-    // Absent ≠ unavailable ≠ zero. An omitted optional argument makes NO claim
-    // and must not manufacture one in either direction.
+    // Absent is not the same as unavailable, and neither is zero. An omitted
+    // optional argument makes NO claim and must not manufacture one.
     const text = formatCiPrefill(status()) as string
     expect(text).not.toMatch(/unresolved/i)
     // Positive control: the rest of the line is unchanged.
@@ -362,10 +424,27 @@ describe('#7430 — the unresolved-thread clause', () => {
     expect(text).toContain('merge state CLEAN')
   })
 
-  it('makes no claim when the count describes a DIFFERENT pull request', () => {
+  it('makes no claim when a count describes a DIFFERENT pull request', () => {
     // A stale count from the previously-active session's PR must not be
-    // narrated as this one's.
+    // narrated as this one's. This is the guard that must survive the reorder:
+    // it applies to a NUMBER, which can be mis-attributed, and the reorder
+    // deliberately does not extend it to a reason, which cannot.
     const text = formatCiPrefill(status(), threads({ prNumber: 9999, unresolvedCount: 0 })) as string
+    expect(text).not.toMatch(/unresolved/i)
+  })
+
+  it('makes no claim when a DEGRADED reading names a different pull request', () => {
+    // The mirror: a reason that explicitly belongs to another PR's count says
+    // nothing about this one either.
+    const text = formatCiPrefill(status(), threads({ prNumber: 9999, unresolvedCount: null, totalCount: null, reason: 'boom' })) as string
+    expect(text).not.toMatch(/unresolved/i)
+  })
+
+  it('refuses to render a count that cannot name its PR', () => {
+    // Defensive, and the reason the reorder keeps a second prNumber test on the
+    // COUNTED branch rather than dropping it: a number with no PR attached is
+    // not attributable to this PR, even though a bare reason is.
+    const text = formatCiPrefill(status(), threads({ prNumber: null, unresolvedCount: 4 })) as string
     expect(text).not.toMatch(/unresolved/i)
   })
 
@@ -377,12 +456,20 @@ describe('#7430 — the unresolved-thread clause', () => {
     expect(text).toContain('2026-08-27T00:05:00.000Z') // countedAt, the thread reading
   })
 
-  it('treats a count that arrives WITH a reason as unavailable', () => {
-    // Defensive: the schema permits the pairing and the server never emits it,
-    // but if a daemon ever does, the caveat wins over the number.
-    const text = formatCiPrefill(status(), threads({ unresolvedCount: 0, reason: 'partial read' })) as string
-    expect(text).not.toMatch(COUNTED_ZERO)
-    expect(text).toContain('unresolved-thread count unavailable')
+  it('RETAINED COUNT: a kept count renders WITH the failed-refresh caveat, not instead of it', () => {
+    // The store keeps the last good count when a degraded reply lands (#7469
+    // S1), so this pairing — a real number plus a reason — is now a shape the
+    // dashboard produces on purpose. Both halves must survive: dropping the
+    // number throws away the only count the user has, and dropping the caveat
+    // presents a stale reading as current.
+    const text = formatCiPrefill(status(), threads({
+      unresolvedCount: 2,
+      reason: 'review threads were counted moments ago — retry in a few seconds',
+    })) as string
+    expect(text).toContain('2 unresolved threads')
+    expect(text).toContain('counted 2026-08-27T00:05:00.000Z')
+    expect(text).toContain('a newer unresolved-thread count was unavailable')
+    expect(text).toContain('retry in a few seconds')
   })
 
   it('positive control: COUNTED_ZERO can actually match, so the negatives are not free', () => {
@@ -393,5 +480,52 @@ describe('#7430 — the unresolved-thread clause', () => {
     // The exclusion the pin depends on, stated as its own fact.
     expect('at least 0 unresolved threads — only part of 150 were read').not.toMatch(COUNTED_ZERO)
     expect('roughly 0 unresolved threads').toMatch(COUNTED_ZERO)
+  })
+})
+
+describe('#7430 — the degraded fixture is joined to the server that produces it', () => {
+  // A shape-coupled fixture is only as good as the coupling. These read the
+  // PRODUCER and fail if it drifts — which is the specific thing that went
+  // wrong before: the formatter was tested against a shape the server does not
+  // emit, and nothing noticed for a whole review cycle.
+  const HANDLER = resolve(__dirname, '..', '..', '..', 'server', 'src', 'handlers', 'session-pr-threads-handlers.js')
+
+  it('the handler source exists where this fixture claims it does', () => {
+    expect(existsSync(HANDLER), `${HANDLER} should exist`).toBe(true)
+  })
+
+  it('the server\'s degraded() really does emit prNumber:null and no counts', () => {
+    const src = readFileSync(HANDLER, 'utf8')
+    const start = src.indexOf('function degraded(')
+    expect(start, 'session-pr-threads-handlers.js should define degraded()').toBeGreaterThan(-1)
+    // Anchored to the function body, never a file-wide grep: `prNumber: null`
+    // also appears nowhere else today, and "also appears elsewhere tomorrow" is
+    // exactly how a file-wide grep goes vacuous.
+    const body = src.slice(start, src.indexOf('\n}', start))
+    expect(body.includes('prNumber: null')).toBe(true)
+    expect(body.includes('unresolvedCount: null')).toBe(true)
+    expect(body.includes('totalCount: null')).toBe(true)
+    expect(body.includes('truncated: false')).toBe(true)
+  })
+
+  it('positive control: the slice is the function, not the whole file', () => {
+    const src = readFileSync(HANDLER, 'utf8')
+    const start = src.indexOf('function degraded(')
+    const body = src.slice(start, src.indexOf('\n}', start))
+    expect(body.includes('export const COUNT_MIN_INTERVAL_MS')).toBe(false)
+    expect(body.length).toBeLessThan(700)
+  })
+
+  it('every reason this file pins is still a reason the server exports', () => {
+    // The fixture strings are copies; this is what keeps them honest.
+    const handlerSrc = readFileSync(HANDLER, 'utf8')
+    const surveySrc = readFileSync(resolve(__dirname, '..', '..', '..', 'server', 'src', 'session-pr-threads.js'), 'utf8')
+    const statusSrc = readFileSync(resolve(__dirname, '..', '..', '..', 'server', 'src', 'session-pr-status.js'), 'utf8')
+    const all = handlerSrc + surveySrc + statusSrc
+    for (const reason of SERVER_REASONS) {
+      // The handler-level failure reason is a template; pin its literal prefix.
+      const needle = reason === 'review-thread count failed: boom' ? 'review-thread count failed: ' : reason
+      expect(all.includes(needle), `server no longer emits: ${needle}`).toBe(true)
+    }
   })
 })

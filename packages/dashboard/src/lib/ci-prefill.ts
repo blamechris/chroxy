@@ -47,20 +47,35 @@
  * message (`session_pr_threads`), which is why it is a second, OPTIONAL argument
  * here rather than another field read off the snapshot.
  *
- * Three renderings, and they must never collapse into each other:
+ * Four renderings, and they must never collapse into each other:
  *
  *   - **absent** — no count was supplied. The line makes NO thread claim.
  *   - **unavailable** — a count was attempted and failed. The line says so, in
  *     words, with the server's reason.
  *   - **counted** — a number, which may be zero.
+ *   - **retained** — a number the store kept when a later refresh failed,
+ *     rendered WITH its own `countedAt` and the failure's reason. Both halves
+ *     matter: dropping the number throws away the only count the user has;
+ *     dropping the caveat presents a stale reading as current.
  *
- * The middle one is the reason this is worth spelling out. A missing count that
+ * The second is the reason this is worth spelling out. A missing count that
  * printed as "0 unresolved threads", beside a green check clause, tells a model
  * that nothing is blocking the PR — the same false green the check clause's own
  * `state: 'none'` handling exists to prevent, arriving by a different route. A
  * TRUNCATED count is the third route to it: 100 resolved threads on page one
  * with every unresolved one past it is a real "0" that means nothing, so it
  * renders as a lower bound instead.
+ *
+ * ## The guard ORDER is the whole of #7469's Critical 2
+ *
+ * A **reason** and a **number** need different join rules against the status
+ * snapshot's PR. A number attributed to the wrong PR is a fabrication; a reason
+ * has no PR to be wrong about. The first version tested `prNumber` before
+ * `reason`, and since every degraded reply the server emits carries
+ * `prNumber: null`, the "unavailable" rendering was unreachable for all four
+ * failures a user can actually provoke — the clause silently vanished in
+ * exactly the cases it exists for. The order below is load-bearing, not
+ * stylistic, and `ci-prefill.test.ts` pins it against the server's real shapes.
  */
 import type { ServerSessionPrStatusMessage, ServerSessionPrThreadsMessage } from '@chroxy/protocol'
 
@@ -151,39 +166,53 @@ function mergeClause(merge: ServerSessionPrStatusMessage['merge']): string {
  * The unresolved-thread clause, or `null` when the line should make no thread
  * claim at all.
  *
- * `null` is returned for exactly two inputs, and both mean "no claim" rather
- * than "no threads": no count was supplied, or the count describes a DIFFERENT
- * pull request (a reply that landed for the previously-active session, say).
- * Narrating another PR's threads as this one's would be a fabrication of the
- * same family as the zero.
+ * `null` means "no claim", never "no threads", and is returned for exactly
+ * three inputs:
  *
- * Note the order of the guards below. `reason` is checked BEFORE the number, so
- * a degraded reading that somehow also carried a count renders as unavailable:
- * the caveat wins, because the failure mode of believing a suspect number is
- * worse than the failure mode of discarding a good one. Today's server never
- * emits that pairing; the schema permits it, and a dashboard talks to daemons
- * it did not ship with.
+ *   1. no count was supplied at all;
+ *   2. the reading names a DIFFERENT pull request — it says nothing about this
+ *      one, neither its count nor whether a count could be taken;
+ *   3. a reading that carries a NUMBER but cannot name its PR. Defensive: the
+ *      server always stamps `prNumber` alongside a count, and a number with no
+ *      PR attached is not attributable to this one.
+ *
+ * A degraded reading with `prNumber: null` is deliberately NOT in that list —
+ * it is the shape every server-side failure actually has, and dropping it is
+ * what #7469's Critical 2 was. See the guard-order note in the file header.
  */
 function threadsClause(
   threads: ServerSessionPrThreadsMessage | null | undefined,
   prNumber: number,
 ): string | null {
   if (!threads) return null
-  if (threads.prNumber !== prNumber) return null
 
-  if (threads.reason !== null || threads.unresolvedCount === null) {
+  // (2) An explicitly different PR: no claim, in either direction.
+  if (threads.prNumber !== null && threads.prNumber !== prNumber) return null
+
+  if (threads.unresolvedCount === null) {
     // Said in words, never by omission: an omitted clause beside a green check
     // clause reads as nothing-to-report, which is the impression to avoid.
+    // Reached with `prNumber: null`, which is what every degraded reply has.
     const why = threads.reason
     return why ? `unresolved-thread count unavailable: ${why}` : 'unresolved-thread count unavailable'
   }
 
+  // (3) From here a NUMBER is rendered, so the join must be positive.
+  if (threads.prNumber !== prNumber) return null
+
   const n = threads.unresolvedCount
   const noun = `unresolved thread${n === 1 ? '' : 's'}`
   // WHEN it was counted, for the same reason the subject carries `generatedAt`:
-  // this is its OWN clock, and the two readings can be minutes apart.
+  // this is its OWN clock, and the two readings can be minutes apart. It is
+  // what makes the RETAINED rendering below honest rather than misleading.
   const at = typeof threads.countedAt === 'string' && threads.countedAt.length > 0
     ? ` (counted ${threads.countedAt})`
+    : ''
+  // A count the store KEPT across a failed refresh (#7469 S1) carries the new
+  // failure's reason beside the old count. Rendering the number without this
+  // would present a stale reading as current.
+  const stale = threads.reason
+    ? ` — a newer unresolved-thread count was unavailable: ${threads.reason}`
     : ''
 
   if (threads.truncated) {
@@ -192,9 +221,9 @@ function threadsClause(
     const of = threads.totalCount === null
       ? ' — not all review threads were read'
       : ` — only part of ${threads.totalCount} review threads were read`
-    return `at least ${n} ${noun}${of}${at}`
+    return `at least ${n} ${noun}${of}${at}${stale}`
   }
-  return `${n} ${noun}${at}`
+  return `${n} ${noun}${at}${stale}`
 }
 
 export function formatCiPrefill(
