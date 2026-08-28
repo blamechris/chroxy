@@ -25,7 +25,7 @@
  * elsewhere in this repo (#7340).
  */
 import { describe, it, expect } from 'vitest'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, globSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 
 // Resolved RELATIVE TO THIS FILE, matching the package's other source-level
@@ -151,30 +151,77 @@ describe('#7430 thread-count wiring', () => {
     expect(body.includes('requestSessionPrThreads()')).toBe(true)
   })
 
-  it('NOTHING requests the count from an effect or a timer', () => {
-    // The anti-schedule guard. Every legitimate call site is a click handler;
-    // a `useEffect`/`setInterval`/`setTimeout` around one would put the daemon
-    // back on the per-tick `gh` cost this design refuses.
-    const src = read(APP_TSX)
-    const sites = [...src.matchAll(/requestSessionPrThreads\s*\(/g)].map(m => m.index ?? 0)
-    expect(sites.length, 'expected the two click call sites').toBeGreaterThan(0)
-    for (const at of sites) {
-      // The 600 characters preceding a call site comfortably cover the
-      // enclosing declaration in either shape.
+  /**
+   * The anti-schedule scan, factored out so the positive controls run the SAME
+   * code the guard does rather than a paraphrase of it.
+   *
+   * Returns the offending call sites. Fail-CLOSED by construction: with neither
+   * token in the window both `lastIndexOf` return -1 and `-1 < -1` is false, so
+   * an unrecognised context is reported rather than waved through.
+   *
+   * Two scope limits, stated here rather than discovered later:
+   *   - the lookbehind is 600 characters, so a call buried deep inside a long
+   *     `useEffect` body escapes if a nearer `useCallback(` token happens to
+   *     sit in the window. It is a smoke alarm, not a type system.
+   *   - it scans whatever sources it is handed. The resource being protected is
+   *     the STORE ACTION, not `App.tsx`, so the caller below sweeps every
+   *     dashboard source — a call added from another component would otherwise
+   *     be invisible to it.
+   */
+  function scheduledCallSites(src: string, label: string): string[] {
+    const bad: string[] = []
+    for (const m of src.matchAll(/requestSessionPrThreads\s*\(/g)) {
+      const at = m.index ?? 0
       const before = src.slice(Math.max(0, at - 600), at)
-      const enclosing = before.lastIndexOf('useEffect(')
-      const callback = before.lastIndexOf('useCallback(')
-      expect(enclosing < callback, `requestSessionPrThreads at ${at} appears to be inside a useEffect`).toBe(true)
-      expect(before.includes('setInterval(') || before.includes('setTimeout(')).toBe(false)
+      if (before.lastIndexOf('useEffect(') >= before.lastIndexOf('useCallback(')) {
+        bad.push(`${label}@${at}: inside a useEffect`)
+      }
+      if (before.includes('setInterval(') || before.includes('setTimeout(')) {
+        bad.push(`${label}@${at}: inside a timer`)
+      }
     }
+    return bad
+  }
+
+  it('NOTHING in the dashboard requests the count from an effect or a timer', () => {
+    // Every legitimate call site is a click handler; a `useEffect` /
+    // `setInterval` / `setTimeout` around one would put the daemon back on the
+    // per-tick `gh` cost this whole design refuses.
+    const files = globSync('src/**/*.{ts,tsx}', { cwd: path.resolve(__dirname, '..', '..') })
+    let seen = 0
+    const bad: string[] = []
+    for (const rel of files) {
+      if (rel.includes('.test.')) continue
+      const abs = path.resolve(__dirname, '..', '..', rel)
+      const src = readFileSync(abs, 'utf8')
+      if (!src.includes('requestSessionPrThreads(')) continue
+      seen += [...src.matchAll(/requestSessionPrThreads\s*\(/g)].length
+      bad.push(...scheduledCallSites(src, rel))
+    }
+    // Positive control on the SWEEP itself: a glob that matched nothing would
+    // make the assertion below pass with no files read at all.
+    expect(seen, 'expected the click call sites to be found').toBeGreaterThan(0)
+    expect(bad).toEqual([])
   })
 
-  it('positive control: the anti-schedule scan can actually fail', () => {
-    // Same scan, run over a fixture that DOES call it from an effect — so the
-    // assertion above is known to be reachable rather than vacuously true.
-    const fixture = 'useEffect(() => { requestSessionPrThreads() }, [])'
-    const at = fixture.indexOf('requestSessionPrThreads(')
-    const before = fixture.slice(0, at)
-    expect(before.lastIndexOf('useEffect(') < before.lastIndexOf('useCallback(')).toBe(false)
+  it('positive control: the scan catches a useEffect call site', () => {
+    expect(scheduledCallSites('useEffect(() => { requestSessionPrThreads() }, [])', 'fx'))
+      .toEqual(['fx@18: inside a useEffect'])
+  })
+
+  it('positive control: the scan catches a TIMER call site', () => {
+    // The half the original control never exercised — it only compared
+    // useEffect against useCallback, so the setInterval/setTimeout branch was
+    // asserted by nothing.
+    expect(scheduledCallSites('useCallback(() => { setInterval(() => requestSessionPrThreads(), 1000) })', 'fx'))
+      .toEqual(['fx@38: inside a timer'])
+    expect(scheduledCallSites('useCallback(() => { setTimeout(() => requestSessionPrThreads(), 10) })', 'fx'))
+      .toEqual(['fx@37: inside a timer'])
+  })
+
+  it('positive control: the scan passes a plain click handler', () => {
+    // The negative controls above are only meaningful if the scan is not simply
+    // reporting everything.
+    expect(scheduledCallSites('const h = useCallback(() => { requestSessionPrThreads() }, [])', 'fx')).toEqual([])
   })
 })

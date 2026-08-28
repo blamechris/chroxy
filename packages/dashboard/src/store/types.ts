@@ -2203,6 +2203,10 @@ export interface ConnectionState {
    * ON-DEMAND ONLY. Every caller must be a user action (the CI chip's Refresh,
    * the prefill click) — never a timer and never an effect that re-fires on
    * its own, because each call costs the daemon a `gh` subprocess.
+   *
+   * No `requestId` is sent, matching `requestSessionPrStatus`: correlation is
+   * by `sessionId` alone, and the reply's `requestId` is therefore always null.
+   * The field exists on the schema for a future caller that needs it.
    */
   requestSessionPrThreads: (sessionId?: string) => boolean;
   /**
