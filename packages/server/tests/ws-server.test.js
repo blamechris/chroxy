@@ -4763,6 +4763,36 @@ describe('#5579: production handler ctx is deep-asserted at construction', () =>
     assert.doesNotThrow(() => assertCtxShape(ctx), 'shallow assert misses a missing key — that is the bug deep closes')
   })
 
+  it('#7427: the SessionCiWatcher reaches handlers through ctx.services', () => {
+    // The `session_pr_status_request` handler arms the CI watch by calling
+    // `ctx.services.sessionCiWatcher.observe(...)`. The deep assert above only
+    // proves the KEY is present — a getter returning the wrong thing, or a
+    // constructor option that is accepted and dropped, passes it. This reads
+    // the value back.
+    const watcher = { observe: () => 'armed' }
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-ci-watch',
+      cliSession: createMockSession(),
+      authRequired: true,
+      sessionCiWatcher: watcher,
+    })
+    assert.equal(server._handlerCtx.services.sessionCiWatcher, watcher)
+  })
+
+  it('#7427: an absent watcher reads as null, not undefined', () => {
+    // `sessionCi.watch: false` builds no watcher at all. The handler's optional
+    // chain copes with either, but the roster documents this field as
+    // `object|null` and a deep-asserted ctx should not hand back `undefined`.
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-ci-watch-off',
+      cliSession: createMockSession(),
+      authRequired: true,
+    })
+    assert.equal(server._handlerCtx.services.sessionCiWatcher, null)
+  })
+
   // #5837: the terminal-mirror coalescer gate. These drive _syncTerminalMirror /
   // _handleClientDeparture directly (no socket) to lock in the 0↔1 crossing on
   // the disconnect path — the riskiest one (a stuck-OFF mirror = a viewer sees a

@@ -84,6 +84,7 @@
  * @property {(value: string|null) => void} setWebhookSecretCache - #6540 refresh the in-process webhook-secret cache.
  * @property {object|null} orchestrationManager - #6691 OrchestrationManager; null while the feature is off.
  * @property {object|null} schedulerEngine - #6871 scheduled-task engine; null when scheduling is off.
+ * @property {object|null} sessionCiWatcher - #7427 SessionCiWatcher, so an on-demand PR survey can arm the watch; null when `sessionCi.watch` is off.
  *
  * @typedef {Object} WsHandlerRuntime
  * @property {boolean} draining - True while the server is draining for shutdown.
@@ -189,6 +190,12 @@ export const CTX_NAMESPACES = {
     // SessionManager and exists either way, so tasks are still readable and
     // editable with no engine present.
     'schedulerEngine',
+    // #7427: the SessionCiWatcher (#7426). The `session_pr_status_request`
+    // handler hands its survey snapshot to `observe()`, so a dashboard pull ARMS
+    // the watch instead of waiting on the sweep's five-minute discovery pass.
+    // NULL whenever `sessionCi.watch` is off — the handler treats absence as
+    // "nothing to arm" and its reply is unaffected either way.
+    'sessionCiWatcher',
   ],
   runtime: [
     'draining',
