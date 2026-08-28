@@ -73,6 +73,45 @@ const _rebuildBaseline = new Map<string, number>()
 const _historyCursors = new Map<string, number>()
 
 /**
+ * Per-session "a replay window is open right now" marker (#7420).
+ *
+ * Deliberately NOT `_rebuildBaseline`: that map only holds FULL rebuilds, and a
+ * live prompt can race a DELTA replay just as easily (the server chunks both
+ * over `setImmediate`, with back-pressure pauses of up to 30s — ws-history.js).
+ * Added at `reconcileReplayStart` for either kind, removed at
+ * `reconcileReplayEnd`.
+ */
+const _replayWindowOpen = new Set<string>()
+
+/**
+ * Per-session ids of `prompt` ChatMessages that arrived LIVE — i.e. were NOT
+ * delivered by the replay — while that session's replay window was open (#7420).
+ *
+ * This is the whole fix for #7420. `history_replay_end` sweeps unanswered
+ * prompts with `answered: '(resolved)'` on the premise that anything in history
+ * is already resolved. `permission_request` is in the server's `builtinTransient`
+ * list so it is never replayed, and #7410/#7419 excluded it by `requestId`. But
+ * `user_question` IS in the history ring buffer, and the ChatMessage it builds
+ * carries no `requestId` and no `expiresAt` — so a live AskUserQuestion that
+ * lands mid-replay is byte-identical in store state to a replayed one, and the
+ * sweep stamped both, silently destroying the answer path for that turn.
+ *
+ * The one signal that separates them is the wire frame, which only exists at
+ * arrival: `replayHistory` stamps every replayed entry with `historySeq`
+ * (ws-history.js) and a live broadcast never carries one. So the call site
+ * records the id here as the message is appended, and the sweep skips it.
+ *
+ * Lifetime is exactly one replay window: the set is dropped at the NEXT
+ * `reconcileReplayStart` for that session (anything already on screen when a
+ * window opens pre-dates it and stays stampable) and by `resetReplayReconcile`.
+ * That also bounds it — the entries are a subset of the ChatMessages the store
+ * is already holding for the same window — so it needs no cap of its own, and
+ * it leaves {@link sweepUnansweredPromptsAtReplayEnd} a pure read, with no
+ * ordering hazard against the caller that consumes it.
+ */
+const _liveDuringReplay = new Map<string, Set<string>>()
+
+/**
  * Client-side cap on the per-session cursor map. Mirrors the server's
  * `MAX_HISTORY_CURSORS` (ws-auth.js): the server only honours that many keys
  * from a single `auth`, so retaining/sending more is pure bloat. Holding the
@@ -90,6 +129,10 @@ const MAX_CLIENT_HISTORY_CURSORS = 64
  */
 export function resetReplayReconcile(opts: { clearCursors?: boolean } = {}): void {
   _rebuildBaseline.clear()
+  // #7420 — an open window and its live-arrival ids are per-connection state
+  // like the baseline, never a cursor: a fresh auth must not inherit either.
+  _replayWindowOpen.clear()
+  _liveDuringReplay.clear()
   if (opts.clearCursors) _historyCursors.clear()
 }
 
@@ -158,6 +201,11 @@ export function reconcileReplayStart(
   _latestSeq?: unknown,
 ): { rebuildInProgress: boolean } {
   if (!sessionId) return { rebuildInProgress: false }
+  // #7420 — open the window for BOTH replay kinds, and drop the previous
+  // window's live-arrival ids: every prompt already on screen pre-dates this
+  // replay, so nothing about it is vouched for by this window.
+  _replayWindowOpen.add(sessionId)
+  _liveDuringReplay.delete(sessionId)
   if (fullHistory) {
     _rebuildBaseline.set(sessionId, Math.max(0, currentLen | 0))
     return { rebuildInProgress: true }
@@ -207,6 +255,11 @@ export function reconcileReplayEnd(
   if (sessionId && typeof latestSeq === 'number' && Number.isFinite(latestSeq)) {
     recordHistorySeq(sessionId, latestSeq)
   }
+  // #7420 — close the window BEFORE the delta-replay early return below, so a
+  // delta replay's window closes too. The live-arrival ids themselves are left
+  // in place for `sweepUnansweredPromptsAtReplayEnd`, which the caller runs
+  // after this; they are dropped at the next start / on reset.
+  if (sessionId) _replayWindowOpen.delete(sessionId)
   if (!sessionId || !_rebuildBaseline.has(sessionId)) {
     return { swappedMessages: null }
   }
@@ -216,4 +269,104 @@ export function reconcileReplayEnd(
   // tail, in array order. A baseline at or past the end yields [] (a session
   // that genuinely had no replayed entries, e.g. server-side trim to empty).
   return { swappedMessages: messages.slice(base) }
+}
+
+// ---------------------------------------------------------------------------
+// #7420 — the `history_replay_end` unanswered-prompt sweep
+// ---------------------------------------------------------------------------
+
+/**
+ * The `answered` value `history_replay_end` stamps on a prompt nobody answered.
+ *
+ * `answered` is a decision TOKEN, not a label (#6222/#6223), and this is the
+ * one non-decision it may hold — which is why `isPermissionRequestAnswered`
+ * (pending-permissions.ts) explicitly rejects it. One writer, here, so the two
+ * clients cannot drift on the string.
+ */
+export const REPLAY_RESOLVED_PLACEHOLDER = '(resolved)'
+
+/** The subset of `ChatMessage` the replay-end sweep reads. */
+interface SweepablePrompt {
+  id: string
+  type: string
+  answered?: unknown
+  requestId?: unknown
+}
+
+/**
+ * Record that a `prompt` message arrived LIVE during `sessionId`'s replay
+ * window, so {@link sweepUnansweredPromptsAtReplayEnd} leaves it alone (#7420).
+ *
+ * A no-op when no window is open for that session — a prompt that arrives
+ * outside a replay is not racing one, and the next replay's sweep is entitled
+ * to stamp it (that is the pre-#7420 behaviour, deliberately kept).
+ *
+ * The CALLER decides liveness, because only the caller still has the wire
+ * frame: a replayed entry carries `historySeq`, a live broadcast does not.
+ */
+export function noteLivePromptDuringReplay(
+  sessionId: string | null | undefined,
+  messageId: string | null | undefined,
+): void {
+  if (!sessionId || !messageId) return
+  if (!_replayWindowOpen.has(sessionId)) return
+  let ids = _liveDuringReplay.get(sessionId)
+  if (!ids) {
+    ids = new Set<string>()
+    _liveDuringReplay.set(sessionId, ids)
+  }
+  ids.add(messageId)
+}
+
+/** Was this prompt recorded as a live arrival during the current window? */
+export function wasPromptLiveDuringReplay(
+  sessionId: string | null | undefined,
+  messageId: string | null | undefined,
+): boolean {
+  if (!sessionId || !messageId) return false
+  return _liveDuringReplay.get(sessionId)?.has(messageId) === true
+}
+
+/**
+ * The `history_replay_end` sweep, shared so the app and the dashboard cannot
+ * drift on it (they carried byte-identical copies until #7420).
+ *
+ * Stamps `answered: '(resolved)'` on every unanswered `prompt` in `messages`
+ * that the sweep is entitled to touch, and returns the new array — or `null`
+ * when there is nothing to stamp, so the caller can return a no-op patch and
+ * avoid a re-render.
+ *
+ * Three exclusions, each for its own reason:
+ *
+ *   - `m.answered` already set — a real decision, or an earlier sweep.
+ *   - `m.requestId` present (#7410/#7419) — only `permission_request` sets it,
+ *     and `permission_request` is in the server's `builtinTransient` list
+ *     (session-manager.js) so it is NEVER written to the history ring buffer.
+ *     A permission prompt at replay-end therefore always RACED the replay; that
+ *     is routine, not exotic, because `resendPendingPermissions` runs after
+ *     `replayHistory` has already sent its first chunk. Keyed on `requestId`
+ *     rather than `isLivePermissionPrompt` because `expiresAt` is only set when
+ *     the frame carried `remainingMs` (`.optional()` in the schema), and a
+ *     `permission_expired` prompt deliberately keeps `answered` empty.
+ *   - recorded by {@link noteLivePromptDuringReplay} (#7420) — a `user_question`
+ *     that arrived live inside this window. `user_question` IS in the ring
+ *     buffer and its ChatMessage sets neither `requestId` nor `expiresAt`, so
+ *     shape alone cannot tell a live one from a replayed one; only the arriving
+ *     frame could, and this is where that observation is kept.
+ *
+ * Everything else — replayed prompts, and prompts that pre-date the window — is
+ * stamped, which is the sweep's original premise.
+ */
+export function sweepUnansweredPromptsAtReplayEnd<T extends SweepablePrompt>(
+  sessionId: string | null | undefined,
+  messages: readonly T[],
+): T[] | null {
+  if (!sessionId) return null
+  const live = _liveDuringReplay.get(sessionId)
+  const isStampable = (m: T): boolean =>
+    m.type === 'prompt' && !m.answered && !m.requestId && !(live?.has(m.id) === true)
+  if (!messages.some(isStampable)) return null
+  return messages.map((m) =>
+    isStampable(m) ? ({ ...m, answered: REPLAY_RESOLVED_PLACEHOLDER } as T) : m,
+  )
 }

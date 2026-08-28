@@ -70,6 +70,14 @@ export {
   reconcileReplayEnd,
   isRebuildInProgress,
   replayDedupCache,
+  // #7420 — the `history_replay_end` unanswered-prompt sweep, and the
+  // live-arrival ledger that keeps it off an AskUserQuestion which raced the
+  // replay. One implementation for both clients (they carried byte-identical
+  // copies of the sweep until now).
+  noteLivePromptDuringReplay,
+  wasPromptLiveDuringReplay,
+  sweepUnansweredPromptsAtReplayEnd,
+  REPLAY_RESOLVED_PLACEHOLDER,
 } from './replay-reconcile'
 
 export type {

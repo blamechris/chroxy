@@ -8,6 +8,10 @@ import {
   reconcileReplayEnd,
   isRebuildInProgress,
   replayDedupCache,
+  noteLivePromptDuringReplay,
+  wasPromptLiveDuringReplay,
+  sweepUnansweredPromptsAtReplayEnd,
+  REPLAY_RESOLVED_PLACEHOLDER,
 } from './replay-reconcile'
 
 type Msg = { id: string }
@@ -187,5 +191,167 @@ describe('replay × delta-flusher race ordering (#5588)', () => {
     // Post-end, no rebuild is active, so a later flush just appends normally;
     // reconcileReplayEnd for a non-rebuild session returns null (no second swap).
     expect(reconcileReplayEnd('s1', [{ id: 'r-1' }, { id: 'f-1' }]).swappedMessages).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #7420 — the history_replay_end unanswered-prompt sweep
+// ---------------------------------------------------------------------------
+//
+// The sweep's premise is "anything in history is already resolved". Two things
+// build a `type: 'prompt'` ChatMessage and history splits them:
+//
+//   - `permission_request` is server-transient (never in the ring buffer) and
+//     is the only producer that sets `requestId` — #7410/#7419 excluded it.
+//   - `user_question` IS in the ring buffer AND is broadcast live, and its
+//     ChatMessage sets neither `requestId` nor `expiresAt` — so the two are
+//     byte-identical here and only the ARRIVING FRAME could tell them apart
+//     (`historySeq` is stamped by replayHistory, never by a live broadcast).
+//
+// `noteLivePromptDuringReplay` is where that observation is kept.
+type Prompt = { id: string; type: string; answered?: string; requestId?: string }
+
+const prompt = (id: string, extra: Partial<Prompt> = {}): Prompt => ({
+  id,
+  type: 'prompt',
+  ...extra,
+})
+
+describe('replay-end unanswered-prompt sweep (#7380 / #7410 / #7420)', () => {
+  it('stamps an unanswered, requestId-less prompt', () => {
+    const out = sweepUnansweredPromptsAtReplayEnd('s1', [prompt('q1')])
+    expect(out).toEqual([{ id: 'q1', type: 'prompt', answered: REPLAY_RESOLVED_PLACEHOLDER }])
+    expect(REPLAY_RESOLVED_PLACEHOLDER).toBe('(resolved)')
+  })
+
+  it('returns null when nothing is stampable (caller emits a no-op patch)', () => {
+    expect(sweepUnansweredPromptsAtReplayEnd('s1', [])).toBeNull()
+    expect(sweepUnansweredPromptsAtReplayEnd('s1', [{ id: 'm1', type: 'response' }])).toBeNull()
+    expect(sweepUnansweredPromptsAtReplayEnd('s1', [prompt('q1', { answered: 'yes' })])).toBeNull()
+  })
+
+  it('never touches a permission prompt — #7410/#7419 unchanged', () => {
+    // Both shapes #7419 protects: with and without a TTL. Only `requestId` is
+    // required, because `expiresAt` is absent whenever the frame omitted
+    // `remainingMs`.
+    expect(
+      sweepUnansweredPromptsAtReplayEnd('s1', [
+        prompt('p1', { requestId: 'req-1' }),
+        prompt('p2', { requestId: 'req-2' }),
+      ]),
+    ).toBeNull()
+  })
+
+  it('leaves other messages untouched and stamps only the stampable prompts', () => {
+    const out = sweepUnansweredPromptsAtReplayEnd('s1', [
+      { id: 'm1', type: 'response' },
+      prompt('q1'),
+      prompt('p1', { requestId: 'req-1' }),
+      prompt('q2', { answered: 'a' }),
+    ])
+    expect(out).toEqual([
+      { id: 'm1', type: 'response' },
+      { id: 'q1', type: 'prompt', answered: REPLAY_RESOLVED_PLACEHOLDER },
+      { id: 'p1', type: 'prompt', requestId: 'req-1' },
+      { id: 'q2', type: 'prompt', answered: 'a' },
+    ])
+  })
+
+  it('returns null for a null/empty sessionId (the sweep is per-session)', () => {
+    expect(sweepUnansweredPromptsAtReplayEnd(null, [prompt('q1')])).toBeNull()
+    expect(sweepUnansweredPromptsAtReplayEnd(undefined, [prompt('q1')])).toBeNull()
+  })
+
+  describe('live-arrival ledger', () => {
+    it('skips a prompt that arrived live inside the window, stamps one the replay delivered', () => {
+      reconcileReplayStart('s1', false, 0)
+      // Only the live one is recorded; the replayed one carried a historySeq at
+      // the call site and so is never noted.
+      noteLivePromptDuringReplay('s1', 'live-q')
+      // Positive control — the fixture actually took effect. Without it, a
+      // green "not stamped" could just as well mean the note never landed.
+      expect(wasPromptLiveDuringReplay('s1', 'live-q')).toBe(true)
+      expect(wasPromptLiveDuringReplay('s1', 'replayed-q')).toBe(false)
+      reconcileReplayEnd('s1', [])
+
+      const out = sweepUnansweredPromptsAtReplayEnd('s1', [
+        prompt('replayed-q'),
+        prompt('live-q'),
+      ])
+      expect(out).toEqual([
+        { id: 'replayed-q', type: 'prompt', answered: REPLAY_RESOLVED_PLACEHOLDER },
+        { id: 'live-q', type: 'prompt' },
+      ])
+    })
+
+    it('is a no-op outside a replay window — a prompt that pre-dates it stays stampable', () => {
+      noteLivePromptDuringReplay('s1', 'q1')
+      expect(wasPromptLiveDuringReplay('s1', 'q1')).toBe(false)
+      reconcileReplayStart('s1', false, 0)
+      reconcileReplayEnd('s1', [])
+      expect(sweepUnansweredPromptsAtReplayEnd('s1', [prompt('q1')])).toEqual([
+        { id: 'q1', type: 'prompt', answered: REPLAY_RESOLVED_PLACEHOLDER },
+      ])
+    })
+
+    it('opens the window for a DELTA replay too, not just a full rebuild', () => {
+      // `_rebuildBaseline` only tracks full rebuilds, so the window has to be
+      // its own thing — a live question races a delta replay just as easily.
+      reconcileReplayStart('s1', false, 0)
+      expect(isRebuildInProgress('s1')).toBe(false)
+      noteLivePromptDuringReplay('s1', 'q1')
+      expect(wasPromptLiveDuringReplay('s1', 'q1')).toBe(true)
+    })
+
+    it('closes the window at replay end — a later arrival is not protected', () => {
+      reconcileReplayStart('s1', true, 0)
+      reconcileReplayEnd('s1', [])
+      noteLivePromptDuringReplay('s1', 'after-q')
+      expect(wasPromptLiveDuringReplay('s1', 'after-q')).toBe(false)
+    })
+
+    it('forgets the previous window at the next start', () => {
+      reconcileReplayStart('s1', false, 0)
+      noteLivePromptDuringReplay('s1', 'q1')
+      reconcileReplayEnd('s1', [])
+      expect(wasPromptLiveDuringReplay('s1', 'q1')).toBe(true)
+      // Second replay: q1 is now just an old on-screen prompt with nothing
+      // vouching for it, so the sweep is entitled to stamp it again.
+      reconcileReplayStart('s1', false, 1)
+      expect(wasPromptLiveDuringReplay('s1', 'q1')).toBe(false)
+      reconcileReplayEnd('s1', [])
+      expect(sweepUnansweredPromptsAtReplayEnd('s1', [prompt('q1')])).toEqual([
+        { id: 'q1', type: 'prompt', answered: REPLAY_RESOLVED_PLACEHOLDER },
+      ])
+    })
+
+    it("is per-session — s2's window does not protect a prompt in s1", () => {
+      reconcileReplayStart('s2', false, 0)
+      noteLivePromptDuringReplay('s1', 'q1')
+      expect(wasPromptLiveDuringReplay('s1', 'q1')).toBe(false)
+      expect(sweepUnansweredPromptsAtReplayEnd('s1', [prompt('q1')])).toEqual([
+        { id: 'q1', type: 'prompt', answered: REPLAY_RESOLVED_PLACEHOLDER },
+      ])
+    })
+
+    it('ignores a null session id or message id', () => {
+      reconcileReplayStart('s1', false, 0)
+      noteLivePromptDuringReplay(null, 'q1')
+      noteLivePromptDuringReplay('s1', null)
+      noteLivePromptDuringReplay('s1', '')
+      expect(wasPromptLiveDuringReplay('s1', 'q1')).toBe(false)
+      expect(wasPromptLiveDuringReplay(null, 'q1')).toBe(false)
+      expect(wasPromptLiveDuringReplay('s1', null)).toBe(false)
+    })
+
+    it('resetReplayReconcile drops the window and the ledger (fresh auth)', () => {
+      reconcileReplayStart('s1', false, 0)
+      noteLivePromptDuringReplay('s1', 'q1')
+      resetReplayReconcile()
+      expect(wasPromptLiveDuringReplay('s1', 'q1')).toBe(false)
+      // Window gone too: a note after the reset is not retroactively honoured.
+      noteLivePromptDuringReplay('s1', 'q2')
+      expect(wasPromptLiveDuringReplay('s1', 'q2')).toBe(false)
+    })
   })
 })
