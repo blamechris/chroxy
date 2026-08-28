@@ -66,6 +66,13 @@ await test('an invalid --min is fail-closed: exit 2, never a disabled floor', as
 await test('a VALID env override outranks --min (the targeted-run escape hatch)', async () => {
   eq(await run(['--min', '100', ...tap(5, 0)], { CHROXY_MIN_TEST_COUNT: '3' }), 0, 'exit')
 })
+await test('a valid env override EQUAL to the server default still outranks --min', async () => {
+  // The distinguishing input for validity-tracking (#7461 review, C1): the
+  // naive value-comparison (EXPECTED === DEFAULT) reads env=13500 as "no
+  // override" and lets --min 1 win, exiting 0 here. Validity tracking keeps
+  // the env floor, so 5 < 13500 exits 1.
+  eq(await run(['--min', '1', ...tap(5, 0)], { CHROXY_MIN_TEST_COUNT: '13500' }), 1, 'exit')
+})
 await test('an INVALID env override falls back to --min, not to the server default', async () => {
   // 5 >= 3 passes ONLY if the fallback floor is --min's 3; the server default
   // (13500) would fail it — so exit 0 pins the fallback target.

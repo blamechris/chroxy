@@ -36,7 +36,8 @@
  *          below the documented floor — a glob that stopped matching, a file
  *          that failed to load, a bad merge that deleted a directory).
  *
- * EXPECTED_MIN_TESTS is a *lower bound*, not the exact count. The floor sits
+ * The floor (--min for the non-server consumers, EXPECTED_MIN_TESTS below for
+ * the server) is a *lower bound*, not the exact count. The floor sits
  * below the live count with headroom so it does not break every time a test is
  * added, but high enough that a meaningful loss trips it. When the suite grows
  * well past the floor, bump the floor (the script prints the live count + a
@@ -74,7 +75,9 @@ if (process.env.CHROXY_MIN_TEST_COUNT !== undefined) {
 }
 
 // How far above the floor the live count must climb before we suggest bumping
-// the floor. Purely advisory — never fails the run.
+// the floor. Purely advisory — never fails the run. Calibrated to the server
+// default; for small --min floors it effectively never fires, which is fine —
+// a 6-test package does not need drift nudges (#7461 review, N1).
 const HEADROOM_NUDGE = 600
 
 // #7447: consumers other than the server pass their own (much smaller) floor
@@ -169,7 +172,8 @@ child.on('close', (code, signal) => {
       '  running or reporting: a glob that no longer matches, a file that threw while\n' +
       '  loading, a deleted directory. Look for a file the TAP output never mentions —\n' +
       '  the count is the only symptom, because the run still exited 0. If you\n' +
-      '  intentionally removed tests below the floor, lower EXPECTED_MIN_TESTS in this script.',
+      '  intentionally removed tests below the floor, lower it: the --min N in your\n' +
+      '  package.json test script, or (server) EXPECTED_MIN_TESTS in this script.',
     )
     return fail()
   }
@@ -178,7 +182,8 @@ child.on('close', (code, signal) => {
   if (total - EXPECTED_MIN_TESTS > HEADROOM_NUDGE) {
     console.error(
       `\n[assert-test-count] OK: ${total} tests ran (floor ${EXPECTED_MIN_TESTS}). ` +
-      `Consider raising EXPECTED_MIN_TESTS — the suite is now ${total - EXPECTED_MIN_TESTS} above the floor.`,
+      `Consider raising the floor (--min in the caller's package.json, or the server's ` +
+      `EXPECTED_MIN_TESTS here) — the suite is now ${total - EXPECTED_MIN_TESTS} above it.`,
     )
   } else {
     console.error(`\n[assert-test-count] OK: ${total} tests ran (floor ${EXPECTED_MIN_TESTS}).`)
