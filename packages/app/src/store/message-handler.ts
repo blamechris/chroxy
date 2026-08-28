@@ -268,7 +268,6 @@ interface MessageHandlerContext extends EncryptionContext {
   // live activity for sessions B/C/etc. Scope the flag per-session id and
   // gate per-target.
   replayingSessions: Set<string>;
-  isSessionSwitchReplay: boolean;
   pendingSwitchSessionId: string | null;
 
   // Permission boundary message splitting (#554)
@@ -323,7 +322,6 @@ function createDefaultContext(): MessageHandlerContext {
   const ctx: MessageHandlerContext = {
     ...INITIAL_ENCRYPTION_CONTEXT,
     replayingSessions: new Set<string>(),
-    isSessionSwitchReplay: false,
     pendingSwitchSessionId: null,
     postPermissionSplits: new Set<string>(),
     deltaIdRemaps: new Map<string, string>(),
@@ -769,7 +767,6 @@ export function setPendingSwitchSessionId(id: string | null): void {
 
 export function resetReplayFlags(): void {
   _ctx.replayingSessions.clear();
-  _ctx.isSessionSwitchReplay = false;
   _ctx.pendingSwitchSessionId = null;
 }
 
@@ -1856,7 +1853,6 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // saw history_replay_end before the socket dropped). Cursors are RETAINED
       // so this reconnect's replay can be incremental.
       resetReplayReconcile();
-      _ctx.isSessionSwitchReplay = false;
       _ctx.pendingSwitchSessionId = null;
       // #5555.5 — a successful auth is the ONLY proof the link is healthy, so
       // reset the close/error-path backoff ladder here (not on socket-open). A
@@ -2322,13 +2318,6 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // switch and the real follow-up could otherwise leave a stale
       // `pendingSwitchSessionId` and falsely flip the replay-dedup flag on
       // the next valid switch. Run the replay-dedup check before clearing.
-      if (
-        switched &&
-        _ctx.pendingSwitchSessionId &&
-        _ctx.pendingSwitchSessionId === switched.newSessionId
-      ) {
-        _ctx.isSessionSwitchReplay = true;
-      }
       _ctx.pendingSwitchSessionId = null;
       if (!switched) break;
       const { newSessionId: sessionId, conversationId: switchConvId } = switched;
@@ -2445,10 +2434,6 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // messages visible and records a baseline; the authoritative replayed set
       // is appended and swapped in atomically at history_replay_end (no blank
       // flash). Delta replay (cursor honoured) is purely append-only.
-      // `isSessionSwitchReplay` still gates the same UX paths as before.
-      if (fullHistory) {
-        _ctx.isSessionSwitchReplay = true;
-      }
       {
         const curLen =
           (replayTargetId && get().sessionStates[replayTargetId]?.messages.length) || 0;
@@ -2615,7 +2600,6 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           });
         }
       }
-      _ctx.isSessionSwitchReplay = false;
       break;
 
     // --- User input echoed from other clients ---
