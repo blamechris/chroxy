@@ -73,6 +73,9 @@ const noRun = (o = {}) => snapshot({ ...o, checks: { state: 'none', counts: coun
 const unrecognised = (o = {}) => snapshot({ ...o, checks: { state: 'unknown', counts: counts({ total: 2, passed: 1, unknown: 1 }) } })
 const degraded = (o = {}) => snapshot({ ...o, checks: null, pr: null, reason: 'gh CLI not found on PATH' })
 const noPr = (o = {}) => snapshot({ ...o, checks: null, pr: null })
+// The fork bail-outs' server-side marker (#7435): pr null AND reason null (the
+// display contract, unchanged) but NOT evidence of absence.
+const indeterminate = (o = {}) => ({ ...noPr(o), indeterminate: true })
 
 /** A ClaudeTuiSession stand-in — the wake gate keys off the CLASS marker. */
 function tuiSession({ isRunning = false } = {}) {
@@ -330,6 +333,19 @@ describe('SessionCiWatcher — the completion transition', () => {
     assert.equal(events.length, 1)
   })
 
+  it('keeps the arm through an INDETERMINATE reading — a fork bail-out is not "no PR" (#7435)', async () => {
+    // The fork-widening bail-outs report pr:null with reason:null (the display
+    // contract) plus `indeterminate: true`: a transient `gh` failure on the
+    // upstream lookup is not evidence in either direction, so it gets exactly
+    // the treatment a `reason` already gets.
+    const h = harness({ queue: [pending(), indeterminate(), green()] })
+    await h.watcher.tick()
+    await h.watcher.tick()
+    assert.deepEqual(h.events, [], 'an indeterminate reading is not a completion')
+    await h.watcher.tick()
+    assert.equal(h.events.length, 1, 'the arm survived the indeterminate reading')
+  })
+
   it('drops the arm when the PR goes away', async () => {
     const h = harness({ queue: [pending(), noPr(), green()] })
     await h.watcher.tick()
@@ -500,6 +516,14 @@ describe('SessionCiWatcher — observe(): the dashboard arming path (#7427)', ()
     assert.equal(h.watcher.observe('s1', degraded()), 'undeterminable')
     await h.watcher.tick()
     assert.equal(h.events.length, 1, 'a `gh` hiccup must not cancel a watch the user is waiting on')
+  })
+
+  it('keeps the arm through an indeterminate dashboard reading (#7435)', async () => {
+    const h = harness({ queue: [green()] })
+    h.watcher.observe('s1', pending())
+    assert.equal(h.watcher.observe('s1', indeterminate()), 'undeterminable')
+    await h.watcher.tick()
+    assert.equal(h.events.length, 1, 'a transient fork bail-out must not cancel the watch')
   })
 
   it('refuses a malformed observation instead of reading it as "no open PR"', async () => {

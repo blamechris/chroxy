@@ -162,7 +162,10 @@ export async function handleSessionPrStatusRequest(ws, client, msg, ctx) {
   markInFlight(client, targetSessionId)
   try {
     const snapshot = await surveyFn({ sessionId: targetSessionId, cwd: entry.cwd })
-    ctx.transport.send(ws, { type: 'session_pr_status', requestId, ...snapshot })
+    // #7435: `indeterminate` is server-side state for the CI watcher below, not
+    // a wire field — the reply keeps the pre-#7435 display contract unchanged.
+    const { indeterminate: _serverOnly, ...wireSnapshot } = snapshot
+    ctx.transport.send(ws, { type: 'session_pr_status', requestId, ...wireSnapshot })
     // #7427: arm the CI watcher off the reading we just paid for. Absent
     // whenever `sessionCi.watch` is off, and in ctx mocks that do not wire it.
     try {

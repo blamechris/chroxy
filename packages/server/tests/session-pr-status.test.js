@@ -210,6 +210,7 @@ describe('#7344 — session PR/CI status survey', () => {
       assert.equal(snap.reason, null, 'no-PR must be distinguishable from cannot-determine')
       assert.equal(snap.branch, 'feat/x')
       assert.deepEqual(snap.repo, { owner: 'blamechris', name: 'chroxy' })
+      assert.equal(snap.indeterminate, false)
     })
 
     it('a FAILED gh call is cannot-determine: pr null WITH a reason', async () => {
@@ -373,6 +374,9 @@ describe('#7344 — session PR/CI status survey', () => {
       })
       assert.equal(snap.pr, null)
       assert.equal(snap.reason, null)
+      // POSITIVE CONTROL for the indeterminate tests above: the upstream WAS
+      // queried and answered, so this genuinely is the quiet negative.
+      assert.equal(snap.indeterminate, false)
     })
 
     it('makes NO extra calls when origin is not a fork and DOES find a PR', async () => {
@@ -388,14 +392,50 @@ describe('#7344 — session PR/CI status survey', () => {
       assert.equal(ghCalls[0].args[0], 'pr')
     })
 
-    it('falls back to the quiet negative when the parent lookup fails', async () => {
-      // A best-effort widening of an already-empty result must not downgrade it
-      // to "cannot determine".
+    it('marks a FAILED parent lookup indeterminate — a transient failure is not a negative (#7435)', async () => {
+      // The display contract is unchanged — pr null, reason null, so the chip is
+      // not downgraded to "cannot determine". But the CI watcher must be able to
+      // tell this apart from the authoritative quiet negative, or a single `gh`
+      // hiccup silently cancels an armed watch (#7435).
       const table = happyTable('[]', 'feat/x', 'me/chroxy')
       table['/usr/local/bin/gh repo view me/chroxy --json parent'] = new Error('boom')
       const snap = await surveySessionPrStatus({ sessionId: 's1', cwd: '/repo', _execFile: fakeExec(table) })
       assert.equal(snap.pr, null)
       assert.equal(snap.reason, null)
+      assert.equal(snap.indeterminate, true)
+    })
+
+    it('marks a FAILED upstream query indeterminate, not a negative (#7435)', async () => {
+      const table = forkTable({ baseRows: '[]' })
+      table[`/usr/local/bin/gh pr list -R cli/cli --head fix-typos --state open --limit ${FORK_QUERY_LIMIT} --json ${FIELDS}`] = new Error('boom')
+      const snap = await surveySessionPrStatus({ sessionId: 's1', cwd: '/repo', _execFile: fakeExec(table) })
+      assert.equal(snap.pr, null)
+      assert.equal(snap.reason, null)
+      assert.equal(snap.indeterminate, true)
+    })
+
+    it('marks unparseable upstream output indeterminate, not a negative (#7435)', async () => {
+      for (const bad of ['not json', '{"not":"an array"}']) {
+        const table = forkTable({ baseRows: bad })
+        const snap = await surveySessionPrStatus({ sessionId: 's1', cwd: '/repo', _execFile: fakeExec(table) })
+        assert.equal(snap.pr, null, `for ${JSON.stringify(bad)}`)
+        assert.equal(snap.reason, null, `for ${JSON.stringify(bad)}`)
+        assert.equal(snap.indeterminate, true, `for ${JSON.stringify(bad)}`)
+      }
+    })
+
+    it('marks a matching-but-unusable upstream row indeterminate, not a negative (#7435)', async () => {
+      // The row IS ours (head owner matches) but carries no usable number — the
+      // same condition the same-repo path reports as a reason. Absence was not
+      // established, so it must not read as the quiet negative.
+      const mine = prRow({ number: 0, headRepositoryOwner: { login: 'MsfPablo' } })
+      const snap = await surveySessionPrStatus({
+        sessionId: 's1', cwd: '/repo',
+        _execFile: fakeExec(forkTable({ baseRows: JSON.stringify([mine]) })),
+      })
+      assert.equal(snap.pr, null)
+      assert.equal(snap.reason, null)
+      assert.equal(snap.indeterminate, true)
     })
 
     it('never puts an option-parseable parent owner/name into an argv slot', async () => {
