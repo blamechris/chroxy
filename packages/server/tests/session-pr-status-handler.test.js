@@ -92,6 +92,19 @@ describe('#7427 — the reply arms the CI watcher', () => {
     assert.equal(observe.calls[0][0], 'sess-2')
   })
 
+  it('arms only AFTER the reply is on the wire', async () => {
+    // The handler's doc block calls this order load-bearing, but the
+    // "throwing observe still yields ONE reply" test below actually pins the
+    // inner `try` — it stays green with the call moved ABOVE `send()`. Review on
+    // #7432 confirmed that mutation survives the whole 94-test suite, so the
+    // ordering gets its own assertion: read the send count AT call time.
+    let sendsAtObserveTime = null
+    const ctx = makeCtx({ sessionCiWatcher: { observe: () => { sendsAtObserveTime = ctx._send.callCount } } })
+    await handler(ws, { id: 'c1' }, req, ctx)
+    soleReply(ctx)
+    assert.equal(sendsAtObserveTime, 1, 'the client must have its answer before the watcher is touched')
+  })
+
   it('a watcher whose observe() THROWS still yields exactly ONE reply, and the real snapshot', async () => {
     // The hand-off runs AFTER send() and inside its own try. Left in the
     // survey's try instead, a throw here lands in the degraded-reply catch and

@@ -19,6 +19,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { surveySessionPrStatus } from '../src/session-pr-status.js'
 import {
   SessionCiWatcher,
   buildSessionCiWatcher,
@@ -399,6 +400,98 @@ describe('SessionCiWatcher — observe(): the dashboard arming path (#7427)', ()
     await h.watcher.tick()
     await h.watcher.tick()
     assert.equal(h.events.length, 1)
+  })
+
+  it('REGRESSION: an observation arriving AFTER the event fired cannot fire it again', async () => {
+    // Review finding on #7432. A survey that STARTED before the run settled and
+    // RESOLVED after it did carries a stale `pending` reading. Consuming the arm
+    // is what makes the pair look un-announced again, so without a record of
+    // what fired, that stale reading re-arms the very same
+    // `(number, headRefOid)` and the next sweep fires a SECOND time — a
+    // duplicate push and a duplicate line typed at the live agent.
+    //
+    // Measured before the fix: 1 event, then 2. The handler cannot prevent this
+    // on its own — `isInFlight` is per-CLIENT, so two dashboards surveying one
+    // session legitimately overlap.
+    const h = harness({ queue: [green()] })
+    h.watcher.observe('s1', pending())
+    await h.watcher.tick()
+    assert.equal(h.events.length, 1, 'baseline: the transition fires once')
+
+    assert.equal(h.watcher.observe('s1', pending()), 'already-fired')
+    await h.watcher.tick()
+    await h.watcher.tick()
+    assert.equal(h.events.length, 1, 'a stale pending reading must not resurrect a completed run')
+  })
+
+  it('POSITIVE CONTROL: a re-push after firing DOES re-arm through this path', async () => {
+    // Otherwise the guard above is satisfied by an observe() that can never arm
+    // twice at all — which would silently disable the whole feature for every
+    // session after its first CI run.
+    const h = harness({ queue: [green(), green({ headRefOid: SHA2 })] })
+    h.watcher.observe('s1', pending())
+    await h.watcher.tick()
+    assert.equal(h.events.length, 1)
+
+    // New head SHA: a genuinely different run. The refusal is keyed on the
+    // PAIR, not on "this session has fired before".
+    assert.equal(h.watcher.observe('s1', pending({ headRefOid: SHA2 })), 'armed')
+    await h.watcher.tick()
+    assert.equal(h.events.length, 2, 'the second run gets its own event')
+    assert.equal(h.events[1].headRefOid, SHA2)
+  })
+
+  it('REGRESSION: a polled session is not starved out of the per-tick batch', async () => {
+    // Review finding on #7432. `observe()` originally stamped `lastSurveyedAt`,
+    // which is ALSO the sweep's oldest-first sort key — so a dashboard polling
+    // once per tick kept its session permanently the youngest due entry and,
+    // with more sessions due than `maxSurveysPerTick`, it never entered the
+    // batch at all. Measured before the fix: 0 surveys and 0 events across ten
+    // ticks, against a control that fired on the first tick.
+    //
+    // That inverted the feature — the starved session is the one the user is
+    // looking at — and falsified the module's own claim that the per-tick cap
+    // "cannot starve a session, only delay it".
+    const sessions = [{ sessionId: 's1', cwd: '/repo' }]
+    for (let i = 0; i < 8; i++) sessions.push({ sessionId: `other${i}`, cwd: `/o${i}` })
+    const h = harness({
+      sessions,
+      maxSurveysPerTick: 4,
+      queue: [green()],
+      survey: async ({ sessionId }) => (sessionId === 's1' ? green() : pending({ sessionId })),
+    })
+    h.watcher.observe('s1', pending())
+    for (let t = 0; t < 10; t++) {
+      h.advance(60_000)
+      h.watcher.observe('s1', pending())   // the dashboard's auto-pull, every tick
+      await h.watcher.tick()
+    }
+    assert.equal(h.events.length, 1, 'the polled session still gets its completion event')
+  })
+
+  it('POSITIVE CONTROL: the same fleet fires for an UN-polled session too', async () => {
+    // Pins that the assertion above is about starvation, not about the fixture
+    // happening to fire for unrelated reasons.
+    const sessions = [{ sessionId: 's1', cwd: '/repo' }]
+    for (let i = 0; i < 8; i++) sessions.push({ sessionId: `other${i}`, cwd: `/o${i}` })
+    const h = harness({
+      sessions,
+      maxSurveysPerTick: 4,
+      queue: [green()],
+      survey: async ({ sessionId }) => (sessionId === 's1' ? green() : pending({ sessionId })),
+    })
+    h.watcher.observe('s1', pending())
+    for (let t = 0; t < 10; t++) { h.advance(60_000); await h.watcher.tick() }
+    assert.equal(h.events.length, 1)
+  })
+
+  it('stamps the deferral only AFTER the shape guard, so garbage cannot defer discovery', async () => {
+    // Ordering pin. With the stamp above the guard, a rejected value still
+    // pushed the sweep's discovery survey out by a full interval.
+    const h = harness({ queue: [noRun()], discoveryIntervalMs: 60_000 })
+    assert.equal(h.watcher.observe('s1', {}), 'ignored')
+    await h.watcher.tick()
+    assert.equal(h.surveyed.length, 1, 'a refused observation must defer nothing')
   })
 
   it('keeps the arm through a dashboard reading that could not determine the state', async () => {
@@ -792,13 +885,59 @@ describe('SessionCiWatcher — bounded fan-out', () => {
 })
 
 describe('isSurveySnapshot', () => {
-  it('accepts every shape surveySessionPrStatus actually returns', () => {
-    // Its `baseSnapshot` skeleton exists "so every return path has the same
-    // shape" — an open PR, no open PR, and a degraded reading all carry `pr`
-    // and `reason` as KEYS. If that ever stops being true, this goes red here
-    // rather than by silently refusing to arm in production.
+  it('accepts every shape surveySessionPrStatus actually returns — from the REAL producer', async () => {
+    // Driven through `surveySessionPrStatus` itself via its `_execFile` seam, NOT
+    // against fixtures built in this file. Fixtures cannot track a rename in
+    // session-pr-status.js, so a test built on them would keep passing while
+    // `observe()` silently refused every real snapshot and arming stopped
+    // working in production — a guard going quietly inert, which is the failure
+    // this predicate exists to prevent. Review on #7432 caught the fixture
+    // version claiming a coverage it did not have.
+    const PR_ROW = JSON.stringify([{
+      headRepositoryOwner: { login: 'blamechris' }, number: 7419, title: 't',
+      url: 'https://example.test/pr/7419', headRefOid: 'abc1234', isDraft: false,
+      statusCheckRollup: [{ __typename: 'CheckRun', status: 'COMPLETED', conclusion: 'SUCCESS' }],
+      mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', reviewDecision: 'APPROVED',
+    }])
+    // Each entry drives ONE real return path. `stdout` is chosen per argv, and a
+    // `throw` stands in for a missing binary / failed git call.
+    const paths = {
+      'no cwd': { cwd: null, exec: async () => ({ stdout: '' }) },
+      'not a repo': { exec: async (bin, argv) => { if (argv[0] === 'branch') throw new Error('nope'); return { stdout: '' } } },
+      'detached HEAD': { exec: async () => ({ stdout: '' }) },
+      'no github remote': { exec: async (bin, argv) => ({ stdout: argv[0] === 'branch' ? 'feat/x\n' : 'git@gitlab.com:o/r.git\n' }) },
+      'gh missing': { exec: async (bin, argv) => {
+        if (bin === 'which') throw new Error('not found')
+        return { stdout: argv[0] === 'branch' ? 'feat/x\n' : 'git@github.com:o/r.git\n' }
+      } },
+      'open PR': { exec: async (bin, argv) => {
+        if (bin === 'which') return { stdout: '/usr/bin/gh\n' }
+        if (bin === '/usr/bin/gh') return { stdout: PR_ROW }
+        return { stdout: argv[0] === 'branch' ? 'feat/x\n' : 'git@github.com:o/r.git\n' }
+      } },
+      'no open PR': { exec: async (bin, argv) => {
+        if (bin === 'which') return { stdout: '/usr/bin/gh\n' }
+        if (bin === '/usr/bin/gh') return { stdout: '[]' }
+        return { stdout: argv[0] === 'branch' ? 'feat/x\n' : 'git@github.com:o/r.git\n' }
+      } },
+    }
+    let sawPr = false, sawReason = false
+    for (const [label, { cwd = '/repo', exec }] of Object.entries(paths)) {
+      const real = await surveySessionPrStatus({ sessionId: 's1', cwd, _execFile: exec })
+      assert.equal(isSurveySnapshot(real), true, `rejected a REAL snapshot from the '${label}' path`)
+      if (real.pr) sawPr = true
+      if (real.reason) sawReason = true
+    }
+    // POSITIVE CONTROL: the table above really did reach both a populated-PR
+    // path and a degraded one, rather than seven variations of the same early
+    // return that would make the assertion above nearly free.
+    assert.ok(sawPr, 'the table must reach a path that returns an actual PR')
+    assert.ok(sawReason, 'the table must reach a degraded path')
+  })
+
+  it('accepts the local fixtures too, which is what the rest of this file uses', () => {
     for (const s of [pending(), green(), red(), noRun(), unrecognised(), noPr(), degraded()]) {
-      assert.equal(isSurveySnapshot(s), true, `rejected a real snapshot: ${JSON.stringify(s).slice(0, 80)}`)
+      assert.equal(isSurveySnapshot(s), true, `rejected a fixture: ${JSON.stringify(s).slice(0, 80)}`)
     }
   })
 
