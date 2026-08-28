@@ -16,7 +16,7 @@ import { validateConfig } from '../src/config.js'
 describe('config.sessionCi (#7424)', () => {
   it('accepts a well-formed block, and an empty one', () => {
     for (const sessionCi of [
-      { watch: true, wakeAgent: false, intervalMs: 30_000, discoveryIntervalMs: 600_000 },
+      { watch: true, wakeAgent: false, intervalMs: 30_000, discoveryIntervalMs: 600_000, maxSurveysPerTick: 8 },
       { watch: false },
       {},
     ]) {
@@ -41,7 +41,7 @@ describe('config.sessionCi (#7424)', () => {
     })
   }
 
-  for (const key of ['intervalMs', 'discoveryIntervalMs']) {
+  for (const key of ['intervalMs', 'discoveryIntervalMs', 'maxSurveysPerTick']) {
     it(`warns on a non-positive or non-numeric ${key}`, () => {
       // 0 and negatives matter specifically: the sweep spawns git + gh, so an
       // interval of 0 is a subprocess spin, not a "run often" setting.
