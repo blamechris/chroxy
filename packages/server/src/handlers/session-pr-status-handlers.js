@@ -60,6 +60,7 @@
  * back-reference. See docs/security/bearer-token-authority.md §4.
  */
 import { surveySessionPrStatus } from '../session-pr-status.js'
+import { createSurveyThrottle } from './survey-throttle.js'
 import { createLogger } from '../logger.js'
 import { getErrorMessage } from '../utils/error-message.js'
 
@@ -109,25 +110,13 @@ export const RATE_LIMITED_REASON = 'pull-request status was surveyed moments ago
 export const SURVEY_MIN_INTERVAL_MS = 5_000
 
 /**
- * WeakMap<sessionManager, Map<sessionId, { at, snapshot }>>.
- *
- * `at` is when the last admitted survey STARTED (the throttle window's edge);
- * `snapshot` is the last COMPLETED reading, kept so a throttled request can be
- * answered by replay rather than degraded (#7445 review). Keyed on the session
- * MANAGER: in production that is the daemon-lifetime singleton, so records
- * survive the per-message shallow ctx copies; in tests every `makeCtx()`
- * builds a fresh mock manager, so isolation comes free. A destroyed session's
- * record lingers until the manager itself is collected — one small record per
- * ever-surveyed session id (pruning on session_destroyed is #7450).
+ * This handler's own throttle instance, keyed on the session MANAGER and then
+ * the session id. The window semantics, the replay-don't-degrade refusal shape
+ * and the compare-and-restore rollback all live in `survey-throttle.js` — the
+ * threads handler (#7430) opens its own instance of the same gate rather than
+ * carrying a second copy of that logic.
  */
-const surveyStamps = new WeakMap()
-
-/** The per-session stamp map for this daemon's manager. */
-function stampsFor(manager) {
-  let m = surveyStamps.get(manager)
-  if (!m) { m = new Map(); surveyStamps.set(manager, m) }
-  return m
-}
+const surveyThrottle = createSurveyThrottle()
 
 /**
  * One survey per (client, session) at a time. `gh` + git spawn subprocesses, so
@@ -219,7 +208,6 @@ export async function handleSessionPrStatusRequest(ws, client, msg, ctx) {
   // must not extend the window. `entry` resolved through this same manager
   // above, so it exists; the optional chain mirrors the lookup's.
   const manager = ctx.sessions?.sessionManager
-  const stamps = stampsFor(manager)
   const nowMs = typeof ctx._nowMs === 'function' ? ctx._nowMs() : Date.now()
   const sendSnapshot = (snap) => {
     // #7435: `indeterminate` is server-side state for the CI watcher, not a
@@ -228,20 +216,16 @@ export async function handleSessionPrStatusRequest(ws, client, msg, ctx) {
     const { indeterminate: _serverOnly, ...wireSnapshot } = snap
     ctx.transport.send(ws, { type: 'session_pr_status', requestId, ...wireSnapshot })
   }
-  const prior = stamps.get(targetSessionId)
-  if (prior && nowMs - prior.at < SURVEY_MIN_INTERVAL_MS) {
+  const gate = surveyThrottle.open(manager, targetSessionId, nowMs, SURVEY_MIN_INTERVAL_MS)
+  if (!gate.admitted) {
     // Same display posture as #7422: never downgrade a usable answer. The
     // cached reading goes out under THIS request's id, with its original
     // generatedAt — honest about when it was taken. Only before the first
     // completed reading is there nothing to replay.
-    if (prior.snapshot) sendSnapshot(prior.snapshot)
+    if (gate.cached) sendSnapshot(gate.cached)
     else ctx.transport.send(ws, degraded({ requestId, sessionId: targetSessionId, reason: RATE_LIMITED_REASON }))
     return
   }
-  // Carry the previous cache forward so a request that lands while THIS
-  // survey is in flight still replays the last completed reading.
-  const record = { at: nowMs, snapshot: prior?.snapshot ?? null }
-  stamps.set(targetSessionId, record)
 
   // Tests can inject `ctx.surveySessionPrStatus` to stub the survey, matching the
   // `ctx.surveyRepos` seam the Control Room handlers use — so a handler test
@@ -251,7 +235,7 @@ export async function handleSessionPrStatusRequest(ws, client, msg, ctx) {
   markInFlight(client, targetSessionId)
   try {
     const snapshot = await surveyFn({ sessionId: targetSessionId, cwd: entry.cwd })
-    record.snapshot = snapshot
+    gate.commit(snapshot)
     sendSnapshot(snapshot)
     // #7427: arm the CI watcher off the reading we just paid for. Absent
     // whenever `sessionCi.watch` is off, and in ctx mocks that do not wire it.
@@ -267,10 +251,7 @@ export async function handleSessionPrStatusRequest(ws, client, msg, ctx) {
     // inFlight is per-CLIENT, so client A's slow survey and client B's later
     // admitted one CAN overlap, and an unconditional delete here would destroy
     // B's newer stamp and cache when A fails late (#7445 review, reproduced).
-    if (stamps.get(targetSessionId) === record) {
-      if (prior) stamps.set(targetSessionId, prior)
-      else stamps.delete(targetSessionId)
-    }
+    gate.rollback()
     // surveySessionPrStatus degrades environmental failures itself, so reaching
     // here means a genuine defect — log it, and still answer.
     const message = getErrorMessage(err, 'unknown error')
