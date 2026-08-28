@@ -66,11 +66,21 @@
  *   - ALIASING. `const c = _ctx; c.field` is invisible unless `c` is listed in
  *     the target's `receivers`. So are `Object.assign(_ctx, {...})`, a spread
  *     copy, a bracket access `_ctx['field']`, and the closure-capture shape
- *     described above. All of these read as ZERO references, i.e. a warning.
+ *     described above. A FULLY aliased field reads as ZERO references — a
+ *     warning; a field with mixed direct and aliased references keeps its
+ *     direct classification, which can land in the failure bucket (#7464 N1) —
+ *     the safe-direction claim holds only for the all-aliased case.
  *   - DESTRUCTURING. `const { field } = _ctx` is a read the classifier does not
  *     count. If a field's ONLY reader destructures, it reads as write-only and
  *     fails — a false positive, resolved by an allowlist entry naming the
- *     destructure site.
+ *     destructure site. The WRITE direction is the unsafe mirror (#7464 S2):
+ *     `({ f: _ctx.field } = o)` and `[_ctx.field] = arr` classify as READS, so
+ *     a field written only that way is invisibly rescued. No such write exists
+ *     in the tree; a real parser is the honest fix.
+ *   - SELF-REFERENTIAL RHS (#7464 S1). `_ctx.f = _ctx.f + 1` counts its own
+ *     right-hand side as a read, so a field consumed only by its own
+ *     read-modify-write never fails — partially negating the `++`-is-not-a-read
+ *     rule above. Zero such writes exist in the tree today.
  *   - STRINGS. Comments are stripped, so a commented-out reader cannot mask a
  *     write-only field — dead readers are routinely left commented out, which
  *     is the whole point. String and template-literal CONTENT is deliberately

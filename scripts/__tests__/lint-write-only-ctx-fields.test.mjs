@@ -38,7 +38,7 @@ const SCRIPT = resolve(HERE, '..', 'lint-write-only-ctx-fields.mjs')
 
 // Every case in this file. Bump it when you add one — a case that vanishes
 // should break the run rather than quietly shrink it (#7447).
-const MIN_CASES = 50
+const MIN_CASES = 53
 
 let pass = 0
 let fail = 0
