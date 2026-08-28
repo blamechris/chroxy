@@ -1215,6 +1215,14 @@ jobs:
         # (scripts/lib, packages/server/src/utils, sidecar/agent.js) — #7222.
         run: node scripts/__tests__/is-entry-point.test.mjs
 
+      - name: Run assert-test-count.mjs tests
+        # #7447 — `node --test` exits 0 on zero discovered tests, so a suite
+        # that stops being discovered and a passing suite are the same
+        # observable outcome. This pins the shared floor wrapper (hoisted from
+        # packages/server) that server, design-tokens and claude-hooks all
+        # front their test commands with — including its fail-closed --min.
+        run: node scripts/__tests__/assert-test-count.test.mjs
+
       - name: Run no-test-force-exit.mjs tests
         # #7400 — `--test-force-exit` made the runner report 154-192 of
         # base-session.test.js's 192 tests, exit 0, and print `# fail 0`. Both
