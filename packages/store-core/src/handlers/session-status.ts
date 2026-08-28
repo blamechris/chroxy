@@ -277,10 +277,9 @@ export interface SessionSwitchedPayload {
  * `set({activeSessionId: ...})` which the rest of the store can't recover
  * from) and tightens validation against malformed payloads.
  *
- * Both clients consume this handler today. Side effects (replay-dedup gating
- * via `_ctx.pendingSwitchSessionId` on the app, flat-field sync on the
- * dashboard, slash-command/agent refresh, sessionStates initialisation) stay
- * at the call site — they touch the WS socket and several side stores.
+ * Both clients consume this handler today. Side effects (flat-field sync on
+ * the dashboard, slash-command/agent refresh, sessionStates initialisation)
+ * stay at the call site — they touch the WS socket and several side stores.
  */
 export function handleSessionSwitched(
   msg: Record<string, unknown>,

@@ -64,7 +64,9 @@
  * derived from the COUNTS rather than from the state label, because reading the
  * label produces guards that mask one another (see `terminalVerdict`). A
  * snapshot carrying a `reason` is "could not determine" and changes nothing — it
- * never disarms and never fires.
+ * never disarms and never fires. A snapshot marked `indeterminate` (#7435 — a
+ * fork-widening lookup failed transiently, so `pr: null` was NOT established)
+ * gets the identical treatment.
  *
  * ## Bounded fan-out
  *
@@ -471,8 +473,12 @@ export class SessionCiWatcher {
     const st = this._stateFor(sessionId)
 
     // "Could not determine" changes nothing. Disarming here would mean a single
-    // `gh` hiccup silently cancels a watch the user is waiting on.
-    if (snapshot?.reason) return 'undeterminable'
+    // `gh` hiccup silently cancels a watch the user is waiting on. The
+    // `indeterminate` marker is the fork bail-outs saying the same thing while
+    // keeping the DISPLAY contract's quiet negative on the wire (#7435). Only
+    // `session-pr-status.js` sets it, always as a literal boolean — the strict
+    // `=== true` is deliberate, so nothing truthy-but-foreign widens the rule.
+    if (snapshot?.reason || snapshot?.indeterminate === true) return 'undeterminable'
 
     // No open PR (the quiet negative — merged, closed, or never opened). Nothing
     // left to report on, so drop any arm.

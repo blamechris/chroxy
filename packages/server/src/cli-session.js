@@ -433,6 +433,13 @@ export class CliSession extends BaseSession {
     // Single-use: set by interrupt(), cleared by _handleChildClose / destroy.
     // The flag itself is declared+initialized on BaseSession (#5375).
 
+    // #7438: latched by the intentional-stop branch of _handleChildClose when
+    // that stop leaves us with no child, and consumed by the next sendMessage
+    // (_restartAfterStop). It is what makes a stopped session restartable —
+    // see _restartAfterStop for why the restart is gated on this rather than
+    // on "the child is gone".
+    this._stoppedByUser = false
+
     // Hook manager (shared module)
     this._hookManager = (this._port) ? createPermissionHookManager(this, { settingsPath }) : null
 
@@ -478,6 +485,11 @@ export class CliSession extends BaseSession {
    * Start the persistent Claude process. Call once after construction.
    */
   start() {
+    // #7438: the session is running again by any route (first start, backoff
+    // respawn, model-switch respawn, restart-on-input), so the stop latch is
+    // spent. Cleared FIRST so a throw below cannot leave it armed.
+    this._stoppedByUser = false
+
     // Register permission hook before starting the process (only once, not on respawn)
     if (this._hookManager && this._respawnCount === 0) {
       this._hookManager.register()
@@ -643,10 +655,20 @@ export class CliSession extends BaseSession {
     log.info('Process started, ready for messages')
     this.emit('ready', { sessionId: null, model: this.model, tools: [] })
 
-    // Dequeue the next pending message if not already busy.
-    // sendMessage() sets _isBusy, so the loop sends at most one message.
-    // Remaining items stay in the queue and are drained one-by-one via
-    // _clearMessageState() after each result.
+    this._drainPendingQueue()
+  }
+
+  /**
+   * Warmup drain: dequeue the next pending message if not already busy.
+   * sendMessage() sets _isBusy, so the loop sends at most one message.
+   * Remaining items stay in the queue and are drained one-by-one via
+   * _clearMessageState() after each result.
+   *
+   * Called at the end of every _spawnPersistentProcess — i.e. this is what
+   * delivers a message queued while the process was down, whether it went down
+   * for a crash, a model switch, or a user Stop (#7438).
+   */
+  _drainPendingQueue() {
     while (this._pendingQueue.length > 0 && !this._isBusy) {
       const pending = this._pendingQueue.shift()
       // #4828: session-scoped when init has fired (dequeue can race with
@@ -726,6 +748,10 @@ export class CliSession extends BaseSession {
       // pre-init or during respawn — both can race with the binding).
       ;(this._log || log).info(`Process not ready, queuing message (queue depth: ${this._pendingQueue.length + 1})`)
       this._pendingQueue.push({ prompt, attachments, options })
+      // #7438: a user Stop leaves no child and no respawn, so without this the
+      // message just queued would sit there forever. Restart lazily, now that
+      // the user has asked for more work; the warmup drain delivers it.
+      this._restartAfterStop()
       return
     }
 
@@ -1976,6 +2002,12 @@ export class CliSession extends BaseSession {
     if (wasIntentionalStop) {
       // #4828: session-scoped if init had fired before the stop.
       ;(this._log || log).info(`Process exited (code ${code}) after user stop`)
+      // #7438: NOT a respawn — the user asked for this child to stop and it
+      // stays stopped. This only records that the session is stoppable-but-
+      // revivable, so the next sendMessage can bring it back (see
+      // _restartAfterStop). Stop halts the turn; it must not end the session's
+      // ability to answer the follow-up.
+      this._stoppedByUser = true
       this.emit('stopped', { code })
       return
     }
@@ -2079,6 +2111,61 @@ export class CliSession extends BaseSession {
     ;(this._log || log).info(`Process exited (code ${code}), scheduling respawn`)
     this.emit('error', { message: 'Claude process exited unexpectedly, restarting...' })
     this._scheduleRespawn()
+  }
+
+  /**
+   * #7438 — restart-on-next-input for a session the user Stopped.
+   *
+   * Stop (interrupt → SIGINT → child exits) deliberately does NOT respawn
+   * (#4602): respawning at stop time fights the thing the user just asked for.
+   * But nothing else restarted the child either, so the next sendMessage hit
+   * the `!_processReady` branch, pushed into `_pendingQueue` — and stranded
+   * there forever, because the queue only drains on a start() warmup or after a
+   * `result`, and with no child neither can ever fire. The follow-up was
+   * silently eaten and the 4th one discarded outright ("queue full"). Stop
+   * ended the conversation instead of interrupting a turn.
+   *
+   * So the respawn is lazy: it happens here, when the user actually asks for
+   * more work. start() passes `--resume this._sessionId`, so the new child
+   * re-attaches to the SAME claude conversation rather than starting cold, and
+   * its warmup drain delivers the queued message.
+   *
+   * Gated on `_stoppedByUser` rather than on the broader "there is no child",
+   * deliberately: every OTHER way to lose a child either already owns its own
+   * restart (a crash schedules a backoff respawn; a model switch runs
+   * _killAndRespawn) or is a considered terminal give-up — the respawn cap, the
+   * rate cap, `resume_unknown_exhausted`. Typing into one of those must not
+   * re-arm a flapping session behind the cap that just stopped it.
+   */
+  _restartAfterStop() {
+    if (!this._stoppedByUser) return
+    if (this._destroying) return
+    if (this._respawning) return
+    if (this._respawnScheduled) return
+    // A child already exists — whoever spawned it owns the warmup drain.
+    if (this._child) return
+
+    ;(this._log || log).info('Restarting the stopped claude process to deliver a new message')
+    // Consume the latch BEFORE starting, not inside start(): DockerSession
+    // overrides start() and defers super.start() behind an async container
+    // launch, so a second message arriving in that window would otherwise see
+    // `_stoppedByUser` still armed and no child yet, and start a SECOND
+    // container. Single-shot here makes the restart at-most-once regardless of
+    // what a subclass's start() does or how long it takes.
+    this._stoppedByUser = false
+    try {
+      this.start()
+    } catch (err) {
+      // Re-arm the latch: start() threw synchronously (spawn/arg failure) BEFORE
+      // any child or container launch, so nothing was started. Without this the
+      // latch stays consumed and the next sendMessage would only enqueue — never
+      // retry the restart — re-stranding the follow-up behind a start-time error
+      // (the exact #7438 failure mode). Re-arming lets the next user input retry;
+      // it is not a loop — a retry only happens on a fresh send.
+      this._stoppedByUser = true
+      ;(this._log || log).error(`Restart after stop failed: ${err.message}`)
+      this.emit('error', { message: `Failed to restart the stopped Claude process: ${err.message}` })
+    }
   }
 
   /** Interrupt the current message (send SIGINT to child process) */

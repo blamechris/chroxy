@@ -114,7 +114,6 @@ import {
   nextReconnectAttempt,
   pendingPairingId,
   setPendingPairingId,
-  setPendingSwitchSessionId,
   resetReplayFlags,
   clearPermissionSplits,
   clearTerminalWriteBatching,
@@ -2430,9 +2429,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
     if (sessionId === activeSessionId) return;
     if (haptic) hapticLight();
-
-    // Mark as user-initiated switch so session_switched handler uses session-switch dedup
-    if (serverNotify) setPendingSwitchSessionId(sessionId);
 
     // Optimistically switch active session + dismiss notifications for target session
     const filteredNotifications = get().sessionNotifications.filter(

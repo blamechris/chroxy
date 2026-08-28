@@ -221,7 +221,13 @@ export async function handleSessionPrStatusRequest(ws, client, msg, ctx) {
   const manager = ctx.sessions?.sessionManager
   const stamps = stampsFor(manager)
   const nowMs = typeof ctx._nowMs === 'function' ? ctx._nowMs() : Date.now()
-  const sendSnapshot = (snap) => ctx.transport.send(ws, { type: 'session_pr_status', requestId, ...snap })
+  const sendSnapshot = (snap) => {
+    // #7435: `indeterminate` is server-side state for the CI watcher, not a
+    // wire field — stripped from fresh replies AND cached replays alike (the
+    // cache keeps the RAW snapshot; observe() also receives it raw).
+    const { indeterminate: _serverOnly, ...wireSnapshot } = snap
+    ctx.transport.send(ws, { type: 'session_pr_status', requestId, ...wireSnapshot })
+  }
   const prior = stamps.get(targetSessionId)
   if (prior && nowMs - prior.at < SURVEY_MIN_INTERVAL_MS) {
     // Same display posture as #7422: never downgrade a usable answer. The

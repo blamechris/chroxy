@@ -48,6 +48,15 @@
  * `pr: null` with a `reason` means the survey could not find out. Those must
  * render differently; "cannot determine" must never read as an implied green.
  *
+ * `indeterminate: true` (#7435) is the third state, and it is SERVER-SIDE ONLY:
+ * a fork-widening lookup failed transiently, so absence was NOT established —
+ * but the display contract above is deliberately unchanged (still the quiet
+ * negative on the wire; a best-effort widening of an already-empty result must
+ * not downgrade a usable partial answer). The one consumer that must not read
+ * it as a fact is the CI watcher, whose `_reconcile` drops an armed watch on
+ * `pr: null` — the marker gets the same "changes nothing" treatment there that
+ * `reason` already gets, and the WS handler strips it before the reply goes out.
+ *
  * Every external interaction is injectable so tests never touch real git/gh:
  *   - `_execFile(file, args, opts)` — async, resolves `{ stdout, stderr }`.
  *   - `_now()` — returns a `Date` (defaults to `new Date()`).
@@ -299,6 +308,8 @@ function baseSnapshot(sessionId, generatedAt) {
     checks: null,
     merge: null,
     reason: null,
+    // #7435: server-side only — stripped by the WS handler, never on the wire.
+    indeterminate: false,
   }
 }
 
@@ -339,32 +350,42 @@ async function resolveRepo(execFn, cwd) {
 }
 
 /**
- * Resolve the upstream this repo was forked from, or null when it is not a fork
- * (or the lookup fails — absence is signal, and the caller then reports the
- * quiet negative it already had).
+ * Resolve the upstream this repo was forked from.
  *
- * @returns {Promise<{owner: string, repo: string}|null>}
+ * The caller needs the AUTHORITATIVE and the TRANSIENT outcome kept apart
+ * (#7435): "gh answered, and this repo has no parent" licenses the quiet
+ * negative, while "the lookup itself failed" establishes nothing and must not.
+ *
+ * @returns {Promise<{parent: {owner: string, repo: string}|null}|{failed: true}>}
+ *   `{ parent }` when gh answered (`parent: null` = authoritatively not a
+ *   fork); `{ failed: true }` when the lookup failed or answered in a shape
+ *   that cannot be used (including a parent name that would be option-parsed —
+ *   the upstream exists but cannot be queried, which is still not absence).
+ *   The union is discriminated by key PRESENCE: `failed` exists only on the
+ *   failure member, `parent` only on the answered one.
  */
 async function resolveParentRepo(execFn, ghPath, target, cwd) {
   let stdout
   try {
     ;({ stdout } = await execFn(ghPath, ['repo', 'view', `${target.owner}/${target.repo}`, '--json', 'parent'], { ...EXEC_OPTS, cwd }))
   } catch {
-    return null
+    return { failed: true }
   }
   let parsed
   try {
     parsed = JSON.parse(String(stdout == null ? '' : stdout))
   } catch {
-    return null
+    return { failed: true }
   }
+  if (!parsed || typeof parsed !== 'object' || !('parent' in parsed)) return { failed: true }
+  if (parsed.parent === null) return { parent: null }
   const owner = parsed?.parent?.owner?.login
   const repo = parsed?.parent?.name
-  if (typeof owner !== 'string' || typeof repo !== 'string') return null
+  if (typeof owner !== 'string' || typeof repo !== 'string') return { failed: true }
   // These come from GitHub's own JSON rather than a client, but they go straight
   // into an option-parsed `-R` slot, so they are checked like any other argv datum.
-  if (!isSafeArgvValue(owner) || !isSafeArgvValue(repo)) return null
-  return { owner, repo }
+  if (!isSafeArgvValue(owner) || !isSafeArgvValue(repo)) return { failed: true }
+  return { parent: { owner, repo } }
 }
 
 /** Probe the PATH for `gh`. Any failure resolves null (the survey then degrades). */
@@ -477,8 +498,18 @@ export async function surveySessionPrStatus({ sessionId, cwd, _execFile = execFi
   // Only a fork pays these two extra calls; the common same-repo case still
   // makes exactly one.
   if (rows.length === 0) {
-    const parent = await resolveParentRepo(_execFile, ghPath, target, cwd)
-    if (!parent) return snapshot
+    const parentResult = await resolveParentRepo(_execFile, ghPath, target, cwd)
+    // A FAILED lookup did not establish absence. The wire fields stay the quiet
+    // negative (the display posture: a best-effort widening of an already-empty
+    // result must not downgrade a usable answer to "cannot determine"), but the
+    // server-side marker keeps the CI watcher from reading it as a fact (#7435).
+    if (parentResult.failed) {
+      snapshot.indeterminate = true
+      return snapshot
+    }
+    // gh answered: not a fork, so the empty origin result IS the quiet negative.
+    if (!parentResult.parent) return snapshot
+    const parent = parentResult.parent
 
     let parentRows
     try {
@@ -492,18 +523,26 @@ export async function surveySessionPrStatus({ sessionId, cwd, _execFile = execFi
       ], { ...EXEC_OPTS, cwd })
       parentRows = JSON.parse(String(parentOut == null ? '' : parentOut))
     } catch {
-      // The fork lookup is a best-effort widening of an already-empty result, so
-      // a failure here falls back to the quiet negative rather than downgrading
-      // a usable answer to "cannot determine".
+      snapshot.indeterminate = true
       return snapshot
     }
-    if (!Array.isArray(parentRows)) return snapshot
+    if (!Array.isArray(parentRows)) {
+      snapshot.indeterminate = true
+      return snapshot
+    }
 
     const mine = parentRows.find(row => row?.headRepositoryOwner?.login === target.owner)
+    // The upstream answered and no open PR has our fork as its head: this is the
+    // authoritative quiet negative, exactly like an answered-empty origin list.
     if (!mine) return snapshot
 
     const forkNormalised = normalisePrRow(mine)
-    if (!forkNormalised) return snapshot
+    // Our row exists but is unusable — the same condition the same-repo path
+    // reports as a reason. Absence was not established either way (#7435).
+    if (!forkNormalised) {
+      snapshot.indeterminate = true
+      return snapshot
+    }
     // `repo` names the repo the PR actually lives on, which is what the user
     // needs in order to find it — for a fork that is the base, not `origin`.
     return { ...snapshot, repo: { owner: parent.owner, name: parent.repo }, ...forkNormalised }

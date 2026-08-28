@@ -4048,9 +4048,9 @@ describe('dashboard message-handler dispatch', () => {
     }
 
     // Regression: on plain reconnect replay (not a session switch), the
-    // dashboard's `tool_start` handler had a blanket
-    // `_receivingHistoryReplay && !_isSessionSwitchReplay && get().messages.length > 0`
-    // early return that fired against the legacy flat `messages` array — but
+    // dashboard's `tool_start` handler had a blanket early return (receiving a
+    // history replay that is not a session-switch one, with `messages`
+    // non-empty) that fired against the legacy flat `messages` array — but
     // multi-session state keeps that array empty, so the guard never tripped
     // and replayed tool_use entries appended on top of the live copies. The
     // per-id dedup at the same handler now runs on every replay path.

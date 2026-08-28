@@ -73,6 +73,9 @@ const noRun = (o = {}) => snapshot({ ...o, checks: { state: 'none', counts: coun
 const unrecognised = (o = {}) => snapshot({ ...o, checks: { state: 'unknown', counts: counts({ total: 2, passed: 1, unknown: 1 }) } })
 const degraded = (o = {}) => snapshot({ ...o, checks: null, pr: null, reason: 'gh CLI not found on PATH' })
 const noPr = (o = {}) => snapshot({ ...o, checks: null, pr: null })
+// The fork bail-outs' server-side marker (#7435): pr null AND reason null (the
+// display contract, unchanged) but NOT evidence of absence.
+const indeterminate = (o = {}) => ({ ...noPr(o), indeterminate: true })
 
 /** A ClaudeTuiSession stand-in — the wake gate keys off the CLASS marker. */
 function tuiSession({ isRunning = false } = {}) {
@@ -330,6 +333,19 @@ describe('SessionCiWatcher — the completion transition', () => {
     assert.equal(events.length, 1)
   })
 
+  it('keeps the arm through an INDETERMINATE reading — a fork bail-out is not "no PR" (#7435)', async () => {
+    // The fork-widening bail-outs report pr:null with reason:null (the display
+    // contract) plus `indeterminate: true`: a transient `gh` failure on the
+    // upstream lookup is not evidence in either direction, so it gets exactly
+    // the treatment a `reason` already gets.
+    const h = harness({ queue: [pending(), indeterminate(), green()] })
+    await h.watcher.tick()
+    await h.watcher.tick()
+    assert.deepEqual(h.events, [], 'an indeterminate reading is not a completion')
+    await h.watcher.tick()
+    assert.equal(h.events.length, 1, 'the arm survived the indeterminate reading')
+  })
+
   it('drops the arm when the PR goes away', async () => {
     const h = harness({ queue: [pending(), noPr(), green()] })
     await h.watcher.tick()
@@ -500,6 +516,14 @@ describe('SessionCiWatcher — observe(): the dashboard arming path (#7427)', ()
     assert.equal(h.watcher.observe('s1', degraded()), 'undeterminable')
     await h.watcher.tick()
     assert.equal(h.events.length, 1, 'a `gh` hiccup must not cancel a watch the user is waiting on')
+  })
+
+  it('keeps the arm through an indeterminate dashboard reading (#7435)', async () => {
+    const h = harness({ queue: [green()] })
+    h.watcher.observe('s1', pending())
+    assert.equal(h.watcher.observe('s1', indeterminate()), 'undeterminable')
+    await h.watcher.tick()
+    assert.equal(h.events.length, 1, 'a transient fork bail-out must not cancel the watch')
   })
 
   it('refuses a malformed observation instead of reading it as "no open PR"', async () => {
@@ -917,22 +941,39 @@ describe('isSurveySnapshot', () => {
       } },
       'no open PR': { exec: async (bin, argv) => {
         if (bin === 'which') return { stdout: '/usr/bin/gh\n' }
+        // The fork lookup gets its OWN answer: a blanket '[]' here also fed
+        // `gh repo view --json parent`, which #7435's `!('parent' in parsed)`
+        // arm reads as a FAILED lookup — quietly rerouting this entry away from
+        // the quiet negative it exists to cover (caught in review of #7440).
+        if (bin === '/usr/bin/gh' && argv[0] === 'repo') return { stdout: '{"parent":null}' }
+        if (bin === '/usr/bin/gh') return { stdout: '[]' }
+        return { stdout: argv[0] === 'branch' ? 'feat/x\n' : 'git@github.com:o/r.git\n' }
+      } },
+      'fork lookup failed': { exec: async (bin, argv) => {
+        // #7435's third state, from the REAL producer: pr:null + reason:null +
+        // indeterminate:true (upstream widening failed; absence not established).
+        if (bin === 'which') return { stdout: '/usr/bin/gh\n' }
+        if (bin === '/usr/bin/gh' && argv[0] === 'repo') return { stdout: '{}' }
         if (bin === '/usr/bin/gh') return { stdout: '[]' }
         return { stdout: argv[0] === 'branch' ? 'feat/x\n' : 'git@github.com:o/r.git\n' }
       } },
     }
-    let sawPr = false, sawReason = false
+    let sawPr = false, sawReason = false, sawQuietNegative = false, sawIndeterminate = false
     for (const [label, { cwd = '/repo', exec }] of Object.entries(paths)) {
       const real = await surveySessionPrStatus({ sessionId: 's1', cwd, _execFile: exec })
       assert.equal(isSurveySnapshot(real), true, `rejected a REAL snapshot from the '${label}' path`)
       if (real.pr) sawPr = true
       if (real.reason) sawReason = true
+      if (!real.pr && !real.reason && real.indeterminate !== true) sawQuietNegative = true
+      if (real.indeterminate === true) sawIndeterminate = true
     }
     // POSITIVE CONTROL: the table above really did reach both a populated-PR
     // path and a degraded one, rather than seven variations of the same early
     // return that would make the assertion above nearly free.
     assert.ok(sawPr, 'the table must reach a path that returns an actual PR')
     assert.ok(sawReason, 'the table must reach a degraded path')
+    assert.ok(sawQuietNegative, 'the table must reach the authoritative quiet negative — a new arm that reroutes it must fail here, not relabel it (#7435)')
+    assert.ok(sawIndeterminate, 'the table must reach an indeterminate fork bail-out (#7435)')
   })
 
   it('accepts the local fixtures too, which is what the rest of this file uses', () => {

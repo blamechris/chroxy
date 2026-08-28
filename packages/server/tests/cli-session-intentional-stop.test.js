@@ -18,6 +18,13 @@ import { CliSession } from '../src/cli-session.js'
  *   2. `interrupt()` sets `_intentionalStop = true` before sending SIGINT.
  *   3. `_handleChildClose` skips the error emit + respawn when the flag is
  *      set, emits a quiet `stopped` event, and clears the flag.
+ *      NB (#7438): "no respawn" here means no respawn AT STOP TIME — the user
+ *      asked for this child to stop and it stays stopped. It does not mean the
+ *      session is finished: the stop latches `_stoppedByUser`, and the NEXT
+ *      sendMessage restarts the child with `--resume <id>` so the follow-up is
+ *      answered on the same conversation. That half of the spec is pinned by
+ *      cli-session-restart-on-input.test.js; the two are complements, not
+ *      contradictions.
  *   4. A subsequent natural exit (flag already cleared) still triggers the
  *      original respawn-with-error path — regression guard.
  *   5. The existing `_respawning` skip path remains independent of the new
@@ -97,7 +104,7 @@ describe('_handleChildClose after intentional stop', () => {
 
     assert.equal(errorEvents.length, 0, 'no error emit on intentional stop')
     assert.equal(stoppedEvents.length, 1, 'should emit a single stopped event')
-    assert.equal(respawnScheduled, 0, 'no respawn on intentional stop')
+    assert.equal(respawnScheduled, 0, 'no respawn AT STOP TIME (#7438: the next input restarts it)')
     assert.equal(session._intentionalStop, false, 'flag must reset for next cycle')
     assert.equal(session._respawnTimer, null, 'no respawn timer left behind')
   })
