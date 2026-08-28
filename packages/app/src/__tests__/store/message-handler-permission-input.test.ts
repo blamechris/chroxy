@@ -71,7 +71,6 @@ function createMockContext() {
     connectionId: 'test-conn-1',
     reconnecting: false,
     connectedAt: Date.now(),
-    isSessionSwitchReplay: false,
     activeSessionIdAtConnect: null,
     replayingSessions: new Set<string>(),
   };
