@@ -28,7 +28,7 @@ test('navy palette + structural tokens are present with expected values', () => 
   assert.equal(vars['bg-primary'], '#0f0f1a') // navy preserved
   assert.equal(vars['accent-blue'], '#4a9eff')
   assert.equal(vars['text-chat'], '15px') // new chat reading size
-  assert.equal(vars['radius-md'], '999px') // RED-PROOF (#7408): temporary — reverted in the next commit
+  assert.equal(vars['radius-md'], '10px')
   assert.equal(vars['dur-base'], '200ms')
   assert.match(vars['ease-out'], /^cubic-bezier/)
 })
