@@ -505,6 +505,32 @@ test('CLI reports the classification stats it acted on', () => {
   assert(/1 field\(s\), 1 source file\(s\), 2 reference\(s\) classified/.test(r.stdout), r.stdout)
 })
 
+// --- #7464 review C1/S3: the classification windows and the quote lexer ----
+
+test('a comment-padded write still classifies as a WRITE (C1: the 8-byte window)', () => {
+  // Stripping a comment leaves blanks between the reference and `=`; the old
+  // 8-byte lookahead filed this as a READ, and one rescued write silences a
+  // whole write-only field (demonstrated on the real #7421 regression).
+  const stmt = '_ctx.n /* review on #7464, a padded write */ = 1;'
+  const { reads, writes } = classifyReferences(stripComments(stmt), 'n', RECEIVERS)
+  assert(writes.length === 1 && reads.length === 0, `padded write misclassified: ${reads.length}r ${writes.length}w`)
+})
+
+test('a comment-padded delete still classifies as a WRITE (C1: the lookbehind window)', () => {
+  const stmt = 'delete /* the mirror case */ _ctx.n;'
+  const { reads, writes } = classifyReferences(stripComments(stmt), 'n', RECEIVERS)
+  assert(writes.length === 1 && reads.length === 0, `padded delete misclassified: ${reads.length}r ${writes.length}w`)
+})
+
+test("a lone apostrophe in JSX prose cannot open a blind span (S3: quote spans stop at newline)", () => {
+  // Live shape from CreateSessionModal.tsx: `server's` has no closing quote on
+  // its line. The old lexer swallowed everything to the next apostrophe —
+  // including a following `// _ctx.n = 1` line the stripper should have blanked.
+  const src = "const label = <p>the server's daemon</p>;\n// _ctx.n = 1\n_ctx.n = 2;\n"
+  const { reads, writes } = classifyReferences(stripComments(src), 'n', RECEIVERS)
+  assert(writes.length === 1 && reads.length === 0, `blind span altered classification: ${reads.length}r ${writes.length}w`)
+})
+
 // ---------------------------------------------------------------------------
 
 for (const d of tmpDirs) rmSync(d, { recursive: true, force: true })

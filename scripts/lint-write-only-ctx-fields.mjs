@@ -209,6 +209,10 @@ export function stripComments(text) {
       while (j < text.length) {
         if (text[j] === '\\') { j += 2; continue }
         if (text[j] === c) { j++; break }
+        // Review on #7464 (S3): a raw '\'' or '"' span cannot cross a newline
+        // in JS/TS. Without this stop, a lone JSX apostrophe opened a blind
+        // span that swallowed following lines (live case: CreateSessionModal).
+        if (c !== '`' && text[j] === '\n') break
         j++
       }
       i = j
@@ -372,8 +376,13 @@ export function classifyReferences(strippedText, field, receivers) {
   let m
   while ((m = re.exec(strippedText)) !== null) {
     const end = m.index + m[0].length
-    const after = strippedText.slice(end, end + 8)
-    const before = strippedText.slice(Math.max(0, m.index - 12), m.index)
+    // Review on #7464 (C1): an 8-byte lookahead filed a write as a READ when
+    // a stripped comment padded the gap before `=` — and one rescued write
+    // silences a whole write-only field (demonstrated on the real #7421
+    // regression by adding one inline comment). 64 bytes covers any stripped
+    // span this repo produces; both windows are pinned by tests.
+    const after = strippedText.slice(end, end + 64)
+    const before = strippedText.slice(Math.max(0, m.index - 64), m.index)
     const isWrite =
       ASSIGN_AHEAD.test(after) ||
       INCDEC_AHEAD.test(after) ||
