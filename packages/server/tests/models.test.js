@@ -22,9 +22,9 @@ describe('FALLBACK_MODELS (default registry)', () => {
     }
   })
 
-  it('contains sonnet, opus, and haiku aliases', () => {
+  it('contains sonnet, opus, haiku, and fable aliases', () => {
     const ids = FALLBACK_MODELS.map(m => m.id).sort()
-    assert.deepEqual(ids, ['haiku', 'opus', 'sonnet']) // #6219 — fable removed
+    assert.deepEqual(ids, ['fable', 'haiku', 'opus', 'sonnet']) // #6219 revert — fable is GA again
   })
 
   it('each entry has id, label, fullId, and contextWindow', () => {
@@ -199,6 +199,11 @@ describe('updateModels', () => {
       updateModels([
         { value: 'claude-opus-4-8', displayName: 'Opus 4.8', description: '' },
       ])
+      // No 1M variant here should warn: opus-4-8[1m] has an explicit pricing
+      // entry with a longContext premium, and the merged fable fallback's
+      // claude-fable-5[1m] carries a flat longContext block too (#6219 revert),
+      // so the guard stays silent for BOTH. Assert zero drift warnings of any
+      // kind — the unscoped form is the stronger assertion.
       const drift = warnings.filter(w => w.includes('pricing-table drift'))
       assert.equal(drift.length, 0, `unexpected drift warning: ${JSON.stringify(warnings)}`)
     })
@@ -262,11 +267,11 @@ describe('updateModels', () => {
     assert.equal(result[1].fullId, 'claude-opus-4-6')
     assert.equal(result[1].contextWindow, 1_000_000)
 
-    // Fallback entries the SDK didn't list are appended (Opus 4.8, Haiku 4.5).
-    // #6219 — fable removed from the roster, so it is no longer merged.
+    // Fallback entries the SDK didn't list are appended (Opus 4.8, Fable, Haiku 4.5).
+    // #6219 revert — fable is GA again, so it IS merged like any other fallback.
     const fullIds = result.map(m => m.fullId)
     assert.ok(fullIds.includes('claude-opus-4-8'), 'opus 4.8 fallback should be merged in')
-    assert.ok(!fullIds.includes('claude-fable-5'), 'fable must not be merged (disallowed)')
+    assert.ok(fullIds.includes('claude-fable-5'), 'fable fallback should be merged in')
     assert.ok(fullIds.includes('claude-haiku-4-5'), 'haiku 4.5 fallback should be merged in')
 
     // 1M variants are synthesized for any 1M-context model that lacks one.
@@ -956,58 +961,75 @@ describe('isClaudeProvider — Claude-family provider allowlist', () => {
   })
 })
 
-// #6219 — Fable (claude-fable-5) is disallowed across ALL sources.
-describe('disallowed models (#6219)', () => {
+// #6219 revert — Fable (claude-fable-5)'s ban was lifted (GA, not disallowed).
+// DISALLOWED_MODEL_IDS is now frozen EMPTY; the plumbing (isDisallowedModelId +
+// its call sites + the #6232 dangling-default guard) is retained on purpose for
+// a future disallow — see the comment on DISALLOWED_MODEL_IDS in models.js. Since
+// the Set is frozen and empty, these tests can no longer inject a synthetic
+// banned id at runtime; they instead pin (a) the guard's precondition — nothing
+// is disallowed — and (b) the resulting revert behavior — fable flows through
+// every path unchanged, same as opus/haiku.
+describe('disallowed models (#6219 revert)', () => {
   beforeEach(() => resetModels())
   afterEach(() => resetModels())
 
-  it('isDisallowedModelId matches claude-fable-5 (and its [1m] variant), not allowed models', () => {
-    assert.ok(DISALLOWED_MODEL_IDS.has('claude-fable-5'))
-    assert.equal(isDisallowedModelId('claude-fable-5'), true)
-    assert.equal(isDisallowedModelId('claude-fable-5[1m]'), true)
-    // Dated SDK forms (claude-*-YYYYMMDD) and dated+[1m] also normalise + match.
-    assert.equal(isDisallowedModelId('claude-fable-5-20251201'), true)
-    assert.equal(isDisallowedModelId('claude-fable-5-20251201[1m]'), true)
+  it('DISALLOWED_MODEL_IDS is empty and frozen; isDisallowedModelId matches nothing', () => {
+    assert.ok(Object.isFrozen(DISALLOWED_MODEL_IDS))
+    assert.equal(DISALLOWED_MODEL_IDS.size, 0)
+    assert.equal(isDisallowedModelId('claude-fable-5'), false)
+    assert.equal(isDisallowedModelId('claude-fable-5[1m]'), false)
+    // Dated SDK forms (claude-*-YYYYMMDD) and dated+[1m] still normalise the
+    // same way — they just no longer resolve to a disallowed entry.
+    assert.equal(isDisallowedModelId('claude-fable-5-20251201'), false)
+    assert.equal(isDisallowedModelId('claude-fable-5-20251201[1m]'), false)
     assert.equal(isDisallowedModelId('claude-opus-4-8'), false)
     assert.equal(isDisallowedModelId('claude-opus-4-8-20251201'), false)
     assert.equal(isDisallowedModelId('claude-sonnet-4-6'), false)
-    // The bare short alias is NOT keyed (avoids clobbering unrelated overlay
-    // ids that merely use `fable` as a label) — only the real fullId is.
     assert.equal(isDisallowedModelId('fable'), false)
     assert.equal(isDisallowedModelId(undefined), false)
   })
 
-  it('fable is absent from FALLBACK_MODELS and the allowlist', () => {
-    assert.ok(!FALLBACK_MODELS.some((m) => m.fullId === 'claude-fable-5'))
-    assert.ok(!ALLOWED_MODEL_IDS.has('claude-fable-5'))
-    assert.ok(!ALLOWED_MODEL_IDS.has('fable'))
+  it('fable is present in FALLBACK_MODELS and the allowlist', () => {
+    assert.ok(FALLBACK_MODELS.some((m) => m.fullId === 'claude-fable-5'))
+    assert.ok(ALLOWED_MODEL_IDS.has('claude-fable-5'))
+    assert.ok(ALLOWED_MODEL_IDS.has('fable'))
   })
 
-  it('updateModels strips an SDK-returned claude-fable-5 (disallowed in SDK/TUI too)', () => {
+  it('updateModels no longer strips an SDK-returned claude-fable-5', () => {
     updateModels([
       { value: 'claude-sonnet-4-6', displayName: 'Default (Sonnet 4.6)', description: '' },
       { value: 'claude-fable-5', displayName: 'Fable 5', description: '' },
     ])
     const fullIds = getModels().map((m) => m.fullId)
-    assert.ok(!fullIds.includes('claude-fable-5'), 'SDK-returned fable must be filtered out')
-    assert.ok(!ALLOWED_MODEL_IDS.has('claude-fable-5'), 'fable must not enter the allowlist')
+    assert.ok(fullIds.includes('claude-fable-5'), 'SDK-returned fable is allowed again and must pass through')
+    assert.ok(ALLOWED_MODEL_IDS.has('claude-fable-5'), 'fable enters the allowlist')
     // A legitimate SDK model alongside it still lands.
     assert.ok(fullIds.includes('claude-sonnet-4-6'))
   })
 
-  it('does not leave defaultModelId pointing at a filtered-out disallowed model (#6232)', () => {
-    // SDK marks the disallowed model as "Default" — after filtering it out the
-    // default must re-resolve to a real model, never a dangling fable id.
+  it('the #6232 dangling-default guard is retained though currently unreachable (nothing gets filtered)', () => {
+    // #6232's original scenario (SDK marks the disallowed model "Default", it
+    // gets filtered by applyModels()'s disallow check, defaultModelId would
+    // otherwise dangle) can't be reproduced anymore: DISALLOWED_MODEL_IDS is
+    // frozen empty, so applyModels() never filters anything and the guard's
+    // "defaultPresent" branch is a no-op for every input today. What IS still
+    // true post-revert: marking fable "Default" resolves the registry's
+    // default TO fable — proving nothing strips it before defaultModelId is
+    // set (the guard's precondition — a disallowed default — never fires).
     updateModels([
       { value: 'claude-fable-5', displayName: 'Default (Fable 5)', description: '' },
       { value: 'claude-sonnet-4-6', displayName: 'Sonnet 4.6', description: '' },
     ])
     const def = getDefaultModelId()
     const fullIds = getModels().map((m) => m.fullId)
-    assert.ok(!fullIds.includes('claude-fable-5'), 'fable filtered out')
-    assert.notEqual(def, 'fable', 'default must not be the filtered-out disallowed short id')
-    assert.notEqual(def, 'claude-fable-5', 'default must not be the filtered-out disallowed fullId')
-    // The re-picked default resolves to a model that is actually in the list.
+    assert.ok(fullIds.includes('claude-fable-5'), 'fable is allowed again and stays in the list')
+    // The default resolves to a model that is actually in the list — and
+    // since nothing filtered fable out, that model IS fable (the one marked
+    // "Default"), not a re-picked stand-in.
     assert.ok(def != null && getModels().some((m) => m.id === def || m.fullId === def), 'default resolves to a present model')
+    // Default registry has no getModelMetadata() hook, so the SDK-derived id
+    // strips only the `claude-` prefix (like `opus-4-6` elsewhere) rather than
+    // using the fallback's static `fable` short alias.
+    assert.equal(def, 'fable-5', 'default resolves to the fable entry — the guard never fires because nothing is disallowed')
   })
 })

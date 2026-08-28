@@ -23,15 +23,17 @@ const log = createLogger('models')
 // drift-guard read the imported CLAUDE_PRICING_USD_PER_MTOK / resolvePricingKey.
 export { DEFAULT_CONTEXT_WINDOW, ONE_M_SUFFIX, resolveClaudeContextWindow, claudeDeriveId, FALLBACK_MODELS }
 
-// #6219 — fullIds chroxy disallows regardless of source: the CLI fallback (gone
-// already, removed from MODEL_METADATA), the Agent SDK's supportedModels() push,
-// the disk cache, AND a user models-overlay.json. Fable (claude-fable-5) is
-// currently the only one. Keyed on the FULL id (not the short `fable` alias) so
-// the precise disallowed model is dropped without false-positiving an unrelated
-// overlay/SDK entry that merely uses `fable` as a short label. The short alias
-// can't resurface anyway — it only ever resolved to claude-fable-5, now removed.
-// The `[1m]` variant is also matched. Exported for tests + future enforcement.
-export const DISALLOWED_MODEL_IDS = Object.freeze(new Set(['claude-fable-5']))
+// fullIds chroxy disallows regardless of source (the Agent SDK's supportedModels()
+// push, the disk cache, and a user models-overlay.json). Keyed on the FULL id (not a
+// short alias) so a precise model is dropped without false-positiving an overlay/SDK
+// entry that merely reuses the alias; the `[1m]` variant is matched too.
+//
+// The Set is EMPTY on purpose. #6219 banned claude-fable-5 as a preview; it is now GA
+// (fleet doctrine skill-templates#236 scopes it to HIGH-tier orchestration with a
+// spend ceiling — allowed, not banned), so it was removed from the ban. The plumbing
+// (isDisallowedModelId + its call sites + the #6232 dangling-default guard) is retained
+// for a future disallow — do NOT delete it as dead code.
+export const DISALLOWED_MODEL_IDS = Object.freeze(new Set())
 
 /**
  * True when a model id resolves to a disallowed fullId, normalising the same id

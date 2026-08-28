@@ -5,9 +5,10 @@
  * filter, and is keyboard-navigable (Esc/Tab via the shared Modal; Arrow keys to
  * move between options, Enter/click to select).
  *
- * Disallowed models (e.g. fable, #6219) are excluded upstream in the server
- * registry so they never reach `availableModels`; as a defensive forward-compat
- * hook this also renders any entry flagged `disabled` as a non-selectable row.
+ * Disallowed models (via `DISALLOWED_MODEL_IDS`) are excluded upstream in the
+ * server registry so they never reach `availableModels`; as a defensive
+ * forward-compat hook this also renders any entry flagged `disabled` as a
+ * non-selectable row.
  */
 import { useMemo, useState, useRef, useEffect, useCallback } from 'react'
 import { Modal } from './Modal'

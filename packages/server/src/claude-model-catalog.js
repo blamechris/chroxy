@@ -104,7 +104,7 @@ export function claudeDeriveId(fullId) {
 //     derived via resolveClaudeContextWindow(fullId), so the derivation is
 //     byte-identical to the prior CLAUDE_FALLBACK_MODELS literals.
 //   pricing — base Anthropic rates in USD per million tokens
-//     {input, output, cacheRead, cacheWrite}. ABSENT (e.g. fable, shipped
+//     {input, output, cacheRead, cacheWrite}. ABSENT (a model shipped
 //     without verified pricing) emits NO pricing key, so resolveModelPricing
 //     returns null — never $0 — for it.
 //   oneM — the `[1m]` long-context variant's rates, including the `longContext`
@@ -138,9 +138,29 @@ const MODEL_METADATA = Object.freeze([
       },
     },
   }),
-  // #6219 — Fable (claude-fable-5) is disallowed for chroxy and removed from the
-  // roster. It is also filtered out of any SDK-returned list (DISALLOWED_MODEL_IDS
-  // in models.js) so it can't reappear in SDK/TUI modes, not just the CLI fallback.
+  // Fable (claude-fable-5) — GA and selectable (re-enabled after #6219, which
+  // banned it as a preview). 1M context (set explicitly; the fullId does not
+  // match the opus-version heuristic, which would wrongly default it to 200k).
+  // Rates: Anthropic API reference ($10/$50 in/out); cache at the standard
+  // 0.1x read / 1.25x write. Fable bills FLAT — no >200K premium (unlike Opus
+  // 4.x) — but it IS a 1M model, so updateModels synthesizes a `claude-fable-5[1m]`
+  // chip. Ship an explicit `oneM` block whose `longContext` equals the base rates:
+  // it keeps [1m] cost correct AND carries the `longContext` key the #4106 drift
+  // guard (models.js) requires, so the guard does not falsely warn "bills may lie"
+  // for a model whose bills do not lie. If Anthropic ever adds a Fable >200K
+  // premium, raise the longContext rates here.
+  Object.freeze({
+    shortId: 'fable', label: 'Fable', fullId: 'claude-fable-5',
+    contextWindow: 1_000_000,
+    pricing: { input: 10.00, output: 50.00, cacheRead: 1.00, cacheWrite: 12.50 },
+    oneM: {
+      input: 10.00, output: 50.00, cacheRead: 1.00, cacheWrite: 12.50,
+      longContext: {
+        thresholdInputTokens: 200_000,
+        input: 10.00, output: 50.00, cacheRead: 1.00, cacheWrite: 12.50,
+      },
+    },
+  }),
   Object.freeze({
     shortId: 'haiku', label: 'Haiku', fullId: 'claude-haiku-4-5',
     pricing: { input: 1.00, output: 5.00, cacheRead: 0.10, cacheWrite: 1.25 },
