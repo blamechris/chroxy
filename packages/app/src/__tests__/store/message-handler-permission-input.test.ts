@@ -19,6 +19,7 @@ import {
   _testResetStore,
   setStore,
 } from '../../store/message-handler';
+import { createMockMessageHandlerContext } from '../../test-utils/mock-message-handler-context';
 import type { ConnectionState } from '../../store/types';
 
 // Mock persistence so the handler's imports resolve without touching disk.
@@ -63,19 +64,6 @@ function createMockStore(initialInputs: Record<string, unknown> = {}) {
   };
 }
 
-function createMockContext() {
-  return {
-    socket: { readyState: 1, send: jest.fn() } as any,
-    serverUrl: 'wss://test.example.com',
-    apiToken: 'test-token',
-    connectionId: 'test-conn-1',
-    reconnecting: false,
-    connectedAt: Date.now(),
-    activeSessionIdAtConnect: null,
-    replayingSessions: new Set<string>(),
-  };
-}
-
 beforeEach(() => {
   jest.clearAllMocks();
 });
@@ -92,7 +80,7 @@ describe('permission_input feeder (#6543 PR-4)', () => {
   it('stores a found:true permission_input keyed by requestId', () => {
     const { store, current } = createMockStore();
     setStore(store as any);
-    _testMessageHandler.setContext(createMockContext() as any);
+    _testMessageHandler.setContext(createMockMessageHandlerContext());
 
     _testMessageHandler.handle({
       type: 'permission_input',
@@ -112,7 +100,7 @@ describe('permission_input feeder (#6543 PR-4)', () => {
   it('stores a found:false permission_input (unavailable, carries error)', () => {
     const { store, current } = createMockStore();
     setStore(store as any);
-    _testMessageHandler.setContext(createMockContext() as any);
+    _testMessageHandler.setContext(createMockMessageHandlerContext());
 
     _testMessageHandler.handle({
       type: 'permission_input',
@@ -130,7 +118,7 @@ describe('permission_input feeder (#6543 PR-4)', () => {
   it('does not clobber a prior entry for a different requestId', () => {
     const { store, current } = createMockStore();
     setStore(store as any);
-    _testMessageHandler.setContext(createMockContext() as any);
+    _testMessageHandler.setContext(createMockMessageHandlerContext());
 
     _testMessageHandler.handle({
       type: 'permission_input',
@@ -157,7 +145,7 @@ describe('permission_input feeder (#6543 PR-4)', () => {
     const seeded = {};
     const { store, current } = createMockStore(seeded);
     setStore(store as any);
-    _testMessageHandler.setContext(createMockContext() as any);
+    _testMessageHandler.setContext(createMockMessageHandlerContext());
 
     expect(() =>
       _testMessageHandler.handle({ type: 'permission_input', requestId: 'r3' }),
@@ -174,7 +162,7 @@ describe('permission_input feeder (#6543 PR-4)', () => {
       keep: { type: 'permission_input', requestId: 'keep', found: true, tool: 'Edit', input: { file_path: '/y' } },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockContext() as any);
+    _testMessageHandler.setContext(createMockMessageHandlerContext());
 
     _testMessageHandler.handle({ type: 'permission_resolved', requestId: 'r1', decision: 'allow' });
 
@@ -188,7 +176,7 @@ describe('permission_input feeder (#6543 PR-4)', () => {
       rt: { type: 'permission_input', requestId: 'rt', found: true, tool: 'Write', input: {} },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockContext() as any);
+    _testMessageHandler.setContext(createMockMessageHandlerContext());
 
     _testMessageHandler.handle({ type: 'permission_expired', requestId: 're', message: 'expired' });
     _testMessageHandler.handle({ type: 'permission_timeout', requestId: 'rt', message: 'timed out' });
@@ -202,7 +190,7 @@ describe('permission_input feeder (#6543 PR-4)', () => {
       live: { type: 'permission_input', requestId: 'live', found: true, tool: 'Write', input: {} },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockContext() as any);
+    _testMessageHandler.setContext(createMockMessageHandlerContext());
 
     // Resolving a DIFFERENT request must not touch the still-live prompt's input.
     _testMessageHandler.handle({ type: 'permission_resolved', requestId: 'other', decision: 'allow' });
