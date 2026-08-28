@@ -1266,6 +1266,25 @@ jobs:
       - name: Run lint-no-nul-bytes golden test
         run: bash scripts/__tests__/lint-no-nul-bytes.test.sh
 
+      - name: Run lint-write-only-ctx-fields tests
+        run: node scripts/__tests__/lint-write-only-ctx-fields.test.mjs
+
+      - name: No write-only fields on the app's MessageHandlerContext
+        # #7452 — a field on the app store's `_ctx` that is written but never
+        # read compiles, type-checks and passes every test: writing to a field
+        # nobody reads is indistinguishable from working code, and
+        # `noUnusedLocals` does not reach interface members. It has happened
+        # twice in a row in the same file — #7421's `isSessionSwitchReplay`,
+        # then `pendingSwitchSessionId`, orphaned by the very PR removing the
+        # first and caught only by a review pass.
+        #
+        # It runs HERE, not in an App job, because it is a pure-node source scan
+        # with no dependencies: this job has setup-node and deliberately no
+        # `npm ci`, which is the same reason `compile-skill-targets --check`
+        # lives here. Exit 2 (cannot check) is a distinct, loud outcome from
+        # exit 0.
+        run: node scripts/lint-write-only-ctx-fields.mjs
+
       - name: Check compiled skill artifacts are in sync with .claude/commands
         # #7253 — .claude/commands/<name>.md is the neutral source, but
         # .claude/skills/<name>/SKILL.md is what Claude actually LOADS (the
