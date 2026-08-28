@@ -37,6 +37,13 @@ export interface SessionCiChipProps {
   loading?: boolean
   /** Re-request the snapshot. */
   onRefresh: () => void
+  /**
+   * Stage this snapshot as a status line in the composer (#7423). PREFILL ONLY —
+   * the user presses Enter. Omit it and the action is not offered; it is also
+   * withheld whenever there is no PR, because "no open PR" is not verified state
+   * worth handing an agent.
+   */
+  onPrefill?: () => void
 }
 
 /** Visual severity, which is NOT the same question as "is it settled". */
@@ -109,7 +116,7 @@ export function formatMergeState(merge: ServerSessionPrStatusMessage['merge']): 
   return `merge: ${status.toLowerCase()}`
 }
 
-export function SessionCiChip({ status, loading = false, onRefresh }: SessionCiChipProps) {
+export function SessionCiChip({ status, loading = false, onRefresh, onPrefill }: SessionCiChipProps) {
   const refresh = (
     <button
       type="button"
@@ -198,6 +205,21 @@ export function SessionCiChip({ status, loading = false, onRefresh }: SessionCiC
         <span className="session-ci-chip__merge" data-testid="session-ci-chip-merge">
           {mergeLabel}
         </span>
+      )}
+      {onPrefill && (
+        // Offered for EVERY state that has a PR — a failing or pending run is
+        // exactly what a user most wants to hand the agent, so this must not be
+        // gated on the tone.
+        <button
+          type="button"
+          className="session-ci-chip__prefill"
+          data-testid="session-ci-chip-prefill"
+          onClick={onPrefill}
+          aria-label="Insert this CI status into the message box"
+          title="Insert this CI status into the message box (does not send)"
+        >
+          {'↳'}
+        </button>
       )}
       {refresh}
     </span>

@@ -43,6 +43,7 @@ import { SessionBar, type SessionTabData, type SessionStatus } from './component
 import { formatTranscript } from './lib/transcript'
 import { extractRowSearchText } from './lib/transcriptSearch'
 import { runQueuedEdit } from './lib/edit-queued'
+import { runCiPrefill } from './lib/ci-prefill'
 import { inputBarBusyProps } from './lib/session-busy'
 import { ActivityIndicator, findInFlightToolUse } from './components/ActivityIndicator'
 import { CheckInChip } from './components/CheckInChip'
@@ -1596,6 +1597,11 @@ export function App() {
   // be added to `evictSessionComposerState()` so the `sessions[]`
   // reconciliation effect can clean it up on server-driven removal.
   const inputDraftsRef = useRef<Map<string, string>>(new Map())
+  // #7423 — the EXACT text the CI prefill last staged per session. Its only job
+  // is to let a second prefill click refresh a line the user has not touched;
+  // any edit makes the draft theirs and the action refuses again. Per-session,
+  // so it obeys the #3977 reconciliation invariant below.
+  const ciPrefillStagedRef = useRef<Map<string, string>>(new Map())
   const [inputDraftValue, setInputDraftValue] = useState('')
   const handleDraftChange = useCallback((text: string) => {
     setInputDraftValue(text)
@@ -1636,6 +1642,31 @@ export function App() {
     [sendCancelQueued, activeSessionId, addInfoNotification],
   )
 
+  // #7423 — stage the session's verified CI status as a composer line. The
+  // decision logic (format + draft-clobber guard) lives in `runCiPrefill`; this
+  // supplies the same effects `onEditQueued` does, and deliberately shares its
+  // refusal shape. It NEVER sends: the user presses Enter, which is the whole
+  // point — #7426 already tells the agent unprompted when it witnessed the run
+  // settle, and this is the path for every case it structurally cannot cover
+  // (a run it never saw pending, a non-claude-tui session, a busy session whose
+  // wake was dropped, or simply asking a second time).
+  const handlePrefillSessionPrStatus = useCallback(() => {
+    runCiPrefill(sessionPrStatus, {
+      getDraft: () =>
+        (activeSessionId ? inputDraftsRef.current.get(activeSessionId) : '') ?? '',
+      getLastStaged: () =>
+        (activeSessionId ? ciPrefillStagedRef.current.get(activeSessionId) : null) ?? null,
+      setDraft: (next) => {
+        setInputDraftValue(next)
+        if (activeSessionId) {
+          inputDraftsRef.current.set(activeSessionId, next)
+          ciPrefillStagedRef.current.set(activeSessionId, next)
+        }
+      },
+      notify: addInfoNotification,
+    })
+  }, [sessionPrStatus, activeSessionId, addInfoNotification])
+
   // Per-session collapsed-paste storage (#3797). Each composer paste that
   // crosses the size threshold is stashed by id; the textarea sees only
   // the marker. Mirrors the draft-text per-session storage so switching
@@ -1660,6 +1691,7 @@ export function App() {
     inputDraftsRef.current.delete(sessionId)
     pastedTextBlocksRef.current.delete(sessionId)
     pastedTextNextIdRef.current.delete(sessionId)
+    ciPrefillStagedRef.current.delete(sessionId)
   }
 
   // #3977: reconcile per-session composer refs against the live `sessions[]`
@@ -1693,6 +1725,11 @@ export function App() {
       if (!liveIds.has(id)) evictSessionComposerState(id)
     }
     for (const id of pastedTextNextIdRef.current.keys()) {
+      if (!liveIds.has(id)) evictSessionComposerState(id)
+    }
+    // #7423: sending clears the draft entry while this ref still holds the text
+    // that was sent, so it can outlive its draft and needs its own pass too.
+    for (const id of ciPrefillStagedRef.current.keys()) {
       if (!liveIds.has(id)) evictSessionComposerState(id)
     }
   }, [sessions])
@@ -2341,6 +2378,7 @@ export function App() {
         sessionPrStatus={sessionPrStatus}
         sessionPrStatusLoading={sessionPrStatusLoading}
         onRefreshSessionPrStatus={refreshSessionPrStatus}
+        onPrefillSessionPrStatus={handlePrefillSessionPrStatus}
       />
 
       {/* Sidebar */}
