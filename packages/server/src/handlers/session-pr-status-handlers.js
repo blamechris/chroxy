@@ -28,6 +28,21 @@
  * use the difference between "not authorised" and "not found" to probe which
  * session ids exist.
  *
+ * ## The reply also ARMS the CI watcher (#7427)
+ *
+ * `SessionCiWatcher` (#7426) fires only on a pending→settled transition it
+ * observed, and its own sweep only surveys an unarmed session every five
+ * minutes — so a run that starts and finishes between two of those passes was
+ * never noticed. This handler surveys the same thing on demand, at the moment
+ * someone is actually looking, so the snapshot is handed to `observe()` on the
+ * way out: opening the dashboard arms the watch.
+ *
+ * `observe()` arms and never fires, so nothing a client does can produce a
+ * completion event. Note the order and the isolation below — the reply goes out
+ * FIRST, and the hand-off is wrapped separately, because an exception raised
+ * after `send()` would fall into the survey's catch and emit a SECOND reply,
+ * breaking the one-reply-per-request property this whole handler is built on.
+ *
  * NOTE the binding check below duplicates the one in `handler-utils.js`'s
  * `resolveSession`. That is deliberate — `resolveSession` collapses "not
  * authorised" and "not found" into a single `null`, and this handler must keep
@@ -143,6 +158,13 @@ export async function handleSessionPrStatusRequest(ws, client, msg, ctx) {
   try {
     const snapshot = await surveyFn({ sessionId: targetSessionId, cwd: entry.cwd })
     ctx.transport.send(ws, { type: 'session_pr_status', requestId, ...snapshot })
+    // #7427: arm the CI watcher off the reading we just paid for. Absent
+    // whenever `sessionCi.watch` is off, and in ctx mocks that do not wire it.
+    try {
+      ctx.services?.sessionCiWatcher?.observe?.(targetSessionId, snapshot)
+    } catch (err) {
+      log.warn(`session_pr_status_request: ci-watch observe failed: ${getErrorMessage(err, 'unknown error')}`)
+    }
   } catch (err) {
     // surveySessionPrStatus degrades environmental failures itself, so reaching
     // here means a genuine defect — log it, and still answer.

@@ -575,7 +575,7 @@ function _isSecureRequest(req) {
  *   - A session operation failed in an expected, user-facing way → `session_error`
  */
 export class WsServer {
-  constructor({ port, apiToken, cliSession, sessionManager, defaultSessionId, authRequired = true, pushManager = null, maxPayload, noEncrypt, keyExchangeTimeoutMs, localhostBypass, tokenManager, pairingManager, serverIdentity = null, maxPendingConnections, backpressureThreshold, environmentManager, orchestrationManager = null, schedulerEngine = null, config = null, diagnosticsRateLimit = null, devicePreferences = null, pagesStore = null, pagesRateLimiter } = {}) {
+  constructor({ port, apiToken, cliSession, sessionManager, defaultSessionId, authRequired = true, pushManager = null, maxPayload, noEncrypt, keyExchangeTimeoutMs, localhostBypass, tokenManager, pairingManager, serverIdentity = null, maxPendingConnections, backpressureThreshold, environmentManager, orchestrationManager = null, schedulerEngine = null, sessionCiWatcher = null, config = null, diagnosticsRateLimit = null, devicePreferences = null, pagesStore = null, pagesRateLimiter } = {}) {
     this.port = port
     this.apiToken = apiToken
     this._tokenManager = tokenManager || null
@@ -941,6 +941,11 @@ export class WsServer {
         // default) — the handlers report that as "not armed" rather than hiding
         // it. Late-bound so it tracks the server instance.
         get schedulerEngine() { return self._schedulerEngine ?? null },
+        // #7427: the SessionCiWatcher. The `session_pr_status_request` handler
+        // feeds its survey snapshot to `observe()`, so opening the dashboard
+        // ARMS the watch rather than waiting on the sweep's five-minute
+        // discovery pass. Null when the watcher is off; the handler no-ops.
+        get sessionCiWatcher() { return self._sessionCiWatcher ?? null },
       },
       runtime: {
         get draining() { return self._draining },
@@ -1127,6 +1132,10 @@ export class WsServer {
     this._orchestrationManager = orchestrationManager || null
     // #6871: nullable by design — null whenever scheduled execution is disabled.
     this._schedulerEngine = schedulerEngine || null
+    // #7427: the CI watcher, so the on-demand PR-survey handler can arm it.
+    // Null when `sessionCi.watch` is off. The WsServer only hands it to
+    // handlers — it never starts, stops or ticks it (server-cli owns that).
+    this._sessionCiWatcher = sessionCiWatcher || null
     this.defaultSessionId = defaultSessionId || null
     this._checkpointManager = new CheckpointManager()
 

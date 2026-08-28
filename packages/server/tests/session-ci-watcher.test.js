@@ -346,6 +346,138 @@ describe('SessionCiWatcher — the completion transition', () => {
   })
 })
 
+describe('SessionCiWatcher — observe(): the dashboard arming path (#7427)', () => {
+  // The sweep surveys an UNARMED session only every `discoveryIntervalMs`
+  // (five minutes in production), so a run that starts and finishes between two
+  // of those passes was never seen pending and therefore never fired. The
+  // dashboard already surveys exactly this, on demand, whenever someone is
+  // looking — `observe()` folds that reading in.
+  //
+  // The contract under test throughout: observe() ARMS and NEVER FIRES.
+
+  it('arms from a dashboard survey alone, so the next sweep fires a run no sweep ever saw pending', async () => {
+    const h = harness({ queue: [green()] })
+    // The ONLY pending reading this watcher ever receives is the handler's.
+    assert.equal(h.watcher.observe('s1', pending()), 'armed')
+    assert.equal(h.events.length, 0, 'observe() must not fire on its own')
+    await h.watcher.tick()
+    assert.equal(h.events.length, 1, 'the sweep closes the transition the dashboard armed')
+    assert.equal(h.events[0].verdict, 'success')
+    assert.equal(h.surveyed.length, 1, 'and it took exactly one sweep survey to do it')
+  })
+
+  it('fires nothing for a settled PR the dashboard is the FIRST to see', async () => {
+    // The honest negative from #7424, restated for this path: an observation is
+    // not evidence that anything completed. Nothing armed it, so nothing fires —
+    // now, or on any later sweep.
+    const h = harness({ queue: [green()] })
+    assert.equal(h.watcher.observe('s1', green()), 'settled')
+    assert.equal(h.events.length, 0)
+    await h.watcher.tick()
+    await h.watcher.tick()
+    assert.equal(h.events.length, 0, 'a run nobody watched start cannot complete')
+  })
+
+  it('leaves the arm INTACT when the dashboard is the one that sees it settle', async () => {
+    // The load-bearing case. Consuming the arm here without firing would be
+    // strictly worse than either alternative: the sweep's own settled reading
+    // would then find nothing armed and the completion would be lost outright.
+    const h = harness({ queue: [green()] })
+    assert.equal(h.watcher.observe('s1', pending()), 'armed')
+    assert.equal(h.watcher.observe('s1', green()), 'settled')
+    assert.equal(h.events.length, 0, 'a client-triggered survey must never fire an event')
+    await h.watcher.tick()
+    assert.equal(h.events.length, 1, 'the arm survived for the sweep to close')
+  })
+
+  it('arms idempotently, so two dashboards on one session still produce ONE event', async () => {
+    const h = harness({ queue: [green()] })
+    // Two clients, plus a rate-limited auto-pull, all surveying the same
+    // (number, headRefOid).
+    for (let i = 0; i < 5; i++) assert.equal(h.watcher.observe('s1', pending()), 'armed')
+    await h.watcher.tick()
+    await h.watcher.tick()
+    assert.equal(h.events.length, 1)
+  })
+
+  it('keeps the arm through a dashboard reading that could not determine the state', async () => {
+    const h = harness({ queue: [green()] })
+    h.watcher.observe('s1', pending())
+    assert.equal(h.watcher.observe('s1', degraded()), 'undeterminable')
+    await h.watcher.tick()
+    assert.equal(h.events.length, 1, 'a `gh` hiccup must not cancel a watch the user is waiting on')
+  })
+
+  it('refuses a malformed observation instead of reading it as "no open PR"', async () => {
+    // `_reconcile` treats a MISSING `pr` as the quiet negative and DROPS the
+    // arm. Forwarding garbage there would let a caller cancel a watch by
+    // handing over nothing at all.
+    const h = harness({ queue: [green()] })
+    h.watcher.observe('s1', pending())
+    for (const bad of [null, undefined, 'nope', 42, true]) {
+      assert.equal(h.watcher.observe('s1', bad), 'ignored', `snapshot ${JSON.stringify(bad)} must be ignored`)
+    }
+    for (const bad of ['', null, undefined, 7]) {
+      assert.equal(h.watcher.observe(bad, pending()), 'ignored', `sessionId ${JSON.stringify(bad)} must be ignored`)
+    }
+    await h.watcher.tick()
+    assert.equal(h.events.length, 1, 'the arm survived every malformed observation')
+  })
+
+  it('POSITIVE CONTROL: a REAL "no open PR" reading does drop the arm', async () => {
+    // Without this, the test above passes for the wrong reason — it would be
+    // satisfied by an observe() that could never drop an arm at all.
+    const h = harness({ queue: [green()] })
+    h.watcher.observe('s1', pending())
+    assert.equal(h.watcher.observe('s1', noPr()), 'no-pr')
+    await h.watcher.tick()
+    assert.equal(h.events.length, 0, 'the PR went away — there is nothing left to report on')
+  })
+
+  it('defers the sweep\'s own discovery survey, so the two paths do not spawn `gh` twice in a row', async () => {
+    const h = harness({ queue: [noRun()], discoveryIntervalMs: 60_000 })
+    h.watcher.observe('s1', noRun())
+    await h.watcher.tick()
+    assert.equal(h.surveyed.length, 0, 'the dashboard just surveyed; the sweep must not immediately repeat it')
+    h.advance(60_000)
+    await h.watcher.tick()
+    assert.equal(h.surveyed.length, 1, 'and discovery resumes on schedule afterwards')
+  })
+
+  it('POSITIVE CONTROL: with no dashboard pull, that same first tick DOES survey', async () => {
+    // Otherwise the deferral above is indistinguishable from a tick that was
+    // never going to survey anything.
+    const h = harness({ queue: [noRun()], discoveryIntervalMs: 60_000 })
+    await h.watcher.tick()
+    assert.equal(h.surveyed.length, 1)
+  })
+
+  it('does NOT defer an armed session — those stay due every tick', async () => {
+    // The deferral applies to the discovery schedule only. An armed session is
+    // due on every tick whenever it was last surveyed, which is what keeps the
+    // close-the-transition latency at `tickIntervalMs` rather than at
+    // `discoveryIntervalMs`.
+    const h = harness({ queue: [green()], discoveryIntervalMs: 60_000 })
+    h.watcher.observe('s1', pending())
+    await h.watcher.tick()
+    assert.equal(h.surveyed.length, 1)
+    assert.equal(h.events.length, 1)
+  })
+
+  it('an observation for a session that has gone away cannot outlive it', async () => {
+    // `observe()` creates watch state on first sight, exactly as the sweep does.
+    // tick()'s prune is what bounds it — assert that still holds for state this
+    // path created, so a stream of observations cannot accumulate ids.
+    const h = harness({ queue: [green()], sessions: [] })
+    h.watcher.observe('ghost', pending())
+    await h.watcher.tick()
+    assert.equal(h.events.length, 0)
+    // Re-observing after the prune arms afresh rather than resurrecting a
+    // half-consumed state.
+    assert.equal(h.watcher.observe('ghost', pending()), 'armed')
+  })
+})
+
 describe('SessionCiWatcher — routing to both audiences', () => {
   it('types one line into an idle claude-tui session naming the PR and the verdict', async () => {
     const session = tuiSession()
@@ -900,6 +1032,34 @@ describe('buildSessionCiWatcher — the daemon wiring', () => {
     assert.ok(ctorAt > 0)
     const args = src.slice(ctorAt, ctorAt + 700)
     assert.ok(/\bsessionCiWatcher,/.test(args), 'the watcher must reach ServerOrchestrator so shutdown can stop it')
+  })
+
+  it('is handed to the WsServer, so a dashboard survey can reach observe() (#7427)', () => {
+    // The fourth wiring site, and the one with no runtime witness reachable
+    // from a unit test: everything downstream of it — the ctx roster, the
+    // typedef, ws-server's own getter, the handler's call — is covered by real
+    // tests, but nothing observes that server-cli actually PASSES the watcher
+    // it built. Delete this one argument and the daemon boots, every suite
+    // stays green, and the arming path is silently dead.
+    //
+    // Sliced to the constructor's own argument list — bounded by the call's
+    // closing `\n  })` — so an unrelated `sessionCiWatcher,` elsewhere in the
+    // 1500-line file cannot satisfy it. Asserted via `re.test` so a failure
+    // prints a message rather than the slice (#7340/#7401).
+    const src = readFileSync(new URL('../src/server-cli.js', import.meta.url), 'utf8')
+    const at = src.indexOf('wsServer = new WsServer({')
+    assert.ok(at > 0, 'server-cli.js must construct the WsServer')
+    const end = src.indexOf('\n  })', at)
+    assert.ok(end > at, 'the WsServer call must be terminated by its own closing brace')
+    const args = src.slice(at, end)
+
+    // POSITIVE CONTROL: the slice really is the ctor argument list — it carries
+    // a known sibling argument, and it CANNOT reach the build site above it, so
+    // `buildSessionCiWatcher(...)` on its own could not satisfy the assertion.
+    assert.ok(/\bschedulerEngine,/.test(args), 'the slice must be the WsServer argument list')
+    assert.ok(!/buildSessionCiWatcher/.test(args), 'the slice must not reach the construction site')
+
+    assert.ok(/\bsessionCiWatcher,/.test(args), 'the watcher must be passed to the WsServer')
   })
 
   it('maps an event to its push shape without a PushManager', () => {

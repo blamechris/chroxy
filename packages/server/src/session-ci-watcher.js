@@ -34,6 +34,21 @@
  * interval, which is silently missed. That is why `tickIntervalMs` is minutes
  * shorter than any real CI run rather than a "cheap" hourly sweep.
  *
+ * ## Two arming paths, one firing path (#7427)
+ *
+ * The sweep is not the only thing that surveys a session. The dashboard asks
+ * the same question on demand through `session_pr_status_request` (#7422), and
+ * it pulls on a rate-limited timer while a human is looking at the chip. That
+ * reply is a `surveySessionPrStatus` snapshot in exactly the shape `_reconcile`
+ * folds in, so `observe()` accepts it — and OPENING THE DASHBOARD ARMS THE
+ * WATCH. The unarmed-session discovery interval (five minutes) then stops being
+ * the thing that decides whether a fast run is noticed at all.
+ *
+ * `observe()` arms and NEVER fires; see its own doc for why consuming the arm
+ * there would be strictly worse than leaving it. Firing stays the sweep's
+ * decision alone, so no client action can replay a completion the user already
+ * received.
+ *
  * ## What "settled" means
  *
  * `counts.pending === 0` — NOT "the rollup's state says success", which hides a
@@ -386,19 +401,27 @@ export class SessionCiWatcher {
    *
    * @param {string} sessionId
    * @param {object} snapshot
+   * @param {{fire?: boolean}} [options] - `fire: false` (the `observe()` path)
+   *   arms exactly as the sweep does but stops short of consuming an arm or
+   *   emitting an event. See `observe()`.
+   * @returns {'undeterminable'|'no-pr'|'armed'|'not-settled'|'settled'|'fired'}
+   *   what this snapshot was taken to mean — `'not-settled'` being a run that is
+   *   not terminal and armed nothing (no run yet for this head SHA, or a pending
+   *   one carrying no SHA to key an arm on). Returned rather than logged so both
+   *   paths are assertable without reaching into private state.
    */
-  _reconcile(sessionId, snapshot) {
+  _reconcile(sessionId, snapshot, { fire = true } = {}) {
     const st = this._stateFor(sessionId)
 
     // "Could not determine" changes nothing. Disarming here would mean a single
     // `gh` hiccup silently cancels a watch the user is waiting on.
-    if (snapshot?.reason) return
+    if (snapshot?.reason) return 'undeterminable'
 
     // No open PR (the quiet negative — merged, closed, or never opened). Nothing
     // left to report on, so drop any arm.
     if (!snapshot?.pr) {
       st.armed = null
-      return
+      return 'no-pr'
     }
 
     const number = snapshot.pr.number
@@ -417,18 +440,68 @@ export class SessionCiWatcher {
       // a stale arm can only ever close against the very run it was set for.
       if (snapshot.checks?.counts?.pending > 0 && typeof headRefOid === 'string' && headRefOid.length > 0) {
         st.armed = { number, headRefOid }
+        return 'armed'
       }
-      return
+      return 'not-settled'
     }
+
+    // A settled reading the watcher did not survey itself stops HERE, with the
+    // arm left INTACT for the sweep to close. Consuming it without firing would
+    // be the worst of the three options: the sweep's own settled reading would
+    // then find nothing armed and the completion would be lost outright.
+    if (!fire) return 'settled'
 
     const armed = st.armed
     // Settled. Consume the arm either way: whether or not it matched, the run it
     // referred to is no longer the one in flight.
     st.armed = null
-    if (!armed) return
-    if (armed.number !== number || armed.headRefOid !== headRefOid) return
+    if (!armed) return 'settled'
+    if (armed.number !== number || armed.headRefOid !== headRefOid) return 'settled'
 
     this._fire(sessionId, snapshot, verdict)
+    return 'fired'
+  }
+
+  /**
+   * Fold an EXTERNALLY produced snapshot into the watch state — the dashboard's
+   * on-demand survey, handed over by `handleSessionPrStatusRequest` (#7427).
+   *
+   * ARMS, NEVER FIRES, and the two reasons are worth keeping apart:
+   *
+   *   - it costs nothing to defer the firing. An ARMED session is due on EVERY
+   *     tick, so once this path arms, the sweep closes the transition within
+   *     `tickIntervalMs` — a minute — instead of within
+   *     `discoveryIntervalMs`. All of the value here is in the arm.
+   *   - the watcher stays the only thing that decides a completion HAPPENED. A
+   *     client-triggered path that could fire is one reconnect-and-refresh away
+   *     from replaying an event the user already received.
+   *
+   * Arming is idempotent on `(number, headRefOid)`, so two dashboards surveying
+   * the same session, or one dashboard's timer pulling repeatedly, produce one
+   * arm and therefore one event.
+   *
+   * There is deliberately NO `_stopped` guard. `observe()` cannot fire, so an
+   * observation landing mid-shutdown only writes to a Map nothing will read;
+   * `tick()` guards because reconciling THERE pushes a notification and types
+   * into a live session.
+   *
+   * @param {string} sessionId
+   * @param {object} snapshot - a `surveySessionPrStatus` result.
+   * @returns {'ignored'|'undeterminable'|'no-pr'|'armed'|'not-settled'|'settled'}
+   */
+  observe(sessionId, snapshot) {
+    if (typeof sessionId !== 'string' || sessionId.length === 0) return 'ignored'
+    // A null/garbage snapshot is NOT the quiet "no open PR" negative, and must
+    // not be read as one: `_reconcile` DROPS the arm on a missing `pr`, so
+    // forwarding nothing would cancel a watch the user is waiting on.
+    if (!snapshot || typeof snapshot !== 'object') return 'ignored'
+    // The survey ran, so the schedule counts it — the same rule `tick()` states
+    // for itself, that the stamp measures ATTEMPTS. A dashboard pull therefore
+    // defers the sweep's own discovery survey for this session, so the two paths
+    // do not spawn git + `gh` twice in a row. It does NOT defer an ARMED
+    // session: those are due every tick whenever they were last surveyed.
+    this._stateFor(sessionId).lastSurveyedAt = this._now()
+    return this._reconcile(sessionId, snapshot, { fire: false })
   }
 
   /**

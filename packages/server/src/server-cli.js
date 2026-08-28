@@ -1155,6 +1155,23 @@ export async function startCliServer(config) {
   // no timers and spawns nothing.
   const schedulerEngine = buildSchedulerEngine({ sessionManager, config, logger: log })
 
+  // #7424 (step 3 of #7344): watch the PR each session opened and announce a CI
+  // run the moment it SETTLES, to both audiences — a `ci_complete` push for the
+  // user's phone, and one typed line into the session's own prompt so the agent
+  // learns it without spending a turn (and a full cached-context re-read)
+  // polling `gh pr checks`.
+  //
+  // ON by default; `sessionCi.watch: false` returns null here. Everything
+  // decidable lives in buildSessionCiWatcher so it is unit-tested rather than
+  // source-grepped.
+  //
+  // Built BEFORE the WsServer (#7427) because the ws handler ctx carries it: the
+  // dashboard's on-demand `session_pr_status_request` survey hands its snapshot
+  // to `observe()`, which ARMS the watch without waiting on the sweep's
+  // five-minute discovery pass.
+  const sessionCiWatcher = buildSessionCiWatcher({ config, sessionManager, pushManager, logger: log })
+  sessionCiWatcher?.start()
+
   wsServer = new WsServer({
     port: PORT,
     apiToken: API_TOKEN,
@@ -1163,6 +1180,9 @@ export async function startCliServer(config) {
     // #6871: nullable — null whenever the scheduled-execution gate is closed (the
     // default). The scheduled-tasks handlers report that as "not armed".
     schedulerEngine,
+    // #7427: nullable — null when `sessionCi.watch` is off. Handed to handlers
+    // only; server-cli owns its start() above and ServerOrchestrator its stop().
+    sessionCiWatcher,
     defaultSessionId,
     authRequired: !NO_AUTH,
     pushManager,
@@ -1277,18 +1297,6 @@ export async function startCliServer(config) {
   sessionManager.on('session_created', () => billingCanaryMonitor.refresh())
   sessionManager.on('session_destroyed', () => billingCanaryMonitor.refresh())
   billingCanaryMonitor.start()
-
-  // #7424 (step 3 of #7344): watch the PR each session opened and announce a CI
-  // run the moment it SETTLES, to both audiences — a `ci_complete` push for the
-  // user's phone, and one typed line into the session's own prompt so the agent
-  // learns it without spending a turn (and a full cached-context re-read)
-  // polling `gh pr checks`.
-  //
-  // ON by default; `sessionCi.watch: false` returns null here. Everything
-  // decidable lives in buildSessionCiWatcher so it is unit-tested rather than
-  // source-grepped.
-  const sessionCiWatcher = buildSessionCiWatcher({ config, sessionManager, pushManager, logger: log })
-  sessionCiWatcher?.start()
 
   // #5053: wire the pool stats aggregator to the shared pool so the
   // dashboard's GET /api/pool/stats has rolling counters (hit rate,
