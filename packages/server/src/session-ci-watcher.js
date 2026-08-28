@@ -703,7 +703,10 @@ export function buildSessionCiWatcher({ config, sessionManager, pushManager = nu
     ...(positive(sessionCi.discoveryIntervalMs) ? { discoveryIntervalMs: sessionCi.discoveryIntervalMs } : {}),
     // #7436: operator escape hatch for sweep contention on many-session
     // daemons; floored to an integer, non-positive/NaN ignored like the rest.
-    ...(positive(sessionCi.maxSurveysPerTick) ? { maxSurveysPerTick: Math.floor(sessionCi.maxSurveysPerTick) } : {}),
+    // Clamped UP to 1: Math.floor(0.5) is 0, which the validator accepts as a
+    // positive number and which would silently kill the whole sweep (#7445
+    // review, measured: 0.5 -> 0 surveys per tick).
+    ...(positive(sessionCi.maxSurveysPerTick) ? { maxSurveysPerTick: Math.max(1, Math.floor(sessionCi.maxSurveysPerTick)) } : {}),
     ...(survey ? { survey } : {}),
     notify: (event) => {
       if (!pushManager) return

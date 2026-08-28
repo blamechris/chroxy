@@ -182,7 +182,8 @@ const CONFIG_SCHEMA = {
   // gc` CLI is always available for manual/dry-run use.
   worktreeGc: 'object',
   // #7424: the session CI-completion watcher. `{ watch?: boolean, wakeAgent?:
-  // boolean, intervalMs?: number, discoveryIntervalMs?: number }`. `watch`
+  // boolean, intervalMs?: number, discoveryIntervalMs?: number,
+  // maxSurveysPerTick?: number }` (#7436 added the per-tick cap). `watch`
   // defaults ON — the daemon periodically surveys each session's PR through the
   // user's own `gh` and, when a run settles, notifies (`ci_complete`) and types
   // one line into the session's prompt. Set `watch: false` on a host that should

@@ -385,32 +385,59 @@ describe('#7436 — per-session survey throttle', () => {
     return { ctx, advance: (ms) => { now += ms } }
   }
 
-  it('refuses a back-to-back re-survey of one session with a schema-valid reason', async () => {
+  it('replays the cached reading on a back-to-back re-survey instead of degrading', async () => {
+    // Review on #7445: a RATE_LIMITED degraded reply would BLANK the chip the
+    // user is looking at (the dashboard writes any reply wholesale and renders
+    // a reason as "CI unavailable", with nothing scheduled to repair it). The
+    // throttle's job is bounding subprocesses, not punishing the click — so a
+    // throttled request is answered from the cache, at zero survey cost.
     const { ctx } = throttleCtx()
-    await handler(ws, { id: 'c1' }, req, ctx)
-    await handler(ws, { id: 'c1' }, req, ctx)
-    assert.equal(ctx._send.callCount, 2, 'a refusal is still a reply — one per request')
-    const refusal = ctx._send.calls[1][1]
-    assert.equal(refusal.type, 'session_pr_status')
-    assert.ok(ServerSessionPrStatusSchema.safeParse(refusal).success, 'the refusal must be schema-valid')
-    assert.equal(refusal.reason, RATE_LIMITED_REASON)
-    assert.equal(refusal.pr, null)
+    await handler(ws, { id: 'c1' }, { ...req, requestId: 'r1' }, ctx)
+    await handler(ws, { id: 'c1' }, { ...req, requestId: 'r2' }, ctx)
+    assert.equal(ctx._send.callCount, 2, 'a throttled request is still answered — one reply per request')
+    const replay = ctx._send.calls[1][1]
+    assert.equal(replay.type, 'session_pr_status')
+    assert.ok(ServerSessionPrStatusSchema.safeParse(replay).success, 'the replay must be schema-valid')
+    assert.equal(replay.reason, null, 'a cached good reading must not be downgraded to a refusal')
+    assert.equal(replay.requestId, 'r2', 'the replay answers THIS request')
+    assert.equal(replay.pr.number, SAMPLE.pr.number)
+    assert.equal(replay.generatedAt, SAMPLE.generatedAt, 'the replay is honest about when the reading was taken')
+    assert.equal(ctx.surveySessionPrStatus.callCount, 1, 'no second subprocess survey ran')
   })
 
-  it('does NOT arm the watcher on a refused request', async () => {
+  it('degrades with RATE_LIMITED_REASON only when throttled BEFORE any reading is cached', async () => {
+    // The only unreplayable case: another client's very first survey of this
+    // session is still in flight, so there is nothing to replay yet.
+    let release
+    const gate = new Promise((resolve) => { release = resolve })
+    const { ctx } = throttleCtx({
+      surveySessionPrStatus: createSpy(async () => { await gate; return SAMPLE }),
+    })
+    const p1 = handler(ws, { id: 'c1' }, { ...req, requestId: 'r1' }, ctx)
+    await handler(ws, { id: 'c2' }, { ...req, requestId: 'r2' }, ctx)
+    const refusal = ctx._send.calls[0][1]
+    assert.equal(refusal.requestId, 'r2')
+    assert.equal(refusal.reason, RATE_LIMITED_REASON)
+    assert.ok(ServerSessionPrStatusSchema.safeParse(refusal).success)
+    release()
+    await p1
+  })
+
+  it('does NOT re-observe the watcher on a replayed reading', async () => {
     const observe = createSpy(() => 'armed')
     const { ctx } = throttleCtx({ sessionCiWatcher: { observe } })
     await handler(ws, { id: 'c1' }, req, ctx)
     await handler(ws, { id: 'c1' }, req, ctx)
-    assert.equal(observe.callCount, 1, 'the refused request must not reach observe()')
+    assert.equal(observe.callCount, 1, 'the cached reading was observed when it was fresh — a replay must not touch the watcher')
   })
 
-  it('POSITIVE CONTROL: past the interval the same session is surveyed again', async () => {
+  it('POSITIVE CONTROL: past the interval the same session is surveyed FRESH again', async () => {
     const { ctx, advance } = throttleCtx()
     await handler(ws, { id: 'c1' }, req, ctx)
     advance(SURVEY_MIN_INTERVAL_MS + 1)
     await handler(ws, { id: 'c1' }, req, ctx)
     assert.equal(ctx._send.calls[1][1].reason, null)
+    assert.equal(ctx.surveySessionPrStatus.callCount, 2, 'past the window the reply must be a fresh survey, not the cache')
   })
 
   it('throttles per SESSION — a second session is not refused on account of the first', async () => {
@@ -420,25 +447,65 @@ describe('#7436 — per-session survey throttle', () => {
     assert.equal(ctx._send.calls[1][1].reason, null)
   })
 
-  it('applies across CLIENTS — the stamp is per session, not per (client, session)', async () => {
+  it('applies across CLIENTS — a second client inside the window gets the cached reading', async () => {
     // bearer-token-authority.md: a pairing-bound token is authoritative for its
     // own session, so the throttle does not need to distinguish token classes —
     // and a per-client stamp would let N clients multiply the subprocess cost.
+    // The phone opening right after the desktop refreshed sees the same
+    // reading, not a degraded chip.
     const { ctx } = throttleCtx()
     await handler(ws, { id: 'c1' }, req, ctx)
     await handler(ws, { id: 'c2' }, req, ctx)
-    assert.equal(ctx._send.calls[1][1].reason, RATE_LIMITED_REASON)
+    assert.equal(ctx._send.calls[1][1].reason, null)
+    assert.equal(ctx._send.calls[1][1].pr.number, SAMPLE.pr.number)
+    assert.equal(ctx.surveySessionPrStatus.callCount, 1)
   })
 
-  it('a refusal does not EXTEND the window', async () => {
+  it('a replay does not EXTEND the window', async () => {
     const { ctx, advance } = throttleCtx()
     await handler(ws, { id: 'c1' }, req, ctx)
     advance(SURVEY_MIN_INTERVAL_MS - 1000)
     await handler(ws, { id: 'c1' }, req, ctx)
-    assert.equal(ctx._send.calls[1][1].reason, RATE_LIMITED_REASON)
+    assert.equal(ctx.surveySessionPrStatus.callCount, 1, 'the mid-window request was a replay')
     advance(2000)
     await handler(ws, { id: 'c1' }, req, ctx)
-    assert.equal(ctx._send.calls[2][1].reason, null, 'the mid-window refusal must not have re-stamped')
+    assert.equal(ctx.surveySessionPrStatus.callCount, 2, 'the replay must not have re-stamped — the window still dates from the survey')
+  })
+
+  it("a slow survey's late failure cannot destroy a newer client's stamp and cache", async () => {
+    // Review on #7445 disproved the original 'no concurrent writer exists'
+    // claim: inFlight is per-CLIENT, so A's slow survey (stamped at t=0) and
+    // B's fresh one (admitted at t=interval+1s) can overlap, and A's failure
+    // used to delete B's stamp unconditionally. The rollback must be
+    // compare-and-restore on the record A itself wrote.
+    let failA
+    const gateA = new Promise((resolve, reject) => { failA = reject })
+    let call = 0
+    const { ctx, advance } = throttleCtx({
+      surveySessionPrStatus: createSpy(async () => {
+        call += 1
+        if (call === 1) return gateA
+        return SAMPLE
+      }),
+    })
+    const pA = handler(ws, { id: 'cA' }, { ...req, requestId: 'rA' }, ctx)
+    advance(SURVEY_MIN_INTERVAL_MS + 1000)
+    await handler(ws, { id: 'cB' }, { ...req, requestId: 'rB' }, ctx)
+    failA(new Error('slow boom'))
+    await pA
+    await handler(ws, { id: 'cC' }, { ...req, requestId: 'rC' }, ctx)
+    const last = ctx._send.calls[ctx._send.callCount - 1][1]
+    assert.equal(last.requestId, 'rC')
+    assert.equal(last.reason, null, "C must get B's cached reading — A's late failure must not have deleted B's record")
+    assert.equal(ctx.surveySessionPrStatus.callCount, 2, "C was a replay of B's reading, not a third survey")
+  })
+
+  it('the interval stays well under the dashboard auto-pull window', () => {
+    // Review on #7445: the magnitude was unpinned (5s -> 600s survived the
+    // suite). The dashboard's own freshness window re-surveys every 30s; a
+    // throttle at or above it would make manual Refresh the SLOWER path.
+    assert.ok(SURVEY_MIN_INTERVAL_MS < 30_000, 'must stay under the 30s dashboard auto-pull window')
+    assert.ok(SURVEY_MIN_INTERVAL_MS >= 1_000, 'sub-second would not bound subprocess fan-out meaningfully')
   })
 
   it('a survey that THROWS rolls its stamp back, so the retry is not punished', async () => {

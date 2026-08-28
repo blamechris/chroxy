@@ -40,9 +40,11 @@
  * Note this endpoint is therefore no longer read-only — it MUTATES daemon watch
  * state. `isInFlight` below bars CONCURRENT surveys per client; the #7436
  * per-session throttle (`SURVEY_MIN_INTERVAL_MS`) bounds back-to-back ones
- * across clients. `observe()` is additionally written to be safe under an
- * un-throttled caller (see its doc) — the throttle is the bound, that is the
- * belt.
+ * across clients — answering throttled requests by REPLAYING the last cached
+ * reading (never a degraded reply after the first reading exists, so a
+ * Refresh inside the window cannot blank the chip). The throttle is the
+ * bound on the caller; `observe()`'s own safety under an un-throttled caller
+ * (see its doc) is the belt behind it.
  *
  * `observe()` arms and never fires, so nothing a client does can produce a
  * completion event. Note the order and the isolation below — the reply goes out
@@ -72,7 +74,15 @@ export const NO_SESSION_REASON = 'no such session'
 /** Reason when this client already has a survey running. */
 export const IN_PROGRESS_REASON = 'a pull-request status survey is already running for this client'
 
-/** Reason when this session was surveyed within the minimum interval (#7436). */
+/**
+ * Reason when a throttled request arrives before ANY reading has been cached
+ * for the session (#7436) — the one unreplayable case: some other client's
+ * very first survey is still in flight. Every later throttled request is
+ * answered by replaying the cached snapshot instead (review on #7445: a
+ * degraded reply here blanks the chip the user is looking at, with nothing
+ * scheduled to repair it — the throttle bounds subprocesses, it must not
+ * punish the click).
+ */
 export const RATE_LIMITED_REASON = 'pull-request status was surveyed moments ago — retry in a few seconds'
 
 /**
@@ -90,17 +100,25 @@ export const RATE_LIMITED_REASON = 'pull-request status was surveyed moments ago
  * is authoritative for its own session (bearer-token-authority.md), so there
  * are no token classes to keep apart — and a per-client stamp would let N
  * clients multiply the subprocess cost N-fold.
+ *
+ * The magnitude is pinned by test: it must stay UNDER the dashboard's 30s
+ * auto-pull freshness window, or manual Refresh becomes the slower path.
+ * (Tests drive the clock through the `ctx._nowMs` seam — the one flat
+ * test-injection field this handler reads; production takes `Date.now()`.)
  */
 export const SURVEY_MIN_INTERVAL_MS = 5_000
 
 /**
- * WeakMap<sessionManager, Map<sessionId, lastSurveyStartedAtMs>>.
+ * WeakMap<sessionManager, Map<sessionId, { at, snapshot }>>.
  *
- * Keyed on the session MANAGER: in production that is the daemon-lifetime
- * singleton, so stamps survive the per-message shallow ctx copies; in tests
- * every `makeCtx()` builds a fresh mock manager, so isolation comes free. A
- * destroyed session's stamp lingers until the manager itself is collected —
- * one number per ever-surveyed session id, bounded and tiny.
+ * `at` is when the last admitted survey STARTED (the throttle window's edge);
+ * `snapshot` is the last COMPLETED reading, kept so a throttled request can be
+ * answered by replay rather than degraded (#7445 review). Keyed on the session
+ * MANAGER: in production that is the daemon-lifetime singleton, so records
+ * survive the per-message shallow ctx copies; in tests every `makeCtx()`
+ * builds a fresh mock manager, so isolation comes free. A destroyed session's
+ * record lingers until the manager itself is collected — one small record per
+ * ever-surveyed session id (pruning on session_destroyed is #7450).
  */
 const surveyStamps = new WeakMap()
 
@@ -195,19 +213,29 @@ export async function handleSessionPrStatusRequest(ws, client, msg, ctx) {
     return
   }
 
-  // #7436: per-session minimum interval. Checked AFTER the in-flight guard so a
-  // concurrent duplicate keeps its more specific reason, and the stamp is only
-  // written when a survey actually starts — a refusal must not extend the
-  // window. `entry` resolved above, so the manager exists.
-  const manager = ctx.sessions.sessionManager
+  // #7436: per-session minimum interval. Checked AFTER the in-flight guard so
+  // a concurrent duplicate keeps its more specific reason, and the record is
+  // only written when a survey actually starts — a replayed or refused request
+  // must not extend the window. `entry` resolved through this same manager
+  // above, so it exists; the optional chain mirrors the lookup's.
+  const manager = ctx.sessions?.sessionManager
   const stamps = stampsFor(manager)
   const nowMs = typeof ctx._nowMs === 'function' ? ctx._nowMs() : Date.now()
-  const last = stamps.get(targetSessionId)
-  if (typeof last === 'number' && nowMs - last < SURVEY_MIN_INTERVAL_MS) {
-    ctx.transport.send(ws, degraded({ requestId, sessionId: targetSessionId, reason: RATE_LIMITED_REASON }))
+  const sendSnapshot = (snap) => ctx.transport.send(ws, { type: 'session_pr_status', requestId, ...snap })
+  const prior = stamps.get(targetSessionId)
+  if (prior && nowMs - prior.at < SURVEY_MIN_INTERVAL_MS) {
+    // Same display posture as #7422: never downgrade a usable answer. The
+    // cached reading goes out under THIS request's id, with its original
+    // generatedAt — honest about when it was taken. Only before the first
+    // completed reading is there nothing to replay.
+    if (prior.snapshot) sendSnapshot(prior.snapshot)
+    else ctx.transport.send(ws, degraded({ requestId, sessionId: targetSessionId, reason: RATE_LIMITED_REASON }))
     return
   }
-  stamps.set(targetSessionId, nowMs)
+  // Carry the previous cache forward so a request that lands while THIS
+  // survey is in flight still replays the last completed reading.
+  const record = { at: nowMs, snapshot: prior?.snapshot ?? null }
+  stamps.set(targetSessionId, record)
 
   // Tests can inject `ctx.surveySessionPrStatus` to stub the survey, matching the
   // `ctx.surveyRepos` seam the Control Room handlers use — so a handler test
@@ -217,7 +245,8 @@ export async function handleSessionPrStatusRequest(ws, client, msg, ctx) {
   markInFlight(client, targetSessionId)
   try {
     const snapshot = await surveyFn({ sessionId: targetSessionId, cwd: entry.cwd })
-    ctx.transport.send(ws, { type: 'session_pr_status', requestId, ...snapshot })
+    record.snapshot = snapshot
+    sendSnapshot(snapshot)
     // #7427: arm the CI watcher off the reading we just paid for. Absent
     // whenever `sessionCi.watch` is off, and in ctx mocks that do not wire it.
     try {
@@ -228,10 +257,14 @@ export async function handleSessionPrStatusRequest(ws, client, msg, ctx) {
   } catch (err) {
     // #7436: a thrown survey did not spend the subprocess budget the throttle
     // protects, and the retry a user reaches for next must not be refused for
-    // it — roll the stamp back. Safe to delete unconditionally: the stamp
-    // written above is ours (the throttle admits one survey per session per
-    // window, so no concurrent writer exists to clobber).
-    stamps.delete(targetSessionId)
+    // it — roll OUR record back. Compare-and-restore, not a bare delete:
+    // inFlight is per-CLIENT, so client A's slow survey and client B's later
+    // admitted one CAN overlap, and an unconditional delete here would destroy
+    // B's newer stamp and cache when A fails late (#7445 review, reproduced).
+    if (stamps.get(targetSessionId) === record) {
+      if (prior) stamps.set(targetSessionId, prior)
+      else stamps.delete(targetSessionId)
+    }
     // surveySessionPrStatus degrades environmental failures itself, so reaching
     // here means a genuine defect — log it, and still answer.
     const message = getErrorMessage(err, 'unknown error')

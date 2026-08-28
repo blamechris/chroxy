@@ -1065,6 +1065,34 @@ describe('buildSessionCiWatcher — the daemon wiring', () => {
     assert.equal(surveyed.length, 2, 'one tick surveys exactly the configured cap')
   })
 
+  it('clamps a sub-1 maxSurveysPerTick UP to 1 — flooring to 0 would silently kill the sweep', async () => {
+    // Review on #7445, measured: 0.5 floored to 0 and the sweep surveyed
+    // NOTHING, on a value the config validator accepts as a positive number.
+    const sessions = Array.from({ length: 5 }, (_, i) => ({ sessionId: `s${i}`, cwd: '/repo' }))
+    const surveyed = []
+    const watcher = buildSessionCiWatcher({
+      config: { sessionCi: { maxSurveysPerTick: 0.5, discoveryIntervalMs: 1 } },
+      sessionManager: { listSessions: () => sessions, getSession: () => null },
+      logger: { debug() {}, info() {}, warn() {} },
+      survey: async ({ sessionId }) => { surveyed.push(sessionId); return noPr() },
+    })
+    await watcher.tick()
+    assert.equal(surveyed.length, 1, 'a sub-1 value clamps to 1, never to 0')
+  })
+
+  it('floors a fractional maxSurveysPerTick', async () => {
+    const sessions = Array.from({ length: 5 }, (_, i) => ({ sessionId: `s${i}`, cwd: '/repo' }))
+    const surveyed = []
+    const watcher = buildSessionCiWatcher({
+      config: { sessionCi: { maxSurveysPerTick: 2.5, discoveryIntervalMs: 1 } },
+      sessionManager: { listSessions: () => sessions, getSession: () => null },
+      logger: { debug() {}, info() {}, warn() {} },
+      survey: async ({ sessionId }) => { surveyed.push(sessionId); return noPr() },
+    })
+    await watcher.tick()
+    assert.equal(surveyed.length, 2, '2.5 floors to 2 — the ctor must receive an integer')
+  })
+
   it('POSITIVE CONTROL: without maxSurveysPerTick one tick surveys the default cap', async () => {
     // Without this, the test above could pass against a builder that ignores
     // the key entirely on a fleet the default cap already covers.
