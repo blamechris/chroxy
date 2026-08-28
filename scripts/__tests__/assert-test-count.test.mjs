@@ -25,9 +25,13 @@ let pass = 0
 let fail = 0
 const failures = []
 
+// Ambient-env insulation: OMIT the key rather than passing undefined. Node
+// does drop undefined env values on every supported version, but an explicit
+// omission cannot be re-litigated (review thread on #7461) and cannot regress.
+const { CHROXY_MIN_TEST_COUNT: _ambient, ...insulatedEnv } = process.env
 const run = (args, env = {}) => new Promise((done) => {
   execFile(process.execPath, [script, ...args], {
-    env: { ...process.env, CHROXY_MIN_TEST_COUNT: undefined, ...env },
+    env: { ...insulatedEnv, ...env },
   }, (err) => done(err ? err.code ?? 1 : 0))
 })
 
