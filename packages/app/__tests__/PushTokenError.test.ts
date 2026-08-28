@@ -1,4 +1,5 @@
 import { _testMessageHandler, setStore } from '../src/store/message-handler';
+import { createMockConnectionContext } from '../src/test-utils/mock-connection-context';
 import { createEmptySessionState } from '../src/store/utils';
 import type { ConnectionState } from '../src/store/types';
 
@@ -30,16 +31,6 @@ function createMockStore(initialState: Partial<ConnectionState>) {
   };
 }
 
-function createMockContext() {
-  return {
-    url: 'wss://test',
-    token: 'test-token',
-    isReconnect: false,
-    silent: false,
-    socket: { send: jest.fn(), close: jest.fn() } as unknown as WebSocket,
-  };
-}
-
 describe('push_token_error handler (#1987)', () => {
   let warnSpy: jest.SpyInstance;
 
@@ -62,7 +53,7 @@ describe('push_token_error handler (#1987)', () => {
       sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockContext() as any);
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'push_token_error',
@@ -82,7 +73,7 @@ describe('push_token_error handler (#1987)', () => {
       sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
     });
     setStore(store as any);
-    _testMessageHandler.setContext(createMockContext() as any);
+    _testMessageHandler.setContext(createMockConnectionContext());
 
     _testMessageHandler.handle({
       type: 'push_token_error',
