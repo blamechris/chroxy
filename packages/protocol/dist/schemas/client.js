@@ -1449,6 +1449,24 @@ export const SessionPrStatusRequestSchema = z.object({
     sessionId: z.string().optional(),
     requestId: z.string().max(128).optional(),
 });
+// #7430: pull the session PR's UNRESOLVED REVIEW-THREAD COUNT (reply:
+// `session_pr_threads` in server/session.ts). A SEPARATE request from
+// `session_pr_status_request`, deliberately, and the separation is the whole
+// point of the issue: the count needs a GraphQL `reviewThreads` read that
+// `gh pr list --json` cannot serve, and since #7426 the status survey runs on a
+// daemon-side sweep across EVERY session. Folding the count into that snapshot
+// would put a second `gh` subprocess on every tick of a background poll to
+// enrich a string only a click ever builds. So it is its own on-demand pair,
+// which the sweep never sends.
+//
+// Same SESSION-scoped authority as `session_pr_status_request`: a
+// pairing-bound client may ask about the session it is bound to and no other.
+// `sessionId` defaults to the client's active session.
+export const SessionPrThreadsRequestSchema = z.object({
+    type: z.literal('session_pr_threads_request'),
+    sessionId: z.string().optional(),
+    requestId: z.string().max(128).optional(),
+});
 // #5500 (epic #5498): a MUTATING Control Room integration action — the
 // observe half of the tab is `integration_status_request`; this is the
 // control half. Actions:
@@ -1773,6 +1791,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     IntegrationStatusRequestSchema,
     SkillsInventoryRequestSchema,
     SessionPrStatusRequestSchema,
+    SessionPrThreadsRequestSchema,
     MailboxStatusRequestSchema,
     ExternalSessionsRequestSchema,
     RepoEventsRequestSchema,

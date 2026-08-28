@@ -556,3 +556,14 @@ export declare const ServerSessionPrStatusSchema: z.ZodObject<{
     }, z.core.$strip>>;
     reason: z.ZodNullable<z.ZodString>;
 }, z.core.$strip>;
+export declare const ServerSessionPrThreadsSchema: z.ZodObject<{
+    type: z.ZodLiteral<"session_pr_threads">;
+    requestId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    sessionId: z.ZodNullable<z.ZodString>;
+    countedAt: z.ZodString;
+    prNumber: z.ZodNullable<z.ZodNumber>;
+    unresolvedCount: z.ZodNullable<z.ZodNumber>;
+    totalCount: z.ZodNullable<z.ZodNumber>;
+    truncated: z.ZodBoolean;
+    reason: z.ZodNullable<z.ZodString>;
+}, z.core.$strip>;
