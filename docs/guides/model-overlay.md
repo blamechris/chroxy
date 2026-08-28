@@ -83,7 +83,7 @@ The overlay is watched and re-folded into the registry on change ([#5932](https:
 ## Notes & limits
 
 - **Secrets never belong here** (same posture as `config.json`) — the overlay only carries model metadata.
-- `claude-fable-5` is disallowed and **cannot be reintroduced** via the overlay ([#6219](https://github.com/blamechris/chroxy/issues/6219)).
+- `claude-fable-5` (Fable) is GA and selectable — it was banned as a preview in [#6219](https://github.com/blamechris/chroxy/issues/6219) and re-enabled once it shipped generally. The `DISALLOWED_MODEL_IDS` mechanism is retained (empty) so a future model can be excluded the same way.
 - Untagged entries are Claude-registry-scoped; use a `provider` field for other providers (see [Targeting a specific provider](#targeting-a-specific-provider-non-claude)). `pricing` overrides apply to Claude and DeepSeek (the providers that report per-token cost).
 - This complements, not replaces, the SDK's live `supportedModels()` push — a brand-new Claude model the SDK already knows about appears with no overlay at all; the overlay is for getting *ahead* of the build (or fixing a label/price) before the SDK or a release catches up.
 

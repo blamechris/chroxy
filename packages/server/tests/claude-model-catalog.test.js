@@ -47,14 +47,29 @@ describe('claude-model-catalog (#6201 OCP characterization)', () => {
     })
   })
 
-  it('prices exactly the intended keys — fable absent, no unverified-pricing $0 (#6219)', () => {
+  it('prices exactly the intended keys — fable GA, no unverified-pricing $0 (#6219 revert)', () => {
     assert.deepEqual(Object.keys(CLAUDE_PRICING_USD_PER_MTOK).sort(), [
+      'claude-fable-5',
+      'claude-fable-5[1m]',
       'claude-haiku-4-5',
       'claude-opus-4-8',
       'claude-opus-4-8[1m]',
       'claude-sonnet-4-6',
     ])
-    assert.ok(!('claude-fable-5' in CLAUDE_PRICING_USD_PER_MTOK))
+    // Fable is a 1M model, so it carries an explicit `claude-fable-5[1m]` key.
+    // Its pricing is FLAT — the [1m] rates and the longContext tier equal the
+    // base rates (no >200K premium), which keeps cost correct AND gives the
+    // #4106 drift guard the longContext block it needs so it does not warn.
+    assert.ok('claude-fable-5' in CLAUDE_PRICING_USD_PER_MTOK)
+    assert.ok('claude-fable-5[1m]' in CLAUDE_PRICING_USD_PER_MTOK)
+    assert.deepEqual(CLAUDE_PRICING_USD_PER_MTOK['claude-fable-5'], {
+      input: 10.00, output: 50.00, cacheRead: 1.00, cacheWrite: 12.50,
+    })
+    assert.equal(CLAUDE_PRICING_USD_PER_MTOK['claude-fable-5[1m]'].input, 10.00)
+    assert.equal(
+      CLAUDE_PRICING_USD_PER_MTOK['claude-fable-5[1m]'].longContext.input, 10.00,
+      'fable is flat — the >200K longContext rate equals base',
+    )
   })
 
   it('keeps pricing entries (incl. the nested longContext premium) deep-frozen', () => {
@@ -69,6 +84,7 @@ describe('claude-model-catalog (#6201 OCP characterization)', () => {
     assert.deepStrictEqual([...CLAUDE_FALLBACK_MODELS], [
       { id: 'sonnet', label: 'Sonnet', fullId: 'claude-sonnet-4-6', contextWindow: 200_000 },
       { id: 'opus', label: 'Opus', fullId: 'claude-opus-4-8', contextWindow: 1_000_000 },
+      { id: 'fable', label: 'Fable', fullId: 'claude-fable-5', contextWindow: 1_000_000 },
       { id: 'haiku', label: 'Haiku', fullId: 'claude-haiku-4-5', contextWindow: 200_000 },
     ])
     assert.ok(Object.isFrozen(CLAUDE_FALLBACK_MODELS))

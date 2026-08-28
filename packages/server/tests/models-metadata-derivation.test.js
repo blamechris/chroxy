@@ -23,18 +23,20 @@ import {
 // Verbatim pre-consolidation FALLBACK_MODELS (contextWindow values inlined to
 // what resolveClaudeContextWindow returned at authoring time, so a regression in
 // the heuristic ALSO trips this test, not just a far-away window test).
-// #6219 updated the intended roster: Opus head bumped 4-7 → 4-8, and Fable
-// (disallowed) removed. The snapshot tracks the CURRENT intended set — the proof
-// is still "the derived table deep-equals the declared literal", just against the
-// post-#6219 roster, not the original #5930 freeze.
+// #6219 originally removed Fable (disallowed); that ban was reverted (fable is
+// GA again, allowed not banned — see models.js DISALLOWED_MODEL_IDS comment),
+// so the snapshot restores its original slot between opus and haiku. The proof
+// is still "the derived table deep-equals the declared literal", just against
+// the current intended roster.
 const FALLBACK_MODELS_SNAPSHOT = [
   { id: 'sonnet', label: 'Sonnet', fullId: 'claude-sonnet-4-6', contextWindow: 200_000 },
   { id: 'opus', label: 'Opus', fullId: 'claude-opus-4-8', contextWindow: 1_000_000 },
+  { id: 'fable', label: 'Fable', fullId: 'claude-fable-5', contextWindow: 1_000_000 },
   { id: 'haiku', label: 'Haiku', fullId: 'claude-haiku-4-5', contextWindow: 200_000 },
 ]
 
-// CLAUDE_PRICING_USD_PER_MTOK snapshot. Fable is ABSENT (removed in #6219;
-// chroxy never shipped verified fable rates anyway — cost "unknown", never $0).
+// CLAUDE_PRICING_USD_PER_MTOK snapshot. Fable is back (GA, #6219 revert) with
+// flat pricing — no >200K premium tier, so no `claude-fable-5[1m]` entry.
 const CLAUDE_PRICING_SNAPSHOT = {
   'claude-sonnet-4-6': { input: 3.00, output: 15.00, cacheRead: 0.30, cacheWrite: 3.75 },
   'claude-opus-4-8': { input: 15.00, output: 75.00, cacheRead: 1.50, cacheWrite: 18.75 },
@@ -45,6 +47,7 @@ const CLAUDE_PRICING_SNAPSHOT = {
       input: 30.00, output: 150.00, cacheRead: 3.00, cacheWrite: 37.50,
     },
   },
+  'claude-fable-5': { input: 10.00, output: 50.00, cacheRead: 1.00, cacheWrite: 12.50 },
   'claude-haiku-4-5': { input: 1.00, output: 5.00, cacheRead: 0.10, cacheWrite: 1.25 },
 }
 
@@ -64,7 +67,7 @@ describe('#5930 model-metadata consolidation is a pure restructure', () => {
   it('FALLBACK_MODELS preserves the exact roster + order', () => {
     assert.deepStrictEqual(
       FALLBACK_MODELS.map((m) => m.id),
-      ['sonnet', 'opus', 'haiku'],
+      ['sonnet', 'opus', 'fable', 'haiku'],
     )
   })
 
@@ -85,9 +88,11 @@ describe('#5930 model-metadata consolidation is a pure restructure', () => {
     }
   })
 
-  it('fable is fully removed (#6219) — not in the roster, no pricing', () => {
-    assert.ok(!FALLBACK_MODELS.some((m) => m.id === 'fable' || m.fullId === 'claude-fable-5'))
-    assert.equal(getModelPricing('claude-fable-5'), null)
+  it('fable is GA and priced (#6219 revert) — present in the roster with flat pricing', () => {
+    assert.ok(FALLBACK_MODELS.some((m) => m.id === 'fable' && m.fullId === 'claude-fable-5'))
+    assert.deepStrictEqual(getModelPricing('claude-fable-5'), {
+      input: 10.00, output: 50.00, cacheRead: 1.00, cacheWrite: 12.50,
+    })
   })
 
   it('keeps pricing entries (incl. the nested longContext premium) deep-frozen', () => {

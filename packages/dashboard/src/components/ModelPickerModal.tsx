@@ -5,7 +5,7 @@
  * filter, and is keyboard-navigable (Esc/Tab via the shared Modal; Arrow keys to
  * move between options, Enter/click to select).
  *
- * Disallowed models (e.g. fable, #6219) are excluded upstream in the server
+ * Disallowed models are excluded upstream in the server (DISALLOWED_MODEL_IDS,
  * registry so they never reach `availableModels`; as a defensive forward-compat
  * hook this also renders any entry flagged `disabled` as a non-selectable row.
  */

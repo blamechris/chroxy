@@ -10,6 +10,8 @@ import {
   watchModelsOverlay,
   getModels,
   _resetModelsOverlayForTests,
+  DISALLOWED_MODEL_IDS,
+  isDisallowedModelId,
 } from '../src/models.js'
 
 /**
@@ -52,12 +54,22 @@ describe('registry.applyOverlay (#5932)', () => {
     assert.ok(reg.getAllowedModelIds().has('fable-9'))
   })
 
-  it('#6219 — a disallowed fullId (claude-fable-5) cannot be re-added via overlay', () => {
+  it('#6219 revert — the disallow-overlay-row guard is retained but inert (DISALLOWED_MODEL_IDS is empty)', () => {
+    // computeFallbackModels() still skips any overlay row whose shortId/fullId
+    // resolves to a disallowed id (see models.js ~L499) — that mechanism is kept
+    // for a future disallow — but claude-fable-5's ban was reverted (GA again,
+    // not banned), so DISALLOWED_MODEL_IDS is now frozen EMPTY and there is no
+    // way to inject a synthetic banned id at runtime to exercise the skip
+    // branch. Pin the guard's precondition (nothing is disallowed) and the
+    // resulting behavior change: an overlay CAN re-add claude-fable-5 now.
+    assert.equal(DISALLOWED_MODEL_IDS.size, 0)
+    assert.equal(isDisallowedModelId('claude-fable-5'), false)
+
     const reg = makeRegistry()
     reg.applyOverlay(overlayMap({ 'claude-fable-5': { shortId: 'fable', label: 'Fable' } }))
-    assert.ok(!reg.getModels().some((m) => m.fullId === 'claude-fable-5'), 'disallowed overlay row must be skipped')
-    assert.ok(!reg.getAllowedModelIds().has('claude-fable-5'))
-    // An unrelated overlay id that merely uses `fable` as a label is unaffected.
+    assert.ok(reg.getModels().some((m) => m.fullId === 'claude-fable-5'), 'fable overlay row lands now that it is allowed')
+    assert.ok(reg.getAllowedModelIds().has('claude-fable-5'))
+    // An unrelated overlay id that merely uses `fable` as a label still lands too.
     reg.applyOverlay(overlayMap({ 'fable-9': { shortId: 'fable', label: 'Fable' } }))
     assert.ok(reg.getModels().some((m) => m.fullId === 'fable-9'), 'non-disallowed overlay row still lands')
   })
