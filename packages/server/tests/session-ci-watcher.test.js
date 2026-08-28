@@ -27,6 +27,7 @@ import {
   describeCiCompletion,
   buildAgentWakeText,
   normaliseMergeState,
+  isSurveySnapshot,
   MAX_TITLE_CHARS,
   DEFAULT_TICK_INTERVAL_MS,
   DEFAULT_DISCOVERY_INTERVAL_MS,
@@ -412,9 +413,13 @@ describe('SessionCiWatcher — observe(): the dashboard arming path (#7427)', ()
     // `_reconcile` treats a MISSING `pr` as the quiet negative and DROPS the
     // arm. Forwarding garbage there would let a caller cancel a watch by
     // handing over nothing at all.
+    //
+    // `{}` and `{ pr: null }` are the cases a bare `typeof === 'object'` test
+    // lets through — the review finding on #7427. They are listed here as
+    // VALUES, not as a shape rule, so this stays red for each one individually.
     const h = harness({ queue: [green()] })
     h.watcher.observe('s1', pending())
-    for (const bad of [null, undefined, 'nope', 42, true]) {
+    for (const bad of [null, undefined, 'nope', 42, true, {}, [], { pr: null }, { reason: null }, snapshot()?.checks]) {
       assert.equal(h.watcher.observe('s1', bad), 'ignored', `snapshot ${JSON.stringify(bad)} must be ignored`)
     }
     for (const bad of ['', null, undefined, 7]) {
@@ -783,6 +788,34 @@ describe('SessionCiWatcher — bounded fan-out', () => {
     watcher.stop()
     await watcher.tick()
     assert.deepEqual(surveyed, [], 'a stopped watcher must spawn no subprocess')
+  })
+})
+
+describe('isSurveySnapshot', () => {
+  it('accepts every shape surveySessionPrStatus actually returns', () => {
+    // Its `baseSnapshot` skeleton exists "so every return path has the same
+    // shape" — an open PR, no open PR, and a degraded reading all carry `pr`
+    // and `reason` as KEYS. If that ever stops being true, this goes red here
+    // rather than by silently refusing to arm in production.
+    for (const s of [pending(), green(), red(), noRun(), unrecognised(), noPr(), degraded()]) {
+      assert.equal(isSurveySnapshot(s), true, `rejected a real snapshot: ${JSON.stringify(s).slice(0, 80)}`)
+    }
+  })
+
+  it('rejects an object that merely LOOKS like one', () => {
+    // The line the guard has to draw: `pr: null` is the survey reporting a fact
+    // (`_reconcile` drops the arm on it). A missing `pr` key reports nothing,
+    // and must not be read as that fact.
+    for (const v of [null, undefined, 'nope', 42, true, [], {}, { pr: null }, { reason: null }, { pr: { number: 1 } }]) {
+      assert.equal(isSurveySnapshot(v), false, `accepted a non-snapshot: ${JSON.stringify(v)}`)
+    }
+  })
+
+  it('draws the line on the KEY, not the value — a null pr with a reason key is real', () => {
+    // POSITIVE CONTROL for the test above: it must not be passing merely
+    // because every listed value is falsy or empty.
+    assert.equal(isSurveySnapshot({ pr: null, reason: null }), true)
+    assert.equal(isSurveySnapshot({ pr: null, reason: 'gh not found' }), true)
   })
 })
 

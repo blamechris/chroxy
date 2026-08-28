@@ -249,6 +249,38 @@ export function buildAgentWakeText(event) {
   return `${head}${merge} You did not need to poll for this.`
 }
 
+/**
+ * Is this a `surveySessionPrStatus` result — as opposed to whatever else a
+ * caller might hand `observe()`?
+ *
+ * The discriminator is the PRESENCE of `pr` and `reason`, not their values, and
+ * it is not an arbitrary shape check: `session-pr-status.js` builds every one of
+ * its return paths from `baseSnapshot`, "so every return path has the same
+ * shape". `pr: null` is therefore the survey saying *I looked, and there is no
+ * open PR* — a fact `_reconcile` acts on by DROPPING the arm. A missing `pr` key
+ * says nothing at all, and must not be read as that fact.
+ *
+ * A `typeof === 'object'` test does not draw that line: `{}` sails through it
+ * and then reads as the quiet no-PR negative, cancelling a watch the user is
+ * waiting on. That is a guard whose comment describes a stronger check than its
+ * code performs (docs/false-safety-guards.md, #7290/#7291) — caught in review on
+ * #7427, which is why the check is a named predicate with its own tests rather
+ * than an inline truthiness test.
+ *
+ * There is no `Array.isArray` arm, deliberately. An array has neither key, so
+ * the key test already rejects it — the extra branch was written, MUTATED, and
+ * SURVIVED, and no input exists that it would decide differently. A refinement
+ * with no behaviour is a guard that cannot be proven, so it is cut rather than
+ * kept for the look of the thing.
+ *
+ * @param {unknown} value
+ * @returns {boolean}
+ */
+export function isSurveySnapshot(value) {
+  if (!value || typeof value !== 'object') return false
+  return 'pr' in value && 'reason' in value
+}
+
 export class SessionCiWatcher {
   /**
    * @param {object} opts
@@ -491,10 +523,7 @@ export class SessionCiWatcher {
    */
   observe(sessionId, snapshot) {
     if (typeof sessionId !== 'string' || sessionId.length === 0) return 'ignored'
-    // A null/garbage snapshot is NOT the quiet "no open PR" negative, and must
-    // not be read as one: `_reconcile` DROPS the arm on a missing `pr`, so
-    // forwarding nothing would cancel a watch the user is waiting on.
-    if (!snapshot || typeof snapshot !== 'object') return 'ignored'
+    if (!isSurveySnapshot(snapshot)) return 'ignored'
     // The survey ran, so the schedule counts it — the same rule `tick()` states
     // for itself, that the stamp measures ATTEMPTS. A dashboard pull therefore
     // defers the sweep's own discovery survey for this session, so the two paths
