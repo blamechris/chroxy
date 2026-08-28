@@ -1988,7 +1988,10 @@ function dispatchUserQuestion<S extends DispatchSessionBase>(
   // `expiresAt`). The wire frame is the only place they differ — `historySeq`
   // is stamped by `replayHistory` and absent from every live broadcast — and
   // this is the last point at which it is still in hand, so record the verdict
-  // now. `history_replay_end`'s sweep then skips the live ones instead of
+  // now. KNOWN GAP (#7454): the `request_full_history` replay path forwards
+  // ring-buffer entries without mapping `_seq` to `historySeq`, so questions
+  // it replays read as live here — they are left unstamped (the benign
+  // direction) until the server closes that gap. `history_replay_end`'s sweep then skips the live ones instead of
   // stamping them '(resolved)' and destroying the answer path for that turn.
   const seq = (msg as { historySeq?: unknown }).historySeq
   const deliveredByReplay = typeof seq === 'number' && Number.isFinite(seq)
