@@ -57,7 +57,7 @@ import {
   MCP_SERVER_OP_PENDING_CAP,
 } from './message-handler'
 import { createEmptySessionState } from './utils'
-import { isLivePermissionPrompt } from '@chroxy/store-core'
+import { isLivePermissionPrompt, resetReplayReconcile } from '@chroxy/store-core'
 import type { ConnectionState } from './types'
 
 function createMockStore(initial: Partial<ConnectionState>) {
@@ -3771,6 +3771,156 @@ describe('dashboard message-handler dispatch', () => {
       expect(st.s2.messages[0].answered).toBeUndefined();
     });
   });
+
+  // #7420 — the other half of #7410. `permission_request` is server-transient, so
+  // a permission prompt present at replay-end always RACED the replay and
+  // `!m.requestId` excludes it exactly. `user_question` is NOT transient: it is
+  // in the history ring buffer and is re-sent on every replay, and the
+  // ChatMessage it builds carries no `requestId` and no `expiresAt`. So a LIVE
+  // AskUserQuestion that lands mid-replay is byte-identical in store state to a
+  // replayed one, and the pre-fix sweep stamped both — losing the answer path
+  // for that turn.
+  //
+  // The discriminator is the wire frame, recorded at arrival: `replayHistory`
+  // stamps every replayed history entry with `historySeq` (ws-history.js) and a
+  // live broadcast never carries it. store-core's replay-reconcile module notes
+  // the ids of questions that arrived WITHOUT one while the session's replay
+  // window was open, and the sweep skips exactly those.
+  describe("history_replay_end: '(resolved)' sweep vs a racing live AskUserQuestion (#7420)", () => {
+    beforeEach(() => {
+      // The live-arrival set is module state in store-core; a window left open
+      // by an earlier test would otherwise decide these cases.
+      resetReplayReconcile({ clearCursors: true })
+    })
+
+    afterEach(() => {
+      resetReplayReconcile({ clearCursors: true })
+    })
+
+    function seedOne(messages: any[] = []) {
+      store = createMockStore(
+        baseState({
+          activeSessionId: 's1',
+          sessions: [{ sessionId: 's1', name: 'S1' } as any],
+          sessionStates: { s1: { ...createEmptySessionState(), messages } },
+        }),
+      )
+      setStore(store)
+    }
+
+    /**
+     * A `user_question` wire frame. `historySeq` present ⇒ the replay delivered
+     * it; absent ⇒ a live broadcast. That is the ONLY difference between the
+     * two on the wire, which is the whole difficulty of this bug.
+     */
+    const question = (extra: Record<string, unknown> = {}) => ({
+      type: 'user_question',
+      sessionId: 's1',
+      toolUseId: 'q-use-1',
+      questions: [{ question: 'Which approach?', options: [{ label: 'A' }, { label: 'B' }] }],
+      ...extra,
+    })
+
+    const answeredOf = (i = 0) =>
+      (store.getState() as any).sessionStates.s1.messages[i].answered
+
+    // --- AC (a): the live racer survives -----------------------------------
+
+    it('does not stamp a live question that arrived mid-replay (delta replay)', () => {
+      seedOne()
+      handleMessage({ type: 'history_replay_start', sessionId: 's1', fullHistory: false }, ctx() as any)
+      handleMessage(question() as any, ctx() as any)
+      // Positive control: the prompt really was appended, so the
+      // `answered === undefined` assertion below is about the sweep and not
+      // about an absent fixture.
+      expect((store.getState() as any).sessionStates.s1.messages).toHaveLength(1)
+      expect((store.getState() as any).sessionStates.s1.messages[0].type).toBe('prompt')
+
+      handleMessage({ type: 'history_replay_end', sessionId: 's1' }, ctx() as any)
+
+      expect(answeredOf()).toBeUndefined()
+    })
+
+    it('does not stamp a live question that arrived mid-replay (full rebuild)', () => {
+      // A pre-replay message makes the baseline non-zero, so the atomic swap at
+      // replay-end is real (it slices the prefix off) rather than a no-op.
+      seedOne([{ id: 'old-1', type: 'response', content: 'before', timestamp: 1 }])
+      handleMessage({ type: 'history_replay_start', sessionId: 's1', fullHistory: true }, ctx() as any)
+      // Replayed first, then the live racer — the interleaving the server's
+      // chunked replay actually produces.
+      handleMessage(question({ historySeq: 3, timestamp: 1000 }) as any, ctx() as any)
+      handleMessage(question({ toolUseId: 'q-use-2' }) as any, ctx() as any)
+      expect((store.getState() as any).sessionStates.s1.messages).toHaveLength(3)
+
+      handleMessage({ type: 'history_replay_end', sessionId: 's1' }, ctx() as any)
+
+      // Swap dropped the pre-replay prefix; both prompts survive it.
+      expect((store.getState() as any).sessionStates.s1.messages).toHaveLength(2)
+      expect(answeredOf(0)).toBe('(resolved)')
+      expect(answeredOf(1)).toBeUndefined()
+    })
+
+    // --- AC (b): a genuinely replayed question is still stamped -------------
+
+    it('still stamps a question the replay itself delivered', () => {
+      seedOne()
+      handleMessage({ type: 'history_replay_start', sessionId: 's1', fullHistory: false }, ctx() as any)
+      handleMessage(question({ historySeq: 7, timestamp: 1000 }) as any, ctx() as any)
+      expect((store.getState() as any).sessionStates.s1.messages).toHaveLength(1)
+
+      handleMessage({ type: 'history_replay_end', sessionId: 's1' }, ctx() as any)
+
+      expect(answeredOf()).toBe('(resolved)')
+    })
+
+    it('still stamps a question that pre-dates the replay window', () => {
+      seedOne()
+      // Live, but BEFORE any replay opened — nothing about this reconnect
+      // vouches for it, so the long-standing sweep behaviour stands.
+      handleMessage(question() as any, ctx() as any)
+      handleMessage({ type: 'history_replay_start', sessionId: 's1', fullHistory: false }, ctx() as any)
+      handleMessage({ type: 'history_replay_end', sessionId: 's1' }, ctx() as any)
+
+      expect(answeredOf()).toBe('(resolved)')
+    })
+
+    it('forgets the previous window: a racer protected once is stamped on the NEXT replay', () => {
+      seedOne()
+      handleMessage({ type: 'history_replay_start', sessionId: 's1', fullHistory: false }, ctx() as any)
+      handleMessage(question() as any, ctx() as any)
+      handleMessage({ type: 'history_replay_end', sessionId: 's1' }, ctx() as any)
+      expect(answeredOf()).toBeUndefined()
+
+      handleMessage({ type: 'history_replay_start', sessionId: 's1', fullHistory: false }, ctx() as any)
+      handleMessage({ type: 'history_replay_end', sessionId: 's1' }, ctx() as any)
+
+      expect(answeredOf()).toBe('(resolved)')
+    })
+
+    it("a racer in session s1 is not protected by session s2's replay window", () => {
+      store = createMockStore(
+        baseState({
+          activeSessionId: 's1',
+          sessions: [{ sessionId: 's1', name: 'S1' } as any, { sessionId: 's2', name: 'S2' } as any],
+          sessionStates: {
+            s1: createEmptySessionState(),
+            s2: createEmptySessionState(),
+          },
+        }),
+      )
+      setStore(store)
+
+      // Only s2 is replaying; a live question for s1 is not inside any window
+      // of its own, so s1's own replay-end still stamps it.
+      handleMessage({ type: 'history_replay_start', sessionId: 's2', fullHistory: false }, ctx() as any)
+      handleMessage(question() as any, ctx() as any)
+      handleMessage({ type: 'history_replay_end', sessionId: 's2' }, ctx() as any)
+      handleMessage({ type: 'history_replay_start', sessionId: 's1', fullHistory: false }, ctx() as any)
+      handleMessage({ type: 'history_replay_end', sessionId: 's1' }, ctx() as any)
+
+      expect(answeredOf()).toBe('(resolved)')
+    })
+  })
 
   describe('history replay: user_input rehydration', () => {
     function seed() {

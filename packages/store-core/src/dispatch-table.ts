@@ -160,6 +160,9 @@ import {
 // #6449 slice 1 — shared raw-output parse for the terminal-mirror cases. The
 // './handlers' barrel doesn't re-export stream.ts, so import it directly.
 import { handleRawOutput } from './handlers/stream'
+// #7420 — the replay window / live-arrival ledger the `user_question` case
+// writes into and `history_replay_end`'s sweep reads.
+import { noteLivePromptDuringReplay } from './replay-reconcile'
 
 // ---------------------------------------------------------------------------
 // Client adapter
@@ -927,6 +930,12 @@ export interface DispatchMessageMap {
     // number) for history-replay ordering, falling back to append-time
     // Date.now(). Documented here so the message shape matches the parser.
     timestamp?: number
+    // #7420 — `replayHistory` stamps every entry it replays with the session's
+    // monotonic history seq (ws-history.js); a LIVE broadcast never carries
+    // one. It is the only thing that separates a replayed AskUserQuestion from
+    // a live one, so the dispatcher reads it to decide liveness. Not a new wire
+    // field: the same value already drives `recordHistorySeq`.
+    historySeq?: number
   }
   // --- multi_question_intervention (#5618) — the deny-event the builder reads ---
   multi_question_intervention: {
@@ -1973,6 +1982,17 @@ function dispatchUserQuestion<S extends DispatchSessionBase>(
   const parsed = handleUserQuestion(msg as Record<string, unknown>, adapter.getActiveSessionId())
   if (!parsed) return
   const { sessionId, chatMessage, questionText } = parsed
+  // #7420 — a `user_question` that arrives while its session's replay window is
+  // open is either an entry the replay itself delivered or a LIVE question that
+  // raced it, and the two build byte-identical ChatMessages (no `requestId`, no
+  // `expiresAt`). The wire frame is the only place they differ — `historySeq`
+  // is stamped by `replayHistory` and absent from every live broadcast — and
+  // this is the last point at which it is still in hand, so record the verdict
+  // now. `history_replay_end`'s sweep then skips the live ones instead of
+  // stamping them '(resolved)' and destroying the answer path for that turn.
+  const seq = (msg as { historySeq?: unknown }).historySeq
+  const deliveredByReplay = typeof seq === 'number' && Number.isFinite(seq)
+  if (!deliveredByReplay) noteLivePromptDuringReplay(sessionId, chatMessage.id)
   if (sessionId && adapter.hasSession(sessionId)) {
     adapter.updateSession(
       sessionId,

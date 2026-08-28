@@ -15,6 +15,14 @@ import type {
   Checkpoint,
 } from './types'
 import type { PermissionRule } from './handlers'
+// #7420 — the replay window / live-arrival ledger the `user_question` case writes.
+import {
+  resetReplayReconcile,
+  reconcileReplayStart,
+  reconcileReplayEnd,
+  wasPromptLiveDuringReplay,
+  sweepUnansweredPromptsAtReplayEnd,
+} from './replay-reconcile'
 
 // ---------------------------------------------------------------------------
 // Fake adapter — a minimal in-memory store that records every mutation a
@@ -391,6 +399,57 @@ describe('shared dispatch table', () => {
       expect(env.notifications).toEqual([
         { sessionId: 's1', eventType: 'question', message: 'Proceed with the deploy?' },
       ])
+    })
+
+    // #7420 — the dispatcher is the last point at which the wire frame is in
+    // hand, so it is where "did the replay deliver this, or did it race the
+    // replay?" is decided. `historySeq` is stamped on every replayed history
+    // entry by `replayHistory` (ws-history.js) and never appears on a live
+    // broadcast; the resulting ChatMessages are byte-identical, which is why
+    // the verdict has to be recorded here rather than re-derived at replay-end.
+    it('records a live question (no historySeq) as a live arrival during the replay window', () => {
+      resetReplayReconcile({ clearCursors: true })
+      reconcileReplayStart('s1', false, 0)
+      const env = makeAdapter({
+        activeSessionId: 's1',
+        sessions: { s1: { sessionId: 's1', messages: [] } },
+      })
+      dispatch(env, {
+        type: 'user_question',
+        sessionId: 's1',
+        questions: [{ question: 'Which approach?' }],
+      })
+      const appended = env.sessions.s1.messages[0]
+      expect(appended).toBeDefined()
+      expect(wasPromptLiveDuringReplay('s1', appended.id)).toBe(true)
+      // ...and the replay-end sweep therefore leaves it alone.
+      reconcileReplayEnd('s1', [])
+      expect(sweepUnansweredPromptsAtReplayEnd('s1', env.sessions.s1.messages)).toBeNull()
+      resetReplayReconcile({ clearCursors: true })
+    })
+
+    it('does NOT record a question the replay delivered (historySeq present)', () => {
+      resetReplayReconcile({ clearCursors: true })
+      reconcileReplayStart('s1', false, 0)
+      const env = makeAdapter({
+        activeSessionId: 's1',
+        sessions: { s1: { sessionId: 's1', messages: [] } },
+      })
+      dispatch(env, {
+        type: 'user_question',
+        sessionId: 's1',
+        questions: [{ question: 'Which approach?' }],
+        historySeq: 12,
+        timestamp: 1_700_000_000_000,
+      } as never)
+      const appended = env.sessions.s1.messages[0]
+      expect(appended).toBeDefined()
+      expect(wasPromptLiveDuringReplay('s1', appended.id)).toBe(false)
+      // ...so the replay-end sweep stamps it, as it always has.
+      reconcileReplayEnd('s1', [])
+      const swept = sweepUnansweredPromptsAtReplayEnd('s1', env.sessions.s1.messages)
+      expect(swept?.[0]).toMatchObject({ answered: '(resolved)' })
+      resetReplayReconcile({ clearCursors: true })
     })
 
     it('honours a finite wire timestamp on the appended prompt (#4613)', () => {
