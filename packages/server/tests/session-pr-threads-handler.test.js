@@ -286,6 +286,57 @@ describe('#7430 — per-session throttle', () => {
     assert.equal(ctx._send.calls[1][1].unresolvedCount, 2)
   })
 
+  it('#7469 S1 — a DEGRADED reading is not cached into the replay window', async () => {
+    // The sibling's #7445 fix was "replay, don't degrade". It does not help
+    // when the replayed thing is ITSELF a degradation: one transient
+    // `gh api graphql` failure would otherwise be handed to every client of
+    // this session for the full window, long after the condition cleared.
+    // The fresh failure still goes out under its own request's id; only the
+    // CACHE keeps the last good count.
+    let call = 0
+    const { ctx, advance } = throttleCtx({
+      surveySessionPrThreads: createSpy(async () => {
+        call += 1
+        if (call === 2) return { ...SAMPLE, prNumber: null, unresolvedCount: null, totalCount: null, reason: 'gh api graphql failed: timeout' }
+        return SAMPLE
+      }),
+    })
+    await handler(ws, { id: 'c1' }, { ...req, requestId: 'r1' }, ctx)
+    assert.equal(ctx._send.calls[0][1].unresolvedCount, 2)
+
+    advance(COUNT_MIN_INTERVAL_MS + 1)
+    await handler(ws, { id: 'c1' }, { ...req, requestId: 'r2' }, ctx)
+    const failure = ctx._send.calls[1][1]
+    assert.equal(failure.requestId, 'r2')
+    assert.equal(failure.unresolvedCount, null, 'the requester that paid for the failed read still sees it')
+    assert.match(failure.reason, /timeout/)
+
+    // Inside the window opened by the FAILED read, a third client asks.
+    await handler(ws, { id: 'c2' }, { ...req, requestId: 'r3' }, ctx)
+    const replay = ctx._send.calls[2][1]
+    assert.equal(replay.requestId, 'r3')
+    assert.equal(replay.reason, null, 'the replay must be the last GOOD count, not the cached failure')
+    assert.equal(replay.unresolvedCount, 2)
+    assert.equal(replay.countedAt, SAMPLE.countedAt, 'and it must be honest about when that count was taken')
+    assert.equal(ctx.surveySessionPrThreads.callCount, 2, 'the third request was a replay, not a third read')
+  })
+
+  it('POSITIVE CONTROL: a failed read still OPENS the window (the subprocess was spent)', async () => {
+    // The complement of the test above, and the thing that keeps it from being
+    // satisfiable by "never stamp on failure": a read that reached `gh` and got
+    // an answer it could not use HAS spent the budget the throttle protects, so
+    // it must not be free to retry immediately. (A THROWN survey is the other
+    // case, rolled back above — it never got that far.)
+    const { ctx } = throttleCtx({
+      surveySessionPrThreads: createSpy(async () => ({ ...SAMPLE, prNumber: null, unresolvedCount: null, totalCount: null, reason: 'gh api graphql failed: timeout' })),
+    })
+    await handler(ws, { id: 'c1' }, { ...req, requestId: 'r1' }, ctx)
+    await handler(ws, { id: 'c1' }, { ...req, requestId: 'r2' }, ctx)
+    assert.equal(ctx.surveySessionPrThreads.callCount, 1, 'the second request fell inside the window the failed read opened')
+    // Nothing good was ever cached, so it degrades rather than replaying.
+    assert.equal(ctx._send.calls[1][1].reason, RATE_LIMITED_REASON)
+  })
+
   it("a slow count's late failure cannot destroy a newer client's cache", async () => {
     let failA
     const gateA = new Promise((resolve, reject) => { failA = reject })

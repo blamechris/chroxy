@@ -3255,19 +3255,44 @@ function handleSessionPrStatus(msg: Record<string, unknown>, get: MsgGet, set: M
  * same reason: a reply can land after a tab switch, and a count attributed to
  * whichever session is active then would report one PR's threads on another's.
  *
- * The message is stored WHOLE, degraded readings included, because the reason
- * is the payload in that case — a consumer must be able to see that the count
- * is missing rather than receive nothing and infer zero.
+ * A degraded reading is STORED, never dropped — the reason is the payload in
+ * that case, and a consumer that received nothing would have to infer, which
+ * next to a green CI chip means inferring zero.
+ *
+ * ## Keep-last-good (#7469 S1)
+ *
+ * But storing it WHOLESALE was wrong, and the reason is the reachable failure
+ * set rather than an exotic one: `IN_PROGRESS` and `RATE_LIMITED` are ordinary
+ * consequences of clicking twice, and a straight overwrite let either of them
+ * ERASE a count the user was looking at, with nothing scheduled to repair it.
+ *
+ * So a degraded reply for a session that already has a COUNT keeps the count,
+ * its `prNumber`, and — the part that makes this honest rather than a lie of
+ * omission — its original `countedAt`, and takes only the new `reason`. The
+ * formatter renders that pairing as the number PLUS a failed-refresh caveat, so
+ * the user sees both how many threads were open and that the figure is not
+ * fresh. Dropping the count would lose the only answer they have; dropping the
+ * caveat would present a stale one as current.
+ *
+ * The retention is per session id, so one session's count can never be borrowed
+ * for another's, and a fresh good reading always replaces wholesale.
  */
 function handleSessionPrThreads(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
   const parsed = ServerSessionPrThreadsSchema.safeParse(msg);
   if (!parsed.success) return;
-  const sessionId = parsed.data.sessionId;
+  const incoming = parsed.data;
+  const sessionId = incoming.sessionId;
   if (!sessionId) return;
   const loading = { ...get().sessionPrThreadsLoading };
   delete loading[sessionId];
+  const prior = get().sessionPrThreads[sessionId];
+  const stored = (incoming.unresolvedCount === null && prior && prior.unresolvedCount !== null)
+    // Keep the counted reading verbatim (count, totals, truncation, prNumber
+    // and its own clock); carry over only this reply's correlation + failure.
+    ? { ...prior, requestId: incoming.requestId, reason: incoming.reason }
+    : incoming;
   set({
-    sessionPrThreads: { ...get().sessionPrThreads, [sessionId]: parsed.data },
+    sessionPrThreads: { ...get().sessionPrThreads, [sessionId]: stored },
     sessionPrThreadsLoading: loading,
   });
 }

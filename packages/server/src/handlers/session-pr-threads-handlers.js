@@ -205,7 +205,17 @@ export async function handleSessionPrThreadsRequest(ws, client, msg, ctx) {
   markInFlight(client, targetSessionId)
   try {
     const snapshot = await surveyFn({ sessionId: targetSessionId, cwd: entry.cwd })
-    gate.commit(snapshot)
+    // #7469 S1: cache ONLY a reading that actually carries a count. #7445's
+    // "replay, don't degrade" does not help when the replayed thing is itself a
+    // degradation — one transient `gh api graphql` failure would be handed to
+    // every client of this session for the whole window, long after the
+    // condition cleared. The requester that paid for the failed read still gets
+    // it below, under its own request id; the CACHE keeps the last good count.
+    //
+    // The window is still STAMPED (that happened in `open()`): a read that
+    // reached `gh` spent the budget the throttle protects, whatever it came
+    // back with. Only a THROWN survey, which never got that far, rolls back.
+    if (snapshot?.reason == null && snapshot?.unresolvedCount != null) gate.commit(snapshot)
     sendCount(snapshot)
   } catch (err) {
     // A thrown count did not spend the subprocess budget the throttle protects,
