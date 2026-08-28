@@ -37,8 +37,12 @@
  * ## Two arming paths, one firing path (#7427)
  *
  * The sweep is not the only thing that surveys a session. The dashboard asks
- * the same question on demand through `session_pr_status_request` (#7422), and
- * it pulls on a rate-limited timer while a human is looking at the chip. That
+ * the same question on demand through `session_pr_status_request` (#7422) — on
+ * an effect gated by a freshness window when the active session or connection
+ * changes, and, on the Refresh button, with NO window and NO server-side rate
+ * limit at all. Assume the un-throttled case: a user waiting on CI clicking
+ * Refresh is exactly the modelled behaviour, and both defects found in review
+ * of #7432 were reachable from it. That
  * reply is a `surveySessionPrStatus` snapshot in exactly the shape `_reconcile`
  * folds in, so `observe()` accepts it — and OPENING THE DASHBOARD ARMS THE
  * WATCH. The unarmed-session discovery interval (five minutes) then stops being

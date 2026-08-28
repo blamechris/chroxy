@@ -37,6 +37,11 @@
  * someone is actually looking, so the snapshot is handed to `observe()` on the
  * way out: opening the dashboard arms the watch.
  *
+ * Note this endpoint is therefore no longer read-only — it MUTATES daemon watch
+ * state — while `isInFlight` below still only bars CONCURRENT surveys per
+ * client, not back-to-back ones. `observe()` is written to be safe under an
+ * un-throttled caller (see its doc); a server-side rate limit is #7436.
+ *
  * `observe()` arms and never fires, so nothing a client does can produce a
  * completion event. Note the order and the isolation below — the reply goes out
  * FIRST, and the hand-off is wrapped separately, because an exception raised
