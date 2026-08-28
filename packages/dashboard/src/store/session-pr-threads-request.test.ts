@@ -1,18 +1,15 @@
 /**
- * #7430 — `requestSessionPrThreads` (the store action) and
- * `session_pr_threads` (the reply handler).
+ * #7430 — `requestSessionPrThreads`, the store action behind the CI chip's
+ * Refresh and the prefill click.
  *
- * Written as one file because the two halves only mean anything together: the
- * action's job is to set a loading flag the handler clears, and the handler's
- * job is to file a reading under the session the ACTION named. A pair of
- * separately-green halves that disagree about the key is the defect this
- * catches.
+ * Mirrors `session-pr-status-request.test.ts` deliberately, including the
+ * #6310 pin: a loading flag flipped before `wsSend` has confirmed the frame
+ * went out disables a control with nothing in flight to ever clear it.
  *
- * The reply is stored WHOLE, degraded readings included. That is the
- * substantive difference from a survey that drops failures: `reason` +
- * `unresolvedCount: null` IS the payload in that case, and a consumer that
- * received nothing would have to infer — which, next to a green CI chip, means
- * inferring zero.
+ * The dispatch half lives in `dispatch-session-pr-threads.test.ts`, split for
+ * the same reason the sibling pair is split — the action tests re-import the
+ * store under `vi.resetModules()`, and the dispatch tests drive
+ * `message-handler`'s module-level store handle.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
@@ -48,18 +45,6 @@ function closedSocket(): WebSocket {
     send: vi.fn(), close: vi.fn(), readyState: WebSocket.CLOSED,
     addEventListener: vi.fn(), removeEventListener: vi.fn(),
   } as unknown as WebSocket
-}
-
-const REPLY = {
-  type: 'session_pr_threads',
-  requestId: null,
-  sessionId: 'sess-1',
-  countedAt: '2026-08-28T00:00:00.000Z',
-  prNumber: 7419,
-  unresolvedCount: 2,
-  totalCount: 9,
-  truncated: false,
-  reason: null,
 }
 
 beforeEach(() => {
@@ -124,71 +109,6 @@ describe('#7430 — requestSessionPrThreads', () => {
     useConnectionStore.getState().requestSessionPrThreads('s1')
     expect(sent).toHaveLength(2)
   })
-})
-
-describe('#7430 — the session_pr_threads reply', () => {
-  async function handle(msg: unknown) {
-    const { useConnectionStore } = await import('./connection')
-    const { handleMessage } = await import('./message-handler')
-    return { useConnectionStore, handleMessage }
-  }
-
-  it('files the reading under ITS OWN session id and clears that loading flag', async () => {
-    const { useConnectionStore, handleMessage } = await handle(REPLY)
-    useConnectionStore.setState({
-      activeSessionId: 'sess-OTHER',
-      sessionPrThreads: {},
-      sessionPrThreadsLoading: { 'sess-1': true, 'sess-2': true },
-    } as never)
-
-    handleMessage(REPLY as never, useConnectionStore.getState as never, useConnectionStore.setState as never, {} as never)
-
-    const s = useConnectionStore.getState()
-    // Filed under sess-1 even though sess-OTHER is active: a reply can land
-    // after a tab switch, and one PR's threads must not be shown on another's.
-    expect(s.sessionPrThreads['sess-1']).toMatchObject({ unresolvedCount: 2, totalCount: 9 })
-    expect(s.sessionPrThreads['sess-OTHER']).toBeUndefined()
-    expect(s.sessionPrThreadsLoading).toEqual({ 'sess-2': true })
-  })
-
-  it('stores a DEGRADED reading rather than dropping it', async () => {
-    // The load-bearing case: silence would leave the previous (or absent)
-    // count in place, and a consumer next to a green CI chip would read the
-    // absence as "no threads".
-    const { useConnectionStore, handleMessage } = await handle(REPLY)
-    useConnectionStore.setState({ sessionPrThreads: {}, sessionPrThreadsLoading: { 'sess-1': true } } as never)
-    const degraded = { ...REPLY, prNumber: null, unresolvedCount: null, totalCount: null, reason: 'gh CLI not found on PATH' }
-
-    handleMessage(degraded as never, useConnectionStore.getState as never, useConnectionStore.setState as never, {} as never)
-
-    const stored = useConnectionStore.getState().sessionPrThreads['sess-1']
-    expect(stored?.reason).toBe('gh CLI not found on PATH')
-    expect(stored?.unresolvedCount).toBeNull()
-    expect(useConnectionStore.getState().sessionPrThreadsLoading).toEqual({})
-  })
-
-  it('drops a reply that is schema-invalid or has no session to attribute it to', async () => {
-    const { useConnectionStore, handleMessage } = await handle(REPLY)
-    useConnectionStore.setState({ sessionPrThreads: {}, sessionPrThreadsLoading: {} } as never)
-
-    handleMessage({ ...REPLY, sessionId: null } as never, useConnectionStore.getState as never, useConnectionStore.setState as never, {} as never)
-    // `truncated` is required and non-optional; a reply missing it is not a
-    // reading this store can reason about.
-    handleMessage({ ...REPLY, truncated: undefined } as never, useConnectionStore.getState as never, useConnectionStore.setState as never, {} as never)
-    // A fabricated NEGATIVE count would be a schema violation, not a reading.
-    handleMessage({ ...REPLY, unresolvedCount: -1 } as never, useConnectionStore.getState as never, useConnectionStore.setState as never, {} as never)
-
-    expect(useConnectionStore.getState().sessionPrThreads).toEqual({})
-  })
-
-  it('positive control: the same handler DOES store a well-formed reply', async () => {
-    // Guards the three negatives above against passing because the message
-    // never reached the handler at all.
-    const { useConnectionStore, handleMessage } = await handle(REPLY)
-    useConnectionStore.setState({ sessionPrThreads: {}, sessionPrThreadsLoading: {} } as never)
-    handleMessage(REPLY as never, useConnectionStore.getState as never, useConnectionStore.setState as never, {} as never)
-    expect(Object.keys(useConnectionStore.getState().sessionPrThreads)).toEqual(['sess-1'])
-  })
 
   it('the socket-drop reset covers the session-keyed loading flag (#6153 family)', () => {
     // A count in flight when the socket died must not leave its control
@@ -201,8 +121,8 @@ describe('#7430 — the session_pr_threads reply', () => {
     // `sessionPrStatusLoading` reset is likewise unpinned). A behavioural test
     // written against `disconnect()` would pass for the wrong reason. So this
     // pins the line inside the ONCLOSE region specifically — an anchored slice,
-    // never a file-wide grep, which the `sessionPrStatusLoading` line above it
-    // would satisfy on its own.
+    // never a file-wide grep, which the initial-state declaration would satisfy
+    // on its own.
     const src = readFileSync(resolve(__dirname, 'connection.ts'), 'utf8')
     const start = src.indexOf('socket.onclose = (event?: CloseEvent) =>')
     expect(start, 'connection.ts should define socket.onclose').toBeGreaterThan(-1)
