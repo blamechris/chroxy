@@ -54,6 +54,9 @@ import type { ServerSessionPrStatusMessage } from '@chroxy/protocol'
 /** Short SHA length, matching the chip's tooltip. */
 const SHA_CHARS = 7
 
+/** The line's opening words — the single place the subject is spelled. */
+export const CI_PREFILL_PREFIX = 'CI status for PR #'
+
 /**
  * The notice shown when the composer already holds a draft. Same fail-shape as
  * `EDIT_QUEUED_BUSY_NOTICE`: refuse rather than clobber, and say so.
@@ -134,21 +137,49 @@ function mergeClause(merge: ServerSessionPrStatusMessage['merge']): string {
 export function formatCiPrefill(status: ServerSessionPrStatusMessage | null): string | null {
   if (!status || !status.pr) return null
   const sha = shortSha(status.pr.headRefOid)
-  const subject = sha === null ? `PR #${status.pr.number}` : `PR #${status.pr.number} (head ${sha})`
+  // Everything after CI_PREFILL_PREFIX, which already carries the "PR #".
+  const head = sha === null ? `${status.pr.number}` : `${status.pr.number} (head ${sha})`
+  // WHEN the reading was taken, always. The snapshot refreshes on a session
+  // switch, a reconnect, or the chip's Refresh — nothing pushes it — so a tab
+  // left open for half an hour holds a half-hour-old rollup, and this line
+  // states it in the present tense to a model that will act on it. Without the
+  // timestamp the staleness is invisible in exactly the artefact that leaves
+  // the dashboard. `generatedAt` is passed through verbatim rather than
+  // rendered relative: no `Date` parsing in a pure formatter, and a UTC instant
+  // is unambiguous to both readers.
+  const readAt = typeof status.generatedAt === 'string' && status.generatedAt.length > 0
+    ? status.generatedAt
+    : null
+  const subject = readAt === null ? head : `${head} as of ${readAt}`
   const clauses = [checksClause(status.checks, sha), mergeClause(status.merge)]
   const reviewDecision = status.merge?.reviewDecision
   if (reviewDecision) clauses.push(`review ${reviewDecision}`)
   if (status.pr.isDraft) clauses.push('PR is a draft')
-  // A partial reading says so. The chip carries it in a tooltip; a prompt line
-  // has nowhere to hide it, and a caveat the model cannot see is a caveat that
-  // did not happen.
+  // A partial reading says so: the chip can hide a caveat in a tooltip, a prompt
+  // line cannot, and a caveat the model never sees is a caveat that did not
+  // happen.
+  //
+  // UNREACHABLE against today's server, deliberately kept. Every
+  // `snapshot.reason = ...` path in `session-pr-status.js` leaves `pr` null, and
+  // this function returns before here in that case — so no current daemon can
+  // produce a `pr` + `reason` snapshot, and the test below covers a state the
+  // server does not emit. It stays because the SCHEMA permits the pairing
+  // (`reason` is independent of `pr`) and a dashboard talks to daemons it did
+  // not ship with; dropping a partial-reading caveat on the floor is the worse
+  // failure. Labelled rather than silently believed to be live coverage.
   if (status.reason) clauses.push(`note: ${status.reason}`)
-  return `CI status for ${subject}: ${clauses.join(' — ')}`
+  return `${CI_PREFILL_PREFIX}${subject}: ${clauses.join(' — ')}`
 }
 
 export interface CiPrefillEffects {
   /** Current composer draft text (untrimmed). */
   getDraft: () => string
+  /**
+   * The EXACT text this helper last staged for this session, or null. Supplying
+   * it lets a second click refresh a line the user has not touched; omitting it
+   * makes every non-empty draft a refusal, which is the safe default.
+   */
+  getLastStaged?: () => string | null
   /** Stage `text` in the composer. Never sends. */
   setDraft: (text: string) => void
   /** Surface a non-blocking notice (the draft-would-be-clobbered guard). */
@@ -170,9 +201,17 @@ export function runCiPrefill(
 ): string | null {
   const text = formatCiPrefill(status)
   if (text === null) return null
+  const draft = fx.getDraft()
   // Guard: never clobber an in-progress draft. #7423 is explicit that the
   // composer keeps what the user typed, or the action is refused.
-  if (fx.getDraft().trim().length > 0) {
+  //
+  // The ONE exception is a line this helper staged and the user has not since
+  // edited: refusing there leaves the composer holding a reading the chip has
+  // already superseded, and the stale line is what gets sent. The test is exact
+  // equality against the last staged text, never a prefix or shape match — a
+  // user who appended "…can you look at the failure?" has made it theirs, and
+  // that must still refuse.
+  if (draft.trim().length > 0 && draft !== fx.getLastStaged?.()) {
     fx.notify(CI_PREFILL_BUSY_NOTICE)
     return null
   }

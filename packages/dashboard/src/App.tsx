@@ -1597,6 +1597,11 @@ export function App() {
   // be added to `evictSessionComposerState()` so the `sessions[]`
   // reconciliation effect can clean it up on server-driven removal.
   const inputDraftsRef = useRef<Map<string, string>>(new Map())
+  // #7423 — the EXACT text the CI prefill last staged per session. Its only job
+  // is to let a second prefill click refresh a line the user has not touched;
+  // any edit makes the draft theirs and the action refuses again. Per-session,
+  // so it obeys the #3977 reconciliation invariant below.
+  const ciPrefillStagedRef = useRef<Map<string, string>>(new Map())
   const [inputDraftValue, setInputDraftValue] = useState('')
   const handleDraftChange = useCallback((text: string) => {
     setInputDraftValue(text)
@@ -1649,9 +1654,14 @@ export function App() {
     runCiPrefill(sessionPrStatus, {
       getDraft: () =>
         (activeSessionId ? inputDraftsRef.current.get(activeSessionId) : '') ?? '',
+      getLastStaged: () =>
+        (activeSessionId ? ciPrefillStagedRef.current.get(activeSessionId) : null) ?? null,
       setDraft: (next) => {
         setInputDraftValue(next)
-        if (activeSessionId) inputDraftsRef.current.set(activeSessionId, next)
+        if (activeSessionId) {
+          inputDraftsRef.current.set(activeSessionId, next)
+          ciPrefillStagedRef.current.set(activeSessionId, next)
+        }
       },
       notify: addInfoNotification,
     })
@@ -1681,6 +1691,7 @@ export function App() {
     inputDraftsRef.current.delete(sessionId)
     pastedTextBlocksRef.current.delete(sessionId)
     pastedTextNextIdRef.current.delete(sessionId)
+    ciPrefillStagedRef.current.delete(sessionId)
   }
 
   // #3977: reconcile per-session composer refs against the live `sessions[]`
@@ -1714,6 +1725,11 @@ export function App() {
       if (!liveIds.has(id)) evictSessionComposerState(id)
     }
     for (const id of pastedTextNextIdRef.current.keys()) {
+      if (!liveIds.has(id)) evictSessionComposerState(id)
+    }
+    // #7423: sending clears the draft entry while this ref still holds the text
+    // that was sent, so it can outlive its draft and needs its own pass too.
+    for (const id of ciPrefillStagedRef.current.keys()) {
       if (!liveIds.has(id)) evictSessionComposerState(id)
     }
   }, [sessions])

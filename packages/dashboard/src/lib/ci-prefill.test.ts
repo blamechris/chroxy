@@ -108,14 +108,14 @@ describe('formatCiPrefill — the cases the user most needs to relay', () => {
   })
 
   it('names the head SHA the verdict describes', () => {
-    expect(formatCiPrefill(status())).toContain('PR #7423 (head 5fff69a)')
+    expect(formatCiPrefill(status())).toContain('PR #7423 (head 5fff69a) as of')
   })
 
   it('drops the head clause rather than printing a fake SHA when there is none', () => {
     const text = formatCiPrefill(status({
       pr: { number: 7423, title: null, url: null, headRefOid: null, isDraft: false },
     })) as string
-    expect(text).toContain('PR #7423:')
+    expect(text).toContain('PR #7423 as of')
     expect(text).not.toContain('head ')
   })
 
@@ -149,6 +149,22 @@ describe('formatCiPrefill — the cases the user most needs to relay', () => {
     const text = formatCiPrefill(status()) as string
     expect(text).not.toContain('draft')
     expect(text).not.toContain('note:')
+  })
+
+  it('says WHEN the reading was taken, so a stale snapshot cannot pass as current', () => {
+    // The snapshot only refreshes on a session switch, a reconnect, or the
+    // chip's Refresh — nothing pushes it. A tab left open holds an old rollup,
+    // and this line states it in the present tense to a model that will act on
+    // it, so the timestamp is the only thing making the staleness visible.
+    const text = formatCiPrefill(status({ generatedAt: '2026-08-27T00:00:00.000Z' })) as string
+    expect(text).toContain('as of 2026-08-27T00:00:00.000Z')
+  })
+
+  it('omits the "as of" clause rather than inventing a time it does not have', () => {
+    const text = formatCiPrefill(status({ generatedAt: '' })) as string
+    expect(text).not.toContain('as of')
+    // Positive control: the rest of the line is unaffected.
+    expect(text).toContain('checks green')
   })
 
   it('returns null when there is no verified state to relay', () => {
@@ -192,6 +208,43 @@ describe('runCiPrefill', () => {
     expect(runCiPrefill(status(), fx)).not.toBeNull()
     expect(fx.setDraft).toHaveBeenCalledTimes(1)
     expect(fx.notify).not.toHaveBeenCalled()
+  })
+
+  it('refreshes a line it staged itself, so the composer cannot disagree with the chip', () => {
+    // The sharp case: prefill, hit Refresh (the chip flips pending -> failure),
+    // click prefill again. Refusing there leaves the SUPERSEDED line in the
+    // composer, and that is what gets sent.
+    const first = formatCiPrefill(status({
+      checks: { state: 'pending', counts: { total: 3, passed: 1, failed: 0, pending: 2, skipped: 0, unknown: 0 } },
+    })) as string
+    const fx = { ...effects(first), getLastStaged: vi.fn(() => first) }
+    const second = runCiPrefill(status({
+      checks: { state: 'failure', counts: { total: 3, passed: 1, failed: 2, pending: 0, skipped: 0, unknown: 0 } },
+    }), fx)
+    expect(second).not.toBeNull()
+    expect(second).not.toBe(first)
+    expect(fx.setDraft).toHaveBeenCalledWith(second)
+    expect(fx.notify).not.toHaveBeenCalled()
+  })
+
+  it('still refuses once the user has EDITED the line it staged', () => {
+    // Exact equality, never a prefix or shape match: an appended question makes
+    // the draft theirs, and theirs is never overwritten.
+    const staged = formatCiPrefill(status()) as string
+    const fx = {
+      ...effects(staged + ' — can you look at the failure?'),
+      getLastStaged: vi.fn(() => staged),
+    }
+    expect(runCiPrefill(status(), fx)).toBeNull()
+    expect(fx.setDraft).not.toHaveBeenCalled()
+    expect(fx.notify).toHaveBeenCalledWith(CI_PREFILL_BUSY_NOTICE)
+  })
+
+  it('refuses a non-empty draft when no getLastStaged is supplied at all', () => {
+    // The effect is optional; omitting it must fail CLOSED, never open.
+    const fx = effects('something the user typed')
+    expect(runCiPrefill(status(), fx)).toBeNull()
+    expect(fx.notify).toHaveBeenCalledWith(CI_PREFILL_BUSY_NOTICE)
   })
 
   it('does nothing at all — not even a notice — when there is no PR', () => {
