@@ -814,6 +814,36 @@ jobs:
       - name: Run tests
         run: npm test
 
+  design-tokens-tests:
+    name: Design Tokens Tests
+    # #7408: the one JS workspace package whose `npm test` no CI job invoked —
+    # the plain form of docs/false-safety-guards.md (a suite that never runs and
+    # a green PR are the same observable outcome; the tokens feed the
+    # dashboard's generated theme.css/tokens.ts, so a regression surfaced as a
+    # visual defect instead of a red check). Six sub-second tests; runs
+    # unconditionally like the sibling per-package jobs.
+    needs: runner-target
+    runs-on: ${{ fromJSON(needs.runner-target.outputs.runner) }}  # SELF_HOSTED_OR_HOSTED (see header)
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: packages/design-tokens
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: ${{ needs.runner-target.outputs.npmcache }}
+          cache-dependency-path: '**/package-lock.json'
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: .
+
+      - name: Run tests
+        run: npm test
+
   store-core-typecheck:
     name: Store Core Type Check
     needs: runner-target
