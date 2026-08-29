@@ -78,6 +78,13 @@ export {
   wasPromptLiveDuringReplay,
   sweepUnansweredPromptsAtReplayEnd,
   REPLAY_RESOLVED_PLACEHOLDER,
+  // #7455 — the replay window is a REFCOUNT so two overlapping replays of one
+  // session compose; #7456 — per-session teardown for the `session_list` prune
+  // and `session_timeout` paths, plus the diagnostics both are asserted on.
+  getReplayWindowDepth,
+  getLiveReplayLedgerSessionIds,
+  dropReplaySessionState,
+  MAX_LIVE_REPLAY_LEDGERS,
 } from './replay-reconcile'
 
 export type {

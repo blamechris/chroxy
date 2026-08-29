@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import {
   resetReplayReconcile,
   recordHistorySeq,
@@ -12,6 +12,10 @@ import {
   wasPromptLiveDuringReplay,
   sweepUnansweredPromptsAtReplayEnd,
   REPLAY_RESOLVED_PLACEHOLDER,
+  getReplayWindowDepth,
+  getLiveReplayLedgerSessionIds,
+  dropReplaySessionState,
+  MAX_LIVE_REPLAY_LEDGERS,
 } from './replay-reconcile'
 
 type Msg = { id: string }
@@ -353,5 +357,251 @@ describe('replay-end unanswered-prompt sweep (#7380 / #7410 / #7420)', () => {
       noteLivePromptDuringReplay('s1', 'q2')
       expect(wasPromptLiveDuringReplay('s1', 'q2')).toBe(false)
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #7455 — overlapping replays of ONE session
+// ---------------------------------------------------------------------------
+//
+// The server can have two replays of the same session in flight at once, and
+// neither caller checks: `subscribe_sessions` replays every newly-subscribed
+// background session (session-handlers.js), and `switch_session` calls
+// `replayHistory(ws, targetId, { forceFull: true })` UNCONDITIONALLY — including
+// for a session the client already subscribed to. `replayHistory` chunks 20
+// entries at a time over `setImmediate` with back-pressure pauses, so replay #1
+// is still streaming when the user taps into the session and starts replay #2.
+// Wire order: start(X) … start(X) … end(X) … end(X).
+//
+// With membership (a Set) rather than a refcount that sequence loses the #7420
+// protection in the tail: start#2 discards start#1's evidence, and end#1 closes
+// the window while replay #2 is still streaming, so every live question between
+// end#1 and end#2 falls through the `noteLivePromptDuringReplay` gate and is
+// stamped '(resolved)' by end#2's sweep — the exact bug #7420 fixed.
+describe('overlapping replays of one session (#7455)', () => {
+  it('keeps the window open until the LAST end — a racer after end#1 is still protected', () => {
+    // The reviewer's reproduction, verbatim: start, start, note, end, note, end.
+    reconcileReplayStart('s1', true, 0) // subscribe_sessions (forceFull)
+    reconcileReplayStart('s1', true, 0) // switch_session (forceFull), replay #1 still streaming
+    noteLivePromptDuringReplay('s1', 'q1')
+    reconcileReplayEnd('s1', [])
+    noteLivePromptDuringReplay('s1', 'q2')
+    reconcileReplayEnd('s1', [])
+
+    // Positive controls: both fixtures took effect, so the "unstamped" below is
+    // about the ledger and not about a note that never landed.
+    expect(wasPromptLiveDuringReplay('s1', 'q1')).toBe(true)
+    expect(wasPromptLiveDuringReplay('s1', 'q2')).toBe(true)
+
+    // A genuinely replayed prompt is still stamped, so this is not a vacuous
+    // "the sweep did nothing" pass.
+    expect(
+      sweepUnansweredPromptsAtReplayEnd('s1', [prompt('replayed-q'), prompt('q1'), prompt('q2')]),
+    ).toEqual([
+      { id: 'replayed-q', type: 'prompt', answered: REPLAY_RESOLVED_PLACEHOLDER },
+      { id: 'q1', type: 'prompt' },
+      { id: 'q2', type: 'prompt' },
+    ])
+  })
+
+  it('a nested start does NOT discard the still-open outer window ledger', () => {
+    reconcileReplayStart('s1', false, 0)
+    noteLivePromptDuringReplay('s1', 'q0')
+    expect(wasPromptLiveDuringReplay('s1', 'q0')).toBe(true)
+    // Replay #2 starts while #1 is in flight: the outer window is still
+    // protecting q0, so its evidence must survive.
+    reconcileReplayStart('s1', true, 0)
+    expect(wasPromptLiveDuringReplay('s1', 'q0')).toBe(true)
+  })
+
+  it('refcounts the window: depth climbs per start and returns to 0 on balanced ends', () => {
+    expect(getReplayWindowDepth('s1')).toBe(0)
+    reconcileReplayStart('s1', false, 0)
+    expect(getReplayWindowDepth('s1')).toBe(1)
+    reconcileReplayStart('s1', false, 0)
+    expect(getReplayWindowDepth('s1')).toBe(2)
+    reconcileReplayEnd('s1', [])
+    expect(getReplayWindowDepth('s1')).toBe(1)
+    reconcileReplayEnd('s1', [])
+    expect(getReplayWindowDepth('s1')).toBe(0)
+  })
+
+  it('is per-session — s2 starting a replay does not hold s1 window open', () => {
+    reconcileReplayStart('s1', false, 0)
+    reconcileReplayStart('s2', false, 0)
+    reconcileReplayEnd('s1', [])
+    expect(getReplayWindowDepth('s1')).toBe(0)
+    expect(getReplayWindowDepth('s2')).toBe(1)
+    noteLivePromptDuringReplay('s1', 'after-q')
+    expect(wasPromptLiveDuringReplay('s1', 'after-q')).toBe(false)
+  })
+
+  it('an unmatched end cannot drive the depth negative (a later start still opens once)', () => {
+    reconcileReplayEnd('s1', [])
+    expect(getReplayWindowDepth('s1')).toBe(0)
+    reconcileReplayStart('s1', false, 0)
+    expect(getReplayWindowDepth('s1')).toBe(1)
+    reconcileReplayEnd('s1', [])
+    expect(getReplayWindowDepth('s1')).toBe(0)
+    noteLivePromptDuringReplay('s1', 'q1')
+    expect(wasPromptLiveDuringReplay('s1', 'q1')).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #7456 — ledger lifetime: release at replay end, teardown, and a loud cap
+// ---------------------------------------------------------------------------
+describe('live-arrival ledger lifetime (#7456)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('releases the per-session ledger when the LAST window closes, while the sweep can still read it', () => {
+    reconcileReplayStart('s1', false, 0)
+    noteLivePromptDuringReplay('s1', 'q1')
+    expect(getLiveReplayLedgerSessionIds()).toEqual(['s1'])
+
+    reconcileReplayEnd('s1', [])
+    // The caller runs the sweep immediately after `reconcileReplayEnd` returns,
+    // so the evidence must still be readable...
+    expect(wasPromptLiveDuringReplay('s1', 'q1')).toBe(true)
+    expect(sweepUnansweredPromptsAtReplayEnd('s1', [prompt('q1')])).toBeNull()
+    // ...but it is no longer RETAINED per-session: nothing accumulates for a
+    // session that is replayed once and then pruned.
+    expect(getLiveReplayLedgerSessionIds()).toEqual([])
+  })
+
+  it('does not release while an overlapping replay is still open (#7455 interaction)', () => {
+    reconcileReplayStart('s1', false, 0)
+    reconcileReplayStart('s1', false, 0)
+    noteLivePromptDuringReplay('s1', 'q1')
+    reconcileReplayEnd('s1', [])
+    expect(getLiveReplayLedgerSessionIds()).toEqual(['s1'])
+    reconcileReplayEnd('s1', [])
+    expect(getLiveReplayLedgerSessionIds()).toEqual([])
+  })
+
+  it('dropReplaySessionState forgets one session entirely and leaves the others alone', () => {
+    reconcileReplayStart('s1', true, 3)
+    noteLivePromptDuringReplay('s1', 'q1')
+    recordHistorySeq('s1', 11)
+    reconcileReplayStart('s2', true, 0)
+    noteLivePromptDuringReplay('s2', 'q2')
+    recordHistorySeq('s2', 22)
+
+    dropReplaySessionState('s1')
+
+    expect(getReplayWindowDepth('s1')).toBe(0)
+    expect(getLiveReplayLedgerSessionIds()).toEqual(['s2'])
+    expect(wasPromptLiveDuringReplay('s1', 'q1')).toBe(false)
+    expect(isRebuildInProgress('s1')).toBe(false)
+    expect(getHistoryCursor('s1')).toBeUndefined()
+    // s2 untouched.
+    expect(getReplayWindowDepth('s2')).toBe(1)
+    expect(wasPromptLiveDuringReplay('s2', 'q2')).toBe(true)
+    expect(isRebuildInProgress('s2')).toBe(true)
+    expect(getHistoryCursor('s2')).toBe(22)
+  })
+
+  it('dropReplaySessionState also drops a ledger already released to the sweep', () => {
+    reconcileReplayStart('s1', false, 0)
+    noteLivePromptDuringReplay('s1', 'q1')
+    reconcileReplayEnd('s1', [])
+    expect(wasPromptLiveDuringReplay('s1', 'q1')).toBe(true)
+    dropReplaySessionState('s1')
+    expect(wasPromptLiveDuringReplay('s1', 'q1')).toBe(false)
+  })
+
+  it('ignores a null/empty session id', () => {
+    reconcileReplayStart('s1', false, 0)
+    noteLivePromptDuringReplay('s1', 'q1')
+    dropReplaySessionState(null)
+    dropReplaySessionState('')
+    dropReplaySessionState(undefined)
+    expect(wasPromptLiveDuringReplay('s1', 'q1')).toBe(true)
+  })
+
+  // The socket-drop leak. A drop mid-replay means `history_replay_end` never
+  // arrives, so with a refcounted window the stranded +1 would keep the session
+  // permanently "in replay": its ledger would never be released and every later
+  // prompt would be protected forever. Both clients now call
+  // `resetReplayReconcile()` from `socket.onclose`/`socket.onerror`.
+  it('a drop mid-replay strands nothing once the transport teardown runs', () => {
+    reconcileReplayStart('s1', true, 0)
+    noteLivePromptDuringReplay('s1', 'q1')
+    recordHistorySeq('s1', 5)
+
+    resetReplayReconcile() // socket.onclose / socket.onerror
+
+    expect(getReplayWindowDepth('s1')).toBe(0)
+    expect(getLiveReplayLedgerSessionIds()).toEqual([])
+    expect(wasPromptLiveDuringReplay('s1', 'q1')).toBe(false)
+    expect(isRebuildInProgress('s1')).toBe(false)
+    // Cursors are NOT transport state — they are what makes the reconnect a
+    // delta replay instead of a full rebuild.
+    expect(getHistoryCursor('s1')).toBe(5)
+
+    // ...and the #7420 protection still works on the NEXT replay.
+    reconcileReplayStart('s1', false, 0)
+    noteLivePromptDuringReplay('s1', 'q2')
+    reconcileReplayEnd('s1', [])
+    expect(
+      sweepUnansweredPromptsAtReplayEnd('s1', [prompt('q1'), prompt('q2')]),
+    ).toEqual([
+      { id: 'q1', type: 'prompt', answered: REPLAY_RESOLVED_PLACEHOLDER },
+      { id: 'q2', type: 'prompt' },
+    ])
+  })
+
+  it('caps the ledger map and says so LOUDLY — never a silent truncation', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    // One open window with one live question per session, one past the cap.
+    for (let i = 0; i < MAX_LIVE_REPLAY_LEDGERS + 1; i++) {
+      const sid = `s${i}`
+      reconcileReplayStart(sid, false, 0)
+      noteLivePromptDuringReplay(sid, `q-${i}`)
+    }
+    expect(getLiveReplayLedgerSessionIds()).toHaveLength(MAX_LIVE_REPLAY_LEDGERS)
+    // LRU: the least-recently-noted session is the one evicted, never the
+    // just-touched one.
+    expect(getLiveReplayLedgerSessionIds()).not.toContain('s0')
+    expect(getLiveReplayLedgerSessionIds()).toContain(`s${MAX_LIVE_REPLAY_LEDGERS}`)
+    expect(wasPromptLiveDuringReplay('s0', 'q-0')).toBe(false)
+
+    // The log names the module, the cap, the evicted session AND the
+    // consequence — an evicted ledger un-protects a racing AskUserQuestion.
+    expect(warn).toHaveBeenCalledTimes(1)
+    const line = String(warn.mock.calls[0]?.[0])
+    expect(line).toContain('[replay-reconcile]')
+    expect(line).toContain(String(MAX_LIVE_REPLAY_LEDGERS))
+    expect(line).toContain('s0')
+    expect(line).toContain('#7456')
+    expect(line).toContain(REPLAY_RESOLVED_PLACEHOLDER)
+  })
+
+  it('re-noting an existing session refreshes its recency so it is not the one evicted', () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    for (let i = 0; i < MAX_LIVE_REPLAY_LEDGERS; i++) {
+      reconcileReplayStart(`s${i}`, false, 0)
+      noteLivePromptDuringReplay(`s${i}`, `q-${i}`)
+    }
+    // Touch the oldest so it moves to the tail...
+    noteLivePromptDuringReplay('s0', 'q-0-again')
+    // ...then overflow by one: s1 (now the oldest) goes, s0 stays.
+    reconcileReplayStart('overflow', false, 0)
+    noteLivePromptDuringReplay('overflow', 'q-overflow')
+
+    expect(getLiveReplayLedgerSessionIds()).toContain('s0')
+    expect(getLiveReplayLedgerSessionIds()).not.toContain('s1')
+    expect(wasPromptLiveDuringReplay('s0', 'q-0')).toBe(true)
+  })
+
+  it('the cap does not fire in the normal case (no warn for a single session)', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    reconcileReplayStart('s1', false, 0)
+    noteLivePromptDuringReplay('s1', 'q1')
+    noteLivePromptDuringReplay('s1', 'q2')
+    reconcileReplayEnd('s1', [])
+    expect(warn).not.toHaveBeenCalled()
   })
 })
