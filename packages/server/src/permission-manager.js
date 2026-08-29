@@ -926,6 +926,31 @@ export class PermissionManager extends EventEmitter {
   }
 
   /**
+   * #7457 -- the AskUserQuestion this manager is still blocked on, if any.
+   *
+   * A read-through of `_pendingUserAnswer`, which IS the blocked `canUseTool`
+   * resolver: every path that resolves the promise nulls it in the same
+   * statement block (`respondToQuestion`, the abort listener, the question
+   * timer, `clearAll`), so this can never report a question the turn is no
+   * longer waiting on. There is no second record to leak.
+   *
+   * `autoAllowPending()` is deliberately NOT one of those paths (#3729/#4462):
+   * solicited user input is not a permission gate, so a mode switch to
+   * auto/bypass leaves the resolver blocked -- and therefore leaves the
+   * question correctly pending here.
+   *
+   * Shaped as an array because the other two providers hold a MAP of them, and
+   * `ws-history.resendPendingQuestions` reads one shape from every provider.
+   *
+   * @returns {{ toolUseId: string, questions: object[] }[]}
+   */
+  getPendingQuestions() {
+    const pending = this._pendingUserAnswer
+    if (!pending) return []
+    return [{ toolUseId: pending.toolUseId, questions: pending.input?.questions ?? [] }]
+  }
+
+  /**
    * Clear a permission timeout timer by request ID.
    */
   _clearPermissionTimer(requestId) {
@@ -1283,6 +1308,13 @@ export function wirePermissionManager(session, permissions, { onRequest, onResol
   // Backward-compatible accessors used by ws-permissions.js + settings-handlers.js.
   session._pendingPermissions = permissions._pendingPermissions
   session._lastPermissionData = permissions._lastPermissionData
+  // #7457 -- delegate the still-blocked AskUserQuestion set, read after every
+  // history replay by `ws-history.resendPendingQuestions`. Installed HERE, once,
+  // rather than as three identical overrides on SdkSession / ByokSession /
+  // CodexAppServerSession: those are exactly the hand-copied parallel wirings
+  // audit P2-9 folded into this function, and the third copy is always the one
+  // that gets forgotten. Shadows BaseSession's empty default as an own property.
+  session.getPendingQuestions = () => permissions.getPendingQuestions()
   // #6830 (PR #6842 review) — public delegate so the WsServer can wire its
   // PermissionAuditLog straight into this manager's persisted-rule audit path
   // (ws-server.js _attachPermissionAuditSink) without reaching into privates.

@@ -399,6 +399,15 @@ async function handleRequestFullHistory(ws, client, msg, ctx) {
       // session, so its confirmed-backgrounded subagents must be re-asserted
       // after the replay that cleared them.
       ctx.transport.reseedActiveAgents(ws, targetId)
+      // #7457: same sweep, same repair. This end frame runs the client's
+      // unanswered-prompt sweep exactly as `replayHistory`'s does, so "Sync
+      // Full History" — the button a user presses BECAUSE the view looks
+      // wrong — would otherwise resolve the very question they are blocked on.
+      // The sibling `request_conversation_transcript` replay is exempt: its
+      // frames carry a conversationId in `sessionId`, which is never a live
+      // session id, so both clients' `updateSession` no-ops and the sweep
+      // touches nothing.
+      ctx.transport.resendPendingQuestions(ws, targetId)
     },
   })
 }

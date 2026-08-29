@@ -47,6 +47,7 @@ function makeBackpressuredWs(readyState = 1) {
 function build(historyEntries, { ws = makeOpenWs(), managerOverrides = {}, source = 'ring', truncated = false, legacyArrayShape = false } = {}) {
   const sends = []
   const reseeds = []
+  const resends = [] // #7457
   const { manager } = createMockSessionManager([{ id: 'sess-1', name: 'Work', cwd: '/repo' }])
   manager.getFullHistoryAsync = async () => (
     legacyArrayShape ? historyEntries : { entries: historyEntries, source, truncated }
@@ -64,8 +65,10 @@ function build(historyEntries, { ws = makeOpenWs(), managerOverrides = {}, sourc
     },
     sessionManager: manager,
     reseedActiveAgents: (_ws, sid) => reseeds.push(sid),
+    // #7457: same post-replay repair lane as the re-seed.
+    resendPendingQuestions: (_ws, sid) => resends.push(sid),
   })
-  return { ctx, sends, ws, reseeds }
+  return { ctx, sends, ws, reseeds, resends }
 }
 
 const client = () => ({ id: 'c1', activeSessionId: 'sess-1' })
@@ -370,6 +373,22 @@ describe('#7460 — request_full_history sends under the same chunk + bufferedAm
       'nothing may be withheld when bufferedAmount never crosses the threshold')
     assert.equal(sends[sends.length - 1].type, 'history_replay_end')
     assert.deepEqual(reseeds, ['sess-1'])
+  })
+
+  // #7457 — `request_full_history` ends with the SAME `history_replay_end` a
+  // replay does, so it runs the same client-side unanswered-prompt sweep. "Sync
+  // Full History" is the button a user presses BECAUSE the view looks wrong, and
+  // without this repair it would resolve the very question they are blocked on.
+  it('re-asserts the session pending questions after the end frame (#7457)', async () => {
+    const history = [{ type: 'user_question', toolUseId: 'ask-1', questions: [], _seq: 1 }]
+    const { ctx, sends, ws, resends } = build(history)
+
+    await handler(ws, client(), { type: 'request_full_history' }, ctx)
+    await turn(10)
+
+    assert.equal(sends[sends.length - 1].type, 'history_replay_end',
+      'precondition: the end frame is the last thing the handler itself sent')
+    assert.deepEqual(resends, ['sess-1'])
   })
 
   it('stops sending when the socket closes while parked on back-pressure', async () => {

@@ -178,7 +178,7 @@ const _replayWindowOpen = new Map<string, number>()
  * bounds the map, so it needs no cap — was wrong (#7456). The store drops a
  * session's `messages` wholesale on prune (`session_list` reconcile) and on
  * `session_timeout`, and neither path touches module state here; and
- * `dispatchUserQuestion` records into the ledger BEFORE its
+ * `dispatchUserQuestion` records into the ledger REGARDLESS of its
  * `adapter.hasSession` check, so a session the store holds nothing for can
  * still open a key. What actually bounds it: the release above, the per-session
  * {@link dropReplaySessionState} both clients call from those two prune paths,
@@ -593,6 +593,16 @@ export function wasPromptLiveDuringReplay(
  *
  * Everything else — replayed prompts, and prompts that pre-date the window — is
  * stamped, which is the sweep's original premise.
+ *
+ * That premise is still WRONG for one case, and it is fixed on the SERVER rather
+ * than here (#7457): a question the agent is genuinely still blocked on comes
+ * back through the ordinary replay, so it carries `historySeq` and is
+ * indistinguishable from a long-answered one by anything the client can see. The
+ * daemon re-sends every still-pending question as a live frame right after
+ * `history_replay_end` (`ws-history.resendPendingQuestions`), and
+ * `dispatchUserQuestion` supersedes the copy this sweep just stamped. Do not try
+ * to carve that case out here — there is nothing in `messages` to carve it out
+ * BY, which is the whole reason it needed a server-side answer.
  */
 export function sweepUnansweredPromptsAtReplayEnd<T extends SweepablePrompt>(
   sessionId: string | null | undefined,

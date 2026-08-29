@@ -139,6 +139,7 @@ if (typeof mock.module !== 'function') {
       broadcastSessionList: createSpy(),
       sendSessionInfo: createSpy(),
       reseedActiveAgents: createSpy(), // #7340
+      resendPendingQuestions: createSpy(), // #7457
       sessionManager: {
         listSessions: createSpy(() => []),
         getSession: createSpy((id) => createdSessions.get(id)),
@@ -184,6 +185,7 @@ if (typeof mock.module !== 'function') {
         broadcastSessionList: createSpy(),
         sendSessionInfo: createSpy(),
         reseedActiveAgents: createSpy(), // #7340
+        resendPendingQuestions: createSpy(), // #7457
         sessionManager: {
           listSessions: createSpy(() => []),
           getSession: createSpy((id) => createdSessions.get(id)),

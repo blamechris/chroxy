@@ -1332,6 +1332,77 @@ export function reseedActiveAgents(ctx, ws, sessionId) {
 }
 
 /**
+ * #7457 -- re-send the AskUserQuestion prompts a session is still BLOCKED on,
+ * as LIVE frames, immediately after a replay's `history_replay_end`.
+ *
+ * The bug this closes is the non-racing half of #7420. `history_replay_end`
+ * stamps `answered: '(resolved)'` on every unanswered `prompt` the sweep is
+ * entitled to touch, on the premise that anything in history is already
+ * resolved. #7453 carved out the question that arrived LIVE during the replay
+ * and deliberately could not carve out the still-pending one: `user_question`
+ * is not in `builtinTransient`, so it IS in the ring buffer, so the replay
+ * re-delivers it carrying `historySeq` -- correctly classified as
+ * replay-delivered by the only discriminator there is. Background the phone
+ * mid-question, reopen it, and the prompt is a resolved pill with the agent
+ * still blocked on the resolver until it times out.
+ *
+ * Two properties make this the fix rather than a mitigation, and BOTH are why
+ * it lives in `finishReplay` rather than beside `resendPendingPermissions` in
+ * the post-auth block (the issue's own suggestion):
+ *
+ *  1. ORDER. `replayHistory` is chunked and yields the event loop between
+ *     chunks, so a call placed after `replayHistory(...)` RETURNS still runs
+ *     before `history_replay_end` reaches the client -- which is precisely why
+ *     the sweep's own comment can say `resendPendingPermissions` runs "after
+ *     replayHistory has already sent its first chunk". Permissions do not care
+ *     (they are excluded from the sweep by `requestId`); a question's whole
+ *     defence is landing after the end frame, so it must be sequenced by the
+ *     replay's completion, not by its invocation.
+ *  2. COVERAGE. `finishReplay` is the ONE exit both replay paths share (#7340),
+ *     and `replayHistory` serves connect, `switch_session` (forceFull rebuild),
+ *     `subscribe_sessions` and the checkpoint restore alike. Bolted onto the
+ *     post-auth block instead, every one of those but connect stays broken.
+ *
+ * The frame carries NO `historySeq`, which is what makes the client treat it as
+ * live: `dispatchUserQuestion` keys #7420's discriminator on that field's
+ * presence. It is otherwise byte-identical to the dispatch-time frame -- no
+ * wire-shape change, no protocol bump, and both clients supersede the copy they
+ * already hold by `toolUseId` rather than stacking a duplicate bubble.
+ *
+ * `getPendingQuestions()` is called UNGUARDED for the same reason
+ * `getActiveAgents()` above is: BaseSession defines it, every provider extends
+ * BaseSession, so a feature-detect here could never fail and would only convert
+ * a future regression into a silent no-op.
+ *
+ * No route registration: `_questionSessionMap` entries are pruned only when the
+ * question resolves or its session is destroyed, so a still-pending question is
+ * still mapped, and `handleUserQuestionResponse`'s viewer check is the same
+ * predicate `_broadcastToSession` uses -- a client being replayed this session
+ * necessarily passes it.
+ *
+ * @param {object} ctx
+ * @param {WebSocket} ws
+ * @param {string} sessionId
+ */
+export function resendPendingQuestions(ctx, ws, sessionId) {
+  const { sessionManager, send } = ctx
+  const session = sessionManager?.getSession(sessionId)?.session
+  if (!session) return
+  for (const { toolUseId, questions } of session.getPendingQuestions()) {
+    // An entry with no id is unanswerable: `handleUserQuestionResponse` routes
+    // strictly by `toolUseId` and fails closed on one it cannot find. Skip it
+    // rather than send a prompt whose answer can only be dropped -- and skip
+    // only IT, so a malformed entry can't strand the valid ones behind it
+    // (#6054's per-entry isolation, same reason).
+    if (typeof toolUseId !== 'string' || toolUseId.length === 0) {
+      log.warn(`Skipping pending question with no toolUseId on session ${sessionId}`)
+      continue
+    }
+    send(ws, { type: 'user_question', sessionId, toolUseId, questions })
+  }
+}
+
+/**
  * Replay message history for a session to a single client.
  * Sends the retained ring buffer in batches to yield the event loop.
  *
@@ -1396,6 +1467,10 @@ export function replayHistory(ctx, ws, sessionId, opts = {}) {
   const finishReplay = () => {
     send(ws, { type: 'history_replay_end', sessionId, latestSeq })
     reseedActiveAgents(ctx, ws, sessionId)
+    // #7457: AFTER the end frame, never before it. The client's replay-end
+    // sweep has already run by the time this lands, which is the entire reason
+    // a still-pending question survives the reconnect.
+    resendPendingQuestions(ctx, ws, sessionId)
   }
 
   // #5555.3 — start at the resolved offset: 0 for a full replay, the

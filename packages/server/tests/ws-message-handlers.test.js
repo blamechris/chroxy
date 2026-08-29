@@ -56,6 +56,7 @@ function makeCtx(overrides = {}) {
     broadcastSessionList: mock.fn(),
     sendSessionInfo: mock.fn(),
     reseedActiveAgents: mock.fn(), // #7340
+    resendPendingQuestions: mock.fn(), // #7457
     updatePrimary: mock.fn((sid, cid) => { primaryMap.set(sid, cid) }),
     claimPrimary: mock.fn((sid, cid, o = {}) => {
       const current = primaryMap.get(sid)

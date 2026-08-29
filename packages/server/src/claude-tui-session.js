@@ -671,6 +671,31 @@ export class ClaudeTuiSession extends BaseSession {
   }
 
   /**
+   * #7457 -- the AskUserQuestion prompts this TUI turn is still blocked on.
+   *
+   * A read-through of `_pendingUserAnswers`, which is the map claude TUI's own
+   * answer routing consults: `respondToQuestion` looks the entry up here, and
+   * every teardown path drops it (`_clearPendingAnswerByToolUseId` from
+   * PostToolUse, the stall watchdog and the #5792 denied-shape reaper;
+   * `_pendingUserAnswers_clearAll` from `_teardownTurn` / `interrupt()` /
+   * `destroy()`). So an entry present here is one the PTY is still parked on,
+   * and there is no second record that could outlive it.
+   *
+   * Keyed by the MAP KEY rather than `entry.toolUseId` for the same reason
+   * `getActiveAgents` is: a record whose field drifted from its key would be
+   * re-announced under one id and answered under another, and
+   * `handleUserQuestionResponse` routes strictly by the id on the wire.
+   *
+   * @returns {{ toolUseId: string, questions: object[] }[]}
+   */
+  getPendingQuestions() {
+    return Array.from(this._pendingUserAnswers, ([toolUseId, entry]) => ({
+      toolUseId,
+      questions: entry?.questions ?? [],
+    }))
+  }
+
+  /**
    * #5617 — delegate the AskUserQuestion answer to the injected FormDriver.
    * Kept on the session because external callers (input-handlers.js) and the
    * provider contract call `session.respondToQuestion(...)`; the driving logic

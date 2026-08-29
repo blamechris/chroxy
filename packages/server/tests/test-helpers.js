@@ -462,6 +462,11 @@ export function createMockSession(overrides = {}) {
   // for the same reason it carries `sendMessage`. Empty by default; tests that
   // exercise the re-seed override it.
   session.getActiveAgents = createSpy(() => [])
+  // #7457: same contract, same reason — `ws-history.resendPendingQuestions`
+  // calls `getPendingQuestions()` unguarded because BaseSession defines it for
+  // every provider. Empty by default; tests that exercise the re-send override
+  // it.
+  session.getPendingQuestions = createSpy(() => [])
   // #5696: mirror the real BaseSession.setModel contract — returns true only
   // when the change actually lands (false when busy mid-turn or a same-model
   // no-op). The handler now reads this return to decide whether to broadcast

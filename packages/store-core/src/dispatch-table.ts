@@ -162,7 +162,14 @@ import {
 import { handleRawOutput } from './handlers/stream'
 // #7420 — the replay window / live-arrival ledger the `user_question` case
 // writes into and `history_replay_end`'s sweep reads.
-import { noteLivePromptDuringReplay } from './replay-reconcile'
+// #7457/#7508 — `replayDedupCache` bounds the re-delivery supersede to the view
+// a rebuild will actually keep, and `REPLAY_RESOLVED_PLACEHOLDER` is the ONE
+// non-decision value of `answered` a re-delivery is allowed to clear.
+import {
+  noteLivePromptDuringReplay,
+  replayDedupCache,
+  REPLAY_RESOLVED_PLACEHOLDER,
+} from './replay-reconcile'
 
 // ---------------------------------------------------------------------------
 // Client adapter
@@ -1995,18 +2002,91 @@ function dispatchUserQuestion<S extends DispatchSessionBase>(
   // stamping them '(resolved)' and destroying the answer path for that turn.
   const seq = (msg as { historySeq?: unknown }).historySeq
   const deliveredByReplay = typeof seq === 'number' && Number.isFinite(seq)
-  if (!deliveredByReplay) noteLivePromptDuringReplay(sessionId, chatMessage.id)
+  // #7457 — a LIVE frame carrying a `toolUseId` we already hold a prompt for is
+  // a RE-DELIVERY of that same question, not a second one, and it SUPERSEDES the
+  // copy held: `answered` cleared (it may have been stamped '(resolved)' by the
+  // replay-end sweep moments ago), id and timestamp kept so the bubble neither
+  // moves nor re-ages. Exactly the merge `handlePermissionRequest` has always
+  // done for a re-sent `permission_request`, keyed on `toolUseId` because that
+  // is what a question carries instead of a `requestId`.
+  //
+  // Its producer is the server's `resendPendingQuestions` (ws-history.js), which
+  // re-asserts every still-blocked question after each replay's
+  // `history_replay_end`; a stuck model re-emitting the same AskUserQuestion
+  // payload (the pre-#4668 failure mode) collapses the same way.
+  //
+  // The `!deliveredByReplay` gate is LOAD-BEARING, not caution. During a full
+  // rebuild the pre-replay prefix is sliced off at `history_replay_end`
+  // (`messages.slice(base)`), so merging a REPLAYED copy into the held one would
+  // leave the question in the part of the array about to be discarded — it would
+  // vanish from the transcript entirely, which is the worse half of #7457's own
+  // symptom. A replayed frame therefore always appends.
+  const toolUseId = chatMessage.toolUseId
+  const canSupersede =
+    !deliveredByReplay && typeof toolUseId === 'string' && toolUseId.length > 0
+  // The id the ledger must name is the one that SURVIVES this dispatch: on a
+  // supersede the freshly minted `chatMessage.id` is discarded, and recording it
+  // would protect a message that is not in the array while leaving the revived
+  // one stampable by the sweep.
+  let survivingId = chatMessage.id
   if (sessionId && adapter.hasSession(sessionId)) {
-    adapter.updateSession(
-      sessionId,
-      (ss) =>
-        ({
-          messages: [...ss.messages, chatMessage],
-        } as Partial<S>),
-    )
+    adapter.updateSession(sessionId, (ss) => {
+      // #7508 F2 — search only the view a rebuild will KEEP. During a full
+      // rebuild `reconcileReplayEnd` swaps in `messages.slice(base)`, so a
+      // supersede that matched a held copy in the pre-baseline PREFIX would
+      // write into a message nobody keeps — and because the merge replaces the
+      // append, the prompt is then neither stamped nor duplicated but GONE. The
+      // paragraph above argued exactly that hazard for the replayed direction
+      // and guarded only it; the live direction has it too, whenever the held
+      // copy sits in the prefix (a provider re-emitting the same
+      // `AskUserQuestion` payload gets there without any replay overlap, and
+      // nothing heals it). `main` appends in that case and keeps the prompt, so
+      // this is #7420's live-racer guarantee, not a new corner.
+      //
+      // `replayDedupCache` is the primitive that already computes this view, for
+      // this reason — "so a replayed entry isn't suppressed by an id in the
+      // discarded prefix" — and it returns the whole array when no rebuild is in
+      // progress, which is the ordinary reconnect.
+      const searchable = replayDedupCache(sessionId, ss.messages)
+      // The view is either the array itself or a tail slice of it, so the
+      // difference in length IS the offset back into `ss.messages`.
+      const offset = ss.messages.length - searchable.length
+      const found = canSupersede
+        ? searchable.findIndex(
+            (m) => m.type === 'prompt' && m.toolUseId === toolUseId,
+          )
+        : -1
+      const idx = found === -1 ? -1 : found + offset
+      const held = idx === -1 ? undefined : ss.messages[idx]
+      if (!held) return { messages: [...ss.messages, chatMessage] } as Partial<S>
+      survivingId = held.id
+      const next = ss.messages.slice()
+      // #7508 F3 — `answered` is a decision TOKEN with exactly one non-decision
+      // value (#6222/#6223). Clearing the sweep's placeholder IS #7457's fix;
+      // clearing a REAL decision is not. A second device can answer after the
+      // server's pending-set read and before this frame lands, and nothing on
+      // the wire un-sticks a prompt revived on top of that answer — the question
+      // variant of `permission_resolved` emits no message, only a route-map
+      // delete, and the late second answer is dropped as an unmapped toolUseId.
+      // So carry a real token across, and clear only the placeholder.
+      const heldAnswered = held.answered
+      const keepAnswered =
+        heldAnswered !== undefined && heldAnswered !== REPLAY_RESOLVED_PLACEHOLDER
+      next[idx] = {
+        ...chatMessage,
+        id: held.id,
+        timestamp: held.timestamp,
+        ...(keepAnswered ? { answered: heldAnswered } : {}),
+      }
+      return { messages: next } as Partial<S>
+    })
   } else {
     adapter.addMessage(chatMessage)
   }
+  // Recorded AFTER the write so the surviving id is known, and still recorded
+  // for a session the store holds nothing for — `noteLivePromptDuringReplay`
+  // reads no store state, so only the statement order moved.
+  if (!deliveredByReplay) noteLivePromptDuringReplay(sessionId, survivingId)
   if (sessionId) adapter.pushSessionNotification(sessionId, 'question', questionText)
 }
 
