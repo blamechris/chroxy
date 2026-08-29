@@ -220,30 +220,52 @@ async function handleRequestConversationTranscript(ws, client, msg, ctx) {
   // Stream back using the SAME wire shape as request_full_history so existing
   // renderers light up. `sessionId` carries the conversationId (read-only; no
   // live session exists for a closed conversation).
-  ctx.transport.send(ws, { type: 'history_replay_start', sessionId: conversationId, fullHistory: true, conversationId })
-  for (const entry of messages) {
-    ctx.transport.send(ws, {
-      type: 'message',
-      messageType: entry.type,
-      content: entry.content,
-      tool: entry.tool,
-      timestamp: entry.timestamp,
-      sessionId: conversationId,
-    })
-  }
-  ctx.transport.send(ws, { type: 'history_replay_end', sessionId: conversationId })
-  // #7340: defence-in-depth. The dashboard normally DIVERTS this frame — it
-  // routes `history_replay_start`/`message`/`history_replay_end` for a pending
-  // transcript id into the transcript viewer, which never touches
-  // `sessionStates`, so no wipe happens — and the mobile app has no transcript
-  // surface at all. This covers the fail-safe branch where the diversion is not
-  // armed (a raw client, or a frame that arrives without a pending request), in
-  // which case the client wipes its ACTIVE session's badge list because
-  // `conversationId` is a closed transcript with no live session behind it.
-  // Idempotent either way: both clients dedupe `agent_spawned` by `toolUseId`.
-  if (client?.activeSessionId) {
-    ctx.transport.reseedActiveAgents(ws, client.activeSessionId)
-  }
+  //
+  // Route through ctx.transport so a method-style sender keeps its receiver;
+  // the shared loop only ever needs a (ws, payload) callable.
+  const send = (target, payload) => ctx.transport.send(target, payload)
+  send(ws, { type: 'history_replay_start', sessionId: conversationId, fullHistory: true, conversationId })
+
+  // #7480 — the THIRD path through the #4833 chunk-and-drain loop, and the
+  // second one that had no `bufferedAmount` check at all: it pushed the whole
+  // transcript onto the socket in one turn of the event loop.
+  // `MAX_TRANSCRIPT_BYTES` caps the transcript, not how much of it is buffered
+  // on the socket at once, so a large transcript on a slow link could still
+  // sail past the 1MB EVICT_THRESHOLD in ws-client-sender.js — which CLOSES
+  // the client. Measured on the pre-fix code, a 30-entry fat transcript peaked
+  // at 6,148,308 bytes buffered: 5.9x the eviction line.
+  sendChunkedWithBackpressure(ws, messages, {
+    emit: (entry) => {
+      send(ws, {
+        type: 'message',
+        messageType: entry.type,
+        content: entry.content,
+        tool: entry.tool,
+        timestamp: entry.timestamp,
+        sessionId: conversationId,
+      })
+    },
+    onDone: () => {
+      send(ws, { type: 'history_replay_end', sessionId: conversationId })
+      // #7340: defence-in-depth. The dashboard normally DIVERTS this frame — it
+      // routes `history_replay_start`/`message`/`history_replay_end` for a pending
+      // transcript id into the transcript viewer, which never touches
+      // `sessionStates`, so no wipe happens — and the mobile app has no transcript
+      // surface at all. This covers the fail-safe branch where the diversion is not
+      // armed (a raw client, or a frame that arrives without a pending request), in
+      // which case the client wipes its ACTIVE session's badge list because
+      // `conversationId` is a closed transcript with no live session behind it.
+      // Idempotent either way: both clients dedupe `agent_spawned` by `toolUseId`.
+      //
+      // The re-seed is CONDITIONAL, so it stays inside onDone rather than being
+      // hoisted out of the now-asynchronous loop: hoisting it would fire it
+      // before the replay frames it repairs, which is exactly the ordering the
+      // #7340 fix exists to establish.
+      if (client?.activeSessionId) {
+        ctx.transport.reseedActiveAgents(ws, client.activeSessionId)
+      }
+    },
+  })
 }
 
 async function handleRequestFullHistory(ws, client, msg, ctx) {
