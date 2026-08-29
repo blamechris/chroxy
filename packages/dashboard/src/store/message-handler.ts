@@ -4511,10 +4511,14 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           terminalRawBuffer: '',
           sessions: [],
           activeSessionId: null,
+          // #7470 authok-reset-start — the roster wipe and everything scoped to
+          // it, in one marked block. The marker opens above `sessionStates: {}`
+          // itself (#7495) so the structural detector in
+          // `session-destroy-prunes-pr-maps.test.ts` can see this removal is
+          // accounted for.
           sessionStates: {},
-          // #7470 authok-reset-start — the per-session PR/CI maps go with the
-          // roster this branch empties, and this is a SITE rather than a case
-          // the removedIds prune below covers. `removedIds` is a diff against
+          // The per-session PR/CI maps go with the roster this branch empties,
+          // and this is a SITE rather than a case the removedIds prune covers. `removedIds` is a diff against
           // `Object.keys(sessionStates)` (store-core `buildSessionListPatches`),
           // so once the roster is empty there is nothing to diff: the next
           // `session_list` yields `removedIds = []`, the `removedIds.length > 0`
@@ -4803,6 +4807,16 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       }
       // Batch in-memory cleanup into a single state update
       if (removedIds.length > 0) {
+        // #7470 prune-block-start — everything this snapshot takes away, in one
+        // marked block: the roster entries themselves, the Control Room
+        // subtrees, and the seven per-session collections below.
+        //
+        // The marker opens HERE, above the roster removal, rather than just
+        // above the prunes (#7495). The removal is what makes this a "the
+        // session went away" SITE, and the structural detector in
+        // `session-destroy-prunes-pr-maps.test.ts` is red on a roster removal
+        // that no marker encloses — which is how a sixth site announces itself
+        // instead of shipping unguarded the way the fifth did.
         const patch: Partial<ConnectionState> = {};
         const newStates = { ...get().sessionStates };
         for (const id of removedIds) {
@@ -4816,7 +4830,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           nextActivity = clearSessionActivity(nextActivity, id);
         }
         if (nextActivity !== get().activity) patch.activity = nextActivity;
-        // #7470 prune-block-start — the per-session collections.
+        // The per-session collections.
         //
         // Seven of them, all session-scoped, and until #7481 nothing removed an
         // entry when the session it describes went away: connection.ts's #6153
@@ -4836,9 +4850,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         // that are still in the roster when the snapshot lands. The three sites
         // that empty the roster WHOLESALE — `auth_ok`'s non-reconnect branch
         // above, and `forgetSession` / `_resetSessionMemory` in connection.ts —
-        // leave nothing to diff, so each must clear these maps itself. All four
-        // are held by the SITES table in
-        // `session-destroy-prunes-pr-maps.test.ts`.
+        // leave nothing to diff, so each must clear these maps itself. So does
+        // `session_timeout` below, which removes ONE id from the roster before
+        // any snapshot can diff it out (#7495, the fifth). All five are held by
+        // the SITES table in `session-destroy-prunes-pr-maps.test.ts`.
         //
         // Each map is assigned EXPLICITLY rather than looped over a list of
         // field names: a name list is the same hardcoded roster with the
@@ -6349,12 +6364,60 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       const { sessionId: timeoutSessionId, name } = sharedSessionTimeout(msg);
       _adapters.alert.alert('Session Closed', `Session "${name}" was closed due to inactivity.`);
       if (timeoutSessionId) {
+        // #7470 timeout-reset-start — the FIFTH "the session went away" site
+        // (#7495). The block covers everything this one takes away: the roster
+        // entry, the Control Room subtree, and the seven per-session
+        // collections.
+        //
+        // Mechanically it is the roster-wipe case one session at a time.
+        // `removedIds` (store-core `buildSessionListPatches`) is a diff against
+        // `Object.keys(sessionStates)`, and the delete below removes the id from
+        // `sessionStates` HERE — so the next `session_list` has nothing to diff,
+        // `removedIds` comes back `[]`, the prune block above is skipped, and
+        // anything not cleared in THIS patch is unprunable for the life of the
+        // tab. Same reasoning as `auth_ok` above and `forgetSession` /
+        // `_resetSessionMemory` in connection.ts; the only difference is one id
+        // rather than the whole roster.
+        //
+        // It shipped unguarded for a structural reason worth keeping in view:
+        // the roster guard's FIELD axis is exhaustive (a new collection on
+        // ConnectionState is red until every site cleans it) while its SITE axis
+        // was a hand-written table of four, so a fifth caller turned nothing
+        // red. The `roster removal sites` describe in
+        // `session-destroy-prunes-pr-maps.test.ts` now derives the site axis
+        // from these sources instead: a roster removal that no marker encloses
+        // fails, naming the file and line.
+        //
         // Clean up sessionStates entry for the destroyed session (#816)
         const { sessionStates, sessions } = get();
         const newStates = { ...sessionStates };
         delete newStates[timeoutSessionId];
         const newSessions = sessions.filter((s) => s.sessionId !== timeoutSessionId);
         const patch: Partial<ConnectionState> = { sessionStates: newStates, sessions: newSessions };
+        // The one removed id, in the shape both pruners take.
+        const removedIds = [timeoutSessionId];
+        // #5163 — drop the Control Room activity tree for the timed-out session,
+        // exactly as the session_list prune does. Without it the tree lingers for
+        // a session the user can no longer select. `clearSessionActivity` returns
+        // the SAME state when the session had no subtree, and the conditional
+        // assign propagates that: an unconditional one re-renders every Control
+        // Room subscriber on a value that did not change.
+        const nextActivity = clearSessionActivity(get().activity, timeoutSessionId);
+        if (nextActivity !== get().activity) patch.activity = nextActivity;
+        // The seven session-scoped collections, assigned EXPLICITLY rather than
+        // looped over a list of field names — see the session_list block above
+        // for why, and for the two shapes: `pruneSessionKeyedMap` for the exact
+        // `Record<sessionId, …>` keys, `pruneSessionScopedKeySet` for the
+        // `${sessionId}:${activityId}` Set. Both return the SAME reference when
+        // the collection held nothing for the removed id.
+        patch.sessionPrStatus = pruneSessionKeyedMap(get().sessionPrStatus, removedIds);
+        patch.sessionPrStatusLoading = pruneSessionKeyedMap(get().sessionPrStatusLoading, removedIds);
+        patch.sessionPrStatusRequestedAt = pruneSessionKeyedMap(get().sessionPrStatusRequestedAt, removedIds);
+        patch.sessionPrThreads = pruneSessionKeyedMap(get().sessionPrThreads, removedIds);
+        patch.sessionPrThreadsLoading = pruneSessionKeyedMap(get().sessionPrThreadsLoading, removedIds);
+        patch.pendingServerSeed = pruneSessionKeyedMap(get().pendingServerSeed, removedIds);
+        patch.cancellingActivityIds = pruneSessionScopedKeySet(get().cancellingActivityIds, removedIds);
+        // #7470 timeout-reset-end
         // If the timed-out session was active, switch to next and sync flat fields (#816)
         if (get().activeSessionId === timeoutSessionId) {
           const remaining = Object.keys(newStates);

@@ -716,6 +716,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   streamStallTimeoutMs: null,
   sessions: [],
   activeSessionId: null,
+  // #7470 not-a-removal: the store's INITIAL empty roster, not a site where a
+  // session goes away — nothing session-scoped exists yet to strand. Annotated
+  // because the roster-removal detector in
+  // `session-destroy-prunes-pr-maps.test.ts` is classify-or-fail: a
+  // `sessionStates: {}` that is neither inside a `#7470 <site>-start/-end` span
+  // nor annotated here is red.
   sessionStates: {},
   // #5163 (epic #5159): Control Room activity tree, fed by the store-core
   // reducer from activity_snapshot / activity_delta.
@@ -3263,12 +3269,17 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       terminalRawBuffer: '',
       sessions: [],
       activeSessionId: null,
+      // #7470 forget-reset-start — the roster wipe and everything scoped to it,
+      // in one marked block. The marker opens above `sessionStates: {}` itself
+      // (#7495) so the structural detector in
+      // `session-destroy-prunes-pr-maps.test.ts` can see this removal is
+      // accounted for.
       sessionStates: {},
       // #5163: drop the Control Room tree on disconnect/forget — a fresh
       // connection re-seeds it from activity_snapshot on subscribe.
       activity: createEmptyActivityState(),
-      // #7470 forget-reset-start — the per-session PR/CI maps go with the
-      // session roster this action empties.
+      // The per-session PR/CI maps go with the session roster this action
+      // empties.
       //
       // Clearing them HERE is not belt-and-braces over the `session_list`
       // removedIds prune (message-handler.ts): it is the only thing that can
@@ -3350,12 +3361,17 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       terminalRawBuffer: '',
       sessions: [],
       activeSessionId: null,
+      // #7470 switch-reset-start — the roster wipe and everything scoped to it,
+      // in one marked block. The marker opens above `sessionStates: {}` itself
+      // (#7495) so the structural detector in
+      // `session-destroy-prunes-pr-maps.test.ts` can see this removal is
+      // accounted for.
       sessionStates: {},
       // #5163: drop the Control Room tree on disconnect/forget — a fresh
       // connection re-seeds it from activity_snapshot on subscribe.
       activity: createEmptyActivityState(),
-      // #7470 switch-reset-start — same mechanism as forgetSession above: this
-      // block empties `sessionStates`, which is the set `removedIds` diffs
+      // Same mechanism as forgetSession above: this block empties
+      // `sessionStates`, which is the set `removedIds` diffs
       // against, so anything left behind here can never be pruned by a later
       // `session_list`. switchServer additionally KEEPS the old server's
       // persisted data on purpose, so leaving these would carry one server's
