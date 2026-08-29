@@ -2771,6 +2771,160 @@ describe('flushPostAuthQueue', () => {
   })
 })
 
+// #7485 — flushPostAuthQueue was the last hand-copied instance of the #4833
+// chunk-and-drain loop, kept separate because it also owns the
+// `_flushing` / `_flushOverflow` queue state that ws-client-sender.js reads.
+// Unifying it means the shared loop has to carry that state across the gate,
+// so these pin the bookkeeping at every exit the loop has: parked, drained,
+// closed mid-flight, and the empty queue. Written against the hand-copied loop
+// first, so they characterise the behaviour being preserved rather than the
+// behaviour of whatever replaced it.
+describe('flushPostAuthQueue — queue bookkeeping across the shared chunk loop (#7485)', () => {
+  function makeDrainableWs(readyState = 1) {
+    const ws = {
+      readyState,
+      bufferedAmount: 0,
+      send(data) {
+        ws.bufferedAmount += Buffer.byteLength(typeof data === 'string' ? data : JSON.stringify(data))
+      },
+      close: createSpy(),
+      drain(bytes) { ws.bufferedAmount = Math.max(0, ws.bufferedAmount - bytes) },
+    }
+    return ws
+  }
+
+  function makeCtxWithRealSend() {
+    const sends = []
+    const ctx = makeCtx({
+      send: (ws, msg) => {
+        sends.push(msg)
+        if (ws.readyState === 1 && typeof ws.send === 'function') ws.send(JSON.stringify(msg))
+      },
+    })
+    ctx._sends = sends
+    return ctx
+  }
+
+  async function turn(n = 5) {
+    for (let i = 0; i < n; i++) await new Promise(r => setImmediate(r))
+  }
+
+  // ws-client-sender.js's EVICT_THRESHOLD — crossing it CLOSES the client.
+  const EVICT_THRESHOLD = 1024 * 1024
+
+  it('keeps _flushing TRUE while parked on back-pressure, then clears it once the queue drains', async () => {
+    const QUEUE_LEN = 30
+    const bigText = 'x'.repeat(200 * 1024)
+    const queue = Array.from({ length: QUEUE_LEN }, (_, i) => ({ type: 'fat_msg', idx: i, data: bigText }))
+    const ws = makeDrainableWs()
+    const ctx = makeCtxWithRealSend()
+    const client = registerClient(ctx, ws)
+
+    flushPostAuthQueue(ctx, ws, queue)
+    await turn(5)
+
+    assert.ok(ctx._sends.filter(m => m.type === 'fat_msg').length < QUEUE_LEN, 'precondition: the flush is parked, not finished')
+    assert.equal(client._flushing, true,
+      'while parked, ws-client-sender must keep buffering concurrent sends into _flushOverflow')
+
+    let maxObserved = ws.bufferedAmount
+    const drainTimer = setInterval(() => {
+      if (ws.bufferedAmount > maxObserved) maxObserved = ws.bufferedAmount
+      ws.drain(512 * 1024)
+    }, 5)
+    try {
+      const deadline = Date.now() + 3000
+      while (Date.now() < deadline && ctx._sends.filter(m => m.type === 'fat_msg').length < QUEUE_LEN) {
+        if (ws.bufferedAmount > maxObserved) maxObserved = ws.bufferedAmount
+        await new Promise(r => setTimeout(r, 10))
+      }
+    } finally {
+      clearInterval(drainTimer)
+    }
+
+    assert.equal(ctx._sends.filter(m => m.type === 'fat_msg').length, QUEUE_LEN, 'a pause resumes, it does not drop')
+    assert.ok(maxObserved < EVICT_THRESHOLD,
+      `bufferedAmount peaked at ${maxObserved}; a post-auth flush must stay under the ${EVICT_THRESHOLD}-byte eviction line that CLOSES the client`)
+    assert.equal(client._flushing, false, 'a completed flush must release the overflow gate')
+  })
+
+  it('drains _flushOverflow after a MULTI-chunk queue, not just a single-chunk one', async () => {
+    // The overflow recursion hangs off the loop's TERMINAL branch. A one-message
+    // queue reaches that branch on the very first synchronous chunk, so it can
+    // pass with the branch wired to the wrong exit; a 42-message queue only
+    // reaches it after the loop has yielded twice.
+    const COUNT = 42
+    const queue = Array.from({ length: COUNT }, (_, i) => ({ type: 'item', idx: i }))
+    const ws = makeFakeWs()
+    const ctx = makeCtxWithRealSend()
+    const client = registerClient(ctx, ws)
+    client._flushOverflow = [{ type: 'overflow_msg' }]
+
+    flushPostAuthQueue(ctx, ws, queue)
+    await turn(6)
+
+    const types = ctx._sends.map(m => m.type)
+    assert.equal(ctx._sends.filter(m => m.type === 'item').length, COUNT)
+    assert.ok(types.includes('overflow_msg'), 'the overflow queue must still drain after a multi-chunk flush')
+    assert.ok(types.lastIndexOf('item') < types.indexOf('overflow_msg'),
+      'and it must follow the primary queue, not interleave with it')
+    assert.equal(client._flushing, false)
+    assert.equal(client._flushOverflow, null)
+  })
+
+  it('clears _flushing and _flushOverflow when the socket closes BETWEEN chunks', async () => {
+    const COUNT = 42
+    const queue = Array.from({ length: COUNT }, (_, i) => ({ type: 'item', idx: i }))
+    const ws = makeFakeWs()
+    const ctx = makeCtxWithRealSend()
+    const client = registerClient(ctx, ws)
+
+    flushPostAuthQueue(ctx, ws, queue) // first chunk runs synchronously
+    const sentBeforeClose = ctx._sends.filter(m => m.type === 'item').length
+    assert.ok(sentBeforeClose > 0 && sentBeforeClose < COUNT, 'precondition: the flush yielded mid-queue')
+
+    ws.readyState = 3
+    client._flushOverflow = [{ type: 'never_sent' }]
+    await turn(4)
+
+    assert.equal(ctx._sends.filter(m => m.type === 'item').length, sentBeforeClose,
+      'nothing may be written to a closed socket')
+    assert.ok(!ctx._sends.some(m => m.type === 'never_sent'), 'nor may the overflow queue be drained at a dead peer')
+    assert.equal(client._flushing, false, 'the gate must be released or every later send is swallowed into _flushOverflow')
+    assert.equal(client._flushOverflow, null, 'and the abandoned overflow must be dropped, not retained forever')
+  })
+
+  it('an EMPTY queue on an OPEN socket releases the gate and still drains overflow', async () => {
+    const ws = makeFakeWs()
+    const ctx = makeCtxWithRealSend()
+    const client = registerClient(ctx, ws)
+    client._flushing = true
+    client._flushOverflow = [{ type: 'overflow_only' }]
+
+    flushPostAuthQueue(ctx, ws, [])
+    await turn(3)
+
+    assert.ok(ctx._sends.some(m => m.type === 'overflow_only'), 'an empty primary queue must not strand the overflow')
+    assert.equal(client._flushing, false)
+  })
+
+  it('an EMPTY queue with NO overflow still releases the gate', async () => {
+    // The empty-queue path is the one that never enters the chunk body, so it
+    // is where a "_flushing is cleared when a chunk starts" implementation
+    // silently leaves the gate latched and swallows every subsequent send.
+    const ws = makeFakeWs()
+    const ctx = makeCtxWithRealSend()
+    const client = registerClient(ctx, ws)
+    client._flushing = true
+
+    flushPostAuthQueue(ctx, ws, [])
+    await turn(2)
+
+    assert.equal(client._flushing, false,
+      'a latched _flushing routes every later send into _flushOverflow, which nothing then drains')
+  })
+})
+
 describe('sendPostAuthInfo — provider-scoped available_models (#2956)', () => {
   it('sends Codex-only models when active session has provider "codex"', () => {
     const { manager } = createMockSessionManager(

@@ -14,13 +14,15 @@ import { MAX_SANE_DURATION_MS } from '@chroxy/protocol'
 
 const log = createLogger('ws')
 
-// #4833 — back-pressure pause for chunked replay/flush loops.
+// #4833 — back-pressure pause for the chunked send loop.
 //
-// Both replayHistory and flushPostAuthQueue emit messages in 20-entry chunks
-// separated by setImmediate yields. On sessions with fat tool_result payloads
-// (200KB+ each), a single chunk can push ws.bufferedAmount past the 1MB
-// EVICT_THRESHOLD in ws-client-sender.js, tripping a post-send 4008 close and
-// surfacing as a "Reconnecting…" loop in the dashboard.
+// `sendChunkedWithBackpressure` emits messages in 20-entry chunks separated by
+// setImmediate yields, on behalf of every path that streams a batch to one
+// client: replayHistory, flushPostAuthQueue, and the two conversation-handler
+// replays. On sessions with fat tool_result payloads (200KB+ each), a single
+// chunk can push ws.bufferedAmount past the 1MB EVICT_THRESHOLD in
+// ws-client-sender.js, tripping a post-send 4008 close and surfacing as a
+// "Reconnecting…" loop in the dashboard.
 //
 // Before scheduling the next chunk, the loop now polls bufferedAmount and
 // pauses (via setTimeout, every BACKPRESSURE_POLL_INTERVAL_MS) until it falls
@@ -29,7 +31,7 @@ const log = createLogger('ws')
 // links. The poll interval (20ms) is short enough to keep the replay
 // responsive but long enough to give the socket time to actually flush.
 //
-// Both helpers abort the poll once ws.readyState leaves OPEN (client
+// The loop aborts the poll once ws.readyState leaves OPEN (client
 // disconnected while paused), so the poll chain terminates on socket close
 // without sending to a closed socket.
 //
@@ -156,19 +158,23 @@ export function scheduleAfterDrain(ws, fn) {
   setTimeout(poll, BACKPRESSURE_POLL_INTERVAL_MS)
 }
 
-// #7460 — ONE implementation of the #4833 chunk-and-drain loop, shared by both
-// replay paths. `replayHistory` (connect / session-switch) and
-// `handleRequestFullHistory` ("Sync Full History", conversation-handlers.js)
-// were divergent copies, and the second had no bufferedAmount check at all: it
-// pushed the entire history onto the socket in one turn of the event loop and
-// could sail past the 1MB EVICT_THRESHOLD in ws-client-sender.js, which CLOSES
-// the client. A second copy of this loop is how that divergence started, so the
-// two REPLAY paths now share exactly one.
+// #7460 / #7480 / #7485 — THE implementation of the #4833 chunk-and-drain loop.
+// Every path in the server that streams a batch of frames to one client goes
+// through it: `replayHistory` (connect / session-switch), `flushPostAuthQueue`
+// (below), `handleRequestFullHistory` ("Sync Full History") and
+// `handleRequestConversationTranscript` (the read-only transcript viewer), the
+// last two in conversation-handlers.js.
 //
-// Not the only instance in this file, and the comment should not pretend
-// otherwise: `flushPostAuthQueue` below still carries its own copy of the same
-// chunk-and-drain shape, kept separate here because it also owns the
-// `_flushing` / `_flushOverflow` queue state. Folding it in is tracked as #7485.
+// They were four hand-copied variants of the same twelve lines, and every
+// copied piece drifted at least once: the `_seq` -> `historySeq` map (#7454),
+// the `result` -> `agent_idle` synthesis (#7459), the bufferedAmount gating on
+// the full-history replay (#7460) and again on the transcript replay (#7480),
+// and a second chunk-size constant with the same value four lines from this
+// one (#7485). A second copy of this loop is how that divergence started, so
+// there is deliberately only one — and `tests/one-chunk-and-drain-loop.test.js`
+// re-derives that claim from this source on every run rather than trusting
+// this sentence, because a comment beside a set that can grow is exactly the
+// shape docs/false-safety-guards.md catalogues.
 const REPLAY_CHUNK_SIZE = 20
 
 /**
@@ -196,19 +202,44 @@ const REPLAY_CHUNK_SIZE = 20
  * `emit(entry, index)` writes one entry; `onDone()` runs once every entry has
  * been written. Neither runs after `ws.readyState` leaves OPEN — a client that
  * disconnects mid-replay gets no further frames and no end marker, which is
- * the behaviour both callers already relied on.
+ * the behaviour every replay caller already relied on.
+ *
+ * #7485 — three OPTIONAL hooks let a caller carry state across the gate, which
+ * is what `flushPostAuthQueue` needs and what kept it a separate copy of this
+ * loop until now. Callers that pass none behave exactly as before:
+ *
+ *  - `onPause()` — fires immediately before the loop parks on a drain (the
+ *    chunk-entry gate, the mid-chunk break, and the between-chunks yield all
+ *    park through one place).
+ *  - `onResume()` — fires each time the loop is CLEAR to write, including the
+ *    first chunk and including the empty slice, which never enters a chunk
+ *    body. A hook that only fired after a real pause would leave the
+ *    empty-queue case latched.
+ *  - `onAbort()` — fires instead of `onDone` when the loop stops because
+ *    `ws.readyState` left OPEN. It does NOT fire when the socket dies while
+ *    parked inside `scheduleAfterDrain` (that chain exits silently, as it
+ *    always has) or when the #5328 max-wait cap closes the socket.
  *
  * @param {WebSocket} ws - The client socket.
  * @param {Array} entries - The full slice to deliver.
- * @param {{startOffset?: number, emit: (entry: any, index: number) => void, onDone: () => void}} opts
+ * @param {{startOffset?: number, emit: (entry: any, index: number) => void, onDone: () => void, onPause?: () => void, onResume?: () => void, onAbort?: () => void}} opts
  */
-export function sendChunkedWithBackpressure(ws, entries, { startOffset = 0, emit, onDone }) {
+export function sendChunkedWithBackpressure(ws, entries, { startOffset = 0, emit, onDone, onPause, onResume, onAbort }) {
+  const park = (offset) => {
+    if (onPause) onPause()
+    scheduleAfterDrain(ws, () => sendChunk(offset))
+  }
+  const abort = () => { if (onAbort) onAbort() }
   const sendChunk = (offset) => {
-    if (ws.readyState !== 1) return
-    if ((ws.bufferedAmount || 0) > BACKPRESSURE_PAUSE_THRESHOLD) {
-      scheduleAfterDrain(ws, () => sendChunk(offset))
+    if (ws.readyState !== 1) {
+      abort()
       return
     }
+    if ((ws.bufferedAmount || 0) > BACKPRESSURE_PAUSE_THRESHOLD) {
+      park(offset)
+      return
+    }
+    if (onResume) onResume()
     const end = Math.min(offset + REPLAY_CHUNK_SIZE, entries.length)
     let nextOffset = end
     for (let i = offset; i < end; i++) {
@@ -219,7 +250,7 @@ export function sendChunkedWithBackpressure(ws, entries, { startOffset = 0, emit
       }
     }
     if (nextOffset < entries.length) {
-      scheduleAfterDrain(ws, () => sendChunk(nextOffset))
+      park(nextOffset)
     } else {
       onDone()
     }
@@ -233,11 +264,18 @@ export function sendChunkedWithBackpressure(ws, entries, { startOffset = 0, emit
   // above. That is the comment-stronger-than-code class
   // (docs/false-safety-guards.md), and it hid in the path taken MOST often:
   // the already-current reconnect (Copilot review, PR #7479).
-  if (ws.readyState !== 1) return
+  if (ws.readyState !== 1) {
+    abort()
+    return
+  }
   // An already-current client (startOffset === entries.length) still gets
   // `onDone` — the empty-slice path, and the most common replay of all.
-  if (startOffset >= entries.length) onDone()
-  else sendChunk(startOffset)
+  if (startOffset >= entries.length) {
+    if (onResume) onResume()
+    onDone()
+  } else {
+    sendChunk(startOffset)
+  }
 }
 
 /**
@@ -1379,59 +1417,47 @@ export function replayHistory(ctx, ws, sessionId, opts = {}) {
 }
 
 /**
- * Flush queued post-auth messages in batches to yield the event loop.
- * Same chunking pattern as replayHistory.
+ * Flush queued post-auth messages to a client through the shared chunk +
+ * back-pressure loop.
+ *
+ * #7485 — this was the last hand-copied instance of that loop: its own
+ * `CHUNK_SIZE = 20` four lines from `REPLAY_CHUNK_SIZE`, its own readyState
+ * exit, its own chunk-entry gate, its own mid-chunk break and its own
+ * scheduling gate, all maintained in parallel since #4845. What kept it
+ * separate is the queue state it owns on top of the loop, and each piece maps
+ * onto one of the hooks `sendChunkedWithBackpressure` now takes:
+ *
+ *  - `_flushing` is the gate ws-client-sender.js reads. It must be TRUE
+ *    whenever this flush is parked, so a concurrent `send` lands in
+ *    `_flushOverflow` behind the queued messages instead of overtaking them,
+ *    and FALSE while a chunk is actually being written — which is exactly
+ *    onPause / onResume.
+ *  - a socket that leaves OPEN mid-flush must drop BOTH `_flushing` (or every
+ *    later send is swallowed by a gate nothing will ever release) and
+ *    `_flushOverflow` (nothing will drain it) — onAbort.
+ *  - the terminal branch recurses into whatever arrived while we were parked,
+ *    rather than sending an end frame — onDone.
  */
 export function flushPostAuthQueue(ctx, ws, queue) {
   const { clients, send } = ctx
   const client = clients.get(ws)
   if (client) client._flushing = true
-  const CHUNK_SIZE = 20
-  const drainChunk = (offset) => {
-    if (ws.readyState !== 1) {
+  sendChunkedWithBackpressure(ws, queue, {
+    emit: (message) => send(ws, message),
+    onPause: () => { if (client) client._flushing = true },
+    onResume: () => { if (client) client._flushing = false },
+    onAbort: () => {
       if (client) {
         client._flushing = false
         client._flushOverflow = null
       }
-      return
-    }
-    // #4833 follow-up: gate chunk *entry* on bufferedAmount too — same
-    // rationale as replayHistory.sendChunk above. drainChunk(0) is invoked
-    // synchronously from flushPostAuthQueue, so the very first queued
-    // message can land on an already-congested socket (e.g. fat post-auth
-    // payloads that were queued during the encryption handshake) before the
-    // mid-chunk break (which only fires after a send) gets a chance to
-    // pause. Keep _flushing = true so any callers using ws-client-sender's
-    // _flushing buffer still queue overflow instead of blasting past us.
-    if ((ws.bufferedAmount || 0) > BACKPRESSURE_PAUSE_THRESHOLD) {
-      if (client) client._flushing = true
-      scheduleAfterDrain(ws, () => drainChunk(offset))
-      return
-    }
-    const end = Math.min(offset + CHUNK_SIZE, queue.length)
-    if (client) client._flushing = false
-    let nextOffset = end
-    for (let i = offset; i < end; i++) {
-      send(ws, queue[i])
-      // #4833: break early if a fat queued message just tipped bufferedAmount
-      // past the pause threshold — same rationale as replayHistory above.
-      if (i + 1 < end && (ws.bufferedAmount || 0) > BACKPRESSURE_PAUSE_THRESHOLD) {
-        nextOffset = i + 1
-        break
-      }
-    }
-    if (nextOffset < queue.length) {
-      if (client) client._flushing = true
-      // #4833: pause if the socket is already congested before scheduling
-      // the next chunk — same rationale as replayHistory above.
-      scheduleAfterDrain(ws, () => drainChunk(nextOffset))
-    } else if (client) {
-      if (client._flushOverflow?.length) {
+    },
+    onDone: () => {
+      if (client?._flushOverflow?.length) {
         const overflow = client._flushOverflow
         client._flushOverflow = null
         flushPostAuthQueue(ctx, ws, overflow)
       }
-    }
-  }
-  drainChunk(0)
+    },
+  })
 }
