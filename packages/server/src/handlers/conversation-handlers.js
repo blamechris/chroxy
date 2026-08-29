@@ -11,6 +11,7 @@ import { searchConversations as defaultSearchConversations } from '../conversati
 import { resolveJsonlPath, readConversationHistoryAsync as defaultReadConversationHistoryAsync } from '../jsonl-reader.js'
 import { validateCwdAllowed, broadcastFocusChanged, resolveSession, autoSubscribeOtherClients, buildSessionTokenMismatchPayload, sendSessionError } from '../handler-utils.js'
 import { scopeConversationsToClient } from '../conversation-scope.js'
+import { sendChunkedWithBackpressure, sendHistoryEntry } from '../ws-history.js'
 import { createLogger, loggerForSession } from '../logger.js'
 
 const log = createLogger('ws')
@@ -254,32 +255,60 @@ async function handleRequestFullHistory(ws, client, msg, ctx) {
     sendSessionError(ws, ctx, message)
     return
   }
-  const fullHistory = await ctx.sessions.sessionManager.getFullHistoryAsync(targetId)
-  ctx.transport.send(ws, { type: 'history_replay_start', sessionId: targetId, fullHistory: true })
-  for (const entry of fullHistory) {
-    if (entry.type === 'user_input' || entry.type === 'response' || entry.type === 'tool_use') {
-      ctx.transport.send(ws, {
-        type: 'message',
-        messageType: entry.type,
-        content: entry.content,
-        tool: entry.tool,
-        timestamp: entry.timestamp,
-        sessionId: targetId,
-      })
-    } else {
-      // #7454: this is the SECOND replay path (replayHistory is the first), and
-      // the #7420 live-vs-replayed discriminator keys on `historySeq` PRESENCE
-      // — map the internal `_seq` onto the wire exactly as replayHistory does
-      // (ws-history.js), and never leak the raw counter.
-      const { _seq, ...wireEntry } = entry
-      ctx.transport.send(ws, { ...wireEntry, sessionId: targetId, ...(typeof _seq === 'number' ? { historySeq: _seq } : {}) })
-    }
-  }
-  ctx.transport.send(ws, { type: 'history_replay_end', sessionId: targetId })
-  // #7340: same wipe, same repair — `request_full_history` targets a LIVE
-  // session, so its confirmed-backgrounded subagents must be re-asserted after
-  // the replay that cleared them.
-  ctx.transport.reseedActiveAgents(ws, targetId)
+  const sessionManager = ctx.sessions.sessionManager
+  const fullHistory = await sessionManager.getFullHistoryAsync(targetId)
+  // Route through ctx.transport so a method-style sender keeps its receiver;
+  // the shared loop only ever needs a (ws, payload) callable.
+  const send = (target, payload) => ctx.transport.send(target, payload)
+
+  // #7460 — frame parity with replayHistory. `truncated` is how a client learns
+  // the ring buffer overflowed on THIS replay; `latestSeq` is the input
+  // reconcileReplayEnd (store-core/replay-reconcile.ts) uses to finalise the
+  // cursor when the replayed slice carried no seq of its own. Both helpers are
+  // probed the way replayHistory probes getLatestHistorySeq — a legacy manager
+  // must not throw its way out of a replay.
+  const truncated = typeof sessionManager.isHistoryTruncated === 'function'
+    ? sessionManager.isHistoryTruncated(targetId)
+    : false
+  const latestSeq = typeof sessionManager.getLatestHistorySeq === 'function'
+    ? sessionManager.getLatestHistorySeq(targetId)
+    : 0
+
+  send(ws, { type: 'history_replay_start', sessionId: targetId, truncated, fullHistory: true, latestSeq })
+
+  // #7460 — the SAME chunk + bufferedAmount loop replayHistory uses, from the
+  // one implementation of it. Sending a 1000-entry ring buffer synchronously
+  // could push the socket past the 1MB EVICT_THRESHOLD in ws-client-sender.js
+  // and CLOSE the client: "Sync Full History" — the button a user presses
+  // BECAUSE the view looks wrong — was the action that could drop the
+  // connection.
+  sendChunkedWithBackpressure(ws, fullHistory, {
+    emit: (entry) => {
+      if (entry.type === 'user_input' || entry.type === 'response' || entry.type === 'tool_use') {
+        send(ws, {
+          type: 'message',
+          messageType: entry.type,
+          content: entry.content,
+          tool: entry.tool,
+          timestamp: entry.timestamp,
+          sessionId: targetId,
+        })
+      } else {
+        // This is the SECOND replay path, and both per-entry duties — the
+        // `_seq` → `historySeq` map (#7454) and the `result` → `agent_idle`
+        // synthesis (#7459 / #4628) — come from ws-history.js's shared emitter
+        // rather than a copy that can drift away from it again.
+        sendHistoryEntry(send, ws, targetId, entry)
+      }
+    },
+    onDone: () => {
+      send(ws, { type: 'history_replay_end', sessionId: targetId, latestSeq })
+      // #7340: same wipe, same repair — `request_full_history` targets a LIVE
+      // session, so its confirmed-backgrounded subagents must be re-asserted
+      // after the replay that cleared them.
+      ctx.transport.reseedActiveAgents(ws, targetId)
+    },
+  })
 }
 
 async function handleRequestSessionContext(ws, client, msg, ctx) {

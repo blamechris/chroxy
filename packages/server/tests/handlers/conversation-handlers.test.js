@@ -55,7 +55,10 @@ function makeClient(overrides = {}) {
   }
 }
 
-function makeWs() { return {} }
+// An OPEN, uncongested socket. `readyState` is load-bearing since #7460: the
+// full-history replay runs through ws-history.js's shared chunk loop, which
+// refuses to write to a non-OPEN peer exactly as replayHistory always has.
+function makeWs() { return { readyState: 1, bufferedAmount: 0 } }
 
 describe('conversation-handlers', () => {
   describe('list_conversations', () => {
