@@ -11,6 +11,24 @@ on:
 # so we fall back to the unique `run_id` — every main run gets its own group and
 # is therefore never cancelled OR queued behind another main run (each validates
 # a distinct merged commit and must complete).
+#
+# LONG-JOB PINNING (#7471): the three longest Linux jobs — Server Tests,
+# Dashboard Tests, Scripts Tests — run on `runner-target.outputs.longrunner`
+# instead of `outputs.runner`. The two ARM64 Docker pool members on the Mac
+# service-cancel long jobs right around their healthy completion mark (~10 min;
+# 6+ carcasses over 2026-08-28/29, every one green on rerun once it landed on
+# the winbox VM — evidence tabulated on #7471). `longrunner` selects the same
+# self-hosted Linux pool NARROWED by the `X64` label, which today uniquely
+# matches `chroxy-linux-winbox-01`. X64 is used as the discriminator — rather
+# than a hand-added custom label — because the arch label is re-asserted by the
+# runner itself on every registration; a custom label added via the API is
+# silently lost on re-registration, and these jobs would then queue forever.
+# The label IS a proxy: the real invariant is "off the Mac-Docker pair". If a
+# healthy x86_64 container ever joins the Mac pool, or the winbox VM is
+# replaced by an ARM box, revisit. UNPIN when #7471's root cause (broker-side
+# cancels on the ARM64 containers) is fixed: point the three jobs back at
+# `outputs.runner` and drop this note + the longrunner output + its pin test
+# (packages/server/tests/ci-long-job-runner-pinning.test.js).
 concurrency:
   group: ci-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
@@ -77,6 +95,7 @@ jobs:
     timeout-minutes: 1
     outputs:
       runner: ${{ steps.resolve.outputs.runner }}
+      longrunner: ${{ steps.resolve.outputs.longrunner }}
       winrunner: ${{ steps.resolve.outputs.winrunner }}
       npmcache: ${{ steps.resolve.outputs.npmcache }}
     steps:
@@ -84,6 +103,9 @@ jobs:
         # The condition is the same routing predicate the per-job ternary used:
         # push events and same-repo PRs are trusted; fork PRs are not.
         #   * runner    — Linux pool (label `chroxy-linux`) / ubuntu-24.04 for forks
+        #   * longrunner — the X64 pool member ONLY (the winbox VM) / ubuntu-24.04
+        #     for forks. #7471 mitigation, see the LONG-JOB PINNING note in the
+        #     header comment.
         #   * winrunner — Windows pool (self-hosted chroxy-win) / windows-latest for forks
         #   * npmcache  — setup-node's `cache:` input; EMPTY on self-hosted, `npm` on hosted (#7383)
         #
@@ -138,10 +160,12 @@ jobs:
         run: |
           if [ "${{ github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository }}" = "true" ]; then
             echo 'runner=["self-hosted", "Linux", "chroxy-linux"]' >> "$GITHUB_OUTPUT"
+            echo 'longrunner=["self-hosted", "Linux", "chroxy-linux", "X64"]' >> "$GITHUB_OUTPUT"
             echo 'winrunner=["self-hosted", "Windows", "X64", "chroxy-win"]' >> "$GITHUB_OUTPUT"
             echo 'npmcache=' >> "$GITHUB_OUTPUT"
           else
             echo 'runner="ubuntu-24.04"' >> "$GITHUB_OUTPUT"
+            echo 'longrunner="ubuntu-24.04"' >> "$GITHUB_OUTPUT"
             echo 'winrunner="windows-latest"' >> "$GITHUB_OUTPUT"
             echo 'npmcache=npm' >> "$GITHUB_OUTPUT"
           fi
@@ -173,8 +197,12 @@ jobs:
     # self-hosted Linux consumers are container-less too — pool-wide decision,
     # left for a follow-up.)
     needs: runner-target
-    runs-on: ${{ fromJSON(needs.runner-target.outputs.runner) }}  # SELF_HOSTED_OR_HOSTED (see header)
-    timeout-minutes: 10
+    runs-on: ${{ fromJSON(needs.runner-target.outputs.longrunner) }}  # LONG-JOB PINNING, #7471 (see header)
+    # 15, not 10: winbox green durations run 6.5-8.5 min with a 9m42s observed
+    # peak — 10 left as little as 18s of headroom on the very runner this job is
+    # now pinned to. Queue wait (the three pinned jobs serialize on one runner)
+    # does NOT count toward timeout-minutes; only execution time does.
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: packages/server
@@ -648,7 +676,7 @@ jobs:
   dashboard-tests:
     name: Dashboard Tests
     needs: runner-target
-    runs-on: ${{ fromJSON(needs.runner-target.outputs.runner) }}  # SELF_HOSTED_OR_HOSTED (see header)
+    runs-on: ${{ fromJSON(needs.runner-target.outputs.longrunner) }}  # LONG-JOB PINNING, #7471 (see header)
     timeout-minutes: 10
     defaults:
       run:
@@ -1215,7 +1243,7 @@ jobs:
   scripts-tests:
     name: Scripts Tests
     needs: runner-target
-    runs-on: ${{ fromJSON(needs.runner-target.outputs.runner) }}  # SELF_HOSTED_OR_HOSTED (see header)
+    runs-on: ${{ fromJSON(needs.runner-target.outputs.longrunner) }}  # LONG-JOB PINNING, #7471 (see header)
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
