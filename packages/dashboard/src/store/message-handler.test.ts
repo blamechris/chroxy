@@ -3963,11 +3963,10 @@ describe('dashboard message-handler dispatch', () => {
       handleMessage(question({ toolUseId: 'q-use-2' }) as any, ctx() as any)
       handleMessage({ type: 'history_replay_end', sessionId: 's1' }, ctx() as any)
 
-      // A racer arriving BEFORE the second start is deliberately not covered
-      // here: `_rebuildBaseline` has the same non-refcount shape and the second
-      // start overwrites it, so end#1's atomic swap slices that racer out of
-      // `messages` entirely. That is a separate defect in the same file, filed
-      // as #7477 — the ledger protects the message, the swap then drops it.
+      // A racer arriving BEFORE the second start was a separate defect in the
+      // same file — `_rebuildBaseline` had the same non-refcount shape, so
+      // end#1's atomic swap sliced that racer out of `messages` entirely. Fixed
+      // as #7477 and covered by the next test.
       //
       // Positive control: both questions really are in the store, so the
       // `undefined` assertions are about the sweep, not a missing fixture.
@@ -3977,15 +3976,149 @@ describe('dashboard message-handler dispatch', () => {
       expect(getReplayWindowDepth('s1')).toBe(0)
     })
 
-    // The 0→1-only ledger clear, pinned at the integration level. Two DELTA
-    // starts, so `_rebuildBaseline` is never set and nothing is swapped — which
-    // is why this shape works where the full-rebuild one cannot: with two full
-    // starts, end#1 slices a racer that pre-dates start#2 out of `messages`
-    // entirely (#7477), so the assertion could never be reached. Overlapping
-    // pure-delta replays are not the common wire shape (the connect handshake
-    // replays the active session with a cursor; `subscribe_sessions`,
-    // `switch_session` and `request_full_history` all force full), so this
-    // guards the logic rather than reproducing a production sequence.
+    // #7477 — one map over from the test above, and the same non-refcount
+    // shape: `_rebuildBaseline` was OVERWRITTEN by the second full start and
+    // DELETED by the first end, so end#1's atomic swap sliced the array at
+    // replay #2's baseline and removed the racer that arrived BEFORE start#2
+    // from `messages` entirely. A drop, not a stamp. The baseline is now owned
+    // by the OUTERMOST rebuild and the swap deferred to the end that closes the
+    // last window, so one swap covers both replays' appended tails.
+    it('keeps a racer that arrives BETWEEN two overlapping full starts (#7477)', () => {
+      // A pre-replay message makes the outer baseline non-zero, so the final
+      // swap is real (it drops the prefix) rather than an identity slice.
+      seedOne([{ id: 'old-1', type: 'response', content: 'before', timestamp: 1 }])
+      handleMessage({ type: 'history_replay_start', sessionId: 's1', fullHistory: true }, ctx() as any)
+      // Racer #1 — after start#1 and BEFORE start#2. This is the one #7477 lost.
+      handleMessage(question({ toolUseId: 'q-use-1' }) as any, ctx() as any)
+      handleMessage({ type: 'history_replay_start', sessionId: 's1', fullHistory: true }, ctx() as any)
+      // Racer #2 — inside the overlap.
+      handleMessage(question({ toolUseId: 'q-use-2' }) as any, ctx() as any)
+      handleMessage({ type: 'history_replay_end', sessionId: 's1' }, ctx() as any)
+      // Racer #3 — in the tail, after end#1, while replay #2 is still streaming.
+      handleMessage(question({ toolUseId: 'q-use-3' }) as any, ctx() as any)
+      handleMessage({ type: 'history_replay_end', sessionId: 's1' }, ctx() as any)
+
+      const msgs = (store.getState() as any).sessionStates.s1.messages
+      // All three survive the single deferred swap...
+      expect(msgs).toHaveLength(3)
+      // ...the swap really did happen (the pre-replay prefix is gone), so this
+      // is not passing because the swap was skipped altogether...
+      expect(msgs.every((m: any) => m.type === 'prompt')).toBe(true)
+      // ...and neither end's sweep stamped any of them.
+      expect(answeredOf(0)).toBeUndefined()
+      expect(answeredOf(1)).toBeUndefined()
+      expect(answeredOf(2)).toBeUndefined()
+      expect(getReplayWindowDepth('s1')).toBe(0)
+    })
+
+    // #7477 review blocker — the deferral window must keep replay dedup ON.
+    // Both clients gated `receivingHistoryReplay` (store-core
+    // handlers/stream.ts) on a Set that the FIRST `history_replay_end`
+    // deletes, so from end#1 onward everything replay #2 still had to deliver
+    // was appended with dedup switched off — and replay #2 is a forceFull from
+    // offset 0, so ALL of it is a re-delivery of what replay #1 already
+    // appended. Before #7477 that was invisible: end#1 swapped at replay #2's
+    // baseline and discarded replay #1's tail, so duplicate-then-discard netted
+    // to one copy. With the swap deferred to end#2 and sliced at the OUTER
+    // baseline, both copies survive — a duplicated bubble and a duplicate React
+    // key. The gate is the refcount now, so the window stays open until the
+    // last end and the dedup cache is actually consulted.
+    it('does not duplicate an entry replay #2 re-delivers after end#1 (#7477)', () => {
+      seedOne()
+      const replayed = () => ({
+        type: 'message',
+        messageType: 'response',
+        content: 'the server said this exactly once',
+        messageId: 'srv-m1',
+        sessionId: 's1',
+        timestamp: 500,
+        historySeq: 4,
+      })
+      handleMessage({ type: 'history_replay_start', sessionId: 's1', fullHistory: true }, ctx() as any)
+      handleMessage(replayed() as any, ctx() as any) // replay #1 delivers it
+      handleMessage({ type: 'history_replay_start', sessionId: 's1', fullHistory: true }, ctx() as any)
+      handleMessage({ type: 'history_replay_end', sessionId: 's1' }, ctx() as any) // replay #1 finishes first
+      handleMessage(replayed() as any, ctx() as any) // replay #2 RE-delivers the same entry
+      handleMessage({ type: 'history_replay_end', sessionId: 's1' }, ctx() as any)
+
+      const msgs = (store.getState() as any).sessionStates.s1.messages
+      expect(msgs.map((m: any) => m.id)).toEqual(['srv-m1'])
+    })
+
+    // Positive control A — the gate is still ON inside an ordinary single
+    // replay window, so the test above cannot pass by dedup being unconditional.
+    it('still dedups a re-delivered entry inside ONE replay window', () => {
+      seedOne()
+      const replayed = () => ({
+        type: 'message',
+        messageType: 'response',
+        content: 'once',
+        messageId: 'srv-m2',
+        sessionId: 's1',
+        timestamp: 500,
+        historySeq: 4,
+      })
+      handleMessage({ type: 'history_replay_start', sessionId: 's1', fullHistory: true }, ctx() as any)
+      handleMessage(replayed() as any, ctx() as any)
+      handleMessage(replayed() as any, ctx() as any)
+      handleMessage({ type: 'history_replay_end', sessionId: 's1' }, ctx() as any)
+      expect((store.getState() as any).sessionStates.s1.messages.map((m: any) => m.id)).toEqual([
+        'srv-m2',
+      ])
+    })
+
+    // Positive control B — the gate is OFF once the LAST window closes, so the
+    // arming lifecycle still ends. A live frame carrying an id the replay
+    // already delivered is NOT suppressed (that is the pre-existing behaviour
+    // the dedup gate exists to scope); if it were, the gate would be stuck on.
+    it('stops deduping once the last replay window closes', () => {
+      seedOne()
+      const frame = (extra: Record<string, unknown> = {}) => ({
+        type: 'message',
+        messageType: 'response',
+        content: 'once',
+        messageId: 'srv-m3',
+        sessionId: 's1',
+        timestamp: 500,
+        ...extra,
+      })
+      handleMessage({ type: 'history_replay_start', sessionId: 's1', fullHistory: true }, ctx() as any)
+      handleMessage(frame({ historySeq: 4 }) as any, ctx() as any)
+      handleMessage({ type: 'history_replay_end', sessionId: 's1' }, ctx() as any)
+      expect((store.getState() as any).sessionStates.s1.messages).toHaveLength(1)
+      handleMessage(frame() as any, ctx() as any) // live, outside any window
+      expect((store.getState() as any).sessionStates.s1.messages).toHaveLength(2)
+    })
+
+    // The SECOND arm of the same gate (#2901 tool dedup, `tool_start`). Written
+    // in the re-review of #7494: reverting only the tool_start gate to Set
+    // membership left BOTH full suites entirely green, so the arm was
+    // load-bearing and unproven — the guard-wired-but-never-failed shape in
+    // docs/false-safety-guards.md. Probed directly, it duplicates a tool chip
+    // in the same window: `['tool-1','tool-1']` with the arm reverted, and one
+    // commit below this branch is #7479, "heal zombie tool chips".
+    it('does not duplicate a tool_start replay #2 re-delivers after end#1 (#7477)', () => {
+      seedOne()
+      const ts = () => ({ type: 'tool_start', messageId: 'tool-1', tool: 'Bash', input: 'ls', sessionId: 's1' })
+      handleMessage({ type: 'history_replay_start', sessionId: 's1', fullHistory: true }, ctx() as any)
+      handleMessage(ts() as any, ctx() as any)                                   // replay #1 delivers it
+      handleMessage({ type: 'history_replay_start', sessionId: 's1', fullHistory: true }, ctx() as any)
+      handleMessage({ type: 'history_replay_end', sessionId: 's1' }, ctx() as any) // replay #1 finishes first
+      handleMessage(ts() as any, ctx() as any)                                   // replay #2 RE-delivers it
+      handleMessage({ type: 'history_replay_end', sessionId: 's1' }, ctx() as any)
+      expect((store.getState() as any).sessionStates.s1.messages.map((m: any) => m.id)).toEqual(['tool-1'])
+    })
+
+    // The 0→1-only ledger clear, pinned at the integration level with the swap
+    // taken out of the picture: two DELTA starts, so `_rebuildBaseline` is
+    // never set and nothing is swapped, and a failure can only be the ledger.
+    // (When this was written the full-rebuild shape could not reach the
+    // assertion at all — end#1 sliced a racer that pre-dated start#2 out of
+    // `messages` entirely, which is #7477, fixed above.) Overlapping pure-delta
+    // replays are not the common wire shape (the connect handshake replays the
+    // active session with a cursor; `subscribe_sessions`, `switch_session` and
+    // `request_full_history` all force full), so this guards the logic rather
+    // than reproducing a production sequence.
     it('a racer before the second DELTA start stays protected', () => {
       seedOne()
       handleMessage({ type: 'history_replay_start', sessionId: 's1', fullHistory: false }, ctx() as any)
@@ -4303,6 +4436,21 @@ describe('dashboard message-handler dispatch', () => {
   })
 
   describe('history replay: tool_start dedup (#2901)', () => {
+    // The replay window is a REFCOUNT in store-core module state (#7455), and
+    // the first test here deliberately opens a replay it never ends. Since
+    // #7477 the atomic swap waits for the LAST window to close, so that
+    // stranded +1 would defer the full-rebuild test's swap and leave the
+    // pre-replay prefix in `messages` — a cross-test leak, not a behaviour of
+    // the case under test. Both clients reset the same module state from
+    // `socket.onclose` / `onerror` for exactly this reason (#7456).
+    beforeEach(() => {
+      resetReplayReconcile({ clearCursors: true })
+    })
+
+    afterEach(() => {
+      resetReplayReconcile({ clearCursors: true })
+    })
+
     function seedWithTool(toolId: string) {
       store = createMockStore(
         baseState({
