@@ -10,7 +10,7 @@ import { MonthlyProgrammaticBudgetManager } from './billing-budget.js'
 import { runProviderPreflight, ProviderBinaryNotFoundError, ProviderBinaryQuarantinedError, ProviderBinaryProvenanceError, ProviderCredentialMissingError } from './utils/preflight.js'
 import { GIT } from './git.js'
 import { sweepOrphanChroxyWorktrees } from './worktree-gc.js'
-import { resolveJsonlPath, readConversationHistoryAsync } from './jsonl-reader.js'
+import { resolveJsonlPath, readConversationHistoryWithMetaAsync } from './jsonl-reader.js'
 import { readSessionContext } from './session-context.js'
 import { parseDuration, isOperatorTimeoutInRange } from './duration.js'
 import { SessionLockManager } from './session-lock.js'
@@ -2950,25 +2950,63 @@ export class SessionManager extends EventEmitter {
    * Get full conversation history asynchronously by reading the JSONL file.
    * Avoids blocking the event loop for large files (use in WS handlers).
    * Falls back to the ring buffer if JSONL is unavailable.
-   * @returns {Promise<Array<{ type, content, tool?, timestamp, messageId? }>>}
+   *
+   * #7484 — returns a DESCRIPTOR, not a bare array, because the two sources are
+   * not interchangeable and the caller has no other way to tell them apart:
+   *
+   *  - `source: 'jsonl'` is the common case for a live claude-family session (a
+   *    `resumeSessionId` plus a readable transcript). Its entries are
+   *    user_input/response/tool_use only — no `result`, no `_seq` — so a replay
+   *    of them carries neither a turn boundary nor a cursor.
+   *  - `source: 'ring'` is the fallback, and the only slice whose truncation
+   *    `isHistoryTruncated()` describes.
+   *  - `truncated` always describes THIS slice: the ring buffer's overflow flag
+   *    for `'ring'`, the transcript reader's own MAX_MESSAGES/byte caps for
+   *    `'jsonl'`. Reporting the ring's flag next to a JSONL slice is a statement
+   *    about a collection the caller never received.
+   *
+   * @returns {Promise<{ entries: Array<{ type, content, tool?, timestamp, messageId? }>, source: 'jsonl'|'ring', truncated: boolean }>}
    */
   async getFullHistoryAsync(sessionId) {
     const entry = this._sessions.get(sessionId)
-    if (!entry || entry._destroying) return []
+    // No session (or one being torn down) read NEITHER source. Labelled 'ring'
+    // because that is the slice a caller would have got — an empty one — and
+    // the label must never imply a transcript was consulted.
+    if (!entry || entry._destroying) return { entries: [], source: 'ring', truncated: false }
 
     const conversationId = entry.session.resumeSessionId
     if (conversationId) {
       try {
         const filePath = resolveJsonlPath(entry.cwd, conversationId)
-        const history = await readConversationHistoryAsync(filePath)
-        if (history.length > 0) return history
+        const { messages, truncated } = await readConversationHistoryWithMetaAsync(filePath)
+        if (messages.length > 0) return { entries: messages, source: 'jsonl', truncated }
       } catch (err) {
         log.error(`Failed to read JSONL history for session ${sessionId}: ${err?.message || err}`)
       }
     }
 
     // Fallback to ring buffer
-    return this.getHistory(sessionId)
+    return {
+      entries: this.getHistory(sessionId),
+      source: 'ring',
+      truncated: this.isHistoryTruncated(sessionId),
+    }
+  }
+
+  /**
+   * Is this session's provider mid-turn right now? (#7484)
+   *
+   * The full-history replay needs this to decide whether a synthesized
+   * `agent_idle` would be TRUE. `agent_idle` sets `isIdle`, clears
+   * `streamingMessageId` (hiding the stop button) and clears `activeTools` —
+   * all correct after a finished turn, all wrong while one is running.
+   *
+   * @param {string} sessionId
+   * @returns {boolean}
+   */
+  isSessionBusy(sessionId) {
+    const entry = this._sessions.get(sessionId)
+    return !!(entry && entry.session && entry.session.isRunning)
   }
 
   /**

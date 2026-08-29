@@ -278,7 +278,22 @@ async function handleRequestFullHistory(ws, client, msg, ctx) {
     return
   }
   const sessionManager = ctx.sessions.sessionManager
-  const fullHistory = await sessionManager.getFullHistoryAsync(targetId)
+  const history = await sessionManager.getFullHistoryAsync(targetId)
+  // #7484 — `getFullHistoryAsync` returns a descriptor: WHICH source it read
+  // (the on-disk JSONL transcript or the ring buffer) alongside the entries and
+  // that source's own truncation. Both decisions below turn on it, and neither
+  // can be recovered from the entries: a JSONL slice and a ring slice are the
+  // same shape of array.
+  //
+  // A bare array is the pre-#7484 shape. Accepted, and read as the ring buffer
+  // it always was, so a legacy ctx fixture keeps replaying rather than throwing
+  // — the same posture as the `typeof === 'function'` probes below. The REAL
+  // manager's shape is pinned at the producer
+  // (tests/session-manager-full-history-source.test.js), because every test on
+  // this side stubs the manager and so cannot witness it.
+  const descriptor = history && !Array.isArray(history) && Array.isArray(history.entries)
+  const fullHistory = descriptor ? history.entries : (Array.isArray(history) ? history : [])
+  const source = descriptor && history.source === 'jsonl' ? 'jsonl' : 'ring'
   // Route through ctx.transport so a method-style sender keeps its receiver;
   // the shared loop only ever needs a (ws, payload) callable.
   const send = (target, payload) => ctx.transport.send(target, payload)

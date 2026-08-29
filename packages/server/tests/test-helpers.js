@@ -392,7 +392,10 @@ export function createMockSessionManager(sessions = [], overrides = {}) {
   }
   manager.recordUserInput = () => {}
   manager.touchActivity = () => {}
-  manager.getFullHistoryAsync = async () => []
+  // #7484 — the descriptor shape the real getFullHistoryAsync returns
+  // ({ entries, source, truncated }). Tests that drive the full-history replay
+  // override this with their own source; the default models "nothing to replay".
+  manager.getFullHistoryAsync = async () => ({ entries: [], source: 'ring', truncated: false })
   manager.isBudgetPaused = () => false
   manager.getSessionContext = async () => null
   Object.defineProperty(manager, 'firstSessionId', {

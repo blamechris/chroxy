@@ -142,7 +142,10 @@ function createCliSessionAdapter(cliSession) {
     destroySession: () => { throw new Error('Session management not available in single-CLI mode') },
     renameSession: () => false,
     getHistoryCount: () => 0,
-    getFullHistoryAsync: () => Promise.resolve([]),
+    // #7484 — the descriptor shape the real SessionManager returns. Legacy
+    // single-CLI mode has no per-session ring buffer and no transcript to read,
+    // so the slice is empty and nothing was dropped to make it so.
+    getFullHistoryAsync: () => Promise.resolve({ entries: [], source: 'ring', truncated: false }),
     getSessionContext: () => Promise.resolve(null),
     getSessionCost: () => 0,
     getTotalCost: () => 0,

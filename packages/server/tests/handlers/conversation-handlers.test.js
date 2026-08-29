@@ -33,7 +33,7 @@ function makeCtx(sessions = new Map(), overrides = {}) {
       getSession: createSpy((id) => sessions.get(id)),
       createSession: createSpy(() => 'new-id'),
       listSessions: createSpy(() => []),
-      getFullHistoryAsync: createSpy(async () => []),
+      getFullHistoryAsync: createSpy(async () => ({ entries: [], source: 'ring', truncated: false })),
       getSessionContext: createSpy(async () => null),
       getSessionCost: createSpy(() => 0),
       getTotalCost: createSpy(() => 0),
@@ -835,9 +835,11 @@ describe('conversation-handlers', () => {
       const sessions = new Map()
       sessions.set('s1', { session: createMockSession(), name: 'S', cwd: '/tmp' })
       const ctx = makeCtx(sessions)
-      ctx.sessions.sessionManager.getFullHistoryAsync = createSpy(async () => [
-        { type: 'user_input', content: 'hello', timestamp: 1 },
-      ])
+      ctx.sessions.sessionManager.getFullHistoryAsync = createSpy(async () => ({
+        entries: [{ type: 'user_input', content: 'hello', timestamp: 1 }],
+        source: 'ring',
+        truncated: false,
+      }))
       const client = makeClient({ activeSessionId: 's1' })
 
       await conversationHandlers.request_full_history(makeWs(), client, {}, ctx)

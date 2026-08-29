@@ -31,11 +31,26 @@ function makeBackpressuredWs(readyState = 1) {
   return ws
 }
 
-function build(historyEntries, { ws = makeOpenWs(), managerOverrides = {} } = {}) {
+/**
+ * `historyEntries` is the slice the manager hands back; `source` is WHICH
+ * collection it came from and `truncated` whether that collection dropped
+ * anything to produce it — the #7484 descriptor.
+ *
+ * The source is explicit on every fixture rather than inferred from the entry
+ * types, because inferring is the bug: a JSONL slice and a ring slice are the
+ * same shape of array, and #7479's C1 came from a fixture that LOOKED
+ * JSONL-shaped while the code under test still read it as ring-buffer.
+ *
+ * Pass `legacyArrayShape: true` to model a pre-#7484 manager that returns a
+ * bare array.
+ */
+function build(historyEntries, { ws = makeOpenWs(), managerOverrides = {}, source = 'ring', truncated = false, legacyArrayShape = false } = {}) {
   const sends = []
   const reseeds = []
   const { manager } = createMockSessionManager([{ id: 'sess-1', name: 'Work', cwd: '/repo' }])
-  manager.getFullHistoryAsync = async () => historyEntries
+  manager.getFullHistoryAsync = async () => (
+    legacyArrayShape ? historyEntries : { entries: historyEntries, source, truncated }
+  )
   Object.assign(manager, managerOverrides)
   const ctx = nsCtx({
     send: (target, msg) => {
