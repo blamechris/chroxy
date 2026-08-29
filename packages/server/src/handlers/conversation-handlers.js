@@ -262,19 +262,36 @@ async function handleRequestFullHistory(ws, client, msg, ctx) {
   const send = (target, payload) => ctx.transport.send(target, payload)
 
   // #7460 — frame parity with replayHistory. `truncated` is how a client learns
-  // the ring buffer overflowed on THIS replay; `latestSeq` is the input
-  // reconcileReplayEnd (store-core/replay-reconcile.ts) uses to finalise the
-  // cursor when the replayed slice carried no seq of its own. Both helpers are
-  // probed the way replayHistory probes getLatestHistorySeq — a legacy manager
-  // must not throw its way out of a replay.
+  // the ring buffer overflowed. Probed the way replayHistory probes its seq
+  // helper: a legacy manager must not throw its way out of a replay.
+  //
+  // NOTE (#7484): `truncated` describes the RING BUFFER, so it is not meaningful
+  // on the JSONL-sourced replay below. Left as-is here deliberately — that is
+  // tracked separately rather than folded into this frame's fix.
   const truncated = typeof sessionManager.isHistoryTruncated === 'function'
     ? sessionManager.isHistoryTruncated(targetId)
     : false
-  const latestSeq = typeof sessionManager.getLatestHistorySeq === 'function'
-    ? sessionManager.getLatestHistorySeq(targetId)
-    : 0
+  // `latestSeq` must describe what THIS replay actually DELIVERS, not what the
+  // ring buffer happens to hold. `getFullHistoryAsync` PREFERS the JSONL
+  // transcript whenever `resumeSessionId` is set, and jsonl-reader.js emits only
+  // user_input/response/tool_use — none of which carry `_seq`. Sourcing the
+  // counter from the buffer there advertises a cursor the client never received:
+  // `reconcileReplayEnd` hands it to `recordHistorySeq`, so the NEXT reconnect
+  // resolves as already-current and replays NOTHING, stranding the client on the
+  // lossy JSONL rebuild. Derived from the entries themselves this is unchanged on
+  // the ring-buffer path — that slice is the whole buffer, so its max `_seq` IS
+  // `getLatestHistorySeq()` — and correctly advertises nothing on the JSONL path.
+  let latestSeq
+  for (const entry of fullHistory) {
+    if (entry && typeof entry._seq === 'number' && (latestSeq === undefined || entry._seq > latestSeq)) {
+      latestSeq = entry._seq
+    }
+  }
+  // Omitted, never zeroed: absence means "this replay carried no cursor", while
+  // `latestSeq: 0` is a real seq the client would happily record.
+  const seqFrame = latestSeq === undefined ? {} : { latestSeq }
 
-  send(ws, { type: 'history_replay_start', sessionId: targetId, truncated, fullHistory: true, latestSeq })
+  send(ws, { type: 'history_replay_start', sessionId: targetId, truncated, fullHistory: true, ...seqFrame })
 
   // #7460 — the SAME chunk + bufferedAmount loop replayHistory uses, from the
   // one implementation of it. Sending a 1000-entry ring buffer synchronously
@@ -302,7 +319,7 @@ async function handleRequestFullHistory(ws, client, msg, ctx) {
       }
     },
     onDone: () => {
-      send(ws, { type: 'history_replay_end', sessionId: targetId, latestSeq })
+      send(ws, { type: 'history_replay_end', sessionId: targetId, ...seqFrame })
       // #7340: same wipe, same repair — `request_full_history` targets a LIVE
       // session, so its confirmed-backgrounded subagents must be re-asserted
       // after the replay that cleared them.

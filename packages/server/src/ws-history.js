@@ -162,24 +162,36 @@ export function scheduleAfterDrain(ws, fn) {
 // were divergent copies, and the second had no bufferedAmount check at all: it
 // pushed the entire history onto the socket in one turn of the event loop and
 // could sail past the 1MB EVICT_THRESHOLD in ws-client-sender.js, which CLOSES
-// the client. A second copy of this loop is how that divergence started, so
-// there is deliberately only one.
+// the client. A second copy of this loop is how that divergence started, so the
+// two REPLAY paths now share exactly one.
+//
+// Not the only instance in this file, and the comment should not pretend
+// otherwise: `flushPostAuthQueue` below still carries its own copy of the same
+// chunk-and-drain shape, kept separate here because it also owns the
+// `_flushing` / `_flushOverflow` queue state. Folding it in is tracked as #7485.
 const REPLAY_CHUNK_SIZE = 20
 
 /**
  * Send `entries` to `ws` in REPLAY_CHUNK_SIZE batches, yielding the event loop
  * between chunks and pausing whenever `ws.bufferedAmount` climbs past
- * BACKPRESSURE_PAUSE_THRESHOLD (#4833). Three gates, all load-bearing:
+ * BACKPRESSURE_PAUSE_THRESHOLD (#4833). Three gates, of which TWO carry
+ * behaviour on their own:
  *
- *  - chunk ENTRY — the first chunk can land on a socket that is already
- *    congested from a preceding burst (post-auth info, session_switched), so
- *    it is deferred before anything is written. The mid-chunk break only fires
- *    *after* a send, so without this gate one fat payload still lands on a
- *    near-eviction buffer.
- *  - MID-chunk — REPLAY_CHUNK_SIZE was sized for short messages; two 200KB
- *    tool_results blow past the threshold inside a single chunk, so the loop
- *    breaks out and resumes from the next UNSENT entry.
- *  - chunk SCHEDULING — pause before queueing the next chunk.
+ *  - chunk ENTRY (load-bearing) — the first chunk can land on a socket that is
+ *    already congested from a preceding burst (post-auth info,
+ *    session_switched), so it is deferred before anything is written. The
+ *    mid-chunk break only fires *after* a send, so without this gate one fat
+ *    payload still lands on a near-eviction buffer.
+ *  - MID-chunk (load-bearing) — REPLAY_CHUNK_SIZE was sized for short messages;
+ *    two 200KB tool_results blow past the threshold inside a single chunk, so
+ *    the loop breaks out and resumes from the next UNSENT entry.
+ *  - chunk SCHEDULING — pauses before queueing the next chunk. Retained as the
+ *    inherited #4833 shape, but it is NOT independently load-bearing: replacing
+ *    it with a bare `setImmediate` is an equivalent mutation, because the next
+ *    `sendChunk` re-checks the chunk-ENTRY gate and enters the same drain wait
+ *    (with the same #5328 max-wait cap) one tick later. Established by mutation
+ *    testing and a 48-scenario differential during review of PR #7479; do not
+ *    read this line as a third independent guard.
  *
  * `emit(entry, index)` writes one entry; `onDone()` runs once every entry has
  * been written. Neither runs after `ws.readyState` leaves OPEN — a client that

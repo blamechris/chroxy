@@ -368,7 +368,38 @@ describe('#7460 — request_full_history sends under the same chunk + bufferedAm
     assert.deepEqual(reseeds, [], 'and no follow-up work is queued against a dead peer')
   })
 
-  it('carries `truncated` + `latestSeq` on history_replay_start and `latestSeq` on history_replay_end', async () => {
+  it('omits latestSeq entirely when NO forwarded entry carried a _seq (the JSONL path)', async () => {
+    // C1 (review of PR #7479). `getFullHistoryAsync` PREFERS the JSONL
+    // transcript whenever `resumeSessionId` is set, and jsonl-reader.js emits
+    // only user_input/response/tool_use — none of which carry `_seq`. Sourcing
+    // `latestSeq` from the RING BUFFER there tells the client it holds entries
+    // this replay never delivered: `reconcileReplayEnd` feeds it straight to
+    // `recordHistorySeq`, so the NEXT reconnect resolves the cursor as
+    // already-current and replays NOTHING — stranding the client on the lossy
+    // JSONL rebuild with no way back to the ring buffer's richer entries.
+    const { ctx, sends, ws } = build([
+      { type: 'user_input', content: 'hi', timestamp: 1 },
+      { type: 'response', content: 'yo', timestamp: 2 },
+      { type: 'tool_use', content: 'ls', tool: 'Bash', timestamp: 3 },
+    ], { managerOverrides: { getLatestHistorySeq: () => 42 } })
+    await handler(ws, client(), { type: 'request_full_history' }, ctx)
+
+    const start = sends.find(m => m.type === 'history_replay_start')
+    const end = sends.find(m => m.type === 'history_replay_end')
+    // Precondition, stated as an assertion so this test cannot pass because the
+    // fixture silently grew a seq: nothing in a JSONL replay is seq-stamped.
+    assert.equal(sends.some(m => 'historySeq' in m), false,
+      'precondition: a JSONL-sourced history stamps historySeq on nothing')
+    assert.ok(!('latestSeq' in end),
+      `the end frame must not advertise a cursor this replay never delivered; got latestSeq=${end.latestSeq}`)
+    assert.ok(!('latestSeq' in start),
+      `nor may the start frame; got latestSeq=${start.latestSeq}`)
+  })
+
+  it('carries `truncated`, and sources `latestSeq` from the entries DELIVERED rather than the buffer', async () => {
+    // The buffer's counter says 42; this replay delivered up to seq 9. Telling
+    // the client 42 would advance its cursor past entries it never received
+    // (C1) — so the frames must carry what was actually sent.
     const { ctx, sends, ws } = build([{ type: 'response', content: 'Hi', timestamp: 1, _seq: 9 }], {
       managerOverrides: { isHistoryTruncated: () => true, getLatestHistorySeq: () => 42 },
     })
@@ -378,11 +409,21 @@ describe('#7460 — request_full_history sends under the same chunk + bufferedAm
     const end = sends.find(m => m.type === 'history_replay_end')
     assert.equal(start.fullHistory, true, 'still an authoritative rebuild')
     assert.equal(start.truncated, true, 'without it a client cannot tell the ring buffer overflowed on this replay')
-    assert.equal(start.latestSeq, 42, 'replayHistory rides latestSeq on the start frame too')
-    assert.equal(end.latestSeq, 42, 'reconcileReplayEnd finalises the cursor from the END frame\'s latestSeq')
+    assert.equal(start.latestSeq, 9, 'replayHistory rides latestSeq on the start frame too — but only the delivered one')
+    assert.equal(end.latestSeq, 9, 'reconcileReplayEnd finalises the cursor from the END frame\'s latestSeq')
   })
 
-  it('degrades to truncated:false / latestSeq:0 on a legacy manager missing the helpers', async () => {
+  it('takes the HIGHEST delivered _seq, not the last entry\'s', async () => {
+    const { ctx, sends, ws } = build([
+      { type: 'tool_start', tool: 'Bash', timestamp: 1, _seq: 12 },
+      { type: 'response', content: 'Hi', timestamp: 2 },
+    ])
+    await handler(ws, client(), { type: 'request_full_history' }, ctx)
+    const end = sends.find(m => m.type === 'history_replay_end')
+    assert.equal(end.latestSeq, 12, 'a trailing seq-less entry must not erase the cursor the replay did deliver')
+  })
+
+  it('degrades to truncated:false and NO latestSeq on a legacy manager missing the helpers', async () => {
     // Same defensive posture replayHistory takes for getLatestHistorySeq —
     // an older ctx fixture must not throw its way out of a replay.
     const { ctx, sends, ws } = build([{ type: 'response', content: 'Hi', timestamp: 1 }], {
@@ -391,7 +432,7 @@ describe('#7460 — request_full_history sends under the same chunk + bufferedAm
     await handler(ws, client(), { type: 'request_full_history' }, ctx)
     const start = sends.find(m => m.type === 'history_replay_start')
     assert.equal(start.truncated, false)
-    assert.equal(start.latestSeq, 0)
+    assert.ok(!('latestSeq' in start), 'no entry carried a _seq, so no cursor is advertised — never a fabricated 0')
     assert.ok(sends.some(m => m.type === 'history_replay_end'), 'the replay still completes')
   })
 })
