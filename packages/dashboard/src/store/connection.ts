@@ -2790,6 +2790,17 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // CURRENT attempt's timer. (Idempotent if the handshake already completed.)
       clearHandshakeTimer();
 
+      // #7456 — the replay window and its live-arrival ledger are
+      // per-CONNECTION state, like the rebuild baseline: release them on the
+      // transport drop rather than waiting for the next `auth_ok`, which for a
+      // tab left open on a dead tunnel may never arrive. Load-bearing since
+      // #7455 made the window a refcount — a `history_replay_start` with no
+      // matching `_end` would otherwise strand a +1 and the window would never
+      // close again for that session. Cursors are deliberately KEPT (they are
+      // what makes the reconnect a delta replay, #5555.3).
+      resetReplayReconcile();
+
+
       // #3068: any in-flight evaluator request is now a guaranteed no-op —
       // reject them so awaiters get a fast error instead of waiting 60s for
       // the timeout to fire.
@@ -3021,6 +3032,17 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // handshake timer so it can't also fire (scheduleReconnect's per-socket
       // dedupe would no-op the second one, but clearing keeps it tidy).
       clearHandshakeTimer();
+
+      // #7456 — the replay window and its live-arrival ledger are
+      // per-CONNECTION state, like the rebuild baseline: release them on the
+      // transport drop rather than waiting for the next `auth_ok`, which for a
+      // tab left open on a dead tunnel may never arrive. Load-bearing since
+      // #7455 made the window a refcount — a `history_replay_start` with no
+      // matching `_end` would otherwise strand a +1 and the window would never
+      // close again for that session. Cursors are deliberately KEPT (they are
+      // what makes the reconnect a delta replay, #5555.3).
+      resetReplayReconcile();
+
 
       // #3605: an unexpected error means any in-flight skill_trust_grant
       // request will never be acked. Clear both the Map-based correlation
