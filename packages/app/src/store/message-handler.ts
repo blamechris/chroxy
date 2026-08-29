@@ -773,10 +773,11 @@ export function resetReplayFlags(): void {
   _ctx.replayingSessions.clear();
   // #7477 — the replay FLAG is the refcount now (see `isSessionReplaying`), so
   // resetting the flags has to reset that too or this clears half the state and
-  // reads as a full reset. Both production callers already run
-  // `resetReplayReconcile({ clearCursors: true })` on the next line
-  // (connection.ts disconnect), so this is a no-op for them and closes the gap
-  // for every test-hygiene caller that only knows about this function.
+  // reads as a full reset. The one production caller (connection.ts's
+  // disconnect) already runs `resetReplayReconcile({ clearCursors: true })`
+  // immediately below, separated only by comment lines, so this is a no-op
+  // there and closes the gap for every test-hygiene caller that only knows
+  // about this function.
   // Cursors are deliberately NOT dropped here: they are what makes the next
   // reconnect a delta replay (#5555.3), and the hard-disconnect path asks for
   // them explicitly.
@@ -810,8 +811,11 @@ export function resetReplayFlags(): void {
  * The Set's other readers — the #3758/#4466 activity bump, the #4889
  * permission-split gate in store-core's shared `StreamDeltaContext`, the delta
  * flusher's reconcile — see exactly the behaviour they saw before #7477 in this
- * window, so moving them is an unrelated behaviour change and is filed rather
- * than folded in here.
+ * window, so moving them is an unrelated behaviour change. Tracked as #7497,
+ * which also carries the one site where the two maps now genuinely DISAGREE:
+ * `dropReplaySessionState` clears the refcount but not the Set, so a pruned
+ * session still receiving replay frames reads as "not replaying" here where the
+ * Set kept dedup on.
  */
 function isSessionReplaying(sessionId: string | null | undefined): boolean {
   return getReplayWindowDepth(sessionId) > 0;

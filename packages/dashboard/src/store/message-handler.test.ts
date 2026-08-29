@@ -4084,6 +4084,25 @@ describe('dashboard message-handler dispatch', () => {
       expect((store.getState() as any).sessionStates.s1.messages).toHaveLength(2)
     })
 
+    // The SECOND arm of the same gate (#2901 tool dedup, `tool_start`). Written
+    // in the re-review of #7494: reverting only the tool_start gate to Set
+    // membership left BOTH full suites entirely green, so the arm was
+    // load-bearing and unproven — the guard-wired-but-never-failed shape in
+    // docs/false-safety-guards.md. Probed directly, it duplicates a tool chip
+    // in the same window: `['tool-1','tool-1']` with the arm reverted, and one
+    // commit below this branch is #7479, "heal zombie tool chips".
+    it('does not duplicate a tool_start replay #2 re-delivers after end#1 (#7477)', () => {
+      seedOne()
+      const ts = () => ({ type: 'tool_start', messageId: 'tool-1', tool: 'Bash', input: 'ls', sessionId: 's1' })
+      handleMessage({ type: 'history_replay_start', sessionId: 's1', fullHistory: true }, ctx() as any)
+      handleMessage(ts() as any, ctx() as any)                                   // replay #1 delivers it
+      handleMessage({ type: 'history_replay_start', sessionId: 's1', fullHistory: true }, ctx() as any)
+      handleMessage({ type: 'history_replay_end', sessionId: 's1' }, ctx() as any) // replay #1 finishes first
+      handleMessage(ts() as any, ctx() as any)                                   // replay #2 RE-delivers it
+      handleMessage({ type: 'history_replay_end', sessionId: 's1' }, ctx() as any)
+      expect((store.getState() as any).sessionStates.s1.messages.map((m: any) => m.id)).toEqual(['tool-1'])
+    })
+
     // The 0→1-only ledger clear, pinned at the integration level with the swap
     // taken out of the picture: two DELTA starts, so `_rebuildBaseline` is
     // never set and nothing is swapped, and a failure can only be the ledger.

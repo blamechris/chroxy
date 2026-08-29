@@ -1124,6 +1124,25 @@ describe("history_replay_end: '(resolved)' sweep vs a racing live AskUserQuestio
     expect(store.getState().sessionStates.s1.messages).toHaveLength(2);
   });
 
+  // The SECOND arm of the same gate (#2901 tool dedup, `tool_start`). Written
+  // in the re-review of #7494: reverting only the tool_start gate to Set
+  // membership left BOTH full suites entirely green, so the arm was
+  // load-bearing and unproven — the guard-wired-but-never-failed shape in
+  // docs/false-safety-guards.md. Probed directly, it duplicates a tool chip in
+  // the same window: `['tool-1','tool-1']` with the arm reverted, and one
+  // commit below this branch is #7479, "heal zombie tool chips".
+  it('does not duplicate a tool_start replay #2 re-delivers after end#1 (#7477)', () => {
+    const store = seedOne();
+    const ts = () => ({ type: 'tool_start', messageId: 'tool-1', tool: 'Bash', input: 'ls', sessionId: 's1' });
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's1', fullHistory: true });
+    _testMessageHandler.handle(ts());                                            // replay #1 delivers it
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's1', fullHistory: true });
+    _testMessageHandler.handle({ type: 'history_replay_end', sessionId: 's1' });  // replay #1 finishes first
+    _testMessageHandler.handle(ts());                                            // replay #2 RE-delivers it
+    _testMessageHandler.handle({ type: 'history_replay_end', sessionId: 's1' });
+    expect(store.getState().sessionStates.s1.messages.map((m: any) => m.id)).toEqual(['tool-1']);
+  });
+
   // #7456 — the store drops a session's messages wholesale on prune and on
   // timeout; module state here used to survive both with nothing left to
   // correspond to.
