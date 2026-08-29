@@ -224,6 +224,16 @@ export function sendChunkedWithBackpressure(ws, entries, { startOffset = 0, emit
       onDone()
     }
   }
+  // Both entry paths are gated on OPEN, not just the chunking one. `sendChunk`
+  // re-checks readyState itself (it is also the resume point for every
+  // scheduled continuation), but the EMPTY-slice path below reaches `onDone`
+  // without going through it — so without this check a client that vanished
+  // before an already-current replay still had its `history_replay_end` and
+  // re-seed burst written at a dead socket, contradicting the contract stated
+  // above. That is the comment-stronger-than-code class
+  // (docs/false-safety-guards.md), and it hid in the path taken MOST often:
+  // the already-current reconnect (Copilot review, PR #7479).
+  if (ws.readyState !== 1) return
   // An already-current client (startOffset === entries.length) still gets
   // `onDone` — the empty-slice path, and the most common replay of all.
   if (startOffset >= entries.length) onDone()

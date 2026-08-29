@@ -396,6 +396,34 @@ describe('#7460 — request_full_history sends under the same chunk + bufferedAm
       `nor may the start frame; got latestSeq=${start.latestSeq}`)
   })
 
+  it('sends no end frame and no re-seed for an EMPTY history when the socket is CLOSED', async () => {
+    // Copilot review: the empty-slice path ran onDone() unconditionally, so a
+    // client that vanished before an empty replay still got a
+    // history_replay_end plus a re-seed burst written at a dead socket —
+    // contradicting the shared helper's own stated contract.
+    const ws = makeBackpressuredWs(3)
+    const { ctx, sends, reseeds } = build([], { ws })
+
+    await handler(ws, client(), { type: 'request_full_history' }, ctx)
+    await turn(3)
+
+    assert.equal(sends.find(m => m.type === 'history_replay_end'), undefined,
+      'no end frame may be written to a socket that is already gone')
+    assert.deepEqual(reseeds, [], 'and no re-seed burst behind it')
+  })
+
+  it('POSITIVE CONTROL: an EMPTY history on an OPEN socket still brackets start+end', async () => {
+    // The empty replay must keep working — gating the dead-socket case must not
+    // turn "nothing to replay" into "no reply at all".
+    const { ctx, sends, ws, reseeds } = build([])
+    await handler(ws, client(), { type: 'request_full_history' }, ctx)
+    await turn(3)
+
+    assert.equal(sends[0].type, 'history_replay_start')
+    assert.equal(sends[sends.length - 1].type, 'history_replay_end')
+    assert.deepEqual(reseeds, ['sess-1'], 'the #7340 re-seed still follows an empty replay')
+  })
+
   it('carries `truncated`, and sources `latestSeq` from the entries DELIVERED rather than the buffer', async () => {
     // The buffer's counter says 42; this replay delivered up to seq 9. Telling
     // the client 42 would advance its cursor past entries it never received
