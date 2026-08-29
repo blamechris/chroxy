@@ -108,13 +108,23 @@ export function pruneSessionKeyedMap<T>(
  * fresh `Set` on every `session_list` that closed some unrelated session would
  * re-render the whole panel for a value that did not change.
  *
+ * There is deliberately NO `removedIds.length === 0 || keys.size === 0` early
+ * return, and the sibling above has none either. It looks like a cheap fast
+ * path and is behaviourally UNOBSERVABLE: with either input empty the loop
+ * body never runs, `next` stays null, and `return next ?? keys` already hands
+ * back the same reference. PR #7489 review measured both halves against every
+ * input class — empty/empty, empty keys, empty ids, no-match, match,
+ * delimiter-less, all-removed — and found no distinguishing input, so under
+ * the untestable-guard rule it is cut rather than kept with a test that cannot
+ * fail. (The assertion originally offered as its proof compared a fresh empty
+ * `Set` against an unrelated one, which is true whatever the helper does.)
+ *
  * Inputs are treated as immutable — the source set is never mutated.
  */
 export function pruneSessionScopedKeySet(
   keys: Set<string>,
   removedIds: readonly string[],
 ): Set<string> {
-  if (removedIds.length === 0 || keys.size === 0) return keys;
   const removed = new Set(removedIds);
   let next: Set<string> | null = null;
   for (const key of keys) {

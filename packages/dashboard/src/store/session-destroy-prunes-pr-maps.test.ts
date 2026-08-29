@@ -595,10 +595,20 @@ describe('#7483 pruneSessionScopedKeySet contract', () => {
   })
 
   it('returns the SAME reference when nothing matched', () => {
+    // Every one of these goes through the GENERAL path — there is no
+    // empty-input early return to shortcut them (see the helper's docstring:
+    // PR #7489 review proved that refinement unobservable and it was cut).
+    // So an always-clone regression dies on each of the three.
     const keys = new Set(['a:1'])
     expect(pruneSessionScopedKeySet(keys, ['b'])).toBe(keys)
     expect(pruneSessionScopedKeySet(keys, [])).toBe(keys)
-    expect(pruneSessionScopedKeySet(new Set<string>(), ['a'])).not.toBe(keys)
+    // The empty-input case, asserted against ITSELF. The first version of this
+    // line read `expect(prune(new Set(), ['a'])).not.toBe(keys)` — a fresh Set
+    // compared to an UNRELATED one, which is true however the helper behaves
+    // and would have passed with the function deleted (PR #7489 review,
+    // BLOCKING). Pinned to its own input, it now pins the real contract.
+    const empty = new Set<string>()
+    expect(pruneSessionScopedKeySet(empty, ['a'])).toBe(empty)
   })
 
   it('keeps a key with no delimiter — an unattributable key is not a licence to delete', () => {
@@ -817,6 +827,41 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
       [...classified].filter((f) => !declaredSet.has(f)),
       'bucket entries for fields no longer declared on ConnectionState — stale allowlist',
     ).toEqual([])
+
+    // And "in EXACTLY one bucket", which this test is NAMED for and did not
+    // check (PR #7489 review): `classified` is a Set, so a field listed in two
+    // buckets collapsed into one entry and passed silently. A field that is
+    // both CLEANED and deferred, or both session-keyed and not, is a
+    // contradiction someone has to resolve — and a guard whose name promises
+    // more than its code checks is the exact class this guard exists for.
+    const allEntries = [
+      ...CLEANED,
+      ...SESSION_KEYED_ELSEWHERE,
+      ...Object.keys(SESSION_KEYED_DEFERRED),
+      ...Object.keys(NOT_SESSION_KEYED),
+    ]
+    const seen = new Set<string>()
+    const duplicated = allEntries.filter((f) => (seen.has(f) ? true : (seen.add(f), false)))
+    expect(duplicated, 'field(s) classified into more than one bucket').toEqual([])
+  })
+
+  it('every DEFERRED entry names a tracking issue', () => {
+    // The bucket's contract, stated in its own comment ("An entry here needs a
+    // tracking issue in its reason string") and never asserted until now — the
+    // partially-pinned shape from this repo's memory: the bucket membership was
+    // pinned, the reason text next to it was not.
+    //
+    // Vacuous while the bucket is empty, which is the honest state after #7478
+    // and #7483 emptied it. It is not vacuous the moment anyone defers a field,
+    // which is when it matters: a deferral without an issue number is how an
+    // exclusion becomes permanent. Proven non-vacuous by mutant (adding an
+    // entry with no `#N` turns this red).
+    for (const [field, reason] of Object.entries(SESSION_KEYED_DEFERRED)) {
+      expect(
+        reason,
+        `SESSION_KEYED_DEFERRED.${field} must cite a tracking issue (#N) in its reason`,
+      ).toMatch(/#\d+/)
+    }
   })
 
   const CASES: [string, string][] = SITES.flatMap(([site]) => CLEANED.map((f) => [site, f] as [string, string]))

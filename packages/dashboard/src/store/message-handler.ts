@@ -3026,19 +3026,29 @@ function clearCancellingActivity(get: MsgGet, set: MsgSet, sessionId: string | u
  * #5277 — drop ALL pending cancels for a session. Used when a session-level
  * error (SESSION_NOT_FOUND) means no cancel for that session can ever resolve,
  * so its nodes must not stay stuck "Cancelling…".
+ *
+ * #7483 (PR #7489 review) — this was a hand-rolled second implementation of
+ * the same session-scoped prune the `session_list` block now performs, and the
+ * two had already DIVERGED: this one matched `key.startsWith(`${sid}:`)` while
+ * `pruneSessionScopedKeySet` splits on the FIRST `:`. They differ only for a
+ * session id that itself contains a colon — `sid = "a:b"` and key `"a:b:tool"`
+ * is dropped by the prefix form and kept by the split form. Unreachable today:
+ * session ids are `randomBytes(16).toString('hex')` (server/session-manager.js),
+ * so no id contains a `:`. This is therefore a single-implementation fold, NOT
+ * a behaviour fix — for every id the daemon can mint, the old and new answers
+ * are identical. The point is that the next divergence cannot happen.
+ *
+ * The `!prev` tolerance is #5277's and is kept as-is: unlike the roster prune
+ * block, this path is reached from a `session_error` on partial mock fixtures
+ * that predate the field.
  */
 function clearCancellingForSession(get: MsgGet, set: MsgSet, sessionId: string | undefined): void {
   if (!sessionId) return;
   const prev = get().cancellingActivityIds;
-  if (!prev || prev.size === 0) return;
-  const prefix = `${sessionId}:`;
-  let changed = false;
-  const next = new Set<string>();
-  for (const key of prev) {
-    if (key.startsWith(prefix)) { changed = true; continue; }
-    next.add(key);
-  }
-  if (changed) set({ cancellingActivityIds: next });
+  if (!prev) return;
+  const next = pruneSessionScopedKeySet(prev, [sessionId]);
+  // Same-reference return means "nothing matched" — don't set() and re-render.
+  if (next !== prev) set({ cancellingActivityIds: next });
 }
 
 /**
