@@ -3891,21 +3891,26 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // Auto-switch to the session that owns this prompt (if different from active).
     // Prefer sessionNotifications lookup (covers prompts stored before sessionStates[sid] existed),
     // fall back to scanning sessionStates messages.
-    const { activeSessionId, sessionStates, sessionNotifications, sessions } = get();
+    const { activeSessionId, sessionStates, sessionNotifications } = get();
     const notifMatch = sessionNotifications.find((n) => n.requestId === requestId);
     const targetSid = notifMatch?.sessionId
       ?? Object.entries(sessionStates).find(([, ss]) => ss.messages.some((m) => m.requestId === requestId))?.[0];
     // #7466 — the owner id must still be a session the operator HAS. Both lookup
     // sources outlive the session: `sessionNotifications` is never pruned on
-    // close, and `sessionStates` retains a closed session's transcript. Without
-    // this check, answering a STALE prompt (session closed, or a daemon restart
-    // regenerated ids) handed `switchSession` a dead id, which writes
-    // `activeSessionId` unconditionally — leaving the SessionBar with every tab
+    // close, and `sessionStates` retains a closed session's transcript. Answering
+    // a STALE prompt (session closed, or a daemon restart regenerated ids) used
+    // to hand `switchSession` a dead id, leaving the SessionBar with every tab
     // unselected (`isActive: s.sessionId === activeSessionId` in App.tsx) and no
-    // way back except clicking a tab. The membership check keeps the legitimate
-    // cross-session jump and drops only the impossible one.
-    const targetIsLive = !!targetSid && sessions.some((s) => s.sessionId === targetSid);
-    if (targetIsLive && targetSid !== activeSessionId) get().switchSession(targetSid);
+    // way back except clicking a tab.
+    //
+    // #7475 — the membership check that used to sit HERE now lives inside
+    // `switchSession`, which is the choke point every caller shares. It was
+    // deleted rather than kept as belt-and-braces on purpose: a second copy is
+    // the thing that made three other call sites unguarded in the first place,
+    // and the one that drifts is always the copy. The behaviour is unchanged and
+    // is still pinned, by `permission-response-dead-session.test.ts` and by
+    // cell 1 of `switch-session-membership.test.ts`.
+    if (targetSid && targetSid !== activeSessionId) get().switchSession(targetSid);
     // For allowSession: send a follow-up set_permission_rules to register
     // auto-approval for this tool. Skip tools the server won't accept as
     // auto-allow rules (execution/network tools). Mirrors the mobile app
@@ -4907,10 +4912,39 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
   },
 
-  switchSession: (sessionId: string) => {
-    const { socket, activeSessionId, sessionStates } = get();
+  switchSession: (sessionId: string, options?: { allowUnlisted?: boolean }): boolean => {
+    const { socket, activeSessionId, sessionStates, sessions } = get();
 
-    if (sessionId === activeSessionId) return;
+    if (sessionId === activeSessionId) return true;
+
+    // #7475 — THE membership check. #7472 proved the mechanism (an id absent
+    // from `sessions` makes `SessionBar` render every tab unselected, because
+    // `isActive` is purely `s.sessionId === activeSessionId`) and fixed it at ONE
+    // call site. The check belongs here instead: `switchSession` is the single
+    // door every caller goes through, and a per-call-site copy is the
+    // "guard wired to only some of its callers" family in
+    // docs/false-safety-guards.md (#7262) — correct for every input it sees, and
+    // never reached by the rest.
+    //
+    // `sessions` is the roster the tab strip renders from, and it is the ONLY
+    // correct source. `sessionStates` is not a substitute even though it looks
+    // like one: it retains a closed session's transcript, which is exactly how
+    // `client_focus_changed`'s `adapter.hasSession()` gate (backed by
+    // `sessionStates`) let follow-mode walk onto a dead session while appearing
+    // to be guarded.
+    //
+    // `allowUnlisted` is the deliberate second door, not an escape hatch. The
+    // checkpoint-restore path switches to a session the server has just created
+    // and re-homed us onto, BEFORE `session_list` reports it; refusing there
+    // would strand every restore. Making it an explicit named option means each
+    // opt-out is a decision someone wrote down, and `grep allowUnlisted` lists
+    // them all.
+    if (!options?.allowUnlisted && !sessions.some((s) => s.sessionId === sessionId)) {
+      // Not a warning: this is reachable through ordinary use (a stale
+      // orchestration node, a peer focusing a session we have already closed),
+      // and the honest UI response is to do nothing rather than to log noise.
+      return false;
+    }
 
     // #4982 — operator picked a live session, so the lost-id banner from
     // the prior SESSION_NOT_FOUND is no longer relevant. Clear it here so
@@ -5012,6 +5046,15 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     if (socket && socket.readyState === WebSocket.OPEN) {
       wsSend(socket, { type: 'switch_session', sessionId });
     }
+    // #7475 — report whether the switch happened, for the same reason
+    // `createSession` reports whether the create was sent (#6285, below): a
+    // caller that latches a "Switching…" state on a call that did nothing wedges
+    // its UI forever. App.tsx's `isSwitchingSession` blanks the ENTIRE content
+    // area and only clears on an `activeSessionId` change, so a refused switch
+    // that still latched it would leave the dashboard showing a switching
+    // placeholder with no way out but clicking another tab — the same class of
+    // wedge this issue is about, reintroduced by its own fix.
+    return true;
   },
 
   // #6285 — return whether the create request actually went on the wire. When

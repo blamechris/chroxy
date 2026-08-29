@@ -931,8 +931,12 @@ export function App() {
     // (CR is overlaid on top of it), so it sits before the no-op early return.
     setControlRoomActive(false)
     if (sessionId === activeSessionId) return
-    setIsSwitchingSession(true)
-    switchSession(sessionId)
+    // #7475 — latch the switching state only when the switch actually happened.
+    // `switchSession` now refuses a target absent from `sessions`, and
+    // `isSwitchingSession` blanks the whole content area until `activeSessionId`
+    // changes — so latching it on a refusal would wedge the dashboard on a
+    // "switching" placeholder forever. Same contract as createSession's (#6285).
+    if (switchSession(sessionId)) setIsSwitchingSession(true)
   }, [switchSession, activeSessionId])
 
   // The actual session teardown, shared by the confirm path and the

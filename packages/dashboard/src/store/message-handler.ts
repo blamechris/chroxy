@@ -1518,9 +1518,16 @@ const _dispatchAdapter: ClientStoreAdapter<SessionState> = {
   // #5618 Batch 6 — checkpoint_created reads the prior flat list to append.
   // The dashboard omits syncSecondaryCheckpoints (no secondary checkpoint store).
   getCheckpoints: () => getStore().getState().checkpoints,
-  // #5618 — checkpoint_restored auto-switches (plain, no options — the dashboard has
-  // no serverNotify/haptic concepts; the app passes those via its own impl).
-  switchToRestoredSession: (sessionId) => getStore().getState().switchSession(sessionId),
+  // #5618 — checkpoint_restored auto-switches. The dashboard has no
+  // serverNotify/haptic concepts, so it passes none of the app's notify options
+  // (the app supplies those via its own impl); it does pass #7475's `allowUnlisted`.
+  // #7475 — the ONE explicit opt-out from switchSession's membership check. The
+  // server has just created this session at the restored checkpoint and re-homed
+  // this client onto it; `session_list` follows. Applying the default check here
+  // would refuse every restore, so the restore path states its exemption rather
+  // than inheriting one.
+  switchToRestoredSession: (sessionId) =>
+    void getStore().getState().switchSession(sessionId, { allowUnlisted: true }),
   // #5618 — search_results staleness gate reads the live flat searchQuery.
   getSearchQuery: () => getStore().getState().searchQuery,
   // #5618 — user_question raises a background-session notification via the
@@ -1544,7 +1551,12 @@ const _dispatchAdapter: ClientStoreAdapter<SessionState> = {
   // dashboard has no secondary presence store, so it OMITS setPrimaryClientId.
   getMyClientId: () => getStore().getState().myClientId,
   getFollowMode: () => getStore().getState().followMode,
-  switchSession: (sessionId) => getStore().getState().switchSession(sessionId),
+  // #7475 — follow-mode rides the DEFAULT (membership-checked) door. The shared
+  // `dispatchClientFocusChanged` gates on `adapter.hasSession()`, which this
+  // client backs with `sessionStates` — a map that outlives the session — so
+  // follow-mode looked guarded while still being able to walk onto a session
+  // this client no longer has a tab for.
+  switchSession: (sessionId) => void getStore().getState().switchSession(sessionId),
   // #5618 Batch 5a — the dashboard tracks which provider the available_models
   // list is for; contribute it to the single available_models patch. The app
   // omits this hook (no availableModelsProvider field). The dashboard omits
@@ -1839,8 +1851,10 @@ function applyRotatedTunnelUrlDashboard(
 }
 
 // checkpoint_restored — migrated to the shared dispatch table (#5618; runDispatch).
-// The auto-switch rides the required switchToRestoredSession adapter hook (the
-// dashboard's impl is the plain switchSession, no options).
+// The auto-switch rides the required switchToRestoredSession adapter hook. Since
+// #7475 the dashboard's impl passes `{ allowUnlisted: true }`: the restored
+// session is created by the server and switched to BEFORE `session_list` reports
+// it, so it is the one caller exempt from switchSession's membership check.
 
 /**
  * Server emits pairing_refreshed whenever the pairing ID changes: after a
