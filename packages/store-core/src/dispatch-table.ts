@@ -162,7 +162,14 @@ import {
 import { handleRawOutput } from './handlers/stream'
 // #7420 — the replay window / live-arrival ledger the `user_question` case
 // writes into and `history_replay_end`'s sweep reads.
-import { noteLivePromptDuringReplay } from './replay-reconcile'
+// #7457/#7508 — `replayDedupCache` bounds the re-delivery supersede to the view
+// a rebuild will actually keep, and `REPLAY_RESOLVED_PLACEHOLDER` is the ONE
+// non-decision value of `answered` a re-delivery is allowed to clear.
+import {
+  noteLivePromptDuringReplay,
+  replayDedupCache,
+  REPLAY_RESOLVED_PLACEHOLDER,
+} from './replay-reconcile'
 
 // ---------------------------------------------------------------------------
 // Client adapter
@@ -2024,16 +2031,53 @@ function dispatchUserQuestion<S extends DispatchSessionBase>(
   let survivingId = chatMessage.id
   if (sessionId && adapter.hasSession(sessionId)) {
     adapter.updateSession(sessionId, (ss) => {
-      const idx = canSupersede
-        ? ss.messages.findIndex(
+      // #7508 F2 — search only the view a rebuild will KEEP. During a full
+      // rebuild `reconcileReplayEnd` swaps in `messages.slice(base)`, so a
+      // supersede that matched a held copy in the pre-baseline PREFIX would
+      // write into a message nobody keeps — and because the merge replaces the
+      // append, the prompt is then neither stamped nor duplicated but GONE. The
+      // paragraph above argued exactly that hazard for the replayed direction
+      // and guarded only it; the live direction has it too, whenever the held
+      // copy sits in the prefix (a provider re-emitting the same
+      // `AskUserQuestion` payload gets there without any replay overlap, and
+      // nothing heals it). `main` appends in that case and keeps the prompt, so
+      // this is #7420's live-racer guarantee, not a new corner.
+      //
+      // `replayDedupCache` is the primitive that already computes this view, for
+      // this reason — "so a replayed entry isn't suppressed by an id in the
+      // discarded prefix" — and it returns the whole array when no rebuild is in
+      // progress, which is the ordinary reconnect.
+      const searchable = replayDedupCache(sessionId, ss.messages)
+      // The view is either the array itself or a tail slice of it, so the
+      // difference in length IS the offset back into `ss.messages`.
+      const offset = ss.messages.length - searchable.length
+      const found = canSupersede
+        ? searchable.findIndex(
             (m) => m.type === 'prompt' && m.toolUseId === toolUseId,
           )
         : -1
+      const idx = found === -1 ? -1 : found + offset
       const held = idx === -1 ? undefined : ss.messages[idx]
       if (!held) return { messages: [...ss.messages, chatMessage] } as Partial<S>
       survivingId = held.id
       const next = ss.messages.slice()
-      next[idx] = { ...chatMessage, id: held.id, timestamp: held.timestamp }
+      // #7508 F3 — `answered` is a decision TOKEN with exactly one non-decision
+      // value (#6222/#6223). Clearing the sweep's placeholder IS #7457's fix;
+      // clearing a REAL decision is not. A second device can answer after the
+      // server's pending-set read and before this frame lands, and nothing on
+      // the wire un-sticks a prompt revived on top of that answer — the question
+      // variant of `permission_resolved` emits no message, only a route-map
+      // delete, and the late second answer is dropped as an unmapped toolUseId.
+      // So carry a real token across, and clear only the placeholder.
+      const heldAnswered = held.answered
+      const keepAnswered =
+        heldAnswered !== undefined && heldAnswered !== REPLAY_RESOLVED_PLACEHOLDER
+      next[idx] = {
+        ...chatMessage,
+        id: held.id,
+        timestamp: held.timestamp,
+        ...(keepAnswered ? { answered: heldAnswered } : {}),
+      }
       return { messages: next } as Partial<S>
     })
   } else {

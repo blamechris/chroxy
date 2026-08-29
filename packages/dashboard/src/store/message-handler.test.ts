@@ -4322,6 +4322,84 @@ describe('dashboard message-handler dispatch', () => {
       expect(messagesOf()[0].answered).toBe('(resolved)')
     })
 
+    // #7508 F2 — the live re-delivery must never merge into the PRE-BASELINE
+    // PREFIX that a full rebuild is about to discard.
+    //
+    // Reachable without any overlapping-replay exotica: a provider re-emitting
+    // the same `AskUserQuestion` payload (the pre-#4668 failure mode) produces a
+    // live frame for a `toolUseId` the client already holds, and if the held
+    // copy is in the prefix the merge writes into a message `messages.slice(base)`
+    // then throws away. The prompt is not stamped and not duplicated — it is
+    // GONE. `main` does not have that failure (there the live frame appends into
+    // the tail and is protected by the live-arrival ledger), so it would be a
+    // regression of #7420's guarantee, not merely an uncovered corner.
+    it('a live re-delivery during a full rebuild never deletes the held prompt (#7508 F2)', () => {
+      seed([
+        { id: 'old-1', type: 'response', content: 'before', timestamp: 1 },
+        {
+          id: 'q-live',
+          type: 'prompt',
+          content: 'Which approach?',
+          toolUseId: 'ask-1',
+          timestamp: 2,
+          options: [],
+          questions: [{ question: 'Which approach?', options: [] }],
+        },
+      ])
+      handleMessage({ type: 'history_replay_start', sessionId: 's1', fullHistory: true }, ctx() as any)
+      // LIVE (no historySeq) — the held copy is in the about-to-be-discarded prefix.
+      handleMessage(question() as any, ctx() as any)
+      handleMessage({ type: 'history_replay_end', sessionId: 's1' }, ctx() as any)
+
+      // Pre-fix this array was EMPTY.
+      expect(messagesOf()).toHaveLength(1)
+      expect(messagesOf()[0].type).toBe('prompt')
+      expect(messagesOf()[0].toolUseId).toBe('ask-1')
+      expect(messagesOf()[0].answered).toBeUndefined()
+    })
+
+    // POSITIVE CONTROL for the bound above. A held copy INSIDE the rebuild tail
+    // is still superseded — otherwise the fix could be "never supersede during a
+    // rebuild", which would restore the duplicate bubble #7457 exists to remove
+    // while leaving every assertion in the test above green.
+    it('still supersedes a held copy that is INSIDE the rebuild tail', () => {
+      seed([{ id: 'old-1', type: 'response', content: 'before', timestamp: 1 }])
+      handleMessage({ type: 'history_replay_start', sessionId: 's1', fullHistory: true }, ctx() as any)
+      // The replay delivers it into the tail...
+      handleMessage(question({ historySeq: 3, timestamp: 1000 }) as any, ctx() as any)
+      // ...and the server's re-send revives that tail copy in place.
+      handleMessage(question() as any, ctx() as any)
+      handleMessage({ type: 'history_replay_end', sessionId: 's1' }, ctx() as any)
+
+      expect(messagesOf()).toHaveLength(1)
+      expect(messagesOf()[0].answered).toBeUndefined()
+    })
+
+    // #7508 F3 — `answered` is a decision TOKEN (#6222/#6223). A re-delivery may
+    // clear the sweep's `(resolved)` placeholder — that IS #7457's bug — but not
+    // a real decision: a second device can answer after the server's pending read
+    // and before the frame lands, and nothing on the wire un-sticks a prompt
+    // revived on top of a real answer.
+    it('a re-delivery does not erase a real answer from another device', () => {
+      seed([
+        {
+          id: 'q-answered',
+          type: 'prompt',
+          content: 'Which approach?',
+          toolUseId: 'ask-1',
+          timestamp: 2,
+          answered: 'Option A',
+          options: [],
+          questions: [{ question: 'Which approach?', options: [] }],
+        },
+      ])
+
+      handleMessage(question() as any, ctx() as any)
+
+      expect(messagesOf()).toHaveLength(1)
+      expect(messagesOf()[0].answered).toBe('Option A')
+    })
+
     // Two DIFFERENT questions stay two bubbles — the supersede is keyed on
     // toolUseId, not on "is a prompt".
     it('a re-send for one question does not collapse a second, unrelated one', () => {

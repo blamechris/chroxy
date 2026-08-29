@@ -31,7 +31,7 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, readdirSync, statSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, relative } from 'node:path'
+import { join, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createSpy, createMockSessionManager } from './test-helpers.js'
 import { replayHistory, resendPendingQuestions } from '../src/ws-history.js'
@@ -537,7 +537,14 @@ describe('pending-question re-send coverage (#7457)', () => {
     }
     return out
   }
-  const rel = (f) => relative(SRC, f)
+  // Normalised to `/`, because `relative()` returns OS-NATIVE separators and the
+  // roster below is an exact `deepEqual` on those strings — so without this the
+  // guard is structurally red on Windows and can only ever pass on the author's
+  // platform. `Server Windows Tests` runs this file, and it caught exactly that
+  // (`'handlers\\conversation-handlers.js'` vs `'handlers/conversation-handlers.js'`).
+  // Same class as #5642 and the #6928 floor-resolver `split(sep)`: measure as
+  // the CI account on the CI platform, not as yourself on yours.
+  const rel = (f) => relative(SRC, f).split(sep).join('/')
 
   /**
    * Comments stripped. Without this the scan counts the wire-protocol JSDoc
