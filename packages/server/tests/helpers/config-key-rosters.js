@@ -29,7 +29,13 @@ export function parseSupportedKeySets(src, label) {
   const re = /(?:export\s+)?const\s+([A-Z0-9_]+_SUPPORTED_KEYS)\s*=\s*new Set\(\[([\s\S]*?)\]\)/g
   const out = new Map()
   for (const m of src.matchAll(re)) {
-    const [, name, body] = m
+    const [, name, rawBody] = m
+    // Strip comments FIRST. Three of these Sets carry `//` notes between their
+    // entries, so one apostrophe ("don't") inside one would otherwise be read
+    // as a string delimiter and the roster would come back wrong — failing
+    // loudly, but with a message that sends the reader hunting a stale export
+    // rather than a comment (#7510 review, nitpick 1).
+    const body = rawBody.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '')
     if (body.includes('...')) {
       throw new Error(`REFUSE: ${label}: ${name} is declared with a spread — its literal roster cannot be read`)
     }

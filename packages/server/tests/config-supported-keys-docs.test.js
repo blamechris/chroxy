@@ -1,6 +1,6 @@
 import { before, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
+import { readdir, readFile } from 'node:fs/promises'
 import * as configModule from '../src/config.js'
 import * as providersModule from '../src/anthropic-compatible-config.js'
 import {
@@ -36,15 +36,29 @@ import {
  * warnUnknownKeys call sites — that is what stops a brand-new roster from
  * escaping the registry below — and it is cross-checked against the runtime
  * Sets so it can never be quietly reading nothing.
+ *
+ * The declaration sweep walks EVERY `*.js` under `packages/server/src/`, and
+ * that breadth is the point (#7510 review). It first read a hand-written list
+ * of two producer files — which was the same hardcoded-list-beside-a-growing-
+ * set defect this file exists to kill, one level up. `providers` is the living
+ * proof that rosters migrate out of config.js, and the review demonstrated it:
+ * a `SUMMARIZE_SUPPORTED_KEYS` set added to acp-config.js, validated inline
+ * exactly the way `providers` is, was entirely invisible — 10 pass, exit 0.
+ *
+ * Two consequences of the breadth, stated rather than discovered later:
+ * `packages/server/src/` is the scope, so a roster placed OUTSIDE it is still
+ * unseen; and a roster whose literal cannot be read (a spread, a computed Set)
+ * anywhere under `src/` REFUSES the whole gate instead of being skipped. Both
+ * are the right direction — loud beats silent — but they are real.
  */
 
 // block name (as the startup warning and CONFIG.md spell it) -> exported set.
 // This mapping is hand-written, and it is the one thing here that COULD go
 // stale — so it is closed from both ends below: every *_SUPPORTED_KEYS
-// declaration in the two producer files must appear here, every warnUnknownKeys
-// call site's (block, set) pair must match here, and the doc table's row set
-// must equal this key set. A new block cannot be added to the code without one
-// of those three going red.
+// declaration ANYWHERE under packages/server/src/ must appear here, every
+// warnUnknownKeys call site's (block, set) pair must match here, and the doc
+// table's row set must equal this key set. A new block cannot be added under
+// src/ without one of those three going red.
 const BLOCK_TO_SET_NAME = new Map([
   ['billing', 'BILLING_SUPPORTED_KEYS'],
   ['worktreeGc', 'WORKTREE_GC_SUPPORTED_KEYS'],
@@ -78,11 +92,27 @@ const BLOCKS_WITH_SCHEMA_COMMENT_SHAPE = ['worktreeGc', 'sessionCi', 'userShell'
 
 const sorted = it2 => [...it2].sort()
 
+const SRC_ROOT = new URL('../src/', import.meta.url)
+
+/** Every `*.js` under packages/server/src/, recursively. */
+async function collectSourceFiles(dir) {
+  const found = []
+  for (const entry of await readdir(dir, { withFileTypes: true })) {
+    if (entry.isDirectory()) {
+      found.push(...(await collectSourceFiles(new URL(`${entry.name}/`, dir))))
+    } else if (entry.name.endsWith('.js')) {
+      found.push(new URL(entry.name, dir))
+    }
+  }
+  return found
+}
+
 describe('CONFIG.md sub-key rosters vs config.js *_SUPPORTED_KEYS (#7449)', () => {
   let configSrc
-  let providersSrc
   let md
   let declared
+  let declaredIn
+  let srcFiles
   let callSites
   let docTable
   /** @type {Map<string, string[]>} block -> the REAL exported Set's contents */
@@ -96,20 +126,39 @@ describe('CONFIG.md sub-key rosters vs config.js *_SUPPORTED_KEYS (#7449)', () =
 
   before(async () => {
     configSrc = await read('../src/config.js')
-    providersSrc = await read('../src/anthropic-compatible-config.js')
     md = await read('../CONFIG.md')
 
-    declared = new Map([
-      ...parseSupportedKeySets(configSrc, 'config.js'),
-      ...parseSupportedKeySets(providersSrc, 'anthropic-compatible-config.js'),
-    ])
+    // The declaration sweep: every source file, not a list of the two that
+    // happen to hold a roster today (#7510 review, finding 1).
+    srcFiles = (await collectSourceFiles(SRC_ROOT)).sort((a, b) => (a.href < b.href ? -1 : 1))
+    declared = new Map()
+    declaredIn = new Map()
+    for (const file of srcFiles) {
+      const rel = decodeURIComponent(file.href.slice(SRC_ROOT.href.length))
+      const text = (await readFile(file, 'utf8')).replace(/\r\n/g, '\n')
+      // Cheap prefilter: parseSupportedKeySets REFUSEs on a file with zero
+      // declarations, which is almost every file here.
+      if (!/_SUPPORTED_KEYS\s*=\s*new Set/.test(text)) continue
+      for (const [name, keys] of parseSupportedKeySets(text, `src/${rel}`)) {
+        if (declared.has(name)) {
+          throw new Error(`REFUSE: ${name} is declared in two files: src/${declaredIn.get(name)} and src/${rel}`)
+        }
+        declared.set(name, keys)
+        declaredIn.set(name, rel)
+      }
+    }
     callSites = parseWarnUnknownKeysCallSites(configSrc)
     docTable = parseRecognisedSubKeys(md)
 
     const exported = { ...configModule, ...providersModule }
     for (const [block, setName] of BLOCK_TO_SET_NAME) {
       const value = exported[setName]
-      assert.ok(value instanceof Set, `${setName} is not an exported Set — the doc gate has nothing to compare against`)
+      assert.ok(
+        value instanceof Set,
+        `${setName} is not an exported Set — the doc gate has nothing to compare against. ` +
+          'If the roster moved to another module, add that module to the namespace imports at the top of this file ' +
+          '(the src/ sweep finds the DECLARATION; the runtime value still has to be importable).'
+      )
       runtime.set(block, [...value])
     }
   })
@@ -124,6 +173,11 @@ describe('CONFIG.md sub-key rosters vs config.js *_SUPPORTED_KEYS (#7449)', () =
     assert.equal(declared.size, 8, `expected exactly 8 *_SUPPORTED_KEYS declarations, got ${sorted(declared.keys()).join(', ')}`)
     assert.equal(docTable.size, 8, `expected exactly 8 Recognised sub-keys rows, got ${sorted(docTable.keys()).join(', ')}`)
     assert.equal(callSites.length, 7, `expected exactly 7 warnUnknownKeys call sites, got ${callSites.length}`)
+    // A floor, deliberately not an exact pin: the number of source files is not
+    // the subject and pinning it would misattribute unrelated refactors. But a
+    // sweep that stopped recursing would return a handful, and a walk over an
+    // empty set is how this whole family of guards dies.
+    assert.ok(srcFiles.length >= 100, `the src/ sweep found only ${srcFiles.length} files — it is not walking the tree`)
     for (const [block, keys] of runtime) {
       assert.ok(keys.length > 0, `${block}'s exported set is empty — nothing would be compared`)
     }
@@ -149,7 +203,8 @@ describe('CONFIG.md sub-key rosters vs config.js *_SUPPORTED_KEYS (#7449)', () =
     assert.deepEqual(
       orphans,
       [],
-      `these rosters exist in code but are not gated against CONFIG.md — add them to BLOCK_TO_SET_NAME and to the Recognised sub-keys table: ${orphans.join(', ')}`
+      'these rosters exist under packages/server/src/ but are not gated against CONFIG.md — add them to ' +
+        `BLOCK_TO_SET_NAME and to the Recognised sub-keys table: ${orphans.map(n => `${n} (src/${declaredIn.get(n)})`).join(', ')}`
     )
     const phantoms = sorted(registered).filter(n => !declared.has(n))
     assert.deepEqual(phantoms, [], `BLOCK_TO_SET_NAME names rosters that no longer exist: ${phantoms.join(', ')}`)
@@ -167,7 +222,7 @@ describe('CONFIG.md sub-key rosters vs config.js *_SUPPORTED_KEYS (#7449)', () =
     const unwarned = sorted(BLOCK_TO_SET_NAME.keys()).filter(b => !warned.has(b))
     assert.deepEqual(
       unwarned,
-      BLOCKS_WITHOUT_WARN_CALL_SITE,
+      sorted(BLOCKS_WITHOUT_WARN_CALL_SITE),
       'the set of blocks not using the shared warnUnknownKeys helper changed'
     )
   })
