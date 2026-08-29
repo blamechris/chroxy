@@ -713,7 +713,12 @@ describe('App', () => {
   })
 
   it('shows session loading skeleton briefly when switching sessions', async () => {
-    const switchSessionFn = vi.fn()
+    // #7475 — `switchSession` now REPORTS whether the switch happened, and
+    // handleSwitchSession latches the skeleton only on `true`. A bare `vi.fn()`
+    // returns undefined, i.e. it models a REFUSED switch — so the mock has to
+    // state the contract it is standing in for. The refusal case is its own test
+    // directly below.
+    const switchSessionFn = vi.fn(() => true)
     stateOverrides = {
       connectionPhase: 'connected',
       sessions: [
@@ -734,6 +739,31 @@ describe('App', () => {
     stateOverrides = { ...stateOverrides, activeSessionId: 's2' }
     rerender(<App />)
     // Skeleton cleared once activeSessionId changes
+    expect(screen.queryByTestId('session-loading-skeleton')).not.toBeInTheDocument()
+  })
+
+  // #7475 — the wedge the membership check would otherwise have introduced.
+  // `isSwitchingSession` blanks the ENTIRE content area and is cleared only by
+  // an `activeSessionId` change, so latching it on a switch the store refused
+  // would leave the dashboard on a skeleton forever, with no way out but
+  // clicking another tab. That is the same shape of dead end #7475 is about,
+  // recreated by its own fix — hence the boolean return and this test.
+  it('does NOT latch the loading skeleton when switchSession refuses (#7475)', () => {
+    const switchSessionFn = vi.fn(() => false)
+    stateOverrides = {
+      connectionPhase: 'connected',
+      sessions: [
+        { sessionId: 's1', name: 'Session 1', cwd: '/tmp', type: 'cli', hasTerminal: true, model: null, permissionMode: null, isBusy: false, createdAt: Date.now(), conversationId: null },
+        { sessionId: 's2', name: 'Session 2', cwd: '/tmp', type: 'cli', hasTerminal: true, model: null, permissionMode: null, isBusy: false, createdAt: Date.now(), conversationId: null },
+      ],
+      activeSessionId: 's1',
+      switchSession: switchSessionFn,
+    }
+    render(<App />)
+    fireEvent.click(screen.getByTestId('session-tab-s2'))
+    // The store was asked...
+    expect(switchSessionFn).toHaveBeenCalledWith('s2')
+    // ...and refused, so the content area must stay usable rather than blanking.
     expect(screen.queryByTestId('session-loading-skeleton')).not.toBeInTheDocument()
   })
 

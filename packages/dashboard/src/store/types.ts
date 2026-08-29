@@ -1984,7 +1984,19 @@ export interface ConnectionState {
   requestDiff: (base?: string) => void;
 
   // Session actions
-  switchSession: (sessionId: string) => void;
+  /**
+   * #7475 — membership-checked by DEFAULT: a `sessionId` absent from the
+   * `sessions` roster is refused and `activeSessionId` does not move, because a
+   * dangling active id renders the whole SessionBar with no tab selected.
+   * Returns whether the switch happened, so a caller that latches a
+   * "Switching..." state does not wedge on a refusal (App.tsx's
+   * `isSwitchingSession` blanks the content area until `activeSessionId`
+   * changes). `allowUnlisted` is the explicit opt-out for the ONE caller that
+   * legitimately switches ahead of the roster — checkpoint restore, where the
+   * server creates the session and re-homes the client before `session_list`
+   * reports it. Every opt-out is greppable by that name.
+   */
+  switchSession: (sessionId: string, options?: { allowUnlisted?: boolean }) => boolean;
   /**
    * #5589 / #5281 — request primary (driver) ownership of a shared session.
    * `force` overrides the current owner (operator-driven take-over). The

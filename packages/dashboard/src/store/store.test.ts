@@ -2353,6 +2353,15 @@ describe('resolvedPermissions + Allow for Session (#2833, #2834)', () => {
 
     useConnectionStore.setState({
       activeSessionId: 's1',
+      // #7475 — `switchSession` membership-checks the target against `sessions`,
+      // so the roster has to hold s2 for this switch to be one the server could
+      // actually produce. Seeding `sessionStates` alone described a state the
+      // daemon never emits for a live session (the same fixture correction #7472
+      // made for the two #1710 cases): a cached transcript with no tab.
+      sessions: [
+        { sessionId: 's1', name: 's1', cwd: '/tmp', type: 'cli' as const, hasTerminal: false, model: null, permissionMode: null, isBusy: false, createdAt: 0, conversationId: null },
+        { sessionId: 's2', name: 's2', cwd: '/tmp', type: 'cli' as const, hasTerminal: false, model: null, permissionMode: null, isBusy: false, createdAt: 0, conversationId: null },
+      ],
       sessionStates: { s1: { ...createEmptySessionState() }, s2: { ...createEmptySessionState() } },
       sessionNotifications: [],
       permissionAudit: [{ type: 'decision', sessionId: 's1', decision: 'allow', timestamp: 1 }],
@@ -2374,6 +2383,15 @@ describe('resolvedPermissions + Allow for Session (#2833, #2834)', () => {
 
     useConnectionStore.setState({
       activeSessionId: 's1',
+      // #7475 — `switchSession` membership-checks the target against `sessions`,
+      // so the roster has to hold s2 for this switch to be one the server could
+      // actually produce. Seeding `sessionStates` alone described a state the
+      // daemon never emits for a live session (the same fixture correction #7472
+      // made for the two #1710 cases): a cached transcript with no tab.
+      sessions: [
+        { sessionId: 's1', name: 's1', cwd: '/tmp', type: 'cli' as const, hasTerminal: false, model: null, permissionMode: null, isBusy: false, createdAt: 0, conversationId: null },
+        { sessionId: 's2', name: 's2', cwd: '/tmp', type: 'cli' as const, hasTerminal: false, model: null, permissionMode: null, isBusy: false, createdAt: 0, conversationId: null },
+      ],
       sessionStates: { s1: { ...createEmptySessionState() }, s2: { ...createEmptySessionState() } },
       sessionNotifications: [],
       memoryStackEntries: [

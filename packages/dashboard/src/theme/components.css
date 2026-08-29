@@ -5003,11 +5003,26 @@ button.sidebar-token-view-session-row:hover {
   flex-shrink: 0;
 }
 
+/* #7473 — the row's height is now DERIVED from the tap-target floor rather than
+   from padding. Every control inside it (Allow / Deny / Dismiss / the session
+   jump) must present a 44px box, and a flex row cannot be shorter than the
+   tallest thing in it, so the row's own floor IS 44px.
+
+   The vertical padding drops to 0 for exactly that reason: `padding: 6px` around
+   a 44px control would make the row 56px — the floor PLUS decoration.
+   `align-items: center` keeps the text visually centred in the taller row, so
+   nothing is cramped by removing it. This matters beyond tidiness: the banner
+   stack sits in normal flow immediately above the view-tab strip, so this row's
+   height is the exact distance the strip jumps when a banner is retired
+   (#7466's layout-shift hypothesis). 30px -> 44px is the SMALLEST increase that
+   can hold a compliant control; 30px -> 56px would have been half again as much
+   movement for no benefit. */
 .notification-banner {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 6px 12px;
+  padding: 0 12px;
+  min-height: 44px;
   font-size: var(--text-sm);
   background: var(--bg-tertiary);
   border-left: 3px solid var(--accent-blue);
@@ -5046,7 +5061,15 @@ button.sidebar-token-view-session-row:hover {
   flex-shrink: 0;
 }
 
+/* #7473 — the session name is a BUTTON (it switches to that session), so it is
+   held to the same 44px floor as Allow/Deny. It is link-styled, which is exactly
+   why it was easy to miss: it does not look like a control, but it is one. */
 .notification-banner-session {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  min-height: 44px;
   background: none;
   border: none;
   color: var(--accent-blue);
@@ -5074,7 +5097,26 @@ button.sidebar-token-view-session-row:hover {
   flex-shrink: 0;
 }
 
+/* #7473 — Allow / Deny / Dismiss cleared the 44pt floor on NEITHER axis: at
+   `padding: 2px 10px` on `--text-xs` (10px) the box was roughly 14px tall and
+   ~40px wide. CLAUDE.md holds 44x44 on every surface (Apple HIG; WCAG 2.1
+   SC 2.5.5), and the dashboard has no React Native `hitSlop` — a web control's
+   hit area IS its box — so the only available fix is to grow the control, which
+   is the preferred one anyway.
+
+   `inline-flex` + centring rather than more padding: padding to 44px would have
+   to be re-derived every time the font size changes, and `min-*` states the
+   floor directly. The declaration order matters — `--allow` / `--deny` /
+   `--dismiss` and `:disabled` all follow this rule at equal-or-higher
+   specificity, so none of them may reintroduce a smaller box; the computed-style
+   test in NotificationBannerTapTarget.test.tsx checks each variant through the
+   real cascade rather than trusting this comment. */
 .notification-banner-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  min-height: 44px;
   border: none;
   border-radius: 4px;
   padding: 2px 10px;
