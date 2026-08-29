@@ -73,15 +73,36 @@ const _rebuildBaseline = new Map<string, number>()
 const _historyCursors = new Map<string, number>()
 
 /**
- * Per-session "a replay window is open right now" marker (#7420).
+ * Per-session replay-window REFCOUNT — how many replays are in flight for that
+ * session right now (#7420, refcounted by #7455). Absent key ⇒ 0 ⇒ no window.
  *
  * Deliberately NOT `_rebuildBaseline`: that map only holds FULL rebuilds, and a
  * live prompt can race a DELTA replay just as easily (the server chunks both
  * over `setImmediate`, with back-pressure pauses of up to 30s — ws-history.js).
- * Added at `reconcileReplayStart` for either kind, removed at
+ * Incremented at `reconcileReplayStart` for either kind, decremented at
  * `reconcileReplayEnd`.
+ *
+ * A COUNT and not membership, because the server can have two replays of ONE
+ * session in flight at once and neither caller checks (#7455):
+ * `subscribe_sessions` replays every newly-subscribed background session, and
+ * `switch_session` calls `replayHistory(ws, id, { forceFull: true })`
+ * unconditionally — including for a session the client is already subscribed
+ * to. `replayHistory` chunks 20 entries at a time over `setImmediate` with
+ * back-pressure pauses, so the wire order is `start(X) start(X) end(X) end(X)`.
+ * With a Set the FIRST end closed the window while replay #2 was still
+ * streaming, and every live `user_question` in that tail fell through the gate
+ * in {@link noteLivePromptDuringReplay} and was stamped '(resolved)' by the
+ * second end's sweep — #7420 again, in the one case the gate exists for.
+ *
+ * (`_rebuildBaseline` has the same non-refcount shape, pre-existing since
+ * #5555.4, and is left alone here to keep this change to the window. It is NOT
+ * benign: #7455 assumed overlapping full rebuilds only mis-slice the deferred
+ * swap, but the second start overwrites the baseline and the first end then
+ * slices a message appended BETWEEN the two starts straight out of the store.
+ * Filed with a reproduction as #7477 — the ledger protects that racer and the
+ * swap then drops it, so the two fixes compose rather than overlap.)
  */
-const _replayWindowOpen = new Set<string>()
+const _replayWindowOpen = new Map<string, number>()
 
 /**
  * Per-session ids of `prompt` ChatMessages that arrived LIVE — i.e. were NOT
@@ -101,15 +122,41 @@ const _replayWindowOpen = new Set<string>()
  * (ws-history.js) and a live broadcast never carries one. So the call site
  * records the id here as the message is appended, and the sweep skips it.
  *
- * Lifetime is exactly one replay window: the set is dropped at the NEXT
- * `reconcileReplayStart` for that session (anything already on screen when a
- * window opens pre-dates it and stays stampable) and by `resetReplayReconcile`.
- * That also bounds it — the entries are a subset of the ChatMessages the store
- * is already holding for the same window — so it needs no cap of its own, and
- * it leaves {@link sweepUnansweredPromptsAtReplayEnd} a pure read, with no
- * ordering hazard against the caller that consumes it.
+ * Lifetime is exactly one replay window, and this map holds a session only
+ * while that window is OPEN (#7456): the ledger is created on the first live
+ * arrival, dropped at the NEXT `reconcileReplayStart` for that session
+ * (anything already on screen when a window opens pre-dates it and stays
+ * stampable), and RELEASED when the last window closes — handed to
+ * {@link _sweepableLedger} so the caller's
+ * {@link sweepUnansweredPromptsAtReplayEnd}, which runs on the next statement
+ * after `reconcileReplayEnd` returns, can still read it. Both stay a pure read,
+ * with no ordering hazard against that caller.
+ *
+ * The claim this comment used to carry — that the store's own message retention
+ * bounds the map, so it needs no cap — was wrong (#7456). The store drops a
+ * session's `messages` wholesale on prune (`session_list` reconcile) and on
+ * `session_timeout`, and neither path touches module state here; and
+ * `dispatchUserQuestion` records into the ledger BEFORE its
+ * `adapter.hasSession` check, so a session the store holds nothing for can
+ * still open a key. What actually bounds it: the release above, the per-session
+ * {@link dropReplaySessionState} both clients call from those two prune paths,
+ * `resetReplayReconcile` on transport teardown and fresh auth — and,
+ * defensively and loudly, {@link MAX_LIVE_REPLAY_LEDGERS}.
  */
 const _liveDuringReplay = new Map<string, Set<string>>()
+
+/**
+ * The ONE just-closed window's ledger, released out of `_liveDuringReplay` at
+ * `reconcileReplayEnd` and held only until its caller's sweep reads it (#7456).
+ *
+ * A single slot, not a map: the sweep runs synchronously on the statement after
+ * `reconcileReplayEnd` in both clients, so at most one closed window is ever
+ * awaiting one. It is overwritten by the next replay end for ANY session,
+ * cleared by a fresh start for the same session, by `dropReplaySessionState`
+ * and by `resetReplayReconcile` — bounded to one entry by construction, with
+ * nothing to cap.
+ */
+let _sweepableLedger: { sessionId: string; ids: Set<string> } | null = null
 
 /**
  * Client-side cap on the per-session cursor map. Mirrors the server's
@@ -120,6 +167,24 @@ const _liveDuringReplay = new Map<string, Set<string>>()
  * always within the honoured window.
  */
 const MAX_CLIENT_HISTORY_CURSORS = 64
+
+/**
+ * Defensive cap on `_liveDuringReplay`, in the same shape as the cursor cap
+ * above (#7456).
+ *
+ * It is ONE-DIMENSIONAL, and deliberately so: it bounds the number of SESSION
+ * KEYS — how many sessions may hold an open-window ledger at once — and puts no
+ * bound on the `Set<string>` of ids inside any one of them. The unbounded axis
+ * is the negligible one: a session blocks on one `AskUserQuestion` at a time,
+ * so a realistic window holds 0–1 ids, whereas `subscribe_sessions` replays
+ * every background session and so can open many windows at once. Read this as
+ * a cap on the key count, not as a complete bound on the map's size.
+ *
+ * Eviction logs LOUDLY: dropping a ledger un-protects the questions it held, so
+ * the next sweep stamps them '(resolved)' and destroys those answer paths. A
+ * silent truncation here would be indistinguishable from the #7420 bug itself.
+ */
+export const MAX_LIVE_REPLAY_LEDGERS = 64
 
 /**
  * Reset all replay-reconcile state. Called on fresh auth / hard reset so a new
@@ -133,6 +198,7 @@ export function resetReplayReconcile(opts: { clearCursors?: boolean } = {}): voi
   // like the baseline, never a cursor: a fresh auth must not inherit either.
   _replayWindowOpen.clear()
   _liveDuringReplay.clear()
+  _sweepableLedger = null
   if (opts.clearCursors) _historyCursors.clear()
 }
 
@@ -201,11 +267,20 @@ export function reconcileReplayStart(
   _latestSeq?: unknown,
 ): { rebuildInProgress: boolean } {
   if (!sessionId) return { rebuildInProgress: false }
-  // #7420 — open the window for BOTH replay kinds, and drop the previous
-  // window's live-arrival ids: every prompt already on screen pre-dates this
-  // replay, so nothing about it is vouched for by this window.
-  _replayWindowOpen.add(sessionId)
-  _liveDuringReplay.delete(sessionId)
+  // #7420 — open the window for BOTH replay kinds. #7455 — as a REFCOUNT, so
+  // two overlapping replays of one session compose instead of the first `end`
+  // closing the window out from under the second.
+  const depth = (_replayWindowOpen.get(sessionId) ?? 0) + 1
+  _replayWindowOpen.set(sessionId, depth)
+  if (depth === 1) {
+    // 0→1 ONLY — a genuinely new window. Drop the previous window's
+    // live-arrival ids: every prompt already on screen pre-dates this replay,
+    // so nothing about it is vouched for by this window. A NESTED start
+    // (depth > 1) must NOT do this — the outer window is still open and still
+    // protecting what it recorded (#7455).
+    _liveDuringReplay.delete(sessionId)
+    if (_sweepableLedger?.sessionId === sessionId) _sweepableLedger = null
+  }
   if (fullHistory) {
     _rebuildBaseline.set(sessionId, Math.max(0, currentLen | 0))
     return { rebuildInProgress: true }
@@ -256,10 +331,10 @@ export function reconcileReplayEnd(
     recordHistorySeq(sessionId, latestSeq)
   }
   // #7420 — close the window BEFORE the delta-replay early return below, so a
-  // delta replay's window closes too. The live-arrival ids themselves are left
-  // in place for `sweepUnansweredPromptsAtReplayEnd`, which the caller runs
-  // after this; they are dropped at the next start / on reset.
-  if (sessionId) _replayWindowOpen.delete(sessionId)
+  // delta replay's window closes too. The live-arrival ids themselves stay
+  // readable for `sweepUnansweredPromptsAtReplayEnd`, which the caller runs
+  // after this — see `closeReplayWindow`.
+  if (sessionId) closeReplayWindow(sessionId)
   if (!sessionId || !_rebuildBaseline.has(sessionId)) {
     return { swappedMessages: null }
   }
@@ -309,13 +384,105 @@ export function noteLivePromptDuringReplay(
   messageId: string | null | undefined,
 ): void {
   if (!sessionId || !messageId) return
-  if (!_replayWindowOpen.has(sessionId)) return
-  let ids = _liveDuringReplay.get(sessionId)
-  if (!ids) {
-    ids = new Set<string>()
-    _liveDuringReplay.set(sessionId, ids)
-  }
+  if (!isReplayWindowOpen(sessionId)) return
+  const existing = _liveDuringReplay.get(sessionId)
+  const ids = existing ?? new Set<string>()
+  // LRU-by-update, like `_historyCursors`: delete-then-set so the touched
+  // session moves to the Map tail and is never the key the cap evicts. A plain
+  // `.set` on an existing key keeps its old slot.
+  if (existing) _liveDuringReplay.delete(sessionId)
+  _liveDuringReplay.set(sessionId, ids)
   ids.add(messageId)
+  while (_liveDuringReplay.size > MAX_LIVE_REPLAY_LEDGERS) {
+    const oldest = _liveDuringReplay.keys().next().value
+    if (oldest === undefined) break
+    _liveDuringReplay.delete(oldest)
+    // LOUD, never silent (#7456). An evicted ledger un-protects every question
+    // it held, so the next `history_replay_end` sweep stamps them and destroys
+    // those answer paths. If this ever fires in the wild, the cap is wrong.
+    console.warn(
+      `[replay-reconcile] live-question ledger cap of ${MAX_LIVE_REPLAY_LEDGERS} exceeded — ` +
+        `evicted session "${oldest}" (#7456). A live AskUserQuestion that raced that ` +
+        `session's replay may now be stamped '${REPLAY_RESOLVED_PLACEHOLDER}'.`,
+    )
+  }
+}
+
+/** Is a replay window open for this session (refcount > 0)? */
+function isReplayWindowOpen(sessionId: string): boolean {
+  return (_replayWindowOpen.get(sessionId) ?? 0) > 0
+}
+
+/**
+ * Decrement the window refcount and, when the LAST window closes, release the
+ * session's live-arrival ledger out of `_liveDuringReplay` (#7455 / #7456).
+ *
+ * The released ids move to the single-slot `_sweepableLedger` rather than being
+ * dropped, because the caller runs `sweepUnansweredPromptsAtReplayEnd` for this
+ * same session on the very next statement — the sweep stays a pure, repeatable
+ * read, and nothing is retained per-session for a session that is replayed once
+ * and then pruned.
+ */
+function closeReplayWindow(sessionId: string): void {
+  const depth = _replayWindowOpen.get(sessionId) ?? 0
+  if (depth > 1) {
+    _replayWindowOpen.set(sessionId, depth - 1)
+    return
+  }
+  _replayWindowOpen.delete(sessionId)
+  const ids = _liveDuringReplay.get(sessionId)
+  _liveDuringReplay.delete(sessionId)
+  _sweepableLedger = ids && ids.size > 0 ? { sessionId, ids } : null
+}
+
+/**
+ * The live-arrival ids in force for this session: the open window's ledger, or
+ * the just-closed window's released one while its sweep is still pending.
+ */
+function ledgerFor(sessionId: string): ReadonlySet<string> | undefined {
+  const open = _liveDuringReplay.get(sessionId)
+  if (open) return open
+  return _sweepableLedger?.sessionId === sessionId ? _sweepableLedger.ids : undefined
+}
+
+/**
+ * How many replays are in flight for this session (0 ⇒ no window open).
+ * Testing / diagnostics — the refcount is what #7455 turned the window into,
+ * and a leaked non-zero depth is the failure that teardown must prevent.
+ */
+export function getReplayWindowDepth(sessionId: string | null | undefined): number {
+  if (!sessionId) return 0
+  return _replayWindowOpen.get(sessionId) ?? 0
+}
+
+/**
+ * Session ids currently RETAINED in the live-arrival ledger map, in LRU order
+ * (oldest first). Testing / diagnostics: the leak in #7456 is precisely an
+ * entry that stays here after its session's last replay.
+ */
+export function getLiveReplayLedgerSessionIds(): string[] {
+  return [..._liveDuringReplay.keys()]
+}
+
+/**
+ * Forget ALL replay-reconcile state for one session (#7456).
+ *
+ * Called by both clients wherever the store itself drops a session wholesale —
+ * the `session_list` prune and `session_timeout` — because those paths already
+ * clear `sessionStates` and the persisted messages, and used to leave this
+ * module's per-session entries behind with nothing left to correspond to.
+ *
+ * Unlike `resetReplayReconcile`, this DOES drop the session's history cursor:
+ * the session is gone server-side, so a cursor for it can only ever be dead
+ * weight in the next `auth` payload.
+ */
+export function dropReplaySessionState(sessionId: string | null | undefined): void {
+  if (!sessionId) return
+  _rebuildBaseline.delete(sessionId)
+  _replayWindowOpen.delete(sessionId)
+  _liveDuringReplay.delete(sessionId)
+  _historyCursors.delete(sessionId)
+  if (_sweepableLedger?.sessionId === sessionId) _sweepableLedger = null
 }
 
 /** Was this prompt recorded as a live arrival during the current window? */
@@ -324,7 +491,7 @@ export function wasPromptLiveDuringReplay(
   messageId: string | null | undefined,
 ): boolean {
   if (!sessionId || !messageId) return false
-  return _liveDuringReplay.get(sessionId)?.has(messageId) === true
+  return ledgerFor(sessionId)?.has(messageId) === true
 }
 
 /**
@@ -362,7 +529,7 @@ export function sweepUnansweredPromptsAtReplayEnd<T extends SweepablePrompt>(
   messages: readonly T[],
 ): T[] | null {
   if (!sessionId) return null
-  const live = _liveDuringReplay.get(sessionId)
+  const live = ledgerFor(sessionId)
   const isStampable = (m: T): boolean =>
     m.type === 'prompt' && !m.answered && !m.requestId && !(live?.has(m.id) === true)
   if (!messages.some(isStampable)) return null

@@ -26,6 +26,9 @@ import {
   PERMISSION_DECISION_TOKENS,
   isLivePermissionPrompt,
   resetReplayReconcile,
+  wasPromptLiveDuringReplay,
+  getReplayWindowDepth,
+  getLiveReplayLedgerSessionIds,
 } from '@chroxy/store-core';
 import { clearPersistedSession } from '../../store/persistence';
 import { setCallback, clearAllCallbacks } from '../../store/imperative-callbacks';
@@ -975,6 +978,88 @@ describe("history_replay_end: '(resolved)' sweep vs a racing live AskUserQuestio
     _testMessageHandler.handle({ type: 'history_replay_end', sessionId: 's1' });
 
     expect((store.getState().sessionStates.s1.messages[0] as any).answered).toBe('(resolved)');
+  });
+
+  // #7455 — the server can have two replays of ONE session in flight at once:
+  // `subscribe_sessions` replays every newly-subscribed background session and
+  // `switch_session` calls `replayHistory(..., { forceFull: true })`
+  // unconditionally, so the wire order is start start end end. Before the
+  // window became a refcount the FIRST end closed it while replay #2 was still
+  // streaming, and every live question in that tail was stamped '(resolved)'.
+  it('protects a racer that arrives between the two ends of overlapping replays (#7455)', () => {
+    const store = seedOne();
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's1', fullHistory: true });
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's1', fullHistory: true });
+    // A racer inside the OVERLAP...
+    _testMessageHandler.handle(question({ toolUseId: 'q-use-1' }));
+    _testMessageHandler.handle({ type: 'history_replay_end', sessionId: 's1' });
+    // ...and one in the TAIL, after end#1, while replay #2 is still streaming.
+    // The tail racer is the one the pre-#7455 Set lost.
+    _testMessageHandler.handle(question({ toolUseId: 'q-use-2' }));
+    _testMessageHandler.handle({ type: 'history_replay_end', sessionId: 's1' });
+
+    // A racer arriving BEFORE the second start is deliberately not covered
+    // here: `_rebuildBaseline` has the same non-refcount shape and the second
+    // start overwrites it, so end#1's atomic swap slices that racer out of
+    // `messages` entirely. That is a separate defect in the same file, filed
+    // as #7477 — the ledger protects the message, the swap then drops it.
+    //
+    // Positive control: both questions really are in the store, so the
+    // `undefined` assertions below are about the sweep and not a missing fixture.
+    expect(store.getState().sessionStates.s1.messages).toHaveLength(2);
+    expect(answeredOf(store, 0)).toBeUndefined();
+    expect(answeredOf(store, 1)).toBeUndefined();
+    // Balanced pairs ⇒ the window is closed again.
+    expect(getReplayWindowDepth('s1')).toBe(0);
+  });
+
+  // #7456 — the store drops a session's messages wholesale on prune and on
+  // timeout; module state here used to survive both with nothing left to
+  // correspond to.
+  it('session_timeout drops the session live-arrival ledger (#7456)', () => {
+    const store = seedOne();
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's1', fullHistory: false });
+    _testMessageHandler.handle(question());
+    const liveId = (store.getState().sessionStates.s1.messages[0] as any).id;
+    expect(wasPromptLiveDuringReplay('s1', liveId)).toBe(true);
+
+    _testMessageHandler.handle({
+      type: 'session_timeout',
+      sessionId: 's1',
+      name: 'S1',
+      idleMs: 600000,
+    });
+
+    expect(wasPromptLiveDuringReplay('s1', liveId)).toBe(false);
+    expect(getReplayWindowDepth('s1')).toBe(0);
+    expect(getLiveReplayLedgerSessionIds()).not.toContain('s1');
+  });
+
+  it('a session_list prune drops the pruned session live-arrival ledger (#7456)', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [
+        { sessionId: 's1', name: 'S1' } as any,
+        { sessionId: 's2', name: 'S2' } as any,
+      ],
+      sessionStates: { s1: createEmptySessionState(), s2: createEmptySessionState() },
+      sessionNotifications: [],
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockConnectionContext());
+
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's1', fullHistory: false });
+    _testMessageHandler.handle(question());
+    const liveId = (store.getState().sessionStates.s1.messages[0] as any).id;
+    expect(wasPromptLiveDuringReplay('s1', liveId)).toBe(true);
+
+    // s1 dropped out of the authoritative list.
+    _testMessageHandler.handle({ type: 'session_list', sessions: [{ sessionId: 's2', name: 'S2' }] });
+
+    expect(store.getState().sessionStates).not.toHaveProperty('s1');
+    expect(wasPromptLiveDuringReplay('s1', liveId)).toBe(false);
+    expect(getReplayWindowDepth('s1')).toBe(0);
+    expect(getLiveReplayLedgerSessionIds()).not.toContain('s1');
   });
 });
 

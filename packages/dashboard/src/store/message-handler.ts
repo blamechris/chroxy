@@ -59,6 +59,10 @@ import {
   recordHistorySeq,
   reconcileReplayStart,
   reconcileReplayEnd,
+  // #7456 — per-session teardown for the two paths that drop a session's store
+  // state wholesale; without it this module's per-session entries outlive
+  // everything they correspond to.
+  dropReplaySessionState,
   // #7420 — the shared `history_replay_end` unanswered-prompt sweep. Both
   // clients carried byte-identical copies of the predicate through #7410/#7419;
   // it now has one implementation, which is also where the live-arrival ledger
@@ -196,7 +200,7 @@ import type {
   MCPResourceItem,
   McpServerOpResult,
 } from './types';
-import { createEmptySessionState } from './utils';
+import { createEmptySessionState, pruneSessionKeyedMap } from './utils';
 import { clearPersistedSession } from './persistence';
 
 // ---------------------------------------------------------------------------
@@ -4447,6 +4451,29 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           sessions: [],
           activeSessionId: null,
           sessionStates: {},
+          // #7470 authok-reset-start — the per-session PR/CI maps go with the
+          // roster this branch empties, and this is a SITE rather than a case
+          // the removedIds prune below covers. `removedIds` is a diff against
+          // `Object.keys(sessionStates)` (store-core `buildSessionListPatches`),
+          // so once the roster is empty there is nothing to diff: the next
+          // `session_list` yields `removedIds = []`, the `removedIds.length > 0`
+          // guard skips the prune block, and anything left here is permanently
+          // unprunable for the life of the tab.
+          //
+          // Reached by Disconnect → Connect to the same server: `disconnect()`
+          // clears `lastConnectedUrl` while preserving the session roster, so
+          // `isReconnect = (lastConnectedUrl === url)` is false and this branch
+          // runs. `scheduleRetry` re-entering `connect()` with `_retryCount > 0`
+          // is a second route to it. Only the NON-reconnect branch clears — a
+          // silent reconnect keeps `sessionStates`, so the snapshots it
+          // describes are still true and blanking them would wipe a chip the
+          // user is reading on every transient drop.
+          sessionPrStatus: {},
+          sessionPrStatusLoading: {},
+          sessionPrStatusRequestedAt: {},
+          sessionPrThreads: {},
+          sessionPrThreadsLoading: {},
+          // #7470 authok-reset-end
           customAgents: [],
         });
       }
@@ -4700,6 +4727,11 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // GC persisted messages for sessions that dropped out of the list
       for (const prevId of removedIds) {
         void clearPersistedSession(prevId);
+        // #7456 — and the store-core replay state keyed to the same id. The
+        // prune drops `sessionStates[prevId]` and its persisted messages just
+        // below, so a retained replay window / live-arrival ledger would refer
+        // to nothing at all.
+        dropReplaySessionState(prevId);
       }
       // Batch in-memory cleanup into a single state update
       if (removedIds.length > 0) {
@@ -4716,6 +4748,46 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           nextActivity = clearSessionActivity(nextActivity, id);
         }
         if (nextActivity !== get().activity) patch.activity = nextActivity;
+        // #7470 prune-block-start — the per-session PR/CI maps.
+        //
+        // Five maps, all keyed by session id, and until now nothing removed an
+        // entry when the session it describes went away: connection.ts's #6153
+        // sweep resets the LOADING-shaped ones on a socket drop, but that is a
+        // reconnect reset for a stranded control, not a lifecycle prune. A
+        // long-lived tab therefore accumulated one full PR/CI snapshot per
+        // session it had ever surveyed, for the life of the connection.
+        //
+        // Pruned HERE, beside `sessionStates` and `activity` above, because
+        // this is where ONE session going away is observed — `destroySession`
+        // only puts a frame on the wire; the server's next `session_list` is
+        // what tells this tab the session is gone.
+        //
+        // It is NOT the only such path, and reading it as one is how PR #7481's
+        // review found a fourth. `removedIds` is a diff against
+        // `Object.keys(sessionStates)`, so this block only ever sees sessions
+        // that are still in the roster when the snapshot lands. The three sites
+        // that empty the roster WHOLESALE — `auth_ok`'s non-reconnect branch
+        // above, and `forgetSession` / `_resetSessionMemory` in connection.ts —
+        // leave nothing to diff, so each must clear these maps itself. All four
+        // are held by the SITES table in
+        // `session-destroy-prunes-pr-maps.test.ts`.
+        //
+        // Each map is assigned EXPLICITLY rather than looped over a list of
+        // field names: a name list is the same hardcoded roster with the
+        // compiler switched off, and a dropped entry in one reads as a missing
+        // string instead of a missing statement. The roster is held honest by
+        // `session-destroy-prunes-pr-maps.test.ts`, which extracts the family
+        // from types.ts and asserts each member appears between these markers.
+        //
+        // `pruneSessionKeyedMap` returns the SAME reference when the map held
+        // none of the removed ids, so this cannot churn `useShallow` consumers
+        // on a snapshot that only removed a session they don't track.
+        patch.sessionPrStatus = pruneSessionKeyedMap(get().sessionPrStatus, removedIds);
+        patch.sessionPrStatusLoading = pruneSessionKeyedMap(get().sessionPrStatusLoading, removedIds);
+        patch.sessionPrStatusRequestedAt = pruneSessionKeyedMap(get().sessionPrStatusRequestedAt, removedIds);
+        patch.sessionPrThreads = pruneSessionKeyedMap(get().sessionPrThreads, removedIds);
+        patch.sessionPrThreadsLoading = pruneSessionKeyedMap(get().sessionPrThreadsLoading, removedIds);
+        // #7470 prune-block-end
         // If the active session was removed, switch to next available
         if (initialActiveId && removedIds.includes(initialActiveId)) {
           const remaining = Object.keys(newStates);
@@ -6234,6 +6306,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         set(patch);
         // Garbage-collect persisted messages for the deleted session (#797)
         void clearPersistedSession(timeoutSessionId);
+        // #7456 — same for the store-core replay window / live-arrival ledger.
+        dropReplaySessionState(timeoutSessionId);
       }
       break;
     }

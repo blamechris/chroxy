@@ -2790,6 +2790,16 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // CURRENT attempt's timer. (Idempotent if the handshake already completed.)
       clearHandshakeTimer();
 
+      // #7456 — the replay window and its live-arrival ledger are
+      // per-CONNECTION state, like the rebuild baseline: release them on the
+      // transport drop rather than waiting for the next `auth_ok`, which for a
+      // tab left open on a dead tunnel may never arrive. Load-bearing since
+      // #7455 made the window a refcount — a `history_replay_start` with no
+      // matching `_end` would otherwise strand a +1 and the window would never
+      // close again for that session. Cursors are deliberately KEPT (they are
+      // what makes the reconnect a delta replay, #5555.3).
+      resetReplayReconcile();
+
       // #3068: any in-flight evaluator request is now a guaranteed no-op —
       // reject them so awaiters get a fast error instead of waiting 60s for
       // the timeout to fire.
@@ -3022,6 +3032,16 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // dedupe would no-op the second one, but clearing keeps it tidy).
       clearHandshakeTimer();
 
+      // #7456 — the replay window and its live-arrival ledger are
+      // per-CONNECTION state, like the rebuild baseline: release them on the
+      // transport drop rather than waiting for the next `auth_ok`, which for a
+      // tab left open on a dead tunnel may never arrive. Load-bearing since
+      // #7455 made the window a refcount — a `history_replay_start` with no
+      // matching `_end` would otherwise strand a +1 and the window would never
+      // close again for that session. Cursors are deliberately KEPT (they are
+      // what makes the reconnect a delta replay, #5555.3).
+      resetReplayReconcile();
+
       // #3605: an unexpected error means any in-flight skill_trust_grant
       // request will never be acked. Clear both the Map-based correlation
       // (#3587) and the per-session arrays (#3588) so the SkillsPanel
@@ -3247,6 +3267,29 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // #5163: drop the Control Room tree on disconnect/forget — a fresh
       // connection re-seeds it from activity_snapshot on subscribe.
       activity: createEmptyActivityState(),
+      // #7470 forget-reset-start — the per-session PR/CI maps go with the
+      // session roster this action empties.
+      //
+      // Clearing them HERE is not belt-and-braces over the `session_list`
+      // removedIds prune (message-handler.ts): it is the only thing that can
+      // reach them. `removedIds` is a diff against `Object.keys(sessionStates)`,
+      // and this block empties `sessionStates` in the same patch — so from the
+      // next snapshot onwards there is nothing to diff, `removedIds` is `[]`,
+      // and any entry left behind is permanently unprunable for the life of the
+      // tab. Same mechanism at `_resetSessionMemory` below and at `auth_ok`'s
+      // non-reconnect branch (message-handler.ts).
+      //
+      // Session ids carry no daemon namespace — they are 16 random bytes
+      // (server/session-manager.js), so entropy is the ONLY thing separating
+      // two servers' id spaces. That is ample (128 bits) and a collision is not
+      // the hazard here; it is simply not a property worth leaning on when the
+      // correct lifetime for these entries is "this connection".
+      sessionPrStatus: {},
+      sessionPrStatusLoading: {},
+      sessionPrStatusRequestedAt: {},
+      sessionPrThreads: {},
+      sessionPrThreadsLoading: {},
+      // #7470 forget-reset-end
       cancellingActivityIds: new Set<string>(),
       // #5500: drop reindex pending/result state with the rest of the
       // connection-scoped Control Room state.
@@ -3302,6 +3345,18 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // #5163: drop the Control Room tree on disconnect/forget — a fresh
       // connection re-seeds it from activity_snapshot on subscribe.
       activity: createEmptyActivityState(),
+      // #7470 switch-reset-start — same mechanism as forgetSession above: this
+      // block empties `sessionStates`, which is the set `removedIds` diffs
+      // against, so anything left behind here can never be pruned by a later
+      // `session_list`. switchServer additionally KEEPS the old server's
+      // persisted data on purpose, so leaving these would carry one server's
+      // PR/CI readings into a session list drawn from another.
+      sessionPrStatus: {},
+      sessionPrStatusLoading: {},
+      sessionPrStatusRequestedAt: {},
+      sessionPrThreads: {},
+      sessionPrThreadsLoading: {},
+      // #7470 switch-reset-end
       cancellingActivityIds: new Set<string>(),
       // #5500: drop reindex pending/result state with the rest of the
       // connection-scoped Control Room state.

@@ -57,7 +57,14 @@ import {
   MCP_SERVER_OP_PENDING_CAP,
 } from './message-handler'
 import { createEmptySessionState } from './utils'
-import { isLivePermissionPrompt, resetReplayReconcile } from '@chroxy/store-core'
+import {
+  isLivePermissionPrompt,
+  resetReplayReconcile,
+  wasPromptLiveDuringReplay,
+  getReplayWindowDepth,
+  getLiveReplayLedgerSessionIds,
+  createEmptyActivityState,
+} from '@chroxy/store-core'
 import type { ConnectionState } from './types'
 
 function createMockStore(initial: Partial<ConnectionState>) {
@@ -105,6 +112,16 @@ function baseState(overrides: Partial<ConnectionState> = {}): Partial<Connection
     socket: null,
     sessions: [],
     activeSessionId: null,
+    // #7481 x #7482 (main-red fix): the session_list prune walks the five
+    // per-session PR/CI maps, which are non-optional on ConnectionState.
+    // baseState predates them, and a fixture without them crashes
+    // pruneSessionKeyedMap (deliberately intolerant of absent maps — a test
+    // omission must fail loudly, not be papered over in the helper).
+    sessionPrStatus: {},
+    sessionPrStatusLoading: {},
+    sessionPrStatusRequestedAt: {},
+    sessionPrThreads: {},
+    sessionPrThreadsLoading: {},
     // #3855: generalized provider-credential state defaults so the
     // credentials_status / credential_test_result dispatch tests start from a
     // clean, well-typed baseline.
@@ -3919,6 +3936,107 @@ describe('dashboard message-handler dispatch', () => {
       handleMessage({ type: 'history_replay_end', sessionId: 's1' }, ctx() as any)
 
       expect(answeredOf()).toBe('(resolved)')
+    })
+
+    // #7455 — the server can have two replays of ONE session in flight at once:
+    // `subscribe_sessions` replays every newly-subscribed background session and
+    // `switch_session` calls `replayHistory(..., { forceFull: true })`
+    // unconditionally, so the wire order is start start end end. Before the
+    // window became a refcount the FIRST end closed it while replay #2 was
+    // still streaming, and every live question in that tail was stamped
+    // '(resolved)'.
+    it('protects a racer that arrives between the two ends of overlapping replays (#7455)', () => {
+      seedOne()
+      handleMessage({ type: 'history_replay_start', sessionId: 's1', fullHistory: true }, ctx() as any)
+      handleMessage({ type: 'history_replay_start', sessionId: 's1', fullHistory: true }, ctx() as any)
+      // A racer inside the OVERLAP...
+      handleMessage(question({ toolUseId: 'q-use-1' }) as any, ctx() as any)
+      handleMessage({ type: 'history_replay_end', sessionId: 's1' }, ctx() as any)
+      // ...and one in the TAIL, after end#1, while replay #2 is still
+      // streaming. The tail racer is the one the pre-#7455 Set lost.
+      handleMessage(question({ toolUseId: 'q-use-2' }) as any, ctx() as any)
+      handleMessage({ type: 'history_replay_end', sessionId: 's1' }, ctx() as any)
+
+      // A racer arriving BEFORE the second start is deliberately not covered
+      // here: `_rebuildBaseline` has the same non-refcount shape and the second
+      // start overwrites it, so end#1's atomic swap slices that racer out of
+      // `messages` entirely. That is a separate defect in the same file, filed
+      // as #7477 — the ledger protects the message, the swap then drops it.
+      //
+      // Positive control: both questions really are in the store, so the
+      // `undefined` assertions are about the sweep, not a missing fixture.
+      expect((store.getState() as any).sessionStates.s1.messages).toHaveLength(2)
+      expect(answeredOf(0)).toBeUndefined()
+      expect(answeredOf(1)).toBeUndefined()
+      expect(getReplayWindowDepth('s1')).toBe(0)
+    })
+
+    // The 0→1-only ledger clear, pinned at the integration level. Two DELTA
+    // starts, so `_rebuildBaseline` is never set and nothing is swapped — which
+    // is why this shape works where the full-rebuild one cannot: with two full
+    // starts, end#1 slices a racer that pre-dates start#2 out of `messages`
+    // entirely (#7477), so the assertion could never be reached. Overlapping
+    // pure-delta replays are not the common wire shape (the connect handshake
+    // replays the active session with a cursor; `subscribe_sessions`,
+    // `switch_session` and `request_full_history` all force full), so this
+    // guards the logic rather than reproducing a production sequence.
+    it('a racer before the second DELTA start stays protected', () => {
+      seedOne()
+      handleMessage({ type: 'history_replay_start', sessionId: 's1', fullHistory: false }, ctx() as any)
+      handleMessage(question({ toolUseId: 'q-use-0' }) as any, ctx() as any)
+      handleMessage({ type: 'history_replay_start', sessionId: 's1', fullHistory: false }, ctx() as any)
+      handleMessage({ type: 'history_replay_end', sessionId: 's1' }, ctx() as any)
+      handleMessage({ type: 'history_replay_end', sessionId: 's1' }, ctx() as any)
+      expect((store.getState() as any).sessionStates.s1.messages).toHaveLength(1)
+      expect(answeredOf(0)).toBeUndefined()
+    })
+
+    // #7456 — the store drops a session's messages wholesale on prune and on
+    // timeout; module state here used to survive both with nothing left to
+    // correspond to.
+    it('session_timeout drops the session live-arrival ledger (#7456)', () => {
+      seedOne()
+      handleMessage({ type: 'history_replay_start', sessionId: 's1', fullHistory: false }, ctx() as any)
+      handleMessage(question() as any, ctx() as any)
+      const liveId = (store.getState() as any).sessionStates.s1.messages[0].id
+      expect(wasPromptLiveDuringReplay('s1', liveId)).toBe(true)
+
+      handleMessage(
+        { type: 'session_timeout', sessionId: 's1', name: 'S1', idleMs: 600000 } as any,
+        ctx() as any,
+      )
+
+      expect(wasPromptLiveDuringReplay('s1', liveId)).toBe(false)
+      expect(getReplayWindowDepth('s1')).toBe(0)
+      expect(getLiveReplayLedgerSessionIds()).not.toContain('s1')
+    })
+
+    it('a session_list prune drops the pruned session live-arrival ledger (#7456)', () => {
+      store = createMockStore(
+        baseState({
+          activeSessionId: 's1',
+          sessions: [{ sessionId: 's1', name: 'S1' } as any, { sessionId: 's2', name: 'S2' } as any],
+          sessionStates: { s1: createEmptySessionState(), s2: createEmptySessionState() },
+          // The prune path also walks the Control Room activity tree (#5163),
+          // which `baseState` leaves undefined because no other session_list
+          // test in this file removes a session.
+          activity: createEmptyActivityState(),
+        }),
+      )
+      setStore(store)
+
+      handleMessage({ type: 'history_replay_start', sessionId: 's1', fullHistory: false }, ctx() as any)
+      handleMessage(question() as any, ctx() as any)
+      const liveId = (store.getState() as any).sessionStates.s1.messages[0].id
+      expect(wasPromptLiveDuringReplay('s1', liveId)).toBe(true)
+
+      // s1 dropped out of the authoritative list.
+      handleMessage({ type: 'session_list', sessions: [{ sessionId: 's2', name: 'S2' }] } as any, ctx() as any)
+
+      expect((store.getState() as any).sessionStates).not.toHaveProperty('s1')
+      expect(wasPromptLiveDuringReplay('s1', liveId)).toBe(false)
+      expect(getReplayWindowDepth('s1')).toBe(0)
+      expect(getLiveReplayLedgerSessionIds()).not.toContain('s1')
     })
   })
 
