@@ -235,7 +235,16 @@ export async function handleSessionPrStatusRequest(ws, client, msg, ctx) {
   markInFlight(client, targetSessionId)
   try {
     const snapshot = await surveyFn({ sessionId: targetSessionId, cwd: entry.cwd })
-    gate.commit(snapshot)
+    // #7469: only a reading worth replaying is cached. `reason` is the whole
+    // test here — deliberately NOT a check on `pr`, because an `indeterminate`
+    // fork bail-out (#7435) carries `reason: null` and is byte-identical on the
+    // wire to an authoritative "no open PR". Replaying it shows a client
+    // exactly what a fresh survey would have shown, so suppressing it would
+    // degrade a usable display for nothing. A reason-bearing snapshot is the
+    // opposite: caching it hands one transient failure to every client of this
+    // session for the rest of the window, and `replayable: false` keeps the
+    // last good reading in place instead of blanking it.
+    gate.commit(snapshot, { replayable: !snapshot?.reason })
     sendSnapshot(snapshot)
     // #7427: arm the CI watcher off the reading we just paid for. Absent
     // whenever `sessionCi.watch` is off, and in ctx mocks that do not wire it.

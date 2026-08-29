@@ -212,10 +212,15 @@ export async function handleSessionPrThreadsRequest(ws, client, msg, ctx) {
     // condition cleared. The requester that paid for the failed read still gets
     // it below, under its own request id; the CACHE keeps the last good count.
     //
+    // This is a STRICTER rule than the status survey's `!reason`, which is why
+    // the gate takes the decision as an argument rather than applying one of
+    // its own: a thread count additionally needs an actual number, since a
+    // count-free reading has nothing to say however it came about.
+    //
     // The window is still STAMPED (that happened in `open()`): a read that
     // reached `gh` spent the budget the throttle protects, whatever it came
     // back with. Only a THROWN survey, which never got that far, rolls back.
-    if (snapshot?.reason == null && snapshot?.unresolvedCount != null) gate.commit(snapshot)
+    gate.commit(snapshot, { replayable: snapshot?.reason == null && snapshot?.unresolvedCount != null })
     sendCount(snapshot)
   } catch (err) {
     // A thrown count did not spend the subprocess budget the throttle protects,

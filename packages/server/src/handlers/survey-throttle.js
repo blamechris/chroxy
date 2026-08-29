@@ -17,6 +17,35 @@
  * click. Only before the FIRST completed reading is there nothing to replay,
  * and that is the one case a caller must degrade for itself.
  *
+ * ## `commit()` requires an explicit `replayable` decision, and THROWS without one
+ *
+ * Replaying is only right for a reading worth replaying. A survey that reached
+ * the CLI and came back unusable must not be handed to every client of the
+ * session for the rest of the window — that is one transient error amplified,
+ * long after the condition cleared.
+ *
+ * Deciding that is DOMAIN knowledge, and this module deliberately has none: it
+ * cannot know that a PR status is worth replaying when `reason` is null (an
+ * `indeterminate` fork bail-out included, since that is display-identical to a
+ * fresh reply) while a thread count additionally needs an actual number. So the
+ * decision belongs to the caller — but it must not be OPTIONAL, and that is the
+ * part worth spelling out.
+ *
+ * #7430 first implemented this rule at one of the two call sites. The other
+ * kept committing unconditionally, and a security doc had already been written
+ * claiming the property for both. That is `docs/false-safety-guards.md`'s "a
+ * guard wired to only some of its callers" — correct for every input it sees,
+ * never reached by the rest. A second call-site guard would share the failure
+ * mode of the first, so the decision moved in here as a REQUIRED argument:
+ * `commit(snapshot, { replayable })` throws unless `replayable` is a boolean.
+ * Forgetting is now a crash on the first survey rather than a silent cache, and
+ * a third caller cannot inherit the defect by omission.
+ *
+ * `replayable: false` does NOT clear the cache — it leaves the previously
+ * retained good reading in place. A transient failure must not blank a reading
+ * other clients are looking at, which is #7445's Critical 1 arriving by a
+ * different route.
+ *
  * ## Why the record is compare-and-restore rather than delete
  *
  * A survey that THREW did not spend the subprocess budget the throttle
@@ -41,8 +70,12 @@
  * @property {boolean} admitted - false when the request fell inside the window.
  * @property {*} [cached] - on a REFUSAL: the last completed reading to replay,
  *   or null when none exists yet (the caller must degrade).
- * @property {(snapshot: *) => void} [commit] - on an ADMISSION: record the
- *   completed reading so later refusals can replay it.
+ * @property {(snapshot: *, opts: { replayable: boolean }) => void} [commit] -
+ *   on an ADMISSION: record the completed reading so later refusals can replay
+ *   it. `replayable` is REQUIRED and must be a boolean — see the module doc;
+ *   `false` keeps any previously retained reading rather than caching this one.
+ *   Throws a `TypeError` when the decision is missing, so a caller cannot
+ *   silently inherit the permissive behaviour.
  * @property {() => void} [rollback] - on an ADMISSION: undo this request's
  *   stamp after a failure that spent no budget. Compare-and-restore: a no-op
  *   once a newer request has re-stamped the key.
@@ -80,7 +113,20 @@ export function createSurveyThrottle() {
       records.set(key, record)
       return {
         admitted: true,
-        commit(snapshot) { record.snapshot = snapshot },
+        commit(snapshot, opts) {
+          const replayable = opts?.replayable
+          // Fail CLOSED and LOUD. A default — either way — would let a caller
+          // that never considered the question inherit a policy silently, which
+          // is exactly how #7430's rule ended up on one call site out of two.
+          if (typeof replayable !== 'boolean') {
+            throw new TypeError('survey-throttle: commit() requires an explicit boolean `replayable` — decide whether this reading is worth replaying to other clients inside the window')
+          }
+          // Not replayable: keep whatever good reading `open()` carried
+          // forward. Overwriting it with a failure would blank a display other
+          // clients are using; clearing it would do the same more quietly.
+          if (!replayable) return
+          record.snapshot = snapshot
+        },
         rollback() {
           if (records.get(key) !== record) return
           if (prior) records.set(key, prior)
