@@ -10,6 +10,7 @@
 // REFUSE line on stderr when the roster cannot be parsed — never a partial
 // list, never a silent empty.
 import { readFile } from 'node:fs/promises'
+import { isEntryPoint } from './is-entry-point.mjs'
 
 export const ROSTER_START = 'Required status checks must be green'
 export const ROSTER_END = 'wired as required'
@@ -31,8 +32,7 @@ export function parseRoster(contributingText) {
   return roster
 }
 
-const invokedAsCli = process.argv[1] && import.meta.url.endsWith(process.argv[1].split('/').pop())
-if (invokedAsCli) {
+if (isEntryPoint(import.meta.url)) {
   try {
     const text = await readFile(new URL('../../CONTRIBUTING.md', import.meta.url), 'utf8')
     process.stdout.write(parseRoster(text).join('\n') + '\n')
