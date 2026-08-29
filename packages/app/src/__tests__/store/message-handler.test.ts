@@ -10,6 +10,7 @@ import {
   setStore,
   sendIfOpen,
   _testResetStore,
+  resetAllHandlerState,
   CLIENT_PROTOCOL_VERSION,
   SUBSCRIBE_SESSIONS_CHUNK_SIZE,
   clearPermissionSplits,
@@ -3165,8 +3166,8 @@ describe('post-tool text chunks split into continuation slots (#4922 / #4889)', 
   beforeEach(() => {
     clearDeltaBuffers();
     clearPermissionSplits();
-    // The replay-guard test below sets `s1` into _ctx.replayingSessions and
-    // never receives a `history_replay_end` to clear it. Without this reset,
+    // The replay-guard test below opens a replay window for `s1` and never
+    // receives a `history_replay_end` to close it. Without this reset,
     // any subsequent test in the block that uses session id `s1` and expects
     // the post-tool split to fire would silently skip the split (replay
     // sessions are guarded out). #4975 added such tests after the replay
@@ -3384,8 +3385,9 @@ describe('post-tool text chunks split into continuation slots (#4922 / #4889)', 
     // entire post-tool tail in one chunk against the original messageId. If
     // the client split it again, replayed history would gain a phantom
     // continuation slot that never existed in the live turn. The guard at
-    // `_ctx.replayingSessions.has(...)` skips the split for replaying sessions
-    // -- this test pins that behavior so it can't silently regress.
+    // `isSessionReplaying(...)` -- the store-core replay-window refcount since
+    // #7497 -- skips the split for replaying sessions; this test pins that
+    // behavior so it can't silently regress.
     const store = createMockStore({
       activeSessionId: 's1',
       sessions: [{ sessionId: 's1', name: 'S1' } as any],
@@ -6207,6 +6209,275 @@ describe('replay flag is per-session (#4512)', () => {
     });
     const lenAfter = store.getState().sessionStates.sA.messages.length;
     expect(lenAfter).toBe(lenBefore);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #7497 — every replay-state reader derives from the ONE refcount
+// ---------------------------------------------------------------------------
+//
+// #7494 moved the two DEDUP gates (`message`, `tool_start`) off
+// `_ctx.replayingSessions` and onto `getReplayWindowDepth`; the Set's OTHER
+// readers kept membership. Two maps answering "is this session replaying"
+// disagree in two places, and both are ordinary wire shapes:
+//
+//   1. `start start end end`. `subscribe_sessions` and `switch_session` both
+//      call `replayHistory(..., { forceFull: true })`, and `replayHistory`
+//      chunks over `setImmediate`, so two replays of ONE session overlap (the
+//      refcount's doc comment in store-core/replay-reconcile.ts derives this
+//      from the server paths). The FIRST end deletes the Set entry, so every
+//      reader below treated replay #2's remaining tail as LIVE traffic —
+//      replay #2 being a forceFull from offset 0, i.e. entirely history.
+//   2. `dropReplaySessionState` (the `session_list` prune and
+//      `session_timeout`) clears the refcount and cannot reach a
+//      connection-local Set, so the Set is left standing for an id whose
+//      window is gone. Only a matching `history_replay_end` or a full reset
+//      ever deletes it, and neither is coming — the session was pruned.
+//
+// Interleave cases assert the FIX (a replayed frame is gated out); prune cases
+// assert the stale-true Set no longer gates a session that is not replaying.
+// Every one of them fails with the reader on Set membership.
+describe('replay-state readers derive from the refcount (#7497)', () => {
+  beforeEach(() => {
+    clearDeltaBuffers();
+    clearPermissionSplits();
+    resetReplayFlags();
+    resetReplayReconcile({ clearCursors: true });
+  });
+
+  afterEach(() => {
+    resetReplayFlags();
+    resetReplayReconcile({ clearCursors: true });
+  });
+
+  const WARNING = { idleMs: 2_792_000, prefab: 'Status update?', receivedAt: 200 };
+
+  function seed(extra: Record<string, unknown> = {}) {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: { ...createEmptySessionState(), ...extra } },
+      sessionNotifications: [],
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockConnectionContext());
+    return store;
+  }
+
+  const activityEvent = (id: string) => ({
+    type: 'tool_start',
+    messageId: id,
+    tool: 'Bash',
+    toolUseId: id,
+    input: { command: 'ls' },
+    sessionId: 's1',
+  });
+
+  /**
+   * Drive the overlap and stop INSIDE replay #2's tail: two forceFull starts,
+   * replay #1's end. Everything delivered after this is still replayed
+   * history, and the Set — deleted by that first end — says otherwise.
+   */
+  function enterReplayTwoTail() {
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's1', fullHistory: true });
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's1', fullHistory: true });
+    _testMessageHandler.handle({ type: 'history_replay_end', sessionId: 's1' });
+    // A precondition, not decoration: at depth 0 every assertion below would
+    // pass for the wrong reason — there would be nothing left to gate.
+    expect(getReplayWindowDepth('s1')).toBe(1);
+  }
+
+  // --- reader 1: the #3758/#4512 dispatch-level activity bump ---------------
+
+  it('activity bump: a replayed activity event in replay #2 tail does not bump', () => {
+    const store = seed({ lastClientActivityAt: 100, inactivityWarning: WARNING });
+    enterReplayTwoTail();
+    _testMessageHandler.handle(activityEvent('tool-1'));
+    // #4466/#4492's symptom in the interleave its gate did not cover:
+    // "Working… last activity Ns ago" resets and the "Agent quiet for 46m"
+    // chip is dismissed without the user ever seeing it.
+    const ss = store.getState().sessionStates.s1;
+    expect(ss.lastClientActivityAt).toBe(100);
+    expect(ss.inactivityWarning).toEqual(WARNING);
+  });
+
+  it('activity bump: resumes once the LAST replay window closes', () => {
+    const store = seed({ lastClientActivityAt: 100, inactivityWarning: WARNING });
+    enterReplayTwoTail();
+    _testMessageHandler.handle({ type: 'history_replay_end', sessionId: 's1' });
+    expect(getReplayWindowDepth('s1')).toBe(0);
+    _testMessageHandler.handle(activityEvent('tool-2'));
+    const ss = store.getState().sessionStates.s1;
+    expect(ss.lastClientActivityAt).toBeGreaterThan(100);
+    expect(ss.inactivityWarning).toBeNull();
+  });
+
+  // --- reader 2: the #6627 result queue reconcile ---------------------------
+
+  it('queue reconcile: a replayed result in replay #2 tail does not trim the queue', () => {
+    const store = seed({
+      queuedMessages: [
+        { clientMessageId: 'c1', text: 'one', queuedAt: 1, status: 'confirmed' },
+        { clientMessageId: 'c2', text: 'two', queuedAt: 2, status: 'confirmed' },
+      ],
+    });
+    enterReplayTwoTail();
+    // A replayed result carries the queueLength from whenever that turn
+    // originally completed — stale by definition, and it must not trim what
+    // the user has queued since.
+    _testMessageHandler.handle({
+      type: 'result', sessionId: 's1', usage: {}, cost: 0, duration: 0, queueLength: 0,
+    });
+    expect(store.getState().sessionStates.s1.queuedMessages).toHaveLength(2);
+  });
+
+  it('queue reconcile: resumes once the LAST replay window closes', () => {
+    const store = seed({
+      queuedMessages: [
+        { clientMessageId: 'c1', text: 'one', queuedAt: 1, status: 'confirmed' },
+        { clientMessageId: 'c2', text: 'two', queuedAt: 2, status: 'confirmed' },
+      ],
+    });
+    enterReplayTwoTail();
+    _testMessageHandler.handle({ type: 'history_replay_end', sessionId: 's1' });
+    _testMessageHandler.handle({
+      type: 'result', sessionId: 's1', usage: {}, cost: 0, duration: 0, queueLength: 0,
+    });
+    expect(store.getState().sessionStates.s1.queuedMessages).toHaveLength(0);
+  });
+
+  // --- reader 3: the #4889 continuation split, in store-core ----------------
+
+  describe('#4889 continuation split', () => {
+    beforeEach(() => {
+      jest.useFakeTimers();
+    });
+
+    afterEach(() => {
+      jest.useRealTimers();
+    });
+
+    it('does not split a post-tool delta delivered in replay #2 tail', () => {
+      const store = seed({ messages: [] });
+      enterReplayTwoTail();
+      // Replayed history is reassembled server-side: one delta carries the
+      // whole post-tool tail against the original messageId. Splitting it
+      // again invents a continuation bubble that never existed in the turn.
+      _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
+      _testMessageHandler.handle({
+        type: 'stream_delta', messageId: 'resp-1', sessionId: 's1', delta: 'First sentence.',
+      });
+      jest.runAllTimers();
+      _testMessageHandler.handle({
+        type: 'tool_start', messageId: 'toolu_a', sessionId: 's1',
+        tool: 'Bash', toolUseId: 'toolu_a', input: { command: 'ls' },
+      });
+      _testMessageHandler.handle({
+        type: 'stream_delta', messageId: 'resp-1', sessionId: 's1', delta: 'Second sentence.',
+      });
+      jest.runAllTimers();
+
+      const responses = store.getState().sessionStates.s1.messages.filter(
+        (m: any) => m.type === 'response',
+      );
+      expect(responses).toHaveLength(1);
+      expect((responses[0] as any).content).toBe('First sentence.Second sentence.');
+    });
+
+    it('still splits a LIVE post-tool delta once the last window closes', () => {
+      const store = seed({ messages: [] });
+      enterReplayTwoTail();
+      _testMessageHandler.handle({ type: 'history_replay_end', sessionId: 's1' });
+      _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
+      _testMessageHandler.handle({
+        type: 'stream_delta', messageId: 'resp-1', sessionId: 's1', delta: 'First sentence.',
+      });
+      jest.runAllTimers();
+      _testMessageHandler.handle({
+        type: 'tool_start', messageId: 'toolu_a', sessionId: 's1',
+        tool: 'Bash', toolUseId: 'toolu_a', input: { command: 'ls' },
+      });
+      _testMessageHandler.handle({
+        type: 'stream_delta', messageId: 'resp-1', sessionId: 's1', delta: 'Second sentence.',
+      });
+      jest.runAllTimers();
+
+      const responses = store.getState().sessionStates.s1.messages.filter(
+        (m: any) => m.type === 'response',
+      );
+      expect(responses).toHaveLength(2);
+    });
+  });
+
+  // #7497 — `resetAllHandlerState` used to reset the replay flags for free:
+  // `replayingSessions` was a field on the MessageHandlerContext it replaces
+  // wholesale. The flag is module state in store-core now, so that reset has to
+  // be explicit — without it this HEAVIER reset would clear strictly less than
+  // `resetReplayFlags` does, which is the half-a-reset shape #7477 called out.
+  it('resetAllHandlerState closes any open replay window', () => {
+    seed({ messages: [] });
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's1', fullHistory: true });
+    expect(getReplayWindowDepth('s1')).toBe(1);
+
+    resetAllHandlerState();
+
+    expect(getReplayWindowDepth('s1')).toBe(0);
+  });
+
+  // --- the prune divergence: refcount cleared, Set left standing ------------
+
+  it('a session_list prune leaves no reader treating s1 as replaying', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [
+        { sessionId: 's1', name: 'S1' } as any,
+        { sessionId: 's2', name: 'S2' } as any,
+      ],
+      sessionStates: {
+        s1: { ...createEmptySessionState(), lastClientActivityAt: 100, inactivityWarning: WARNING },
+        s2: createEmptySessionState(),
+      },
+      sessionNotifications: [],
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockConnectionContext());
+
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's1', fullHistory: true });
+    expect(getReplayWindowDepth('s1')).toBe(1);
+
+    // s1 drops out of the authoritative list. The store drops its state and
+    // calls `dropReplaySessionState`, which clears the refcount — and cannot
+    // touch a connection-local Set.
+    _testMessageHandler.handle({ type: 'session_list', sessions: [{ sessionId: 's2', name: 'S2' }] });
+    expect(store.getState().sessionStates).not.toHaveProperty('s1');
+    expect(getReplayWindowDepth('s1')).toBe(0);
+
+    // s1 comes back with fresh state and no replay in flight. Module replay
+    // state is deliberately NOT reset in between — a stale entry surviving the
+    // prune is exactly what is under test, and the Set holds one because the
+    // `history_replay_end` that would have deleted it is never coming.
+    const revived = seed({ lastClientActivityAt: 100, inactivityWarning: WARNING });
+    _testMessageHandler.handle(activityEvent('tool-9'));
+    const ss = revived.getState().sessionStates.s1;
+    expect(ss.lastClientActivityAt).toBeGreaterThan(100);
+    expect(ss.inactivityWarning).toBeNull();
+  });
+
+  it('a session_timeout leaves no reader treating s1 as replaying', () => {
+    seed({ lastClientActivityAt: 100, inactivityWarning: WARNING });
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's1', fullHistory: true });
+    expect(getReplayWindowDepth('s1')).toBe(1);
+
+    _testMessageHandler.handle({
+      type: 'session_timeout', sessionId: 's1', name: 'S1', idleMs: 600000,
+    });
+    expect(getReplayWindowDepth('s1')).toBe(0);
+
+    const revived = seed({ lastClientActivityAt: 100, inactivityWarning: WARNING });
+    _testMessageHandler.handle(activityEvent('tool-8'));
+    const ss = revived.getState().sessionStates.s1;
+    expect(ss.lastClientActivityAt).toBeGreaterThan(100);
+    expect(ss.inactivityWarning).toBeNull();
   });
 });
 

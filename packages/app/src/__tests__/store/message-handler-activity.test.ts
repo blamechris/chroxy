@@ -17,10 +17,15 @@
 import {
   _testMessageHandler,
   _testResetStore,
+  resetReplayFlags,
   setStore,
 } from '../../store/message-handler';
 import { createMockConnectionContext } from '../../test-utils/mock-connection-context';
-import { createEmptyActivityState } from '@chroxy/store-core';
+import {
+  createEmptyActivityState,
+  getReplayWindowDepth,
+  resetReplayReconcile,
+} from '@chroxy/store-core';
 import type { ActivityEntry, ActivityState } from '@chroxy/store-core';
 import type { ConnectionState } from '../../store/types';
 
@@ -82,6 +87,12 @@ function createMockStore(
 
 beforeEach(() => {
   jest.clearAllMocks();
+  // The replay guardrails below deliberately open a replay window and never
+  // send its `history_replay_end`, and that window is MODULE state (the
+  // store-core refcount). Reset around every test so a leftover window can't
+  // decide a later case in this file — or, via module memory, in another.
+  resetReplayFlags();
+  resetReplayReconcile({ clearCursors: true });
 });
 
 // #6247 review: the message-handler keeps module-level store + context refs.
@@ -92,6 +103,8 @@ beforeEach(() => {
 afterEach(() => {
   _testResetStore();
   _testMessageHandler.setContext(null as never);
+  resetReplayFlags();
+  resetReplayReconcile({ clearCursors: true });
 });
 
 describe('activity feeder (#6246)', () => {
@@ -259,7 +272,8 @@ describe('activity feeder (#6246)', () => {
     setStore(store as any);
     _testMessageHandler.setContext(createMockConnectionContext());
 
-    // Put s2 into _ctx.replayingSessions via the real replay-start path.
+    // Open s2's replay window via the real replay-start path (#7497: the gate
+    // reads the store-core refcount, which that frame increments).
     _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's2' });
     const before = (current().sessionStates as Record<string, { lastClientActivityAt?: number }>).s2.lastClientActivityAt;
 
@@ -275,6 +289,69 @@ describe('activity feeder (#6246)', () => {
     // Gated out: the delta did not bump the timestamp. The tree itself still upserts.
     expect(ss.lastClientActivityAt).toBe(before);
     expect(current().activity.bySession.s2!.byId.d1!.status).toBe('running');
+  });
+
+
+  // #7497 — the same gate, in the interleave Set membership cannot express.
+  // `subscribe_sessions` and `switch_session` both replay this session with
+  // `forceFull`, so two windows overlap and the FIRST `history_replay_end`
+  // deleted the Set entry — leaving replay #2's remaining tail (a forceFull
+  // from offset 0, i.e. entirely history) reading as live Control Room
+  // traffic, which is precisely what this bump must not treat as fresh work.
+  it('activity_delta does NOT bump in replay #2 tail of an overlapping pair (#7497)', () => {
+    const { store, current } = createMockStore(createEmptyActivityState(), {
+      s2: { messages: [], lastClientActivityAt: 1000, inactivityWarning: { remainingMs: 5000 } },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockConnectionContext());
+
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's2', fullHistory: true });
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's2', fullHistory: true });
+    _testMessageHandler.handle({ type: 'history_replay_end', sessionId: 's2' });
+    // A precondition, not decoration: at depth 0 the assertions below would
+    // pass for the wrong reason — there would be nothing left to gate.
+    expect(getReplayWindowDepth('s2')).toBe(1);
+
+    _testMessageHandler.handle({
+      type: 'activity_delta',
+      sessionId: 's2',
+      schemaVersion: 1,
+      op: 'started',
+      entry: entry({ id: 'd1', status: 'running' }),
+    });
+
+    const ss = (current().sessionStates as Record<string, { lastClientActivityAt?: number; inactivityWarning?: unknown }>).s2;
+    expect(ss.lastClientActivityAt).toBe(1000);
+    expect(ss.inactivityWarning).toEqual({ remainingMs: 5000 });
+    // Positive control: the delta really was applied to the activity tree, so
+    // the two assertions above are about the gate and not a rejected fixture.
+    expect(current().activity.bySession.s2!.byId.d1!.status).toBe('running');
+  });
+
+  it('activity_delta bumps again once the LAST replay window closes (#7497)', () => {
+    const { store, current } = createMockStore(createEmptyActivityState(), {
+      s2: { messages: [], lastClientActivityAt: 1000, inactivityWarning: { remainingMs: 5000 } },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockConnectionContext());
+
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's2', fullHistory: true });
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's2', fullHistory: true });
+    _testMessageHandler.handle({ type: 'history_replay_end', sessionId: 's2' });
+    _testMessageHandler.handle({ type: 'history_replay_end', sessionId: 's2' });
+    expect(getReplayWindowDepth('s2')).toBe(0);
+
+    _testMessageHandler.handle({
+      type: 'activity_delta',
+      sessionId: 's2',
+      schemaVersion: 1,
+      op: 'started',
+      entry: entry({ id: 'd2', status: 'running' }),
+    });
+
+    const ss = (current().sessionStates as Record<string, { lastClientActivityAt?: number; inactivityWarning?: unknown }>).s2;
+    expect(ss.lastClientActivityAt).toBeGreaterThan(1000);
+    expect(ss.inactivityWarning).toBeNull();
   });
 
   // #6248 guardrail 2: activity_snapshot is a full-state RESYNC (on subscribe /

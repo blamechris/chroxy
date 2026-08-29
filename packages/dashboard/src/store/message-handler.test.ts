@@ -4184,6 +4184,223 @@ describe('dashboard message-handler dispatch', () => {
     })
   })
 
+  // ---------------------------------------------------------------------------
+  // #7497 — every replay-state reader derives from the ONE refcount
+  // ---------------------------------------------------------------------------
+  //
+  // #7494 moved the two DEDUP gates (`message`, `tool_start`) off
+  // `_replayingSessions` and onto `getReplayWindowDepth`; the Set's OTHER
+  // readers kept membership. Two maps answering "is this session replaying"
+  // disagree in two places, and both are ordinary wire shapes:
+  //
+  //   1. `start start end end`. `subscribe_sessions` and `switch_session` both
+  //      call `replayHistory(..., { forceFull: true })`, and `replayHistory`
+  //      chunks over `setImmediate`, so two replays of ONE session overlap (the
+  //      refcount's doc comment in store-core/replay-reconcile.ts derives this
+  //      from the server paths). The FIRST end deletes the Set entry, so every
+  //      reader below treated replay #2's remaining tail as LIVE traffic —
+  //      replay #2 being a forceFull from offset 0, i.e. entirely history.
+  //   2. `dropReplaySessionState` (the `session_list` prune and
+  //      `session_timeout`) clears the refcount and cannot reach a client-local
+  //      Set, so the Set is left standing for an id whose window is gone. Only
+  //      a matching `history_replay_end` or a full reset ever deletes it, and
+  //      neither is coming — the session was pruned — so it reads "replaying"
+  //      for the life of the connection.
+  //
+  // Interleave cases assert the FIX (a replayed frame is gated out); prune
+  // cases assert the stale-true Set no longer gates a session that is not
+  // replaying. Every one of them fails with the reader on Set membership.
+  describe('replay-state readers derive from the refcount (#7497)', () => {
+    beforeEach(() => {
+      resetReplayReconcile({ clearCursors: true })
+    })
+
+    afterEach(() => {
+      resetReplayReconcile({ clearCursors: true })
+    })
+
+    const WARNING = { idleMs: 2_792_000, prefab: 'Status update?', receivedAt: 200 }
+
+    function seed(extra: Record<string, unknown> = {}) {
+      store = createMockStore(
+        baseState({
+          activeSessionId: 's1',
+          sessions: [{ sessionId: 's1', name: 'S1' } as any],
+          sessionStates: { s1: { ...createEmptySessionState(), ...extra } },
+        }),
+      )
+      setStore(store)
+    }
+
+    const ss = () => (store.getState() as any).sessionStates.s1
+
+    const activityEvent = (id: string) => ({
+      type: 'tool_start',
+      messageId: id,
+      tool: 'Bash',
+      toolUseId: id,
+      input: { command: 'ls' },
+      sessionId: 's1',
+    })
+
+    const activityDelta = (id: string) => ({
+      type: 'activity_delta',
+      sessionId: 's1',
+      schemaVersion: 1,
+      op: 'started',
+      entry: { id, kind: 'tool', label: 'Bash', status: 'running', startedAt: 1_800_000_000_000 },
+    })
+
+    /**
+     * Drive the overlap and stop INSIDE replay #2's tail: two forceFull starts,
+     * replay #1's end. Everything delivered after this is still replayed
+     * history, and the Set — deleted by that first end — says otherwise.
+     */
+    function enterReplayTwoTail() {
+      handleMessage({ type: 'history_replay_start', sessionId: 's1', fullHistory: true }, ctx() as any)
+      handleMessage({ type: 'history_replay_start', sessionId: 's1', fullHistory: true }, ctx() as any)
+      handleMessage({ type: 'history_replay_end', sessionId: 's1' }, ctx() as any)
+      // A precondition, not decoration: at depth 0 every assertion below would
+      // pass for the wrong reason — there would be nothing left to gate.
+      expect(getReplayWindowDepth('s1')).toBe(1)
+    }
+
+    // --- reader 1: the #3758/#4466 dispatch-level activity bump -------------
+
+    it('activity bump: a replayed activity event in replay #2 tail does not bump', () => {
+      seed({ lastClientActivityAt: 100, inactivityWarning: WARNING })
+      enterReplayTwoTail()
+      handleMessage(activityEvent('tool-1') as any, ctx() as any)
+      // This is #4466's symptom in the interleave its gate did not cover:
+      // "Working… last activity Ns ago" resets and the "Agent quiet for 46m"
+      // chip is dismissed without the user ever seeing it.
+      expect(ss().lastClientActivityAt).toBe(100)
+      expect(ss().inactivityWarning).toEqual(WARNING)
+    })
+
+    it('activity bump: resumes once the LAST replay window closes', () => {
+      seed({ lastClientActivityAt: 100, inactivityWarning: WARNING })
+      enterReplayTwoTail()
+      handleMessage({ type: 'history_replay_end', sessionId: 's1' }, ctx() as any)
+      expect(getReplayWindowDepth('s1')).toBe(0)
+      handleMessage(activityEvent('tool-2') as any, ctx() as any)
+      expect(ss().lastClientActivityAt).toBeGreaterThan(100)
+      expect(ss().inactivityWarning).toBeNull()
+    })
+
+    // --- reader 2: the Control Room `activity_delta` bump -------------------
+
+    it('activity_delta: a delta in replay #2 tail does not bump', () => {
+      seed({ lastClientActivityAt: 100, inactivityWarning: WARNING })
+      enterReplayTwoTail()
+      handleMessage(activityDelta('a1') as any, ctx() as any)
+      expect(ss().lastClientActivityAt).toBe(100)
+      expect(ss().inactivityWarning).toEqual(WARNING)
+      // Positive control: the delta really was applied to the activity tree, so
+      // the two assertions above are about the gate and not a rejected fixture.
+      expect((store.getState() as any).activity.bySession.s1.byId.a1.status).toBe('running')
+    })
+
+    it('activity_delta: resumes once the LAST replay window closes', () => {
+      seed({ lastClientActivityAt: 100, inactivityWarning: WARNING })
+      enterReplayTwoTail()
+      handleMessage({ type: 'history_replay_end', sessionId: 's1' }, ctx() as any)
+      handleMessage(activityDelta('a2') as any, ctx() as any)
+      expect(ss().lastClientActivityAt).toBeGreaterThan(100)
+      expect(ss().inactivityWarning).toBeNull()
+    })
+
+    // --- readers 3 + 4: the `result` queue reconcile and activeTools wipe ---
+
+    it('queue reconcile: a replayed result in replay #2 tail does not trim the queue', () => {
+      seed({
+        queuedMessages: [
+          { clientMessageId: 'c1', text: 'one', queuedAt: 1, status: 'confirmed' },
+          { clientMessageId: 'c2', text: 'two', queuedAt: 2, status: 'confirmed' },
+        ],
+      })
+      enterReplayTwoTail()
+      // A replayed result carries the queueLength from whenever that turn
+      // originally completed — stale by definition, and it must not trim what
+      // the user has queued since.
+      handleMessage(
+        { type: 'result', sessionId: 's1', usage: {}, cost: 0, duration: 0, queueLength: 0 },
+        ctx() as any,
+      )
+      expect(ss().queuedMessages).toHaveLength(2)
+    })
+
+    it('activeTools wipe: a replayed result in replay #2 tail does not wipe activeTools', () => {
+      const inFlight = { toolUseId: 'tu-1', tool: 'Bash', input: { command: 'sleep 999' }, startedAt: 100 }
+      seed({ activeTools: [inFlight] })
+      enterReplayTwoTail()
+      handleMessage(
+        { type: 'result', sessionId: 's1', usage: {}, cost: 0, duration: 0 },
+        ctx() as any,
+      )
+      // #4491's symptom: the wipe lands, the replayed tool_start re-adds the
+      // entry with a fresh startedAt, and "Running Bash · 1s" restarts.
+      expect(ss().activeTools).toHaveLength(1)
+      expect(ss().activeTools[0].startedAt).toBe(100)
+    })
+
+    it('queue reconcile + activeTools: both resume once the LAST window closes', () => {
+      seed({
+        queuedMessages: [{ clientMessageId: 'c1', text: 'one', queuedAt: 1, status: 'confirmed' }],
+        activeTools: [{ toolUseId: 'tu-1', tool: 'Bash', input: {}, startedAt: 100 }],
+      })
+      enterReplayTwoTail()
+      handleMessage({ type: 'history_replay_end', sessionId: 's1' }, ctx() as any)
+      handleMessage(
+        { type: 'result', sessionId: 's1', usage: {}, cost: 0, duration: 0, queueLength: 0 },
+        ctx() as any,
+      )
+      expect(ss().queuedMessages).toHaveLength(0)
+      expect(ss().activeTools).toEqual([])
+    })
+
+    // --- the prune divergence: refcount cleared, Set left standing ----------
+
+    it('a session_list prune leaves no reader treating s1 as replaying', () => {
+      seed({ lastClientActivityAt: 100, inactivityWarning: WARNING })
+      handleMessage({ type: 'history_replay_start', sessionId: 's1', fullHistory: true }, ctx() as any)
+      expect(getReplayWindowDepth('s1')).toBe(1)
+
+      // s1 drops out of the authoritative list. The store drops its state and
+      // calls `dropReplaySessionState`, which clears the refcount — and cannot
+      // touch a client-local Set.
+      handleMessage({ type: 'session_list', sessions: [{ sessionId: 's2', name: 'S2' }] } as any, ctx() as any)
+      expect((store.getState() as any).sessionStates).not.toHaveProperty('s1')
+      expect(getReplayWindowDepth('s1')).toBe(0)
+
+      // s1 comes back with fresh state and no replay in flight. Module replay
+      // state is deliberately NOT reset in between — a stale entry surviving
+      // the prune is exactly what is under test, and the Set holds one because
+      // the `history_replay_end` that would have deleted it is never coming.
+      seed({ lastClientActivityAt: 100, inactivityWarning: WARNING })
+      handleMessage(activityEvent('tool-9') as any, ctx() as any)
+      expect(ss().lastClientActivityAt).toBeGreaterThan(100)
+      expect(ss().inactivityWarning).toBeNull()
+    })
+
+    it('a session_timeout leaves no reader treating s1 as replaying', () => {
+      seed({ lastClientActivityAt: 100, inactivityWarning: WARNING })
+      handleMessage({ type: 'history_replay_start', sessionId: 's1', fullHistory: true }, ctx() as any)
+      expect(getReplayWindowDepth('s1')).toBe(1)
+
+      handleMessage(
+        { type: 'session_timeout', sessionId: 's1', name: 'S1', idleMs: 600000 } as any,
+        ctx() as any,
+      )
+      expect(getReplayWindowDepth('s1')).toBe(0)
+
+      seed({ lastClientActivityAt: 100, inactivityWarning: WARNING })
+      handleMessage(activityEvent('tool-8') as any, ctx() as any)
+      expect(ss().lastClientActivityAt).toBeGreaterThan(100)
+      expect(ss().inactivityWarning).toBeNull()
+    })
+  })
+
   // #7457 — the NON-racing half of #7420, and the half the client cannot fix
   // alone. A question that is genuinely still PENDING comes back through the
   // ordinary history replay (`user_question` is not `builtinTransient`, so it

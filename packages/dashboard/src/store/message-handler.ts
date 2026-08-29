@@ -853,15 +853,18 @@ export function setLastConnectedUrl(url: string | null): void {
 // the replay over `setImmediate` (ws-history.js), which yields the event loop
 // between chunks, so live broadcasts from OTHER sessions can interleave with
 // session A's replay. A module-level boolean would gate all sessions on A's
-// replay state and drop legitimate live activity for sessions B/C/etc.
-// Scope the flag per-session id and gate per-target.
-const _replayingSessions = new Set<string>();
+// replay state and drop legitimate live activity for sessions B/C/etc. So the
+// flag is per-session id and every gate is per-target.
+//
+// #7497 — and there is exactly ONE flag: the replay-window REFCOUNT in
+// store-core, read through `isSessionReplaying` below. The `_replayingSessions`
+// Set that used to live here was a SECOND answer to the same question, and the
+// two disagreed in both directions — see that function's comment.
 
 export function resetReplayFlags(): void {
-  _replayingSessions.clear();
-  // #7477 — the replay FLAG is the refcount now (see `isSessionReplaying`), so
-  // resetting the flags has to reset that too or this clears half the state and
-  // reads as a full reset. The one production caller (connection.ts's
+  // #7477 — the replay FLAG is the refcount (see `isSessionReplaying`), so
+  // resetting the flags has to reset that or this clears nothing at all while
+  // reading as a full reset. The one production caller (connection.ts's
   // disconnect) already runs `resetReplayReconcile({ clearCursors: true })` a
   // few statements later — `resetTranscriptFetchTracking()` sits between them
   // and touches only the transcript pending-map and its watchdog, no
@@ -874,11 +877,11 @@ export function resetReplayFlags(): void {
 }
 
 /**
- * Is a history replay in flight for this session — the question the REPLAY
- * DEDUP gate has to ask (#7477 review).
+ * Is a history replay in flight for this session — the ONE question every
+ * replay-state gate in this file asks (#7477 review, #7497).
  *
- * NOT `_replayingSessions.has(id)`. That Set is the third map in this family to
- * carry membership where a COUNT is needed: the server routinely has two
+ * There used to be a `_replayingSessions` Set beside this, and it carried
+ * membership where a COUNT is needed: the server routinely has two
  * replays of one session in flight (`subscribe_sessions` + `switch_session`,
  * both forceFull), so the wire order is `start start end end`, and the FIRST
  * end deletes the id. Everything replay #2 still had to deliver then appended
@@ -896,14 +899,24 @@ export function resetReplayFlags(): void {
  * and inherits `resetReplayReconcile` (fresh auth, socket close/error) and
  * `dropReplaySessionState` (prune, timeout) teardown for free.
  *
- * Scope: this is wired to the two DEDUP gates only (`message` and `tool_start`).
- * The Set's other readers — the #4466 activity bump, the #4889 permission-split
- * gate in store-core's shared `StreamDeltaContext`, the queue reconcile — see
- * exactly the behaviour they saw before #7477 in this window, so moving them is
- * an unrelated behaviour change. Tracked as #7497, which also carries the one
- * site where the two maps now genuinely DISAGREE: `dropReplaySessionState`
- * clears the refcount but not the Set, so a pruned session still receiving
- * replay frames reads as "not replaying" here where the Set kept dedup on.
+ * #7494 moved the two DEDUP gates (`message`, `tool_start`) here; #7497 moved
+ * the REST and deleted the Set, because two maps answering one question drift.
+ * They had already drifted in BOTH directions:
+ *
+ *   - in the `start start end end` window above, the Set said "not replaying"
+ *     while replay #2 was still streaming history — the #3758/#4466 activity
+ *     bump reset "last activity Ns ago" and dismissed the "Agent quiet for 46m"
+ *     chip on a REPLAYED event, the #6627 queue reconcile trimmed the live
+ *     queue against a stale `queueLength`, the #4491 activeTools wipe restarted
+ *     the "Running Bash · 1s" clock, and the #4889 continuation split invented
+ *     a `-cont-` bubble that never existed in the turn;
+ *   - after a `session_list` prune or a `session_timeout` the Set said
+ *     "replaying" forever. `dropReplaySessionState` clears the refcount and
+ *     cannot reach a client-local Set, and the `history_replay_end` that would
+ *     have deleted the entry is never coming — the session is gone.
+ *
+ * The Set had no teardown of its own on either path, so keeping both maps meant
+ * one more place they had to be kept in step. There is now one map.
  */
 function isSessionReplaying(sessionId: string | null | undefined): boolean {
   return getReplayWindowDepth(sessionId) > 0;
@@ -922,7 +935,7 @@ function isSessionReplaying(sessionId: string | null | undefined): boolean {
 // `get().addMessage(newMsg)` — appending into whatever session IS currently
 // active — whenever `sessionStates[targetId]` doesn't exist. A transcript fetch
 // must never touch `sessionStates`, the replay dedup cache, or
-// `_replayingSessions`, so a matching frame is diverted at the top of
+// the replay window refcount, so a matching frame is diverted at the top of
 // `handleMessage` into the dedicated `transcriptViewer` store slice instead
 // (see the interception guard there and `applyTranscriptFrame` below).
 //
@@ -950,7 +963,7 @@ function isSessionReplaying(sessionId: string | null | undefined): boolean {
 // entirely. Do NOT read that as "late replay frames are now inert" — the two
 // unconditional statements above the wipe still run on the frame's raw id, so
 // a disarmed transcript stream would add a conversationId to
-// `_replayingSessions` (gating live-session replay logic on an id that is not
+// the replay window (gating live-session replay logic on an id that is not
 // a session) and hand it to `reconcileReplayStart` as a rebuild baseline.
 //
 // So: closing the viewer stops RENDERING, never INTERCEPTING.
@@ -1081,7 +1094,7 @@ export function resetTranscriptFetchTracking(): void {
 /**
  * Apply a diverted `history_replay_start` / `message` / `history_replay_end`
  * frame to the `transcriptViewer` store slice — NEVER to `sessionStates`, the
- * replay dedup cache, or `_replayingSessions`. See the `_pendingTranscriptIds`
+ * replay dedup cache, or the replay window. See the `_pendingTranscriptIds`
  * doc above for why this is reached via the pending set, not the displayed
  * conversationId.
  */
@@ -2446,7 +2459,6 @@ function handleStreamDelta(msg: Record<string, unknown>, get: MsgGet, set: MsgSe
     pendingDeltas,
     deltaIdRemaps: _deltaIdRemaps,
     postPermissionSplits: _postPermissionSplits,
-    replayingSessions: _replayingSessions,
 
     getSessionMessages: (sessionId) =>
       sessionId && get().sessionStates[sessionId]
@@ -3011,9 +3023,9 @@ function handleActivitySnapshot(msg: Record<string, unknown>, get: MsgGet, set: 
  * also counts as activity-bearing — bump `lastClientActivityAt` and clear any
  * outstanding `inactivityWarning` for the delta's session so the "Working… last
  * activity Ns ago" indicator and the inactivity chip don't go stale while only
- * Control Room traffic is flowing. Gated on `_replayingSessions` exactly like
- * the dispatch-level bump (#4466) so a session switch's history replay doesn't
- * reset the timestamp. NOTE: `activity_snapshot` deliberately does NOT bump —
+ * Control Room traffic is flowing. Gated on `isSessionReplaying` exactly like
+ * the dispatch-level bump (#4466 / #7497) so a session switch's history replay
+ * doesn't reset the timestamp. NOTE: `activity_snapshot` deliberately does NOT bump —
  * it's a full-state resync emitted on subscribe / reconnect, not fresh work.
  */
 function handleActivityDelta(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
@@ -3032,7 +3044,7 @@ function handleActivityDelta(msg: Record<string, unknown>, get: MsgGet, set: Msg
   }
 
   const sessionId = parsed.data.sessionId;
-  if (get().sessionStates[sessionId] && !_replayingSessions.has(sessionId)) {
+  if (get().sessionStates[sessionId] && !isSessionReplaying(sessionId)) {
     updateSession(sessionId, (ss) => {
       const patch: Partial<SessionState> = { lastClientActivityAt: Date.now() };
       if (ss.inactivityWarning) patch.inactivityWarning = null;
@@ -4358,17 +4370,23 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
   //      activity Ns ago" resets to 1s no matter how idle the session was;
   //   2) wipes inactivityWarning, so the "Agent quiet for 46m 32s · Status
   //      update?" chip disappears without the user ever seeing it again.
-  // The live activity events that arrive AFTER history_replay_end removes
-  // the session from the set still bump correctly — verified by the
-  // regression-guard tests in message-handler.test.ts.
+  // The live activity events that arrive after the LAST history_replay_end
+  // closes the window still bump correctly — verified by the regression-guard
+  // tests in message-handler.test.ts.
   //
-  // #4493 — gate per target session id (Set membership), not a module flag.
-  // `replayHistory()` chunks over setImmediate, so live broadcasts from
-  // session B can interleave with A's replay. A module-wide boolean would
-  // wrongly suppress B's live activity bump for the duration of A's replay.
+  // #4493 — gate per target session id, not a module flag. `replayHistory()`
+  // chunks over setImmediate, so live broadcasts from session B can interleave
+  // with A's replay. A module-wide boolean would wrongly suppress B's live
+  // activity bump for the duration of A's replay.
+  //
+  // #7497 — and per-session DEPTH, not membership: two forceFull replays of one
+  // session overlap (`subscribe_sessions` + `switch_session`), and the Set this
+  // used to read was deleted by the FIRST end. Replay #2's tail then bumped the
+  // timestamp and dismissed the chip off REPLAYED events — #4466's own symptom,
+  // in the interleave its gate did not cover.
   if (isActivityEvent(msg.type)) {
     const targetId = (typeof msg.sessionId === 'string' && msg.sessionId) || get().activeSessionId;
-    if (targetId && get().sessionStates[targetId] && !_replayingSessions.has(targetId)) {
+    if (targetId && get().sessionStates[targetId] && !isSessionReplaying(targetId)) {
       updateSession(targetId, (ss) => {
         const patch: Partial<SessionState> = { lastClientActivityAt: Date.now() };
         if (ss.inactivityWarning) patch.inactivityWarning = null;
@@ -4401,10 +4419,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
   switch (msg.type) {
 
     case 'auth_ok': {
-      // Reset replay flags — fresh auth means clean slate (#4493: clear the
-      // per-session replaying set so a reconnect doesn't leave stale ids
-      // gating future activity bumps).
-      _replayingSessions.clear();
+      // Reset replay flags — fresh auth means clean slate (#4493/#7497: clear
+      // every per-session replay window so a reconnect doesn't leave a stale
+      // one gating future activity bumps; `resetReplayReconcile` below IS that
+      // clear now that the refcount is the only flag).
       // #5555.4 — clear any in-progress replay BASELINE (a rebuild that never
       // saw its history_replay_end before the socket dropped). Cursors are
       // intentionally RETAINED so this reconnect's replay can be incremental.
@@ -5361,9 +5379,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         msg,
         get().activeSessionId,
       );
-      // #4493 — track per-session. Falls back to activeSessionId via
-      // sharedHistoryReplayStart, matching the gate's targetId resolution.
-      if (replayTargetId) _replayingSessions.add(replayTargetId);
+      // #4493/#7497 — the per-session window is opened by `reconcileReplayStart`
+      // below (refcounted, so overlapping replays compose). `replayTargetId`
+      // falls back to activeSessionId via sharedHistoryReplayStart, matching
+      // the gates' targetId resolution.
       // #5555.4 — DO NOT wipe messages here. For a full rebuild we record the
       // pre-replay baseline and keep the existing messages visible; the
       // authoritative replayed set is appended after the baseline and swapped
@@ -5436,12 +5455,13 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     case 'history_replay_end':
       // Parser is shared via store-core; flag mutation stays here.
       sharedHistoryReplayEnd();
-      // #4493 — remove this session id from the replaying set. Falls back
-      // to activeSessionId to mirror sharedHistoryReplayStart's resolution.
+      // #4493/#7497 — the window is closed by `reconcileReplayEnd` below, which
+      // DECREMENTS: with two replays of this session in flight the window stays
+      // open until the last end. `endTargetId` falls back to activeSessionId to
+      // mirror sharedHistoryReplayStart's resolution.
       {
         const endTargetId =
           (typeof msg.sessionId === 'string' && msg.sessionId) || get().activeSessionId;
-        if (endTargetId) _replayingSessions.delete(endTargetId);
         // #5555.4 — atomic swap for a full rebuild: replace messages with the
         // appended replayed tail in ONE update (old prefix dropped here, not at
         // start → no blank flash). reconcileReplayEnd also advances the cursor
@@ -5649,7 +5669,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           // referential inequality avoids a needless write/rerender every turn.
           const currentQueue = ss.queuedMessages ?? [];
           const reconciledQueue =
-            queueReconcile && !_replayingSessions.has(targetId)
+            queueReconcile && !isSessionReplaying(targetId)
               ? queueReconcile.applyTo(currentQueue).queuedMessages
               : currentQueue;
           const patch: Partial<SessionState> = {
@@ -5662,7 +5682,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           };
           // #4493 — gate per target session id. A live `result` for
           // session B during A's replay must still sweep B's activeTools.
-          if (ss.activeTools.length > 0 && !_replayingSessions.has(targetId)) patch.activeTools = [];
+          if (ss.activeTools.length > 0 && !isSessionReplaying(targetId)) patch.activeTools = [];
           return patch;
         });
       } else {
