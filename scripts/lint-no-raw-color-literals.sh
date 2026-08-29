@@ -24,6 +24,21 @@
 
 set -euo pipefail
 
+# #7493: pin the collation for the WHOLE script, not just the sorts.
+#
+# `comm` requires its inputs sorted in ITS OWN collation. The sorts below were
+# pinned to C while `comm` ran under the ambient locale, and the two disagree:
+# in C, `components/SettingsBar.tsx` precedes `components/chat/...` (`S` = 0x53
+# < `c` = 0x63), while en_US.UTF-8 folds case and orders `chat/` first. `comm`
+# then walked off the merge and reported already-baselined files as NEW
+# offenders — a red job caused by the runner's LANG rather than by the diff,
+# on a self-hosted macOS runner where LANG=en_US.UTF-8 is the default.
+#
+# Pinning once here rather than per-command is deliberate: a per-command pin is
+# the split that caused the bug, and the next tool added to the pipeline would
+# inherit the ambient locale again.
+export LC_ALL=C
+
 cd "$(dirname "$0")/.."
 
 BASELINE="${LINT_COLOR_BASELINE:-scripts/no-raw-color-literals-baseline.txt}"
@@ -72,7 +87,7 @@ collect() {
           printf '%s\n' "$f"
         fi
       done \
-    | LC_ALL=C sort
+    | sort
 }
 
 current="$(collect || true)"
@@ -89,7 +104,7 @@ if [ ! -f "$BASELINE" ]; then
   exit 1
 fi
 
-baseline="$(LC_ALL=C sort "$BASELINE")"
+baseline="$(sort "$BASELINE")"
 
 # New offenders = files-with-literals not present in the baseline.
 offenders="$(comm -23 <(printf '%s\n' "$current") <(printf '%s\n' "$baseline") | grep -v '^$' || true)"
