@@ -1995,18 +1995,54 @@ function dispatchUserQuestion<S extends DispatchSessionBase>(
   // stamping them '(resolved)' and destroying the answer path for that turn.
   const seq = (msg as { historySeq?: unknown }).historySeq
   const deliveredByReplay = typeof seq === 'number' && Number.isFinite(seq)
-  if (!deliveredByReplay) noteLivePromptDuringReplay(sessionId, chatMessage.id)
+  // #7457 — a LIVE frame carrying a `toolUseId` we already hold a prompt for is
+  // a RE-DELIVERY of that same question, not a second one, and it SUPERSEDES the
+  // copy held: `answered` cleared (it may have been stamped '(resolved)' by the
+  // replay-end sweep moments ago), id and timestamp kept so the bubble neither
+  // moves nor re-ages. Exactly the merge `handlePermissionRequest` has always
+  // done for a re-sent `permission_request`, keyed on `toolUseId` because that
+  // is what a question carries instead of a `requestId`.
+  //
+  // Its producer is the server's `resendPendingQuestions` (ws-history.js), which
+  // re-asserts every still-blocked question after each replay's
+  // `history_replay_end`; a stuck model re-emitting the same AskUserQuestion
+  // payload (the pre-#4668 failure mode) collapses the same way.
+  //
+  // The `!deliveredByReplay` gate is LOAD-BEARING, not caution. During a full
+  // rebuild the pre-replay prefix is sliced off at `history_replay_end`
+  // (`messages.slice(base)`), so merging a REPLAYED copy into the held one would
+  // leave the question in the part of the array about to be discarded — it would
+  // vanish from the transcript entirely, which is the worse half of #7457's own
+  // symptom. A replayed frame therefore always appends.
+  const toolUseId = chatMessage.toolUseId
+  const canSupersede =
+    !deliveredByReplay && typeof toolUseId === 'string' && toolUseId.length > 0
+  // The id the ledger must name is the one that SURVIVES this dispatch: on a
+  // supersede the freshly minted `chatMessage.id` is discarded, and recording it
+  // would protect a message that is not in the array while leaving the revived
+  // one stampable by the sweep.
+  let survivingId = chatMessage.id
   if (sessionId && adapter.hasSession(sessionId)) {
-    adapter.updateSession(
-      sessionId,
-      (ss) =>
-        ({
-          messages: [...ss.messages, chatMessage],
-        } as Partial<S>),
-    )
+    adapter.updateSession(sessionId, (ss) => {
+      const idx = canSupersede
+        ? ss.messages.findIndex(
+            (m) => m.type === 'prompt' && m.toolUseId === toolUseId,
+          )
+        : -1
+      const held = idx === -1 ? undefined : ss.messages[idx]
+      if (!held) return { messages: [...ss.messages, chatMessage] } as Partial<S>
+      survivingId = held.id
+      const next = ss.messages.slice()
+      next[idx] = { ...chatMessage, id: held.id, timestamp: held.timestamp }
+      return { messages: next } as Partial<S>
+    })
   } else {
     adapter.addMessage(chatMessage)
   }
+  // Recorded AFTER the write so the surviving id is known, and still recorded
+  // for a session the store holds nothing for — `noteLivePromptDuringReplay`
+  // reads no store state, so only the statement order moved.
+  if (!deliveredByReplay) noteLivePromptDuringReplay(sessionId, survivingId)
   if (sessionId) adapter.pushSessionNotification(sessionId, 'question', questionText)
 }
 

@@ -26,6 +26,7 @@ function gateCtx({ requireApproval, store, createSession, enabled = true }) {
     broadcastSessionList: createSpy(),
     sendSessionInfo: createSpy(),
     reseedActiveAgents: createSpy(), // #7340
+    resendPendingQuestions: createSpy(), // #7457
     config: { userShell: { enabled, requireApproval } },
     sessionManager: {
       listSessions: () => [],

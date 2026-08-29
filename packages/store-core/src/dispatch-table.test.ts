@@ -483,6 +483,153 @@ describe('shared dispatch table', () => {
       expect(env.notifications).toHaveLength(0)
     })
 
+    // #7457 — the server re-sends every question a session is still BLOCKED on
+    // as a LIVE frame right after each replay's `history_replay_end`
+    // (ws-history.js `resendPendingQuestions`). The client already holds the
+    // replay's copy, which that same end frame just stamped '(resolved)'. A
+    // second bubble would leave the user staring at a resolved pill above an
+    // identical live prompt, so a live frame SUPERSEDES the copy it matches —
+    // the same in-place, `answered`-clearing merge `handlePermissionRequest`
+    // has always done for a re-sent `permission_request` (by `requestId`).
+    describe('re-delivery supersedes the copy already held (#7457)', () => {
+      const held = (extra: Record<string, unknown> = {}): ChatMessage =>
+        ({
+          id: 'question-old',
+          type: 'prompt',
+          content: 'Which approach?',
+          toolUseId: 'ask-1',
+          timestamp: 1_700_000_000_000,
+          options: [],
+          questions: [{ question: 'Which approach?', options: [] }],
+          ...extra,
+        }) as ChatMessage
+
+      it('clears `answered` on the matching prompt instead of appending a duplicate', () => {
+        const env = makeAdapter({
+          activeSessionId: 's1',
+          sessions: { s1: { sessionId: 's1', messages: [held({ answered: '(resolved)' })] } },
+        })
+        dispatch(env, {
+          type: 'user_question',
+          sessionId: 's1',
+          toolUseId: 'ask-1',
+          questions: [{ question: 'Which approach?' }],
+        })
+        expect(env.sessions.s1.messages).toHaveLength(1)
+        expect(env.sessions.s1.messages[0].answered).toBeUndefined()
+      })
+
+      it('keeps the held id and timestamp so the prompt does not jump position or age', () => {
+        const env = makeAdapter({
+          activeSessionId: 's1',
+          sessions: { s1: { sessionId: 's1', messages: [held({ answered: '(resolved)' })] } },
+        })
+        dispatch(env, {
+          type: 'user_question',
+          sessionId: 's1',
+          toolUseId: 'ask-1',
+          questions: [{ question: 'Which approach?' }],
+        })
+        // Length is asserted here too: without it the held copy sits at index 0
+        // untouched and this passes for the wrong reason — a duplicate appended
+        // BELOW it would satisfy every field this test reads.
+        expect(env.sessions.s1.messages).toHaveLength(1)
+        expect(env.sessions.s1.messages[0]).toMatchObject({
+          id: 'question-old',
+          timestamp: 1_700_000_000_000,
+        })
+      })
+
+      it('refreshes the question body from the re-sent frame', () => {
+        const env = makeAdapter({
+          activeSessionId: 's1',
+          sessions: { s1: { sessionId: 's1', messages: [held({ answered: '(resolved)' })] } },
+        })
+        dispatch(env, {
+          type: 'user_question',
+          sessionId: 's1',
+          toolUseId: 'ask-1',
+          questions: [{ question: 'Which approach NOW?', options: [{ label: 'A' }] }],
+        })
+        expect(env.sessions.s1.messages[0]).toMatchObject({ content: 'Which approach NOW?' })
+        expect(env.sessions.s1.messages[0].options).toEqual([
+          { label: 'A', value: 'A' },
+          { label: 'Other', value: '__chroxy_other__' },
+        ])
+      })
+
+      it('appends when no held prompt carries that toolUseId', () => {
+        const env = makeAdapter({
+          activeSessionId: 's1',
+          sessions: { s1: { sessionId: 's1', messages: [held({ toolUseId: 'ask-OTHER' })] } },
+        })
+        dispatch(env, {
+          type: 'user_question',
+          sessionId: 's1',
+          toolUseId: 'ask-1',
+          questions: [{ question: 'Which approach?' }],
+        })
+        expect(env.sessions.s1.messages).toHaveLength(2)
+      })
+
+      it('never supersedes on a toolUseId-less frame — every such prompt would collapse into one', () => {
+        const env = makeAdapter({
+          activeSessionId: 's1',
+          sessions: { s1: { sessionId: 's1', messages: [held({ id: 'q-a', toolUseId: undefined })] } },
+        })
+        dispatch(env, {
+          type: 'user_question',
+          sessionId: 's1',
+          questions: [{ question: 'Which approach?' }],
+        })
+        expect(env.sessions.s1.messages).toHaveLength(2)
+      })
+
+      // The GATE, and the reason it is `!deliveredByReplay` rather than an
+      // unconditional dedup. During a FULL rebuild the pre-replay prefix is
+      // sliced off at `history_replay_end` (`messages.slice(base)`), so merging
+      // the replayed copy into the held one would put the question in the part
+      // of the array that is about to be DISCARDED — the prompt would vanish
+      // from the transcript entirely, which is the worse half of #7457's own
+      // symptom. A replayed frame therefore always appends.
+      it('a REPLAY-delivered frame appends rather than merging into the held copy', () => {
+        const env = makeAdapter({
+          activeSessionId: 's1',
+          sessions: { s1: { sessionId: 's1', messages: [held()] } },
+        })
+        dispatch(env, {
+          type: 'user_question',
+          sessionId: 's1',
+          toolUseId: 'ask-1',
+          questions: [{ question: 'Which approach?' }],
+          historySeq: 12,
+        } as never)
+        expect(env.sessions.s1.messages).toHaveLength(2)
+      })
+
+      // The ledger must name the id that SURVIVES. A superseded prompt keeps the
+      // held id, so recording the (discarded) freshly-minted one would protect
+      // nothing and the sweep would re-stamp the very prompt the merge revived.
+      it('records the SURVIVING id in the live-arrival ledger when a window is open', () => {
+        resetReplayReconcile({ clearCursors: true })
+        reconcileReplayStart('s1', false, 0)
+        const env = makeAdapter({
+          activeSessionId: 's1',
+          sessions: { s1: { sessionId: 's1', messages: [held({ answered: '(resolved)' })] } },
+        })
+        dispatch(env, {
+          type: 'user_question',
+          sessionId: 's1',
+          toolUseId: 'ask-1',
+          questions: [{ question: 'Which approach?' }],
+        })
+        expect(wasPromptLiveDuringReplay('s1', 'question-old')).toBe(true)
+        reconcileReplayEnd('s1', [])
+        expect(sweepUnansweredPromptsAtReplayEnd('s1', env.sessions.s1.messages)).toBeNull()
+        resetReplayReconcile({ clearCursors: true })
+      })
+    })
+
     it('is handled (no mutation) when the questions payload is malformed', () => {
       const env = makeAdapter({ activeSessionId: 's1', sessions: { s1: { sessionId: 's1', messages: [] } } })
       const handled = dispatch(env, { type: 'user_question', questions: [] })

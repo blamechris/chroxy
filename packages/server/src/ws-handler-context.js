@@ -49,6 +49,7 @@
  * @property {(ws: any, sessionId: string) => void} sendSessionInfo - Send a session_info envelope.
  * @property {(ws: any, sessionId: string) => void} replayHistory - Replay a session's history to a client.
  * @property {(ws: any, sessionId: string) => void} reseedActiveAgents - Re-assert a session's live subagents after a replay wiped the client's list (#7340).
+ * @property {(ws: any, sessionId: string) => void} resendPendingQuestions - Re-assert the AskUserQuestions a session is still blocked on, after a replay's `history_replay_end` let the client's sweep stamp them '(resolved)' (#7457).
  * @property {Map} clients - WebSocket → client-state Map (the WsClientManager's Map).
  *
  * @typedef {Object} WsHandlerSessions
@@ -132,6 +133,7 @@ export const CTX_NAMESPACES = {
     'sendSessionInfo',
     'replayHistory',
     'reseedActiveAgents',
+    'resendPendingQuestions',
     'clients',
   ],
   sessions: [

@@ -1025,6 +1025,35 @@ export class BaseSession extends EventEmitter {
   }
 
   /**
+   * #7457: the AskUserQuestion prompts this session's turn is still BLOCKED on.
+   *
+   * Read by `ws-history.resendPendingQuestions`, which re-sends each one as a
+   * LIVE `user_question` frame after every replay's `history_replay_end`. Until
+   * then the only path a pending question had to a reconnecting client was the
+   * history replay itself -- and `history_replay_end`'s sweep stamps every
+   * replay-delivered prompt `answered: '(resolved)'`, so an ordinary reconnect
+   * destroyed the answer path for a question the agent was still waiting on.
+   *
+   * Deliberately a READ-THROUGH to whatever store the provider already uses to
+   * hold the blocked resolver -- `PermissionManager._pendingUserAnswer` for the
+   * in-process providers, `_pendingUserAnswers` for claude-tui,
+   * `_pendingQuestion` for cli-session. A mirrored copy would need a lifecycle
+   * of its own, and a leaked mirror entry re-delivers a dead question to every
+   * client that ever connects again; a read-through cannot leak, because the
+   * record IS the thing blocking the turn.
+   *
+   * The default is EMPTY, not "unsupported": a provider with no question
+   * surface has nothing pending, and `resendPendingQuestions` calls this
+   * unguarded -- a feature-detect that can never fail only converts a future
+   * regression into a silent no-op (docs/false-safety-guards.md).
+   *
+   * @returns {{ toolUseId: string, questions: object[] }[]}
+   */
+  getPendingQuestions() {
+    return []
+  }
+
+  /**
    * #6832: last-known `mcp_servers` payload, wrapped as the wire message
    * shape (`{ type: 'mcp_servers', servers }`). Served to a fresh subscriber
    * (snapshot-on-subscribe, via `ws-history.sendSessionInfo`) so a client

@@ -1193,6 +1193,168 @@ describe("history_replay_end: '(resolved)' sweep vs a racing live AskUserQuestio
   });
 });
 
+// #7457 — the NON-racing half of #7420, and the half the client cannot fix
+// alone. A question that is genuinely still PENDING comes back through the
+// ordinary history replay (`user_question` is not `builtinTransient`, so it IS
+// in the ring buffer), which means it carries `historySeq` and is correctly
+// classified as replay-delivered by #7420's discriminator — and the sweep then
+// stamps it '(resolved)'. Background the phone mid-question, reopen it, and the
+// prompt is a dead pill with the agent still blocked on the resolver until it
+// times out.
+//
+// The server closes it: `resendPendingQuestions` (ws-history.js) re-sends every
+// question a session is still blocked on as a LIVE frame from `finishReplay`,
+// AFTER the end frame, so the sweep has already run when it lands. The client's
+// part is that a live re-delivery SUPERSEDES the copy it matches by `toolUseId`
+// — `answered` cleared, id and position kept — instead of stacking a second
+// bubble under the resolved one. That is the same merge `handlePermissionRequest`
+// has always done for a re-sent `permission_request`.
+describe('a still-PENDING question survives an ordinary reconnect (#7457)', () => {
+  beforeEach(() => {
+    resetReplayReconcile({ clearCursors: true });
+  });
+
+  afterEach(() => {
+    resetReplayFlags();
+    resetReplayReconcile({ clearCursors: true });
+  });
+
+  function seed(messages: any[] = []) {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: { ...createEmptySessionState(), messages } },
+      sessionNotifications: [],
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockConnectionContext());
+    return store;
+  }
+
+  const question = (extra: Record<string, unknown> = {}) => ({
+    type: 'user_question',
+    sessionId: 's1',
+    toolUseId: 'ask-1',
+    questions: [{ question: 'Which approach?', options: [{ label: 'A' }, { label: 'B' }] }],
+    ...extra,
+  });
+
+  const messagesOf = (store: any) => store.getState().sessionStates.s1.messages as any[];
+
+  it('delta replay: the re-sent pending question is answerable again', () => {
+    const store = seed();
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's1', fullHistory: false });
+    _testMessageHandler.handle(question({ historySeq: 3, timestamp: 1000 }));
+    _testMessageHandler.handle({ type: 'history_replay_end', sessionId: 's1' });
+    // Precondition — this IS the bug: the replay's own copy was stamped.
+    expect(messagesOf(store)[0].answered).toBe('(resolved)');
+
+    // The server's post-replay re-send: same toolUseId, NO historySeq.
+    _testMessageHandler.handle(question());
+
+    expect(messagesOf(store)).toHaveLength(1);
+    expect(messagesOf(store)[0].answered).toBeUndefined();
+    expect(messagesOf(store)[0].toolUseId).toBe('ask-1');
+  });
+
+  it('full rebuild (session switch): the re-sent pending question is answerable again', () => {
+    // A pre-replay message makes the baseline non-zero, so the atomic swap at
+    // replay-end really slices rather than being an identity.
+    const store = seed([{ id: 'old-1', type: 'response', content: 'before', timestamp: 1 }]);
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's1', fullHistory: true });
+    _testMessageHandler.handle(question({ historySeq: 3, timestamp: 1000 }));
+    _testMessageHandler.handle({ type: 'history_replay_end', sessionId: 's1' });
+    expect(messagesOf(store)).toHaveLength(1);
+    expect(messagesOf(store)[0].answered).toBe('(resolved)');
+
+    _testMessageHandler.handle(question());
+
+    expect(messagesOf(store)).toHaveLength(1);
+    expect(messagesOf(store)[0].answered).toBeUndefined();
+  });
+
+  // The realistic reconnect for a client that stayed alive: it already holds the
+  // question it saw LIVE before the socket dropped, and the full rebuild
+  // re-delivers that same toolUseId out of the ring buffer. The replayed copy
+  // must APPEND into the post-baseline tail — merged into the held copy instead
+  // it would sit in the prefix that `messages.slice(base)` discards, and the
+  // prompt would vanish from the transcript entirely (#7457's worse half). Then
+  // the re-send revives the surviving copy.
+  it('full rebuild over a copy the client already held: the prompt survives and is answerable', () => {
+    const store = seed([
+      {
+        id: 'q-live',
+        type: 'prompt',
+        content: 'Which approach?',
+        toolUseId: 'ask-1',
+        timestamp: 1,
+        options: [],
+        questions: [{ question: 'Which approach?', options: [] }],
+      },
+    ]);
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's1', fullHistory: true });
+    _testMessageHandler.handle(question({ historySeq: 3, timestamp: 1000 }));
+    _testMessageHandler.handle({ type: 'history_replay_end', sessionId: 's1' });
+    // The swap kept the replayed copy and dropped the pre-replay prefix.
+    expect(messagesOf(store)).toHaveLength(1);
+    expect(messagesOf(store)[0].toolUseId).toBe('ask-1');
+    expect(messagesOf(store)[0].answered).toBe('(resolved)');
+
+    _testMessageHandler.handle(question());
+
+    expect(messagesOf(store)).toHaveLength(1);
+    expect(messagesOf(store)[0].answered).toBeUndefined();
+  });
+
+  // Position matters: a re-send that APPENDED would move the prompt to the
+  // bottom of the transcript, below turns that came after it. A delta replay is
+  // append-only (no atomic swap), so index 1 here is a real position.
+  it('the revived prompt keeps its place in the transcript', () => {
+    const store = seed([{ id: 'old-1', type: 'response', content: 'before', timestamp: 1 }]);
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's1', fullHistory: false });
+    _testMessageHandler.handle(question({ historySeq: 3, timestamp: 1000 }));
+    _testMessageHandler.handle({ type: 'history_replay_end', sessionId: 's1' });
+    expect(messagesOf(store)).toHaveLength(2);
+    expect(messagesOf(store)[1].answered).toBe('(resolved)');
+
+    _testMessageHandler.handle(question());
+
+    expect(messagesOf(store)).toHaveLength(2);
+    expect(messagesOf(store)[0].id).toBe('old-1');
+    expect(messagesOf(store)[1].type).toBe('prompt');
+    expect(messagesOf(store)[1].answered).toBeUndefined();
+  });
+
+  // AC (b), unchanged: no re-send means the server said nothing is pending, so
+  // a long-answered question replayed out of history keeps its stamp. Green on
+  // BOTH sides of the fix and stated as such — it exists to catch an over-broad
+  // fix, one that un-stamped on any replayed question.
+  it('a long-answered question with NO re-send stays stamped (resolved)', () => {
+    const store = seed();
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's1', fullHistory: false });
+    _testMessageHandler.handle(question({ historySeq: 3, timestamp: 1000 }));
+    _testMessageHandler.handle({ type: 'history_replay_end', sessionId: 's1' });
+
+    expect(messagesOf(store)[0].answered).toBe('(resolved)');
+  });
+
+  // Two DIFFERENT questions stay two bubbles — the supersede is keyed on
+  // toolUseId, not on "is a prompt".
+  it('a re-send for one question does not collapse a second, unrelated one', () => {
+    const store = seed();
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's1', fullHistory: false });
+    _testMessageHandler.handle(question({ historySeq: 3, timestamp: 1000 }));
+    _testMessageHandler.handle(question({ toolUseId: 'ask-2', historySeq: 4, timestamp: 1001 }));
+    _testMessageHandler.handle({ type: 'history_replay_end', sessionId: 's1' });
+
+    _testMessageHandler.handle(question({ toolUseId: 'ask-2' }));
+
+    expect(messagesOf(store)).toHaveLength(2);
+    expect(messagesOf(store)[0].answered).toBe('(resolved)');
+    expect(messagesOf(store)[1].answered).toBeUndefined();
+  });
+});
+
 describe('session_timeout handler', () => {
   it('removes timed-out session from sessionStates and sessions list', () => {
     const store = createMockStore({

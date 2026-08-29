@@ -50,6 +50,7 @@ function build(transcript, { ws = makeOpenWs() } = {}) {
     }),
     ...makeSessionIndexCtx(),
     reseedActiveAgents: createSpy((_ws, sid) => reseeds.push(sid)),
+    resendPendingQuestions: createSpy(), // #7457
     scanConversations: createSpy(async () => [{ conversationId: CONV_ID, cwd: CONV_CWD }]),
     readConversationTranscript: createSpy(async () => transcript),
     sessionManager: {

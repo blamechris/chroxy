@@ -402,6 +402,14 @@ export class CliSession extends BaseSession {
     this._inPlanMode = false
     this._planAllowedPrompts = null
     this._waitingForAnswer = false
+    // #7457 -- the AskUserQuestion payload behind `_waitingForAnswer`, so a
+    // reconnecting client can be handed the question the child is parked on
+    // (`getPendingQuestions`). Kept strictly CO-LOCATED with the flag: every
+    // line that writes `_waitingForAnswer` writes this in the same statement
+    // block, so the two cannot disagree and there is no second lifecycle to
+    // leak. `_waitingForAnswer` stays the read gate `respondToQuestion` uses --
+    // this is a payload, not a new source of truth.
+    this._pendingQuestion = null
     this._currentCtx = null
     this._pendingQueue = []
     this._respawnCount = 0
@@ -1493,6 +1501,8 @@ export class CliSession extends BaseSession {
         // #4828: session-scoped.
         ;(this._log || log).info(`AskUserQuestion detected (${toolUseId})`)
         this._waitingForAnswer = true
+        // #7457 -- co-located with the flag (see the constructor).
+        this._pendingQuestion = { toolUseId, questions: semantics.payload.questions ?? [] }
         this.emit('user_question', {
           toolUseId,
           questions: semantics.payload.questions,
@@ -1539,6 +1549,7 @@ export class CliSession extends BaseSession {
   _clearMessageState(opts) {
     super._clearMessageState(opts)
     this._waitingForAnswer = false
+    this._pendingQuestion = null // #7457 -- co-located with the flag.
     this._currentCtx = null
     // #7335: this is the ONE funnel every turn end passes through — the normal
     // `result`, the hard cap, the interrupt safety timeout, destroy() — and it
@@ -1905,6 +1916,32 @@ export class CliSession extends BaseSession {
   }
 
   /**
+   * #7457 -- the AskUserQuestion this child is parked on stdin for, if any.
+   *
+   * A read-through of `_pendingQuestion`, which is written and cleared in the
+   * same statement block as `_waitingForAnswer` at every one of that flag's
+   * four sites -- construction, the emit, the `_clearMessageState` turn-end
+   * funnel ("the ONE funnel every turn end passes through": normal `result`,
+   * hard cap, interrupt safety timeout, destroy) and `respondToQuestion`. So it
+   * cannot report a question the child has stopped waiting on.
+   *
+   * It reads `_pendingQuestion` ALONE and does not re-check `_waitingForAnswer`.
+   * The two are set and cleared together, so the extra clause could never
+   * change an answer -- and it would make every one of those null-outs
+   * unfalsifiable, since the flag would mask a leaked payload
+   * (docs/false-safety-guards.md: a guard whose only two states are green).
+   * `tests/pending-question-resend.test.js` asserts the co-location mechanically
+   * rather than trusting this paragraph.
+   *
+   * @returns {{ toolUseId: string, questions: object[] }[]}
+   */
+  getPendingQuestions() {
+    const pending = this._pendingQuestion
+    if (!pending) return []
+    return [{ toolUseId: pending.toolUseId, questions: pending.questions }]
+  }
+
+  /**
    * Send a response to an AskUserQuestion prompt.
    * Claude is waiting for user input on stdin mid-turn, so we bypass
    * the _isBusy check and write directly.
@@ -1912,6 +1949,7 @@ export class CliSession extends BaseSession {
   respondToQuestion(text) {
     if (!this._child || !this._waitingForAnswer) return
     this._waitingForAnswer = false
+    this._pendingQuestion = null // #7457 -- co-located with the flag.
     const ndjson = JSON.stringify({
       type: 'user',
       message: {

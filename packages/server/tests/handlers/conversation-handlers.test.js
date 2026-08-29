@@ -26,6 +26,9 @@ function makeCtx(sessions = new Map(), overrides = {}) {
     // is erased by it. A spy that only counted calls passed with the re-seed
     // hoisted above the replay entirely.
     reseedActiveAgents: createSpy((_ws, sid) => { sent.push({ type: '__reseed', sessionId: sid }) }),
+    // #7457: the second post-replay repair — re-assert the questions the session
+    // is still blocked on, after the end frame ran the client's sweep.
+    resendPendingQuestions: createSpy((_ws, sid) => { sent.push({ type: '__resend_questions', sessionId: sid }) }),
     // Default test stubs — never touch real ~/.claude/projects
     scanConversations: createSpy(async () => []),
     searchConversations: createSpy(async () => []),
@@ -675,6 +678,33 @@ describe('conversation-handlers', () => {
       )
     })
 
+    // #7457 — this is the ONE `history_replay_end` producer that is EXEMPT from
+    // the pending-question re-send, and the exemption is pinned rather than left
+    // as an omission. The frames carry a conversationId in `sessionId`, which is
+    // never a live session id, so both clients' `updateSession` no-ops and the
+    // sweep those frames trigger touches nothing. Re-sending against the ACTIVE
+    // session (the way the #7340 re-seed does) would be wrong here for the
+    // opposite reason: it would inject a live prompt into a transcript view the
+    // user opened read-only.
+    it('does NOT re-send pending questions (a conversationId has no live session behind it)', async () => {
+      const ctx = makeCtx()
+      ctx.scanConversations = createSpy(async () => [{ conversationId: CONV_ID, cwd: '/tmp/repo' }])
+      ctx.readConversationTranscript = createSpy(async () => [])
+      await conversationHandlers.request_conversation_transcript(makeWs(), makeClient({ activeSessionId: 'live-1' }), {
+        type: 'request_conversation_transcript',
+        conversationId: CONV_ID,
+      }, ctx)
+
+      // Positive control for the negative assertion: the handler really did run
+      // its replay to completion. Without this, an early `session_error` return
+      // reports the same 0 for entirely the wrong reason.
+      assert.ok(
+        ctx._sent.some((m) => m.type === 'history_replay_end'),
+        'precondition: the transcript replay actually completed',
+      )
+      assert.equal(ctx.transport.resendPendingQuestions.callCount, 0)
+    })
+
     it('re-seeds nothing when the client has no active session', async () => {
       const ctx = makeCtx()
       ctx.scanConversations = createSpy(async () => [{ conversationId: CONV_ID, cwd: '/tmp/repo' }])
@@ -867,6 +897,28 @@ describe('conversation-handlers', () => {
       assert.ok(
         types.indexOf('__reseed') > types.indexOf('history_replay_end'),
         'the re-seed must FOLLOW the replay — the client wipes on history_replay_start, so anything sent before that is erased by it',
+      )
+    })
+
+    // #7457 — this handler ends with the SAME `history_replay_end` a replay
+    // does, so it runs the same '(resolved)' sweep over unanswered prompts.
+    // "Sync Full History" is the button a user presses BECAUSE the view looks
+    // wrong; without this it resolves the very question they are blocked on.
+    it("re-asserts the session's still-pending questions after the replay", async () => {
+      const sessions = new Map()
+      sessions.set('s1', { session: createMockSession(), name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+
+      await conversationHandlers.request_full_history(makeWs(), client, {}, ctx)
+
+      assert.equal(ctx.transport.resendPendingQuestions.callCount, 1)
+      assert.equal(ctx.transport.resendPendingQuestions.calls[0][1], 's1',
+        'the re-send must target the session that was just replayed')
+      const types = ctx._sent.map((m) => m.type)
+      assert.ok(
+        types.indexOf('__resend_questions') > types.indexOf('history_replay_end'),
+        'the re-send must FOLLOW the end frame — before it, the sweep the end frame triggers would stamp the question we just re-sent',
       )
     })
   })

@@ -19,7 +19,7 @@ import { setupForwarding } from './ws-forwarding.js'
 import { handleSessionMessage, handleCliMessage } from './ws-message-handlers.js'
 import { handleAuthMessage, handlePairMessage, handlePairRequestMessage, handleKeyExchange, BENIGN_PAIR_WINDOW_MS } from './ws-auth.js'
 import { postPairLinkToDiscord } from './discord-pair-delivery.js'
-import { sendPostAuthInfo, replayHistory, flushPostAuthQueue, sendSessionInfo, reseedActiveAgents } from './ws-history.js'
+import { sendPostAuthInfo, replayHistory, flushPostAuthQueue, sendSessionInfo, reseedActiveAgents, resendPendingQuestions } from './ws-history.js'
 import { createDevicePreferences } from './device-preferences.js'
 import { isUserShellEnabled, isIdeFeatureEnabled, isOrchestrationEnabled, DEFAULT_MAX_PAYLOAD_BYTES } from './config.js'
 import { createHttpHandler } from './http-routes.js'
@@ -867,6 +867,9 @@ export class WsServer {
         replayHistory: (ws, sid, opts) => self._replayHistory(ws, sid, opts),
         // #7340: re-assert a session's live subagents after a replay wiped them.
         reseedActiveAgents: (ws, sid) => self._reseedActiveAgents(ws, sid),
+        // #7457: re-assert the questions a session is still blocked on, after a
+        // replay's end frame let the client's sweep stamp them '(resolved)'.
+        resendPendingQuestions: (ws, sid) => self._resendPendingQuestions(ws, sid),
         get clients() { return self.clients },
       },
       sessions: {
@@ -2418,6 +2421,7 @@ export class WsServer {
   _flushPostAuthQueue(ws, queue) { flushPostAuthQueue(this._historyCtx, ws, queue) }
   _sendSessionInfo(ws, sessionId) { sendSessionInfo(this._historyCtx, ws, sessionId) }
   _reseedActiveAgents(ws, sessionId) { reseedActiveAgents(this._historyCtx, ws, sessionId) }
+  _resendPendingQuestions(ws, sessionId) { resendPendingQuestions(this._historyCtx, ws, sessionId) }
 
   /** Route incoming client messages */
   async _handleMessage(ws, msg) {
