@@ -357,12 +357,16 @@ describe('request_full_history handler', () => {
     const { manager } = createMockSessionManager([
       { id: 'sess-1', name: 'Test', cwd: '/tmp' },
     ])
-    manager.getFullHistoryAsync = async () => [
-      { type: 'user_input', content: 'hello', timestamp: 1000 },
-      { type: 'response', content: 'world', timestamp: 2000 },
-      { type: 'tool_use', content: 'bash', tool: 'bash', timestamp: 3000 },
-      { type: 'status', status: 'idle', timestamp: 4000 },
-    ]
+    manager.getFullHistoryAsync = async () => ({
+      entries: [
+        { type: 'user_input', content: 'hello', timestamp: 1000 },
+        { type: 'response', content: 'world', timestamp: 2000 },
+        { type: 'tool_use', content: 'bash', tool: 'bash', timestamp: 3000 },
+        { type: 'status', status: 'idle', timestamp: 4000 },
+      ],
+      source: 'ring',
+      truncated: false,
+    })
     ctx = createMockCtx(manager)
     client = { id: 'client-A', activeSessionId: 'sess-1' }
     // OPEN socket: the replay loop refuses to write to a non-OPEN peer (#7460),

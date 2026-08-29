@@ -3,7 +3,12 @@ import { readFile, stat, open } from 'fs/promises'
 import { join } from 'path'
 import { homedir } from 'os'
 
-const MAX_MESSAGES = 500
+// Wire cap for a transcript read: the MOST RECENT 500 parsed messages. This is
+// the JSONL path's OWN truncation, entirely separate from the ring buffer's
+// (#7484) — a caller that reports `isHistoryTruncated()` alongside a JSONL slice
+// is describing a collection it never sent. Exported so callers and tests name
+// the same number instead of re-deriving it.
+export const MAX_MESSAGES = 500
 
 // Byte ceiling for a single transcript read. The wire replay is capped at
 // MAX_MESSAGES frames, but the file read itself was previously unbounded — a
@@ -64,8 +69,19 @@ export function getJsonlMtime(filePath) {
 /**
  * Parse raw JSONL text into Chroxy message format.
  * Shared by both sync and async readers.
+ *
+ * Returns the parsed slice ALONGSIDE whether content was dropped to produce it
+ * (#7484). Two independent things can drop content, and a caller cannot infer
+ * either from the returned array: the `MAX_MESSAGES` message cap here, and the
+ * `MAX_TRANSCRIPT_BYTES` tail read the caller may already have performed
+ * (`byteTruncated`). Both mean "the client is not seeing the whole
+ * conversation", which is exactly what `truncated` on the wire claims to say.
+ *
+ * @param {string} raw
+ * @param {{ byteTruncated?: boolean }} [opts]
+ * @returns {{ messages: Array<object>, truncated: boolean }}
  */
-function parseJsonlContent(raw) {
+function parseJsonlContent(raw, { byteTruncated = false } = {}) {
   const lines = raw.split('\n').filter(Boolean)
   const messages = []
 
@@ -146,12 +162,14 @@ function parseJsonlContent(raw) {
     }
   }
 
-  // Cap at MAX_MESSAGES most recent
-  if (messages.length > MAX_MESSAGES) {
-    return messages.slice(-MAX_MESSAGES)
+  // Cap at MAX_MESSAGES most recent. The cap TRIPPING is the JSONL path's own
+  // truncation signal — reported, never inferred: 500 returned messages is
+  // equally the shape of a 500-message transcript that lost nothing.
+  const capped = messages.length > MAX_MESSAGES
+  return {
+    messages: capped ? messages.slice(-MAX_MESSAGES) : messages,
+    truncated: byteTruncated || capped,
   }
-
-  return messages
 }
 
 /**
@@ -168,17 +186,35 @@ function parseJsonlContent(raw) {
  * @returns {Array<{ type: string, content: string, tool?: string, timestamp: number, messageId?: string }>}
  */
 export function readConversationHistory(filePath, maxBytes = MAX_TRANSCRIPT_BYTES) {
+  return readConversationHistoryWithMeta(filePath, maxBytes).messages
+}
+
+/**
+ * `readConversationHistory` + the truncation flag for the slice it returned
+ * (#7484). Same read, same parse — the only difference is that the caller is
+ * told whether content was dropped, which the array alone cannot express.
+ *
+ * @param {string} filePath - Absolute path to the JSONL file
+ * @param {number} [maxBytes]
+ * @returns {{ messages: Array<object>, truncated: boolean }}
+ */
+export function readConversationHistoryWithMeta(filePath, maxBytes = MAX_TRANSCRIPT_BYTES) {
   let raw
+  let byteTruncated = false
   try {
     const { size } = statSync(filePath)
-    raw = size > maxBytes
+    byteTruncated = size > maxBytes
+    raw = byteTruncated
       ? readTailBytesSync(filePath, maxBytes)
       : readFileSync(filePath, 'utf-8')
   } catch {
-    return []
+    // Unreadable is not truncated: nothing was dropped from a slice that does
+    // not exist, and claiming otherwise would put a permanent "history
+    // incomplete" banner in front of every session with no transcript.
+    return { messages: [], truncated: false }
   }
 
-  return parseJsonlContent(raw)
+  return parseJsonlContent(raw, { byteTruncated })
 }
 
 /**
@@ -209,17 +245,30 @@ function readTailBytesSync(filePath, maxBytes) {
  * @returns {Promise<Array<{ type: string, content: string, tool?: string, timestamp: number, messageId?: string }>>}
  */
 export async function readConversationHistoryAsync(filePath, maxBytes = MAX_TRANSCRIPT_BYTES) {
+  return (await readConversationHistoryWithMetaAsync(filePath, maxBytes)).messages
+}
+
+/**
+ * Async variant of {@link readConversationHistoryWithMeta} (#7484).
+ *
+ * @param {string} filePath - Absolute path to the JSONL file
+ * @param {number} [maxBytes]
+ * @returns {Promise<{ messages: Array<object>, truncated: boolean }>}
+ */
+export async function readConversationHistoryWithMetaAsync(filePath, maxBytes = MAX_TRANSCRIPT_BYTES) {
   let raw
+  let byteTruncated = false
   try {
     const { size } = await stat(filePath)
-    raw = size > maxBytes
+    byteTruncated = size > maxBytes
+    raw = byteTruncated
       ? await readTailBytesAsync(filePath, maxBytes)
       : await readFile(filePath, 'utf-8')
   } catch {
-    return []
+    return { messages: [], truncated: false }
   }
 
-  return parseJsonlContent(raw)
+  return parseJsonlContent(raw, { byteTruncated })
 }
 
 /**
