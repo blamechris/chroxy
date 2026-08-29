@@ -112,6 +112,16 @@ function baseState(overrides: Partial<ConnectionState> = {}): Partial<Connection
     socket: null,
     sessions: [],
     activeSessionId: null,
+    // #7481 x #7482 (main-red fix): the session_list prune walks the five
+    // per-session PR/CI maps, which are non-optional on ConnectionState.
+    // baseState predates them, and a fixture without them crashes
+    // pruneSessionKeyedMap (deliberately intolerant of absent maps — a test
+    // omission must fail loudly, not be papered over in the helper).
+    sessionPrStatus: {},
+    sessionPrStatusLoading: {},
+    sessionPrStatusRequestedAt: {},
+    sessionPrThreads: {},
+    sessionPrThreadsLoading: {},
     // #3855: generalized provider-credential state defaults so the
     // credentials_status / credential_test_result dispatch tests start from a
     // clean, well-typed baseline.
