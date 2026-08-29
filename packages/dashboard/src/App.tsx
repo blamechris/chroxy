@@ -2072,13 +2072,21 @@ export function App() {
   // consumers expect) and unconditional (it ran even when the send was refused
   // while disconnected, falsely clearing the prompt). Dropped in favour of the
   // single choke point.
+  // #7466 — dismiss ONLY when the answer actually went on the wire.
+  // `sendPermissionResponse` returns false without throwing when the socket is
+  // down or flipped OPEN -> CLOSING mid-send (#5699 / #6308), and
+  // `dismissSessionNotification` REMOVES the row from the store outright. So a
+  // click that achieved nothing used to delete the operator's only record of
+  // the request, and the banner stack collapsing under the cursor is what
+  // invites the second, mis-aimed click. 'queued' is not a failure — the
+  // message will send — so only an explicit `false` holds the row.
   const handleBannerApprove = useCallback((requestId: string, notificationId: string) => {
-    respondToPermission(requestId, 'allow')
+    if (respondToPermission(requestId, 'allow') === false) return
     dismissSessionNotification(notificationId)
   }, [respondToPermission, dismissSessionNotification])
 
   const handleBannerDeny = useCallback((requestId: string, notificationId: string) => {
-    respondToPermission(requestId, 'deny')
+    if (respondToPermission(requestId, 'deny') === false) return
     dismissSessionNotification(notificationId)
   }, [respondToPermission, dismissSessionNotification])
 
