@@ -16,7 +16,7 @@ import type { PermissionMode } from '@chroxy/store-core'
 // #5175: Host/Repo Status Control Room snapshot type (epic #5170). The store
 // holds the latest `host_status_snapshot` so the Control Room section can render
 // the fleet table; the type is the protocol contract pinned in @chroxy/protocol.
-import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerContainersStatusSnapshotMessage, ServerRepoRuntimeConfigSnapshotMessage, ServerByokPoolStatusSnapshotMessage, ServerHostPruneStatusSnapshotMessage, ServerSimulatorStatusSnapshotMessage, ServerEmulatorStatusSnapshotMessage, ServerWslStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, ServerSkillsInventorySnapshotMessage, ServerMailboxStatusSnapshotMessage, ServerExternalSessionsSnapshotMessage, ServerRepoEventsSnapshotMessage, ServerGithubWebhookConfigMessage, ServerSessionPrStatusMessage, ServerPermissionInputMessage, ServerSymbolsSnapshotMessage, ServerSearchResultsMessage, ServerReferencesResultMessage, IntegrationActionCounts, ServerPairPendingMessage, ServerSessionPresetFull, Attachment, ServerOrchestrationRunsSnapshot, ServerScheduledTasksMessage, ScheduledTaskInput, CodexSandboxMode } from '@chroxy/protocol'
+import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerContainersStatusSnapshotMessage, ServerRepoRuntimeConfigSnapshotMessage, ServerByokPoolStatusSnapshotMessage, ServerHostPruneStatusSnapshotMessage, ServerSimulatorStatusSnapshotMessage, ServerEmulatorStatusSnapshotMessage, ServerWslStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, ServerSkillsInventorySnapshotMessage, ServerMailboxStatusSnapshotMessage, ServerExternalSessionsSnapshotMessage, ServerRepoEventsSnapshotMessage, ServerGithubWebhookConfigMessage, ServerSessionPrStatusMessage, ServerSessionPrThreadsMessage, ServerPermissionInputMessage, ServerSymbolsSnapshotMessage, ServerSearchResultsMessage, ServerReferencesResultMessage, IntegrationActionCounts, ServerPairPendingMessage, ServerSessionPresetFull, Attachment, ServerOrchestrationRunsSnapshot, ServerScheduledTasksMessage, ScheduledTaskInput, CodexSandboxMode } from '@chroxy/protocol'
 import type { HeldRunDetail } from '@chroxy/store-core'
 // #5184: header cost-badge display mode. Defined in a plain lib module
 // (which owns the union + runtime guard) — the store only needs the type
@@ -1334,6 +1334,23 @@ export interface ConnectionState {
    */
   sessionPrStatusRequestedAt: Record<string, number>;
   /**
+   * #7430 — the latest `session_pr_threads` per session id: the unresolved
+   * review-thread count for the PR that session's branch has open. Keyed by
+   * session for the same reason `sessionPrStatus` is, and kept SEPARATE from it
+   * because the two are different reads on different clocks — a consumer that
+   * merged them would be claiming a freshness neither has.
+   *
+   * `unresolvedCount: null` (always with a `reason`) is "not counted", NOT
+   * zero. Anything rendering this must keep the two apart.
+   */
+  sessionPrThreads: Record<string, ServerSessionPrThreadsMessage>;
+  /**
+   * #7430 — per-session in-flight flag for the above. Reset on a socket drop
+   * alongside `sessionPrStatusLoading`, so a count that was in flight when the
+   * socket died cannot strand a control.
+   */
+  sessionPrThreadsLoading: Record<string, boolean>;
+  /**
    * #6540 (item 3 of #6536) — Control Room repo-events webhook-secret config: the
    * latest `github_webhook_config` (is a secret set + source, the payload URL,
    * recent delivery status — never the secret value), or null before the first
@@ -2177,6 +2194,21 @@ export interface ConnectionState {
    * Refresh does not and so always re-fetches.
    */
   requestSessionPrStatus: (sessionId?: string, maxAgeMs?: number) => boolean;
+  /**
+   * #7430 — request the unresolved review-thread count for the session's PR.
+   * Defaults to the active session. Sets `sessionPrThreadsLoading[sessionId]`;
+   * the reply lands in `sessionPrThreads[sessionId]`. Returns false (without
+   * setting loading) when the socket is closed or no session id resolves.
+   *
+   * ON-DEMAND ONLY. Every caller must be a user action (the CI chip's Refresh,
+   * the prefill click) — never a timer and never an effect that re-fires on
+   * its own, because each call costs the daemon a `gh` subprocess.
+   *
+   * No `requestId` is sent, matching `requestSessionPrStatus`: correlation is
+   * by `sessionId` alone, and the reply's `requestId` is therefore always null.
+   * The field exists on the schema for a future caller that needs it.
+   */
+  requestSessionPrThreads: (sessionId?: string) => boolean;
   /**
    * #6540 — request the current GitHub webhook config (secret status + payload
    * URL + delivery readout). Sets `githubWebhookConfigLoading`; the reply lands

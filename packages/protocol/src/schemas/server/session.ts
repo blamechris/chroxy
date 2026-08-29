@@ -770,3 +770,51 @@ export const ServerSessionPrStatusSchema = z.object({
   merge: SessionPrMergeSchema.nullable(),
   reason: z.string().nullable(),
 })
+
+// #7430 — the session PR's UNRESOLVED REVIEW-THREAD COUNT. Reply to
+// `session_pr_threads_request`, and a SEPARATE message from `session_pr_status`
+// rather than four more fields on it. Two reasons, both structural:
+//
+//   - the count needs a GraphQL `reviewThreads` read, which the status survey's
+//     single `gh pr list --json` call cannot serve; and since #7426 that survey
+//     runs on a daemon-side sweep over every session, so enriching it would put
+//     a second subprocess on every tick of a background poll for a field only a
+//     click wants. This pair is sent by the click and never by the sweep.
+//   - the count is a function of the PR, not of the head SHA. It does not
+//     straddle a push the way `checks`/`merge` would, but it also does not go
+//     stale on the same schedule — hence `countedAt`, its OWN timestamp, rather
+//     than borrowing the status snapshot's `generatedAt`. A consumer that
+//     rendered both under one timestamp would be claiming a consistency neither
+//     message has.
+//
+// The field contract that matters most, and the reason the counts are
+// `.nullable()` rather than defaulting to 0:
+//
+//   - `unresolvedCount: 0` means the server COUNTED and found none unresolved.
+//     `unresolvedCount: null` (always with a `reason`) means it could not find
+//     out. A client MUST render those differently — "0 unresolved threads"
+//     printed for a count that was never taken is precisely the false green
+//     this whole surface exists to prevent, and it is the more dangerous
+//     direction: it reads as "nothing is blocking this PR".
+//   - `truncated: true` means more review threads exist than the server read in
+//     one page, so `unresolvedCount` is a LOWER BOUND — an unresolved thread
+//     could sit past the page. A client must not render a truncated 0 as a
+//     definite zero for the same reason.
+//   - `totalCount` is GitHub's own total and stays authoritative even when
+//     `truncated` is true; it is the size of the set `unresolvedCount` was
+//     sampled from.
+//   - `prNumber` names the PR the count describes, so a consumer holding a
+//     `session_pr_status` snapshot can check the two agree before rendering
+//     them in one sentence. `null` (always with a `reason`) means no PR was
+//     resolved at all.
+export const ServerSessionPrThreadsSchema = z.object({
+  type: z.literal('session_pr_threads'),
+  requestId: z.string().max(128).nullable().optional(),
+  sessionId: z.string().nullable(),
+  countedAt: z.string(),
+  prNumber: z.number().int().positive().nullable(),
+  unresolvedCount: z.number().int().nonnegative().nullable(),
+  totalCount: z.number().int().nonnegative().nullable(),
+  truncated: z.boolean(),
+  reason: z.string().nullable(),
+})

@@ -25,7 +25,7 @@
  * elsewhere in this repo (#7340).
  */
 import { describe, it, expect } from 'vitest'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, globSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 
 // Resolved RELATIVE TO THIS FILE, matching the package's other source-level
@@ -86,7 +86,7 @@ describe('#7423 CI prefill wiring', () => {
 
     // The helper is CALLED — a handler that formatted the line itself would
     // bypass the draft-clobber guard entirely.
-    expect(body.includes('runCiPrefill(sessionPrStatus, {')).toBe(true)
+    expect(body.includes('runCiPrefill(sessionPrStatus, sessionPrThreads, {')).toBe(true)
     // Both halves of the draft write. Dropping the ref write leaves the staged
     // text invisible to the session-switch restore effect, so switching tabs and
     // back would silently discard it.
@@ -108,5 +108,120 @@ describe('#7423 CI prefill wiring', () => {
     // Unbounded growth over a long-lived dashboard process is the failure this
     // invariant exists to prevent.
     expect(body.includes('ciPrefillStagedRef.current.delete(sessionId)')).toBe(true)
+  })
+})
+
+/**
+ * #7430 — the thread count must be REQUESTED, and requested only from a click.
+ *
+ * Two failure shapes this pins, both of which type-check and leave every unit
+ * test green:
+ *
+ *   1. the count is never asked for, so `sessionPrThreads` stays empty and the
+ *      prefill line silently omits the clause forever — indistinguishable from
+ *      "this PR genuinely has no count to show";
+ *   2. the count IS asked for, from a `useEffect` or an interval. That is the
+ *      failure the whole issue exists to prevent, one layer up: the reason it
+ *      is not on the daemon sweep is that a `gh` subprocess must not be spent
+ *      on a schedule, and a dashboard timer re-introduces exactly that.
+ */
+describe('#7430 thread-count wiring', () => {
+  /** The body of a named `useCallback` handler in App.tsx. */
+  function handlerBody(src: string, name: string, span = 1200): string {
+    const start = src.indexOf(`const ${name}`)
+    expect(start, `App.tsx should define ${name}`).toBeGreaterThan(-1)
+    return src.slice(start, start + span)
+  }
+
+  it('the prefill handler passes the stored count to runCiPrefill', () => {
+    const body = handlerBody(read(APP_TSX), 'handlePrefillSessionPrStatus')
+    // The second argument is the whole feature. Without it the helper renders
+    // the pre-#7430 line and no test of the formatter can notice.
+    expect(body.includes('runCiPrefill(sessionPrStatus, sessionPrThreads, {')).toBe(true)
+  })
+
+  it('the prefill click also REQUESTS a fresh count', () => {
+    const body = handlerBody(read(APP_TSX), 'handlePrefillSessionPrStatus')
+    expect(body.includes('requestSessionPrThreads()')).toBe(true)
+  })
+
+  it('the chip Refresh requests the count alongside the status', () => {
+    const body = handlerBody(read(APP_TSX), 'refreshSessionPrStatus', 400)
+    expect(body.includes('requestSessionPrStatus()')).toBe(true)
+    expect(body.includes('requestSessionPrThreads()')).toBe(true)
+  })
+
+  /**
+   * The anti-schedule scan, factored out so the positive controls run the SAME
+   * code the guard does rather than a paraphrase of it.
+   *
+   * Returns the offending call sites. Fail-CLOSED by construction: with neither
+   * token in the window both `lastIndexOf` return -1 and `-1 < -1` is false, so
+   * an unrecognised context is reported rather than waved through.
+   *
+   * Two scope limits, stated here rather than discovered later:
+   *   - the lookbehind is 600 characters, so a call buried deep inside a long
+   *     `useEffect` body escapes if a nearer `useCallback(` token happens to
+   *     sit in the window. It is a smoke alarm, not a type system.
+   *   - it scans whatever sources it is handed. The resource being protected is
+   *     the STORE ACTION, not `App.tsx`, so the caller below sweeps every
+   *     dashboard source — a call added from another component would otherwise
+   *     be invisible to it.
+   */
+  function scheduledCallSites(src: string, label: string): string[] {
+    const bad: string[] = []
+    for (const m of src.matchAll(/requestSessionPrThreads\s*\(/g)) {
+      const at = m.index ?? 0
+      const before = src.slice(Math.max(0, at - 600), at)
+      if (before.lastIndexOf('useEffect(') >= before.lastIndexOf('useCallback(')) {
+        bad.push(`${label}@${at}: inside a useEffect`)
+      }
+      if (before.includes('setInterval(') || before.includes('setTimeout(')) {
+        bad.push(`${label}@${at}: inside a timer`)
+      }
+    }
+    return bad
+  }
+
+  it('NOTHING in the dashboard requests the count from an effect or a timer', () => {
+    // Every legitimate call site is a click handler; a `useEffect` /
+    // `setInterval` / `setTimeout` around one would put the daemon back on the
+    // per-tick `gh` cost this whole design refuses.
+    const files = globSync('src/**/*.{ts,tsx}', { cwd: path.resolve(__dirname, '..', '..') })
+    let seen = 0
+    const bad: string[] = []
+    for (const rel of files) {
+      if (rel.includes('.test.')) continue
+      const abs = path.resolve(__dirname, '..', '..', rel)
+      const src = readFileSync(abs, 'utf8')
+      if (!src.includes('requestSessionPrThreads(')) continue
+      seen += [...src.matchAll(/requestSessionPrThreads\s*\(/g)].length
+      bad.push(...scheduledCallSites(src, rel))
+    }
+    // Positive control on the SWEEP itself: a glob that matched nothing would
+    // make the assertion below pass with no files read at all.
+    expect(seen, 'expected the click call sites to be found').toBeGreaterThan(0)
+    expect(bad).toEqual([])
+  })
+
+  it('positive control: the scan catches a useEffect call site', () => {
+    expect(scheduledCallSites('useEffect(() => { requestSessionPrThreads() }, [])', 'fx'))
+      .toEqual(['fx@18: inside a useEffect'])
+  })
+
+  it('positive control: the scan catches a TIMER call site', () => {
+    // The half the original control never exercised — it only compared
+    // useEffect against useCallback, so the setInterval/setTimeout branch was
+    // asserted by nothing.
+    expect(scheduledCallSites('useCallback(() => { setInterval(() => requestSessionPrThreads(), 1000) })', 'fx'))
+      .toEqual(['fx@38: inside a timer'])
+    expect(scheduledCallSites('useCallback(() => { setTimeout(() => requestSessionPrThreads(), 10) })', 'fx'))
+      .toEqual(['fx@37: inside a timer'])
+  })
+
+  it('positive control: the scan passes a plain click handler', () => {
+    // The negative controls above are only meaningful if the scan is not simply
+    // reporting everything.
+    expect(scheduledCallSites('const h = useCallback(() => { requestSessionPrThreads() }, [])', 'fx')).toEqual([])
   })
 })

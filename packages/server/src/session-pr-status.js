@@ -74,8 +74,13 @@ const execFileAsync = promisify(execFile)
 /** Output cap: one PR's JSON, rollup included, is small. */
 const EXEC_MAX_BUFFER = 8 * 1024 * 1024
 
-/** Shared exec options for every probe (see EXEC_TIMEOUT_MS's rationale). */
-const EXEC_OPTS = { timeout: EXEC_TIMEOUT_MS, maxBuffer: EXEC_MAX_BUFFER }
+/**
+ * Shared exec options for every probe (see EXEC_TIMEOUT_MS's rationale).
+ * Exported so the sibling review-thread survey (#7430) runs its one `gh api
+ * graphql` call under the SAME timeout and output cap rather than minting a
+ * second pair that can drift from these.
+ */
+export const EXEC_OPTS = { timeout: EXEC_TIMEOUT_MS, maxBuffer: EXEC_MAX_BUFFER }
 
 /**
  * How many base-repo rows to consider when disambiguating a fork's PR by head
@@ -388,8 +393,15 @@ async function resolveParentRepo(execFn, ghPath, target, cwd) {
   return { parent: { owner, repo } }
 }
 
-/** Probe the PATH for `gh`. Any failure resolves null (the survey then degrades). */
-async function probeGh(execFn) {
+/**
+ * Probe the PATH for `gh`. Any failure resolves null (the survey then degrades).
+ *
+ * Exported for #7430: the review-thread survey needs the same binary and must
+ * degrade with the same `GH_MISSING_REASON`. Deliberately NOT memoised — the
+ * daemon outlives a `gh` install or removal, and a cached "absent" would keep
+ * degrading a host that has since installed it.
+ */
+export async function probeGh(execFn) {
   try {
     const { stdout } = await execFn('which', ['gh'], EXEC_OPTS)
     const path = String(stdout == null ? '' : stdout).split('\n')[0].trim()

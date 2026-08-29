@@ -160,7 +160,7 @@ import {
   formatMemoryAppendNotice,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
-import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerByokPoolStatusSnapshotSchema, ServerByokPoolActionAckSchema, ServerHostPruneStatusSnapshotSchema, ServerHostPruneActionAckSchema, ServerSimulatorStatusSnapshotSchema, ServerSimulatorActionAckSchema, ServerEmulatorStatusSnapshotSchema, ServerEmulatorActionAckSchema, ServerWslStatusSnapshotSchema, ServerWslActionAckSchema, ServerIntegrationStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerExternalSessionsSnapshotSchema, ServerRepoEventsSnapshotSchema, ServerRepoEventsDeltaSchema, ServerSessionPrStatusSchema, ServerGithubWebhookConfigSchema, ServerPermissionInputSchema, ServerPermissionAuditResultSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerSessionPresetSnapshotSchema, ServerPairPendingSchema, ServerPairResolvedSchema, ServerBillingCanarySchema, BillingCanarySnapshotSchema, ServerSymbolsSnapshotSchema, ServerSymbolLocationSchema, ServerSearchResultsSchema, ServerReferencesResultSchema, ServerOrchestrationRunsSnapshotSchema, ServerOrchestrationRunSnapshotSchema, ServerOrchestrationRunDeltaSchema, ServerOrchestrationActionAckSchema, ServerGitCreatePrResultSchema, ServerMemoryStackResultSchema, ServerScheduledTasksSchema } from '@chroxy/protocol/schemas'
+import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerByokPoolStatusSnapshotSchema, ServerByokPoolActionAckSchema, ServerHostPruneStatusSnapshotSchema, ServerHostPruneActionAckSchema, ServerSimulatorStatusSnapshotSchema, ServerSimulatorActionAckSchema, ServerEmulatorStatusSnapshotSchema, ServerEmulatorActionAckSchema, ServerWslStatusSnapshotSchema, ServerWslActionAckSchema, ServerIntegrationStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerExternalSessionsSnapshotSchema, ServerRepoEventsSnapshotSchema, ServerRepoEventsDeltaSchema, ServerSessionPrStatusSchema, ServerSessionPrThreadsSchema, ServerGithubWebhookConfigSchema, ServerPermissionInputSchema, ServerPermissionAuditResultSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerSessionPresetSnapshotSchema, ServerPairPendingSchema, ServerPairResolvedSchema, ServerBillingCanarySchema, BillingCanarySnapshotSchema, ServerSymbolsSnapshotSchema, ServerSymbolLocationSchema, ServerSearchResultsSchema, ServerReferencesResultSchema, ServerOrchestrationRunsSnapshotSchema, ServerOrchestrationRunSnapshotSchema, ServerOrchestrationRunDeltaSchema, ServerOrchestrationActionAckSchema, ServerGitCreatePrResultSchema, ServerMemoryStackResultSchema, ServerScheduledTasksSchema } from '@chroxy/protocol/schemas'
 import { resolveSummarizeRequest, rejectSummarizeRequest } from './summarizeRequests'
 import { settleSchedulerRequest } from './scheduledTaskRequests'
 import {
@@ -3249,6 +3249,55 @@ function handleSessionPrStatus(msg: Record<string, unknown>, get: MsgGet, set: M
 }
 
 /**
+ * #7430 — `session_pr_threads`: file the unresolved review-thread count under
+ * ITS OWN session id and clear that session's loading flag. Same filed-by-id
+ * and Zod-validate-or-drop posture as `session_pr_status` above, and for the
+ * same reason: a reply can land after a tab switch, and a count attributed to
+ * whichever session is active then would report one PR's threads on another's.
+ *
+ * A degraded reading is STORED, never dropped — the reason is the payload in
+ * that case, and a consumer that received nothing would have to infer, which
+ * next to a green CI chip means inferring zero.
+ *
+ * ## Keep-last-good (#7469 S1)
+ *
+ * But storing it WHOLESALE was wrong, and the reason is the reachable failure
+ * set rather than an exotic one: `IN_PROGRESS` and `RATE_LIMITED` are ordinary
+ * consequences of clicking twice, and a straight overwrite let either of them
+ * ERASE a count the user was looking at, with nothing scheduled to repair it.
+ *
+ * So a degraded reply for a session that already has a COUNT keeps the count,
+ * its `prNumber`, and — the part that makes this honest rather than a lie of
+ * omission — its original `countedAt`, and takes only the new `reason`. The
+ * formatter renders that pairing as the number PLUS a failed-refresh caveat, so
+ * the user sees both how many threads were open and that the figure is not
+ * fresh. Dropping the count would lose the only answer they have; dropping the
+ * caveat would present a stale one as current.
+ *
+ * The retention is per session id, so one session's count can never be borrowed
+ * for another's, and a fresh good reading always replaces wholesale.
+ */
+function handleSessionPrThreads(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const parsed = ServerSessionPrThreadsSchema.safeParse(msg);
+  if (!parsed.success) return;
+  const incoming = parsed.data;
+  const sessionId = incoming.sessionId;
+  if (!sessionId) return;
+  const loading = { ...get().sessionPrThreadsLoading };
+  delete loading[sessionId];
+  const prior = get().sessionPrThreads[sessionId];
+  const stored = (incoming.unresolvedCount === null && prior && prior.unresolvedCount !== null)
+    // Keep the counted reading verbatim (count, totals, truncation, prNumber
+    // and its own clock); carry over only this reply's correlation + failure.
+    ? { ...prior, requestId: incoming.requestId, reason: incoming.reason }
+    : incoming;
+  set({
+    sessionPrThreads: { ...get().sessionPrThreads, [sessionId]: stored },
+    sessionPrThreadsLoading: loading,
+  });
+}
+
+/**
  * #6536 (PR-2 of #5966) — live repo-events delta `repo_events_delta`: APPEND the
  * single carried event to the stored snapshot so the pane updates without a
  * Refresh. Same defensive Zod-validate-or-drop pattern as the snapshot. A delta
@@ -4125,6 +4174,8 @@ const HANDLERS: Record<string, Handler> = {
   repo_events_snapshot: handleRepoEventsSnapshot,
   // #7344: the session's pull-request / CI status (display slice).
   session_pr_status: handleSessionPrStatus,
+  // #7430: the same session's unresolved review-thread count, on its own clock.
+  session_pr_threads: handleSessionPrThreads,
   github_webhook_config: handleGithubWebhookConfig,
   // #6536 (PR-2 of #5966): live repo-events delta appended to the pane.
   repo_events_delta: handleRepoEventsDelta,

@@ -26,6 +26,7 @@ import { tokenHandlers } from './handlers/token-handlers.js'
 import { orchestrationHandlers } from './handlers/orchestration-handlers.js'
 import { schedulerHandlers } from './handlers/scheduler-handlers.js'
 import { sessionPrStatusHandlers } from './handlers/session-pr-status-handlers.js'
+import { sessionPrThreadsHandlers } from './handlers/session-pr-threads-handlers.js'
 
 const log = createLogger('ws')
 
@@ -49,6 +50,7 @@ const handlerRegistry = new Map([
   ...Object.entries(orchestrationHandlers),
   ...Object.entries(schedulerHandlers),
   ...Object.entries(sessionPrStatusHandlers),
+  ...Object.entries(sessionPrThreadsHandlers),
 ])
 
 /**

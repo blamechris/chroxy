@@ -39,17 +39,45 @@
  *     would pass a naive test while dropping the case the user most needs to
  *     relay.
  *
- * ## Deliberately NOT included: the unresolved-thread count
+ * ## The unresolved-thread count (#7430)
  *
  * #7423's example line carries "0 unresolved threads", which `session_pr_status`
- * does not have — it needs a GraphQL `reviewThreads` read. That is not paid for
- * here: since #7426 the same survey runs on a daemon-side sweep across every
- * session, so adding a second `gh` call to it would multiply the cost of a
- * background poll to enrich a string that only a click builds. `reviewDecision`
- * (already on the snapshot) carries the review state in the meantime. See the
- * follow-on issue for the on-demand shape.
+ * does not have — it needs a GraphQL `reviewThreads` read that the daemon-side
+ * CI sweep must not be made to pay for. It arrives instead as its OWN on-demand
+ * message (`session_pr_threads`), which is why it is a second, OPTIONAL argument
+ * here rather than another field read off the snapshot.
+ *
+ * Four renderings, and they must never collapse into each other:
+ *
+ *   - **absent** — no count was supplied. The line makes NO thread claim.
+ *   - **unavailable** — a count was attempted and failed. The line says so, in
+ *     words, with the server's reason.
+ *   - **counted** — a number, which may be zero.
+ *   - **retained** — a number the store kept when a later refresh failed,
+ *     rendered WITH its own `countedAt` and the failure's reason. Both halves
+ *     matter: dropping the number throws away the only count the user has;
+ *     dropping the caveat presents a stale reading as current.
+ *
+ * The second is the reason this is worth spelling out. A missing count that
+ * printed as "0 unresolved threads", beside a green check clause, tells a model
+ * that nothing is blocking the PR — the same false green the check clause's own
+ * `state: 'none'` handling exists to prevent, arriving by a different route. A
+ * TRUNCATED count is the third route to it: 100 resolved threads on page one
+ * with every unresolved one past it is a real "0" that means nothing, so it
+ * renders as a lower bound instead.
+ *
+ * ## The guard ORDER is the whole of #7469's Critical 2
+ *
+ * A **reason** and a **number** need different join rules against the status
+ * snapshot's PR. A number attributed to the wrong PR is a fabrication; a reason
+ * has no PR to be wrong about. The first version tested `prNumber` before
+ * `reason`, and since every degraded reply the server emits carries
+ * `prNumber: null`, the "unavailable" rendering was unreachable for all four
+ * failures a user can actually provoke — the clause silently vanished in
+ * exactly the cases it exists for. The order below is load-bearing, not
+ * stylistic, and `ci-prefill.test.ts` pins it against the server's real shapes.
  */
-import type { ServerSessionPrStatusMessage } from '@chroxy/protocol'
+import type { ServerSessionPrStatusMessage, ServerSessionPrThreadsMessage } from '@chroxy/protocol'
 
 /** Short SHA length, matching the chip's tooltip. */
 const SHA_CHARS = 7
@@ -134,7 +162,74 @@ function mergeClause(merge: ServerSessionPrStatusMessage['merge']): string {
  * A caller must not offer the action in that case; a line saying "this branch
  * has no open PR" is not state worth handing an agent.
  */
-export function formatCiPrefill(status: ServerSessionPrStatusMessage | null): string | null {
+/**
+ * The unresolved-thread clause, or `null` when the line should make no thread
+ * claim at all.
+ *
+ * `null` means "no claim", never "no threads", and is returned for exactly
+ * three inputs:
+ *
+ *   1. no count was supplied at all;
+ *   2. the reading names a DIFFERENT pull request — it says nothing about this
+ *      one, neither its count nor whether a count could be taken;
+ *   3. a reading that carries a NUMBER but cannot name its PR. Defensive: the
+ *      server always stamps `prNumber` alongside a count, and a number with no
+ *      PR attached is not attributable to this one.
+ *
+ * A degraded reading with `prNumber: null` is deliberately NOT in that list —
+ * it is the shape every server-side failure actually has, and dropping it is
+ * what #7469's Critical 2 was. See the guard-order note in the file header.
+ */
+function threadsClause(
+  threads: ServerSessionPrThreadsMessage | null | undefined,
+  prNumber: number,
+): string | null {
+  if (!threads) return null
+
+  // (2) An explicitly different PR: no claim, in either direction.
+  if (threads.prNumber !== null && threads.prNumber !== prNumber) return null
+
+  if (threads.unresolvedCount === null) {
+    // Said in words, never by omission: an omitted clause beside a green check
+    // clause reads as nothing-to-report, which is the impression to avoid.
+    // Reached with `prNumber: null`, which is what every degraded reply has.
+    const why = threads.reason
+    return why ? `unresolved-thread count unavailable: ${why}` : 'unresolved-thread count unavailable'
+  }
+
+  // (3) From here a NUMBER is rendered, so the join must be positive.
+  if (threads.prNumber !== prNumber) return null
+
+  const n = threads.unresolvedCount
+  const noun = `unresolved thread${n === 1 ? '' : 's'}`
+  // WHEN it was counted, for the same reason the subject carries `generatedAt`:
+  // this is its OWN clock, and the two readings can be minutes apart. It is
+  // what makes the RETAINED rendering below honest rather than misleading.
+  const at = typeof threads.countedAt === 'string' && threads.countedAt.length > 0
+    ? ` (counted ${threads.countedAt})`
+    : ''
+  // A count the store KEPT across a failed refresh (#7469 S1) carries the new
+  // failure's reason beside the old count. Rendering the number without this
+  // would present a stale reading as current.
+  const stale = threads.reason
+    ? ` — a newer unresolved-thread count was unavailable: ${threads.reason}`
+    : ''
+
+  if (threads.truncated) {
+    // A lower bound, and labelled as one. `totalCount` is GitHub's own total and
+    // stays authoritative even when only part of it was read.
+    const of = threads.totalCount === null
+      ? ' — not all review threads were read'
+      : ` — only part of ${threads.totalCount} review threads were read`
+    return `at least ${n} ${noun}${of}${at}${stale}`
+  }
+  return `${n} ${noun}${at}${stale}`
+}
+
+export function formatCiPrefill(
+  status: ServerSessionPrStatusMessage | null,
+  threads?: ServerSessionPrThreadsMessage | null,
+): string | null {
   if (!status || !status.pr) return null
   const sha = shortSha(status.pr.headRefOid)
   // Everything after CI_PREFILL_PREFIX, which already carries the "PR #".
@@ -154,6 +249,10 @@ export function formatCiPrefill(status: ServerSessionPrStatusMessage | null): st
   const clauses = [checksClause(status.checks, sha), mergeClause(status.merge)]
   const reviewDecision = status.merge?.reviewDecision
   if (reviewDecision) clauses.push(`review ${reviewDecision}`)
+  // #7430: placed after the review decision, which it explains — the count is
+  // what turns `CHANGES_REQUESTED` or a `BLOCKED` merge state into a number.
+  const threadsText = threadsClause(threads, status.pr.number)
+  if (threadsText !== null) clauses.push(threadsText)
   if (status.pr.isDraft) clauses.push('PR is a draft')
   // A partial reading says so: the chip can hide a caveat in a tooltip, a prompt
   // line cannot, and a caveat the model never sees is a caveat that did not
@@ -197,9 +296,10 @@ export interface CiPrefillEffects {
  */
 export function runCiPrefill(
   status: ServerSessionPrStatusMessage | null,
+  threads: ServerSessionPrThreadsMessage | null,
   fx: CiPrefillEffects,
 ): string | null {
-  const text = formatCiPrefill(status)
+  const text = formatCiPrefill(status, threads)
   if (text === null) return null
   const draft = fx.getDraft()
   // Guard: never clobber an in-progress draft. #7423 is explicit that the

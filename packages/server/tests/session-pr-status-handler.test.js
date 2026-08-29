@@ -492,6 +492,73 @@ describe('#7436 — per-session survey throttle', () => {
     assert.equal(ctx.surveySessionPrStatus.callCount, 2, 'the replay must not have re-stamped — the window still dates from the survey')
   })
 
+  it('#7469 — a DEGRADED survey is not cached, and does not overwrite a cached good reading', async () => {
+    // Review on #7469, probed live: the "don't replay a failure" rule shipped
+    // in #7430 was wired to the THREADS handler only, so this survey still
+    // cached a transient failure and handed it to every client of the session
+    // for the whole window. The doc had already claimed the property for both.
+    let call = 0
+    const DEGRADED = { ...SAMPLE, pr: null, checks: null, merge: null, reason: 'gh pr list failed: timeout' }
+    const { ctx, advance } = throttleCtx({
+      surveySessionPrStatus: createSpy(async () => {
+        call += 1
+        return call === 2 ? DEGRADED : SAMPLE
+      }),
+    })
+
+    await handler(ws, { id: 'c1' }, { ...req, requestId: 'r1' }, ctx)
+    assert.equal(ctx._send.calls[0][1].pr.number, SAMPLE.pr.number)
+
+    advance(SURVEY_MIN_INTERVAL_MS + 1)
+    await handler(ws, { id: 'c1' }, { ...req, requestId: 'r2' }, ctx)
+    const failure = ctx._send.calls[1][1]
+    assert.equal(failure.requestId, 'r2')
+    assert.equal(failure.reason, 'gh pr list failed: timeout', 'the requester that paid for the failed survey still sees it')
+
+    // A second client inside the window opened by the FAILED survey.
+    await handler(ws, { id: 'c2' }, { ...req, requestId: 'r3' }, ctx)
+    const replay = ctx._send.calls[2][1]
+    assert.equal(replay.requestId, 'r3')
+    assert.equal(replay.reason, null, 'the replay must be the last GOOD reading, not the cached failure')
+    assert.equal(replay.pr.number, SAMPLE.pr.number)
+    assert.equal(replay.generatedAt, SAMPLE.generatedAt, 'and honest about when that reading was taken')
+    assert.equal(ctx.surveySessionPrStatus.callCount, 2, 'the third request was a replay, not a third survey')
+  })
+
+  it('#7469 — a degraded survey with NO prior good reading degrades rather than replaying', async () => {
+    // With nothing worth replaying the handler falls back to the pre-cache
+    // behaviour. RATE_LIMITED is honest — "surveyed moments ago, retry" — and
+    // the next request past the 5s window gets the real reason afresh.
+    const { ctx } = throttleCtx({
+      surveySessionPrStatus: createSpy(async () => ({ ...SAMPLE, pr: null, checks: null, merge: null, reason: 'no GitHub remote' })),
+    })
+    await handler(ws, { id: 'c1' }, { ...req, requestId: 'r1' }, ctx)
+    assert.equal(ctx._send.calls[0][1].reason, 'no GitHub remote')
+
+    await handler(ws, { id: 'c2' }, { ...req, requestId: 'r2' }, ctx)
+    assert.equal(ctx._send.calls[1][1].reason, RATE_LIMITED_REASON)
+    assert.equal(ctx.surveySessionPrStatus.callCount, 1, 'the failed survey still OPENED the window')
+  })
+
+  it('#7469 — an `indeterminate` quiet negative IS replayable', async () => {
+    // The one case the `!reason` rule must NOT catch. A fork widening that
+    // failed transiently carries `indeterminate: true` but `reason: null`, and
+    // on the wire it is byte-identical to an authoritative "no open PR" (#7435).
+    // Replaying it therefore shows the client exactly what a fresh survey would
+    // have shown; suppressing it would degrade a usable display for nothing.
+    const forkBailout = { ...SAMPLE, pr: null, checks: null, merge: null, reason: null, indeterminate: true }
+    const { ctx } = throttleCtx({ surveySessionPrStatus: createSpy(async () => forkBailout) })
+
+    await handler(ws, { id: 'c1' }, { ...req, requestId: 'r1' }, ctx)
+    await handler(ws, { id: 'c2' }, { ...req, requestId: 'r2' }, ctx)
+    const replay = ctx._send.calls[1][1]
+    assert.equal(replay.requestId, 'r2')
+    assert.equal(replay.reason, null)
+    assert.equal(replay.pr, null)
+    assert.ok(!('indeterminate' in replay), 'the server-only marker never reaches the wire, replay included')
+    assert.equal(ctx.surveySessionPrStatus.callCount, 1, 'it was replayed, not re-surveyed')
+  })
+
   it("a slow survey's late failure cannot destroy a newer client's stamp and cache", async () => {
     // Review on #7445 disproved the original 'no concurrent writer exists'
     // claim: inFlight is per-CLIENT, so A's slow survey (stamped at t=0) and
