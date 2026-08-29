@@ -145,3 +145,30 @@ describe('workflow reader: step + input parsing (#7386)', () => {
     assert.throws(() => parseJobs('name: nope\non: push\n', 'nope.yml'), /top-level 'jobs:' key/)
   })
 })
+
+describe('parseJobs — job-id lines with trailing comments (#7499)', () => {
+  // `  jobid:  # why this job is pinned` is a semantic no-op to GitHub but the
+  // job-start regex used to require end-of-line after the colon, so the whole
+  // job silently merged into its predecessor — its name vanished from every
+  // consumer's view (found while #7499 added a job-NAME consumer; a runs-on
+  // comment like ci.yml's own `# LONG-JOB PINNING` on the id line would have
+  // done the same to the cache guards).
+  const COMMENTED_ID = `
+jobs:
+  first:
+    name: First Job
+    runs-on: ubuntu-latest
+  second:  # pinned per #7471
+    name: Second Job
+    runs-on: ubuntu-latest
+`
+
+  it('recognizes a commented job-id line as a job start', () => {
+    const jobs = parseJobs(COMMENTED_ID, 'commented.yml')
+    assert.deepEqual(jobs.map(j => j.id), ['first', 'second'])
+    assert.ok(
+      jobs[1].body.some(l => l.includes('name: Second Job')),
+      "second's body must carry its own name line, not be merged into first"
+    )
+  })
+})

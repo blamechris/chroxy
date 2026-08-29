@@ -2,6 +2,7 @@ import { before, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { parseJobs, code } from './helpers/workflow-reader.js'
+import { parseRoster } from '../../../scripts/lib/contributing-roster.mjs'
 
 /**
  * #7448 — CONTRIBUTING.md's required-checks roster must stay true.
@@ -21,30 +22,38 @@ import { parseJobs, code } from './helpers/workflow-reader.js'
  * scripts/check-required-contexts.sh (local, exits 2 — never 0 — when blind).
  */
 
-const ROSTER_START = 'Required status checks must be green'
-const ROSTER_END = 'wired as required'
-
 describe('CONTRIBUTING required-checks roster (#7448)', () => {
   let roster
   let jobNames
 
   before(async () => {
+    // The parse is scripts/lib/contributing-roster.mjs — the SAME implementation
+    // scripts/check-required-contexts.sh executes, so the two guards cannot
+    // disagree about what the roster says (#7499 review, finding: the previous
+    // awk copy diverged from this slice on plausible doc edits).
     const contributing = await readFile(new URL('../../../CONTRIBUTING.md', import.meta.url), 'utf8')
-    const startAt = contributing.indexOf(ROSTER_START)
-    const endAt = contributing.indexOf(ROSTER_END)
-    assert.ok(startAt !== -1 && endAt > startAt, 'could not locate the required-checks bullet in CONTRIBUTING.md')
-    roster = [...contributing.slice(startAt, endAt).matchAll(/`([^`]+)`/g)].map(m => m[1])
+    roster = parseRoster(contributing)
 
     const ciYml = await readFile(new URL('../../../.github/workflows/ci.yml', import.meta.url), 'utf8')
-    jobNames = parseJobs(ciYml)
-      .map(j => code(j.body).map(l => /^\s{4}name:\s*(.+?)\s*$/.exec(l)).find(Boolean))
-      .filter(Boolean)
-      .map(m => m[1])
+    // A job's check context is its display name when `name:` is present, else
+    // its job id — and YAML quoting is cosmetic, so strip it (a quoted
+    // `name: "X"` is the same context as `name: X`).
+    jobNames = parseJobs(ciYml).map(j => {
+      const m = code(j.body).map(l => /^\s{4}name:\s*(.+?)\s*$/.exec(l)).find(Boolean)
+      const raw = m ? m[1] : j.id
+      return raw.replace(/^(['"])(.*)\1$/, '$2')
+    })
   })
 
   // ---- positive controls ----
-  it('parses a non-trivial roster and the ci.yml job names', () => {
-    assert.ok(roster.length >= 12, `expected >=12 roster entries, got ${roster.length}: ${roster.join(', ')}`)
+  it('parses exactly the 13 required contexts and the ci.yml job names', () => {
+    // EXACT on purpose, not a floor: the #7499 review proved a floor of 12 let
+    // any single entry vanish silently — the precise drift this file exists to
+    // prevent. The count IS the subject here, so changing the required set
+    // must force a same-PR edit of this line. (Contrast the deliberately
+    // loose floors in ci-npm-cache-routing.test.js, where the count is NOT
+    // the subject and pinning it would misattribute unrelated refactors.)
+    assert.equal(roster.length, 13, `expected exactly 13 roster entries, got ${roster.length}: ${roster.join(', ')}`)
     assert.ok(jobNames.length >= 10, `expected >=10 ci.yml job names, got ${jobNames.length}`)
   })
 
@@ -63,10 +72,25 @@ describe('CONTRIBUTING required-checks roster (#7448)', () => {
     )
   })
 
-  it('carries the #7448 addition', () => {
+  it('carries the #7448 addition and the drift that motivated it', () => {
     assert.ok(
       roster.includes('Design Tokens Tests'),
       "CONTRIBUTING.md's roster must list 'Design Tokens Tests' (#7448)"
     )
+    // The entry whose omission motivated #7448 — pinned by name so its
+    // deletion can never again ride out on a green suite.
+    assert.ok(
+      roster.includes('Server Windows Tests'),
+      "CONTRIBUTING.md's roster must list 'Server Windows Tests' (live-required; its omission is the drift #7448 documents)"
+    )
+  })
+
+  it('no roster entry or job name is a matrix template', () => {
+    // `name: X ${{ matrix.arch }}` is a literal here but GitHub expands it —
+    // the real contexts are the expanded forms, so a roster entry matching the
+    // template names a context nothing ever produces (#7191 family: every PR
+    // wedges while this suite reports the roster clean).
+    const templated = [...roster, ...jobNames].filter(n => n.includes('${{'))
+    assert.deepEqual(templated, [], `matrix-templated names cannot be required contexts: ${templated.join(', ')}`)
   })
 })

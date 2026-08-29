@@ -71,7 +71,7 @@ export function parseJobs(yml, name = 'workflow') {
 
   const starts = []
   for (let i = jobsAt + 1; i < lines.length; i++) {
-    const m = /^ {2}([A-Za-z0-9_-]+):\s*$/.exec(lines[i])
+    const m = /^ {2}([A-Za-z0-9_-]+):\s*(?:#.*)?$/.exec(lines[i])
     if (m) starts.push({ id: m[1], line: i })
   }
 
