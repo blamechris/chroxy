@@ -69,6 +69,7 @@ import {
   // that protects a racing AskUserQuestion is read.
   sweepUnansweredPromptsAtReplayEnd,
   replayDedupCache,
+  getReplayWindowDepth,
   resetReplayReconcile,
   handlePermissionExpired as sharedPermissionExpired,
   // #7380 — one wording for the #2833 already-answered race, shared with the app
@@ -858,6 +859,49 @@ const _replayingSessions = new Set<string>();
 
 export function resetReplayFlags(): void {
   _replayingSessions.clear();
+  // #7477 — the replay FLAG is the refcount now (see `isSessionReplaying`), so
+  // resetting the flags has to reset that too or this clears half the state and
+  // reads as a full reset. Both production callers already run
+  // `resetReplayReconcile({ clearCursors: true })` on the next line
+  // (connection.ts disconnect), so this is a no-op for them and closes the gap
+  // for every test-hygiene caller that only knows about this function.
+  // Cursors are deliberately NOT dropped here: they are what makes the next
+  // reconnect a delta replay (#5555.3), and the hard-disconnect path asks for
+  // them explicitly.
+  resetReplayReconcile();
+}
+
+/**
+ * Is a history replay in flight for this session — the question the REPLAY
+ * DEDUP gate has to ask (#7477 review).
+ *
+ * NOT `_replayingSessions.has(id)`. That Set is the third map in this family to
+ * carry membership where a COUNT is needed: the server routinely has two
+ * replays of one session in flight (`subscribe_sessions` + `switch_session`,
+ * both forceFull), so the wire order is `start start end end`, and the FIRST
+ * end deletes the id. Everything replay #2 still had to deliver then appended
+ * with dedup switched off — and replay #2 is a forceFull from offset 0, so ALL
+ * of it is a re-delivery of what replay #1 already appended.
+ *
+ * Before #7477 the damage was masked: `history_replay_end` swapped at replay
+ * #2's baseline and discarded replay #1's tail, so duplicate-then-discard netted
+ * to one copy. #7477 defers the swap to the last end and slices at the OUTER
+ * baseline, so both copies survive into the store — a duplicated bubble and a
+ * duplicate React key. Reproduced in both clients before this gate moved.
+ *
+ * `getReplayWindowDepth` is the refcount `reconcileReplayStart` /
+ * `reconcileReplayEnd` already maintain (#7455), so this needs no fourth map
+ * and inherits `resetReplayReconcile` (fresh auth, socket close/error) and
+ * `dropReplaySessionState` (prune, timeout) teardown for free.
+ *
+ * Scope: this is wired to the two DEDUP gates only (`message` and `tool_start`).
+ * The Set's other readers — the #4466 activity bump, the #4889 permission-split
+ * gate in store-core's shared `StreamDeltaContext`, the queue reconcile — see
+ * exactly the behaviour they saw before #7477 in this window, so moving them is
+ * an unrelated behaviour change and is filed rather than folded in here.
+ */
+function isSessionReplaying(sessionId: string | null | undefined): boolean {
+  return getReplayWindowDepth(sessionId) > 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -2568,8 +2612,10 @@ function handleToolStart(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet
     );
   })();
   // #4493 — per-session replay scoping. Dedup against the cached history
-  // only when THIS message's session is currently replaying.
-  const toolStartIsReplay = toolStartTargetId ? _replayingSessions.has(toolStartTargetId) : false;
+  // only when THIS message's session is currently replaying. #7477 — the
+  // refcount, not the Set: see `isSessionReplaying`. The #2901 tool dedup is
+  // exposed by the overlap window exactly as the `message` one is.
+  const toolStartIsReplay = isSessionReplaying(toolStartTargetId);
   // #5555.3 — advance the cursor for replayed tool_start entries.
   if (toolStartIsReplay) recordHistorySeq(toolStartTargetId, (msg as { historySeq?: unknown }).historySeq);
   const result = sharedToolStart(msg, get().activeSessionId, toolStartIsReplay, cached);
@@ -5442,8 +5488,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       );
       // #4493 — dedup against history only when THIS message's session is
       // currently replaying. A module-wide boolean would suppress live
-      // messages for session B while A replays.
-      const messageIsReplay = targetId ? _replayingSessions.has(targetId) : false;
+      // messages for session B while A replays. #7477 — asked of the replay
+      // REFCOUNT, not the Set: the first of two overlapping ends deletes the
+      // Set entry and replay #2 then re-appends its whole tail undeduped.
+      const messageIsReplay = isSessionReplaying(targetId);
       // #5555.3 — advance this session's cursor as we apply a replayed entry.
       if (messageIsReplay) recordHistorySeq(targetId, (msg as { historySeq?: unknown }).historySeq);
       const result = sharedMessageHandler(msg, get().activeSessionId, messageIsReplay, cached);

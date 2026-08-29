@@ -75,11 +75,28 @@
  * re-delivering entries replay #1 already appended dedups against them normally
  * instead of appending a second copy.
  *
- * The lifetime is therefore tied to the window refcount, which is what makes
- * the teardown in `resetReplayReconcile` / {@link dropReplaySessionState}
- * load-bearing rather than tidy: a start with no matching end strands a +1 on
- * the refcount, and a swap deferred to a window that never closes is a swap
- * that never happens.
+ * The lifetime is therefore tied to the window refcount, and that makes the
+ * teardown in `resetReplayReconcile` / {@link dropReplaySessionState}
+ * LOAD-BEARING rather than tidy. Say the cost plainly: a `history_replay_start`
+ * with no matching end strands a +1, and set-if-absent plus the deferral then
+ * mean the baseline is never re-captured AND no later end ever reaches the
+ * swap — that session's messages stop being rebuilt for the life of the
+ * connection. Pre-#7477 the overwrite-every-start shape SELF-HEALED there: the
+ * next full start captured a fresh baseline and its end swapped normally. So
+ * this is strictly worse under a stranded start, and it is only safe because
+ * the strand is unreachable:
+ *
+ *   - the only server path that emits a start without an end is
+ *     `sendChunkedWithBackpressure` bailing on `ws.readyState !== 1` — the
+ *     chunk-entry gate, `sendChunk`'s own re-check, and `scheduleAfterDrain`
+ *     (which `ws.close(1013)`s at the max-wait cap). All of them mean the
+ *     socket is already gone.
+ *   - both clients reset TWICE per connection: `socket.onclose` /
+ *     `socket.onerror` and again on `auth_ok` (#7456), plus
+ *     `dropReplaySessionState` on session prune and timeout.
+ *
+ * If either of those ever regresses, this map wedges where it used to recover.
+ * Treat the teardown as part of this invariant, not as housekeeping.
  */
 const _rebuildBaseline = new Map<string, number>()
 

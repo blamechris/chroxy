@@ -4005,6 +4005,85 @@ describe('dashboard message-handler dispatch', () => {
       expect(getReplayWindowDepth('s1')).toBe(0)
     })
 
+    // #7477 review blocker — the deferral window must keep replay dedup ON.
+    // Both clients gated `receivingHistoryReplay` (store-core
+    // handlers/stream.ts) on a Set that the FIRST `history_replay_end`
+    // deletes, so from end#1 onward everything replay #2 still had to deliver
+    // was appended with dedup switched off — and replay #2 is a forceFull from
+    // offset 0, so ALL of it is a re-delivery of what replay #1 already
+    // appended. Before #7477 that was invisible: end#1 swapped at replay #2's
+    // baseline and discarded replay #1's tail, so duplicate-then-discard netted
+    // to one copy. With the swap deferred to end#2 and sliced at the OUTER
+    // baseline, both copies survive — a duplicated bubble and a duplicate React
+    // key. The gate is the refcount now, so the window stays open until the
+    // last end and the dedup cache is actually consulted.
+    it('does not duplicate an entry replay #2 re-delivers after end#1 (#7477)', () => {
+      seedOne()
+      const replayed = () => ({
+        type: 'message',
+        messageType: 'response',
+        content: 'the server said this exactly once',
+        messageId: 'srv-m1',
+        sessionId: 's1',
+        timestamp: 500,
+        historySeq: 4,
+      })
+      handleMessage({ type: 'history_replay_start', sessionId: 's1', fullHistory: true }, ctx() as any)
+      handleMessage(replayed() as any, ctx() as any) // replay #1 delivers it
+      handleMessage({ type: 'history_replay_start', sessionId: 's1', fullHistory: true }, ctx() as any)
+      handleMessage({ type: 'history_replay_end', sessionId: 's1' }, ctx() as any) // replay #1 finishes first
+      handleMessage(replayed() as any, ctx() as any) // replay #2 RE-delivers the same entry
+      handleMessage({ type: 'history_replay_end', sessionId: 's1' }, ctx() as any)
+
+      const msgs = (store.getState() as any).sessionStates.s1.messages
+      expect(msgs.map((m: any) => m.id)).toEqual(['srv-m1'])
+    })
+
+    // Positive control A — the gate is still ON inside an ordinary single
+    // replay window, so the test above cannot pass by dedup being unconditional.
+    it('still dedups a re-delivered entry inside ONE replay window', () => {
+      seedOne()
+      const replayed = () => ({
+        type: 'message',
+        messageType: 'response',
+        content: 'once',
+        messageId: 'srv-m2',
+        sessionId: 's1',
+        timestamp: 500,
+        historySeq: 4,
+      })
+      handleMessage({ type: 'history_replay_start', sessionId: 's1', fullHistory: true }, ctx() as any)
+      handleMessage(replayed() as any, ctx() as any)
+      handleMessage(replayed() as any, ctx() as any)
+      handleMessage({ type: 'history_replay_end', sessionId: 's1' }, ctx() as any)
+      expect((store.getState() as any).sessionStates.s1.messages.map((m: any) => m.id)).toEqual([
+        'srv-m2',
+      ])
+    })
+
+    // Positive control B — the gate is OFF once the LAST window closes, so the
+    // arming lifecycle still ends. A live frame carrying an id the replay
+    // already delivered is NOT suppressed (that is the pre-existing behaviour
+    // the dedup gate exists to scope); if it were, the gate would be stuck on.
+    it('stops deduping once the last replay window closes', () => {
+      seedOne()
+      const frame = (extra: Record<string, unknown> = {}) => ({
+        type: 'message',
+        messageType: 'response',
+        content: 'once',
+        messageId: 'srv-m3',
+        sessionId: 's1',
+        timestamp: 500,
+        ...extra,
+      })
+      handleMessage({ type: 'history_replay_start', sessionId: 's1', fullHistory: true }, ctx() as any)
+      handleMessage(frame({ historySeq: 4 }) as any, ctx() as any)
+      handleMessage({ type: 'history_replay_end', sessionId: 's1' }, ctx() as any)
+      expect((store.getState() as any).sessionStates.s1.messages).toHaveLength(1)
+      handleMessage(frame() as any, ctx() as any) // live, outside any window
+      expect((store.getState() as any).sessionStates.s1.messages).toHaveLength(2)
+    })
+
     // The 0→1-only ledger clear, pinned at the integration level with the swap
     // taken out of the picture: two DELTA starts, so `_rebuildBaseline` is
     // never set and nothing is swapped, and a failure can only be the ledger.
