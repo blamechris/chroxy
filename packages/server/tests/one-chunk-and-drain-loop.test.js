@@ -17,13 +17,13 @@ import { fileURLToPath } from 'node:url'
  *
  * So this file re-derives the claim from the source on every run.
  *
- * It is deliberately ANCHORED PER FUNCTION rather than file-wide: a file-wide
+ * It is deliberately ANCHORED PER REGION rather than file-wide: a file-wide
  * grep for `bufferedAmount` over ws-history.js is satisfied by the shared
  * helper itself, so it stays green while a brand-new copy is pasted in
- * underneath it. Every check below slices ONE function body out by its
- * declaration and asserts inside that slice, and every slice is proven
- * non-empty first — a stale anchor yields '' against which every negative
- * assertion passes vacuously, which is strictly worse than no guard.
+ * underneath it. Every check below scans ONE top-level region and asserts
+ * inside it, and the partition is proven to reconstruct the file byte-for-byte
+ * first — an enumerator that misses a region yields no findings for it, which
+ * is strictly worse than no guard.
  */
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -36,17 +36,15 @@ const CONVERSATION_HANDLERS = join(SRC, 'handlers', 'conversation-handlers.js')
 const LOOP_OWNERS = ['scheduleAfterDrain', 'sendChunkedWithBackpressure']
 
 function read(path) {
-  // Trailing newline so the last top-level function has a `\n}\n` terminator
-  // like every other one.
+  // Trailing newline so the last top-level declaration has a `\n}\n`
+  // terminator like every other one.
   return readFileSync(path, 'utf8') + '\n'
 }
 
 /**
  * Drop WHOLE-LINE comments. The guard is about code: a docblock that explains
  * the back-pressure gate must not read as a second implementation of it, and
- * these two files put every such explanation on its own line. Trailing
- * comments are left in place — none of the tokens below appear in one, and
- * stripping them needs string-literal awareness this does not have.
+ * these two files put every such explanation on its own line.
  */
 function stripLineComments(text) {
   return text
@@ -58,15 +56,9 @@ function stripLineComments(text) {
     .join('\n')
 }
 
-/** Every top-level function declaration in a module, in source order. */
-function topLevelFunctionNames(src) {
-  return [...src.matchAll(/^(?:export )?(?:async )?function (\w+)\(/gm)].map((m) => m[1])
-}
-
 /**
  * Slice one top-level function out: from its `function NAME(` declaration to
- * the first closing brace in column 0. Both files indent every nested block,
- * so a `}` at column 0 is the function's own terminator.
+ * the first closing brace in column 0.
  */
 function sliceTopLevelFunction(src, name) {
   const decl = new RegExp(`^(?:export )?(?:async )?function ${name}\\(`, 'm')
@@ -78,6 +70,65 @@ function sliceTopLevelFunction(src, name) {
   return { text: rest.slice(0, endRel + 3), start: m.index, end: m.index + endRel + 3 }
 }
 
+/**
+ * Any statement that can begin at column 0. Review of PR #7490 proved why this
+ * is not a list of the shapes we expect: a complete hand-rolled loop written as
+ * `const drainQueueAgain = (ws, entries, emit) => { … }` scored 7/7 GREEN
+ * against an enumerator that only recognised `function NAME(`, because a shape
+ * the enumerator does not know about is a region it never scans. Enumerating
+ * KNOWN shapes beside a language that has others is the same defect this whole
+ * file exists to catch, one level up.
+ */
+const TOP_LEVEL_DECL = /^(?:export\s+(?:default\s+)?)?(?:async\s+)?(?:function|class|const|let|var)\s+([A-Za-z_$][\w$]*)|^(?:import|export)\b/gm
+
+/**
+ * PARTITION a module into top-level regions: every byte belongs to exactly one,
+ * attributed to the nearest preceding declaration. Exhaustive by construction
+ * rather than by enumeration, which is the property the byte-for-byte control
+ * below asserts — a scan that silently skips 28% of a file (measured: 54311 of
+ * 75759 bytes, before this) reports "clean" for the part it never read.
+ */
+function topLevelRegions(src) {
+  const marks = [...src.matchAll(TOP_LEVEL_DECL)].map((m) => ({ index: m.index, name: m[1] || '<module statement>' }))
+  const regions = []
+  const first = marks.length ? marks[0].index : src.length
+  if (first > 0) regions.push({ name: '<module prologue>', text: src.slice(0, first), start: 0, end: first })
+  for (let i = 0; i < marks.length; i++) {
+    const start = marks[i].index
+    const end = i + 1 < marks.length ? marks[i + 1].index : src.length
+    regions.push({ name: marks[i].name, text: src.slice(start, end), start, end })
+  }
+  return regions
+}
+
+/** The machinery a hand-rolled copy of the loop cannot avoid carrying. */
+const MACHINERY = [
+  // The BARE word, not `.bufferedAmount`: review of PR #7490 proved that
+  // `const { bufferedAmount } = ws` reads the same property a dot does and
+  // scored 7/7 green against the dotted form. `ws['bufferedAmount']` and
+  // `const ba = ws.bufferedAmount` are the same evasion wearing other hats.
+  [/\bbufferedAmount\b/, 'reads bufferedAmount'],
+  [/scheduleAfterDrain\s*\(/, 'uses scheduleAfterDrain'],
+  [/^[ \t]+const \w*CHUNK_SIZE\w*\s*=/m, 'declares its own chunk size'],
+]
+
+/**
+ * Report every top-level region that carries the loop's machinery and is not
+ * one of the loop's owners. Returns short strings, never source text — a
+ * failing assertion must not dump a 60KB subject into the TAP stream (#7340).
+ */
+function scanForHandRolledCopies(src, owners = []) {
+  const offenders = []
+  for (const region of topLevelRegions(src)) {
+    if (owners.includes(region.name)) continue
+    const body = stripLineComments(region.text)
+    for (const [re, what] of MACHINERY) {
+      if (re.test(body)) offenders.push(`${region.name}: ${what}`)
+    }
+  }
+  return offenders
+}
+
 function allSrcFiles() {
   return readdirSync(SRC, { recursive: true, withFileTypes: true })
     .filter((d) => d.isFile() && d.name.endsWith('.js'))
@@ -85,19 +136,19 @@ function allSrcFiles() {
 }
 
 describe('#7485 — exactly ONE chunk-and-drain loop, re-derived from the source', () => {
-  it('the slicer finds every top-level function in ws-history.js and returns a real body for each', () => {
-    // POSITIVE CONTROL for every negative assertion below. A stale or broken
-    // anchor returns null/'' and silently satisfies all of them.
-    const src = read(WS_HISTORY)
-    const names = topLevelFunctionNames(src)
-    assert.ok(names.length >= 10, `expected ws-history.js to declare many top-level functions; found ${names.length}`)
-    for (const owner of LOOP_OWNERS) {
-      assert.ok(names.includes(owner), `${owner} must still be a top-level function in ws-history.js`)
-    }
-    for (const name of names) {
-      const slice = sliceTopLevelFunction(src, name)
-      assert.ok(slice && slice.text.length > 0, `could not slice ${name} out of ws-history.js — the anchor is stale`)
-      assert.ok(slice.text.includes(`function ${name}(`), `slice for ${name} does not start at its declaration`)
+  it('the partition reconstructs each module byte-for-byte, so nothing goes unscanned', () => {
+    // THE positive control for every negative assertion in this file. An
+    // enumerator that only recognises some top-level shapes reports no
+    // findings for the shapes it misses, and a clean report from an
+    // incomplete scan is indistinguishable from a clean file.
+    for (const [label, path] of [['ws-history.js', WS_HISTORY], ['conversation-handlers.js', CONVERSATION_HANDLERS]]) {
+      const src = read(path)
+      const regions = topLevelRegions(src)
+      assert.ok(regions.length >= 5, `${label}: expected many top-level regions; found ${regions.length}`)
+      const covered = regions.map((r) => r.text).join('')
+      assert.equal(covered.length, src.length,
+        `${label}: the partition covers ${covered.length} of ${src.length} bytes — the rest is unscanned, so a copy can hide there`)
+      assert.ok(covered === src, `${label}: the partition does not reconstruct the module`)
     }
   })
 
@@ -105,26 +156,19 @@ describe('#7485 — exactly ONE chunk-and-drain loop, re-derived from the source
     // Without this the negative assertions below could all pass because the
     // tokens are wrong, not because the copies are gone.
     const src = read(WS_HISTORY)
+    const byName = new Map(topLevelRegions(src).map((r) => [r.name, r]))
     for (const owner of LOOP_OWNERS) {
-      const body = stripLineComments(sliceTopLevelFunction(src, owner).text)
-      assert.ok(/\.bufferedAmount/.test(body), `${owner} is supposed to be the code that reads ws.bufferedAmount`)
+      assert.ok(byName.has(owner), `${owner} must still be a top-level region in ws-history.js`)
+      const body = stripLineComments(byName.get(owner).text)
+      assert.ok(/bufferedAmount/.test(body), `${owner} is supposed to be the code that reads ws.bufferedAmount`)
     }
-    const shared = stripLineComments(sliceTopLevelFunction(src, 'sendChunkedWithBackpressure').text)
+    const shared = stripLineComments(byName.get('sendChunkedWithBackpressure').text)
     assert.ok(/scheduleAfterDrain\s*\(/.test(shared), 'the shared loop is supposed to be the code that parks on a drain')
     assert.ok(/CHUNK_SIZE/.test(shared), 'the shared loop is supposed to be the code that reads the chunk size')
   })
 
-  it('no OTHER function in ws-history.js reads bufferedAmount, parks on a drain, or declares a chunk size', () => {
-    const src = read(WS_HISTORY)
-    const offenders = []
-    for (const name of topLevelFunctionNames(src)) {
-      if (LOOP_OWNERS.includes(name)) continue
-      const body = stripLineComments(sliceTopLevelFunction(src, name).text)
-      if (/\.bufferedAmount/.test(body)) offenders.push(`${name}: reads ws.bufferedAmount`)
-      if (/scheduleAfterDrain\s*\(/.test(body)) offenders.push(`${name}: calls scheduleAfterDrain`)
-      if (/^\s*const \w*CHUNK_SIZE\b/m.test(body)) offenders.push(`${name}: declares its own chunk size`)
-    }
-    assert.deepEqual(offenders, [],
+  it('no OTHER region in ws-history.js reads bufferedAmount, parks on a drain, or declares a chunk size', () => {
+    assert.deepEqual(scanForHandRolledCopies(read(WS_HISTORY), LOOP_OWNERS), [],
       'a second copy of the #4833 chunk-and-drain loop has appeared in ws-history.js — route it through sendChunkedWithBackpressure instead (#7460, #7480, #7485)')
   })
 
@@ -152,20 +196,8 @@ describe('#7485 — exactly ONE chunk-and-drain loop, re-derived from the source
     }
   })
 
-  it('no function in conversation-handlers.js reads bufferedAmount, parks on a drain, or declares a chunk size', () => {
-    const src = read(CONVERSATION_HANDLERS)
-    const names = topLevelFunctionNames(src)
-    assert.ok(names.length >= 5, `expected conversation-handlers.js to declare several handlers; found ${names.length}`)
-    const offenders = []
-    for (const name of names) {
-      const slice = sliceTopLevelFunction(src, name)
-      assert.ok(slice && slice.text.length > 0, `could not slice ${name} out of conversation-handlers.js — the anchor is stale`)
-      const body = stripLineComments(slice.text)
-      if (/\.bufferedAmount/.test(body)) offenders.push(`${name}: reads ws.bufferedAmount`)
-      if (/scheduleAfterDrain\s*\(/.test(body)) offenders.push(`${name}: calls scheduleAfterDrain`)
-      if (/^\s*const \w*CHUNK_SIZE\b/m.test(body)) offenders.push(`${name}: declares its own chunk size`)
-    }
-    assert.deepEqual(offenders, [],
+  it('no region in conversation-handlers.js reads bufferedAmount, parks on a drain, or declares a chunk size', () => {
+    assert.deepEqual(scanForHandRolledCopies(read(CONVERSATION_HANDLERS)), [],
       'a replay handler has grown its own chunk-and-drain loop again — that is #7460/#7480 for the third time')
   })
 
@@ -195,5 +227,80 @@ describe('#7485 — exactly ONE chunk-and-drain loop, re-derived from the source
     assert.ok(insideShared >= 1, 'POSITIVE CONTROL: the shared loop must itself park on a drain, or this scan proves nothing')
     assert.deepEqual(strays, [],
       'scheduleAfterDrain may only be called by sendChunkedWithBackpressure — a second caller is a second chunk-and-drain loop')
+  })
+
+  // ── The two evasions the review of PR #7490 demonstrated ──────────────────
+  //
+  // Both scored 7/7 GREEN against the first version of this file, which
+  // enumerated `function NAME(` declarations and matched `.bufferedAmount`.
+  // They are pinned as synthetic modules rather than by editing the real
+  // source, because what failed is the DETECTOR's shape coverage — that is the
+  // unit under test, and a synthetic module states the shape in five lines.
+
+  it('EVASION PIN 1 — catches a complete hand-rolled loop hidden in a top-level ARROW-CONST', () => {
+    const evasion = [
+      "import { createLogger } from './logger.js'",
+      '',
+      'const REPLAY_BATCH = 20',
+      '',
+      'const drainQueueAgain = (ws, entries, emit) => {',
+      '  const step = (offset) => {',
+      '    if (ws.readyState !== 1) return',
+      '    if ((ws.bufferedAmount || 0) > 262144) {',
+      '      setTimeout(() => step(offset), 20)',
+      '      return',
+      '    }',
+      '    const end = Math.min(offset + REPLAY_BATCH, entries.length)',
+      '    for (let i = offset; i < end; i++) emit(entries[i], i)',
+      '    if (end < entries.length) setTimeout(() => step(end), 20)',
+      '  }',
+      '  step(0)',
+      '}',
+      '',
+    ].join('\n')
+    assert.deepEqual(scanForHandRolledCopies(evasion), ['drainQueueAgain: reads bufferedAmount'],
+      'a hand-rolled loop declared as `const NAME = (…) => {` is still a hand-rolled loop')
+  })
+
+  it('EVASION PIN 2 — catches bufferedAmount reached by DESTRUCTURING rather than a dot', () => {
+    const evasion = [
+      'export function replayThings(ctx, ws, entries) {',
+      '  const { bufferedAmount } = ws',
+      '  if (bufferedAmount > 262144) {',
+      '    setTimeout(() => replayThings(ctx, ws, entries), 20)',
+      '    return',
+      '  }',
+      '  for (const e of entries) ctx.send(ws, e)',
+      '}',
+      '',
+    ].join('\n')
+    assert.deepEqual(scanForHandRolledCopies(evasion), ['replayThings: reads bufferedAmount'],
+      '`const { bufferedAmount } = ws` reads the same property a dot does')
+  })
+
+  it('NEGATIVE CONTROL: a module with no back-pressure machinery reports nothing', () => {
+    // Without this, a detector that flagged EVERY region would satisfy both
+    // pins above and still be worthless — the "denies everything" class
+    // (docs/false-safety-guards.md), whose negative tests pass for the wrong
+    // reason and keep passing with the check deleted.
+    const innocent = [
+      "import { createLogger } from './logger.js'",
+      '',
+      'const log = createLogger("x")',
+      '',
+      'export function sendOne(ws, msg) {',
+      '  ws.send(JSON.stringify(msg))',
+      '}',
+      '',
+      'const formatAll = (entries) => entries.map((e) => e.type).join(",")',
+      '',
+      'export function replayNothing(ws, entries) {',
+      '  for (const e of entries) sendOne(ws, e)',
+      '  log.info(formatAll(entries))',
+      '}',
+      '',
+    ].join('\n')
+    assert.deepEqual(scanForHandRolledCopies(innocent), [],
+      'the detector must distinguish a plain send loop from a chunk-and-drain copy, or it proves nothing')
   })
 })
