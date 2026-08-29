@@ -17,6 +17,18 @@
  * #2852: guards Allow / Deny / Allow for Session and the keyboard shortcuts
  * behind a local `submitting` flag so double-click and key-repeat cannot
  * fire onRespond twice before the store's answered state catches up.
+ *
+ * #7466 — SECOND SURFACE. The cross-session notification banner
+ * (NotificationBanners.tsx) offers Allow/Deny for the same requests and must
+ * honour the same three gates: answered, expiry, and `connected`. It cannot
+ * share this component's code — the countdown below is anchored to a monotonic
+ * `performance.now()` taken at THIS prompt's mount (#3619), and a banner has no
+ * mount lifetime to anchor one to, so it answers from store state
+ * (`isLivePermissionPrompt` over the prompt ChatMessage) instead. Same three
+ * gates, two vantage points. Changing `respond()`'s bail conditions or
+ * `showButtons` here means changing `permissionNotificationStatus` there; the
+ * banner had NONE of the three until #7466 and shipped a live Allow for an
+ * already-expired request for the rest of its five minutes.
  */
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useConnectionStore, isRuleEligibleTool, isRuleEligibleProvider, isDenyReasonHonoredProvider, DENY_REASON_MAX_LENGTH } from '../store/connection'

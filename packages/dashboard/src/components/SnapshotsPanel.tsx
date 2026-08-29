@@ -20,6 +20,14 @@
 import { useCallback, useEffect, useState } from 'react'
 import { getAuthToken } from '../utils/auth'
 
+/**
+ * #7466 — the default fetch, allocated ONCE at module scope. See the block
+ * comment in the component for why this is not a `useMemo`.
+ */
+const WINDOW_FETCH: typeof fetch = (input: RequestInfo | URL, init?: RequestInit) =>
+  window.fetch(input, init)
+
+
 export interface Snapshot {
   tag: string
   name: string
@@ -170,8 +178,30 @@ export function SnapshotsPanel({ fetchImpl, getToken }: SnapshotsPanelProps = {}
 
   // Hoist for testability — production passes neither override and falls
   // back to the shared globals.
-  const resolvedFetch: typeof fetch =
-    fetchImpl ?? ((input: RequestInfo | URL, init?: RequestInit) => window.fetch(input, init))
+  // #7466 — `resolvedFetch` MUST be identity-stable across renders. It feeds
+  // `refresh`'s useCallback dep list, and `refresh` is the sole dep of the mount
+  // effect below. Computed inline, the `??` fallback allocated a fresh arrow on
+  // EVERY render, so the effect re-fired on every render and its own setState
+  // re-rendered — an unbounded fetch/render loop that flashed the panel header's
+  // Loading…/Refresh label. It only ever bit PRODUCTION, which renders this panel
+  // with no props (App.tsx); every existing test passed `fetchImpl`, which pinned
+  // the identity and hid the loop. See PanelRefreshLoop.test.tsx.
+  //
+  // The fallback is a MODULE-LEVEL constant, not a `useMemo`. React documents a
+  // memoized value as discardable — it may be recomputed at any time — so a memo
+  // is a performance hint, and here identity stability IS the correctness
+  // property. The constant also has no dep list, which removes the guard's own
+  // weak spot: mutating a `[fetchImpl]` dep to `[]` left the whole suite green,
+  // because nothing proved `resolvedFetch` tracked a CHANGING `fetchImpl`. That
+  // mutant is now unwritable rather than merely unkilled, and the input it named
+  // is pinned anyway by the changing-`fetchImpl` control in PanelRefreshLoop.
+  //
+  // `resolvedGetToken` gets no wrapper for the same reason it never got a memo:
+  // `getAuthToken` is a module import and the ternary's result changes exactly
+  // when the `getToken` prop does, so any wrapper is a provable no-op — one was
+  // written, mutation-tested, survived its own mutant, and removed rather than
+  // shipped as a guard with no behaviour.
+  const resolvedFetch = fetchImpl ?? WINDOW_FETCH
   const resolvedGetToken = getToken ?? getAuthToken
 
   const refresh = useCallback(async () => {

@@ -3773,11 +3773,21 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // Auto-switch to the session that owns this prompt (if different from active).
     // Prefer sessionNotifications lookup (covers prompts stored before sessionStates[sid] existed),
     // fall back to scanning sessionStates messages.
-    const { activeSessionId, sessionStates, sessionNotifications } = get();
+    const { activeSessionId, sessionStates, sessionNotifications, sessions } = get();
     const notifMatch = sessionNotifications.find((n) => n.requestId === requestId);
     const targetSid = notifMatch?.sessionId
       ?? Object.entries(sessionStates).find(([, ss]) => ss.messages.some((m) => m.requestId === requestId))?.[0];
-    if (targetSid && targetSid !== activeSessionId) get().switchSession(targetSid);
+    // #7466 — the owner id must still be a session the operator HAS. Both lookup
+    // sources outlive the session: `sessionNotifications` is never pruned on
+    // close, and `sessionStates` retains a closed session's transcript. Without
+    // this check, answering a STALE prompt (session closed, or a daemon restart
+    // regenerated ids) handed `switchSession` a dead id, which writes
+    // `activeSessionId` unconditionally — leaving the SessionBar with every tab
+    // unselected (`isActive: s.sessionId === activeSessionId` in App.tsx) and no
+    // way back except clicking a tab. The membership check keeps the legitimate
+    // cross-session jump and drops only the impossible one.
+    const targetIsLive = !!targetSid && sessions.some((s) => s.sessionId === targetSid);
+    if (targetIsLive && targetSid !== activeSessionId) get().switchSession(targetSid);
     // For allowSession: send a follow-up set_permission_rules to register
     // auto-approval for this tool. Skip tools the server won't accept as
     // auto-allow rules (execution/network tools). Mirrors the mobile app

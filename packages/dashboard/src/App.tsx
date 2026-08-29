@@ -24,6 +24,7 @@ import {
 } from '@chroxy/store-core'
 import { useConnectionStore } from './store/connection'
 import type { BaseSessionState, ContextOccupancy } from '@chroxy/store-core'
+import type { SessionNotification } from './store/types'
 
 import { Sidebar, type RepoNode, type ContextMenuTarget } from './components/Sidebar'
 import { resolveActivePrimaryClientId } from './components/ViewersIndicator'
@@ -56,7 +57,7 @@ import { BillingWarningBanner } from './components/BillingWarningBanner'
 import { ConnectionAnnouncer } from './components/ConnectionAnnouncer'
 import { StdinDisabledBanner } from './components/StdinDisabledBanner'
 import { WelcomeScreen } from './components/WelcomeScreen'
-import { NotificationBanners } from './components/NotificationBanners'
+import { NotificationBanners, permissionNotificationStatus } from './components/NotificationBanners'
 import { PendingPairRequests } from './components/PendingPairRequests'
 import { type ToastItem } from './components/Toast'
 import { FileBrowserPanel } from './components/FileBrowserPanel'
@@ -2048,6 +2049,28 @@ export function App() {
     return result
   }, [sendUserQuestionResponse])
 
+  // #7466 — the banner's staleness + connectivity gate. `sessionStates` is the
+  // store's own record of every prompt, and `isLivePermissionPrompt` (inside the
+  // helper) is the SAME signal the tab badge and jump-to-pending already use, so
+  // this adds no second notion of "still pending". Read at render time:
+  // `sessionStates` is replaced on every WS event, so a prompt the server retires
+  // (#7335 stamps `expiresAt`) disarms its banner on the next event, and a prompt
+  // that simply times out disarms on the next render past its deadline — the same
+  // way the inline PermissionPrompt's own countdown retires its buttons. The
+  // CLICK-time re-check lives in NotificationBanners itself (it calls this again
+  // inside onClick): one place to gate, and reachable from a component test.
+  //
+  // `connectionPhase === 'connected'` is the third gate, matching
+  // PermissionPrompt's `connected` — without it the banner showed ENABLED
+  // Allow/Deny over a dead socket, and since the handlers below correctly refuse
+  // to dismiss when the send fails, that click produced no observable change at
+  // all.
+  const permissionStatus = useCallback(
+    (n: SessionNotification) =>
+      permissionNotificationStatus(n, sessionStates, Date.now(), connectionPhase === 'connected'),
+    [sessionStates, connectionPhase],
+  )
+
   // #6222/#6224: respondToPermission (sendPermissionResponse) now marks the
   // prompt answered with the canonical decision token itself — only when the
   // answer actually went over the wire (after the disconnected-socket guard).
@@ -2056,13 +2079,21 @@ export function App() {
   // consumers expect) and unconditional (it ran even when the send was refused
   // while disconnected, falsely clearing the prompt). Dropped in favour of the
   // single choke point.
+  // #7466 — dismiss ONLY when the answer actually went on the wire.
+  // `sendPermissionResponse` returns false without throwing when the socket is
+  // down or flipped OPEN -> CLOSING mid-send (#5699 / #6308), and
+  // `dismissSessionNotification` REMOVES the row from the store outright. So a
+  // click that achieved nothing used to delete the operator's only record of
+  // the request, and the banner stack collapsing under the cursor is what
+  // invites the second, mis-aimed click. 'queued' is not a failure — the
+  // message will send — so only an explicit `false` holds the row.
   const handleBannerApprove = useCallback((requestId: string, notificationId: string) => {
-    respondToPermission(requestId, 'allow')
+    if (respondToPermission(requestId, 'allow') === false) return
     dismissSessionNotification(notificationId)
   }, [respondToPermission, dismissSessionNotification])
 
   const handleBannerDeny = useCallback((requestId: string, notificationId: string) => {
-    respondToPermission(requestId, 'deny')
+    if (respondToPermission(requestId, 'deny') === false) return
     dismissSessionNotification(notificationId)
   }, [respondToPermission, dismissSessionNotification])
 
@@ -2569,7 +2600,9 @@ export function App() {
             onApprove={handleBannerApprove}
             onDeny={handleBannerDeny}
             onDismiss={dismissSessionNotification}
+            onMarkRead={markSessionNotificationRead}
             onSwitchSession={handleSwitchSession}
+            permissionStatus={permissionStatus}
           />
         )}
 

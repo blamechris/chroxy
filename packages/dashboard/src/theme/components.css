@@ -5093,6 +5093,18 @@ button.sidebar-token-view-session-row:hover {
   color: #fff;
 }
 
+/* #7466 — a permission banner whose request is no longer pending keeps the row
+   (the record) but loses its Allow/Deny. This label says why, so a button-less
+   permission banner does not read as a rendering failure. */
+.notification-banner-stale {
+  font-size: var(--text-xs);
+  font-style: italic;
+  color: var(--text-secondary);
+  opacity: 0.8;
+  flex-shrink: 0;
+  align-self: center;
+}
+
 .notification-banner-btn--dismiss {
   background: transparent;
   color: var(--text-secondary);
@@ -5101,6 +5113,26 @@ button.sidebar-token-view-session-row:hover {
 
 .notification-banner-btn:hover {
   opacity: 0.85;
+}
+
+/* #7466 — a permission banner over a dead socket keeps its buttons (the request
+   is still live and becomes answerable on reconnect) but must not accept a
+   click. Mirrors the inline prompt's disabled Allow/Deny + perm-disconnected-hint
+   rather than inventing a second visual language for one condition. */
+.notification-banner-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.notification-banner-btn:disabled:hover {
+  opacity: 0.45;
+}
+
+.notification-banner-hint {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  flex-shrink: 0;
+  align-self: center;
 }
 
 /* #5510 (epic #5509): pairing-approval primitive — host approval banner. */

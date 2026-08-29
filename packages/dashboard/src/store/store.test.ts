@@ -1642,8 +1642,21 @@ describe('system message routing', () => {
 
 // ---------------------------------------------------------------------------
 // Permission response auto-switch (#1710)
+//
+// #7466 — the auto-switch is now membership-checked against `sessions`, so these
+// fixtures seed the roster as well as `sessionStates`. A world with a
+// sessionStates entry and no matching `sessions` row is not a state the server
+// can produce for a LIVE session; it is exactly the stale-prompt shape (session
+// closed, or a daemon restart regenerated ids) that must NOT navigate — pinned
+// on its own in permission-response-dead-session.test.ts.
 // ---------------------------------------------------------------------------
 describe('permission response auto-switch', () => {
+  const rosterEntry = (id: string) => ({
+    sessionId: id, name: id, cwd: '/tmp', type: 'cli' as const,
+    hasTerminal: false, model: null, permissionMode: null, isBusy: false,
+    createdAt: 0, conversationId: null,
+  });
+
   it('switches to session that owns the permission when different from active', async () => {
     const { useConnectionStore } = await import('./connection');
 
@@ -1657,6 +1670,7 @@ describe('permission response auto-switch', () => {
 
     useConnectionStore.setState({
       activeSessionId: 's1',
+      sessions: [rosterEntry('s1'), rosterEntry('s2')],
       sessionStates: {
         s1: { ...createEmptySessionState(), messages: [makeMsg('m1', 'req-a')] },
         s2: { ...createEmptySessionState(), messages: [makeMsg('m2', 'req-b')] },
@@ -1719,6 +1733,7 @@ describe('permission response auto-switch', () => {
 
     useConnectionStore.setState({
       activeSessionId: 's1',
+      sessions: [rosterEntry('s1'), rosterEntry('s2')],
       sessionStates: {
         s1: { ...createEmptySessionState(), messages: [makeMsg('m1', 'req-a')] },
         s2: { ...createEmptySessionState(), messages: [makeMsg('m2', 'req-b')] },
@@ -1732,7 +1747,12 @@ describe('permission response auto-switch', () => {
     expect(sentMessages[0]?.type).toBe('permission_response');
     const switchIdx = sentMessages.findIndex((m) => m.type === 'switch_session');
     const permIdx = sentMessages.findIndex((m) => m.type === 'permission_response');
-    expect(permIdx).toBeLessThan(switchIdx === -1 ? Infinity : switchIdx);
+    // #7466 — assert the switch actually happened. `switchIdx === -1 ? Infinity`
+    // made this pass just as happily when NO switch was sent, so it could not
+    // have caught the membership check silently suppressing the cross-session
+    // jump. Ordering is only meaningful once both frames exist.
+    expect(switchIdx).toBeGreaterThan(-1);
+    expect(permIdx).toBeLessThan(switchIdx);
 
     useConnectionStore.setState({ sessions: [], activeSessionId: null, sessionStates: {}, socket: null });
   });

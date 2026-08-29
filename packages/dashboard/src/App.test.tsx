@@ -3077,3 +3077,148 @@ describe('App-level view-mode effect (#5998)', () => {
     expect(subscribeTerminalMirror).toHaveBeenLastCalledWith('s1')
   })
 })
+
+// ---------------------------------------------------------------------------
+// #7466 — a banner whose answer never went on the wire must not vanish
+// ---------------------------------------------------------------------------
+describe('#7466 — cross-session permission banner, failed send', () => {
+  const bannerSession = {
+    sessionId: 's1', name: 'Chroxy', cwd: '/tmp', type: 'cli' as const,
+    hasTerminal: true, model: null, permissionMode: null, isBusy: false,
+    createdAt: Date.now(), conversationId: null,
+  }
+
+  const livePermissionBanner = {
+    id: 'n-1',
+    sessionId: 's1',
+    sessionName: 'Chroxy',
+    eventType: 'permission' as const,
+    message: 'Bash: rm -rf /tmp/x',
+    timestamp: Date.now(),
+    requestId: 'req-abc',
+  }
+
+  function connectedWithBanner(overrides: Record<string, unknown> = {}) {
+    return {
+      connectionPhase: 'connected',
+      sessions: [bannerSession],
+      activeSessionId: 's1',
+      // No prompt message for req-abc anywhere: the banner's staleness gate is
+      // conservative on absence, so the buttons render. That keeps this case
+      // about the SEND result and nothing else.
+      sessionStates: {},
+      sessionNotifications: [livePermissionBanner],
+      ...overrides,
+    }
+  }
+
+  it('keeps the banner when sendPermissionResponse reports the send failed', () => {
+    // #6308/#5699: the socket can be OPEN at render and CLOSING by the click, and
+    // sendPermissionResponse returns false rather than throwing. Dismissing anyway
+    // deleted the row outright (dismissSessionNotification filters it out of the
+    // store) — so the operator's only record of the request was destroyed by a
+    // click that did nothing, and the banner stack collapsing under the cursor is
+    // what invites the second, mis-aimed click.
+    const sendPermissionResponse = vi.fn(() => false as const)
+    const dismissSessionNotification = vi.fn()
+    stateOverrides = connectedWithBanner({ sendPermissionResponse, dismissSessionNotification })
+    render(<App />)
+
+    fireEvent.click(screen.getByLabelText('Allow'))
+    expect(sendPermissionResponse).toHaveBeenCalledWith('req-abc', 'allow')
+    expect(dismissSessionNotification).not.toHaveBeenCalled()
+  })
+
+  it('keeps the banner when a Deny fails to send', () => {
+    const sendPermissionResponse = vi.fn(() => false as const)
+    const dismissSessionNotification = vi.fn()
+    stateOverrides = connectedWithBanner({ sendPermissionResponse, dismissSessionNotification })
+    render(<App />)
+
+    fireEvent.click(screen.getByLabelText('Deny'))
+    expect(sendPermissionResponse).toHaveBeenCalledWith('req-abc', 'deny')
+    expect(dismissSessionNotification).not.toHaveBeenCalled()
+  })
+
+  it('POSITIVE CONTROL: dismisses the banner when the answer WAS sent', () => {
+    const sendPermissionResponse = vi.fn(() => 'sent' as const)
+    const dismissSessionNotification = vi.fn()
+    stateOverrides = connectedWithBanner({ sendPermissionResponse, dismissSessionNotification })
+    render(<App />)
+
+    fireEvent.click(screen.getByLabelText('Allow'))
+    expect(dismissSessionNotification).toHaveBeenCalledWith('n-1')
+  })
+
+  it("POSITIVE CONTROL: dismisses on 'queued' too — a queued answer is not a failure", () => {
+    const sendPermissionResponse = vi.fn(() => 'queued' as const)
+    const dismissSessionNotification = vi.fn()
+    stateOverrides = connectedWithBanner({ sendPermissionResponse, dismissSessionNotification })
+    render(<App />)
+
+    fireEvent.click(screen.getByLabelText('Deny'))
+    expect(dismissSessionNotification).toHaveBeenCalledWith('n-1')
+  })
+
+  // #7466 review finding 1 — the App->banner WIRING of the third gate. The
+  // component's own behaviour is pinned in NotificationBannersStale.test.tsx;
+  // this pins that App actually feeds it `connectionPhase`, which is the
+  // "guard wired to only some of its callers" failure the component tests
+  // cannot see.
+  it('disables the banner buttons while the socket is down', () => {
+    stateOverrides = connectedWithBanner({ connectionPhase: 'reconnecting' })
+    render(<App />)
+    expect(screen.getByLabelText('Allow')).toBeDisabled()
+    expect(screen.getByLabelText('Deny')).toBeDisabled()
+    expect(screen.getByTestId('notification-banner-disconnected-hint')).toBeInTheDocument()
+  })
+
+  it('POSITIVE CONTROL: the same banner is enabled while connected', () => {
+    stateOverrides = connectedWithBanner()
+    render(<App />)
+    expect(screen.getByLabelText('Allow')).toBeEnabled()
+    expect(screen.queryByTestId('notification-banner-disconnected-hint')).not.toBeInTheDocument()
+  })
+
+  // #7466 review nit 5 — an INERT permission row retires by mark-read, not by
+  // deletion. Wiring-level: the component gets `onMarkRead`, and App must hand
+  // it `markSessionNotificationRead` rather than the removing `onDismiss`.
+  it('marks an inert permission row read instead of deleting it', () => {
+    const markSessionNotificationRead = vi.fn()
+    const dismissSessionNotification = vi.fn()
+    stateOverrides = connectedWithBanner({
+      markSessionNotificationRead,
+      dismissSessionNotification,
+      // A prompt the store has SEEN and knows is expired -> 'not-pending'.
+      // The rest of the SessionState shape is present because App reads several
+      // of these fields off the active session while rendering.
+      sessionStates: {
+        s1: {
+          messages: [{
+            id: 'm-1', type: 'prompt', content: 'Bash: rm -rf /tmp/x',
+            timestamp: 1, requestId: 'req-abc', expiresAt: Date.now() - 1,
+          }],
+          streamingMessageId: null,
+          activeModel: null,
+          permissionMode: null,
+          contextUsage: null,
+          sessionCost: null,
+          isIdle: true,
+          activeAgents: [],
+          isPlanPending: false,
+          systemMessages: [],
+          childAgentEvents: [],
+          sessionRules: [],
+          claudeReady: true,
+        },
+      },
+    })
+    render(<App />)
+
+    expect(screen.getByTestId('notification-banner-stale')).toBeInTheDocument()
+    expect(screen.queryByLabelText('Allow')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByLabelText('Dismiss'))
+    expect(markSessionNotificationRead).toHaveBeenCalledWith('n-1')
+    expect(dismissSessionNotification).not.toHaveBeenCalled()
+  })
+})
