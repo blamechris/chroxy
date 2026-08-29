@@ -3159,4 +3159,66 @@ describe('#7466 — cross-session permission banner, failed send', () => {
     fireEvent.click(screen.getByLabelText('Deny'))
     expect(dismissSessionNotification).toHaveBeenCalledWith('n-1')
   })
+
+  // #7466 review finding 1 — the App->banner WIRING of the third gate. The
+  // component's own behaviour is pinned in NotificationBannersStale.test.tsx;
+  // this pins that App actually feeds it `connectionPhase`, which is the
+  // "guard wired to only some of its callers" failure the component tests
+  // cannot see.
+  it('disables the banner buttons while the socket is down', () => {
+    stateOverrides = connectedWithBanner({ connectionPhase: 'reconnecting' })
+    render(<App />)
+    expect(screen.getByLabelText('Allow')).toBeDisabled()
+    expect(screen.getByLabelText('Deny')).toBeDisabled()
+    expect(screen.getByTestId('notification-banner-disconnected-hint')).toBeInTheDocument()
+  })
+
+  it('POSITIVE CONTROL: the same banner is enabled while connected', () => {
+    stateOverrides = connectedWithBanner()
+    render(<App />)
+    expect(screen.getByLabelText('Allow')).toBeEnabled()
+    expect(screen.queryByTestId('notification-banner-disconnected-hint')).not.toBeInTheDocument()
+  })
+
+  // #7466 review nit 5 — an INERT permission row retires by mark-read, not by
+  // deletion. Wiring-level: the component gets `onMarkRead`, and App must hand
+  // it `markSessionNotificationRead` rather than the removing `onDismiss`.
+  it('marks an inert permission row read instead of deleting it', () => {
+    const markSessionNotificationRead = vi.fn()
+    const dismissSessionNotification = vi.fn()
+    stateOverrides = connectedWithBanner({
+      markSessionNotificationRead,
+      dismissSessionNotification,
+      // A prompt the store has SEEN and knows is expired -> 'not-pending'.
+      // The rest of the SessionState shape is present because App reads several
+      // of these fields off the active session while rendering.
+      sessionStates: {
+        s1: {
+          messages: [{
+            id: 'm-1', type: 'prompt', content: 'Bash: rm -rf /tmp/x',
+            timestamp: 1, requestId: 'req-abc', expiresAt: Date.now() - 1,
+          }],
+          streamingMessageId: null,
+          activeModel: null,
+          permissionMode: null,
+          contextUsage: null,
+          sessionCost: null,
+          isIdle: true,
+          activeAgents: [],
+          isPlanPending: false,
+          systemMessages: [],
+          childAgentEvents: [],
+          sessionRules: [],
+          claudeReady: true,
+        },
+      },
+    })
+    render(<App />)
+
+    expect(screen.getByTestId('notification-banner-stale')).toBeInTheDocument()
+    expect(screen.queryByLabelText('Allow')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByLabelText('Dismiss'))
+    expect(markSessionNotificationRead).toHaveBeenCalledWith('n-1')
+    expect(dismissSessionNotification).not.toHaveBeenCalled()
+  })
 })

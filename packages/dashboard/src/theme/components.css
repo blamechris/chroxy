@@ -5115,6 +5115,26 @@ button.sidebar-token-view-session-row:hover {
   opacity: 0.85;
 }
 
+/* #7466 — a permission banner over a dead socket keeps its buttons (the request
+   is still live and becomes answerable on reconnect) but must not accept a
+   click. Mirrors the inline prompt's disabled Allow/Deny + perm-disconnected-hint
+   rather than inventing a second visual language for one condition. */
+.notification-banner-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.notification-banner-btn:disabled:hover {
+  opacity: 0.45;
+}
+
+.notification-banner-hint {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  flex-shrink: 0;
+  align-self: center;
+}
+
 /* #5510 (epic #5509): pairing-approval primitive — host approval banner. */
 .pair-requests {
   display: flex;

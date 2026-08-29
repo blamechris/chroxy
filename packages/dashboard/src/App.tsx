@@ -57,7 +57,7 @@ import { BillingWarningBanner } from './components/BillingWarningBanner'
 import { ConnectionAnnouncer } from './components/ConnectionAnnouncer'
 import { StdinDisabledBanner } from './components/StdinDisabledBanner'
 import { WelcomeScreen } from './components/WelcomeScreen'
-import { NotificationBanners, isPermissionNotificationActionable } from './components/NotificationBanners'
+import { NotificationBanners, permissionNotificationStatus } from './components/NotificationBanners'
 import { PendingPairRequests } from './components/PendingPairRequests'
 import { type ToastItem } from './components/Toast'
 import { FileBrowserPanel } from './components/FileBrowserPanel'
@@ -2049,19 +2049,26 @@ export function App() {
     return result
   }, [sendUserQuestionResponse])
 
-  // #7466 — the banner's staleness gate. `sessionStates` is the store's own
-  // record of every prompt, and `isLivePermissionPrompt` (inside the helper) is
-  // the SAME signal the tab badge and jump-to-pending already use, so this adds
-  // no second notion of "still pending". Read at render time: `sessionStates` is
-  // replaced on every WS event, so a prompt the server retires (#7335 stamps
-  // `expiresAt`) disarms its banner on the next event, and a prompt that simply
-  // times out disarms on the next render past its deadline — the same way the
-  // inline PermissionPrompt's own countdown retires its buttons. The CLICK-time
-  // re-check lives in NotificationBanners itself (it calls the predicate again
+  // #7466 — the banner's staleness + connectivity gate. `sessionStates` is the
+  // store's own record of every prompt, and `isLivePermissionPrompt` (inside the
+  // helper) is the SAME signal the tab badge and jump-to-pending already use, so
+  // this adds no second notion of "still pending". Read at render time:
+  // `sessionStates` is replaced on every WS event, so a prompt the server retires
+  // (#7335 stamps `expiresAt`) disarms its banner on the next event, and a prompt
+  // that simply times out disarms on the next render past its deadline — the same
+  // way the inline PermissionPrompt's own countdown retires its buttons. The
+  // CLICK-time re-check lives in NotificationBanners itself (it calls this again
   // inside onClick): one place to gate, and reachable from a component test.
-  const isPermissionActionable = useCallback(
-    (n: SessionNotification) => isPermissionNotificationActionable(n, sessionStates, Date.now()),
-    [sessionStates],
+  //
+  // `connectionPhase === 'connected'` is the third gate, matching
+  // PermissionPrompt's `connected` — without it the banner showed ENABLED
+  // Allow/Deny over a dead socket, and since the handlers below correctly refuse
+  // to dismiss when the send fails, that click produced no observable change at
+  // all.
+  const permissionStatus = useCallback(
+    (n: SessionNotification) =>
+      permissionNotificationStatus(n, sessionStates, Date.now(), connectionPhase === 'connected'),
+    [sessionStates, connectionPhase],
   )
 
   // #6222/#6224: respondToPermission (sendPermissionResponse) now marks the
@@ -2593,8 +2600,9 @@ export function App() {
             onApprove={handleBannerApprove}
             onDeny={handleBannerDeny}
             onDismiss={dismissSessionNotification}
+            onMarkRead={markSessionNotificationRead}
             onSwitchSession={handleSwitchSession}
-            isPermissionActionable={isPermissionActionable}
+            permissionStatus={permissionStatus}
           />
         )}
 
