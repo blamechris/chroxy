@@ -173,11 +173,21 @@ describe('CONFIG.md sub-key rosters vs config.js *_SUPPORTED_KEYS (#7449)', () =
     assert.equal(declared.size, 8, `expected exactly 8 *_SUPPORTED_KEYS declarations, got ${sorted(declared.keys()).join(', ')}`)
     assert.equal(docTable.size, 8, `expected exactly 8 Recognised sub-keys rows, got ${sorted(docTable.keys()).join(', ')}`)
     assert.equal(callSites.length, 7, `expected exactly 7 warnUnknownKeys call sites, got ${callSites.length}`)
-    // A floor, deliberately not an exact pin: the number of source files is not
-    // the subject and pinning it would misattribute unrelated refactors. But a
-    // sweep that stopped recursing would return a handful, and a walk over an
-    // empty set is how this whole family of guards dies.
-    assert.ok(srcFiles.length >= 100, `the src/ sweep found only ${srcFiles.length} files — it is not walking the tree`)
+    // Floor the NESTED files, not the total. A total floor reads like a guard
+    // against a sweep that stopped recursing and is inert against exactly that:
+    // src/ has 189 top-level .js files of 317, so deleting the recursive branch
+    // leaves 189 — over any plausible total floor, and green (#7510 review;
+    // measured: the >= 100 total floor fired at 60, never at 189). This is the
+    // comment-describes-a-stronger-check-than-the-code class in
+    // docs/false-safety-guards.md, inside the positive control meant to prevent
+    // it. A floor rather than an exact pin, deliberately: the file count is not
+    // the subject and pinning it would misattribute unrelated refactors.
+    const nestedFiles = srcFiles.filter(f => f.href.slice(SRC_ROOT.href.length).includes('/'))
+    assert.ok(
+      nestedFiles.length >= 50,
+      `the src/ sweep found only ${nestedFiles.length} files in SUBDIRECTORIES (${srcFiles.length} total) — ` +
+        'it is not recursing, so every roster below src/ is invisible to this gate'
+    )
     for (const [block, keys] of runtime) {
       assert.ok(keys.length > 0, `${block}'s exported set is empty — nothing would be compared`)
     }
