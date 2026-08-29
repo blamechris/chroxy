@@ -82,6 +82,30 @@ await test('an INVALID env override falls back to --min, not to the server defau
   // (13500) would fail it — so exit 0 pins the fallback target.
   eq(await run(['--min', '3', ...tap(5, 0)], { CHROXY_MIN_TEST_COUNT: 'abc' }), 0, 'exit')
 })
+// --- #7462: the four pre-existing exit paths, each mutation-demonstrated ----
+
+await test('a signal death fails even with a clean summary above the floor', async () => {
+  // Kill only after the summary write's flush callback: with piped stdout, a
+  // timed kill can lose the summary under load, and the mutant would then die
+  // via the missing-summary branch instead of the signal branch (Copilot
+  // review on #7476) — red for the wrong reason proves nothing.
+  eq(await run(['--min', '5', process.execPath, '-e',
+    "process.stdout.write('# tests 9\\n# fail 0\\n',()=>setTimeout(()=>process.kill(process.pid,'SIGKILL'),20))"]), 1, 'exit')
+})
+await test('a non-zero child exit is preserved even when the summary is clean', async () => {
+  // Same flush discipline: process.exit can truncate queued pipe writes.
+  eq(await run(['--min', '5', process.execPath, '-e',
+    "process.stdout.write('# tests 9\\n# fail 0\\n',()=>process.exit(3))"]), 3, 'exit')
+})
+await test('a spawn failure is exit 2 (the guard broke), not exit 1 (the code is dirty)', async () => {
+  eq(await run(['--min', '5', 'definitely-not-a-real-binary-xyz']), 2, 'exit')
+})
+await test('a PARTIAL TAP summary (tests line, no fail line) fails', async () => {
+  // The existing missing-summary case emits NEITHER line, so the floor branch
+  // catches its mutant anyway (#7462) — this one distinguishes the null-check.
+  eq(await run(['--min', '5', process.execPath, '-e', "console.log('# tests 5')"]), 1, 'exit')
+})
+
 await test('no command at all is a usage error', async () => {
   eq(await run(['--min', '5']), 2, 'exit')
 })
