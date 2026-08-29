@@ -60,13 +60,18 @@ Thanks for your interest in contributing! This document covers how to get starte
 `main` is protected. Every PR is expected to clear these gates before merging:
 
 - **Required status checks must be green.** These checks block the merge:
-  `Server Tests`, `Server Lint`, `Protocol Tests`, `Store Core Tests`,
-  `Store Core Type Check`, `Dashboard Tests`, `Dashboard Type Check`, `App Tests`,
-  `App Type Check`, `App Expo Doctor`, and `Desktop Rust Tests`. (Other CI jobs
-  run too — e.g. conditional Windows platform tests and scripts/hooks jobs — but
-  the list above is the set wired as required. The `Desktop (macOS)` /
-  `Desktop (Windows)` release builds run only on tag pushes and gate the release
-  pipeline, not PRs.)
+  `Server Tests`, `Server Lint`, `Server Windows Tests`, `Protocol Tests`,
+  `Store Core Tests`, `Store Core Type Check`, `Dashboard Tests`,
+  `Dashboard Type Check`, `Design Tokens Tests`, `App Tests`, `App Type Check`,
+  `App Expo Doctor`, and `Desktop Rust Tests`. (Other CI jobs run too — e.g.
+  scripts/hooks jobs — but the list above is the set wired as required. The
+  `Desktop (macOS)` / `Desktop (Windows)` release builds run only on tag pushes
+  and gate the release pipeline, not PRs.) Two guards hold this list honest:
+  `packages/server/tests/contributing-required-checks.test.js` proves every name
+  above is a real, unconditional ci.yml job, and
+  `scripts/check-required-contexts.sh` (local, needs repo-admin read) diffs it
+  against the LIVE branch-protection set — run it after changing either side; it
+  exits 2, never 0, when it cannot see the live settings.
 - **All review conversations must be resolved.** A PR with an open review thread
   cannot merge — resolve it (or have it resolved) first.
 - **A Copilot review** is requested automatically on the default branch (via a
