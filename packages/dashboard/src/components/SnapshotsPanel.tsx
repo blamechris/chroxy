@@ -17,7 +17,7 @@
  * `snapshotImage` through SessionManager / the WS protocol is a larger
  * surface than this panel can own on its own).
  */
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { getAuthToken } from '../utils/auth'
 
 export interface Snapshot {
@@ -170,8 +170,24 @@ export function SnapshotsPanel({ fetchImpl, getToken }: SnapshotsPanelProps = {}
 
   // Hoist for testability — production passes neither override and falls
   // back to the shared globals.
-  const resolvedFetch: typeof fetch =
-    fetchImpl ?? ((input: RequestInfo | URL, init?: RequestInit) => window.fetch(input, init))
+  // #7466 — `resolvedFetch` MUST be identity-stable across renders. It feeds
+  // `refresh`'s useCallback dep list, and `refresh` is the sole dep of the mount
+  // effect below. Computed inline, the `??` fallback allocated a fresh arrow on
+  // EVERY render, so the effect re-fired on every render and its own setState
+  // re-rendered — an unbounded fetch/render loop that flashed the panel header's
+  // Loading…/Refresh label. It only ever bit PRODUCTION, which renders this panel
+  // with no props (App.tsx); every existing test passed `fetchImpl`, which pinned
+  // the identity and hid the loop. See PanelRefreshLoop.test.tsx.
+  //
+  // `resolvedGetToken` deliberately gets NO memo: `getAuthToken` is a module
+  // import and the ternary's result changes exactly when the `getToken` prop
+  // does, so `useMemo(..., [getToken])` is a provable no-op — it was written,
+  // mutation-tested, survived its own mutant, and removed rather than shipped as
+  // a guard with no behaviour.
+  const resolvedFetch = useMemo<typeof fetch>(
+    () => fetchImpl ?? ((input: RequestInfo | URL, init?: RequestInit) => window.fetch(input, init)),
+    [fetchImpl],
+  )
   const resolvedGetToken = getToken ?? getAuthToken
 
   const refresh = useCallback(async () => {
