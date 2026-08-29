@@ -43,6 +43,18 @@ export function createEmptySessionState(): SessionState {
  * change.
  *
  * Inputs are treated as immutable — the source map is never mutated.
+ *
+ * Membership is an OWN-property test, deliberately not `in`. `in` walks the
+ * prototype chain, so `prune({ a: 1 }, ['toString'])` would find a "match",
+ * clone, and return a NEW object with identical contents — defeating the
+ * same-reference guarantee above. Unreachable with today's session ids
+ * (`[a-f0-9]{32}`), but this helper is generic and exported, and its contract
+ * is reference identity: `__proto__` / `constructor` / `hasOwnProperty` must
+ * not be able to break it (PR #7481 review N1).
+ *
+ * Spelled `Object.prototype.hasOwnProperty.call` rather than `Object.hasOwn`:
+ * the latter is ES2022 and this package's `lib` predates it, so it fails
+ * `tsc --noEmit`. Caught by running the typecheck for its bare exit code.
  */
 export function pruneSessionKeyedMap<T>(
   map: Record<string, T>,
@@ -50,7 +62,7 @@ export function pruneSessionKeyedMap<T>(
 ): Record<string, T> {
   let next: Record<string, T> | null = null;
   for (const id of removedIds) {
-    if (!(id in map)) continue;
+    if (!Object.prototype.hasOwnProperty.call(map, id)) continue;
     if (!next) next = { ...map };
     delete next[id];
   }
