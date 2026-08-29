@@ -365,7 +365,9 @@ describe('request_full_history handler', () => {
     ]
     ctx = createMockCtx(manager)
     client = { id: 'client-A', activeSessionId: 'sess-1' }
-    ws = {}
+    // OPEN socket: the replay loop refuses to write to a non-OPEN peer (#7460),
+    // exactly as replayHistory always has.
+    ws = { readyState: 1, bufferedAmount: 0 }
   })
 
   it('replays full history with start/end markers', async () => {

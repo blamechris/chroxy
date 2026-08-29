@@ -156,6 +156,125 @@ export function scheduleAfterDrain(ws, fn) {
   setTimeout(poll, BACKPRESSURE_POLL_INTERVAL_MS)
 }
 
+// #7460 — ONE implementation of the #4833 chunk-and-drain loop, shared by both
+// replay paths. `replayHistory` (connect / session-switch) and
+// `handleRequestFullHistory` ("Sync Full History", conversation-handlers.js)
+// were divergent copies, and the second had no bufferedAmount check at all: it
+// pushed the entire history onto the socket in one turn of the event loop and
+// could sail past the 1MB EVICT_THRESHOLD in ws-client-sender.js, which CLOSES
+// the client. A second copy of this loop is how that divergence started, so the
+// two REPLAY paths now share exactly one.
+//
+// Not the only instance in this file, and the comment should not pretend
+// otherwise: `flushPostAuthQueue` below still carries its own copy of the same
+// chunk-and-drain shape, kept separate here because it also owns the
+// `_flushing` / `_flushOverflow` queue state. Folding it in is tracked as #7485.
+const REPLAY_CHUNK_SIZE = 20
+
+/**
+ * Send `entries` to `ws` in REPLAY_CHUNK_SIZE batches, yielding the event loop
+ * between chunks and pausing whenever `ws.bufferedAmount` climbs past
+ * BACKPRESSURE_PAUSE_THRESHOLD (#4833). Three gates, of which TWO carry
+ * behaviour on their own:
+ *
+ *  - chunk ENTRY (load-bearing) — the first chunk can land on a socket that is
+ *    already congested from a preceding burst (post-auth info,
+ *    session_switched), so it is deferred before anything is written. The
+ *    mid-chunk break only fires *after* a send, so without this gate one fat
+ *    payload still lands on a near-eviction buffer.
+ *  - MID-chunk (load-bearing) — REPLAY_CHUNK_SIZE was sized for short messages;
+ *    two 200KB tool_results blow past the threshold inside a single chunk, so
+ *    the loop breaks out and resumes from the next UNSENT entry.
+ *  - chunk SCHEDULING — pauses before queueing the next chunk. Retained as the
+ *    inherited #4833 shape, but it is NOT independently load-bearing: replacing
+ *    it with a bare `setImmediate` is an equivalent mutation, because the next
+ *    `sendChunk` re-checks the chunk-ENTRY gate and enters the same drain wait
+ *    (with the same #5328 max-wait cap) one tick later. Established by mutation
+ *    testing and a 48-scenario differential during review of PR #7479; do not
+ *    read this line as a third independent guard.
+ *
+ * `emit(entry, index)` writes one entry; `onDone()` runs once every entry has
+ * been written. Neither runs after `ws.readyState` leaves OPEN — a client that
+ * disconnects mid-replay gets no further frames and no end marker, which is
+ * the behaviour both callers already relied on.
+ *
+ * @param {WebSocket} ws - The client socket.
+ * @param {Array} entries - The full slice to deliver.
+ * @param {{startOffset?: number, emit: (entry: any, index: number) => void, onDone: () => void}} opts
+ */
+export function sendChunkedWithBackpressure(ws, entries, { startOffset = 0, emit, onDone }) {
+  const sendChunk = (offset) => {
+    if (ws.readyState !== 1) return
+    if ((ws.bufferedAmount || 0) > BACKPRESSURE_PAUSE_THRESHOLD) {
+      scheduleAfterDrain(ws, () => sendChunk(offset))
+      return
+    }
+    const end = Math.min(offset + REPLAY_CHUNK_SIZE, entries.length)
+    let nextOffset = end
+    for (let i = offset; i < end; i++) {
+      emit(entries[i], i)
+      if (i + 1 < end && (ws.bufferedAmount || 0) > BACKPRESSURE_PAUSE_THRESHOLD) {
+        nextOffset = i + 1
+        break
+      }
+    }
+    if (nextOffset < entries.length) {
+      scheduleAfterDrain(ws, () => sendChunk(nextOffset))
+    } else {
+      onDone()
+    }
+  }
+  // Both entry paths are gated on OPEN, not just the chunking one. `sendChunk`
+  // re-checks readyState itself (it is also the resume point for every
+  // scheduled continuation), but the EMPTY-slice path below reaches `onDone`
+  // without going through it — so without this check a client that vanished
+  // before an already-current replay still had its `history_replay_end` and
+  // re-seed burst written at a dead socket, contradicting the contract stated
+  // above. That is the comment-stronger-than-code class
+  // (docs/false-safety-guards.md), and it hid in the path taken MOST often:
+  // the already-current reconnect (Copilot review, PR #7479).
+  if (ws.readyState !== 1) return
+  // An already-current client (startOffset === entries.length) still gets
+  // `onDone` — the empty-slice path, and the most common replay of all.
+  if (startOffset >= entries.length) onDone()
+  else sendChunk(startOffset)
+}
+
+/**
+ * Write ONE history entry to a client, the way BOTH replay paths must.
+ *
+ * Two things happen per entry, and both were forgotten by the second copy of
+ * this loop — which is the whole reason this is a function (#7454, #7459):
+ *
+ *  1. #5555.3 — surface the server-internal `_seq` as `historySeq` (and strip
+ *     the underscore-prefixed internal field) so the client can advance its
+ *     per-session cursor as it applies each entry. #7420's live-vs-replayed
+ *     discriminator keys on that field's PRESENCE, so a missing stamp reads as
+ *     a live racer — and a fabricated one is just as wrong.
+ *  2. #4628 — mirror the live `result` → `agent_idle` fan-out from
+ *     event-normalizer.js. The dashboard's handler dispatch table has no
+ *     `result` entry, only `agent_idle`, and both clients' `case 'result'` is
+ *     replay-gated (#4466) precisely so a replayed result cannot wipe the
+ *     activeTools that `history_replay_start` is preserving. That leaves
+ *     `agent_idle` — which is NOT replay-gated — as the only frame that clears
+ *     a zombie "Running X" chip left by an orphan tool_start (a dropped
+ *     PostToolUse hook, the #4628 root cause). The companion `_emitResult`
+ *     sweep in BaseSession stops new orphans being persisted; this heals the
+ *     sessions already wedged, on every replay path a user can reach.
+ *
+ * @param {(ws: WebSocket, payload: object) => void} send
+ * @param {WebSocket} ws
+ * @param {string} sessionId
+ * @param {object} entry - A ring-buffer entry, possibly carrying `_seq`.
+ */
+export function sendHistoryEntry(send, ws, sessionId, entry) {
+  const { _seq, ...wireEntry } = entry
+  send(ws, { ...wireEntry, sessionId, ...(typeof _seq === 'number' ? { historySeq: _seq } : {}) })
+  if (entry && entry.type === 'result') {
+    send(ws, { type: 'agent_idle', sessionId })
+  }
+}
+
 /**
  * Send all post-authentication info to a newly authenticated client.
  * This includes auth_ok, server mode, session list, model/permission state,
@@ -1241,78 +1360,22 @@ export function replayHistory(ctx, ws, sessionId, opts = {}) {
     reseedActiveAgents(ctx, ws, sessionId)
   }
 
-  const CHUNK_SIZE = 20
-  const sendChunk = (offset) => {
-    if (ws.readyState !== 1) return
-    // #4833 follow-up: gate chunk *entry* on bufferedAmount too, not just
-    // chunk *scheduling*. The recursive setImmediate-via-scheduleAfterDrain
-    // path is already gated, but the very first sendChunk(0) call can land
-    // on a socket that's already congested from the preceding
-    // sendPostAuthInfo / session_switched burst. Without this check, the
-    // first history entry would be sent unconditionally and the mid-chunk
-    // break (which only fires *after* a send) wouldn't trip until i=1 —
-    // meaning we still push one fat tool_result onto an already-congested
-    // socket and can trip the 1MB EVICT_THRESHOLD.
-    if ((ws.bufferedAmount || 0) > BACKPRESSURE_PAUSE_THRESHOLD) {
-      scheduleAfterDrain(ws, () => sendChunk(offset))
-      return
-    }
-    const end = Math.min(offset + CHUNK_SIZE, history.length)
-    let nextOffset = end
-    for (let i = offset; i < end; i++) {
-      const entry = history[i]
-      // #5555.3 — surface the server-internal `_seq` to the client as
-      // `historySeq` (and strip the underscore-prefixed internal field) so the
-      // client can advance its per-session cursor as it applies each entry.
-      const { _seq, ...wireEntry } = entry
-      send(ws, { ...wireEntry, sessionId, ...(typeof _seq === 'number' ? { historySeq: _seq } : {}) })
-      // #4628: mirror the live `result → agent_idle` fan-out from
-      // event-normalizer.js. The dashboard's handler dispatch table has
-      // no `result` entry — only `agent_idle` — so a raw `result` in
-      // history-replay is silently dropped, and `handleAgentIdle`
-      // (which clears activeTools as the #4308 safety net) never fires.
-      // Without this, a session that completed cleanly but had an
-      // orphan tool_start in history (e.g. dropped PostToolUse hook,
-      // #4628 root cause) shows a zombie "Running X" chip every time
-      // the dashboard reconnects, until the next chroxy restart. The
-      // companion `_emitResult` sweep in BaseSession prevents new
-      // orphans from being persisted; this heals the existing wedged
-      // sessions on reconnect without requiring a restart.
-      if (entry && entry.type === 'result') {
-        send(ws, { type: 'agent_idle', sessionId })
-      }
-      // #4833: break out of the chunk early if bufferedAmount already
-      // crossed the pause threshold mid-burst. The CHUNK_SIZE=20 cap was
-      // designed for short messages; a session with fat tool_result
-      // payloads (200KB+) can blow past the 1MB EVICT_THRESHOLD inside
-      // a single chunk, before the post-chunk scheduleAfterDrain ever
-      // gets to inspect bufferedAmount. Pause + resume from the next
-      // unsent entry instead.
-      if (i + 1 < end && (ws.bufferedAmount || 0) > BACKPRESSURE_PAUSE_THRESHOLD) {
-        nextOffset = i + 1
-        break
-      }
-    }
-    if (nextOffset < history.length) {
-      // #4833: pause if the socket is already congested before scheduling
-      // the next chunk. Without this, every setImmediate fires another
-      // burst regardless of buffer pressure, blowing past the 1MB
-      // EVICT_THRESHOLD in ws-client-sender.js on sessions with fat
-      // tool_result payloads.
-      scheduleAfterDrain(ws, () => sendChunk(nextOffset))
-    } else {
-      finishReplay()
-    }
-  }
   // #5555.3 — start at the resolved offset: 0 for a full replay, the
   // first-newer-than-cursor index for a delta replay. When the client is
-  // already current (startOffset === history.length) this immediately falls
-  // through to the empty-slice path and emits start+end with nothing between.
-  if (startOffset >= history.length) {
-    finishReplay()
-  } else {
-    sendChunk(startOffset)
-  }
+  // already current (startOffset === history.length) sendChunkedWithBackpressure
+  // falls straight through to the empty-slice path and emits start+end with
+  // nothing between.
+  //
+  // #7460 — the chunk-and-drain machinery and the per-entry wire mapping both
+  // live in ONE place now (above), because `handleRequestFullHistory` is the
+  // second caller of exactly this loop and every hand-copied piece of it has
+  // drifted: the `_seq` map (#7454), the `result` → `agent_idle` synthesis
+  // (#7459), and the bufferedAmount gating (#7460) were each missing there.
+  sendChunkedWithBackpressure(ws, history, {
+    startOffset,
+    emit: (entry) => sendHistoryEntry(send, ws, sessionId, entry),
+    onDone: finishReplay,
+  })
 }
 
 /**

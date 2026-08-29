@@ -12,6 +12,7 @@ import {
   resolveReplayPlan,
   flushPostAuthQueue,
   scheduleAfterDrain,
+  sendChunkedWithBackpressure,
   scheduleProviderModelsRefresh,
   _reserveEagerDerivationSlot,
   _resetEagerDerivationBudgetForTests,
@@ -3500,5 +3501,81 @@ describe('scheduleProviderModelsRefresh (#5421 / #5450)', () => {
     const totalPushes = ctx._sends.filter(m => m.type === 'available_models').length
     assert.equal(totalPushes, syncPushes + 1,
       'exactly one async re-push on top of the single synchronous snapshot')
+  })
+})
+
+
+// Copilot review of PR #7479 — the empty-slice path called onDone()
+// unconditionally while the function's own contract says neither emit nor
+// onDone runs once the socket leaves OPEN. That is the
+// comment-stronger-than-code class (docs/false-safety-guards.md): the
+// non-empty path is gated by sendChunk's readyState check, the empty one was
+// not, so a client that vanished before an already-current replay still got a
+// history_replay_end and a re-seed burst written at it.
+describe('sendChunkedWithBackpressure — the OPEN gate covers the empty-slice path too', () => {
+  function ws(readyState) { return { readyState, bufferedAmount: 0 } }
+
+  it('does NOT run onDone for an empty slice when the socket is CLOSED', () => {
+    const calls = []
+    sendChunkedWithBackpressure(ws(3), [], {
+      emit: () => calls.push('emit'),
+      onDone: () => calls.push('onDone'),
+    })
+    assert.deepEqual(calls, [],
+      'the contract says neither emit nor onDone runs after readyState leaves OPEN — the empty slice is not an exception')
+  })
+
+  it('does NOT run onDone for an already-current slice (startOffset === length) when CLOSED', () => {
+    // The real empty-slice shape: a non-empty history the client is already
+    // current with. This is the most common replay of all, so an ungated
+    // onDone here is the most frequently reached instance of the bug.
+    const calls = []
+    sendChunkedWithBackpressure(ws(3), [{ type: 'response' }, { type: 'result' }], {
+      startOffset: 2,
+      emit: () => calls.push('emit'),
+      onDone: () => calls.push('onDone'),
+    })
+    assert.deepEqual(calls, [], 'an already-current cursor against a dead socket must send nothing')
+  })
+
+  it('POSITIVE CONTROL: an empty slice on an OPEN socket still runs onDone', () => {
+    // The empty-slice path must keep working — an already-current reconnect
+    // still needs its history_replay_end and re-seed. Gating must not become
+    // "never fires".
+    const calls = []
+    sendChunkedWithBackpressure(ws(1), [], {
+      emit: () => calls.push('emit'),
+      onDone: () => calls.push('onDone'),
+    })
+    assert.deepEqual(calls, ['onDone'],
+      'start+end with nothing between is the whole point of the empty-slice path')
+  })
+
+  it('POSITIVE CONTROL: an already-current slice on an OPEN socket still runs onDone', () => {
+    const calls = []
+    sendChunkedWithBackpressure(ws(1), [{ type: 'response' }], {
+      startOffset: 1,
+      emit: () => calls.push('emit'),
+      onDone: () => calls.push('onDone'),
+    })
+    assert.deepEqual(calls, ['onDone'])
+  })
+
+  it('matches the NON-empty path, which has always been gated', () => {
+    // Equivalence is the actual claim: both entry paths must treat a dead
+    // socket identically. Same fixture, one entry to send instead of none.
+    const closed = []
+    sendChunkedWithBackpressure(ws(3), [{ type: 'response' }], {
+      emit: () => closed.push('emit'),
+      onDone: () => closed.push('onDone'),
+    })
+    assert.deepEqual(closed, [], 'non-empty + closed sends nothing (pre-existing behaviour)')
+
+    const empty = []
+    sendChunkedWithBackpressure(ws(3), [], {
+      emit: () => empty.push('emit'),
+      onDone: () => empty.push('onDone'),
+    })
+    assert.deepEqual(empty, closed, 'and the empty slice must behave the same way')
   })
 })
