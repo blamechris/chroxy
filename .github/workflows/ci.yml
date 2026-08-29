@@ -12,22 +12,42 @@ on:
 # is therefore never cancelled OR queued behind another main run (each validates
 # a distinct merged commit and must complete).
 #
-# LONG-JOB PINNING (#7471): the three longest Linux jobs — Server Tests,
-# Dashboard Tests, Scripts Tests — run on `runner-target.outputs.longrunner`
-# instead of `outputs.runner`. The two ARM64 Docker pool members on the Mac
-# service-cancel long jobs right around their healthy completion mark (~10 min;
-# 6+ carcasses over 2026-08-28/29, every one green on rerun once it landed on
-# the winbox VM — evidence tabulated on #7471). `longrunner` selects the same
-# self-hosted Linux pool NARROWED by the `X64` label, which today uniquely
-# matches `chroxy-linux-winbox-01`. X64 is used as the discriminator — rather
-# than a hand-added custom label — because the arch label is re-asserted by the
-# runner itself on every registration; a custom label added via the API is
-# silently lost on re-registration, and these jobs would then queue forever.
-# The label IS a proxy: the real invariant is "off the Mac-Docker pair". If a
-# healthy x86_64 container ever joins the Mac pool, or the winbox VM is
-# replaced by an ARM box, revisit. UNPIN when #7471's root cause (broker-side
-# cancels on the ARM64 containers) is fixed: point the three jobs back at
-# `outputs.runner` and drop this note + the longrunner output + its pin test
+# LONG-JOB PINNING (#7471): Server Tests, Dashboard Tests and Scripts Tests
+# run on `runner-target.outputs.longrunner` instead of `outputs.runner`. Jobs
+# on the two ARM64 Docker pool members on the Mac intermittently take 2-4x
+# their normal wall clock and are then killed at their own `timeout-minutes`
+# (enforcement arrives at the runner as a service-side channel cancel).
+# Because Server and Dashboard Tests both sat at 10 minutes, the kills read as
+# a fixed "~10-minute cancel" — but 5-minute jobs on the same containers die
+# at ~5 minutes; see the 543-record per-job classification on #7471/#7491.
+# Every carcass re-ran green once it landed on the winbox VM, which shows ZERO
+# over-timeout cancels across the same records. The three pinned jobs are the
+# HIGHEST-FREQUENCY carcasses, not the whole class — App Tests, Store Core
+# Type Check, Claude Hooks Tests and Design Tokens Tests have isolated kills
+# too and deliberately stay on the mixed pool (#7491): a carcass there is
+# still this failure class, whatever the job's duration.
+#
+# `longrunner` selects the same self-hosted Linux pool NARROWED by the `X64`
+# label, which today uniquely matches `chroxy-linux-winbox-01`. X64 is the
+# discriminator — rather than a hand-added custom label — because the arch
+# label is re-asserted by the runner itself on every registration; a custom
+# label added via the API is silently lost on re-registration, and these jobs
+# would then queue forever. The label IS a proxy: the real invariant is "off
+# the Mac-Docker pair". If a healthy x86_64 container ever joins the Mac pool,
+# or the winbox VM is replaced by an ARM box, revisit.
+#
+# Two accepted costs, stated so they read as predicted rather than as new
+# mysteries: (1) if winbox-01 is OFFLINE these three jobs QUEUE (GitHub holds
+# an unpicked job 24h) and the merge gate stops rather than degrades — the
+# deliberate trade against the ARM pair's kill rate, with the unpin recipe
+# below as the remedy; (2) the pin serializes ~15 min of work onto the box
+# vite.config.ts already documents as contention-prone (#7300 — it shares
+# hardware with chroxy-win-01), so a rise in vitest-timeout flakes there is a
+# predicted consequence and an argument for unpinning, not a new mystery.
+#
+# UNPIN when #7471's root cause (why the ARM64 containers wedge) is fixed:
+# point the three jobs back at `outputs.runner` and drop this note + the
+# longrunner output + its pin test
 # (packages/server/tests/ci-long-job-runner-pinning.test.js).
 concurrency:
   group: ci-${{ github.head_ref || github.run_id }}
@@ -56,7 +76,7 @@ permissions:
 # `runner-target` and every consumer follows. The cost is one extra
 # job-scheduling hop and a `needs:` edge per consumer.
 #
-# A THIRD output, `npmcache`, rides the same predicate and feeds setup-node's
+# A FOURTH output, `npmcache`, rides the same predicate and feeds setup-node's
 # `cache:` input: empty on the self-hosted pool (whose ~/.npm is already warm and
 # persistent), `npm` on GitHub-hosted fork-PR runners (whose VM is fresh). See the
 # long comment on the `resolve` step for the measurements behind it (#7383). Every
