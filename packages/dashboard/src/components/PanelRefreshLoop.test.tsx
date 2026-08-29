@@ -169,4 +169,41 @@ describe('#7466 — panels rendered the way production renders them do not refet
       restore()
     }
   })
+
+  it('a CHANGING fetchImpl prop re-arms exactly once — the resolver tracks the prop', async () => {
+    // The mirror of the getToken control above, and the input that was missing:
+    // nothing proved `resolvedFetch` tracks a changing `fetchImpl`. While the
+    // fallback was a `useMemo`, mutating its dep list from `[fetchImpl]` to `[]`
+    // left the whole suite green at 17 passed / exit 0. The module-level constant
+    // makes that mutant unwritable, but "unwritable" is not "unnecessary" — this
+    // pins the behaviour the dep list was supposed to defend, so a future edit
+    // that reintroduces a wrapper cannot silently drop it.
+    const { restore } = installFetchSpy({ devices: [] })
+    try {
+      const calls: number[] = []
+      const makeFetch = (n: number) =>
+        (async () => {
+          calls.push(n)
+          return new Response(JSON.stringify({ devices: [] }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        }) as unknown as typeof fetch
+
+      render(<Bumper>{(n) => <PairedDevicesPanel fetchImpl={makeFetch(n)} />}</Bumper>)
+      await settle()
+      expect(calls).toEqual([0])
+
+      fireEvent.click(document.querySelector('[data-testid="bump"]')!)
+      await settle()
+      // Tracked the new prop (n=1 fetched, not n=0 again) and stopped there.
+      expect(calls).toEqual([0, 1])
+
+      fireEvent.click(document.querySelector('[data-testid="bump"]')!)
+      await settle()
+      expect(calls).toEqual([0, 1, 2])
+    } finally {
+      restore()
+    }
+  })
 })
