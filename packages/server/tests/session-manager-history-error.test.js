@@ -56,7 +56,11 @@ describe('getFullHistoryAsync error handling', () => {
     // Before the fix, this rejects with TypeError: Cannot read properties of null
     // After the fix, it should catch and fall back to the ring buffer
     const result = await mgr.getFullHistoryAsync('s1')
-    assert.deepStrictEqual(result, [ringEntry])
+    assert.deepStrictEqual(result.entries, [ringEntry])
+    // #7484 — and it must SAY so: a caller that cannot tell a failed transcript
+    // read from a successful one reports the wrong collection's truncation and
+    // heals the wrong chip.
+    assert.equal(result.source, 'ring')
   })
 
   it('falls back to ring buffer when JSONL read returns empty', async () => {
@@ -68,12 +72,15 @@ describe('getFullHistoryAsync error handling', () => {
     mgr._messageHistory.set('s1', [ringEntry])
 
     const result = await mgr.getFullHistoryAsync('s1')
-    assert.deepStrictEqual(result, [ringEntry])
+    assert.deepStrictEqual(result.entries, [ringEntry])
+    assert.equal(result.source, 'ring')
   })
 
   it('returns empty array for unknown session', async () => {
     const result = await mgr.getFullHistoryAsync('nonexistent')
-    assert.deepStrictEqual(result, [])
+    assert.deepStrictEqual(result.entries, [])
+    assert.equal(result.source, 'ring', 'no transcript was consulted, so the label must not claim one was')
+    assert.equal(result.truncated, false)
   })
 
   it('returns ring buffer when no conversationId exists', async () => {
@@ -84,6 +91,7 @@ describe('getFullHistoryAsync error handling', () => {
     mgr._messageHistory.set('s1', [ringEntry])
 
     const result = await mgr.getFullHistoryAsync('s1')
-    assert.deepStrictEqual(result, [ringEntry])
+    assert.deepStrictEqual(result.entries, [ringEntry])
+    assert.equal(result.source, 'ring')
   })
 })

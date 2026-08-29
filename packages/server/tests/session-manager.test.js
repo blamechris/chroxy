@@ -2682,7 +2682,8 @@ describe('SessionManager._destroying filter (#2728)', () => {
     mgr._sessions.set('s1', { session, name: 'S1', cwd: '/tmp', createdAt: 1, _destroying: true })
 
     const history = await mgr.getFullHistoryAsync('s1')
-    assert.deepEqual(history, [])
+    assert.deepEqual(history.entries, [])
+    assert.equal(history.source, 'ring', '#7484 — no transcript was read, so the descriptor must not claim one')
   })
 })
 
