@@ -31,3 +31,28 @@ export function createEmptySessionState(): SessionState {
     pendingEvaluatorClarify: null,
   };
 }
+
+/**
+ * #7470 — drop every id in `removedIds` from a session-keyed map, returning a
+ * NEW object only when something was actually removed.
+ *
+ * The same-reference return on a no-op is load-bearing, not an optimisation
+ * detail: these maps are read through `useShallow` selectors, and rebuilding
+ * them on every `session_list` snapshot (one per session lifecycle event, plus
+ * every reconnect) would re-render each consumer for a value that did not
+ * change.
+ *
+ * Inputs are treated as immutable — the source map is never mutated.
+ */
+export function pruneSessionKeyedMap<T>(
+  map: Record<string, T>,
+  removedIds: readonly string[],
+): Record<string, T> {
+  let next: Record<string, T> | null = null;
+  for (const id of removedIds) {
+    if (!(id in map)) continue;
+    if (!next) next = { ...map };
+    delete next[id];
+  }
+  return next ?? map;
+}

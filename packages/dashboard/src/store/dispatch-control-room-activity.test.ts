@@ -79,6 +79,15 @@ function baseState(): Partial<ConnectionState> {
     sessionStates: { [SESSION_ID]: createEmptySessionState() },
     activity: createEmptyActivityState(),
     messages: [],
+    // #7470 — the `session_list` removedIds block now prunes the per-session
+    // PR/CI maps alongside the activity tree. They are non-optional on
+    // `ConnectionState` and always `{}` in the real store, so a partial mock
+    // that omits them is a fixture gap, not a production shape.
+    sessionPrStatus: {},
+    sessionPrStatusLoading: {},
+    sessionPrStatusRequestedAt: {},
+    sessionPrThreads: {},
+    sessionPrThreadsLoading: {},
   }
 }
 

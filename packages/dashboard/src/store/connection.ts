@@ -3247,6 +3247,19 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // #5163: drop the Control Room tree on disconnect/forget — a fresh
       // connection re-seeds it from activity_snapshot on subscribe.
       activity: createEmptyActivityState(),
+      // #7470 forget-reset-start — the per-session PR/CI maps go with the
+      // session state they describe. They are keyed by SESSION ID, and session
+      // ids are minted per daemon, so an entry that outlived its server can be
+      // read against a DIFFERENT server's session of the same id — one
+      // machine's CI state rendered on another machine's chip. That is a wrong
+      // answer, not just retained memory, which is why these are cleared here
+      // and not only pruned on the session_list removal path (message-handler.ts).
+      sessionPrStatus: {},
+      sessionPrStatusLoading: {},
+      sessionPrStatusRequestedAt: {},
+      sessionPrThreads: {},
+      sessionPrThreadsLoading: {},
+      // #7470 forget-reset-end
       cancellingActivityIds: new Set<string>(),
       // #5500: drop reindex pending/result state with the rest of the
       // connection-scoped Control Room state.
@@ -3302,6 +3315,17 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // #5163: drop the Control Room tree on disconnect/forget — a fresh
       // connection re-seeds it from activity_snapshot on subscribe.
       activity: createEmptyActivityState(),
+      // #7470 switch-reset-start — same reasoning as forgetSession above, and
+      // this is the path where the cross-server read is REACHABLE rather than
+      // theoretical: switchServer keeps the old server's persisted data on
+      // purpose, so without this the new server's session ids can collide with
+      // the old server's PR/CI entries.
+      sessionPrStatus: {},
+      sessionPrStatusLoading: {},
+      sessionPrStatusRequestedAt: {},
+      sessionPrThreads: {},
+      sessionPrThreadsLoading: {},
+      // #7470 switch-reset-end
       cancellingActivityIds: new Set<string>(),
       // #5500: drop reindex pending/result state with the rest of the
       // connection-scoped Control Room state.

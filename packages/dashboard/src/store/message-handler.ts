@@ -196,7 +196,7 @@ import type {
   MCPResourceItem,
   McpServerOpResult,
 } from './types';
-import { createEmptySessionState } from './utils';
+import { createEmptySessionState, pruneSessionKeyedMap } from './utils';
 import { clearPersistedSession } from './persistence';
 
 // ---------------------------------------------------------------------------
@@ -4716,6 +4716,36 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           nextActivity = clearSessionActivity(nextActivity, id);
         }
         if (nextActivity !== get().activity) patch.activity = nextActivity;
+        // #7470 prune-block-start — the per-session PR/CI maps.
+        //
+        // Five maps, all keyed by session id, and until now nothing removed an
+        // entry when the session it describes went away: connection.ts's #6153
+        // sweep resets the LOADING-shaped ones on a socket drop, but that is a
+        // reconnect reset for a stranded control, not a lifecycle prune. A
+        // long-lived tab therefore accumulated one full PR/CI snapshot per
+        // session it had ever surveyed, for the life of the connection.
+        //
+        // Pruned HERE, beside `sessionStates` and `activity` above, because
+        // this removedIds block is the store's one session-went-away path —
+        // `destroySession` only puts a frame on the wire; the server's next
+        // `session_list` is what tells this tab the session is gone.
+        //
+        // Each map is assigned EXPLICITLY rather than looped over a list of
+        // field names: a name list is the same hardcoded roster with the
+        // compiler switched off, and a dropped entry in one reads as a missing
+        // string instead of a missing statement. The roster is held honest by
+        // `session-destroy-prunes-pr-maps.test.ts`, which extracts the family
+        // from types.ts and asserts each member appears between these markers.
+        //
+        // `pruneSessionKeyedMap` returns the SAME reference when the map held
+        // none of the removed ids, so this cannot churn `useShallow` consumers
+        // on a snapshot that only removed a session they don't track.
+        patch.sessionPrStatus = pruneSessionKeyedMap(get().sessionPrStatus, removedIds);
+        patch.sessionPrStatusLoading = pruneSessionKeyedMap(get().sessionPrStatusLoading, removedIds);
+        patch.sessionPrStatusRequestedAt = pruneSessionKeyedMap(get().sessionPrStatusRequestedAt, removedIds);
+        patch.sessionPrThreads = pruneSessionKeyedMap(get().sessionPrThreads, removedIds);
+        patch.sessionPrThreadsLoading = pruneSessionKeyedMap(get().sessionPrThreadsLoading, removedIds);
+        // #7470 prune-block-end
         // If the active session was removed, switch to next available
         if (initialActiveId && removedIds.includes(initialActiveId)) {
           const remaining = Object.keys(newStates);
