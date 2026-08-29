@@ -10,7 +10,10 @@ import {
   getJsonlMtime,
   readConversationHistory,
   readConversationHistoryAsync,
+  readConversationHistoryWithMeta,
+  readConversationHistoryWithMetaAsync,
   MAX_TRANSCRIPT_BYTES,
+  MAX_MESSAGES,
 } from '../src/jsonl-reader.js'
 
 describe('encodeProjectPath', () => {
@@ -629,6 +632,149 @@ describe('transcript byte ceiling', () => {
       const result = await readConversationHistoryAsync(filePath, 10 * 1024 * 1024)
       assert.equal(result.length, 5)
       assert.equal(result[0].content, 'message-0')
+    } finally {
+      teardown()
+    }
+  })
+})
+
+/**
+ * #7484 — the transcript read has TWO of its own truncations, and a caller
+ * holding only the returned array can infer neither: 500 messages back is
+ * equally the shape of a 500-message transcript that lost nothing, and a tail
+ * read looks exactly like a short file. `request_full_history` puts `truncated`
+ * on the wire for this slice, so the reader has to say.
+ */
+describe('#7484 — readConversationHistoryWithMeta reports the slice\'s own truncation', () => {
+  let tempDir
+
+  function writeJsonl(filename, entries) {
+    const filePath = join(tempDir, filename)
+    writeFileSync(filePath, entries.map(e => JSON.stringify(e)).join('\n'))
+    return filePath
+  }
+
+  function setup() {
+    tempDir = mkdtempSync(join(tmpdir(), 'chroxy-jsonl-meta-'))
+  }
+
+  function teardown() {
+    rmSync(tempDir, { recursive: true, force: true })
+  }
+
+  // A FIXED timestamp, not the parser's `Date.now()` fallback: two reads of the
+  // same file must be comparable entry-for-entry.
+  function userEntries(n) {
+    return Array.from({ length: n }, (_, i) => ({
+      type: 'user',
+      uuid: `u-${i}`,
+      timestamp: '2026-01-15T00:00:00.000Z',
+      message: { content: [{ type: 'text', text: `message ${i}` }] },
+    }))
+  }
+
+  it('exports the message cap rather than leaving callers to re-derive it', () => {
+    assert.equal(MAX_MESSAGES, 500)
+  })
+
+  it('flags truncated when the MAX_MESSAGES cap drops the head of the transcript', () => {
+    setup()
+    try {
+      const filePath = writeJsonl('over-cap.jsonl', userEntries(MAX_MESSAGES + 100))
+      const { messages, truncated } = readConversationHistoryWithMeta(filePath)
+      assert.equal(messages.length, MAX_MESSAGES)
+      assert.equal(truncated, true, 'the 100 dropped messages are exactly what `truncated` exists to announce')
+      assert.equal(messages[0].content, 'message 100', 'and the retained slice is the most recent')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('POSITIVE CONTROL: a transcript EXACTLY at the cap lost nothing and is not flagged', () => {
+    // The boundary is the whole point: `messages.length === 500` cannot be the
+    // signal, because a complete 500-message transcript looks identical.
+    setup()
+    try {
+      const filePath = writeJsonl('at-cap.jsonl', userEntries(MAX_MESSAGES))
+      const { messages, truncated } = readConversationHistoryWithMeta(filePath)
+      assert.equal(messages.length, MAX_MESSAGES)
+      assert.equal(truncated, false)
+      assert.equal(messages[0].content, 'message 0', 'nothing was dropped from the head')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('POSITIVE CONTROL: a short transcript is not flagged', () => {
+    setup()
+    try {
+      const filePath = writeJsonl('small.jsonl', userEntries(3))
+      assert.deepEqual(
+        readConversationHistoryWithMeta(filePath).truncated,
+        false,
+      )
+    } finally {
+      teardown()
+    }
+  })
+
+  it('flags truncated when the BYTE ceiling forces a tail read', () => {
+    // The other truncation, and the one no message count can reveal.
+    setup()
+    try {
+      const filePath = writeJsonl('big.jsonl', userEntries(50))
+      const { messages, truncated } = readConversationHistoryWithMeta(filePath, 200)
+      assert.ok(messages.length > 0 && messages.length < 50, 'a tail window, not the whole file')
+      assert.equal(truncated, true, 'the head of the file was dropped before parsing ever started')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('an unreadable transcript is EMPTY, not truncated', () => {
+    // Nothing was dropped from a slice that does not exist. Flagging it would
+    // put a permanent "history incomplete" banner on every session without a
+    // transcript — the majority of them.
+    const meta = readConversationHistoryWithMeta('/nonexistent/path/file.jsonl')
+    assert.deepEqual(meta, { messages: [], truncated: false })
+  })
+
+  it('the async reader reports the same metadata as the sync one', async () => {
+    setup()
+    try {
+      const over = writeJsonl('async-over.jsonl', userEntries(MAX_MESSAGES + 1))
+      const under = writeJsonl('async-under.jsonl', userEntries(2))
+      const overMeta = await readConversationHistoryWithMetaAsync(over)
+      const underMeta = await readConversationHistoryWithMetaAsync(under)
+      assert.equal(overMeta.truncated, true)
+      assert.equal(overMeta.messages.length, MAX_MESSAGES)
+      assert.equal(underMeta.truncated, false)
+      assert.deepEqual(
+        await readConversationHistoryWithMetaAsync('/nonexistent/path/file.jsonl'),
+        { messages: [], truncated: false },
+      )
+    } finally {
+      teardown()
+    }
+  })
+
+  it('the array-returning readers still return exactly the same messages', async () => {
+    // Their contract is unchanged — they delegate. A caller that only wants the
+    // messages must not have to learn a new shape.
+    setup()
+    try {
+      const filePath = writeJsonl('parity.jsonl', userEntries(MAX_MESSAGES + 7))
+      // Collapsed to a boolean before asserting: a deepEqual over a 500-entry
+      // array carries the whole array into the failure payload (#7340).
+      const ids = (rows) => rows.map(m => m.messageId).join(',')
+      assert.ok(
+        ids(readConversationHistory(filePath)) === ids(readConversationHistoryWithMeta(filePath).messages),
+        'the sync array reader must return the meta reader\'s messages verbatim',
+      )
+      assert.ok(
+        ids(await readConversationHistoryAsync(filePath)) === ids((await readConversationHistoryWithMetaAsync(filePath)).messages),
+        'and so must the async one',
+      )
     } finally {
       teardown()
     }

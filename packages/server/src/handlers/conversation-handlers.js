@@ -291,23 +291,28 @@ async function handleRequestFullHistory(ws, client, msg, ctx) {
   // manager's shape is pinned at the producer
   // (tests/session-manager-full-history-source.test.js), because every test on
   // this side stubs the manager and so cannot witness it.
-  const descriptor = history && !Array.isArray(history) && Array.isArray(history.entries)
-  const fullHistory = descriptor ? history.entries : (Array.isArray(history) ? history : [])
-  const source = descriptor && history.source === 'jsonl' ? 'jsonl' : 'ring'
+  const hasDescriptor = !!history && !Array.isArray(history) && Array.isArray(history.entries)
+  const fullHistory = hasDescriptor ? history.entries : (Array.isArray(history) ? history : [])
+  const source = hasDescriptor && history.source === 'jsonl' ? 'jsonl' : 'ring'
   // Route through ctx.transport so a method-style sender keeps its receiver;
   // the shared loop only ever needs a (ws, payload) callable.
   const send = (target, payload) => ctx.transport.send(target, payload)
 
   // #7460 — frame parity with replayHistory. `truncated` is how a client learns
-  // the ring buffer overflowed. Probed the way replayHistory probes its seq
-  // helper: a legacy manager must not throw its way out of a replay.
+  // history was dropped on this replay.
   //
-  // NOTE (#7484): `truncated` describes the RING BUFFER, so it is not meaningful
-  // on the JSONL-sourced replay below. Left as-is here deliberately — that is
-  // tracked separately rather than folded into this frame's fix.
-  const truncated = typeof sessionManager.isHistoryTruncated === 'function'
-    ? sessionManager.isHistoryTruncated(targetId)
-    : false
+  // #7484 — and it must describe the collection ACTUALLY SENT. `isHistoryTruncated`
+  // reports the RING BUFFER's overflow, while this handler usually sends the JSONL
+  // transcript, which has its own entirely separate caps (500 most-recent
+  // messages / a 25MB tail read, jsonl-reader.js). So `truncated: false` could
+  // accompany a slice that silently dropped everything before the last 500.
+  // Sourced from the descriptor it follows the slice; the probe survives only for
+  // the legacy array shape, where the ring IS the slice.
+  const truncated = hasDescriptor && typeof history.truncated === 'boolean'
+    ? history.truncated
+    : (typeof sessionManager.isHistoryTruncated === 'function'
+      ? sessionManager.isHistoryTruncated(targetId)
+      : false)
   // `latestSeq` must describe what THIS replay actually DELIVERS, not what the
   // ring buffer happens to hold. `getFullHistoryAsync` PREFERS the JSONL
   // transcript whenever `resumeSessionId` is set, and jsonl-reader.js emits only
@@ -356,6 +361,39 @@ async function handleRequestFullHistory(ws, client, msg, ctx) {
       }
     },
     onDone: () => {
+      // #7484 — the JSONL path's heal. `sendHistoryEntry` synthesizes
+      // `agent_idle` from a replayed `result`, and a JSONL slice has none:
+      // jsonl-reader.js emits user_input/response/tool_use only. Since
+      // `getFullHistoryAsync` PREFERS that transcript for any session with a
+      // `resumeSessionId` — the normal state of a live claude-family session —
+      // the #4628 heal could not fire on the source almost every "Sync Full
+      // History" press actually reads.
+      //
+      // The stale chip is CLIENT-side state: a live `tool_start` whose
+      // `tool_result` never arrived (a dropped PostToolUse hook).
+      // `history_replay_start` deliberately PRESERVES that set (#4466) and
+      // nothing in a JSONL slice can clear it — those entries rebuild as
+      // `message` frames, which touch no tool state. `agent_idle` is the only
+      // frame that clears it and is not replay-gated.
+      //
+      // ONE heal, at the end, rather than a per-entry synthesis: JSONL rows
+      // carry no dependable turn boundary to hang one on, and landing after the
+      // last entry is what makes it unable to wipe an activeTools set
+      // MID-replay. Before `history_replay_end`, so it stays inside the window
+      // where the #4466 reasoning holds.
+      //
+      // NOT while the session is mid-turn: `agent_idle` sets isIdle, clears
+      // streamingMessageId (hiding the stop button) and clears activeTools —
+      // all true after a finished turn, all false during a running one, and no
+      // `agent_busy` is coming to undo it before the next turn starts. A
+      // manager that cannot answer is treated as idle: "cannot tell" must not
+      // silently become "never heal", which is the defect this fixes.
+      const busy = typeof sessionManager.isSessionBusy === 'function'
+        ? sessionManager.isSessionBusy(targetId)
+        : false
+      if (source === 'jsonl' && !busy) {
+        send(ws, { type: 'agent_idle', sessionId: targetId })
+      }
       send(ws, { type: 'history_replay_end', sessionId: targetId, ...seqFrame })
       // #7340: same wipe, same repair — `request_full_history` targets a LIVE
       // session, so its confirmed-backgrounded subagents must be re-asserted

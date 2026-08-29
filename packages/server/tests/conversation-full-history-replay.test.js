@@ -233,17 +233,36 @@ describe('#7459 — request_full_history mirrors replayHistory result → agent_
   })
 
   it('POSITIVE CONTROL: a JSONL-sourced history leaves the message branch untouched', async () => {
-    // jsonl-reader.js only ever emits user_input/response/tool_use, so a
-    // JSONL history has no `result` to synthesize from and the rebuilt
-    // `message` frames must not grow one.
+    // jsonl-reader.js only ever emits user_input/response/tool_use, so a JSONL
+    // history has no `result` to synthesize FROM and the rebuilt `message`
+    // frames must not grow one. #7484 heals this path at the END of the replay
+    // instead (see its describe below) — the per-entry branch stays exactly as
+    // it was, which is what this control pins.
     const { ctx, sends, ws } = build([
       { type: 'user_input', content: 'hi', timestamp: 1 },
       { type: 'response', content: 'yo', timestamp: 2 },
       { type: 'tool_use', content: 'ls', tool: 'Bash', timestamp: 3 },
-    ])
+    ], { source: 'jsonl' })
     await handler(ws, client(), { type: 'request_full_history' }, ctx)
-    assert.equal(sends.filter(m => m.type === 'agent_idle').length, 0)
     assert.equal(sends.filter(m => m.type === 'message').length, 3, 'all three JSONL types still rebuild as `message`')
+    assert.equal(sends.filter(m => m.type === 'result').length, 0, 'and none of them turns into a `result` frame')
+    // The message branch enumerates its fields; the field SHAPE is the thing
+    // this control exists to keep pinned.
+    for (const m of sends.filter(x => x.type === 'message')) {
+      assert.deepEqual(
+        Object.keys(m).sort(),
+        ['content', 'messageType', 'sessionId', 'timestamp', 'tool', 'type'],
+        'the rebuilt message frame carries exactly these fields',
+      )
+      assert.ok(!('historySeq' in m) && !('_seq' in m), 'and no cursor of any kind')
+    }
+    // No PER-ENTRY synthesis: the one agent_idle below is the end-of-replay
+    // heal, and it must sit after the last message rather than between them.
+    const types = sends.map(m => m.type)
+    const idles = types.filter(t => t === 'agent_idle')
+    assert.equal(idles.length, 1, '#7484 — one heal for the whole replay, never one per entry')
+    assert.ok(types.lastIndexOf('message') < types.indexOf('agent_idle'),
+      'every message frame precedes the heal — a mid-replay agent_idle would wipe the activeTools history_replay_start is preserving')
   })
 })
 
@@ -444,7 +463,9 @@ describe('#7460 — request_full_history sends under the same chunk + bufferedAm
     // the client 42 would advance its cursor past entries it never received
     // (C1) — so the frames must carry what was actually sent.
     const { ctx, sends, ws } = build([{ type: 'response', content: 'Hi', timestamp: 1, _seq: 9 }], {
-      managerOverrides: { isHistoryTruncated: () => true, getLatestHistorySeq: () => 42 },
+      source: 'ring',
+      truncated: true,
+      managerOverrides: { getLatestHistorySeq: () => 42 },
     })
     await handler(ws, client(), { type: 'request_full_history' }, ctx)
 
@@ -468,8 +489,11 @@ describe('#7460 — request_full_history sends under the same chunk + bufferedAm
 
   it('degrades to truncated:false and NO latestSeq on a legacy manager missing the helpers', async () => {
     // Same defensive posture replayHistory takes for getLatestHistorySeq —
-    // an older ctx fixture must not throw its way out of a replay.
+    // an older ctx fixture must not throw its way out of a replay. `legacyArrayShape`
+    // is the pre-#7484 return: a bare array, so the ring probe is the only
+    // truncation signal there is, and here it is missing too.
     const { ctx, sends, ws } = build([{ type: 'response', content: 'Hi', timestamp: 1 }], {
+      legacyArrayShape: true,
       managerOverrides: { isHistoryTruncated: undefined, getLatestHistorySeq: undefined },
     })
     await handler(ws, client(), { type: 'request_full_history' }, ctx)
@@ -477,5 +501,197 @@ describe('#7460 — request_full_history sends under the same chunk + bufferedAm
     assert.equal(start.truncated, false)
     assert.ok(!('latestSeq' in start), 'no entry carried a _seq, so no cursor is advertised — never a fabricated 0')
     assert.ok(sends.some(m => m.type === 'history_replay_end'), 'the replay still completes')
+  })
+})
+
+/**
+ * #7484 — #7459's synthesis fires on a replayed `result`, and the JSONL
+ * transcript has none. `getFullHistoryAsync` PREFERS that transcript whenever a
+ * session has a `resumeSessionId`, which is the normal state of a live
+ * claude-family session, so the synthesis could not fire on the path almost
+ * every "Sync Full History" press actually takes — the user-facing symptom
+ * survived on the default source.
+ *
+ * The zombie chip itself lives in the CLIENT's `activeTools`, put there by a
+ * LIVE `tool_start` whose `tool_result` never arrived (a dropped PostToolUse
+ * hook, the #4628 root cause). `history_replay_start` deliberately PRESERVES
+ * that set (#4466), and nothing in a JSONL slice can clear it: its entries
+ * rebuild as `message` frames, which touch no tool state at all. `agent_idle`
+ * is the only frame that clears it and is not replay-gated.
+ *
+ * The heal is therefore ONE `agent_idle` at the end of the replay rather than a
+ * per-entry synthesis: it lands after the last entry, so it cannot wipe an
+ * activeTools set mid-replay, and the JSONL rows carry no reliable turn
+ * boundary to hang a per-entry synthesis on anyway.
+ */
+describe('#7484 — request_full_history heals the chip on the JSONL path too', () => {
+  /** A realistic JSONL slice: user_input / response / tool_use, no result, no _seq. */
+  const jsonlSlice = () => ([
+    { type: 'user_input', content: 'run the tests', timestamp: 1 },
+    { type: 'response', content: 'sure', timestamp: 2 },
+    { type: 'tool_use', content: '{"command":"npm test"}', tool: 'Bash', timestamp: 3 },
+  ])
+
+  it('synthesizes an agent_idle for a JSONL-sourced replay', async () => {
+    const { ctx, sends, ws } = build(jsonlSlice(), { source: 'jsonl' })
+    await handler(ws, client(), { type: 'request_full_history' }, ctx)
+
+    const idle = sends.find(m => m.type === 'agent_idle')
+    assert.ok(idle,
+      'without it "Sync Full History" cannot clear a zombie tool chip on the source it reads by DEFAULT — the whole of #7459 as the user meets it')
+    assert.equal(idle.sessionId, 'sess-1', 'the heal targets the replayed session')
+    assert.deepEqual(
+      Object.keys(idle).sort(),
+      ['sessionId', 'type'],
+      'the same { type, sessionId } ws-history.js emits — a divergent shape hits different client branches',
+    )
+  })
+
+  it('synthesizes exactly ONE, however many turns the transcript carries', async () => {
+    // Coarser than the ring path's per-result synthesis, and deliberately so:
+    // one clear at the end says the same thing about the session's CURRENT
+    // state without wiping activeTools between entries.
+    const { ctx, sends, ws } = build([
+      ...jsonlSlice(),
+      { type: 'user_input', content: 'and again', timestamp: 4 },
+      { type: 'response', content: 'done', timestamp: 5 },
+      { type: 'tool_use', content: '{}', tool: 'Read', timestamp: 6 },
+    ], { source: 'jsonl' })
+    await handler(ws, client(), { type: 'request_full_history' }, ctx)
+
+    assert.equal(sends.filter(m => m.type === 'agent_idle').length, 1)
+  })
+
+  it('lands AFTER every replayed entry and BEFORE history_replay_end', async () => {
+    const { ctx, sends, ws } = build(jsonlSlice(), { source: 'jsonl' })
+    await handler(ws, client(), { type: 'request_full_history' }, ctx)
+
+    const types = sends.map(m => m.type)
+    const idleIdx = types.indexOf('agent_idle')
+    assert.equal(types[0], 'history_replay_start')
+    assert.equal(types[types.length - 1], 'history_replay_end')
+    assert.ok(idleIdx > types.lastIndexOf('message'),
+      `the heal must follow the last entry, never interleave with it; got ${types.join(',')}`)
+    assert.ok(idleIdx < types.indexOf('history_replay_end'),
+      'and stay INSIDE the replay window, where the #4466 gate reasoning holds')
+  })
+
+  it('heals an EMPTY JSONL replay too — the chip is client-side state, not an entry', async () => {
+    // A transcript read that came back empty still falls back to the ring, so
+    // an empty slice labelled 'jsonl' is unusual — but if the source says JSONL
+    // the heal is owed, because the stale chip is in the client's store either
+    // way.
+    const { ctx, sends, ws } = build([], { source: 'jsonl' })
+    await handler(ws, client(), { type: 'request_full_history' }, ctx)
+    await turn(3)
+
+    assert.equal(sends.filter(m => m.type === 'agent_idle').length, 1)
+    assert.equal(sends[sends.length - 1].type, 'history_replay_end')
+  })
+
+  it('POSITIVE CONTROL: a RING-sourced replay is untouched — its heal still comes from `result`', async () => {
+    // The ring path already synthesizes per replayed `result` (#7459). Adding a
+    // second, unconditional heal there would emit two for one turn boundary.
+    const { ctx, sends, ws } = build([
+      { type: 'tool_start', tool: 'Bash', toolUseId: 'toolu_1', timestamp: 1, _seq: 1 },
+      { type: 'result', durationMs: 12, timestamp: 2, _seq: 2 },
+    ], { source: 'ring' })
+    await handler(ws, client(), { type: 'request_full_history' }, ctx)
+
+    const types = sends.map(m => m.type)
+    assert.equal(types.filter(t => t === 'agent_idle').length, 1, 'exactly the one the result synthesized')
+    assert.equal(types.indexOf('agent_idle'), types.indexOf('result') + 1,
+      'and it is still the per-result synthesis, immediately after its result — not an end-of-replay heal')
+  })
+
+  it('POSITIVE CONTROL: a ring-sourced replay with NO result still synthesizes nothing', async () => {
+    const { ctx, sends, ws } = build(jsonlSlice(), { source: 'ring' })
+    await handler(ws, client(), { type: 'request_full_history' }, ctx)
+    assert.equal(sends.filter(m => m.type === 'agent_idle').length, 0,
+      'the source is the discriminator — identical entries under `ring` must NOT be healed')
+  })
+
+  it('POSITIVE CONTROL: a session that is mid-turn is NOT declared idle', async () => {
+    // `agent_idle` sets isIdle, clears streamingMessageId (hiding the stop
+    // button) and clears activeTools. All correct after a finished turn; all
+    // WRONG while one is running — and the client has no `agent_busy` coming to
+    // undo it until the next turn starts.
+    const { ctx, sends, ws } = build(jsonlSlice(), {
+      source: 'jsonl',
+      managerOverrides: { isSessionBusy: () => true },
+    })
+    await handler(ws, client(), { type: 'request_full_history' }, ctx)
+
+    assert.equal(sends.filter(m => m.type === 'agent_idle').length, 0,
+      'a running turn is not a turn boundary')
+    assert.equal(sends.filter(m => m.type === 'message').length, 3, 'the replay itself still happens')
+    assert.equal(sends[sends.length - 1].type, 'history_replay_end')
+  })
+
+  it('heals when the manager has no busy probe at all', async () => {
+    // A legacy ctx fixture cannot answer, and "cannot tell" must not silently
+    // become "do nothing" — that is the defect this issue is about. The one
+    // real SessionManager always answers (pinned at the producer).
+    const { ctx, sends, ws } = build(jsonlSlice(), {
+      source: 'jsonl',
+      managerOverrides: { isSessionBusy: undefined },
+    })
+    await handler(ws, client(), { type: 'request_full_history' }, ctx)
+    assert.equal(sends.filter(m => m.type === 'agent_idle').length, 1)
+  })
+
+  it('LEGACY SHAPE: a manager returning a bare array is read as the ring buffer, not healed', async () => {
+    const { ctx, sends, ws } = build(jsonlSlice(), { legacyArrayShape: true })
+    await handler(ws, client(), { type: 'request_full_history' }, ctx)
+    assert.equal(sends.filter(m => m.type === 'message').length, 3, 'a legacy manager still replays')
+    assert.equal(sends.filter(m => m.type === 'agent_idle').length, 0,
+      'nothing said JSONL, so nothing may be healed on a guess')
+  })
+
+  describe('`truncated` describes the collection actually sent', () => {
+    it('reports the JSONL slice\'s own truncation, not the ring buffer\'s', async () => {
+      // jsonl-reader caps at the 500 most-recent messages. Pre-#7484 the frame
+      // carried isHistoryTruncated() — the RING's overflow — so a slice that
+      // silently dropped everything before the last 500 went out as
+      // `truncated: false`.
+      const { ctx, sends, ws } = build(jsonlSlice(), {
+        source: 'jsonl',
+        truncated: true,
+        managerOverrides: { isHistoryTruncated: () => false },
+      })
+      await handler(ws, client(), { type: 'request_full_history' }, ctx)
+
+      const start = sends.find(m => m.type === 'history_replay_start')
+      assert.equal(start.truncated, true,
+        'the 500-message cap tripped on the slice the client just received; the ring says nothing about it')
+    })
+
+    it('does NOT report a ring overflow next to a complete JSONL slice', async () => {
+      // The other direction, and the one a single-direction test would miss:
+      // the ring overflowed, but the client received a complete transcript.
+      const { ctx, sends, ws } = build(jsonlSlice(), {
+        source: 'jsonl',
+        truncated: false,
+        managerOverrides: { isHistoryTruncated: () => true },
+      })
+      await handler(ws, client(), { type: 'request_full_history' }, ctx)
+
+      const start = sends.find(m => m.type === 'history_replay_start')
+      assert.equal(start.truncated, false,
+        'a ring-buffer overflow is not a statement about the transcript the client actually got')
+    })
+
+    it('a RING-sourced replay reports the ring\'s overflow', async () => {
+      const { ctx, sends, ws } = build([{ type: 'response', content: 'Hi', timestamp: 1, _seq: 1 }], {
+        source: 'ring',
+        truncated: true,
+        managerOverrides: { isHistoryTruncated: () => false },
+      })
+      await handler(ws, client(), { type: 'request_full_history' }, ctx)
+
+      const start = sends.find(m => m.type === 'history_replay_start')
+      assert.equal(start.truncated, true,
+        'the descriptor carries the ring\'s own flag on this path — the probe is the legacy fallback, not the source of truth')
+    })
   })
 })
