@@ -1,14 +1,25 @@
 /**
- * #7470 — destroying a session must prune its entry from EVERY per-session
- * PR/CI map in the connection store.
+ * #7470 / #7478 / #7483 — destroying a session must drop its entry from EVERY
+ * session-scoped collection in the connection store.
  *
- * The store keeps five session-keyed maps for the PR/CI surface:
+ * The file is still named for the five PR/CI maps #7470 was filed against, and
+ * the roster is no longer only those five:
  *
  *   sessionPrStatus            (#7344)  full PR + check-rollup snapshot
  *   sessionPrStatusLoading     (#7344)  in-flight flag
  *   sessionPrStatusRequestedAt (#7344)  client-clock auto-pull throttle stamp
  *   sessionPrThreads           (#7430)  unresolved review-thread reading
  *   sessionPrThreadsLoading    (#7430)  in-flight flag
+ *   pendingServerSeed          (#7478)  server-provided composer seed (#5553)
+ *   cancellingActivityIds      (#7483)  in-flight cancel_activity keys (#5277)
+ *
+ * The last two were the visible DEFERRED bucket of the roster guard below when
+ * #7481 landed; they are cleaned now, and the bucket is empty. They are also
+ * the reason the guard had to stop reading names: `pendingServerSeed` is a
+ * `Record` under a name with no `session` prefix at all, and
+ * `cancellingActivityIds` is a `Set` whose key is COMPOSITE
+ * (`${sessionId}:${activityId}`) rather than a bare session id — two shapes a
+ * roster built from `sessionPr*` could not express.
  *
  * `connection.ts` resets the three LOADING-shaped maps on a socket drop, which
  * is a reconnect reset (a control stranded by a reply that will never arrive) —
@@ -64,7 +75,7 @@ vi.mock('./crypto', () => ({
 vi.mock('./persistence', () => ({ clearPersistedSession: vi.fn() }))
 
 import { handleMessage, setStore, clearDeltaBuffers, clearPermissionSplits, stopHeartbeat, resetReplayFlags } from './message-handler'
-import { createEmptySessionState, pruneSessionKeyedMap } from './utils'
+import { createEmptySessionState, pruneSessionKeyedMap, pruneSessionScopedKeySet } from './utils'
 import type { ConnectionState } from './types'
 import { createEmptyActivityState } from '@chroxy/store-core'
 import type { ServerSessionPrStatusMessage, ServerSessionPrThreadsMessage } from '@chroxy/protocol'
@@ -158,6 +169,20 @@ function baseState(): Partial<ConnectionState> {
     sessionPrStatusRequestedAt: { [DEAD]: 1000, [LIVE]: 2000 },
     sessionPrThreads: { [DEAD]: prThreads(DEAD, 3), [LIVE]: prThreads(LIVE, 4) },
     sessionPrThreadsLoading: { [DEAD]: true, [LIVE]: true },
+    // #7478 — the server-provided composer seed. A plain `Record<sessionId, …>`,
+    // so `pruneSessionKeyedMap` applies to it unchanged.
+    pendingServerSeed: { [DEAD]: 'seed for the dead session', [LIVE]: 'seed for the live session' },
+    // #7483 — a `Set` keyed `${sessionId}:${activityId}`, NOT a Record keyed by
+    // session id. TWO entries for the dead session so "dropped one of them"
+    // is distinguishable from "dropped the session", and the survivor reuses
+    // one of the dead session's activity ids so an activityId-only match
+    // cannot pass.
+    //
+    // Carried here for the same reason #7486 filled the five PR/CI maps: both
+    // pruners are deliberately intolerant of an absent collection, so a
+    // fixture that omits one must fail loudly rather than be papered over in
+    // the helper.
+    cancellingActivityIds: new Set<string>([`${DEAD}:act-1`, `${DEAD}:act-2`, `${LIVE}:act-1`]),
   }
 }
 
@@ -231,6 +256,64 @@ describe('#7470 session destroy prunes the per-session PR/CI maps', () => {
     expect(after[LIVE]).toBe(true)
   })
 
+  it('prunes pendingServerSeed for the destroyed session and leaves the survivor', () => {
+    // #7478 (1): the seed is drained only if App's create-confirm effect runs
+    // for that session. A session destroyed before the composer is touched
+    // leaves its seed behind, and until now nothing here removed it.
+    handleMessage(listWithoutDead(), ctx() as never)
+    const after = store.getState().pendingServerSeed
+    expect(after[DEAD]).toBeUndefined()
+    expect(Object.keys(after)).toEqual([LIVE])
+    // Positive control: the survivor's seed comes through byte-identical, so a
+    // blanket `pendingServerSeed: {}` cannot satisfy the assertion above.
+    expect(after[LIVE]).toBe('seed for the live session')
+  })
+
+  it('prunes cancellingActivityIds for the destroyed session and leaves the survivor', () => {
+    // #7483: the composite key is `${sessionId}:${activityId}`, so this is a
+    // session-SCOPED prune of a Set, not an exact-key prune of a Record.
+    handleMessage(listWithoutDead(), ctx() as never)
+    const after = store.getState().cancellingActivityIds
+    // BOTH of the dead session's keys go — not just the first one found.
+    expect(after.has(`${DEAD}:act-1`)).toBe(false)
+    expect(after.has(`${DEAD}:act-2`)).toBe(false)
+    // Positive control: the survivor's key carries the SAME activityId as one
+    // of the dead session's, so neither "clear the whole set" nor a match on
+    // the activityId half can pass.
+    expect(after.has(`${LIVE}:act-1`)).toBe(true)
+    expect([...after]).toEqual([`${LIVE}:act-1`])
+  })
+
+  it('does NOT cross-prune a session id that is a strict PREFIX of another', () => {
+    // #7483 acceptance: the prefix match must be anchored on the `:`
+    // delimiter. `sess-dead` is a strict prefix of `sess-deadbeef`; a
+    // `startsWith(id)` without the delimiter — or a bare `includes(id)` —
+    // takes the neighbour's keys with it. Today's ids are 32 hex chars so this
+    // cannot arise in production, and the helper must not depend on that.
+    const NEIGHBOUR = `${DEAD}beef`
+    store.setState({
+      sessions: [
+        { sessionId: DEAD, name: 'dead' },
+        { sessionId: NEIGHBOUR, name: 'neighbour' },
+      ] as ConnectionState['sessions'],
+      sessionStates: {
+        [DEAD]: createEmptySessionState(),
+        [NEIGHBOUR]: createEmptySessionState(),
+      },
+      pendingServerSeed: { [DEAD]: 'dead seed', [NEIGHBOUR]: 'neighbour seed' },
+      cancellingActivityIds: new Set<string>([`${DEAD}:act-1`, `${NEIGHBOUR}:act-1`]),
+    })
+    handleMessage({
+      type: 'session_list',
+      sessions: [{ sessionId: NEIGHBOUR, name: 'neighbour', isBusy: false }],
+    }, ctx() as never)
+    const s = store.getState()
+    expect(s.pendingServerSeed[DEAD]).toBeUndefined()
+    expect(s.pendingServerSeed[NEIGHBOUR]).toBe('neighbour seed')
+    expect(s.cancellingActivityIds.has(`${DEAD}:act-1`)).toBe(false)
+    expect(s.cancellingActivityIds.has(`${NEIGHBOUR}:act-1`)).toBe(true)
+  })
+
   // ---- Shape / no-op properties.
 
   it('leaves every map untouched (same reference) when no session was removed', () => {
@@ -241,6 +324,8 @@ describe('#7470 session destroy prunes the per-session PR/CI maps', () => {
       sessionPrStatusRequestedAt: before.sessionPrStatusRequestedAt,
       sessionPrThreads: before.sessionPrThreads,
       sessionPrThreadsLoading: before.sessionPrThreadsLoading,
+      pendingServerSeed: before.pendingServerSeed,
+      cancellingActivityIds: before.cancellingActivityIds,
     }
     handleMessage({
       type: 'session_list',
@@ -278,6 +363,22 @@ describe('#7470 session destroy prunes the per-session PR/CI maps', () => {
     expect(after.sessionPrStatus[DEAD]).toBeUndefined()
   })
 
+  it('keeps cancellingActivityIds by reference when no removed session had a key in it', () => {
+    // The Set sibling of the Record case above. `pruneSessionScopedKeySet`
+    // carries the same same-reference contract, and it matters for the same
+    // reason: ControlRoomSection / CrossSessionMissionControl subscribe to this
+    // Set, so a fresh object on every session close re-renders the whole
+    // Control Room for a value that did not change.
+    store.setState({ cancellingActivityIds: new Set<string>([`${LIVE}:act-1`]) })
+    const before = store.getState().cancellingActivityIds
+    handleMessage(listWithoutDead(), ctx() as never)
+    expect(store.getState().cancellingActivityIds).toBe(before)
+    // Positive control for THIS test: a collection that DID hold the removed
+    // id is rebuilt, so the assertion above cannot be passing because the
+    // prune block never ran at all.
+    expect(store.getState().pendingServerSeed[DEAD]).toBeUndefined()
+  })
+
   it('prunes every removed session when several disappear at once', () => {
     handleMessage({ type: 'session_list', sessions: [] }, ctx() as never)
     const s = store.getState()
@@ -286,6 +387,8 @@ describe('#7470 session destroy prunes the per-session PR/CI maps', () => {
     expect(s.sessionPrStatusRequestedAt).toEqual({})
     expect(s.sessionPrThreads).toEqual({})
     expect(s.sessionPrThreadsLoading).toEqual({})
+    expect(s.pendingServerSeed).toEqual({})
+    expect(s.cancellingActivityIds.size).toBe(0)
   })
 })
 
@@ -340,6 +443,8 @@ describe('#7470 a fresh auth_ok clears the per-session PR/CI maps', () => {
     const s = store.getState()
     expect(Object.keys(s.sessionPrStatus)).toEqual([DEAD, LIVE])
     expect(Object.keys(s.sessionPrThreads)).toEqual([DEAD, LIVE])
+    expect(Object.keys(s.pendingServerSeed)).toEqual([DEAD, LIVE])
+    expect(s.cancellingActivityIds.size).toBe(3)
   })
 
   it('clears sessionPrStatus', () => {
@@ -362,6 +467,14 @@ describe('#7470 a fresh auth_ok clears the per-session PR/CI maps', () => {
     handleMessage(authOk(), freshCtx() as never)
     expect(store.getState().sessionPrThreadsLoading).toEqual({})
   })
+  it('clears pendingServerSeed', () => {
+    handleMessage(authOk(), freshCtx() as never)
+    expect(store.getState().pendingServerSeed).toEqual({})
+  })
+  it('clears cancellingActivityIds', () => {
+    handleMessage(authOk(), freshCtx() as never)
+    expect(store.getState().cancellingActivityIds.size).toBe(0)
+  })
 
   it('clears them in the same patch that empties sessionStates', () => {
     handleMessage(authOk(), freshCtx() as never)
@@ -383,6 +496,10 @@ describe('#7470 a fresh auth_ok clears the per-session PR/CI maps', () => {
     expect(Object.keys(s.sessionPrStatusRequestedAt)).toEqual([DEAD, LIVE])
     expect(Object.keys(s.sessionPrThreads)).toEqual([DEAD, LIVE])
     expect(Object.keys(s.sessionPrThreadsLoading)).toEqual([DEAD, LIVE])
+    expect(Object.keys(s.pendingServerSeed)).toEqual([DEAD, LIVE])
+    // A silent reconnect keeps the roster, so a seed the composer has not yet
+    // drained is still owed to a session that still exists.
+    expect(s.cancellingActivityIds.size).toBe(3)
   })
 
   /**
@@ -442,6 +559,65 @@ describe('#7470 pruneSessionKeyedMap reference contract', () => {
 })
 
 /**
+ * `pruneSessionScopedKeySet`'s contract, tested directly (#7483).
+ *
+ * The Set/composite-key sibling of `pruneSessionKeyedMap`, and it is a sibling
+ * rather than a second pruner on purpose: it carries the SAME same-reference
+ * guarantee, and both live in `utils.ts` so the next collection to join the
+ * roster picks one by SHAPE instead of re-deriving a filter at the call site.
+ *
+ * The membership rule is the interesting half. The keys here are
+ * `${sessionId}:${activityId}` and `removedIds` is a list of bare session ids,
+ * so the match has to be anchored on the delimiter — a `startsWith(id)` or an
+ * `includes(id)` is the "guard whose comment describes a stronger check than
+ * its code performs" shape from docs/false-safety-guards.md.
+ */
+describe('#7483 pruneSessionScopedKeySet contract', () => {
+  it('drops every key scoped to a removed session', () => {
+    const out = pruneSessionScopedKeySet(new Set(['a:1', 'a:2', 'b:1']), ['a'])
+    expect([...out]).toEqual(['b:1'])
+  })
+
+  it('is ANCHORED on the delimiter: a session id that is a prefix of another does not cross-prune', () => {
+    // `sess-a` vs `sess-ab`: `'sess-ab:1'.startsWith('sess-a')` is true, so an
+    // unanchored implementation deletes the neighbour's key here.
+    const out = pruneSessionScopedKeySet(new Set(['sess-a:1', 'sess-ab:1']), ['sess-a'])
+    expect([...out]).toEqual(['sess-ab:1'])
+  })
+
+  it('is anchored on the FIRST delimiter, so an activityId containing a colon is safe', () => {
+    // Activity ids are provider tool-use ids and are not guaranteed
+    // colon-free; only the session-id half may decide the match.
+    const out = pruneSessionScopedKeySet(new Set(['a:tool:1', 'b:tool:1']), ['b'])
+    expect([...out]).toEqual(['a:tool:1'])
+    // And the reverse: a removed id must not be matched against the tail.
+    expect([...pruneSessionScopedKeySet(new Set(['a:tool:1']), ['tool'])]).toEqual(['a:tool:1'])
+  })
+
+  it('returns the SAME reference when nothing matched', () => {
+    const keys = new Set(['a:1'])
+    expect(pruneSessionScopedKeySet(keys, ['b'])).toBe(keys)
+    expect(pruneSessionScopedKeySet(keys, [])).toBe(keys)
+    expect(pruneSessionScopedKeySet(new Set<string>(), ['a'])).not.toBe(keys)
+  })
+
+  it('keeps a key with no delimiter — an unattributable key is not a licence to delete', () => {
+    // Unreachable from `sendCancelActivity`, which always writes
+    // `${sid}:${activityId}`. The rule still has to be stated: a prune may only
+    // remove what it can PROVE belongs to a removed session.
+    const keys = new Set(['orphan'])
+    expect(pruneSessionScopedKeySet(keys, ['orphan'])).toBe(keys)
+  })
+
+  it('does not mutate its input', () => {
+    const keys = new Set(['a:1', 'b:1'])
+    const out = pruneSessionScopedKeySet(keys, ['a'])
+    expect(out).not.toBe(keys)
+    expect([...keys]).toEqual(['a:1', 'b:1'])
+  })
+})
+
+/**
  * Roster coverage — the adjacent-field guard.
  *
  * ## What the first version of this got wrong (PR #7481 review, Critical 2)
@@ -470,11 +646,12 @@ describe('#7470 pruneSessionKeyedMap reference contract', () => {
  * someone states how it is keyed — `sessionCiChecks` included, whatever it is
  * named.
  *
- * The buckets are visible rather than inferred, because the deferred ones are
- * the point: `pendingServerSeed` (#7478) and `cancellingActivityIds` (#7483) are
- * session-scoped and NOT yet cleaned, and a reader has to be able to see that
- * they were considered. An exclusion list that names them beats a pattern that
- * cannot see them.
+ * The buckets are visible rather than inferred, because a deferral has to be
+ * READABLE: `pendingServerSeed` (#7478) and `cancellingActivityIds` (#7483) sat
+ * in the deferred bucket when #7481 landed — session-scoped, considered, not
+ * yet cleaned — and an exclusion list that names them is what made them
+ * findable enough to fix here. The bucket is empty now and stays, for the next
+ * one.
  *
  * Every "keyed by" reason below is quoted from the field's OWN declaration in
  * types.ts, not inferred from its name — the naming inference is what produced
@@ -508,13 +685,23 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
     ['_resetSessionMemory', connectionSrc, '#7470 switch-reset-start', '#7470 switch-reset-end'],
   ]
 
-  // -- Bucket 1: session-id-keyed, cleaned at every site by this PR. ----------
+  // -- Bucket 1: session-scoped, cleaned at every site. ----------------------
+  // Two SHAPES live here, and the site blocks spell them differently:
+  //   * `Record<sessionId, …>` — pruned with `pruneSessionKeyedMap` (exact key)
+  //   * `Set<`${sessionId}:${activityId}`>` — pruned with
+  //     `pruneSessionScopedKeySet` (anchored session-scope match)
+  // The guard below asserts the field is ASSIGNED in each block, not how, so
+  // it holds either way — which is what lets a new collection join by shape.
   const CLEANED = [
     'sessionPrStatus',
     'sessionPrStatusLoading',
     'sessionPrStatusRequestedAt',
     'sessionPrThreads',
     'sessionPrThreadsLoading',
+    // #7478 — server-provided composer seed, keyed by sessionId.
+    'pendingServerSeed',
+    // #7483 — in-flight cancel_activity keys, `${sessionId}:${activityId}`.
+    'cancellingActivityIds',
   ]
 
   // -- Bucket 2: session-id-keyed, cleaned by its own code at all four sites. -
@@ -524,10 +711,13 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
   const SESSION_KEYED_ELSEWHERE = ['sessionStates']
 
   // -- Bucket 3: session-scoped and NOT yet cleaned — tracked, not hidden. ----
-  const SESSION_KEYED_DEFERRED: Record<string, string> = {
-    pendingServerSeed: '#7478 — keyed by sessionId; different feature family (#5553 presets)',
-    cancellingActivityIds: '#7483 — keyed `${sessionId}:${activityId}`; missing from the removedIds site only',
-  }
+  // EMPTY as of #7478 / #7483: both former entries moved to CLEANED above.
+  // The bucket stays because it is the honest place to park the next one —
+  // #7481's review established that a deferral a reader can SEE beats a
+  // pattern that cannot see the field at all. An entry here needs a tracking
+  // issue in its reason string; the `classification` test below is what makes
+  // adding one the only alternative to fixing the field.
+  const SESSION_KEYED_DEFERRED: Record<string, string> = {}
 
   // -- Bucket 4: keyed by something that is not a session id. ----------------
   // Reason quoted from each field's own declaration in types.ts.
@@ -583,19 +773,23 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
     // "cannot check this" silently becoming "nothing to check".
     //
     // The floor is deliberately loose (the roster grows) but the named members
-    // are exact: the five under test, one from each other bucket, and one
-    // `Set<string>` so a regression to Records-only is caught. A `Set` matters
-    // because #7483 is one — the shape the first version of this guard could
-    // not express at all.
+    // are exact: the seven under test, one from each other bucket, and a
+    // `Set<string>` from OUTSIDE `CLEANED` so a regression to Records-only is
+    // still caught if the CLEANED roster ever loses its own Set. A `Set`
+    // matters because #7483 is one — the shape the first version of this guard
+    // could not express at all.
     expect(declared.length).toBeGreaterThanOrEqual(30)
     expect(declared).toEqual(expect.arrayContaining([
       ...CLEANED,
       'sessionStates',
-      'pendingServerSeed',
-      'cancellingActivityIds',
       'sessionPresetSnapshots',
       'resolvedPermissions',
+      'reindexingRepoPaths',
     ]))
+    // Both shapes are represented in what the site blocks are checked against,
+    // so `[site] cleans up X` cannot be a Records-only guard by accident.
+    expect(CLEANED).toContain('pendingServerSeed')
+    expect(CLEANED).toContain('cancellingActivityIds')
   })
 
   it('classification: every session-keyed-shaped collection is in exactly one bucket', () => {

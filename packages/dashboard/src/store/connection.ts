@@ -3289,8 +3289,17 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       sessionPrStatusRequestedAt: {},
       sessionPrThreads: {},
       sessionPrThreadsLoading: {},
-      // #7470 forget-reset-end
+      // #7478 — the server-provided composer seed (#5553) goes with them. A
+      // seed left here is owed to a session this action just forgot, and the
+      // next server's session of the same id would drain it into ITS composer.
+      pendingServerSeed: {},
+      // #7483 — moved INSIDE these markers, unchanged in behaviour: this clear
+      // predates #7470 (it is #5277's) and was already correct here. Its
+      // position is what changed, so the roster guard in
+      // session-destroy-prunes-pr-maps.test.ts can hold all four sites for it
+      // in one table instead of covering three and trusting the fourth.
       cancellingActivityIds: new Set<string>(),
+      // #7470 forget-reset-end
       // #5500: drop reindex pending/result state with the rest of the
       // connection-scoped Control Room state.
       reindexingRepoPaths: new Set<string>(),
@@ -3356,8 +3365,18 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       sessionPrStatusRequestedAt: {},
       sessionPrThreads: {},
       sessionPrThreadsLoading: {},
-      // #7470 switch-reset-end
+      // #7478 — and the composer seed. This is the SERVER SWITCH, where the
+      // consequence is not retained memory but a WRONG VALUE: session ids are
+      // minted per daemon, so a seed that outlives its server can be drained
+      // against another server's session of the same id and pre-fill one
+      // machine's composer with another machine's preset text. switchServer
+      // KEEPS the old server's persisted data on purpose, which is what makes
+      // that read reachable rather than theoretical.
+      pendingServerSeed: {},
+      // #7483 — moved inside the markers, behaviour unchanged (see
+      // forgetSession above for why).
       cancellingActivityIds: new Set<string>(),
+      // #7470 switch-reset-end
       // #5500: drop reindex pending/result state with the rest of the
       // connection-scoped Control Room state.
       reindexingRepoPaths: new Set<string>(),

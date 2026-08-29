@@ -200,7 +200,7 @@ import type {
   MCPResourceItem,
   McpServerOpResult,
 } from './types';
-import { createEmptySessionState, pruneSessionKeyedMap } from './utils';
+import { createEmptySessionState, pruneSessionKeyedMap, pruneSessionScopedKeySet } from './utils';
 import { clearPersistedSession } from './persistence';
 
 // ---------------------------------------------------------------------------
@@ -4473,6 +4473,13 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           sessionPrStatusRequestedAt: {},
           sessionPrThreads: {},
           sessionPrThreadsLoading: {},
+          // #7478 / #7483 — same reasoning, same site: this branch empties the
+          // roster, so anything session-scoped left behind is unprunable for
+          // the life of the tab. The seed is owed to a session that no longer
+          // exists, and a "Cancelling…" key can never be acked on a connection
+          // that no longer knows the session.
+          pendingServerSeed: {},
+          cancellingActivityIds: new Set<string>(),
           // #7470 authok-reset-end
           customAgents: [],
         });
@@ -4748,9 +4755,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           nextActivity = clearSessionActivity(nextActivity, id);
         }
         if (nextActivity !== get().activity) patch.activity = nextActivity;
-        // #7470 prune-block-start — the per-session PR/CI maps.
+        // #7470 prune-block-start — the per-session collections.
         //
-        // Five maps, all keyed by session id, and until now nothing removed an
+        // Seven of them, all session-scoped, and until #7481 nothing removed an
         // entry when the session it describes went away: connection.ts's #6153
         // sweep resets the LOADING-shaped ones on a socket drop, but that is a
         // reconnect reset for a stranded control, not a lifecycle prune. A
@@ -4787,6 +4794,19 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         patch.sessionPrStatusRequestedAt = pruneSessionKeyedMap(get().sessionPrStatusRequestedAt, removedIds);
         patch.sessionPrThreads = pruneSessionKeyedMap(get().sessionPrThreads, removedIds);
         patch.sessionPrThreadsLoading = pruneSessionKeyedMap(get().sessionPrThreadsLoading, removedIds);
+        // #7478 — the server-provided composer seed (#5553). Same exact-key
+        // shape as the five above: `Record<sessionId, string>`. It is drained
+        // only when App's create-confirm effect runs for that session, so a
+        // session destroyed before the composer is touched leaves its seed
+        // here, and this block is what removes it.
+        patch.pendingServerSeed = pruneSessionKeyedMap(get().pendingServerSeed, removedIds);
+        // #7483 — the in-flight cancel_activity keys (#5277). A DIFFERENT
+        // shape: a `Set` keyed `${sessionId}:${activityId}`, because activity
+        // ids are only unique within a session. `pruneSessionKeyedMap` cannot
+        // serve it — no member of the set is ever equal to a session id — so
+        // it gets the Set/composite-key sibling, which anchors the match on
+        // the first `:` rather than on a bare prefix.
+        patch.cancellingActivityIds = pruneSessionScopedKeySet(get().cancellingActivityIds, removedIds);
         // #7470 prune-block-end
         // If the active session was removed, switch to next available
         if (initialActiveId && removedIds.includes(initialActiveId)) {
