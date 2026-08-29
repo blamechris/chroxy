@@ -59,6 +59,10 @@ import {
   recordHistorySeq,
   reconcileReplayStart,
   reconcileReplayEnd,
+  // #7456 — per-session teardown for the two paths that drop a session's store
+  // state wholesale; without it this module's per-session entries outlive
+  // everything they correspond to.
+  dropReplaySessionState,
   // #7420 — the shared `history_replay_end` unanswered-prompt sweep. Both
   // clients carried byte-identical copies of the predicate through #7410/#7419;
   // it now has one implementation, which is also where the live-arrival ledger
@@ -4723,6 +4727,11 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // GC persisted messages for sessions that dropped out of the list
       for (const prevId of removedIds) {
         void clearPersistedSession(prevId);
+        // #7456 — and the store-core replay state keyed to the same id. The
+        // prune drops `sessionStates[prevId]` and its persisted messages just
+        // below, so a retained replay window / live-arrival ledger would refer
+        // to nothing at all.
+        dropReplaySessionState(prevId);
       }
       // Batch in-memory cleanup into a single state update
       if (removedIds.length > 0) {
@@ -6297,6 +6306,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         set(patch);
         // Garbage-collect persisted messages for the deleted session (#797)
         void clearPersistedSession(timeoutSessionId);
+        // #7456 — same for the store-core replay window / live-arrival ledger.
+        dropReplaySessionState(timeoutSessionId);
       }
       break;
     }

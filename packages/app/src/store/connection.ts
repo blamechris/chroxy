@@ -1398,6 +1398,16 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       const wasConnected = useConnectionLifecycleStore.getState().connectionPhase === 'connected';
       set({ socket: null });
 
+      // #7456 — the replay window and its live-arrival ledger are
+      // per-CONNECTION state, like the rebuild baseline: release them on the
+      // transport drop rather than waiting for the next `auth_ok`, which on a
+      // backgrounded app may never arrive. Load-bearing since #7455 made the
+      // window a refcount — a `history_replay_start` with no matching `_end`
+      // would otherwise strand a +1 and the window would never close again for
+      // that session. Cursors are deliberately KEPT (they are what makes the
+      // reconnect a delta replay, #5555.3).
+      resetReplayReconcile();
+
       // Clear transient streaming/plan state so stale UI doesn't persist
       clearPermissionSplits();
       updateActiveSession((ss) => {
@@ -1467,6 +1477,16 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       clearHandshakeTimer();
 
       set({ socket: null });
+
+      // #7456 — the replay window and its live-arrival ledger are
+      // per-CONNECTION state, like the rebuild baseline: release them on the
+      // transport drop rather than waiting for the next `auth_ok`, which on a
+      // backgrounded app may never arrive. Load-bearing since #7455 made the
+      // window a refcount — a `history_replay_start` with no matching `_end`
+      // would otherwise strand a +1 and the window would never close again for
+      // that session. Cursors are deliberately KEPT (they are what makes the
+      // reconnect a delta replay, #5555.3).
+      resetReplayReconcile();
 
       // UX landmine #8: extract whatever detail we can from the error
       // event. React Native's WebSocket implementation exposes a
