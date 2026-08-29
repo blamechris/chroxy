@@ -567,6 +567,12 @@ describe('live-arrival ledger lifetime (#7456)', () => {
     expect(getLiveReplayLedgerSessionIds()).not.toContain('s0')
     expect(getLiveReplayLedgerSessionIds()).toContain(`s${MAX_LIVE_REPLAY_LEDGERS}`)
     expect(wasPromptLiveDuringReplay('s0', 'q-0')).toBe(false)
+    // ...and the consequence the warn text claims, demonstrated rather than
+    // implied: the evicted session's question is now stampable again.
+    reconcileReplayEnd('s0', [])
+    expect(sweepUnansweredPromptsAtReplayEnd('s0', [prompt('q-0')])).toEqual([
+      { id: 'q-0', type: 'prompt', answered: REPLAY_RESOLVED_PLACEHOLDER },
+    ])
 
     // The log names the module, the cap, the evicted session AND the
     // consequence — an evicted ledger un-protects a racing AskUserQuestion.

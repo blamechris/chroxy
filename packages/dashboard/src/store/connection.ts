@@ -2800,7 +2800,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // what makes the reconnect a delta replay, #5555.3).
       resetReplayReconcile();
 
-
       // #3068: any in-flight evaluator request is now a guaranteed no-op —
       // reject them so awaiters get a fast error instead of waiting 60s for
       // the timeout to fire.
@@ -3042,7 +3041,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // close again for that session. Cursors are deliberately KEPT (they are
       // what makes the reconnect a delta replay, #5555.3).
       resetReplayReconcile();
-
 
       // #3605: an unexpected error means any in-flight skill_trust_grant
       // request will never be acked. Clear both the Map-based correlation

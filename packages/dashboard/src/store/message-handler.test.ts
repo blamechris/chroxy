@@ -3961,6 +3961,26 @@ describe('dashboard message-handler dispatch', () => {
       expect(getReplayWindowDepth('s1')).toBe(0)
     })
 
+    // The 0→1-only ledger clear, pinned at the integration level. Two DELTA
+    // starts, so `_rebuildBaseline` is never set and nothing is swapped — which
+    // is why this shape works where the full-rebuild one cannot: with two full
+    // starts, end#1 slices a racer that pre-dates start#2 out of `messages`
+    // entirely (#7477), so the assertion could never be reached. Overlapping
+    // pure-delta replays are not the common wire shape (the connect handshake
+    // replays the active session with a cursor; `subscribe_sessions`,
+    // `switch_session` and `request_full_history` all force full), so this
+    // guards the logic rather than reproducing a production sequence.
+    it('a racer before the second DELTA start stays protected', () => {
+      seedOne()
+      handleMessage({ type: 'history_replay_start', sessionId: 's1', fullHistory: false }, ctx() as any)
+      handleMessage(question({ toolUseId: 'q-use-0' }) as any, ctx() as any)
+      handleMessage({ type: 'history_replay_start', sessionId: 's1', fullHistory: false }, ctx() as any)
+      handleMessage({ type: 'history_replay_end', sessionId: 's1' }, ctx() as any)
+      handleMessage({ type: 'history_replay_end', sessionId: 's1' }, ctx() as any)
+      expect((store.getState() as any).sessionStates.s1.messages).toHaveLength(1)
+      expect(answeredOf(0)).toBeUndefined()
+    })
+
     // #7456 — the store drops a session's messages wholesale on prune and on
     // timeout; module state here used to survive both with nothing left to
     // correspond to.

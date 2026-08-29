@@ -169,16 +169,20 @@ let _sweepableLedger: { sessionId: string; ids: Set<string> } | null = null
 const MAX_CLIENT_HISTORY_CURSORS = 64
 
 /**
- * Defensive cap on the number of sessions holding an OPEN-window live-arrival
- * ledger (#7456), in the same shape as the cursor cap above.
+ * Defensive cap on `_liveDuringReplay`, in the same shape as the cursor cap
+ * above (#7456).
  *
- * Reaching it needs this many replay windows open at once, each having taken a
- * live `user_question` — `subscribe_sessions` does replay every background
- * session, so it is reachable, but it is not a shape the product produces on
- * purpose. Eviction therefore logs LOUDLY: dropping a ledger un-protects the
- * questions it held, so the next sweep stamps them '(resolved)' and destroys
- * those answer paths. A silent truncation here would be indistinguishable from
- * the #7420 bug itself.
+ * It is ONE-DIMENSIONAL, and deliberately so: it bounds the number of SESSION
+ * KEYS — how many sessions may hold an open-window ledger at once — and puts no
+ * bound on the `Set<string>` of ids inside any one of them. The unbounded axis
+ * is the negligible one: a session blocks on one `AskUserQuestion` at a time,
+ * so a realistic window holds 0–1 ids, whereas `subscribe_sessions` replays
+ * every background session and so can open many windows at once. Read this as
+ * a cap on the key count, not as a complete bound on the map's size.
+ *
+ * Eviction logs LOUDLY: dropping a ledger un-protects the questions it held, so
+ * the next sweep stamps them '(resolved)' and destroys those answer paths. A
+ * silent truncation here would be indistinguishable from the #7420 bug itself.
  */
 export const MAX_LIVE_REPLAY_LEDGERS = 64
 
