@@ -1,5 +1,11 @@
 /**
  * NotificationBanners — cross-session notification banners with quick-approve (#1369)
+ *
+ * Every render here passes `isPermissionActionable={() => true}` (#7466): these
+ * cases predate the staleness gate and are about the LIVE-prompt rendering they
+ * were written for. The gate's own behaviour — including that the prop is
+ * required precisely so no call site can silently reopen the hole — is pinned in
+ * NotificationBannersStale.test.tsx.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, screen, fireEvent, cleanup } from '@testing-library/react'
@@ -32,6 +38,7 @@ describe('NotificationBanners', () => {
         onDeny={vi.fn()}
         onDismiss={vi.fn()}
         onSwitchSession={vi.fn()}
+        isPermissionActionable={() => true}
       />
     )
     expect(container.querySelector('.notification-banners')).not.toBeInTheDocument()
@@ -45,6 +52,7 @@ describe('NotificationBanners', () => {
         onDeny={vi.fn()}
         onDismiss={vi.fn()}
         onSwitchSession={vi.fn()}
+        isPermissionActionable={() => true}
       />
     )
     expect(screen.getByText('My Session')).toBeInTheDocument()
@@ -59,6 +67,7 @@ describe('NotificationBanners', () => {
         onDeny={vi.fn()}
         onDismiss={vi.fn()}
         onSwitchSession={vi.fn()}
+        isPermissionActionable={() => true}
       />
     )
     expect(screen.getByRole('button', { name: /allow/i })).toBeInTheDocument()
@@ -74,6 +83,7 @@ describe('NotificationBanners', () => {
         onDeny={vi.fn()}
         onDismiss={vi.fn()}
         onSwitchSession={vi.fn()}
+        isPermissionActionable={() => true}
       />
     )
     fireEvent.click(screen.getByRole('button', { name: /allow/i }))
@@ -89,6 +99,7 @@ describe('NotificationBanners', () => {
         onDeny={onDeny}
         onDismiss={vi.fn()}
         onSwitchSession={vi.fn()}
+        isPermissionActionable={() => true}
       />
     )
     fireEvent.click(screen.getByRole('button', { name: /deny/i }))
@@ -103,6 +114,7 @@ describe('NotificationBanners', () => {
         onDeny={vi.fn()}
         onDismiss={vi.fn()}
         onSwitchSession={vi.fn()}
+        isPermissionActionable={() => true}
       />
     )
     expect(screen.queryByRole('button', { name: /allow/i })).not.toBeInTheDocument()
@@ -118,6 +130,7 @@ describe('NotificationBanners', () => {
         onDeny={vi.fn()}
         onDismiss={onDismiss}
         onSwitchSession={vi.fn()}
+        isPermissionActionable={() => true}
       />
     )
     fireEvent.click(screen.getByRole('button', { name: /dismiss/i }))
@@ -133,6 +146,7 @@ describe('NotificationBanners', () => {
         onDeny={vi.fn()}
         onDismiss={vi.fn()}
         onSwitchSession={onSwitch}
+        isPermissionActionable={() => true}
       />
     )
     fireEvent.click(screen.getByText('My Session'))
@@ -154,6 +168,7 @@ describe('NotificationBanners', () => {
         onDeny={vi.fn()}
         onDismiss={vi.fn()}
         onSwitchSession={vi.fn()}
+        isPermissionActionable={() => true}
       />
     )
     // Should show 3 banners + overflow indicator
@@ -172,6 +187,7 @@ describe('NotificationBanners', () => {
         onDeny={vi.fn()}
         onDismiss={vi.fn()}
         onSwitchSession={vi.fn()}
+        isPermissionActionable={() => true}
       />
     )
     expect(screen.getByText(/Session crashed/)).toBeInTheDocument()
@@ -185,6 +201,7 @@ describe('NotificationBanners', () => {
         onDeny={vi.fn()}
         onDismiss={vi.fn()}
         onSwitchSession={vi.fn()}
+        isPermissionActionable={() => true}
       />
     )
     expect(screen.getByRole('log')).toBeInTheDocument()
@@ -208,6 +225,7 @@ describe('NotificationBanners — read/unread filtering (#4890)', () => {
         onDeny={vi.fn()}
         onDismiss={vi.fn()}
         onSwitchSession={vi.fn()}
+        isPermissionActionable={() => true}
       />
     )
     expect(container.querySelector('.notification-banners')).not.toBeInTheDocument()
@@ -224,6 +242,7 @@ describe('NotificationBanners — read/unread filtering (#4890)', () => {
         onDeny={vi.fn()}
         onDismiss={vi.fn()}
         onSwitchSession={vi.fn()}
+        isPermissionActionable={() => true}
       />
     )
     expect(screen.getByText('Unread Session')).toBeInTheDocument()
@@ -248,6 +267,7 @@ describe('NotificationBanners — read/unread filtering (#4890)', () => {
         onDeny={vi.fn()}
         onDismiss={vi.fn()}
         onSwitchSession={vi.fn()}
+        isPermissionActionable={() => true}
       />
     )
     expect(screen.getByText('Session 1')).toBeInTheDocument()

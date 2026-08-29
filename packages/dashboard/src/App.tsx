@@ -24,6 +24,7 @@ import {
 } from '@chroxy/store-core'
 import { useConnectionStore } from './store/connection'
 import type { BaseSessionState, ContextOccupancy } from '@chroxy/store-core'
+import type { SessionNotification } from './store/types'
 
 import { Sidebar, type RepoNode, type ContextMenuTarget } from './components/Sidebar'
 import { resolveActivePrimaryClientId } from './components/ViewersIndicator'
@@ -56,7 +57,7 @@ import { BillingWarningBanner } from './components/BillingWarningBanner'
 import { ConnectionAnnouncer } from './components/ConnectionAnnouncer'
 import { StdinDisabledBanner } from './components/StdinDisabledBanner'
 import { WelcomeScreen } from './components/WelcomeScreen'
-import { NotificationBanners } from './components/NotificationBanners'
+import { NotificationBanners, isPermissionNotificationActionable } from './components/NotificationBanners'
 import { PendingPairRequests } from './components/PendingPairRequests'
 import { type ToastItem } from './components/Toast'
 import { FileBrowserPanel } from './components/FileBrowserPanel'
@@ -2048,6 +2049,21 @@ export function App() {
     return result
   }, [sendUserQuestionResponse])
 
+  // #7466 — the banner's staleness gate. `sessionStates` is the store's own
+  // record of every prompt, and `isLivePermissionPrompt` (inside the helper) is
+  // the SAME signal the tab badge and jump-to-pending already use, so this adds
+  // no second notion of "still pending". Read at render time: `sessionStates` is
+  // replaced on every WS event, so a prompt the server retires (#7335 stamps
+  // `expiresAt`) disarms its banner on the next event, and a prompt that simply
+  // times out disarms on the next render past its deadline — the same way the
+  // inline PermissionPrompt's own countdown retires its buttons. The CLICK-time
+  // re-check lives in NotificationBanners itself (it calls the predicate again
+  // inside onClick): one place to gate, and reachable from a component test.
+  const isPermissionActionable = useCallback(
+    (n: SessionNotification) => isPermissionNotificationActionable(n, sessionStates, Date.now()),
+    [sessionStates],
+  )
+
   // #6222/#6224: respondToPermission (sendPermissionResponse) now marks the
   // prompt answered with the canonical decision token itself — only when the
   // answer actually went over the wire (after the disconnected-socket guard).
@@ -2570,6 +2586,7 @@ export function App() {
             onDeny={handleBannerDeny}
             onDismiss={dismissSessionNotification}
             onSwitchSession={handleSwitchSession}
+            isPermissionActionable={isPermissionActionable}
           />
         )}
 
