@@ -32,7 +32,10 @@
  *      `history_replay_end`. Implemented as a "deferred swap": record the
  *      pre-replay message count as a baseline; replayed entries append AFTER it;
  *      at end, slice the array down to the appended tail (the replayed set) in a
- *      single store update. The pre-replay prefix stays on screen the whole time
+ *      single store update. When two full replays of one session overlap the
+ *      OUTERMOST baseline is the one that survives and the swap waits for the
+ *      last end (#7477), so nothing appended between the two starts is sliced
+ *      off. The pre-replay prefix stays on screen the whole time
  *      and vanishes only at the swap — no blank flash, scroll position
  *      preserved by the UI layer because the array identity only changes once.
  *
@@ -52,8 +55,31 @@
 
 /**
  * Per-session full-rebuild state. Absent key ⇒ no rebuild in progress for that
- * session (delta replay or no replay). `baseline` is the `messages.length`
- * captured at `history_replay_start`.
+ * session (delta replay or no replay). The value is the `messages.length`
+ * captured at the OUTERMOST full `history_replay_start` — the index the
+ * deferred swap slices at.
+ *
+ * "Outermost" is the whole of #7477. This map used to be written by every full
+ * start and deleted by the first end, which is the non-refcount shape #7455
+ * removed from {@link _replayWindowOpen} one map over. Two overlapping full
+ * replays of one session (`start start end end` — see that comment for why the
+ * server produces them) then had end#1 slice the array at replay #2's baseline
+ * and apply the result as the atomic swap, DELETING everything appended between
+ * the two starts. That window is exactly the live-racer window #7420 exists to
+ * protect: the ledger vouched for the message and the swap threw it away.
+ *
+ * So the outermost rebuild owns the baseline — set only when absent, cleared
+ * only by the end that closes the LAST window (and by the teardown paths). The
+ * union of both replays' appended tails survives one swap, in array order;
+ * {@link replayDedupCache} is scoped at the same baseline, so replay #2
+ * re-delivering entries replay #1 already appended dedups against them normally
+ * instead of appending a second copy.
+ *
+ * The lifetime is therefore tied to the window refcount, which is what makes
+ * the teardown in `resetReplayReconcile` / {@link dropReplaySessionState}
+ * load-bearing rather than tidy: a start with no matching end strands a +1 on
+ * the refcount, and a swap deferred to a window that never closes is a swap
+ * that never happens.
  */
 const _rebuildBaseline = new Map<string, number>()
 
@@ -94,13 +120,12 @@ const _historyCursors = new Map<string, number>()
  * in {@link noteLivePromptDuringReplay} and was stamped '(resolved)' by the
  * second end's sweep — #7420 again, in the one case the gate exists for.
  *
- * (`_rebuildBaseline` has the same non-refcount shape, pre-existing since
- * #5555.4, and is left alone here to keep this change to the window. It is NOT
- * benign: #7455 assumed overlapping full rebuilds only mis-slice the deferred
- * swap, but the second start overwrites the baseline and the first end then
- * slices a message appended BETWEEN the two starts straight out of the store.
- * Filed with a reproduction as #7477 — the ledger protects that racer and the
- * swap then drops it, so the two fixes compose rather than overlap.)
+ * (`_rebuildBaseline` carried the same non-refcount shape, pre-existing since
+ * #5555.4 and deliberately out of scope for #7455, and it was NOT the cosmetic
+ * mis-swap that scoping assumed: the second start overwrote the baseline and
+ * the first end sliced a message appended BETWEEN the two starts straight out
+ * of the store. Fixed as #7477 — the two compose, the ledger protecting the
+ * racer and the swap no longer dropping it.)
  */
 const _replayWindowOpen = new Map<string, number>()
 
@@ -282,12 +307,24 @@ export function reconcileReplayStart(
     if (_sweepableLedger?.sessionId === sessionId) _sweepableLedger = null
   }
   if (fullHistory) {
-    _rebuildBaseline.set(sessionId, Math.max(0, currentLen | 0))
+    // #7477 — set only when ABSENT. The OUTERMOST full rebuild owns the
+    // baseline: overwriting it from a nested start makes end#1 slice at the
+    // inner baseline and drop everything appended between the two starts.
+    // A genuinely new window never has one (the last end and every teardown
+    // path clear it), so at depth 1 this always sets.
+    if (!_rebuildBaseline.has(sessionId)) {
+      _rebuildBaseline.set(sessionId, Math.max(0, currentLen | 0))
+    }
     return { rebuildInProgress: true }
   }
-  // Delta replay: append-only, ensure no stale baseline lingers.
-  _rebuildBaseline.delete(sessionId)
-  return { rebuildInProgress: false }
+  // Delta replay: append-only, and it contributes no baseline of its own. It
+  // clears a stale one only when it OPENS the window (#7477): nested inside a
+  // full rebuild that is still streaming, deleting the baseline would cancel
+  // that rebuild's swap outright and leave the discarded prefix on screen.
+  if (depth === 1) _rebuildBaseline.delete(sessionId)
+  // Reports the session's rebuild state, not this replay's kind — a delta
+  // nested inside a live full rebuild is still inside a rebuild.
+  return { rebuildInProgress: isRebuildInProgress(sessionId) }
 }
 
 /** Is a full rebuild currently in progress for this session? */
@@ -319,6 +356,12 @@ export function replayDedupCache<T>(
  * caller applies it in ONE store update — the atomic swap. For a delta replay /
  * no rebuild, returns `null` (caller leaves `messages` untouched).
  *
+ * Also `null` while another replay of the same session is STILL IN FLIGHT
+ * (#7477): the swap is deferred to the end that closes the last window, so
+ * overlapping replays produce exactly one swap, sliced at the outermost
+ * baseline. That is what keeps a live message appended between the two starts
+ * — the racer #7420 protects — out of the discarded prefix.
+ *
  * `latestSeq` (when present) advances the cursor one last time, covering the
  * empty-slice case where no entry carried a seq.
  */
@@ -336,6 +379,16 @@ export function reconcileReplayEnd(
   // after this — see `closeReplayWindow`.
   if (sessionId) closeReplayWindow(sessionId)
   if (!sessionId || !_rebuildBaseline.has(sessionId)) {
+    return { swappedMessages: null }
+  }
+  // #7477 — a window is still open (this end belongs to an INNER replay of an
+  // overlapping pair), so the array is not yet the authoritative set and there
+  // is nothing to swap to. Defer to the end that closes the last window: it
+  // slices at the outer baseline and covers both replays' appended tails in one
+  // update. `closeReplayWindow` above already decremented, so > 0 here means a
+  // replay is genuinely still streaming — an unmatched end reads 0 and swaps,
+  // as it did before.
+  if ((_replayWindowOpen.get(sessionId) ?? 0) > 0) {
     return { swappedMessages: null }
   }
   const base = _rebuildBaseline.get(sessionId) as number

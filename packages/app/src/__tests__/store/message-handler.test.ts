@@ -998,11 +998,10 @@ describe("history_replay_end: '(resolved)' sweep vs a racing live AskUserQuestio
     _testMessageHandler.handle(question({ toolUseId: 'q-use-2' }));
     _testMessageHandler.handle({ type: 'history_replay_end', sessionId: 's1' });
 
-    // A racer arriving BEFORE the second start is deliberately not covered
-    // here: `_rebuildBaseline` has the same non-refcount shape and the second
-    // start overwrites it, so end#1's atomic swap slices that racer out of
-    // `messages` entirely. That is a separate defect in the same file, filed
-    // as #7477 — the ledger protects the message, the swap then drops it.
+    // A racer arriving BEFORE the second start was a separate defect in the
+    // same file — `_rebuildBaseline` had the same non-refcount shape, so end#1's
+    // atomic swap sliced that racer out of `messages` entirely. Fixed as #7477
+    // and covered by the next test.
     //
     // Positive control: both questions really are in the store, so the
     // `undefined` assertions below are about the sweep and not a missing fixture.
@@ -1010,6 +1009,41 @@ describe("history_replay_end: '(resolved)' sweep vs a racing live AskUserQuestio
     expect(answeredOf(store, 0)).toBeUndefined();
     expect(answeredOf(store, 1)).toBeUndefined();
     // Balanced pairs ⇒ the window is closed again.
+    expect(getReplayWindowDepth('s1')).toBe(0);
+  });
+
+  // #7477 — one map over from the test above, and the same non-refcount shape:
+  // `_rebuildBaseline` was OVERWRITTEN by the second full start and DELETED by
+  // the first end, so end#1's atomic swap sliced the array at replay #2's
+  // baseline and removed the racer that arrived BEFORE start#2 from `messages`
+  // entirely. A drop, not a stamp. The baseline is now owned by the OUTERMOST
+  // rebuild and the swap deferred to the end that closes the last window, so
+  // one swap covers both replays' appended tails.
+  it('keeps a racer that arrives BETWEEN two overlapping full starts (#7477)', () => {
+    // A pre-replay message makes the outer baseline non-zero, so the final swap
+    // is real (it drops the prefix) rather than an identity slice.
+    const store = seedOne([{ id: 'old-1', type: 'response', content: 'before', timestamp: 1 }]);
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's1', fullHistory: true });
+    // Racer #1 — after start#1 and BEFORE start#2. This is the one #7477 lost.
+    _testMessageHandler.handle(question({ toolUseId: 'q-use-1' }));
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's1', fullHistory: true });
+    // Racer #2 — inside the overlap.
+    _testMessageHandler.handle(question({ toolUseId: 'q-use-2' }));
+    _testMessageHandler.handle({ type: 'history_replay_end', sessionId: 's1' });
+    // Racer #3 — in the tail, after end#1, while replay #2 is still streaming.
+    _testMessageHandler.handle(question({ toolUseId: 'q-use-3' }));
+    _testMessageHandler.handle({ type: 'history_replay_end', sessionId: 's1' });
+
+    const msgs = store.getState().sessionStates.s1.messages;
+    // All three survive the single deferred swap...
+    expect(msgs).toHaveLength(3);
+    // ...the swap really did happen (the pre-replay prefix is gone), so this is
+    // not passing because the swap was skipped altogether...
+    expect(msgs.every((m: any) => m.type === 'prompt')).toBe(true);
+    // ...and neither end's sweep stamped any of them.
+    expect(answeredOf(store, 0)).toBeUndefined();
+    expect(answeredOf(store, 1)).toBeUndefined();
+    expect(answeredOf(store, 2)).toBeUndefined();
     expect(getReplayWindowDepth('s1')).toBe(0);
   });
 
