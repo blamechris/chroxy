@@ -128,6 +128,13 @@ function baseState(overrides: Partial<ConnectionState> = {}): Partial<Connection
     // way on an absent fixture.
     pendingServerSeed: {},
     cancellingActivityIds: new Set<string>(),
+    // #7495 — same intolerance, one field over: `session_timeout` now calls
+    // `clearSessionActivity` alongside the seven prunes (it is the fifth "the
+    // session went away" site), and that helper dereferences `state.bySession`.
+    // An absent tree threw a TypeError from inside the handler, which is a
+    // CRASH rather than a red assertion — so it is filled here for every test
+    // in the file rather than patched per-test at the two call sites.
+    activity: createEmptyActivityState(),
     // #3855: generalized provider-credential state defaults so the
     // credentials_status / credential_test_result dispatch tests start from a
     // clean, well-typed baseline.
@@ -4156,10 +4163,8 @@ describe('dashboard message-handler dispatch', () => {
           activeSessionId: 's1',
           sessions: [{ sessionId: 's1', name: 'S1' } as any, { sessionId: 's2', name: 'S2' } as any],
           sessionStates: { s1: createEmptySessionState(), s2: createEmptySessionState() },
-          // The prune path also walks the Control Room activity tree (#5163),
-          // which `baseState` leaves undefined because no other session_list
-          // test in this file removes a session.
-          activity: createEmptyActivityState(),
+          // (The prune path also walks the Control Room activity tree (#5163);
+          // `baseState` supplies an empty one since #7495.)
         }),
       )
       setStore(store)

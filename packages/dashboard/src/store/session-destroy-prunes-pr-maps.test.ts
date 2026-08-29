@@ -78,7 +78,8 @@ import { handleMessage, setStore, clearDeltaBuffers, clearPermissionSplits, stop
 import { createEmptySessionState, pruneSessionKeyedMap, pruneSessionScopedKeySet } from './utils'
 import type { ConnectionState } from './types'
 import { createEmptyActivityState } from '@chroxy/store-core'
-import type { ServerSessionPrStatusMessage, ServerSessionPrThreadsMessage } from '@chroxy/protocol'
+import type { ActivityState } from '@chroxy/store-core'
+import type { ActivityEntry, ServerSessionPrStatusMessage, ServerSessionPrThreadsMessage } from '@chroxy/protocol'
 
 const DEAD = 'sess-dead'
 const LIVE = 'sess-live'
@@ -141,6 +142,32 @@ function prThreads(sessionId: string, unresolvedCount: number): ServerSessionPrT
 }
 
 /**
+ * One session's Control Room activity subtree (#5163), carrying a real running
+ * entry.
+ *
+ * Seeded rather than left empty (#7495): `clearSessionActivity` only removes a
+ * key that is present, so `bySession[DEAD] === undefined` after the handler runs
+ * is satisfied for free by a tree that never held `DEAD` at all — this repo's
+ * "negative assertions need a positive control" rule. The entry is typed as
+ * `ActivityEntry` without a cast, so a fixture that drifts from the wire
+ * contract fails the typecheck.
+ */
+function activitySubtree(sessionId: string): ActivityState['bySession'][string] {
+  const entry: ActivityEntry = {
+    id: `${sessionId}-act-1`,
+    kind: 'agent',
+    label: `work in ${sessionId}`,
+    status: 'running',
+    startedAt: 1000,
+  }
+  return { byId: { [entry.id]: entry }, order: [entry.id] }
+}
+
+function seededActivity(): ActivityState {
+  return { bySession: { [DEAD]: activitySubtree(DEAD), [LIVE]: activitySubtree(LIVE) } }
+}
+
+/**
  * Both sessions are known to the store (they have `sessionStates` entries —
  * that is what `removedIds` is computed against) and both carry an entry in
  * every one of the five maps.
@@ -163,7 +190,12 @@ function baseState(): Partial<ConnectionState> {
     // #5163 activity tree — the removedIds block calls `clearSessionActivity`
     // on it, so an undefined value throws there and the PR/CI assertions below
     // would never run (a crash is not a red assertion).
-    activity: createEmptyActivityState(),
+    //
+    // #7495: SEEDED with a subtree per session rather than empty. It was empty
+    // because nothing asserted on it; `session_timeout` leaking the subtree is
+    // half of #7495, and an empty tree makes every "the subtree is gone"
+    // assertion pass for the wrong reason.
+    activity: seededActivity(),
     sessionPrStatus: { [DEAD]: prStatus(DEAD, 1), [LIVE]: prStatus(LIVE, 2) },
     sessionPrStatusLoading: { [DEAD]: true, [LIVE]: true },
     sessionPrStatusRequestedAt: { [DEAD]: 1000, [LIVE]: 2000 },
@@ -267,6 +299,19 @@ describe('#7470 session destroy prunes the per-session PR/CI maps', () => {
     // Positive control: the survivor's seed comes through byte-identical, so a
     // blanket `pendingServerSeed: {}` cannot satisfy the assertion above.
     expect(after[LIVE]).toBe('seed for the live session')
+  })
+
+  it('drops the destroyed session\'s Control Room activity subtree', () => {
+    // #5163's clear, which this site has always done and no test in this file
+    // asserted — the fixture carried an EMPTY tree purely so the call would not
+    // throw. Pinned here because it is the same per-session-state family as the
+    // seven below, and #7495 is the same clear missing at the fifth site.
+    handleMessage(listWithoutDead(), ctx() as never)
+    const after = store.getState().activity
+    expect(after.bySession[DEAD]).toBeUndefined()
+    expect(Object.keys(after.bySession)).toEqual([LIVE])
+    // Positive control: the survivor's subtree comes through intact.
+    expect(after.bySession[LIVE]?.order).toEqual([`${LIVE}-act-1`])
   })
 
   it('prunes cancellingActivityIds for the destroyed session and leaves the survivor', () => {
@@ -523,6 +568,240 @@ describe('#7470 a fresh auth_ok clears the per-session PR/CI maps', () => {
 })
 
 /**
+ * #7495 — the FIFTH site: `session_timeout`.
+ *
+ * The server closes an idle session on its own and pushes `session_timeout`.
+ * The handler deletes `sessionStates[id]` and filters `sessions`, and until this
+ * issue it pruned NONE of the seven collections above — no helper call, no
+ * marker block, no row in the SITES table at the bottom of this file.
+ *
+ * Mechanically it is the roster-wipe case, one session at a time. `removedIds`
+ * is a diff against `Object.keys(sessionStates)` (store-core
+ * `buildSessionListPatches`) and this handler removes the id from
+ * `sessionStates` ITSELF, so by the time the next `session_list` lands there is
+ * nothing to diff: `removedIds` is `[]`, the prune block is skipped, and the
+ * entries are unreachable for the life of the tab. The MECHANISM test at the
+ * bottom of this describe drives exactly that sequence.
+ *
+ * How it slipped is the more useful half. The FIELD axis of the roster guard
+ * below is exhaustive — every `Record<string, …>` / `Set<string>` on
+ * `ConnectionState` must be classified or the run is red — while the SITE axis
+ * was a hand-written list of four. So adding a collection was red until every
+ * site cleaned it, and adding a SITE was green. That is
+ * docs/false-safety-guards.md's "guard wired to only some of its callers", at
+ * the site axis, and the `roster removal sites` describe at the end of this
+ * file is the answer to it.
+ */
+describe('#7495 session_timeout prunes the per-session roster (the fifth site)', () => {
+  let store: ReturnType<typeof createMockStore>
+  let mockSocket: WebSocket
+  let warn: ReturnType<typeof vi.spyOn>
+  const ctx = () => ({ url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false })
+
+  /** The frame the server pushes when it closes an idle session. */
+  function timeout(sessionId: string = DEAD): Record<string, unknown> {
+    return { type: 'session_timeout', sessionId, name: 'dead', idleMs: 600000 }
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks(); localStorage.clear(); clearDeltaBuffers(); clearPermissionSplits(); resetReplayFlags()
+    // The handler raises a platform alert, which on the dashboard is
+    // `console.warn`. Silenced so this describe does not bury the run's real
+    // output, and restored in afterEach rather than left patched for whatever
+    // file vitest schedules next.
+    warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    mockSocket = createMockSocket(); store = createMockStore(baseState()); setStore(store)
+  })
+  afterEach(() => { warn.mockRestore(); stopHeartbeat() })
+
+  it('control: the fixture holds entries for both sessions before the timeout', () => {
+    // Without this, every "is gone afterwards" assertion below could be passing
+    // because the seed never landed.
+    const s = store.getState()
+    expect(Object.keys(s.sessionPrStatus)).toEqual([DEAD, LIVE])
+    expect(Object.keys(s.sessionPrStatusLoading)).toEqual([DEAD, LIVE])
+    expect(Object.keys(s.sessionPrStatusRequestedAt)).toEqual([DEAD, LIVE])
+    expect(Object.keys(s.sessionPrThreads)).toEqual([DEAD, LIVE])
+    expect(Object.keys(s.sessionPrThreadsLoading)).toEqual([DEAD, LIVE])
+    expect(Object.keys(s.pendingServerSeed)).toEqual([DEAD, LIVE])
+    expect(s.cancellingActivityIds.size).toBe(3)
+    expect(Object.keys(s.activity.bySession)).toEqual([DEAD, LIVE])
+  })
+
+  it('removes the timed-out session from sessionStates and sessions', () => {
+    // The pre-existing behaviour (#816). Pinned so the prune assertions below
+    // cannot be read as the whole of what this site does — and so a fix that
+    // broke the roster removal to satisfy them would be caught here.
+    handleMessage(timeout(), ctx() as never)
+    const s = store.getState()
+    expect(s.sessionStates[DEAD]).toBeUndefined()
+    expect(Object.keys(s.sessionStates)).toEqual([LIVE])
+    expect(s.sessions.map((x) => x.sessionId)).toEqual([LIVE])
+  })
+
+  // ---- One `it` per collection, so a partial fix fails naming what was missed.
+
+  it('prunes sessionPrStatus for the timed-out session and leaves the survivor', () => {
+    const before = store.getState().sessionPrStatus[LIVE]
+    handleMessage(timeout(), ctx() as never)
+    const after = store.getState().sessionPrStatus
+    expect(after[DEAD]).toBeUndefined()
+    expect(Object.keys(after)).toEqual([LIVE])
+    // Positive control: the survivor's snapshot is untouched, so a blanket
+    // `sessionPrStatus: {}` cannot satisfy the assertion above.
+    expect(after[LIVE]).toBe(before)
+    expect(after[LIVE]?.pr?.number).toBe(2)
+  })
+
+  it('prunes sessionPrStatusLoading for the timed-out session and leaves the survivor', () => {
+    handleMessage(timeout(), ctx() as never)
+    const after = store.getState().sessionPrStatusLoading
+    expect(after[DEAD]).toBeUndefined()
+    expect(Object.keys(after)).toEqual([LIVE])
+    expect(after[LIVE]).toBe(true)
+  })
+
+  it('prunes sessionPrStatusRequestedAt for the timed-out session and leaves the survivor', () => {
+    handleMessage(timeout(), ctx() as never)
+    const after = store.getState().sessionPrStatusRequestedAt
+    expect(after[DEAD]).toBeUndefined()
+    expect(Object.keys(after)).toEqual([LIVE])
+    // The survivor's auto-pull stamp must survive intact — clearing it re-opens
+    // the #7344 request-rate hole for every session that did not time out.
+    expect(after[LIVE]).toBe(2000)
+  })
+
+  it('prunes sessionPrThreads for the timed-out session and leaves the survivor', () => {
+    const before = store.getState().sessionPrThreads[LIVE]
+    handleMessage(timeout(), ctx() as never)
+    const after = store.getState().sessionPrThreads
+    expect(after[DEAD]).toBeUndefined()
+    expect(Object.keys(after)).toEqual([LIVE])
+    expect(after[LIVE]).toBe(before)
+    expect(after[LIVE]?.unresolvedCount).toBe(4)
+  })
+
+  it('prunes sessionPrThreadsLoading for the timed-out session and leaves the survivor', () => {
+    handleMessage(timeout(), ctx() as never)
+    const after = store.getState().sessionPrThreadsLoading
+    expect(after[DEAD]).toBeUndefined()
+    expect(Object.keys(after)).toEqual([LIVE])
+    expect(after[LIVE]).toBe(true)
+  })
+
+  it('prunes pendingServerSeed for the timed-out session and leaves the survivor', () => {
+    // #7478's collection at this site. A seed is drained only when App's
+    // create-confirm effect runs for that session, so a session that idles out
+    // before the composer is touched leaves its seed behind forever.
+    handleMessage(timeout(), ctx() as never)
+    const after = store.getState().pendingServerSeed
+    expect(after[DEAD]).toBeUndefined()
+    expect(Object.keys(after)).toEqual([LIVE])
+    expect(after[LIVE]).toBe('seed for the live session')
+  })
+
+  it('prunes cancellingActivityIds for the timed-out session and leaves the survivor', () => {
+    // #7483's collection: a Set keyed `${sessionId}:${activityId}`, so this is
+    // the session-SCOPED prune, not the exact-key one.
+    handleMessage(timeout(), ctx() as never)
+    const after = store.getState().cancellingActivityIds
+    // BOTH of the dead session's keys go, not just the first found.
+    expect(after.has(`${DEAD}:act-1`)).toBe(false)
+    expect(after.has(`${DEAD}:act-2`)).toBe(false)
+    // Positive control: the survivor's key carries the SAME activityId as one
+    // of the timed-out session's, so neither "clear the whole set" nor a match
+    // on the activityId half can pass.
+    expect(after.has(`${LIVE}:act-1`)).toBe(true)
+    expect([...after]).toEqual([`${LIVE}:act-1`])
+  })
+
+  it('drops the timed-out session\'s Control Room activity subtree', () => {
+    // Not one of the seven — `activity` is an ActivityState, not a
+    // `Record<string, …>` — but it is the same "belongs to a session that is
+    // gone" family, it IS cleared at the other four sites, and the issue names
+    // it explicitly. Without this the Control Room keeps rendering a tree for a
+    // session the user can no longer select.
+    handleMessage(timeout(), ctx() as never)
+    const after = store.getState().activity
+    expect(after.bySession[DEAD]).toBeUndefined()
+    expect(Object.keys(after.bySession)).toEqual([LIVE])
+    // Positive control: the survivor's subtree comes through intact, so
+    // `activity: createEmptyActivityState()` cannot pass.
+    expect(after.bySession[LIVE]?.order).toEqual([`${LIVE}-act-1`])
+  })
+
+  // ---- Reference contracts: the prune must not churn subscribers.
+
+  it('keeps the activity reference when the timed-out session had no subtree', () => {
+    // `clearSessionActivity` returns the SAME state when the session is absent,
+    // and the handler must propagate that rather than assign unconditionally —
+    // every Control Room subscriber re-renders on a value that did not change.
+    store.setState({ activity: createEmptyActivityState() })
+    const before = store.getState().activity
+    handleMessage(timeout(), ctx() as never)
+    expect(store.getState().activity).toBe(before)
+  })
+
+  it('keeps a collection\'s reference when the timed-out session was never in it', () => {
+    // The reachable case: a tab holds a PR status for both sessions but has
+    // only ever counted threads for the survivor. A fresh object for
+    // `sessionPrThreads` re-renders every `useShallow` consumer of it on every
+    // idle timeout, for a value that did not change.
+    store.setState({ sessionPrThreads: { [LIVE]: prThreads(LIVE, 4) } })
+    const untrackedBefore = store.getState().sessionPrThreads
+    const trackedBefore = store.getState().sessionPrStatus
+    handleMessage(timeout(), ctx() as never)
+    const after = store.getState()
+    expect(after.sessionPrThreads).toBe(untrackedBefore)
+    // Positive control for THIS test: a collection that DID hold the id is
+    // rebuilt, so the assertion above cannot be passing because the prune never
+    // ran at all.
+    expect(after.sessionPrStatus).not.toBe(trackedBefore)
+    expect(after.sessionPrStatus[DEAD]).toBeUndefined()
+  })
+
+  it('POSITIVE CONTROL: a timeout for an UNKNOWN session touches none of them', () => {
+    // What stops the fix degenerating into "clear everything on any timeout",
+    // which would satisfy all seven assertions above. A `session_timeout` for
+    // an id this tab never knew must leave every collection at its own
+    // reference — nothing to prune, nothing rebuilt.
+    const before = store.getState()
+    const refs = {
+      sessionPrStatus: before.sessionPrStatus,
+      sessionPrStatusLoading: before.sessionPrStatusLoading,
+      sessionPrStatusRequestedAt: before.sessionPrStatusRequestedAt,
+      sessionPrThreads: before.sessionPrThreads,
+      sessionPrThreadsLoading: before.sessionPrThreadsLoading,
+      pendingServerSeed: before.pendingServerSeed,
+      cancellingActivityIds: before.cancellingActivityIds,
+      activity: before.activity,
+    }
+    handleMessage(timeout('sess-never-seen'), ctx() as never)
+    const after = store.getState()
+    for (const key of Object.keys(refs) as (keyof typeof refs)[]) {
+      expect(after[key], `${key} must keep its reference when the timed-out id was unknown`).toBe(refs[key])
+    }
+    // And the roster is otherwise untouched.
+    expect(Object.keys(after.sessionStates)).toEqual([DEAD, LIVE])
+  })
+
+  it('MECHANISM: after the timeout, no later session_list can prune the stale ids', () => {
+    // Passes both before and after the fix, and that is the point — it states
+    // in one place WHY this site cannot be folded into the removedIds block.
+    // The timeout removes the id from `sessionStates`, which is the set
+    // `removedIds` is diffed against, so the next snapshot yields `[]` and the
+    // prune block never runs.
+    handleMessage(timeout(), ctx() as never)
+    // Re-seed as if the timeout site had left an entry behind, then prove no
+    // snapshot can reclaim it.
+    store.setState({ pendingServerSeed: { [DEAD]: 'stranded', [LIVE]: 'seed for the live session' } })
+    handleMessage(listWithoutDead(), ctx() as never)
+    expect(store.getState().pendingServerSeed[DEAD]).toBe('stranded')
+    expect(store.getState().pendingServerSeed[LIVE]).toBe('seed for the live session')
+  })
+})
+
+/**
  * `pruneSessionKeyedMap`'s reference contract, tested directly (PR #7481 N1).
  *
  * The docstring calls the same-reference return "load-bearing, not an
@@ -628,6 +907,36 @@ describe('#7483 pruneSessionScopedKeySet contract', () => {
 })
 
 /**
+ * The three store sources the guards below read, and the SITE table.
+ *
+ * At module scope (#7495) because two describes need them now: the per-cell
+ * `[site] cleans up <field>` matrix, and the structural roster-removal detector
+ * that cross-checks this table against the markers actually present in the
+ * sources.
+ */
+const typesSrc = readFileSync(resolve(__dirname, 'types.ts'), 'utf8')
+const handlerSrc = readFileSync(resolve(__dirname, 'message-handler.ts'), 'utf8')
+const connectionSrc = readFileSync(resolve(__dirname, 'connection.ts'), 'utf8')
+
+/** `[file label, source text]` — for error messages and per-file scans. */
+const SOURCES: [string, string][] = [
+  ['message-handler.ts', handlerSrc],
+  ['connection.ts', connectionSrc],
+]
+
+/** `[site label, source text, start marker, end marker]`. */
+const SITES: [string, string, string, string][] = [
+  ['session_list removedIds', handlerSrc, '#7470 prune-block-start', '#7470 prune-block-end'],
+  ['auth_ok fresh connect', handlerSrc, '#7470 authok-reset-start', '#7470 authok-reset-end'],
+  ['forgetSession', connectionSrc, '#7470 forget-reset-start', '#7470 forget-reset-end'],
+  ['_resetSessionMemory', connectionSrc, '#7470 switch-reset-start', '#7470 switch-reset-end'],
+  // #7495 — the fifth. Found in review of #7489 with the table already at
+  // four: `session_timeout` removes ONE id from `sessionStates` and, like the
+  // three wipe sites, removes it before any `session_list` can diff it out.
+  ['session_timeout', handlerSrc, '#7470 timeout-reset-start', '#7470 timeout-reset-end'],
+]
+
+/**
  * Roster coverage — the adjacent-field guard.
  *
  * ## What the first version of this got wrong (PR #7481 review, Critical 2)
@@ -667,33 +976,29 @@ describe('#7483 pruneSessionScopedKeySet contract', () => {
  * types.ts, not inferred from its name — the naming inference is what produced
  * the defect this guard now exists to catch.
  *
- * ## Four sites
+ * ## Five sites
  *
- * "The session went away" has four spellings in this store. Covering only the
+ * "The session went away" has five spellings in this store. Covering only the
  * one the issue named is the same adjacent-field mistake one level up, and the
- * review found the fourth after this table already had three:
+ * count has now grown TWICE under review — the fourth was found reviewing
+ * #7481, the fifth reviewing #7489:
  *
- *   1. `session_list` removedIds  — one session closed        (message-handler.ts)
+ *   1. `session_list` removedIds  — one session closed         (message-handler.ts)
  *   2. `auth_ok` non-reconnect    — fresh connect, roster wipe (message-handler.ts)
  *   3. `forgetSession`            — disconnect + forget        (connection.ts)
  *   4. `_resetSessionMemory`      — switchServer               (connection.ts)
+ *   5. `session_timeout`          — server closed an idle one  (message-handler.ts)
  *
- * 2/3/4 empty `sessionStates` wholesale, and `removedIds` is a diff against
- * `sessionStates` — so each must clear these maps itself or they are permanently
- * unprunable. That is one mechanism, not four coincidences.
+ * 2/3/4 empty `sessionStates` wholesale and 5 removes one id from it, while
+ * `removedIds` is a diff against `sessionStates` — so each must clear these maps
+ * itself or they are permanently unprunable. That is one mechanism, not five
+ * coincidences.
+ *
+ * Twice is a pattern, so the SITE axis is no longer only this hand-written
+ * table: the `roster removal sites` describe below finds the removal statements
+ * structurally and fails on one that is not accounted for here.
  */
 describe('#7470 roster coverage: every session-keyed collection is classified and cleaned', () => {
-  const typesSrc = readFileSync(resolve(__dirname, 'types.ts'), 'utf8')
-  const handlerSrc = readFileSync(resolve(__dirname, 'message-handler.ts'), 'utf8')
-  const connectionSrc = readFileSync(resolve(__dirname, 'connection.ts'), 'utf8')
-
-  /** `[site label, source text, start marker, end marker]`. */
-  const SITES: [string, string, string, string][] = [
-    ['session_list removedIds', handlerSrc, '#7470 prune-block-start', '#7470 prune-block-end'],
-    ['auth_ok fresh connect', handlerSrc, '#7470 authok-reset-start', '#7470 authok-reset-end'],
-    ['forgetSession', connectionSrc, '#7470 forget-reset-start', '#7470 forget-reset-end'],
-    ['_resetSessionMemory', connectionSrc, '#7470 switch-reset-start', '#7470 switch-reset-end'],
-  ]
 
   // -- Bucket 1: session-scoped, cleaned at every site. ----------------------
   // Two SHAPES live here, and the site blocks spell them differently:
@@ -888,5 +1193,334 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
     // rejects a longer identifier that merely starts with it.
     const assigned = new RegExp(`(^|[^A-Za-z0-9_$])${field}\\s*[:=][^=]`)
     expect(assigned.test(block), `${site} must assign ${field} (token match, not substring)`).toBe(true)
+  })
+})
+
+/**
+ * Roster REMOVAL sites — the SITE axis, found structurally (#7495).
+ *
+ * ## Why this exists
+ *
+ * The guard above is exhaustive on FIELDS and hand-written on SITES. Adding a
+ * collection to `ConnectionState` is red until every site cleans it; adding a
+ * SITE was green. `session_timeout` shipped as exactly that: a fifth caller
+ * that removed a session from the roster, pruned none of the seven, and turned
+ * nothing red. Twice now the site count has grown under review (the fourth in
+ * #7481, the fifth in #7489), which is the definition of a class rather than an
+ * oversight — docs/false-safety-guards.md's "a guard wired to only some of its
+ * callers", at the site axis.
+ *
+ * ## What it does
+ *
+ * It does not read the SITES table to decide what to look for. It scans the two
+ * store sources for the statements that actually REMOVE entries from the
+ * session roster, and requires each one to be either
+ *
+ *   (a) inside a `#7470 <site>-start` … `#7470 <site>-end` span, or
+ *   (b) annotated in the comment block directly above it with
+ *       `#7470 not-a-removal: <reason>`.
+ *
+ * Anything else is red, naming the file and line. Both escapes live AT the
+ * site, so neither can go stale in a list somewhere else — and (b) is what the
+ * store's initial-state literal uses, because an empty roster at construction
+ * time is not a session going away.
+ *
+ * `sessionStates` is the right thing to scan for rather than `sessions`:
+ * `sessionStates` is the set `removedIds` is diffed against (store-core
+ * `buildSessionListPatches`), so it is the roster whose emptying is what makes
+ * everything session-scoped permanently unprunable.
+ *
+ * ## Known limit, stated rather than implied
+ *
+ * Two spellings are recognised — a `sessionStates: {}` wipe, and a `delete`
+ * against a spread COPY of the roster — because those are the two all five real
+ * sites use. A future site that removed a session by rest-destructuring
+ * (`const { [id]: _, ...rest } = sessionStates`) or by
+ * `Object.fromEntries(Object.entries(...).filter(...))` would not be seen. That
+ * is a narrower hole than "no site detector at all", and the control below
+ * asserts the detector still sees a removal inside every marked site — so the
+ * two shapes it does claim cannot quietly stop matching.
+ */
+describe('#7495 roster removal sites: every site that drops a session is accounted for', () => {
+  interface Removal {
+    /** Human label for the statement, e.g. ``delete newStates[…]``. */
+    label: string
+    /** Byte offset into the source. */
+    index: number
+    /** 1-based line number, for the failure message. */
+    line: number
+  }
+
+  /**
+   * Blank every comment, preserving byte offsets and line breaks.
+   *
+   * Necessary rather than tidy: this file's own prose, and the annotation in
+   * `connection.ts` that the detector reads, both QUOTE the patterns below —
+   * `sessionStates: {}` appears verbatim inside the comment explaining why the
+   * initial state is not a removal. Scanning raw text made the detector match
+   * its own documentation, which is a guard reporting on itself.
+   *
+   * Spaces (not deletion) so every index the caller derives still lines up with
+   * the ORIGINAL source, which `spansIn` and `annotatedNotARemoval` read. The
+   * `(?<!:)` keeps a `https://` inside a string literal from blanking the rest
+   * of its line.
+   */
+  function blankComments(src: string): string {
+    return src.replace(/\/\*[\s\S]*?\*\/|(?<!:)\/\/[^\n]*/g, (m) => m.replace(/[^\n]/g, ' '))
+  }
+
+  /**
+   * Every statement in `src` that removes entries from the session roster.
+   *
+   * Two shapes (see the docstring's "known limit"):
+   *   1. `sessionStates: {}` — a wholesale wipe in an object literal.
+   *   2. `delete <name>[…]` where `<name>` was bound to a spread copy of the
+   *      roster. The provenance step is the whole point: `delete next[requestId]`
+   *      appears a dozen times in these files and is not a roster removal, so
+   *      the copy has to be identified first.
+   */
+  function findRosterRemovals(rawSrc: string): Removal[] {
+    const src = blankComments(rawSrc)
+    const at = (index: number): number => src.slice(0, index).split('\n').length
+    const hits: Removal[] = []
+
+    for (const m of src.matchAll(/sessionStates:\s*\{\s*\}/g)) {
+      hits.push({ label: 'sessionStates: {} (wholesale wipe)', index: m.index, line: at(m.index) })
+    }
+
+    const copies = new Set<string>()
+    for (const m of src.matchAll(
+      /(?:const|let)\s+([A-Za-z0-9_$]+)\s*(?::\s*[^=;]+)?=\s*\{\s*\.\.\.\s*(?:[A-Za-z0-9_$]+(?:\(\))?\.)*sessionStates\s*\}/g,
+    )) {
+      copies.add(m[1]!)
+    }
+    for (const name of copies) {
+      for (const m of src.matchAll(
+        new RegExp(`(^|[^A-Za-z0-9_$.])delete\\s+${name}\\s*\\[`, 'g'),
+      )) {
+        hits.push({ label: `delete ${name}[…]`, index: m.index, line: at(m.index) })
+      }
+    }
+
+    return hits.sort((a, b) => a.index - b.index)
+  }
+
+  /** `[startOffset, endOffset]` for each marked span present in `src`. */
+  function spansIn(src: string, markers: [string, string][]): [number, number][] {
+    const spans: [number, number][] = []
+    for (const [start, end] of markers) {
+      const s = src.indexOf(start)
+      const e = src.indexOf(end)
+      if (s > -1 && e > s) spans.push([s, e])
+    }
+    return spans
+  }
+
+  /**
+   * True when the contiguous `//` comment block DIRECTLY above `index` carries
+   * the `#7470 not-a-removal` escape. Scoped to that block rather than a window
+   * of N lines so the annotation cannot be satisfied by an unrelated comment
+   * further up the file — "source-level guards must be anchored".
+   */
+  function annotatedNotARemoval(src: string, index: number): boolean {
+    const lines = src.slice(0, index).split('\n')
+    lines.pop() // the (partial) line the hit is on
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i]!.trim()
+      if (!line.startsWith('//')) return false
+      if (line.includes('#7470 not-a-removal')) return true
+    }
+    return false
+  }
+
+  /** The removals in `src` that are neither inside a marked span nor annotated. */
+  function unaccountedRemovals(src: string, markers: [string, string][]): Removal[] {
+    const spans = spansIn(src, markers)
+    return findRosterRemovals(src).filter(
+      (h) =>
+        !spans.some(([s, e]) => h.index > s && h.index < e) &&
+        !annotatedNotARemoval(src, h.index),
+    )
+  }
+
+  const markersFor = (src: string): [string, string][] =>
+    SITES.filter(([, s]) => s === src).map(([, , start, end]) => [start, end] as [string, string])
+
+  // ---- The guard itself. --------------------------------------------------
+
+  it.each(SOURCES)('%s: every roster removal is inside a marked site block or annotated', (file, src) => {
+    const unaccounted = unaccountedRemovals(src, markersFor(src))
+    expect(
+      unaccounted.map((h) => `${file}:${h.line} ${h.label}`),
+      `unaccounted roster-removal site(s) in ${file}. A statement that drops a session from ` +
+      '`sessionStates` is a "the session went away" SITE: wrap it in `#7470 <site>-start` / ' +
+      '`-end` markers, prune all seven session-scoped collections inside them, and add the ' +
+      'site to SITES in this file — or, if it genuinely removes nothing (the initial state), ' +
+      'annotate it `#7470 not-a-removal: <reason>` in the comment directly above.',
+    ).toEqual([])
+  })
+
+  // ---- Controls: the detector is not vacuous, in both directions. ---------
+
+  it.each(SITES)('control: [%s] contains a roster removal the detector can see', (_site, src, start, end) => {
+    // The non-vacuity guard that matters. If either pattern stops matching —
+    // a site is rewritten to remove a session some third way, or the regex
+    // rots — the `unaccounted` test above goes vacuously green while the
+    // detector sees nothing at all. This fails instead.
+    const s = src.indexOf(start)
+    const e = src.indexOf(end)
+    expect(s, `${start} must exist`).toBeGreaterThan(-1)
+    expect(e, `${end} must exist and follow its start`).toBeGreaterThan(s)
+    const inside = findRosterRemovals(src).filter((h) => h.index > s && h.index < e)
+    expect(inside.length, `${start} encloses no roster removal the detector recognises`).toBeGreaterThan(0)
+  })
+
+  it('control: the one annotated non-removal is real and is the initial state', () => {
+    // The other escape hatch, proven live rather than assumed. `connection.ts`
+    // builds the store's initial state with an empty roster; that is not a
+    // session going away, and it is the only `#7470 not-a-removal` in the tree.
+    const annotated = findRosterRemovals(connectionSrc).filter((h) =>
+      annotatedNotARemoval(connectionSrc, h.index),
+    )
+    expect(annotated.map((h) => h.label)).toEqual(['sessionStates: {} (wholesale wipe)'])
+    expect(findRosterRemovals(handlerSrc).some((h) => annotatedNotARemoval(handlerSrc, h.index))).toBe(false)
+  })
+
+  it('control: the detector finds at least one removal per site plus the initial state', () => {
+    const total = SOURCES.reduce((n, [, src]) => n + findRosterRemovals(src).length, 0)
+    // Five sites + the annotated initial state. A floor, not an equality: the
+    // `unaccounted` test is what handles growth.
+    expect(total).toBeGreaterThanOrEqual(6)
+  })
+
+  // ---- Marker hygiene: the table and the sources must agree. --------------
+
+  it.each(SITES)('[%s] its markers appear exactly once, in order', (_site, src, start, end) => {
+    // `[site] cleans up <field>` slices with `indexOf`, so a duplicated start
+    // marker would silently guard the WRONG block.
+    expect(src.split(start).length - 1, `${start} must appear exactly once`).toBe(1)
+    expect(src.split(end).length - 1, `${end} must appear exactly once`).toBe(1)
+    expect(src.indexOf(end)).toBeGreaterThan(src.indexOf(start))
+  })
+
+  it.each(SOURCES)('%s: every #7470 site marker in the source is listed in SITES', (file, src) => {
+    // The other direction. Without it, someone can mark a new site's block
+    // (satisfying the detector above) and never add the SITES row — so the
+    // per-cell `[site] cleans up <field>` matrix would not cover it, which is
+    // most of what went wrong with the fifth site.
+    const found = [...src.matchAll(/#7470 ([a-z][a-z-]*)-start/g)].map((m) => `#7470 ${m[1]}-start`)
+    const listed = new Set(markersFor(src).map(([s]) => s))
+    expect(
+      found.filter((m) => !listed.has(m)),
+      `marked site block(s) in ${file} with no row in SITES — the per-field matrix does not cover them`,
+    ).toEqual([])
+  })
+
+  // ---- The detector's own contract, on synthetic sources. -----------------
+  //
+  // The phantom sixth site, kept as a permanent test rather than run once as a
+  // mutant: these pin what the detector CLAIMS, so the claim cannot rot into
+  // "matches nothing" while the guard above stays green.
+
+  const PHANTOM_MARKERS: [string, string][] = [['#7470 evict-reset-start', '#7470 evict-reset-end']]
+
+  it('flags a phantom sixth site that deletes from a roster copy with no marker', () => {
+    const phantom = [
+      "    case 'session_evicted': {",
+      '      const next = { ...get().sessionStates };',
+      '      delete next[evictedId];',
+      '      set({ sessionStates: next });',
+      '      break;',
+      '    }',
+    ].join('\n')
+    const found = unaccountedRemovals(phantom, PHANTOM_MARKERS)
+    expect(found.map((h) => h.label)).toEqual(['delete next[…]'])
+    expect(found[0]!.line).toBe(3)
+  })
+
+  it('flags a phantom sixth site that wipes the roster wholesale with no marker', () => {
+    const phantom = '  _nuke: () => {\n    set({ sessions: [], sessionStates: {} });\n  },'
+    expect(unaccountedRemovals(phantom, PHANTOM_MARKERS).map((h) => h.label))
+      .toEqual(['sessionStates: {} (wholesale wipe)'])
+  })
+
+  it('accepts the same phantom site once its removal is inside a marked block', () => {
+    // The positive control for both tests above: they must be failing on the
+    // MISSING MARKER, not on something about the phantom source itself.
+    const phantom = [
+      "    case 'session_evicted': {",
+      '      // #7470 evict-reset-start',
+      '      const next = { ...get().sessionStates };',
+      '      delete next[evictedId];',
+      '      set({ sessionStates: next });',
+      '      // #7470 evict-reset-end',
+      '    }',
+    ].join('\n')
+    expect(unaccountedRemovals(phantom, PHANTOM_MARKERS)).toEqual([])
+    // …and the detector still SEES the removal — "accepted" must not mean
+    // "invisible", or the marked-site control above would be satisfiable by a
+    // dead pattern.
+    expect(findRosterRemovals(phantom).map((h) => h.label)).toEqual(['delete next[…]'])
+  })
+
+  it('accepts a removal annotated #7470 not-a-removal in the comment above it', () => {
+    const phantom = [
+      '  // #7470 not-a-removal: the initial empty roster.',
+      '  sessionStates: {},',
+    ].join('\n')
+    expect(unaccountedRemovals(phantom, PHANTOM_MARKERS)).toEqual([])
+  })
+
+  it('does not accept an annotation separated from the removal by code', () => {
+    // The anchor. A `#7470 not-a-removal` anywhere above must not license a
+    // removal further down the file — that is the file-wide-grep failure the
+    // roster guard above was already burned by.
+    const phantom = [
+      '  // #7470 not-a-removal: the initial empty roster.',
+      '  sessionStates: {},',
+      '  activeSessionId: null,',
+      '  sessionStates: {},',
+    ].join('\n')
+    expect(unaccountedRemovals(phantom, PHANTOM_MARKERS).map((h) => h.line)).toEqual([4])
+  })
+
+  it('ignores a removal that only appears inside a comment', () => {
+    // Exercised for real by `connection.ts`, whose `#7470 not-a-removal`
+    // annotation quotes `sessionStates: {}` in its own prose. Without the
+    // blanking pass the detector counted that comment as a second removal —
+    // and, being inside the annotated block, it silently classified itself.
+    const commented = [
+      '  // a wipe would be written `sessionStates: {}` and would be a site',
+      '  /** and `delete newStates[id]` after `const newStates = { ...sessionStates }`. */',
+      '  const real = 1;',
+    ].join('\n')
+    expect(findRosterRemovals(commented)).toEqual([])
+  })
+
+  it('does not flag a delete against a map that is not the session roster', () => {
+    // What keeps the detector from degenerating into "every `delete` is a
+    // site". Both files are full of requestId- and repoPath-keyed deletes; if
+    // those counted, the guard would be noise and the escape hatch would get
+    // used to silence it.
+    const unrelated = [
+      '    const next = { ...get().resolvedPermissions };',
+      '    delete next[requestId];',
+      '    const copy = { ...map };',
+      '    delete copy[sessionId];',
+    ].join('\n')
+    expect(findRosterRemovals(unrelated)).toEqual([])
+  })
+
+  it('sees a roster copy however the store is reached', () => {
+    // The three spellings that appear across these files, so a future site
+    // written in any of them is still detected.
+    const spellings = [
+      'const a = { ...sessionStates };\ndelete a[id];',
+      'const b = { ...get().sessionStates };\ndelete b[id];',
+      'const c = { ...state.sessionStates };\ndelete c[id];',
+    ]
+    for (const src of spellings) {
+      expect(findRosterRemovals(src).map((h) => h.label), src).toHaveLength(1)
+    }
   })
 })

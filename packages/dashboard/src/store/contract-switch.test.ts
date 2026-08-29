@@ -134,6 +134,19 @@ function seedStore(fx: ContractFixture) {
     connectedClients: [],
     activity: { bySession: {} },
     serverErrors: [],
+    // #7495: the seven session-scoped collections the "session went away" sites
+    // prune. `session_timeout` is the fifth such site and now prunes them, and
+    // both pruners are deliberately intolerant of an absent collection — an
+    // omitted fixture must fail LOUDLY rather than be papered over in the
+    // helper. Absent, `pruneSessionKeyedMap` threw out of the handler, which is
+    // a crash rather than a red assertion.
+    sessionPrStatus: {},
+    sessionPrStatusLoading: {},
+    sessionPrStatusRequestedAt: {},
+    sessionPrThreads: {},
+    sessionPrThreadsLoading: {},
+    pendingServerSeed: {},
+    cancellingActivityIds: new Set<string>(),
     // #6268: web_task_error maps over state.webTasks; seed it (default []) so the
     // .map never throws, and let a fixture seed a task to flip to `failed`.
     webTasks: fx.init?.webTasks ?? [],
