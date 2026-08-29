@@ -85,12 +85,17 @@ await test('an INVALID env override falls back to --min, not to the server defau
 // --- #7462: the four pre-existing exit paths, each mutation-demonstrated ----
 
 await test('a signal death fails even with a clean summary above the floor', async () => {
+  // Kill only after the summary write's flush callback: with piped stdout, a
+  // timed kill can lose the summary under load, and the mutant would then die
+  // via the missing-summary branch instead of the signal branch (Copilot
+  // review on #7476) — red for the wrong reason proves nothing.
   eq(await run(['--min', '5', process.execPath, '-e',
-    "console.log('# tests 9');console.log('# fail 0');setTimeout(()=>process.kill(process.pid,'SIGKILL'),150)"]), 1, 'exit')
+    "process.stdout.write('# tests 9\\n# fail 0\\n',()=>setTimeout(()=>process.kill(process.pid,'SIGKILL'),20))"]), 1, 'exit')
 })
 await test('a non-zero child exit is preserved even when the summary is clean', async () => {
+  // Same flush discipline: process.exit can truncate queued pipe writes.
   eq(await run(['--min', '5', process.execPath, '-e',
-    "console.log('# tests 9');console.log('# fail 0');process.exit(3)"]), 3, 'exit')
+    "process.stdout.write('# tests 9\\n# fail 0\\n',()=>process.exit(3))"]), 3, 'exit')
 })
 await test('a spawn failure is exit 2 (the guard broke), not exit 1 (the code is dirty)', async () => {
   eq(await run(['--min', '5', 'definitely-not-a-real-binary-xyz']), 2, 'exit')
