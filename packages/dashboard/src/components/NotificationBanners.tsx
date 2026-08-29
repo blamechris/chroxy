@@ -34,6 +34,7 @@
  * precisely the hole being closed, and a default would let a future call site
  * reopen it silently.
  */
+import { useReducer } from 'react'
 import { isLivePermissionPrompt } from '@chroxy/store-core'
 import type { ChatMessage, SessionNotification } from '../store/types'
 
@@ -143,6 +144,29 @@ export function NotificationBanners({
   onSwitchSession,
   permissionStatus,
 }: NotificationBannersProps) {
+  // #7474 — a refused click must be VISIBLE, not merely harmless.
+  //
+  // The click-time re-check below (added by #7466) correctly declines to act on
+  // a request that stopped being answerable since the last render. But declining
+  // wrote nothing: no store update, no local state, so React had no reason to
+  // re-render and the row kept displaying the enabled Allow/Deny it was drawn
+  // with. The operator clicks a live-looking button, nothing happens, and the
+  // button still looks live — which is the same "a control that visibly does
+  // nothing invites a second click" loop #7466 blames for the mis-aimed second
+  // click, arrived at from the opposite direction.
+  //
+  // Nothing else can fix this from outside: the render gate holds the
+  // `Date.now()` of the LAST render, and no store event fires on the mere
+  // passage of a deadline (#6308's TOCTOU), so the parent has no reason to
+  // re-render either. A local bump is the whole mechanism — it forces this
+  // component through `permissionStatus` again, which recomputes with a fresh
+  // `Date.now()` and the current connection phase, so the row lands in whichever
+  // inert form is actually true (retired record, or disabled + "reconnect to
+  // answer"). It deliberately does NOT decide that form itself: a bump that
+  // hard-coded "not-pending" would tell a disconnected operator their live
+  // request was gone.
+  const [, recheck] = useReducer((n: number) => n + 1, 0)
+
   // #4890 — render unread only; read history lives in the widget.
   const unread = notifications.filter((n) => n.readAt === undefined)
   if (unread.length === 0) return null
@@ -195,6 +219,13 @@ export function NotificationBanners({
                 <span
                   className="notification-banner-stale"
                   data-testid="notification-banner-stale"
+                  // #7474 — a live region for the same reason the disconnected
+                  // hint below is one: since the click-time re-check, this
+                  // marker can APPEAR in direct response to a click, replacing
+                  // the buttons the operator just pressed. A sighted user sees
+                  // that; without role="status" a screen-reader user gets the
+                  // silent dead click this issue is about.
+                  role="status"
                 >
                   No longer pending
                 </span>
@@ -230,7 +261,13 @@ export function NotificationBanners({
                   // prompt can cross its expiry with the buttons still on screen.
                   // A dead click that fires `permission_response` into the void is
                   // the "the click ACTS" half of #7466.
-                  onClick={() => { if (permissionStatus(n) === 'actionable') onApprove(n.requestId!, n.id) }}
+                  // #7474 — on refusal, `recheck()` re-renders this row through
+                  // `permissionStatus` so it redraws in its true inert form.
+                  // Without the else branch the refusal is invisible.
+                  onClick={() => {
+                    if (permissionStatus(n) === 'actionable') onApprove(n.requestId!, n.id)
+                    else recheck()
+                  }}
                 >
                   Allow
                 </button>
@@ -239,7 +276,10 @@ export function NotificationBanners({
                   className="notification-banner-btn notification-banner-btn--deny"
                   aria-label="Deny"
                   disabled={status === 'disconnected'}
-                  onClick={() => { if (permissionStatus(n) === 'actionable') onDeny(n.requestId!, n.id) }}
+                  onClick={() => {
+                    if (permissionStatus(n) === 'actionable') onDeny(n.requestId!, n.id)
+                    else recheck()
+                  }}
                 >
                   Deny
                 </button>

@@ -268,19 +268,22 @@ describe('#7466 — NotificationBanners renders a stale permission inert', () =>
     expect(screen.getAllByTestId('notification-banner-stale')).toHaveLength(1)
   })
 
-  it('refuses the CLICK when the request died since the last render', () => {
-    // The render gate runs with the `Date.now()` of the last render, and nothing
-    // re-renders on the mere passage of a deadline — so the buttons can still be
-    // on screen after the request stopped being answerable. Flipping the
-    // predicate WITHOUT re-rendering models exactly that window.
+  // #7474 — this pair was ONE test that clicked Allow and then Deny on the same
+  // render. That only worked while a refused click left the row untouched, which
+  // is the defect #7474 fixed: the first refusal now redraws the row into its
+  // inert form, so the Deny button is legitimately gone by the second click and
+  // the old shape failed with "Unable to find a label with the text of: Deny".
+  // Split into one render per button rather than relaxing the query — the
+  // assertion being made is "this button did not fire", and a query that
+  // tolerated the button's absence would pass just as well if neither button had
+  // ever rendered.
+  function renderDying(handlers: { onApprove?: () => void; onDeny?: () => void }) {
     let live = true
-    const onApprove = vi.fn()
-    const onDeny = vi.fn()
     render(
       <NotificationBanners
         notifications={[notification()]}
-        onApprove={onApprove}
-        onDeny={onDeny}
+        onApprove={handlers.onApprove ?? vi.fn()}
+        onDeny={handlers.onDeny ?? vi.fn()}
         onDismiss={vi.fn()}
         onSwitchSession={vi.fn()}
         onMarkRead={vi.fn()}
@@ -289,11 +292,27 @@ describe('#7466 — NotificationBanners renders a stale permission inert', () =>
     )
     // Rendered live: the buttons exist.
     expect(screen.getByLabelText('Allow')).toBeInTheDocument()
+    expect(screen.getByLabelText('Deny')).toBeInTheDocument()
+    return { kill: () => { live = false } }
+  }
 
-    live = false
+  it('refuses the ALLOW click when the request died since the last render', () => {
+    // The render gate runs with the `Date.now()` of the last render, and nothing
+    // re-renders on the mere passage of a deadline — so the buttons can still be
+    // on screen after the request stopped being answerable. Flipping the
+    // predicate WITHOUT re-rendering models exactly that window.
+    const onApprove = vi.fn()
+    const h = renderDying({ onApprove })
+    h.kill()
     fireEvent.click(screen.getByLabelText('Allow'))
-    fireEvent.click(screen.getByLabelText('Deny'))
     expect(onApprove).not.toHaveBeenCalled()
+  })
+
+  it('refuses the DENY click when the request died since the last render', () => {
+    const onDeny = vi.fn()
+    const h = renderDying({ onDeny })
+    h.kill()
+    fireEvent.click(screen.getByLabelText('Deny'))
     expect(onDeny).not.toHaveBeenCalled()
   })
 
