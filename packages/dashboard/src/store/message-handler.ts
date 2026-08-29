@@ -200,7 +200,7 @@ import type {
   MCPResourceItem,
   McpServerOpResult,
 } from './types';
-import { createEmptySessionState, pruneSessionKeyedMap } from './utils';
+import { createEmptySessionState, pruneSessionKeyedMap, pruneSessionScopedKeySet } from './utils';
 import { clearPersistedSession } from './persistence';
 
 // ---------------------------------------------------------------------------
@@ -3026,19 +3026,29 @@ function clearCancellingActivity(get: MsgGet, set: MsgSet, sessionId: string | u
  * #5277 — drop ALL pending cancels for a session. Used when a session-level
  * error (SESSION_NOT_FOUND) means no cancel for that session can ever resolve,
  * so its nodes must not stay stuck "Cancelling…".
+ *
+ * #7483 (PR #7489 review) — this was a hand-rolled second implementation of
+ * the same session-scoped prune the `session_list` block now performs, and the
+ * two had already DIVERGED: this one matched `key.startsWith(`${sid}:`)` while
+ * `pruneSessionScopedKeySet` splits on the FIRST `:`. They differ only for a
+ * session id that itself contains a colon — `sid = "a:b"` and key `"a:b:tool"`
+ * is dropped by the prefix form and kept by the split form. Unreachable today:
+ * session ids are `randomBytes(16).toString('hex')` (server/session-manager.js),
+ * so no id contains a `:`. This is therefore a single-implementation fold, NOT
+ * a behaviour fix — for every id the daemon can mint, the old and new answers
+ * are identical. The point is that the next divergence cannot happen.
+ *
+ * The `!prev` tolerance is #5277's and is kept as-is: unlike the roster prune
+ * block, this path is reached from a `session_error` on partial mock fixtures
+ * that predate the field.
  */
 function clearCancellingForSession(get: MsgGet, set: MsgSet, sessionId: string | undefined): void {
   if (!sessionId) return;
   const prev = get().cancellingActivityIds;
-  if (!prev || prev.size === 0) return;
-  const prefix = `${sessionId}:`;
-  let changed = false;
-  const next = new Set<string>();
-  for (const key of prev) {
-    if (key.startsWith(prefix)) { changed = true; continue; }
-    next.add(key);
-  }
-  if (changed) set({ cancellingActivityIds: next });
+  if (!prev) return;
+  const next = pruneSessionScopedKeySet(prev, [sessionId]);
+  // Same-reference return means "nothing matched" — don't set() and re-render.
+  if (next !== prev) set({ cancellingActivityIds: next });
 }
 
 /**
@@ -4473,6 +4483,13 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           sessionPrStatusRequestedAt: {},
           sessionPrThreads: {},
           sessionPrThreadsLoading: {},
+          // #7478 / #7483 — same reasoning, same site: this branch empties the
+          // roster, so anything session-scoped left behind is unprunable for
+          // the life of the tab. The seed is owed to a session that no longer
+          // exists, and a "Cancelling…" key can never be acked on a connection
+          // that no longer knows the session.
+          pendingServerSeed: {},
+          cancellingActivityIds: new Set<string>(),
           // #7470 authok-reset-end
           customAgents: [],
         });
@@ -4748,9 +4765,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           nextActivity = clearSessionActivity(nextActivity, id);
         }
         if (nextActivity !== get().activity) patch.activity = nextActivity;
-        // #7470 prune-block-start — the per-session PR/CI maps.
+        // #7470 prune-block-start — the per-session collections.
         //
-        // Five maps, all keyed by session id, and until now nothing removed an
+        // Seven of them, all session-scoped, and until #7481 nothing removed an
         // entry when the session it describes went away: connection.ts's #6153
         // sweep resets the LOADING-shaped ones on a socket drop, but that is a
         // reconnect reset for a stranded control, not a lifecycle prune. A
@@ -4787,6 +4804,19 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         patch.sessionPrStatusRequestedAt = pruneSessionKeyedMap(get().sessionPrStatusRequestedAt, removedIds);
         patch.sessionPrThreads = pruneSessionKeyedMap(get().sessionPrThreads, removedIds);
         patch.sessionPrThreadsLoading = pruneSessionKeyedMap(get().sessionPrThreadsLoading, removedIds);
+        // #7478 — the server-provided composer seed (#5553). Same exact-key
+        // shape as the five above: `Record<sessionId, string>`. It is drained
+        // only when App's create-confirm effect runs for that session, so a
+        // session destroyed before the composer is touched leaves its seed
+        // here, and this block is what removes it.
+        patch.pendingServerSeed = pruneSessionKeyedMap(get().pendingServerSeed, removedIds);
+        // #7483 — the in-flight cancel_activity keys (#5277). A DIFFERENT
+        // shape: a `Set` keyed `${sessionId}:${activityId}`, because activity
+        // ids are only unique within a session. `pruneSessionKeyedMap` cannot
+        // serve it — no member of the set is ever equal to a session id — so
+        // it gets the Set/composite-key sibling, which anchors the match on
+        // the first `:` rather than on a bare prefix.
+        patch.cancellingActivityIds = pruneSessionScopedKeySet(get().cancellingActivityIds, removedIds);
         // #7470 prune-block-end
         // If the active session was removed, switch to next available
         if (initialActiveId && removedIds.includes(initialActiveId)) {

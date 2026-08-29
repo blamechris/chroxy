@@ -88,6 +88,12 @@ function baseState(): Partial<ConnectionState> {
     sessionPrStatusRequestedAt: {},
     sessionPrThreads: {},
     sessionPrThreadsLoading: {},
+    // #7478 / #7483 — the same prune block now also walks these two, and both
+    // pruners are deliberately intolerant of an absent collection (#7486): a
+    // fixture omission must fail loudly rather than be papered over in the
+    // helper. `cancellingActivityIds` is empty here and set per-test below.
+    pendingServerSeed: {},
+    cancellingActivityIds: new Set<string>(),
   }
 }
 

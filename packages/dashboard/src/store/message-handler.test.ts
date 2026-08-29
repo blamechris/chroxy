@@ -122,6 +122,12 @@ function baseState(overrides: Partial<ConnectionState> = {}): Partial<Connection
     sessionPrStatusRequestedAt: {},
     sessionPrThreads: {},
     sessionPrThreadsLoading: {},
+    // #7478 / #7483 — two more collections on the same prune block, with the
+    // same intolerance. `cancellingActivityIds` is a Set, pruned by
+    // pruneSessionScopedKeySet, which reads `.size` and would throw the same
+    // way on an absent fixture.
+    pendingServerSeed: {},
+    cancellingActivityIds: new Set<string>(),
     // #3855: generalized provider-credential state defaults so the
     // credentials_status / credential_test_result dispatch tests start from a
     // clean, well-typed baseline.

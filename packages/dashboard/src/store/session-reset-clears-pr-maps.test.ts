@@ -1,6 +1,6 @@
 /**
- * #7470 (second site) — the two FULL-RESET actions must drop the per-session
- * PR/CI maps along with everything else session-scoped.
+ * #7470 / #7478 / #7483 (third and fourth sites) — the two FULL-RESET actions
+ * must drop every session-scoped collection along with the roster.
  *
  * `forgetSession()` (disconnect + forget this server) and `_resetSessionMemory()`
  * (switchServer, which preserves the old server's PERSISTED data but must not
@@ -10,6 +10,18 @@
  * these maps are keyed by SESSION ID, and session ids are minted per daemon —
  * so a surviving entry can be read against a DIFFERENT server's session of the
  * same id and render one machine's CI state on another machine's chip.
+ *
+ * #7478 adds `pendingServerSeed` to both: `_resetSessionMemory` is the SERVER
+ * SWITCH, and a seed that outlives its daemon is not retained memory but a
+ * WRONG VALUE — session ids are minted per daemon, so a stale entry drained
+ * against another server's session of the same id pre-fills one machine's
+ * composer with another machine's seed text.
+ *
+ * #7483's `cancellingActivityIds` was already cleared by both actions before
+ * this PR; it is asserted here anyway, because the roster guard in
+ * `session-destroy-prunes-pr-maps.test.ts` now holds all four sites for it and
+ * a behavioural assertion is what stops the guard's marker block from being
+ * satisfied by a clear that does not actually run.
  *
  * Driven through the REAL store rather than a mock, because the thing under
  * test is the action's `set({ ... })` payload itself.
@@ -38,7 +50,7 @@ const { createEmptySessionState } = await import('./utils')
 const A = 'sess-A'
 const B = 'sess-B'
 
-/** The five maps, populated for two sessions. */
+/** Every session-scoped collection, populated for two sessions. */
 function seedPrMaps() {
   useConnectionStore.setState({
     sessions: [{ sessionId: A }, { sessionId: B }] as never,
@@ -49,6 +61,8 @@ function seedPrMaps() {
     sessionPrStatusRequestedAt: { [A]: 1000, [B]: 2000 },
     sessionPrThreads: { [A]: { type: 'session_pr_threads' } as never, [B]: { type: 'session_pr_threads' } as never },
     sessionPrThreadsLoading: { [A]: true, [B]: true },
+    pendingServerSeed: { [A]: 'seed A', [B]: 'seed B' },
+    cancellingActivityIds: new Set<string>([`${A}:act-1`, `${B}:act-1`]),
   })
 }
 
@@ -60,13 +74,15 @@ function clearPrMaps() {
     sessionPrStatusRequestedAt: {},
     sessionPrThreads: {},
     sessionPrThreadsLoading: {},
+    pendingServerSeed: {},
+    cancellingActivityIds: new Set<string>(),
   })
 }
 
 describe.each([
   ['forgetSession', () => useConnectionStore.getState().forgetSession()],
   ['_resetSessionMemory', () => useConnectionStore.getState()._resetSessionMemory()],
-])('#7470 %s clears the per-session PR/CI maps', (_name, run) => {
+])('#7470 %s clears every session-scoped collection', (_name, run) => {
   beforeEach(() => {
     clearPrMaps()
     seedPrMaps()
@@ -75,16 +91,19 @@ describe.each([
   // A positive control for the whole block: the seed actually landed, so an
   // "everything is empty afterwards" assertion cannot pass because the fixture
   // was never applied.
-  it('control: the seed populated all five maps for two sessions', () => {
+  it('control: the seed populated every collection for two sessions', () => {
     const s = useConnectionStore.getState()
     expect(Object.keys(s.sessionPrStatus)).toEqual([A, B])
     expect(Object.keys(s.sessionPrStatusLoading)).toEqual([A, B])
     expect(Object.keys(s.sessionPrStatusRequestedAt)).toEqual([A, B])
     expect(Object.keys(s.sessionPrThreads)).toEqual([A, B])
     expect(Object.keys(s.sessionPrThreadsLoading)).toEqual([A, B])
+    expect(Object.keys(s.pendingServerSeed)).toEqual([A, B])
+    expect(s.cancellingActivityIds.size).toBe(2)
   })
 
-  // One assertion per map: a reset that clears four of five must name the fifth.
+  // One assertion per collection: a reset that clears six of seven must name
+  // the seventh.
   it('clears sessionPrStatus', () => {
     run()
     expect(useConnectionStore.getState().sessionPrStatus).toEqual({})
@@ -104,6 +123,14 @@ describe.each([
   it('clears sessionPrThreadsLoading', () => {
     run()
     expect(useConnectionStore.getState().sessionPrThreadsLoading).toEqual({})
+  })
+  it('clears pendingServerSeed', () => {
+    run()
+    expect(useConnectionStore.getState().pendingServerSeed).toEqual({})
+  })
+  it('clears cancellingActivityIds', () => {
+    run()
+    expect(useConnectionStore.getState().cancellingActivityIds.size).toBe(0)
   })
 
   it('clears them as part of the same reset that drops sessionStates', () => {
