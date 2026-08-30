@@ -62,7 +62,7 @@
  * docstring below for why the first two versions of that guard did not work.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { readFileSync } from 'fs'
+import { readFileSync, readdirSync } from 'fs'
 import { resolve } from 'path'
 
 vi.mock('./crypto', () => ({
@@ -918,6 +918,23 @@ const typesSrc = readFileSync(resolve(__dirname, 'types.ts'), 'utf8')
 const handlerSrc = readFileSync(resolve(__dirname, 'message-handler.ts'), 'utf8')
 const connectionSrc = readFileSync(resolve(__dirname, 'connection.ts'), 'utf8')
 
+/**
+ * The SERVER's production source tree, for the one classification in this file
+ * that depends on it (#7551 review).
+ *
+ * `environments` sits in NOT_SESSION_KEYED because `EnvironmentInfo.sessions` is
+ * dead surface — see its reason. That is a claim about server code, so it is
+ * checked against server code rather than asserted from the dashboard. Tests are
+ * deliberately excluded: `environment-manager.test.js` is the ONLY caller of the
+ * writer, and counting it would make the check permanently red on the state the
+ * classification is correct for.
+ */
+const serverSrcDir = resolve(__dirname, '../../../server/src')
+const serverProductionSources: [string, string][] = readdirSync(serverSrcDir, { recursive: true })
+  .map((e) => String(e))
+  .filter((f) => /\.(js|mjs)$/.test(f))
+  .map((f) => [f, readFileSync(resolve(serverSrcDir, f), 'utf8')] as [string, string])
+
 /** `[file label, source text]` — for error messages and per-file scans. */
 const SOURCES: [string, string][] = [
   ['message-handler.ts', handlerSrc],
@@ -1048,11 +1065,19 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
   ]
 
   // -- Bucket 2: session-scoped, cleaned by its OWN code at all five sites. --
-  // Not "cleaned by the block below" — cleaned by a statement that predates it
-  // and sits OUTSIDE the markers, because these three are what the site is
-  // fundamentally about rather than baggage that has to follow it. A reason per
-  // entry, because #7527 turned a one-name array into three and "you can see
-  // which is which" stopped being true.
+  // Not "cleaned by the marked block" — cleaned by a statement that predates
+  // #7470 entirely, because these three are what the site is fundamentally
+  // about rather than baggage that has to follow it. Their position relative to
+  // the markers VARIES (#7551 review corrected an earlier "sits OUTSIDE the
+  // markers" here, which was false for `sessions` at `session_timeout`, where
+  // the `sessions.filter(...)` is inside the marked block beside the roster
+  // delete): at auth_ok / forgetSession / _resetSessionMemory the `sessions: []`
+  // and `messages: []` lines sit above the marker, and at session_timeout the
+  // roster filter sits within it. That is exactly why these are classified here
+  // rather than asserted against the markers — the per-cell matrix slices to the
+  // marked block, and a field whose cleaning straddles it cannot be held that
+  // way. A reason per entry, because #7527 turned a one-name array into three
+  // and "you can see which is which" stopped being true.
   //
   // The reason is not decoration: `classification` requires it to be non-empty
   // and `every SESSION_KEYED_ELSEWHERE entry names where it is cleaned` requires
@@ -1160,10 +1185,13 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
     credentialTestResults: 'keyed by credential key',
 
     // ---- #7527: the ARRAY members. -------------------------------------
-    // Fifteen of the 24. Each element type was READ (not inferred from the
-    // field name) to confirm it carries no session id — the naming inference
-    // is what produced the defect this guard exists to catch, and #7481's
-    // review killed a version of it that guessed from names.
+    // Sixteen of the 24 (fifteen at first draft, plus `environments` after
+    // #7551's review re-adjudicated it — see its own comment below). Each
+    // element type was READ (not inferred from the field name) to confirm it
+    // carries no session id — the naming inference is what produced the defect
+    // this guard exists to catch, and #7481's review killed a version of it that
+    // guessed from names. #7551 is the reminder that reading the TYPE is not
+    // always enough either: `environments` needed the WRITERS read too.
     serverRegistry:
       'ServerEntry[] — keyed by `ServerEntry.id` ("Unique ID for this server (stable across ' +
       'renames)"). A server, not a session; it outlives every connection by design (it is what ' +
@@ -1211,6 +1239,34 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
       'to the requesting client\'s session and the panel re-pulls, and the element carries no ' +
       'sessionId — unlike `memoryStackEntries` / `permissionAudit`, nothing in the store claims a ' +
       'previous session\'s checkpoints must not be shown against a new one.',
+    // #7551 review, Critical. This row was in SESSION_TAGGED_BY_DESIGN with a
+    // reason that cited a mechanism which DOES NOT EXIST: "`environment_list`
+    // replaces the whole array on every change, so the server is the authority".
+    // The server does re-send the list, but not on session lifecycle — all four
+    // `environment_list` emit sites are in `handlers/feature-handlers.js`
+    // (env list / create / destroy requests) and NONE is on a session opening or
+    // closing. The reason was a plausible story, not the code.
+    //
+    // The code is simpler and the honest reason is different: the `sessions` tag
+    // is DEAD SURFACE. `environmentManager.addSession` / `removeSession`
+    // (`packages/server/src/environment-manager.js`) are the only writers, and
+    // they have ZERO production callers — the only call sites in the repo are
+    // five lines of `tests/environment-manager.test.js`. `sessions: []` at
+    // creation and `env.sessions = []` on boot reconnect are the only other
+    // touches. So the tag is `[]` at runtime, always, and a dead session id
+    // cannot be stranded in it because a LIVE one never gets in.
+    //
+    // That makes the bucket right for the ordinary reason — the element is keyed
+    // by `id` — rather than for an invented one. It is pinned rather than
+    // asserted in prose by `EnvironmentInfo.sessions has no production writer`
+    // below, because "this classification is correct while a surface stays dead"
+    // is exactly the claim that rots silently. Dead-surface cleanup: #7552.
+    environments:
+      'EnvironmentInfo[] — keyed by `EnvironmentInfo.id`. The element also declares ' +
+      '`sessions: string[]`, but that tag is dead surface: its only writers ' +
+      '(`environmentManager.addSession` / `removeSession`) have zero production callers, so it ' +
+      'is `[]` at runtime and no session id — live or dead — is ever in it. If it gains a writer ' +
+      'the classification must be revisited; the cell below is what forces that. #7551 / #7552',
     // The one array member in this bucket whose ELEMENT TYPE could carry a
     // session id and does not. `ServerError` has an optional `sessionId` and
     // `serverErrors` (session-tagged, bucket 5) really does set it — but this
@@ -1257,16 +1313,6 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
       'The daemon log is a diagnostic record and the entries about a session that just died are ' +
       'the ones worth reading; the Console page clears it on an explicit action. Bounded to the ' +
       'last 500. #7527',
-    // A judgment call, and the reason says which way and why — see the PR
-    // table for #7527. It is here rather than in NOT_SESSION_KEYED because the
-    // element genuinely does carry session ids and a reader who found a dead
-    // one in `environments[i].sessions` would be entitled to call that bucket
-    // a lie.
-    environments:
-      'EnvironmentInfo[]; the element is keyed by `id`, but carries `sessions: string[]` — the ' +
-      "server's list of session ids attached to the environment. The client must NOT prune it: " +
-      '`environment_list` replaces the whole array on every change, so the server is the ' +
-      'authority and a client-side prune would fight it and lose on the next broadcast. #7527',
   }
 
 
@@ -1306,36 +1352,90 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
     // unclassified collections would be noise someone silences by widening a
     // bucket to admit them.
     //
-    // TWO things exclude them, and this comment names both because the first
-    // draft named a third that did nothing. Measured: the draft was anchored
-    // `…\[\](?: \| null)?;$` and claimed the end-of-line anchor was what
-    // separated function members; deleting that anchor as a mutant killed
-    // NOTHING (119/119 green), because:
+    // TWO things exclude them, and this comment names both because two earlier
+    // drafts each named something that did not do the job:
     //
     //   1. The type HEAD is anchored immediately after `: `. A function
     //      member's head is a parameter list, and `[]` never follows its
     //      closing paren — `(paths: string[])` is followed by ` => boolean`.
     //      This is what actually does the work.
-    //   2. `(?!.*=>)` rejects any member whose declaration contains `=>` at
-    //      all. Belt-and-braces for the parenthesised-union alternative, which
-    //      is genuinely fooled by a parenthesised type inside a parameter list:
-    //      `(a: (b)[]) => void` reads as `(…)[]` to rule 1 alone. Contrived,
-    //      but it is the one input where the exclusion has behaviour, so it is
-    //      the input `covers arrays without swallowing function-typed members`
-    //      feeds it.
+    //   2. `(?![^;]*=>)` rejects a member whose declaration reaches a `=>`
+    //      BEFORE its terminating `;`. Belt-and-braces for the parenthesised
+    //      alternative, which is genuinely fooled by a parenthesised type inside
+    //      a parameter list: `(a: (b)[]) => void` reads as `(…)[]` to rule 1
+    //      alone.
     //
-    // The end anchor is GONE rather than kept as harmless: it cost two real
-    // cases (a member with a trailing `// comment`, and `Foo[] | Bar[]`) for a
-    // protection it did not provide. Both are pinned in
-    // `covers the array spellings a real member is written in` below, so
-    // re-adding it turns that cell red.
+    // Draft 1 anchored `…\[\](?: \| null)?;$` and claimed the END-OF-LINE
+    // anchor separated function members. Deleting it as a mutant killed NOTHING
+    // (119/119 green) — rule 1 was doing the work — and it cost two real cases
+    // (a member with a trailing `// comment`, and `Foo[] | Bar[]`). Deleted.
+    //
+    // Draft 2 wrote rule 2 as `(?!.*=>)`, scanning the WHOLE LINE, and PR #7551's
+    // review found the hole that opens: a trailing comment is part of the line,
+    // so
+    //
+    //     sessionAgentRuns: AgentRunRecord[]; // maps sessionId => run
+    //
+    // is a session-tagged array member that the guard cannot see, because the
+    // `=>` in its COMMENT disarms the lookahead. Green, silently, on exactly the
+    // field this guard exists to catch — the trailing-comment hole draft 1 had
+    // closed by accident and draft 2 reopened by hand. `[^;]*` stops the
+    // lookahead at the member's own terminator, so the comment can no longer
+    // reach into it. Verified byte-identical on the real interface: both spellings
+    // extract the same 24 members, and all seven function members stay out
+    // (including `sendInput` / `addUserMessage`, whose inline-object parameters
+    // contain a `;` of their own — those are excluded by rule 1, not rule 2).
+    //
+    // Both holes are pinned below: `covers the array spellings a real member is
+    // written in` (re-adding the end anchor goes red) and `sees a session-tagged
+    // array member hidden behind a trailing comment` (reverting to `.*` goes red).
     const array = [
-      ...body.matchAll(/^ {2}(\w+)\??: (?!.*=>)(?:readonly )?(?:Array<[^<>]*>|(?:\w+(?:<[^<>]*>)?|\([^)]*\))\[\])/gm),
+      ...body.matchAll(/^ {2}(\w+)\??: (?![^;]*=>)(?:readonly )?(?:Array<[^<>]*>|(?:\w+(?:<[^<>]*>)?|\([^)]*\))\[\])/gm),
     ].map((x) => x[1]!)
     // Deduped: a member could in principle match BOTH shapes (an array OF
     // records, `Record<string, X>[]`). None is declared today; if one lands it
     // is one member needing one bucket, not two entries needing two.
     return { recordSet, array, all: [...new Set([...recordSet, ...array])] }
+  }
+
+  /**
+   * The RESIDUAL: members that MENTION an array and are not accounted for.
+   *
+   * PR #7551's review, and the answer to a question the spelling list could not
+   * answer. `covers the array spellings a real member is written in` enumerates
+   * the shapes the extraction handles — which means it can only ever be as
+   * complete as whoever last thought about it, and the review named four shapes
+   * it missed at once: an inline-object element (`{ sessionId: string }[]`,
+   * already IN USE at types.ts:445 on `PermissionAuditEntry.rules`, an element
+   * of a DEFERRED member), `ReadonlyArray<…>`, `Array<Record<…>>`, and tuples.
+   * Adding four rows to a list is the "hardcoded list next to a set that grows"
+   * move that produced this whole issue; deriving the residual is not.
+   *
+   * The claim: every member whose TYPE mentions an array is either extracted as
+   * an array, extracted as a Record/Set, or is function-typed. Anything else is
+   * a shape that mentions an array and reached NO bucket — which is precisely
+   * "unclassified and invisible", the #7527 defect, whatever spelling it wears.
+   *
+   * Both derived sets strip a trailing `// comment` first, for the same reason
+   * the extraction's own lookahead does: a comment is not part of the type, and
+   * letting it in is how the trailing-comment hole worked. Without the strip,
+   * `sessionAgentRuns: AgentRunRecord[]; // a => b` would be misread as
+   * function-typed and excused from the residual — the hole one level up.
+   */
+  function arrayResidual(src: string): string[] {
+    const body = sliceInterface(src)
+    const typeOf = (t: string): string => t.replace(/\/\/.*$/, '')
+    const members = [...body.matchAll(/^ {2}(\w+)\??: ([^\n]*)$/gm)].map((m) => ({
+      name: m[1]!,
+      type: typeOf(m[2]!),
+    }))
+    const { recordSet, array } = declaredMembers(src)
+    const accounted = new Set([...recordSet, ...array])
+    return members
+      .filter((m) => /\[|Array</.test(m.type))          // mentions an array, in any spelling
+      .filter((m) => !accounted.has(m.name))            // …and no shape pattern claimed it
+      .filter((m) => !/=>/.test(m.type))                // …and it is not a function member
+      .map((m) => `${m.name}: ${m.type}`)
   }
 
   // One derivation of the slice, used by both the extraction and the
@@ -1511,13 +1611,29 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
     // collection deliberately survives the session — that is exactly the kind
     // of assertion a later reader must be able to check against a record.
     //
-    // Not vacuous: the bucket has four entries.
+    // Not vacuous: the bucket has entries.
     expect(Object.keys(SESSION_TAGGED_BY_DESIGN).length).toBeGreaterThan(0)
     for (const [field, reason] of Object.entries(SESSION_TAGGED_BY_DESIGN)) {
+      // `/#\d+/` alone is satisfied by `'dunno #1'` (#7551 review). Two cheap
+      // tightenings, and the comment says what they do and do not buy:
+      //   * `#\d{4,}` — chroxy passed #1000 years ago, so a 1-3 digit citation
+      //     is a placeholder, not a reference. It does NOT prove the issue
+      //     exists or is about this field; nothing short of a network call
+      //     would, and a guard that needs the network is a guard that flakes.
+      //   * a length floor — an entry in this bucket is asserting that a
+      //     session-tagged collection deliberately outlives its session, and
+      //     that assertion does not fit in a sentence fragment. This is the half
+      //     that actually rejects `'dunno #1234'`.
       expect(
         reason,
-        `SESSION_TAGGED_BY_DESIGN.${field} must cite the adjudication (#N) that decided it survives`,
-      ).toMatch(/#\d+/)
+        `SESSION_TAGGED_BY_DESIGN.${field} must cite the adjudication (#NNNN, four+ digits) that ` +
+        'decided it survives — a 1-3 digit number is a placeholder, not a reference',
+      ).toMatch(/#\d{4,}/)
+      expect(
+        reason.length,
+        `SESSION_TAGGED_BY_DESIGN.${field} needs the RATIONALE beside the issue number: why does ` +
+        'this session-tagged collection deliberately outlive the session it describes?',
+      ).toBeGreaterThan(120)
     }
   })
 
@@ -1529,15 +1645,21 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
     // the cleaning happens OUTSIDE the `#7470` markers the per-cell matrix
     // slices to. So the reason must at least NAME a site, which is what makes
     // the claim falsifiable by a reader.
+    // ALL five, not "at least one" (#7551 review). The bucket's claim is
+    // "cleaned by its own code at all five sites"; a reason naming one site
+    // satisfies a `.some` while documenting a fifth of the claim, which is the
+    // partially-pinned shape this repo keeps rediscovering — the membership
+    // pinned, the assertion beside it not.
     const SITE_WORDS = SITES.map(([site]) => site.split(' ')[0]!)
+    expect(SITE_WORDS.length, 'the site roster is empty — this check is vacuous').toBe(5)
     for (const [field, reason] of Object.entries(SESSION_KEYED_ELSEWHERE)) {
-      expect(reason, `SESSION_KEYED_ELSEWHERE.${field} needs a reason, not an empty string`).not.toBe('')
+      const missing = SITE_WORDS.filter((w) => !reason.includes(w))
       expect(
-        SITE_WORDS.some((w) => reason.includes(w)),
-        `SESSION_KEYED_ELSEWHERE.${field} must name at least one of the five sites ` +
-        `(${SITE_WORDS.join(', ')}) — "cleaned elsewhere" without saying WHERE is an exclusion ` +
-        'nobody can check.',
-      ).toBe(true)
+        missing,
+        `SESSION_KEYED_ELSEWHERE.${field} claims it is cleaned at all five sites but its reason ` +
+        'names only some of them. Name every site, or the entry belongs in a different bucket — ' +
+        '"cleaned elsewhere" without saying WHERE is an exclusion nobody can check.',
+      ).toEqual([])
     }
   })
 
@@ -1571,6 +1693,50 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
       'NOT_SESSION_KEYED reason is no longer true. Move it to SESSION_TAGGED_BY_DESIGN with the ' +
       'adjudication, or prune it (#7527).',
     ).toBe(false)
+  })
+
+  it('EnvironmentInfo.sessions has no production writer', () => {
+    // #7551 review, Critical. `environments` was classified SESSION_TAGGED_BY_DESIGN
+    // with a reason that described a mechanism which does not exist — an
+    // `environment_list` re-broadcast "on every change" that is not wired to
+    // session lifecycle at all. The row is now NOT_SESSION_KEYED for the real
+    // reason: `EnvironmentInfo.sessions` is never written in production, so no
+    // session id — live or dead — is ever in it, so nothing can be stranded.
+    //
+    // "Correct while a surface stays dead" is exactly the claim that rots
+    // silently, so it is a check rather than a comment. `addSession` is the only
+    // thing that can put a session id into that array (`removeSession` only ever
+    // takes one out), which makes it the precise thing to pin: if it gains a
+    // production caller, `environments` becomes genuinely session-tagged and the
+    // classification must be revisited. Cleanup / decision: #7552.
+    //
+    // Positive controls FIRST, so a scan that reached the wrong tree — or no
+    // tree — cannot report a clean zero. This is the "validate the control, not
+    // just the experiment" failure: a mutant that never loads reports 0 hits.
+    expect(serverProductionSources.length, 'the server source scan found nothing')
+      .toBeGreaterThan(50)
+    const manager = serverProductionSources.find(([f]) => f.endsWith('environment-manager.js'))
+    expect(manager, 'environment-manager.js must be in the scanned tree').toBeDefined()
+    expect(/^ {2}addSession\(envId, sessionId\) \{/m.test(manager![1]),
+      'the writer this cell is about must still exist, or the check is about nothing').toBe(true)
+
+    // The check. A DEFINITION is not a caller, so the declaration line above is
+    // excluded by requiring a receiver (`x.addSession(`) — otherwise
+    // environment-manager.js would flag itself and the escape would be to
+    // exclude the file, which is how a guard stops covering the thing it names.
+    const callers = serverProductionSources
+      .flatMap(([file, src]) =>
+        [...src.matchAll(/[A-Za-z0-9_$)\]]\s*\.\s*addSession\s*\(/g)].map(
+          (m) => `${file}:${src.slice(0, m.index).split('\n').length}`,
+        ),
+      )
+    expect(
+      callers,
+      'production call site(s) of environmentManager.addSession. `EnvironmentInfo.sessions` is no ' +
+      'longer dead surface, so `environments` is genuinely session-tagged and its ' +
+      'NOT_SESSION_KEYED reason is now false — re-adjudicate it (SESSION_TAGGED_BY_DESIGN, or the ' +
+      'prune roster) and close #7552.',
+    ).toEqual([])
   })
 
   // ---- The extraction's own contract, on synthetic sources (#7527). -------
@@ -1615,25 +1781,111 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
 
   it('covers arrays without swallowing function-typed members', () => {
     // The guard's CLAIM, fed exactly what it says it rejects — the failure mode
-    // is not that it misses something but that it reports SEVEN phantom
-    // "unclassified members" that are not collections at all, and someone
-    // silences the noise by widening a bucket to admit them.
+    // is not that it misses something but that it reports the function members
+    // as phantom "unclassified collections", and someone silences the noise by
+    // widening a bucket to admit them.
     //
-    // The real function members of ConnectionState, verbatim, PLUS the one
-    // synthetic case that the head anchor alone gets wrong: a parenthesised
-    // type inside a parameter list reads as `(…)[]`. That last line is the only
-    // input in this file where `(?!.*=>)` changes the verdict, so it is the
-    // input that keeps it from being an untestable refinement — deleting the
-    // lookahead turns this cell red and nothing else.
+    // DERIVED from the real interface, not a hand-copied sample (#7551 review):
+    // the first version listed four of the seven verbatim, which is the same
+    // hardcoded-list-beside-a-growing-set shape the guard is about. Every member
+    // whose declaration reaches a `=>` before its `;` is a function member, and
+    // NONE of them may be extracted as an array — however many there are.
+    const fnMembers = [...interfaceBody.matchAll(/^ {2}(\w+)\??: ([^\n]*)$/gm)]
+      .filter((m) => /=>/.test(m[2]!.replace(/\/\/.*$/, '')))
+      .map((m) => m[1]!)
+    // Non-vacuous, and a floor rather than an equality so the interface can grow:
+    // ConnectionState declares ~200 function members, seven of which mention a
+    // `[]` inside their parameter list and are therefore the ones that could be
+    // mistaken for collections.
+    expect(fnMembers.length, 'no function members derived — the derivation is broken').toBeGreaterThan(50)
+    const fnWithArrayParam = fnMembers.filter((n) =>
+      new RegExp(`^ {2}${n}\\??: [^\\n]*\\[\\]`, 'm').test(interfaceBody),
+    )
+    expect(fnWithArrayParam.length, 'no function member has an array in its params — nothing to swallow')
+      .toBeGreaterThanOrEqual(7)
+    expect(
+      declaredArray.filter((f) => fnMembers.includes(f)),
+      'function-typed member(s) extracted as array collections',
+    ).toEqual([])
+
+    // Plus the one synthetic case the head anchor alone gets wrong: a
+    // parenthesised type inside a parameter list reads as `(…)[]`. It is the only
+    // input in this file where `(?![^;]*=>)` changes the verdict, so it is what
+    // keeps that lookahead from being an untestable refinement — deleting it
+    // turns this cell red and nothing else.
+    expect(declaredMembers(iface(['checkpoints: Checkpoint[];', 'weird: (a: (b)[]) => void;'])).array)
+      .toEqual(['checkpoints'])
+  })
+
+  it('sees a session-tagged array member hidden behind a trailing comment', () => {
+    // PR #7551 review, the hole the whole-line lookahead reopened. The `=>` here
+    // is in a COMMENT, not in the type — the member is an ordinary
+    // session-tagged array, and a guard that cannot see it is green on exactly
+    // the field it exists to catch.
     const phantom = iface([
-      'checkpoints: Checkpoint[];',
-      'requestGitStage: (paths: string[]) => boolean;',
-      'setPermissionRules: (rules: PermissionRule[]) => void;',
-      'setNotificationPrefsBypassCategories: (categories: string[]) => boolean;',
-      "sendInput: (input: string, wireAttachments?: Attachment[], options?: { isVoice?: boolean }) => 'sent' | false;",
-      'weird: (a: (b)[]) => void;',
+      'sessionStates: Record<string, SessionState>;',
+      'sessionAgentRuns: AgentRunRecord[]; // maps sessionId => run',
     ])
-    expect(declaredMembers(phantom).array).toEqual(['checkpoints'])
+    expect(declaredMembers(phantom).array).toEqual(['sessionAgentRuns'])
+    // …and it reaches `classification` unclassified, which is the red that matters.
+    const classified = new Set([
+      ...CLEANED,
+      ...Object.keys(SESSION_KEYED_ELSEWHERE),
+      ...Object.keys(SESSION_KEYED_DEFERRED),
+      ...Object.keys(SESSION_TAGGED_BY_DESIGN),
+      ...Object.keys(NOT_SESSION_KEYED),
+    ])
+    expect(declaredMembers(phantom).all.filter((f) => !classified.has(f))).toEqual(['sessionAgentRuns'])
+  })
+
+  it('residual: every array-mentioning member reaches a shape pattern', () => {
+    // The backstop for the SPELLING axis, derived rather than enumerated
+    // (#7551 review). The cell below enumerates the spellings the extraction
+    // handles; this one asks the complementary question the enumeration cannot:
+    // is there a member that mentions an array and reached NO pattern at all?
+    //
+    // Baseline is exactly zero over 31 array-mentioning members — 24 extracted
+    // as arrays, 7 function-typed — so it is a live check on the real interface
+    // and not a floor that a broken derivation would satisfy.
+    expect(
+      arrayResidual(typesSrc),
+      'member(s) whose type mentions an array but which no shape pattern extracted and which are ' +
+      'not function-typed. A new array SPELLING has landed that the extraction cannot see — ' +
+      'widen it (and add the spelling to `covers the array spellings a real member is written ' +
+      'in`), do not classify around it. #7527/#7551',
+    ).toEqual([])
+    // Non-vacuous in the other direction: the derivation really is looking at
+    // the 31 members it claims to, not at an empty set.
+    const mentioning = [...interfaceBody.matchAll(/^ {2}(\w+)\??: ([^\n]*)$/gm)]
+      .filter((m) => /\[|Array</.test(m[2]!.replace(/\/\/.*$/, '')))
+    expect(mentioning.length, 'no member mentions an array — the residual is vacuously empty')
+      .toBeGreaterThanOrEqual(31)
+  })
+
+  it.each([
+    ['an inline-object element (IN USE at types.ts:445)', 'sessionAgentRuns: { sessionId: string; runId: string }[];'],
+    ['ReadonlyArray<…>', 'sessionAgentRuns: ReadonlyArray<AgentRunRecord>;'],
+    ['a tuple element', 'sessionAgentRuns: [string, AgentRunRecord][];'],
+    ['Array<Record<…>>', 'sessionAgentRuns: Array<Record<string, string>>;'],
+    // The two holes COMPOSED, which is the input that gives the residual's own
+    // comment-strip behaviour. Deleting the strip was a surviving mutant until
+    // this row: without it, the `=>` in the COMMENT makes the member look
+    // function-typed to the residual, so an unextractable spelling is excused
+    // from the one check that would have caught it — the trailing-comment hole
+    // one level up from where #7551's review found it.
+    ['an unextractable spelling behind a trailing `=>` comment',
+      'sessionAgentRuns: ReadonlyArray<AgentRunRecord>; // keyed sessionId => run'],
+  ])('residual: flags a session-tagged array written as %s', (_label, decl) => {
+    // The four spellings #7551's review named, each proven to RED the residual
+    // rather than assumed to. The first is not hypothetical: `{ tool: string;
+    // decision: string }[]` is declared at types.ts:445 on
+    // `PermissionAuditEntry.rules` — an element of a member this very guard
+    // DEFERS — so the shape is already in the codebase and one refactor away
+    // from being a ConnectionState member.
+    const phantom = iface(['sessionStates: Record<string, SessionState>;', decl])
+    expect(declaredMembers(phantom).array, 'the extraction should NOT see this spelling yet').toEqual([])
+    expect(arrayResidual(phantom)).toHaveLength(1)
+    expect(arrayResidual(phantom)[0]).toContain('sessionAgentRuns')
   })
 
   it('covers the array spellings a real member is written in', () => {
