@@ -1390,3 +1390,32 @@ them. `const` bindings with zero writes was a number the lint could already
 print; nobody had asked it. And when the answer is "not all of them", pin the
 remainder as an explicit decision — a limit that cannot change silently is worth
 more than a limit that does not exist.
+
+**Addendum — it had a third spelling, and the pin caught that too (`#7553`,
+`#7554`).** The fix above taught `isWriteAt` to step over one accessor before
+testing the ASSIGNMENT operator. The INCREMENT test one line above it kept
+reading the unstepped text, so `o[k] = v`, `o[k] += 1` and `++o[k]` were writes
+while **`o[k]++` was a read** — one mutation, three spellings, two
+classifications, and a `const counts: Record<string, number> = {}` mutated only
+by `counts[k]++` still unfailable by construction. Same rule, same function, one
+operator over. PR #7548's review pinned all four spellings at their then-current
+answers with the same instruction attached, and #7553 turned exactly the two
+`read` rows red and nothing else — the arrangement paying off a **second** time,
+which is the argument for it. The fix routes both operators through one shared
+scan (`accessorStepEnd`) rather than a second bracket matcher, because a second
+hand-written copy is how the first gap survived being fixed.
+
+`#7554` is the neighbouring cause on the same rule: statement position was
+decided by `STATEMENT_BOUNDARY`, five hardcoded characters, and #7537 had just
+routed a **second** predicate through it — a hardcoded set beside a growing set
+of *callers*. It lost in-place writes in a semicolon-free module (the character
+before the statement is whatever ended the previous expression) and after a
+braceless `else`. What made that one tractable was **counting before choosing**:
+a sweep of every in-place-shaped reference on both rosters returned exactly two
+misses, and each candidate widening was measured against all ~950 classified
+references before adoption. The keyword arm (`else`, `do`) is closed by the
+grammar and moved one reference; the ASI arm restricted to characters that close
+a primary expression moved one; the identifier arm — which would need a
+hand-maintained list of TypeScript's operator keywords, cause #1 in this
+document — moved **zero**, and was refused and pinned as a residual on that
+evidence rather than on taste.

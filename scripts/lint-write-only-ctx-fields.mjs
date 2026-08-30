@@ -67,15 +67,27 @@
  * every write site.
  *
  * `++`/`--` is a write and NOT a read — but only at STATEMENT POSITION, which
- * is the literal test the code applies (`atStatementStart`): the last
- * significant character before the reference closed the previous statement.
- * `n++;` and `for (;; n++)` qualify, so a name whose sole consumer is its own
- * increment still has no reader. `return n++` and `String(++n)` do not, and
- * are therefore reads as well. The refinement is not hypothetical: both live
- * shapes exist in the dashboard store (`nextReconnectAttempt`,
- * `requestFileContent`), and without it the lint's first run reported two
- * false positives. It changes nothing for the app target, which has no `++` on
- * a context field at all.
+ * is the literal test the code applies (`atStatementStart`): the reference
+ * begins a statement. `n++;` and `for (;; n++)` qualify, so a name whose sole
+ * consumer is its own increment still has no reader. `return n++` and
+ * `String(++n)` do not, and are therefore reads as well. The refinement is not
+ * hypothetical: both live shapes exist in the dashboard store
+ * (`nextReconnectAttempt`, `requestFileContent`), and without it the lint's
+ * first run reported two false positives. It changes nothing for the app
+ * target, which has no `++` on a context field at all.
+ *
+ * "Begins a statement" is decided three ways (#7554). The previous significant
+ * character closed the previous statement — `;`, `{`, `}`, `)`, or nothing.
+ * The previous WORD is `else` or `do`, the only two keywords the grammar lets
+ * introduce a statement with no punctuation between them and it. Or the
+ * previous character closed a complete primary expression (`]`, a string or
+ * template close, a digit) and the reference starts a new LINE, which is
+ * automatic semicolon insertion — the shape a semicolon-free module is made
+ * of. The first was the whole rule until #7554, and it lost exactly two live
+ * in-place writes to the other two: `else _pendingTranscriptFetches.set(…)`
+ * (message-handler.ts:1084) and `pending.clear()` after `[…]`
+ * (scheduledTaskRequests.ts:95). A sweep of every in-place-shaped reference on
+ * both rosters found those two and no others.
  *
  * Statement position is a STRICT SUBSET of "the value is discarded", and the
  * difference is a gap rather than a synonym (#7530 F2). `void n++;` and
@@ -90,13 +102,13 @@
  * module-bindings kind IN-PLACE MUTATION is the only write shape it has, and
  * there are exactly two of those. A MUTATOR CALL at statement position —
  * `m.set(k, v);`, `m.clear();`, `arr.push(x);` (#7467) — and an INDEX or
- * PROPERTY ASSIGNMENT at statement position — `o[k] = v;`, `o.field = v;`,
- * `o[k] += v;` (#7537). Without both, every `const _x = new Map()` AND every
- * `const o: Record<string, T> = {}` in the roster would have zero writes by
- * construction and could never reach the failure bucket: a guard reporting
- * clean on state it structurally cannot fail. Statement position is what keeps
- * `if (m.delete(k))`, `const last = arr.pop()` and `const x = (o[k] = v)`
- * reads.
+ * PROPERTY MUTATION at statement position — `o[k] = v;`, `o.field = v;`,
+ * `o[k] += v;` (#7537), `o[k]++;`, `o.field--;` (#7553). Without both, every
+ * `const _x = new Map()` AND every `const o: Record<string, T> = {}` in the
+ * roster would have zero writes by construction and could never reach the
+ * failure bucket: a guard reporting clean on state it structurally cannot
+ * fail. Statement position is what keeps `if (m.delete(k))`,
+ * `const last = arr.pop()`, `const x = (o[k] = v)` and `return o[k]++` reads.
  *
  * The second shape landed after the first shipped without it, and the hole it
  * left was not theoretical. `gitOneshotTimers` (connection.ts) reported SIX reads and
@@ -104,9 +116,23 @@
  * deleting both of its genuine readers on the real file left this lint green at
  * exit 0. It reports 2r/4w now, and that same mutation fails.
  *
+ * AND IT ARRIVED IN TWO PIECES, which is the other half of the lesson. #7537
+ * taught `isWriteAt` to step over ONE accessor before testing the ASSIGNMENT
+ * operator; the INCREMENT test one line above it was left reading the unstepped
+ * text, so `o[k] = v`, `o[k] += 1` and `++o[k]` were writes while `o[k]++` was
+ * a read — three spellings of one mutation, two classifications, and a
+ * `const counts: Record<string, number> = {}` mutated only by `counts[k]++`
+ * still unfailable by construction. #7553 routes both operators through one
+ * shared scan (`accessorStepEnd`) rather than a second bracket matcher, which
+ * is what stops there being a third such gap: a hand-written copy of a
+ * classifier is precisely the drift this lint exists to catch. Measured on the
+ * live tree, it moved `_encryptionState` (`_encryptionState.sendNonce++`,
+ * message-handler.ts:680) from 7r/5w to 6r/6w, and nothing else.
+ *
  * ONE ACCESSOR STEP counts, which is the adjudication the mutator rule already
- * makes for `m.get(k).push(x)`: `o.a.b = v` and `o[i][j] = v` store into the
- * object held in `o.a` / `o[i]`, so `o` itself is genuinely read there.
+ * makes for `m.get(k).push(x)`: `o.a.b = v`, `o[i][j] = v` and `o.a.b++` store
+ * into or mutate the object held in `o.a` / `o[i]`, so `o` itself is genuinely
+ * read there. One scan enforces that for every operator.
  *
  * Both shapes ride ONE per-target flag, `inPlaceMutationIsWrite` — on for the
  * dashboard's module bindings, off for the app's interface target, where a
@@ -205,29 +231,29 @@
  *   - …AND ONLY AT STATEMENT POSITION. `const x = (o[k] = v)` and
  *     `if ((o[k] = v))` mutate and are still READS, exactly as
  *     `const x = m.set(k, v)` is. Same rescue-only direction as the `++` rule
- *     above, and the same gap. The boundary set that decides this loses
- *     in-place writes in a semicolon-free file and after a braceless `else`
- *     (#7554, pre-dating both in-place rules; #7537 routed a second predicate
- *     through the same gate, so it now decides twice as many classifications).
- *   - A POSTFIX INCREMENT THROUGH AN ACCESSOR IS A READ (#7553). This is the
- *     bug #7537 fixed, surviving one operator over: `INCDEC_AHEAD` is tested
- *     against the same text that starts with `[` or `.`, so it never sees the
- *     `++`. After #7537 one mutation has THREE spellings and TWO
- *     classifications, on the same binding:
- *
- *         o[k] = v;   WRITE      o.f = v;    WRITE
- *         o[k] += 1;  WRITE      o.f += 1;   WRITE
- *         ++o[k];     WRITE      ++o.f;      WRITE
- *         o[k]++;     read       o.f++;      read     <- the gap
- *
- *     So a `const counts: Record<string, number> = {}` whose only mutation is
- *     `counts[k]++` is STILL unfailable by construction — the exact property
- *     #7537 exists to remove, for one remaining spelling. The live instance is
- *     `_encryptionState.sendNonce++` (message-handler.ts:680), masked today by
- *     that binding's five other writes (7r/5w) rather than by anything the
- *     lint understands. All four spellings are pinned, so #7553 landing turns
- *     the two `read` rows red alongside this bullet — the same arrangement
- *     #7530 made for #7537, which is why this gap is written down at all.
+ *     above, and the same gap.
+ *   - STATEMENT POSITION IS DECIDED WITHOUT A PARSE, so two shapes of it are
+ *     out of model (#7554). An IDENTIFIER-terminated line does not begin a new
+ *     statement here — `const a = b` then `m.clear()`, with no semicolons, is
+ *     the same ASI as the `]` case the rule DOES accept, and it stays a read.
+ *     Admitting it means knowing the trailing word is not an operator keyword
+ *     (`new`, `as`, `await`, `of`, `typeof`, `instanceof`, …), and a
+ *     hand-maintained keyword list beside a language that keeps adding
+ *     contextual keywords is the shape docs/false-safety-guards.md catalogues.
+ *     Measured before it was refused: that arm moves ZERO of the ~950
+ *     references classified across both targets. A braceless `case`/`default`
+ *     arm is out for the mirror reason — `:` is also a ternary and an object
+ *     value, so the CHARACTER cannot be admitted and the keyword form needs a
+ *     parse of the case expression. Zero live instances of either; both pinned.
+ *   - A PREFIX INCREMENT THROUGH AN ACCESSOR IS A WRITE WITH THE FLAG OFF.
+ *     `++o[k]` reaches `isWriteAt` through `INCDEC_BEHIND`, which is checked
+ *     before either in-place rule and consults NEITHER the per-target flag nor
+ *     the accessor scan — so on the INTERFACE kind, where in-place mutation is
+ *     deliberately not a write, `++_ctx.map[k]` is counted as a write of
+ *     `_ctx.map` while `_ctx.map[k] = v` and `_ctx.map[k]++` are reads. That is
+ *     the ACCUSE direction, the only in-place shape on this list that runs
+ *     that way, and it is pinned as such. No such reference exists on either
+ *     roster today (#7558 owns closing it; #7532 owns the flag).
  *   - A PARENTHESISED OR ASSERTED BASE IS A READ. `(o)[k] = v`, `o![k] = v`,
  *     `o!.field = v`, `(o as T)[k] = v` and `(<T>o)[k] = v` all classify as
  *     reads, because the accessor scan starts at the character after the
@@ -632,40 +658,52 @@ const MUTATOR_AHEAD = new RegExp(`^\\s*\\??\\s*\\.\\s*(?:${MUTATORS.join('|')})\
  * a reason that does not apply. 256 clears every index expression in the tree
  * several times over; one longer than that reads as a READ, which is the
  * rescue direction. Both sides are pinned.
+ *
+ * ONE window, BOTH accessor predicates: `o[k] = v` (#7537) and `o[k]++` (#7553)
+ * are separated from their operator by the same arbitrary index expression, so
+ * a second number here would be a second thing to drift. Both sides of 256 are
+ * pinned for each predicate.
  */
 const ACCESSOR_ASSIGN_WINDOW = 256
 
 /**
- * Is the text immediately after a reference `[...] <assign>` or `.name
- * <assign>` — i.e. is the reference the BASE of an index or property
- * assignment (#7537)?
+ * How far into `after` ONE accessor step reaches — `[…]` or `.name` — or -1
+ * when the text does not begin with exactly one such step.
  *
- * `after` is the already comment-stripped text following the reference,
- * normally `ACCESSOR_ASSIGN_WINDOW` bytes of it.
+ * `after` is the already comment-stripped text following a reference, normally
+ * `ACCESSOR_ASSIGN_WINDOW` bytes of it. This is the SCAN both accessor
+ * predicates share: `assignsThroughAccessor` asks what operator sits past the
+ * step, `incrementsThroughAccessor` asks the same question one operator over.
+ * #7537 fixed the first and #7553 the second, and the second existed at all
+ * because the scan was private to the first — the offset was computed and then
+ * thrown away. Returning it is what makes ONE scan answer both, instead of a
+ * second hand-written copy of the bracket matcher.
  *
  * EXACTLY ONE accessor step counts, and that is the same adjudication the
  * mutator rule already makes for `m.get(k).push(x)` — a READ of `m`, because
  * what gets mutated is the object `m.get(k)` returned, not `m`. By the same
- * reasoning `o.a.b = v` and `o[i][j] = v` store into the object held in `o.a` /
- * `o[i]`; `o` itself is only read to reach it. Only the single step that stores
- * INTO `o` is a write of `o`.
+ * reasoning `o.a.b = v` and `o[i][j]++` store into / mutate the object held in
+ * `o.a` / `o[i]`; `o` itself is only read to reach it. Only the single step
+ * that lands IN `o` is a write of `o`.
  *
  * `?.` is deliberately not accepted: assigning through an optional chain
  * (`o?.k = v`) is a SyntaxError, so a branch for it could never be exercised by
- * any input — an untestable refinement is worse than no refinement.
+ * any input — an untestable refinement is worse than no refinement. `o?.k++`
+ * is a SyntaxError for the same reason (an optional chain is not a valid
+ * assignment target), so the exclusion is right for both predicates.
  *
- * A window that runs out mid-index (an unbalanced `[`) returns false: the shape
- * is unproven, and unproven must not read as a write.
+ * A window that runs out mid-index (an unbalanced `[`) returns -1: the shape is
+ * unproven, and unproven must not read as a write.
  */
-export function assignsThroughAccessor(after) {
+function accessorStepEnd(after) {
   let i = 0
   const skipSpace = () => { while (i < after.length && /\s/.test(after[i])) i++ }
   skipSpace()
-  if (i >= after.length) return false
+  if (i >= after.length) return -1
   if (after[i] === '.') {
     i++
     skipSpace()
-    if (!/[A-Za-z_$]/.test(after[i] ?? '')) return false
+    if (!/[A-Za-z_$]/.test(after[i] ?? '')) return -1
     i++
     while (i < after.length && /[\w$]/.test(after[i])) i++
   } else if (after[i] === '[') {
@@ -688,11 +726,46 @@ export function assignsThroughAccessor(after) {
       else if (c === ']') depth--
       i++
     }
-    if (depth !== 0) return false
+    if (depth !== 0) return -1
   } else {
-    return false
+    return -1
   }
-  return ASSIGN_AHEAD.test(after.slice(i))
+  return i
+}
+
+/**
+ * Is the text immediately after a reference `[...] <assign>` or `.name
+ * <assign>` — i.e. is the reference the BASE of an index or property
+ * assignment (#7537)?
+ *
+ * `after` is the already comment-stripped text following the reference,
+ * normally `ACCESSOR_ASSIGN_WINDOW` bytes of it.
+ */
+export function assignsThroughAccessor(after) {
+  const i = accessorStepEnd(after)
+  return i >= 0 && ASSIGN_AHEAD.test(after.slice(i))
+}
+
+/**
+ * Is the text immediately after a reference `[...]++` / `[...]--` or `.name++`
+ * / `.name--` — i.e. is the reference the BASE of a POSTFIX increment or
+ * decrement (#7553)?
+ *
+ * The same blind spot #7537 fixed, one operator over. `INCDEC_AHEAD` in
+ * `isWriteAt` is tested against text that for `o[k]++` begins with `[`, so it
+ * never reaches the `++`; the PREFIX form `++o[k]` was a write only because
+ * `INCDEC_BEHIND` matches the operator on the other side of the identifier.
+ * The result was one mutation with three spellings and two classifications on
+ * the same binding, and a `const counts: Record<string, number> = {}` mutated
+ * only by `counts[k]++` had zero writes by construction — unfailable however
+ * dead it became, which is the exact property #7537 exists to remove.
+ *
+ * Only POSTFIX is asked here. Prefix through an accessor is already a write via
+ * `INCDEC_BEHIND`, which is checked first and does not consult this predicate.
+ */
+export function incrementsThroughAccessor(after) {
+  const i = accessorStepEnd(after)
+  return i >= 0 && INCDEC_AHEAD.test(after.slice(i))
 }
 
 // A statement's left edge: the last significant character before the reference
@@ -704,6 +777,70 @@ export function assignsThroughAccessor(after) {
 const STATEMENT_BOUNDARY = new Set(['', ';', '{', '}', ')'])
 
 /**
+ * The KEYWORDS that introduce a statement with nothing but whitespace between
+ * them and it (#7554).
+ *
+ * Every other statement-introducing construct already ends in a character the
+ * set above carries — `if (…)`, `for (…)`, `while (…)`, `catch (…)` end in
+ * `)`, and `try` / `finally` / a block end in `{` or `}`. `else` and `do` are
+ * the only two that do not, so `else m.set(k, v);` and `do m.clear(); while (c)`
+ * were the only statement positions the character set could not reach. This is
+ * a CLOSED set, fixed by the grammar rather than a list that grows: what
+ * follows either keyword is a *Statement*, whose value is discarded by
+ * definition, which is the whole property `atStatementStart` is testing for.
+ */
+const STATEMENT_KEYWORD_BOUNDARY = new Set(['else', 'do'])
+
+/**
+ * Characters that CLOSE a complete primary expression — the ASI half of #7554.
+ *
+ * `packages/dashboard/src/store/scheduledTaskRequests.ts` is written without
+ * semicolons, so the character before a statement is whatever ended the
+ * previous expression. When that character closes a complete primary
+ * expression AND the reference starts a new LINE, automatic semicolon
+ * insertion guarantees a statement boundary: no identifier token can continue
+ * `arr[i]`, `'s'`, `` `t` `` or `1`, so the parser must insert the semicolon
+ * the source omitted. `]` is the live one —
+ *
+ *     const entries = [...pending.values()]
+ *     pending.clear()
+ *
+ * — and the rest of the class is here because the rule is a CLASS, not the one
+ * character that happens to occur today; picking only `]` would be the
+ * hardcoded-list shape in the other direction.
+ *
+ * An IDENTIFIER character is deliberately NOT in this set even though
+ * `const a = b` / `m.clear()` is the same ASI, because accepting it requires
+ * knowing that the trailing word is not an operator keyword — `new`, `typeof`,
+ * `void`, `delete`, `in`, `of`, `instanceof`, `as`, `await`, `case` — and a
+ * hand-maintained keyword list beside a language that keeps adding contextual
+ * keywords is exactly the shape docs/false-safety-guards.md catalogues. It was
+ * measured before it was rejected: across both targets' 950 classified
+ * references, the identifier arm moves ZERO of them, so the list would be
+ * unpaid-for risk. Pinned as a residual, rescue-only like every other gap here.
+ */
+const PRIMARY_EXPRESSION_END = /[\]'"`0-9]/
+
+/**
+ * The word ending at `i`, or '' when `i` is not an identifier character or the
+ * word is really a property access (`o.else`).
+ */
+function wordEndingAt(text, i) {
+  if (i < 0 || !/[\w$]/.test(text[i])) return ''
+  let j = i
+  while (j >= 0 && /[\w$]/.test(text[j])) j--
+  if (j >= 0 && text[j] === '.') return ''
+  return text.slice(j + 1, i + 1)
+}
+
+/** Is `pos` preceded on its own line by nothing but spaces and tabs? */
+function beginsLine(text, pos) {
+  let i = pos - 1
+  while (i >= 0 && (text[i] === ' ' || text[i] === '\t')) i--
+  return i < 0 || text[i] === '\n'
+}
+
+/**
  * Does the reference at `index` begin a statement?
  *
  * Scans BACK over whitespace in the full stripped text rather than over a
@@ -711,15 +848,33 @@ const STATEMENT_BOUNDARY = new Set(['', ';', '{', '}', ')'])
  * comment sitting between `n` and its `++` must read the same as `n++;`
  * however long that comment was. An attached prefix
  * `++`/`--` is stepped over, so `++n;` and `n++;` answer alike.
+ *
+ * Three ways to qualify, in the order the grammar makes them cheap to test:
+ * the previous significant character closed the previous statement
+ * (`STATEMENT_BOUNDARY`); the previous word is a statement-introducing keyword
+ * (`STATEMENT_KEYWORD_BOUNDARY`); or the previous character closed a complete
+ * primary expression and this reference starts a new line, which is ASI
+ * (`PRIMARY_EXPRESSION_END`). The last two are #7554 — the character set alone
+ * lost every in-place write in a semicolon-free file and after a braceless
+ * `else`, and #7537 had just routed a SECOND predicate through this gate, so
+ * one hardcoded set of five characters was deciding roughly twice as many
+ * classifications as when it was written.
  */
 export function atStatementStart(text, index) {
+  // The leftmost character of the reference INCLUDING an attached prefix
+  // operator: `++n` at the start of a line begins that line, and the `++` is
+  // what sits in column 0.
+  let start = index
   let i = index - 1
   while (i >= 0 && /\s/.test(text[i])) i--
   if (i >= 1 && ((text[i] === '+' && text[i - 1] === '+') || (text[i] === '-' && text[i - 1] === '-'))) {
+    start = i - 1
     i -= 2
     while (i >= 0 && /\s/.test(text[i])) i--
   }
-  return i < 0 || STATEMENT_BOUNDARY.has(text[i])
+  if (i < 0 || STATEMENT_BOUNDARY.has(text[i])) return true
+  if (STATEMENT_KEYWORD_BOUNDARY.has(wordEndingAt(text, i))) return true
+  return PRIMARY_EXPRESSION_END.test(text[i]) && beginsLine(text, start)
 }
 
 function lineOf(text, index) {
@@ -771,9 +926,16 @@ function isWriteAt(text, index, end, { inPlaceMutationIsWrite = false } = {}) {
   // deleting both of its genuine readers left the lint green (proved on the
   // real file). Statement position is the same gate the mutator rule uses, so
   // `const x = (o[k] = v)` and `if ((o[k] = v))` stay reads.
+  // POSTFIX INCREMENT THROUGH AN ACCESSOR (#7553) rides the same window, the
+  // same flag and the same statement-position gate, because it is the same
+  // mutation written a third way. Before it, `o[k] = v` and `o[k] += 1` and
+  // `++o[k]` were writes while `o[k]++` was a read — three spellings, two
+  // classifications, and a `const counts: Record<string, number> = {}` mutated
+  // only by `counts[k]++` was still unfailable by construction.
+  const accessorWindow = text.slice(end, end + ACCESSOR_ASSIGN_WINDOW)
   if (
     inPlaceMutationIsWrite &&
-    assignsThroughAccessor(text.slice(end, end + ACCESSOR_ASSIGN_WINDOW))
+    (assignsThroughAccessor(accessorWindow) || incrementsThroughAccessor(accessorWindow))
   ) {
     return atStatementStart(text, index)
   }

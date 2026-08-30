@@ -190,6 +190,7 @@ const {
   classifyReferences,
   extractInterfaceFields,
   extractModuleBindings,
+  incrementsThroughAccessor,
   stripComments,
 } = await import(pathToFileURL(SCRIPT).href)
 
@@ -802,21 +803,59 @@ const accessorAssignCases = [
   ['o [ k ] = v; is a WRITE — whitespace between the steps is not a shape', 'o [ k ] = v;', 'o', true, 0, 1],
   ['o.length = 0; is a WRITE — truncating an array is a mutation', 'o.length = 0;', 'o', true, 0, 1],
   // #7548 F1 / #7553 — the SAME accessor blindness #7537 fixed, one operator
-  // over: INCDEC_AHEAD is tested against the text that starts with `[` or `.`,
-  // so it never sees the `++`. The result is one mutation with THREE spellings
-  // and TWO classifications on the same binding, and a `const counts: Record<
-  // string, number> = {}` mutated only by `counts[k]++` is still unfailable by
-  // construction. The live instance is `_encryptionState.sendNonce++`
-  // (message-handler.ts:680), masked only by that binding's five other writes.
+  // over: INCDEC_AHEAD was tested against the text that starts with `[` or `.`,
+  // so it never saw the `++`. One mutation had THREE spellings and TWO
+  // classifications on the same binding, and a `const counts: Record<string,
+  // number> = {}` mutated only by `counts[k]++` was still unfailable by
+  // construction — the exact property #7537 exists to remove, for one
+  // remaining spelling.
   //
-  // All four spellings are pinned at their CURRENT classification, which is the
-  // arrangement #7530 made for #7537 and which just paid off: when #7553 lands,
-  // the two `read` rows go red and the WHAT IT CANNOT SEE bullet must be
-  // updated with them. A gap that is only prose is a gap that changes silently.
+  // These four were pinned at their then-current classification by #7548, with
+  // the instruction that #7553 landing must turn the two `read` rows red and
+  // take the WHAT IT CANNOT SEE bullet with them. #7553 landed; both were
+  // flipped in the same commit as the header, exactly as that comment said —
+  // the same arrangement #7530 made for #7537, for the second time.
+  // `_encryptionState` (message-handler.ts:680, `_encryptionState.sendNonce++`)
+  // was the live instance: 7r/5w before, 6r/6w now, masked either way by five
+  // plain reassignments rather than by anything the lint understood.
   ['++o[k]; is a WRITE — the prefix form is seen (INCDEC_BEHIND)', '++o[k];', 'o', true, 0, 1],
   ['++o.field; is a WRITE — same, property form', '++o.field;', 'o', true, 0, 1],
-  ['o[k]++; is a READ — the postfix form is NOT seen (#7553)', 'o[k]++;', 'o', true, 1, 0],
-  ['o.field++; is a READ — same gap, property form (#7553)', 'o.field++;', 'o', true, 1, 0],
+  ['o[k]++; is a WRITE — the postfix form, through the accessor (#7553)', 'o[k]++;', 'o', true, 0, 1],
+  ['o.field++; is a WRITE — same, property form (#7553)', 'o.field++;', 'o', true, 0, 1],
+  // The decrement spelling is the same operator class and must not need its own
+  // rule: INCDEC_AHEAD carries `--` alongside `++`, and dropping half of it
+  // would survive every `++` case above.
+  ['o[k]--; is a WRITE — `--` is the same mutation (#7553)', 'o[k]--;', 'o', true, 0, 1],
+  ['o.field--; is a WRITE — same, property form (#7553)', 'o.field--;', 'o', true, 0, 1],
+  // …under the SAME statement-position gate as every other in-place shape.
+  // These three consume the value, so they are reads exactly as `return n++`
+  // and `String(++n)` are on a bare binding.
+  ['return o[k]++ is a READ — its value is handed on (#7553)', 'function f() { return o[k]++; }', 'o', true, 1, 0],
+  ['const x = o[k]++ is a READ — its value is consumed (#7553)', 'const x = o[k]++;', 'o', true, 1, 0],
+  ['f(o.field++) is a READ (#7553)', 'f(o.field++);', 'o', true, 1, 0],
+  ['for (;; o[k]++) is a WRITE — nothing consumes it (#7553)', 'for (let i = 0; i < 3; o[k]++) {}', 'o', true, 0, 1],
+  ['if (c) o[k]++; is a WRITE — `)` is a statement boundary (#7553)', 'if (c) o[k]++;', 'o', true, 0, 1],
+  // ONE STEP DEEP applies to the postfix form too: what `o.a.b++` mutates is
+  // the object held in `o.a`, not `o` — the same adjudication as `o.a.b = v`.
+  ['o.a.b++; is a READ of o — the mutation lands in o.a (#7553)', 'o.a.b++;', 'o', true, 1, 0],
+  ['o[i][j]++; is a READ of o — the mutation lands in o[i] (#7553)', 'o[i][j]++;', 'o', true, 1, 0],
+  // `o?.f++` is a SyntaxError (an optional chain is not an assignment target),
+  // so the `?.` exclusion the assign predicate already makes is right here too.
+  ['o?.field++; is a READ — an optional chain is not a mutation target', 'o?.field++;', 'o', true, 1, 0],
+  // NOT an increment. `o[k] - -1` is subtraction of a negative literal; a
+  // predicate that matched `-` loosely would file it as a write.
+  ['o[k] - -1 is a READ — a minus is not a decrement', 'const x = o[k] - -1;', 'o', true, 1, 0],
+  ['o[k]++; is a READ with the flag OFF (control) (#7553)', 'o[k]++;', 'o', false, 1, 0],
+  ['o.field++; is a READ with the flag OFF (control) (#7553)', 'o.field++;', 'o', false, 1, 0],
+  // …and the PREFIX form is NOT symmetric with it, which is the one in-place
+  // shape on the list running in the ACCUSE direction. `++o[k]` reaches
+  // isWriteAt through INCDEC_BEHIND, checked before either in-place rule and
+  // consulting neither the flag nor the accessor scan, so with the flag OFF it
+  // is a write while `o[k] = v` and `o[k]++` are reads. Pinned so the asymmetry
+  // is a recorded decision; no such reference exists on either roster today
+  // (swept: zero `++X[` / `++X.` in packages/{dashboard,app}/src). #7558.
+  ['++o[k]; is a WRITE with the flag OFF too — the accuse-direction asymmetry (#7558)', '++o[k];', 'o', false, 0, 1],
+  ['++o.field; is a WRITE with the flag OFF too (#7558)', '++o.field;', 'o', false, 0, 1],
   // The index expression is arbitrary source, so the scan must actually parse
   // it. A naive `\[[^\]]*\]` stops at the FIRST `]` and files both of these
   // as reads — one rescued write silences a whole binding.
@@ -888,6 +927,20 @@ test('an index expression LONGER than the window is a READ — unproven is not a
   assert(reads.length === 1 && writes.length === 0, `got ${reads.length}r ${writes.length}w`)
 })
 
+test('the POSTFIX predicate shares that one window — both sides of 256 (#7553)', () => {
+  // One window, both accessor predicates. A second number here would be a
+  // second thing to drift, so `o[<200>]++` and `o[<300>]++` must answer exactly
+  // as `o[<200>] = v` and `o[<300>] = v` do.
+  const inside = classifyBindingReferences(stripComments(`o[${'k'.repeat(200)}]++;`), 'o', {
+    inPlaceMutationIsWrite: true,
+  })
+  assert(inside.writes.length === 1 && inside.reads.length === 0, `inside: ${inside.reads.length}r ${inside.writes.length}w`)
+  const outside = classifyBindingReferences(stripComments(`o[${'k'.repeat(300)}]++;`), 'o', {
+    inPlaceMutationIsWrite: true,
+  })
+  assert(outside.reads.length === 1 && outside.writes.length === 0, `outside: ${outside.reads.length}r ${outside.writes.length}w`)
+})
+
 const accessorPredicateCases = [
   ['[k] =', true],
   ['.field =', true],
@@ -910,6 +963,49 @@ for (const [after, want] of accessorPredicateCases) {
     assert(assignsThroughAccessor(after) === want, `got ${assignsThroughAccessor(after)}`)
   })
 }
+
+// #7553 — the second predicate over the SAME accessor scan. The step-parsing
+// half of these answers must be identical to the table above; only the operator
+// past the step differs, which is the whole point of sharing `accessorStepEnd`.
+const incrementPredicateCases = [
+  ['[k]++', true],
+  ['.field++', true],
+  ['[k]--', true],
+  ['.field --', true],
+  ['[arr[i]]++', true],
+  ["['a]b']++", true],
+  ['[k] =', false],
+  ['.field =', false],
+  ['[k] +=', false],
+  ['[k] + +x', false],
+  ['[k] - -x', false],
+  ['.a.b++', false],
+  ['[i][j]++', false],
+  ['?.[k]++', false],
+  ['?.field++', false],
+  ['[k++', false],
+  ['.0++', false],
+  ['', false],
+  ['(k)++', false],
+  ['++', false],
+]
+for (const [after, want] of incrementPredicateCases) {
+  test(`incrementsThroughAccessor(${JSON.stringify(after)}) === ${want}`, () => {
+    assert(incrementsThroughAccessor(after) === want, `got ${incrementsThroughAccessor(after)}`)
+  })
+}
+
+test('the two accessor predicates are DISJOINT on every case in both tables', () => {
+  // They share one scan and split on the operator past it. If a case ever
+  // satisfied both, one of the two operator regexes has grown into the other's
+  // territory — `=` is not `++` and `+=` is neither.
+  for (const [after] of [...accessorPredicateCases, ...incrementPredicateCases]) {
+    assert(
+      !(assignsThroughAccessor(after) && incrementsThroughAccessor(after)),
+      `both predicates accepted ${JSON.stringify(after)}`,
+    )
+  }
+})
 
 test('the INTERFACE kind still classifies _ctx.map[k] = v as a READ (#7532 owns that)', () => {
   // Both in-place rules ride one per-target flag, and classifyReferences never
@@ -943,6 +1039,104 @@ test('atStatementStart answers alike for a prefix and a postfix increment', () =
   assert(atStatementStart('f(++n);', 4) === false, 'inside a call')
   assert(atStatementStart('{ n++; }', 2) === true, 'after a brace')
   assert(atStatementStart('if (c) n++;', 7) === true, 'after a paren')
+})
+
+// --- 10c-3. The two statement-boundary arms #7554 added --------------------
+//
+// STATEMENT_BOUNDARY is five characters, and #7537 had just routed a SECOND
+// predicate through the gate it decides — a hardcoded set beside a growing set
+// of callers, the shape docs/false-safety-guards.md catalogues. Two shapes fell
+// through it, both verified live and both measured before the rule changed:
+//
+//   message-handler.ts:1084  `else _pendingTranscriptFetches.set(…)`  7r/4w -> 6r/5w
+//   scheduledTaskRequests.ts:95  `[…]` then `pending.clear()`, no `;`  5r/4w -> 4r/5w
+//
+// A sweep of EVERY in-place-shaped reference on both rosters found exactly
+// those two and nothing else, so these arms are the whole of the miss rather
+// than a sample of it. The MISS direction is rescue-only, as every gap here is;
+// widening the gate is the direction that can accuse, which is why the negative
+// controls below matter more than the positives and why the identifier residual
+// at the end of the table is refused rather than admitted.
+
+const statementBoundaryCases = [
+  // Arm 1: the keyword boundary. What follows `else` and `do` is a Statement,
+  // so its value is discarded by definition.
+  ['else m.clear(); is a WRITE (#7554)', 'if (c) f();\nelse m.clear();', 'm', 0, 1],
+  ['else o[k] = v; is a WRITE — the same gate both in-place rules use', 'if (c) f();\nelse o[k] = v;', 'o', 0, 1],
+  ['else o[k]++; is a WRITE — #7553 rides the same gate', 'if (c) f();\nelse o[k]++;', 'o', 0, 1],
+  ['do m.clear(); while (c) is a WRITE (#7554)', 'do m.clear(); while (c);', 'm', 0, 1],
+  // …and the keyword must be a whole KEYWORD, not the tail of an identifier
+  // and not a member named `else`.
+  ['a property named `else` is not the keyword', 'const x = a.else m.clear();', 'm', 1, 0],
+  ['an identifier ENDING in `do` is not the keyword', 'const x = judo m.clear();', 'm', 1, 0],
+  // Arm 2: ASI. The previous character closed a complete primary expression and
+  // the reference starts a new line, so the parser must insert the `;`.
+  // The live shape, copied from scheduledTaskRequests.ts:94-95. Note the 0
+  // READS: `[...m.values()]` yields NO reference at all, because the
+  // `(?<![\w$.])` lookbehind rejects the `.` of the spread (#7548 F5). That gap
+  // is live on this exact binding: `scheduledTaskRequests.ts` mentions `pending`
+  // 11 times outside comments and the classifier sees 10 of them, the missing
+  // one being line 94's `[...pending.values()]`. That is why line 95's
+  // `.clear()` was this binding's only unseen WRITE rather than one of two.
+  ['`]` then a new line is a WRITE — the live semicolon-free shape (#7554)', 'const e = [...m.values()]\nm.clear()', 'm', 0, 1],
+  ['…and the same shape with a countable read', 'const e = [m.size]\nm.clear()', 'm', 1, 1],
+  ['a string close then a new line is a WRITE', "const s = 'x'\nm.clear()", 'm', 0, 1],
+  ['a template close then a new line is a WRITE', 'const s = `x`\nm.clear()', 'm', 0, 1],
+  ['a numeric literal then a new line is a WRITE', 'const n2 = 1\nm.clear()', 'm', 0, 1],
+  ['`]` then a new line, index-assignment form', 'const e = [1]\no[k] = v', 'o', 0, 1],
+  ['`]` then a new line, postfix form (#7553 + #7554)', 'const e = [1]\no[k]++', 'o', 0, 1],
+  // The line break is load-bearing: without it there is no ASI, and the same
+  // characters are not two statements at all.
+  ['`]` on the SAME line is still a READ — ASI needs the newline', 'const y = e[0] m.clear();', 'm', 1, 0],
+  // The negative controls — continuations ending in a character NOT in the
+  // primary-expression set. Each consumes the value, so each must stay a read;
+  // accepting any of them would be a false ACCUSATION, the one direction this
+  // lint's gaps do not otherwise run in.
+  ['a ternary continuation stays a READ', 'const a = c\n  ? m.get(1)\n  : m.get(2);', 'm', 2, 0],
+  ['an argument on its own line stays a READ', 'f(\n  m.set(k, v)\n);', 'm', 1, 0],
+  ['an array element on its own line stays a READ', 'const a = [\n  m.get(1),\n  m.get(2)\n];', 'm', 2, 0],
+  ['an object value on its own line stays a READ', 'const o2 = {\n  a: m.get(1)\n};', 'm', 1, 0],
+  ['an `&&` continuation stays a READ', 'const a = c &&\n  m.delete(k);', 'm', 1, 0],
+  ['an `=` continuation stays a READ', 'const a =\n  m.delete(k);', 'm', 1, 0],
+  // THE RESIDUAL, pinned as a decision rather than left as prose. This IS the
+  // same ASI, and it stays a read because accepting an identifier character
+  // means knowing the trailing word is not `new` / `as` / `await` / `of` / … —
+  // a hand-maintained keyword list beside a language that keeps adding
+  // contextual keywords. Measured before it was refused: the identifier arm
+  // moves ZERO of the ~950 classified references on either roster.
+  ['an identifier-terminated line is a READ — the #7554 residual', 'const a = b\nm.clear()', 'm', 1, 0],
+  // …and a braceless `case` arm is a read for the mirror reason: `:` is also a
+  // ternary and an object value, so the character cannot be admitted, and the
+  // keyword form needs a parse of the case expression. Zero live instances.
+  ['a braceless `case` arm is a READ — `:` is ambiguous, so it is out of model', 'switch (x) {\n  case 1:\n    m.clear();\n}', 'm', 1, 0],
+]
+for (const [label, stmt, name, wantReads, wantWrites] of statementBoundaryCases) {
+  test(`statement position: ${label}`, () => {
+    const { reads, writes } = classifyBindingReferences(stripComments(stmt), name, { inPlaceMutationIsWrite: true })
+    assert(
+      reads.length === wantReads && writes.length === wantWrites,
+      `got ${reads.length}r ${writes.length}w, wanted ${wantReads}r ${wantWrites}w`,
+    )
+  })
+}
+
+test('atStatementStart: the #7554 arms, at the predicate', () => {
+  assert(atStatementStart('else m.clear();', 5) === true, 'after `else`')
+  assert(atStatementStart('do m.clear(); while (c);', 3) === true, 'after `do`')
+  assert(atStatementStart('judo m.clear();', 5) === false, 'after an identifier ENDING in `do`')
+  assert(atStatementStart('a.else m.clear();', 7) === false, 'after a property named `else`')
+  assert(atStatementStart('const e = [1]\nm.clear()', 14) === true, 'ASI after `]` at line start')
+  assert(atStatementStart('const e = [1] m.clear()', 14) === false, 'the same characters, SAME line')
+  assert(atStatementStart('const a = b\nm.clear()', 12) === false, 'the identifier residual')
+  // The reference's LEFTMOST character is what has to begin the line, prefix
+  // operator included: `++n` at column 0 begins its line even though `n` is at
+  // column 2.
+  assert(atStatementStart('const e = [1]\n++n', 16) === true, 'a prefix ++ at line start after ASI')
+  // A stripped comment is blanked to spaces, so it can sit on either side of
+  // the newline without changing the answer — the same property the C1 window
+  // has, and the reason this scan is over the full text and not a window.
+  assert(atStatementStart(stripComments('const e = [1] // why\nm.clear()'), 21) === true, 'comment before the newline')
+  assert(atStatementStart(stripComments('const e = [1]\n/* why */ m.clear()'), 24) === true, 'comment after the newline')
 })
 
 // --- 10d. Roster discovery -------------------------------------------------
@@ -1176,6 +1370,66 @@ test('CLI exits 1 on a dashboard Record mutated only by index assignment (#7537)
   }))
   assert(r.status === 1, `exit ${r.status}\n${r.stdout}${r.stderr}`)
   assert(/store\/message-handler\.ts::counts is WRITE-ONLY/.test(r.stderr), r.stderr)
+})
+
+test('CLI exits 1 on a dashboard counter mutated only by counts[k]++ (#7553)', () => {
+  // The shape the header's WHAT IT CANNOT SEE bullet named as STILL unfailable
+  // after #7537: `o[k] = v` was a write, `o[k]++` was not, so a Record counter
+  // written only the second way could never reach the failure bucket however
+  // dead it became. End to end through the SHIPPED target config, because the
+  // classifier answering correctly is not the same as the flag reaching it.
+  const r = runCliOn(fixtureRoot(CLEAN_DECL, {
+    [DASH_DECL_REL]:
+      `${DASH_TEST_EXPORTS}const counts: Record<string, number> = {};\n` +
+      'export function record(k: string): void { counts[k]++; }\n',
+  }))
+  assert(r.status === 1, `exit ${r.status}\n${r.stdout}${r.stderr}`)
+  assert(/store\/message-handler\.ts::counts is WRITE-ONLY/.test(r.stderr), r.stderr)
+})
+
+test('CLI exits 1 on a counter mutated only by counts.hits++ (#7553, property form)', () => {
+  const r = runCliOn(fixtureRoot(CLEAN_DECL, {
+    [DASH_DECL_REL]:
+      `${DASH_TEST_EXPORTS}const counts = { hits: 0 };\n` +
+      'export function record(): void { counts.hits++; }\n',
+  }))
+  assert(r.status === 1, `exit ${r.status}\n${r.stdout}${r.stderr}`)
+  assert(/store\/message-handler\.ts::counts is WRITE-ONLY/.test(r.stderr), r.stderr)
+})
+
+test('CLI exits 1 on a Map whose only mutation is a braceless `else` arm (#7554)', () => {
+  // Before the keyword boundary, `else m.clear();` was a READ, so this Map had
+  // zero writes and could not reach the failure bucket however dead it became —
+  // the same unfailable-by-construction shape #7467 and #7537 each closed for a
+  // different spelling. The live instance was message-handler.ts:1084.
+  const r = runCliOn(fixtureRoot(CLEAN_DECL, {
+    [DASH_DECL_REL]:
+      `${DASH_TEST_EXPORTS}const cache = new Map<string, number>();\n` +
+      'export function drop(k: string, c: boolean): void {\n' +
+      '  if (c) other(k);\n' +
+      '  else cache.delete(k);\n' +
+      '}\n',
+  }))
+  assert(r.status === 1, `exit ${r.status}\n${r.stdout}${r.stderr}`)
+  assert(/store\/message-handler\.ts::cache is WRITE-ONLY/.test(r.stderr), r.stderr)
+})
+
+test('CLI exits 1 on a SEMICOLON-FREE module whose only mutation follows a `]` (#7554)', () => {
+  // scheduledTaskRequests.ts is written without semicolons, so the character
+  // before a statement is whatever ended the previous expression. Before the
+  // ASI arm every in-place write in such a file after a line ending in `]` was
+  // a read — a property of the file's STYLE, not of the statement.
+  const r = runCliOn(fixtureRoot(CLEAN_DECL, {
+    [DASH_DECL_REL]:
+      `${DASH_TEST_EXPORTS}const cache = new Map<string, number>()\n` +
+      'export function sweep(ks: string[]): void {\n' +
+      '  const first = [ks[0]]\n' +
+      '  cache.clear()\n' +
+      '  other(first)\n' +
+      '}\n',
+  }))
+  assert(r.status === 1, `exit ${r.status}\n${r.stdout}${r.stderr}`)
+  assert(/store\/message-handler\.ts::cache is WRITE-ONLY/.test(r.stderr), r.stderr)
 })
 
 test('CLI reports the binding target with its own noun', () => {
