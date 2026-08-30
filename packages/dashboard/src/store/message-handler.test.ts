@@ -4397,7 +4397,14 @@ describe('dashboard message-handler dispatch', () => {
       expect(ss().inactivityWarning).toBeNull()
     })
 
-    // --- readers 3 + 4: the `result` queue reconcile and activeTools wipe ---
+    // --- reader 3: the `result` queue reconcile ---
+    //
+    // #7512 drove a FOURTH reader here — the #4491 `activeTools` wipe. #7515
+    // deleted that gate: the server pairs every replayed `result` with an
+    // ungated `agent_idle` (ws-history.js `sendHistoryEntry`), so gating the
+    // `result` case could not change the outcome. `agent_idle` is not an
+    // ACTIVITY_EVENT_TYPE and touches no `queuedMessages`, so the reader below
+    // is untouched by that decision.
 
     it('queue reconcile: a replayed result in replay #2 tail does not trim the queue', () => {
       seed({
@@ -4417,24 +4424,9 @@ describe('dashboard message-handler dispatch', () => {
       expect(ss().queuedMessages).toHaveLength(2)
     })
 
-    it('activeTools wipe: a replayed result in replay #2 tail does not wipe activeTools', () => {
-      const inFlight = { toolUseId: 'tu-1', tool: 'Bash', input: { command: 'sleep 999' }, startedAt: 100 }
-      seed({ activeTools: [inFlight] })
-      enterReplayTwoTail()
-      handleMessage(
-        { type: 'result', sessionId: 's1', usage: {}, cost: 0, duration: 0 },
-        ctx() as any,
-      )
-      // #4491's symptom: the wipe lands, the replayed tool_start re-adds the
-      // entry with a fresh startedAt, and "Running Bash · 1s" restarts.
-      expect(ss().activeTools).toHaveLength(1)
-      expect(ss().activeTools[0].startedAt).toBe(100)
-    })
-
-    it('queue reconcile + activeTools: both resume once the LAST window closes', () => {
+    it('queue reconcile: resumes once the LAST window closes', () => {
       seed({
         queuedMessages: [{ clientMessageId: 'c1', text: 'one', queuedAt: 1, status: 'confirmed' }],
-        activeTools: [{ toolUseId: 'tu-1', tool: 'Bash', input: {}, startedAt: 100 }],
       })
       enterReplayTwoTail()
       handleMessage({ type: 'history_replay_end', sessionId: 's1' }, ctx() as any)
@@ -4443,7 +4435,6 @@ describe('dashboard message-handler dispatch', () => {
         ctx() as any,
       )
       expect(ss().queuedMessages).toHaveLength(0)
-      expect(ss().activeTools).toEqual([])
     })
 
     // --- the prune divergence: refcount cleared, Set left standing ----------
@@ -6257,10 +6248,13 @@ describe('dashboard message-handler dispatch', () => {
       expect(ss.queuedMessages).toEqual(queued)
     })
 
-    // Mirrors the #4491 activeTools replay guard a few tests down (same
-    // file, same `case 'result'` handler): a REPLAYED result on switch_session
-    // carries a stale queueLength from whenever the turn originally completed
-    // and must not trim the CURRENT queue.
+    // The #6627 reconcile is the replay-gated reader in `case 'result'` — the
+    // only one left after #7515 retired the #4491 `activeTools` gate as inert.
+    // A REPLAYED result on switch_session carries a stale queueLength from
+    // whenever the turn originally completed and must not trim the CURRENT
+    // queue. Nothing else on the wire re-writes `queuedMessages` a frame
+    // later, which is exactly what made the activeTools gate unobservable and
+    // leaves this one load-bearing.
     it('a replayed result does not trim the queue', () => {
       seedSession([
         { clientMessageId: 'c1', text: 'one', queuedAt: 1, status: 'confirmed' },
@@ -7945,31 +7939,100 @@ describe('dashboard message-handler dispatch', () => {
       expect(ss.inactivityWarning).toBeNull()
     })
 
-    // Regression for the agent-review critical finding (#4491): `result`
-    // events are recorded in the per-session history ring buffer
-    // (session-message-history.js) and replayed via PROXIED_EVENTS
-    // (session-manager.js). The `case 'result'` handler also clears
-    // activeTools — without a replay gate on THAT clear, every tab switch
-    // on a session with at least one completed prior turn fires a replayed
-    // result mid-replay, wiping the activeTools that history_replay_start
-    // had intentionally preserved. Tested explicitly: a replayed result
-    // must NOT touch activeTools, but a live result still must (#4308
-    // turn-boundary sweep stays intact for the legitimate "missed
-    // tool_result" case after a server crash / dropped broadcast).
-    it('replayed result events do NOT clear activeTools (regression #4491)', () => {
-      const startedAt = 100
-      const inFlightTool = { toolUseId: 'tu-1', tool: 'Bash', input: { command: 'sleep' }, startedAt }
+    // #4491 pinned the OPPOSITE of the three tests below — "a replayed result
+    // must NOT clear activeTools" — and it passed, for four months, beside a
+    // wire on which the very next frame cleared them anyway. Both assertions
+    // were green in the same file at the same time; that pair IS #7515, and
+    // the gate they disagreed about is gone. What replaces it is the frame
+    // PAIR the server actually sends, plus the two things the gate was
+    // wrongly credited with protecting: the JSONL heal, and the clock.
+    // #7515 — the WIRE, not the handler. `sendHistoryEntry`
+    // (packages/server/src/ws-history.js) fans EVERY replayed `result` out
+    // into a synthesized `agent_idle` on the very next frame, deliberately
+    // since #4628, and that frame carries no `historySeq` and is not
+    // replay-gated anywhere. So a replay-gate on `case 'result'` could never
+    // change what the user sees: the pair, which is what the server actually
+    // sends, wipes `activeTools` either way. `agent_idle` OWNS the wipe.
+    //
+    // Pinned server-side by
+    // `packages/server/tests/ws-history.test.js` — "emits synthetic agent_idle
+    // after each `result` entry …(#4628)" — which asserts the exact frame
+    // ORDER this test consumes. If that synthesis is ever removed, that test
+    // goes red first and this comment is the pointer to why the client stopped
+    // gating.
+    it('the replayed result + its synthesized agent_idle clears activeTools — agent_idle owns the wipe (#7515)', () => {
+      const inFlightTool = { toolUseId: 'tu-1', tool: 'Bash', input: { command: 'sleep' }, startedAt: 100 }
       seedSession({ activeTools: [inFlightTool] })
       handleMessage({ type: 'history_replay_start', sessionId: 's1' }, ctx() as any)
-      // result fires during the replay window — pre-fix this wiped activeTools.
       handleMessage(
-        { type: 'result', sessionId: 's1', usage: {}, cost: 0, duration: 0 },
+        { type: 'result', sessionId: 's1', usage: {}, cost: 0, duration: 0, historySeq: 5 },
+        ctx() as any,
+      )
+      // The frame the server sends next, unconditionally.
+      handleMessage({ type: 'agent_idle', sessionId: 's1' }, ctx() as any)
+      const ss = (store.getState() as any).sessionStates.s1
+      expect(ss.activeTools).toEqual([])
+    })
+
+    // #7484 / #7500 — the JSONL replay heal lands MID-window, deliberately
+    // (`conversation-handlers.js`: "Before `history_replay_end`, so it stays
+    // inside the window where the #4466 reasoning holds"). It is the ONLY
+    // frame that can clear a zombie chip on a JSONL-sourced full-history
+    // replay, because a JSONL slice rebuilds as `message` frames that touch no
+    // tool state. Positive control for the #7515 adjudication: whatever the
+    // `result` case does, a mid-replay `agent_idle` must keep healing.
+    it('a mid-replay agent_idle still clears activeTools — the #7484 JSONL heal (#7500)', () => {
+      const inFlightTool = { toolUseId: 'tu-zombie', tool: 'Bash', input: {}, startedAt: 100 }
+      seedSession({ activeTools: [inFlightTool] })
+      handleMessage(
+        { type: 'history_replay_start', sessionId: 's1', fullHistory: true },
+        ctx() as any,
+      )
+      handleMessage({ type: 'agent_idle', sessionId: 's1' }, ctx() as any)
+      const ss = (store.getState() as any).sessionStates.s1
+      expect(ss.activeTools).toEqual([])
+      expect(ss.isIdle).toBe(true)
+    })
+
+    // #4607 — and this is why losing the `result` gate costs no user-visible
+    // symptom. #4466's complaint was the "Running Bash · 1s" CLOCK RESET, not
+    // the wipe itself: the wipe was only harmful because the replayed
+    // `tool_start` that followed re-anchored `startedAt` to `Date.now()`.
+    // History entries carry the server-side `timestamp` stamped at append time
+    // (session-message-history.js), and `sharedToolStart` re-anchors from it,
+    // so the elapsed clock survives an EMPTY activeTools set. Drive the full
+    // wire order — replayed result, synthesized agent_idle, replayed
+    // in-flight tool_start — and pin the clock.
+    it('the wipe does not reset the elapsed clock: the replayed tool_start re-anchors from the wire timestamp (#4607/#7515)', () => {
+      const originalStartedAt = 100
+      seedSession({
+        activeTools: [{ toolUseId: 'tu-1', tool: 'Bash', input: { command: 'sleep 999' }, startedAt: originalStartedAt }],
+      })
+      handleMessage(
+        { type: 'history_replay_start', sessionId: 's1', fullHistory: true },
+        ctx() as any,
+      )
+      handleMessage(
+        { type: 'result', sessionId: 's1', usage: {}, cost: 0, duration: 0, historySeq: 5 },
+        ctx() as any,
+      )
+      handleMessage({ type: 'agent_idle', sessionId: 's1' }, ctx() as any)
+      expect((store.getState() as any).sessionStates.s1.activeTools).toEqual([])
+      handleMessage(
+        {
+          type: 'tool_start',
+          messageId: 'tool-1',
+          tool: 'Bash',
+          toolUseId: 'tu-1',
+          input: { command: 'sleep 999' },
+          sessionId: 's1',
+          timestamp: originalStartedAt,
+        },
         ctx() as any,
       )
       const ss = (store.getState() as any).sessionStates.s1
       expect(ss.activeTools).toHaveLength(1)
-      expect(ss.activeTools[0].toolUseId).toBe('tu-1')
-      expect(ss.activeTools[0].startedAt).toBe(startedAt)
+      expect(ss.activeTools[0].startedAt).toBe(originalStartedAt)
     })
 
     it('live result events still clear activeTools (#4308 turn-boundary sweep preserved)', () => {
@@ -8172,20 +8235,15 @@ describe('dashboard message-handler dispatch', () => {
       expect(ssA.lastClientActivityAt).toBe(100)
     })
 
-    it('live result for session B still clears B.activeTools during A replay', () => {
-      // Mirror of the #4491 gate, per-session: a live `result` for session
-      // B during A's replay window must still run the #4308 turn-boundary
-      // sweep on B.activeTools.
-      const inFlightToolB = { toolUseId: 'tu-b-1', tool: 'Bash', input: { command: 'sleep' }, startedAt: 100 }
-      seedTwoSessions({}, { activeTools: [inFlightToolB] })
-      handleMessage({ type: 'history_replay_start', sessionId: 'sA' }, ctx() as any)
-      handleMessage(
-        { type: 'result', sessionId: 'sB', usage: {}, cost: 0, duration: 0 },
-        ctx() as any,
-      )
-      const ssB = (store.getState() as any).sessionStates.sB
-      expect(ssB.activeTools).toEqual([])
-    })
+    // There used to be an `activeTools` twin of the test above here — "a live
+    // result for session B still clears B.activeTools during A's replay",
+    // the per-session mirror of the #4491 gate. #7515 deleted that gate, so
+    // the assertion no longer distinguishes a per-session gate from a
+    // module-level one from NO gate: it passes for all three. Removed rather
+    // than kept as decoration; #4308's unconditional sweep is covered by
+    // "clears activeTools on result as a safety net", and the per-session
+    // scoping of the readers that DO still gate is covered above and by the
+    // queue-reconcile tests.
 
     it('history_replay_end for A clears only A from the replaying set', () => {
       // With two sessions concurrently replaying, ending one must not
@@ -8254,6 +8312,135 @@ describe('dashboard message-handler dispatch', () => {
       )
       const ss = (store.getState() as any).sessionStates.s1
       expect(ss.isIdle).toBe(true)
+    })
+
+    // #7529 — the seed and the FLAT mirror. `updateSession` is the only writer
+    // that mirrors `isIdle` into the dashboard's flat connection state (the
+    // value `App.tsx` reads for `isBusy={!isIdle}` — the Send/Stop button and
+    // the Working banner). Seeding a fresh shell by direct assignment bypassed
+    // it, and the resync loop below then short-circuited on
+    // `ss.isIdle === desired`, so a tab that restored `activeSessionId` before
+    // the roster landed showed **Send** for a session the server said was
+    // mid-turn. Measured on the pre-fix tree as `{ shell: false, flat: true }`.
+    it('session_list seeding a NEW session that is ALREADY the active session mirrors isIdle into flat state (#7529)', () => {
+      store = createMockStore(baseState({ activeSessionId: 's1', sessionStates: {}, isIdle: true } as any))
+      setStore(store)
+      handleMessage(
+        {
+          type: 'session_list',
+          sessions: [
+            { sessionId: 's1', name: 'S1', isBusy: true } as any,
+          ],
+        },
+        ctx() as any,
+      )
+      const state = store.getState() as any
+      expect(state.sessionStates.s1.isIdle).toBe(false)
+      // The whole point: the flat mirror agrees with the shell.
+      expect(state.isIdle).toBe(false)
+      expect(state.isIdle).toBe(state.sessionStates.s1.isIdle)
+    })
+
+    // Positive control for the seed removal: a NON-active new session must
+    // still land busy in its own shell (the #4639 seed's real job), and must
+    // NOT drag the flat mirror with it — flat state belongs to the ACTIVE
+    // session alone.
+    it('session_list seeding a NEW NON-active busy session lands busy in its shell and leaves flat isIdle alone (#7529)', () => {
+      store = createMockStore(baseState({ activeSessionId: 's1', sessionStates: {}, isIdle: true } as any))
+      setStore(store)
+      handleMessage(
+        {
+          type: 'session_list',
+          sessions: [
+            { sessionId: 's1', name: 'S1', isBusy: false } as any,
+            { sessionId: 's2', name: 'S2', isBusy: true } as any,
+          ],
+        },
+        ctx() as any,
+      )
+      const state = store.getState() as any
+      expect(state.sessionStates.s2.isIdle).toBe(false)
+      expect(state.sessionStates.s1.isIdle).toBe(true)
+      expect(state.isIdle).toBe(true)
+    })
+
+    // #7529 (review finding) — the OTHER direction, and it is reachable, which
+    // this PR's first pass wrongly argued it was not. `_resetSessionMemory()`
+    // (`switchServer` / `connectLocal`) and `forgetSession` clear `sessions`,
+    // `sessionStates` and `activeSessionId` — but NOT the flat `isIdle`, which
+    // keeps the previous server's busy session's `false`. `switchServer` then
+    // restores `activeSessionId` from persistence BEFORE the first
+    // `session_list`, so the snapshot seeds a fresh shell (default
+    // `isIdle: true`) for the active session while flat still says `false`.
+    // With the snapshot ALSO reporting idle, the resync's no-op short-circuit
+    // fires and the flat value is never corrected: a Stop button and a Working
+    // banner on an idle session until the next agent_busy / agent_idle /
+    // session_activity.
+    //
+    // So the loop cannot short-circuit on the SHELL alone — the flat mirror is
+    // a side effect of `updateSession`, and skipping the write skips the
+    // mirror.
+    it('session_list converges a stale FLAT isIdle even when the shell already matches — new shell (#7529)', () => {
+      store = createMockStore(baseState({
+        activeSessionId: 's1',
+        sessionStates: {},
+        isIdle: false,
+      } as any))
+      setStore(store)
+      handleMessage(
+        {
+          type: 'session_list',
+          sessions: [{ sessionId: 's1', name: 'S1', isBusy: false } as any],
+        },
+        ctx() as any,
+      )
+      const state = store.getState() as any
+      expect(state.sessionStates.s1.isIdle).toBe(true)
+      expect(state.isIdle).toBe(true)
+    })
+
+    it('session_list converges a stale FLAT isIdle even when the shell already matches — existing shell (#7529)', () => {
+      store = createMockStore(baseState({
+        activeSessionId: 's1',
+        sessionStates: { s1: { ...createEmptySessionState(), isIdle: true } },
+        isIdle: false,
+      } as any))
+      setStore(store)
+      handleMessage(
+        {
+          type: 'session_list',
+          sessions: [{ sessionId: 's1', name: 'S1', isBusy: false } as any],
+        },
+        ctx() as any,
+      )
+      const state = store.getState() as any
+      expect(state.sessionStates.s1.isIdle).toBe(true)
+      expect(state.isIdle).toBe(true)
+    })
+
+    // NEGATIVE CONTROL for the force above: when the flat mirror already
+    // agrees, the loop must still no-op. Pinned by value AND by the absence of
+    // a write — the SCOPE tests below would not see a redundant same-value
+    // write, so this one watches the store's identity instead.
+    it('session_list does NOT write when both the shell and the flat mirror already agree (#7529)', () => {
+      store = createMockStore(baseState({
+        activeSessionId: 's1',
+        sessionStates: { s1: { ...createEmptySessionState(), isIdle: true } },
+        isIdle: true,
+      } as any))
+      setStore(store)
+      const before = (store.getState() as any).sessionStates.s1
+      handleMessage(
+        {
+          type: 'session_list',
+          sessions: [{ sessionId: 's1', name: 'S1', isBusy: false } as any],
+        },
+        ctx() as any,
+      )
+      const state = store.getState() as any
+      expect(state.isIdle).toBe(true)
+      // Same object reference — `updateSession` returned before writing.
+      expect(state.sessionStates.s1).toBe(before)
     })
 
     it('session_list resyncs isIdle on an existing session when server flips to busy', () => {

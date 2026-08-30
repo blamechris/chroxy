@@ -290,15 +290,26 @@ export function sendChunkedWithBackpressure(ws, entries, { startOffset = 0, emit
  *     discriminator keys on that field's PRESENCE, so a missing stamp reads as
  *     a live racer — and a fabricated one is just as wrong.
  *  2. #4628 — mirror the live `result` → `agent_idle` fan-out from
- *     event-normalizer.js. The dashboard's handler dispatch table has no
- *     `result` entry, only `agent_idle`, and both clients' `case 'result'` is
- *     replay-gated (#4466) precisely so a replayed result cannot wipe the
- *     activeTools that `history_replay_start` is preserving. That leaves
- *     `agent_idle` — which is NOT replay-gated — as the only frame that clears
- *     a zombie "Running X" chip left by an orphan tool_start (a dropped
- *     PostToolUse hook, the #4628 root cause). The companion `_emitResult`
- *     sweep in BaseSession stops new orphans being persisted; this heals the
- *     sessions already wedged, on every replay path a user can reach.
+ *     event-normalizer.js. `agent_idle` is the frame that clears a zombie
+ *     "Running X" chip left by an orphan tool_start (a dropped PostToolUse
+ *     hook, the #4628 root cause): the mobile app has no `activeTools` reader
+ *     at all, and the dashboard's own `case 'result'` sweep is a redundant
+ *     second copy of the same wipe rather than an independent one. The
+ *     companion `_emitResult` sweep in BaseSession stops new orphans being
+ *     persisted; this heals the sessions already wedged, on every replay path
+ *     a user can reach.
+ *
+ *     THIS PAIRING IS A WIRE CONTRACT, not an implementation detail (#7515).
+ *     Until #7515 this comment claimed the clients' `case 'result'` was
+ *     replay-gated "precisely so a replayed result cannot wipe" what
+ *     `history_replay_start` preserves — which made the two halves of the
+ *     paragraph contradict each other, since the very next frame wiped it
+ *     regardless. The dashboard's gate is gone and its `result` sweep is
+ *     unconditional again; both clients now depend on this synthesis being
+ *     the authority. Removing it is a client-visible behaviour change, and
+ *     `tests/ws-history.test.js`'s "emits synthetic agent_idle after each
+ *     `result` entry …(#4628)" — which asserts the exact frame ORDER — is the
+ *     test that must go red first if anyone tries.
  *
  * @param {(ws: WebSocket, payload: object) => void} send
  * @param {WebSocket} ws

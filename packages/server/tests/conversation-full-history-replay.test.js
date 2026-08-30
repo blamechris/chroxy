@@ -161,14 +161,18 @@ describe('#7454 — request_full_history maps _seq onto the wire like replayHist
  * #7459 — the same family, a different mechanism. `replayHistory` synthesises
  * an `agent_idle` after every replayed `result` (#4628); this handler did not.
  *
- * The raw `result` is not a substitute: both clients DO have a `case 'result'`
- * that clears `activeTools` as the #4308 turn-boundary net, but #4466 gated it
- * behind "not replaying" so a replayed result can't wipe the activeTools that
- * `history_replay_start` is trying to preserve. During a replay the clear comes
- * from `agent_idle`, which is NOT replay-gated — and only replayHistory
- * synthesised it. Net effect: reconnect/session-switch healed a zombie
- * "Running X" chip, but "Sync Full History" — the button a user presses
- * BECAUSE the view looks wrong — could not.
+ * The raw `result` is not a substitute. The mobile app has no `activeTools`
+ * reader at all — `agent_idle` is its ONLY writer of the state behind the
+ * chip — and on the dashboard the `case 'result'` sweep is a redundant second
+ * copy of the same wipe, not an independent one. Until #7515 the dashboard
+ * additionally gated that sweep behind "not replaying" (#4491), which this
+ * comment used to cite as the reason `agent_idle` had to exist; the citation
+ * was wrong in a way that did not change the conclusion, since the gate was
+ * defeated by this very synthesis a frame later. `agent_idle` is the frame
+ * that clears the chip, and only replayHistory synthesised it. Net effect:
+ * reconnect/session-switch healed a zombie "Running X" chip, but "Sync Full
+ * History" — the button a user presses BECAUSE the view looks wrong — could
+ * not.
  */
 describe('#7459 — request_full_history mirrors replayHistory result → agent_idle synthesis (#4628)', () => {
   it('emits agent_idle immediately after a ring-buffer result entry', async () => {
@@ -184,7 +188,7 @@ describe('#7459 — request_full_history mirrors replayHistory result → agent_
     assert.ok(resultIdx >= 0, 'the result entry itself is still forwarded')
     assert.ok(
       idleIdx >= 0,
-      'a replayed result must be followed by a synthesized agent_idle — the clients\' case \'result\' is replay-gated (#4466), so agent_idle is the ONLY thing that clears the zombie tool chip',
+      'a replayed result must be followed by a synthesized agent_idle — the mobile app has no activeTools reader at all and the dashboard\'s case \'result\' sweep is a redundant copy of this same wipe, so agent_idle is what actually clears the zombie tool chip (#7515)',
     )
     assert.equal(idleIdx, resultIdx + 1, 'the synthesis must come IMMEDIATELY after its result, in the same order replayHistory emits it')
   })
