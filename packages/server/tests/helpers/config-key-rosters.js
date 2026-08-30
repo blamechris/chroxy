@@ -286,8 +286,13 @@ export function wordTokens(text) {
  * Generic literals that share the shape are excluded by the roster below —
  * grow it deliberately, with the doc line in hand, never pre-emptively.
  */
-const GENERIC_BACKTICK_LITERALS = new Set([
-  'true', 'false', 'null', 'undefined', 'auto', 'npm', 'node', 'ms', 'gh',
+export const GENERIC_BACKTICK_LITERALS = new Set([
+  // Every entry here must appear backticked in at least one gated region —
+  // the gate asserts that, so an entry whose doc line disappears fails as
+  // stale instead of quietly widening the evasion surface (#7545 review F1:
+  // this roster shipped with four members that appeared NOWHERE in the doc,
+  // one of which — `auto` — was a live phantom-sub-key evasion).
+  'true', 'false', 'gh',
 ])
 
 export function claimedSubKeyTokens(regionText) {

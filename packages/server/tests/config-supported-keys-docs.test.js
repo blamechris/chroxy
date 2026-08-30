@@ -7,6 +7,7 @@ import {
   extractTypeShapes,
   findConfigTableRow,
   claimedSubKeyTokens,
+  GENERIC_BACKTICK_LITERALS,
   findSchemaComment,
   findSection,
   parseRecognisedSubKeys,
@@ -338,8 +339,13 @@ describe('CONFIG.md sub-key rosters vs config.js *_SUPPORTED_KEYS (#7449)', () =
   const REGION_NON_KEY_TOKENS = new Map([
     // billing plan classes are values of `class`, not sub-keys
     ['billing', ['pro', 'max5x', 'max20x']],
-    // entry-level keys of the provider lists (one nesting level BELOW this
-    // roster, validated by the per-entry schema in anthropic-compatible-config)
+    // apiKeyEnv/credentialsKey/baseUrl are entry-level keys one nesting BELOW
+    // this roster (validated by KNOWN_ENTRY_KEYS in anthropic-compatible-
+    // config); `provider` is the TOP-LEVEL CONFIG_SCHEMA key cross-referenced
+    // here (#7545 review F3 corrected the original entry-level claim). With
+    // all four excluded plus the own-name rule this region contributes ZERO
+    // claims — recorded in REGION_MIN_CLAIMS below as explicitly vacuous; the
+    // FORWARD check still covers it.
     ['providers', ['provider', 'apiKeyEnv', 'credentialsKey', 'baseUrl']],
   ])
 
@@ -350,6 +356,7 @@ describe('CONFIG.md sub-key rosters vs config.js *_SUPPORTED_KEYS (#7449)', () =
     // bare lower-camel backticked tokens; see claimedSubKeyTokens for why
     // paths/env vars/examples are structurally outside the claim shape.
     let claimedTotal = 0
+    const claimedPerBlock = new Map()
     for (const block of BLOCK_TO_SET_NAME.keys()) {
       const region = findConfigTableRow(md, block) ?? findSection(md, block)
       if (!region) continue
@@ -366,15 +373,46 @@ describe('CONFIG.md sub-key rosters vs config.js *_SUPPORTED_KEYS (#7449)', () =
       const supported = new Set(runtime.get(block))
       const phantom = claimed.filter(k => !supported.has(k))
       claimedTotal += claimed.length
+      claimedPerBlock.set(block, claimed.length)
       assert.deepEqual(
         phantom,
         [],
         `CONFIG.md's prose for \`${block}\` cites ${phantom.join(', ')} as sub-keys the producer no longer supports`
       )
     }
-    // Positive control: an extractor that stops matching would pass the loop
-    // over empty claim sets and report a clean green.
-    assert.ok(claimedTotal >= 10, `expected >=10 claimed sub-key tokens across regions, got ${claimedTotal}`)
+    // Positive control, PER REGION: a single total floor was proven inert
+    // against losing 5 of 6 regions (#7545 review F2 — discord's 13 claims
+    // met it alone; the same concentration trap the #7510 review caught 190
+    // lines above). Floors, not exact pins: the count is not the subject,
+    // but losing any one region's extraction must trip its own row.
+    const REGION_MIN_CLAIMS = new Map([
+      ['billing', 3], ['worktreeGc', 2], ['sessionCi', 3],
+      ['userShell', 1], ['notifications.discord', 8], ['providers', 0],
+    ])
+    for (const [block, min] of REGION_MIN_CLAIMS) {
+      assert.ok(
+        (claimedPerBlock.get(block) ?? 0) >= min,
+        `region \`${block}\` yielded ${claimedPerBlock.get(block) ?? 0} claims, expected >=${min} — its extraction has degraded`
+      )
+    }
+    assert.deepEqual(
+      sorted([...claimedPerBlock.keys()]),
+      sorted([...REGION_MIN_CLAIMS.keys()]),
+      'the set of regions contributing to the reverse check changed — update REGION_MIN_CLAIMS deliberately'
+    )
+    void claimedTotal
+    // F1 staleness: every generic literal must appear backticked in some gated
+    // region, or it is a stale entry widening the evasion surface.
+    const allRegions = [...BLOCK_TO_SET_NAME.keys()]
+      .map(b => findConfigTableRow(md, b) ?? findSection(md, b))
+      .filter(Boolean)
+      .join('\n')
+    for (const lit of GENERIC_BACKTICK_LITERALS) {
+      assert.ok(
+        allRegions.includes('\`' + lit + '\`'),
+        `GENERIC_BACKTICK_LITERALS entry '${lit}' appears backticked in no gated region — stale, remove it`
+      )
+    }
   })
 
   // ---- the #7445 incident itself, pinned by name ----
