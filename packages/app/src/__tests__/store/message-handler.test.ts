@@ -19,6 +19,9 @@ import {
   registerPendingPermissionModeRequest,
   _testClearPendingPermissionModeRequests,
   setDeltaFlushIntervalOverride,
+  startHeartbeat,
+  stopHeartbeat,
+  HEARTBEAT_INTERVAL_MS,
 } from '../../store/message-handler';
 import { createMockConnectionContext } from '../../test-utils/mock-connection-context';
 import { createEmptySessionState } from '../../store/utils';
@@ -30,6 +33,8 @@ import {
   wasPromptLiveDuringReplay,
   getReplayWindowDepth,
   getLiveReplayLedgerSessionIds,
+  DELTA_FLUSH_FLOOR_MS,
+  DELTA_FLUSH_MAX_MS,
 } from '@chroxy/store-core';
 import { clearPersistedSession } from '../../store/persistence';
 import { setCallback, clearAllCallbacks } from '../../store/imperative-callbacks';
@@ -2996,6 +3001,58 @@ describe('stream_delta handler', () => {
     } finally {
       setDeltaFlushIntervalOverride(null);
       setTimeoutSpy.mockRestore();
+    }
+  });
+
+  // #7468 — the delta flusher's adaptive window and the heartbeat's RTT
+  // measurement must consume ONE RttSmoother: the one held on the handler
+  // context. Both used to close over a `const` local to createDefaultContext,
+  // which made `ctx.rttSmoother` a field with no reader (a permanent
+  // `::warning::` from scripts/lint-write-only-ctx-fields.mjs) and made
+  // "replace the context, replace the smoother" true only at construction.
+  //
+  // This pins the coupling behaviourally rather than by inspection. A pong
+  // lands 500ms after its ping, so the heartbeat bootstraps the EWMA to
+  // exactly 500ms — above DELTA_FLUSH_POOR_RTT_MS (400), which resolves the
+  // flush window to DELTA_FLUSH_MAX_MS (100ms). If either consumer held a
+  // smoother of its own, the flusher would still read `null` here and schedule
+  // at the unknown-RTT floor (33ms) — so the batch would already have rendered
+  // at the first checkpoint below. That is the exact drift the ctx-field
+  // consumption prevents, and it is what makes this test go red without it.
+  it('sizes the delta-flush window off the heartbeat-fed context smoother (#7468)', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+    });
+    setStore(store as any);
+    const socket = { readyState: 1, send: jest.fn(), close: jest.fn() } as unknown as WebSocket;
+    _testMessageHandler.setContext(createMockConnectionContext({ socket }));
+
+    const contentOf = () =>
+      store.getState().sessionStates.s1.messages.find((m) => m.id === 'msg-rtt')?.content;
+
+    try {
+      startHeartbeat(socket);
+      // Ping at the heartbeat interval; pong 500ms later (well inside
+      // PONG_TIMEOUT_MS, so the reaper never fires).
+      jest.advanceTimersByTime(HEARTBEAT_INTERVAL_MS);
+      jest.advanceTimersByTime(500);
+      _testMessageHandler.handle({ type: 'pong' });
+
+      _testMessageHandler.handle({ type: 'stream_start', messageId: 'msg-rtt', sessionId: 's1' });
+      _testMessageHandler.handle({ type: 'stream_delta', messageId: 'msg-rtt', sessionId: 's1', delta: 'Hi' });
+
+      // Floor tick: with a shared smoother the window is 100ms, so nothing has
+      // rendered yet. With a private one it would be 33ms and 'Hi' would be here.
+      jest.advanceTimersByTime(DELTA_FLUSH_FLOOR_MS);
+      expect(contentOf()).not.toBe('Hi');
+
+      // The RTT-derived window elapses and the batch lands.
+      jest.advanceTimersByTime(DELTA_FLUSH_MAX_MS - DELTA_FLUSH_FLOOR_MS);
+      expect(contentOf()).toBe('Hi');
+    } finally {
+      stopHeartbeat();
     }
   });
 

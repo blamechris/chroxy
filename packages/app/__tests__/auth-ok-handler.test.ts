@@ -123,6 +123,17 @@ import {
 import type { ConnectionState } from '../src/store/types';
 import { hapticSuccess } from '../src/utils/haptics';
 import { createKeyPair } from '../src/utils/crypto';
+// #7465: this suite's 31 hand-rolled connection-context literals now consume the
+// shared factory (#7451). Every value that DIVERGES from a factory default is
+// still passed as an override at its own call site — `token` (the factory
+// defaults to 'test-token'; several tests assert on 'tok' / 'original-tok' /
+// 'my-tok' / 'lan-tok' reaching setConnectionDetails and setSavedConnection),
+// `socket` (this suite's spy socket), a non-default `url`, and `isReconnect:
+// true`. Only `silent: false` and the default `url` are dropped, both being the
+// factory's own values. Because the factory returns the REAL ConnectionContext,
+// the `ctx as any` that used to hide a drifted shape at each handleMessage call
+// is gone too.
+import { createMockConnectionContext } from '../src/test-utils/mock-connection-context';
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -210,15 +221,15 @@ describe('auth_ok handler', () => {
 
   describe('fresh connection', () => {
     it('sets connectionPhase to connected', () => {
-      const ctx = { url: 'wss://test.example.com', token: 'tok', socket: mockSocket, isReconnect: false, silent: false };
-      handleMessage(createAuthOkMessage(), ctx as any);
+      const ctx = createMockConnectionContext({ token: 'tok', socket: mockSocket });
+      handleMessage(createAuthOkMessage(), ctx);
 
       expect(mockSetConnectionPhase).toHaveBeenCalledWith('connected');
     });
 
     it('stores server version and commit in lifecycle store', () => {
-      const ctx = { url: 'wss://test.example.com', token: 'tok', socket: mockSocket, isReconnect: false, silent: false };
-      handleMessage(createAuthOkMessage(), ctx as any);
+      const ctx = createMockConnectionContext({ token: 'tok', socket: mockSocket });
+      handleMessage(createAuthOkMessage(), ctx);
 
       expect(mockSetServerInfo).toHaveBeenCalledWith(expect.objectContaining({
         serverVersion: '0.6.0',
@@ -231,23 +242,23 @@ describe('auth_ok handler', () => {
     });
 
     it('stores connection details (url and token)', () => {
-      const ctx = { url: 'wss://test.example.com', token: 'tok', socket: mockSocket, isReconnect: false, silent: false };
-      handleMessage(createAuthOkMessage(), ctx as any);
+      const ctx = createMockConnectionContext({ url: 'wss://test.example.com', token: 'tok', socket: mockSocket });
+      handleMessage(createAuthOkMessage(), ctx);
 
       expect(mockSetConnectionDetails).toHaveBeenCalledWith('wss://test.example.com', 'tok');
     });
 
     it('clears connection error and resets user disconnected', () => {
-      const ctx = { url: 'wss://test.example.com', token: 'tok', socket: mockSocket, isReconnect: false, silent: false };
-      handleMessage(createAuthOkMessage(), ctx as any);
+      const ctx = createMockConnectionContext({ token: 'tok', socket: mockSocket });
+      handleMessage(createAuthOkMessage(), ctx);
 
       expect(mockSetConnectionError).toHaveBeenCalledWith(null, 0);
       expect(mockSetUserDisconnected).toHaveBeenCalledWith(false);
     });
 
     it('resets terminal buffers and session state on fresh connect', () => {
-      const ctx = { url: 'wss://test.example.com', token: 'tok', socket: mockSocket, isReconnect: false, silent: false };
-      handleMessage(createAuthOkMessage(), ctx as any);
+      const ctx = createMockConnectionContext({ token: 'tok', socket: mockSocket });
+      handleMessage(createAuthOkMessage(), ctx);
 
       const state = store.getState();
       expect(state.terminalBuffer).toBe('');
@@ -259,8 +270,8 @@ describe('auth_ok handler', () => {
     });
 
     it('fires haptic feedback on fresh connect', () => {
-      const ctx = { url: 'wss://test.example.com', token: 'tok', socket: mockSocket, isReconnect: false, silent: false };
-      handleMessage(createAuthOkMessage(), ctx as any);
+      const ctx = createMockConnectionContext({ token: 'tok', socket: mockSocket });
+      handleMessage(createAuthOkMessage(), ctx);
 
       expect(hapticSuccess).toHaveBeenCalled();
     });
@@ -268,8 +279,8 @@ describe('auth_ok handler', () => {
 
   describe('server capabilities', () => {
     it('parses protocolVersion as integer >= 1', () => {
-      const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false };
-      handleMessage(createAuthOkMessage({ protocolVersion: 5 }), ctx as any);
+      const ctx = createMockConnectionContext({ url: 'wss://t', token: 'tok', socket: mockSocket });
+      handleMessage(createAuthOkMessage({ protocolVersion: 5 }), ctx);
 
       expect(mockSetServerInfo).toHaveBeenCalledWith(expect.objectContaining({
         serverProtocolVersion: 5,
@@ -277,10 +288,10 @@ describe('auth_ok handler', () => {
     });
 
     it('rejects invalid protocolVersion (not integer, < 1, or non-number)', () => {
-      const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false };
+      const ctx = createMockConnectionContext({ url: 'wss://t', token: 'tok', socket: mockSocket });
 
       // Non-integer
-      handleMessage(createAuthOkMessage({ protocolVersion: 2.5 }), ctx as any);
+      handleMessage(createAuthOkMessage({ protocolVersion: 2.5 }), ctx);
       expect(mockSetServerInfo).toHaveBeenCalledWith(expect.objectContaining({
         serverProtocolVersion: null,
       }));
@@ -288,7 +299,7 @@ describe('auth_ok handler', () => {
       jest.clearAllMocks();
 
       // Zero
-      handleMessage(createAuthOkMessage({ protocolVersion: 0 }), ctx as any);
+      handleMessage(createAuthOkMessage({ protocolVersion: 0 }), ctx);
       expect(mockSetServerInfo).toHaveBeenCalledWith(expect.objectContaining({
         serverProtocolVersion: null,
       }));
@@ -296,39 +307,39 @@ describe('auth_ok handler', () => {
       jest.clearAllMocks();
 
       // String
-      handleMessage(createAuthOkMessage({ protocolVersion: '3' }), ctx as any);
+      handleMessage(createAuthOkMessage({ protocolVersion: '3' }), ctx);
       expect(mockSetServerInfo).toHaveBeenCalledWith(expect.objectContaining({
         serverProtocolVersion: null,
       }));
     });
 
     it('sets isEncrypted to false when encryption not required', () => {
-      const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false };
-      handleMessage(createAuthOkMessage(), ctx as any);
+      const ctx = createMockConnectionContext({ url: 'wss://t', token: 'tok', socket: mockSocket });
+      handleMessage(createAuthOkMessage(), ctx);
 
       expect(mockSetServerInfo).toHaveBeenCalledWith({ isEncrypted: false });
     });
 
     it('sets isEncrypted to true when encryption is required', () => {
-      const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false };
-      handleMessage(createAuthOkMessage({ encryption: 'required' }), ctx as any);
+      const ctx = createMockConnectionContext({ url: 'wss://t', token: 'tok', socket: mockSocket });
+      handleMessage(createAuthOkMessage({ encryption: 'required' }), ctx);
 
       expect(mockSetServerInfo).toHaveBeenCalledWith({ isEncrypted: true });
     });
 
     it('parses webFeatures from auth_ok', () => {
-      const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false };
+      const ctx = createMockConnectionContext({ url: 'wss://t', token: 'tok', socket: mockSocket });
       handleMessage(createAuthOkMessage({
         webFeatures: { available: true, remote: false, teleport: true },
-      }), ctx as any);
+      }), ctx);
 
       const state = store.getState();
       expect(state.webFeatures).toEqual({ available: true, remote: false, teleport: true });
     });
 
     it('defaults webFeatures to all false when not provided', () => {
-      const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false };
-      handleMessage(createAuthOkMessage(), ctx as any);
+      const ctx = createMockConnectionContext({ url: 'wss://t', token: 'tok', socket: mockSocket });
+      handleMessage(createAuthOkMessage(), ctx);
 
       const state = store.getState();
       expect(state.webFeatures).toEqual({ available: false, remote: false, teleport: false });
@@ -338,8 +349,8 @@ describe('auth_ok handler', () => {
     // ActivityIndicator can render its "approaching timeout" warning against
     // the real configured value instead of a hardcoded BaseSession default.
     it('stores server resultTimeoutMs when present', () => {
-      const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false };
-      handleMessage(createAuthOkMessage({ resultTimeoutMs: 45 * 60 * 1000 }), ctx as any);
+      const ctx = createMockConnectionContext({ url: 'wss://t', token: 'tok', socket: mockSocket });
+      handleMessage(createAuthOkMessage({ resultTimeoutMs: 45 * 60 * 1000 }), ctx);
 
       expect(mockSetServerInfo).toHaveBeenCalledWith(expect.objectContaining({
         serverResultTimeoutMs: 45 * 60 * 1000,
@@ -347,8 +358,8 @@ describe('auth_ok handler', () => {
     });
 
     it('leaves serverResultTimeoutMs null when older server omits the field', () => {
-      const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false };
-      handleMessage(createAuthOkMessage(), ctx as any);
+      const ctx = createMockConnectionContext({ url: 'wss://t', token: 'tok', socket: mockSocket });
+      handleMessage(createAuthOkMessage(), ctx);
 
       expect(mockSetServerInfo).toHaveBeenCalledWith(expect.objectContaining({
         serverResultTimeoutMs: null,
@@ -360,8 +371,8 @@ describe('auth_ok handler', () => {
       // Number.isFinite guard so the client never stores an unusable timeout.
       for (const bad of [0, -1, NaN, Infinity, -Infinity, 'twenty minutes', null]) {
         jest.clearAllMocks();
-        const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false };
-        handleMessage(createAuthOkMessage({ resultTimeoutMs: bad }), ctx as any);
+        const ctx = createMockConnectionContext({ url: 'wss://t', token: 'tok', socket: mockSocket });
+        handleMessage(createAuthOkMessage({ resultTimeoutMs: bad }), ctx);
         expect(mockSetServerInfo).toHaveBeenCalledWith(expect.objectContaining({
           serverResultTimeoutMs: null,
         }));
@@ -371,8 +382,8 @@ describe('auth_ok handler', () => {
 
   describe('post-auth messages', () => {
     it('sends list_providers, list_slash_commands, and list_agents when no encryption', () => {
-      const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false };
-      handleMessage(createAuthOkMessage(), ctx as any);
+      const ctx = createMockConnectionContext({ url: 'wss://t', token: 'tok', socket: mockSocket });
+      handleMessage(createAuthOkMessage(), ctx);
 
       const sends = (mockSocket.send as jest.Mock).mock.calls.map(
         (c: unknown[]) => JSON.parse(c[0] as string)
@@ -384,8 +395,8 @@ describe('auth_ok handler', () => {
     });
 
     it('defers post-auth messages when encryption is required', () => {
-      const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false };
-      handleMessage(createAuthOkMessage({ encryption: 'required' }), ctx as any);
+      const ctx = createMockConnectionContext({ url: 'wss://t', token: 'tok', socket: mockSocket });
+      handleMessage(createAuthOkMessage({ encryption: 'required' }), ctx);
 
       const sends = (mockSocket.send as jest.Mock).mock.calls.map(
         (c: unknown[]) => JSON.parse(c[0] as string)
@@ -399,8 +410,8 @@ describe('auth_ok handler', () => {
     });
 
     it('initiates key exchange with createKeyPair when encryption required', () => {
-      const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false };
-      handleMessage(createAuthOkMessage({ encryption: 'required' }), ctx as any);
+      const ctx = createMockConnectionContext({ url: 'wss://t', token: 'tok', socket: mockSocket });
+      handleMessage(createAuthOkMessage({ encryption: 'required' }), ctx);
 
       expect(createKeyPair).toHaveBeenCalled();
       const sends = (mockSocket.send as jest.Mock).mock.calls.map(
@@ -413,14 +424,14 @@ describe('auth_ok handler', () => {
 
   describe('client list parsing', () => {
     it('parses clients array and detects self by clientId', () => {
-      const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false };
+      const ctx = createMockConnectionContext({ url: 'wss://t', token: 'tok', socket: mockSocket });
       handleMessage(createAuthOkMessage({
         clientId: 'client-1',
         connectedClients: [
           { clientId: 'client-1', deviceName: 'Phone', deviceType: 'phone', platform: 'ios' },
           { clientId: 'client-2', deviceName: 'Desktop', deviceType: 'desktop', platform: 'macos' },
         ],
-      }), ctx as any);
+      }), ctx);
 
       expect(mockSetMyClientId).toHaveBeenCalledWith('client-1');
       expect(mockSetConnectedClients).toHaveBeenCalledWith([
@@ -430,7 +441,7 @@ describe('auth_ok handler', () => {
     });
 
     it('filters out invalid clients (missing clientId)', () => {
-      const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false };
+      const ctx = createMockConnectionContext({ url: 'wss://t', token: 'tok', socket: mockSocket });
       handleMessage(createAuthOkMessage({
         clientId: 'client-1',
         connectedClients: [
@@ -439,7 +450,7 @@ describe('auth_ok handler', () => {
           null,
           42,
         ],
-      }), ctx as any);
+      }), ctx);
 
       expect(mockSetConnectedClients).toHaveBeenCalledWith([
         { clientId: 'client-1', deviceName: 'Phone', deviceType: 'phone', platform: 'ios', isSelf: true },
@@ -447,13 +458,13 @@ describe('auth_ok handler', () => {
     });
 
     it('defaults deviceType to unknown for invalid values', () => {
-      const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false };
+      const ctx = createMockConnectionContext({ url: 'wss://t', token: 'tok', socket: mockSocket });
       handleMessage(createAuthOkMessage({
         clientId: 'c1',
         connectedClients: [
           { clientId: 'c1', deviceName: 'X', deviceType: 'spaceship', platform: 'mars' },
         ],
-      }), ctx as any);
+      }), ctx);
 
       expect(mockSetConnectedClients).toHaveBeenCalledWith([
         expect.objectContaining({ deviceType: 'unknown' }),
@@ -461,15 +472,15 @@ describe('auth_ok handler', () => {
     });
 
     it('handles empty connectedClients array', () => {
-      const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false };
-      handleMessage(createAuthOkMessage({ connectedClients: [] }), ctx as any);
+      const ctx = createMockConnectionContext({ url: 'wss://t', token: 'tok', socket: mockSocket });
+      handleMessage(createAuthOkMessage({ connectedClients: [] }), ctx);
 
       expect(mockSetConnectedClients).toHaveBeenCalledWith([]);
     });
 
     it('handles missing connectedClients (not an array)', () => {
-      const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false };
-      handleMessage(createAuthOkMessage({ connectedClients: undefined }), ctx as any);
+      const ctx = createMockConnectionContext({ url: 'wss://t', token: 'tok', socket: mockSocket });
+      handleMessage(createAuthOkMessage({ connectedClients: undefined }), ctx);
 
       expect(mockSetConnectedClients).toHaveBeenCalledWith([]);
     });
@@ -488,8 +499,8 @@ describe('auth_ok handler', () => {
       } as unknown as ConnectionState);
       setStore(store);
 
-      const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: true, silent: false };
-      handleMessage(createAuthOkMessage(), ctx as any);
+      const ctx = createMockConnectionContext({ url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: true });
+      handleMessage(createAuthOkMessage(), ctx);
 
       const state = store.getState();
       // On reconnect, these should NOT be reset
@@ -502,15 +513,15 @@ describe('auth_ok handler', () => {
     });
 
     it('does not fire haptic feedback on reconnect', () => {
-      const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: true, silent: false };
-      handleMessage(createAuthOkMessage(), ctx as any);
+      const ctx = createMockConnectionContext({ url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: true });
+      handleMessage(createAuthOkMessage(), ctx);
 
       expect(hapticSuccess).not.toHaveBeenCalled();
     });
 
     it('still updates socket and connection lifecycle on reconnect', () => {
-      const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: true, silent: false };
-      handleMessage(createAuthOkMessage(), ctx as any);
+      const ctx = createMockConnectionContext({ url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: true });
+      handleMessage(createAuthOkMessage(), ctx);
 
       expect(mockSetConnectionPhase).toHaveBeenCalledWith('connected');
       const state = store.getState();
@@ -520,8 +531,8 @@ describe('auth_ok handler', () => {
 
   describe('session token from pairing', () => {
     it('uses sessionToken from auth_ok when provided (pairing flow)', () => {
-      const ctx = { url: 'wss://t', token: 'original-tok', socket: mockSocket, isReconnect: false, silent: false };
-      handleMessage(createAuthOkMessage({ sessionToken: 'paired-tok' }), ctx as any);
+      const ctx = createMockConnectionContext({ url: 'wss://t', token: 'original-tok', socket: mockSocket });
+      handleMessage(createAuthOkMessage({ sessionToken: 'paired-tok' }), ctx);
 
       // Connection details should use the sessionToken, not original token
       expect(mockSetConnectionDetails).toHaveBeenCalledWith('wss://t', 'paired-tok');
@@ -535,8 +546,8 @@ describe('auth_ok handler', () => {
     });
 
     it('falls back to original token when sessionToken is absent', () => {
-      const ctx = { url: 'wss://t', token: 'original-tok', socket: mockSocket, isReconnect: false, silent: false };
-      handleMessage(createAuthOkMessage(), ctx as any);
+      const ctx = createMockConnectionContext({ url: 'wss://t', token: 'original-tok', socket: mockSocket });
+      handleMessage(createAuthOkMessage(), ctx);
 
       expect(mockSetConnectionDetails).toHaveBeenCalledWith('wss://t', 'original-tok');
       expect(mockSetSavedConnection).toHaveBeenCalledWith(
@@ -547,8 +558,8 @@ describe('auth_ok handler', () => {
 
   describe('saved connection', () => {
     it('saves connection for quick reconnect', () => {
-      const ctx = { url: 'wss://my.server.com', token: 'my-tok', socket: mockSocket, isReconnect: false, silent: false };
-      handleMessage(createAuthOkMessage(), ctx as any);
+      const ctx = createMockConnectionContext({ url: 'wss://my.server.com', token: 'my-tok', socket: mockSocket });
+      handleMessage(createAuthOkMessage(), ctx);
 
       expect(mockSetSavedConnection).toHaveBeenCalledWith(
         expect.objectContaining({ url: 'wss://my.server.com', token: 'my-tok' }),
@@ -556,8 +567,8 @@ describe('auth_ok handler', () => {
     });
 
     it('#5518 — marks a ws:// LAN connect as the verified LAN candidate', () => {
-      const ctx = { url: 'ws://192.168.1.5:8765', token: 'lan-tok', socket: mockSocket, isReconnect: false, silent: false };
-      handleMessage(createAuthOkMessage(), ctx as any);
+      const ctx = createMockConnectionContext({ url: 'ws://192.168.1.5:8765', token: 'lan-tok', socket: mockSocket });
+      handleMessage(createAuthOkMessage(), ctx);
 
       expect(mockSetActivePath).toHaveBeenCalledWith('lan');
       const saved = mockSetSavedConnection.mock.calls.at(-1)![0];
@@ -566,8 +577,8 @@ describe('auth_ok handler', () => {
     });
 
     it('#5518 — sets activePath to tunnel for a wss:// connect', () => {
-      const ctx = { url: 'wss://my.server.com', token: 'my-tok', socket: mockSocket, isReconnect: false, silent: false };
-      handleMessage(createAuthOkMessage(), ctx as any);
+      const ctx = createMockConnectionContext({ url: 'wss://my.server.com', token: 'my-tok', socket: mockSocket });
+      handleMessage(createAuthOkMessage(), ctx);
       expect(mockSetActivePath).toHaveBeenCalledWith('tunnel');
     });
   });

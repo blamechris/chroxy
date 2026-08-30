@@ -299,6 +299,14 @@ interface MessageHandlerContext extends EncryptionContext {
   // #5556: EWMA-smoothed RTT (replaces the inlined `ewmaRtt` accumulator).
   // Declared here (not inside the controller) because the delta-flusher also
   // reads `rttSmoother.value` for its adaptive interval.
+  //
+  // #7468: BOTH consumers reach it through the context (`ctx.rttSmoother`) —
+  // the heartbeat controller at construction, the delta flusher lazily on each
+  // schedule. They used to close over a `const` local to createDefaultContext
+  // instead, which left this field with zero readers: a standing
+  // `::warning::` from scripts/lint-write-only-ctx-fields.mjs, and
+  // "replace the context, replace the smoother" true only at construction
+  // rather than at the point of use.
   rttSmoother: RttSmoother;
 
   // Delta batching (#5556): the accumulator map + coalescing timer + adaptive
@@ -328,7 +336,6 @@ interface MessageHandlerContext extends EncryptionContext {
 }
 
 function createDefaultContext(): MessageHandlerContext {
-  const rttSmoother = new RttSmoother();
   const ctx: MessageHandlerContext = {
     ...INITIAL_ENCRYPTION_CONTEXT,
     postPermissionSplits: new Set<string>(),
@@ -340,12 +347,19 @@ function createDefaultContext(): MessageHandlerContext {
     // `onLatencyLog` can gate on THIS context's shared `lastLatencyLogAt`
     // throttle cursor (the same cursor the delta-flush latency path uses).
     heartbeat: null as unknown as HeartbeatController<WebSocket>,
-    rttSmoother,
+    // #7468: constructed inline — the context field is the sole holder, so
+    // there is no local for a consumer to capture instead.
+    rttSmoother: new RttSmoother(),
     // #5556: the flusher owns the accumulator + coalescing timer + adaptive
     // window, sizing it off this context's own RttSmoother. `applyDeltas` is
     // the app's session-only store mutation (no flat-`messages` fallback).
+    // #7468: `ctx` is read INSIDE the arrow, which `createDeltaFlusher` calls
+    // lazily on each schedule ("Read lazily on each schedule so the interval
+    // tracks live RTT") — never during construction — so the self-reference is
+    // resolved long after `ctx` is bound. Same shape as `onLatencyLog`'s
+    // `ctx.lastLatencyLogAt` read below.
     deltaFlusher: createDeltaFlusher({
-      getEwmaRtt: () => rttSmoother.value,
+      getEwmaRtt: () => ctx.rttSmoother.value,
       applyDeltas: applyDeltaBatch,
     }),
     deltaServerTs: new Map<string, { serverTs: number; recvAt: number }>(),
@@ -357,7 +371,9 @@ function createDefaultContext(): MessageHandlerContext {
   };
   ctx.heartbeat = createHeartbeatController({
     wsSend,
-    rttSmoother,
+    // #7468: read off the context, not a local — this runs after `ctx` is
+    // bound, so it is an ordinary property read.
+    rttSmoother: ctx.rttSmoother,
     onPongQuality: (latencyMs, quality) => {
       useConnectionLifecycleStore.getState().setConnectionQuality(latencyMs, quality);
     },
