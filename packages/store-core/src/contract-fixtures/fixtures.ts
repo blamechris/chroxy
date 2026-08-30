@@ -1452,12 +1452,27 @@ export const DISPATCH_FIXTURES: ContractFixture[] = [
     // → updateSession. (The no-session FLAT fallback is preserved per-client by the
     // optional applyNoSessionFallback adapter hook — dashboard implements, app
     // omits — and is exercised by each client's own tests, not the shared contract.)
-    name: 'agent_idle flips the seeded session to idle and clears the streaming id (both clients)',
+    // #7549 — and `activeTools: []` is the THIRD field of the patch, asserted
+    // by VALUE against a seeded in-flight chip rather than left off the slice.
+    // `agent_idle` is the only frame that clears it on a JSONL-sourced replay
+    // (#7484/#7500), and the app has no `activeTools` reader of its own, so the
+    // wipe is a both-clients contract. An empty `init` would have satisfied the
+    // expectation for free (#7531: assert VALUES, not key-sets).
+    name: 'agent_idle flips the seeded session to idle, clears the streaming id AND the in-flight tools (both clients)',
     type: 'agent_idle',
-    init: { activeSessionId: 's1', sessions: { s1: { isIdle: false, streamingMessageId: 'live-1' } } },
+    init: {
+      activeSessionId: 's1',
+      sessions: {
+        s1: {
+          isIdle: false,
+          streamingMessageId: 'live-1',
+          activeTools: [{ toolUseId: 'tu-zombie', tool: 'Bash', input: {}, startedAt: 100 }],
+        },
+      },
+    },
     message: { type: 'agent_idle', sessionId: 's1' },
     expect: {
-      sessions: { s1: { isIdle: true, streamingMessageId: null } },
+      sessions: { s1: { isIdle: true, streamingMessageId: null, activeTools: [] } },
     },
   },
   {

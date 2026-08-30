@@ -20,6 +20,7 @@ import {
   resetReplayReconcile,
   reconcileReplayStart,
   reconcileReplayEnd,
+  getReplayWindowDepth,
   wasPromptLiveDuringReplay,
   sweepUnansweredPromptsAtReplayEnd,
 } from './replay-reconcile'
@@ -350,6 +351,169 @@ describe('shared dispatch table', () => {
       const env = makeAdapter({ activeSessionId: 'gone' })
       dispatch(env, { type: 'agent_busy' })
       expect(Object.keys(env.sessions)).toHaveLength(0)
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // #7549 — the MID-REPLAY heal, pinned in the SHARED package.
+  //
+  // `sendHistoryEntry` fans every replayed `result` out into a synthesized
+  // `agent_idle`, and `conversation-handlers.js` emits ONE more for a
+  // JSONL-sourced full replay — deliberately BEFORE `history_replay_end`, "so
+  // it stays inside the window where the #4466 reasoning holds". A JSONL slice
+  // rebuilds as `message` frames that touch no tool state and carries no
+  // `result`, so that mid-window frame is the ONLY thing that can clear a
+  // zombie tool chip on either client.
+  //
+  // The client half of that contract had NO pin here. Measured on the mutant
+  // #7515 rejected as option (c) — `if (getReplayWindowDepth(targetId) > 0)
+  // return` at the top of `dispatchAgentIdle`: the whole store-core suite
+  // stayed green (60 files / 2265 tests, exit 0) while the dashboard's own
+  // `a mid-replay agent_idle still clears activeTools` went red. `dispatch-table.ts`
+  // is where BOTH clients meet, so a replay gate added here also lands on the
+  // mobile app — which has no `activeTools` reader at all (its chip is an
+  // `!isIdle`-gated `messages[]` walk) and whose other two `isIdle` writers,
+  // the `session_list` resync and `session_activity` (#7518), deliberately
+  // write `isIdle` ONLY so a routine snapshot cannot wipe the turn-scoped state
+  // #7500/#7508 own. A change with that blast radius must not be able to pass
+  // the shared package's own suite.
+  //
+  // Values, not key-sets (#7531): every case below asserts the three fields
+  // `handleAgentIdle()` returns, and asserts the zombie was really seeded first
+  // so an empty fixture cannot pass them for free.
+  // -------------------------------------------------------------------------
+  describe('agent_idle — the mid-replay JSONL heal (#7484/#7500/#7549)', () => {
+    const zombie = () => ({ toolUseId: 'tu-zombie', tool: 'Bash', input: {}, startedAt: 100 })
+
+    function seeded() {
+      return makeAdapter({
+        activeSessionId: 's1',
+        sessions: {
+          s1: {
+            sessionId: 's1',
+            messages: [],
+            isIdle: false,
+            streamingMessageId: 'live-1',
+            activeTools: [zombie()],
+          },
+        },
+      })
+    }
+
+    /** The full `handleAgentIdle()` patch, asserted by VALUE on every case. */
+    function expectHealed(env: ReturnType<typeof makeAdapter>) {
+      expect(env.sessions.s1.activeTools).toEqual([])
+      expect(env.sessions.s1.isIdle).toBe(true)
+      expect(env.sessions.s1.streamingMessageId).toBeNull()
+    }
+
+    /** The zombie is genuinely on the session — so a wipe assertion measures a wipe. */
+    function expectZombieSeeded(env: ReturnType<typeof makeAdapter>) {
+      expect(env.sessions.s1.activeTools).toEqual([zombie()])
+      expect(env.sessions.s1.isIdle).toBe(false)
+      expect(env.sessions.s1.streamingMessageId).toBe('live-1')
+    }
+
+    // The CONTROL for the four window cases below. Without it they read as
+    // "agent_idle heals", with no evidence the window was the variable.
+    it('heals outside any replay window (control)', () => {
+      resetReplayReconcile({ clearCursors: true })
+      const env = seeded()
+      expectZombieSeeded(env)
+      dispatch(env, { type: 'agent_idle', sessionId: 's1' })
+      expectHealed(env)
+    })
+
+    it('still heals MID-WINDOW on a full-history replay — the #7484 JSONL heal (#7500)', () => {
+      resetReplayReconcile({ clearCursors: true })
+      const env = seeded()
+      reconcileReplayStart('s1', true, env.sessions.s1!.messages)
+      expectZombieSeeded(env)
+      dispatch(env, { type: 'agent_idle', sessionId: 's1' })
+      expectHealed(env)
+      // …and it is genuinely still mid-window: the swap has not run yet, which
+      // is what "before history_replay_end" means on the wire.
+      expect(getReplayWindowDepth('s1')).toBe(1)
+      reconcileReplayEnd('s1', env.sessions.s1.messages)
+      resetReplayReconcile({ clearCursors: true })
+    })
+
+    // The delta reconnect opens a window too (#7420), and the same synthesized
+    // frame rides it. What this case UNIQUELY kills is a DELTA-ONLY gate —
+    // `getReplayWindowDepth(targetId) > 0 && !isRebuildInProgress(targetId)`:
+    // measured, that mutant reds this case and nothing else.
+    //
+    // Stated the other way round first, and backwards: an `isRebuildInProgress`
+    // gate does NOT "pass the case above only". A delta opens no rebuild, so
+    // that gate reds the full-replay, depth-2 and active-session cases and
+    // leaves THIS one green — measured, 3 red with this case passing. It is what
+    // makes the full-replay case above a distinct arm; this case is the converse
+    // of it, not a stronger version.
+    it('still heals mid-window on a DELTA replay', () => {
+      resetReplayReconcile({ clearCursors: true })
+      const env = seeded()
+      reconcileReplayStart('s1', false, env.sessions.s1!.messages)
+      expectZombieSeeded(env)
+      dispatch(env, { type: 'agent_idle', sessionId: 's1' })
+      expectHealed(env)
+      expect(getReplayWindowDepth('s1')).toBe(1)
+      reconcileReplayEnd('s1', env.sessions.s1.messages)
+      resetReplayReconcile({ clearCursors: true })
+    })
+
+    // Two overlapping replays of one session (#7455/#7477) hold the refcount at
+    // 2, which is the depth the server's `start start end end` actually
+    // produces — a gate keyed on `> 1`, or one the first `end` released, would
+    // survive both cases above.
+    it('still heals at window depth 2 (overlapping replays, #7455)', () => {
+      resetReplayReconcile({ clearCursors: true })
+      const env = seeded()
+      reconcileReplayStart('s1', true, env.sessions.s1!.messages)
+      reconcileReplayStart('s1', true, env.sessions.s1!.messages)
+      expect(getReplayWindowDepth('s1')).toBe(2)
+      expectZombieSeeded(env)
+      dispatch(env, { type: 'agent_idle', sessionId: 's1' })
+      expectHealed(env)
+      reconcileReplayEnd('s1', env.sessions.s1.messages)
+      reconcileReplayEnd('s1', env.sessions.s1.messages)
+      resetReplayReconcile({ clearCursors: true })
+    })
+
+    // The synthesized heal carries a `sessionId`, but `dispatchAgentIdle`
+    // resolves through `resolveSessionId`'s active-session fallback, so that arm
+    // needs its own pin inside the window. What this case UNIQUELY kills is a
+    // gate on the FALLBACK ARM alone — one that fires only when the frame
+    // carried no explicit `sessionId`: measured, that mutant reds this case and
+    // nothing else.
+    //
+    // NOT a gate hoisted ABOVE the resolution, which was the original claim here
+    // and is backwards: hoisted, it reads the depth of the frame's OWN
+    // `sessionId`, which this frame does not carry — `depth(null)` is 0, the
+    // gate never fires, and THIS case stays green while the other three go red
+    // (measured, 3 red). The two mutants split the arms in opposite directions,
+    // which is why both pins exist.
+    it('still heals mid-window when the target comes from the ACTIVE session', () => {
+      resetReplayReconcile({ clearCursors: true })
+      const env = seeded()
+      reconcileReplayStart('s1', true, env.sessions.s1!.messages)
+      expectZombieSeeded(env)
+      dispatch(env, { type: 'agent_idle' })
+      expectHealed(env)
+      reconcileReplayEnd('s1', env.sessions.s1.messages)
+      resetReplayReconcile({ clearCursors: true })
+    })
+
+    // Per-session, like every other window read in this file: s2 replaying must
+    // not change what s1's heal does either way.
+    it("is not affected by ANOTHER session's open window", () => {
+      resetReplayReconcile({ clearCursors: true })
+      const env = seeded()
+      reconcileReplayStart('s2', true, [])
+      expectZombieSeeded(env)
+      dispatch(env, { type: 'agent_idle', sessionId: 's1' })
+      expectHealed(env)
+      reconcileReplayEnd('s2', [])
+      resetReplayReconcile({ clearCursors: true })
     })
   })
 
