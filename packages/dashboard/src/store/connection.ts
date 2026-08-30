@@ -82,7 +82,7 @@ import {
   updateServerEntry,
   markServerConnected,
 } from './server-registry';
-import { stripAnsi, filterThinking, nextMessageId, createEmptySessionState, isSessionListed } from './utils';
+import { stripAnsi, filterThinking, nextMessageId, createEmptyFlatSessionMirror, createEmptySessionState, isSessionListed } from './utils';
 import { registerSummarizeRequest, cancelSummarizeRequest, rejectAllSummarizeRequests } from './summarizeRequests';
 import { armSchedulerRequest, failAllSchedulerRequests, SCHEDULER_DISCONNECT_ERROR } from './scheduledTaskRequests';
 import { formatQuestionAnswerSummary } from '../utils/questionAnswerSummary';
@@ -3264,9 +3264,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     setLastConnectedUrl(null);
     clearPersistedState();
     set({
-      messages: [],
+      // #7555 — `messages` and `terminalRawBuffer` used to be spelled out here.
+      // They are two of the twelve FLAT_SESSION_FIELDS, so they now come from
+      // the `createEmptyFlatSessionMirror()` spread inside the marked block
+      // below, with the other ten. `terminalBuffer` is NOT one of them (it is
+      // connection-scoped, not a mirror of any session) and stays here.
       terminalBuffer: '',
-      terminalRawBuffer: '',
       sessions: [],
       activeSessionId: null,
       // #7470 forget-reset-start — the roster wipe and everything scoped to it,
@@ -3310,6 +3313,31 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // session-destroy-prunes-pr-maps.test.ts can hold all four sites for it
       // in one table instead of covering three and trusting the fourth.
       cancellingActivityIds: new Set<string>(),
+      // #7488 — the per-repo session presets, keyed by CWD. Not session-keyed,
+      // which is what kept it out of every roster prune and is also what makes
+      // it worse here: session ids are 16 random bytes, so entropy alone
+      // separates two daemons' id spaces, and cwd paths have no such property.
+      // `/home/user/project`, `/workspace` and `/Users/chris/Projects/chroxy`
+      // are shared across machines routinely, so a preset fetched from server A
+      // is very likely to be read against server B at the same path. What is
+      // read is not a status chip: `ServerSessionPresetFull` carries the full
+      // preamble + seed text and the preset's approval state, surfaced by the
+      // per-repo drawer and the create-session modal disclosure — so the user
+      // is shown one machine's preset content, and can approve and apply it,
+      // believing it came from the daemon they are now connected to.
+      //
+      // NOT cleared at `auth_ok`'s non-reconnect branch, deliberately: that
+      // branch is also reached by Disconnect → Connect to the SAME server, and
+      // a preset for a cwd is still true there. The server-switch path reaches
+      // it too, but `_resetSessionMemory` has already run by then.
+      sessionPresetSnapshots: {},
+      // #7555 — the FLAT session mirror: the twelve ConnectionState fields that
+      // hold the ACTIVE session's value (`isIdle`, `claudeReady`, the context
+      // meters, the transcript…). `activeSessionId` is nulled above and
+      // `updateSession` only mirrors for a session that EXISTS, so anything
+      // left here describes a session this action just forgot. One roster,
+      // shared with `updateSession`'s mirror block, so the two cannot drift.
+      ...createEmptyFlatSessionMirror(),
       // #7470 forget-reset-end
       // #5500: drop reindex pending/result state with the rest of the
       // connection-scoped Control Room state.
@@ -3356,9 +3384,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   _resetSessionMemory: () => {
     setLastConnectedUrl(null);
     set({
-      messages: [],
+      // #7555 — `messages` and `terminalRawBuffer` used to be spelled out here.
+      // They are two of the twelve FLAT_SESSION_FIELDS, so they now come from
+      // the `createEmptyFlatSessionMirror()` spread inside the marked block
+      // below, with the other ten. `terminalBuffer` is NOT one of them (it is
+      // connection-scoped, not a mirror of any session) and stays here.
       terminalBuffer: '',
-      terminalRawBuffer: '',
       sessions: [],
       activeSessionId: null,
       // #7470 switch-reset-start — the roster wipe and everything scoped to it,
@@ -3392,6 +3423,25 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // #7483 — moved inside the markers, behaviour unchanged (see
       // forgetSession above for why).
       cancellingActivityIds: new Set<string>(),
+      // #7488 — and the per-repo presets, keyed by CWD. This is the SERVER
+      // SWITCH, where the key space is the whole problem: two machines share
+      // `/home/user/project` routinely, so a preset fetched from server A is
+      // read against server B at the same path — and `ServerSessionPresetFull`
+      // carries the full preamble + seed text and the approval state, which the
+      // per-repo drawer and the create-session modal disclosure surface as the
+      // CURRENT daemon's. `switchServer` KEEPS the old server's persisted data
+      // on purpose, which is what makes that read reachable rather than
+      // theoretical. See forgetSession above for why `auth_ok` is exempt.
+      sessionPresetSnapshots: {},
+      // #7555 — same reasoning as forgetSession, one field class over: the flat
+      // session mirror holds the PREVIOUS server's active session's `isIdle`,
+      // `claudeReady`, meters and transcript, and `switchServer` then restores
+      // `activeSessionId` from persistence BEFORE the first `session_list`. The
+      // #7550 consumer-side force converges `isIdle` only, and only when the
+      // snapshot has an opinion about that id; when the new server has no
+      // session for it, `sendPostAuthInfo` sends no `session_switched` either
+      // (ws-history.js — `if (entry)`), so nothing re-syncs the mirror at all.
+      ...createEmptyFlatSessionMirror(),
       // #7470 switch-reset-end
       // #5500: drop reindex pending/result state with the rest of the
       // connection-scoped Control Room state.
