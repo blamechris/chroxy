@@ -490,6 +490,22 @@ function validateCompatibleProviders(configKey, value, opts = {}) {
   return { entries, warnings }
 }
 
+// Recognised sub-keys of the OBJECT form of the top-level `providers` block.
+//
+// #7319 — 'acp' is a KNOWN key here (so it doesn't warn as unrecognized), but
+// its entries are validated by config.js directly via `validateAcpProviders`
+// (acp-config.js), not here: acp-config.js already imports
+// RESERVED_PROVIDER_IDS from this module, so importing back from acp-config.js
+// here would be circular.
+//
+// #7449: hoisted out of validateProvidersConfigBlock and exported so the
+// CONFIG.md doc gate (packages/server/tests/config-supported-keys-docs.test.js)
+// reads the same roster the validator enforces. It is named
+// `*_SUPPORTED_KEYS` deliberately — that suffix is what the gate's
+// declaration sweep looks for, so a future sibling roster is picked up
+// automatically instead of quietly escaping the comparison.
+export const PROVIDERS_SUPPORTED_KEYS = new Set(['anthropicCompatible', 'openaiCompatible', 'allowAnyModel', 'acp'])
+
 /**
  * Validate the top-level `providers` value when it is an OBJECT (#5419).
  * The legacy form — an array of provider-id strings written by
@@ -500,14 +516,8 @@ function validateCompatibleProviders(configKey, value, opts = {}) {
  * @param {string[]} warnings - Accumulator the caller logs/returns
  */
 export function validateProvidersConfigBlock(providers, warnings) {
-  // #7319 — 'acp' is a KNOWN key here (so it doesn't warn as unrecognized),
-  // but its entries are validated by config.js directly via
-  // `validateAcpProviders` (acp-config.js), not here: acp-config.js already
-  // imports RESERVED_PROVIDER_IDS from this module, so importing back from
-  // acp-config.js here would be circular.
-  const KNOWN_PROVIDER_BLOCK_KEYS = new Set(['anthropicCompatible', 'openaiCompatible', 'allowAnyModel', 'acp'])
   for (const key of Object.keys(providers)) {
-    if (!KNOWN_PROVIDER_BLOCK_KEYS.has(key)) {
+    if (!PROVIDERS_SUPPORTED_KEYS.has(key)) {
       warnings.push(`Unknown key 'providers.${key}' (will be ignored)`)
     }
   }

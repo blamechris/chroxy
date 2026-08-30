@@ -885,6 +885,10 @@ The non-secret knobs live under `notifications.discord` in `config.json`:
 | `heartbeatIntervalMs` | number | Elapsed-time footer refresh interval for live embeds — offline embeds are final and never re-PATCHed (default `300000`; `0` disables; minimum `10000`) |
 | `pruneAfterMs` | number | Retention for state-store entries: entries untouched longer than this are dropped on load (default `86400000` / 24h; `0` disables; minimum `60000` / 60s — smaller values fall back to the default, since a retention shorter than the gap between events prunes the tracked message id in between and turns the embed into message-per-event spam; the last Discord message is kept). Heartbeat refreshes don't reset the clock — only real pipeline events do |
 | `billingAlerts` | boolean | Kill-switch for the daemon-global billing-alert message (the 2026-06-15 billing canary). Default `true` when a webhook is configured; `false` keeps billing alerts off Discord while the per-project status embed stays on |
+| `staleAfterMs` | number | How long a live embed may go without a pipeline event before the sink marks the project **stale** (#5676 status watchdog; default `600000` / 10 min). Any finite value >= 0 is honoured; anything else falls back to the default |
+| `offlineAfterMs` | number | How long a live embed may go without a pipeline event before the sink marks the project **offline** and stops re-PATCHing it (#5676; default `1800000` / 30 min). Same validation as `staleAfterMs` |
+| `statePath` | string | Override for the status-embed state store (default `~/.chroxy/discord-webhook-state.json`). The caller defaults it and the config value wins — set it to relocate the store off `$HOME` |
+| `billingStatePath` | string | Override for the billing-alert state store (default `~/.chroxy/discord-billing-state.json`), the billing-sink counterpart to `statePath` |
 
 Status-message state (message ids, current state per project) persists in
 `~/.chroxy/discord-webhook-state.json`; the billing-alert message tracks its own

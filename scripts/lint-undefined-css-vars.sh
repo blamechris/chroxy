@@ -19,6 +19,15 @@
 
 set -euo pipefail
 
+# #7493: pin the collation script-wide. This lint sorts BOTH `comm` inputs
+# under the ambient locale, so its sort and its comm agree today and it has no
+# reproduced failure — but that agreement is accidental, and the sibling lint
+# (lint-no-raw-color-literals.sh) went red on a runner's LANG for exactly the
+# reason that one of its two collations had been pinned and the other had not.
+# C ordering also makes `sort -u` byte-exact, so two var names that a UTF-8
+# collation could compare equal can never be folded into one.
+export LC_ALL=C
+
 cd "$(dirname "$0")/.."
 
 ROOT="packages/dashboard/src"

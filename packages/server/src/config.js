@@ -176,10 +176,13 @@ const CONFIG_SCHEMA = {
   // discord-credentials.js. Documented in CONFIG.md +
   // docs/guides/discord-notifications.md.
   notifications: 'object',
-  // #5158: worktree garbage-collection. `{ autoReap: boolean }` — when true,
-  // the server reclaims orphaned, dead-pid-locked agent worktrees on startup
-  // (clean trees only, never --force). Defaults to off; the `chroxy worktree
-  // gc` CLI is always available for manual/dry-run use.
+  // #5158: worktree garbage-collection. `{ autoReap?: boolean, reapIntervalMs?:
+  // number, maxLockAgeMs?: number }` — when `autoReap` is true, the server
+  // reclaims orphaned, dead-pid-locked agent worktrees on startup and then
+  // every `reapIntervalMs` (clean trees only, never --force); `maxLockAgeMs` is
+  // the absolute-age fallback for the PID-liveness check (0 disables it).
+  // Defaults to off; the `chroxy worktree gc` CLI is always available for
+  // manual/dry-run use.
   worktreeGc: 'object',
   // #7424: the session CI-completion watcher. `{ watch?: boolean, wakeAgent?:
   // boolean, intervalMs?: number, discoveryIntervalMs?: number,
@@ -210,7 +213,8 @@ const CONFIG_SCHEMA = {
   // #5985 (epic #5982): gate for the embedded user-shell terminal — a
   // `user-shell` session spawns the operator's `$SHELL` (arbitrary code
   // execution on the dev machine, reachable through the tunnel). Nested object
-  // `{ enabled: boolean }`. Defaults to undefined/false so fresh installs are
+  // `{ enabled?: boolean, requireApproval?: boolean }` (#6277 added the
+  // host-local approval gate). Defaults to undefined/false so fresh installs are
   // secure-by-default: creating a `user-shell` session is rejected with
   // USER_SHELL_DISABLED unless `userShell.enabled === true`. Enabling is a
   // deliberate edit on the dev machine (physical-access proxy for confirmation),
@@ -521,20 +525,27 @@ function warnUnknownKeys(obj, knownSet, prefix, warnings, supportedKeys = knownS
 // `workspace` sub-block (#4556); billing-budget.js + billing-canary (egressCheck
 // / datacenterPrefixes via server-cli); worktree-reaper.js; rancher.js (the
 // RancherBackend ctor) + resolveRancherToken (tokenEnv / tokenFile).
-const K8S_SUPPORTED_KEYS = new Set([
+//
+// #7449: these are EXPORTED solely so the doc gate
+// (tests/config-supported-keys-docs.test.js) can compare CONFIG.md's rosters
+// against the producer itself rather than a hand-copied expectation. Nothing
+// in src/ imports them across module boundaries — but a re-parse of this file
+// as text would be a second implementation of the roster, and that copy is
+// what drifts.
+export const K8S_SUPPORTED_KEYS = new Set([
   'namespace', 'inCluster', 'kubeconfigPath', 'sidecarImage', 'imagePullPolicy',
   'connectMode', 'namespaceQuota', 'namespaceLimitRange', 'workspace',
 ])
-const BILLING_SUPPORTED_KEYS = new Set([
+export const BILLING_SUPPORTED_KEYS = new Set([
   'creditTier', 'monthlyCreditBudgetUsd', 'budgetWarningPercent', 'egressCheck', 'datacenterPrefixes',
 ])
-const WORKTREE_GC_SUPPORTED_KEYS = new Set([
+export const WORKTREE_GC_SUPPORTED_KEYS = new Set([
   'autoReap', 'reapIntervalMs', 'maxLockAgeMs',
 ])
-const SESSION_CI_SUPPORTED_KEYS = new Set([
+export const SESSION_CI_SUPPORTED_KEYS = new Set([
   'watch', 'wakeAgent', 'intervalMs', 'discoveryIntervalMs', 'maxSurveysPerTick',
 ])
-const RANCHER_SUPPORTED_KEYS = new Set([
+export const RANCHER_SUPPORTED_KEYS = new Set([
   'rancherUrl', 'clusterId', 'token', 'tokenEnv', 'tokenFile', 'caData', 'skipTLSVerify', 'defaultProjectId',
 ])
 
@@ -701,7 +712,7 @@ const MAX_DISCORD_COLOR = 16777215
 // `{ ...config.notifications.discord }` spread into the sink) surfaces instead of
 // silently no-op'ing / failing the sink closed. Keep in sync with the per-key
 // validation below. The webhook URL is a SECRET (its own warning) — not a knob.
-const DISCORD_SUPPORTED_KEYS = new Set([
+export const DISCORD_SUPPORTED_KEYS = new Set([
   'botName', 'billingAlerts', 'defaultColor', 'permissionColor', 'errorColor',
   'colors', 'updateThrottleMs', 'heartbeatIntervalMs', 'pruneAfterMs',
   // #5676 status-watchdog tunables — the sink reads these from the config spread
@@ -786,7 +797,7 @@ function validateBillingBlock(billing, warnings) {
   warnUnknownKeys(billing, BILLING_SUPPORTED_KEYS, 'billing', warnings)
 }
 
-const USER_SHELL_SUPPORTED_KEYS = new Set(['enabled', 'requireApproval'])
+export const USER_SHELL_SUPPORTED_KEYS = new Set(['enabled', 'requireApproval'])
 
 // #5985 (epic #5982): validate the `userShell` block. Only `enabled` (boolean)
 // today; the security primitives (primary-token gate, audit, isolation) land in
