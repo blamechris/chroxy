@@ -94,6 +94,13 @@ import {
 } from '../src/store/message-handler';
 import { createEmptySessionState } from '../src/store/utils';
 import type { ConnectionState, SessionState } from '../src/store/types';
+// #7465: these seven contexts used to be `as any` literals that omitted `silent`
+// entirely — the drifted-shape, no-compiler-backstop condition #7451 exists to
+// remove. The factory supplies `silent: false` (behaviourally identical here:
+// every path this suite exercises tests `!ctx.silent`, true either way) and the
+// real ConnectionContext type, so the casts are gone. `token: 'tok'` is kept as
+// an override because it diverges from the factory default.
+import { createMockConnectionContext } from '../src/test-utils/mock-connection-context';
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -166,7 +173,7 @@ describe('auto-resume on reconnect', () => {
       const socket = makeMockSocket();
       store = createMockStore(createMockState(socket));
       setStore(store);
-      setConnectionContext({ url: 'wss://test.example.com', token: 'tok', socket, isReconnect: false } as any);
+      setConnectionContext(createMockConnectionContext({ token: 'tok', socket }));
 
       handleMessage({
         type: 'session_list',
@@ -185,7 +192,7 @@ describe('auto-resume on reconnect', () => {
       const socket = makeMockSocket();
       store = createMockStore(createMockState(socket));
       setStore(store);
-      setConnectionContext({ url: 'wss://test.example.com', token: 'tok', socket, isReconnect: false } as any);
+      setConnectionContext(createMockConnectionContext({ token: 'tok', socket }));
 
       handleMessage({
         type: 'session_list',
@@ -203,7 +210,7 @@ describe('auto-resume on reconnect', () => {
       const socket = makeMockSocket();
       store = createMockStore(createMockState(socket));
       setStore(store);
-      setConnectionContext({ url: 'wss://test.example.com', token: 'tok', socket, isReconnect: false } as any);
+      setConnectionContext(createMockConnectionContext({ token: 'tok', socket }));
 
       handleMessage({
         type: 'session_list',
@@ -224,7 +231,7 @@ describe('auto-resume on reconnect', () => {
       const socket = makeMockSocket();
       store = createMockStore(createMockState(socket));
       setStore(store);
-      setConnectionContext({ url: 'wss://test.example.com', token: 'tok', socket, isReconnect: true } as any);
+      setConnectionContext(createMockConnectionContext({ token: 'tok', socket, isReconnect: true }));
 
       handleMessage({ type: 'session_list', sessions: [] });
 
@@ -244,7 +251,7 @@ describe('auto-resume on reconnect', () => {
       const socket = makeMockSocket();
       store = createMockStore(createMockState(socket));
       setStore(store);
-      setConnectionContext({ url: 'wss://test.example.com', token: 'tok', socket, isReconnect: true } as any);
+      setConnectionContext(createMockConnectionContext({ token: 'tok', socket, isReconnect: true }));
 
       handleMessage({ type: 'session_list', sessions: [] });
 
@@ -260,7 +267,7 @@ describe('auto-resume on reconnect', () => {
       store = createMockStore(createMockState(socket));
       setStore(store);
       // isReconnect: false — brand new connection, e.g. first time connecting
-      setConnectionContext({ url: 'wss://test.example.com', token: 'tok', socket, isReconnect: false } as any);
+      setConnectionContext(createMockConnectionContext({ token: 'tok', socket }));
 
       handleMessage({ type: 'session_list', sessions: [] });
 
@@ -275,7 +282,7 @@ describe('auto-resume on reconnect', () => {
       const closedSocket = { readyState: WebSocket.CLOSED, send: mockSend } as unknown as WebSocket;
       store = createMockStore(createMockState(closedSocket));
       setStore(store);
-      setConnectionContext({ url: 'wss://test.example.com', token: 'tok', socket: closedSocket, isReconnect: true } as any);
+      setConnectionContext(createMockConnectionContext({ token: 'tok', socket: closedSocket, isReconnect: true }));
 
       handleMessage({ type: 'session_list', sessions: [] });
 
