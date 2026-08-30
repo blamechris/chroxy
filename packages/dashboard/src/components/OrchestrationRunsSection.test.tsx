@@ -8,6 +8,8 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, cleanup } from '@testing-library/react'
+import fs from 'node:fs'
+import path from 'node:path'
 
 const requestRunsMock = vi.fn(() => true)
 const requestDetailMock = vi.fn(() => true)
@@ -24,6 +26,12 @@ function resetStore(over: Record<string, unknown> = {}) {
   startRunMock.mockClear(); gateResponseMock.mockClear(); runActionMock.mockClear(); annotateMock.mockClear()
   storeState = {
     connectionPhase: 'connected',
+    // #7536 — the node gate reads the SAME `sessions` roster `switchSession`
+    // membership-checks against, so the fixture has to carry one. Filled with
+    // the session `runDetail()`'s node points at, which makes every pre-existing
+    // case a LIVE-node case (what they were written against) instead of
+    // silently flipping them to the gone branch.
+    sessions: [{ sessionId: 'sess_9', name: 'Audit auth', cwd: '/repo' }],
     orchestrationRuns: null,
     orchestrationRunsLoading: false,
     orchestrationRunDetails: {},
@@ -334,5 +342,179 @@ describe('OrchestrationRunsSection (#6691 S-3b)', () => {
     fireEvent.change(screen.getByTestId('orch-new-epic'), { target: { value: 'Refactor the auth module' } })
     fireEvent.click(screen.getByTestId('orch-new-submit'))
     expect(startRunMock).toHaveBeenCalledWith(expect.objectContaining({ cwd: '/repo', epicPrompt: 'Refactor the auth module', preset: undefined }))
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #7536 — a run node's "Open session" button, gated on roster membership
+// ---------------------------------------------------------------------------
+/**
+ * `orchestrationRuns[].nodes[].sessionId` is PROVENANCE, not a live handle. A
+ * node's session is closed the moment the node finishes; the run record keeps
+ * the id long afterwards, which is the point of a run record. The render gate
+ * was `node.sessionId` being TRUTHY — "this node ever had a session" — so a
+ * completed node kept a link-styled, clickable "Open session" button that
+ * `switchSession` has refused in silence since #7511. A finished run is the
+ * NORMAL state of this panel, so that was not an edge case: it was most of the
+ * rows.
+ *
+ * Same defect class and same remedy as the notification surfaces (#7516 /
+ * PR #7528), and deliberately the SAME predicate — `isSessionListed` over the
+ * store's `sessions` — because a second `sessions.some(...)` written here is
+ * the copy that drifts away from the door it is supposed to mirror (#7475).
+ *
+ * ## The inert shape, and where it diverges from the banner
+ *
+ * The button goes (the banner's shape, not the widget's): a closed node session
+ * does not come back under the same id, and #7466's criterion is that an
+ * unrecoverable state loses the control rather than keeping a disabled one.
+ * Unlike the widget row, this button carries no second duty — it is not a
+ * mark-read affordance and not a menu anchor — so there is nothing to preserve.
+ *
+ * A marker says WHY, in the banner's own vocabulary ("No longer open"), because
+ * a silently affordance-less row reads as a rendering bug. It is NOT a
+ * `role="status"` live region, and that is the one place this surface argues
+ * away from the banner precedent: the banner shows at most a few rows and the
+ * gone state is its exception, whereas a run detail renders one node row per
+ * subtask and the gone state is the terminal state of every one of them. A live
+ * region per list item is unbounded simultaneous announcement for a read-only
+ * observer panel — the row's own status chip already moved to `completed` in the
+ * same render, which is the change worth hearing.
+ */
+describe('#7536 — the orchestration node session-jump is gated on roster membership', () => {
+  const node = (over: Record<string, unknown> = {}) => ({
+    nodeId: 'st_a', runId: 'run_1', title: 'Audit auth', role: 'worker.audit',
+    provider: 'codex', model: 'm', status: 'completed', attempt: 0,
+    committeeIterations: 1, sessionId: 'sess_9', worktreePath: null, branch: 'feat/x',
+    planSummary: null, resultSummary: null, usage: USAGE, createdAt: 1000, updatedAt: 1500,
+    ...over,
+  })
+
+  function renderWithNodes(nodes: unknown[], sessions: unknown[]) {
+    resetStore({
+      sessions,
+      orchestrationRuns: snapshot([runSummary()]),
+      selectedRunId: 'run_1',
+      orchestrationRunDetails: { run_1: { detail: runDetail({ nodes }), seq: 3 } },
+    })
+    render(<OrchestrationRunsSection />)
+  }
+
+  it('CONTROL: a LISTED session keeps its button, and it still switches', () => {
+    renderWithNodes([node()], [{ sessionId: 'sess_9' }])
+    fireEvent.click(screen.getByTestId('orch-node-open-session'))
+    expect(switchSessionMock).toHaveBeenCalledWith('sess_9')
+    expect(screen.queryByTestId('orch-node-session-gone')).toBeNull()
+  })
+
+  it('an ABSENT session presents no jump affordance', () => {
+    renderWithNodes([node()], [])
+    expect(screen.queryByTestId('orch-node-open-session')).toBeNull()
+    // Enumerated rather than "the jump one is missing", so a control appearing
+    // or vanishing inside the node row is red rather than unnoticed.
+    const row = screen.getByTestId('orch-node-row')
+    expect(row.querySelectorAll('button').length).toBe(0)
+  })
+
+  it('KEEPS the record: title, role, status and branch all still render', () => {
+    // The issue's own acceptance criterion — a gate, not a dismissal. A fix
+    // that dropped the whole row would satisfy "no dead click" and destroy the
+    // provenance the run detail exists to show.
+    renderWithNodes([node()], [])
+    const row = screen.getByTestId('orch-node-row')
+    expect(row.textContent).toContain('Audit auth')
+    expect(screen.getByTestId('orch-node-role').textContent).toBe('worker.audit')
+    // Scoped to the row: `StatusChip` carries `orch-run-status` on the run row
+    // and the detail header too, so an unscoped query matches three elements.
+    expect(row.querySelector('[data-testid="orch-run-status"]')?.textContent).toContain('completed')
+    expect(screen.getByTestId('orch-node-branch').textContent).toBe('feat/x')
+  })
+
+  it('says WHY, rather than going silently affordance-less', () => {
+    renderWithNodes([node()], [])
+    expect(screen.getByTestId('orch-node-session-gone').textContent).toBe('No longer open')
+  })
+
+  it('a node that NEVER had a session gets neither the button nor the marker', () => {
+    // The two absences are different facts and must not collapse. "No longer
+    // open" against a node that never ran a session would be a false claim,
+    // and it is the shape a naive `!listed` gate produces.
+    renderWithNodes([node({ sessionId: null })], [])
+    expect(screen.queryByTestId('orch-node-open-session')).toBeNull()
+    expect(screen.queryByTestId('orch-node-session-gone')).toBeNull()
+  })
+
+  it('gates PER NODE: a live sibling keeps its button', () => {
+    // The predicate is asked per node. A single run-level "something is gone"
+    // flag would disarm every row in a run whose first node finished — which is
+    // every run.
+    renderWithNodes(
+      [node({ nodeId: 'st_a', sessionId: 'sess_dead' }), node({ nodeId: 'st_b', sessionId: 'sess_9' })],
+      [{ sessionId: 'sess_9' }],
+    )
+    const buttons = screen.getAllByTestId('orch-node-open-session')
+    expect(buttons.length).toBe(1)
+    expect(screen.getAllByTestId('orch-node-session-gone').length).toBe(1)
+    fireEvent.click(buttons[0]!)
+    expect(switchSessionMock).toHaveBeenCalledWith('sess_9')
+    expect(switchSessionMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('no dead id reaches the choke point: there is nothing left to click', () => {
+    // The whole harm: `switchSession` refusing in silence is what made the
+    // click dead, and App's handler used to apply half a switch on the way to
+    // that refusal (#7535). The gate means the question is never asked.
+    //
+    // The row's remaining controls are CLICKED rather than merely counted. A
+    // bare `expect(switchSessionMock).not.toHaveBeenCalled()` after a render
+    // nothing clicked is green against the unfixed component too — the
+    // "negative assertion with no positive control" shape.
+    renderWithNodes([node()], [])
+    const row = screen.getByTestId('orch-node-row')
+    row.querySelectorAll('button').forEach((b) => fireEvent.click(b))
+    expect(switchSessionMock).not.toHaveBeenCalled()
+  })
+
+  it('flips LIVE when the roster drops the node session under the cursor', () => {
+    // Roster membership changes only by a store WRITE, which re-renders — the
+    // same argument NotificationBanners makes for having no click-time
+    // re-check. Pinned here so the argument is tested, not merely asserted.
+    resetStore({
+      sessions: [{ sessionId: 'sess_9' }],
+      orchestrationRuns: snapshot([runSummary()]),
+      selectedRunId: 'run_1',
+      orchestrationRunDetails: { run_1: { detail: runDetail({ nodes: [node()] }), seq: 3 } },
+    })
+    const { rerender } = render(<OrchestrationRunsSection />)
+    expect(screen.getByTestId('orch-node-open-session')).toBeTruthy()
+    storeState = { ...storeState, sessions: [] }
+    rerender(<OrchestrationRunsSection />)
+    expect(screen.queryByTestId('orch-node-open-session')).toBeNull()
+    expect(screen.getByTestId('orch-node-session-gone')).toBeTruthy()
+  })
+
+  it('uses the SHARED predicate, not a second sessions.some() in this file', () => {
+    // #7475 collapsed four call-site membership copies into one door precisely
+    // so that "looks clickable" and "will work" cannot disagree. A hand-rolled
+    // `.some()` here would be copy number two, and it would pass every
+    // behavioural cell above on the day it was written.
+    //
+    // Collapsed to a boolean before asserting: a failing `toContain` against a
+    // 20KB source file dumps the whole subject into the failure report
+    // (docs/false-safety-guards.md entry 17).
+    //
+    // Comments are stripped first, and that is not tidiness: the first cut of
+    // this guard went red against the component's OWN docstring, whose sentence
+    // "never a second `sessions.some(...)`" is itself a match. A guard a
+    // comment can satisfy — or violate — is reading prose, not code.
+    const raw = fs.readFileSync(path.resolve(__dirname, './OrchestrationRunsSection.tsx'), 'utf-8')
+    const code = raw.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+    // Positive controls for the stripper, both directions: it must remove the
+    // prose and keep the code. Without these a stripper that returned '' would
+    // make every assertion below pass.
+    expect(code.includes('#7536')).toBe(false)
+    expect(code.includes("data-testid=\"orch-node-session-gone\"")).toBe(true)
+    expect(code.includes("import { isSessionListed } from '../store/utils'")).toBe(true)
+    expect(/sessions\.some\s*\(/.test(code)).toBe(false)
   })
 })

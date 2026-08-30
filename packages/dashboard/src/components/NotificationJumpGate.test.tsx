@@ -265,9 +265,12 @@ describe('#7516 widget — an ABSENT session acknowledges without jumping', () =
     // Visible outcomes, so the click is not dead...
     expect(h.onMarkRead).toHaveBeenCalledWith('n-1')
     expect(screen.queryByTestId('notifications-widget-panel')).toBeNull()
-    // ...and no dead id reaches the choke point, so App's handler cannot fire
-    // its `setControlRoomActive(false)` side effect for a jump that will not
-    // happen — which was the whole of the observable behaviour before this.
+    // ...and no dead id reaches the choke point. When this was written that
+    // also prevented App's handler from firing `setControlRoomActive(false)`
+    // for a jump that would not happen — the whole of the observable behaviour
+    // at the time. #7535 fixed that ordering at the handler, so this assertion
+    // now stands on the narrower and more durable claim: a row must not offer
+    // a jump the choke point will refuse.
     expect(h.onSwitchSession).not.toHaveBeenCalled()
   })
 

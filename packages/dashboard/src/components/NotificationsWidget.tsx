@@ -389,11 +389,15 @@ export function NotificationsWidget({
                 const activate = () => {
                   onMarkRead(n.id)
                   // The jump is what the gate drops — NOT the acknowledgement
-                  // and NOT the record. Handing the dead id to `switchSession`
-                  // anyway would be harmless in the store and still wrong here:
-                  // App's handler fires `setControlRoomActive(false)` before it
-                  // ever asks, so a refused jump silently closed the Control
-                  // Room and did nothing else.
+                  // and NOT the record.
+                  //
+                  // #7535 corrected the claim that used to sit here: App's
+                  // handler no longer fires `setControlRoomActive(false)` ahead
+                  // of the store's membership check, so handing a dead id to
+                  // `switchSession` is now genuinely inert. The gate stays, and
+                  // its reason is the one #7516 was filed for and #7535 does not
+                  // touch — a row must not OFFER a jump the choke point will
+                  // refuse. "Harmless when clicked" was never the bar.
                   if (listed) onSwitchSession(n.sessionId)
                   setOpen(false)
                 }

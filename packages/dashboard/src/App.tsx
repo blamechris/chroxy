@@ -927,17 +927,46 @@ export function App() {
   }, [activeSessionId])
 
   const handleSwitchSession = useCallback((sessionId: string) => {
-    // #5204 — clicking any session tab returns from the Control Room view.
-    // This must run even when the clicked session is already the active one
-    // (CR is overlaid on top of it), so it sits before the no-op early return.
+    // #7535 — ASK FIRST, ACT AFTER. Every side effect below hangs off
+    // `switchSession`'s boolean, so a refused jump applies NO PART of a
+    // successful one.
+    //
+    // This used to open with an unconditional `setControlRoomActive(false)`,
+    // which made the whole observable outcome of a refused jump "the Control
+    // Room closed and nothing else happened". For the session tabs that is
+    // unreachable (they index into `sessions`), and for the two rendered
+    // notification surfaces #7516/#7528 gates it at render time — but the OS
+    // turn-complete notification has no render surface to gate. Its card sits
+    // in the notification centre with the id baked in and is only ever
+    // dispatched while the window is UNfocused, so the click lands minutes
+    // later against a roster that has moved on. PR #7528 read that as landing
+    // on a silent refusal; it was not silent, it was HALF-APPLIED.
+    //
+    // Deliberately still SILENT on refusal, not a toast: what #7511 got right
+    // was doing nothing, and what was broken was doing half of something. This
+    // handler is also shared with follow-mode and the permission auto-switch,
+    // whose refusals `switchSession`'s own comment argues must stay quiet
+    // ("reachable through ordinary use... the honest UI response is to do
+    // nothing rather than to log noise") — making the DOOR noisy would be wrong
+    // for them, and a per-caller wrapper would be a second membership reading.
+    //
+    // ONE membership implementation, and it stays the store's (#7475/#7511).
+    // The handler does not re-ask `isSessionListed`: a second reading here is
+    // the copy that drifts from the door it mirrors.
+    if (!switchSession(sessionId)) return
+    // #5204 — clicking any session tab returns from the Control Room view, and
+    // that must hold when the clicked session is ALREADY the active one (the CR
+    // is overlaid on top of it, so its own tab is the way back). It survives the
+    // reorder because `switchSession` returns `true` for the already-active id
+    // before it reads the roster or writes anything — the early-return branch
+    // this line used to sit above.
     setControlRoomActive(false)
-    if (sessionId === activeSessionId) return
     // #7475 — latch the switching state only when the switch actually happened.
-    // `switchSession` now refuses a target absent from `sessions`, and
     // `isSwitchingSession` blanks the whole content area until `activeSessionId`
-    // changes — so latching it on a refusal would wedge the dashboard on a
-    // "switching" placeholder forever. Same contract as createSession's (#6285).
-    if (switchSession(sessionId)) setIsSwitchingSession(true)
+    // changes, so latching it for the already-active id — whose `activeSessionId`
+    // never changes — would wedge the dashboard on a "switching" placeholder
+    // forever. Same contract as createSession's (#6285).
+    if (sessionId !== activeSessionId) setIsSwitchingSession(true)
   }, [switchSession, activeSessionId])
 
   // #7516 — the RENDER-time reading of `switchSession`'s own membership check,
@@ -952,6 +981,14 @@ export function App() {
   // ordinary use... the honest UI response is to do nothing"). Making the DOOR
   // noisy would be wrong for them; making the operator's CONTROL honest is what
   // #7516 asks for.
+  //
+  // #7535 separated the two things that argument had run together. The door
+  // stays SILENT and is now also side-effect-FREE — a refused jump applies no
+  // part of a successful one — which is a different property from surfacing the
+  // refusal, and the one that was actually broken. Render-time gating remains
+  // the only way to make an operator-aimed CONTROL honest, and it is why the OS
+  // notification (which has no render surface) can only be made inert, not
+  // informative, from inside this handler.
   const sessionIsListed = useCallback(
     (sessionId: string) => isSessionListed(sessions, sessionId),
     [sessions],
