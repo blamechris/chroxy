@@ -85,6 +85,17 @@ export {
   getLiveReplayLedgerSessionIds,
   dropReplaySessionState,
   MAX_LIVE_REPLAY_LEDGERS,
+  // #7519 — per-append provenance. `beginReplayFrame`/`endReplayFrame` scope one
+  // dispatched wire frame (the `historySeq` on it is the replayed-vs-live
+  // discriminator) and `noteReplayMessagesUpdate` observes each client's
+  // `updateSession`, so the deferred swap can return the tail in chronological
+  // order instead of array order — and, with it, tell #7543's degenerate
+  // whole-prefix-removed window from a legitimate empty replay.
+  beginReplayFrame,
+  endReplayFrame,
+  noteReplayMessagesUpdate,
+  getReplayAppendProvenance,
+  MAX_REPLAY_APPEND_PROVENANCE,
 } from './replay-reconcile'
 
 export type {

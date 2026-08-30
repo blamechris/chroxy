@@ -16,6 +16,11 @@ import {
   getLiveReplayLedgerSessionIds,
   dropReplaySessionState,
   MAX_LIVE_REPLAY_LEDGERS,
+  beginReplayFrame,
+  endReplayFrame,
+  noteReplayMessagesUpdate,
+  getReplayAppendProvenance,
+  MAX_REPLAY_APPEND_PROVENANCE,
 } from './replay-reconcile'
 
 type Msg = { id: string }
@@ -28,6 +33,48 @@ type Msg = { id: string }
  * (#7524).
  */
 const prefix = (n: number): Msg[] => Array.from({ length: n }, (_, i) => ({ id: `p-${i + 1}` }))
+
+/**
+ * ONE dispatched wire frame, driven exactly as both clients drive it since
+ * #7519: open the provenance scope with the RAW frame, let the frame mutate the
+ * session's `messages`, report that mutation through the observation hook their
+ * `updateSession` now carries, and close the scope in a `finally`.
+ *
+ * `seq` is the frame's `historySeq` and is the whole discriminator — a number
+ * for an entry the REPLAY delivered (`sendHistoryEntry` stamps every one),
+ * absent for a live broadcast. Passing the raw frame rather than a boolean is
+ * the point: the clients pass the frame too, so a test cannot classify an
+ * append in a way the wire could not.
+ */
+const frame = (
+  sessionId: string,
+  messages: Msg[],
+  seq: number | null,
+  mutate: (m: Msg[]) => void,
+): void => {
+  beginReplayFrame(seq === null ? { type: 'message' } : { type: 'message', historySeq: seq })
+  try {
+    const before = messages.slice()
+    mutate(messages)
+    noteReplayMessagesUpdate(sessionId, before, messages)
+  } finally {
+    endReplayFrame()
+  }
+}
+
+/** The replay re-delivering one history entry through the dedup gate. */
+const replayed = (sessionId: string, messages: Msg[], id: string, seq: number): void =>
+  frame(sessionId, messages, seq, (m) => {
+    const cache = replayDedupCache(sessionId, m) as Msg[]
+    if (!cache.some((x) => x.id === id)) m.push({ id })
+  })
+
+/** A live broadcast appending one entry while the window is open. */
+const arrivedLive = (sessionId: string, messages: Msg[], id: string): void =>
+  frame(sessionId, messages, null, (m) => m.push({ id }))
+
+const idsOf = (messages: unknown): (string | undefined)[] | null =>
+  (messages as Msg[] | null)?.map((m) => m.id) ?? null
 
 beforeEach(() => {
   resetReplayReconcile({ clearCursors: true })
@@ -194,6 +241,24 @@ describe('replay × delta-flusher race ordering (#5588)', () => {
     const { swappedMessages } = reconcileReplayEnd('s1', live)
     // Tail preserved in exact array order — flush neither dropped nor reordered.
     expect(swappedMessages).toEqual([{ id: 'r-1' }, { id: 'f-1' }, { id: 'r-2' }])
+  })
+
+  it('with provenance, the flush sorts AFTER the replayed set — chronological, not array order', () => {
+    // #7519 changed this shape deliberately, and the module's ordering note says
+    // so. Array order put the racing flush BETWEEN two replayed entries because
+    // that is where it landed on the wire; it is a live streamed response, so it
+    // is newer than every history entry the rebuild is replaying, and it belongs
+    // last. Nothing is duplicated and nothing is dropped — the same two
+    // guarantees the array-order version above pins, now with the order corrected.
+    const live: Msg[] = [{ id: 'old' }]
+    reconcileReplayStart('s1', true, live)
+    replayed('s1', live, 'r-1', 1)
+    arrivedLive('s1', live, 'f-1') // the forced delta flush
+    replayed('s1', live, 'r-2', 2)
+
+    const swapped = reconcileReplayEnd('s1', live).swappedMessages as Msg[]
+    expect(swapped.map((m) => m.id)).toEqual(['r-1', 'r-2', 'f-1'])
+    expect(swapped).toHaveLength(3)
   })
 
   it('a flush landing AFTER end appends to the already-swapped set with no duplication', () => {
@@ -706,36 +771,41 @@ describe('full rebuild nested inside a DELTA window (#7492)', () => {
     expect(getReplayWindowDepth('s1')).toBe(0)
   })
 
-  // The KNOWN LIMIT, pinned rather than left to be discovered (#7519). When the
-  // outermost delta actually APPENDED before the nested full start, its entries
-  // are inside the preserved tail, `replayDedupCache` is scoped at the same
-  // baseline, and the full replay's re-delivery of them is therefore suppressed
-  // — so they keep their early position while the older history the full replay
-  // delivers appends after them. Complete, but mis-ORDERED.
+  // WAS the known ordering limit, now the fix (#7519). When the outermost delta
+  // APPENDED before the nested full start, its entries sit inside the preserved
+  // tail, `replayDedupCache` is scoped at the same baseline, and the full
+  // replay's re-delivery of them is suppressed — so in ARRAY order they keep
+  // their early position while the older history the full replay delivers lands
+  // after them. Complete, but mis-ORDERED: measured `['d-1','racer','old']`
+  // before this landed, and `['old','d-1']` on pre-#7492 `main`, which had the
+  // order right only by dropping the racer.
   //
-  // On main this same interleave returns ['old', 'd-1']: correctly ordered and
-  // the racer silently DROPPED, which is the trade #7492 makes deliberately.
-  // Change this expectation only alongside #7519.
-  it("the delta's own appends keep their early position — the known ordering limit (#7519)", () => {
+  // The swap no longer returns array order. Each append made while the window is
+  // open carries the `historySeq` of the frame that caused it, so the tail comes
+  // back as (replayed, in the SERVER's history order) ++ (live, in arrival
+  // order) — which is chronological for all three entries here. The companion
+  // block below (`append PROVENANCE …`) is where the mechanism itself is pinned;
+  // this is the issue's own reproduction, kept where it was found.
+  it("the delta's own appends come back in HISTORY order, racer last (#7519)", () => {
     const live: Msg[] = [{ id: 'old' }]
     reconcileReplayStart('s1', false, live) // outermost DELTA opens at 1
-    live.push({ id: 'd-1' }) // the delta appends the newest history entry
-    live.push({ id: 'racer' }) // a LIVE arrival
+    replayed('s1', live, 'd-1', 2) // the delta replays the newest history entry
+    arrivedLive('s1', live, 'racer') // a LIVE arrival
     reconcileReplayStart('s1', true, live) // nested FULL start
 
-    // The full replay re-delivers the whole ring buffer, deduped against the
-    // cache exactly as both clients do it.
-    for (const id of ['old', 'd-1']) {
-      const cache = replayDedupCache('s1', live) as Msg[]
-      if (!cache.some((m) => m.id === id)) live.push({ id })
-    }
+    // The full replay re-delivers the whole ring buffer oldest-first, deduped
+    // against the cache exactly as both clients do it — 'old' is appended, 'd-1'
+    // dedups against the copy the delta already appended.
+    replayed('s1', live, 'old', 1)
+    replayed('s1', live, 'd-1', 2)
+    expect(live.map((m) => m.id)).toEqual(['old', 'd-1', 'racer', 'old'])
 
     expect(reconcileReplayEnd('s1', live).swappedMessages).toBeNull()
     const swapped = reconcileReplayEnd('s1', live).swappedMessages as Msg[]
     // Nothing is LOST — the racer and both history entries are all present...
     expect(swapped.map((m) => m.id).sort()).toEqual(['d-1', 'old', 'racer'])
-    // ...but 'old' is last. This is the #7519 artifact, not the fix working.
-    expect(swapped.map((m) => m.id)).toEqual(['d-1', 'racer', 'old'])
+    // ...and 'old' is FIRST: seq 1 before seq 2, live racer after both.
+    expect(swapped.map((m) => m.id)).toEqual(['old', 'd-1', 'racer'])
   })
 
   it('a delta nested inside the delta-opened window does not clear the adopted baseline', () => {
@@ -755,6 +825,392 @@ describe('full rebuild nested inside a DELTA window (#7492)', () => {
       { id: 'racer' },
       { id: 'r-1' },
     ])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #7519 — per-append PROVENANCE: the swap returns the tail in chronological
+// order, not in the order the replay and the live wire happened to interleave
+// ---------------------------------------------------------------------------
+//
+// Measured on the branch point (19d5f22), verbatim from the issue and from
+// #7542's second-racer table, and every row is what this block now asserts:
+//
+//   worked example      array ['old','d-1','racer','old']
+//                       was ['d-1','racer','old']            now ['old','d-1','racer']
+//   + a second racer    array ['old','d-1','racer-A','old','racer-B']
+//                       was ['d-1','racer-A','old','racer-B'] (2 inversions)
+//                       now ['old','d-1','racer-A','racer-B'] (0)
+//
+// The two shapes #7542 rejected are rejected by construction here: a second CUT
+// point cannot separate these (both regions hold both kinds), and an id-keyed
+// SET cannot either (#7556 — a replayed id matching a surviving prefix entry is
+// appended as a second copy, and a membership test then matches the PREFIX copy
+// and cuts at 0). The record is a per-append parallel ARRAY, and every use of it
+// re-verifies its alignment against the array as it stands.
+describe('append PROVENANCE orders the swapped tail (#7519)', () => {
+  it('a second racer during the nested rebuild lands last too (the #7542 table)', () => {
+    const live: Msg[] = [{ id: 'old' }]
+    reconcileReplayStart('s1', false, live)
+    replayed('s1', live, 'd-1', 2)
+    arrivedLive('s1', live, 'racer-A')
+    reconcileReplayStart('s1', true, live)
+    replayed('s1', live, 'old', 1)
+    replayed('s1', live, 'd-1', 2)
+    arrivedLive('s1', live, 'racer-B') // arrives DURING the nested rebuild
+    expect(live.map((m) => m.id)).toEqual(['old', 'd-1', 'racer-A', 'old', 'racer-B'])
+
+    expect(reconcileReplayEnd('s1', live).swappedMessages).toBeNull()
+    // The row #7542 measured at 2 inversions for BOTH the shipped behaviour and
+    // the sketch it rejected. Zero here.
+    expect(idsOf(reconcileReplayEnd('s1', live).swappedMessages)).toEqual([
+      'old',
+      'd-1',
+      'racer-A',
+      'racer-B',
+    ])
+  })
+
+  it('replayed entries sort by historySeq, NOT by the order the frames arrived', () => {
+    // The reason the record holds the seq rather than a replayed/live boolean.
+    // A bare partition would return delivery order — ['r-9','r-3','r-1'] — which
+    // is exactly as wrong as array order for a delta that ran newest-first
+    // before a full rebuild re-delivered the rest.
+    const live: Msg[] = [{ id: 'old' }]
+    reconcileReplayStart('s1', true, live)
+    replayed('s1', live, 'r-9', 9)
+    replayed('s1', live, 'r-3', 3)
+    replayed('s1', live, 'r-1', 1)
+
+    expect(idsOf(reconcileReplayEnd('s1', live).swappedMessages)).toEqual(['r-1', 'r-3', 'r-9'])
+  })
+
+  it('equal seqs keep delivery order (the comparator tiebreak, not the engine)', () => {
+    const live: Msg[] = [{ id: 'old' }]
+    reconcileReplayStart('s1', true, live)
+    replayed('s1', live, 'r-a', 5)
+    replayed('s1', live, 'r-b', 5)
+    replayed('s1', live, 'r-c', 5)
+
+    expect(idsOf(reconcileReplayEnd('s1', live).swappedMessages)).toEqual(['r-a', 'r-b', 'r-c'])
+  })
+
+  it('a live-only tail keeps arrival order — nothing to sort, nothing moved', () => {
+    const live: Msg[] = [{ id: 'old' }]
+    reconcileReplayStart('s1', true, live)
+    arrivedLive('s1', live, 'L1')
+    arrivedLive('s1', live, 'L2')
+    arrivedLive('s1', live, 'L3')
+
+    expect(idsOf(reconcileReplayEnd('s1', live).swappedMessages)).toEqual(['L1', 'L2', 'L3'])
+  })
+
+  it('an append-only full rebuild is UNCHANGED — the ordering is a no-op (control)', () => {
+    // The positive control for the whole block: an ordinary reconnect replays
+    // oldest-first with no racer, so provenance order and array order coincide.
+    // Without this the block reads as "the reorder is doing something" when what
+    // it must do first is nothing.
+    const live: Msg[] = [{ id: 'p1' }, { id: 'p2' }]
+    reconcileReplayStart('s1', true, live)
+    replayed('s1', live, 'r-1', 1)
+    replayed('s1', live, 'r-2', 2)
+    replayed('s1', live, 'r-3', 3)
+
+    expect(idsOf(reconcileReplayEnd('s1', live).swappedMessages)).toEqual(['r-1', 'r-2', 'r-3'])
+  })
+
+  it('a replayed frame carrying NO seq is treated as live — presence is the whole signal', () => {
+    // `sendHistoryEntry` stamps every replayed entry, and #7420 already depends
+    // on that. Said plainly rather than assumed: an unstamped frame is
+    // indistinguishable from a live broadcast HERE, so it sorts with the live
+    // half. That is the documented floor, not a silent mis-classification.
+    const live: Msg[] = [{ id: 'old' }]
+    reconcileReplayStart('s1', true, live)
+    frame('s1', live, null, (m) => m.push({ id: 'unstamped' }))
+    replayed('s1', live, 'r-1', 1)
+
+    expect(idsOf(reconcileReplayEnd('s1', live).swappedMessages)).toEqual(['r-1', 'unstamped'])
+  })
+
+  it('refuses a seq `recordHistorySeq` would refuse — one validity rule, not two', () => {
+    // NaN / Infinity / negative: the cursor already rejects them
+    // (`ignores non-finite / negative / non-number seqs`), so ordering must too,
+    // and the refusal lands on LIVE — late, never hoisted into history.
+    const live: Msg[] = [{ id: 'old' }]
+    reconcileReplayStart('s1', true, live)
+    for (const [id, seq] of [
+      ['bad-nan', Number.NaN],
+      ['bad-inf', Number.POSITIVE_INFINITY],
+      ['bad-neg', -1],
+    ] as [string, number][]) {
+      frame('s1', live, seq, (m) => m.push({ id }))
+    }
+    replayed('s1', live, 'r-1', 1)
+
+    expect(getReplayAppendProvenance('s1')).toEqual([
+      { id: 'bad-nan', seq: null },
+      { id: 'bad-inf', seq: null },
+      { id: 'bad-neg', seq: null },
+      { id: 'r-1', seq: 1 },
+    ])
+    expect(idsOf(reconcileReplayEnd('s1', live).swappedMessages)).toEqual([
+      'r-1',
+      'bad-nan',
+      'bad-inf',
+      'bad-neg',
+    ])
+  })
+
+  // --- the degradations, each pinned rather than left to be discovered ------
+
+  it('an append NO observation point saw degrades to array order — and drops nothing', () => {
+    // The record is allowed to UNDER-count: a store path that appends without
+    // going through `updateSession` is simply absent from it. `resolveCut` takes
+    // the MINIMUM of the walk and the provenance start precisely so that costs
+    // only the improvement — the pre-#7519 array order — and never an entry.
+    const live: Msg[] = [{ id: 'old' }]
+    reconcileReplayStart('s1', false, live)
+    replayed('s1', live, 'd-1', 2)
+    arrivedLive('s1', live, 'racer')
+    reconcileReplayStart('s1', true, live)
+    replayed('s1', live, 'old', 1)
+    replayed('s1', live, 'd-1', 2)
+    live.push({ id: 'unwired' }) // an append nothing reported
+
+    expect(reconcileReplayEnd('s1', live).swappedMessages).toBeNull()
+    expect(idsOf(reconcileReplayEnd('s1', live).swappedMessages)).toEqual([
+      'd-1',
+      'racer',
+      'old',
+      'unwired',
+    ])
+  })
+
+  it('the record is POSITIONAL: a tail that no longer matches it is refused, not trusted', () => {
+    // The guard the whole mechanism rests on. If the parallel array has drifted
+    // by even one position it describes each tail entry with its NEIGHBOUR's
+    // provenance, and the swap would reorder against a lie — silently, and in
+    // the direction that looks like a fix. `provenanceStart` re-verifies the run
+    // id by id at every use and returns null on the first disagreement.
+    const live: Msg[] = [{ id: 'old' }]
+    reconcileReplayStart('s1', true, live)
+    replayed('s1', live, 'r-9', 9)
+    arrivedLive('s1', live, 'L1')
+    replayed('s1', live, 'r-1', 1)
+    // The record still says [r-9(9), L1(live), r-1(1)] — but the array no longer
+    // does: something removed the middle entry without reporting it.
+    live.splice(2, 1)
+    expect(live.map((m) => m.id)).toEqual(['old', 'r-9', 'r-1'])
+
+    // Refused: array order, and the walk's cut. Not [r-1, r-9] (which is what
+    // trusting the drifted record would produce — r-1 read as L1's live slot and
+    // r-9 hoisted past it).
+    expect(idsOf(reconcileReplayEnd('s1', live).swappedMessages)).toEqual(['r-9', 'r-1'])
+  })
+
+  it('a mid-window MOVE gives the record up rather than let it drift', () => {
+    // `reorderEmptyResponseSlot` moves a message to the end of the array
+    // (#7524). Reported through the hook like any other update, that is neither
+    // an append nor an untouched run, so the record is dropped for the rest of
+    // the window and the swap reverts to array order.
+    const live: Msg[] = [{ id: 'old' }]
+    reconcileReplayStart('s1', true, live)
+    replayed('s1', live, 'r-2', 2)
+    replayed('s1', live, 'r-1', 1)
+    expect(getReplayAppendProvenance('s1')).toHaveLength(2)
+
+    frame('s1', live, null, (m) => {
+      const [moved] = m.splice(1, 1) // 'r-2' moves to the end
+      m.push(moved as Msg)
+    })
+    expect(getReplayAppendProvenance('s1')).toBeNull()
+    expect(idsOf(reconcileReplayEnd('s1', live).swappedMessages)).toEqual(['r-1', 'r-2'])
+  })
+
+  it('a PREFIX removal keeps the record — it is the shape #7543 is made of', () => {
+    // The one non-append shape the record survives, and it has to: Stop dropping
+    // every queued bubble mid-window is a removal that lands entirely in the
+    // prefix, and it is the setup for #7543's degenerate window. Giving up here
+    // would give up the case the record exists to decide.
+    const live: Msg[] = [{ id: 'p1' }, { id: 'p2' }]
+    reconcileReplayStart('s1', true, live)
+    replayed('s1', live, 'r-1', 1)
+    frame('s1', live, null, (m) => m.splice(0, 2)) // Stop drops both bubbles
+    expect(idsOf(getReplayAppendProvenance('s1'))).toEqual(['r-1'])
+    replayed('s1', live, 'r-2', 2)
+
+    expect(idsOf(reconcileReplayEnd('s1', live).swappedMessages)).toEqual(['r-1', 'r-2'])
+  })
+
+  it('an id-less append disables the record rather than recording a hole', () => {
+    // Same bail as `snapshotPrefix`, and for a sharper reason: two id-less
+    // entries compare EQUAL in the alignment check, so a hole does not merely
+    // fail to help — it would license a reorder nothing verified.
+    const live: Msg[] = [{ id: 'old' }]
+    reconcileReplayStart('s1', true, live)
+    replayed('s1', live, 'r-2', 2)
+    frame('s1', live, 1, (m) => m.push({} as Msg))
+    expect(getReplayAppendProvenance('s1')).toBeNull()
+    replayed('s1', live, 'r-1', 1)
+
+    // Array order, unchanged — and nothing lost.
+    expect(idsOf(reconcileReplayEnd('s1', live).swappedMessages)).toEqual([
+      'r-2',
+      undefined,
+      'r-1',
+    ])
+  })
+
+  // --- the frame scope ------------------------------------------------------
+
+  it('closing the frame scope is what keeps the NEXT live append live', () => {
+    // The `finally` in both clients' `handleMessage`, pinned by its consequence.
+    // A scope left open past the dispatch stamps the frame's seq on whatever the
+    // store appends next — and the nearest such append is the optimistic bubble
+    // a user types mid-replay, i.e. the live racer this family of issues exists
+    // to protect.
+    const live: Msg[] = [{ id: 'old' }]
+    reconcileReplayStart('s1', true, live)
+    replayed('s1', live, 'r-5', 5)
+    // The user's own message, appended by a store action and not by a frame.
+    const before = live.slice()
+    live.push({ id: 'typed' })
+    noteReplayMessagesUpdate('s1', before, live)
+
+    expect(getReplayAppendProvenance('s1')).toEqual([
+      { id: 'r-5', seq: 5 },
+      { id: 'typed', seq: null },
+    ])
+    expect(idsOf(reconcileReplayEnd('s1', live).swappedMessages)).toEqual(['r-5', 'typed'])
+  })
+
+  it('a LEAKED scope would stamp it replayed — the mutant this pins, run forwards', () => {
+    // The negative control for the test above: the same sequence with the scope
+    // left open (what dropping the `finally` does) classifies the typed message
+    // as replayed at seq 5, ties with 'r-5', and orders it by array position
+    // instead of holding it after the replayed set. Written out so "the finally
+    // is load-bearing" is a measurement rather than a claim.
+    const live: Msg[] = [{ id: 'old' }]
+    reconcileReplayStart('s1', true, live)
+    beginReplayFrame({ type: 'message', historySeq: 5 })
+    const beforeReplay = live.slice()
+    live.push({ id: 'r-5' })
+    noteReplayMessagesUpdate('s1', beforeReplay, live)
+    // ...no endReplayFrame() here — the leak.
+    const before = live.slice()
+    live.push({ id: 'typed' })
+    noteReplayMessagesUpdate('s1', before, live)
+    endReplayFrame()
+
+    expect(getReplayAppendProvenance('s1')).toEqual([
+      { id: 'r-5', seq: 5 },
+      { id: 'typed', seq: 5 }, // WRONG — a live arrival called history
+    ])
+  })
+
+  it('the scope is cleared by a transport teardown that lands mid-dispatch', () => {
+    beginReplayFrame({ type: 'message', historySeq: 7 })
+    resetReplayReconcile()
+    const live: Msg[] = [{ id: 'old' }]
+    reconcileReplayStart('s1', true, live)
+    const before = live.slice()
+    live.push({ id: 'after-reset' })
+    noteReplayMessagesUpdate('s1', before, live)
+    expect(getReplayAppendProvenance('s1')).toEqual([{ id: 'after-reset', seq: null }])
+    endReplayFrame()
+  })
+
+  // --- lifetime: the record dies with the window, at all four teardowns -----
+
+  it('the record dies with the window — last end, fresh start, reset, drop', () => {
+    // The memory shape `ReplayWindow` states for the baseline, held to for the
+    // provenance parked on it. It lives on the SAME record the two maps share,
+    // so there is no fifth place to remember.
+    const live: Msg[] = [{ id: 'old' }]
+    reconcileReplayStart('s1', true, live)
+    replayed('s1', live, 'r-1', 1)
+    expect(getReplayAppendProvenance('s1')).toHaveLength(1)
+    reconcileReplayEnd('s1', live) // the LAST end takes it with the swap
+    expect(getReplayAppendProvenance('s1')).toBeNull()
+
+    // A fresh window starts from an EMPTY record, never the previous window's.
+    const live2: Msg[] = [{ id: 'r-1' }]
+    reconcileReplayStart('s1', true, live2)
+    expect(getReplayAppendProvenance('s1')).toEqual([])
+    replayed('s1', live2, 'r-2', 2)
+    resetReplayReconcile()
+    expect(getReplayAppendProvenance('s1')).toBeNull()
+
+    reconcileReplayStart('s2', true, [])
+    const live3: Msg[] = []
+    replayed('s2', live3, 'r-3', 3)
+    expect(getReplayAppendProvenance('s2')).toHaveLength(1)
+    dropReplaySessionState('s2')
+    expect(getReplayAppendProvenance('s2')).toBeNull()
+  })
+
+  it('is a no-op outside a window, and per-session inside one', () => {
+    const live: Msg[] = [{ id: 'a' }]
+    // No window open for s1 at all.
+    noteReplayMessagesUpdate('s1', [], live)
+    expect(getReplayAppendProvenance('s1')).toBeNull()
+    noteReplayMessagesUpdate(null, [], live)
+    noteReplayMessagesUpdate('', [], live)
+
+    reconcileReplayStart('s1', true, [])
+    reconcileReplayStart('s2', true, [])
+    const s1Live: Msg[] = []
+    replayed('s1', s1Live, 'r-1', 1)
+    expect(getReplayAppendProvenance('s1')).toHaveLength(1)
+    expect(getReplayAppendProvenance('s2')).toEqual([])
+  })
+
+  it('a NESTED start keeps the outer window record — provenance spans the window', () => {
+    // The record belongs to the window, not to a replay: the whole point of
+    // #7519 is that a delta's appends and a nested full rebuild's appends sit in
+    // ONE tail and have to be ordered against each other.
+    const live: Msg[] = [{ id: 'old' }]
+    reconcileReplayStart('s1', false, live)
+    replayed('s1', live, 'd-1', 2)
+    reconcileReplayStart('s1', true, live)
+    expect(idsOf(getReplayAppendProvenance('s1'))).toEqual(['d-1'])
+  })
+
+  it('caps ONE window record and says so LOUDLY, degrading to array order', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const live: Msg[] = [{ id: 'old' }]
+    reconcileReplayStart('s1', true, live)
+    for (let i = 0; i <= MAX_REPLAY_APPEND_PROVENANCE; i++) {
+      replayed('s1', live, `r-${i}`, MAX_REPLAY_APPEND_PROVENANCE - i)
+    }
+    // Dropped, never truncated: a truncated array is positionally WRONG, which
+    // is the one state this record must not be in.
+    expect(getReplayAppendProvenance('s1')).toBeNull()
+    expect(warn).toHaveBeenCalledTimes(1)
+    const line = String(warn.mock.calls[0]?.[0])
+    expect(line).toContain('[replay-reconcile]')
+    expect(line).toContain(String(MAX_REPLAY_APPEND_PROVENANCE))
+    expect(line).toContain('s1')
+    expect(line).toContain('#7519')
+
+    // ...and the consequence the warn text claims, demonstrated: the swap keeps
+    // everything and returns it in array order rather than by seq.
+    const swapped = reconcileReplayEnd('s1', live).swappedMessages as Msg[]
+    expect(swapped).toHaveLength(MAX_REPLAY_APPEND_PROVENANCE + 1)
+    expect(swapped[0]?.id).toBe('r-0')
+  })
+
+  it('the cap does not fire on an ordinary replay (no warn)', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const live: Msg[] = [{ id: 'old' }]
+    reconcileReplayStart('s1', true, live)
+    for (let i = 0; i < 50; i++) replayed('s1', live, `r-${i}`, i)
+    reconcileReplayEnd('s1', live)
+    expect(warn).not.toHaveBeenCalled()
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
   })
 })
 
@@ -951,48 +1407,82 @@ describe('mid-window messages SHRINK moves the swap cut (#7524)', () => {
     ])
   })
 
-  // --- the KNOWN LIMIT the walk does NOT cover (#7543) ---------------------
+  // --- what the walk alone does NOT cover, and what provenance adds (#7543) -
   //
   // `messages[0..cut)` is the greedy SUBSEQUENCE match of `prefixIds`, so once
   // the surviving prefix runs out the walk continues into the appended tail if
   // the tail keeps matching — and a full replay re-delivers exactly the ids the
-  // prefix held. Both shapes below return the SAME values on `main` (measured:
-  // [] and ['c']), so this is the #7524 symptom in a shape the identity baseline
-  // cannot reach rather than something it broke. Nothing id-based can separate a
-  // re-delivered copy from the original; the answer is provenance per append,
-  // the same one #7519 lands on.
+  // prefix held. Measured on `main` AND on the pre-#7519 branch point: [] and
+  // ['c'], the replayed set discarded both times.
   //
-  // Change these two expectations only alongside #7543.
-  it('KNOWN LIMIT: whole prefix removed + same ids re-delivered blanks the swap (#7543)', () => {
+  // The walk still does that; nothing here changed it, because nothing id-based
+  // can (the pin below is the proof, and it stays). What changed is that the cut
+  // is no longer the walk ALONE: `resolveCut` also knows how many entries the
+  // window APPENDED, and everything a window appended is past the prefix by
+  // definition. The smaller of the two wins, so these two shapes now keep the
+  // replayed set — and the legitimate empty replay beside them, which recorded
+  // ZERO appends, still swaps to [].
+  it('whole prefix removed + same ids re-delivered keeps the replayed set (#7543)', () => {
     const live: Msg[] = [{ id: 'a' }, { id: 'b' }]
     reconcileReplayStart('s1', true, live)
-    live.length = 0 // every prefix entry removed mid-window
+    // Stop drops every queued bubble mid-window, reported through the same
+    // observation hook both clients' `updateSession` carries.
+    frame('s1', live, null, (m) => { m.length = 0 })
     // The replay re-delivers them in order, through the dedup gate exactly as
     // both clients drive it.
+    replayed('s1', live, 'a', 1)
+    replayed('s1', live, 'b', 2)
+    // The replayed set IS there — the fixture took effect — and the swap now
+    // keeps it. Measured [] before #7519.
+    expect(live.map((m) => m.id)).toEqual(['a', 'b'])
+    expect(reconcileReplayEnd('s1', live).swappedMessages).toEqual([{ id: 'a' }, { id: 'b' }])
+  })
+
+  it('a removal followed by its id being re-appended moves the cut to 0 (#7543)', () => {
+    const live: Msg[] = [{ id: 'a' }, { id: 'b' }]
+    reconcileReplayStart('s1', true, live)
+    frame('s1', live, null, (m) => { m.splice(0, 2) }) // two removed
+    replayed('s1', live, 'a', 1)
+    replayed('s1', live, 'b', 2)
+    replayed('s1', live, 'c', 3)
+    // The walk still says 2 ('a' and 'b' re-match the prefix ids from the tail);
+    // the provenance says three entries were appended, so the cut is 0. Measured
+    // ['c'] before #7519.
+    expect(reconcileReplayEnd('s1', live).swappedMessages).toEqual([
+      { id: 'a' },
+      { id: 'b' },
+      { id: 'c' },
+    ])
+  })
+
+  it('the same two shapes still blank/truncate when provenance is UNAVAILABLE', () => {
+    // The other direction, kept because removing it would leave the pair above
+    // reading as "the walk was fixed". It was not: with no record to consult —
+    // an un-instrumented store path, an id-less append, a window past the cap —
+    // `resolveCut` is the walk and the pre-#7519 values come straight back.
+    const live: Msg[] = [{ id: 'a' }, { id: 'b' }]
+    reconcileReplayStart('s1', true, live)
+    live.length = 0
     for (const id of ['a', 'b']) {
       const cache = replayDedupCache('s1', live) as Msg[]
       if (!cache.some((m) => m.id === id)) live.push({ id })
     }
-    // The replayed set IS there — the fixture took effect — and the swap
-    // discards it anyway. This is the #7543 residual, not the fix working.
     expect(live.map((m) => m.id)).toEqual(['a', 'b'])
     expect(reconcileReplayEnd('s1', live).swappedMessages).toEqual([])
+
+    const live2: Msg[] = [{ id: 'a' }, { id: 'b' }]
+    reconcileReplayStart('s2', true, live2)
+    live2.splice(0, 2)
+    live2.push({ id: 'a' }, { id: 'b' }, { id: 'c' })
+    expect(reconcileReplayEnd('s2', live2).swappedMessages).toEqual([{ id: 'c' }])
   })
 
-  it('KNOWN LIMIT: a removal can move the cut by ZERO when its id is re-appended (#7543)', () => {
-    const live: Msg[] = [{ id: 'a' }, { id: 'b' }]
-    reconcileReplayStart('s1', true, live)
-    live.splice(0, 2) // two removed, so a "moves back by the number removed"
-    live.push({ id: 'a' }, { id: 'b' }, { id: 'c' }) // ...walk would cut at 0
-    // The cut is 2, not 0: 'a' and 'b' re-match the prefix ids from the tail.
-    expect(reconcileReplayEnd('s1', live).swappedMessages).toEqual([{ id: 'c' }])
-  })
-
-  // WHY the two pins above are pinned rather than fixed — mechanically, not in
-  // prose. The module's entire view of `messages` is `idOf` (its only reader),
-  // and its entire record of the prefix is `prefixIds`. The two states below
-  // present the SAME id sequence against the SAME recorded prefix while their
-  // CORRECT answers differ, so no function of those two inputs can serve both:
+  // WHY those two shapes could not be fixed from the ids — mechanically, not in
+  // prose, and STILL TRUE. The module's entire view of `messages` is `idOf` (its
+  // only reader), and its entire record of the prefix is `prefixIds`. The two
+  // states below present the SAME id sequence against the SAME recorded prefix
+  // while their CORRECT answers differ, so no function of those two inputs can
+  // serve both:
   //
   //   A  legitimate empty replay — prefix intact, the server trimmed history to
   //      nothing. Correct swap `[]`, pinned by `empty replay (baseline at end)
@@ -1005,9 +1495,12 @@ describe('mid-window messages SHRINK moves the swap cut (#7524)', () => {
   // id-only shapes proposed for #7543 — a degenerate-outcome guard ("never
   // return an empty swap when the walk consumed everything"), an
   // `openLen`-bounded fallback, and a survivor-anchor requirement — because each
-  // is a function of exactly these inputs. What is left is provenance per
-  // append: `historySeq` present ⇒ replayed, reported by the call sites, which
-  // is #7519.
+  // is a function of exactly these inputs. What was left is provenance per
+  // append: `historySeq` present ⇒ replayed, observed at the call sites, which
+  // is #7519 — and which is what the second half of this test now measures. The
+  // first half is unchanged and stays unchanged: it is the reason no future
+  // id-only "fix" may be accepted here, and deleting it once the answer arrived
+  // would leave nothing refusing the next one.
   //
   // Object identity is not the escape hatch either. A mid-window UPDATE to a
   // prefix message REPLACES its object (`{ ...m, … }` — `finalizeThinkingStreams`
@@ -1016,9 +1509,9 @@ describe('mid-window messages SHRINK moves the swap cut (#7524)', () => {
   // streamed-into or patched prefix entry and collapse the cut to an identity
   // slice: #7477's failure, on a far more reachable path than this one.
   //
-  // This test is the REASON the two expectations above read as they do. It goes
-  // with them when #7543 lands, and not before.
-  it('#7543 is UNDECIDABLE from the ids alone — the legitimate empty replay is the same input', () => {
+  // This test is the REASON the two expectations above read as they do — first
+  // that they were pinned, now that they are what they are.
+  it('#7543 is undecidable from the IDS, and DECIDED by the provenance (#7519)', () => {
     // The cut the module resolves, read through the one public surface that
     // exposes it: `replayDedupCache` returns `messages.slice(cut)`.
     const cutOf = (sid: string, messages: Msg[]) =>
@@ -1064,6 +1557,26 @@ describe('mid-window messages SHRINK moves the swap cut (#7524)', () => {
     expect(reconcileReplayEnd('sA2', a2).swappedMessages).toEqual(
       reconcileReplayEnd('sB2', b2).swappedMessages,
     )
+
+    // --- and now the SAME two histories, driven through the observation hook
+    // both clients carry since #7519. The ids are still identical — that half is
+    // not repaired and cannot be — but the module is no longer looking only at
+    // ids, and the two now resolve to their own correct answers.
+    const c: Msg[] = [{ id: 'a' }, { id: 'b' }]
+    reconcileReplayStart('sC', true, c) // A again: prefix intact, nothing replayed
+
+    const d: Msg[] = [{ id: 'a' }, { id: 'b' }]
+    reconcileReplayStart('sD', true, d) // B again: prefix removed, ids re-delivered
+    frame('sD', d, null, (m) => { m.length = 0 })
+    replayed('sD', d, 'a', 1)
+    replayed('sD', d, 'b', 2)
+
+    expect(c.map((m) => m.id)).toEqual(d.map((m) => m.id))
+    // The distinguishing input, named: zero appends against two.
+    expect(getReplayAppendProvenance('sC')).toEqual([])
+    expect(idsOf(getReplayAppendProvenance('sD'))).toEqual(['a', 'b'])
+    expect(reconcileReplayEnd('sC', c).swappedMessages).toEqual([]) // still correct
+    expect(reconcileReplayEnd('sD', d).swappedMessages).toEqual([{ id: 'a' }, { id: 'b' }])
   })
 
   it('but ONE survivor at the front already keeps more than the raw index does', () => {

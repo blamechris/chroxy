@@ -77,6 +77,14 @@ import {
   replayDedupCache,
   getReplayWindowDepth,
   resetReplayReconcile,
+  // #7519 — per-append provenance for the deferred swap. `beginReplayFrame` /
+  // `endReplayFrame` scope one dispatched wire frame (the `historySeq` on it is
+  // the replayed-vs-live discriminator, read inside store-core so the two
+  // clients cannot drift on it); `noteReplayMessagesUpdate` observes every
+  // session-messages write through `updateSession` below.
+  beginReplayFrame,
+  endReplayFrame,
+  noteReplayMessagesUpdate,
   handlePermissionRequest as sharedPermissionRequest,
   handlePermissionResolved as sharedPermissionResolved,
   handlePermissionExpired as sharedPermissionExpired,
@@ -1262,6 +1270,14 @@ export function updateSession(sessionId: string, updater: (session: SessionState
   const current = state.sessionStates[sessionId];
   const patch = updater(current);
   if (Object.keys(patch).length === 0) return;
+  // #7519 — the ONE funnel every session-messages write goes through, including
+  // the shared dispatch table's (it reaches here via the store adapter). Hooking
+  // the funnel rather than the ~dozen append sites is the same reasoning
+  // `RebuildBaseline` states for re-deriving the cut instead of being notified
+  // of a shrink: a hook wired per call site is correct only for the ones someone
+  // remembered, and the next handler lands silently. Costs one Map lookup for a
+  // session with no replay window open, which is nearly always.
+  if (patch.messages) noteReplayMessagesUpdate(sessionId, current.messages, patch.messages);
   const updated = { ...current, ...patch };
   // Auto-derive activity state from session state changes
   const newActivity = deriveActivityState(
@@ -1859,6 +1875,26 @@ function enforceEncryptionGateOrRefuse(ctx: ConnectionContext, encryptionMode: s
  * The few variables that were closured in connect() are accessed via _connectionContext.
  */
 export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
+  // #7519 — one dispatched frame, one provenance scope. Every append the frame
+  // causes (through ANY handler, including ones added later) is recorded by
+  // `updateSession`'s observation hook against this frame's `historySeq`, so the
+  // deferred replay swap can put the replayed entries back in history order and
+  // leave the live racers after them instead of returning the tail in whatever
+  // order the two interleaved.
+  //
+  // The `finally` is load-bearing, not tidiness: a scope left open past the
+  // dispatch would stamp REPLAYED on the next store-driven append, and the
+  // nearest one is the optimistic bubble a user types mid-replay — the live
+  // racer #7420/#7492 exist to protect.
+  beginReplayFrame(raw);
+  try {
+    dispatchFrame(raw, ctxOverride);
+  } finally {
+    endReplayFrame();
+  }
+}
+
+function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
   const ctx = ctxOverride ?? _connectionContext;
   if (!ctx) return;
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return;

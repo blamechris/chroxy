@@ -47,13 +47,26 @@
  *      replayed entry is not suppressed by matching an id in the
  *      about-to-be-discarded prefix (which would drop it from the swapped set).
  *
- * Ordering note (replay × delta-flusher race, #5588): a forced delta flush that
- * lands DURING a full rebuild appends a streamed response into the tail just
- * like a replayed entry, so it survives the swap in array order. A flush that
- * lands AFTER `history_replay_end` (rebuild already cleared) appends normally.
- * Either way the swap only ever slices off the pre-baseline prefix, so a racing
- * flush can neither be duplicated nor reordered relative to replayed entries —
- * see `reconcileReplayEnd` and the race test in `replay-reconcile.test.ts`.
+ * Ordering note (replay × delta-flusher race, #5588 / #7519): a forced delta
+ * flush that lands DURING a full rebuild appends a streamed response into the
+ * tail just like a replayed entry, so it survives the swap. A flush that lands
+ * AFTER `history_replay_end` (rebuild already cleared) appends normally. Either
+ * way the swap only ever slices off the pre-baseline prefix, so a racing flush
+ * can never be duplicated or dropped — see `reconcileReplayEnd` and the race
+ * tests in `replay-reconcile.test.ts`.
+ *
+ * It CAN now be reordered relative to replayed entries, and that is the one
+ * clause #7519 retracts. This note used to say array order was preserved and
+ * therefore nothing moved; array order was the bug. Where every append during
+ * the window is accounted for, the swap returns (everything the replay
+ * delivered, in the server's `historySeq` order) ++ (everything that arrived
+ * live, in arrival order) — so a flush that landed between two replayed entries
+ * comes back after both, which is where a live streamed response chronologically
+ * belongs. Measured: `['r-1','f-1','r-2']` before, `['r-1','r-2','f-1']` after,
+ * pinned by the pair of tests in the `#5588` block. Where the record is
+ * incomplete or un-alignable the swap falls back to array order exactly as
+ * described above.
+ *
  * #7524 does not touch that shape: it changes only HOW the end of the prefix is
  * identified (by the ids captured at window open, not by a fixed index), so the
  * cut still falls between prefix and tail — and now keeps falling there when the
@@ -189,19 +202,23 @@ interface ReplayWindow {
    * and a nested full start adopts this record instead of snapshotting its own.
    * At depth 1 the two are the same prefix, so every #7477 case is unchanged.
    *
-   * KNOWN LIMIT, stated rather than hidden: when the delta actually APPENDED
-   * entries before the nested full start, those entries are now inside the
-   * preserved tail, so the full replay's re-delivery of them dedups against
-   * them ({@link replayDedupCache} is scoped at the same baseline) and they
-   * keep their early position while the older history the full replay delivers
-   * appends after — a correctly-populated but mis-ORDERED transcript. That is a
-   * strictly better failure than the silent DROP it replaces (nothing is lost,
-   * and the next full replay re-orders it), and fixing it needs the swap to
-   * distinguish replayed appends from live ones — a change to the "slice off a
-   * prefix" SHAPE, rather than to where the prefix ends, which is all #7524
-   * changed. Tracked as #7519, and PINNED by `full rebuild nested inside a
-   * DELTA window (#7492) > the delta's own appends keep their early position`
-   * so it cannot change unnoticed.
+   * That interleave left ONE artifact, which was this comment's KNOWN LIMIT and
+   * is now fixed (#7519): when the delta actually APPENDED entries before the
+   * nested full start, those entries are inside the preserved tail, so the full
+   * replay's re-delivery of them dedups against them
+   * ({@link replayDedupCache} is scoped at the same baseline) and in ARRAY order
+   * they keep their early position while the older history the full replay
+   * delivers lands after — a correctly-populated but mis-ORDERED transcript
+   * (`['d-1','racer','old']` where `['old','d-1','racer']` was wanted).
+   *
+   * Fixing it needed what this comment said it needed: the swap distinguishing
+   * replayed appends from live ones, which is a change to the "slice off a
+   * prefix" SHAPE rather than to where the prefix ends. That is
+   * {@link ReplayAppend} — per-append, positional, recorded while the window is
+   * open and dying with it — and the swap now orders the tail by it. Pinned by
+   * `full rebuild nested inside a DELTA window (#7492) > the delta's own appends
+   * come back in HISTORY order, racer last (#7519)` and by the whole
+   * `append PROVENANCE orders the swapped tail (#7519)` block.
    */
   baseline: RebuildBaseline
 }
@@ -251,6 +268,57 @@ interface RebuildBaseline {
    * to the pre-#7524 index behaviour rather than to a guess.
    */
   prefixIds: readonly string[] | null
+  /**
+   * Every append made since the window opened, in order, each carrying whether
+   * the frame that produced it was REPLAY-delivered (#7519). `null` once the
+   * record can no longer be trusted positionally — see
+   * {@link noteReplayMessagesUpdate}.
+   *
+   * On the BASELINE record and not on {@link ReplayWindow} itself, for a
+   * lifetime reason that is load-bearing rather than tidy: `reconcileReplayEnd`
+   * calls `closeReplayWindow` — which DELETES the window record — three
+   * statements before it reads `_rebuildBaseline` and performs the swap. The
+   * two maps hold the SAME object (`ReplayWindow.baseline` is shared, never
+   * copied), so provenance parked here is still readable at the one moment the
+   * swap needs it, and is still dropped by all four teardowns because they drop
+   * both maps. A sibling map would have neither property.
+   */
+  appends: ReplayAppend[] | null
+}
+
+/**
+ * ONE append made while a replay window was open — the per-append provenance
+ * the swap orders by (#7519).
+ *
+ * PER-APPEND and POSITIONAL, because #7556 proved an id-keyed SET insufficient:
+ * during a full rebuild `replayDedupCache` is scoped to the appended tail, so a
+ * replayed entry whose id matches a SURVIVING prefix entry is appended as a
+ * second copy, and a membership test then matches the PREFIX copy and cuts at 0
+ * — an identity slice, which is #7477's failure. The record is therefore a
+ * parallel ARRAY, aligned index-for-index with the tail the swap keeps, and
+ * every use of it re-verifies that alignment against the array as it stands
+ * (see {@link provenanceStart}) rather than assuming it.
+ */
+interface ReplayAppend {
+  /**
+   * The appended message's id. Never `null`: an id-less append disables the
+   * whole record instead of recording a hole, on the same reasoning as
+   * {@link snapshotPrefix} — two id-less entries would compare EQUAL in the
+   * alignment check and silently license a wrong re-order.
+   */
+  id: string
+  /**
+   * The `historySeq` the delivering frame carried, or `null` when it carried
+   * none — i.e. when the append was a LIVE arrival.
+   *
+   * The same discriminator {@link noteLivePromptDuringReplay} already runs on,
+   * and for the same reason: `replayHistory` stamps every replayed entry
+   * (ws-history.js `sendHistoryEntry`) and a live broadcast never does. Held as
+   * the seq itself rather than as a boolean because the seq is the server's
+   * authoritative ORDER for history, which is what makes the swap chronological
+   * rather than merely grouped — see {@link orderByProvenance}.
+   */
+  seq: number | null
 }
 
 /** A message's id, or `null` when it has none this module can match on. */
@@ -285,10 +353,10 @@ function snapshotPrefix(messages: readonly unknown[]): RebuildBaseline {
   const prefixIds: string[] = []
   for (const message of messages) {
     const id = idOf(message)
-    if (id === null) return { openLen: messages.length, prefixIds: null }
+    if (id === null) return { openLen: messages.length, prefixIds: null, appends: [] }
     prefixIds.push(id)
   }
-  return { openLen: prefixIds.length, prefixIds }
+  return { openLen: prefixIds.length, prefixIds, appends: [] }
 }
 
 /**
@@ -318,26 +386,27 @@ function snapshotPrefix(messages: readonly unknown[]): RebuildBaseline {
  *     unless the replay re-delivers, at exactly that position, an id from the
  *     removed part of the prefix.
  *
- * KNOWN LIMIT (#7543), pinned rather than left to be discovered. When the
- * surviving prefix runs out and the tail continues the match, the walk marches
- * into the replayed tail and the swap discards it. Measured: `[]` for a
- * whole-prefix-removed window whose ids the replay re-delivers in order, and
- * `['c']` — the cut moved by ZERO after two removals — for the
- * splice-then-re-append shape. `main` returns those same two values, so this is
- * the #7524 symptom in a shape identity cannot reach, not something identity
- * broke. Because `replayHistory` re-delivers oldest-first, a prefix entry
- * surviving at the front normally blocks it (the oldest id is already consumed,
- * so it cannot match a later one) — normally, not always: a server-side trim can
- * make the tail begin at a LATER prefix id, which does continue the match.
+ * WHAT THIS FUNCTION STILL CANNOT DO (#7543), unchanged and stated here because
+ * its CALLER is where the answer lives. When the surviving prefix runs out and
+ * the tail continues the match, the walk marches into the replayed tail and
+ * would have the swap discard it. Measured: `[]` for a whole-prefix-removed
+ * window whose ids the replay re-delivers in order, and `['c']` — the cut moved
+ * by ZERO after two removals — for the splice-then-re-append shape. `main`
+ * returns those same two values, so this is the #7524 symptom in a shape
+ * identity cannot reach, not something identity broke. Because `replayHistory`
+ * re-delivers oldest-first, a prefix entry surviving at the front normally
+ * blocks it (the oldest id is already consumed, so it cannot match a later one)
+ * — normally, not always: a server-side trim can make the tail begin at a LATER
+ * prefix id, which does continue the match.
  *
  * Not "no id-based fix has been found" — no such fix EXISTS, and that is pinned
- * rather than argued: `#7543 is UNDECIDABLE from the ids alone` builds the
- * legitimate empty replay (prefix intact, history trimmed to nothing, correct
- * swap `[]`) beside the degenerate one (prefix removed, same ids re-delivered,
- * correct swap `[a, b]`) and asserts they present this function the SAME id
- * sequence against the SAME `prefixIds`. Since `idOf` is the only reader this
- * module has of a message, any resolution that returns the replayed set for the
- * second returns it for the first too and breaks
+ * rather than argued: `#7543 is undecidable from the IDS, and DECIDED by the
+ * provenance` builds the legitimate empty replay (prefix intact, history trimmed
+ * to nothing, correct swap `[]`) beside the degenerate one (prefix removed, same
+ * ids re-delivered, correct swap `[a, b]`) and asserts they present this
+ * function the SAME id sequence against the SAME `prefixIds`. Since `idOf` is
+ * the only reader this module has of a message, any resolution HERE that returns
+ * the replayed set for the second returns it for the first too and breaks
  * `empty replay (baseline at end) swaps to []` in the same motion — which is
  * what rules out the three shapes reviewed for #7543 (a degenerate-outcome
  * guard, an `openLen`-bounded fallback, a survivor anchor). Object identity is
@@ -345,9 +414,15 @@ function snapshotPrefix(messages: readonly unknown[]): RebuildBaseline {
  * object (`finalizeThinkingStreams`, `peelSlotContent`, every tool_result patch
  * — all `{ ...m, … }`), so an identity walk stalls at the first patched prefix
  * entry and collapses the cut to an identity slice, i.e. #7477's failure on a
- * much more reachable path. What is left is the same conclusion #7519 reaches:
- * provenance per append, `historySeq` present ⇒ replayed, reported by the call
- * sites.
+ * much more reachable path.
+ *
+ * So the missing input was never in this function's arguments, and #7519 supplied
+ * it from outside them: per-append provenance ({@link ReplayAppend}), which knows
+ * the empty replay appended NOTHING and the degenerate one appended two. The cut
+ * both callers use is {@link resolveCut}, which takes the smaller of this walk
+ * and `messages.length - appends.length`. Leave THIS function strict — a walk
+ * that tried to guess its way out of the above is the thing the pin refuses, and
+ * it would still be wrong.
  *
  * Strict rather than a search-ahead for a MEASURED reason, then, and not an
  * absolute one: a walk allowed to scan forward makes that limit the NORMAL case
@@ -381,6 +456,117 @@ function resolveBaselineIndex(baseline: RebuildBaseline, messages: readonly unkn
     if (idOf(messages[cut]) === prefixId) cut += 1
   }
   return cut
+}
+
+/**
+ * Where the recorded appends BEGIN in `messages` right now — or `null` when the
+ * record cannot be trusted against this array (#7519).
+ *
+ * The appends are, by construction, the LAST `appends.length` entries: nothing
+ * in this module appends, and {@link noteReplayMessagesUpdate} gives the record
+ * up the moment an update disturbs that shape. "By construction" is not a
+ * licence to assume it, though — the record is written by call sites this module
+ * does not control and cannot enumerate, so every use re-verifies the whole run
+ * positionally, id by id, and returns `null` on the first disagreement.
+ *
+ * That verification is the mechanism's load-bearing guard, not a belt-and-braces
+ * extra. A provenance array that has DRIFTED by one position describes each tail
+ * entry with its neighbour's provenance, so the swap would reorder against a
+ * lie — silently, and in exactly the direction that looks like a fix. Everything
+ * downstream is gated on this returning non-null, so a drift degrades to the
+ * pre-#7519 behaviour (array order, walk-resolved cut) instead.
+ */
+function provenanceStart(baseline: RebuildBaseline, messages: readonly unknown[]): number | null {
+  const { appends } = baseline
+  if (appends === null) return null
+  const start = messages.length - appends.length
+  if (start < 0) return null
+  for (let i = 0; i < appends.length; i++) {
+    const append = appends[i]
+    if (append === undefined || idOf(messages[start + i]) !== append.id) return null
+  }
+  return start
+}
+
+/**
+ * Where the deferred swap (and the dedup cache, which must be the SAME number —
+ * see {@link replayDedupCache}) cuts `messages` right now.
+ *
+ * Two independent resolutions of the same question, and the SMALLER wins:
+ *
+ *   - the id walk ({@link resolveBaselineIndex}), which knows what the prefix
+ *     was, and
+ *   - the provenance run, which knows how many entries this window APPENDED —
+ *     and everything a window appended is, by definition, past the prefix.
+ *
+ * `Math.min` and not the provenance number alone, because the record is allowed
+ * to UNDER-count: an append made by a path that does not route through
+ * {@link noteReplayMessagesUpdate} is simply absent from it. Taking the minimum
+ * makes an under-count cost only the improvement — the cut can never move LATER
+ * than the walk already put it, so no entry this module used to keep can be
+ * dropped by provenance being incomplete. Over-counting cannot survive
+ * {@link provenanceStart}'s alignment check, which returns `null` and takes the
+ * walk unmodified.
+ *
+ * The provenance side is what closes #7543. That issue's degenerate case (whole
+ * prefix removed, the replay re-delivering its ids) and the legitimate empty
+ * replay beside it present the WALK identical inputs — proven, not asserted, and
+ * that proof is why an id-only fix was refused. They do not present the same
+ * inputs here: the empty replay recorded ZERO appends and the degenerate one
+ * recorded two, so `messages.length - appends.length` is `2` for the first and
+ * `0` for the second while the walk says `2` for both.
+ */
+function resolveCut(baseline: RebuildBaseline, messages: readonly unknown[]): number {
+  const walk = resolveBaselineIndex(baseline, messages)
+  const start = provenanceStart(baseline, messages)
+  return start === null ? walk : Math.min(walk, start)
+}
+
+/**
+ * The swapped tail, in CHRONOLOGICAL order rather than in array order (#7519).
+ *
+ * `tail[i]` is described by `appends[i]` — the caller has already established
+ * that via {@link provenanceStart}. The order is then:
+ *
+ *   1. everything the replay DELIVERED, sorted by `historySeq` — the server's
+ *      own monotonic per-session order, so this is history's true chronology and
+ *      not merely the order the frames happened to arrive in, then
+ *   2. everything that arrived LIVE, in arrival order.
+ *
+ * Sorting the replayed half is what makes the transformation correct rather than
+ * just different, and it is the whole reason the provenance holds the seq rather
+ * than a boolean. On #7519's worked example a mere replayed/live PARTITION
+ * yields `['d-1','old','racer']` — the delta replayed 'd-1' before the nested
+ * full rebuild re-delivered the older 'old', so delivery order is not history
+ * order — where the seqs put it back to `['old','d-1','racer']`.
+ *
+ * Live LAST, and stated as the assumption it is: a live broadcast is emitted as
+ * the event happens, so it is newer than any history entry the same window is
+ * replaying. The one way that could be false is a replay delivering an entry
+ * recorded AFTER a live arrival — and such an entry is one the client already
+ * holds from that live broadcast, so `replayDedupCache` suppresses it and it is
+ * never appended at all.
+ *
+ * A live entry with no seq to sort by keeps its arrival order; a replayed entry
+ * whose frame carried no seq is indistinguishable from a live one HERE by
+ * construction (that absence is the discriminator) and sorts with the live half.
+ */
+function orderByProvenance<T>(tail: readonly T[], appends: readonly ReplayAppend[]): T[] {
+  const replayed: { index: number; seq: number }[] = []
+  const arrivedLive: number[] = []
+  for (let i = 0; i < appends.length; i++) {
+    const seq = appends[i]?.seq ?? null
+    if (seq === null) arrivedLive.push(i)
+    else replayed.push({ index: i, seq })
+  }
+  // Explicit index tiebreak rather than a bare comparator leaning on V8's stable
+  // sort: equal seqs (and a re-delivered duplicate the dedup let through) then
+  // keep delivery order by the comparator's own terms, not by the engine's.
+  replayed.sort((a, b) => a.seq - b.seq || a.index - b.index)
+  const out: T[] = []
+  for (const { index } of replayed) out.push(tail[index] as T)
+  for (const index of arrivedLive) out.push(tail[index] as T)
+  return out
 }
 
 /**
@@ -478,6 +664,10 @@ export function resetReplayReconcile(opts: { clearCursors?: boolean } = {}): voi
   _replayWindowOpen.clear()
   _liveDuringReplay.clear()
   _sweepableLedger = null
+  // #7519 — the frame scope is per-connection state too. `endReplayFrame`'s
+  // `finally` is the normal clear; this covers a teardown that lands with a
+  // dispatch still on the stack.
+  _currentFrameSeq = null
   if (opts.clearCursors) _historyCursors.clear()
 }
 
@@ -587,10 +777,15 @@ export function reconcileReplayStart(
     // when a DELTA did, and this start's own view then counts a live racer that
     // arrived during the delta straight into the discarded prefix.
     //
-    // The window's record is SHARED, not copied: it is never mutated, and the
-    // two maps are cleared independently on paths that must not clear the other
-    // (`closeReplayWindow` at the last end drops the window while the swap
-    // still needs the baseline, three statements later in `reconcileReplayEnd`).
+    // The window's record is SHARED, not copied, and since #7519 that is
+    // load-bearing rather than merely economical: `noteReplayMessagesUpdate`
+    // writes the append provenance onto THIS object through the window map,
+    // while `reconcileReplayEnd` reads it back through `_rebuildBaseline` —
+    // three statements after `closeReplayWindow` has dropped the window. One
+    // object is what makes those the same record. (`openLen` and `prefixIds`
+    // are still never mutated; `appends` is, in place, and only here.) The two
+    // maps are otherwise cleared independently, on paths that must not clear
+    // the other — which is exactly that `closeReplayWindow`-then-swap order.
     if (!_rebuildBaseline.has(sessionId)) {
       _rebuildBaseline.set(sessionId, replayWindow.baseline)
     }
@@ -631,8 +826,182 @@ export function replayDedupCache<T>(
   // moves both together; scoping the dedup cache and the swap differently is
   // how a replayed entry gets suppressed by a prefix that is about to be
   // discarded (the hazard the paragraph above is about).
-  if (baseline) return messages.slice(resolveBaselineIndex(baseline, messages))
+  if (baseline) return messages.slice(resolveCut(baseline, messages))
   return messages
+}
+
+// ---------------------------------------------------------------------------
+// #7519 — per-append provenance: which of the tail's entries the replay
+// DELIVERED, and which arrived live while it streamed
+// ---------------------------------------------------------------------------
+
+/**
+ * The `historySeq` of the frame currently being dispatched, or `null` outside a
+ * frame and for any frame that carried none — i.e. for a LIVE broadcast.
+ *
+ * A module-level current-frame slot rather than a parameter threaded through
+ * every append, because the append sites are not a list this module can hold:
+ * the two clients append session messages from ~22 places between them and the
+ * shared dispatch table adds more. The #7524 doc one screen up spells out why a
+ * per-call-site notification is the wrong shape — "correct only for the
+ * mutations someone remembered to wire it to, and the next one lands silently"
+ * — so the wiring is instead ONE observation point per client
+ * ({@link noteReplayMessagesUpdate}, hooked into each `updateSession`) plus this
+ * one frame scope, and a handler added tomorrow is covered without being told.
+ *
+ * Cleared by {@link endReplayFrame} in a `finally`, and that is load-bearing: a
+ * seq left set past the dispatch would stamp REPLAYED on the very next
+ * store-driven append, and the nearest such append is the optimistic user
+ * bubble a person types mid-replay — the live racer this whole family of issues
+ * exists to protect.
+ */
+let _currentFrameSeq: number | null = null
+
+/**
+ * Defensive cap on ONE window's provenance record, in the same shape as
+ * {@link MAX_LIVE_REPLAY_LEDGERS} and for the same reason: the array grows by
+ * one per append for as long as the window is open, and the module already
+ * documents (at {@link _rebuildBaseline}) that a `history_replay_start` with no
+ * matching end strands the window open.
+ *
+ * Comfortably above any real replay — the server's ring is capped at
+ * `maxMessages` (default 1000) and overlapping replays deliver at most a couple
+ * of those — so reaching it means something is wrong rather than something is
+ * big. Over the cap the record is DROPPED rather than truncated: a truncated
+ * array is positionally wrong, which is the one state this mechanism must never
+ * be in, whereas dropping it degrades to the documented pre-#7519 behaviour.
+ */
+export const MAX_REPLAY_APPEND_PROVENANCE = 2048
+
+/**
+ * Read the frame's `historySeq`, which is the whole liveness discriminator: the
+ * server stamps every replayed entry (`sendHistoryEntry`, ws-history.js) and a
+ * live broadcast never carries one.
+ *
+ * One reader, here, so the two clients cannot drift on it — the reason
+ * {@link beginReplayFrame} takes the raw frame rather than a boolean the caller
+ * derived. `noteLivePromptDuringReplay`'s "the CALLER decides liveness" is the
+ * older shape and stays as it is; it is asked about ONE message it already
+ * holds, whereas this is asked about every append a frame happens to cause.
+ */
+function frameSeqOf(frame: unknown): number | null {
+  if (typeof frame !== 'object' || frame === null) return null
+  const seq = (frame as { historySeq?: unknown }).historySeq
+  // The SAME validity rule `recordHistorySeq` applies, deliberately: a value it
+  // would refuse to advance the cursor with must not be trusted to order the
+  // transcript either, and two different notions of "a valid seq" in one module
+  // is a drift waiting to happen. An invalid one falls to `null`, i.e. LIVE,
+  // which is the conservative direction — a mis-classified replayed entry sorts
+  // late, while a mis-classified LIVE one would be hoisted into history and
+  // that is the racer these issues exist to protect.
+  if (typeof seq !== 'number' || !Number.isFinite(seq) || seq < 0) return null
+  return seq
+}
+
+/**
+ * Open the provenance scope for one dispatched wire frame (#7519). Pass the RAW
+ * frame; the discriminator is read here so both clients read it identically.
+ *
+ * MUST be paired with {@link endReplayFrame} in a `finally` — see
+ * `_currentFrameSeq` for what a leaked scope mislabels.
+ */
+export function beginReplayFrame(frame: unknown): void {
+  _currentFrameSeq = frameSeqOf(frame)
+}
+
+/** Close the provenance scope opened by {@link beginReplayFrame}. */
+export function endReplayFrame(): void {
+  _currentFrameSeq = null
+}
+
+/**
+ * Observe one mutation of a session's `messages` and record the provenance of
+ * anything it APPENDED (#7519).
+ *
+ * Hooked into each client's `updateSession` — the single funnel every session
+ * message write already goes through, including the shared dispatch table's,
+ * which reaches it via the store adapter. A no-op (one Map lookup) for a session
+ * with no replay window open, which is every session almost all of the time.
+ *
+ * Three shapes, and only the third loses the record:
+ *
+ *   - APPENDED at the end (the ordinary case, whatever produced it) — the new
+ *     entries are recorded against the frame currently in scope.
+ *   - the recorded run is still the array's tail, nothing added — a patch in
+ *     place (`tool_result`, `finalizeThinkingStreams`) or a REMOVAL that landed
+ *     in the prefix. Kept: `sendInterrupt` dropping every queued bubble
+ *     mid-window is exactly this, and it is #7543's own shape, so giving up
+ *     here would give up the case the record exists to decide.
+ *   - anything else — a reorder, an insert, a removal from inside the recorded
+ *     run, a filtered append. The parallel array can no longer be aligned with
+ *     the tail, so it is dropped and the swap reverts to its pre-#7519
+ *     behaviour for the rest of the window.
+ *
+ * The check is the cheap ANCHOR — the most recent recorded append must still sit
+ * where an untouched run would put it — and not the whole run, deliberately: the
+ * full positional verification runs once at the swap ({@link provenanceStart}),
+ * where it is the guard, rather than once per append, where it would be O(n) per
+ * frame. Anything this admits is caught there and degrades to array order; the
+ * anchor's job is only to keep the common cases cheap and the record honest.
+ */
+export function noteReplayMessagesUpdate(
+  sessionId: string | null | undefined,
+  before: readonly unknown[],
+  after: readonly unknown[],
+): void {
+  if (!sessionId) return
+  const replayWindow = _replayWindowOpen.get(sessionId)
+  if (!replayWindow) return
+  const baseline = replayWindow.baseline
+  const appends = baseline.appends
+  if (appends === null) return
+  const n = appends.length
+  const anchorId = n === 0 ? null : (appends[n - 1] as ReplayAppend).id
+  const anchoredAt = (index: number): boolean =>
+    anchorId === null || (index >= 0 && index < after.length && idOf(after[index]) === anchorId)
+  if (after.length >= before.length && anchoredAt(before.length - 1)) {
+    for (let i = before.length; i < after.length; i++) {
+      const id = idOf(after[i])
+      // The same bail as `snapshotPrefix`, for the same reason: a hole would
+      // compare EQUAL to any other hole in the alignment check and license a
+      // re-order nothing verified.
+      if (id === null) {
+        baseline.appends = null
+        return
+      }
+      appends.push({ id, seq: _currentFrameSeq })
+      if (appends.length > MAX_REPLAY_APPEND_PROVENANCE) {
+        baseline.appends = null
+        // Loud, and exactly once per window by construction (the record is gone
+        // after this). Benign on its own — the swap falls back to array order —
+        // but it can only be reached by a window that never closed, which is
+        // not benign at all.
+        console.warn(
+          `[replay-reconcile] append-provenance cap of ${MAX_REPLAY_APPEND_PROVENANCE} exceeded ` +
+            `for session "${sessionId}" (#7519) — the replay swap falls back to array order for ` +
+            `this window. A window this long-lived is itself the bug to chase.`,
+        )
+        return
+      }
+    }
+    return
+  }
+  if (anchoredAt(after.length - 1)) return
+  baseline.appends = null
+}
+
+/**
+ * The provenance recorded for a session's open (or just-closed-and-not-yet-
+ * swapped) window — testing / diagnostics. `null` when there is no record, or
+ * when one was dropped as un-alignable.
+ */
+export function getReplayAppendProvenance(
+  sessionId: string | null | undefined,
+): readonly { id: string; seq: number | null }[] | null {
+  if (!sessionId) return null
+  const baseline = _replayWindowOpen.get(sessionId)?.baseline ?? _rebuildBaseline.get(sessionId)
+  const appends = baseline?.appends
+  return appends ? appends.map((a) => ({ ...a })) : null
 }
 
 /**
@@ -684,7 +1053,17 @@ export function reconcileReplayEnd(
   // moves it instead of shifting the whole tail. A prefix still wholly present
   // and nothing appended yields [] (a session that genuinely had no replayed
   // entries, e.g. server-side trim to empty).
-  return { swappedMessages: messages.slice(resolveBaselineIndex(baseline, messages)) }
+  const cut = resolveCut(baseline, messages)
+  const tail = messages.slice(cut)
+  // #7519 — order the tail by PROVENANCE when the record aligns with it exactly
+  // (`cut === start` is that: the kept tail and the recorded appends are the
+  // same run). An under-counted record leaves `start` past the cut and the tail
+  // is returned in array order, which is precisely the pre-#7519 behaviour.
+  const start = provenanceStart(baseline, messages)
+  if (start !== null && start === cut && baseline.appends !== null) {
+    return { swappedMessages: orderByProvenance(tail, baseline.appends) }
+  }
+  return { swappedMessages: tail }
 }
 
 // ---------------------------------------------------------------------------
