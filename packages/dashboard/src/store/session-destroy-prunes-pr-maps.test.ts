@@ -56,10 +56,10 @@
  * exist so that `set({ sessionPrStatus: {} })` — clearing everything, always —
  * cannot pass.
  *
- * Plus a roster guard that classifies every session-keyed-shaped collection on
- * `ConnectionState`, so a new one is red until someone says how it is keyed.
- * See its own docstring below for why the first version of that guard did not
- * work.
+ * Plus a roster guard that classifies every collection-shaped member of
+ * `ConnectionState` — `Record<string, …>`, `Set<string>` and, since #7527,
+ * ARRAYS — so a new one is red until someone says how it is keyed. See its own
+ * docstring below for why the first two versions of that guard did not work.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { readFileSync } from 'fs'
@@ -955,15 +955,43 @@ const SITES: [string, string, string, string][] = [
  * prevent its cousin. A guard certified by a mutant named after its own pattern
  * is testing itself.
  *
+ * ## What the SECOND version got wrong (#7527)
+ *
+ * Making the extraction structural fixed the NAME axis and left a SHAPE axis
+ * that was hand-written: `Record<string, …>` and `Set<string>`, because those
+ * were the two shapes the roster happened to hold. There is a third.
+ * `sessionNotifications: SessionNotification[]` is a session-TAGGED array —
+ * every element carries a required `sessionId`, and connection.ts says out loud
+ * that it "is never pruned on close" — and it is one of TWENTY-FOUR array
+ * members of `ConnectionState` the guard could not see. So the field was
+ * outside the roster in BOTH directions: not cleaned, and not classifiable
+ * (adding it to any bucket turned the stale-allowlist assertion red, because
+ * `declared` did not contain it).
+ *
+ * That is the same defect one axis over — "a hardcoded list next to a set that
+ * grows", `docs/false-safety-guards.md` — and it is the third time this guard's
+ * coverage has been widened under review rather than by a test going red: the
+ * NAME axis in #7481, the SITE axis in #7495, the SHAPE axis here. The
+ * countermeasure is the same each time: derive the axis, then pin the
+ * derivation with a phantom that no bucket names.
+ *
  * ## What it does now: classify-or-fail, red by default
  *
- * The extraction is now STRUCTURAL — every `Record<string, …>` and
- * `Set<string>` field declared on the `ConnectionState` interface, which is the
- * shape a session-keyed collection actually has, with no reliance on what it is
- * called. Each one must appear in exactly one of four buckets below. A field in
- * NONE of them fails `classification`, so a newly-added collection is RED until
- * someone states how it is keyed — `sessionCiChecks` included, whatever it is
- * named.
+ * The extraction is STRUCTURAL over THREE shapes — every `Record<string, …>`,
+ * `Set<string>` and ARRAY member declared on the `ConnectionState` interface,
+ * with no reliance on what any of them is called. Each one must appear in
+ * exactly one of FIVE buckets below. A member in NONE of them fails
+ * `classification`, so a newly-added collection is RED until someone states how
+ * it is keyed — `sessionCiChecks` included, whatever it is named, and
+ * `agentRunLedger: AgentRunRecord[]` included, whatever shape it has.
+ *
+ * The fifth bucket is #7527's: session-TAGGED and deliberately NOT pruned.
+ * `sessionNotifications` needed a home that neither of the two honest existing
+ * ones could give — DEFERRED claims someone will fix it, NOT_SESSION_KEYED
+ * claims the element has no session id — and #7516 had already adjudicated it
+ * as a RECORD that outlives its session on purpose (#7528 gated the
+ * session-jump instead). An entry there must cite the adjudication, exactly as
+ * a deferral must cite its tracking issue.
  *
  * The buckets are visible rather than inferred, because a deferral has to be
  * READABLE: `pendingServerSeed` (#7478) and `cancellingActivityIds` (#7483) sat
@@ -1019,23 +1047,87 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
     'cancellingActivityIds',
   ]
 
-  // -- Bucket 2: session-id-keyed, cleaned by its own code at all four sites. -
-  // `sessionStates` IS the roster the other three sites empty and the set
-  // `removedIds` diffs against; the five above follow it rather than duplicate
-  // it, so it is classified, not asserted against the markers.
-  const SESSION_KEYED_ELSEWHERE = ['sessionStates']
+  // -- Bucket 2: session-scoped, cleaned by its OWN code at all five sites. --
+  // Not "cleaned by the block below" — cleaned by a statement that predates it
+  // and sits OUTSIDE the markers, because these three are what the site is
+  // fundamentally about rather than baggage that has to follow it. A reason per
+  // entry, because #7527 turned a one-name array into three and "you can see
+  // which is which" stopped being true.
+  //
+  // The reason is not decoration: `classification` requires it to be non-empty
+  // and `every SESSION_KEYED_ELSEWHERE entry names where it is cleaned` requires
+  // it to name a site, so a field cannot be parked here with a shrug.
+  const SESSION_KEYED_ELSEWHERE: Record<string, string> = {
+    sessionStates:
+      'IS the roster `removedIds` diffs against, and the thing every site removes FROM: ' +
+      '`delete newStates[id]` at session_list / session_timeout, `sessionStates: {}` at auth_ok ' +
+      '/ forgetSession / _resetSessionMemory. The seven CLEANED collections follow it rather ' +
+      'than duplicate it, so it is classified here and not asserted against the markers (#7470)',
+    // #7527 — an ARRAY member, visible to the extraction for the first time.
+    sessions:
+      'SessionInfo[] — the roster in list form, replaced wholesale by the `session_list` ' +
+      'snapshot, `filter`ed by `session_timeout`, and emptied by `sessions: []` at auth_ok / ' +
+      'forgetSession / _resetSessionMemory (#7527)',
+    // #7527 — an ARRAY member. ChatMessage carries an optional `sessionId`
+    // (#5667), but this array is not a per-session store: the per-session
+    // transcripts live in `sessionStates[id].messages` and this is the ACTIVE
+    // one's flat mirror.
+    messages:
+      "ChatMessage[] — the ACTIVE session's flat mirror of `sessionStates[activeSessionId]" +
+      ".messages`, re-synced from the newly-active session by the flat-field block at " +
+      'session_list / session_timeout and emptied by `messages: []` at auth_ok / forgetSession ' +
+      '/ _resetSessionMemory (#7527)',
+  }
 
   // -- Bucket 3: session-scoped and NOT yet cleaned — tracked, not hidden. ----
-  // EMPTY as of #7478 / #7483: both former entries moved to CLEANED above.
-  // The bucket stays because it is the honest place to park the next one —
-  // #7481's review established that a deferral a reader can SEE beats a
-  // pattern that cannot see the field at all. An entry here needs a tracking
-  // issue in its reason string; the `classification` test below is what makes
-  // adding one the only alternative to fixing the field.
-  const SESSION_KEYED_DEFERRED: Record<string, string> = {}
+  // It was EMPTY between #7478/#7483 and #7527, kept "because it is the honest
+  // place to park the next one". #7527 is the next one, and it is the first
+  // time this bucket has held real entries — which also makes the `#N` contract
+  // below non-vacuous for the first time.
+  //
+  // #7481's review established that a deferral a reader can SEE beats a pattern
+  // that cannot see the field at all. An entry here needs a tracking issue in
+  // its reason string; the `classification` test below is what makes adding one
+  // the only alternative to fixing the field.
+  const SESSION_KEYED_DEFERRED: Record<string, string> = {
+    // #7527 / #7546 — both are ARRAY members, and both are session-scoped by
+    // their OWN code: `switchSession` clears each one on purpose so a previous
+    // session's data is never shown against a new one (`memoryStackEntries`'
+    // declaration in types.ts says exactly that; the `permissionAudit` reset
+    // says "so the panel re-fetches for the new session").
+    //
+    // Two of the five sites move `activeSessionId` WITHOUT going through
+    // `switchSession` — the `session_list` removedIds flat-field block and the
+    // `session_timeout` one — and neither hand-synced list includes these. So
+    // the active session dying re-homes the dashboard onto another session with
+    // the dead one's memory stack and permission audit still on screen.
+    //
+    // Deferred rather than folded because the fix needs a DECISION this guard
+    // cannot make: the clear has to be conditional on the ACTIVE session being
+    // the one that died (an unconditional clear inside the prune block would
+    // blank a panel the operator is reading when an unrelated BACKGROUND
+    // session closes), which means these do not fit CLEANED's "assigned in
+    // every site block" contract at all. #7546 carries it.
+    memoryStackEntries:
+      'MemoryStackEntry[] | null — the active session\'s merged CLAUDE.md stack. `switchSession` ' +
+      'resets it "so a previous session\'s stack is never shown against a new one"; the two ' +
+      'death sites that re-home `activeSessionId` do not. #7546 (#6867)',
+    permissionAudit:
+      'PermissionAuditEntry[] | null — the active session\'s pulled audit (the server filters by ' +
+      'sessionId). `switchSession` resets it "so the panel re-fetches for the new session"; the ' +
+      'two death sites that re-home `activeSessionId` do not. #7546 (#6772)',
+  }
 
   // -- Bucket 4: keyed by something that is not a session id. ----------------
   // Reason quoted from each field's own declaration in types.ts.
+  //
+  // #7527 added the ARRAY members, where "keyed by" has to be read as "what
+  // identifies an element, and does the element carry a session id" — an array
+  // has no key, and the honest question for a session-death roster is whether
+  // destroying a session can strand anything in here. So each array reason
+  // names the element type and the field that identifies it. A member whose
+  // element DOES carry a session id does not belong in this bucket, however
+  // incidental the tagging looks; that is what SESSION_TAGGED_BY_DESIGN is for.
   const NOT_SESSION_KEYED: Record<string, string> = {
     sessionPresetSnapshots: 'keyed by cwd (#5553)',
     reindexingRepoPaths: 'keyed by the repoPath the dashboard sent',
@@ -1066,21 +1158,192 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
     wslActionResults: 'per distro name',
     serverCapabilities: 'keyed by feature name',
     credentialTestResults: 'keyed by credential key',
+
+    // ---- #7527: the ARRAY members. -------------------------------------
+    // Fifteen of the 24. Each element type was READ (not inferred from the
+    // field name) to confirm it carries no session id — the naming inference
+    // is what produced the defect this guard exists to catch, and #7481's
+    // review killed a version of it that guessed from names.
+    serverRegistry:
+      'ServerEntry[] — keyed by `ServerEntry.id` ("Unique ID for this server (stable across ' +
+      'renames)"). A server, not a session; it outlives every connection by design (it is what ' +
+      'the picker is drawn from) and is loaded from localStorage at construction.',
+    pendingPairRequests:
+      'ServerPairPendingMessage[] — keyed by `requestId`. A device-pairing request (deviceName / ' +
+      'verifyCode / expiresAt); the wire schema has no sessionId, and entries are removed on ' +
+      '`pair_resolved` or by TTL (#5510).',
+    availableProviders:
+      'ProviderInfo[] — keyed by `name`. The server\'s provider registry, connection-wide.',
+    availableModels:
+      'ModelInfo[] — keyed by `id` / `fullId`. The server\'s model list, connection-wide.',
+    availablePermissionModes:
+      'PermissionMode[] — keyed by `id`. The server\'s PERMISSION_MODES table, connection-wide ' +
+      '(#4019).',
+    connectedClients:
+      'ConnectedClient[] — keyed by `clientId`. Clients, not sessions; replaced wholesale from ' +
+      'each `auth_ok` / clients broadcast.',
+    serverStartupLogs:
+      'string[] | null — plain lines fetched over Tauri IPC on a startup FAILURE, before any ' +
+      'session exists. No element identity at all, let alone a session one.',
+    webTasks:
+      'WebTask[] — keyed by `taskId`. A web task is not a chroxy session and the type carries no ' +
+      'sessionId; `webTasks` is emptied by disconnect, not by session death.',
+    slashCommands:
+      'SlashCommand[] — keyed by `name`, with a `source` of builtin/project/user/mcp. The ' +
+      'command roster for the connection, replaced wholesale by the server\'s reply.',
+    filePickerFiles:
+      'FilePickerItem[] | null — keyed by `path`. The last `list_files` reply, replaced wholesale ' +
+      'on each pull and null until the first.',
+    mcpResources:
+      'MCPResourceItem[] | null — keyed by `uri`. From the same file_list reply as ' +
+      '`filePickerFiles`; replaced wholesale, empty for non-BYOK sessions (#6823).',
+    customAgents:
+      'CustomAgent[] — keyed by `name`, with a `source` of project/user. Agent definitions on ' +
+      'disk, not per-session state.',
+    conversationHistory:
+      'ConversationSummary[] — keyed by `conversationId`. Past CONVERSATIONS, which are exactly ' +
+      'the thing that outlives the session that wrote them; this is the list you resume FROM.',
+    searchResults:
+      'SearchResult[] — keyed by `conversationId`. The last cross-session search\'s hits, ' +
+      'replaced wholesale per query and cleared by `clearSearch`.',
+    checkpoints:
+      'Checkpoint[] — keyed by `Checkpoint.id`. The server scopes the `list_checkpoints` reply ' +
+      'to the requesting client\'s session and the panel re-pulls, and the element carries no ' +
+      'sessionId — unlike `memoryStackEntries` / `permissionAudit`, nothing in the store claims a ' +
+      'previous session\'s checkpoints must not be shown against a new one.',
+    // The one array member in this bucket whose ELEMENT TYPE could carry a
+    // session id and does not. `ServerError` has an optional `sessionId` and
+    // `serverErrors` (session-tagged, bucket 5) really does set it — but this
+    // field's ONE producer never does, which is a property of the PRODUCER
+    // rather than of the type, so it is pinned by its own test below rather
+    // than asserted here in prose.
+    infoNotifications:
+      'ServerError[] structurally, but host-level notices only ("update available, etc." — last ' +
+      '10). Its only producer, `addInfoNotification(message)`, builds the entry from ' +
+      '{id, category, message, recoverable, timestamp} and never sets `sessionId` — pinned by ' +
+      '`infoNotifications\' only producer never session-tags an entry` below (#7527).',
   }
 
+  // -- Bucket 5: session-TAGGED, and deliberately NOT pruned. ----------------
+  //
+  // #7527. The bucket the array shape needed and the four above could not
+  // express. Every element here carries a session id, so NOT_SESSION_KEYED
+  // would be a lie; nobody is going to "fix" them, so SESSION_KEYED_DEFERRED
+  // would be a lie in the other direction — its contract is "a tracking issue
+  // and someone will fix it". These are RECORDS: history that deliberately
+  // survives the session it describes, and pruning them is the wrong default.
+  //
+  // The reason must state WHY it survives and cite the adjudication (`#N`),
+  // asserted below — same convention as the deferred bucket, for the same
+  // reason: an unsourced "by design" is indistinguishable from an oversight
+  // nobody has looked at yet.
+  const SESSION_TAGGED_BY_DESIGN: Record<string, string> = {
+    // #7516 adjudicated this one deliberately, and #7528 landed the gate it
+    // chose instead. It is the field that made this bucket necessary.
+    sessionNotifications:
+      'SessionNotification[], every element carries a required `sessionId`. The row IS the record ' +
+      'of what happened (#7353) and a "session errored" alert pointing at a now-closed session is ' +
+      'exactly what the operator wants kept, so #7516 gated the session-JUMP at the two ' +
+      'operator-clicked controls (#7528) instead of pruning the history. connection.ts says it ' +
+      'out loud: "`sessionNotifications` is never pruned on close" (#7466). #7516/#7527',
+    serverErrors:
+      'ServerError[] with an optional `sessionId` the wire path really sets ' +
+      '(`handleServerError` reads `serverError.sessionId` and routes on it). The error is usually ' +
+      'the REASON the session died — dropping it with the session would delete the explanation ' +
+      'at the moment it is wanted. Bounded to the last 10 and individually dismissible, so it ' +
+      'cannot grow without limit the way an unpruned Record can. #7527',
+    logEntries:
+      'LogEntry[] with an optional `sessionId` set from the wire (store-core `handleLogEntry`). ' +
+      'The daemon log is a diagnostic record and the entries about a session that just died are ' +
+      'the ones worth reading; the Console page clears it on an explicit action. Bounded to the ' +
+      'last 500. #7527',
+    // A judgment call, and the reason says which way and why — see the PR
+    // table for #7527. It is here rather than in NOT_SESSION_KEYED because the
+    // element genuinely does carry session ids and a reader who found a dead
+    // one in `environments[i].sessions` would be entitled to call that bucket
+    // a lie.
+    environments:
+      'EnvironmentInfo[]; the element is keyed by `id`, but carries `sessions: string[]` — the ' +
+      "server's list of session ids attached to the environment. The client must NOT prune it: " +
+      '`environment_list` replaces the whole array on every change, so the server is the ' +
+      'authority and a client-side prune would fight it and lose on the next broadcast. #7527',
+  }
+
+
   /**
-   * Every `Record<string, …>` / `Set<string>` declared on `ConnectionState`.
+   * Every COLLECTION-shaped member declared on `ConnectionState`, by shape.
+   *
+   * THREE shapes since #7527, not two: `Record<string, …>`, `Set<string>`, and
+   * arrays. The array half was the blind spot #7527 was filed for —
+   * `sessionNotifications: SessionNotification[]` is a session-TAGGED array
+   * that this extraction could not see in either direction, so it was neither
+   * cleaned nor classifiable, and the next session-tagged array would have
+   * joined the store the same way: unclassified, unguarded, and green.
    *
    * Sliced to the interface first: types.ts declares other interfaces with
    * two-space members (`env?: Record<string, string>` on the MCP shapes), and a
    * file-wide match would silently widen the roster with fields that are not
    * store state at all.
+   *
+   * A FUNCTION over an arbitrary source, not an expression over `typesSrc`, so
+   * the phantom-member tests at the bottom of this describe can run the real
+   * extraction against a synthetic interface. That is what turns "a new array
+   * member is red until classified" from a mutant someone ran once into a
+   * permanent cell — the same move the `roster removal sites` describe already
+   * makes for its site detector.
    */
-  const interfaceBody = (() => {
-    const m = /^export interface ConnectionState[\s\S]*?^\}/m.exec(typesSrc)
-    return m ? m[0] : ''
-  })()
-  const declared = [...interfaceBody.matchAll(/^ {2}(\w+)\??: (?:Record<string,|Set<string>)/gm)].map((m) => m[1]!)
+  /** The `ConnectionState` interface body in `src`, or `''` when it is absent. */
+  const sliceInterface = (src: string): string =>
+    (/^export interface ConnectionState[\s\S]*?^\}/m.exec(src) ?? [''])[0]!
+
+  function declaredMembers(src: string): { recordSet: string[]; array: string[]; all: string[] } {
+    const body = sliceInterface(src)
+    const recordSet = [...body.matchAll(/^ {2}(\w+)\??: (?:Record<string,|Set<string>)/gm)].map((x) => x[1]!)
+    // The array shape. Seven FUNCTION members are declared on this interface and
+    // every one of them has a `[]` inside its parameter list
+    // (`requestGitStage: (paths: string[]) => boolean;`), so "contains `[]`" is
+    // not the test — a version of this that reported those seven as
+    // unclassified collections would be noise someone silences by widening a
+    // bucket to admit them.
+    //
+    // TWO things exclude them, and this comment names both because the first
+    // draft named a third that did nothing. Measured: the draft was anchored
+    // `…\[\](?: \| null)?;$` and claimed the end-of-line anchor was what
+    // separated function members; deleting that anchor as a mutant killed
+    // NOTHING (119/119 green), because:
+    //
+    //   1. The type HEAD is anchored immediately after `: `. A function
+    //      member's head is a parameter list, and `[]` never follows its
+    //      closing paren — `(paths: string[])` is followed by ` => boolean`.
+    //      This is what actually does the work.
+    //   2. `(?!.*=>)` rejects any member whose declaration contains `=>` at
+    //      all. Belt-and-braces for the parenthesised-union alternative, which
+    //      is genuinely fooled by a parenthesised type inside a parameter list:
+    //      `(a: (b)[]) => void` reads as `(…)[]` to rule 1 alone. Contrived,
+    //      but it is the one input where the exclusion has behaviour, so it is
+    //      the input `covers arrays without swallowing function-typed members`
+    //      feeds it.
+    //
+    // The end anchor is GONE rather than kept as harmless: it cost two real
+    // cases (a member with a trailing `// comment`, and `Foo[] | Bar[]`) for a
+    // protection it did not provide. Both are pinned in
+    // `covers the array spellings a real member is written in` below, so
+    // re-adding it turns that cell red.
+    const array = [
+      ...body.matchAll(/^ {2}(\w+)\??: (?!.*=>)(?:readonly )?(?:Array<[^<>]*>|(?:\w+(?:<[^<>]*>)?|\([^)]*\))\[\])/gm),
+    ].map((x) => x[1]!)
+    // Deduped: a member could in principle match BOTH shapes (an array OF
+    // records, `Record<string, X>[]`). None is declared today; if one lands it
+    // is one member needing one bucket, not two entries needing two.
+    return { recordSet, array, all: [...new Set([...recordSet, ...array])] }
+  }
+
+  // One derivation of the slice, used by both the extraction and the
+  // declaration-text assertions below. It was two identical regexes until the
+  // #7527 refactor; the copy is always the convenient thing to write and always
+  // the one that drifts.
+  const interfaceBody = sliceInterface(typesSrc)
+  const { recordSet: declaredRecordSet, array: declaredArray, all: declared } = declaredMembers(typesSrc)
 
   it('control: the structural extraction is non-vacuous and sees the known fields', () => {
     // Guards the guard. If the interface slice or the member pattern stops
@@ -1100,11 +1363,43 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
       'sessionPresetSnapshots',
       'resolvedPermissions',
       'reindexingRepoPaths',
+      // #7527 — an ARRAY member in the floor, one per bucket, so a regression
+      // that drops the array half of the extraction fails HERE and not only in
+      // `classification`. Without these the whole array shape could stop
+      // matching and every array member would simply vanish from `declared` —
+      // which reads as green, because an unclassified member that is never
+      // extracted is never unclassified.
+      'sessions',                // SESSION_KEYED_ELSEWHERE
+      'memoryStackEntries',      // SESSION_KEYED_DEFERRED
+      'sessionNotifications',    // SESSION_TAGGED_BY_DESIGN
+      'checkpoints',             // NOT_SESSION_KEYED
     ]))
     // Both shapes are represented in what the site blocks are checked against,
     // so `[site] cleans up X` cannot be a Records-only guard by accident.
     expect(CLEANED).toContain('pendingServerSeed')
     expect(CLEANED).toContain('cancellingActivityIds')
+  })
+
+  it('control: each of the THREE shapes is extracted, and neither half can go quiet', () => {
+    // The per-shape non-vacuity the combined `declared` cannot give. A floor on
+    // the union is satisfiable by one shape alone: 37 Record/Set members would
+    // clear a `>= 30` union floor with the array pattern matching nothing at
+    // all. So each half gets its own floor and its own named members.
+    //
+    // Both floors are loose (the roster grows in both directions); what they
+    // pin is that the half is ALIVE.
+    expect(declaredRecordSet.length, 'the Record/Set half of the extraction matched nothing')
+      .toBeGreaterThanOrEqual(30)
+    expect(declaredArray.length, 'the ARRAY half of the extraction matched nothing (#7527)')
+      .toBeGreaterThanOrEqual(20)
+    expect(declaredRecordSet).toEqual(expect.arrayContaining(['sessionStates', 'cancellingActivityIds']))
+    expect(declaredArray).toEqual(expect.arrayContaining(['sessions', 'sessionNotifications']))
+    // And the halves are disjoint in fact, so `declared`'s dedupe is not
+    // quietly hiding a member classified once and counted twice.
+    expect(
+      declaredArray.filter((f) => declaredRecordSet.includes(f)),
+      'member(s) matched by BOTH shape patterns — check the array regex is not eating a Record',
+    ).toEqual([])
   })
 
   it('classification: every session-keyed-shaped collection is in exactly one bucket', () => {
@@ -1113,16 +1408,20 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
     // mutant that survived the name-prefix version, fails here by name.
     const classified = new Set([
       ...CLEANED,
-      ...SESSION_KEYED_ELSEWHERE,
+      ...Object.keys(SESSION_KEYED_ELSEWHERE),
       ...Object.keys(SESSION_KEYED_DEFERRED),
+      ...Object.keys(SESSION_TAGGED_BY_DESIGN),
       ...Object.keys(NOT_SESSION_KEYED),
     ])
     const unclassified = declared.filter((f) => !classified.has(f))
     expect(
       unclassified,
-      'new session-keyed-shaped field(s) on ConnectionState. Add each to CLEANED (and to all four ' +
-      'site blocks), to SESSION_KEYED_DEFERRED with a tracking issue, or to NOT_SESSION_KEYED with ' +
-      'the key it is actually keyed by — quoted from its declaration, not inferred from its name.',
+      'new collection-shaped field(s) on ConnectionState — Record, Set or ARRAY (#7527). Add each ' +
+      'to CLEANED (and to all five site blocks), to SESSION_KEYED_ELSEWHERE naming the site that ' +
+      'already cleans it, to SESSION_KEYED_DEFERRED with a tracking issue, to ' +
+      'SESSION_TAGGED_BY_DESIGN with the adjudication that says why it must SURVIVE the session, ' +
+      'or to NOT_SESSION_KEYED with the key it is actually keyed by — quoted from its ' +
+      'declaration, not inferred from its name.',
     ).toEqual([])
 
     // And the reverse: a bucket entry for a field that no longer exists is a
@@ -1141,8 +1440,9 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
     // more than its code checks is the exact class this guard exists for.
     const allEntries = [
       ...CLEANED,
-      ...SESSION_KEYED_ELSEWHERE,
+      ...Object.keys(SESSION_KEYED_ELSEWHERE),
       ...Object.keys(SESSION_KEYED_DEFERRED),
+      ...Object.keys(SESSION_TAGGED_BY_DESIGN),
       ...Object.keys(NOT_SESSION_KEYED),
     ]
     const seen = new Set<string>()
@@ -1150,44 +1450,38 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
     expect(duplicated, 'field(s) classified into more than one bucket').toEqual([])
   })
 
-  it('#7516/#7527 — the extraction covers TWO shapes; the array shape is out of reach', () => {
-    // Stated here because #7516 had to make a roster decision this guard cannot
-    // hold, and an undocumented gap is the thing this guard exists to prevent.
+  it('#7527 — the extraction covers THREE shapes, and sessionNotifications is classified', () => {
+    // RETIRES the `#7516/#7527 — the array shape is out of reach` cell that
+    // stood here. That cell was the honest marker for a gap: it asserted
+    // `declared` did NOT contain `sessionNotifications`, and its own comment
+    // said it "goes red the moment someone widens the extraction, which is when
+    // the note above stops being true". Widening it is what this change does,
+    // so the marker was replaced by the real classification in the same commit
+    // rather than deleted or relaxed — measured red first: the widening alone,
+    // with no bucket work, failed exactly the two cells the marker predicted
+    // (`classification` + this one), 2 failed / 110.
     //
-    // `sessionNotifications` is a session-TAGGED array: every element carries a
-    // `sessionId`, and connection.ts:3899 already notes it "is never pruned on
-    // close". #7516 adjudicated that DELIBERATELY — the row is the record of
-    // what happened (#7353), and a "session errored" alert pointing at a closed
-    // session is exactly what the operator wants kept. #7516 gates the JUMP
-    // instead, at the two operator-clicked controls.
-    //
-    // That decision cannot be written into a bucket: `declared` matches only
-    // `Record<string, …>` and `Set<string>` members, so the field is not in it,
-    // and the `classification` cell above turns RED on any bucket entry naming
-    // it — its stale-allowlist half asserts `classified` minus `declared` is
-    // empty. Measured, not theorised: adding
-    // `sessionNotifications: '…'` to NOT_SESSION_KEYED fails `classification`
-    // (1 failed / 110), and widening the extraction to arrays fails THIS cell
-    // plus `classification` (2 failed / 110). Both directions are red, which is
-    // why the gap is a note rather than a bucket.
-    //
-    // Widening the extraction to arrays means classifying all 24 array members
-    // of ConnectionState and adding a fifth bucket for "session-tagged, not
-    // pruned BY DESIGN" — a real piece of work, tracked in #7527 rather than
-    // folded into a UI fix. This cell is the honest marker in the meantime: it
-    // goes red the moment someone widens the extraction, which is when the note
-    // above stops being true.
+    // What replaces it is the positive form of the same claim, which the marker
+    // could not state: the field IS extracted, and it IS classified — into the
+    // bucket #7516 adjudicated it into.
+    expect(declared, 'the array shape stopped being extracted (#7527)').toContain('sessionNotifications')
+    expect(declaredArray, 'sessionNotifications must come from the ARRAY half').toContain('sessionNotifications')
     expect(
-      declared,
-      'the extraction now sees an array-shaped member. Widening it is #7527: ' +
-      'classify all 24 array members of ConnectionState first, and add the ' +
-      '"session-tagged, deliberately NOT pruned" bucket this field needs — it is ' +
-      'neither DEFERRED (nobody will fix it) nor NOT_SESSION_KEYED (that would be a lie).',
-    ).not.toContain('sessionNotifications')
-    // Non-vacuous: the field really is declared on the interface, in the shape
-    // the pattern cannot see. Without this the assertion above would also pass
-    // if the field were renamed or deleted.
+      Object.keys(SESSION_TAGGED_BY_DESIGN),
+      'sessionNotifications belongs in the session-tagged-BY-DESIGN bucket: #7516 decided the ' +
+      'alert OUTLIVES its session on purpose (the row is the record of what happened, #7353) and ' +
+      'gated the session-jump instead (#7528). DEFERRED would claim someone will prune it; ' +
+      'NOT_SESSION_KEYED would claim the element has no sessionId, and it has a required one.',
+    ).toContain('sessionNotifications')
+    // Non-vacuous, in the shape and at the declaration the classification is
+    // ABOUT. Without this, every assertion above would still pass if the field
+    // were renamed, or its type changed to something that is not an array of
+    // session-tagged records at all.
     expect(/^ {2}sessionNotifications\??: SessionNotification\[\];/m.test(interfaceBody)).toBe(true)
+    expect(/^ {2}sessionId: string;/m.test(
+      (/^export interface SessionNotification[\s\S]*?^\}/m.exec(typesSrc) ?? [''])[0],
+    ), 'SessionNotification must still carry a REQUIRED sessionId, or the bucket is the wrong one')
+      .toBe(true)
   })
 
   it('every DEFERRED entry names a tracking issue', () => {
@@ -1207,6 +1501,207 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
         `SESSION_KEYED_DEFERRED.${field} must cite a tracking issue (#N) in its reason`,
       ).toMatch(/#\d+/)
     }
+  })
+
+  it('every SESSION_TAGGED_BY_DESIGN entry names the adjudication that made it by-design', () => {
+    // #7527. Same contract as the deferred bucket, for the opposite claim and
+    // the same reason: "by design" with no pointer is indistinguishable from
+    // "nobody has looked at this", and this bucket's whole job is to be the
+    // place a DECISION is written down. An entry here says a session-tagged
+    // collection deliberately survives the session — that is exactly the kind
+    // of assertion a later reader must be able to check against a record.
+    //
+    // Not vacuous: the bucket has four entries.
+    expect(Object.keys(SESSION_TAGGED_BY_DESIGN).length).toBeGreaterThan(0)
+    for (const [field, reason] of Object.entries(SESSION_TAGGED_BY_DESIGN)) {
+      expect(
+        reason,
+        `SESSION_TAGGED_BY_DESIGN.${field} must cite the adjudication (#N) that decided it survives`,
+      ).toMatch(/#\d+/)
+    }
+  })
+
+  it('every SESSION_KEYED_ELSEWHERE entry names where it is cleaned', () => {
+    // #7527. This bucket used to be a bare `['sessionStates']` with the reason
+    // in a comment above it, which was fine for one member and stopped being
+    // fine at three. Its claim — "cleaned by its own code at all five sites" —
+    // is the one claim in this file that nothing checks mechanically, because
+    // the cleaning happens OUTSIDE the `#7470` markers the per-cell matrix
+    // slices to. So the reason must at least NAME a site, which is what makes
+    // the claim falsifiable by a reader.
+    const SITE_WORDS = SITES.map(([site]) => site.split(' ')[0]!)
+    for (const [field, reason] of Object.entries(SESSION_KEYED_ELSEWHERE)) {
+      expect(reason, `SESSION_KEYED_ELSEWHERE.${field} needs a reason, not an empty string`).not.toBe('')
+      expect(
+        SITE_WORDS.some((w) => reason.includes(w)),
+        `SESSION_KEYED_ELSEWHERE.${field} must name at least one of the five sites ` +
+        `(${SITE_WORDS.join(', ')}) — "cleaned elsewhere" without saying WHERE is an exclusion ` +
+        'nobody can check.',
+      ).toBe(true)
+    }
+  })
+
+  it("infoNotifications' only producer never session-tags an entry", () => {
+    // The one NOT_SESSION_KEYED reason that is a claim about a PRODUCER rather
+    // than about a type, pinned so it cannot rot silently.
+    //
+    // `infoNotifications` is `ServerError[]` — the SAME element type as
+    // `serverErrors`, which is in the session-tagged bucket because its wire
+    // path really does set `sessionId`. The only thing separating them is that
+    // `addInfoNotification` builds its entry by hand and never sets one. If a
+    // session-scoped info notice is ever added, that separation disappears and
+    // the field belongs in SESSION_TAGGED_BY_DESIGN (or gets pruned) — but
+    // nothing about the TYPE would change, so no shape-based guard in this file
+    // would notice. This is the guard that does.
+    //
+    // Anchored to the action's own body, not the file: `sessionId` appears
+    // hundreds of times in connection.ts, so a file-wide grep would be
+    // satisfied by any of them ("source-level guards must be anchored").
+    const start = connectionSrc.indexOf('  addInfoNotification: (message: string) => {')
+    expect(start, 'addInfoNotification must exist in connection.ts').toBeGreaterThan(-1)
+    const end = connectionSrc.indexOf('\n  },', start)
+    expect(end, 'addInfoNotification must have a closing brace').toBeGreaterThan(start)
+    const body = connectionSrc.slice(start, end)
+    // Positive control FIRST: the slice is the right body and is non-empty, so
+    // a negative assertion below cannot pass because `indexOf` drifted.
+    expect(body).toContain('infoNotifications: [...state.infoNotifications, notification]')
+    expect(
+      /sessionId/.test(body),
+      'addInfoNotification now sets a sessionId — infoNotifications is session-tagged and its ' +
+      'NOT_SESSION_KEYED reason is no longer true. Move it to SESSION_TAGGED_BY_DESIGN with the ' +
+      'adjudication, or prune it (#7527).',
+    ).toBe(false)
+  })
+
+  // ---- The extraction's own contract, on synthetic sources (#7527). -------
+  //
+  // The phantom 25th array member, kept as PERMANENT tests rather than run once
+  // as a mutant — the same move the `roster removal sites` describe makes for
+  // its site detector, and for the same reason: a mutant proves the guard was
+  // alive on the day someone ran it, and these prove it is alive on every run.
+  //
+  // #7481's review is the standard being met here. It killed the previous
+  // version of this guard with a mutant named for the DEFECT (`sessionCiChecks`
+  // — a real-looking session-keyed map) rather than for the guard's own
+  // pattern (`sessionPrMutantSixth`), and the renamed mutant survived 38/38 in
+  // silence. So the phantoms below are named for what a real new field would be
+  // called, and the shapes are the ones a real one would have.
+
+  /** A synthetic `ConnectionState` with `members` as its body. */
+  const iface = (members: string[]): string =>
+    ['export interface ConnectionState {', ...members.map((m) => `  ${m}`), '}', ''].join('\n')
+
+  it('sees a phantom 25th array member that no bucket names', () => {
+    // THE cell #7527's acceptance asks for. A session-tagged array added to the
+    // store is RED until someone classifies it — which is the property the old
+    // marker cell could only assert the ABSENCE of.
+    const phantom = iface([
+      'sessionStates: Record<string, SessionState>;',
+      'sessionAgentRuns: AgentRunRecord[];',
+    ])
+    const { array, all } = declaredMembers(phantom)
+    expect(array).toEqual(['sessionAgentRuns'])
+    // …and it reaches `classification` as unclassified, against the REAL
+    // buckets — the half that actually turns the run red.
+    const classified = new Set([
+      ...CLEANED,
+      ...Object.keys(SESSION_KEYED_ELSEWHERE),
+      ...Object.keys(SESSION_KEYED_DEFERRED),
+      ...Object.keys(SESSION_TAGGED_BY_DESIGN),
+      ...Object.keys(NOT_SESSION_KEYED),
+    ])
+    expect(all.filter((f) => !classified.has(f))).toEqual(['sessionAgentRuns'])
+  })
+
+  it('covers arrays without swallowing function-typed members', () => {
+    // The guard's CLAIM, fed exactly what it says it rejects — the failure mode
+    // is not that it misses something but that it reports SEVEN phantom
+    // "unclassified members" that are not collections at all, and someone
+    // silences the noise by widening a bucket to admit them.
+    //
+    // The real function members of ConnectionState, verbatim, PLUS the one
+    // synthetic case that the head anchor alone gets wrong: a parenthesised
+    // type inside a parameter list reads as `(…)[]`. That last line is the only
+    // input in this file where `(?!.*=>)` changes the verdict, so it is the
+    // input that keeps it from being an untestable refinement — deleting the
+    // lookahead turns this cell red and nothing else.
+    const phantom = iface([
+      'checkpoints: Checkpoint[];',
+      'requestGitStage: (paths: string[]) => boolean;',
+      'setPermissionRules: (rules: PermissionRule[]) => void;',
+      'setNotificationPrefsBypassCategories: (categories: string[]) => boolean;',
+      "sendInput: (input: string, wireAttachments?: Attachment[], options?: { isVoice?: boolean }) => 'sent' | false;",
+      'weird: (a: (b)[]) => void;',
+    ])
+    expect(declaredMembers(phantom).array).toEqual(['checkpoints'])
+  })
+
+  it('covers the array spellings a real member is written in', () => {
+    // Optional members, `| null` unions, generic element types, unions in
+    // parens, `Array<…>`, and `readonly`. All but the last two appear in
+    // ConnectionState today; the last two are covered so a future member
+    // written that way is not silently invisible — which is the whole defect
+    // class #7527 is an instance of.
+    const phantom = iface([
+      'a: Foo[];',
+      'b?: Foo[];',
+      'c: Foo[] | null;',
+      'd: Foo<Bar>[];',
+      "e: ('x' | 'y')[];",
+      'f: Array<Foo>;',
+      'g: readonly Foo[];',
+      // The two the first draft's `;$` anchor silently dropped. They are here
+      // so the anchor cannot come back as a tidy-up: both go red if it does.
+      'h: Foo[]; // a trailing comment is not a change of shape',
+      'i: Foo[] | Bar[];',
+    ])
+    expect(declaredMembers(phantom).array).toEqual(['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i'])
+  })
+
+  it('does not read array members off a NEIGHBOURING interface', () => {
+    // The interface slice, asserted rather than assumed. types.ts declares
+    // plenty of other two-space-indented interfaces (the site of the original
+    // `env?: Record<string, string>` hazard), and an array member on one of
+    // them is not store state — extracting it would make `classification`
+    // permanently red on something no bucket should ever name.
+    const phantom = [
+      'export interface ConnectionState {',
+      '  checkpoints: Checkpoint[];',
+      '}',
+      '',
+      'export interface McpServerConfig {',
+      '  args: string[];',
+      '  hosts: HostEntry[];',
+      '}',
+      '',
+    ].join('\n')
+    expect(declaredMembers(phantom).array).toEqual(['checkpoints'])
+  })
+
+  it('control: a bucket that loses an entry turns the phantom cell red', () => {
+    // The positive control for the phantom above, and the "bucket-list
+    // deletion" mutant kept as a cell. Deleting a name from a bucket must make
+    // that member unclassified — if it did not, every bucket entry would be
+    // decoration and the whole classify-or-fail contract would be vacuous.
+    const full = new Set([
+      ...CLEANED,
+      ...Object.keys(SESSION_KEYED_ELSEWHERE),
+      ...Object.keys(SESSION_KEYED_DEFERRED),
+      ...Object.keys(SESSION_TAGGED_BY_DESIGN),
+      ...Object.keys(NOT_SESSION_KEYED),
+    ])
+    const withoutOne = new Set(full)
+    expect(withoutOne.delete('sessionNotifications'), 'the entry must have been there to delete').toBe(true)
+    // The DIFFERENCE the deletion makes, not the absolute unclassified list.
+    // Asserting the list outright would also go red when an unrelated new
+    // member lands unclassified — a second, misleading failure beside the real
+    // one in `classification`, which is the cell that owns that finding.
+    const unclassifiedWithout = declared.filter((f) => !withoutOne.has(f))
+    const unclassifiedFull = declared.filter((f) => !full.has(f))
+    expect(
+      unclassifiedWithout.filter((f) => !unclassifiedFull.includes(f)),
+      'deleting a bucket entry did not make its member unclassified — the buckets are decoration',
+    ).toEqual(['sessionNotifications'])
   })
 
   const CASES: [string, string][] = SITES.flatMap(([site]) => CLEANED.map((f) => [site, f] as [string, string]))
