@@ -89,43 +89,93 @@ REQUIRED_CHECKS=$(node scripts/lib/contributing-roster.mjs) || {
   exit 2
 }
 
-# `gh pr checks` exits non-zero when a check is red or still running. The JSON
-# is still on stdout and classifying it is this step's whole job, so gh's exit
-# code is deliberately not the gate. An EMPTY payload is one: no rows must never
-# read as nothing wrong.
-CHECKS=$(gh pr checks "${PR_NUM}" --json name,state)
-[ -n "$CHECKS" ] || {
-  echo "REFUSE: no check payload for #${PR_NUM} - not gating blind" >&2
+# Extraction runs through gh's BUILT-IN `--jq` (gojq, compiled into gh), like
+# every other extraction in this playbook - never an external `jq` binary.
+# macOS ships no jq, and a classifier whose failure yields an empty blocker list
+# is fail-open: #7503's own shape one layer down, with "cannot check" reading as
+# "nothing to check" (#7540 review, and Copilot's thread on the same lines).
+#
+# `gh pr checks` exits non-zero when a check is red or still running. The rows
+# are still on stdout and classifying them is this step's whole job, so gh's
+# exit code is deliberately not the gate. An EMPTY stdout is: no rows must never
+# read as nothing wrong, and it is equally what a gh auth failure, a network
+# error and a broken --jq program produce.
+ROWS=$(gh pr checks "${PR_NUM}" --json name,state --jq '.[] | [.name, .state] | @tsv')
+[ -n "$ROWS" ] || {
+  echo "REFUSE: no check rows for #${PR_NUM} - not gating blind" >&2
   exit 2
 }
 
+# Classification is pure shell: there is no third binary here whose failure
+# could empty the blocker list. It counts what it classified, so "examined
+# nothing" cannot report clean either.
+#
 # A required context MISSING from the payload BLOCKS. Absence is what a stale or
 # misspelled roster entry produces, and it is equally what a renamed ci.yml job
 # produces (#7191) - branch protection wedges on both, so neither may pass here.
-BLOCKERS=$(jq -r --arg roster "$REQUIRED_CHECKS" '
-  ($roster | split("\n") | map(select(length > 0))) as $required
-  | . as $checks
-  | [ $required[]
-      | . as $name
-      | ($checks | map(select(.name == $name)) | map(.state)) as $states
-      | if ($states | length) == 0 then "\($name)=MISSING"
-        elif ($states | all(. == "SUCCESS" or . == "SKIPPED")) then empty
-        else "\($name)=\($states | join(","))" end ]
-  | join("; ")' <<<"$CHECKS")
+BLOCKERS=""
+GATED=0
+TAB=$(printf '\t')
+while IFS= read -r name; do
+  [ -n "$name" ] || continue
+  GATED=$((GATED + 1))
+  seen=0
+  bad=""
+  while IFS="$TAB" read -r rname rstate; do
+    [ "$rname" = "$name" ] || continue
+    seen=1
+    # SUCCESS and SKIPPED are the ONLY accepted states. FAILURE, ERROR,
+    # CANCELLED, TIMED_OUT, PENDING, QUEUED, IN_PROGRESS and any state GitHub
+    # adds later all fall to the else arm and block. Listing what passes, not
+    # what fails, is what keeps a new state from being accepted by default.
+    case "$rstate" in
+      SUCCESS|SKIPPED) ;;
+      *) bad="${bad}${bad:+,}${rstate}" ;;
+    esac
+  done <<<"$ROWS"
+  if [ "$seen" -eq 0 ]; then
+    BLOCKERS="${BLOCKERS}${BLOCKERS:+; }${name}=MISSING"
+  elif [ -n "$bad" ]; then
+    BLOCKERS="${BLOCKERS}${BLOCKERS:+; }${name}=${bad}"
+  fi
+done <<<"$REQUIRED_CHECKS"
+
+# Classifying nothing is not a pass.
+[ "$GATED" -gt 0 ] || {
+  echo "REFUSE: classified 0 required contexts - not gating blind" >&2
+  exit 2
+}
 ```
 
-An empty `BLOCKERS` is the only pass. A non-empty one names every required
-context that is missing, red, or still running:
+An empty `BLOCKERS` **after a non-zero `GATED`** is the only pass — the count is
+the positive signal, and every way of failing to look reaches a `REFUSE` above
+rather than an empty list. A non-empty `BLOCKERS` names every required context
+that is missing, red, or still running:
 
 - **`=PENDING` / `=QUEUED` / `=IN_PROGRESS`** — poll every 30s for up to 3
   minutes, re-running the block each time.
 - **`=FAILURE` / `=ERROR` / any other state** — run `/fix-ci ${PR_NUM}`. If
   fixed, continue. If escalated, mark the PR `Skipped` and continue to the next.
-- **`=MISSING`** — stop and report; never treat it as a skip. The context is
-  required and nothing on this head produced it, so branch protection will
-  refuse the merge however long you wait. Either a `ci.yml` job was renamed
-  without updating CONTRIBUTING.md and the live protection, or the workflow
-  never ran on this head.
+- **`=MISSING`** — **re-poll once** after the pending window before treating it
+  as final, then mark the PR `Skipped` with the reason and continue to the next
+  (Critical Rule 6: one stale PR must not stop the batch). Absence is not
+  automatically terminal — a push can produce **no workflow run at all** for the
+  new head, and every tool renders that as pending rather than absent. This repo
+  has an instance: on PR #7023 the concurrency group was never freed by a
+  run stuck on an offline runner, the next push created zero runs, and
+  `gh pr checks` reported "no checks reported" indefinitely. So assert a run
+  exists for the head before concluding:
+
+  ```bash
+  gh run list --branch "$(gh pr view ${PR_NUM} --json headRefName -q .headRefName)" \
+    --limit 5 --json headSha,name,status,conclusion
+  ```
+
+  If the newest run's `headSha` is not the PR's head, nothing is running and
+  waiting longer cannot help. If a run *does* exist for the head and the context
+  is still absent, it is terminal: a `ci.yml` job was renamed without updating
+  CONTRIBUTING.md and the live protection, and branch protection will refuse the
+  merge however long you wait.
 
 Note that Phase 1's pre-flight count is a *different* expression on purpose — it
 quantifies over every check the PR has, required or not, and is explicitly

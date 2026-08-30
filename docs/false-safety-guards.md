@@ -1263,11 +1263,36 @@ protection — and a required context ABSENT from the payload is classified
 phantom `Run Tests` back in through the roster now yields
 `Run Tests=MISSING` → BLOCK, where before it yielded PASS.
 
+**And the first fix put it back, one layer down.** The replacement classified
+the payload with an external `jq`, checked `node`'s exit status and the
+payload's emptiness — and not `jq`'s. `BLOCKERS=$(jq ... )` yields the empty
+string when `jq` is missing or the input will not parse, against a rule that
+read "an empty `BLOCKERS` is the only pass". Review reproduced it four ways:
+with `jq` unavailable the gate returned PASS on a payload carrying
+`Server Tests=FAILURE`, and with `jq` present but the response non-JSON it
+returned PASS again. macOS ships no `jq`, and every other extraction in the same
+playbook already used `gh --jq` — gh's built-in gojq, no external binary — so
+the dependency arrived *with the fix*. The extraction now goes through `gh --jq`
+like its siblings and the comparison is pure shell, which removes the third
+binary rather than guarding it; the pass is a positive signal (a count of
+contexts actually classified) instead of an empty list.
+
+**`MISSING` is not automatically terminal, either.** "Nothing produced this
+context, so waiting cannot help" is true for a renamed job and false for the
+window in which a run does not yet exist — and this repo has that instance:
+on PR #7023 a run wedged on an offline runner never freed its concurrency
+group, the next push created **zero** runs, and every tool rendered the absence
+as "pending" (`ci-run-absent-reads-as-pending`). The operator guidance now
+re-polls once and asserts a run exists for the head SHA before calling it, and
+marks the PR `Skipped` rather than aborting the batch.
+
 **Guard against it:** a filter-then-assert gate has two failure modes, and the
 loud one is the states. Ask what the gate does when the filter matches **zero
 rows**, and make that answer BLOCK. Then ask where the filter's terms came
 from — if they were typed into the file rather than derived from the thing they
-describe, they are already drifting.
+describe, they are already drifting. Then ask the same question of every tool
+the gate shells out to: if that tool failing produces the same output as
+"nothing to report", the gate is fail-open no matter how good its logic is.
 
 ### 23. The suite that ran in no workflow — `#7504`
 
@@ -1291,13 +1316,14 @@ discusses these files by name, and a guard that reads prose as configuration is
 satisfiable by prose).
 
 Found alongside it: **nothing in `.github/` had ever parsed a shell script.**
-The repo's 30 tracked `*.sh` files are invoked from workflow steps, git hooks
-and by hand; none is imported by a test suite, so a syntax error in one ships
-green and is discovered by the next person to run it. A `bash -n` step now
+Every tracked `*.sh` file is invoked from a workflow step, a git hook or by
+hand; none is imported by a test suite, so a syntax error in one ships green and
+is discovered by the next person to run it. A `bash -n` step now
 covers them, enumerated by `git ls-files -z '*.sh'` rather than a glob typed
 into CI config — the pathspec is the property, and narrowing it to `scripts/*.sh`
 drops packages/server/scripts/, packages/desktop/scripts/ and
-packages/app/.maestro/scripts/ while staying green over 13 of 30 files. The step
+packages/app/.maestro/scripts/ while staying green — 13 of the 30 files present
+when that was measured. The step
 fails **closed** below a floor of 20 files, because a `for f in glob` loop over
 an unmatched glob iterates zero times and exits 0. It is parse-level and claims
 no more: `bash -n` reports syntax errors without executing anything, and catches

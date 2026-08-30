@@ -59,6 +59,19 @@ function sliceBash(text, heading) {
   return out.length > 0 ? out.join('\n') : null
 }
 
+/**
+ * The fence with its `#` comment lines dropped.
+ *
+ * Step 2a's comments discuss `jq`, `MISSING` and the accepted states by name
+ * while explaining the rules — so every assertion about what the fence DOES
+ * reads this, not the raw block. A guard that reads its own rationale as
+ * evidence is satisfiable by prose (the same reason `workflow-reader.js`
+ * exports `code()`).
+ */
+function shellCode(block) {
+  return block.split('\n').filter(l => !/^\s*#/.test(l)).join('\n')
+}
+
 // The neutral source plus every repo-local compiled target from
 // .claude/skill-profile.md's `targets:` line (claude, gemini). Both artifacts
 // embed the playbook verbatim, so one slicer reads all three.
@@ -75,12 +88,15 @@ const PHANTOMS = ['Run Tests', 'Validate Project']
 describe('/batch-merge Step 2a derives its required-check roster (#7503)', () => {
   let roster
   const bash = new Map()
+  const sh = new Map()
 
   before(async () => {
     const contributing = await readFile(new URL('../../../CONTRIBUTING.md', import.meta.url), 'utf8')
     roster = parseRoster(contributing)
     for (const [label, rel] of SURFACES) {
-      bash.set(label, sliceBash(await readFile(new URL(rel, import.meta.url), 'utf8'), '#### Step 2a'))
+      const block = sliceBash(await readFile(new URL(rel, import.meta.url), 'utf8'), '#### Step 2a')
+      bash.set(label, block)
+      sh.set(label, block === null ? null : shellCode(block))
     }
   })
 
@@ -112,7 +128,7 @@ describe('/batch-merge Step 2a derives its required-check roster (#7503)', () =>
 
   it('names no check context of its own — neither a real one nor a phantom', () => {
     for (const [label] of SURFACES) {
-      const block = bash.get(label)
+      const block = sh.get(label)
       const named = [...roster, ...PHANTOMS].filter(n => block.includes(n))
       assert.deepEqual(
         named,
@@ -124,30 +140,92 @@ describe('/batch-merge Step 2a derives its required-check roster (#7503)', () =>
   })
 
   it('treats a required context that is ABSENT from the payload as a blocker', () => {
-    // The second half of the defect, and the one a truthful hardcoded list
-    // would still have: filter-then-check-states passes when the filter matches
+    // The second half of #7503, and the one a truthful hardcoded list would
+    // still have had: filter-then-check-states passes when the filter matches
     // nothing. Proven against the `missing` fixture — the old shape with REAL
     // names still returned PASS with `Server Tests` deleted from the payload.
     for (const [label] of SURFACES) {
-      const block = bash.get(label)
+      const block = sh.get(label)
       assert.ok(
-        block.includes('MISSING'),
+        block.includes('=MISSING'),
         `${label}: Step 2a must classify an absent required context as MISSING, not skip it`
       )
       assert.ok(
-        /length\)?\s*==\s*0/.test(block),
-        `${label}: Step 2a must branch on a required context having zero check runs`
+        /\[ "\$seen" -eq 0 \]/.test(block),
+        `${label}: Step 2a must branch on a required context having matched zero check rows`
+      )
+    }
+  })
+
+  it('accepts SUCCESS and SKIPPED and NOTHING else', () => {
+    // #7540 review, finding 2. Nothing here pinned the arm that rejects a red
+    // check, so neutering it — `all(. == "SUCCESS" or . == "SKIPPED")` ->
+    // `all(. != "NEVER_A_STATE")` in the old jq shape, widening the case arm in
+    // this one — left the guard green while the fence passed a FAILURE payload.
+    //
+    // The acceptance list is extracted and compared EXACTLY rather than
+    // searched for. `includes('SUCCESS')` would survive widening the arm to
+    // `SUCCESS|SKIPPED|FAILURE`, which is the mutant's whole shape.
+    for (const [label] of SURFACES) {
+      const block = sh.get(label)
+      const arm = /case "\$rstate" in\s*\n\s*([A-Z|_]+)\)/.exec(block)
+      assert.ok(
+        arm,
+        `${label}: Step 2a must classify each check state with an explicit case arm — ` +
+          'the acceptance list is the property, and it cannot be read here'
+      )
+      assert.equal(
+        arm[1],
+        'SUCCESS|SKIPPED',
+        `${label}: Step 2a accepts "${arm[1]}"; SUCCESS and SKIPPED are the only states branch ` +
+          'protection treats as satisfied, and listing what PASSES is what stops a state GitHub ' +
+          'adds later from being accepted by default'
+      )
+      assert.ok(
+        /\*\)\s*bad=/.test(block),
+        `${label}: Step 2a needs a catch-all arm that RECORDS the offending state — without it the ` +
+          'acceptance list is decorative and every state passes'
+      )
+    }
+  })
+
+  it('shells out to no external jq — extraction goes through gh built-in', () => {
+    // #7540 review, finding 1 (and Copilot's thread), reproduced four ways:
+    // `BLOCKERS=$(jq ... )` yields the empty string when jq is missing or the
+    // input will not parse, and the step's own rule was "an empty BLOCKERS is
+    // the only pass". macOS ships no jq, and every other extraction in this
+    // playbook already used gh's built-in gojq — Step 2a's was the only
+    // external call, so the dependency arrived with the fix for #7503.
+    for (const [label] of SURFACES) {
+      const withoutGhFlag = sh.get(label).replace(/--jq\b/g, '')
+      assert.ok(
+        !/\bjq\b/.test(withoutGhFlag),
+        `${label}: Step 2a must not shell out to an external jq — a classifier whose failure yields ` +
+          'an empty blocker list is fail-open, which is #7503 one layer down'
+      )
+      assert.ok(
+        /gh pr checks .*--json name,state --jq/.test(sh.get(label)),
+        `${label}: the check payload must be extracted with gh's built-in --jq`
       )
     }
   })
 
   it('refuses rather than gating on a guess when an input is unreadable', () => {
+    // Three ways to fail to look, three REFUSEs: the roster parser exiting
+    // non-zero, gh producing no rows (auth failure, network error, a broken
+    // --jq program), and a classification pass that examined nothing.
     for (const [label] of SURFACES) {
-      const block = bash.get(label)
+      const block = sh.get(label)
       const refusals = (block.match(/REFUSE:/g) || []).length
       assert.ok(
-        refusals >= 2,
-        `${label}: expected >=2 REFUSE paths in Step 2a (unreadable roster, empty check payload), found ${refusals}`
+        refusals >= 3,
+        `${label}: expected >=3 REFUSE paths in Step 2a (unreadable roster, no check rows, ` +
+          `zero contexts classified), found ${refusals}`
+      )
+      assert.ok(
+        /\[ "\$GATED" -gt 0 \]/.test(block),
+        `${label}: the pass must be positive — a run that classified zero required contexts must ` +
+          'REFUSE, not report an empty blocker list'
       )
     }
   })

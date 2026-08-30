@@ -1281,10 +1281,12 @@ jobs:
           node-version: 22
 
       - name: Parse-check every tracked shell script
-        # #7504 — nothing in .github/ had ever parsed these. The repo's 30
-        # tracked *.sh files are invoked from workflow steps, git hooks and by
-        # hand; none is imported by a test suite, so a syntax error in one ships
-        # green and is discovered by the next person to run it.
+        # #7504 — nothing in .github/ had ever parsed these. Every tracked
+        # *.sh file is invoked from a workflow step, a git hook or by hand; none
+        # is imported by a test suite, so a syntax error in one ships green and
+        # is discovered by the next person to run it. No count is written here:
+        # the `-lt 20` floor below is the guard, and a number beside a growing
+        # set is the first cause in docs/false-safety-guards.md.
         #
         # PARSE-LEVEL ONLY, and the comment claims no more than the code does:
         # `bash -n` reads a file and reports SYNTAX errors without executing

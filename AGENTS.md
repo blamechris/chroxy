@@ -337,7 +337,10 @@ The recurring causes:
 - a filter whose terms match NOTHING, so the gate is satisfied by zero rows —
   `/batch-merge`'s CI gate named two check contexts this repo has never produced,
   selected 0 of a real PR's 23, and reported "no required check is failing" on a
-  payload containing `Server Tests=FAILURE` (`#7503`)
+  payload containing `Server Tests=FAILURE` (`#7503`); its first FIX then
+  reintroduced the shape one layer down, classifying with an external `jq` whose
+  failure yields the same empty list as "nothing wrong" — ask that question of
+  every tool a gate shells out to (`#7540` review)
 - a test suite that runs in NO job — executable, passing, and named by no
   workflow step for its whole life, while guarding the release updater-feed
   merge; the same sweep found that nothing in `.github/` had ever `bash -n`'d a
