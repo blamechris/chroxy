@@ -5018,10 +5018,25 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         // `switchServer` then restores `activeSessionId` from persistence
         // BEFORE the first `session_list`, so an idle session on the new server
         // lands `{ shell: true, flat: false }` — a Stop button and a Working
-        // banner on an idle session — and the short-circuit means nothing
-        // corrects it until the next agent_busy / agent_idle / session_activity.
-        // The mirror-image of the `{ shell: false, flat: true }` this issue was
-        // filed for.
+        // banner on an idle session. The mirror-image of the
+        // `{ shell: false, flat: true }` this issue was filed for.
+        //
+        // How long it lasts, precisely, because the first draft of this comment
+        // overstated it (review finding): `sendPostAuthInfo` sends `session_list`
+        // and then `session_switched` in the SAME post-auth burst
+        // (ws-history.js:773 → :871), and `handleSessionSwitched` re-syncs the
+        // whole flat block — `isIdle` included — from the shell. So without this
+        // force the mirror is stale from `session_list` until `session_switched`
+        // a few frames later: a visible FLASH of the wrong Send/Stop button
+        // (React renders between the two `onmessage` macrotasks), not a durable
+        // wedge. Reproduced through the real handler:
+        // `flat before session_switched = false | after = true`.
+        //
+        // The durable variants are the ones this loop cannot see — an active id
+        // ABSENT from the snapshot (`session_switched` is sent only `if (entry)`,
+        // ws-history.js:864, so nothing re-syncs it either), or an entry with no
+        // boolean `isBusy`. Those are the reset's problem, not the consumer's,
+        // and are filed as #7555.
         const flatMirrorStale =
           sid === get().activeSessionId && get().isIdle !== desiredIsIdle;
         updateSession(sid, (ss) =>
@@ -5697,10 +5712,27 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           // frame. `sendHistoryEntry` (packages/server/src/ws-history.js)
           // synthesizes one after EVERY replayed `result`, deliberately since
           // #4628, and `event-normalizer.js` appends one to every live
-          // `result` just as unconditionally. There is no wire path on which
-          // a `result` frame reaches a client unpaired, so the gated and
-          // ungated branches had the same observable outcome — the
-          // false-safety shape docs/false-safety-guards.md catalogues.
+          // `result` just as unconditionally.
+          //
+          // That pairing is a PRODUCER-level guarantee, and only that. No
+          // producer emits a `result` without an adjacent `agent_idle` — those
+          // two are the only `result` producers, and the #7484 JSONL heal is
+          // the only unpaired `agent_idle` producer. The TRANSPORT can still
+          // split the pair: `ws-broadcaster.js`'s `_sendOneWithBackpressure`
+          // DROPS a frame over the 1MB buffered threshold and keeps the socket
+          // open (the live path sends the two as separate `broadcastToSession`
+          // calls, ws-forwarding.js), and `ws-client-sender.js` latches
+          // `_evicted` + `ws.close(4008)` post-send, which swallows the second
+          // of `sendHistoryEntry`'s two `send()` calls. Benign either way, and
+          // stated rather than glossed: the deleted gate only ever suppressed
+          // the sweep DURING a replay, so an unpaired live `result` behaves
+          // identically before and after — it just runs #4308 on a real turn
+          // boundary — and the replay split ends in a close, whose reconnect
+          // re-anchors the in-flight tool from the wire timestamp (#4607).
+          //
+          // So the gated and ungated branches had the same observable outcome
+          // wherever the gate could act at all — the false-safety shape
+          // docs/false-safety-guards.md catalogues.
           //
           // `agent_idle` OWNS the wipe. It has to: it is the only frame that
           // can clear a zombie "Running X" chip left by an orphan tool_start
