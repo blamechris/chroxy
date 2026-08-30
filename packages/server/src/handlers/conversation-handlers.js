@@ -8,7 +8,7 @@
 import { realpathSync } from 'fs'
 import { scanConversations as defaultScanConversations } from '../conversation-scanner.js'
 import { searchConversations as defaultSearchConversations } from '../conversation-search.js'
-import { resolveJsonlPath, readConversationHistoryAsync as defaultReadConversationHistoryAsync } from '../jsonl-reader.js'
+import { resolveJsonlPath, readConversationHistoryWithMetaAsync as defaultReadConversationTranscript } from '../jsonl-reader.js'
 import { validateCwdAllowed, broadcastFocusChanged, resolveSession, autoSubscribeOtherClients, buildSessionTokenMismatchPayload, sendSessionError } from '../handler-utils.js'
 import { scopeConversationsToClient } from '../conversation-scope.js'
 import { sendChunkedWithBackpressure, sendHistoryEntry } from '../ws-history.js'
@@ -143,6 +143,11 @@ async function handleResumeConversation(ws, client, msg, ctx) {
  * is no live session, and a resumed session always gets a fresh id distinct from
  * the conversationId, so this cannot collide with or clobber a live session's
  * transcript.
+ *
+ * `history_replay_start` carries `truncated` for the slice actually sent (#7501),
+ * from the same meta reader `getFullHistoryAsync` uses — this path is subject to
+ * jsonl-reader's `MAX_MESSAGES` / `MAX_TRANSCRIPT_BYTES` caps exactly as the
+ * full-history path is, and used to omit the field entirely.
  */
 async function handleRequestConversationTranscript(ws, client, msg, ctx) {
   const { conversationId } = msg
@@ -207,14 +212,45 @@ async function handleRequestConversationTranscript(ws, client, msg, ctx) {
 
   // Read the transcript from disk. NO createSession, NO provider spawn. Reader is
   // injectable for tests so the suite never touches the real ~/.claude/projects.
-  const readTranscript = ctx.readConversationTranscript || defaultReadConversationHistoryAsync
+  //
+  // #7501 — through the META reader, not the array-returning sibling one line
+  // away. This path is subject to jsonl-reader's OWN two caps (the 500
+  // most-recent `MAX_MESSAGES` window and the `MAX_TRANSCRIPT_BYTES` tail read),
+  // and the array alone cannot express either: 500 entries back is equally the
+  // shape of a complete 500-message conversation. This is the SAME reader
+  // `getFullHistoryAsync` uses for the full-history path (#7484) rather than a
+  // second meta implementation, so both replays report the same caps from one
+  // place and cannot drift apart.
+  const readTranscript = ctx.readConversationTranscript || defaultReadConversationTranscript
   let messages = []
+  let truncated = false
   try {
-    messages = await readTranscript(resolveJsonlPath(cwd, conversationId))
+    const read = await readTranscript(resolveJsonlPath(cwd, conversationId))
+    if (Array.isArray(read)) {
+      // The pre-#7501 reader shape. `ctx.readConversationTranscript` is a
+      // TEST-ONLY injection seam — nothing in production injects it, so this
+      // branch is unreachable outside the suite — and a legacy fixture still
+      // supplies a bare array, accepted and reported as untruncated rather than
+      // throwing on a shape that used to work. `false` over omitting the field:
+      // omitting it puts the frame back into the exact absent-vs-false ambiguity
+      // #7501 removes, and gives the wire two shapes to pin instead of one. Same
+      // posture handleRequestFullHistory takes toward a descriptor-less legacy
+      // manager.
+      messages = read
+    } else if (read && Array.isArray(read.messages)) {
+      messages = read.messages
+      // Strict boolean, matching how both clients read this family of field.
+      truncated = read.truncated === true
+    }
   } catch (err) {
     // A read error is graceful — surface an empty transcript rather than a crash.
     log.warn(`Failed to read transcript for ${conversationId}: ${err.message}`)
     messages = []
+    // And unreadable is NOT truncated: nothing was dropped from a slice that
+    // does not exist, and claiming otherwise would put a permanent "history
+    // incomplete" banner in front of every conversation whose file has gone.
+    // jsonl-reader takes the same position on its own catch.
+    truncated = false
   }
 
   // Stream back using the SAME wire shape as request_full_history so existing
@@ -224,7 +260,12 @@ async function handleRequestConversationTranscript(ws, client, msg, ctx) {
   // Route through ctx.transport so a method-style sender keeps its receiver;
   // the shared loop only ever needs a (ws, payload) callable.
   const send = (target, payload) => ctx.transport.send(target, payload)
-  send(ws, { type: 'history_replay_start', sessionId: conversationId, fullHistory: true, conversationId })
+
+  // #7501 — `truncated` describes the collection ACTUALLY SENT, and is emitted
+  // unconditionally: absence reads to a client exactly like `truncated: false`,
+  // which is what let this path hand the viewer the last 500 messages of a
+  // 5,000-message conversation with nothing on the wire saying so.
+  send(ws, { type: 'history_replay_start', sessionId: conversationId, truncated, fullHistory: true, conversationId })
 
   // #7480 — the THIRD path through the #4833 chunk-and-drain loop, and the
   // second one that had no `bufferedAmount` check at all: it pushed the whole
@@ -382,11 +423,43 @@ async function handleRequestFullHistory(ws, client, msg, ctx) {
       // MID-replay. Before `history_replay_end`, so it stays inside the window
       // where the #4466 reasoning holds.
       //
-      // NOT while the session is mid-turn: `agent_idle` sets isIdle, clears
-      // streamingMessageId (hiding the stop button) and clears activeTools —
-      // all true after a finished turn, all false during a running one, and no
-      // `agent_busy` is coming to undo it before the next turn starts. A
-      // manager that cannot answer is treated as idle: "cannot tell" must not
+      // NOT while `isSessionBusy` reports the session LIVE. `agent_idle` sets
+      // isIdle, clears streamingMessageId (hiding the stop button) and clears
+      // activeTools — all true after a finished turn, and no `agent_busy` is
+      // coming to undo it before the next turn starts.
+      //
+      // #7507 — "live" here is deliberately WIDER than mid-turn, and the comment
+      // this replaced described only the narrow half. `isSessionBusy` is
+      // `entry.session.isRunning`, which BaseSession defines as
+      // `_isBusy || _backgroundShellTracker.size > 0`: a session whose turn has
+      // ENDED but which still holds an un-polled `Bash(run_in_background: true)`
+      // shell reads busy (#4307; the 60s advisory sweep must not flip liveness,
+      // #5247, so release comes only from BashOutput / destroy / the 4h hard
+      // quiesce). Do NOT "simplify" this to `_isBusy`.
+      //
+      // The reason is CONSISTENCY WITH THE SERVER'S SINGLE BUSY AUTHORITY, not
+      // mid-turn correctness. `listSessions()` publishes that same `isRunning` as
+      // each entry's `isBusy`, and the dashboard re-derives `isIdle` from it on
+      // every `session_list` and `session_activity` (#4639). A narrower `_isBusy`
+      // guard would emit an `agent_idle` that the very next broadcast reverts —
+      // a flicker, not a heal. Pinned by behaviour in
+      // tests/conversation-full-history-replay.test.js (a real SessionManager +
+      // BaseSession) and at the producer in
+      // tests/session-manager-full-history-source.test.js.
+      //
+      // Two consequences, recorded rather than hidden:
+      //   - On MOBILE the suppression is a pure false negative. The app has no
+      //     `session_activity` case and never derives `isIdle` from `isBusy`, so
+      //     nothing there would revert a narrower heal — and this synthesized
+      //     `agent_idle` is the ONLY thing that can clear a stale chip on that
+      //     client (#7479 N2). Fixing it belongs on the app side (give it the
+      //     #4639 resync), not by forking this guard per client: tracked in #7518.
+      //   - The LIVE path is LESS conservative than this. event-normalizer.js
+      //     appends `agent_idle` to every `result` unconditionally, without
+      //     consulting `isRunning`; the replay heal mirrors that fan-out
+      //     (ws-history.js) everywhere except this state.
+      //
+      // A manager that cannot answer is treated as idle: "cannot tell" must not
       // silently become "never heal", which is the defect this fixes.
       const busy = typeof sessionManager.isSessionBusy === 'function'
         ? sessionManager.isSessionBusy(targetId)

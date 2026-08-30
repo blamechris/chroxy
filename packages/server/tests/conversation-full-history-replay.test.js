@@ -1,6 +1,11 @@
-import { describe, it } from 'node:test'
+import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, mkdirSync, rmSync } from 'fs'
+import { tmpdir } from 'os'
+import { join } from 'path'
 import { conversationHandlers } from '../src/handlers/conversation-handlers.js'
+import { SessionManager } from '../src/session-manager.js'
+import { BaseSession } from '../src/base-session.js'
 import { createMockSessionManager, nsCtx } from './test-helpers.js'
 
 const handler = conversationHandlers.request_full_history
@@ -712,5 +717,196 @@ describe('#7484 — request_full_history heals the chip on the JSONL path too', 
       assert.equal(start.truncated, true,
         'the descriptor carries the ring\'s own flag on this path — the probe is the legacy fallback, not the source of truth')
     })
+  })
+})
+
+/**
+ * #7507 — the guard above is `sessionManager.isSessionBusy`, which is
+ * `entry.session.isRunning`: LIVENESS, not mid-turn. Every other test in this
+ * file stubs that method, so none of them can witness which state a REAL session
+ * reports — and the state that matters is a turn that has ENDED while an
+ * un-polled `Bash(run_in_background: true)` shell is still tracked (#4307).
+ *
+ * These drive a real `SessionManager` holding a real `BaseSession`, so the
+ * decision is recorded as behaviour: in that state the heal is SUPPRESSED.
+ * Narrowing the guard to `_isBusy` flips the first test below, which is exactly
+ * what should happen — the choice is consistency with the server's single busy
+ * authority (`listSessions().isBusy` is the same `isRunning`, and the dashboard
+ * re-derives `isIdle` from it on every `session_list` / `session_activity`,
+ * #4639), and it is a choice, not an accident.
+ *
+ * `getFullHistoryAsync` is stubbed to a JSONL descriptor because the transcript
+ * READ is not what is under test here (it is pinned at the producer, in
+ * session-manager-full-history-source.test.js) — the busy probe is.
+ */
+describe('#7507 — the JSONL heal is gated on LIVENESS, and a pending background shell is live', () => {
+  let tmpRoot
+  let emptySkillsDir
+
+  before(() => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'fh-replay-liveness-'))
+    emptySkillsDir = join(tmpRoot, 'skills')
+    mkdirSync(emptySkillsDir, { recursive: true })
+  })
+
+  after(() => {
+    rmSync(tmpRoot, { recursive: true, force: true })
+  })
+
+  const jsonlSlice = () => ([
+    { type: 'user_input', content: 'run the tests', timestamp: 1 },
+    { type: 'response', content: 'sure', timestamp: 2 },
+    { type: 'tool_use', content: '{"command":"npm test"}', tool: 'Bash', timestamp: 3 },
+  ])
+
+  /** A real manager + a real session — no `isSessionBusy` stub anywhere. */
+  function buildReal() {
+    const sends = []
+    // #4633: temp stateFilePath, always.
+    const manager = new SessionManager({
+      skipPreflight: true,
+      maxSessions: 5,
+      stateFilePath: join(tmpRoot, `state-${Math.random().toString(36).slice(2)}.json`),
+    })
+    const session = new BaseSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+    manager._sessions.set('sess-1', { session, name: 'Work', cwd: '/repo', createdAt: Date.now() })
+    manager.getFullHistoryAsync = async () => ({ entries: jsonlSlice(), source: 'jsonl', truncated: false })
+    const ctx = nsCtx({
+      send: (_target, msg) => sends.push(msg),
+      sessionManager: manager,
+      reseedActiveAgents: () => {},
+      resendPendingQuestions: () => {},
+    })
+    return { ctx, sends, session, ws: makeOpenWs() }
+  }
+
+  it('does NOT heal while a background shell is pending, though NO turn is in flight', async () => {
+    const { ctx, sends, session, ws } = buildReal()
+    try {
+      session.trackBackgroundShell({ shellId: 'brk57kt6pm', command: 'npm run dev' })
+      assert.equal(session._isBusy, false, 'precondition: the turn has ended — this is not a mid-turn suppression')
+
+      await handler(ws, client(), { type: 'request_full_history' }, ctx)
+      await turn(5)
+
+      assert.equal(sends.filter(m => m.type === 'agent_idle').length, 0,
+        'a session waiting on background work is LIVE; declaring it idle would be reverted by the next session_list (#4639)')
+      assert.equal(sends.filter(m => m.type === 'message').length, 3,
+        'positive control: the replay itself still happened, so the 0 above is not an early return')
+      assert.equal(sends[sends.length - 1].type, 'history_replay_end')
+    } finally {
+      session._destroyPendingBackgroundShells()
+    }
+  })
+
+  it('POSITIVE CONTROL: the SAME replay heals once the shell is acknowledged', async () => {
+    // The other direction, and the one that proves the suppression above is the
+    // guard doing its job rather than the heal being broken outright.
+    const { ctx, sends, session, ws } = buildReal()
+    try {
+      session.trackBackgroundShell({ shellId: 'brk57kt6pm', command: 'npm run dev' })
+      session.clearBackgroundShell('brk57kt6pm')
+
+      await handler(ws, client(), { type: 'request_full_history' }, ctx)
+      await turn(5)
+
+      assert.equal(sends.filter(m => m.type === 'agent_idle').length, 1)
+    } finally {
+      session._destroyPendingBackgroundShells()
+    }
+  })
+
+  it('does not heal mid-turn either — the other arm of the same getter', async () => {
+    const { ctx, sends, session, ws } = buildReal()
+    session._isBusy = true
+
+    await handler(ws, client(), { type: 'request_full_history' }, ctx)
+    await turn(5)
+
+    assert.equal(sends.filter(m => m.type === 'agent_idle').length, 0)
+    assert.equal(sends[sends.length - 1].type, 'history_replay_end')
+  })
+})
+
+/**
+ * #7521 review, finding 1 — the ten pins above constrain WHAT `isSessionBusy`
+ * returns for a given state, and THAT the handler consults it. None of them
+ * constrains WHEN it is consulted. `sendChunkedWithBackpressure` drains across
+ * `setImmediate` turns, and the guard is deliberately read inside `onDone` — the
+ * latest, most conservative point. Hoisting that read to just after the
+ * `history_replay_start` send and caching it across the drain was green on all
+ * four suites (38/38, 16/16, 18/18, 43/43), which is the gap this closes.
+ *
+ * The mutant is not cosmetic. A session that goes live DURING the replay (a turn
+ * starts, or a background shell is tracked) would be handed the synthesized
+ * `agent_idle` mid-turn — precisely the outcome the guard exists to prevent —
+ * and the reverse (busy -> idle during the drain) suppresses a heal that is due.
+ *
+ * The ctx is the file's own `build()` rather than a copy of it: `build` already
+ * mirrors each payload's bytes back into the ws stub, which is the "ctx that
+ * mirrors bufferedAmount back into ws" this probe needs. Everything else —
+ * fixture size, the frame counter that flips `live`, `turn(50)`, both assertions
+ * — is the probe as written in the review.
+ */
+describe('#7521 review — the busy guard is READ at onDone, not cached across the drain', () => {
+  it('a session that goes LIVE DURING the replay is not declared idle at replay-end', async () => {
+    const entries = Array.from({ length: 300 }, (_, i) => ({ type: 'response', content: `m${i}`, timestamp: i }))
+    let live = false, frames = 0
+    const ws = { readyState: 1, bufferedAmount: 0, send() { frames++; if (frames > 2) live = true } }
+    const { ctx, sends } = build(entries, {
+      ws,
+      source: 'jsonl',
+      managerOverrides: { isSessionBusy: () => live },
+    })
+
+    await handler(ws, client(), { type: 'request_full_history' }, ctx)
+    await turn(50)
+
+    assert.ok(live, 'precondition: the session really did go live during the drain')
+    assert.equal(sends.filter(m => m.type === 'agent_idle').length, 0,
+      'the guard must be read at onDone, not cached before the drain')
+    assert.equal(sends.filter(m => m.type === 'message').length, entries.length,
+      'positive control: the whole replay really did drain, so the 0 above is not a stalled loop')
+    assert.equal(sends[sends.length - 1].type, 'history_replay_end')
+  })
+
+  it('POSITIVE CONTROL: a session that stays idle through the SAME drain IS healed', async () => {
+    // Without this, a probe that only ever observed "no agent_idle" would pass
+    // against a handler that had stopped healing altogether.
+    const entries = Array.from({ length: 300 }, (_, i) => ({ type: 'response', content: `m${i}`, timestamp: i }))
+    let frames = 0
+    const ws = { readyState: 1, bufferedAmount: 0, send() { frames++ } }
+    const { ctx, sends } = build(entries, {
+      ws,
+      source: 'jsonl',
+      managerOverrides: { isSessionBusy: () => false },
+    })
+
+    await handler(ws, client(), { type: 'request_full_history' }, ctx)
+    await turn(50)
+
+    assert.ok(frames > 2, 'precondition: the same multi-chunk drain really did happen')
+    assert.equal(sends.filter(m => m.type === 'agent_idle').length, 1)
+  })
+
+  it('and the reverse: busy at the START, idle by the END, still heals', async () => {
+    // The other direction of the same read-point property. A cached read taken
+    // before the drain sees BUSY here and suppresses a heal that is due by the
+    // time the replay actually ends.
+    const entries = Array.from({ length: 300 }, (_, i) => ({ type: 'response', content: `m${i}`, timestamp: i }))
+    let live = true, frames = 0
+    const ws = { readyState: 1, bufferedAmount: 0, send() { frames++; if (frames > 2) live = false } }
+    const { ctx, sends } = build(entries, {
+      ws,
+      source: 'jsonl',
+      managerOverrides: { isSessionBusy: () => live },
+    })
+
+    await handler(ws, client(), { type: 'request_full_history' }, ctx)
+    await turn(50)
+
+    assert.equal(live, false, 'precondition: the session really did go quiet during the drain')
+    assert.equal(sends.filter(m => m.type === 'agent_idle').length, 1,
+      'a read cached before the drain would have suppressed this heal')
   })
 })

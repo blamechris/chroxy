@@ -1,6 +1,10 @@
-import { describe, it } from 'node:test'
+import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'fs'
+import { tmpdir } from 'os'
+import { join } from 'path'
 import { conversationHandlers } from '../src/handlers/conversation-handlers.js'
+import { encodeProjectPath, MAX_MESSAGES } from '../src/jsonl-reader.js'
 import { createSpy, nsCtx, makeSessionIndexCtx } from './test-helpers.js'
 
 const handler = conversationHandlers.request_conversation_transcript
@@ -35,9 +39,15 @@ function makeBackpressuredWs(readyState = 1) {
   return ws
 }
 
-function build(transcript, { ws = makeOpenWs() } = {}) {
+function build(transcript, { ws = makeOpenWs(), readerResult, reader } = {}) {
   const sends = []
   const reseeds = []
+  // `reader: null` means inject NOTHING, so the handler falls through to its own
+  // default reader. #7501's cap tests need that: the question there is which
+  // reader the default IS, and an injected stub answers it by assumption.
+  const readerFn = reader === null
+    ? null
+    : (reader || createSpy(async () => (readerResult === undefined ? transcript : readerResult)))
   const ctx = nsCtx({
     send: createSpy((target, msg) => {
       sends.push(msg)
@@ -52,7 +62,7 @@ function build(transcript, { ws = makeOpenWs() } = {}) {
     reseedActiveAgents: createSpy((_ws, sid) => reseeds.push(sid)),
     resendPendingQuestions: createSpy(), // #7457
     scanConversations: createSpy(async () => [{ conversationId: CONV_ID, cwd: CONV_CWD }]),
-    readConversationTranscript: createSpy(async () => transcript),
+    ...(readerFn ? { readConversationTranscript: readerFn } : {}),
     sessionManager: {
       getSession: createSpy(() => undefined),
       createSession: createSpy(() => 'new-id'),
@@ -282,5 +292,212 @@ describe('#7480 — request_conversation_transcript sends under the shared chunk
 
     assert.deepEqual(reseeds, [], 'the conditional re-seed must stay conditional inside onDone')
     assert.equal(sends[sends.length - 1].type, 'history_replay_end')
+  })
+})
+
+/**
+ * #7501 — `history_replay_start` on the TRANSCRIPT path carried no `truncated`
+ * field at all, over a slice subject to the same two caps #7484 made honest on
+ * the full-history path: jsonl-reader's 500-most-recent `MAX_MESSAGES` window
+ * and its `MAX_TRANSCRIPT_BYTES` tail read. Absence reads to a client exactly
+ * like `truncated: false`, so the viewer could be handed the last 500 messages
+ * of a 5,000-message conversation with nothing on the wire saying so — and 500
+ * entries back is equally the shape of a complete 500-message conversation, so
+ * the array cannot be inspected to recover the answer.
+ *
+ * HONEST DEVIATION, recorded here rather than in a commit message nobody
+ * re-reads: NO client renders this field today. `handleHistoryReplayStart`
+ * (store-core/src/handlers/conversation.ts) does not parse `truncated`, the
+ * dashboard's transcript viewer (`applyTranscriptFrame` in
+ * dashboard/src/store/message-handler.ts) only flips status/messages from these
+ * frames, and the mobile app has no transcript surface at all. The field is
+ * correct-by-CONTRACT — it is the same field `handleRequestFullHistory` and
+ * `replayHistory` already emit, so a renderer added later reads one meaning off
+ * all three paths — and the wire shape is pinned below so it has something
+ * stable to read. It is not, on its own, a user-visible fix.
+ */
+describe('#7501 — the transcript replay reports the truncation of the slice it sent', () => {
+  const slice = () => ([
+    { type: 'user_input', content: 'hello', timestamp: 1 },
+    { type: 'response', content: 'hi there', timestamp: 2 },
+    { type: 'tool_use', tool: 'Bash', content: '{"command":"ls"}', timestamp: 3 },
+  ])
+
+  it('carries the reader\'s own truncation onto the wire', async () => {
+    const { ctx, sends, ws } = build(null, { readerResult: { messages: slice(), truncated: true } })
+    await handler(ws, client(), request(), ctx)
+    await turn(5)
+
+    const start = sends.find(m => m.type === 'history_replay_start')
+    assert.equal(start.truncated, true,
+      'the cap tripped on the slice the client just received; pre-#7501 the frame said nothing at all')
+    assert.equal(sends.filter(m => m.type === 'message').length, 3,
+      'and the truncated slice still replays — the flag annotates it, it does not gate it')
+  })
+
+  it('POSITIVE CONTROL: a COMPLETE transcript reports false — and the key is PRESENT', async () => {
+    // The half a one-directional test misses. `truncated: false` and no
+    // `truncated` key at all are the same thing to a client reading
+    // `msg.truncated`, so asserting the value without asserting PRESENCE would
+    // stay green against the pre-#7501 code for the complete case.
+    const { ctx, sends, ws } = build(null, { readerResult: { messages: slice(), truncated: false } })
+    await handler(ws, client(), request(), ctx)
+    await turn(5)
+
+    const start = sends.find(m => m.type === 'history_replay_start')
+    assert.ok('truncated' in start, 'the field must be emitted unconditionally, not only when true')
+    assert.equal(start.truncated, false)
+  })
+
+  it('pins the wire shape of the start frame', async () => {
+    // This frame is a contract with two clients and the #7345-family raw
+    // consumers. Adding a field is a wire change and should be a deliberate
+    // edit here, not a side effect somewhere in the handler.
+    const { ctx, sends, ws } = build(null, { readerResult: { messages: slice(), truncated: false } })
+    await handler(ws, client(), request(), ctx)
+    await turn(5)
+
+    const start = sends.find(m => m.type === 'history_replay_start')
+    assert.deepEqual(
+      Object.keys(start).sort(),
+      ['conversationId', 'fullHistory', 'sessionId', 'truncated', 'type'],
+    )
+    assert.equal(start.sessionId, CONV_ID, 'still the conversationId — there is no live session behind it')
+    assert.equal(start.fullHistory, true)
+  })
+
+  it('reads `truncated` STRICTLY — a truthy non-boolean is not a truncation claim', async () => {
+    const { ctx, sends, ws } = build(null, { readerResult: { messages: slice(), truncated: 'yes' } })
+    await handler(ws, client(), request(), ctx)
+    await turn(5)
+
+    const start = sends.find(m => m.type === 'history_replay_start')
+    assert.equal(start.truncated, false,
+      'same strict-boolean posture the clients take toward this field (store-core handleFileContent)')
+  })
+
+  it('LEGACY SHAPE: an injected array-returning reader still replays, reporting false rather than throwing', async () => {
+    // The reader is an injection seam (`ctx.readConversationTranscript`) and a
+    // pre-#7501 fixture supplies the bare array `readConversationHistoryAsync`
+    // used to return. Accepted and read as untruncated — the same posture
+    // `handleRequestFullHistory` takes toward a descriptor-less legacy manager.
+    const { ctx, sends, ws } = build(slice())
+    await handler(ws, client(), request(), ctx)
+    await turn(5)
+
+    const start = sends.find(m => m.type === 'history_replay_start')
+    assert.equal(sends.filter(m => m.type === 'message').length, 3, 'a legacy reader still replays')
+    assert.equal(start.truncated, false)
+    assert.equal(sends[sends.length - 1].type, 'history_replay_end')
+  })
+
+  it('an UNREADABLE transcript is not truncated — nothing was dropped from a slice that does not exist', async () => {
+    // jsonl-reader takes the same position on its own catch: claiming
+    // truncation here would put a permanent "history incomplete" banner in
+    // front of every conversation whose file has gone.
+    const { ctx, sends, ws } = build(null, {
+      reader: createSpy(async () => { throw new Error('ENOENT') }),
+    })
+    await handler(ws, client(), request(), ctx)
+    await turn(5)
+
+    const start = sends.find(m => m.type === 'history_replay_start')
+    assert.equal(start.truncated, false)
+    assert.equal(sends.filter(m => m.type === 'message').length, 0)
+    assert.equal(sends[sends.length - 1].type, 'history_replay_end',
+      'positive control: the handler really did run its replay to completion, so the 0 above is not an early return')
+  })
+})
+
+/**
+ * #7501, the load-bearing half: the tests above inject a reader, so every one of
+ * them would stay green if the handler were wired back to the ARRAY-returning
+ * `readConversationHistoryAsync` — a stub that hands back a descriptor proves
+ * only that the handler forwards one. These drive the handler's OWN default
+ * reader over a real transcript on disk, so "which reader is the default" is
+ * answered by observation rather than by assumption.
+ *
+ * CRITICAL: `HOME` is redirected (#4633 posture) — `resolveJsonlPath` builds
+ * `~/.claude/projects/<encoded cwd>/<id>.jsonl`, and the fixture must land in a
+ * temp tree, never the developer's real one.
+ */
+describe('#7501 — the DEFAULT reader reports the transcript\'s own MAX_MESSAGES cap', () => {
+  let tmpRoot
+  let fakeHome
+  let realHome
+  let realUserProfile
+
+  before(() => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'transcript-truncation-'))
+    fakeHome = join(tmpRoot, 'home')
+    mkdirSync(fakeHome, { recursive: true })
+    realHome = process.env.HOME
+    realUserProfile = process.env.USERPROFILE
+    // os.homedir() reads $HOME on POSIX and %USERPROFILE% on Windows.
+    process.env.HOME = fakeHome
+    process.env.USERPROFILE = fakeHome
+  })
+
+  after(() => {
+    if (realHome === undefined) delete process.env.HOME
+    else process.env.HOME = realHome
+    if (realUserProfile === undefined) delete process.env.USERPROFILE
+    else process.env.USERPROFILE = realUserProfile
+    rmSync(tmpRoot, { recursive: true, force: true })
+  })
+
+  /** Write a transcript exactly where the handler's `resolveJsonlPath` will look. */
+  function writeTranscript(entries) {
+    const dir = join(fakeHome, '.claude', 'projects', encodeProjectPath(CONV_CWD))
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, `${CONV_ID}.jsonl`), entries.map(e => JSON.stringify(e)).join('\n'))
+  }
+
+  function userTurns(n) {
+    return Array.from({ length: n }, (_, i) => ({
+      type: 'user',
+      uuid: `u-${i}`,
+      timestamp: '2026-01-15T00:00:00.000Z',
+      message: { content: [{ type: 'text', text: `message ${i}` }] },
+    }))
+  }
+
+  /** Pump the setImmediate-scheduled chunk loop until the end frame lands. */
+  async function drain(sends, deadlineMs = 5000) {
+    const deadline = Date.now() + deadlineMs
+    while (Date.now() < deadline) {
+      if (sends.some(m => m.type === 'history_replay_end')) return
+      await new Promise(r => setImmediate(r))
+    }
+    throw new Error('the replay never produced a history_replay_end')
+  }
+
+  it('a transcript past the 500-message cap replays truncated: true', async () => {
+    writeTranscript(userTurns(MAX_MESSAGES + 40))
+    const { ctx, sends, ws } = build(null, { reader: null })
+
+    await handler(ws, client(), request(), ctx)
+    await drain(sends)
+
+    const messages = sends.filter(m => m.type === 'message')
+    assert.equal(messages.length, MAX_MESSAGES, 'precondition: the cap really did trip on this read')
+    assert.equal(messages[0].content, 'message 40', 'and the retained slice is the most recent')
+    const start = sends.find(m => m.type === 'history_replay_start')
+    assert.equal(start.truncated, true,
+      'the 40 dropped messages are invisible in the frames the client received — this field is the only thing that says so')
+  })
+
+  it('POSITIVE CONTROL: a COMPLETE transcript on the same path replays truncated: false', async () => {
+    // Without this, a handler that hardcoded `truncated: true` would pass the
+    // test above.
+    writeTranscript(userTurns(3))
+    const { ctx, sends, ws } = build(null, { reader: null })
+
+    await handler(ws, client(), request(), ctx)
+    await drain(sends)
+
+    assert.equal(sends.filter(m => m.type === 'message').length, 3)
+    const start = sends.find(m => m.type === 'history_replay_start')
+    assert.equal(start.truncated, false)
   })
 })
