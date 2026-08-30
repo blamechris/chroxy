@@ -943,12 +943,31 @@ export function App() {
     // on a silent refusal; it was not silent, it was HALF-APPLIED.
     //
     // Deliberately still SILENT on refusal, not a toast: what #7511 got right
-    // was doing nothing, and what was broken was doing half of something. This
-    // handler is also shared with follow-mode and the permission auto-switch,
-    // whose refusals `switchSession`'s own comment argues must stay quiet
-    // ("reachable through ordinary use... the honest UI response is to do
-    // nothing rather than to log noise") — making the DOOR noisy would be wrong
-    // for them, and a per-caller wrapper would be a second membership reading.
+    // was doing nothing, and what was broken was doing half of something.
+    //
+    // Be accurate about what that choice does and does not cost, because the
+    // first draft of this comment was not (PR #7539 review F1). EVERY caller of
+    // this handler is an operator action — tab click, sidebar row, Cmd+N and
+    // the tab-cycle shortcuts, the SessionBar jump-to-pending button, the
+    // notification banner, the notifications-widget row, the OS card. The two
+    // MACHINE callers do not come through here at all: follow-mode
+    // (`store/message-handler.ts`) and the permission auto-switch
+    // (`store/connection.ts`) both call the raw store action directly, so
+    // `switchSession`'s own "do nothing rather than log noise" argument is
+    // theirs and does not constrain this handler. Nor would surfacing a refusal
+    // here need a second membership reading: the boolean is in hand one line
+    // below, and the message would be written beside it.
+    //
+    // So the silence is a choice on its merits, not a constraint: (1) #7511's
+    // precedent — a refusal reachable through ordinary use is honestly answered
+    // by doing nothing, and the bug was the half-applied state, not the quiet;
+    // (2) the honest surface already exists and is already reached — clicking a
+    // native notification focuses the window, and the widget row and banner for
+    // that session are gated by #7516/#7528 and already read "No longer open";
+    // (3) this click path is web-only — `sendNativeNotification` drops
+    // `options.onClick` on Tauri (#7367) — so a toast here would cover half the
+    // surface. If a later change makes a refusal worth SAYING, say it here off
+    // the boolean; nothing structural is in the way.
     //
     // ONE membership implementation, and it stays the store's (#7475/#7511).
     // The handler does not re-ask `isSessionListed`: a second reading here is
@@ -975,20 +994,21 @@ export function App() {
   // describes). Deliberately the same `isSessionListed` the store calls, over
   // the same `sessions` array, so a jump that is offered is a jump that works.
   //
-  // The refusal is surfaced HERE and not inside `handleSwitchSession`: that
-  // handler is shared with follow-mode and the permission auto-switch, whose
-  // silent refusal `switchSession`'s own comment argues for ("reachable through
-  // ordinary use... the honest UI response is to do nothing"). Making the DOOR
-  // noisy would be wrong for them; making the operator's CONTROL honest is what
-  // #7516 asks for.
+  // The refusal is surfaced HERE and not inside `handleSwitchSession`, and the
+  // reason is NOT the one this comment used to give (PR #7539 review F1): it
+  // said the handler is shared with follow-mode and the permission auto-switch,
+  // whose silence must be preserved. Neither goes through the handler — both
+  // call the raw store action — so no machine caller was ever being protected.
   //
-  // #7535 separated the two things that argument had run together. The door
-  // stays SILENT and is now also side-effect-FREE — a refused jump applies no
-  // part of a successful one — which is a different property from surfacing the
-  // refusal, and the one that was actually broken. Render-time gating remains
-  // the only way to make an operator-aimed CONTROL honest, and it is why the OS
-  // notification (which has no render surface) can only be made inert, not
-  // informative, from inside this handler.
+  // The real reason is what each vantage point can express. A RENDER gate can
+  // remove the affordance, which is what #7516 asks for: "looks clickable" and
+  // "will work" must not disagree. The handler runs after the operator has
+  // already aimed and clicked, so the best it can do is be INERT — which is
+  // what #7535 fixed, separately from silence. The door stays SILENT on its own
+  // merits (see the adjudication on `handleSwitchSession` above) and is now
+  // also side-effect-FREE; those are two different properties and only the
+  // second was broken. The OS notification has no render surface, so inert is
+  // all that is available to it.
   const sessionIsListed = useCallback(
     (sessionId: string) => isSessionListed(sessions, sessionId),
     [sessions],

@@ -125,14 +125,39 @@ function RunRow({ run, selected, onSelect }: { run: RunSummary; selected: boolea
  * dismissal, and the row is the provenance the panel exists to show.
  *
  * A marker says WHY, in the banner's vocabulary ("No longer open"), because a
- * silently affordance-less row reads as a rendering bug. It is deliberately NOT
- * a `role="status"` live region, which is the one place this diverges from the
- * banner: the banner shows a handful of rows and the gone state is its
- * exception, whereas a run detail renders one row per subtask and the gone
- * state is the terminal state of EVERY one of them. A live region per list item
- * is unbounded simultaneous announcement on a read-only observer panel, and the
- * row's own status chip has already moved to `completed` in the same render —
- * that is the change worth hearing.
+ * silently affordance-less row reads as a rendering bug. It carries
+ * `role="status"`, which is the banner's marker verbatim — same role, same
+ * text — and the reason is the scenario the banner itself cites: the roster
+ * snapshot that removes a session re-renders this row WHILE THE PANEL IS OPEN,
+ * replacing a control the operator was about to aim at. A sighted user sees
+ * that; without the role a screen-reader user gets a silent disappearance. It
+ * is also the case with a test — `flips LIVE when the roster drops the node
+ * session under the cursor` — whereas the alternative is speculative.
+ *
+ * An earlier draft made this the one deliberate DIVERGENCE from the banner, on
+ * two premises that do not survive checking (PR #7539 review F2), and they are
+ * recorded because the shape recurs:
+ *   - "a run detail renders one marker per subtask and the gone state is the
+ *     terminal state of every one" describes the panel's INITIAL RENDER, and a
+ *     live region inserted already-populated is the case mainstream screen
+ *     readers do NOT announce. Twenty completed nodes are silent either way, so
+ *     the noise the divergence was avoiding largely does not exist.
+ *   - "the row's own status chip is the change worth hearing" was simply false:
+ *     `StatusChip` above is a bare `<span className="cr-tag">` with no role, no
+ *     `aria-live` and no live-region ancestor. The alternative channel it
+ *     pointed at is not audible at all.
+ *
+ * The real cost, stated rather than denied: a `session_list` that retires
+ * SEVERAL node sessions at once — a run completing — inserts N markers in one
+ * commit. That is a genuine batch, it is accepted here, and it is bounded by
+ * the same insertion behaviour above (a populated region on insert is at worst
+ * announced once per AT that does announce it). Consistency of one marker with
+ * one meaning across every surface is worth more than a per-surface divergence
+ * argued from contested AT behaviour.
+ *
+ * The CSS class stays `cr-dim` rather than the banner's own: styling is
+ * surface-local (`cr-orch` has no stylesheet rule at all), and it is the ROLE
+ * and the TEXT that have to match, not the paint.
  *
  * A node that never had a session at all gets neither the button nor the
  * marker: "no longer open" would be a false claim about it, and the two
@@ -158,7 +183,7 @@ function NodeRow({ node, onOpenSession, isSessionListed: sessionIsListed }: {
         </button>
       )}
       {!!node.sessionId && !openable && (
-        <span className="cr-dim" data-testid="orch-node-session-gone">No longer open</span>
+        <span className="cr-dim" data-testid="orch-node-session-gone" role="status">No longer open</span>
       )}
     </li>
   )

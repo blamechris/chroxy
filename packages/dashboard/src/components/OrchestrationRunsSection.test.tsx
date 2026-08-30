@@ -372,14 +372,15 @@ describe('OrchestrationRunsSection (#6691 S-3b)', () => {
  * mark-read affordance and not a menu anchor — so there is nothing to preserve.
  *
  * A marker says WHY, in the banner's own vocabulary ("No longer open"), because
- * a silently affordance-less row reads as a rendering bug. It is NOT a
- * `role="status"` live region, and that is the one place this surface argues
- * away from the banner precedent: the banner shows at most a few rows and the
- * gone state is its exception, whereas a run detail renders one node row per
- * subtask and the gone state is the terminal state of every one of them. A live
- * region per list item is unbounded simultaneous announcement for a read-only
- * observer panel — the row's own status chip already moved to `completed` in the
- * same render, which is the change worth hearing.
+ * a silently affordance-less row reads as a rendering bug — and it is the
+ * banner's marker VERBATIM, `role="status"` included. PR #7539 review F2 struck
+ * the earlier divergence: it rested on "the gone state is the terminal state of
+ * every row" (true of the INITIAL render, which a populated-on-insert live
+ * region does not announce anyway) and on the row's status chip being the
+ * audible alternative (it is a bare `<span className="cr-tag">` with no role at
+ * all). The scenario that DOES announce is one node's session leaving the
+ * roster while the panel is open — which is the banner's own cited reason, and
+ * which the `flips LIVE …` cell below exercises.
  */
 describe('#7536 — the orchestration node session-jump is gated on roster membership', () => {
   const node = (over: Record<string, unknown> = {}) => ({
@@ -430,9 +431,16 @@ describe('#7536 — the orchestration node session-jump is gated on roster membe
     expect(screen.getByTestId('orch-node-branch').textContent).toBe('feat/x')
   })
 
-  it('says WHY, rather than going silently affordance-less', () => {
+  it('says WHY, in a live region — the banner marker verbatim', () => {
+    // Role AND text, both pinned. The marker is the banner's
+    // `notification-banner-session-gone` semantics reused rather than a
+    // lookalike, so a divergence has to be a deliberate edit here (PR #7539
+    // review F2 removed the earlier divergence, which rested on two premises
+    // that did not hold — see the component docstring).
     renderWithNodes([node()], [])
-    expect(screen.getByTestId('orch-node-session-gone').textContent).toBe('No longer open')
+    const marker = screen.getByTestId('orch-node-session-gone')
+    expect(marker.textContent).toBe('No longer open')
+    expect(marker.getAttribute('role')).toBe('status')
   })
 
   it('a node that NEVER had a session gets neither the button nor the marker', () => {
