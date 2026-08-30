@@ -355,7 +355,6 @@ describe('CONFIG.md sub-key rosters vs config.js *_SUPPORTED_KEYS (#7449)', () =
     // (#7514 — the half #7449 deliberately left loose). Key claims are the
     // bare lower-camel backticked tokens; see claimedSubKeyTokens for why
     // paths/env vars/examples are structurally outside the claim shape.
-    let claimedTotal = 0
     const claimedPerBlock = new Map()
     for (const block of BLOCK_TO_SET_NAME.keys()) {
       const region = findConfigTableRow(md, block) ?? findSection(md, block)
@@ -363,7 +362,7 @@ describe('CONFIG.md sub-key rosters vs config.js *_SUPPORTED_KEYS (#7449)', () =
       const nonKeys = new Set(REGION_NON_KEY_TOKENS.get(block) ?? [])
       for (const t of nonKeys) {
         assert.ok(
-          region.includes('\`' + t + '\`'),
+          region.includes('`' + t + '`'),
           `REGION_NON_KEY_TOKENS entry '${t}' for \`${block}\` no longer appears in its region — stale exclusion`
         )
       }
@@ -372,7 +371,6 @@ describe('CONFIG.md sub-key rosters vs config.js *_SUPPORTED_KEYS (#7449)', () =
         .filter(k => k !== ownName && !nonKeys.has(k))
       const supported = new Set(runtime.get(block))
       const phantom = claimed.filter(k => !supported.has(k))
-      claimedTotal += claimed.length
       claimedPerBlock.set(block, claimed.length)
       assert.deepEqual(
         phantom,
@@ -400,7 +398,6 @@ describe('CONFIG.md sub-key rosters vs config.js *_SUPPORTED_KEYS (#7449)', () =
       sorted([...REGION_MIN_CLAIMS.keys()]),
       'the set of regions contributing to the reverse check changed — update REGION_MIN_CLAIMS deliberately'
     )
-    void claimedTotal
     // F1 staleness: every generic literal must appear backticked in some gated
     // region, or it is a stale entry widening the evasion surface.
     const allRegions = [...BLOCK_TO_SET_NAME.keys()]
@@ -409,7 +406,7 @@ describe('CONFIG.md sub-key rosters vs config.js *_SUPPORTED_KEYS (#7449)', () =
       .join('\n')
     for (const lit of GENERIC_BACKTICK_LITERALS) {
       assert.ok(
-        allRegions.includes('\`' + lit + '\`'),
+        allRegions.includes('`' + lit + '`'),
         `GENERIC_BACKTICK_LITERALS entry '${lit}' appears backticked in no gated region — stale, remove it`
       )
     }
