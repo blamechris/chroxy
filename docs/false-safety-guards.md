@@ -1221,3 +1221,91 @@ same expression, the test has one input and proves nothing about agreement. The
 question to ask of any coverage or parity test is not "does it iterate the right
 list" but **"which file would I have to break for this to go red?"** — and if
 the answer is "the one it iterates", the other file is unguarded.
+
+### 22. The merge gate whose check names matched nothing — `#7503`
+
+`/batch-merge` is the skill that merges a queue of reviewed PRs unattended. Its
+Step 2a was the CI gate, and it read:
+
+```bash
+REQUIRED_CHECKS=("Run Tests" "Validate Project")
+CHECKS=$(gh pr checks ${PR_NUM} --json name,state)
+```
+
+followed by the prose "All required checks must be `SUCCESS` or `SKIPPED`."
+Neither name exists in this repo — not in CONTRIBUTING.md's roster of 13
+required contexts, not as any `name:` in `ci.yml`. They are leftovers from the
+registry template's original repo.
+
+Walking the shipped fence against a captured `gh pr checks --json name,state`
+payload from PR #7530 (23 real contexts) makes the arithmetic explicit: the
+filter selects **zero rows**, so "no required check is failing" is true by
+construction. The same verdict comes back on a payload with
+`Server Tests=FAILURE` in it. The gate said PASS on all three fixtures — green,
+red, and one with a required context deleted entirely.
+
+Two things make this worse than a stale constant. First, the *neighbouring*
+expression is correct: Phase 1's pre-flight counts non-green checks across the
+whole payload — but it is explicitly labelled informational and does not block,
+so the honest check is the one that cannot stop a merge. Second, truing the
+names up would have fixed only half of it. `filter by name, then check states`
+still passes when the filter matches nothing, so a **renamed `ci.yml` job**
+(the `#7191` family) produces the identical false green: verified by running the
+old shape with the *real* names against a payload with `Server Tests` removed —
+`rows-matched=1` of 2, `non-green=0`, PASS.
+
+The roster is now derived from `scripts/lib/contributing-roster.mjs` — the one
+parse of CONTRIBUTING.md that `contributing-required-checks.test.js` pins
+against `ci.yml` and `check-required-contexts.sh` diffs against live branch
+protection — and a required context ABSENT from the payload is classified
+`MISSING` and blocks. Re-run against the same three fixtures: PASS / BLOCK
+(`Server Tests=FAILURE`) / BLOCK (`Server Tests=MISSING`). Feeding the old
+phantom `Run Tests` back in through the roster now yields
+`Run Tests=MISSING` → BLOCK, where before it yielded PASS.
+
+**Guard against it:** a filter-then-assert gate has two failure modes, and the
+loud one is the states. Ask what the gate does when the filter matches **zero
+rows**, and make that answer BLOCK. Then ask where the filter's terms came
+from — if they were typed into the file rather than derived from the thing they
+describe, they are already drifting.
+
+### 23. The suite that ran in no workflow — `#7504`
+
+`scripts/__tests__/merge-updater-feeds.test.sh` was mode 100755, passed 14
+assertions, and appeared in **no workflow step** for its entire life. Its
+subject is not incidental: `release.yml`'s `github-release` job runs
+`scripts/merge-updater-feeds.mjs` to fold the per-platform Tauri updater feeds
+into the single `latest.json` the auto-updater serves, so a regression there
+breaks updates for installed desktop clients and surfaces only after a release.
+This is the plainest form of the whole class — a test that never runs and a
+passing test emit the same signal — and it is the one that needs no cleverness
+to produce.
+
+The cause is structural rather than an oversight: `scripts-tests` names each
+suite in its own hand-written step, which is entry 3's hardcoded list beside a
+growing directory. Registering the orphan alone would leave the next one exactly
+as invisible, so `ci-scripts-tests-registration.test.js` now quantifies over the
+DIRECTORY — every `scripts/__tests__/*.test.{sh,mjs,js}` must be named by some
+workflow step, matched against step bodies with comments stripped (ci.yml
+discusses these files by name, and a guard that reads prose as configuration is
+satisfiable by prose).
+
+Found alongside it: **nothing in `.github/` had ever parsed a shell script.**
+The repo's 30 tracked `*.sh` files are invoked from workflow steps, git hooks
+and by hand; none is imported by a test suite, so a syntax error in one ships
+green and is discovered by the next person to run it. A `bash -n` step now
+covers them, enumerated by `git ls-files -z '*.sh'` rather than a glob typed
+into CI config — the pathspec is the property, and narrowing it to `scripts/*.sh`
+drops packages/server/scripts/, packages/desktop/scripts/ and
+packages/app/.maestro/scripts/ while staying green over 13 of 30 files. The step
+fails **closed** below a floor of 20 files, because a `for f in glob` loop over
+an unmatched glob iterates zero times and exits 0. It is parse-level and claims
+no more: `bash -n` reports syntax errors without executing anything, and catches
+none of the semantic class (unset variables, word splitting, quoting) that
+shellcheck covers — adopting shellcheck across 30 files is a separate decision
+with a real baseline behind it.
+
+**Guard against it:** when you add a test file, the question is not "does it
+pass" but "which job runs it, and have I seen that job's log?" For a directory
+of them, put the answer in a guard that reads the directory, because the step
+list in CI config is a hand-maintained roster and rosters stop growing.
