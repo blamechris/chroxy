@@ -62,14 +62,25 @@
  * A name with at least one WRITE and zero READs FAILS the lint, naming it and
  * every write site.
  *
- * `++`/`--` is a write and NOT a read — but only where its value is DISCARDED.
- * `n++;` and `for (;; n++)` consume nothing, so a name whose sole consumer is
- * its own increment still has no reader. `return n++` and `String(++n)` hand
- * the value on and are therefore reads as well. The refinement is not
- * hypothetical: both live shapes exist in the dashboard store
- * (`nextReconnectAttempt`, `requestFileContent`), and without it the lint's
- * first run reported two false positives. It changes nothing for the app
- * target, which has no `++` on a context field at all.
+ * `++`/`--` is a write and NOT a read — but only at STATEMENT POSITION, which
+ * is the literal test the code applies (`atStatementStart`): the last
+ * significant character before the reference closed the previous statement.
+ * `n++;` and `for (;; n++)` qualify, so a name whose sole consumer is its own
+ * increment still has no reader. `return n++` and `String(++n)` do not, and
+ * are therefore reads as well. The refinement is not hypothetical: both live
+ * shapes exist in the dashboard store (`nextReconnectAttempt`,
+ * `requestFileContent`), and without it the lint's first run reported two
+ * false positives. It changes nothing for the app target, which has no `++` on
+ * a context field at all.
+ *
+ * Statement position is a STRICT SUBSET of "the value is discarded", and the
+ * difference is a gap rather than a synonym (#7530 F2). `void n++;` and
+ * `c && n++;` discard the value too, yet neither is at statement position, so
+ * both classify as READS. That direction only ever RESCUES a name from the
+ * failure bucket, so it cannot produce a false accusation — but a binding
+ * whose sole mutation is written that way is invisible to this lint. Both
+ * shapes are pinned in the harness so the gap stays a documented decision
+ * rather than an assumption about what the regex does.
  *
  * A `const` module-level binding cannot be reassigned, so for the
  * module-bindings kind a MUTATOR CALL at statement position — `m.set(k, v);`,
@@ -78,6 +89,10 @@
  * and could never reach the failure bucket: a guard reporting clean on state
  * it structurally cannot fail. Statement position is what keeps
  * `if (m.delete(k))` and `const last = arr.pop()` reads.
+ *
+ * It recovers that bucket for METHOD-mutated containers ONLY. A `const` object
+ * or `Record` mutated by index or property assignment is still unfailable —
+ * see the next section, and #7537.
  *
  * A field with NO reference at all is a WARNING, not a failure — and the
  * distinction is load-bearing rather than squeamish. Zero references is the
@@ -159,6 +174,21 @@
  *     a false green on something already in the roster.
  *   - A mutator call in a concise arrow body (`() => m.clear()`) is not at
  *     statement position and reads as a READ — safe direction, still a gap.
+ *   - INDEX AND PROPERTY ASSIGNMENT THROUGH A BINDING IS A READ, NOT A WRITE.
+ *     `o[k] = v;` and `o.k = v;` classify as reads of `o`, because the
+ *     assignment's target is the ELEMENT, not the binding. The MUTATORS rule
+ *     therefore recovers the failure bucket for method-mutated containers
+ *     only: a `const` object, `Record` or array populated and cleared solely
+ *     by index assignment can never fail, however dead it becomes. This is not
+ *     hypothetical. Of the 78 bindings on the live roster 51 are `const`, 34
+ *     of those have ZERO writes under these rules, and four are mutated by
+ *     index assignment today: `gitOneshotTimers` and `_prevMessageCounts`
+ *     (connection.ts), `messageQueue` (message-handler.ts) and
+ *     `_messagePersisters` (persistence.ts). `gitOneshotTimers` is the
+ *     sharpest: six references, four of them `gitOneshotTimers[key] = …`, and
+ *     it reports 6 reads / 0 writes — so if its two genuine readers were
+ *     deleted tomorrow this lint would stay green. Widening the rule is #7537;
+ *     naming the gap here is so a green run is not read as more than it is.
  *
  * ALLOWLIST
  * ---------
@@ -256,22 +286,30 @@ export const TARGETS = [
     declDirs: ['packages/dashboard/src/store'],
     scanDirs: ['packages/dashboard/src'],
     // Mutating a `const` container in place is the only WRITE shape a `const`
-    // binding has — it can never be reassigned. Without this the whole
-    // write-only class would be UNREACHABLE for every `const _x = new Map()`
-    // in the roster, and the guard would be inert for two thirds of it while
-    // still reporting "clean". See MUTATORS below for the statement-position
-    // rule that keeps `if (m.delete(k))` a read.
+    // binding has — it can never be reassigned. Without this the write-only
+    // class would be UNREACHABLE for every `const _x = new Map()` in the
+    // roster. It recovers that class for METHOD-mutated containers only:
+    // `o[k] = v` is still a read of `o`, so a `const` object or `Record`
+    // mutated only that way stays unfailable (#7537 — the gap is enumerated in
+    // the header). See MUTATORS below for the statement-position rule that
+    // keeps `if (m.delete(k))` a read.
     mutatorsAreWrites: true,
     // '<declaring file>::<binding>': 'why it is legitimately unreferenced'
     allow: {
       'packages/dashboard/src/store/message-handler.ts::_testQueueInternals':
-        'A test-only export. Its only consumers are in ' +
-        'packages/dashboard/src/store/store.test.ts, and this lint scans no ' +
-        'test file on either side, so it reads as zero references rather than ' +
-        'as state. Stale-checked: a production reader refuses the entry.',
+        'A test-only export, consumed 12 times in ' +
+        'packages/dashboard/src/store/store.test.ts and nowhere else. Its one ' +
+        'non-test mention is the pass-through re-export on connection.ts:59, ' +
+        'which blankModuleClauses deliberately does not count as a read — a ' +
+        're-export forwards a name, it does not consume it. This lint scans no ' +
+        'test file on either side, so the binding reads as zero references ' +
+        'rather than as state. Stale-checked: a production reader refuses the ' +
+        'entry.',
       'packages/dashboard/src/store/message-handler.ts::_testMessageHandler':
-        'A test-only export — the handler surface re-exported so the dashboard ' +
-        'suite can drive it. Same consumers, same reasoning as ' +
+        'A test-only export — the handler surface, so the dashboard suite can ' +
+        'drive it directly. Consumed by store.test.ts (~60 call sites) AND by ' +
+        'permission-expired-retires-card.test.ts:38,101; forwarded, not ' +
+        'consumed, by the same connection.ts:59 re-export. Same reasoning as ' +
         '_testQueueInternals above.',
     },
   },
@@ -492,12 +530,19 @@ const DELETE_BEHIND = /\bdelete\s+$/
 /**
  * Member names whose call MUTATES the receiver in place.
  *
- * Needed only by the module-bindings kind, and there it is load-bearing rather
- * than a nicety: a `const` binding cannot be reassigned, so `m.set(k, v)` is
- * the ONLY write shape `const m = new Map()` has. Without this rule every such
- * binding would have zero writes by construction, could never reach the
- * failure bucket, and the lint would report it clean forever — the "guard that
- * cannot fail" shape from docs/false-safety-guards.md.
+ * Needed only by the module-bindings kind. A `const` binding cannot be
+ * reassigned, so a mutation through it is the only write shape it has; without
+ * this rule a `const m = new Map()` would have zero writes by construction and
+ * could never reach the failure bucket at all.
+ *
+ * SCOPE, stated precisely because the first draft of this comment overclaimed
+ * it (#7530 F1): this recovers the failure bucket for containers mutated by a
+ * METHOD CALL — `Map`, `Set`, `Array`. It does NOT recover it for a container
+ * mutated by INDEX or PROPERTY ASSIGNMENT (`o[k] = v`, `o.k = v`), which still
+ * classifies as a read of `o`. A plain object or `Record` populated and
+ * cleared only that way remains unfailable, and the live tree contains such a
+ * case — see WHAT IT CANNOT SEE in the header, and #7537 for the behaviour
+ * half.
  *
  * The return values (`Map.prototype.delete`'s boolean, `push`'s new length,
  * `pop`'s element) are exactly why the statement-position rule below applies:
@@ -558,11 +603,13 @@ function isWriteAt(text, index, end, { mutatorsAreWrites = false } = {}) {
   const before = text.slice(Math.max(0, index - 64), index)
   if (ASSIGN_AHEAD.test(after)) return true
   if (DELETE_BEHIND.test(before)) return true
-  // An increment is a write ONLY where its value is discarded. `n++;` and
-  // `for (;; n++)` consume nothing; `return n++` and `String(++n)` hand the
-  // value on and are therefore reads as well, so they must not be filed as
-  // writes. Both live shapes are in the dashboard store today — the rule was
-  // written against them, not imagined (#7467).
+  // An increment is a write ONLY at statement position. `n++;` and
+  // `for (;; n++)` qualify; `return n++` and `String(++n)` do not and are
+  // therefore reads as well, so they must not be filed as writes. Both live
+  // shapes are in the dashboard store today — the rule was written against
+  // them, not imagined (#7467). Note this is NARROWER than "the value is
+  // discarded": `void n++` and `c && n++` discard it and still classify as
+  // reads. Rescue-only, and pinned as such (#7530 F2).
   if (INCDEC_AHEAD.test(after) || INCDEC_BEHIND.test(before)) {
     return atStatementStart(text, index)
   }

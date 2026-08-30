@@ -38,7 +38,7 @@ const SCRIPT = resolve(HERE, '..', 'lint-write-only-ctx-fields.mjs')
 
 // Every case in this file. Bump it when you add one — a case that vanishes
 // should break the run rather than quietly shrink it (#7447).
-const MIN_CASES = 120
+const MIN_CASES = 125
 
 let pass = 0
 let fail = 0
@@ -665,6 +665,13 @@ const incdecCases = [
   ['String(++n) is a READ — its value is consumed', 'const s = String(++n);', 1, 0],
   ['f(n++) is a READ', 'f(n++);', 1, 0],
   ['a plain assignment is still a WRITE', 'n = 1;', 0, 1],
+  // #7530 F2 — the header used to claim the rule was "the value is DISCARDED".
+  // It is not: the code tests STATEMENT POSITION, a strict subset. These two
+  // discard the value and still classify as reads. Rescue-only, so it cannot
+  // produce a false accusation — pinned so the gap stays a decision on record
+  // instead of an assumption about what the regex does.
+  ['void n++ is a READ — discarded, but not at statement position', 'void n++;', 1, 0],
+  ['c && n++ is a READ — discarded, but not at statement position', 'c && n++;', 1, 0],
 ]
 for (const [label, stmt, wantReads, wantWrites] of incdecCases) {
   test(`binding: ${label}`, () => {
@@ -684,17 +691,30 @@ test('the SAME rule applies to a context field — return _ctx.n++ is a read', (
 })
 
 const mutatorCases = [
-  ['m.set(k, v); is a WRITE', 'm.set(k, v);', 0, 1],
-  ['m.clear(); is a WRITE', 'm.clear();', 0, 1],
-  ['arr.push(x); is a WRITE', 'arr.push(x);', 0, 1],
-  ['if (m.delete(k)) is a READ — the result is consumed', 'if (m.delete(k)) doThing();', 1, 0],
-  ['const last = m.pop() is a READ', 'const last = m.pop();', 1, 0],
-  ['m.get(k) is a READ', 'm.get(k);', 1, 0],
-  ['m.size is a READ', 'const n = m.size;', 1, 0],
+  ['m.set(k, v); is a WRITE', 'm.set(k, v);', 'm', 0, 1],
+  ['m.clear(); is a WRITE', 'm.clear();', 'm', 0, 1],
+  ['arr.push(x); is a WRITE', 'arr.push(x);', 'arr', 0, 1],
+  ['if (m.delete(k)) is a READ — the result is consumed', 'if (m.delete(k)) doThing();', 'm', 1, 0],
+  ['const last = m.pop() is a READ', 'const last = m.pop();', 'm', 1, 0],
+  ['m.get(k) is a READ', 'm.get(k);', 'm', 1, 0],
+  ['m.size is a READ', 'const n = m.size;', 'm', 1, 0],
+  // #7530 F3 — MUTATOR_AHEAD carries a `\??` for optional chaining. Dropping
+  // it survived every other case in this file, so the optional form gets its
+  // own pin: `m?.set(...)` at statement position must classify exactly as
+  // `m.set(...)` does.
+  ['m?.set(k, v); is a WRITE — optional chaining is the same mutation', 'm?.set(k, v);', 'm', 0, 1],
+  // #7530 F1 — a DELIBERATE, DOCUMENTED gap, pinned so it cannot change
+  // silently. The assignment's target is the element, not the binding, so
+  // index/property assignment classifies as a READ of the binding and a
+  // `const` object populated only that way can never fail. `gitOneshotTimers`
+  // in connection.ts is the live instance (6 reads / 0 writes, four of the six
+  // references being `gitOneshotTimers[key] = …`). Widening this is #7537; if
+  // that lands, this pin goes red and the header must be updated with it.
+  ['o[k] = v; is a READ of o — index assignment targets the element (#7537)', 'o[k] = v;', 'o', 1, 0],
+  ['o.k = v; is a READ of o — property assignment targets the element (#7537)', 'o.k = v;', 'o', 1, 0],
 ]
-for (const [label, stmt, wantReads, wantWrites] of mutatorCases) {
+for (const [label, stmt, name, wantReads, wantWrites] of mutatorCases) {
   test(`binding: ${label}`, () => {
-    const name = /^arr/.test(stmt) || /= arr/.test(stmt) ? 'arr' : 'm'
     const { reads, writes } = classifyBindingReferences(stripComments(stmt), name, { mutatorsAreWrites: true })
     assert(
       reads.length === wantReads && writes.length === wantWrites,
