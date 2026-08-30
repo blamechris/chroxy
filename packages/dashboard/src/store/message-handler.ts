@@ -5005,8 +5005,27 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // source of truth.
       for (const [sid, desiredIsIdle] of isIdlePatches) {
         if (!get().sessionStates[sid]) continue;
+        // #7529 — the short-circuit is on the SHELL, and the FLAT mirror is a
+        // side effect of `updateSession`, so skipping the write also skips the
+        // mirror. For the ACTIVE session that is observable: flat `isIdle` is
+        // what `App.tsx` reads for `isBusy={!isIdle}`. Force the write when the
+        // shell already agrees but the mirror does not.
+        //
+        // Reachable, not hypothetical (review finding): `_resetSessionMemory()`
+        // — `switchServer` / `connectLocal` — and `forgetSession` clear
+        // `sessions`, `sessionStates` and `activeSessionId`, but NOT the flat
+        // `isIdle`, which keeps the previous server's busy session's `false`.
+        // `switchServer` then restores `activeSessionId` from persistence
+        // BEFORE the first `session_list`, so an idle session on the new server
+        // lands `{ shell: true, flat: false }` — a Stop button and a Working
+        // banner on an idle session — and the short-circuit means nothing
+        // corrects it until the next agent_busy / agent_idle / session_activity.
+        // The mirror-image of the `{ shell: false, flat: true }` this issue was
+        // filed for.
+        const flatMirrorStale =
+          sid === get().activeSessionId && get().isIdle !== desiredIsIdle;
         updateSession(sid, (ss) =>
-          ss.isIdle === desiredIsIdle ? {} : { isIdle: desiredIsIdle }
+          ss.isIdle === desiredIsIdle && !flatMirrorStale ? {} : { isIdle: desiredIsIdle }
         );
       }
       // Sync conversationId from session list into session states

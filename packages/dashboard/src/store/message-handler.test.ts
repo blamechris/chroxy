@@ -8364,6 +8364,85 @@ describe('dashboard message-handler dispatch', () => {
       expect(state.isIdle).toBe(true)
     })
 
+    // #7529 (review finding) — the OTHER direction, and it is reachable, which
+    // this PR's first pass wrongly argued it was not. `_resetSessionMemory()`
+    // (`switchServer` / `connectLocal`) and `forgetSession` clear `sessions`,
+    // `sessionStates` and `activeSessionId` — but NOT the flat `isIdle`, which
+    // keeps the previous server's busy session's `false`. `switchServer` then
+    // restores `activeSessionId` from persistence BEFORE the first
+    // `session_list`, so the snapshot seeds a fresh shell (default
+    // `isIdle: true`) for the active session while flat still says `false`.
+    // With the snapshot ALSO reporting idle, the resync's no-op short-circuit
+    // fires and the flat value is never corrected: a Stop button and a Working
+    // banner on an idle session until the next agent_busy / agent_idle /
+    // session_activity.
+    //
+    // So the loop cannot short-circuit on the SHELL alone — the flat mirror is
+    // a side effect of `updateSession`, and skipping the write skips the
+    // mirror.
+    it('session_list converges a stale FLAT isIdle even when the shell already matches — new shell (#7529)', () => {
+      store = createMockStore(baseState({
+        activeSessionId: 's1',
+        sessionStates: {},
+        isIdle: false,
+      } as any))
+      setStore(store)
+      handleMessage(
+        {
+          type: 'session_list',
+          sessions: [{ sessionId: 's1', name: 'S1', isBusy: false } as any],
+        },
+        ctx() as any,
+      )
+      const state = store.getState() as any
+      expect(state.sessionStates.s1.isIdle).toBe(true)
+      expect(state.isIdle).toBe(true)
+    })
+
+    it('session_list converges a stale FLAT isIdle even when the shell already matches — existing shell (#7529)', () => {
+      store = createMockStore(baseState({
+        activeSessionId: 's1',
+        sessionStates: { s1: { ...createEmptySessionState(), isIdle: true } },
+        isIdle: false,
+      } as any))
+      setStore(store)
+      handleMessage(
+        {
+          type: 'session_list',
+          sessions: [{ sessionId: 's1', name: 'S1', isBusy: false } as any],
+        },
+        ctx() as any,
+      )
+      const state = store.getState() as any
+      expect(state.sessionStates.s1.isIdle).toBe(true)
+      expect(state.isIdle).toBe(true)
+    })
+
+    // NEGATIVE CONTROL for the force above: when the flat mirror already
+    // agrees, the loop must still no-op. Pinned by value AND by the absence of
+    // a write — the SCOPE tests below would not see a redundant same-value
+    // write, so this one watches the store's identity instead.
+    it('session_list does NOT write when both the shell and the flat mirror already agree (#7529)', () => {
+      store = createMockStore(baseState({
+        activeSessionId: 's1',
+        sessionStates: { s1: { ...createEmptySessionState(), isIdle: true } },
+        isIdle: true,
+      } as any))
+      setStore(store)
+      const before = (store.getState() as any).sessionStates.s1
+      handleMessage(
+        {
+          type: 'session_list',
+          sessions: [{ sessionId: 's1', name: 'S1', isBusy: false } as any],
+        },
+        ctx() as any,
+      )
+      const state = store.getState() as any
+      expect(state.isIdle).toBe(true)
+      // Same object reference — `updateSession` returned before writing.
+      expect(state.sessionStates.s1).toBe(before)
+    })
+
     it('session_list resyncs isIdle on an existing session when server flips to busy', () => {
       // Tab swap path: the session state exists with isIdle: true (default
       // after createEmptySessionState), but the server is still in-flight.
