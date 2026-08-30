@@ -1139,6 +1139,91 @@ test('atStatementStart: the #7554 arms, at the predicate', () => {
   assert(atStatementStart(stripComments('const e = [1]\n/* why */ m.clear()'), 24) === true, 'comment after the newline')
 })
 
+// --- 10c-4. The three review findings on #7560 -----------------------------
+//
+// All three run in the ACCUSE direction — a read filed as a write — which is
+// the one direction this lint's gaps are not allowed to take, so all three are
+// fixed rather than documented as limits. Two of them (F1, F5) were introduced
+// or widened by this PR; F2 was a hole in what the PR's own new rule was
+// allowed to grow into.
+
+const reviewFindingCases = [
+  // F1. `UpdateExpression : LeftHandSideExpression [no LineTerminator] ++` is a
+  // RESTRICTED PRODUCTION, so `o[k]` ⏎ `++x` is `o[k];` then `++x` — a READ of
+  // o. INCDEC_AHEAD's `\s*` crossed the newline and filed it as a write.
+  ['o[k] ⏎ ++x is a READ — postfix cannot cross a line terminator (F1)', 'o[k]\n++x;', 'o', true, 1, 0],
+  ['o.field ⏎ ++x is a READ — same, property form (F1)', 'o.field\n++x;', 'o', true, 1, 0],
+  ['o[k]++ on ONE line is still a WRITE — the control for F1', 'o[k]++;', 'o', true, 0, 1],
+  ['o[k]  ++ with spaces is a WRITE — only a LINE TERMINATOR is restricted', 'o[k]  ++;', 'o', true, 0, 1],
+  // ALL FOUR line terminators, not just `\n`. A mutant narrowing the class to
+  // `[^\S\n]` SURVIVED the rest of this file — `\r`, `\u2028` and `\u2029` are
+  // matched by `\s` and are not `\n`, so it read them as ordinary space and
+  // filed the write. `\r` is reachable on a CRLF checkout (this lint runs on
+  // Windows runners too) and `\u2028`/`\u2029` are line terminators the spec
+  // lists, so the refinement has behaviour and gets pins rather than removal.
+  ['o[k] CR ++x is a READ — a bare CR is a line terminator (F1)', 'o[k]\r++x;', 'o', true, 1, 0],
+  ['o[k] CRLF ++x is a READ (F1)', 'o[k]\r\n++x;', 'o', true, 1, 0],
+  ['o[k] U+2028 ++x is a READ — LINE SEPARATOR (F1)', 'o[k]\u2028++x;', 'o', true, 1, 0],
+  ['o[k] U+2029 ++x is a READ — PARAGRAPH SEPARATOR (F1)', 'o[k]\u2029++x;', 'o', true, 1, 0],
+  ['o[k] VT ++ is a WRITE — U+000B is whitespace, NOT a line terminator', 'o[k]\v++;', 'o', true, 0, 1],
+  ['o[k] FF ++ is a WRITE — U+000C is whitespace, NOT a line terminator', 'o[k]\f++;', 'o', true, 0, 1],
+  // The BARE form had the same defect, predating this PR — which is why the
+  // restriction lives in the shared regex and not in the accessor predicate.
+  ['n ⏎ ++x is a READ on a bare binding too (F1)', 'n\n++x;', 'n', true, 1, 0],
+  ['n++ on one line is still a WRITE — the bare control', 'n++;', 'n', true, 0, 1],
+  // …and the two operators that RIGHTLY cross a newline. Restricting either of
+  // them would lose a real write; the asymmetry is the grammar's.
+  ['o[k] ⏎ = v is a WRITE — an assignment operator is NOT restricted', 'o[k]\n= v;', 'o', true, 0, 1],
+  ['++ ⏎ n is a WRITE — a PREFIX ++ is NOT restricted', '++\nn;', 'n', true, 0, 1],
+  ['o ⏎ [k]++ is a WRITE — a member access is not restricted either', 'o\n[k]++;', 'o', true, 0, 1],
+  // F5. A member access is not restricted, so `o.` ⏎ `else` and `o. else` are
+  // both the member `o.else` and neither introduces a statement. The `.` guard
+  // only saw a dot sitting hard against the word.
+  ['a. ⏎ else m.clear() is a READ — the member access spans the line (F5)', 'a.\nelse m.clear();', 'm', true, 1, 0],
+  ['a. else m.clear() is a READ — a space is enough to miss the dot (F5)', 'a. else m.clear();', 'm', true, 1, 0],
+  ['a?. ⏎ else m.clear() is a READ — optional member, same shape (F5)', 'a?.\nelse m.clear();', 'm', true, 1, 0],
+  ['a.else m.clear() is a READ — the control that already passed', 'a.else m.clear();', 'm', true, 1, 0],
+  ['a genuine else arm across a newline is STILL a WRITE — the F5 control', 'if (c) f();\nelse m.clear();', 'm', true, 0, 1],
+  // F2. `/` closes a regex literal (a primary expression) AND is the division
+  // operator, and this predicate has no lexer state to tell them apart. The
+  // division reading is the one that accuses, so `/` stays out.
+  ['a division continuation is a READ — `/` is not a primary-expression end (F2)', 'const a = b /\nm.delete(k);', 'm', true, 1, 0],
+  ['a `>` continuation is a READ — comparison, JSX close, arrow tail', 'const a = b >\nm.delete(k);', 'm', true, 1, 0],
+]
+for (const [label, stmt, name, flag, wantReads, wantWrites] of reviewFindingCases) {
+  test(`review finding: ${label}`, () => {
+    const { reads, writes } = classifyBindingReferences(stripComments(stmt), name, { inPlaceMutationIsWrite: flag })
+    assert(
+      reads.length === wantReads && writes.length === wantWrites,
+      `got ${reads.length}r ${writes.length}w, wanted ${wantReads}r ${wantWrites}w`,
+    )
+  })
+}
+
+// F2, at the predicate: the whole SET, in both directions. Adding `/` to
+// PRIMARY_EXPRESSION_END moved zero references in the tree and passed the
+// entire harness, so the exclusions need a pin of their own — an admitted
+// character converts reads into writes, and that is the accuse direction.
+const primaryExpressionEndChars = [
+  // Admitted: these can ONLY end a complete primary expression, so an
+  // identifier on the next line cannot continue them and ASI is guaranteed.
+  [']', true], ["'", true], ['"', true], ['`', true], ['0', true], ['9', true],
+  // Refused: every one of these can end a CONTINUED line.
+  ['/', false], ['>', false], ['<', false], ['+', false], ['-', false],
+  ['*', false], ['%', false], ['&', false], ['|', false], ['^', false],
+  ['~', false], ['!', false], ['?', false], [':', false], [',', false],
+  ['.', false], ['=', false], ['(', false], ['[', false], ['@', false],
+]
+for (const [ch, admitted] of primaryExpressionEndChars) {
+  test(`atStatementStart: a line ending in ${JSON.stringify(ch)} ${admitted ? 'IS' : 'is NOT'} a statement boundary`, () => {
+    const text = `x ${ch}\nn`
+    assert(
+      atStatementStart(text, text.length - 1) === admitted,
+      `got ${atStatementStart(text, text.length - 1)}`,
+    )
+  })
+}
+
 // --- 10d. Roster discovery -------------------------------------------------
 
 test('every module-level LET is state; a nested one is not', () => {

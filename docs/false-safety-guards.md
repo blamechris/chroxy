@@ -1419,3 +1419,24 @@ a primary expression moved one; the identifier arm — which would need a
 hand-maintained list of TypeScript's operator keywords, cause #1 in this
 document — moved **zero**, and was refused and pinned as a residual on that
 evidence rather than on taste.
+
+**And the review of that PR found the failure mode this document is about,
+three times, in the fix itself.** All three ran in the ACCUSE direction — a read
+filed as a write — which every other gap in the lint is careful not to do. (a)
+`INCDEC_AHEAD` used `\s*`, so it crossed a line terminator; but postfix `++` is
+a RESTRICTED PRODUCTION, so `o[k]` ⏎ `++x` is two statements and `o[k]` is a
+read. The new rule filed it as a write, and the defect was in the *shared*
+regex, so the bare form `n` ⏎ `++x` had been wrong since long before. (b) The
+`.`-lookback that keeps `o.else` a member access only fired when the dot sat
+hard against the keyword, so `o.` ⏎ `else` *and* `o. else` invented a statement
+boundary. (c) Sharpest, and the reason it belongs here rather than in a
+changelog: adding `/` to the ASI character set **passed all 243 tests and moved
+zero references in the tree**, while flipping `const a = b /` ⏎ `m.delete(k)` —
+one division spanning two lines — from read to write. A guard's *exclusions*
+were unpinned, so the set was free to grow into a false accusation with nothing
+to stop it. The lesson generalises past this lint: when a rule is a membership
+test, pin **what is not in the set**, because that is the half a passing suite
+cannot see. The set is now pinned in both directions, 26 characters, and a
+`SURVIVED` mutant on the line-terminator class was answered by naming its
+differing inputs (`\r`, `\u2028`, `\u2029`) rather than by deleting the
+refinement.

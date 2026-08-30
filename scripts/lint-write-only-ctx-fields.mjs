@@ -251,9 +251,21 @@
  *     the accessor scan — so on the INTERFACE kind, where in-place mutation is
  *     deliberately not a write, `++_ctx.map[k]` is counted as a write of
  *     `_ctx.map` while `_ctx.map[k] = v` and `_ctx.map[k]++` are reads. That is
- *     the ACCUSE direction, the only in-place shape on this list that runs
- *     that way, and it is pinned as such. No such reference exists on either
- *     roster today (#7558 owns closing it; #7532 owns the flag).
+ *     the ACCUSE direction, and it is pinned as such. No such reference exists
+ *     on either roster today (#7558 owns closing it; #7532 owns the flag).
+ *
+ *     IT IS THE ONLY SHAPE ON THIS LIST THAT RUNS THAT WAY, and that claim is
+ *     load-bearing rather than decorative — every other entry here is a missed
+ *     write, which can only rescue a binding from the failure bucket. The first
+ *     push of #7560 wrote the claim while breaking it twice, and review caught
+ *     both: `INCDEC_AHEAD` crossed a line terminator, so `o[k]` ⏎ `++x` — two
+ *     statements, because postfix `++` is a restricted production — was filed
+ *     as a write of `o` (F1); and `wordEndingAt` checked for the `.` of a
+ *     member access only when it sat hard against the keyword, so `o.` ⏎ `else`
+ *     and `o. else` introduced a phantom statement (F5). Both are fixed here
+ *     and pinned in both directions, which is what makes the sentence true
+ *     again. A third, `/` admitted to `PRIMARY_EXPRESSION_END`, would have
+ *     re-broken it silently — a whole-set pin now stops that (F2).
  *   - A PARENTHESISED OR ASSERTED BASE IS A READ. `(o)[k] = v`, `o![k] = v`,
  *     `o!.field = v`, `(o as T)[k] = v` and `(<T>o)[k] = v` all classify as
  *     reads, because the accessor scan starts at the character after the
@@ -618,7 +630,41 @@ export function extractInterfaceFields(text, name, { followExtends = false, _see
 // ---------------------------------------------------------------------------
 
 const ASSIGN_AHEAD = /^\s*(?:=(?![=>])|\+=|-=|\*\*=|\*=|\/=|%=|<<=|>>>=|>>=|&&=|\|\|=|\?\?=|&=|\|=|\^=)/
-const INCDEC_AHEAD = /^\s*(?:\+\+|--)/
+
+/**
+ * A POSTFIX `++`/`--` following the reference — and it may NOT cross a line
+ * terminator, which is the one place these three regexes deliberately differ
+ * (#7560 F1).
+ *
+ * `UpdateExpression : LeftHandSideExpression [no LineTerminator here] ++` is a
+ * RESTRICTED PRODUCTION. So this —
+ *
+ *     o[k]
+ *     ++x;
+ *
+ * — is not `o[k]++` at all: ASI ends the statement after `o[k]`, and the `++`
+ * belongs to `++x` on the next line. `o[k]` is a READ. A `\s*` here matched
+ * across the newline and filed it as a WRITE, which is the ACCUSE direction —
+ * a binding whose only other reference is that read would be reported
+ * write-only, and this lint's whole contract is that its gaps rescue rather
+ * than accuse. Caught on review of #7553, and it applies to the BARE form
+ * (`n` ⏎ `++x`) exactly as it does through an accessor, so the restriction
+ * lives in the shared regex rather than in the accessor predicate. Fixing only
+ * the accessor path would have left one operator with two behaviours in two
+ * spellings — the shape this PR exists to remove.
+ *
+ * The other two rightly DO cross a newline, and the asymmetry is the grammar's,
+ * not a preference:
+ *   - `ASSIGN_AHEAD`  — an assignment operator is not a restricted production.
+ *     `o[k]` ⏎ `= v` is one statement, and the `=` must be seen.
+ *   - `INCDEC_BEHIND` — a PREFIX `++` is `++ UnaryExpression` with no
+ *     [no LineTerminator] clause, so `++` ⏎ `n` is one expression.
+ * Only the postfix form is restricted. All three directions are pinned.
+ *
+ * `[^\S\n\r\u2028\u2029]` is "whitespace that is not a line terminator" —
+ * the four the spec lists, not just `\n`.
+ */
+const INCDEC_AHEAD = /^[^\S\n\r\u2028\u2029]*(?:\+\+|--)/
 const INCDEC_BEHIND = /(?:\+\+|--)\s*$/
 const DELETE_BEHIND = /\bdelete\s+$/
 
@@ -809,6 +855,21 @@ const STATEMENT_KEYWORD_BOUNDARY = new Set(['else', 'do'])
  * character that happens to occur today; picking only `]` would be the
  * hardcoded-list shape in the other direction.
  *
+ * WHAT IS EXCLUDED MATTERS AS MUCH AS WHAT IS IN, because every character
+ * added here converts reads into writes — the ACCUSE direction. `/` is the
+ * sharp one (#7560 F2): it closes a REGEX literal, which is a primary
+ * expression, and it is also the division operator, and `atStatementStart`
+ * runs over stripped text with no lexer state to tell them apart. Reading it
+ * as a regex close would file `const a = b /` ⏎ `m.delete(k)` — one division
+ * spanning two lines — as a WRITE of `m`. So `/` is out, and so is every other
+ * operator character that could end a continued line (`>` closes a JSX tag and
+ * is also a comparison; `+`, `-`, `*`, `%`, `&`, `|`, `^`, `~`, `!`, `?`, `:`,
+ * `,`, `.`, `=`, `(`, `[`, `@` are unambiguously continuations). Only
+ * characters that can ONLY end a complete primary expression are admitted.
+ * The exclusions are pinned as a table, not left implicit: adding `/` to this
+ * set moves ZERO references in the tree and passed the whole harness, so
+ * nothing but a direct pin would have caught it.
+ *
  * An IDENTIFIER character is deliberately NOT in this set even though
  * `const a = b` / `m.clear()` is the same ASI, because accepting it requires
  * knowing that the trailing word is not an operator keyword — `new`, `typeof`,
@@ -824,12 +885,23 @@ const PRIMARY_EXPRESSION_END = /[\]'"`0-9]/
 /**
  * The word ending at `i`, or '' when `i` is not an identifier character or the
  * word is really a property access (`o.else`).
+ *
+ * The `.` may be separated from the word by whitespace, and a member access is
+ * NOT a restricted production, so `o.` ⏎ `else` and `o. else` are both the
+ * member `o.else` and neither introduces a statement (#7560 F5). Without the
+ * skip the guard only saw a `.` sitting immediately against the word, and both
+ * of those classified the following mutation as a WRITE — the ACCUSE
+ * direction, so it is fixed rather than pinned as a limit.
  */
 function wordEndingAt(text, i) {
   if (i < 0 || !/[\w$]/.test(text[i])) return ''
   let j = i
   while (j >= 0 && /[\w$]/.test(text[j])) j--
-  if (j >= 0 && text[j] === '.') return ''
+  // The `.` lookback gets its OWN index: `j` is the slice start, and moving it
+  // over the whitespace would return '\nelse' instead of 'else'.
+  let k = j
+  while (k >= 0 && /\s/.test(text[k])) k--
+  if (k >= 0 && text[k] === '.') return ''
   return text.slice(j + 1, i + 1)
 }
 
