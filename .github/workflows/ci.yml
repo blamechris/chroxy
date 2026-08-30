@@ -356,9 +356,10 @@ jobs:
     #
     # The manifest itself is gated in `Server Lint`, so its blocking power
     # never depends on the required-status roster. THIS JOB IS ALSO REQUIRED
-    # (#7502 — an earlier version of this comment claimed otherwise), and it
-    # runs on exactly one machine: OPERATOR RUNBOOK — if chroxy-win-01 is down,
-    # every merge wedges on this context. Remedy: temporarily un-require it
+    # (#7502 — an earlier version of this comment claimed otherwise), and for
+    # same-repo events it runs on exactly one machine (fork PRs route to
+    # GitHub-hosted windows-latest via winrunner): OPERATOR RUNBOOK — if
+    # chroxy-win-01 is down, every same-repo merge wedges on this context. Remedy: temporarily un-require it
     # (one API call), verify with scripts/check-required-contexts.sh (updating
     # CONTRIBUTING.md's roster + pins in the same motion), and re-require on
     # recovery. Do NOT let a red/hung run of this job ride on the belief it is
