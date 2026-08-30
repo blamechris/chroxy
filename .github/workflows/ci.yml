@@ -1280,6 +1280,48 @@ jobs:
         with:
           node-version: 22
 
+      - name: Parse-check every tracked shell script
+        # #7504 — nothing in .github/ had ever parsed these. The repo's 30
+        # tracked *.sh files are invoked from workflow steps, git hooks and by
+        # hand; none is imported by a test suite, so a syntax error in one ships
+        # green and is discovered by the next person to run it.
+        #
+        # PARSE-LEVEL ONLY, and the comment claims no more than the code does:
+        # `bash -n` reads a file and reports SYNTAX errors without executing
+        # anything. It does not catch unset variables, word-splitting, bad
+        # quoting or any of the semantic class shellcheck covers — adopting
+        # shellcheck over 30 files is a separate decision with a real baseline
+        # of findings behind it, deliberately not folded in here.
+        #
+        # The file list comes from `git ls-files`, not a glob roster typed into
+        # this step: a hardcoded list beside a growing set is the first cause in
+        # docs/false-safety-guards.md (and #7270 is the instance that lived in
+        # CI config, where no lint or test of the repo could reach it). A step
+        # scoped to `scripts/*.sh` would silently skip packages/server/scripts/,
+        # packages/desktop/scripts/, packages/app/.maestro/scripts/ and every
+        # directory added after it was written. Every tracked *.sh carries a
+        # bash shebang, so `bash -n` is the right parser for all of them.
+        #
+        # It fails CLOSED on a broken enumeration: finding nothing to check must
+        # not read as nothing wrong. The floor is loose on purpose — it catches
+        # an enumeration that has stopped working or been narrowed, not today's
+        # file count.
+        shell: bash
+        run: |
+          set -u
+          count=0
+          rc=0
+          while IFS= read -r -d '' f; do
+            count=$((count + 1))
+            bash -n "$f" || { echo "::error file=$f::bash -n: parse error"; rc=1; }
+          done < <(git ls-files -z '*.sh')
+          echo "parsed $count tracked shell script(s)"
+          if [ "$count" -lt 20 ]; then
+            echo "::error::enumerated only $count shell scripts (expected >=20) - the enumeration is broken, not the tree"
+            exit 2
+          fi
+          exit "$rc"
+
       - name: Run bump-version.sh tests
         run: bash scripts/__tests__/bump-version.test.sh
 
@@ -1289,6 +1331,15 @@ jobs:
         # the mounted volume and read state from an unmounted path. Silent,
         # because the token survived via the exported API_TOKEN.
         run: bash scripts/__tests__/docker-entrypoint.test.sh
+
+      - name: Run merge-updater-feeds.mjs tests
+        # #7504 — this suite existed, was executable, and ran in NO workflow.
+        # Its subject is release-critical: release.yml's `github-release` job
+        # runs `node scripts/merge-updater-feeds.mjs` to fold the per-platform
+        # Tauri updater feeds into the single latest.json the auto-updater
+        # serves, so a regression there breaks updates for installed desktop
+        # clients and shows up only after a release.
+        run: bash scripts/__tests__/merge-updater-feeds.test.sh
 
       - name: Run flush-and-exit.mjs tests
         run: node scripts/__tests__/flush-and-exit.test.mjs
