@@ -45,6 +45,36 @@
  *   - Bell + eye glyphs are inline SVG (consistent with other header
  *     icons that render via CSS / plain unicode, not platform color
  *     emoji fonts — important inside stripped-down Tauri webviews).
+ *
+ * #7516 — a row's `sessionId` can name a session that has left the roster.
+ * `sessionNotifications` is append-only on purpose (the row is the record of
+ * what happened, #7353), so the history outlives the sessions it describes, and
+ * since #7511 `switchSession` refuses a dead id in SILENCE. Activating such a
+ * row therefore did nothing the operator could see.
+ *
+ * The row does NOT lose its button: it is also the mark-read affordance and the
+ * `role="menuitem"` anchor of the WAI-ARIA roving-tabindex menu, so removing it
+ * would break keyboard navigation for a row that is still a legitimate record.
+ * Instead the JUMP is dropped from what activation does — the row still marks
+ * itself read and closes the panel, which are visible outcomes — and a marker
+ * inside the button says why, so it is part of the row's accessible name rather
+ * than a visual-only cue.
+ *
+ * The predicate is the choke point's own (`isSessionListed`, store/utils.ts),
+ * passed in rather than recomputed here: same function, same `sessions` array
+ * `switchSession` reads, so a row that offers a jump is a row whose jump works.
+ *
+ * The dead row carries `--gone` on the row BUTTON, not just on the marker, and
+ * that is load-bearing rather than cosmetic (PR #7528 review C1). This button
+ * is a four-column GRID (`auto auto 1fr auto` — type | session | message |
+ * time). The first cut of this change simply appended the marker as a fifth
+ * child, so auto-placement handed it the `time` column and pushed the timestamp
+ * into an implicit SECOND ROW at column 1: measured in Chromium, the row went
+ * 30px -> 47px and `2m ago` rendered alone at the far left. The modifier
+ * declares a fifth track for the state that has a fifth child, so track count
+ * and child count match in both states — which is exactly what
+ * `NotificationJumpGate.test.tsx` now asserts through the real cascade, because
+ * jsdom performs no layout and nothing else in the suite could go red for it.
  */
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { KeyboardEvent as ReactKeyboardEvent } from 'react'
@@ -68,6 +98,13 @@ const UNREAD_BADGE_CAP = 99
 export interface NotificationsWidgetProps {
   notifications: SessionNotification[]
   onSwitchSession: (sessionId: string) => void
+  /**
+   * #7516 — REQUIRED, deliberately without a default: a default of "listed" is
+   * the hole being closed. Supply `isSessionListed` from `store/utils.ts` over
+   * the same `sessions` array `switchSession` membership-checks against, never
+   * a second `.some()` written at the call site (#7475).
+   */
+  isSessionListed: (sessionId: string) => boolean
   onMarkRead: (notificationId: string) => void
   onMarkAllRead: () => void
   onDismiss: (notificationId: string) => void
@@ -137,6 +174,7 @@ function EyeIcon() {
 export function NotificationsWidget({
   notifications,
   onSwitchSession,
+  isSessionListed,
   onMarkRead,
   onMarkAllRead,
   onDismiss,
@@ -343,6 +381,22 @@ export function NotificationsWidget({
                   `notifications-widget-item--${n.eventType}`,
                 ].join(' ')
                 const isFocused = focusedIndex === index
+                // #7516 — one activation path for pointer and keyboard, so the
+                // gate cannot be applied to one and forgotten on the other.
+                // That split is how a guard ends up "correct for every input it
+                // sees and never reached by the rest" (#7262).
+                const listed = isSessionListed(n.sessionId)
+                const activate = () => {
+                  onMarkRead(n.id)
+                  // The jump is what the gate drops — NOT the acknowledgement
+                  // and NOT the record. Handing the dead id to `switchSession`
+                  // anyway would be harmless in the store and still wrong here:
+                  // App's handler fires `setControlRoomActive(false)` before it
+                  // ever asks, so a refused jump silently closed the Control
+                  // Room and did nothing else.
+                  if (listed) onSwitchSession(n.sessionId)
+                  setOpen(false)
+                }
                 const handleKeyDown = (e: ReactKeyboardEvent<HTMLButtonElement>) => {
                   switch (e.key) {
                     case 'ArrowDown': {
@@ -380,9 +434,7 @@ export function NotificationsWidget({
                       // browsers.
                       e.preventDefault()
                       e.stopPropagation()
-                      onMarkRead(n.id)
-                      onSwitchSession(n.sessionId)
-                      setOpen(false)
+                      activate()
                       break
                     }
                     // Escape is handled at the document level so it
@@ -411,13 +463,13 @@ export function NotificationsWidget({
                       // calls .focus()) without polluting the outer
                       // header's Tab order.
                       tabIndex={isFocused ? 0 : -1}
-                      className="notifications-widget-item-body"
+                      className={
+                        listed
+                          ? 'notifications-widget-item-body'
+                          : 'notifications-widget-item-body notifications-widget-item-body--gone'
+                      }
                       data-testid={`notifications-widget-item-body-${n.id}`}
-                      onClick={() => {
-                        onMarkRead(n.id)
-                        onSwitchSession(n.sessionId)
-                        setOpen(false)
-                      }}
+                      onClick={activate}
                       onKeyDown={handleKeyDown}
                     >
                       <span className="notifications-widget-item-type">
@@ -429,6 +481,18 @@ export function NotificationsWidget({
                       <span className="notifications-widget-item-message">
                         {n.message}
                       </span>
+                      {!listed && (
+                        // INSIDE the button on purpose: it becomes part of the
+                        // row's accessible name, so a screen-reader user is told
+                        // the jump is gone at the moment they land on the row
+                        // rather than after activating it.
+                        <span
+                          className="notifications-widget-item-gone"
+                          data-testid={`notifications-widget-item-gone-${n.id}`}
+                        >
+                          No longer open
+                        </span>
+                      )}
                       <span className="notifications-widget-item-time">
                         {formatRelative(n.timestamp, now)}
                       </span>

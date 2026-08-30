@@ -125,6 +125,7 @@ describe('#7473 — the measurement itself', () => {
         onMarkRead={vi.fn()}
         onSwitchSession={vi.fn()}
         permissionStatus={() => 'actionable'}
+        isSessionListed={() => true}
       />,
     )
     const label = document.querySelector('.notification-banner-type')!
@@ -145,6 +146,7 @@ describe('#7473 — every banner control clears the 44pt floor', () => {
         onMarkRead={vi.fn()}
         onSwitchSession={vi.fn()}
         permissionStatus={() => 'actionable'}
+        isSessionListed={() => true}
       />,
     )
     const buttons = bannerButtons()
@@ -173,6 +175,7 @@ describe('#7473 — every banner control clears the 44pt floor', () => {
         onMarkRead={vi.fn()}
         onSwitchSession={vi.fn()}
         permissionStatus={() => 'disconnected'}
+        isSessionListed={() => true}
       />,
     )
     const buttons = bannerButtons()
@@ -195,6 +198,7 @@ describe('#7473 — every banner control clears the 44pt floor', () => {
         onMarkRead={vi.fn()}
         onSwitchSession={vi.fn()}
         permissionStatus={() => 'not-pending'}
+        isSessionListed={() => true}
       />,
     )
     const buttons = bannerButtons()
@@ -215,6 +219,7 @@ describe('#7473 — every banner control clears the 44pt floor', () => {
         onMarkRead={vi.fn()}
         onSwitchSession={vi.fn()}
         permissionStatus={() => 'actionable'}
+        isSessionListed={() => true}
       />,
     )
     const buttons = bannerButtons()
@@ -223,6 +228,36 @@ describe('#7473 — every banner control clears the 44pt floor', () => {
       'Dismiss',
     ])
     for (const b of buttons) expectClearsFloor(b, b.getAttribute('aria-label') ?? b.textContent!)
+  })
+
+  it('#7516 session GONE: the jump leaves the roster entirely, floor and all', () => {
+    // #7516 replaces the session-name button with a plain span when the session
+    // has left the roster. Two things have to hold, and this file is where the
+    // #7473 enumeration can see both:
+    //   1. the button roster shrinks — the jump is not a disabled control that
+    //      still has to clear the floor, it is not a control at all;
+    //   2. the span it became must NOT inherit the 44px floor. A
+    //      non-interactive element carrying a tap-target minimum is the
+    //      live-looking-but-dead shape #7516 exists to remove, restated in CSS.
+    render(
+      <NotificationBanners
+        notifications={[notification({ eventType: 'completed', requestId: undefined })]}
+        onApprove={vi.fn()}
+        onDeny={vi.fn()}
+        onDismiss={vi.fn()}
+        onMarkRead={vi.fn()}
+        onSwitchSession={vi.fn()}
+        permissionStatus={() => 'actionable'}
+        isSessionListed={() => false}
+      />,
+    )
+    const buttons = bannerButtons()
+    expect(buttons.map((b) => b.getAttribute('aria-label') ?? b.textContent)).toEqual(['Dismiss'])
+    for (const b of buttons) expectClearsFloor(b, b.getAttribute('aria-label') ?? b.textContent!)
+    // Same shape as the negative control above: no declared floor at all.
+    const name = screen.getByTestId('notification-banner-session-name')
+    expect(Number.isNaN(px(getComputedStyle(name).minHeight))).toBe(true)
+    expect(() => expectClearsFloor(name, 'retired session name')).toThrow()
   })
 
   it('the banner ROW is tall enough to contain a floor-compliant control', () => {
@@ -240,6 +275,7 @@ describe('#7473 — every banner control clears the 44pt floor', () => {
         onMarkRead={vi.fn()}
         onSwitchSession={vi.fn()}
         permissionStatus={() => 'actionable'}
+        isSessionListed={() => true}
       />,
     )
     const row = document.querySelector('.notification-banner')!

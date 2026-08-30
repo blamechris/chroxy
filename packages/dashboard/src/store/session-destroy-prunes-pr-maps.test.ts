@@ -1150,6 +1150,46 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
     expect(duplicated, 'field(s) classified into more than one bucket').toEqual([])
   })
 
+  it('#7516/#7527 — the extraction covers TWO shapes; the array shape is out of reach', () => {
+    // Stated here because #7516 had to make a roster decision this guard cannot
+    // hold, and an undocumented gap is the thing this guard exists to prevent.
+    //
+    // `sessionNotifications` is a session-TAGGED array: every element carries a
+    // `sessionId`, and connection.ts:3899 already notes it "is never pruned on
+    // close". #7516 adjudicated that DELIBERATELY — the row is the record of
+    // what happened (#7353), and a "session errored" alert pointing at a closed
+    // session is exactly what the operator wants kept. #7516 gates the JUMP
+    // instead, at the two operator-clicked controls.
+    //
+    // That decision cannot be written into a bucket: `declared` matches only
+    // `Record<string, …>` and `Set<string>` members, so the field is not in it,
+    // and the `classification` cell above turns RED on any bucket entry naming
+    // it — its stale-allowlist half asserts `classified` minus `declared` is
+    // empty. Measured, not theorised: adding
+    // `sessionNotifications: '…'` to NOT_SESSION_KEYED fails `classification`
+    // (1 failed / 110), and widening the extraction to arrays fails THIS cell
+    // plus `classification` (2 failed / 110). Both directions are red, which is
+    // why the gap is a note rather than a bucket.
+    //
+    // Widening the extraction to arrays means classifying all 24 array members
+    // of ConnectionState and adding a fifth bucket for "session-tagged, not
+    // pruned BY DESIGN" — a real piece of work, tracked in #7527 rather than
+    // folded into a UI fix. This cell is the honest marker in the meantime: it
+    // goes red the moment someone widens the extraction, which is when the note
+    // above stops being true.
+    expect(
+      declared,
+      'the extraction now sees an array-shaped member. Widening it is #7527: ' +
+      'classify all 24 array members of ConnectionState first, and add the ' +
+      '"session-tagged, deliberately NOT pruned" bucket this field needs — it is ' +
+      'neither DEFERRED (nobody will fix it) nor NOT_SESSION_KEYED (that would be a lie).',
+    ).not.toContain('sessionNotifications')
+    // Non-vacuous: the field really is declared on the interface, in the shape
+    // the pattern cannot see. Without this the assertion above would also pass
+    // if the field were renamed or deleted.
+    expect(/^ {2}sessionNotifications\??: SessionNotification\[\];/m.test(interfaceBody)).toBe(true)
+  })
+
   it('every DEFERRED entry names a tracking issue', () => {
     // The bucket's contract, stated in its own comment ("An entry here needs a
     // tracking issue in its reason string") and never asserted until now — the

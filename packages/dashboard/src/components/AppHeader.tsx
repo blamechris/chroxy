@@ -54,6 +54,10 @@ export interface AppHeaderProps {
   // NotificationsWidget
   sessionNotifications: ComponentProps<typeof NotificationsWidget>['notifications']
   onSwitchSession: ComponentProps<typeof NotificationsWidget>['onSwitchSession']
+  // #7516 — the roster-membership predicate the widget's rows are gated on.
+  // Named for the surface rather than the prop so it reads unambiguously beside
+  // the header's other session props.
+  isNotificationSessionListed: ComponentProps<typeof NotificationsWidget>['isSessionListed']
   onMarkNotificationRead: ComponentProps<typeof NotificationsWidget>['onMarkRead']
   onMarkAllNotificationsRead: ComponentProps<typeof NotificationsWidget>['onMarkAllRead']
   onDismissNotification: ComponentProps<typeof NotificationsWidget>['onDismiss']
@@ -227,6 +231,7 @@ export function AppHeader(props: AppHeaderProps) {
         <NotificationsWidget
           notifications={props.sessionNotifications}
           onSwitchSession={props.onSwitchSession}
+          isSessionListed={props.isNotificationSessionListed}
           onMarkRead={props.onMarkNotificationRead}
           onMarkAllRead={props.onMarkAllNotificationsRead}
           onDismiss={props.onDismissNotification}
