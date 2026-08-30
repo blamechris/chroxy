@@ -170,7 +170,7 @@ Docker providers (`docker`, `docker-sdk`) require `--environments` flag. See [Co
 | `create_environment` | Create a persistent container environment (Docker Compose, DevContainer, or plain) |
 | `create_session` | Create new session with optional name/cwd |
 | `delete_checkpoint` | Delete a checkpoint by ID |
-| `destroy_environment` | Remove a persistent container environment |
+| `destroy_environment` | Remove a persistent container environment. Refuses while sessions are running inside it (`environment_error`, `code: ENVIRONMENT_HAS_LIVE_SESSIONS`) unless `force: true`, which destroys those sessions cleanly first — see [docs/decisions/2026-08-destroy-environment-live-sessions.md](../decisions/2026-08-destroy-environment-live-sessions.md) |
 | `destroy_session` | Delete session by ID |
 | `encrypted` | Encrypted message envelope (E2E encryption) |
 | `get_diff` | Request git diff for uncommitted changes |

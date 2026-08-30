@@ -191,6 +191,10 @@ You can snapshot a running environment at any point using `docker commit`. Snaps
 
 **WebSocket API:** Four environment messages are available (`create_environment`, `list_environments`, `destroy_environment`, `get_environment`). See the protocol table in `docs/architecture/reference.md`. The EnvironmentManager also supports snapshot and restore operations at the server level.
 
+**Destroying an environment that has live sessions (#7562):** `destroy_environment` — and the Control Room's `containers_action` with `action: 'destroy'` — refuse while any session is running inside the environment, replying with `environment_error` / `code: ENVIRONMENT_HAS_LIVE_SESSIONS` (or `session_error` / `reason: 'live-sessions'`) and the ids of the sessions holding it. Send `force: true` to escalate: the server destroys those sessions cleanly first, then the environment. The rationale is in [docs/decisions/2026-08-destroy-environment-live-sessions.md](../decisions/2026-08-destroy-environment-live-sessions.md).
+
+**Restarting the daemon with an environment-backed session (#7561):** a session created into an environment persists its binding (`environmentId` plus the resolved container) and re-enters the SAME container on restore, re-attaching to `EnvironmentInfo.sessions`. If the environment is gone, stopped, or container environments have since been disabled, the restore FAILS LOUDLY into the needs-attention list (`session_restore_failed`, `errorCode: ENVIRONMENT_UNAVAILABLE`) with its history preserved for a retry — it is never silently restarted outside its container.
+
 **CLI:**
 
 ```bash

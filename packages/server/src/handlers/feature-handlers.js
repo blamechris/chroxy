@@ -13,6 +13,7 @@ import { createLogger, loggerForSession } from '../logger.js'
 import { validateCwdAllowed, buildSessionTokenMismatchPayload, sendSessionError } from '../handler-utils.js'
 import { validateDockerImage } from '../docker-image-allowlist.js'
 import { WebTaskUnavailableError } from '../web-task-manager.js'
+import { destroyEnvironmentWithSessions, ENVIRONMENT_HAS_LIVE_SESSIONS } from '../environments/destroy-with-sessions.js'
 
 const log = createLogger('ws')
 
@@ -268,6 +269,18 @@ function handleListEnvironments(ws, _client, _msg, ctx) {
   })
 }
 
+/**
+ * #7562 — destroy an environment, refusing while sessions are running inside
+ * it unless the client sets `force: true`.
+ *
+ * The refusal and the cascade both live in
+ * `environments/destroy-with-sessions.js` / `EnvironmentManager.destroy()`, so
+ * this handler and the Control Room's `containers_action` share ONE
+ * implementation. `force` cascades: the attached sessions are destroyed cleanly
+ * first, then the environment. The refusal reply carries
+ * `code: 'ENVIRONMENT_HAS_LIVE_SESSIONS'` and the session ids, so a client can
+ * name them (or offer the escalation) rather than showing a bare string.
+ */
 function handleDestroyEnvironment(ws, _client, msg, ctx) {
   if (!ctx.services.environmentManager) {
     ctx.transport.send(ws, { type: 'environment_error', error: 'Environment management is not enabled' })
@@ -282,8 +295,20 @@ function handleDestroyEnvironment(ws, _client, msg, ctx) {
     return
   }
 
-  ctx.services.environmentManager.destroy(environmentId)
-    .then(() => {
+  // Strict boolean: only an explicit `true` escalates. A truthy string from a
+  // hand-rolled client must not silently destroy live sessions.
+  const force = msg.force === true
+
+  return destroyEnvironmentWithSessions({
+    environmentManager: ctx.services.environmentManager,
+    sessionManager: ctx.sessions.sessionManager,
+    environmentId,
+    force,
+  })
+    .then(({ destroyedSessions }) => {
+      if (destroyedSessions.length > 0) {
+        log.warn(`Force-destroyed environment ${environmentId} with ${destroyedSessions.length} live session(s): ${destroyedSessions.join(', ')}`)
+      }
       ctx.transport.send(ws, { type: 'environment_destroyed', environmentId })
       ctx.transport.broadcast({
         type: 'environment_list',
@@ -291,6 +316,18 @@ function handleDestroyEnvironment(ws, _client, msg, ctx) {
       })
     })
     .catch((err) => {
+      if (err?.code === ENVIRONMENT_HAS_LIVE_SESSIONS) {
+        // Not an operational failure — the guard doing its job. Info, not error.
+        log.info(`Refused destroy of environment ${environmentId}: ${err.message}`)
+        ctx.transport.send(ws, {
+          type: 'environment_error',
+          environmentId,
+          error: err.message,
+          code: ENVIRONMENT_HAS_LIVE_SESSIONS,
+          sessions: err.sessions || [],
+        })
+        return
+      }
       log.error(`Failed to destroy environment: ${err.message}`)
       ctx.transport.send(ws, { type: 'environment_error', environmentId, error: err.message })
     })

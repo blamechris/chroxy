@@ -38,6 +38,7 @@ import { surveyContainers } from '../control-room/containers.js'
 import { surveyRepoRuntimeConfig, hostRuntimeDefaults } from '../control-room/repo-runtime-config.js'
 import { surveyByokPool } from '../control-room/byok-pool.js'
 import { isPoolEnabled, getSharedPool } from '../docker-byok-pool.js'
+import { destroyEnvironmentWithSessions, ENVIRONMENT_HAS_LIVE_SESSIONS } from '../environments/destroy-with-sessions.js'
 import { surveyHostPrune, runHostPrune, PRUNE_KINDS } from '../control-room/host-prune.js'
 import { surveySimulators, runSimulatorAction, SIMULATOR_ACTIONS } from '../control-room/simulators.js'
 import { surveyEmulators, runEmulatorAction, EMULATOR_ACTIONS } from '../control-room/emulators.js'
@@ -903,6 +904,14 @@ const CONTAINER_ACTION_FAILURE_REASON = {
 }
 
 /**
+ * #7562: the destroy refusal gets its OWN reason rather than folding into
+ * `destroy-failed`. It is a policy answer, not an operational failure, and a
+ * client that wants to offer the `force` escalation has to be able to tell the
+ * two apart.
+ */
+const LIVE_SESSIONS_REASON = 'live-sessions'
+
+/**
  * #6134 (epic #5530) — `containers_action` handler. Stop / restart / destroy a
  * chroxy-managed environment, replying with exactly one `containers_action_ack`
  * on success or one CONTAINER_ACTION_FAILED `session_error` on failure.
@@ -976,7 +985,24 @@ async function handleContainersAction(ws, client, msg, ctx) {
     } else if (action === 'restart') {
       status = await envManager.restart(environmentId)
     } else {
-      await envManager.destroy(environmentId)
+      // #7562: the Control Room is NOT exempt from the live-session guard. The
+      // issue floated leaving this path as "the deliberate override", but an
+      // override that depends on WHICH handler you reached is the
+      // guard-wired-to-only-some-of-its-callers shape in
+      // docs/false-safety-guards.md — the same shape that left this path with
+      // no check at all while the dashboard had one. The override is an
+      // explicit `force` on the message instead, available on both paths and
+      // visible in the audit log.
+      const { destroyedSessions } = await destroyEnvironmentWithSessions({
+        environmentManager: envManager,
+        sessionManager: ctx?.sessions?.sessionManager,
+        environmentId,
+        // Strict boolean: only an explicit `true` escalates.
+        force: msg?.force === true,
+      })
+      if (destroyedSessions.length > 0) {
+        log.warn(`containers_action destroy force: tore down ${destroyedSessions.length} live session(s) in ${environmentId} (${destroyedSessions.join(', ')}) before destroying the environment`)
+      }
       status = 'destroyed'
     }
     log.info(`containers_action ${action} completed for ${environmentId} (client=${client?.id})`)
@@ -989,8 +1015,15 @@ async function handleContainersAction(ws, client, msg, ctx) {
     })
   } catch (err) {
     const message = getErrorMessage(err, `${action} failed`)
-    log.warn(`containers_action ${action} failed for ${environmentId}: ${message}`)
-    containerActionError(ws, ctx, msg, CONTAINER_ACTION_FAILURE_REASON[action], message)
+    // #7562: a refusal is the guard working, not a broken action — its own
+    // reason, and info rather than warn.
+    if (err?.code === ENVIRONMENT_HAS_LIVE_SESSIONS) {
+      log.info(`containers_action destroy refused for ${environmentId}: ${message}`)
+      containerActionError(ws, ctx, msg, LIVE_SESSIONS_REASON, message)
+    } else {
+      log.warn(`containers_action ${action} failed for ${environmentId}: ${message}`)
+      containerActionError(ws, ctx, msg, CONTAINER_ACTION_FAILURE_REASON[action], message)
+    }
   } finally {
     containerActionInFlight.delete(environmentId)
   }
