@@ -922,12 +922,19 @@ const connectionSrc = readFileSync(resolve(__dirname, 'connection.ts'), 'utf8')
  * The SERVER's production source tree, for the one classification in this file
  * that depends on it (#7551 review).
  *
- * `environments` sits in NOT_SESSION_KEYED because `EnvironmentInfo.sessions` is
- * dead surface — see its reason. That is a claim about server code, so it is
- * checked against server code rather than asserted from the dashboard. Tests are
- * deliberately excluded: `environment-manager.test.js` is the ONLY caller of the
- * writer, and counting it would make the check permanently red on the state the
- * classification is correct for.
+ * `environments` sits in SESSION_TAGGED_BY_DESIGN because `EnvironmentInfo.sessions`
+ * is written by the SERVER on session create/destroy (#7552) — see its reason.
+ * That is a claim about server code, so it is checked against server code rather
+ * than asserted from the dashboard. Tests are deliberately excluded on BOTH
+ * directions of the claim: counting `environment-manager.test.js` would let the
+ * evidence be satisfied by a test file, which is precisely how this surface
+ * looked alive for as long as it was not.
+ *
+ * #7552 INVERTED the cell below. Between #7551 and #7552 this scan proved a
+ * NEGATIVE (zero production callers of `addSession`); it now proves a POSITIVE
+ * (at least one, in session-manager.js). The scan and its detector are
+ * unchanged — only the direction of the claim moved, which is what the old cell
+ * said would happen and told the next reader to do.
  */
 const serverSrcDir = resolve(__dirname, '../../../server/src')
 const serverProductionSources: [string, string][] = readdirSync(serverSrcDir, { recursive: true })
@@ -1239,34 +1246,6 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
       'to the requesting client\'s session and the panel re-pulls, and the element carries no ' +
       'sessionId — unlike `memoryStackEntries` / `permissionAudit`, nothing in the store claims a ' +
       'previous session\'s checkpoints must not be shown against a new one.',
-    // #7551 review, Critical. This row was in SESSION_TAGGED_BY_DESIGN with a
-    // reason that cited a mechanism which DOES NOT EXIST: "`environment_list`
-    // replaces the whole array on every change, so the server is the authority".
-    // The server does re-send the list, but not on session lifecycle — all four
-    // `environment_list` emit sites are in `handlers/feature-handlers.js`
-    // (env list / create / destroy requests) and NONE is on a session opening or
-    // closing. The reason was a plausible story, not the code.
-    //
-    // The code is simpler and the honest reason is different: the `sessions` tag
-    // is DEAD SURFACE. `environmentManager.addSession` / `removeSession`
-    // (`packages/server/src/environment-manager.js`) are the only writers, and
-    // they have ZERO production callers — the only call sites in the repo are
-    // five lines of `tests/environment-manager.test.js`. `sessions: []` at
-    // creation and `env.sessions = []` on boot reconnect are the only other
-    // touches. So the tag is `[]` at runtime, always, and a dead session id
-    // cannot be stranded in it because a LIVE one never gets in.
-    //
-    // That makes the bucket right for the ordinary reason — the element is keyed
-    // by `id` — rather than for an invented one. It is pinned rather than
-    // asserted in prose by `EnvironmentInfo.sessions has no production writer`
-    // below, because "this classification is correct while a surface stays dead"
-    // is exactly the claim that rots silently. Dead-surface cleanup: #7552.
-    environments:
-      'EnvironmentInfo[] — keyed by `EnvironmentInfo.id`. The element also declares ' +
-      '`sessions: string[]`, but that tag is dead surface: its only writers ' +
-      '(`environmentManager.addSession` / `removeSession`) have zero production callers, so it ' +
-      'is `[]` at runtime and no session id — live or dead — is ever in it. If it gains a writer ' +
-      'the classification must be revisited; the cell below is what forces that. #7551 / #7552',
     // The one array member in this bucket whose ELEMENT TYPE could carry a
     // session id and does not. `ServerError` has an optional `sessionId` and
     // `serverErrors` (session-tagged, bucket 5) really does set it — but this
@@ -1313,6 +1292,42 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
       'The daemon log is a diagnostic record and the entries about a session that just died are ' +
       'the ones worth reading; the Console page clears it on an explicit action. Bounded to the ' +
       'last 500. #7527',
+    // The one entry in this bucket that is NOT a record, and it took two
+    // adjudications to land here honestly.
+    //
+    // #7551's first draft put it here with a mechanism that DID NOT EXIST:
+    // "`environment_list` replaces the whole array on every change, so the
+    // server is the authority". The server re-sent the list, but never on
+    // session lifecycle — all four emit sites were in feature-handlers.js
+    // (env list / create / destroy requests). Review caught it and moved the
+    // row to NOT_SESSION_KEYED for the REAL reason: `EnvironmentInfo.sessions`
+    // was dead surface, `[]` at runtime forever, with zero production writers.
+    //
+    // #7552 fixed the surface rather than the story. The tag was load-bearing:
+    // EnvironmentPanel renders "{env.sessions.length} connected" and gates the
+    // Destroy button on `env.sessions.length > 0` ("Disconnect all sessions
+    // first"), so a permanently-empty tag meant that safety could never engage
+    // — docs/false-safety-guards.md's class, rendered as UI. #7552 wired the
+    // writers (SessionManager tags on create, untags in `_cleanupSessionMaps`
+    // and `destroyAll`) AND built the missing re-broadcast: EnvironmentManager
+    // emits `environment_sessions_changed` and WsServer re-sends
+    // `environment_list`. So the mechanism the first draft invented is now
+    // real, and this row is back in this bucket citing the code instead of a
+    // plausible story.
+    //
+    // "By design" here means: the dashboard must NOT prune it on session death.
+    // The server owns the tag and replaces the whole array; a local prune would
+    // be a second implementation racing the authoritative one, and would be
+    // overwritten by the next broadcast anyway.
+    environments:
+      'EnvironmentInfo[] — keyed by `EnvironmentInfo.id`, and the element carries `sessions: ' +
+      'string[]`, a LIVE attachment list of real session ids (#7552 wired ' +
+      '`environmentManager.addSession`/`removeSession` to SessionManager\'s create/cleanup ' +
+      'funnels). It is not pruned dashboard-side because the SERVER owns it: it untags on every ' +
+      'session-death path and re-broadcasts `environment_list` via ' +
+      '`environment_sessions_changed`, replacing the whole array — a local prune would race the ' +
+      'authoritative replacement and be overwritten by it. The tag is load-bearing, not ' +
+      'cosmetic: EnvironmentPanel gates Destroy on `sessions.length > 0`. #7551 / #7552',
   }
 
 
@@ -1748,24 +1763,30 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
       .toEqual([])
   })
 
-  it('EnvironmentInfo.sessions has no production writer', () => {
-    // #7551 review, Critical. `environments` was classified SESSION_TAGGED_BY_DESIGN
-    // with a reason that described a mechanism which does not exist — an
-    // `environment_list` re-broadcast "on every change" that is not wired to
-    // session lifecycle at all. The row is now NOT_SESSION_KEYED for the real
-    // reason: `EnvironmentInfo.sessions` is never written in production, so no
-    // session id — live or dead — is ever in it, so nothing can be stranded.
+  it('EnvironmentInfo.sessions has a production writer, and it is paired with a remover', () => {
+    // #7552 INVERTED this cell, which is what its predecessor said to do.
     //
-    // "Correct while a surface stays dead" is exactly the claim that rots
-    // silently, so it is a check rather than a comment. `addSession` is the only
-    // thing that can put a session id into that array (`removeSession` only ever
-    // takes one out), which makes it the precise thing to pin: if it gains a
-    // production caller, `environments` becomes genuinely session-tagged and the
-    // classification must be revisited. Cleanup / decision: #7552.
+    // The history in one paragraph, because the classification is only legible
+    // with it: #7551's draft called `environments` session-tagged and justified
+    // it with an `environment_list` re-broadcast that did not exist. Review
+    // moved the row to NOT_SESSION_KEYED for the real reason — the `sessions`
+    // tag had ZERO production writers and was `[]` at runtime forever — and
+    // left THIS cell asserting that zero, so the classification could not
+    // outlive the state it was correct for. #7552 then fixed the surface: the
+    // tag is load-bearing (EnvironmentPanel gates its Destroy button on
+    // `sessions.length > 0`), so a permanently-empty tag was a safety that
+    // could never engage.
+    //
+    // So the scan is unchanged and the claim is now the positive one: there IS
+    // a production caller. The pairing half matters as much as the existence
+    // half — an `addSession` with no matching `removeSession` caller is the
+    // INVERSE bug (a stale id makes the environment permanently undestroyable),
+    // so both are pinned here rather than only the writer the old cell named.
     //
     // Positive controls FIRST, so a scan that reached the wrong tree — or no
-    // tree — cannot report a clean zero. This is the "validate the control, not
-    // just the experiment" failure: a mutant that never loads reports 0 hits.
+    // tree — cannot report a clean answer in EITHER direction. This is the
+    // "validate the control, not just the experiment" failure: a mutant that
+    // never loads reports 0 hits, which used to read as PASS here.
     expect(serverProductionSources.length, 'the server source scan found nothing')
       .toBeGreaterThan(50)
     const manager = serverProductionSources.find(([f]) => f.endsWith('environment-manager.js'))
@@ -1791,12 +1812,66 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
     // DEFINITION line still does not match — it has no receiver at all.
     const callers = addSessionCallers(serverProductionSources)
     expect(
-      callers,
-      'production call site(s) of environmentManager.addSession. `EnvironmentInfo.sessions` is no ' +
-      'longer dead surface, so `environments` is genuinely session-tagged and its ' +
-      'NOT_SESSION_KEYED reason is now false — re-adjudicate it (SESSION_TAGGED_BY_DESIGN, or the ' +
-      'prune roster) and close #7552.',
-    ).toEqual([])
+      callers.length,
+      '`EnvironmentInfo.sessions` has NO production caller of environmentManager.addSession — it ' +
+      'is dead surface again (#7552). The dashboard renders the tag and GATES the Destroy button ' +
+      'on it ("Disconnect all sessions first"), so an unwritten tag makes that safety unable to ' +
+      'engage: an environment becomes destroyable out from under its live sessions. Either ' +
+      're-wire the writer or delete the tag AND the guard together — a permanently-inert safety ' +
+      'gate is not an option.',
+    ).toBeGreaterThan(0)
+    // WHERE, not just how many. `toBeGreaterThan(0)` alone would be satisfied by
+    // a caller anywhere — including a future one added for an unrelated reason
+    // in an unrelated file — while the session lifecycle quietly stopped
+    // tagging. session-manager.js is the attach point the whole fix rests on.
+    expect(
+      callers.map((c) => c.split(':')[0]),
+      'the addSession caller must be SessionManager (the create funnel). If the attach moved, ' +
+      'move this expectation with it and say where it went.',
+    ).toContain('session-manager.js')
+
+    // The remover, pinned in the same cell. An attach without a detach is the
+    // inverse bug: a stale session id in `env.sessions` keeps the Destroy
+    // button disabled forever and the environment can never be torn down. The
+    // per-path proof lives server-side in
+    // packages/server/tests/environment-session-wiring.test.js (six detach
+    // cells); this is the cross-package structural half, because the dashboard
+    // classification is what goes stale if the pairing is ever dropped.
+    // The RECEIVER is part of the pattern here, unlike `addSession`. A bare
+    // `x.removeSession(` detector would be satisfied by
+    // `this._timeoutManager.removeSession(sessionId)` and
+    // `this._costBudget.removeSession(sessionId)`, which sit four lines away in
+    // the same function — the "measure a defect class with a tool that lacks
+    // it" failure, and it would have passed on the dead-surface tree too.
+    // Deliberately NOT /g: a global regex carries `lastIndex` across `.test()`
+    // calls, so reusing one in a `.filter()` skips files at random — a detector
+    // whose answer depends on iteration order.
+    const ENV_REMOVE_RE = /environmentManager\s*\??\.\s*removeSession\s*\(/i
+    // Control: the detector is anchored to the receiver, not to the method name.
+    expect('    this._timeoutManager.removeSession(sessionId)'.match(ENV_REMOVE_RE)).toBe(null)
+    expect('this._environmentManager?.removeSession(id, sid)'.match(ENV_REMOVE_RE)).not.toBe(null)
+
+    const removeCallers = serverProductionSources
+      .filter(([, src]) => ENV_REMOVE_RE.test(src))
+      .map(([file]) => file)
+    expect(
+      removeCallers,
+      'SessionManager calls environmentManager.addSession but never removeSession — every session ' +
+      'that opens in an environment would be tagged FOREVER, and the environment could never be ' +
+      'destroyed (the inverse of #7552).',
+    ).toContain('session-manager.js')
+
+    // And the CLASSIFICATION this evidence exists for, asserted in the same
+    // cell so the two cannot drift apart. The predecessor cell had a real gap
+    // here: it proved "no writer" and left the bucket membership to prose, so a
+    // row moved between buckets by hand was invisible to it. Now the evidence
+    // and the conclusion go red together.
+    expect(
+      Object.keys(SESSION_TAGGED_BY_DESIGN),
+      '`environments` must be classified SESSION_TAGGED_BY_DESIGN while `EnvironmentInfo.sessions` ' +
+      'carries live session ids (#7552). NOT_SESSION_KEYED would claim the element has no session ' +
+      'id, and it has a list of them.',
+    ).toContain('environments')
   })
 
   // ---- The extraction's own contract, on synthetic sources (#7527). -------

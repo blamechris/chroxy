@@ -1390,3 +1390,65 @@ them. `const` bindings with zero writes was a number the lint could already
 print; nobody had asked it. And when the answer is "not all of them", pin the
 remainder as an explicit decision — a limit that cannot change silently is worth
 more than a limit that does not exist.
+
+### 25. The safety gate whose precondition nothing could ever set — `#7552`
+
+`EnvironmentPanel.tsx` gates the Destroy button on the environment's session
+count:
+
+```tsx
+disabled={env.sessions.length > 0}
+title={env.sessions.length > 0 ? 'Disconnect all sessions first' : 'Destroy environment'}
+```
+
+`EnvironmentInfo.sessions` was declared, persisted to `environments.json`, typed
+on the dashboard's `ConnectionState`, and carried by the `environment_list` wire
+schema. **Nothing ever put a session id in it.** Its only writers —
+`EnvironmentManager.addSession` / `removeSession` — had zero production callers;
+the only call sites in the repo were five lines of
+`tests/environment-manager.test.js`. Everything else only emptied it (`sessions: []`
+at creation, `env.sessions = []` on boot reconnect).
+
+So the tag was `[]` at runtime, permanently, `length > 0` was false forever, and
+the button was **always enabled** — including for an environment with live
+sessions running inside it, which is the one case the guard was written for.
+Mode: *never ran*, and this is its UI form: no job, no exit code, nothing to be
+green. The signal was a control that renders exactly as it would if it had
+checked and approved.
+
+Two things made it survive. The guard's own display was consistent with itself —
+"0 connected" beside an enabled Destroy button is not a contradiction, it is
+what an empty environment looks like — so no screenshot, no manual pass and no
+component test could distinguish "no sessions" from "cannot see sessions".
+And every test that existed *did* exercise the writers: `addSession` had five
+callers, all in a test file, which is enough to make a coverage report and a
+`grep` for the method both look healthy. The evidence that the surface was alive
+was manufactured by the tests written to check it.
+
+It was caught, finally, by a classification: #7551 needed to say why the
+dashboard does not prune `environments` on session death, and its first draft
+invented a mechanism to justify it ("`environment_list` replaces the whole array
+on every change, so the server is the authority"). Review checked the four emit
+sites, found none on session lifecycle, and the search for the real reason found
+the dead surface instead. A field nothing writes is an invitation to reason
+about behaviour that does not exist, and someone eventually accepts it.
+
+The fix (#7552) wired the association that already existed — `create_session`
+takes an `environmentId` and resolves the container from it — attaching in
+`SessionManager.createSession` and detaching in `_cleanupSessionMaps`, the sole
+funnel out of `_sessions`, plus `destroyAll()`. The detach placement is the load
+-bearing choice: hanging it off the `session_destroyed` EVENT would have missed
+`_handleAsyncStartFailure`'s restore-rebind branch, which leaves `_sessions` and
+emits `session_restore_failed` instead — and a missed detach is the *inverse*
+false safety, a stale id that disables the button forever and makes the
+environment undestroyable.
+
+**Guard against it:** a guard that reads a *field* is only as alive as the
+field's writers, and "the type declares it" is not a writer. When a check's
+precondition comes from data rather than from a computation, ask who writes that
+data **in production** — and answer it with a grep that excludes tests, because
+a surface kept alive exclusively by its own tests presents every symptom of a
+healthy one. The generalisation of "prove the guard can fail" for data-driven
+guards is: **construct the state the guard is supposed to refuse, through the
+production path, and watch it refuse.** Setting the field by hand in a test
+proves the branch, not the wiring.

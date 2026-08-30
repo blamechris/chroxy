@@ -423,6 +423,15 @@ export class SessionManager extends EventEmitter {
     // mirroring the agent-worktree reaper's opt-in. Always clean-tree-guarded.
     sweepOrphanWorktrees = false,
 
+    // #7552: the EnvironmentManager, so a session created with an
+    // `environmentId` is TAGGED onto that environment for its whole life and
+    // untagged the moment it leaves `_sessions`. Null whenever container
+    // environments are off (server-cli only constructs one when the feature is
+    // enabled), and every use below is `?.`-guarded. The coupling is the one
+    // `EnvironmentManager`'s own class doc already describes ("SessionManager
+    // uses EnvironmentManager … when creating sessions with an environmentId").
+    environmentManager = null,
+
     // Test-only: skip preflight checks (binary + credential). Production must
     // leave this false so missing providers surface cleanly at createSession.
     skipPreflight = false,
@@ -501,6 +510,9 @@ export class SessionManager extends EventEmitter {
     this._port = port || null
     this._apiToken = apiToken || null
     this._skipPreflight = skipPreflight
+    // #7552: null when container environments are disabled — every call site
+    // is optional-chained rather than branched.
+    this._environmentManager = environmentManager || null
 
     // Session defaults
     this.maxSessions = maxSessions
@@ -816,6 +828,17 @@ export class SessionManager extends EventEmitter {
     if (entry && entry.agentCommId) {
       this._agentCommIds.delete(entry.agentCommId)
     }
+    // #7552: untag the container environment. This is deliberately HERE and not
+    // on the `session_destroyed` EVENT: `_handleAsyncStartFailure`'s
+    // restore-rebind branch removes a session from `_sessions` and emits
+    // `session_restore_failed` INSTEAD of `session_destroyed`, so an event
+    // listener would miss it and strand the id — and a stranded id makes the
+    // environment permanently undestroyable, the exact inverse of the bug the
+    // attach fixes. Every path out of `_sessions` runs this method (the sole
+    // `_sessions.delete` site); `destroyAll()` is the one exception and untags
+    // in its own loop. Both are pinned per-path in
+    // tests/environment-session-wiring.test.js.
+    if (entry?.environmentId) this._environmentManager?.removeSession(entry.environmentId, sessionId)
     this._sessions.delete(sessionId)
     this._sessionLastActivityAt.delete(sessionId)
     this._timeoutManager.removeSession(sessionId)
@@ -1339,7 +1362,7 @@ export class SessionManager extends EventEmitter {
    *   it (#6743).
    * @returns {string} sessionId
    */
-  createSession({ name, cwd, model, permissionMode, resumeSessionId, provider, worktree, restoreWorktreePath, restoreWorktreeRepoDir, sandbox, codexSandbox, containerId, containerUser, containerCliPath, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, stdinForwardingDisabled, disabledMcpServers, bootedModel, messageCounter, skipPermissions, agentCommId, metadata = null, skipPersist = false, preserveId, isRestore = false } = {}) {
+  createSession({ name, cwd, model, permissionMode, resumeSessionId, provider, worktree, restoreWorktreePath, restoreWorktreeRepoDir, sandbox, codexSandbox, environmentId, containerId, containerUser, containerCliPath, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, stdinForwardingDisabled, disabledMcpServers, bootedModel, messageCounter, skipPermissions, agentCommId, metadata = null, skipPersist = false, preserveId, isRestore = false } = {}) {
     // #6036 — front-half SRP extraction: preflight + isolation + provider/preset
     // resolution (incl. the limit guard, cwd check, id/name, #2962 preflight,
     // #5985 user-shell gate, #3403 model fallback, worktree create/restore, and
@@ -1560,9 +1583,24 @@ export class SessionManager extends EventEmitter {
       // orchestrationRole } for the session-list badges). In-memory only in v1 —
       // not persisted; a restart-reconcile re-establishes it (E-3 part 3).
       metadata: metadata || null,
+      // #7552: the container environment this session was created INTO, or null.
+      // In-memory ONLY, deliberately: `_serializeSessionEntry` does not persist
+      // the container binding (containerId/containerUser/containerCliPath are
+      // absent from the saved shape), so a restored session is NOT in the
+      // container any more and must not claim to be. That is the same fact
+      // `EnvironmentManager.reconnect()` already encodes by clearing
+      // `env.sessions` unconditionally at boot. The read side is
+      // `_cleanupSessionMaps`, which is how the tag comes back off.
+      environmentId: (typeof environmentId === 'string' && environmentId.length > 0) ? environmentId : null,
     }
 
     this._sessions.set(sessionId, entry)
+    // #7552: TAG the environment as soon as the entry is live — paired with the
+    // untag in `_cleanupSessionMaps`, the single funnel every session takes out
+    // of `_sessions`. Attaching here rather than after `start()` keeps the pair
+    // symmetric: a start() failure (sync throw or async rejection) runs that
+    // same cleanup, so the tag is removed on the failure paths too.
+    if (entry.environmentId) this._environmentManager?.addSession(entry.environmentId, sessionId)
     // Mailbox (#5914 follow-up): auto-register the session's AGENT_COMM_ID so the
     // live-interrupt route resolves agent -> session WITHOUT a separate POST
     // /api/mailbox/register. registerAgentCommId is the authoritative validator
@@ -2326,6 +2364,14 @@ export class SessionManager extends EventEmitter {
           reason: entry.session._exitReason ?? 'shutdown',
         })
       }
+      // #7552: destroyAll() clears `_sessions` wholesale instead of going
+      // through `_cleanupSessionMaps`, so it is the ONE path that has to untag
+      // for itself. Shutdown makes this belt-and-braces — the next boot's
+      // `EnvironmentManager.reconnect()` clears `env.sessions` unconditionally —
+      // but leaving it out would mean the environments file is written with
+      // session ids that are already dead, and "correct only because something
+      // else cleans up later" is the shape that rots.
+      if (entry.environmentId) this._environmentManager?.removeSession(entry.environmentId, sessionId)
       this.emit('session_destroyed', { sessionId })
     }
     this._sessions.clear()

@@ -202,6 +202,14 @@ function handleCreateSession(ws, client, msg, ctx) {
       const info = ctx.services.environmentManager.getContainerInfo(environmentId)
       envOpts = {
         provider: 'docker-sdk',
+        // #7552: carry the environment ID itself, not only the container it
+        // resolves to. SessionManager tags the environment with the new session
+        // id (and untags it on teardown), which is what makes the dashboard's
+        // "Disconnect all sessions first" destroy guard able to engage at all —
+        // before this, `EnvironmentInfo.sessions` was `[]` at runtime forever.
+        // Both create paths carry it: the deferred user-shell approval path
+        // replays this exact `createOptions` object.
+        environmentId,
         containerId: info.containerId,
         containerUser: info.containerUser,
         containerCliPath: info.containerCliPath,
