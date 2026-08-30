@@ -438,9 +438,17 @@ describe('shared dispatch table', () => {
       resetReplayReconcile({ clearCursors: true })
     })
 
-    // A gate written against `isRebuildInProgress` rather than the refcount
-    // would pass the case above only. The delta reconnect opens a window too
-    // (#7420), and the same synthesized frame rides it.
+    // The delta reconnect opens a window too (#7420), and the same synthesized
+    // frame rides it. What this case UNIQUELY kills is a DELTA-ONLY gate —
+    // `getReplayWindowDepth(targetId) > 0 && !isRebuildInProgress(targetId)`:
+    // measured, that mutant reds this case and nothing else.
+    //
+    // Stated the other way round first, and backwards: an `isRebuildInProgress`
+    // gate does NOT "pass the case above only". A delta opens no rebuild, so
+    // that gate reds the full-replay, depth-2 and active-session cases and
+    // leaves THIS one green — measured, 3 red with this case passing. It is what
+    // makes the full-replay case above a distinct arm; this case is the converse
+    // of it, not a stronger version.
     it('still heals mid-window on a DELTA replay', () => {
       resetReplayReconcile({ clearCursors: true })
       const env = seeded()
@@ -472,9 +480,18 @@ describe('shared dispatch table', () => {
     })
 
     // The synthesized heal carries a `sessionId`, but `dispatchAgentIdle`
-    // resolves through `resolveSessionId`'s active-session fallback, and a gate
-    // placed ABOVE that resolution reads a different session's depth. Pin the
-    // fallback arm inside the window too.
+    // resolves through `resolveSessionId`'s active-session fallback, so that arm
+    // needs its own pin inside the window. What this case UNIQUELY kills is a
+    // gate on the FALLBACK ARM alone — one that fires only when the frame
+    // carried no explicit `sessionId`: measured, that mutant reds this case and
+    // nothing else.
+    //
+    // NOT a gate hoisted ABOVE the resolution, which was the original claim here
+    // and is backwards: hoisted, it reads the depth of the frame's OWN
+    // `sessionId`, which this frame does not carry — `depth(null)` is 0, the
+    // gate never fires, and THIS case stays green while the other three go red
+    // (measured, 3 red). The two mutants split the arms in opposite directions,
+    // which is why both pins exist.
     it('still heals mid-window when the target comes from the ACTIVE session', () => {
       resetReplayReconcile({ clearCursors: true })
       const env = seeded()
