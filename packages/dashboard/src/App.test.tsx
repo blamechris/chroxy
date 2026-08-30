@@ -6,7 +6,7 @@
  * avoiding real WebSocket connections.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
-import { render, screen, cleanup, fireEvent, within, waitFor } from '@testing-library/react'
+import { render, screen, cleanup, fireEvent, within, waitFor, act } from '@testing-library/react'
 
 vi.mock('./hooks/usePathAutocomplete', () => ({
   usePathAutocomplete: () => ({ suggestions: [] }),
@@ -122,6 +122,25 @@ vi.mock('./components/CreateSessionModal', () => ({
         ) : null}
       </div>
     ) : null,
+}))
+
+// #7535 — intercept the OS notification DISPATCH so the tests below can hold on
+// to the `onClick` the card carries and fire it later, which is exactly what an
+// operator does: the notification is only sent while the window is UNfocused,
+// so the click arrives minutes after the id was captured. The rest of the
+// module is passed through — `useNotificationPermission` /
+// `usePermissionNotification` read `getNotificationPermission` and
+// `refreshNotificationPermission` from it, and stubbing those would change
+// unrelated cases in this file.
+const { sendNativeNotificationMock } = vi.hoisted(() => ({
+  sendNativeNotificationMock: vi.fn<(title: string, options?: { onClick?: () => void }) => boolean>(
+    () => true,
+  ),
+}))
+vi.mock('./utils/native-notifications', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./utils/native-notifications')>()),
+  sendNativeNotification: (title: string, options?: { onClick?: () => void }) =>
+    sendNativeNotificationMock(title, options),
 }))
 
 vi.mock('./components/StdinDisabledBanner', () => ({
@@ -322,6 +341,8 @@ beforeEach(() => {
   // #4796 — reset between cases so per-test mode assertions only see the
   // current render's invocations.
   voiceInputModeSpy.mockReset()
+  // #7535 — each case only sees the notification IT armed.
+  sendNativeNotificationMock.mockClear()
 })
 
 afterEach(cleanup)
@@ -3338,7 +3359,209 @@ describe('#7516 — the notification session-jump is gated on roster membership'
     fireEvent.click(screen.getByTestId('notifications-widget-item-body-n-1'))
     // Not a dead click: the row is acknowledged and the panel closes.
     expect(markSessionNotificationRead).toHaveBeenCalledWith('n-1')
-    // But no dead id reaches the choke point, so no side effect fires for it.
+    // But no dead id reaches the choke point at all. (Since #7535 a dead id
+    // that DID reach it would be inert rather than half-applied — the gate is
+    // here because the row must not offer the jump, not because the handler
+    // used to misbehave.)
     expect(switchSession).not.toHaveBeenCalled()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #7535 — a REFUSED session jump must apply NO part of a successful one
+// ---------------------------------------------------------------------------
+/**
+ * `handleSwitchSession` is the shared handler behind four callers: the session
+ * tabs, follow-mode, the permission auto-switch, and the OS turn-complete
+ * notification's click. Only the last can hand it an id the roster has since
+ * dropped — the tabs index into `sessions` itself, and the two RENDERED
+ * notification surfaces are gated at render time by #7516/PR #7528.
+ *
+ * The OS one has no render surface to gate. PR #7528 left it on the grounds
+ * that a stale click there "lands on `switchSession`'s silent refusal", but the
+ * refusal was not silent: the handler ran `setControlRoomActive(false)` BEFORE
+ * asking the store anything. So the entire observable outcome of clicking an OS
+ * notification for a session that closed while the operator was away was that
+ * the Control Room they were reading closed and the jump did not happen —
+ * HALF of a switch, applied to a switch that was refused. PR #7528's own widget
+ * comment names that as the reason a dead id must not reach this handler.
+ *
+ * The remedy is ORDERING, not noise. Every side effect now hangs off
+ * `switchSession`'s boolean, and there is still exactly ONE membership
+ * implementation — the store's. Silence on refusal is kept deliberately: what
+ * #7511 got right was doing nothing, and what was broken was doing half of
+ * something. See the PR body for the adjudication against a toast.
+ *
+ * These are App-level cells because `handleSwitchSession` is not exported and
+ * `controlRoomActive` is local App state; nothing below App can see either.
+ */
+describe('#7535 — the OS turn-complete notification click applies no half-switch', () => {
+  const SESSION = (id: string, name: string) => ({
+    sessionId: id, name, cwd: '/tmp/work', type: 'cli' as const, hasTerminal: true,
+    model: null, permissionMode: null, isBusy: false, createdAt: 1, conversationId: null,
+  })
+  const ALPHA = SESSION('s1', 'Alpha')
+  const BETA = SESSION('s2', 'Beta')
+
+  /**
+   * The per-session slice App actually reads on this path. `messages` and
+   * `activeAgents` are not padding — App derives `pendingPermissionCounts` and
+   * the per-tab activity summary from EVERY session state, and the
+   * turn-complete memo consumes the first of those to suppress a notification
+   * for a session that stopped ON a permission prompt. A partial fixture
+   * crashes the render rather than skipping the derivation, which is how this
+   * came to be filled out.
+   */
+  const sessionState = (isIdle: boolean) => ({
+    isIdle,
+    messages: [],
+    activeAgents: [],
+    streamingMessageId: null,
+  })
+
+  let hasFocusSpy: ReturnType<typeof vi.spyOn> | null = null
+
+  beforeEach(() => {
+    // The hook only dispatches while the window is UNFOCUSED — which is
+    // precisely why the click can land minutes later against a roster that has
+    // moved on. jsdom reports focus by default, so without this the hook's own
+    // gate suppresses every notification and all these cells pass vacuously
+    // (the arming assertion below is the positive control for exactly that).
+    hasFocusSpy = vi.spyOn(document, 'hasFocus').mockReturnValue(false)
+  })
+  afterEach(() => {
+    hasFocusSpy?.mockRestore()
+    hasFocusSpy = null
+  })
+
+  /**
+   * A stand-in for the real `switchSession` door, stating the contract it is
+   * standing in for (the #7475 test's convention): the already-active id is
+   * accepted without a roster reading, anything else must be listed. Read live
+   * off `stateOverrides` so a roster change between arming and clicking is
+   * reflected — that IS the scenario.
+   */
+  function realisticSwitchSession() {
+    return vi.fn((sessionId: string) => {
+      const s = stateOverrides as { sessions?: { sessionId: string }[]; activeSessionId?: string | null }
+      if (sessionId === s.activeSessionId) return true
+      return (s.sessions ?? []).some((x) => x.sessionId === sessionId)
+    })
+  }
+
+  /**
+   * Drive the REAL hook across a busy -> idle edge for s1 and hand back the
+   * `onClick` the OS card carries. That callback is production code — the
+   * `() => clickRef.current?.(session.sessionId)` arrow closed over App's
+   * `handleSwitchSession` — so these cells exercise the wiring, not a stub.
+   */
+  function armTurnCompleteNotification(over: Record<string, unknown>) {
+    stateOverrides = {
+      connectionPhase: 'connected',
+      sessions: [ALPHA, BETA],
+      activeSessionId: 's2',
+      sessionStates: { s1: sessionState(false), s2: sessionState(true) },
+      ...over,
+    }
+    const { rerender } = render(<App />)
+    // s1 finishes its turn.
+    stateOverrides = {
+      ...stateOverrides,
+      sessionStates: { s1: sessionState(true), s2: sessionState(true) },
+    }
+    rerender(<App />)
+
+    expect(
+      sendNativeNotificationMock,
+      'the turn-complete notification never fired — the rest of this cell would pass vacuously',
+    ).toHaveBeenCalledWith('Chroxy: Alpha', expect.objectContaining({ tag: 'chroxy-turn-s1' }))
+    // Indexed rather than `.at(-1)`: this package's `lib` predates ES2022, so
+    // `Array.prototype.at` fails `tsc --noEmit` (the `Object.hasOwn` note in
+    // store/utils.ts, same cause).
+    const calls = sendNativeNotificationMock.mock.calls
+    const onClick = calls[calls.length - 1]![1]?.onClick
+    expect(typeof onClick, 'the notification carried no click callback').toBe('function')
+    return { rerender, onClick: onClick! }
+  }
+
+  function openControlRoom() {
+    fireEvent.click(screen.getByTestId('sidebar-panel-slot-launcher-control-room'))
+    expect(screen.getByTestId('control-room-main')).toBeInTheDocument()
+  }
+
+  it('CONTROL: a LISTED session jumps, and the click closes the Control Room', () => {
+    // The success path is unchanged, and it is asserted first so the two
+    // refusal cells below cannot be satisfied by a handler that simply stopped
+    // closing the Control Room for everyone.
+    const switchSession = realisticSwitchSession()
+    const { onClick } = armTurnCompleteNotification({ switchSession })
+    openControlRoom()
+    act(() => { onClick() })
+    expect(switchSession).toHaveBeenCalledWith('s1')
+    expect(screen.queryByTestId('control-room-main')).not.toBeInTheDocument()
+  })
+
+  it('an ABSENT session does NOT close the Control Room', () => {
+    // The issue's first acceptance criterion. Red before the reorder: the
+    // handler closed the Control Room and then asked.
+    const switchSession = realisticSwitchSession()
+    const { rerender, onClick } = armTurnCompleteNotification({ switchSession })
+    openControlRoom()
+    // The session closes while the operator is away — the notification card is
+    // already sitting in the OS notification centre with s1's id baked in.
+    stateOverrides = { ...stateOverrides, sessions: [BETA] }
+    rerender(<App />)
+    act(() => { onClick() })
+    expect(switchSession).toHaveBeenCalledWith('s1')
+    expect(switchSession).toHaveReturnedWith(false)
+    expect(screen.getByTestId('control-room-main')).toBeInTheDocument()
+  })
+
+  it('an ABSENT session does not latch the switching skeleton either', () => {
+    // The handler's SECOND side effect, audited on the same rule. #7475 already
+    // gated this one on the boolean, so this cell is a regression pin rather
+    // than a red-first cell — stated here so "every side effect is downstream
+    // of the boolean" is enumerated rather than asserted for the one that broke.
+    const switchSession = realisticSwitchSession()
+    const { rerender, onClick } = armTurnCompleteNotification({ switchSession })
+    stateOverrides = { ...stateOverrides, sessions: [BETA] }
+    rerender(<App />)
+    act(() => { onClick() })
+    expect(screen.queryByTestId('session-loading-skeleton')).not.toBeInTheDocument()
+  })
+
+  it('the STORE is still what refuses — App does not grow a second membership check', () => {
+    // #7475 collapsed four call-site membership copies into one door. Fixing
+    // this by re-asking `isSessionListed` inside the handler and never calling
+    // `switchSession` would pass the cell above and reopen that hole, so the
+    // question must still reach the choke point.
+    const switchSession = realisticSwitchSession()
+    const { rerender, onClick } = armTurnCompleteNotification({ switchSession })
+    stateOverrides = { ...stateOverrides, sessions: [BETA] }
+    rerender(<App />)
+    act(() => { onClick() })
+    expect(switchSession).toHaveBeenCalledWith('s1')
+  })
+
+  it('#5204 SURVIVES: clicking the already-active session tab still leaves the Control Room', () => {
+    // The regression the reorder is most likely to cause. `setControlRoomActive`
+    // sat first precisely so it ran for the already-active id, which #5204 needs
+    // (the CR is overlaid ON TOP of that session, so its tab is the way back).
+    // The ordering fix keeps it by hanging off the boolean, which the store
+    // returns `true` for on the already-active id without touching anything.
+    const switchSession = realisticSwitchSession()
+    stateOverrides = {
+      connectionPhase: 'connected',
+      sessions: [ALPHA, BETA],
+      activeSessionId: 's1',
+      switchSession,
+    }
+    render(<App />)
+    openControlRoom()
+    fireEvent.click(screen.getByTestId('session-tab-s1'))
+    expect(screen.queryByTestId('control-room-main')).not.toBeInTheDocument()
+    // ...and it must not blank the content area, since activeSessionId never
+    // changes and nothing would ever clear the flag (#7475's wedge).
+    expect(screen.queryByTestId('session-loading-skeleton')).not.toBeInTheDocument()
   })
 })

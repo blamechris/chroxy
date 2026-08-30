@@ -927,17 +927,65 @@ export function App() {
   }, [activeSessionId])
 
   const handleSwitchSession = useCallback((sessionId: string) => {
-    // #5204 — clicking any session tab returns from the Control Room view.
-    // This must run even when the clicked session is already the active one
-    // (CR is overlaid on top of it), so it sits before the no-op early return.
+    // #7535 — ASK FIRST, ACT AFTER. Every side effect below hangs off
+    // `switchSession`'s boolean, so a refused jump applies NO PART of a
+    // successful one.
+    //
+    // This used to open with an unconditional `setControlRoomActive(false)`,
+    // which made the whole observable outcome of a refused jump "the Control
+    // Room closed and nothing else happened". For the session tabs that is
+    // unreachable (they index into `sessions`), and for the two rendered
+    // notification surfaces #7516/#7528 gates it at render time — but the OS
+    // turn-complete notification has no render surface to gate. Its card sits
+    // in the notification centre with the id baked in and is only ever
+    // dispatched while the window is UNfocused, so the click lands minutes
+    // later against a roster that has moved on. PR #7528 read that as landing
+    // on a silent refusal; it was not silent, it was HALF-APPLIED.
+    //
+    // Deliberately still SILENT on refusal, not a toast: what #7511 got right
+    // was doing nothing, and what was broken was doing half of something.
+    //
+    // Be accurate about what that choice does and does not cost, because the
+    // first draft of this comment was not (PR #7539 review F1). EVERY caller of
+    // this handler is an operator action — tab click, sidebar row, Cmd+N and
+    // the tab-cycle shortcuts, the SessionBar jump-to-pending button, the
+    // notification banner, the notifications-widget row, the OS card. The two
+    // MACHINE callers do not come through here at all: follow-mode
+    // (`store/message-handler.ts`) and the permission auto-switch
+    // (`store/connection.ts`) both call the raw store action directly, so
+    // `switchSession`'s own "do nothing rather than log noise" argument is
+    // theirs and does not constrain this handler. Nor would surfacing a refusal
+    // here need a second membership reading: the boolean is in hand one line
+    // below, and the message would be written beside it.
+    //
+    // So the silence is a choice on its merits, not a constraint: (1) #7511's
+    // precedent — a refusal reachable through ordinary use is honestly answered
+    // by doing nothing, and the bug was the half-applied state, not the quiet;
+    // (2) the honest surface already exists and is already reached — clicking a
+    // native notification focuses the window, and the widget row and banner for
+    // that session are gated by #7516/#7528 and already read "No longer open";
+    // (3) this click path is web-only — `sendNativeNotification` drops
+    // `options.onClick` on Tauri (#7367) — so a toast here would cover half the
+    // surface. If a later change makes a refusal worth SAYING, say it here off
+    // the boolean; nothing structural is in the way.
+    //
+    // ONE membership implementation, and it stays the store's (#7475/#7511).
+    // The handler does not re-ask `isSessionListed`: a second reading here is
+    // the copy that drifts from the door it mirrors.
+    if (!switchSession(sessionId)) return
+    // #5204 — clicking any session tab returns from the Control Room view, and
+    // that must hold when the clicked session is ALREADY the active one (the CR
+    // is overlaid on top of it, so its own tab is the way back). It survives the
+    // reorder because `switchSession` returns `true` for the already-active id
+    // before it reads the roster or writes anything — the early-return branch
+    // this line used to sit above.
     setControlRoomActive(false)
-    if (sessionId === activeSessionId) return
     // #7475 — latch the switching state only when the switch actually happened.
-    // `switchSession` now refuses a target absent from `sessions`, and
     // `isSwitchingSession` blanks the whole content area until `activeSessionId`
-    // changes — so latching it on a refusal would wedge the dashboard on a
-    // "switching" placeholder forever. Same contract as createSession's (#6285).
-    if (switchSession(sessionId)) setIsSwitchingSession(true)
+    // changes, so latching it for the already-active id — whose `activeSessionId`
+    // never changes — would wedge the dashboard on a "switching" placeholder
+    // forever. Same contract as createSession's (#6285).
+    if (sessionId !== activeSessionId) setIsSwitchingSession(true)
   }, [switchSession, activeSessionId])
 
   // #7516 — the RENDER-time reading of `switchSession`'s own membership check,
@@ -946,12 +994,21 @@ export function App() {
   // describes). Deliberately the same `isSessionListed` the store calls, over
   // the same `sessions` array, so a jump that is offered is a jump that works.
   //
-  // The refusal is surfaced HERE and not inside `handleSwitchSession`: that
-  // handler is shared with follow-mode and the permission auto-switch, whose
-  // silent refusal `switchSession`'s own comment argues for ("reachable through
-  // ordinary use... the honest UI response is to do nothing"). Making the DOOR
-  // noisy would be wrong for them; making the operator's CONTROL honest is what
-  // #7516 asks for.
+  // The refusal is surfaced HERE and not inside `handleSwitchSession`, and the
+  // reason is NOT the one this comment used to give (PR #7539 review F1): it
+  // said the handler is shared with follow-mode and the permission auto-switch,
+  // whose silence must be preserved. Neither goes through the handler — both
+  // call the raw store action — so no machine caller was ever being protected.
+  //
+  // The real reason is what each vantage point can express. A RENDER gate can
+  // remove the affordance, which is what #7516 asks for: "looks clickable" and
+  // "will work" must not disagree. The handler runs after the operator has
+  // already aimed and clicked, so the best it can do is be INERT — which is
+  // what #7535 fixed, separately from silence. The door stays SILENT on its own
+  // merits (see the adjudication on `handleSwitchSession` above) and is now
+  // also side-effect-FREE; those are two different properties and only the
+  // second was broken. The OS notification has no render surface, so inert is
+  // all that is available to it.
   const sessionIsListed = useCallback(
     (sessionId: string) => isSessionListed(sessions, sessionId),
     [sessions],

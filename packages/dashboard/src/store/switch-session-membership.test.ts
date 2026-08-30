@@ -292,6 +292,33 @@ describe('#7475 — switchSession REPORTS what it did', () => {
     expect(useConnectionStore.getState().switchSession('sess-a')).toBe(true)
   })
 
+  it('returns true for the already-active id even when the roster has DROPPED it', async () => {
+    // #7535 (PR #7539 review F3) — the ORDER of the already-active shortcut
+    // relative to the membership check, which nothing pinned.
+    //
+    // The cell above uses an already-active id that is ALSO listed, so it
+    // passes whichever branch answers first. App's reorder hangs
+    // `setControlRoomActive(false)` off this boolean and relies on the shortcut
+    // sitting ABOVE the roster read — that is what keeps #5204 working when the
+    // Control Room is open over a session the roster has since dropped (a
+    // `session_list` that closes the active session while the CR is up, or the
+    // `restoreState` window before the new session is listed). Move the
+    // shortcut below the membership check and this is the only cell that
+    // notices: 1508 store + App tests stay green under that mutation.
+    //
+    // The roster is deliberately EMPTY while `activeSessionId` names a session,
+    // which is the one input that separates the two orderings.
+    const { useConnectionStore } = await import('./connection')
+    useConnectionStore.setState({
+      socket: liveSocket([]),
+      activeSessionId: 'sess-a',
+      sessions: [],
+      sessionStates: {},
+    } as unknown as Partial<ConnectionState>)
+
+    expect(useConnectionStore.getState().switchSession('sess-a')).toBe(true)
+  })
+
   it('returns true through the opt-out door', async () => {
     const { useConnectionStore } = await import('./connection')
     useConnectionStore.setState({

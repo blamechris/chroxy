@@ -20,8 +20,9 @@
  * ControlRoomView strip/deep-link layer — this component assumes it only
  * renders when the engine is enabled.
  */
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useConnectionStore } from '../store/connection'
+import { isSessionListed } from '../store/utils'
 import type { RunSummary, RunDetail, RunGate, RunNode, RunTimelineEntry, RunUsage } from '@chroxy/protocol'
 import { formatGeneratedAgo } from './ControlRoomSection'
 import { renderMarkdown } from '../lib/markdown'
@@ -97,7 +98,77 @@ function RunRow({ run, selected, onSelect }: { run: RunSummary; selected: boolea
   )
 }
 
-function NodeRow({ node, onOpenSession }: { node: RunNode; onOpenSession: (sessionId: string) => void }) {
+/**
+ * #7536 — the node's "Open session" jump, gated on ROSTER MEMBERSHIP rather
+ * than on `node.sessionId` being truthy.
+ *
+ * `node.sessionId` is PROVENANCE, not a live handle: a node's session is closed
+ * the moment the node finishes and the run record keeps the id long after, which
+ * is the point of a run record. Gating on truthiness therefore left a
+ * link-styled, clickable button on every completed node — most of the rows in a
+ * finished run — that `switchSession` has refused in SILENCE since #7511. The
+ * dead click #7474/#7516 were filed about, on a third surface.
+ *
+ * `isSessionListed` is the choke point's OWN predicate (`store/utils.ts`, the
+ * function `switchSession` calls) read at render time over the same `sessions`
+ * array, so "looks clickable" and "will work" cannot disagree. Never a second
+ * `sessions.some(...)` written here — that is the copy #7475 collapsed four of.
+ *
+ * ## The inert shape
+ *
+ * The BUTTON goes, following the banner rather than the widget row (PR #7528).
+ * #7466's criterion is recoverability: a closed node session does not come back
+ * under the same id, so the control is removed rather than disabled. Unlike the
+ * widget row this button carries no second duty — it is not a mark-read
+ * affordance and not a `role="menuitem"` anchor — so nothing is lost by
+ * removing it. Everything else in the row stays: this is a gate, not a
+ * dismissal, and the row is the provenance the panel exists to show.
+ *
+ * A marker says WHY, in the banner's vocabulary ("No longer open"), because a
+ * silently affordance-less row reads as a rendering bug. It carries
+ * `role="status"`, which is the banner's marker verbatim — same role, same
+ * text — and the reason is the scenario the banner itself cites: the roster
+ * snapshot that removes a session re-renders this row WHILE THE PANEL IS OPEN,
+ * replacing a control the operator was about to aim at. A sighted user sees
+ * that; without the role a screen-reader user gets a silent disappearance. It
+ * is also the case with a test — `flips LIVE when the roster drops the node
+ * session under the cursor` — whereas the alternative is speculative.
+ *
+ * An earlier draft made this the one deliberate DIVERGENCE from the banner, on
+ * two premises that do not survive checking (PR #7539 review F2), and they are
+ * recorded because the shape recurs:
+ *   - "a run detail renders one marker per subtask and the gone state is the
+ *     terminal state of every one" describes the panel's INITIAL RENDER, and a
+ *     live region inserted already-populated is the case mainstream screen
+ *     readers do NOT announce. Twenty completed nodes are silent either way, so
+ *     the noise the divergence was avoiding largely does not exist.
+ *   - "the row's own status chip is the change worth hearing" was simply false:
+ *     `StatusChip` above is a bare `<span className="cr-tag">` with no role, no
+ *     `aria-live` and no live-region ancestor. The alternative channel it
+ *     pointed at is not audible at all.
+ *
+ * The real cost, stated rather than denied: a `session_list` that retires
+ * SEVERAL node sessions at once — a run completing — inserts N markers in one
+ * commit. That is a genuine batch, it is accepted here, and it is bounded by
+ * the same insertion behaviour above (a populated region on insert is at worst
+ * announced once per AT that does announce it). Consistency of one marker with
+ * one meaning across every surface is worth more than a per-surface divergence
+ * argued from contested AT behaviour.
+ *
+ * The CSS class stays `cr-dim` rather than the banner's own: styling is
+ * surface-local (`cr-orch` has no stylesheet rule at all), and it is the ROLE
+ * and the TEXT that have to match, not the paint.
+ *
+ * A node that never had a session at all gets neither the button nor the
+ * marker: "no longer open" would be a false claim about it, and the two
+ * absences are different facts.
+ */
+function NodeRow({ node, onOpenSession, isSessionListed: sessionIsListed }: {
+  node: RunNode
+  onOpenSession: (sessionId: string) => void
+  isSessionListed: (sessionId: string) => boolean
+}) {
+  const openable = !!node.sessionId && sessionIsListed(node.sessionId)
   return (
     <li className="cr-orch-node" data-testid="orch-node-row">
       <span className="cr-orch-node-title">{node.title || node.nodeId}</span>
@@ -106,10 +177,13 @@ function NodeRow({ node, onOpenSession }: { node: RunNode; onOpenSession: (sessi
       <span className="cr-dim"> · {usd(node.usage ?? null)}</span>
       {node.committeeIterations > 0 && <span className="cr-dim"> · {node.committeeIterations} committee round{node.committeeIterations === 1 ? '' : 's'}</span>}
       {node.branch && <code className="cr-dim" data-testid="orch-node-branch">{node.branch}</code>}
-      {node.sessionId && (
+      {openable && (
         <button type="button" className="cr-link-btn" data-testid="orch-node-open-session" onClick={() => onOpenSession(node.sessionId!)}>
           Open session
         </button>
+      )}
+      {!!node.sessionId && !openable && (
+        <span className="cr-dim" data-testid="orch-node-session-gone" role="status">No longer open</span>
       )}
     </li>
   )
@@ -210,7 +284,17 @@ function TimelineRow({ entry }: { entry: RunTimelineEntry }) {
   )
 }
 
-function DetailPanel({ runId, onOpenSession }: { runId: string; onOpenSession: (sessionId: string) => void }) {
+function DetailPanel({ runId, onOpenSession, isSessionListed: sessionIsListed }: {
+  runId: string
+  onOpenSession: (sessionId: string) => void
+  /**
+   * #7536 — threaded down rather than recomputed here, and REQUIRED with no
+   * default: defaulting to "listed" is exactly the hole being closed, and a
+   * default would let a future call site reopen it silently (the
+   * `NotificationsWidget` prop's reasoning, same shape).
+   */
+  isSessionListed: (sessionId: string) => boolean
+}) {
   const held = useConnectionStore((s) => s.orchestrationRunDetails[runId] ?? null)
   const loading = useConnectionStore((s) => s.orchestrationRunDetailLoading.has(runId))
   const stale = useConnectionStore((s) => s.orchestrationRunDetailStale[runId] === true)
@@ -248,7 +332,7 @@ function DetailPanel({ runId, onOpenSession }: { runId: string; onOpenSession: (
       <h5>Subtasks</h5>
       {run.nodes.length === 0
         ? <p className="cr-dim" data-testid="orch-nodes-empty">No subtasks yet (planning).</p>
-        : <ul className="cr-orch-nodes">{run.nodes.map((n) => <NodeRow key={n.nodeId} node={n} onOpenSession={onOpenSession} />)}</ul>}
+        : <ul className="cr-orch-nodes">{run.nodes.map((n) => <NodeRow key={n.nodeId} node={n} onOpenSession={onOpenSession} isSessionListed={sessionIsListed} />)}</ul>}
 
       {run.timeline.length > 0 && (
         <>
@@ -473,6 +557,15 @@ export function OrchestrationRunsSection({ now = Date.now }: OrchestrationRunsSe
   const selectedRunId = useConnectionStore((s) => s.selectedRunId)
   const selectRun = useConnectionStore((s) => s.selectRun)
   const switchSession = useConnectionStore((s) => s.switchSession)
+  // #7536 — the roster `switchSession` membership-checks against, read here so
+  // the node rows can ask the SAME question at render time. Mirrors App's
+  // `sessionIsListed` wrapper (#7516): the shared helper, over the store's own
+  // `sessions`, memoised on it.
+  const sessions = useConnectionStore((s) => s.sessions)
+  const sessionIsListed = useCallback(
+    (sessionId: string) => isSessionListed(sessions, sessionId),
+    [sessions],
+  )
   const [showNewRun, setShowNewRun] = useState(false)
 
   // Pull the selected run's detail when it isn't held yet (selection persists
@@ -533,7 +626,7 @@ export function OrchestrationRunsSection({ now = Date.now }: OrchestrationRunsSe
               <RunRow key={r.runId} run={r} selected={r.runId === selectedRunId} onSelect={(id) => selectRun(id)} />
             ))}
           </ul>
-          {selectedRunId && <DetailPanel runId={selectedRunId} onOpenSession={(sessionId) => switchSession(sessionId)} />}
+          {selectedRunId && <DetailPanel runId={selectedRunId} onOpenSession={(sessionId) => switchSession(sessionId)} isSessionListed={sessionIsListed} />}
         </div>
       )}
     </section>
