@@ -1,7 +1,7 @@
 /**
  * Tests for shared stateless message handler functions.
  */
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { MAX_SANE_DURATION_MS } from '@chroxy/protocol'
 import {
   resolveSessionId,
@@ -116,6 +116,12 @@ import {
   resolvePermissionStreamSplit,
 } from './index'
 import type { StreamDeltaContext, PendingDelta } from './index'
+import {
+  getReplayWindowDepth,
+  reconcileReplayEnd,
+  reconcileReplayStart,
+  resetReplayReconcile,
+} from '../replay-reconcile'
 import { nextMessageId } from '../utils'
 import type {
   ActiveTool,
@@ -8825,6 +8831,17 @@ describe('applyInterventionBuilder', () => {
 // ---------------------------------------------------------------------------
 
 describe('sharedStreamDelta (#4981)', () => {
+  // The #4889 replay guard reads the store-core replay-window REFCOUNT, which
+  // is module state — a window left open by one case would otherwise decide
+  // the next.
+  beforeEach(() => {
+    resetReplayReconcile({ clearCursors: true })
+  })
+
+  afterEach(() => {
+    resetReplayReconcile({ clearCursors: true })
+  })
+
   function makeHarness(sessionId: string) {
     // Single session-state messages array + streamingMessageId.
     let messages: ChatMessage[] = []
@@ -8832,14 +8849,12 @@ describe('sharedStreamDelta (#4981)', () => {
     const pendingDeltas = new Map<string, PendingDelta>()
     const deltaIdRemaps = new Map<string, string>()
     const postPermissionSplits = new Set<string>()
-    const replayingSessions = new Set<string>()
 
     const ctx: StreamDeltaContext = {
       activeSessionId: sessionId,
       pendingDeltas,
       deltaIdRemaps,
       postPermissionSplits,
-      replayingSessions,
       getSessionMessages: (id) => (id === sessionId ? messages : null),
       getFlatMessages: () => [],
       appendTerminalDelta: () => {},
@@ -8897,7 +8912,6 @@ describe('sharedStreamDelta (#4981)', () => {
       pendingDeltas,
       deltaIdRemaps,
       postPermissionSplits,
-      replayingSessions,
     }
   }
 
@@ -9003,7 +9017,9 @@ describe('sharedStreamDelta (#4981)', () => {
 
   it('replay guard: no continuation split while the session is replaying', () => {
     const h = makeHarness('s1')
-    h.replayingSessions.add('s1')
+    // #7497 — open a real replay window rather than seeding a context Set. The
+    // guard reads the store-core refcount now, so this is the production path.
+    reconcileReplayStart('s1', true, 0)
     h.seedResponse('resp-1', 'First sentence.')
     h.seedTool('toolu_a')
     h.send({ messageId: 'resp-1', delta: 'Second sentence.' })
@@ -9014,6 +9030,54 @@ describe('sharedStreamDelta (#4981)', () => {
     expect(responses).toHaveLength(1)
     expect(responses[0]!.content).toBe('First sentence.Second sentence.')
     expect(h.deltaIdRemaps.has('resp-1')).toBe(false)
+  })
+
+
+  // #7497 — the same guard, in the interleave Set membership cannot express.
+  // `subscribe_sessions` and `switch_session` both replay one session with
+  // `forceFull` and `replayHistory` chunks over `setImmediate`, so two windows
+  // overlap: `start start end end`. The FIRST end deleted the id from the
+  // context Set, so replay #2's remaining tail — a forceFull from offset 0,
+  // i.e. entirely server-reassembled history — was split as if it were live,
+  // inventing a `-cont-` bubble that never existed in the original turn.
+  // The refcount is still at 1 there, so the guard holds until the LAST end.
+  it('replay guard: no continuation split in replay #2 tail after end#1 (#7497)', () => {
+    const h = makeHarness('s1')
+    reconcileReplayStart('s1', true, 0)
+    reconcileReplayStart('s1', true, 0)
+    reconcileReplayEnd('s1', [])
+    // A precondition, not decoration: at depth 0 the assertions below would
+    // pass for the wrong reason — there would be nothing left to gate.
+    expect(getReplayWindowDepth('s1')).toBe(1)
+
+    h.seedResponse('resp-1', 'First sentence.')
+    h.seedTool('toolu_a')
+    h.send({ messageId: 'resp-1', delta: 'Second sentence.' })
+    h.flush()
+
+    const responses = h.messages.filter((m) => m.type === 'response')
+    expect(responses).toHaveLength(1)
+    expect(responses[0]!.content).toBe('First sentence.Second sentence.')
+    expect(h.deltaIdRemaps.has('resp-1')).toBe(false)
+  })
+
+  // Positive control — the guard's lifecycle still ENDS. Once the last window
+  // closes the split fires again, so the case above cannot pass by the guard
+  // being stuck on.
+  it('replay guard: splits again once the LAST replay window closes (#7497)', () => {
+    const h = makeHarness('s1')
+    reconcileReplayStart('s1', true, 0)
+    reconcileReplayStart('s1', true, 0)
+    reconcileReplayEnd('s1', [])
+    reconcileReplayEnd('s1', [])
+    expect(getReplayWindowDepth('s1')).toBe(0)
+
+    h.seedResponse('resp-1', 'First sentence.')
+    h.seedTool('toolu_a')
+    h.send({ messageId: 'resp-1', delta: 'Second sentence.' })
+    h.flush()
+
+    expect(h.messages.filter((m) => m.type === 'response')).toHaveLength(2)
   })
 
   it('defensive remap: delta whose slot is a tool_use routes to a -response slot', () => {
@@ -9103,7 +9167,6 @@ describe('sharedStreamDelta (#4981)', () => {
         pendingDeltas: h.pendingDeltas,
         deltaIdRemaps: h.deltaIdRemaps,
         postPermissionSplits: h.postPermissionSplits,
-        replayingSessions: h.replayingSessions,
         getSessionMessages: (id) => (id === 's1' ? h.messages : null),
         getFlatMessages: () => [],
         appendTerminalDelta: () => {},

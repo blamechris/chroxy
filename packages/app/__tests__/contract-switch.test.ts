@@ -256,10 +256,11 @@ describe('contract switch fixtures — app real handleMessage (#5556.5)', () => 
   beforeEach(() => {
     jest.useFakeTimers();
     clearDeltaBuffers();
-    // #6325: reset the per-context replay flags between fixtures (the dashboard
-    // twin already does). Without this a prior history-replay fixture leaves a
-    // session in `_ctx.replayingSessions`, which gates off activity_delta's
-    // inactivity-warning clear (test-order contamination).
+    // #6325: reset the replay flags between fixtures (the dashboard twin
+    // already does). Without this a prior history-replay fixture leaves that
+    // session's replay window OPEN (#7497: the store-core refcount), which
+    // gates off activity_delta's inactivity-warning clear (test-order
+    // contamination).
     resetReplayFlags();
   });
 

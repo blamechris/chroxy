@@ -270,14 +270,15 @@ const INITIAL_ENCRYPTION_CONTEXT: EncryptionContext = {
 interface MessageHandlerContext extends EncryptionContext {
   // History replay
   //
-  // #4512 — per-session replay tracking (mirror of dashboard #4493). The
-  // server's `replayHistory()` chunks over `setImmediate` (ws-history.js),
-  // which yields the event loop between chunks, so live broadcasts from
-  // OTHER sessions can interleave with session A's replay. A per-connection
-  // boolean would gate all sessions on A's replay state and drop legitimate
-  // live activity for sessions B/C/etc. Scope the flag per-session id and
-  // gate per-target.
-  replayingSessions: Set<string>;
+  // #4512 — per-session replay tracking (mirror of dashboard #4493) used to
+  // live here as a `Set<string>`. #7497 removed it: the per-session replay
+  // window is the REFCOUNT in store-core's replay-reconcile module, which both
+  // clients already drive from the `history_replay_*` frames, and two maps
+  // answering "is this session replaying" drifted in both directions. Read it
+  // through `isSessionReplaying` below. The per-session scoping the Set existed
+  // for is unchanged and still load-bearing: `replayHistory()` chunks over
+  // `setImmediate`, so live broadcasts for session B interleave with A's
+  // replay, and a per-connection boolean would suppress B's live activity.
 
   // Permission boundary message splitting (#554)
   postPermissionSplits: Set<string>;
@@ -330,7 +331,6 @@ function createDefaultContext(): MessageHandlerContext {
   const rttSmoother = new RttSmoother();
   const ctx: MessageHandlerContext = {
     ...INITIAL_ENCRYPTION_CONTEXT,
-    replayingSessions: new Set<string>(),
     postPermissionSplits: new Set<string>(),
     deltaIdRemaps: new Map<string, string>(),
     pendingTerminalWrites: '',
@@ -390,6 +390,12 @@ export function resetAllHandlerState(): void {
   _ctx.heartbeat.clearHandshakeTimer();
   _ctx.deltaFlusher.dispose();
   _ctx = createDefaultContext();
+  // #7497 — replacing the context used to reset the replay flags for free (the
+  // `replayingSessions` Set was a context field). The flag is module state in
+  // store-core now, so the reset has to be explicit or this heavier reset would
+  // clear STRICTLY LESS than `resetReplayFlags` does. Cursors are retained, for
+  // the same reason they are there (#5555.3).
+  resetReplayReconcile();
   _pendingPermissionModeRequests.clear();
   // Reset connection-attempt tracking (kept as export let for live-binding semantics)
   connectionAttemptId = 0;
@@ -770,10 +776,9 @@ export function setPendingPairingIdentityKey(key: string | null): void {
 // History replay flags
 // ---------------------------------------------------------------------------
 export function resetReplayFlags(): void {
-  _ctx.replayingSessions.clear();
-  // #7477 — the replay FLAG is the refcount now (see `isSessionReplaying`), so
-  // resetting the flags has to reset that too or this clears half the state and
-  // reads as a full reset. The one production caller (connection.ts's
+  // #7477 — the replay FLAG is the refcount (see `isSessionReplaying`), so
+  // resetting the flags has to reset that or this clears nothing at all while
+  // reading as a full reset. The one production caller (connection.ts's
   // disconnect) already runs `resetReplayReconcile({ clearCursors: true })`
   // immediately below, separated only by comment lines, so this is a no-op
   // there and closes the gap for every test-hygiene caller that only knows
@@ -785,11 +790,11 @@ export function resetReplayFlags(): void {
 }
 
 /**
- * Is a history replay in flight for this session — the question the REPLAY
- * DEDUP gate has to ask (#7477 review).
+ * Is a history replay in flight for this session — the ONE question every
+ * replay-state gate in this file asks (#7477 review, #7497).
  *
- * NOT `_ctx.replayingSessions.has(id)`. That Set is the third map in this
- * family to carry membership where a COUNT is needed: the server routinely has
+ * There used to be a `_ctx.replayingSessions` Set beside this, and it carried
+ * membership where a COUNT is needed: the server routinely has
  * two replays of one session in flight (`subscribe_sessions` + `switch_session`,
  * both forceFull), so the wire order is `start start end end`, and the FIRST
  * end deletes the id. Everything replay #2 still had to deliver then appended
@@ -807,15 +812,23 @@ export function resetReplayFlags(): void {
  * and inherits `resetReplayReconcile` (fresh auth, socket close/error) and
  * `dropReplaySessionState` (prune, timeout) teardown for free.
  *
- * Scope: this is wired to the two DEDUP gates only (`message` and `tool_start`).
- * The Set's other readers — the #3758/#4466 activity bump, the #4889
- * permission-split gate in store-core's shared `StreamDeltaContext`, the delta
- * flusher's reconcile — see exactly the behaviour they saw before #7477 in this
- * window, so moving them is an unrelated behaviour change. Tracked as #7497,
- * which also carries the one site where the two maps now genuinely DISAGREE:
- * `dropReplaySessionState` clears the refcount but not the Set, so a pruned
- * session still receiving replay frames reads as "not replaying" here where the
- * Set kept dedup on.
+ * #7494 moved the two DEDUP gates (`message`, `tool_start`) here; #7497 moved
+ * the REST and deleted the Set, because two maps answering one question drift.
+ * They had already drifted in BOTH directions:
+ *
+ *   - in the `start start end end` window above, the Set said "not replaying"
+ *     while replay #2 was still streaming history — the #3758/#4512 activity
+ *     bump reset "last activity Ns ago" and dismissed the "Agent quiet for 46m"
+ *     chip on a REPLAYED event, the #6627 queue reconcile trimmed the live
+ *     queue against a stale `queueLength`, and the #4889 continuation split
+ *     invented a `-cont-` bubble that never existed in the turn;
+ *   - after a `session_list` prune or a `session_timeout` the Set said
+ *     "replaying" forever. `dropReplaySessionState` clears the refcount and
+ *     cannot reach a connection-local Set, and the `history_replay_end` that
+ *     would have deleted the entry is never coming — the session is gone.
+ *
+ * The Set had no teardown of its own on either path, so keeping both maps meant
+ * one more place they had to be kept in step. There is now one map.
  */
 function isSessionReplaying(sessionId: string | null | undefined): boolean {
   return getReplayWindowDepth(sessionId) > 0;
@@ -1861,18 +1874,23 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
   //      activity Ns ago" resets to 1s no matter how idle the session was;
   //   2) wipes inactivityWarning, so the "Agent quiet for 46m 32s · Status
   //      update?" chip disappears without the user ever seeing it again.
-  // Live activity events arriving AFTER history_replay_end clears the flag
-  // still bump correctly — verified by the regression-guard test in
+  // Live activity events arriving after the LAST history_replay_end closes the
+  // window still bump correctly — verified by the regression-guard test in
   // message-handler.test.ts.
   //
-  // #4512 — gate per target session id (Set membership), not a connection
-  // flag. `replayHistory()` chunks over setImmediate, so live broadcasts
-  // from session B can interleave with A's replay. A per-connection boolean
-  // would wrongly suppress B's live activity bump for the duration of A's
-  // replay.
+  // #4512 — gate per target session id, not a connection flag.
+  // `replayHistory()` chunks over setImmediate, so live broadcasts from session
+  // B can interleave with A's replay. A per-connection boolean would wrongly
+  // suppress B's live activity bump for the duration of A's replay.
+  //
+  // #7497 — and per-session DEPTH, not membership: two forceFull replays of one
+  // session overlap (`subscribe_sessions` + `switch_session`), and the Set this
+  // used to read was deleted by the FIRST end. Replay #2's tail then bumped the
+  // timestamp and dismissed the chip off REPLAYED events — #4492's own symptom,
+  // in the interleave its gate did not cover.
   if (isActivityEvent(msg.type)) {
     const targetId = (typeof msg.sessionId === 'string' && msg.sessionId) || get().activeSessionId;
-    if (targetId && get().sessionStates[targetId] && !_ctx.replayingSessions.has(targetId)) {
+    if (targetId && get().sessionStates[targetId] && !isSessionReplaying(targetId)) {
       updateSession(targetId, (ss) => {
         const patch: Partial<SessionState> = { lastClientActivityAt: Date.now() };
         if (ss.inactivityWarning) patch.inactivityWarning = null;
@@ -1896,10 +1914,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // Eager-encryption and no-encryption connects never send key_exchange, so
       // this is the single authoritative clear (key_exchange_ok clears defensively).
       clearHandshakeTimer();
-      // Reset replay flags — fresh auth means clean slate (#4512: clear the
-      // per-session replaying set so a reconnect doesn't leave stale ids
-      // gating future activity bumps).
-      _ctx.replayingSessions.clear();
+      // Reset replay flags — fresh auth means clean slate (#4512/#7497: clear
+      // every per-session replay window so a reconnect doesn't leave a stale
+      // one gating future activity bumps; `resetReplayReconcile` below IS that
+      // clear now that the refcount is the only flag).
       // #5555.4 — clear any in-progress replay BASELINE (a rebuild that never
       // saw history_replay_end before the socket dropped). Cursors are RETAINED
       // so this reconnect's replay can be incremental.
@@ -2476,9 +2494,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         msg,
         get().activeSessionId,
       );
-      // #4512 — track per-session. Falls back to activeSessionId via
-      // sharedHistoryReplayStart, matching the gate's targetId resolution.
-      if (replayTargetId) _ctx.replayingSessions.add(replayTargetId);
+      // #4512/#7497 — the per-session window is opened by `reconcileReplayStart`
+      // below (refcounted, so overlapping replays compose). `replayTargetId`
+      // falls back to activeSessionId via sharedHistoryReplayStart, matching
+      // the gates' targetId resolution.
       // #5555.4 — DO NOT wipe messages here. Full rebuild keeps the existing
       // messages visible and records a baseline; the authoritative replayed set
       // is appended and swapped in atomically at history_replay_end (no blank
@@ -2551,14 +2570,15 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'history_replay_end':
-      // Parser is shared via store-core; flag mutation stays here.
-      // #4512 — remove this session id from the replaying set. Falls back
-      // to activeSessionId to mirror sharedHistoryReplayStart's resolution.
+      // Parser is shared via store-core.
+      // #4512/#7497 — the window is closed by `reconcileReplayEnd` below, which
+      // DECREMENTS: with two replays of this session in flight the window stays
+      // open until the last end. `endTargetId` falls back to activeSessionId to
+      // mirror sharedHistoryReplayStart's resolution.
       sharedHistoryReplayEnd();
       {
         const endTargetId =
           (typeof msg.sessionId === 'string' && msg.sessionId) || get().activeSessionId;
-        if (endTargetId) _ctx.replayingSessions.delete(endTargetId);
         // #5555.4 — atomic swap for a full rebuild: replace messages with the
         // appended replayed tail in ONE update (no blank flash). reconcileReplayEnd
         // also advances the cursor from `latestSeq`; returns null for delta replay.
@@ -2749,7 +2769,6 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         pendingDeltas: _ctx.deltaFlusher.pendingDeltas,
         deltaIdRemaps: _ctx.deltaIdRemaps,
         postPermissionSplits: _ctx.postPermissionSplits,
-        replayingSessions: _ctx.replayingSessions,
 
         getSessionMessages: (sessionId) =>
           sessionId && get().sessionStates[sessionId]
@@ -2988,7 +3007,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
             // → no needless write/rerender every turn).
             const currentQueue = ss.queuedMessages ?? [];
             const reconciledQueue =
-              queueReconcile && effectiveId === targetId && !_ctx.replayingSessions.has(effectiveId)
+              queueReconcile && effectiveId === targetId && !isSessionReplaying(effectiveId)
                 ? queueReconcile.applyTo(currentQueue).queuedMessages
                 : currentQueue;
             return {
@@ -3884,12 +3903,12 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // activity: bump `lastClientActivityAt` and clear any `inactivityWarning`
       // for the delta's session, mirroring the dashboard feeder + the app's
       // `isActivityEvent` bump (activity_delta isn't in ACTIVITY_EVENT_TYPES, so
-      // it's done here). Gated on `replayingSessions` exactly like that bump so a
-      // session-switch history replay doesn't reset the "Working… last activity
-      // Ns ago" timestamp (#4512). activity_snapshot deliberately does NOT bump —
+      // it's done here). Gated on `isSessionReplaying` exactly like that bump so
+      // a session-switch history replay doesn't reset the "Working… last
+      // activity Ns ago" timestamp (#4512 / #7497). activity_snapshot deliberately does NOT bump —
       // it's a full-state resync on subscribe/reconnect, not fresh work.
       const deltaSid = parsed.data.sessionId;
-      if (get().sessionStates[deltaSid] && !_ctx.replayingSessions.has(deltaSid)) {
+      if (get().sessionStates[deltaSid] && !isSessionReplaying(deltaSid)) {
         updateSession(deltaSid, (ss) => {
           const patch: Partial<SessionState> = { lastClientActivityAt: Date.now() };
           if (ss.inactivityWarning) patch.inactivityWarning = null;

@@ -13,6 +13,7 @@
 import type { ActiveTool, ChatMessage, ContextOccupancy, ContextUsage, ToolResultImage } from '../types'
 import { nextMessageId } from '../utils'
 import { isReplayDuplicate } from '../replay-dedup'
+import { getReplayWindowDepth } from '../replay-reconcile'
 import { resolveStreamId } from '../stream-id'
 import { isRateLimitMessage, MAX_SANE_DURATION_MS } from '@chroxy/protocol'
 import { parseRawStringField } from './_shared'
@@ -835,7 +836,9 @@ export function handleStreamStart(
 // peel (#4975) logic was previously duplicated verbatim between the dashboard
 // (`handleStreamDelta`) and the app (`case 'stream_delta'`). Both maintain the
 // same module-local state (`pendingDeltas`, `deltaIdRemaps`,
-// `postPermissionSplits`, `replayingSessions`, the 100ms flush timer).
+// `postPermissionSplits`, the 100ms flush timer). The per-session replay
+// guard is NOT among them since #7497: it is the replay-window refcount in
+// `../replay-reconcile`, which this module reads directly.
 //
 // `sharedStreamDelta` owns the platform-NEUTRAL algorithm. Platform-specific
 // side-effects stay at the call site, surfaced through `StreamDeltaContext`
@@ -868,7 +871,7 @@ export interface PendingDelta {
 
 /**
  * Platform surface for {@link sharedStreamDelta}. The shared function reads and
- * mutates the four module-local collections directly (they are identical on
+ * mutates the three module-local collections directly (they are identical on
  * both platforms) and delegates every store-touching or platform-divergent
  * operation to a callback.
  */
@@ -894,8 +897,6 @@ export interface StreamDeltaContext {
   deltaIdRemaps: Map<string, string>
   /** `_postPermissionSplits` set (shared). */
   postPermissionSplits: Set<string>
-  /** Per-session replay guard set (shared). */
-  replayingSessions: Set<string>
   /**
    * Forward the raw delta text to the terminal view. Dashboard-only side
    * effect; the app passes a no-op. Called once at the top of the handler,
@@ -1192,7 +1193,17 @@ export function sharedStreamDelta(
   // server-side and must not be re-split on the client.
   {
     const { sessionMessages: splitSessionMessages, effectiveSessionId: splitEffectiveId } = resolveSession()
-    const isReplaying = splitEffectiveId ? ctx.replayingSessions.has(splitEffectiveId) : false
+    // #7497 — the replay REFCOUNT, read straight out of this package, not a
+    // `Set<string>` threaded in through the context. `replay-reconcile` is a
+    // leaf module both clients already drive (`reconcileReplayStart` /
+    // `reconcileReplayEnd` on the `history_replay_*` frames), so this reads
+    // the one map that answers the question instead of a second one each
+    // client maintained by hand. Two of those two maps disagreed:
+    // `start start end end` (the ordinary `subscribe_sessions` +
+    // `switch_session` overlap) had the FIRST end delete the Set entry, so
+    // replay #2's tail was split as if live; and `dropReplaySessionState`
+    // could clear the refcount but never a client-local Set.
+    const isReplaying = getReplayWindowDepth(splitEffectiveId) > 0
     if (!isReplaying) {
       const splitMessages = splitSessionMessages ?? ctx.getFlatMessages()
       // The continuation split writes through `appendResponseSlot`/
