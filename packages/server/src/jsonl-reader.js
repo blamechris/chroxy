@@ -1,4 +1,4 @@
-import { readFileSync, statSync, existsSync, openSync, readSync, closeSync, fstatSync } from 'fs'
+import { statSync, existsSync } from 'fs'
 import { readFile, stat, open } from 'fs/promises'
 import { join } from 'path'
 import { homedir } from 'os'
@@ -68,7 +68,7 @@ export function getJsonlMtime(filePath) {
 
 /**
  * Parse raw JSONL text into Chroxy message format.
- * Shared by both sync and async readers.
+ * Shared parse core for the reader.
  *
  * Returns the parsed slice ALONGSIDE whether content was dropped to produce it
  * (#7484). Two independent things can drop content, and a caller cannot infer
@@ -173,83 +173,10 @@ function parseJsonlContent(raw, { byteTruncated = false } = {}) {
 }
 
 /**
- * Read a Claude Code conversation JSONL file and convert entries to Chroxy's message format.
- *
- * JSONL entry types:
- *   - type: "user" with message.content[].type === "text" -> { type: 'user_input', content }
- *   - type: "assistant" with text blocks -> { type: 'response', content }
- *   - type: "assistant" with tool_use blocks -> { type: 'tool_use', tool, content }
- *   - type: "queue-operation", "file-history-snapshot" -> skipped
- *   - type: "user" with tool_result content -> skipped (displayed as part of tool flow)
- *
- * @param {string} filePath - Absolute path to the JSONL file
- * @returns {Array<{ type: string, content: string, tool?: string, timestamp: number, messageId?: string }>}
- */
-export function readConversationHistory(filePath, maxBytes = MAX_TRANSCRIPT_BYTES) {
-  return readConversationHistoryWithMeta(filePath, maxBytes).messages
-}
-
-/**
- * `readConversationHistory` + the truncation flag for the slice it returned
- * (#7484). Same read, same parse — the only difference is that the caller is
- * told whether content was dropped, which the array alone cannot express.
- *
- * @param {string} filePath - Absolute path to the JSONL file
- * @param {number} [maxBytes]
- * @returns {{ messages: Array<object>, truncated: boolean }}
- */
-export function readConversationHistoryWithMeta(filePath, maxBytes = MAX_TRANSCRIPT_BYTES) {
-  let raw
-  let byteTruncated = false
-  try {
-    const { size } = statSync(filePath)
-    byteTruncated = size > maxBytes
-    raw = byteTruncated
-      ? readTailBytesSync(filePath, maxBytes)
-      : readFileSync(filePath, 'utf-8')
-  } catch {
-    // Unreadable is not truncated: nothing was dropped from a slice that does
-    // not exist, and claiming otherwise would put a permanent "history
-    // incomplete" banner in front of every session with no transcript.
-    return { messages: [], truncated: false }
-  }
-
-  return parseJsonlContent(raw, { byteTruncated })
-}
-
-/**
- * Read the last `maxBytes` of a file (sync). Used when a JSONL exceeds the
- * transcript byte ceiling so the read stays bounded. The window's first line is
- * usually a partial JSONL record; parseJsonlContent skips unparseable lines, so
- * the truncated head is dropped automatically.
- */
-function readTailBytesSync(filePath, maxBytes) {
-  const fd = openSync(filePath, 'r')
-  try {
-    const { size } = fstatSync(fd)
-    const start = Math.max(0, size - maxBytes)
-    const length = size - start
-    const buf = Buffer.alloc(length)
-    readSync(fd, buf, 0, length, start)
-    return new TextDecoder('utf-8', { fatal: false }).decode(buf)
-  } finally {
-    closeSync(fd)
-  }
-}
-
-/**
- * Async variant of readConversationHistory.
- * Uses fs.promises.readFile to avoid blocking the event loop for large JSONL files.
- *
- * @param {string} filePath - Absolute path to the JSONL file
- * @returns {Promise<Array<{ type: string, content: string, tool?: string, timestamp: number, messageId?: string }>>}
- */
-export async function readConversationHistoryAsync(filePath, maxBytes = MAX_TRANSCRIPT_BYTES) {
-  return (await readConversationHistoryWithMetaAsync(filePath, maxBytes)).messages
-}
-
-/**
- * Async variant of {@link readConversationHistoryWithMeta} (#7484).
+ * This module's sole exported transcript reader (#7484/#7520; conversation-search/-scanner and transcript-tasks read transcripts their own way): returns { messages, truncated } so
+ * a caller can report the slice's own truncation. The sync and array-returning
+ * variants were removed in #7520 — the array shape structurally cannot report
+ * truncation, which is the false-safety footgun this file used to carry.
  *
  * @param {string} filePath - Absolute path to the JSONL file
  * @param {number} [maxBytes]
@@ -272,7 +199,7 @@ export async function readConversationHistoryWithMetaAsync(filePath, maxBytes = 
 }
 
 /**
- * Async variant of readTailBytesSync — read the last `maxBytes` of a file so an
+ * Read the last `maxBytes` of a file so an
  * oversized transcript read stays bounded (see MAX_TRANSCRIPT_BYTES).
  */
 async function readTailBytesAsync(filePath, maxBytes) {

@@ -8,51 +8,48 @@ import {
   decodeProjectPath,
   resolveJsonlPath,
   getJsonlMtime,
-  readConversationHistory,
-  readConversationHistoryAsync,
-  readConversationHistoryWithMeta,
   readConversationHistoryWithMetaAsync,
   MAX_TRANSCRIPT_BYTES,
   MAX_MESSAGES,
 } from '../src/jsonl-reader.js'
 
 describe('encodeProjectPath', () => {
-  it('replaces slashes with dashes', () => {
+  it('replaces slashes with dashes', async () => {
     assert.equal(
       encodeProjectPath('/Users/alice/projects/myrepo'),
       '-Users-alice-projects-myrepo',
     )
   })
 
-  it('handles root path', () => {
+  it('handles root path', async () => {
     assert.equal(encodeProjectPath('/'), '-')
   })
 
-  it('handles path without leading slash', () => {
+  it('handles path without leading slash', async () => {
     assert.equal(encodeProjectPath('foo/bar'), 'foo-bar')
   })
 })
 
 describe('decodeProjectPath', () => {
-  it('decodes path that exists on disk', () => {
+  it('decodes path that exists on disk', async () => {
     // /tmp always exists on macOS/Linux
     const result = decodeProjectPath('-tmp')
     assert.equal(result, '/tmp')
   })
 
-  it('returns null for nonexistent path', () => {
+  it('returns null for nonexistent path', async () => {
     const result = decodeProjectPath('-nonexistent-path-that-does-not-exist')
     assert.equal(result, null)
   })
 
-  it('returns null for path that decodes to a file, not directory', () => {
+  it('returns null for path that decodes to a file, not directory', async () => {
     // Even if the decoded path exists, it must be a directory
     assert.equal(decodeProjectPath('no-leading-slash'), null)
   })
 })
 
 describe('resolveJsonlPath', () => {
-  it('builds correct path from cwd and conversation ID', () => {
+  it('builds correct path from cwd and conversation ID', async () => {
     const result = resolveJsonlPath('/Users/test/project', 'abc-123')
     const expected = join(
       homedir(),
@@ -68,7 +65,7 @@ describe('resolveJsonlPath', () => {
 describe('getJsonlMtime', () => {
   let tempDir
 
-  it('returns mtime for existing file', () => {
+  it('returns mtime for existing file', async () => {
     tempDir = mkdtempSync(join(tmpdir(), 'chroxy-jsonl-test-'))
     const filePath = join(tempDir, 'test.jsonl')
     writeFileSync(filePath, '{}')
@@ -78,12 +75,12 @@ describe('getJsonlMtime', () => {
     rmSync(tempDir, { recursive: true, force: true })
   })
 
-  it('returns null for missing file', () => {
+  it('returns null for missing file', async () => {
     assert.equal(getJsonlMtime('/nonexistent/path/file.jsonl'), null)
   })
 })
 
-describe('readConversationHistory', () => {
+describe('readConversationHistoryWithMetaAsync — parsed message shapes (#7520: the sole reader)', () => {
   let tempDir
 
   function writeJsonl(filename, entries) {
@@ -103,14 +100,14 @@ describe('readConversationHistory', () => {
   }
 
   describe('missing file', () => {
-    it('returns empty array for nonexistent file', () => {
-      const result = readConversationHistory('/nonexistent/path/file.jsonl')
+    it('returns empty array for nonexistent file', async () => {
+      const result = (await readConversationHistoryWithMetaAsync('/nonexistent/path/file.jsonl')).messages
       assert.deepEqual(result, [])
     })
   })
 
   describe('user messages', () => {
-    it('parses user text entries', () => {
+    it('parses user text entries', async () => {
       setup()
       try {
         const filePath = writeJsonl('test.jsonl', [
@@ -123,7 +120,7 @@ describe('readConversationHistory', () => {
             },
           },
         ])
-        const result = readConversationHistory(filePath)
+        const result = (await readConversationHistoryWithMetaAsync(filePath)).messages
         assert.equal(result.length, 1)
         assert.equal(result[0].type, 'user_input')
         assert.equal(result[0].content, 'Hello Claude')
@@ -134,7 +131,7 @@ describe('readConversationHistory', () => {
       }
     })
 
-    it('joins multiple text blocks with newlines', () => {
+    it('joins multiple text blocks with newlines', async () => {
       setup()
       try {
         const filePath = writeJsonl('test.jsonl', [
@@ -150,7 +147,7 @@ describe('readConversationHistory', () => {
             },
           },
         ])
-        const result = readConversationHistory(filePath)
+        const result = (await readConversationHistoryWithMetaAsync(filePath)).messages
         assert.equal(result.length, 1)
         assert.equal(result[0].content, 'Line 1\nLine 2')
       } finally {
@@ -158,7 +155,7 @@ describe('readConversationHistory', () => {
       }
     })
 
-    it('skips user entries with tool_result content', () => {
+    it('skips user entries with tool_result content', async () => {
       setup()
       try {
         const filePath = writeJsonl('test.jsonl', [
@@ -170,21 +167,21 @@ describe('readConversationHistory', () => {
             },
           },
         ])
-        const result = readConversationHistory(filePath)
+        const result = (await readConversationHistoryWithMetaAsync(filePath)).messages
         assert.equal(result.length, 0)
       } finally {
         teardown()
       }
     })
 
-    it('skips user entries without array content', () => {
+    it('skips user entries without array content', async () => {
       setup()
       try {
         const filePath = writeJsonl('test.jsonl', [
           { type: 'user', uuid: 'u4', message: { content: 'just a string' } },
           { type: 'user', uuid: 'u5', message: {} },
         ])
-        const result = readConversationHistory(filePath)
+        const result = (await readConversationHistoryWithMetaAsync(filePath)).messages
         assert.equal(result.length, 0)
       } finally {
         teardown()
@@ -193,7 +190,7 @@ describe('readConversationHistory', () => {
   })
 
   describe('assistant messages', () => {
-    it('parses assistant text responses', () => {
+    it('parses assistant text responses', async () => {
       setup()
       try {
         const filePath = writeJsonl('test.jsonl', [
@@ -206,7 +203,7 @@ describe('readConversationHistory', () => {
             },
           },
         ])
-        const result = readConversationHistory(filePath)
+        const result = (await readConversationHistoryWithMetaAsync(filePath)).messages
         assert.equal(result.length, 1)
         assert.equal(result[0].type, 'response')
         assert.equal(result[0].content, 'Here is my response.')
@@ -216,7 +213,7 @@ describe('readConversationHistory', () => {
       }
     })
 
-    it('parses assistant tool_use blocks', () => {
+    it('parses assistant tool_use blocks', async () => {
       setup()
       try {
         const filePath = writeJsonl('test.jsonl', [
@@ -236,7 +233,7 @@ describe('readConversationHistory', () => {
             },
           },
         ])
-        const result = readConversationHistory(filePath)
+        const result = (await readConversationHistoryWithMetaAsync(filePath)).messages
         assert.equal(result.length, 1)
         assert.equal(result[0].type, 'tool_use')
         assert.equal(result[0].tool, 'Read')
@@ -247,7 +244,7 @@ describe('readConversationHistory', () => {
       }
     })
 
-    it('handles mixed text and tool_use in one assistant entry', () => {
+    it('handles mixed text and tool_use in one assistant entry', async () => {
       setup()
       try {
         const filePath = writeJsonl('test.jsonl', [
@@ -263,7 +260,7 @@ describe('readConversationHistory', () => {
             },
           },
         ])
-        const result = readConversationHistory(filePath)
+        const result = (await readConversationHistoryWithMetaAsync(filePath)).messages
         assert.equal(result.length, 2)
         assert.equal(result[0].type, 'response')
         assert.equal(result[0].content, 'Let me read that file.')
@@ -274,7 +271,7 @@ describe('readConversationHistory', () => {
       }
     })
 
-    it('uses "unknown" for tool_use without name', () => {
+    it('uses "unknown" for tool_use without name', async () => {
       setup()
       try {
         const filePath = writeJsonl('test.jsonl', [
@@ -286,7 +283,7 @@ describe('readConversationHistory', () => {
             },
           },
         ])
-        const result = readConversationHistory(filePath)
+        const result = (await readConversationHistoryWithMetaAsync(filePath)).messages
         assert.equal(result[0].tool, 'unknown')
       } finally {
         teardown()
@@ -295,7 +292,7 @@ describe('readConversationHistory', () => {
   })
 
   describe('skipped entries', () => {
-    it('skips queue-operation entries', () => {
+    it('skips queue-operation entries', async () => {
       setup()
       try {
         const filePath = writeJsonl('test.jsonl', [
@@ -306,7 +303,7 @@ describe('readConversationHistory', () => {
             message: { content: [{ type: 'text', text: 'kept' }] },
           },
         ])
-        const result = readConversationHistory(filePath)
+        const result = (await readConversationHistoryWithMetaAsync(filePath)).messages
         assert.equal(result.length, 1)
         assert.equal(result[0].content, 'kept')
       } finally {
@@ -314,7 +311,7 @@ describe('readConversationHistory', () => {
       }
     })
 
-    it('skips file-history-snapshot entries', () => {
+    it('skips file-history-snapshot entries', async () => {
       setup()
       try {
         const filePath = writeJsonl('test.jsonl', [
@@ -325,7 +322,7 @@ describe('readConversationHistory', () => {
             message: { content: [{ type: 'text', text: 'kept' }] },
           },
         ])
-        const result = readConversationHistory(filePath)
+        const result = (await readConversationHistoryWithMetaAsync(filePath)).messages
         assert.equal(result.length, 1)
         assert.equal(result[0].content, 'kept')
       } finally {
@@ -335,7 +332,7 @@ describe('readConversationHistory', () => {
   })
 
   describe('malformed data handling', () => {
-    it('skips malformed JSON lines', () => {
+    it('skips malformed JSON lines', async () => {
       setup()
       try {
         const filePath = join(tempDir, 'malformed.jsonl')
@@ -344,7 +341,7 @@ describe('readConversationHistory', () => {
           'NOT VALID JSON',
           '{"type":"assistant","uuid":"a20","message":{"content":[{"type":"text","text":"also good"}]}}',
         ].join('\n'))
-        const result = readConversationHistory(filePath)
+        const result = (await readConversationHistoryWithMetaAsync(filePath)).messages
         assert.equal(result.length, 2)
         assert.equal(result[0].content, 'good')
         assert.equal(result[1].content, 'also good')
@@ -353,12 +350,12 @@ describe('readConversationHistory', () => {
       }
     })
 
-    it('handles empty file', () => {
+    it('handles empty file', async () => {
       setup()
       try {
         const filePath = join(tempDir, 'empty.jsonl')
         writeFileSync(filePath, '')
-        const result = readConversationHistory(filePath)
+        const result = (await readConversationHistoryWithMetaAsync(filePath)).messages
         assert.deepEqual(result, [])
       } finally {
         teardown()
@@ -367,7 +364,7 @@ describe('readConversationHistory', () => {
   })
 
   describe('message cap', () => {
-    it('caps at 500 most recent messages', () => {
+    it('caps at 500 most recent messages', async () => {
       setup()
       try {
         const entries = []
@@ -380,7 +377,7 @@ describe('readConversationHistory', () => {
           })
         }
         const filePath = writeJsonl('large.jsonl', entries)
-        const result = readConversationHistory(filePath)
+        const result = (await readConversationHistoryWithMetaAsync(filePath)).messages
         assert.equal(result.length, 500)
         // Should keep the most recent (last 500)
         assert.equal(result[0].content, 'message 100')
@@ -390,7 +387,7 @@ describe('readConversationHistory', () => {
       }
     })
 
-    it('returns all messages when under cap', () => {
+    it('returns all messages when under cap', async () => {
       setup()
       try {
         const entries = []
@@ -402,7 +399,7 @@ describe('readConversationHistory', () => {
           })
         }
         const filePath = writeJsonl('small.jsonl', entries)
-        const result = readConversationHistory(filePath)
+        const result = (await readConversationHistoryWithMetaAsync(filePath)).messages
         assert.equal(result.length, 10)
       } finally {
         teardown()
@@ -411,7 +408,7 @@ describe('readConversationHistory', () => {
   })
 
   describe('full conversation flow', () => {
-    it('parses a realistic conversation', () => {
+    it('parses a realistic conversation', async () => {
       setup()
       try {
         const filePath = writeJsonl('conversation.jsonl', [
@@ -456,7 +453,7 @@ describe('readConversationHistory', () => {
           },
         ])
 
-        const result = readConversationHistory(filePath)
+        const result = (await readConversationHistoryWithMetaAsync(filePath)).messages
         assert.equal(result.length, 4)
 
         assert.equal(result[0].type, 'user_input')
@@ -477,7 +474,7 @@ describe('readConversationHistory', () => {
   })
 })
 
-describe('readConversationHistoryAsync', () => {
+describe('readConversationHistoryWithMetaAsync — read behaviour', () => {
   let tempDir
 
   function writeJsonl(filename, entries) {
@@ -496,45 +493,8 @@ describe('readConversationHistoryAsync', () => {
   }
 
   it('returns empty array for nonexistent file', async () => {
-    const result = await readConversationHistoryAsync('/nonexistent/path/file.jsonl')
+    const result = (await readConversationHistoryWithMetaAsync('/nonexistent/path/file.jsonl')).messages
     assert.deepEqual(result, [])
-  })
-
-  it('produces identical output to sync variant', async () => {
-    setup()
-    try {
-      const filePath = writeJsonl('test.jsonl', [
-        {
-          type: 'user',
-          uuid: 'u1',
-          timestamp: '2026-01-15T10:00:00.000Z',
-          message: { content: [{ type: 'text', text: 'Hello Claude' }] },
-        },
-        {
-          type: 'assistant',
-          uuid: 'a1',
-          timestamp: '2026-01-15T10:01:00.000Z',
-          message: {
-            content: [
-              { type: 'text', text: 'Hi there!' },
-              { type: 'tool_use', id: 'tool-1', name: 'Read', input: { file_path: '/tmp/x' } },
-            ],
-          },
-        },
-        { type: 'queue-operation', data: {} },
-      ])
-
-      const syncResult = readConversationHistory(filePath)
-      const asyncResult = await readConversationHistoryAsync(filePath)
-
-      assert.deepEqual(asyncResult, syncResult)
-      assert.equal(asyncResult.length, 3)
-      assert.equal(asyncResult[0].type, 'user_input')
-      assert.equal(asyncResult[1].type, 'response')
-      assert.equal(asyncResult[2].type, 'tool_use')
-    } finally {
-      teardown()
-    }
   })
 
   it('handles malformed JSON lines', async () => {
@@ -547,7 +507,7 @@ describe('readConversationHistoryAsync', () => {
         '{"type":"assistant","uuid":"a1","message":{"content":[{"type":"text","text":"also ok"}]}}',
       ].join('\n'))
 
-      const result = await readConversationHistoryAsync(filePath)
+      const result = (await readConversationHistoryWithMetaAsync(filePath)).messages
       assert.equal(result.length, 2)
     } finally {
       teardown()
@@ -584,7 +544,7 @@ describe('transcript byte ceiling', () => {
     return entries
   }
 
-  it('exposes a sane default ceiling', () => {
+  it('exposes a sane default ceiling', async () => {
     assert.equal(typeof MAX_TRANSCRIPT_BYTES, 'number')
     assert.ok(MAX_TRANSCRIPT_BYTES >= 10 * 1024 * 1024 && MAX_TRANSCRIPT_BYTES <= 50 * 1024 * 1024,
       'ceiling should sit in the 10-50MB band')
@@ -595,10 +555,10 @@ describe('transcript byte ceiling', () => {
     try {
       const filePath = writeJsonl('big.jsonl', manyEntries(50))
       // Default (huge) ceiling returns everything.
-      const full = await readConversationHistoryAsync(filePath)
+      const full = (await readConversationHistoryWithMetaAsync(filePath)).messages
       assert.equal(full.length, 50)
       // Tiny override forces a tail read — earliest messages are dropped.
-      const capped = await readConversationHistoryAsync(filePath, 200)
+      const capped = (await readConversationHistoryWithMetaAsync(filePath, 200)).messages
       assert.ok(capped.length > 0 && capped.length < 50,
         'must return a truncated subset (tail), not the whole file')
       assert.equal(capped[capped.length - 1].content, 'message-49',
@@ -610,26 +570,11 @@ describe('transcript byte ceiling', () => {
     }
   })
 
-  it('sync: caps an oversized transcript to a tail window', () => {
-    setup()
-    try {
-      const filePath = writeJsonl('big.jsonl', manyEntries(50))
-      const full = readConversationHistory(filePath)
-      assert.equal(full.length, 50)
-      const capped = readConversationHistory(filePath, 200)
-      assert.ok(capped.length > 0 && capped.length < 50)
-      assert.equal(capped[capped.length - 1].content, 'message-49')
-      assert.ok(!capped.some(m => m.content === 'message-0'))
-    } finally {
-      teardown()
-    }
-  })
-
   it('reads the whole file untruncated when under the ceiling', async () => {
     setup()
     try {
       const filePath = writeJsonl('small.jsonl', manyEntries(5))
-      const result = await readConversationHistoryAsync(filePath, 10 * 1024 * 1024)
+      const result = (await readConversationHistoryWithMetaAsync(filePath, 10 * 1024 * 1024)).messages
       assert.equal(result.length, 5)
       assert.equal(result[0].content, 'message-0')
     } finally {
@@ -645,7 +590,7 @@ describe('transcript byte ceiling', () => {
  * read looks exactly like a short file. `request_full_history` puts `truncated`
  * on the wire for this slice, so the reader has to say.
  */
-describe('#7484 — readConversationHistoryWithMeta reports the slice\'s own truncation', () => {
+describe('#7484 — the meta reader reports the slice\'s own truncation', () => {
   let tempDir
 
   function writeJsonl(filename, entries) {
@@ -673,15 +618,15 @@ describe('#7484 — readConversationHistoryWithMeta reports the slice\'s own tru
     }))
   }
 
-  it('exports the message cap rather than leaving callers to re-derive it', () => {
+  it('exports the message cap rather than leaving callers to re-derive it', async () => {
     assert.equal(MAX_MESSAGES, 500)
   })
 
-  it('flags truncated when the MAX_MESSAGES cap drops the head of the transcript', () => {
+  it('flags truncated when the MAX_MESSAGES cap drops the head of the transcript', async () => {
     setup()
     try {
       const filePath = writeJsonl('over-cap.jsonl', userEntries(MAX_MESSAGES + 100))
-      const { messages, truncated } = readConversationHistoryWithMeta(filePath)
+      const { messages, truncated } = await readConversationHistoryWithMetaAsync(filePath)
       assert.equal(messages.length, MAX_MESSAGES)
       assert.equal(truncated, true, 'the 100 dropped messages are exactly what `truncated` exists to announce')
       assert.equal(messages[0].content, 'message 100', 'and the retained slice is the most recent')
@@ -690,13 +635,13 @@ describe('#7484 — readConversationHistoryWithMeta reports the slice\'s own tru
     }
   })
 
-  it('POSITIVE CONTROL: a transcript EXACTLY at the cap lost nothing and is not flagged', () => {
+  it('POSITIVE CONTROL: a transcript EXACTLY at the cap lost nothing and is not flagged', async () => {
     // The boundary is the whole point: `messages.length === 500` cannot be the
     // signal, because a complete 500-message transcript looks identical.
     setup()
     try {
       const filePath = writeJsonl('at-cap.jsonl', userEntries(MAX_MESSAGES))
-      const { messages, truncated } = readConversationHistoryWithMeta(filePath)
+      const { messages, truncated } = await readConversationHistoryWithMetaAsync(filePath)
       assert.equal(messages.length, MAX_MESSAGES)
       assert.equal(truncated, false)
       assert.equal(messages[0].content, 'message 0', 'nothing was dropped from the head')
@@ -705,12 +650,12 @@ describe('#7484 — readConversationHistoryWithMeta reports the slice\'s own tru
     }
   })
 
-  it('POSITIVE CONTROL: a short transcript is not flagged', () => {
+  it('POSITIVE CONTROL: a short transcript is not flagged', async () => {
     setup()
     try {
       const filePath = writeJsonl('small.jsonl', userEntries(3))
       assert.deepEqual(
-        readConversationHistoryWithMeta(filePath).truncated,
+        (await readConversationHistoryWithMetaAsync(filePath)).truncated,
         false,
       )
     } finally {
@@ -718,12 +663,12 @@ describe('#7484 — readConversationHistoryWithMeta reports the slice\'s own tru
     }
   })
 
-  it('flags truncated when the BYTE ceiling forces a tail read', () => {
+  it('flags truncated when the BYTE ceiling forces a tail read', async () => {
     // The other truncation, and the one no message count can reveal.
     setup()
     try {
       const filePath = writeJsonl('big.jsonl', userEntries(50))
-      const { messages, truncated } = readConversationHistoryWithMeta(filePath, 200)
+      const { messages, truncated } = await readConversationHistoryWithMetaAsync(filePath, 200)
       assert.ok(messages.length > 0 && messages.length < 50, 'a tail window, not the whole file')
       assert.equal(truncated, true, 'the head of the file was dropped before parsing ever started')
     } finally {
@@ -731,11 +676,11 @@ describe('#7484 — readConversationHistoryWithMeta reports the slice\'s own tru
     }
   })
 
-  it('an unreadable transcript is EMPTY, not truncated', () => {
+  it('an unreadable transcript is EMPTY, not truncated', async () => {
     // Nothing was dropped from a slice that does not exist. Flagging it would
     // put a permanent "history incomplete" banner on every session without a
     // transcript — the majority of them.
-    const meta = readConversationHistoryWithMeta('/nonexistent/path/file.jsonl')
+    const meta = await readConversationHistoryWithMetaAsync('/nonexistent/path/file.jsonl')
     assert.deepEqual(meta, { messages: [], truncated: false })
   })
 
@@ -758,25 +703,5 @@ describe('#7484 — readConversationHistoryWithMeta reports the slice\'s own tru
     }
   })
 
-  it('the array-returning readers still return exactly the same messages', async () => {
-    // Their contract is unchanged — they delegate. A caller that only wants the
-    // messages must not have to learn a new shape.
-    setup()
-    try {
-      const filePath = writeJsonl('parity.jsonl', userEntries(MAX_MESSAGES + 7))
-      // Collapsed to a boolean before asserting: a deepEqual over a 500-entry
-      // array carries the whole array into the failure payload (#7340).
-      const ids = (rows) => rows.map(m => m.messageId).join(',')
-      assert.ok(
-        ids(readConversationHistory(filePath)) === ids(readConversationHistoryWithMeta(filePath).messages),
-        'the sync array reader must return the meta reader\'s messages verbatim',
-      )
-      assert.ok(
-        ids(await readConversationHistoryAsync(filePath)) === ids((await readConversationHistoryWithMetaAsync(filePath)).messages),
-        'and so must the async one',
-      )
-    } finally {
-      teardown()
-    }
-  })
+
 })
