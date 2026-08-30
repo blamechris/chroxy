@@ -82,7 +82,7 @@ import {
   updateServerEntry,
   markServerConnected,
 } from './server-registry';
-import { stripAnsi, filterThinking, nextMessageId, createEmptyFlatSessionMirror, createEmptySessionState, isSessionListed } from './utils';
+import { stripAnsi, filterThinking, nextMessageId, createEmptyConnectionScope, createEmptyFlatSessionMirror, createEmptySessionState, isSessionListed } from './utils';
 import { registerSummarizeRequest, cancelSummarizeRequest, rejectAllSummarizeRequests } from './summarizeRequests';
 import { armSchedulerRequest, failAllSchedulerRequests, SCHEDULER_DISCONNECT_ERROR } from './scheduledTaskRequests';
 import { formatQuestionAnswerSummary } from '../utils/questionAnswerSummary';
@@ -3163,17 +3163,18 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       claudeReady: false,
       streamingMessageId: null,
       activeModel: null,
-      availableProviders: [],
-      environments: [],
+      // #7559 — the connection-scoped roster (permissionInputs, serverCapabilities,
+      // availablePermissionModes, environments, checkpoints, … and #7557's
+      // infoNotifications), shared with `_resetSessionMemory` so a switchServer made
+      // from an ALREADY-disconnected tab clears them too. These were sixteen literals
+      // here; the reasons for each moved with them into `createEmptyConnectionScope()`.
+      ...createEmptyConnectionScope(),
       pairingRefreshedCount: 0,
-      availableModels: [],
       availableModelsProvider: null,
       defaultModelId: null,
       permissionMode: null,
       previousPermissionMode: null,
-      availablePermissionModes: [],
       myClientId: null,
-      connectedClients: [],
       primaryClientId: null,
       connectionError: null,
       connectionRetryCount: 0,
@@ -3182,12 +3183,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       logEntries: [],
       serverErrors: [],
       sessionNotifications: [],
-      resolvedPermissions: {},
-      // #6559 — drop any pulled pre-write-diff inputs on disconnect (per-connection
-      // state; mirrors the app disconnect reset so both clients clear the tail if
-      // we disconnect mid-prompt). A resolved/expired/timed-out prompt already
-      // self-prunes above.
-      permissionInputs: {},
       serverPhase: null,
       tunnelProgress: null,
       // #5356: clear exposure on disconnect so a reconnect against a
@@ -3202,9 +3197,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       restartEtaMs: null,
       restartingSince: null,
       pendingPermissionConfirm: null,
-      slashCommands: [],
-      filePickerFiles: null,
-      mcpResources: null,
   fileBrowserPendingOpen: null,
   workspaceSymbols: null,
   workspaceSymbolsLoading: false,
@@ -3229,8 +3221,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   memoryStackError: null,
   memoryStackLoading: false,
   lastMemoryStackRequestId: null,
-      customAgents: [],
-      checkpoints: [],
       _directoryListingCallback: null,
       _terminalWriteCallback: null,
       contextUsage: null,
@@ -3238,12 +3228,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       lastResultCost: null,
       lastResultDuration: null,
       webFeatures: { available: false, remote: false, teleport: false },
-      webTasks: [],
-      // #3272 review: clear advertised capabilities on disconnect so a
-      // reconnect against a different (or older) server can't have its
-      // UI gates left enabled by stale state. Empty map = fail-closed
-      // for any capability-gated affordance.
-      serverCapabilities: {},
       // #6999: same reasoning — a reconnect may present a different
       // (possibly primary) token, so don't carry a stale "forbidden"
       // verdict past a user-initiated disconnect.
@@ -3251,10 +3235,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       savedConnection: null,
       userDisconnected: true,
       viewingCachedSession: false,
-      conversationHistory: [],
       conversationHistoryLoading: false,
       transcriptViewer: EMPTY_TRANSCRIPT_VIEWER,
-      searchResults: [],
       searchLoading: false,
       searchQuery: '',
     });
@@ -3368,6 +3350,42 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // #6138: WSL distro action pending/result state goes with it.
       wslActioningIds: new Set<string>(),
       wslActionResults: {},
+      // #7557 — the orchestration / scheduled-task / credential-test family, plus
+      // the pair-request queue and the daemon's startup log. Eleven
+      // connection-scoped collections that were cleared by NOTHING on any path:
+      // not here, not `_resetSessionMemory`, not `disconnect()`, not `auth_ok`.
+      //
+      // The hazard is the same WRONG VALUE class as #7478 / #7488, and the key
+      // spaces are what make it reachable rather than theoretical. `runId`s are
+      // minted per daemon and are not the 16 random bytes a session id is;
+      // `credentialTestResults` is keyed by credential key (`anthropic`,
+      // `openai`, …), identical on EVERY daemon by construction, so server A's
+      // green "test passed" renders against server B where the credential may be
+      // absent or wrong. `serverStartupLogs` is one daemon's startup output
+      // rendered without provenance — the operator reads server A's failure
+      // while looking at server B. `pendingPairRequests` is the sharpest: an
+      // approve/deny prompt for a device that asked ANOTHER daemon to pair,
+      // surfaced against the one you are connected to now.
+      //
+      // NOT cleared at `disconnect()`, and NOT at `auth_ok`'s non-reconnect
+      // branch, both decided per field rather than by analogy: every one of them
+      // is still TRUE of the same daemon across a Disconnect → Connect to the
+      // SAME server, which is the branch `auth_ok` reaches. `disconnect()`
+      // additionally drains `scheduledTaskPendingActions` into
+      // `scheduledTaskActionResults` with a reason (`failAllSchedulerRequests`),
+      // and clearing the results there would erase the explanation the panel is
+      // meant to show. #7557
+      orchestrationPendingActions: {},
+      orchestrationActionResults: {},
+      orchestrationRunDetails: {},
+      orchestrationRunDetailErrors: {},
+      orchestrationRunDetailStale: {},
+      orchestrationRunDetailLoading: new Set<string>(),
+      scheduledTaskPendingActions: {},
+      scheduledTaskActionResults: {},
+      credentialTestResults: {},
+      pendingPairRequests: [],
+      serverStartupLogs: null,
       wsUrl: null,
       apiToken: null,
       serverMode: null,
@@ -3472,6 +3490,49 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // #6138: WSL distro action pending/result state goes with it.
       wslActioningIds: new Set<string>(),
       wslActionResults: {},
+      // #7557 — the same eleven, at the SERVER SWITCH, which is where their key
+      // spaces bite. See `forgetSession` above for the per-field adjudication.
+      //
+      // The hazard is the same WRONG VALUE class as #7478 / #7488, and the key
+      // spaces are what make it reachable rather than theoretical. `runId`s are
+      // minted per daemon and are not the 16 random bytes a session id is;
+      // `credentialTestResults` is keyed by credential key (`anthropic`,
+      // `openai`, …), identical on EVERY daemon by construction, so server A's
+      // green "test passed" renders against server B where the credential may be
+      // absent or wrong. `serverStartupLogs` is one daemon's startup output
+      // rendered without provenance — the operator reads server A's failure
+      // while looking at server B. `pendingPairRequests` is the sharpest: an
+      // approve/deny prompt for a device that asked ANOTHER daemon to pair,
+      // surfaced against the one you are connected to now.
+      //
+      // NOT cleared at `disconnect()`, and NOT at `auth_ok`'s non-reconnect
+      // branch, both decided per field rather than by analogy: every one of them
+      // is still TRUE of the same daemon across a Disconnect → Connect to the
+      // SAME server, which is the branch `auth_ok` reaches. `disconnect()`
+      // additionally drains `scheduledTaskPendingActions` into
+      // `scheduledTaskActionResults` with a reason (`failAllSchedulerRequests`),
+      // and clearing the results there would erase the explanation the panel is
+      // meant to show. #7557
+      orchestrationPendingActions: {},
+      orchestrationActionResults: {},
+      orchestrationRunDetails: {},
+      orchestrationRunDetailErrors: {},
+      orchestrationRunDetailStale: {},
+      orchestrationRunDetailLoading: new Set<string>(),
+      scheduledTaskPendingActions: {},
+      scheduledTaskActionResults: {},
+      credentialTestResults: {},
+      pendingPairRequests: [],
+      serverStartupLogs: null,
+      // #7559 — the connection-scoped roster, the SAME one `disconnect()` spreads.
+      // `switchServer` / `connectLocal` call `disconnect()` only
+      // `if (connectionPhase !== 'disconnected')`, and a FAILED CONNECT lands at
+      // exactly that phase with the previous server's values fully populated — so
+      // a switch made from there ran this action alone and all seventeen survived
+      // into the next server's UI. Spreading the roster here is what makes the
+      // clear unconditional on the switch paths; the phase guard is left alone,
+      // because what it protects is the SOCKET teardown, not this.
+      ...createEmptyConnectionScope(),
       wsUrl: null,
       apiToken: null,
       serverMode: null,

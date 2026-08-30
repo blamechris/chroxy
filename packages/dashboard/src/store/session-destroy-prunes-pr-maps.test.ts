@@ -75,7 +75,14 @@ vi.mock('./crypto', () => ({
 vi.mock('./persistence', () => ({ clearPersistedSession: vi.fn() }))
 
 import { handleMessage, setStore, clearDeltaBuffers, clearPermissionSplits, stopHeartbeat, resetReplayFlags } from './message-handler'
-import { createEmptySessionState, pruneSessionKeyedMap, pruneSessionScopedKeySet } from './utils'
+import { createEmptyConnectionScope, createEmptySessionState, pruneSessionKeyedMap, pruneSessionScopedKeySet } from './utils'
+
+/**
+ * The #7559 roster's field names, derived from the ONE factory the fix spreads
+ * (`utils.ts`) rather than transcribed — a hardcoded copy beside a growing set
+ * is the defect class this whole file is about.
+ */
+const CONNECTION_SCOPED_RESET_FIELDS: readonly string[] = Object.keys(createEmptyConnectionScope())
 import type { ConnectionState } from './types'
 import { createEmptyActivityState } from '@chroxy/store-core'
 import type { ActivityState } from '@chroxy/store-core'
@@ -2216,32 +2223,38 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
  * NOT get answered with a comment: a comment beside a growing set is the defect
  * this whole file is about.
  *
- * ## What it found
+ * ## What it found, and what #7557 / #7559 then did about it
  *
- * Of the 46 members: 17 are cleared at both full-reset sites, 16 by
- * `disconnect()`, 1 (`serverRegistry`) outlives every connection by design, and
- * 12 by nothing at all — the orchestration / scheduled-task / credential-test
- * family plus `pendingPairRequests`, `serverStartupLogs` and
- * `infoNotifications`, filed as #7557. Those twelve are the deferral below,
- * visible rather than invisible, which is the whole point of #7481's "a
- * deferral a reader can SEE beats a pattern that cannot see the field at all".
+ * The first run of this axis put TWELVE members in answer 4 — the orchestration
+ * / scheduled-task / credential-test family plus `pendingPairRequests`,
+ * `serverStartupLogs` and `infoNotifications` — cleared by nothing at all, and
+ * filed as #7557. That bucket is now EMPTY, which was the acceptance #7557 wrote
+ * for itself. Eleven of the twelve are cleared at both full-reset sites (answer
+ * 1); `infoNotifications` went to answer 2 instead, with its two banner siblings.
  *
- * ## The caveat on answer 2, which is a finding rather than a footnote
+ * No tally in this docstring any more. It used to open with "Of the 46 members:
+ * 17 ... 16 ... 1 ... 12" and every one of those numbers was a hand-count beside
+ * a set that grows — the first recurring cause in
+ * `docs/false-safety-guards.md` — and the total was already wrong (the bucket
+ * held 45) by the time #7557 was picked up. The split is asserted instead, and
+ * asserted as a PARTITION, by `the four answers PARTITION the bucket`.
  *
- * `disconnect()` is NOT unconditional on the switch paths: `switchServer` and
- * `connectLocal` call it only `if (get().connectionPhase !== 'disconnected')`.
- * So a server switch made from a tab already at `'disconnected'` runs
- * `_resetSessionMemory()` alone, and all 16 `CLEARED_ON_DISCONNECT` members
- * survive it.
+ * ## The caveat on answer 2, which was a finding and is now fixed
  *
- * ONE route reaches that state with the previous server's values intact, and it
- * is worth naming precisely — PR #7564's review checked the first draft of this
- * paragraph and two of the three triggers it listed were wrong:
+ * `disconnect()` was NOT unconditional on the switch paths: `switchServer` and
+ * `connectLocal` call it only `if (get().connectionPhase !== 'disconnected')`,
+ * so a server switch made from a tab already at `'disconnected'` ran
+ * `_resetSessionMemory()` alone and every `CLEARED_ON_DISCONNECT` member
+ * survived it (#7559).
+ *
+ * ONE route reached that state with the previous server's values intact, and it
+ * is worth keeping written down — PR #7564's review checked the first draft of
+ * this paragraph and two of the three triggers it listed were wrong:
  *
  *   * a FAILED CONNECT — real. `onRestartGaveUp` / `onProbeGaveUp`
- *     (`connection.ts`), the pinned-identity refusal and the key-exchange
- *     failures (`message-handler.ts`) all land at `'disconnected'` with server
- *     A's state fully populated.
+ *     (`connection.ts`), the `auth_fail` handler, the pinned-identity refusal
+ *     and the key-exchange failures (`message-handler.ts`) all land at
+ *     `'disconnected'` with server A's state fully populated.
  *   * `server_down` — NOT this. It is its OWN `ConnectionPhase`
  *     (`store-core/src/types/connection.ts`), so the `!== 'disconnected'` test
  *     is true and `disconnect()` does run.
@@ -2255,10 +2268,22 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
  * `availablePermissionModes`, re-set only CONDITIONALLY (`message-handler.ts`,
  * `if (auth.availablePermissionModes)`).
  *
- * That is #7559, and it is out of scope here (a conditional call, not a missing
- * clear). Answer 2 therefore means "cleared by disconnect(), with #7559 open
- * against that being enough" — stated rather than implied, so nobody reads this
- * bucket as a clean bill of health.
+ * The fix did NOT touch the phase guard. What that guard protects is the SOCKET
+ * teardown — `socket.close()`, the attempt-id bump, the message queue and the
+ * request correlations — none of which a tab with no socket needs. The sixteen
+ * field clears were the part that was wrong to skip, so they moved into
+ * `createEmptyConnectionScope()` (`utils.ts`) and are spread by BOTH
+ * `disconnect()` and `_resetSessionMemory()`, the action every switch path runs
+ * unconditionally. `assigns` resolves that spread from the imported roster, so
+ * answer 2 still means "really cleared by disconnect()" and now holds on the
+ * switch as well.
+ *
+ * The remaining hole, named rather than omitted: `connectToServer` goes through
+ * NEITHER action — it calls `connect()`, whose `currentUrl !== url` self-clear
+ * runs `forgetSession()`, and `forgetSession` does not spread this roster. A
+ * `connectToServer` to a DIFFERENT daemon from a disconnected tab would still
+ * carry the seventeen. Its callers target the ACTIVE server, so nothing reaches
+ * it today; filed rather than folded.
  */
 describe('#7488 connection lifetime: a NOT_SESSION_KEYED member still needs one', () => {
   /**
@@ -2280,9 +2305,44 @@ describe('#7488 connection lifetime: a NOT_SESSION_KEYED member still needs one'
   const switchBody = actionBody(connectionSrc, '  _resetSessionMemory: () => {', '  setViewMode:')
   const disconnectBody = actionBody(connectionSrc, "      connectionPhase: 'disconnected',", '  forgetSession:')
 
+  /**
+   * The spread rosters an action clears THROUGH rather than naming each field
+   * inline. `#7559` moved the sixteen `CLEARED_ON_DISCONNECT` literals out of
+   * `disconnect()` and into `createEmptyConnectionScope()`, so that both it and
+   * `_resetSessionMemory` clear the same set from one definition — a token match
+   * for `serverCapabilities` in `disconnect()`'s body would otherwise report
+   * "cleared by nothing" for a field the action really does clear.
+   *
+   * The roster is IMPORTED, not transcribed: a name added to the factory is
+   * resolved here on the next run, and a name deleted from it stops being
+   * resolved. Transcribing it would be the hardcoded-list-beside-a-growing-set
+   * defect this whole file exists to catch.
+   */
+  const SPREAD_ROSTERS: ReadonlyArray<readonly [string, readonly string[]]> = [
+    ['createEmptyConnectionScope()', CONNECTION_SCOPED_RESET_FIELDS],
+  ]
+
+  /**
+   * Does `block` really SPREAD `call`, on a line that is code?
+   *
+   * The line filter is not decoration. `assigns` is satisfiable by a COMMENT
+   * (#7566, pre-existing and out of scope here), and resolving a spread makes
+   * that worse by a factor of the roster's length: ONE sentence mentioning
+   * `...createEmptyConnectionScope()` in prose would otherwise light up all
+   * seventeen fields at once. This narrows the new surface to a real statement;
+   * the pre-existing per-field surface is #7566's.
+   */
+  const spreadsRoster = (block: string, call: string): boolean =>
+    block.split('\n').some((line) => {
+      const code = line.trimStart()
+      if (code.startsWith('//') || code.startsWith('*') || code.startsWith('/*')) return false
+      return code.includes(`...${call}`)
+    })
+
   /** Token match, not substring — `reindexResults` contains `reindex`. */
   const assigns = (block: string, field: string): boolean =>
-    new RegExp(`(^|[^A-Za-z0-9_$])${field}\\s*[:=][^=]`).test(block)
+    new RegExp(`(^|[^A-Za-z0-9_$])${field}\\s*[:=][^=]`).test(block) ||
+    SPREAD_ROSTERS.some(([call, fields]) => fields.includes(field) && spreadsRoster(block, call))
 
   /**
    * Answer 2: cleared by `disconnect()`, not by the two full-reset sites.
@@ -2313,6 +2373,21 @@ describe('#7488 connection lifetime: a NOT_SESSION_KEYED member still needs one'
     searchResults: "disconnect() — a search over the OLD daemon's transcripts",
     checkpoints: 'disconnect() — checkpoints belong to a session on the old daemon',
     environments: 'disconnect() — container/worktree environments are per daemon',
+    // #7557's twelfth field, adjudicated onto THIS answer rather than onto the
+    // two full-reset sites, and it is the one member here whose home was
+    // decided against a precedent rather than by its key space. #7528 ruled
+    // that a notification row is a RECORD and must survive the SESSION it
+    // describes; that is about session death and is untouched (nothing prunes
+    // this map on a roster wipe). Its two siblings in the SAME banner list,
+    // `serverErrors` and `sessionNotifications`, are cleared by `disconnect()`
+    // and by neither full-reset site — so the connection boundary is already
+    // where host-level notice history dies, and this field was simply the one
+    // nobody added.
+    infoNotifications:
+      "#7557 — host-level toasts ('update available', 'Transcript copied'), bounded to the last " +
+      '10. Cleared by disconnect() with its two banner siblings serverErrors / sessionNotifications, ' +
+      'which #7528 (a notification is a RECORD) does not cover: that adjudication is about SESSION ' +
+      'death, and no roster wipe touches this map',
   }
 
   /**
@@ -2326,34 +2401,28 @@ describe('#7488 connection lifetime: a NOT_SESSION_KEYED member still needs one'
       'Its NOT_SESSION_KEYED reason already says it "outlives every connection by design".',
   }
 
-  /** Answer 4: not cleared anywhere. Tracked, not hidden. */
-  const CONNECTION_LIFECYCLE_DEFERRED: Record<string, string> = {
-    orchestrationPendingActions: 'keyed by requestId; never cleared on any path. #7557',
-    orchestrationActionResults: 'keyed by requestId; never cleared on any path. #7557',
-    scheduledTaskPendingActions: 'keyed by requestId; never cleared on any path. #7557',
-    scheduledTaskActionResults: 'keyed by requestId; never cleared on any path. #7557',
-    orchestrationRunDetails:
-      'keyed by runId — a snapshot pulled from ONE daemon, readable against another after a ' +
-      'switchServer. #7557',
-    orchestrationRunDetailErrors: 'keyed by runId; never cleared on any path. #7557',
-    orchestrationRunDetailStale: 'keyed by runId; never cleared on any path. #7557',
-    orchestrationRunDetailLoading:
-      'keyed by runId. Reset on a SOCKET DROP (the reconnect reset for a reply that will never ' +
-      'arrive) — which is not a connection lifetime: switchServer does not go through it when the ' +
-      'dashboard is already disconnected. #7557',
-    credentialTestResults:
-      'keyed by credential key (`anthropic`, `openai`, …) — identical on every daemon by ' +
-      "construction, so server A's green verdict renders against server B. #7557",
-    pendingPairRequests:
-      'ServerPairPendingMessage[] keyed by requestId — a device-pairing request from one daemon, ' +
-      'surfaced against another after a switch. #7557',
-    serverStartupLogs:
-      "string[] | null — ONE daemon's startup output, rendered without provenance, so after a " +
-      "switchServer the operator reads server A's failure while looking at server B. #7557",
-    infoNotifications:
-      'ServerError[] — info-level toasts accumulated for the life of the tab, with no connection ' +
-      'boundary. #7557',
-  }
+  /**
+   * Answer 4: not cleared anywhere. Tracked, not hidden.
+   *
+   * EMPTY, and that is #7557's acceptance rather than an accident. It held
+   * twelve names — the orchestration / scheduled-task / credential-test family
+   * plus `pendingPairRequests`, `serverStartupLogs` and `infoNotifications` —
+   * and every one of them now has a real lifetime: eleven are cleared at BOTH
+   * full-reset sites (answer 1, derived, so nothing lists them), and
+   * `infoNotifications` sits in `CLEARED_ON_DISCONNECT` above with the reason it
+   * went there instead.
+   *
+   * Leave it empty rather than deleting it. The `every NOT_SESSION_KEYED member
+   * has a lifetime` cell needs a fourth answer to point a future field at, and
+   * the per-entry contract below (cite an issue, and stop being deferred once
+   * fixed) is what makes the next deferral expire on its own. The cells that
+   * iterate it are VACUOUS while it is empty — stated plainly, because a
+   * for-loop over `{}` passing is not evidence of anything — so the two cells
+   * that carry real weight now are `the deferred bucket is EMPTY` and the
+   * membership predicate below it, both of which assert against a non-empty
+   * subject.
+   */
+  const CONNECTION_LIFECYCLE_DEFERRED: Record<string, string> = {}
 
   it('every NOT_SESSION_KEYED member has a lifetime, or is a tracked deferral', () => {
     const unaccounted = Object.keys(NOT_SESSION_KEYED).filter(
@@ -2455,6 +2524,141 @@ describe('#7488 connection lifetime: a NOT_SESSION_KEYED member still needs one'
         'CONNECTION_LIFECYCLE_DEFERRED (that removal is the acceptance for #7557)',
       ).toBe(false)
     }
+  })
+
+  it("the deferred bucket is EMPTY — #7557's acceptance, asserted per field", () => {
+    // The acceptance #7557 wrote for itself: "the guard is already derived, so
+    // the deferral disappearing IS the acceptance". Asserted two ways, because
+    // an empty object is also what a DELETED bucket looks like.
+    expect(
+      Object.keys(CONNECTION_LIFECYCLE_DEFERRED),
+      'a field was deferred again. That is allowed — but say which, cite the issue, and expect ' +
+      'this cell to be the thing that reminds the next reader the axis is no longer clean.',
+    ).toEqual([])
+
+    // …and the eleven really are cleared, PER FIELD and PER SITE, so clearing
+    // ten of them names the eleventh instead of reporting a vague red. This is
+    // the source axis; `connection-lifecycle-resets.test.ts` drives the same
+    // eleven through the real store.
+    const CLEARED_AT_BOTH_FULL_RESETS = [
+      'orchestrationPendingActions',
+      'orchestrationActionResults',
+      'scheduledTaskPendingActions',
+      'scheduledTaskActionResults',
+      'orchestrationRunDetails',
+      'orchestrationRunDetailErrors',
+      'orchestrationRunDetailStale',
+      'orchestrationRunDetailLoading',
+      'credentialTestResults',
+      'pendingPairRequests',
+      'serverStartupLogs',
+    ]
+    for (const field of CLEARED_AT_BOTH_FULL_RESETS) {
+      expect(field in NOT_SESSION_KEYED, `${field} is no longer a NOT_SESSION_KEYED member`).toBe(true)
+      expect(assigns(forgetBody, field), `forgetSession must clear ${field} (#7557)`).toBe(true)
+      expect(assigns(switchBody, field), `_resetSessionMemory must clear ${field} (#7557)`).toBe(true)
+    }
+    // The twelfth went to `disconnect()` instead — named here so the split is
+    // visible from the acceptance cell rather than only from the bucket above.
+    expect(assigns(disconnectBody, 'infoNotifications'), 'disconnect() must clear infoNotifications (#7557)').toBe(true)
+    expect(
+      assigns(forgetBody, 'infoNotifications') && assigns(switchBody, 'infoNotifications'),
+      'infoNotifications is in CLEARED_ON_DISCONNECT, so it must NOT be cleared at both full-reset sites',
+    ).toBe(false)
+  })
+
+  it('the four answers PARTITION the bucket — derived, so no tally can go stale', () => {
+    // This docstring used to open with "Of the 46 members: 17 … 16 … 1 … 12".
+    // Every one of those numbers was a hand-count beside a set that grows, which
+    // is the first recurring cause in `docs/false-safety-guards.md`, and the
+    // total was already wrong when #7557 was picked up (the bucket held 45).
+    // A count in prose cannot be checked; this can.
+    //
+    // Coverage is the `every NOT_SESSION_KEYED member has a lifetime` cell
+    // above. This is the other half — that the answers do not OVERLAP, so a
+    // field cannot be counted as cleared twice and a genuinely unclassified one
+    // cannot hide behind a double count.
+    const members = Object.keys(NOT_SESSION_KEYED)
+    const bothSites = members.filter((f) => assigns(forgetBody, f) && assigns(switchBody, f))
+    const byDisconnect = members.filter((f) => f in CLEARED_ON_DISCONNECT)
+    const byDesign = members.filter((f) => f in OUTLIVES_BY_DESIGN)
+    const deferred = members.filter((f) => f in CONNECTION_LIFECYCLE_DEFERRED)
+    expect(
+      bothSites.length + byDisconnect.length + byDesign.length + deferred.length,
+      'the four lifetime answers no longer partition NOT_SESSION_KEYED — a member is in two of ' +
+      'them, or in none. The per-answer cells say WHICH.',
+    ).toBe(members.length)
+    // Non-vacuous: each answer is actually populated, so the sum is not being
+    // satisfied by one bucket holding everything.
+    expect(bothSites.length, 'nothing is cleared at both full-reset sites').toBeGreaterThan(20)
+    expect(byDisconnect.length, 'nothing is cleared by disconnect()').toBeGreaterThan(10)
+    expect(byDesign.length).toBe(1)
+    expect(deferred.length, "#7557's acceptance").toBe(0)
+  })
+
+  it('a deferral must be a NOT_SESSION_KEYED member — the axis this describe scoped itself to', () => {
+    // #7563's review, A2. The staleness cell below widened its predicate to
+    // `NOT_SESSION_KEYED ∪ SESSION_TAGGED_BY_DESIGN` for a real reason
+    // (`environments` moved buckets and its disconnect entry is real coverage),
+    // and a consequence nobody intended came with it: a SESSION_TAGGED_BY_DESIGN
+    // member could be parked in THIS bucket and nothing would object, inflating
+    // an issue's roster with a field that was never in its scope.
+    //
+    // The tightening is per-bucket rather than a narrowing of the shared
+    // predicate, exactly as A2 suggested: `CLEARED_ON_DISCONNECT` legitimately
+    // holds `environments`, a by-design member, and must keep it (#7552).
+    const misfiled = Object.keys(CONNECTION_LIFECYCLE_DEFERRED).filter((f) => !(f in NOT_SESSION_KEYED))
+    expect(
+      misfiled,
+      'deferred name(s) that are not NOT_SESSION_KEYED members. This describe asks the LIFETIME ' +
+      'question of that bucket alone; a by-design member parked here is out of scope for whatever ' +
+      'issue the deferral cites. #7563 review (A2)',
+    ).toEqual([])
+
+    // Non-vacuous while the bucket is empty: the predicate itself is exercised
+    // against a synthetic bucket holding one member of each kind. Without this,
+    // the cell above is a filter over `{}` and would pass with the predicate
+    // inverted, deleted, or written against the wrong bucket.
+    const synthetic = {
+      credentialTestResults: 'a NOT_SESSION_KEYED member — allowed',
+      sessionNotifications: 'a SESSION_TAGGED_BY_DESIGN member — must be rejected',
+      sessionPrMutantGhostField: 'in no bucket at all — must be rejected',
+    }
+    expect(
+      Object.keys(synthetic).filter((f) => !(f in NOT_SESSION_KEYED)),
+    ).toEqual(['sessionNotifications', 'sessionPrMutantGhostField'])
+  })
+
+  it('control: the spread roster is RESOLVED, not matched as a token', () => {
+    // #7559 moved the sixteen literals out of `disconnect()`. Everything above
+    // that says "disconnect() clears X" now runs through `SPREAD_ROSTERS`, so
+    // this cell proves the resolution is what is doing the work — if the literals
+    // were somehow still there, `assigns` would pass for the old reason and a
+    // broken roster resolution would never be noticed.
+    expect(
+      /(^|[^A-Za-z0-9_$])serverCapabilities\s*[:=][^=]/.test(disconnectBody),
+      'disconnect() names serverCapabilities inline again — the spread is no longer the mechanism ' +
+      'under test here, so re-check that _resetSessionMemory still clears it too (#7559)',
+    ).toBe(false)
+    expect(assigns(disconnectBody, 'serverCapabilities'), 'resolved via the spread roster').toBe(true)
+    expect(assigns(switchBody, 'serverCapabilities'), '_resetSessionMemory spreads the same roster').toBe(true)
+
+    // The roster is the real one, and it is the size the two issues describe:
+    // #7559's sixteen plus #7557's `infoNotifications`.
+    expect(CONNECTION_SCOPED_RESET_FIELDS.length).toBe(17)
+    expect([...CONNECTION_SCOPED_RESET_FIELDS].sort()).toEqual([...Object.keys(CLEARED_ON_DISCONNECT)].sort())
+
+    // A field OUTSIDE the roster is not lit up by the spread — otherwise the
+    // resolution would classify the whole store as cleared.
+    expect(assigns(disconnectBody, 'reindexResults'), 'not a roster member, and not inline here').toBe(false)
+
+    // And the resolution refuses a spread that appears only in PROSE. This is
+    // the surface the line filter exists for: one comment would otherwise
+    // classify all seventeen fields at once.
+    const commentOnly = ['  // we could just do ...createEmptyConnectionScope() here one day', '  foo: 1,'].join('\n')
+    expect(assigns(commentOnly, 'serverCapabilities'), 'a comment must not satisfy the spread').toBe(false)
+    const realSpread = ['  ...createEmptyConnectionScope(),'].join('\n')
+    expect(assigns(realSpread, 'serverCapabilities'), 'a real spread must satisfy it').toBe(true)
   })
 
   it('no field is in two lifetime answers at once', () => {
