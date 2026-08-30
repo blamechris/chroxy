@@ -41,6 +41,7 @@ describe('NotificationsWidget — trigger + unread badge', () => {
           makeNotification({ id: 'n-2', readAt: 2 }),
         ]}
         onSwitchSession={vi.fn()}
+        isSessionListed={() => true}
         onMarkRead={vi.fn()}
         onMarkAllRead={vi.fn()}
         onDismiss={vi.fn()}
@@ -58,6 +59,7 @@ describe('NotificationsWidget — trigger + unread badge', () => {
           makeNotification({ id: 'n-3' }),
         ]}
         onSwitchSession={vi.fn()}
+        isSessionListed={() => true}
         onMarkRead={vi.fn()}
         onMarkAllRead={vi.fn()}
         onDismiss={vi.fn()}
@@ -74,6 +76,7 @@ describe('NotificationsWidget — trigger + unread badge', () => {
       <NotificationsWidget
         notifications={notifications}
         onSwitchSession={vi.fn()}
+        isSessionListed={() => true}
         onMarkRead={vi.fn()}
         onMarkAllRead={vi.fn()}
         onDismiss={vi.fn()}
@@ -90,6 +93,7 @@ describe('NotificationsWidget — trigger + unread badge', () => {
           makeNotification({ id: 'n-2', requestId: 'req-def' }),
         ]}
         onSwitchSession={vi.fn()}
+        isSessionListed={() => true}
         onMarkRead={vi.fn()}
         onMarkAllRead={vi.fn()}
         onDismiss={vi.fn()}
@@ -115,6 +119,7 @@ describe('NotificationsWidget — panel content + interactions', () => {
           }),
         ]}
         onSwitchSession={vi.fn()}
+        isSessionListed={() => true}
         onMarkRead={vi.fn()}
         onMarkAllRead={vi.fn()}
         onDismiss={vi.fn()}
@@ -134,6 +139,7 @@ describe('NotificationsWidget — panel content + interactions', () => {
           makeNotification({ id: 'n-read', requestId: 'req-other', readAt: 1 }),
         ]}
         onSwitchSession={vi.fn()}
+        isSessionListed={() => true}
         onMarkRead={vi.fn()}
         onMarkAllRead={vi.fn()}
         onDismiss={vi.fn()}
@@ -155,6 +161,7 @@ describe('NotificationsWidget — panel content + interactions', () => {
       <NotificationsWidget
         notifications={[makeNotification({ id: 'n-1', sessionId: 'sess-target' })]}
         onSwitchSession={onSwitchSession}
+        isSessionListed={() => true}
         onMarkRead={onMarkRead}
         onMarkAllRead={vi.fn()}
         onDismiss={vi.fn()}
@@ -176,6 +183,7 @@ describe('NotificationsWidget — panel content + interactions', () => {
           makeNotification({ id: 'n-2', requestId: 'req-other', readAt: 1 }),
         ]}
         onSwitchSession={onSwitchSession}
+        isSessionListed={() => true}
         onMarkRead={onMarkRead}
         onMarkAllRead={vi.fn()}
         onDismiss={vi.fn()}
@@ -198,6 +206,7 @@ describe('NotificationsWidget — panel content + interactions', () => {
       <NotificationsWidget
         notifications={[makeNotification({ id: 'n-1' })]}
         onSwitchSession={onSwitchSession}
+        isSessionListed={() => true}
         onMarkRead={vi.fn()}
         onMarkAllRead={vi.fn()}
         onDismiss={onDismiss}
@@ -215,6 +224,7 @@ describe('NotificationsWidget — panel content + interactions', () => {
       <NotificationsWidget
         notifications={[makeNotification({ id: 'n-1' })]}
         onSwitchSession={vi.fn()}
+        isSessionListed={() => true}
         onMarkRead={vi.fn()}
         onMarkAllRead={onMarkAllRead}
         onDismiss={vi.fn()}
@@ -230,6 +240,7 @@ describe('NotificationsWidget — panel content + interactions', () => {
       <NotificationsWidget
         notifications={[makeNotification({ id: 'n-1', readAt: 1 })]}
         onSwitchSession={vi.fn()}
+        isSessionListed={() => true}
         onMarkRead={vi.fn()}
         onMarkAllRead={vi.fn()}
         onDismiss={vi.fn()}
@@ -246,6 +257,7 @@ describe('NotificationsWidget — panel content + interactions', () => {
       <NotificationsWidget
         notifications={[]}
         onSwitchSession={vi.fn()}
+        isSessionListed={() => true}
         onMarkRead={vi.fn()}
         onMarkAllRead={vi.fn()}
         onDismiss={vi.fn()}
@@ -261,6 +273,7 @@ describe('NotificationsWidget — panel content + interactions', () => {
       <NotificationsWidget
         notifications={[makeNotification({ id: 'n-1' })]}
         onSwitchSession={vi.fn()}
+        isSessionListed={() => true}
         onMarkRead={vi.fn()}
         onMarkAllRead={vi.fn()}
         onDismiss={vi.fn()}
@@ -284,6 +297,7 @@ describe('NotificationsWidget — WAI-ARIA keyboard navigation (#5009)', () => {
       <NotificationsWidget
         notifications={[makeNotification({ id: 'n-1' })]}
         onSwitchSession={vi.fn()}
+        isSessionListed={() => true}
         onMarkRead={vi.fn()}
         onMarkAllRead={vi.fn()}
         onDismiss={vi.fn()}
@@ -302,6 +316,7 @@ describe('NotificationsWidget — WAI-ARIA keyboard navigation (#5009)', () => {
           makeNotification({ id: 'n-2', requestId: 'req-other' }),
         ]}
         onSwitchSession={vi.fn()}
+        isSessionListed={() => true}
         onMarkRead={vi.fn()}
         onMarkAllRead={vi.fn()}
         onDismiss={vi.fn()}
@@ -335,6 +350,7 @@ describe('NotificationsWidget — WAI-ARIA keyboard navigation (#5009)', () => {
       <NotificationsWidget
         notifications={[makeNotification({ id: 'n-1' })]}
         onSwitchSession={vi.fn()}
+        isSessionListed={() => true}
         onMarkRead={vi.fn()}
         onMarkAllRead={vi.fn()}
         onDismiss={vi.fn()}
@@ -356,6 +372,7 @@ describe('NotificationsWidget — WAI-ARIA keyboard navigation (#5009)', () => {
           makeNotification({ id: 'n-2', requestId: 'req-2', timestamp: 1000 }),
         ]}
         onSwitchSession={vi.fn()}
+        isSessionListed={() => true}
         onMarkRead={vi.fn()}
         onMarkAllRead={vi.fn()}
         onDismiss={vi.fn()}
@@ -377,6 +394,7 @@ describe('NotificationsWidget — WAI-ARIA keyboard navigation (#5009)', () => {
           makeNotification({ id: 'n-3', requestId: 'req-3', timestamp: 1000 }),
         ]}
         onSwitchSession={vi.fn()}
+        isSessionListed={() => true}
         onMarkRead={vi.fn()}
         onMarkAllRead={vi.fn()}
         onDismiss={vi.fn()}
@@ -397,6 +415,7 @@ describe('NotificationsWidget — WAI-ARIA keyboard navigation (#5009)', () => {
           makeNotification({ id: 'n-3', requestId: 'req-3', timestamp: 1000 }),
         ]}
         onSwitchSession={vi.fn()}
+        isSessionListed={() => true}
         onMarkRead={vi.fn()}
         onMarkAllRead={vi.fn()}
         onDismiss={vi.fn()}
@@ -424,6 +443,7 @@ describe('NotificationsWidget — WAI-ARIA keyboard navigation (#5009)', () => {
           makeNotification({ id: 'n-3', requestId: 'req-3', timestamp: 1000 }),
         ]}
         onSwitchSession={vi.fn()}
+        isSessionListed={() => true}
         onMarkRead={vi.fn()}
         onMarkAllRead={vi.fn()}
         onDismiss={vi.fn()}
@@ -446,6 +466,7 @@ describe('NotificationsWidget — WAI-ARIA keyboard navigation (#5009)', () => {
           makeNotification({ id: 'n-3', requestId: 'req-3', timestamp: 1000 }),
         ]}
         onSwitchSession={vi.fn()}
+        isSessionListed={() => true}
         onMarkRead={vi.fn()}
         onMarkAllRead={vi.fn()}
         onDismiss={vi.fn()}
@@ -469,6 +490,7 @@ describe('NotificationsWidget — WAI-ARIA keyboard navigation (#5009)', () => {
           makeNotification({ id: 'n-3', requestId: 'req-3', timestamp: 1000 }),
         ]}
         onSwitchSession={vi.fn()}
+        isSessionListed={() => true}
         onMarkRead={vi.fn()}
         onMarkAllRead={vi.fn()}
         onDismiss={vi.fn()}
@@ -486,6 +508,7 @@ describe('NotificationsWidget — WAI-ARIA keyboard navigation (#5009)', () => {
       <NotificationsWidget
         notifications={[makeNotification({ id: 'n-1' })]}
         onSwitchSession={vi.fn()}
+        isSessionListed={() => true}
         onMarkRead={vi.fn()}
         onMarkAllRead={vi.fn()}
         onDismiss={vi.fn()}
@@ -504,6 +527,7 @@ describe('NotificationsWidget — WAI-ARIA keyboard navigation (#5009)', () => {
       <NotificationsWidget
         notifications={[makeNotification({ id: 'n-1', sessionId: 'sess-target' })]}
         onSwitchSession={onSwitchSession}
+        isSessionListed={() => true}
         onMarkRead={onMarkRead}
         onMarkAllRead={vi.fn()}
         onDismiss={vi.fn()}
@@ -522,6 +546,7 @@ describe('NotificationsWidget — WAI-ARIA keyboard navigation (#5009)', () => {
         <NotificationsWidget
           notifications={[makeNotification({ id: 'n-1' })]}
           onSwitchSession={vi.fn()}
+          isSessionListed={() => true}
           onMarkRead={vi.fn()}
           onMarkAllRead={vi.fn()}
           onDismiss={vi.fn()}
@@ -539,6 +564,7 @@ describe('NotificationsWidget — WAI-ARIA keyboard navigation (#5009)', () => {
       <NotificationsWidget
         notifications={[makeNotification({ id: 'n-1' })]}
         onSwitchSession={vi.fn()}
+        isSessionListed={() => true}
         onMarkRead={vi.fn()}
         onMarkAllRead={vi.fn()}
         onDismiss={vi.fn()}
@@ -569,6 +595,7 @@ describe('NotificationsWidget — WAI-ARIA keyboard navigation (#5009)', () => {
           makeNotification({ id: 'n-2', requestId: 'req-other' }),
         ]}
         onSwitchSession={vi.fn()}
+        isSessionListed={() => true}
         onMarkRead={vi.fn()}
         onMarkAllRead={vi.fn()}
         onDismiss={vi.fn()}
@@ -594,6 +621,7 @@ describe('NotificationsWidget — WAI-ARIA keyboard navigation (#5009)', () => {
       <NotificationsWidget
         notifications={[makeNotification({ id: 'n-1', sessionId: 'sess-target' })]}
         onSwitchSession={onSwitchSession}
+        isSessionListed={() => true}
         onMarkRead={onMarkRead}
         onMarkAllRead={vi.fn()}
         onDismiss={vi.fn()}
@@ -617,6 +645,7 @@ describe('NotificationsWidget — WAI-ARIA keyboard navigation (#5009)', () => {
       <NotificationsWidget
         notifications={[makeNotification({ id: 'n-1', sessionId: 'sess-target' })]}
         onSwitchSession={onSwitchSession}
+        isSessionListed={() => true}
         onMarkRead={onMarkRead}
         onMarkAllRead={vi.fn()}
         onDismiss={vi.fn()}
@@ -646,6 +675,7 @@ describe('NotificationsWidget — end-to-end: viewing decrements unread', () => 
       <NotificationsWidget
         notifications={initial}
         onSwitchSession={onSwitchSession}
+        isSessionListed={() => true}
         onMarkRead={onMarkRead}
         onMarkAllRead={vi.fn()}
         onDismiss={vi.fn()}
@@ -667,6 +697,7 @@ describe('NotificationsWidget — end-to-end: viewing decrements unread', () => 
           initial[1]!,
         ]}
         onSwitchSession={onSwitchSession}
+        isSessionListed={() => true}
         onMarkRead={onMarkRead}
         onMarkAllRead={vi.fn()}
         onDismiss={vi.fn()}

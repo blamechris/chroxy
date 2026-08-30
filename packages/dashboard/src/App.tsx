@@ -25,6 +25,7 @@ import {
 import { useConnectionStore } from './store/connection'
 import type { BaseSessionState, ContextOccupancy } from '@chroxy/store-core'
 import type { SessionNotification } from './store/types'
+import { isSessionListed } from './store/utils'
 
 import { Sidebar, type RepoNode, type ContextMenuTarget } from './components/Sidebar'
 import { resolveActivePrimaryClientId } from './components/ViewersIndicator'
@@ -938,6 +939,23 @@ export function App() {
     // "switching" placeholder forever. Same contract as createSession's (#6285).
     if (switchSession(sessionId)) setIsSwitchingSession(true)
   }, [switchSession, activeSessionId])
+
+  // #7516 — the RENDER-time reading of `switchSession`'s own membership check,
+  // for the two operator-clicked controls that source their ids from
+  // `sessionNotifications` (an append-only record that outlives the sessions it
+  // describes). Deliberately the same `isSessionListed` the store calls, over
+  // the same `sessions` array, so a jump that is offered is a jump that works.
+  //
+  // The refusal is surfaced HERE and not inside `handleSwitchSession`: that
+  // handler is shared with follow-mode and the permission auto-switch, whose
+  // silent refusal `switchSession`'s own comment argues for ("reachable through
+  // ordinary use... the honest UI response is to do nothing"). Making the DOOR
+  // noisy would be wrong for them; making the operator's CONTROL honest is what
+  // #7516 asks for.
+  const sessionIsListed = useCallback(
+    (sessionId: string) => isSessionListed(sessions, sessionId),
+    [sessions],
+  )
 
   // The actual session teardown, shared by the confirm path and the
   // no-confirm path (#5206).
@@ -2400,6 +2418,7 @@ export function App() {
         onThinkingLevelChange={(level) => setThinkingLevel(level as 'default' | 'high' | 'max')}
         sessionNotifications={sessionNotifications}
         onSwitchSession={handleSwitchSession}
+        isNotificationSessionListed={sessionIsListed}
         onMarkNotificationRead={markSessionNotificationRead}
         onMarkAllNotificationsRead={markAllSessionNotificationsRead}
         onDismissNotification={dismissSessionNotification}
@@ -2630,6 +2649,7 @@ export function App() {
             onDismiss={dismissSessionNotification}
             onMarkRead={markSessionNotificationRead}
             onSwitchSession={handleSwitchSession}
+            isSessionListed={sessionIsListed}
             permissionStatus={permissionStatus}
           />
         )}

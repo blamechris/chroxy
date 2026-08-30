@@ -33,6 +33,36 @@
  * The prop is REQUIRED and has no default: defaulting to "actionable" is
  * precisely the hole being closed, and a default would let a future call site
  * reopen it silently.
+ *
+ * #7516 — the SESSION-NAME button gets the same treatment, for the same reason
+ * and from the opposite direction. `sessionNotifications` is an append-only
+ * record: nothing prunes it when a session leaves the roster (deliberately —
+ * the row is the trace of what happened, #7353), so `n.sessionId` can name a
+ * session that no longer exists. Since #7511 `switchSession` refuses such an id
+ * and refuses it SILENTLY, which is right for its machine-driven callers and
+ * wrong for a control an operator aimed at: the row kept a live-looking link
+ * whose click did nothing at all. `isSessionListed` is the render-time reading
+ * of the CHOKE POINT'S OWN predicate (`store/utils.ts`, the function
+ * `switchSession` calls), so the button exists exactly when the jump would
+ * work.
+ *
+ * The inert shape follows `not-pending`, not `disconnected`, and the criterion
+ * is recoverability: a disconnected request becomes answerable again on
+ * reconnect, so it keeps disabled buttons and a reason. A session that left the
+ * roster does not come back under the same id, so — like an expired prompt —
+ * the control goes away and a marker says why. Collapsing "gone" into "looks
+ * clickable" is the state #7472 established must not exist.
+ *
+ * NO click-time re-check here, unlike `permissionStatus` above, and the
+ * difference is not an oversight. A permission deadline passes with no event at
+ * all, so nothing re-renders and the render gate goes stale silently (#6308's
+ * TOCTOU) — that is what forced the re-check + `recheck()` pair. Roster
+ * membership changes only by a store WRITE (`session_list`, `session_timeout`,
+ * `auth_ok`), and this component's predicate is derived from `sessions`, so the
+ * row re-renders into its inert form the moment the session leaves. And the
+ * residual window is covered rather than ignored: `switchSession` still
+ * membership-checks (#7511), so the worst case is a refusal the operator would
+ * have got anyway — never a switch onto a dead id.
  */
 import { useReducer } from 'react'
 import { isLivePermissionPrompt } from '@chroxy/store-core'
@@ -133,6 +163,17 @@ export interface NotificationBannersProps {
    * closed, so there isn't one.
    */
   permissionStatus: (n: SessionNotification) => PermissionBannerStatus
+  /**
+   * #7516 — REQUIRED, deliberately without a default, for the same reason
+   * `permissionStatus` has none: a default of "listed" is the hole being
+   * closed, and it would let a future call site reopen it in silence.
+   *
+   * Supply the CHOKE POINT'S predicate (`isSessionListed` from
+   * `store/utils.ts`, over the same `sessions` array `switchSession` reads) —
+   * not a second `.some()` written here. Two copies of one rule is what #7475
+   * removed.
+   */
+  isSessionListed: (sessionId: string) => boolean
 }
 
 export function NotificationBanners({
@@ -143,6 +184,7 @@ export function NotificationBanners({
   onMarkRead,
   onSwitchSession,
   permissionStatus,
+  isSessionListed,
 }: NotificationBannersProps) {
   // #7474 — a refused click must be VISIBLE, not merely harmless.
   //
@@ -192,13 +234,45 @@ export function NotificationBanners({
             <span className="notification-banner-type">
               {EVENT_LABELS[n.eventType]}
             </span>
-            <button
-              type="button"
-              className="notification-banner-session"
-              onClick={() => onSwitchSession(n.sessionId)}
-            >
-              {n.sessionName}
-            </button>
+            {isSessionListed(n.sessionId) ? (
+              <button
+                type="button"
+                className="notification-banner-session"
+                onClick={() => onSwitchSession(n.sessionId)}
+              >
+                {n.sessionName}
+              </button>
+            ) : (
+              <>
+                {/* #7516 — the NAME survives (the row is a record, #7353); only
+                    the affordance goes. Rendering it as a non-interactive span
+                    is the issue's first-choice remedy: there is nothing left to
+                    aim at, so the dead click is impossible rather than merely
+                    harmless. A disabled <button> would still be a target the
+                    operator reaches for, and "gone" is not recoverable the way
+                    `disconnected` is. */}
+                <span
+                  className="notification-banner-session-name"
+                  data-testid="notification-banner-session-name"
+                >
+                  {n.sessionName}
+                </span>
+                {/* Says WHY, in the vocabulary the row already uses for its
+                    other retired control ("No longer pending"). role="status"
+                    for the same reason that one has it: this marker can appear
+                    while the banner is on screen — the roster snapshot that
+                    removes the session re-renders the row under the cursor —
+                    and without it a screen-reader user gets the silent
+                    disappearance instead of the dead click. */}
+                <span
+                  className="notification-banner-session-gone"
+                  data-testid="notification-banner-session-gone"
+                  role="status"
+                >
+                  No longer open
+                </span>
+              </>
+            )}
             <span className="notification-banner-message">{n.message}</span>
           </div>
           <div className="notification-banner-actions">

@@ -82,7 +82,7 @@ import {
   updateServerEntry,
   markServerConnected,
 } from './server-registry';
-import { stripAnsi, filterThinking, nextMessageId, createEmptySessionState } from './utils';
+import { stripAnsi, filterThinking, nextMessageId, createEmptySessionState, isSessionListed } from './utils';
 import { registerSummarizeRequest, cancelSummarizeRequest, rejectAllSummarizeRequests } from './summarizeRequests';
 import { armSchedulerRequest, failAllSchedulerRequests, SCHEDULER_DISCONNECT_ERROR } from './scheduledTaskRequests';
 import { formatQuestionAnswerSummary } from '../utils/questionAnswerSummary';
@@ -4939,7 +4939,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // would strand every restore. Making it an explicit named option means each
     // opt-out is a decision someone wrote down, and `grep allowUnlisted` lists
     // them all.
-    if (!options?.allowUnlisted && !sessions.some((s) => s.sessionId === sessionId)) {
+    // #7516 — the membership predicate is now a NAMED shared helper rather than
+    // an inline `.some()`, because the two operator-clicked notification
+    // surfaces have to ask the identical question at render time to avoid
+    // drawing a jump this door will refuse. Same function, same array, so
+    // "looks clickable" and "will work" cannot disagree.
+    if (!options?.allowUnlisted && !isSessionListed(sessions, sessionId)) {
       // Not a warning: this is reachable through ordinary use (a stale
       // orchestration node, a peer focusing a session we have already closed),
       // and the honest UI response is to do nothing rather than to log noise.

@@ -5084,6 +5084,32 @@ button.sidebar-token-view-session-row:hover {
   text-decoration: underline;
 }
 
+/* #7516 — the same name once its session has left the roster. It is NOT a
+   control any more, so it deliberately does not inherit the link colour, the
+   pointer cursor or the 44px floor from `.notification-banner-session` above:
+   an element that carries a tap-target floor and looks like a link is the
+   live-looking dead click this replaced. Muted, plain, still legible — the row
+   is a record and the name is part of it (#7353). */
+.notification-banner-session-name {
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  opacity: 0.7;
+  flex-shrink: 0;
+}
+
+/* Says why the jump is gone. Same treatment as `.notification-banner-stale`,
+   which is the row's other "this control retired" marker — one vocabulary for
+   one kind of fact. */
+.notification-banner-session-gone {
+  font-size: var(--text-xs);
+  font-style: italic;
+  color: var(--text-secondary);
+  opacity: 0.8;
+  flex-shrink: 0;
+  align-self: center;
+}
+
 .notification-banner-message {
   color: var(--text-secondary);
   overflow: hidden;
@@ -5473,6 +5499,16 @@ button.sidebar-token-view-session-row:hover {
 
 .notifications-widget-item-time {
   font-size: var(--text-xs);
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+/* #7516 — the row's session has left the roster, so activating it no longer
+   jumps (it still marks read and closes the panel). Same italic-muted marker
+   the banner uses for the same fact. */
+.notifications-widget-item-gone {
+  font-size: var(--text-xs);
+  font-style: italic;
   color: var(--text-secondary);
   flex-shrink: 0;
 }

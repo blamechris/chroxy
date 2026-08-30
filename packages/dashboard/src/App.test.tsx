@@ -3252,3 +3252,93 @@ describe('#7466 — cross-session permission banner, failed send', () => {
     expect(dismissSessionNotification).not.toHaveBeenCalled()
   })
 })
+
+// ---------------------------------------------------------------------------
+// #7516 — an operator-clicked session jump must not be a live-looking dead click
+// ---------------------------------------------------------------------------
+/**
+ * These are the WIRING cells: that App actually derives the predicate from the
+ * SAME `sessions` roster `switchSession` membership-checks against (#7511). The
+ * components' own behaviour is pinned in `NotificationJumpGate.test.tsx`; this
+ * file is the only place that can see the wiring, which is the
+ * "guard wired to only some of its callers" half of the defect.
+ */
+describe('#7516 — the notification session-jump is gated on roster membership', () => {
+  const CHROXY = {
+    sessionId: 's1', name: 'Chroxy', cwd: '/tmp', type: 'cli' as const,
+    hasTerminal: true, model: null, permissionMode: null, isBusy: false,
+    createdAt: 1, conversationId: null,
+  }
+  const notification = {
+    id: 'n-1',
+    sessionId: 's1',
+    sessionName: 'Chroxy',
+    eventType: 'completed' as const,
+    message: 'Turn finished',
+    timestamp: 1,
+  }
+
+  function bannerStack() {
+    const stack = document.querySelector('.notification-banners')
+    expect(stack, 'the banner stack did not render at all').not.toBeNull()
+    return within(stack as HTMLElement)
+  }
+
+  function withRoster(sessions: unknown[], over: Record<string, unknown> = {}) {
+    return {
+      connectionPhase: 'connected',
+      sessions,
+      activeSessionId: null,
+      sessionNotifications: [notification],
+      ...over,
+    }
+  }
+
+  it('CONTROL: a LISTED session keeps its banner jump button, and it switches', () => {
+    const switchSession = vi.fn(() => true)
+    stateOverrides = withRoster([CHROXY], { switchSession })
+    render(<App />)
+    fireEvent.click(bannerStack().getByRole('button', { name: 'Chroxy' }))
+    expect(switchSession).toHaveBeenCalledWith('s1')
+  })
+
+  it('an ABSENT session presents no jump affordance in the banner', () => {
+    const switchSession = vi.fn(() => true)
+    stateOverrides = withRoster([], { switchSession })
+    render(<App />)
+    const stack = bannerStack()
+    // The RECORD survives — this is a gate, not a dismissal (#7353).
+    expect(stack.getByText('Chroxy')).toBeInTheDocument()
+    expect(stack.getByText('Turn finished')).toBeInTheDocument()
+    // ...and it says WHY, rather than going silently affordance-less.
+    expect(stack.getByTestId('notification-banner-session-gone')).toBeInTheDocument()
+    // Nothing to aim at: the dead click is impossible, not merely harmless.
+    expect(stack.queryByRole('button', { name: 'Chroxy' })).toBeNull()
+    expect(switchSession).not.toHaveBeenCalled()
+  })
+
+  it('CONTROL: a LISTED session still jumps from the notifications widget row', () => {
+    const switchSession = vi.fn(() => true)
+    const markSessionNotificationRead = vi.fn()
+    stateOverrides = withRoster([CHROXY], { switchSession, markSessionNotificationRead })
+    render(<App />)
+    fireEvent.click(screen.getByTestId('notifications-widget-trigger'))
+    fireEvent.click(screen.getByTestId('notifications-widget-item-body-n-1'))
+    expect(markSessionNotificationRead).toHaveBeenCalledWith('n-1')
+    expect(switchSession).toHaveBeenCalledWith('s1')
+  })
+
+  it('an ABSENT session marks the widget row read WITHOUT jumping', () => {
+    const switchSession = vi.fn(() => true)
+    const markSessionNotificationRead = vi.fn()
+    stateOverrides = withRoster([], { switchSession, markSessionNotificationRead })
+    render(<App />)
+    fireEvent.click(screen.getByTestId('notifications-widget-trigger'))
+    expect(screen.getByTestId('notifications-widget-item-gone-n-1')).toBeInTheDocument()
+    fireEvent.click(screen.getByTestId('notifications-widget-item-body-n-1'))
+    // Not a dead click: the row is acknowledged and the panel closes.
+    expect(markSessionNotificationRead).toHaveBeenCalledWith('n-1')
+    // But no dead id reaches the choke point, so no side effect fires for it.
+    expect(switchSession).not.toHaveBeenCalled()
+  })
+})

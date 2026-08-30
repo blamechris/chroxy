@@ -136,3 +136,32 @@ export function pruneSessionScopedKeySet(
   }
   return next ?? keys;
 }
+
+/**
+ * #7516 — is `sessionId` present in the roster the tab strip renders from?
+ *
+ * ONE implementation, two vantage points. `switchSession` asks it to decide
+ * whether an id may become `activeSessionId` (#7475/#7511, the choke point);
+ * the notification surfaces ask the SAME question at RENDER time, so the
+ * operator is never offered a jump the choke point is going to refuse. The
+ * invariant that buys is "looks clickable ⟺ will work", and it holds because
+ * both readings are the same function over the same array — a second
+ * hand-rolled `sessions.some(...)` in a component would be the copy that
+ * drifts, which is exactly what #7475 collapsed four call-site copies into one
+ * door to avoid.
+ *
+ * `sessions` is the only correct source, and `sessionStates` is not a
+ * substitute even though it looks like one: it retains a closed session's
+ * transcript, which is how follow-mode's `hasSession()` gate walked onto a dead
+ * session while appearing to be guarded (#7475).
+ *
+ * Typed on the structural minimum rather than `SessionInfo[]` so a caller
+ * holding a narrower projection of the roster can still use it — and so this
+ * file keeps its "pure functions with no store dependency" property.
+ */
+export function isSessionListed(
+  sessions: readonly { sessionId: string }[],
+  sessionId: string,
+): boolean {
+  return sessions.some((s) => s.sessionId === sessionId);
+}
