@@ -1149,6 +1149,43 @@ describe("history_replay_end: '(resolved)' sweep vs a racing live AskUserQuestio
     expect(store.getState().sessionStates.s1.messages.map((m: any) => m.id)).toEqual(['tool-1']);
   });
 
+  // #7492 — one interleave over from #7477. The OUTERMOST replay here is a
+  // DELTA (the connect handshake replays the active session with a cursor,
+  // ws-history.js) and a FULL rebuild starts nested inside it
+  // (`switch_session` / `request_full_history` force full). The delta
+  // contributes no baseline, so pre-fix the nested full start was the first to
+  // set one and captured a `messages.length` that already counted the racer —
+  // which the deferred swap then sliced straight out of `messages`. A drop, not
+  // a stamp, exactly like #7477, reached from the other side.
+  it('keeps every racer when a full rebuild nests inside a DELTA window (#7492)', () => {
+    // A pre-replay message makes the outer baseline non-zero, so the final swap
+    // is real (it drops the prefix) rather than an identity slice.
+    const store = seedOne([{ id: 'old-1', type: 'response', content: 'before', timestamp: 1 }]);
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's1', fullHistory: false });
+    // Racer #1 — inside the DELTA window and BEFORE the nested full start. This
+    // is the one #7492 lost.
+    _testMessageHandler.handle(question({ toolUseId: 'q-use-1' }));
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's1', fullHistory: true });
+    // Racer #2 — inside the nested full rebuild.
+    _testMessageHandler.handle(question({ toolUseId: 'q-use-2' }));
+    _testMessageHandler.handle({ type: 'history_replay_end', sessionId: 's1' });
+    // Racer #3 — after end#1, while the outer window is still open.
+    _testMessageHandler.handle(question({ toolUseId: 'q-use-3' }));
+    _testMessageHandler.handle({ type: 'history_replay_end', sessionId: 's1' });
+
+    const msgs = store.getState().sessionStates.s1.messages;
+    // All three survive the single deferred swap...
+    expect(msgs).toHaveLength(3);
+    // ...the swap really did happen (the pre-replay prefix is gone), so this is
+    // not passing because the rebuild was cancelled altogether...
+    expect(msgs.every((m: any) => m.type === 'prompt')).toBe(true);
+    // ...and neither end's sweep stamped any of them.
+    expect(answeredOf(store, 0)).toBeUndefined();
+    expect(answeredOf(store, 1)).toBeUndefined();
+    expect(answeredOf(store, 2)).toBeUndefined();
+    expect(getReplayWindowDepth('s1')).toBe(0);
+  });
+
   // #7456 — the store drops a session's messages wholesale on prune and on
   // timeout; module state here used to survive both with nothing left to
   // correspond to.

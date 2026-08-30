@@ -572,6 +572,184 @@ describe('overlapping full rebuilds — swap at the OUTERMOST baseline (#7477)',
 })
 
 // ---------------------------------------------------------------------------
+// #7492 — the OUTERMOST window owns the baseline whatever KIND opened it
+// ---------------------------------------------------------------------------
+describe('full rebuild nested inside a DELTA window (#7492)', () => {
+  it('keeps a live racer that arrived before the nested full start (the issue reproduction)', () => {
+    // Verbatim from the issue. Pre-fix: end#2 returned [{ id: 'r-1' }] — the
+    // delta contributed no baseline, so the NESTED full start was the first to
+    // set one and captured a length that already counted the racer.
+    reconcileReplayStart('s1', false, 0) // outermost = DELTA (handshake, cursor path)
+    const live: Msg[] = [{ id: 'racer' }] // a LIVE arrival during the delta window
+    reconcileReplayStart('s1', true, live.length) // nested FULL start
+    live.push({ id: 'r-1' }) // the full replay appends
+
+    expect(reconcileReplayEnd('s1', live).swappedMessages).toBeNull()
+    expect(reconcileReplayEnd('s1', live).swappedMessages).toEqual([
+      { id: 'racer' },
+      { id: 'r-1' },
+    ])
+  })
+
+  it('still discards the pre-WINDOW prefix — the swap is real, not an identity slice', () => {
+    // The adopted baseline is the length at the 0->1 transition, so a session
+    // that had messages on screen before the delta opened still gets them
+    // sliced off by the rebuild. Without this the fix would "pass" by never
+    // swapping anything.
+    const live: Msg[] = [{ id: 'old-1' }, { id: 'old-2' }]
+    reconcileReplayStart('s1', false, live.length) // outermost DELTA at length 2
+    live.push({ id: 'racer' }) // live arrival inside the delta window
+    reconcileReplayStart('s1', true, live.length) // nested FULL — must adopt 2, not 3
+    live.push({ id: 'r-1' })
+
+    expect(reconcileReplayEnd('s1', live).swappedMessages).toBeNull()
+    expect(reconcileReplayEnd('s1', live).swappedMessages).toEqual([
+      { id: 'racer' },
+      { id: 'r-1' },
+    ])
+  })
+
+  it('scopes the dedup cache at the ADOPTED baseline, not at the nested full start', () => {
+    // The dedup cache and the swap baseline are the same number by
+    // construction (`replayDedupCache` reads `_rebuildBaseline`), so adopting
+    // the window-open length has to move BOTH — otherwise the racer survives
+    // the swap and is invisible to dedup.
+    const live: Msg[] = [{ id: 'old' }]
+    reconcileReplayStart('s1', false, live.length)
+    live.push({ id: 'racer' })
+    reconcileReplayStart('s1', true, live.length)
+
+    expect(replayDedupCache('s1', live)).toEqual([{ id: 'racer' }])
+  })
+
+  it('keeps a racer that arrives DURING the nested full rebuild (control — green pre-fix)', () => {
+    // The other side of the interleave: nothing is appended between the delta
+    // start and the full start, so the two baselines coincide and this case was
+    // already correct. Here so the fix is pinned as covering BOTH racer
+    // positions rather than trading one for the other.
+    reconcileReplayStart('s1', false, 0)
+    reconcileReplayStart('s1', true, 0)
+    const live: Msg[] = [{ id: 'racer' }]
+    live.push({ id: 'r-1' })
+
+    expect(reconcileReplayEnd('s1', live).swappedMessages).toBeNull()
+    expect(reconcileReplayEnd('s1', live).swappedMessages).toEqual([
+      { id: 'racer' },
+      { id: 'r-1' },
+    ])
+  })
+
+  it('reports the rebuild the nested full started, not the delta that opened the window', () => {
+    expect(reconcileReplayStart('s1', false, 0).rebuildInProgress).toBe(false)
+    expect(isRebuildInProgress('s1')).toBe(false)
+    expect(reconcileReplayStart('s1', true, 0).rebuildInProgress).toBe(true)
+    expect(isRebuildInProgress('s1')).toBe(true)
+    expect(getReplayWindowDepth('s1')).toBe(2)
+  })
+
+  it('does not leak the window-open length into the NEXT window', () => {
+    // The recorded length lives exactly as long as the refcount does. A stale
+    // 5 here would make the following rebuild swap to [] and blank the session.
+    reconcileReplayStart('s1', false, 5)
+    reconcileReplayEnd('s1', [{ id: 'a' }, { id: 'b' }, { id: 'c' }, { id: 'd' }, { id: 'e' }])
+    reconcileReplayStart('s1', true, 1)
+    expect(
+      reconcileReplayEnd('s1', [{ id: 'old' }, { id: 'r-1' }]).swappedMessages,
+    ).toEqual([{ id: 'r-1' }])
+  })
+
+  it('teardown drops the window-open length with the refcount (mid-window socket drop)', () => {
+    reconcileReplayStart('s1', false, 5)
+    resetReplayReconcile()
+    expect(getReplayWindowDepth('s1')).toBe(0)
+    // A fresh rebuild must use ITS OWN length, not the torn-down window's 5.
+    reconcileReplayStart('s1', true, 1)
+    expect(
+      reconcileReplayEnd('s1', [{ id: 'old' }, { id: 'r-1' }]).swappedMessages,
+    ).toEqual([{ id: 'r-1' }])
+
+    reconcileReplayStart('s2', false, 5)
+    dropReplaySessionState('s2')
+    expect(getReplayWindowDepth('s2')).toBe(0)
+    reconcileReplayStart('s2', true, 1)
+    expect(
+      reconcileReplayEnd('s2', [{ id: 'old' }, { id: 'r-1' }]).swappedMessages,
+    ).toEqual([{ id: 'r-1' }])
+  })
+
+  it('is per-session — s2 opening a delta window does not give s1 a baseline', () => {
+    reconcileReplayStart('s2', false, 4)
+    reconcileReplayStart('s1', true, 1)
+    expect(
+      reconcileReplayEnd('s1', [{ id: 'old' }, { id: 'r-1' }]).swappedMessages,
+    ).toEqual([{ id: 'r-1' }])
+  })
+
+  it('overlapping PURE deltas still swap nothing at all', () => {
+    // No full start anywhere, so no baseline is ever recorded and both ends
+    // return null — the window-open length is captured but never adopted.
+    reconcileReplayStart('s1', false, 2)
+    reconcileReplayStart('s1', false, 2)
+    const live: Msg[] = [{ id: 'old-1' }, { id: 'old-2' }, { id: 'd-1' }]
+    expect(reconcileReplayEnd('s1', live).swappedMessages).toBeNull()
+    expect(reconcileReplayEnd('s1', live).swappedMessages).toBeNull()
+    expect(isRebuildInProgress('s1')).toBe(false)
+    expect(getReplayWindowDepth('s1')).toBe(0)
+  })
+
+  // The KNOWN LIMIT, pinned rather than left to be discovered (#7519). When the
+  // outermost delta actually APPENDED before the nested full start, its entries
+  // are inside the preserved tail, `replayDedupCache` is scoped at the same
+  // baseline, and the full replay's re-delivery of them is therefore suppressed
+  // — so they keep their early position while the older history the full replay
+  // delivers appends after them. Complete, but mis-ORDERED.
+  //
+  // On main this same interleave returns ['old', 'd-1']: correctly ordered and
+  // the racer silently DROPPED, which is the trade #7492 makes deliberately.
+  // Change this expectation only alongside #7519.
+  it("the delta's own appends keep their early position — the known ordering limit (#7519)", () => {
+    const live: Msg[] = [{ id: 'old' }]
+    reconcileReplayStart('s1', false, live.length) // outermost DELTA opens at 1
+    live.push({ id: 'd-1' }) // the delta appends the newest history entry
+    live.push({ id: 'racer' }) // a LIVE arrival
+    reconcileReplayStart('s1', true, live.length) // nested FULL start
+
+    // The full replay re-delivers the whole ring buffer, deduped against the
+    // cache exactly as both clients do it.
+    for (const id of ['old', 'd-1']) {
+      const cache = replayDedupCache('s1', live) as Msg[]
+      if (!cache.some((m) => m.id === id)) live.push({ id })
+    }
+
+    expect(reconcileReplayEnd('s1', live).swappedMessages).toBeNull()
+    const swapped = reconcileReplayEnd('s1', live).swappedMessages as Msg[]
+    // Nothing is LOST — the racer and both history entries are all present...
+    expect(swapped.map((m) => m.id).sort()).toEqual(['d-1', 'old', 'racer'])
+    // ...but 'old' is last. This is the #7519 artifact, not the fix working.
+    expect(swapped.map((m) => m.id)).toEqual(['d-1', 'racer', 'old'])
+  })
+
+  it('a delta nested inside the delta-opened window does not clear the adopted baseline', () => {
+    // The delta branch only clears a stale baseline when it OPENS the window
+    // (#7477). Now that a nested FULL can install one under a delta-opened
+    // window, a THIRD, deeper delta must not cancel that rebuild's swap.
+    reconcileReplayStart('s1', false, 0) // outermost DELTA
+    const live: Msg[] = [{ id: 'racer' }]
+    reconcileReplayStart('s1', true, live.length) // nested FULL
+    reconcileReplayStart('s1', false, live.length) // deeper DELTA
+    live.push({ id: 'r-1' })
+
+    expect(isRebuildInProgress('s1')).toBe(true)
+    expect(reconcileReplayEnd('s1', live).swappedMessages).toBeNull()
+    expect(reconcileReplayEnd('s1', live).swappedMessages).toBeNull()
+    expect(reconcileReplayEnd('s1', live).swappedMessages).toEqual([
+      { id: 'racer' },
+      { id: 'r-1' },
+    ])
+  })
+})
+
+// ---------------------------------------------------------------------------
 // #7456 — ledger lifetime: release at replay end, teardown, and a loud cap
 // ---------------------------------------------------------------------------
 describe('live-arrival ledger lifetime (#7456)', () => {

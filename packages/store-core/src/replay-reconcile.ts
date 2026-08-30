@@ -143,8 +143,60 @@ const _historyCursors = new Map<string, number>()
  * the first end sliced a message appended BETWEEN the two starts straight out
  * of the store. Fixed as #7477 — the two compose, the ledger protecting the
  * racer and the swap no longer dropping it.)
+ *
+ * The value carries {@link ReplayWindow.openLen} alongside the depth because
+ * that number has exactly this map's lifetime (#7492) — see the interface.
  */
-const _replayWindowOpen = new Map<string, number>()
+const _replayWindowOpen = new Map<string, ReplayWindow>()
+
+/**
+ * The open replay window for one session: the refcount, plus the
+ * `messages.length` captured when it OPENED.
+ *
+ * One record and not two maps, deliberately. `openLen` is meaningful for
+ * exactly as long as the refcount is non-zero and must be dropped at the same
+ * instant — so making it a field of the refcount's own value means the four
+ * teardown paths (`closeReplayWindow`'s last decrement, `resetReplayReconcile`,
+ * {@link dropReplaySessionState}, and the `delete` inside `closeReplayWindow`)
+ * cannot clear one and leave the other. A sibling `Map<string, number>` would
+ * be a second thing to remember at each of them, which is the drift the
+ * `_rebuildBaseline` teardown comment already warns about at length.
+ */
+interface ReplayWindow {
+  /** How many replays are in flight for this session right now (>= 1). */
+  depth: number
+  /**
+   * `messages.length` at the 0->1 transition — the OUTERMOST start, whatever
+   * KIND it was (#7492).
+   *
+   * #7477 made the outermost FULL rebuild own {@link _rebuildBaseline}, which
+   * covers `start(full) start(full) end end`. It does not cover a full rebuild
+   * nested inside a DELTA window: the delta contributes no baseline, so the
+   * nested full start is the first to set one and captures a `messages.length`
+   * that already counts everything appended during the delta — including a
+   * live racer, which the deferred swap then slices off. That is #7420's own
+   * window again, reached by a different interleave: the ledger vouches for the
+   * message right up to the moment the swap discards it.
+   *
+   * So the OUTERMOST WINDOW owns the baseline, not the outermost full rebuild,
+   * and a nested full start adopts this number instead of its own `currentLen`.
+   * At depth 1 the two are the same value, so every #7477 case is unchanged.
+   *
+   * KNOWN LIMIT, stated rather than hidden: when the delta actually APPENDED
+   * entries before the nested full start, those entries are now inside the
+   * preserved tail, so the full replay's re-delivery of them dedups against
+   * them ({@link replayDedupCache} is scoped at the same baseline) and they
+   * keep their early position while the older history the full replay delivers
+   * appends after — a correctly-populated but mis-ORDERED transcript. That is a
+   * strictly better failure than the silent DROP it replaces (nothing is lost,
+   * and the next full replay re-orders it), and fixing it needs the swap to
+   * distinguish replayed appends from live ones — a change to the "slice off a
+   * prefix" shape rather than to this number. Tracked as #7519, and PINNED by
+   * `full rebuild nested inside a DELTA window (#7492) > the delta's own
+   * appends keep their early position` so it cannot change unnoticed.
+   */
+  openLen: number
+}
 
 /**
  * Per-session ids of `prompt` ChatMessages that arrived LIVE — i.e. were NOT
@@ -312,14 +364,19 @@ export function reconcileReplayStart(
   // #7420 — open the window for BOTH replay kinds. #7455 — as a REFCOUNT, so
   // two overlapping replays of one session compose instead of the first `end`
   // closing the window out from under the second.
-  const depth = (_replayWindowOpen.get(sessionId) ?? 0) + 1
-  _replayWindowOpen.set(sessionId, depth)
-  if (depth === 1) {
-    // 0→1 ONLY — a genuinely new window. Drop the previous window's
-    // live-arrival ids: every prompt already on screen pre-dates this replay,
-    // so nothing about it is vouched for by this window. A NESTED start
-    // (depth > 1) must NOT do this — the outer window is still open and still
-    // protecting what it recorded (#7455).
+  const existing = _replayWindowOpen.get(sessionId)
+  // 0→1 ONLY — a genuinely new window, whatever KIND of replay opened it.
+  const isOutermost = existing === undefined
+  const replayWindow = existing ?? { depth: 0, openLen: Math.max(0, currentLen | 0) }
+  replayWindow.depth += 1
+  if (isOutermost) {
+    // #7492 — the record (and with it `openLen`) is installed here and nowhere
+    // else, so the captured length is the OUTERMOST start's by construction.
+    _replayWindowOpen.set(sessionId, replayWindow)
+    // Drop the previous window's live-arrival ids: every prompt already on
+    // screen pre-dates this replay, so nothing about it is vouched for by this
+    // window. A NESTED start must NOT do this — the outer window is still open
+    // and still protecting what it recorded (#7455).
     _liveDuringReplay.delete(sessionId)
     if (_sweepableLedger?.sessionId === sessionId) _sweepableLedger = null
   }
@@ -329,8 +386,13 @@ export function reconcileReplayStart(
     // inner baseline and drop everything appended between the two starts.
     // A genuinely new window never has one (the last end and every teardown
     // path clear it), so at depth 1 this always sets.
+    //
+    // #7492 — and the value is the WINDOW's open length, not this start's own
+    // `currentLen`. They are the same number when a full start opened the
+    // window; they differ when a DELTA did, and `currentLen` then counts a live
+    // racer that arrived during the delta straight into the discarded prefix.
     if (!_rebuildBaseline.has(sessionId)) {
-      _rebuildBaseline.set(sessionId, Math.max(0, currentLen | 0))
+      _rebuildBaseline.set(sessionId, replayWindow.openLen)
     }
     return { rebuildInProgress: true }
   }
@@ -338,7 +400,10 @@ export function reconcileReplayStart(
   // clears a stale one only when it OPENS the window (#7477): nested inside a
   // full rebuild that is still streaming, deleting the baseline would cancel
   // that rebuild's swap outright and leave the discarded prefix on screen.
-  if (depth === 1) _rebuildBaseline.delete(sessionId)
+  // Since #7492 that rebuild can be one a nested full start installed under a
+  // delta-opened window, so this stays keyed on "did I open the window", not on
+  // "was the outermost replay a full one".
+  if (isOutermost) _rebuildBaseline.delete(sessionId)
   // Reports the session's rebuild state, not this replay's kind — a delta
   // nested inside a live full rebuild is still inside a rebuild.
   return { rebuildInProgress: isRebuildInProgress(sessionId) }
@@ -405,7 +470,7 @@ export function reconcileReplayEnd(
   // update. `closeReplayWindow` above already decremented, so > 0 here means a
   // replay is genuinely still streaming — an unmatched end reads 0 and swaps,
   // as it did before.
-  if ((_replayWindowOpen.get(sessionId) ?? 0) > 0) {
+  if (isReplayWindowOpen(sessionId)) {
     return { swappedMessages: null }
   }
   const base = _rebuildBaseline.get(sessionId) as number
@@ -480,7 +545,7 @@ export function noteLivePromptDuringReplay(
 
 /** Is a replay window open for this session (refcount > 0)? */
 function isReplayWindowOpen(sessionId: string): boolean {
-  return (_replayWindowOpen.get(sessionId) ?? 0) > 0
+  return (_replayWindowOpen.get(sessionId)?.depth ?? 0) > 0
 }
 
 /**
@@ -494,11 +559,12 @@ function isReplayWindowOpen(sessionId: string): boolean {
  * and then pruned.
  */
 function closeReplayWindow(sessionId: string): void {
-  const depth = _replayWindowOpen.get(sessionId) ?? 0
-  if (depth > 1) {
-    _replayWindowOpen.set(sessionId, depth - 1)
+  const replayWindow = _replayWindowOpen.get(sessionId)
+  if (replayWindow && replayWindow.depth > 1) {
+    replayWindow.depth -= 1
     return
   }
+  // Last (or unmatched) end — the whole record goes, `openLen` with it (#7492).
   _replayWindowOpen.delete(sessionId)
   const ids = _liveDuringReplay.get(sessionId)
   _liveDuringReplay.delete(sessionId)
@@ -522,7 +588,7 @@ function ledgerFor(sessionId: string): ReadonlySet<string> | undefined {
  */
 export function getReplayWindowDepth(sessionId: string | null | undefined): number {
   if (!sessionId) return 0
-  return _replayWindowOpen.get(sessionId) ?? 0
+  return _replayWindowOpen.get(sessionId)?.depth ?? 0
 }
 
 /**
