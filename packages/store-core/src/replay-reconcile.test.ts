@@ -988,6 +988,84 @@ describe('mid-window messages SHRINK moves the swap cut (#7524)', () => {
     expect(reconcileReplayEnd('s1', live).swappedMessages).toEqual([{ id: 'c' }])
   })
 
+  // WHY the two pins above are pinned rather than fixed — mechanically, not in
+  // prose. The module's entire view of `messages` is `idOf` (its only reader),
+  // and its entire record of the prefix is `prefixIds`. The two states below
+  // present the SAME id sequence against the SAME recorded prefix while their
+  // CORRECT answers differ, so no function of those two inputs can serve both:
+  //
+  //   A  legitimate empty replay — prefix intact, the server trimmed history to
+  //      nothing. Correct swap `[]`, pinned by `empty replay (baseline at end)
+  //      swaps to []`.
+  //   B  the #7543 degenerate — whole prefix removed, replay re-delivered the
+  //      same ids. Correct swap `[a, b]`.
+  //
+  // Any resolver that returns `[a, b]` for B returns it for A too, and breaks
+  // the empty-replay contract in the same motion. That rules out all three
+  // id-only shapes proposed for #7543 — a degenerate-outcome guard ("never
+  // return an empty swap when the walk consumed everything"), an
+  // `openLen`-bounded fallback, and a survivor-anchor requirement — because each
+  // is a function of exactly these inputs. What is left is provenance per
+  // append: `historySeq` present ⇒ replayed, reported by the call sites, which
+  // is #7519.
+  //
+  // Object identity is not the escape hatch either. A mid-window UPDATE to a
+  // prefix message REPLACES its object (`{ ...m, … }` — `finalizeThinkingStreams`
+  // in handlers/stream.ts, `peelSlotContent` in each client's message-handler,
+  // every tool_result patch), so an identity walk would stall at the first
+  // streamed-into or patched prefix entry and collapse the cut to an identity
+  // slice: #7477's failure, on a far more reachable path than this one.
+  //
+  // This test is the REASON the two expectations above read as they do. It goes
+  // with them when #7543 lands, and not before.
+  it('#7543 is UNDECIDABLE from the ids alone — the legitimate empty replay is the same input', () => {
+    // The cut the module resolves, read through the one public surface that
+    // exposes it: `replayDedupCache` returns `messages.slice(cut)`.
+    const cutOf = (sid: string, messages: Msg[]) =>
+      messages.length - (replayDedupCache(sid, messages) as Msg[]).length
+
+    // --- A: prefix intact, replay delivered nothing. Correct swap: [].
+    const a: Msg[] = [{ id: 'a' }, { id: 'b' }]
+    reconcileReplayStart('sA', true, a)
+
+    // --- B: whole prefix removed, replay re-delivered the same ids through the
+    // dedup gate exactly as both clients drive it. Correct swap: [a, b].
+    const b: Msg[] = [{ id: 'a' }, { id: 'b' }]
+    reconcileReplayStart('sB', true, b)
+    b.length = 0
+    for (const id of ['a', 'b']) {
+      const cache = replayDedupCache('sB', b) as Msg[]
+      if (!cache.some((m) => m.id === id)) b.push({ id })
+    }
+    // Both fixtures took effect and are genuinely distinct histories...
+    expect(b.map((m) => m.id)).toEqual(['a', 'b'])
+
+    // ...and the module cannot tell them apart: same ids, same resolved cut.
+    expect(a.map((m) => m.id)).toEqual(b.map((m) => m.id))
+    expect(cutOf('sA', a)).toBe(cutOf('sB', b))
+    expect(reconcileReplayEnd('sA', a).swappedMessages).toEqual(
+      reconcileReplayEnd('sB', b).swappedMessages,
+    )
+
+    // The same holds for the second #7543 shape, where the correct answers are
+    // ['c'] (A2: prefix intact, one entry replayed) and ['a','b','c'] (B2: the
+    // prefix removed and all three replayed).
+    const a2: Msg[] = [{ id: 'a' }, { id: 'b' }]
+    reconcileReplayStart('sA2', true, a2)
+    a2.push({ id: 'c' })
+
+    const b2: Msg[] = [{ id: 'a' }, { id: 'b' }]
+    reconcileReplayStart('sB2', true, b2)
+    b2.splice(0, 2)
+    b2.push({ id: 'a' }, { id: 'b' }, { id: 'c' })
+
+    expect(a2.map((m) => m.id)).toEqual(b2.map((m) => m.id))
+    expect(cutOf('sA2', a2)).toBe(cutOf('sB2', b2))
+    expect(reconcileReplayEnd('sA2', a2).swappedMessages).toEqual(
+      reconcileReplayEnd('sB2', b2).swappedMessages,
+    )
+  })
+
   it('but ONE survivor at the front already keeps more than the raw index does', () => {
     // The positive control for the two pins above — without it they read as "the
     // mechanism does nothing". Same re-delivery, one prefix entry surviving: the

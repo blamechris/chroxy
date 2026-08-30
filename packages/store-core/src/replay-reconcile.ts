@@ -329,9 +329,25 @@ function snapshotPrefix(messages: readonly unknown[]): RebuildBaseline {
  * surviving at the front normally blocks it (the oldest id is already consumed,
  * so it cannot match a later one) — normally, not always: a server-side trim can
  * make the tail begin at a LATER prefix id, which does continue the match.
- * Nothing id-based can separate a re-delivered copy from the original, which is
- * the same conclusion #7519 reaches: provenance per append, `historySeq` present
- * ⇒ replayed.
+ *
+ * Not "no id-based fix has been found" — no such fix EXISTS, and that is pinned
+ * rather than argued: `#7543 is UNDECIDABLE from the ids alone` builds the
+ * legitimate empty replay (prefix intact, history trimmed to nothing, correct
+ * swap `[]`) beside the degenerate one (prefix removed, same ids re-delivered,
+ * correct swap `[a, b]`) and asserts they present this function the SAME id
+ * sequence against the SAME `prefixIds`. Since `idOf` is the only reader this
+ * module has of a message, any resolution that returns the replayed set for the
+ * second returns it for the first too and breaks
+ * `empty replay (baseline at end) swaps to []` in the same motion — which is
+ * what rules out the three shapes reviewed for #7543 (a degenerate-outcome
+ * guard, an `openLen`-bounded fallback, a survivor anchor). Object identity is
+ * not the missing input either: a mid-window update REPLACES a prefix message's
+ * object (`finalizeThinkingStreams`, `peelSlotContent`, every tool_result patch
+ * — all `{ ...m, … }`), so an identity walk stalls at the first patched prefix
+ * entry and collapses the cut to an identity slice, i.e. #7477's failure on a
+ * much more reachable path. What is left is the same conclusion #7519 reaches:
+ * provenance per append, `historySeq` present ⇒ replayed, reported by the call
+ * sites.
  *
  * Strict rather than a search-ahead for a MEASURED reason, then, and not an
  * absolute one: a walk allowed to scan forward makes that limit the NORMAL case
