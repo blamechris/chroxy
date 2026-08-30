@@ -7,7 +7,7 @@
  * The pure helpers (stripAnsi, nextMessageId, withJitter, filterThinking)
  * live in @chroxy/store-core and are re-exported here for convenience.
  */
-import type { SessionState } from './types';
+import type { ConnectionState, SessionState } from './types';
 import { createEmptyBaseSessionState } from '@chroxy/store-core';
 
 export {
@@ -30,6 +30,123 @@ export function createEmptySessionState(): SessionState {
     // `toBeNull()` (cleared) for the same field.
     pendingEvaluatorClarify: null,
   };
+}
+
+/**
+ * #7555 — the FLAT session mirror: the `ConnectionState` fields that hold a
+ * copy of the ACTIVE session's `SessionState` value.
+ *
+ * These are not a cache. `App.tsx` reads the flat `isIdle` for
+ * `isBusy={!isIdle}` (the Send/Stop button and the Working banner), the flat
+ * `messages` for the transcript, the flat meters for the StatusBar — so a stale
+ * mirror is a wrong thing on screen, not a slow one.
+ *
+ * "A copy of the active session's value" is the rule for eleven of the twelve.
+ * `primaryClientId` is the exception and it is worth being exact about, because
+ * a neighbouring docstring says the opposite: the server routes `primary_changed`
+ * to two DISTINCT slots, and `resolveActivePrimaryClientId`
+ * (`components/ViewersIndicator.tsx`) deliberately IGNORES the flat slot
+ * whenever a session is active, reading the per-session one instead — the flat
+ * slot is the default / no-session-context primary (#5281 ①.3). It belongs in
+ * this roster because it is declared on both interfaces and because nulling it
+ * at three connection teardowns is right either way, not because the UI reads it
+ * as the active session's value (#7564 review, finding 7).
+ *
+ * The roster is exactly `keyof ConnectionState & keyof SessionState`, and the
+ * `_flatSessionFieldsAreDeclaredOnBothInterfaces` binding below makes `tsc`
+ * enforce one half of that. The other half — that no field declared on both
+ * interfaces is MISSING here — is the TypeScript CHECKER, run over `types.ts` in
+ * `flat-session-mirror-reset.test.ts` (a regex over the source had a blind spot
+ * for a member whose type starts on the next line, and #7564's review walked a
+ * thirteenth field straight through it), so a thirteenth field is red until
+ * someone classifies it. A hand-list beside the state type is the drift class
+ * this issue is an instance of (`docs/false-safety-guards.md`, "a hardcoded
+ * list next to a set that grows"): #7550 fixed ONE member of this roster at the
+ * consumer, and the other eleven were still stale.
+ */
+export const FLAT_SESSION_FIELDS = [
+  'messages',
+  'streamingMessageId',
+  'claudeReady',
+  'activeModel',
+  'permissionMode',
+  'contextUsage',
+  'contextOccupancy',
+  'lastResultCost',
+  'lastResultDuration',
+  'isIdle',
+  'primaryClientId',
+  'terminalRawBuffer',
+] as const;
+
+export type FlatSessionField = (typeof FLAT_SESSION_FIELDS)[number];
+
+/**
+ * Compile-time half of the roster contract: every name above must be declared
+ * on BOTH interfaces. A typo, or a field that only exists on one of them, is a
+ * typecheck error rather than a test that quietly stops covering it.
+ */
+const _flatSessionFieldsAreDeclaredOnBothInterfaces:
+  readonly (keyof ConnectionState & keyof SessionState)[] = FLAT_SESSION_FIELDS;
+void _flatSessionFieldsAreDeclaredOnBothInterfaces;
+
+/**
+ * #7555 — the two roster members `updateSession` deliberately does NOT mirror,
+ * with the reason each is excluded. Written as an EXCLUSION list so the default
+ * for a new flat field is "mirrored": the failure this issue is about is a
+ * field that nobody remembered to add, and the safe direction for that mistake
+ * is to mirror one field too many rather than one too few.
+ */
+export const FLAT_SESSION_FIELDS_NOT_MIRRORED = {
+  primaryClientId:
+    "#5731 T2 — mirrored by `switchSession`'s two branches, not by `updateSession`. The " +
+    'presence/"who is driving" badge is re-established by `primary_changed` / `session_role`, ' +
+    'which write the flat slot themselves.',
+  terminalRawBuffer:
+    '#5982 — the raw PTY buffer is written through the terminal write-batching path, not through ' +
+    'a `SessionState` patch. Mirroring it here would re-broadcast a multi-MB buffer on every ' +
+    'unrelated session patch.',
+  // #7564 review (finding 2, and Copilot's thread) — `satisfies Partial<Record<
+  // FlatSessionField, string>>` rather than `Record<string, string>`, which
+  // accepted ANY key. A one-character typo (`primaryClientId` →
+  // `primaryClientld`) silently promoted the field back into
+  // `UPDATE_SESSION_MIRRORED_FIELDS`, and `tsc` plus all 1458 store tests stayed
+  // green — the same edit against `terminalRawBuffer` would re-enable exactly
+  // the multi-MB re-broadcast its reason string exists to prevent. The argument
+  // that an exclusion list is the safe DIRECTION for this mistake only holds if
+  // the keys are real.
+} as const satisfies Partial<Record<FlatSessionField, string>>;
+
+/**
+ * The roster `updateSession` mirrors into the flat connection state when the
+ * patched session is the active one. Derived, so adding a flat field lands in
+ * the mirror AND in every reset without a second edit.
+ */
+export const UPDATE_SESSION_MIRRORED_FIELDS: readonly FlatSessionField[] =
+  FLAT_SESSION_FIELDS.filter(
+    // OWN property, not `in` — the same hygiene `pruneSessionKeyedMap` uses, and
+    // it closes `in`'s prototype-chain surface: a future flat field named
+    // `toString` or `constructor` would otherwise be excluded from the mirror by
+    // `Object.prototype` alone (#7564 review).
+    (f) => !Object.prototype.hasOwnProperty.call(FLAT_SESSION_FIELDS_NOT_MIRRORED, f),
+  );
+
+/**
+ * #7555 — the flat mirror of "no session", for the three sites that empty the
+ * session roster wholesale (`forgetSession`, `_resetSessionMemory`, `auth_ok`'s
+ * non-reconnect branch).
+ *
+ * Sourced from {@link createEmptySessionState} rather than from a literal, so
+ * the value the flat slot falls back to and the value a fresh shell starts at
+ * are the same value by construction. Without this the mirror survived the
+ * roster wipe and described a session that no longer exists — on a server that
+ * may not even be the one it came from (#7555).
+ */
+export function createEmptyFlatSessionMirror(): Pick<SessionState, FlatSessionField> {
+  const empty = createEmptySessionState() as unknown as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const field of FLAT_SESSION_FIELDS) out[field] = empty[field];
+  return out as Pick<SessionState, FlatSessionField>;
 }
 
 /**
