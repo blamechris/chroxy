@@ -41,13 +41,55 @@
  *     outcomes, and the reason marker sits INSIDE the button so it is part of
  *     the row's accessible name.
  */
-import { describe, it, expect, afterEach, vi } from 'vitest'
+import { describe, it, expect, afterEach, beforeAll, vi } from 'vitest'
 import { render, screen, fireEvent, cleanup, within } from '@testing-library/react'
+import fs from 'node:fs'
+import path from 'node:path'
 import { NotificationBanners } from './NotificationBanners'
 import { NotificationsWidget } from './NotificationsWidget'
 import type { SessionNotification } from '../store/types'
 
 afterEach(cleanup)
+
+beforeAll(() => {
+  // Attach the REAL stylesheet so the layout cell below runs through the actual
+  // cascade. Same technique as `NotificationBannerTapTarget.test.tsx`, and for
+  // the same reason: jsdom performs no layout, but it DOES implement the
+  // cascade for `getComputedStyle`, so a declared-value invariant is checkable
+  // here even though a rendered-geometry one is not.
+  const css = fs.readFileSync(path.resolve(__dirname, '../theme/components.css'), 'utf-8')
+  const style = document.createElement('style')
+  style.setAttribute('data-testid', 'components-css')
+  style.textContent = css
+  document.head.appendChild(style)
+})
+
+/**
+ * Split a `grid-template-columns` value into its tracks.
+ *
+ * Paren-aware, so a future `minmax(0, 1fr)` or `repeat(2, auto)` counts as ONE
+ * track rather than two or three. Today's values are all bare keywords, but a
+ * whitespace `.split()` here would be a guard that silently miscounts the
+ * moment the stylesheet grows a function — and a miscounting guard is worse
+ * than none, because it goes red for the wrong reason.
+ */
+function gridTracks(value: string): string[] {
+  const tracks: string[] = []
+  let depth = 0
+  let current = ''
+  for (const ch of value.trim()) {
+    if (ch === '(') depth++
+    else if (ch === ')') depth--
+    if (/\s/.test(ch) && depth === 0) {
+      if (current) tracks.push(current)
+      current = ''
+    } else {
+      current += ch
+    }
+  }
+  if (current) tracks.push(current)
+  return tracks
+}
 
 function notification(overrides: Partial<SessionNotification> = {}): SessionNotification {
   return {
@@ -272,5 +314,258 @@ describe('#7516 widget — an ABSENT session acknowledges without jumping', () =
     fireEvent.click(screen.getByTestId('notifications-widget-item-body-n-live'))
     expect(h.onSwitchSession).toHaveBeenCalledWith('sess-live')
     expect(h.onSwitchSession).toHaveBeenCalledTimes(1)
+  })
+})
+
+
+/**
+ * #7516 (PR #7528 review, C1) — the widget row is a GRID, and the dead-row
+ * marker must have a track of its own.
+ *
+ * The first version of this fix appended the marker as a fifth child of
+ * `.notifications-widget-item-body`, whose template declares exactly four
+ * columns (`auto auto 1fr auto` — type | session | message | time). Auto
+ * placement gave the marker the `time` column and pushed the timestamp into an
+ * IMPLICIT second row at column 1. Measured in Chromium by the reviewer: the
+ * dead row's `grid-template-rows` went `14px` -> `14px 11px`, its height 30px ->
+ * 47px, and `2m ago` rendered on its own line at the far left of a list whose
+ * whole visual grammar is a right-aligned timestamp column. The one state this
+ * PR exists to introduce was the one state that rendered broken.
+ *
+ * WHAT THIS CELL CAN AND CANNOT SEE. jsdom performs no layout, so it cannot
+ * measure the wrap — that is precisely why the defect shipped past a green
+ * suite. What jsdom does implement is the cascade for `getComputedStyle`, and
+ * it reports `grid-template-columns` as DECLARED (verified: it returns
+ * `"auto auto 1fr auto"` for the base class). So the invariant that actually
+ * broke — *every direct child of the row has a track* — is checkable here as a
+ * count, on the real stylesheet, against the real rendered DOM.
+ *
+ * Placed in this file rather than `NotificationBannerTapTarget.test.tsx`
+ * (whose machinery this borrows) because that file is scoped to the 44pt floor
+ * on BANNER controls; this is the widget's row shape, and #7516 is the issue
+ * that owns both surfaces' dead state. The technique is the shared thing, not
+ * the home.
+ */
+/**
+ * #7516 (PR #7528 review, S1) — the REVIVE direction.
+ *
+ * The live -> dead flip is pinned above, and the argument for having no
+ * click-time re-check is built on it. The reverse — a session re-listed under
+ * the SAME id must get its jump back — was unpinned on both surfaces, and this
+ * repo's memory is explicit that a stripping bug has two directions and testing
+ * one is how the valuable half gets deleted.
+ *
+ * The behaviour was already correct (the reviewer drove both directions in a
+ * throwaway probe and both passed), so these cells are pinning, not fixing.
+ * What they protect is the `useCallback(…, [sessions])` in App and the absence
+ * of any memo inside the components: a predicate cached per row, or a dep array
+ * that stopped tracking `sessions`, would leave a revived row permanently inert
+ * — a failure mode strictly worse than the one this PR fixes, because the
+ * session is right there in the tab strip and the row still refuses.
+ *
+ * A same-id revival is not hypothetical: the roster is emptied wholesale by
+ * `auth_ok`'s non-reconnect branch and refilled by the next `session_list`, so
+ * every session in the tab strip makes exactly this dead -> live transition on
+ * a reconnect.
+ */
+describe('#7516 — a re-listed session gets its jump BACK (the revive direction)', () => {
+  it('banner: the button returns, and it works', () => {
+    const n = notification({ sessionId: 'sess-revive' })
+    const onSwitchSession = vi.fn()
+    const banners = (isSessionListed: (id: string) => boolean) => (
+      <NotificationBanners
+        notifications={[n]}
+        onApprove={vi.fn()}
+        onDeny={vi.fn()}
+        onDismiss={vi.fn()}
+        onMarkRead={vi.fn()}
+        onSwitchSession={onSwitchSession}
+        permissionStatus={() => 'actionable'}
+        isSessionListed={isSessionListed}
+      />
+    )
+    const { rerender } = render(banners(listedOnly()))
+    expect(screen.getByTestId('notification-banner-session-gone')).toBeInTheDocument()
+
+    // The session comes back under the same id — a reconnect refilling the
+    // roster does exactly this.
+    rerender(banners(listedOnly('sess-revive')))
+    expect(screen.queryByTestId('notification-banner-session-gone')).toBeNull()
+    expect(screen.queryByTestId('notification-banner-session-name')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Chroxy' }))
+    expect(onSwitchSession).toHaveBeenCalledWith('sess-revive')
+  })
+
+  it('widget: the row jumps again, and the marker and its grid track both go', () => {
+    const n = notification({ sessionId: 'sess-revive' })
+    const onSwitchSession = vi.fn()
+    const onMarkRead = vi.fn()
+    const widget = (isSessionListed: (id: string) => boolean) => (
+      <NotificationsWidget
+        notifications={[n]}
+        onSwitchSession={onSwitchSession}
+        onMarkRead={onMarkRead}
+        onMarkAllRead={vi.fn()}
+        onDismiss={vi.fn()}
+        isSessionListed={isSessionListed}
+      />
+    )
+    const { rerender } = render(widget(listedOnly()))
+    fireEvent.click(screen.getByTestId('notifications-widget-trigger'))
+    expect(screen.getByTestId('notifications-widget-item-gone-n-1')).toBeInTheDocument()
+
+    // Re-listed while the panel is OPEN — the operator is looking at the row.
+    rerender(widget(listedOnly('sess-revive')))
+    expect(screen.queryByTestId('notifications-widget-item-gone-n-1')).toBeNull()
+    const body = screen.getByTestId('notifications-widget-item-body-n-1')
+    // The layout returns with it: four children, four tracks (C1's invariant
+    // has to survive the round trip, not just the one-way flip).
+    expect(gridTracks(getComputedStyle(body).gridTemplateColumns)).toHaveLength(body.children.length)
+    fireEvent.click(body)
+    expect(onMarkRead).toHaveBeenCalledWith('n-1')
+    expect(onSwitchSession).toHaveBeenCalledWith('sess-revive')
+  })
+})
+
+describe('#7516 widget row — every direct child of the grid has a track', () => {
+  function rowBody(id: string): HTMLElement {
+    return screen.getByTestId(`notifications-widget-item-body-${id}`)
+  }
+
+  it('CONTROL: the row really is a grid and the stylesheet really is attached', () => {
+    // Guards the guard. If the <style> failed to attach, or jsdom stopped
+    // reporting this property, every count below would compare 0 to 0 and pass
+    // — "cannot check this" silently becoming "nothing to check".
+    renderWidget([notification()], listedOnly('sess-live'))
+    const cs = getComputedStyle(rowBody('n-1'))
+    expect(cs.display).toBe('grid')
+    expect(gridTracks(cs.gridTemplateColumns).length).toBeGreaterThanOrEqual(4)
+  })
+
+  it('CONTROL: the parser counts a functional track as one', () => {
+    // The paren-aware split is the part a whitespace `.split()` would get
+    // wrong, so it is exercised directly rather than trusted.
+    expect(gridTracks('auto auto 1fr auto')).toHaveLength(4)
+    expect(gridTracks('auto minmax(0, 1fr) auto')).toHaveLength(3)
+    expect(gridTracks('repeat(2, auto) 1fr')).toHaveLength(2)
+  })
+
+  it('LISTED row: track count equals child count', () => {
+    renderWidget([notification()], listedOnly('sess-live'))
+    const body = rowBody('n-1')
+    const tracks = gridTracks(getComputedStyle(body).gridTemplateColumns)
+    expect(tracks).toHaveLength(body.children.length)
+  })
+
+  it('DEAD row: the marker gets a track — the timestamp does not wrap', () => {
+    // THE cell. Red on the commit this review was written against: five
+    // children, four tracks.
+    renderWidget([notification({ sessionId: 'sess-gone' })], listedOnly('sess-live'))
+    const body = rowBody('n-1')
+    const tracks = gridTracks(getComputedStyle(body).gridTemplateColumns)
+    // Collapsed to two integers before asserting so a failure prints `5 !== 4`
+    // rather than the row's serialized HTML (docs/false-safety-guards.md #17).
+    expect(
+      tracks.length,
+      `dead row declares ${tracks.length} column track(s) for ${body.children.length} ` +
+      `direct children — the overflow child is auto-placed into an implicit ROW, ` +
+      `which is what wrapped the timestamp (PR #7528 review C1)`,
+    ).toBe(body.children.length)
+  })
+
+  it('DEAD row: the marker is the LAST-but-one child, ahead of the timestamp', () => {
+    // The count alone would also be satisfied by a fifth track with the marker
+    // in the wrong place. Pin the order the tracks are sized for.
+    renderWidget([notification({ sessionId: 'sess-gone' })], listedOnly('sess-live'))
+    const classes = Array.from(rowBody('n-1').children).map((c) => c.className)
+    expect(classes).toEqual([
+      'notifications-widget-item-type',
+      'notifications-widget-item-session',
+      'notifications-widget-item-message',
+      'notifications-widget-item-gone',
+      'notifications-widget-item-time',
+    ])
+  })
+})
+
+/**
+ * #7516 (PR #7528 review, M1) — the dead row's session name must not stay
+ * link-blue.
+ *
+ * `.notifications-widget-item-session` is `var(--accent-blue)` for every row,
+ * and the review measured `rgb(74, 158, 255)` on a dead row — identical to the
+ * live rows above and below it. That is the exact shape the BANNER half of this
+ * PR removed, in a comment written in this PR: "an element that carries a
+ * tap-target floor and looks like a link is the live-looking dead click this
+ * replaced". The button stays (it is the mark-read affordance and the
+ * `role="menuitem"` anchor), but the NAME inside it is not that affordance, and
+ * accent-blue says "this name goes to that session" on a row where it no longer
+ * does.
+ *
+ * MEASURED CORRECTION to the review's premise, recorded because a fix aimed at
+ * the wrong cause is worse than none. The review reported the dead row as
+ * `var(--accent-blue)` / `rgb(74, 158, 255)`. Against the REAL component that
+ * is not what ships: `.notifications-widget-item--unread .…-item-session` and
+ * its `--read` sibling are specificity 0,2,0 and already outrank the bare
+ * `.notifications-widget-item-session { color: var(--accent-blue) }` at 0,1,0,
+ * so the shipped render is `--text-primary` (unread) or `--text-secondary`
+ * (read). Accent-blue only wins on a fixture that omits the `<li>` modifier
+ * class — which a hand-authored Playwright row would. Verified in all four
+ * read x listed combinations through this same cascade, and jsdom is
+ * trustworthy for it precisely BECAUSE it returned the more-specific earlier
+ * rule over the less-specific later one.
+ *
+ * The substantive finding survives the correction and is what these cells pin:
+ * dead and live rows were rendering IDENTICALLY. So the invariant asserted is
+ * "the dead row differs from the live one", not a hard-coded colour — a cell
+ * that pinned only the dead row's token would stay green if the live row were
+ * later muted to match, which is the state being ruled out.
+ *
+ * jsdom does not substitute `var()` (theme.css is not attached), so these read
+ * the declared TOKEN. That is the right granularity anyway: the token is the
+ * decision; the rgb is whatever the active theme makes of it.
+ */
+describe('#7516 widget row — a dead row does not read as a live one', () => {
+  function sessionName(id: string): HTMLElement {
+    return screen
+      .getByTestId(`notifications-widget-item-body-${id}`)
+      .querySelector('.notifications-widget-item-session') as HTMLElement
+  }
+
+  function nameColour(read: boolean, listed: boolean): string {
+    cleanup()
+    renderWidget(
+      [notification({ readAt: read ? 5 : undefined, sessionId: listed ? 'sess-live' : 'sess-gone' })],
+      listedOnly('sess-live'),
+    )
+    return getComputedStyle(sessionName('n-1')).color
+  }
+
+  it('CONTROL: a LIVE row renders the read-state token, not the accent rule', () => {
+    // Guards the guard, and pins the correction above: if this ever comes back
+    // as `var(--accent-blue)` the cascade has changed and the reasoning behind
+    // the `--gone` rule's specificity tie needs re-deriving.
+    expect(nameColour(false, true)).toBe('var(--text-primary)')
+    expect(nameColour(true, true)).toBe('var(--text-secondary)')
+  })
+
+  it('UNREAD: the dead row is muted and DIFFERS from the live row', () => {
+    const live = nameColour(false, true)
+    const dead = nameColour(false, false)
+    expect(dead).toBe('var(--text-secondary)')
+    expect(dead).not.toBe(live)
+  })
+
+  it('READ: the dead row is muted there too — the tie is broken for both states', () => {
+    // The `--gone` rule ties on specificity with BOTH the `--unread` and
+    // `--read` rules and wins on source order. A rule that only beat one of
+    // them would leave half the rows unfixed, so both are asserted.
+    expect(nameColour(true, false)).toBe('var(--text-secondary)')
+  })
+
+  it('the weight is dropped too, so an unread dead row loses its bold', () => {
+    cleanup()
+    renderWidget([notification({ sessionId: 'sess-gone' })], listedOnly('sess-live'))
+    expect(getComputedStyle(sessionName('n-1')).fontWeight).toBe('400')
   })
 })

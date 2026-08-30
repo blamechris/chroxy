@@ -5505,12 +5505,55 @@ button.sidebar-token-view-session-row:hover {
 
 /* #7516 — the row's session has left the roster, so activating it no longer
    jumps (it still marks read and closes the panel). Same italic-muted marker
-   the banner uses for the same fact. */
+   the banner uses for the same fact.
+
+   NOT `flex-shrink: 0` (PR #7528 review C1): the row body is a GRID, not a
+   flex container, so that declaration was inert — and the fact that it was
+   written at all is the tell that the parent's display mode had not been
+   checked. `white-space: nowrap` is the property that actually does the job
+   here: the marker is a short fixed phrase and must not wrap inside its
+   track. */
 .notifications-widget-item-gone {
   font-size: var(--text-xs);
   font-style: italic;
   color: var(--text-secondary);
-  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+/* #7516 (PR #7528 review C1) — the dead row has FIVE children, so it needs a
+   fifth column track. Without this the marker is auto-placed into the `time`
+   column and the timestamp overflows into an implicit second row at column 1:
+   measured in Chromium, row height 30px -> 47px with `2m ago` alone at the far
+   left, in a list whose whole visual grammar is a right-aligned time column.
+
+   A modifier rather than a fifth `auto` on the base rule, because the base rule
+   must keep declaring exactly as many tracks as the LISTED row has children —
+   that one-to-one is the invariant `NotificationJumpGate.test.tsx` asserts, and
+   a permanently-empty trailing track would make it unassertable. Same
+   specificity as the base rule (0,1,0), later in source order, so it wins. */
+.notifications-widget-item-body--gone {
+  grid-template-columns: auto auto 1fr auto auto;
+}
+
+/* #7516 (PR #7528 review M1) — a dead row's session name must not read as a
+   live one. This is the widget's version of the move the banner makes at
+   `.notification-banner-session-name`: the row's BUTTON stays (it is the
+   mark-read affordance and the `role="menuitem"` anchor of the #5009 menu), but
+   the NAME inside it is not that affordance, and rendering it exactly like the
+   live rows above and below says "this name goes to that session" on a row
+   where it no longer does.
+
+   Specificity 0,2,0 — a deliberate tie with the `--unread` / `--read` rules
+   above, broken by source order, so it holds for BOTH read states. (The review
+   reported this row as `var(--accent-blue)`; measured against the real
+   component that is not what ships — the `--unread`/`--read` pair at 0,2,0
+   already outranks the bare `.notifications-widget-item-session` accent rule,
+   which only wins on a fixture that omits the `<li>` modifier class. The
+   substantive point stands and is what this rule fixes: dead and live were
+   indistinguishable.) */
+.notifications-widget-item-body--gone .notifications-widget-item-session {
+  color: var(--text-secondary);
+  font-weight: 400;
 }
 
 .notifications-widget-item-actions {

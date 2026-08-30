@@ -63,6 +63,18 @@
  * The predicate is the choke point's own (`isSessionListed`, store/utils.ts),
  * passed in rather than recomputed here: same function, same `sessions` array
  * `switchSession` reads, so a row that offers a jump is a row whose jump works.
+ *
+ * The dead row carries `--gone` on the row BUTTON, not just on the marker, and
+ * that is load-bearing rather than cosmetic (PR #7528 review C1). This button
+ * is a four-column GRID (`auto auto 1fr auto` — type | session | message |
+ * time). The first cut of this change simply appended the marker as a fifth
+ * child, so auto-placement handed it the `time` column and pushed the timestamp
+ * into an implicit SECOND ROW at column 1: measured in Chromium, the row went
+ * 30px -> 47px and `2m ago` rendered alone at the far left. The modifier
+ * declares a fifth track for the state that has a fifth child, so track count
+ * and child count match in both states — which is exactly what
+ * `NotificationJumpGate.test.tsx` now asserts through the real cascade, because
+ * jsdom performs no layout and nothing else in the suite could go red for it.
  */
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { KeyboardEvent as ReactKeyboardEvent } from 'react'
@@ -451,7 +463,11 @@ export function NotificationsWidget({
                       // calls .focus()) without polluting the outer
                       // header's Tab order.
                       tabIndex={isFocused ? 0 : -1}
-                      className="notifications-widget-item-body"
+                      className={
+                        listed
+                          ? 'notifications-widget-item-body'
+                          : 'notifications-widget-item-body notifications-widget-item-body--gone'
+                      }
                       data-testid={`notifications-widget-item-body-${n.id}`}
                       onClick={activate}
                       onKeyDown={handleKeyDown}

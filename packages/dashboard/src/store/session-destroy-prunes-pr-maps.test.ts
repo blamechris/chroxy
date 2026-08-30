@@ -1177,7 +1177,13 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
     // folded into a UI fix. This cell is the honest marker in the meantime: it
     // goes red the moment someone widens the extraction, which is when the note
     // above stops being true.
-    expect(declared).not.toContain('sessionNotifications')
+    expect(
+      declared,
+      'the extraction now sees an array-shaped member. Widening it is #7527: ' +
+      'classify all 24 array members of ConnectionState first, and add the ' +
+      '"session-tagged, deliberately NOT pruned" bucket this field needs — it is ' +
+      'neither DEFERRED (nobody will fix it) nor NOT_SESSION_KEYED (that would be a lie).',
+    ).not.toContain('sessionNotifications')
     // Non-vacuous: the field really is declared on the interface, in the shape
     // the pattern cannot see. Without this the assertion above would also pass
     // if the field were renamed or deleted.
